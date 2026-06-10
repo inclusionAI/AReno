@@ -1,6 +1,6 @@
 """Loss functions consumed by `Trainer.train`.
 
-Three flavours are bundled:
+Five flavours are bundled:
     dpo_loss_fn  - pairwise preference loss over chosen/rejected rows.
     grpo_loss_fn - PPO-style clipping applied per response token (GRPO).
     gspo_loss_fn - sequence-level clipping using a length-averaged log ratio.

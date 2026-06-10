@@ -17,7 +17,7 @@ from areno.api.models import (
     TrainSequence,
     BackendType,
 )
-from areno.api.loss_fns import dpo_loss_fn, gspo_loss_fn, grpo_loss_fn, sft_loss_fn
+from areno.api.loss_fns import dpo_loss_fn, gspo_loss_fn, grpo_loss_fn, ppo_loss_fn, sft_loss_fn
 
 # Friendly aliases mirroring the BackendType enum members; `DefaultBackend`
 # documents the fallback used when callers do not pass `backend_type=`.
@@ -42,5 +42,6 @@ __all__ = [
     "dpo_loss_fn",
     "gspo_loss_fn",
     "grpo_loss_fn",
+    "ppo_loss_fn",
     "sft_loss_fn",
 ]
