@@ -1,0 +1,114 @@
+from __future__ import annotations
+
+import unittest
+
+from areno.api import data_utils
+from areno.api.trainers import dpo as dpo_mod
+from areno.api.trainers import sft as sft_mod
+
+
+class FakeTextTokenizer:
+    """Tokenizer double for offline SFT/DPO row conversion helpers."""
+
+    eos_token_id = 99
+    chat_template = None
+
+    def encode(self, text, add_special_tokens=False):
+        del add_special_tokens
+        return [ord(ch) % 50 + 1 for ch in text]
+
+    def apply_chat_template(self, messages, tokenize, add_generation_prompt=False):
+        del tokenize, add_generation_prompt
+        ids = []
+        for message in messages:
+            ids.extend(self.encode(f"{message.get('role')}:{message.get('content')}"))
+        return ids
+
+
+class TrainerDatasetUtilityTest(unittest.TestCase):
+    """Dataset helper tests convert rows to TrainSequence without backend init."""
+
+    def test_sft_prompt_response_row_masks_only_response_suffix(self):
+        """Prompt/response SFT rows should train on response tokens plus EOS."""
+        tokenizer = FakeTextTokenizer()
+
+        seq = sft_mod._record_to_train_sequence({"prompt": "q", "response": "a"}, tokenizer, max_seq_len=16)
+
+        self.assertIsNotNone(seq)
+        self.assertEqual(seq.eos_token_id, 99)
+        self.assertEqual(seq.tokens[-1], 99)
+        self.assertEqual(seq.prompt_mask.count(True), 1)
+        self.assertTrue(any(not item for item in seq.prompt_mask[1:]))
+
+    def test_sft_text_row_trains_after_first_context_token(self):
+        """Plain text SFT rows use the first token as context and train the rest."""
+        tokenizer = FakeTextTokenizer()
+
+        seq = sft_mod._record_to_train_sequence({"text": "abc"}, tokenizer, max_seq_len=16)
+
+        self.assertEqual(seq.prompt_mask, [True, False, False])
+
+    def test_sft_drops_rows_without_target_tokens(self):
+        """Rows that cannot produce a next-token target should be filtered out."""
+        tokenizer = FakeTextTokenizer()
+
+        seq = sft_mod._record_to_train_sequence({"text": "a"}, tokenizer, max_seq_len=16)
+
+        self.assertIsNone(seq)
+
+    def test_dpo_requires_explicit_prompt_chosen_rejected_schema(self):
+        """DPO rows should not guess preference or prompt field aliases."""
+        tokenizer = FakeTextTokenizer()
+
+        with self.assertRaisesRegex(ValueError, "`chosen` and `rejected`"):
+            dpo_mod._record_to_train_pair({"winner": "yes", "loser": "no"}, tokenizer, max_seq_len=32)
+        with self.assertRaisesRegex(ValueError, "`prompt`"):
+            dpo_mod._record_to_train_pair({"chosen": "yes", "rejected": "no"}, tokenizer, max_seq_len=32)
+
+    def test_dpo_record_to_train_pair_keeps_chosen_rejected_adjacent(self):
+        """DPO rows are emitted as chosen then rejected with shared prompt masks."""
+        tokenizer = FakeTextTokenizer()
+
+        pair = dpo_mod._record_to_train_pair({"prompt": "q", "chosen": "good", "rejected": "bad"}, tokenizer, max_seq_len=32)
+
+        self.assertEqual(len(pair), 2)
+        self.assertEqual(pair[0].eos_token_id, 99)
+        self.assertEqual(pair[1].eos_token_id, 99)
+        self.assertEqual(pair[0].prompt_mask[0], True)
+        self.assertEqual(pair[1].prompt_mask[0], True)
+        self.assertTrue(any(not item for item in pair[0].prompt_mask[1:]))
+
+    def test_common_prefix_len_stops_at_first_difference(self):
+        """Chat-style DPO uses common-prefix length as prompt context."""
+        self.assertEqual(dpo_mod._common_prefix_len([1, 2, 3], [1, 2, 4]), 2)
+        self.assertEqual(dpo_mod._common_prefix_len([1, 2], [1, 2, 3]), 2)
+
+    def test_dpo_make_sequence_filters_too_long_rows(self):
+        """DPO sequence builder should drop over-budget preference examples."""
+        seq = dpo_mod._make_sequence([1, 2, 3], [True, False, False], eos_token_id=99, max_seq_len=2)
+
+        self.assertIsNone(seq)
+
+
+class SharedDataUtilityTest(unittest.TestCase):
+    """Shared tokenizer helpers should preserve SFT and DPO row semantics."""
+
+    def test_prompt_response_helper_appends_eos_and_masks_prompt(self):
+        """Prompt/response tokenization should train only response tokens."""
+        tokenizer = FakeTextTokenizer()
+
+        tokens, mask = data_utils.prompt_response_to_tokens_and_mask("q", "a", tokenizer, tokenizer.eos_token_id)
+
+        self.assertEqual(tokens[-1], tokenizer.eos_token_id)
+        self.assertEqual(mask, [True, False, False])
+
+    def test_first_value_returns_only_explicit_keys(self):
+        """Shared first_value remains a literal-key utility, not schema guessing."""
+        messages = [{"role": "assistant", "content": "ok"}]
+
+        self.assertEqual(data_utils.first_value({"chosen": messages}, ("chosen",)), messages)
+        self.assertIsNone(data_utils.first_value({}, ("chosen",)))
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "areno"
+version = "0.1.0"
+description = "Local LLM post-training stack with the areno engine and model plugins."
+requires-python = ">=3.10"
+dependencies = [
+  "torch>=2.6",
+  "flash-attn>=2.7",
+  "flash-linear-attention>=0.2",
+  "safetensors>=0.4",
+  "transformers>=4.56",
+  "huggingface-hub>=0.25",
+  "datasets>=3.3.0",
+  "numpy",
+  "tensorboard",
+  "einops",
+  "fastapi>=0.110",
+  "click>=8.1",
+  "tqdm>=4.66",
+  "uvicorn>=0.27",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["areno*"]
+
+[project.scripts]
+areno = "areno.cli.main:main"
