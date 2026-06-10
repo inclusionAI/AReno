@@ -6,7 +6,7 @@ on:
       branch:
         description: "Git branch, tag, or SHA to release"
         required: true
-        default: "master"
+        default: "main"
         type: string
       version:
         description: "PyPI version to publish, for example 0.1.0"
@@ -58,6 +58,8 @@ jobs:
           PY
 
       - name: Build source distribution only
+        env:
+          ARENO_BUILD_EXT: "0"
         run: |
           rm -rf dist build *.egg-info
           python -m build --sdist --no-isolation
