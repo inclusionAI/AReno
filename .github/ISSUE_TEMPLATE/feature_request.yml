@@ -4,11 +4,7 @@ labels: ["enhancement"]
 body:
   - type: markdown
     attributes:
-      value: |
-        Thanks for suggesting a feature! For a new post-training **algorithm**,
-        please also skim the
-        [contribution guide](https://github.com/inclusionAI/asystem-areno/blob/main/CONTRIBUTING.md#do-you-want-to-implement-a-new-algorithm)
-        first — good candidates favor simplicity or single-node efficiency.
+      value: "Thanks for suggesting a feature! For a new post-training **algorithm**, please also skim the [contribution guide](https://github.com/inclusionAI/asystem-areno/blob/main/CONTRIBUTING.md#do-you-want-to-implement-a-new-algorithm) first — good candidates favor simplicity or single-node efficiency."
 
   - type: textarea
     id: motivation

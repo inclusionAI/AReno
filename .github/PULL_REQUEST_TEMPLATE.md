@@ -27,10 +27,7 @@ Fixes #(issue)
 
 ## How was it tested?
 
-<!--
-Note the test commands you ran (e.g. `pytest tests/ -k cpu`) and any hardware
-limitations. New behavior must be covered by tests — no testing, no merge.
--->
+<!-- Note the test commands you ran (e.g. `pytest tests/ -k cpu`) and any hardware limitations. New behavior must be covered by tests — no testing, no merge. -->
 
 ## Checklist
 
