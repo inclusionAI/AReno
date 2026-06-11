@@ -573,6 +573,9 @@ class _QueueDouble:
             raise worker_mod.queue.Empty
         return self.items.pop(0)
 
+    def get_nowait(self):
+        return self.get()
+
 
 class _ResultQueueDouble:
     """Capture worker result queue writes for early-return tests."""
@@ -592,6 +595,29 @@ def test_worker_refill_target_requires_half_batch_refill():
     assert worker_mod._rollout_refill_target(payload, active_count=1) == 16
     assert worker_mod._rollout_refill_target(payload, active_count=4) == 16
     assert worker_mod._rollout_refill_target(payload, active_count=20) == 16
+
+
+def test_worker_waiting_rollout_ready_uses_tensor_broadcast(monkeypatch):
+    """Readiness sync should avoid object broadcast pickle paths."""
+
+    worker = worker_mod.ArenoWorker.__new__(worker_mod.ArenoWorker)
+    worker._deferred_commands = []
+    worker._cmd_queue = _QueueDouble([])
+    payload = _rollout_command(1, [[1]], target=16, dp_size=1).payload
+    calls = []
+    ctx = SimpleNamespace(is_rank0=True, group=object(), dp_rank=0, world_size=4, device=torch.device("cpu"))
+
+    monkeypatch.setattr(worker_mod, "get_tp_context", lambda: ctx)
+    monkeypatch.setattr(worker_mod.dist, "broadcast", lambda tensor, src, group: calls.append((tensor.clone(), src, group)))
+    monkeypatch.setattr(
+        worker_mod.dist,
+        "broadcast_object_list",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("object broadcast should not be used")),
+    )
+
+    assert worker._has_enough_waiting_rollouts(payload, active_count=1) is False
+    assert calls
+    assert calls[0][1] == 0
 
 
 def _rollout_command(request_id: int, prompts: list[list[int]], *, target: int, dp_size: int = 1) -> Command:

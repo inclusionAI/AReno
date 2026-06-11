@@ -232,9 +232,9 @@ class ArenoWorker:
         if ctx.is_rank0:
             ready = self._waiting_rollout_count(payload, active_count) >= _rollout_refill_target(payload, active_count)
         if ctx.group is not None:
-            flag = [ready]
-            dist.broadcast_object_list(flag, src=ctx.dp_rank * ctx.world_size, group=ctx.group)
-            ready = bool(flag[0])
+            flag = torch.tensor([1 if ready else 0], device=ctx.device, dtype=torch.int8)
+            dist.broadcast(flag, src=ctx.dp_rank * ctx.world_size, group=ctx.group)
+            ready = bool(flag.item())
         return ready
 
     def _waiting_rollout_count(self, payload: RolloutPayload, active_count: int) -> int:

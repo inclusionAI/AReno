@@ -14,6 +14,7 @@ coverage can be added without changing trainer boundaries.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import importlib.util
 import json
 import logging
@@ -34,6 +35,7 @@ if TYPE_CHECKING:
     from areno.api.models import SamplingParams
 
 logger = logging.getLogger(__name__)
+AGENTIC_PROXY_COALESCE_WAIT_S = 10.0
 
 
 @dataclass(slots=True)
@@ -197,15 +199,36 @@ class _PendingChat:
     tools: list[dict[str, Any]] = field(default_factory=list)
     tool_choice: Any = None
     event: threading.Event = field(default_factory=threading.Event)
+    future: asyncio.Future | None = None
     response: dict[str, Any] | None = None
     error: BaseException | None = None
     prompt_index: int = -1
     sample_recorded: bool = False
+    cancelled: bool = False
 
 
 class _AgenticHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
-    request_queue_size = 128
+    request_queue_size = 2048
+    max_threads = 2048
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._thread_slots = threading.BoundedSemaphore(int(self.max_threads))
+
+    def process_request(self, request, client_address) -> None:
+        self._thread_slots.acquire()
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._thread_slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._thread_slots.release()
 
 
 class RolloutSession:
@@ -233,6 +256,9 @@ class RolloutSession:
         self._timeout_s = float(timeout_s)
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
+        self._request_queue: asyncio.Queue[_PendingChat] | None = None
+        self._batch_task: asyncio.Task | None = None
+        self._deferred_pending: list[_PendingChat] = []
         self._loop: asyncio.AbstractEventLoop | None = None
         self._lock = threading.Lock()
         self._closing = False
@@ -259,6 +285,8 @@ class RolloutSession:
         await self._trainer.begin_rollout_session_async()
         if not self._proxy_enabled:
             return self
+        self._request_queue = asyncio.Queue()
+        self._batch_task = asyncio.create_task(self._batch_worker_loop(), name="areno-agentic-proxy-batcher")
         handler_cls = self._handler_cls()
         try:
             self._server = self._http_server_cls()(("127.0.0.1", 0), handler_cls)
@@ -268,6 +296,7 @@ class RolloutSession:
             self._thread = threading.Thread(target=self._server.serve_forever, name="areno-agentic-proxy", daemon=True)
             self._thread.start()
         except BaseException:
+            self._stop_batch_worker()
             await self._trainer.end_rollout_session_async()
             raise
         return self
@@ -283,6 +312,7 @@ class RolloutSession:
                 self._server.server_close()
             if self._thread is not None:
                 self._thread.join(timeout=2.0)
+            self._stop_batch_worker()
         finally:
             await self._trainer.end_rollout_session_async()
 
@@ -302,11 +332,15 @@ class RolloutSession:
     def finish_requests(self) -> None:
         """Compatibility no-op for agents that mark request submission done."""
 
+    def _stop_batch_worker(self) -> None:
+        if self._batch_task is not None:
+            self._batch_task.cancel()
+
     def _http_server_cls(self) -> type[_AgenticHTTPServer]:
         return type(
             "AgenticRolloutHTTPServer",
             (_AgenticHTTPServer,),
-            {"request_queue_size": max(128, self._max_running_prompts)},
+            {"request_queue_size": max(2048, self._max_running_prompts), "max_threads": 2048},
         )
 
     def attach_batch(self, batch: AgentBatch) -> None:
@@ -502,17 +536,21 @@ class RolloutSession:
         if body.get("stream"):
             _write_json(handler, 400, {"error": {"message": "streaming chat completions are not supported yet"}})
             return
+        if self._loop is None:
+            _write_json(handler, 500, {"error": {"message": "agent rollout proxy is not running"}})
+            return
         try:
-            response = self._complete_chat(body)
+            future = asyncio.run_coroutine_threadsafe(self._complete_chat(body), self._loop)
+            response = future.result(timeout=self._timeout_s)
             _write_json(handler, 200, response)
         except ValueError as exc:
             _write_json(handler, 400, {"error": {"message": str(exc)}})
-        except Exception as exc:  # Keep proxy errors visible to get_train_batch.
+        except Exception as exc:
             with self._lock:
                 self._errors.append(str(exc))
             _write_json(handler, 500, {"error": {"message": str(exc)}})
 
-    def _complete_chat(self, body: dict[str, Any]) -> dict[str, Any]:
+    async def _complete_chat(self, body: dict[str, Any]) -> dict[str, Any]:
         # Bind every HTTP turn back to one prompt/sample pair. Multi-turn agents
         # resend the same first user prompt, so this remains stable even when
         # requests arrive out of order.
@@ -527,22 +565,10 @@ class RolloutSession:
             params.temperature = float(body["temperature"])
         if body.get("top_p") is not None:
             params.top_p = float(body["top_p"])
-        input_tokens = _messages_to_prompt_tokens(self._trainer.get_tokenizer(), messages, tools=tools, fallback_prompt=item.prompt)
-        max_sequence_len = _max_sequence_len(params)
-        if max_sequence_len is not None and len(input_tokens) + int(params.max_new_tokens) > max_sequence_len:
-            # Overlong multi-turn contexts are dropped as filtered samples so
-            # the rest of the rollout batch can keep training.
-            self._mark_item_filtered_if_unrecorded(item)
-            return _filtered_chat_response(
-                model=body.get("model") or "policy",
-                prompt_tokens=len(input_tokens),
-                max_sequence_len=max_sequence_len,
-            )
-
         pending = _PendingChat(
             item=item,
             messages=messages,
-            input_tokens=input_tokens,
+            input_tokens=[],
             params=params,
             key=_chat_batch_key(params),
             model=body.get("model") or "policy",
@@ -550,36 +576,120 @@ class RolloutSession:
             tool_choice=tool_choice,
             created_at=time.monotonic(),
         )
-        if self._loop is None:
+        if self._loop is None or self._request_queue is None:
             raise RuntimeError("agent rollout proxy is not running")
-        future = asyncio.run_coroutine_threadsafe(self._run_chat_rollout_async(pending), self._loop)
-        if not pending.event.wait(timeout=self._timeout_s):
-            future.cancel()
-            raise TimeoutError("agent rollout proxy timed out waiting for completion")
-        if pending.error is not None:
-            raise pending.error
-        if pending.response is None:
-            raise RuntimeError("agent rollout proxy finished without a response")
-        return pending.response
-
-    async def _run_chat_rollout_async(self, pending: _PendingChat) -> None:
+        pending.future = self._loop.create_future()
+        await self._request_queue.put(pending)
         try:
-            results = await self._trainer.rollout_token_batch_async([pending.input_tokens], 1, pending.params)
-            sequence = results[0].sequences[0] if results and results[0].sequences else None
-            if sequence is None:
-                self._record_chat_sample(pending, [], [])
+            return await asyncio.wait_for(asyncio.shield(pending.future), timeout=self._timeout_s)
+        except asyncio.TimeoutError as exc:
+            pending.cancelled = True
+            raise TimeoutError("agent rollout proxy timed out waiting for completion")
+
+    async def _batch_worker_loop(self) -> None:
+        while not self._closing:
+            try:
+                batch = await self._pop_chat_batch()
+            except asyncio.CancelledError:
+                raise
+            except BaseException as exc:
+                with self._lock:
+                    self._errors.append(str(exc))
+                continue
+            if not batch:
+                continue
+            await self._run_chat_batch(batch)
+
+    async def _pop_chat_batch(self) -> list[_PendingChat]:
+        if self._request_queue is None:
+            return []
+        first = self._deferred_pending.pop(0) if self._deferred_pending else await self._request_queue.get()
+        if first.cancelled:
+            return []
+        batch = [first]
+        deferred: list[_PendingChat] = []
+        deadline = first.created_at + AGENTIC_PROXY_COALESCE_WAIT_S
+        target = self._max_running_prompts
+        while len(batch) < target:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                pending = await asyncio.wait_for(self._request_queue.get(), timeout=remaining)
+            except asyncio.TimeoutError:
+                break
+            if pending.cancelled:
+                continue
+            if pending.key == first.key:
+                batch.append(pending)
             else:
-                self._record_chat_sample(pending, sequence.resp_tokens, sequence.resp_logprobs)
+                deferred.append(pending)
+        self._deferred_pending[0:0] = deferred
+        return batch
+
+    async def _run_chat_batch(self, batch: list[_PendingChat]) -> None:
+        valid: list[_PendingChat] = []
+        tokenizer = self._trainer.get_tokenizer()
+        for pending in batch:
+            if pending.cancelled:
+                continue
+            try:
+                pending.input_tokens = _messages_to_prompt_tokens(
+                    tokenizer,
+                    pending.messages,
+                    tools=pending.tools,
+                    fallback_prompt=pending.item.prompt,
+                )
+                max_sequence_len = _max_sequence_len(pending.params)
+                if max_sequence_len is not None and len(pending.input_tokens) + int(pending.params.max_new_tokens) > max_sequence_len:
+                    # Overlong multi-turn contexts are dropped as filtered samples so
+                    # the rest of the rollout batch can keep training.
+                    self._mark_item_filtered_if_unrecorded(pending.item)
+                    response = _filtered_chat_response(
+                        model=pending.model,
+                        prompt_tokens=len(pending.input_tokens),
+                        max_sequence_len=max_sequence_len,
+                    )
+                    self._set_pending_response(pending, response)
+                    continue
+                valid.append(pending)
+            except BaseException as exc:
+                self._set_pending_error(pending, exc)
+        if not valid:
+            return
+        try:
+            results = await self._trainer.rollout_token_batch_async([pending.input_tokens for pending in valid], 1, valid[0].params)
+            for idx, pending in enumerate(valid):
+                sequence = results[idx].sequences[0] if idx < len(results) and results[idx].sequences else None
+                if sequence is None:
+                    self._record_chat_sample(pending, [], [])
+                else:
+                    self._record_chat_sample(pending, sequence.resp_tokens, sequence.resp_logprobs)
         except BaseException as exc:
-            pending.error = exc
-            pending.event.set()
+            for pending in valid:
+                self._set_pending_error(pending, exc)
 
     def _record_chat_sample(self, pending: _PendingChat, response_ids: list[int], logprobs: list[float]) -> None:
-        if pending.sample_recorded:
+        if pending.sample_recorded or pending.cancelled:
             return
         response = _ResponseData(response_tokens=list(response_ids), response_logprobs=list(logprobs))
-        pending.response = self._finish_pending_chat(pending, response)
+        self._set_pending_response(pending, self._finish_pending_chat(pending, response))
+
+    def _set_pending_response(self, pending: _PendingChat, response: dict[str, Any]) -> None:
+        if pending.cancelled:
+            return
+        pending.response = response
         pending.event.set()
+        if pending.future is not None and not pending.future.done():
+            pending.future.set_result(response)
+
+    def _set_pending_error(self, pending: _PendingChat, exc: BaseException) -> None:
+        if pending.cancelled:
+            return
+        pending.error = exc
+        pending.event.set()
+        if pending.future is not None and not pending.future.done():
+            pending.future.set_exception(exc)
 
     def _mark_item_filtered_if_unrecorded(self, item: AgentItem) -> None:
         key = (item.prompt_index, item.sample_index)
@@ -639,6 +749,8 @@ class RolloutSession:
     def _find_sample_for_item_locked(self, item: AgentItem) -> _AgentSample | None:
         """Find an existing trajectory for the same prompt/sample pair."""
 
+        if item.prompt_index < 0 or item.sample_index < 0:
+            return None
         key = (item.prompt_index, item.sample_index)
         for sample in self._samples:
             if (sample.item.prompt_index, sample.item.sample_index) == key:

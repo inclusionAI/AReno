@@ -1,5 +1,6 @@
 import importlib.util
 import asyncio
+import contextlib
 import sys
 import time
 from pathlib import Path
@@ -197,23 +198,102 @@ def test_proxy_keeps_max_running_prompts_global_across_dp():
     assert session._local_max_running_prompts == 8
 
 
-def test_proxy_rollout_uses_async_trainer_entry():
+def test_proxy_http_server_allows_large_thread_pool():
+    session = RolloutSession(
+        _FakeTrainer(),
+        sampling_params=_FakeSamplingParams(),
+        loss_mask_policy=LossMaskPolicy(),
+        max_running_prompts=256,
+    )
+    server_cls = session._http_server_cls()
+
+    assert server_cls.max_threads == 2048
+    assert server_cls.request_queue_size >= 2048
+
+
+def test_proxy_rollout_batches_queued_requests():
     trainer = _FakeTrainer(world_size=1, tp_size=1)
     session = RolloutSession(
         trainer,
         sampling_params=_FakeSamplingParams(),
         loss_mask_policy=LossMaskPolicy(),
-        max_running_prompts=4,
+        max_running_prompts=2,
     )
-    params = _FakeSamplingParams()
-    pending = _pending_chat(1, params)
 
-    asyncio.run(session._run_chat_rollout_async(pending))
+    async def run():
+        session._loop = asyncio.get_running_loop()
+        session._request_queue = asyncio.Queue()
+        session._batch_task = asyncio.create_task(session._batch_worker_loop())
+        try:
+            return await asyncio.gather(
+                session._complete_chat({"model": "policy", "messages": [{"role": "user", "content": "p0"}]}),
+                session._complete_chat({"model": "policy", "messages": [{"role": "user", "content": "p1"}]}),
+            )
+        finally:
+            session._closing = True
+            session._batch_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await session._batch_task
 
-    assert trainer.rollout_batches == [([[1]], 1)]
-    assert pending.event.is_set()
-    assert pending.response is not None
+    responses = asyncio.run(run())
+
+    assert trainer.rollout_batches == [([[2], [2]], 1)]
+    assert [response["usage"]["completion_tokens"] for response in responses] == [1, 1]
+    assert len(session._samples) == 2
+
+
+def test_proxy_client_cancellation_does_not_cancel_queued_rollout():
+    trainer = _FakeTrainer(world_size=1, tp_size=1)
+    trainer.rollout_delay_s = 0.05
+    session = RolloutSession(
+        trainer,
+        sampling_params=_FakeSamplingParams(),
+        loss_mask_policy=LossMaskPolicy(),
+        max_running_prompts=1,
+    )
+
+    async def run():
+        session._loop = asyncio.get_running_loop()
+        session._request_queue = asyncio.Queue()
+        session._batch_task = asyncio.create_task(session._batch_worker_loop())
+        task = asyncio.create_task(session._complete_chat({"model": "policy", "messages": [{"role": "user", "content": "p0"}]}))
+        await asyncio.sleep(0)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        await asyncio.sleep(0.1)
+        session._closing = True
+        session._batch_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await session._batch_task
+
+    asyncio.run(run())
+
+    assert trainer.rollout_batches == [([[2]], 1)]
     assert len(session._samples) == 1
+
+
+def test_proxy_coalesce_deadline_starts_when_first_item_is_queued():
+    trainer = _FakeTrainer(world_size=1, tp_size=1)
+    session = RolloutSession(
+        trainer,
+        sampling_params=_FakeSamplingParams(),
+        loss_mask_policy=LossMaskPolicy(),
+        max_running_prompts=2,
+    )
+    first = _pending_chat(0, _FakeSamplingParams())
+    first.created_at = time.monotonic() - agentic.AGENTIC_PROXY_COALESCE_WAIT_S - 1.0
+    second = _pending_chat(1, _FakeSamplingParams())
+
+    async def run():
+        session._request_queue = asyncio.Queue()
+        await session._request_queue.put(first)
+        await session._request_queue.put(second)
+        return await session._pop_chat_batch()
+
+    batch = asyncio.run(run())
+
+    assert batch == [first]
 
 
 def test_rollout_session_context_owns_backend_lifecycle():
@@ -225,16 +305,14 @@ def test_rollout_session_context_owns_backend_lifecycle():
             sampling_params=_FakeSamplingParams(),
             loss_mask_policy=LossMaskPolicy(),
             max_running_prompts=4,
+            proxy=False,
         )
-        session._http_server_cls = lambda: _FakeHTTPServer
         async with session:
-            pending = _pending_chat(1, _FakeSamplingParams())
-            await session._run_chat_rollout_async(pending)
+            pass
 
     asyncio.run(run_session())
 
     assert trainer.rollout_session_events == ["begin", "end"]
-    assert trainer.rollout_batches == [([[1]], 1)]
 
 
 def test_proxy_filters_prompt_exceeding_max_sequence_len_without_rollout():
@@ -247,30 +325,30 @@ def test_proxy_filters_prompt_exceeding_max_sequence_len_without_rollout():
         trainer,
         sampling_params=params,
         loss_mask_policy=LossMaskPolicy(),
-        max_running_prompts=4,
+        max_running_prompts=1,
     )
     batch = AgentBatch(records=[{"task": "long"}], prompts=["prompt"], input_tokens=[[1]], n_samples=1)
     session.attach_batch(batch)
 
-    response = session._complete_chat({"model": "policy", "messages": [{"role": "user", "content": "long prompt"}]})
+    async def run():
+        session._loop = asyncio.get_running_loop()
+        session._request_queue = asyncio.Queue()
+        session._batch_task = asyncio.create_task(session._batch_worker_loop())
+        try:
+            return await session._complete_chat({"model": "policy", "messages": [{"role": "user", "content": "long prompt"}]})
+        finally:
+            session._closing = True
+            session._batch_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await session._batch_task
+
+    response = asyncio.run(run())
     train_batch = asyncio.run(session.get_train_batch())
 
     assert response["choices"][0]["finish_reason"] == "length"
     assert response["usage"]["max_sequence_len"] == 9
     assert trainer.rollout_batches == []
     assert train_batch.token_rows == []
-
-
-def test_proxy_server_backlog_tracks_max_running_prompts():
-    trainer = _FakeTrainer()
-    session = RolloutSession(
-        trainer,
-        sampling_params=_FakeSamplingParams(),
-        loss_mask_policy=LossMaskPolicy(),
-        max_running_prompts=256,
-    )
-
-    assert session._http_server_cls().request_queue_size >= 256
 
 
 def test_agentic_partial_with_logprobs_completes_http_request():
@@ -702,6 +780,7 @@ class _FakeTrainer:
         self.rollout_batches = []
         self.tokenizer = _FakeTokenizer()
         self.rollout_session_events = []
+        self.rollout_delay_s = 0.0
 
     def get_tokenizer(self):
         return self.tokenizer
@@ -722,6 +801,8 @@ class _FakeTrainer:
         ]
 
     async def rollout_token_batch_async(self, prompt_tokens, n_samples, sampling_params):
+        if self.rollout_delay_s:
+            await asyncio.sleep(self.rollout_delay_s)
         return self.rollout_token_batch(prompt_tokens, n_samples, sampling_params)
 
     async def begin_rollout_session_async(self):
@@ -729,24 +810,6 @@ class _FakeTrainer:
 
     async def end_rollout_session_async(self):
         self.rollout_session_events.append("end")
-
-
-class _FakeHTTPServer:
-    def __init__(self, server_address, handler_cls):
-        del handler_cls
-        self.server_address = (server_address[0], 12345)
-        self.timeout = None
-        self.shutdown_called = False
-        self.server_close_called = False
-
-    def serve_forever(self):
-        return None
-
-    def shutdown(self):
-        self.shutdown_called = True
-
-    def server_close(self):
-        self.server_close_called = True
 
 
 def _pending_chat(idx, params):
