@@ -115,6 +115,7 @@ class InferenceManager:
             worker._decode_progress_window_start = time.perf_counter()
             worker._decode_progress_window_tokens = 0
             worker._decode_progress_active: dict[int, int] = {}
+            worker._decode_progress_cuda_graph = False
 
     def __getattr__(self, name):
         return getattr(self.worker, name)
@@ -643,17 +644,18 @@ class InferenceManager:
                 return
             window_elapsed = max(now - self._decode_progress_window_start, 1e-9)
             window_tokens = int(self._decode_progress_window_tokens)
-            concurrent_batches = len(self._decode_progress_active)
             total_active = sum(self._decode_progress_active.values())
+            cuda_graph = bool(self._decode_progress_cuda_graph)
             self._decode_progress_window_start = now
             self._decode_progress_next_time = now + interval_s
             self._decode_progress_window_tokens = 0
+            self._decode_progress_cuda_graph = False
         logger.info(
-            "rollout decode progress: dp=%d/%d concurrent_batches=%d active=%d tokens_per_second=%.1f window_tokens=%d step=%d/%d cache_tokens=%d",
+            "rollout decode progress: dp=%d/%d active=%d cuda_graph=%s tokens_per_second=%.1f window_tokens=%d step=%d/%d cache_tokens=%d",
             ctx.dp_rank,
             ctx.dp_size,
-            concurrent_batches,
             total_active,
+            cuda_graph,
             window_tokens / window_elapsed,
             window_tokens,
             sample_step,
@@ -887,6 +889,7 @@ class InferenceManager:
             # Graph replay path: copies inputs into the captured input buffers
             # and replays. Only the first `active_count` rows are meaningful;
             # the rest are padding pointed at the scratch block.
+            self._decode_progress_cuda_graph = True
             logits_shard = graph.replay_tensors(input_ids, position_ids, cache_seqlens, block_table)[0, :active_count]
 
         if sampling_params.temperature == 0.0:

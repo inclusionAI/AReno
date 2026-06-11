@@ -131,6 +131,7 @@ class ServeState:
     default_max_tokens: int
     active_tasks: set[asyncio.Task] = field(default_factory=set)
     closing: bool = False
+    rollout_session_started: bool = False
 
 
 def create_app(
@@ -169,13 +170,27 @@ def create_app(
     app.state.areno_serve = state
     app.state.decode_progress_interval_s = float(decode_progress_interval_s)
 
+    @app.on_event("startup")
+    async def startup() -> None:
+        """Open one long-lived rollout session for serving."""
+        try:
+            await state.engine.begin_rollout_session_async()
+        except BaseException:
+            state.engine.close()
+            raise
+        state.rollout_session_started = True
+
     @app.on_event("shutdown")
     async def shutdown() -> None:
         """Signal closing, drain in-flight request tasks, then tear the engine down."""
         state.closing = True
         if state.active_tasks:
             await asyncio.gather(*state.active_tasks, return_exceptions=True)
-        state.engine.close()
+        try:
+            if state.rollout_session_started:
+                await state.engine.end_rollout_session_async()
+        finally:
+            state.engine.close()
 
     @app.get("/health")
     def health() -> dict[str, str]:

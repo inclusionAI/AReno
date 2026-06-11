@@ -363,10 +363,16 @@ class RolloutSession:
         rewards_done = time.perf_counter()
         rows = self._build_train_rows(samples)
         rows_done = time.perf_counter()
+        tool_call_count = sum(len(record.tool_calls) for record in reward_records)
+        tool_result_count = sum(len(record.tool_results) for record in reward_records)
+        message_count = sum(len(record.messages) for record in reward_records)
         logger.info(
-            "agentic train batch built samples=%d tokens=%d wait_s=%.3f records_s=%.3f rewards_s=%.3f rows_s=%.3f total_s=%.3f",
+            "agentic train batch built samples=%d tokens=%d messages=%d tool_calls=%d tool_results=%d wait_s=%.3f records_s=%.3f rewards_s=%.3f rows_s=%.3f total_s=%.3f",
             len(samples),
             rows.total_tokens,
+            message_count,
+            tool_call_count,
+            tool_result_count,
             wait_done - start,
             records_done - wait_done,
             rewards_done - records_done,
@@ -407,6 +413,7 @@ class RolloutSession:
             if event.type == "assistant_tool_call" and event.name is not None
         ]
         tool_results = _tool_results_from_messages(messages)
+        trace = _trace_with_tool_results(sample.trace, messages)
         tokenizer = self._trainer.get_tokenizer() if self._trainer is not None else None
         rendered_completion = _render_messages_for_display(tokenizer, messages)
         return RewardRecord(
@@ -416,7 +423,7 @@ class RolloutSession:
             final_answer=sample.last_response_text,
             answer=answer,
             messages=messages,
-            trace=sample.trace,
+            trace=trace,
             tool_calls=tool_calls,
             tool_results=tool_results,
             tokens=sample.response_tokens,
@@ -506,6 +513,9 @@ class RolloutSession:
             _write_json(handler, 500, {"error": {"message": str(exc)}})
 
     def _complete_chat(self, body: dict[str, Any]) -> dict[str, Any]:
+        # Bind every HTTP turn back to one prompt/sample pair. Multi-turn agents
+        # resend the same first user prompt, so this remains stable even when
+        # requests arrive out of order.
         item = self._claim_item(body.get("messages") or [])
         messages = _normalize_messages(body.get("messages") or [])
         tools = list(body.get("tools") or [])
@@ -520,6 +530,8 @@ class RolloutSession:
         input_tokens = _messages_to_prompt_tokens(self._trainer.get_tokenizer(), messages, tools=tools, fallback_prompt=item.prompt)
         max_sequence_len = _max_sequence_len(params)
         if max_sequence_len is not None and len(input_tokens) + int(params.max_new_tokens) > max_sequence_len:
+            # Overlong multi-turn contexts are dropped as filtered samples so
+            # the rest of the rollout batch can keep training.
             self._mark_item_filtered_if_unrecorded(item)
             return _filtered_chat_response(
                 model=body.get("model") or "policy",
@@ -605,6 +617,9 @@ class RolloutSession:
             response_kind=response_kind,
             loss_mask_override=_tool_call_loss_mask(tokenizer, response.response_tokens) if tool_parse.tool_calls else None,
         )
+        # The prompt tokens are the fully rendered chat context for this turn,
+        # including prior assistant/tool messages. Those context tokens are
+        # needed for scoring but are masked out of policy loss.
         self._set_sample_training_row(sample, pending.input_tokens)
         with self._lock:
             if not pending.sample_recorded:
@@ -642,6 +657,9 @@ class RolloutSession:
         existing.response_logprobs.extend(new_sample.response_logprobs)
         existing.trace.extend(new_sample.trace)
         existing.messages = new_sample.messages
+        # Each later turn is rendered as: previous messages + new assistant.
+        # Append only the suffix so the training row becomes one trajectory
+        # instead of duplicating the shared prefix for every tool call.
         prefix_len = _common_prefix_len(existing.token_row, new_sample.token_row)
         if prefix_len < len(new_sample.token_row):
             existing.token_row.extend(new_sample.token_row[prefix_len:])
@@ -666,6 +684,8 @@ class RolloutSession:
     def _set_sample_training_row(self, sample: _AgentSample, prompt_tokens: list[int]) -> None:
         response_mask = [True] * len(sample.response_tokens)
         loss_mask = self._response_loss_mask(sample)
+        # response_mask marks generated tokens; loss_mask is stricter and can
+        # suppress tool-result or other non-policy spans.
         sample.token_row = list(prompt_tokens) + list(sample.response_tokens)
         sample.response_mask_row = [False] * len(prompt_tokens) + response_mask
         sample.loss_mask_row = [False] * len(prompt_tokens) + loss_mask
@@ -707,6 +727,8 @@ class RolloutSession:
     def _claim_item(self, messages: list[dict[str, Any]]) -> AgentItem:
         prompt = _first_user_text(messages)
         with self._lock:
+            # Prefer prompt-based reuse for multi-turn conversations; fall back
+            # to sequential assignment for one-shot agents and ad hoc requests.
             item = self._reuse_item_for_prompt_locked(prompt)
             if item is not None:
                 return item
@@ -749,6 +771,8 @@ def _messages_to_prompt_tokens(tokenizer, messages: list[dict[str, Any]], *, too
         if tools:
             kwargs["tools"] = tools
         try:
+            # Use the model's own chat template so assistant/tool messages are
+            # tokenized exactly as they were shown to the model.
             return tokenizer.apply_chat_template(messages, **kwargs)
         except TypeError:
             kwargs.pop("tools", None)
@@ -890,6 +914,32 @@ def _tool_results_from_messages(messages: list[dict[str, Any]]) -> list[dict[str
             }
         )
     return results
+
+
+def _trace_with_tool_results(trace: list[RewardEvent], messages: list[dict[str, Any]]) -> list[RewardEvent]:
+    """Return trace augmented with explicit tool-result events from messages."""
+
+    tool_result_events = [
+        RewardEvent(
+            type="tool_result",
+            name=result.get("name"),
+            content=result.get("content"),
+            metadata={"tool_call_id": result.get("tool_call_id")} if result.get("tool_call_id") is not None else {},
+        )
+        for result in _tool_results_from_messages(messages)
+    ]
+    if not tool_result_events:
+        return trace
+    augmented = []
+    inserted = False
+    for event in trace:
+        if not inserted and event.type == "finish":
+            augmented.extend(tool_result_events)
+            inserted = True
+        augmented.append(event)
+    if not inserted:
+        augmented.extend(tool_result_events)
+    return augmented
 
 
 def _common_prefix_len(left: list[int], right: list[int]) -> int:

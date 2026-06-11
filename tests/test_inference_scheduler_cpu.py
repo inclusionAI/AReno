@@ -380,8 +380,8 @@ def test_decode_progress_log_is_worker_aggregated(monkeypatch):
         )
 
     assert len(messages) == 1
-    assert "concurrent_batches=2" in messages[0]
     assert "active=10" in messages[0]
+    assert "cuda_graph=False" in messages[0]
 
 
 def test_worker_coalesces_rollout_commands_until_local_capacity():

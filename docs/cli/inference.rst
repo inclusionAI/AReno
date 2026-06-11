@@ -5,7 +5,8 @@ Inference CLI reference
 
 Start an OpenAI-compatible HTTP server backed by the Areno inference engine.
 The server exposes ``/v1/chat/completions``, accepts standard chat-completion
-``tools`` fields, and batches compatible requests in a continuous decode loop.
+``tools`` fields, and keeps one rollout session open for the process lifetime
+so rollout state and CUDA graph state can be reused across requests.
 
 .. code-block:: bash
 
@@ -40,13 +41,6 @@ Options:
 
 ``--max-running-prompts INTEGER``
    Maximum concurrent rollout prompts per request chunk. Default: ``128``.
-
-``--max-batch-prompts INTEGER``
-   Maximum prompts to merge into one generate call. Default: ``128``.
-
-``--batch-wait-ms FLOAT``
-   Milliseconds to wait for compatible requests before starting a new decode
-   session. Default: ``10.0``.
 
 ``--default-max-tokens INTEGER``
    Default max generated tokens when requests omit a token budget. Default:
@@ -162,8 +156,9 @@ Request fields
 Batching behavior
 -----------------
 
-The server batches compatible chat-completion requests. Requests are compatible
-when these fields match:
+The server runs inside a long-lived rollout session. Compatible requests can be
+coalesced by the engine; requests with different generation settings are
+scheduled separately. Requests are compatible when these fields match:
 
 * generated token budget
 * temperature
@@ -174,6 +169,22 @@ when these fields match:
 * EOS token id
 
 Requests with different generation settings are scheduled separately.
+
+Decode progress logs
+--------------------
+
+Set ``--decode-progress-interval-s`` to a positive value to print worker decode
+progress:
+
+.. code-block:: text
+
+   rollout decode progress: dp=0/4 active=32 cuda_graph=True tokens_per_second=2810.7 window_tokens=28134 step=450/3071 cache_tokens=631
+
+``tokens_per_second`` is the scheduled decode throughput for that DP worker in
+the reporting window. It excludes prefill and is not the same as end-to-end
+request throughput. ``window_tokens`` is the raw token count for the same
+window. ``cuda_graph=True`` means the worker used CUDA graph replay for at
+least one decode step in that window; ``False`` means the window ran eagerly.
 
 Tool calls
 ----------

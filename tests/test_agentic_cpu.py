@@ -332,6 +332,7 @@ def test_agentic_multi_turn_calls_merge_into_one_training_sample():
     assert record.completion == "10 11\n20"
     assert record.final_answer == "20"
     assert [event.type for event in record.trace].count("request") == 2
+    assert [event.type for event in record.trace].count("tool_result") == 1
     assert record.source_record == {"task": "multi"}
 
 

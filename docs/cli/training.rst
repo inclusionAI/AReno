@@ -97,8 +97,8 @@ Parallelism and batch shape
    mini-batches in one train call.
 
 ``--max-running-prompts INTEGER``
-   Override concurrent rollout prompts. Defaults to
-   ``batch-size * n-samples // dp-size``.
+   Override global concurrent rollout prompts. Defaults to
+   ``batch-size * n-samples`` for rollout algorithms.
 
 ``world-size`` must be divisible by ``tp-size``.
 
@@ -167,6 +167,11 @@ Runtime memory and speed
 ``--eager-decode``
    Disable decode CUDA graph and run rollout decode eagerly.
 
+Training rollouts run inside a rollout session. The session owns actor
+onload/offload, rollout cache state, CUDA graph state, and cleanup between
+rollout and train phases. Direct prompt rollout and agentic rollout both use
+the same session lifecycle.
+
 Agentic rollout
 ~~~~~~~~~~~~~~~
 
@@ -175,6 +180,8 @@ Agentic rollout
    online RL algorithms use agentic rollout mode instead of direct prompt
    completion. The agent receives a local OpenAI-compatible base URL from
    ``ctx.get_base_url()`` and can call ``/v1/chat/completions`` with tools.
+   Use ``batch.iter_samples()`` to iterate the expanded
+   ``batch-size * n-samples`` agent tasks.
 
 ``--agent-timeout-s FLOAT``
    Timeout for agentic proxy requests and trajectory collection. Default:
@@ -184,6 +191,13 @@ Agentic rollout
    Include tool-result spans in policy loss. Disabled by default because tool
    results are environment observations rather than policy actions. Assistant
    text and assistant tool-call spans are trainable by default.
+
+Agentic trajectories can contain multiple chat-completion turns for the same
+prompt/sample pair. Areno records the full OpenAI-style message list, tool
+calls, tool results, token ids, rollout logprobs, and loss masks for each
+completed trajectory. Tool-result/context spans are included in the token row
+for correct scoring but are masked from policy loss unless
+``--train-tool-results`` is set.
 
 Checkpointing and metrics
 ~~~~~~~~~~~~~~~~~~~~~~~~~

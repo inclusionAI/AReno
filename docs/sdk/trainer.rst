@@ -393,7 +393,9 @@ Data classes
    :param dict | None runtime: Advanced runtime config passed to the engine.
    :param int max_running_prompts: Concurrent rollout prompt limit.
    :param float decode_progress_interval_s: Worker decode progress log
-      interval.
+      interval. Logs report per-DP scheduled decode throughput for the current
+      window and include ``cuda_graph=True`` when CUDA graph replay was used in
+      that window.
 
 .. py:class:: areno.api.agentic.AgentBatch(records, prompts, input_tokens, n_samples)
 
@@ -409,10 +411,20 @@ Data classes
 
    Unified reward input for agentic rollouts.
 
-   Reward functions receive one ``RewardRecord`` per completed trajectory. The
-   record includes ``prompt``, ``completion``, ``messages``, ``trace``,
-   ``tool_calls``, ``tokens``, ``logprobs``, ``loss_mask``, ``source_record``,
-   and ``metadata``.
+   Reward functions receive one ``RewardRecord`` per completed trajectory. For
+   multi-turn agents, the record represents one prompt/sample pair, not one HTTP
+   request.
+
+   ``completion`` contains concatenated assistant response spans for backwards
+   compatibility. ``final_answer`` contains the last assistant response.
+   ``messages`` is the full OpenAI-style message list, including tool-result
+   messages. ``rendered_completion`` is the same trajectory rendered through the
+   tokenizer chat template when available. ``tool_calls`` and ``tool_results``
+   expose parsed tool calls and environment observations. ``tokens``,
+   ``logprobs``, and ``loss_mask`` describe the model-generated response spans.
+
+   Tool-result/context spans are included in train rows so logprob scoring sees
+   the same context as rollout, but they are masked from policy loss by default.
 
 .. py:class:: areno.api.agentic.LossMaskPolicy(assistant_text=True, assistant_tool_calls=True, tool_results=False, final_assistant_text=True, system_prompt=False, user_prompt=False)
 
