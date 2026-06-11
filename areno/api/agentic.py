@@ -113,6 +113,7 @@ class RewardRecord(BaseModel):
 
     prompt: str
     completion: str
+    rendered_completion: str | None = None
     final_answer: str | None = None
     answer: Any | None = None
     messages: list[dict[str, Any]] = Field(default_factory=list)
@@ -149,6 +150,10 @@ class _AgentSample:
     trace: list[RewardEvent]
     response_kind: Literal["assistant_text", "assistant_tool_call"] = "assistant_text"
     loss_mask_override: list[bool] | None = None
+    token_row: list[int] = field(default_factory=list)
+    response_mask_row: list[bool] = field(default_factory=list)
+    loss_mask_row: list[bool] = field(default_factory=list)
+    rollout_logprobs_row: list[float] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -400,14 +405,19 @@ class RolloutSession:
             for event in sample.trace
             if event.type == "assistant_tool_call" and event.name is not None
         ]
+        tool_results = _tool_results_from_messages(messages)
+        tokenizer = self._trainer.get_tokenizer() if self._trainer is not None else None
+        rendered_completion = _render_messages_for_display(tokenizer, messages)
         return RewardRecord(
             prompt=sample.item.prompt,
             completion=sample.response_text,
+            rendered_completion=rendered_completion,
             final_answer=sample.response_text,
             answer=answer,
             messages=messages,
             trace=sample.trace,
             tool_calls=tool_calls,
+            tool_results=tool_results,
             tokens=sample.response_tokens,
             logprobs=sample.response_logprobs,
             loss_mask=self._response_loss_mask(sample),
@@ -436,6 +446,13 @@ class RolloutSession:
         rollout_logprobs: list[list[float]] = []
         total_tokens = 0
         for sample in samples:
+            if sample.token_row:
+                token_rows.append(list(sample.token_row))
+                response_masks.append(list(sample.response_mask_row))
+                loss_masks.append(list(sample.loss_mask_row))
+                rollout_logprobs.append(list(sample.rollout_logprobs_row))
+                total_tokens += len(sample.token_row)
+                continue
             prompt_len = len(sample.item.input_tokens)
             response_len = len(sample.response_tokens)
             token_row = sample.item.input_tokens + sample.response_tokens
@@ -586,6 +603,7 @@ class RolloutSession:
             response_kind=response_kind,
             loss_mask_override=_tool_call_loss_mask(tokenizer, response.response_tokens) if tool_parse.tool_calls else None,
         )
+        self._set_sample_training_row(sample, pending.input_tokens)
         with self._lock:
             if not pending.sample_recorded:
                 existing = self._find_sample_for_item_locked(pending.item)
@@ -621,6 +639,18 @@ class RolloutSession:
         existing.response_logprobs.extend(new_sample.response_logprobs)
         existing.trace.extend(new_sample.trace)
         existing.messages = new_sample.messages
+        prefix_len = _common_prefix_len(existing.token_row, new_sample.token_row)
+        if prefix_len < len(new_sample.token_row):
+            existing.token_row.extend(new_sample.token_row[prefix_len:])
+            existing.response_mask_row.extend(new_sample.response_mask_row[prefix_len:])
+            existing.loss_mask_row.extend(new_sample.loss_mask_row[prefix_len:])
+            existing.rollout_logprobs_row.extend(new_sample.rollout_logprobs_row[prefix_len:])
+        elif not existing.token_row:
+            existing.token_row = list(existing.item.input_tokens) + list(existing.response_tokens)
+            prompt_len = len(existing.item.input_tokens)
+            existing.response_mask_row = [False] * prompt_len + [True] * len(existing.response_tokens)
+            existing.loss_mask_row = [False] * prompt_len + self._response_loss_mask(existing)
+            existing.rollout_logprobs_row = [0.0] * prompt_len + list(existing.response_logprobs)
         old_mask = existing.loss_mask_override
         if old_mask is None:
             old_mask = self._response_loss_mask_for_span(old_response_kind, old_response_len)
@@ -629,6 +659,14 @@ class RolloutSession:
             new_mask = self._response_loss_mask_for_span(new_sample.response_kind, len(new_sample.response_tokens))
         existing.loss_mask_override = list(old_mask) + list(new_mask)
         existing.response_kind = new_sample.response_kind
+
+    def _set_sample_training_row(self, sample: _AgentSample, prompt_tokens: list[int]) -> None:
+        response_mask = [True] * len(sample.response_tokens)
+        loss_mask = self._response_loss_mask(sample)
+        sample.token_row = list(prompt_tokens) + list(sample.response_tokens)
+        sample.response_mask_row = [False] * len(prompt_tokens) + response_mask
+        sample.loss_mask_row = [False] * len(prompt_tokens) + loss_mask
+        sample.rollout_logprobs_row = [0.0] * len(prompt_tokens) + list(sample.response_logprobs)
 
     def _build_pending_chat_response(
         self,
@@ -666,12 +704,12 @@ class RolloutSession:
     def _claim_item(self, messages: list[dict[str, Any]]) -> AgentItem:
         prompt = _first_user_text(messages)
         with self._lock:
+            item = self._reuse_item_for_prompt_locked(prompt)
+            if item is not None:
+                return item
             if self._next_item < len(self._agent_items):
                 item = self._agent_items[self._next_item]
                 self._next_item += 1
-                return item
-            item = self._reuse_item_for_prompt_locked(prompt)
-            if item is not None:
                 return item
             return AgentItem(record={"prompt": prompt}, prompt=prompt, input_tokens=[], prompt_index=-1, sample_index=-1)
 
@@ -713,6 +751,23 @@ def _messages_to_prompt_tokens(tokenizer, messages: list[dict[str, Any]], *, too
             kwargs.pop("tools", None)
             return tokenizer.apply_chat_template(messages, **kwargs)
     return tokenizer.encode(_messages_to_text(messages) or fallback_prompt)
+
+
+def _render_messages_for_display(tokenizer, messages: list[dict[str, Any]]) -> str:
+    """Render a message trajectory with the tokenizer chat template when available."""
+
+    if getattr(tokenizer, "chat_template", None):
+        try:
+            rendered = tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=False,
+            )
+            if isinstance(rendered, str):
+                return rendered
+        except TypeError:
+            pass
+    return _messages_to_text(messages)
 
 
 def _max_sequence_len(params: Any) -> int | None:
@@ -815,6 +870,33 @@ def _tool_call_loss_mask(tokenizer, response_tokens: list[int]) -> list[bool]:
     for mask_idx in range(start, len(mask)):
         mask[mask_idx] = False
     return mask
+
+
+def _tool_results_from_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Extract OpenAI tool result messages into reward-facing records."""
+
+    results = []
+    for message in messages:
+        if message.get("role") != "tool":
+            continue
+        results.append(
+            {
+                "name": message.get("name"),
+                "tool_call_id": message.get("tool_call_id"),
+                "content": message.get("content"),
+            }
+        )
+    return results
+
+
+def _common_prefix_len(left: list[int], right: list[int]) -> int:
+    """Return the shared token prefix length for incremental multi-turn rows."""
+
+    limit = min(len(left), len(right))
+    for idx in range(limit):
+        if left[idx] != right[idx]:
+            return idx
+    return limit
 
 
 def _chat_batch_key(params: Any) -> _ChatBatchKey:

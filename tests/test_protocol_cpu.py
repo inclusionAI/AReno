@@ -112,6 +112,7 @@ class TPClusterResourceTest(unittest.TestCase):
                 block_size=16,
                 coalesce_max_running_seqs=2,
                 coalesce_timeout_s=5.0,
+                partial_tail_cooldown_until_s_by_dp=[[float(max_cache_len)], []],
             )
 
         short = payload([1, 2], max_cache_len=18, max_blocks_per_seq=2, max_prefill_tokens=4)
@@ -123,8 +124,9 @@ class TPClusterResourceTest(unittest.TestCase):
         self.assertEqual(merged.max_cache_len, 20)
         self.assertEqual(merged.max_blocks_per_seq, 3)
         self.assertEqual(merged.max_prefill_tokens, 8)
-        self.assertEqual(merged.num_blocks, 3)
+        self.assertEqual(merged.num_blocks, 6)
         self.assertEqual(merged.prompts_by_dp, [[[1, 2]], [[3, 4, 5, 6]]])
+        self.assertEqual(merged.partial_tail_cooldown_until_s_by_dp, [[18.0], [20.0]])
         self.assertEqual(merged.coalesced_request_ids, [10, 11])
         self.assertEqual(merged.coalesced_counts_by_dp, [[1, 0], [0, 1]])
 
@@ -147,6 +149,7 @@ class TPClusterResourceTest(unittest.TestCase):
                 coalesce_max_running_seqs=16,
                 coalesce_timeout_s=5.0,
                 partial_tail_threshold=0,
+                partial_tail_min_tokens=256,
             )
             for idx in range(16)
         ]
@@ -154,7 +157,8 @@ class TPClusterResourceTest(unittest.TestCase):
         merged = protocol._merge_rollout_payloads_for_cluster(payloads, list(range(16)))
 
         self.assertEqual(merged.max_running_seqs, 16)
-        self.assertEqual(merged.partial_tail_threshold, 4)
+        self.assertEqual(merged.partial_tail_threshold, 2)
+        self.assertEqual(merged.partial_tail_min_tokens, 256)
 
 
 if __name__ == "__main__":

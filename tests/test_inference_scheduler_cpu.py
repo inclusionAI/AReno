@@ -129,6 +129,7 @@ def test_no_sync_rollout_marks_small_active_tail_partial():
             eos_token_id=None,
             prompt_indices=[0, 1, 2, 3],
             partial_tail_threshold=1,
+            partial_tail_ready_callback=lambda active_count: True,
         )
 
     assert state.generated[0] == [1, 2]
@@ -136,12 +137,150 @@ def test_no_sync_rollout_marks_small_active_tail_partial():
     assert state.finish_reason[1:] == ["stop", "stop", "stop"]
 
 
-def test_partial_tail_threshold_disabled_for_single_or_continuation_batches():
-    """Continuation batches should be allowed to finish instead of being cut forever."""
+def test_no_sync_rollout_keeps_tail_when_no_waiting_batch():
+    """Small tails should continue when no compatible queued requests can refill them."""
+
+    class TailManager(_FakeInferenceManager):
+        def _infer_decode_next_token_tensor(self, *args, **kwargs):
+            active_count = int(args[4])
+            next_tokens = args[0]
+            values = next_tokens + 1
+            if active_count == 4:
+                values = torch.tensor([2, 99, 99, 99], dtype=torch.long)
+            return values, torch.zeros_like(values, dtype=torch.float32)
+
+    manager = TailManager()
+    state = InferenceBatchState(
+        prompts=[[10], [11], [12], [13]],
+        max_new_tokens=4,
+        max_running_seqs=4,
+        max_cache_len=8,
+        max_prefill_tokens=8,
+        kv_block_size=4,
+        num_cache_blocks=8,
+    )
+    ctx = SimpleNamespace(is_rank0=True, dp_rank=0, dp_size=1)
+
+    with PatchedContext(inference_mod, get_tp_context=lambda: ctx, broadcast_object=lambda value, src=0: value):
+        manager._generate_rollout_tokens_no_sync(
+            state,
+            SamplingParams(stop_token_ids=(99,)),
+            eos_token_id=None,
+            prompt_indices=[0, 1, 2, 3],
+            partial_tail_threshold=1,
+            partial_tail_ready_callback=lambda active_count: False,
+        )
+
+    assert state.generated[0] == [1, 2, 3, 4]
+    assert state.finish_reason[0] == "length"
+
+
+def test_no_sync_rollout_respects_partial_tail_min_tokens():
+    """A tail should not be cut before it has made enough decode progress."""
+
+    manager = _FakeInferenceManager()
+    state = InferenceBatchState(
+        prompts=[[10]],
+        max_new_tokens=3,
+        max_running_seqs=4,
+        max_cache_len=8,
+        max_prefill_tokens=8,
+        kv_block_size=4,
+        num_cache_blocks=8,
+    )
+    ctx = SimpleNamespace(is_rank0=True, dp_rank=0, dp_size=1)
+
+    with PatchedContext(inference_mod, get_tp_context=lambda: ctx, broadcast_object=lambda value, src=0: value):
+        manager._generate_rollout_tokens_no_sync(
+            state,
+            SamplingParams(),
+            eos_token_id=None,
+            prompt_indices=[0],
+            partial_tail_threshold=1,
+            partial_tail_min_tokens=4,
+        )
+
+    assert state.generated == [[1, 2, 3]]
+    assert state.finish_reason == ["length"]
+
+
+def test_no_sync_rollout_respects_partial_tail_cooldown():
+    """The same rollout row should not be cut again before its cooldown expires."""
+
+    manager = _FakeInferenceManager()
+    state = InferenceBatchState(
+        prompts=[[10]],
+        max_new_tokens=3,
+        max_running_seqs=4,
+        max_cache_len=8,
+        max_prefill_tokens=8,
+        kv_block_size=4,
+        num_cache_blocks=8,
+    )
+    ctx = SimpleNamespace(is_rank0=True, dp_rank=0, dp_size=1)
+
+    with PatchedContext(inference_mod, get_tp_context=lambda: ctx, broadcast_object=lambda value, src=0: value):
+        manager._generate_rollout_tokens_no_sync(
+            state,
+            SamplingParams(),
+            eos_token_id=None,
+            prompt_indices=[0],
+            partial_tail_threshold=1,
+            partial_tail_ready_callback=lambda active_count: True,
+            partial_tail_cooldown_until_s=[inference_mod.time.monotonic() + 100.0],
+        )
+
+    assert state.generated == [[1, 2, 3]]
+    assert state.finish_reason == ["length"]
+
+
+def test_partial_tail_threshold_uses_local_capacity():
+    """Single-request async payloads can still use configured local capacity for tail cuts."""
 
     assert partial_tail_threshold(local_running=1, coalesce_timeout_s=5.0) == 0
     assert partial_tail_threshold(local_running=8, coalesce_timeout_s=0.0) == 0
-    assert partial_tail_threshold(local_running=8, coalesce_timeout_s=5.0) == 2
+    assert partial_tail_threshold(local_running=8, coalesce_timeout_s=5.0) == 1
+
+
+def test_async_single_request_payload_uses_capacity_for_partial_tail():
+    """Serve singletons should still allocate local capacity so long tails can be cut."""
+
+    class ClusterStub:
+        def __init__(self):
+            self.payload = None
+
+        async def call_async(self, op, payload):
+            self.payload = payload
+            assert op is Op.INFER_ROLLOUT
+            output = _build_rollout_from_rows(
+                [[1]],
+                [[2]],
+                ["stop"],
+                [torch.tensor([-0.1], dtype=torch.float32)],
+                metrics=None,
+            )
+            return [output, None]
+
+    cluster = ClusterStub()
+    engine = object.__new__(ArenoEngine)
+    engine.cluster = cluster
+    engine.config = SimpleNamespace(tp_size=1, dp_size=2, runtime=SimpleNamespace(kv_block_size=16))
+
+    result = asyncio.run(
+        engine._generate_rollout_async_once(
+            [[1]],
+            max_new_tokens=16,
+            max_running_prompts=32,
+            eos_token_id=None,
+            sampling_params=SamplingParams(),
+            coalesce_timeout_s=0.01,
+        )
+    )
+
+    assert result.response_ids == [[2]]
+    assert cluster.payload.max_running_seqs == 16
+    assert cluster.payload.partial_tail_threshold == 2
+    assert cluster.payload.partial_tail_min_tokens == 256
 
 
 def test_partial_continuation_allows_repeated_tail_cuts_until_progress_completes():
@@ -322,7 +461,7 @@ def test_worker_coalesced_rollout_returns_finished_request_early():
     worker._result_queue = _ResultQueueDouble()
     ctx = SimpleNamespace(dp_rank=0, is_rank0=True)
 
-    def infer_rollout(payload, finished_callback=None):
+    def infer_rollout(payload, finished_callback=None, partial_tail_ready_callback=None):
         finished_callback(torch.tensor([0]), generated, logprobs, response_lens, "stop", ())
         return worker_mod._build_rollout_from_tensor_rows(
             payload.prompts_by_dp[0],
@@ -443,6 +582,16 @@ class _ResultQueueDouble:
 
     def put(self, item):
         self.items.append(item)
+
+
+def test_worker_refill_target_requires_half_batch_refill():
+    """Partial tail should wait for enough queued rows to rebuild a useful batch."""
+
+    payload = _rollout_command(1, [[1]], target=16, dp_size=2).payload
+
+    assert worker_mod._rollout_refill_target(payload, active_count=1) == 16
+    assert worker_mod._rollout_refill_target(payload, active_count=4) == 16
+    assert worker_mod._rollout_refill_target(payload, active_count=20) == 16
 
 
 def _rollout_command(request_id: int, prompts: list[list[int]], *, target: int, dp_size: int = 1) -> Command:

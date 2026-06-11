@@ -91,6 +91,8 @@ class RolloutPayload:
     coalesced_request_ids: list[int] | None = None
     coalesced_counts_by_dp: list[list[int]] | None = None
     partial_tail_threshold: int = 0
+    partial_tail_min_tokens: int = 0
+    partial_tail_cooldown_until_s_by_dp: list[list[float]] | None = None
 
 
 @dataclass(slots=True)
@@ -223,20 +225,23 @@ def _merge_rollout_payloads_for_cluster(payloads: list[RolloutPayload], request_
     dp_size = len(first.prompts_by_dp)
     prompts_by_dp: list[list[list[int]]] = [[] for _ in range(dp_size)]
     prompt_indices_by_dp: list[list[int]] = [[] for _ in range(dp_size)]
+    cooldown_until_by_dp: list[list[float]] = [[] for _ in range(dp_size)]
     counts_by_dp = [[0 for _ in payloads] for _ in range(dp_size)]
     row_idx = 0
     for request_idx, payload in enumerate(payloads):
-        for prompt, prompt_index in _iter_rollout_payload_rows(payload):
+        for prompt, prompt_index, cooldown_until_s in _iter_rollout_payload_rows(payload):
             dp_rank = row_idx % dp_size
             prompts_by_dp[dp_rank].append(prompt)
             prompt_indices_by_dp[dp_rank].append(prompt_index)
+            cooldown_until_by_dp[dp_rank].append(cooldown_until_s)
             counts_by_dp[dp_rank][request_idx] += 1
             row_idx += 1
-    max_running_seqs = max(max((len(rows) for rows in prompts_by_dp), default=0), 1)
+    local_capacity = max(int(first.coalesce_max_running_seqs or first.max_running_seqs), 1)
+    max_running_seqs = max(max((len(rows) for rows in prompts_by_dp), default=0), local_capacity)
     max_cache_len = max(payload.max_cache_len for payload in payloads)
     max_blocks_per_seq = max(payload.max_blocks_per_seq for payload in payloads)
     max_prefill_tokens = max(payload.max_prefill_tokens for payload in payloads)
-    tail_threshold = partial_tail_threshold(max_running_seqs, float(first.coalesce_timeout_s))
+    tail_threshold = partial_tail_threshold(local_capacity, float(first.coalesce_timeout_s))
     return replace(
         first,
         prompts_by_dp=prompts_by_dp,
@@ -250,6 +255,8 @@ def _merge_rollout_payloads_for_cluster(payloads: list[RolloutPayload], request_
         coalesced_request_ids=list(request_ids),
         coalesced_counts_by_dp=counts_by_dp,
         partial_tail_threshold=tail_threshold,
+        partial_tail_min_tokens=max(int(payload.partial_tail_min_tokens) for payload in payloads),
+        partial_tail_cooldown_until_s_by_dp=cooldown_until_by_dp,
     )
 
 
@@ -273,7 +280,10 @@ def _iter_rollout_payload_rows(payload: RolloutPayload):
     for original_idx in range(total):
         dp_rank = original_idx % dp_size
         local_idx = original_idx // dp_size
-        yield payload.prompts_by_dp[dp_rank][local_idx], payload.prompt_indices_by_dp[dp_rank][local_idx]
+        cooldown_until_s = 0.0
+        if payload.partial_tail_cooldown_until_s_by_dp is not None:
+            cooldown_until_s = float(payload.partial_tail_cooldown_until_s_by_dp[dp_rank][local_idx])
+        yield payload.prompts_by_dp[dp_rank][local_idx], payload.prompt_indices_by_dp[dp_rank][local_idx], cooldown_until_s
 
 
 class TPCluster:
@@ -439,14 +449,14 @@ class TPCluster:
         async with self._rollout_queue_lock:
             self._rollout_queue.append(_QueuedRolloutCall(request_id, payload, future, loop))
             if self._rollout_flush_task is None or self._rollout_flush_task.done():
-                self._rollout_flush_task = asyncio.create_task(self._flush_rollout_queue_after(float(payload.coalesce_timeout_s)))
+                self._rollout_flush_task = asyncio.create_task(self._flush_rollout_queue_at_deadline(float(payload.coalesce_timeout_s)))
             first = self._rollout_queue[0].payload
             if _rollout_queue_count(self._rollout_queue) >= _rollout_queue_target(first):
                 self._rollout_flush_task.cancel()
                 self._rollout_flush_task = asyncio.create_task(self._flush_rollout_queue_now())
 
-    async def _flush_rollout_queue_after(self, delay_s: float) -> None:
-        """Flush queued rollout calls after the coalescing delay."""
+    async def _flush_rollout_queue_at_deadline(self, delay_s: float) -> None:
+        """Flush queued rollout calls at the DDL if the batch did not fill."""
 
         try:
             await asyncio.sleep(max(delay_s, 0.0))

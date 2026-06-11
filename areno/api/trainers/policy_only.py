@@ -270,17 +270,25 @@ class PolicyOnlyTrainer:
         for logged, record in enumerate(agent_batch.reward_records):
             prompt_idx = int(record.metadata.get("prompt_index", -1))
             sample_idx = int(record.metadata.get("sample_index", -1))
+            loss_mask = agent_batch.loss_masks[logged]
+            token_row = agent_batch.token_rows[logged]
+            first_loss_idx = next((idx for idx, enabled in enumerate(loss_mask) if enabled), -1)
             self.logger.info(
-                "epoch=%d step=%d prompt_idx=%d sample_idx=%d prompt=%r completion=%r tool_calls=%s loss_mask=%s tokens=%s",
+                "epoch=%d step=%d prompt_idx=%d sample_idx=%d prompt=%r rendered_completion=%r final_answer=%r tool_calls=%s tool_results=%s loss_mask_true=%d/%d first_loss_idx=%d loss_mask=%s tokens=%s",
                 epoch,
                 step,
                 prompt_idx,
                 sample_idx,
                 record.prompt,
-                record.completion,
+                record.rendered_completion,
+                record.final_answer,
                 record.tool_calls,
-                record.loss_mask[:64],
-                record.tokens[:64],
+                record.tool_results[:4],
+                sum(1 for enabled in loss_mask if enabled),
+                len(loss_mask),
+                first_loss_idx,
+                loss_mask[:64],
+                token_row[:64],
             )
             if logged + 1 >= limit:
                 return

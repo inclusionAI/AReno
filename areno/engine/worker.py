@@ -115,12 +115,16 @@ class ArenoWorker:
         """Delegate non-actor role lifecycle to `RoleManager`."""
         return self.roles.ensure_roles(payload)
 
-    def infer_rollout(self, payload: dict, finished_callback=None) -> RolloutOutput | None:
+    def infer_rollout(self, payload: dict, finished_callback=None, partial_tail_ready_callback=None) -> RolloutOutput | None:
         """Delegate rollout generation to `InferenceManager`."""
-        return self.inference.infer_rollout(payload, finished_callback=finished_callback)
+        return self.inference.infer_rollout(
+            payload,
+            finished_callback=finished_callback,
+            partial_tail_ready_callback=partial_tail_ready_callback,
+        )
 
     def collect_rollout_commands(self, first_cmd: Command) -> list[Command]:
-        """Collect compatible rollout commands for one worker-local batch."""
+        """Collect compatible commands until the worker batch fills or reaches DDL."""
 
         first_payload = first_cmd.payload
         if not _rollout_coalesce_enabled(first_payload):
@@ -149,7 +153,16 @@ class ArenoWorker:
 
         ctx = get_tp_context()
         if len(commands) == 1:
-            return [(commands[0].request_id, self.infer_rollout(commands[0].payload))]
+            payload = commands[0].payload
+            return [
+                (
+                    commands[0].request_id,
+                    self.infer_rollout(
+                        payload,
+                        partial_tail_ready_callback=lambda active_count: self._has_enough_waiting_rollouts(payload, active_count),
+                    ),
+                )
+            ]
         merged, counts = _merge_rollout_payloads([cmd.payload for cmd in commands], ctx.dp_rank)
         request_ids = [cmd.request_id for cmd in commands]
         return self.run_coalesced_rollout_payload(merged, request_ids, counts)
@@ -203,9 +216,47 @@ class ArenoWorker:
                     self._current_request_ids = [pending_id for pending_id in current_request_ids if pending_id != request_id]
                 sent.add(request_idx)
 
-        output = self.infer_rollout(payload, finished_callback=send_finished)
+        output = self.infer_rollout(
+            payload,
+            finished_callback=send_finished,
+            partial_tail_ready_callback=lambda active_count: self._has_enough_waiting_rollouts(payload, active_count),
+        )
         parts = _split_rollout_output(output, counts)
         return [(request_id, part) for idx, (request_id, part) in enumerate(zip(request_ids, parts, strict=True)) if idx not in sent]
+
+    def _has_enough_waiting_rollouts(self, payload: RolloutPayload, active_count: int) -> bool:
+        """Return true when queued compatible requests can usefully refill the tail."""
+
+        ctx = get_tp_context()
+        ready = False
+        if ctx.is_rank0:
+            ready = self._waiting_rollout_count(payload, active_count) >= _rollout_refill_target(payload, active_count)
+        if ctx.group is not None:
+            flag = [ready]
+            dist.broadcast_object_list(flag, src=ctx.dp_rank * ctx.world_size, group=ctx.group)
+            ready = bool(flag[0])
+        return ready
+
+    def _waiting_rollout_count(self, payload: RolloutPayload, active_count: int) -> int:
+        """Count compatible waiting rollout rows, draining queue entries to deferred."""
+
+        count = 0
+        for cmd in self._deferred_commands:
+            if cmd.op is Op.INFER_ROLLOUT and _rollout_payloads_compatible(payload, cmd.payload):
+                count += _rollout_global_count(cmd.payload)
+                continue
+            return count
+        target = _rollout_refill_target(payload, active_count)
+        while count < target:
+            try:
+                cmd = self._cmd_queue.get_nowait()
+            except queue.Empty:
+                break
+            self._deferred_commands.append(cmd)
+            if cmd.op is not Op.INFER_ROLLOUT or not _rollout_payloads_compatible(payload, cmd.payload):
+                break
+            count += _rollout_global_count(cmd.payload)
+        return count
 
     def rollout_session_begin(self, payload: None) -> None:
         """Prepare actor state for one or more rollout calls."""
@@ -336,7 +387,7 @@ class ArenoWorker:
 def _rollout_coalesce_enabled(payload: RolloutPayload) -> bool:
     """Return whether this rollout payload can wait for worker-local batching."""
 
-    return bool(float(getattr(payload, "coalesce_timeout_s", 0.0)) > 0.0 and payload.cancel_flags is None)
+    return bool(float(payload.coalesce_timeout_s) > 0.0 and payload.cancel_flags is None)
 
 
 def _rollout_local_count(payload: RolloutPayload, dp_rank: int) -> int:
@@ -357,18 +408,25 @@ def _rollout_coalesce_target(payload: RolloutPayload) -> int:
     return max(int(payload.coalesce_max_running_seqs or payload.max_running_seqs), 1)
 
 
+def _rollout_refill_target(payload: RolloutPayload, active_count: int) -> int:
+    """Global queued-row count needed before cutting the current active tail."""
+
+    del active_count
+    local_target = _rollout_coalesce_target(payload)
+    lower = max(1, (local_target + 7) // 8)
+    local_needed = max(lower, local_target // 2)
+    return local_needed * len(payload.prompts_by_dp)
+
+
 def _rollout_payloads_compatible(first: RolloutPayload, other: RolloutPayload) -> bool:
     """Return whether two rollout payloads can share one InferenceBatchState."""
 
-    if not _rollout_coalesce_enabled(other):
+    if other.cancel_flags is not None:
         return False
     return (
         first.max_new_tokens == other.max_new_tokens
         and first.eos_token_id == other.eos_token_id
         and first.sampling_params == other.sampling_params
-        and first.max_cache_len == other.max_cache_len
-        and first.max_blocks_per_seq == other.max_blocks_per_seq
-        and first.max_prefill_tokens == other.max_prefill_tokens
         and first.block_size == other.block_size
         and first.decode_progress_interval_s == other.decode_progress_interval_s
         and first.cancel_flags is None
@@ -385,23 +443,34 @@ def _merge_rollout_payloads(payloads: list[RolloutPayload], current_dp_rank: int
     dp_size = len(first.prompts_by_dp)
     prompts_by_dp = [[] for _ in range(dp_size)]
     prompt_indices_by_dp = [[] for _ in range(dp_size)]
+    cooldown_until_by_dp = [[] for _ in range(dp_size)]
     counts_by_dp = [[0 for _ in payloads] for _ in range(dp_size)]
     row_idx = 0
     for request_idx, payload in enumerate(payloads):
-        for prompt, prompt_index in _iter_rollout_payload_rows(payload):
+        for prompt, prompt_index, cooldown_until_s in _iter_rollout_payload_rows(payload):
             dp_rank = row_idx % dp_size
             prompts_by_dp[dp_rank].append(prompt)
             prompt_indices_by_dp[dp_rank].append(prompt_index)
+            cooldown_until_by_dp[dp_rank].append(cooldown_until_s)
             counts_by_dp[dp_rank][request_idx] += 1
             row_idx += 1
-    max_running_seqs = max(max((len(rows) for rows in prompts_by_dp), default=0), 1)
+    local_capacity = max(int(first.coalesce_max_running_seqs or first.max_running_seqs), 1)
+    max_running_seqs = max(max((len(rows) for rows in prompts_by_dp), default=0), local_capacity)
+    max_cache_len = max(payload.max_cache_len for payload in payloads)
+    max_blocks_per_seq = max(payload.max_blocks_per_seq for payload in payloads)
+    max_prefill_tokens = max(payload.max_prefill_tokens for payload in payloads)
     return replace(
         first,
         prompts_by_dp=prompts_by_dp,
         prompt_indices_by_dp=prompt_indices_by_dp,
         max_running_seqs=max_running_seqs,
-        num_blocks=max_running_seqs * int(first.max_blocks_per_seq),
-        partial_tail_threshold=partial_tail_threshold(max_running_seqs, float(first.coalesce_timeout_s)),
+        max_cache_len=max_cache_len,
+        max_blocks_per_seq=max_blocks_per_seq,
+        max_prefill_tokens=max_prefill_tokens,
+        num_blocks=max_running_seqs * int(max_blocks_per_seq),
+        partial_tail_threshold=partial_tail_threshold(local_capacity, float(first.coalesce_timeout_s)),
+        partial_tail_min_tokens=max(int(payload.partial_tail_min_tokens) for payload in payloads),
+        partial_tail_cooldown_until_s_by_dp=cooldown_until_by_dp,
     ), counts_by_dp[current_dp_rank]
 
 
@@ -413,7 +482,10 @@ def _iter_rollout_payload_rows(payload: RolloutPayload):
     for original_idx in range(total):
         dp_rank = original_idx % dp_size
         local_idx = original_idx // dp_size
-        yield payload.prompts_by_dp[dp_rank][local_idx], payload.prompt_indices_by_dp[dp_rank][local_idx]
+        cooldown_until_s = 0.0
+        if payload.partial_tail_cooldown_until_s_by_dp is not None:
+            cooldown_until_s = float(payload.partial_tail_cooldown_until_s_by_dp[dp_rank][local_idx])
+        yield payload.prompts_by_dp[dp_rank][local_idx], payload.prompt_indices_by_dp[dp_rank][local_idx], cooldown_until_s
 
 
 def _split_rollout_output(output: RolloutOutput | None, counts: list[int]) -> list[RolloutOutput | None]:

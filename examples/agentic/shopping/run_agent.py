@@ -80,6 +80,15 @@ TOOLS = [
     },
 ]
 
+TOOL_BY_NAME = {tool["function"]["name"]: tool for tool in TOOLS}
+
+TURN_PROMPTS = {
+    "search_catalog": "Turn 1: call search_catalog only. Search for the required categories from the task.",
+    "inspect_items": "Turn 2: call inspect_items only. Inspect promising item ids from the search results.",
+    "check_kit": "Turn 3: call check_kit only. Check one complete proposed kit against the task constraints.",
+    "submit_bundle": "Turn 4: call submit_bundle only. Submit the final item ids.",
+}
+
 
 async def run_agent(ctx, batch) -> None:
     """Run four tool-call turns for each shopping task."""
@@ -120,14 +129,16 @@ async def run_agent(ctx, batch) -> None:
 
 
 async def _call_model(client, messages: list[dict], tool_name: str):
+    turn_messages = [*messages, {"role": "user", "content": TURN_PROMPTS[tool_name]}]
     response = await client.chat.completions.create(
         model="policy",
-        messages=messages,
-        tools=TOOLS,
+        messages=turn_messages,
+        tools=[TOOL_BY_NAME[tool_name]],
         tool_choice={"type": "function", "function": {"name": tool_name}},
         stream=False,
     )
     message = response.choices[0].message
+    tool_calls = [call for call in (message.tool_calls or []) if call.function.name == tool_name][:1]
     return {
         "role": "assistant",
         "content": message.content,
@@ -140,7 +151,7 @@ async def _call_model(client, messages: list[dict], tool_name: str):
                     "arguments": call.function.arguments,
                 },
             }
-            for call in (message.tool_calls or [])
+            for call in tool_calls
         ],
     }
 

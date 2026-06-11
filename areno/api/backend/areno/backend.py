@@ -183,25 +183,20 @@ class ArenoBackend(Backend):
         flat_prompts = [ids for ids in prompt_tokens for _ in range(n_samples)]
         options = _rollout_options(ctx, sampling_params)
 
-        rollout_start = time.perf_counter()
         if self._step_e2e_start is None:
-            self._step_e2e_start = rollout_start
+            self._step_e2e_start = time.perf_counter()
             self._step_rollout_time_s = 0.0
-        try:
-            # Translate the public SamplingParams into the engine's native type.
-            # Greedy decoding is implemented by forcing temperature to zero.
-            rollout = engine.generate_rollout(
-                flat_prompts,
-                max_new_tokens=sampling_params.max_new_tokens,
-                max_running_prompts=options["max_running_prompts"],
-                max_prompt_len=options["max_prompt_len"],
-                eos_token_id=options["eos_token_id"],
-                decode_progress_interval_s=options["decode_progress_interval_s"],
-                sampling_params=options["sampling_params"],
-            )
-        finally:
-            rollout_generate_time_s = time.perf_counter() - rollout_start
-            self._step_rollout_time_s += rollout_generate_time_s
+        # Translate the public SamplingParams into the engine's native type.
+        # Greedy decoding is implemented by forcing temperature to zero.
+        rollout = engine.generate_rollout(
+            flat_prompts,
+            max_new_tokens=sampling_params.max_new_tokens,
+            max_running_prompts=options["max_running_prompts"],
+            max_prompt_len=options["max_prompt_len"],
+            eos_token_id=options["eos_token_id"],
+            decode_progress_interval_s=options["decode_progress_interval_s"],
+            sampling_params=options["sampling_params"],
+        )
         # Repack the flat result into per-prompt groups of `n_samples`
         # completions so downstream code can iterate `for item, result`.
         results = []
@@ -259,23 +254,19 @@ class ArenoBackend(Backend):
             return []
         prompts = [tokens for tokens in prompt_tokens for _ in range(n_samples)]
         options = _rollout_options(ctx, sampling_params)
-        rollout_start = time.perf_counter()
         if self._step_e2e_start is None:
-            self._step_e2e_start = rollout_start
+            self._step_e2e_start = time.perf_counter()
             self._step_rollout_time_s = 0.0
-        try:
-            rollout = await engine.generate_rollout_async(
-                prompts,
-                max_new_tokens=sampling_params.max_new_tokens,
-                max_running_prompts=options["max_running_prompts"],
-                max_prompt_len=options["max_prompt_len"],
-                eos_token_id=options["eos_token_id"],
-                decode_progress_interval_s=options["decode_progress_interval_s"],
-                coalesce_timeout_s=ROLLOUT_COALESCE_WAIT_S,
-                sampling_params=options["sampling_params"],
-            )
-        finally:
-            self._step_rollout_time_s += time.perf_counter() - rollout_start
+        rollout = await engine.generate_rollout_async(
+            prompts,
+            max_new_tokens=sampling_params.max_new_tokens,
+            max_running_prompts=options["max_running_prompts"],
+            max_prompt_len=options["max_prompt_len"],
+            eos_token_id=options["eos_token_id"],
+            decode_progress_interval_s=options["decode_progress_interval_s"],
+            coalesce_timeout_s=ROLLOUT_COALESCE_WAIT_S,
+            sampling_params=options["sampling_params"],
+        )
         results = []
         for prompt_idx in range(len(prompt_tokens)):
             start = prompt_idx * n_samples

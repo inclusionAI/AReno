@@ -58,7 +58,9 @@ class Trainer:
         # so `record_train_step` can flush a complete timing snapshot.
         self._metric_timings: dict[str, float] = {}
         self._step_active = False
+        self._step_wall_start: float | None = None
         self._rollout_session_depth = 0
+        self._rollout_wall_start: float | None = None
 
     def init(self) -> None:
         """Load tokenizer, create backend context, and initialize workers."""
@@ -88,11 +90,13 @@ class Trainer:
         self._ctx.step()
         self._metric_timings = {}
         self._step_active = True
+        self._step_wall_start = time.perf_counter()
 
     def finish_step(self) -> None:
         """Close the current trainer-owned step without running actor train."""
 
         self._step_active = False
+        self._step_wall_start = None
 
     def begin_rollout_session(self) -> None:
         """Prepare backend rollout state for one or more rollout calls."""
@@ -100,6 +104,8 @@ class Trainer:
         if self._backend is None or self._ctx is None:
             raise RuntimeError("Trainer is not initialized")
         if self._rollout_session_depth == 0:
+            self._begin_step()
+            self._rollout_wall_start = time.perf_counter()
             self._backend.begin_rollout_session(self._ctx)
         self._rollout_session_depth += 1
 
@@ -109,6 +115,8 @@ class Trainer:
         if self._backend is None or self._ctx is None:
             raise RuntimeError("Trainer is not initialized")
         if self._rollout_session_depth == 0:
+            self._begin_step()
+            self._rollout_wall_start = time.perf_counter()
             await self._backend.begin_rollout_session_async(self._ctx)
         self._rollout_session_depth += 1
 
@@ -121,7 +129,10 @@ class Trainer:
             return
         self._rollout_session_depth -= 1
         if self._rollout_session_depth == 0:
-            self._backend.end_rollout_session(self._ctx)
+            try:
+                self._backend.end_rollout_session(self._ctx)
+            finally:
+                self._finish_rollout_timing()
 
     async def end_rollout_session_async(self) -> None:
         """Async variant of :meth:`end_rollout_session`."""
@@ -132,7 +143,18 @@ class Trainer:
             return
         self._rollout_session_depth -= 1
         if self._rollout_session_depth == 0:
-            await self._backend.end_rollout_session_async(self._ctx)
+            try:
+                await self._backend.end_rollout_session_async(self._ctx)
+            finally:
+                self._finish_rollout_timing()
+
+    def _finish_rollout_timing(self) -> None:
+        """Record one rollout-session wall time for the current policy step."""
+
+        if self._rollout_wall_start is None:
+            return
+        self._metric_timings["rollout"] = self._metric_timings.get("rollout", 0.0) + time.perf_counter() - self._rollout_wall_start
+        self._rollout_wall_start = None
 
     def load_prompt_batches(
         self,
@@ -208,12 +230,7 @@ class Trainer:
         if self._rollout_session_depth <= 0:
             raise RuntimeError("rollout_token_batch must be called inside `async with trainer.rollout_session(...)`")
         self._begin_step()
-        start = time.perf_counter()
-        try:
-            result = self._backend.rollout_batch(self._ctx, prompt_tokens, n_samples, sampling_params)
-            return result
-        finally:
-            self._metric_timings["rollout"] = self._metric_timings.get("rollout", 0.0) + time.perf_counter() - start
+        return self._backend.rollout_batch(self._ctx, prompt_tokens, n_samples, sampling_params)
 
     async def rollout_token_batch_async(
         self,
@@ -226,13 +243,8 @@ class Trainer:
         if self._rollout_session_depth <= 0:
             raise RuntimeError("rollout_token_batch_async must be called inside `async with trainer.rollout_session(...)`")
         self._begin_step()
-        start = time.perf_counter()
         rollout_async = getattr(self._backend, "rollout_batch_async")
-        try:
-            result = await rollout_async(self._ctx, prompt_tokens, n_samples, sampling_params)
-            return result
-        finally:
-            self._metric_timings["rollout"] = self._metric_timings.get("rollout", 0.0) + time.perf_counter() - start
+        return await rollout_async(self._ctx, prompt_tokens, n_samples, sampling_params)
 
     def rollout_session(
         self,
@@ -274,6 +286,12 @@ class Trainer:
         start = time.perf_counter()
         result = self._backend.train(self._ctx, batch_data, loss_fn, mini_bs, gradient_accumulation_steps)
         self._metric_timings["train"] = time.perf_counter() - start
+        if isinstance(result, dict):
+            if "rollout" in self._metric_timings:
+                result["step_rollout_time_s"] = self._metric_timings["rollout"]
+            result["step_train_time_s"] = self._metric_timings["train"]
+            if self._step_wall_start is not None:
+                result["step_e2e_time_s"] = time.perf_counter() - self._step_wall_start
         if self._metrics is not None:
             self._metrics.record_train_step(
                 step=self._ctx.global_step,

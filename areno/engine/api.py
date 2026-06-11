@@ -20,6 +20,7 @@ High-level responsibilities:
 
 from __future__ import annotations
 
+import time
 from typing import Any, Callable
 
 import torch
@@ -49,6 +50,10 @@ from areno.engine.runtime.common import (
 )
 from areno.engine.runtime.decode_graph import ceil_div
 from areno.engine.runtime.rollout import _build_rollout_from_rows, _merge_dp_rollouts_in_input_order, _merge_rollouts, partial_tail_threshold
+
+
+PARTIAL_TAIL_MIN_TOKENS = 256
+PARTIAL_TAIL_COOLDOWN_S = 10.0
 
 
 def _merge_async_dp_rollouts(outputs: list[RolloutOutput | None], *, total_count: int) -> RolloutOutput:
@@ -276,6 +281,7 @@ class ArenoEngine:
         decode_progress_interval_s: float = 0.0,
         cancel_flags: torch.Tensor | None = None,
         coalesce_timeout_s: float = 5.0,
+        partial_tail_cooldown_until_s: list[float] | None = None,
     ) -> RolloutOutput:
         """Async rollout path using TPCluster request-id demux.
 
@@ -294,6 +300,7 @@ class ArenoEngine:
             decode_progress_interval_s=decode_progress_interval_s,
             cancel_flags=cancel_flags,
             coalesce_timeout_s=coalesce_timeout_s,
+            partial_tail_cooldown_until_s=partial_tail_cooldown_until_s,
         )
         if cancel_flags is not None:
             return output
@@ -319,6 +326,7 @@ class ArenoEngine:
         decode_progress_interval_s: float = 0.0,
         cancel_flags: torch.Tensor | None = None,
         coalesce_timeout_s: float = 5.0,
+        partial_tail_cooldown_until_s: list[float] | None = None,
     ) -> RolloutOutput:
         """Run one async rollout pass without resolving ``partial`` rows."""
 
@@ -343,7 +351,13 @@ class ArenoEngine:
             chunk_start = sum(len(output.prompt_ids) for output in outputs)
             prompts_by_dp = split_list_by_dp(chunk, dp_size)
             prompt_indices_by_dp = split_list_by_dp(list(range(chunk_start, chunk_start + len(chunk))), dp_size)
+            cooldown_chunk = (
+                partial_tail_cooldown_until_s[chunk_start : chunk_start + len(chunk)]
+                if partial_tail_cooldown_until_s is not None
+                else [0.0 for _ in chunk]
+            )
             current_local_running = max(max((len(rows) for rows in prompts_by_dp), default=0), 1)
+            capacity_local_running = local_max_running_prompts if coalesce_timeout_s > 0.0 and cancel_flags is None else current_local_running
             max_cache_len = max(max(len(prompt) + max_new_tokens for prompt in chunk), rollout_max_cache_len)
             max_blocks_per_seq = ceil_div(max_cache_len, self.config.runtime.kv_block_size)
             payload = RolloutPayload(
@@ -352,11 +366,11 @@ class ArenoEngine:
                 max_new_tokens=max_new_tokens,
                 eos_token_id=eos_token_id,
                 sampling_params=sampling_params,
-                max_running_seqs=current_local_running,
+                max_running_seqs=capacity_local_running,
                 max_cache_len=max_cache_len,
                 max_blocks_per_seq=max_blocks_per_seq,
                 max_prefill_tokens=max_prefill_tokens,
-                num_blocks=current_local_running * max_blocks_per_seq,
+                num_blocks=capacity_local_running * max_blocks_per_seq,
                 block_size=self.config.runtime.kv_block_size,
                 decode_progress_interval_s=decode_progress_interval_s,
                 cancel_flags=cancel_flags,
@@ -365,9 +379,10 @@ class ArenoEngine:
                 else None,
                 coalesce_max_running_seqs=local_max_running_prompts,
                 coalesce_timeout_s=max(float(coalesce_timeout_s), 0.0),
+                partial_tail_cooldown_until_s_by_dp=split_list_by_dp(cooldown_chunk, dp_size),
             )
-            if hasattr(payload, "partial_tail_threshold"):
-                payload.partial_tail_threshold = partial_tail_threshold(current_local_running, coalesce_timeout_s)
+            payload.partial_tail_threshold = partial_tail_threshold(capacity_local_running, coalesce_timeout_s)
+            payload.partial_tail_min_tokens = PARTIAL_TAIL_MIN_TOKENS
             results = await self.cluster.call_async(
                 Op.INFER_ROLLOUT,
                 payload,
@@ -394,6 +409,11 @@ class ArenoEngine:
         response_rows = [list(row) for row in output.response_ids]
         finish_reason = list(output.finish_reason)
         logprob_rows = [output.logprobs[row_idx, : len(response)].detach().cpu() for row_idx, response in enumerate(response_rows)]
+        now = time.monotonic()
+        partial_cooldown_until = [
+            now + PARTIAL_TAIL_COOLDOWN_S if reason == "partial" else 0.0
+            for reason in finish_reason
+        ]
 
         while True:
             partial_indices = [
@@ -409,6 +429,7 @@ class ArenoEngine:
                 groups.setdefault(remaining, []).append(row_idx)
             for remaining, row_indices in groups.items():
                 continuation_prompts = [prompt_rows[row_idx] + response_rows[row_idx] for row_idx in row_indices]
+                continuation_cooldowns = [partial_cooldown_until[row_idx] for row_idx in row_indices]
                 continuation = await self._generate_rollout_async_once(
                     continuation_prompts,
                     max_new_tokens=remaining,
@@ -419,6 +440,7 @@ class ArenoEngine:
                     decode_progress_interval_s=decode_progress_interval_s,
                     cancel_flags=None,
                     coalesce_timeout_s=coalesce_timeout_s,
+                    partial_tail_cooldown_until_s=continuation_cooldowns,
                 )
                 for local_idx, row_idx in enumerate(row_indices):
                     next_response = continuation.response_ids[local_idx]
@@ -429,6 +451,8 @@ class ArenoEngine:
                     next_logprobs = continuation.logprobs[local_idx, : len(next_response)].detach().cpu()
                     logprob_rows[row_idx] = torch.cat([logprob_rows[row_idx], next_logprobs]) if logprob_rows[row_idx].numel() else next_logprobs
                     finish_reason[row_idx] = continuation.finish_reason[local_idx]
+                    if finish_reason[row_idx] == "partial":
+                        partial_cooldown_until[row_idx] = time.monotonic() + PARTIAL_TAIL_COOLDOWN_S
             if all(reason != "partial" or len(response_rows[row_idx]) >= max_new_tokens for row_idx, reason in enumerate(finish_reason)):
                 break
         finish_reason = ["length" if reason == "partial" else reason for reason in finish_reason]

@@ -24,7 +24,7 @@ from areno.engine.data.tokenizer import load_tokenizer
 from areno.engine import ArenoEngine
 
 
-SERVE_COALESCE_WAIT_S = 0.01
+SERVE_COALESCE_DEADLINE_S = 5.0
 
 
 def _serve_loss_fn(*_: Any) -> torch.Tensor:
@@ -264,7 +264,7 @@ async def _run_request_rollout(app: FastAPI, item: PendingRequest) -> ChatComple
             stop_token_ids=key.stop_token_ids,
         ),
         decode_progress_interval_s=app.state.decode_progress_interval_s,
-        coalesce_timeout_s=SERVE_COALESCE_WAIT_S,
+        coalesce_timeout_s=SERVE_COALESCE_DEADLINE_S,
     )
     if item.future.done():
         return None

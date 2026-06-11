@@ -123,6 +123,25 @@ def test_claim_item_reuses_source_record_for_extra_agent_requests():
     assert second.record == {"board": "b"}
 
 
+def test_claim_item_matches_prompt_before_sequential_order():
+    """Out-of-order concurrent HTTP arrivals should not attach to the wrong source record."""
+
+    session = RolloutSession(None, sampling_params=None, loss_mask_policy=LossMaskPolicy())
+    batch = AgentBatch(
+        records=[{"task": "a"}, {"task": "b"}],
+        prompts=["prompt a", "prompt b"],
+        input_tokens=[[1], [2]],
+        n_samples=1,
+    )
+    session.attach_batch(batch)
+
+    item = session._claim_item([{"role": "user", "content": "prompt b"}])
+
+    assert item.prompt == "prompt b"
+    assert item.record == {"task": "b"}
+    assert item.prompt_index == 1
+
+
 def test_messages_to_prompt_tokens_passes_tools_to_chat_template():
     tokenizer = _ToolAwareTokenizer()
     messages = [{"role": "user", "content": "choose"}]
@@ -286,12 +305,15 @@ def test_agentic_multi_turn_calls_merge_into_one_training_sample():
     item = agentic.AgentItem(record={"task": "multi"}, prompt="p", input_tokens=[1, 2], prompt_index=0, sample_index=0)
     first = _pending_chat(0, _FakeSamplingParams())
     first.item = item
+    first.input_tokens = [1, 2]
     first.messages = [{"role": "user", "content": "step 1"}]
     second = _pending_chat(0, _FakeSamplingParams())
     second.item = item
+    second.input_tokens = [1, 2, 10, 11, 30, 31]
     second.messages = [
         {"role": "user", "content": "step 1"},
         {"role": "assistant", "content": "10 11"},
+        {"role": "tool", "content": "tool result"},
         {"role": "user", "content": "step 2"},
     ]
 
@@ -301,12 +323,32 @@ def test_agentic_multi_turn_calls_merge_into_one_training_sample():
     record = batch.reward_records[0]
 
     assert len(session._samples) == 1
-    assert batch.token_rows == [[1, 2, 10, 11, 20]]
-    assert batch.loss_masks == [[False, False, True, True, True]]
-    assert batch.rollout_logprobs == [[0.0, 0.0, -0.1, -0.2, -0.3]]
+    assert batch.token_rows == [[1, 2, 10, 11, 30, 31, 20]]
+    assert batch.response_masks == [[False, False, True, True, False, False, True]]
+    assert batch.loss_masks == [[False, False, True, True, False, False, True]]
+    assert batch.rollout_logprobs == [[0.0, 0.0, -0.1, -0.2, 0.0, 0.0, -0.3]]
     assert record.tokens == [10, 11, 20]
+    assert record.tool_results == [{"name": None, "tool_call_id": None, "content": "tool result"}]
+    assert record.completion == "10 11\n20"
     assert [event.type for event in record.trace].count("request") == 2
     assert record.source_record == {"task": "multi"}
+
+
+def test_agentic_reward_record_renders_messages_with_chat_template():
+    trainer = _FakeTrainer(world_size=1, tp_size=1)
+    trainer.tokenizer = _DisplayTokenizer()
+    session = RolloutSession(trainer, sampling_params=_FakeSamplingParams(), loss_mask_policy=LossMaskPolicy())
+    item = agentic.AgentItem(record={}, prompt="p", input_tokens=[1], prompt_index=0, sample_index=0)
+    sample = _sample(item, "answer", [2])
+    sample.messages = [
+        {"role": "user", "content": "question"},
+        {"role": "tool", "content": "tool result"},
+    ]
+
+    record = session._reward_record(sample)
+
+    assert record.completion == "answer"
+    assert record.rendered_completion == "user:question|tool:tool result|assistant:answer"
 
 
 def test_agentic_tool_request_returns_tool_call_and_reward_record():
@@ -500,6 +542,27 @@ def test_tool_call_parser_supports_flat_tool_schema():
     assert parsed.tool_calls[0]["function"]["name"] == "choose_move"
 
 
+def test_json_tool_call_parser_rejects_tool_choice_mismatch():
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "submit_bundle",
+                "parameters": {"type": "object", "properties": {"item_ids": {"type": "array", "items": {"type": "string"}}}},
+            },
+        }
+    ]
+
+    parsed = JsonToolCallParser().parse(
+        '{"name":"check_kit","arguments":{"item_ids":["packable-rain-shell","insulated-bottle-750"]}}',
+        tools,
+        {"type": "function", "function": {"name": "submit_bundle"}},
+    )
+
+    assert parsed.tool_calls == []
+    assert parsed.normal_text
+
+
 def _sample(item, text, tokens):
     return agentic._AgentSample(
         item=item,
@@ -594,6 +657,15 @@ class _ToolAwareTokenizer(_FakeTokenizer):
         assert add_generation_prompt is True
         self.calls.append((messages, tools))
         return [len(messages), len(tools or [])]
+
+
+class _DisplayTokenizer(_FakeTokenizer):
+    chat_template = "template"
+
+    def apply_chat_template(self, messages, *, tokenize, add_generation_prompt):
+        assert tokenize is False
+        assert add_generation_prompt is False
+        return "|".join(f"{message['role']}:{message.get('content')}" for message in messages)
 
 
 class _StrictContentTokenizer(_FakeTokenizer):

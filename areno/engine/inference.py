@@ -34,6 +34,7 @@ from areno.engine.runtime.rollout import _empty_rollout
 logger = logging.getLogger(__name__)
 
 FinishedRowsCallback = Callable[[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, str, tuple[int, ...]], None]
+PartialTailReadyCallback = Callable[[int], bool]
 
 
 def _cancel_stop_token(stop_token_ids: list[int], eos_token_id: int | tuple[int, ...] | None) -> int:
@@ -193,7 +194,12 @@ class InferenceManager:
             self._init_decode_graphs()
 
     @torch.inference_mode()
-    def infer_rollout(self, payload: RolloutPayload, finished_callback: FinishedRowsCallback | None = None) -> RolloutOutput | None:
+    def infer_rollout(
+        self,
+        payload: RolloutPayload,
+        finished_callback: FinishedRowsCallback | None = None,
+        partial_tail_ready_callback: PartialTailReadyCallback | None = None,
+    ) -> RolloutOutput | None:
         """Top-level rollout entry: prepare cache, generate, return on rank 0.
 
         Empty-input shards (e.g. idle DP rank) return an empty RolloutOutput
@@ -231,6 +237,7 @@ class InferenceManager:
             )
             sampling_params = payload.sampling_params
             cancel_indices_by_dp = payload.cancel_indices_by_dp
+            cooldown_until_by_dp = payload.partial_tail_cooldown_until_s_by_dp
             self._generate_rollout_tokens_no_sync(
                 state,
                 sampling_params,
@@ -240,7 +247,10 @@ class InferenceManager:
                 cancel_indices=cancel_indices_by_dp[ctx.dp_rank] if cancel_indices_by_dp is not None else None,
                 prompt_indices=prompt_indices,
                 finished_callback=finished_callback,
-                partial_tail_threshold=int(getattr(payload, "partial_tail_threshold", 0)),
+                partial_tail_threshold=int(payload.partial_tail_threshold),
+                partial_tail_min_tokens=int(payload.partial_tail_min_tokens),
+                partial_tail_ready_callback=partial_tail_ready_callback,
+                partial_tail_cooldown_until_s=cooldown_until_by_dp[ctx.dp_rank] if cooldown_until_by_dp is not None else None,
             )
             if ctx.is_rank0:
                 return state.to_rollout()
@@ -264,6 +274,9 @@ class InferenceManager:
         prompt_indices: list[int] | None = None,
         finished_callback: FinishedRowsCallback | None = None,
         partial_tail_threshold: int = 0,
+        partial_tail_min_tokens: int = 0,
+        partial_tail_ready_callback: PartialTailReadyCallback | None = None,
+        partial_tail_cooldown_until_s: list[float] | None = None,
     ) -> None:
         """Prefill all prompts then decode up to `max_new_tokens` without DP-sync.
 
@@ -304,6 +317,11 @@ class InferenceManager:
         truncate_stop_token_ids = stop_token_ids if stop_token_ids else ([cancel_token] if cancel_flags is not None else [])
         prompt_indices_list = list(prompt_indices) if prompt_indices is not None else list(range(prompt_count))
         partial_rows = torch.zeros(prompt_count, device=self.device, dtype=torch.bool)
+        cooldown_until = torch.tensor(
+            partial_tail_cooldown_until_s if partial_tail_cooldown_until_s is not None else [0.0 for _ in range(prompt_count)],
+            device=self.device,
+            dtype=torch.float64,
+        )
 
         # generated/logprobs shape: (prompt_count, max_new_tokens), with only
         # the prefix [0:response_lens[i]] valid for row i.
@@ -488,7 +506,27 @@ class InferenceManager:
                 position_ids = position_ids[keep]
                 block_table = block_table[keep]
                 active_count = int(active_rows.numel())
-            if self._should_partial_tail(state, active_count, partial_tail_threshold):
+            if self._should_partial_tail(
+                state,
+                active_rows,
+                response_lens,
+                active_count,
+                partial_tail_threshold,
+                partial_tail_min_tokens,
+                partial_tail_ready_callback,
+                cooldown_until,
+            ):
+                if progress_enabled:
+                    min_len = int(response_lens[active_rows].min().item()) if active_count else 0
+                    logger.info(
+                        "rollout partial tail: dp=%d/%d active=%d threshold=%d min_response_len=%d max_new_tokens=%d",
+                        ctx.dp_rank,
+                        ctx.dp_size,
+                        active_count,
+                        partial_tail_threshold,
+                        min_len,
+                        state.max_new_tokens,
+                    )
                 partial_rows[active_rows] = True
                 self._free_rollout_rows(state, active_rows)
                 break
@@ -545,7 +583,17 @@ class InferenceManager:
         state.finished = [True for _ in state.generated]
         state.finish_reason = finish_reason_obj
 
-    def _should_partial_tail(self, state: InferenceBatchState, active_count: int, partial_tail_threshold: int) -> bool:
+    def _should_partial_tail(
+        self,
+        state: InferenceBatchState,
+        active_rows: torch.Tensor,
+        response_lens: torch.Tensor,
+        active_count: int,
+        partial_tail_threshold: int,
+        partial_tail_min_tokens: int,
+        partial_tail_ready_callback: PartialTailReadyCallback | None,
+        partial_tail_cooldown_until: torch.Tensor,
+    ) -> bool:
         """Return whether a small active tail should be resumed by a later batch."""
 
         if partial_tail_threshold <= 0 or active_count <= 0:
@@ -553,6 +601,13 @@ class InferenceManager:
         if active_count >= state.max_running_seqs:
             return False
         if state._pending_seq_id < len(state.prompts):
+            return False
+        if partial_tail_min_tokens > 0 and int(response_lens[active_rows].min().item()) < partial_tail_min_tokens:
+            return False
+        now = time.monotonic()
+        if bool((partial_tail_cooldown_until[active_rows] > now).any().item()):
+            return False
+        if partial_tail_ready_callback is None or not partial_tail_ready_callback(active_count):
             return False
         return active_count <= int(partial_tail_threshold)
 

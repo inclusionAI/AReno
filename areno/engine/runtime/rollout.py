@@ -120,7 +120,7 @@ def partial_tail_threshold(local_running: int, coalesce_timeout_s: float) -> int
 
     if coalesce_timeout_s <= 0.0 or local_running <= 1:
         return 0
-    return max(1, int(local_running) // 4)
+    return max(1, int(local_running) // 8)
 
 
 def _merge_rollout_metrics(outputs: list[RolloutOutput]) -> dict[str, float] | None:

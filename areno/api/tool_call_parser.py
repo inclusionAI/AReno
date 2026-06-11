@@ -225,7 +225,7 @@ def _parse_json_tool_calls(content: str, tools: list[dict[str, Any]], chosen_nam
         if parsed is None:
             continue
         name, args = parsed
-        if _tool_name_allowed(name, tools, None):
+        if _tool_name_allowed(name, tools, _forced_tool_choice(chosen_name)):
             calls.append(_openai_tool_call(name, args))
     return calls
 
@@ -292,6 +292,12 @@ def _chosen_tool_name(tools: list[dict[str, Any]], tool_choice: Any) -> str | No
         if isinstance(function, dict) and isinstance(function.get("name"), str):
             return function["name"]
     return None
+
+
+def _forced_tool_choice(name: str | None) -> dict[str, Any] | None:
+    if name is None:
+        return None
+    return {"type": "function", "function": {"name": name}}
 
 
 def _tool_name_allowed(name: str, tools: list[dict[str, Any]], tool_choice: Any) -> bool:
