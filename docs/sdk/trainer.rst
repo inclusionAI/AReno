@@ -25,6 +25,10 @@ directly from Python.
    * score logprobs, values, and rewards through backend-owned roles
    * save Hugging Face-compatible checkpoints
 
+   Direct rollout calls must run inside ``async with
+   trainer.rollout_session(...)``. The session is the lifecycle boundary for
+   rollout state, actor onload/offload, and optional agentic proxy serving.
+
    .. rubric:: Typical flow
 
    .. code-block:: python
