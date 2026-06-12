@@ -8,6 +8,8 @@ import logging
 import sys
 from pathlib import Path
 
+from areno.api.agentic import AgentTrajectory, AgentTrajectoryTurn
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from game import check_kit, inspect_items, search_catalog_many  # noqa: E402
 
@@ -90,7 +92,7 @@ TURN_PROMPTS = {
 }
 
 
-async def run_agent(ctx, batch) -> None:
+async def run_agent(ctx, batch):
     """Run four tool-call turns for each shopping task."""
 
     try:
@@ -104,42 +106,51 @@ async def run_agent(ctx, batch) -> None:
     max_connections = max(len(items), ctx.max_running_prompts)
     http_client = httpx.AsyncClient(
         limits=httpx.Limits(max_connections=max_connections, max_keepalive_connections=max_connections),
-        timeout=300.0,
+        timeout=httpx.Timeout(900.0, connect=30.0),
     )
     client = AsyncOpenAI(base_url=ctx.get_base_url(), api_key=ctx.api_key, http_client=http_client, max_retries=0)
 
-    async def run_one(item) -> None:
+    async def run_one(item):
+        turns = []
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": item.prompt},
         ]
-        search = await _call_model(client, messages, "search_catalog")
+        search, turn = await _call_model(item, client, messages, "search_catalog")
+        turns.append(turn)
         messages.extend(_tool_messages(search, _run_tool(search, item.record)))
-        inspect = await _call_model(client, messages, "inspect_items")
+        inspect, turn = await _call_model(item, client, messages, "inspect_items")
+        turns.append(turn)
         messages.extend(_tool_messages(inspect, _run_tool(inspect, item.record)))
-        check = await _call_model(client, messages, "check_kit")
+        check, turn = await _call_model(item, client, messages, "check_kit")
+        turns.append(turn)
         messages.extend(_tool_messages(check, _run_tool(check, item.record)))
-        submit = await _call_model(client, messages, "submit_bundle")
+        submit, turn = await _call_model(item, client, messages, "submit_bundle")
+        turns.append(turn)
         messages.extend(_tool_messages(submit, _run_tool(submit, item.record)))
+        return turns
 
     try:
-        await asyncio.gather(*(run_one(item) for item in items))
+        grouped = await asyncio.gather(*(run_one(item) for item in items))
+        return AgentTrajectory(turns=[turn for turns in grouped for turn in turns])
     finally:
         await client.close()
 
 
-async def _call_model(client, messages: list[dict], tool_name: str):
+async def _call_model(item, client, messages: list[dict], tool_name: str):
     turn_messages = [*messages, {"role": "user", "content": TURN_PROMPTS[tool_name]}]
+    tools = [TOOL_BY_NAME[tool_name]]
+    tool_choice = {"type": "function", "function": {"name": tool_name}}
     response = await client.chat.completions.create(
         model="policy",
         messages=turn_messages,
-        tools=[TOOL_BY_NAME[tool_name]],
-        tool_choice={"type": "function", "function": {"name": tool_name}},
+        tools=tools,
+        tool_choice=tool_choice,
         stream=False,
     )
     message = response.choices[0].message
     tool_calls = [call for call in (message.tool_calls or []) if call.function.name == tool_name][:1]
-    return {
+    assistant_message = {
         "role": "assistant",
         "content": message.content,
         "tool_calls": [
@@ -154,6 +165,24 @@ async def _call_model(client, messages: list[dict], tool_name: str):
             for call in tool_calls
         ],
     }
+    if not assistant_message["tool_calls"]:
+        assistant_message["tool_calls"] = [
+            {
+                "id": f"missing_{tool_name}",
+                "type": "function",
+                "function": {
+                    "name": tool_name,
+                    "arguments": "{}",
+                },
+            }
+        ]
+    return assistant_message, AgentTrajectoryTurn(
+        item=item,
+        messages=turn_messages,
+        response=response,
+        tools=tools,
+        tool_choice=tool_choice,
+    )
 
 
 def _tool_messages(assistant_message: dict, tool_result: dict) -> list[dict]:

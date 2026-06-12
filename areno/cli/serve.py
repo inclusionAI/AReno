@@ -2,7 +2,7 @@
 
 Exposes a `/v1/chat/completions` endpoint backed by concurrent rollout calls.
 HTTP disconnects resolve the client request promptly. The engine rollout keeps
-running so concurrent requests can be coalesced for throughput.
+running so worker-side continuous batching can admit later requests.
 """
 
 from __future__ import annotations
@@ -19,12 +19,10 @@ from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from areno.cli.model_refs import resolve_model_ref
+from areno.engine.config import RuntimeConfig
 from areno.engine.data import SamplingParams
 from areno.engine.data.tokenizer import load_tokenizer
 from areno.engine import ArenoEngine
-
-
-SERVE_COALESCE_DEADLINE_S = 5.0
 
 
 def _serve_loss_fn(*_: Any) -> torch.Tensor:
@@ -129,6 +127,7 @@ class ServeState:
     engine: ArenoEngine
     max_running_prompts: int
     default_max_tokens: int
+    max_model_len: int
     active_tasks: set[asyncio.Task] = field(default_factory=set)
     closing: bool = False
     rollout_session_started: bool = False
@@ -142,6 +141,7 @@ def create_app(
     max_running_prompts: int,
     default_max_tokens: int,
     decode_progress_interval_s: float,
+    eager_decode: bool = False,
 ) -> FastAPI:
     """Construct the FastAPI app: load tokenizer/engine, install routes and lifecycle hooks."""
     if world_size < 1:
@@ -157,6 +157,7 @@ def create_app(
         tp_size=tp_size,
         dp_size=world_size // tp_size,
         devices=list(range(world_size)),
+        runtime_config=RuntimeConfig(eager_decode=bool(eager_decode)),
         loss_fn=_serve_loss_fn,
     )
     state = ServeState(
@@ -165,6 +166,7 @@ def create_app(
         engine=engine,
         max_running_prompts=max_running_prompts,
         default_max_tokens=default_max_tokens,
+        max_model_len=int(engine.config.model.max_position_embeddings),
     )
     app = FastAPI(title="areno OpenAI-compatible server")
     app.state.areno_serve = state
@@ -270,6 +272,7 @@ async def _run_request_rollout(app: FastAPI, item: PendingRequest) -> ChatComple
         prompts,
         max_new_tokens=key.max_new_tokens,
         max_running_prompts=max(state.max_running_prompts, len(prompts)),
+        max_prompt_len=max(state.max_model_len - key.max_new_tokens, len(item.prompt)),
         eos_token_id=key.eos_token_id,
         sampling_params=SamplingParams(
             temperature=key.temperature,
@@ -279,7 +282,6 @@ async def _run_request_rollout(app: FastAPI, item: PendingRequest) -> ChatComple
             stop_token_ids=key.stop_token_ids,
         ),
         decode_progress_interval_s=app.state.decode_progress_interval_s,
-        coalesce_timeout_s=SERVE_COALESCE_DEADLINE_S,
     )
     if item.future.done():
         return None
@@ -471,6 +473,7 @@ def _trim_stop_strings(text: str, stop: list[str]) -> tuple[str, bool]:
 @click.option("--max-running-prompts", type=int, default=128, show_default=True, help="Maximum concurrent rollout prompts per request chunk.")
 @click.option("--default-max-tokens", type=int, default=1024, show_default=True, help="Default max generated tokens.")
 @click.option("--decode-progress-interval-s", type=float, default=0.0, show_default=True, help="Worker decode progress log interval.")
+@click.option("--eager-decode", is_flag=True, help="Run decode in eager mode instead of CUDA graph replay.")
 def serve_command(
     model_path: str,
     tp_size: int,
@@ -480,6 +483,7 @@ def serve_command(
     max_running_prompts: int,
     default_max_tokens: int,
     decode_progress_interval_s: float,
+    eager_decode: bool,
 ) -> None:
     """Click entry point: build the app and hand it to uvicorn."""
     import uvicorn
@@ -492,6 +496,7 @@ def serve_command(
         max_running_prompts=max_running_prompts,
         default_max_tokens=default_max_tokens,
         decode_progress_interval_s=decode_progress_interval_s,
+        eager_decode=eager_decode,
     )
     uvicorn.run(app, host=host, port=port)
 

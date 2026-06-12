@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from areno.api.agentic import AgentTrajectory, AgentTrajectoryTurn
+
 logger = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
@@ -35,7 +37,7 @@ CHOOSE_SQUARE_TOOL = {
 }
 
 
-async def run_agent(ctx, batch) -> None:
+async def run_agent(ctx, batch):
     """Run one tool-call model request for each board."""
 
     try:
@@ -49,23 +51,32 @@ async def run_agent(ctx, batch) -> None:
     max_connections = max(len(items), ctx.max_running_prompts)
     http_client = httpx.AsyncClient(
         limits=httpx.Limits(max_connections=max_connections, max_keepalive_connections=max_connections),
-        timeout=300.0,
+        timeout=httpx.Timeout(900.0, connect=30.0),
     )
     client = AsyncOpenAI(base_url=ctx.get_base_url(), api_key=ctx.api_key, http_client=http_client, max_retries=0)
 
-    async def run_one(item) -> None:
-        await client.chat.completions.create(
+    async def run_one(item):
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": item.prompt},
+        ]
+        tool_choice = {"type": "function", "function": {"name": "choose_square"}}
+        response = await client.chat.completions.create(
             model="policy",
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": item.prompt},
-            ],
+            messages=messages,
             tools=[CHOOSE_SQUARE_TOOL],
-            tool_choice={"type": "function", "function": {"name": "choose_square"}},
+            tool_choice=tool_choice,
             stream=False,
+        )
+        return AgentTrajectoryTurn(
+            item=item,
+            messages=messages,
+            response=response,
+            tools=[CHOOSE_SQUARE_TOOL],
+            tool_choice=tool_choice,
         )
 
     try:
-        await asyncio.gather(*(run_one(item) for item in items))
+        return AgentTrajectory(turns=list(await asyncio.gather(*(run_one(item) for item in items))))
     finally:
         await client.close()

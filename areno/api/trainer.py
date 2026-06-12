@@ -120,6 +120,35 @@ class Trainer:
             await self._backend.begin_rollout_session_async(self._ctx)
         self._rollout_session_depth += 1
 
+    async def sync_rollout_session_async(self) -> None:
+        """Synchronize backend rollout workers before request-driven rollout."""
+
+        if self._backend is None or self._ctx is None:
+            raise RuntimeError("Trainer is not initialized")
+        if self._rollout_session_depth <= 0:
+            raise RuntimeError("sync_rollout_session_async must be called inside `async with trainer.rollout_session(...)`")
+        await self._backend.sync_rollout_session_async(self._ctx)
+
+    def dp_size(self) -> int:
+        """Return the initialized backend's effective data-parallel size."""
+
+        if self._backend is None or self._ctx is None:
+            raise RuntimeError("Trainer is not initialized")
+        try:
+            return int(self._backend.dp_size(self._ctx))
+        except AttributeError:
+            config = self._ctx.custom_config
+            if config is None:
+                return int(self._ctx.world_size)
+            return max(int(self._ctx.world_size) // int(config.tp_size), 1)
+
+    def model_context_len(self) -> int | None:
+        """Return the loaded model's context length when the backend exposes it."""
+
+        if self._backend is None or self._ctx is None:
+            raise RuntimeError("Trainer is not initialized")
+        return self._backend.model_context_len(self._ctx)
+
     def end_rollout_session(self) -> None:
         """Finalize backend rollout state when a rollout group completes."""
 

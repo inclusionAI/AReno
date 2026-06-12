@@ -153,12 +153,13 @@ Request fields
 ``content``
    Message content as ``str | list | None``.
 
-Batching behavior
------------------
+Continuous batching behavior
+----------------------------
 
 The server runs inside a long-lived rollout session. Compatible requests can be
-coalesced by the engine; requests with different generation settings are
-scheduled separately. Requests are compatible when these fields match:
+admitted into an active worker decode loop through continuous batching; requests
+with different generation settings are scheduled separately. Requests are
+compatible when these fields match:
 
 * generated token budget
 * temperature

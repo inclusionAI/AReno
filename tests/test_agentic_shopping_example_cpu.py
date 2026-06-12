@@ -117,6 +117,27 @@ def test_shopping_agent_tools_use_agent_item_record_shape():
     assert result["kit"]["valid"] is True
 
 
+def test_shopping_agent_missing_tool_call_returns_error_tool_result():
+    run_agent = _load_module_without_sys_path("run_agent")
+    assistant_message = {
+        "role": "assistant",
+        "content": "plain text",
+        "tool_calls": [
+            {
+                "id": "missing_submit_bundle",
+                "type": "function",
+                "function": {"name": "submit_bundle", "arguments": "{}"},
+            }
+        ],
+    }
+
+    messages = run_agent._tool_messages(assistant_message, run_agent._run_tool(assistant_message, {}))
+
+    assert messages[0]["tool_calls"][0]["function"]["name"] == "submit_bundle"
+    assert messages[1]["role"] == "tool"
+    assert json.loads(messages[1]["content"])["submitted"] == []
+
+
 def test_shopping_reward_requires_final_submit_bundle():
     game = _load_module("game")
     reward = _load_module("reward")

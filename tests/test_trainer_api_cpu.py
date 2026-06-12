@@ -100,6 +100,9 @@ class TrainerPromptBatchTest(unittest.TestCase):
             async def begin_rollout_session_async(self, _ctx):
                 self.begin_rollout_session(_ctx)
 
+            async def sync_rollout_session_async(self, _ctx):
+                self.synced = True
+
             async def end_rollout_session_async(self, _ctx):
                 self.end_rollout_session(_ctx)
 
@@ -122,6 +125,37 @@ class TrainerPromptBatchTest(unittest.TestCase):
         self.assertEqual(result, [])
         self.assertEqual(backend.prompt_tokens, [[1, 2], [3]])
         self.assertEqual(backend.n_samples, 4)
+
+    def test_rollout_session_sync_requires_active_session(self):
+        """Agentic pre-rollout sync should be forwarded only inside rollout sessions."""
+
+        class BackendStub:
+            def __init__(self):
+                self.synced = False
+
+            async def begin_rollout_session_async(self, _ctx):
+                return None
+
+            async def sync_rollout_session_async(self, _ctx):
+                self.synced = True
+
+            async def end_rollout_session_async(self, _ctx):
+                return None
+
+        backend = BackendStub()
+        trainer = Trainer(world_size=1, model_path="unused")
+        trainer._backend = backend
+        trainer._ctx = Context(1, "unused", object())
+
+        with self.assertRaisesRegex(RuntimeError, "sync_rollout_session_async"):
+            asyncio.run(trainer.sync_rollout_session_async())
+
+        async def run_sync():
+            async with trainer.rollout_session(sampling_params=SamplingParams(), proxy=False):
+                await trainer.sync_rollout_session_async()
+
+        asyncio.run(run_sync())
+        self.assertTrue(backend.synced)
 
     def test_consecutive_rollouts_share_one_context_step_until_train(self):
         """The trainer, not the backend, owns step increments across rollout/train."""

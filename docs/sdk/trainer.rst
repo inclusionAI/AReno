@@ -524,7 +524,7 @@ regular rollouts.
 
    import areno
    from areno import SamplingParams, Trainer
-   from areno.api.agentic import AgentBatch
+   from areno.api.agentic import AgentBatch, AgentTrajectory, AgentTrajectoryTurn
    from openai import AsyncOpenAI
 
 
@@ -549,20 +549,31 @@ regular rollouts.
        client = AsyncOpenAI(base_url=ctx.get_base_url(), api_key=ctx.api_key, max_retries=0)
 
        async def run_one(item):
-           await client.chat.completions.create(
+           messages = [
+               {"role": "system", "content": "Call choose_move with the selected direction."},
+               {"role": "user", "content": item.prompt},
+           ]
+           tool_choice = {"type": "function", "function": {"name": "choose_move"}}
+           response = await client.chat.completions.create(
                model="policy",
-               messages=[
-                   {"role": "system", "content": "Call choose_move with the selected direction."},
-                   {"role": "user", "content": item.prompt},
-               ],
+               messages=messages,
                tools=tools,
-               tool_choice={"type": "function", "function": {"name": "choose_move"}},
+               tool_choice=tool_choice,
                max_tokens=16,
                temperature=0.7,
            )
+           return AgentTrajectoryTurn(
+               item=item,
+               messages=messages,
+               response=response,
+               tools=tools,
+               tool_choice=tool_choice,
+           )
 
        try:
-           await asyncio.gather(*(run_one(item) for item in batch.iter_samples()))
+           return AgentTrajectory(
+               turns=list(await asyncio.gather(*(run_one(item) for item in batch.iter_samples())))
+           )
        finally:
            await client.close()
 
@@ -579,9 +590,7 @@ regular rollouts.
            sampling_params=SamplingParams(max_new_tokens=16, temperature=0.7),
            max_running_prompts=len(agent_batch),
        ) as ctx:
-           ctx.attach_batch(agent_batch)
-           await run_agent(ctx, agent_batch)
-           return await ctx.get_train_batch(reward_fn=reward_fn)
+           return await run_agent(ctx, agent_batch)
 
 
    trainer = Trainer(

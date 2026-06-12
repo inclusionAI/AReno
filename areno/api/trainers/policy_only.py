@@ -164,10 +164,10 @@ class PolicyOnlyTrainer:
             proxy=False,
         ):
             prompt_tokens = [item.input_tokens for item in prompt_batch.items]
-            return self.areno.rollout_token_batch(prompt_tokens, self.config.n_samples, sampling_params)
+            return await self.areno.rollout_token_batch_async(prompt_tokens, self.config.n_samples, sampling_params)
 
     async def _run_agentic_rollout(self, sampling_params, prompt_batch):
-        from areno.api.agentic import AgentBatch, maybe_await
+        from areno.api.agentic import AgentBatch, AgentTrainBatch, maybe_await
 
         agent_batch = AgentBatch.from_prompt_batch(prompt_batch, n_samples=self.config.n_samples)
         self.logger.info(
@@ -183,10 +183,173 @@ class PolicyOnlyTrainer:
             max_running_prompts=self.config.resolved_max_running_prompts(),
             timeout_s=self.config.agent_timeout_s,
         ) as ctx:
-            ctx.attach_batch(agent_batch)
-            await maybe_await(self._get_agent_run_fn()(ctx, agent_batch))
-            ctx.finish_requests()
-            return await ctx.get_train_batch(reward_fn=self.reward_fn)
+            await ctx.sync_rollout_session_async()
+            trajectories = await maybe_await(self._get_agent_run_fn()(ctx, agent_batch))
+            if trajectories is None:
+                raise RuntimeError("agent run function must return explicit trajectories")
+            samples = []
+            for turn in self._agent_trajectory_turns(ctx, trajectories):
+                sample = ctx._sample_from_trajectory_turn(turn)
+                existing = self._find_agent_sample(samples, sample.item)
+                if existing is None:
+                    samples.append(sample)
+                else:
+                    ctx._append_sample_response(existing, sample)
+            samples, filtered_count, filter_diagnostics = self._filter_overlong_agent_samples(ctx, samples, sampling_params)
+            expected = len(agent_batch)
+            if len(samples) + filtered_count != expected:
+                raise RuntimeError(f"agent rollout produced {len(samples)} trajectories and filtered {filtered_count}, expected {expected}")
+            if not samples:
+                raise RuntimeError(
+                    f"all {filtered_count} agent trajectories exceeded the configured context length; "
+                    f"{self._format_agent_filter_diagnostics(filter_diagnostics)}"
+                )
+            reward_records = [ctx.reward_record(sample) for sample in samples]
+            rewards = [float(self.reward_fn(record)) for record in reward_records]
+            rows = ctx._train_rows_from_samples(samples)
+            tool_call_count = sum(len(record.tool_calls) for record in reward_records)
+            tool_result_count = sum(len(record.tool_results) for record in reward_records)
+            message_count = sum(len(record.messages) for record in reward_records)
+            self.logger.info(
+                "agentic train batch built samples=%d tokens=%d messages=%d tool_calls=%d tool_results=%d",
+                len(samples),
+                rows.total_tokens,
+                message_count,
+                tool_call_count,
+                tool_result_count,
+            )
+            return AgentTrainBatch(
+                token_rows=rows.token_rows,
+                response_masks=rows.response_masks,
+                loss_masks=rows.loss_masks,
+                rollout_logprobs=rows.rollout_logprobs,
+                rewards=rewards,
+                records=[sample.item.record for sample in samples],
+                reward_records=reward_records,
+            )
+
+    def _filter_overlong_agent_samples(self, ctx, samples, sampling_params):
+        max_context_len = self._agent_model_context_len()
+        if max_context_len is None:
+            return samples, 0, {}
+        kept = []
+        filtered_details = []
+        all_details = []
+        for sample in samples:
+            rows = ctx._train_rows_from_samples([sample])
+            token_len = len(rows.token_rows[0]) if rows.token_rows else 0
+            detail = self._agent_sample_filter_detail(sample, token_len)
+            all_details.append(detail)
+            if token_len <= max_context_len:
+                kept.append(sample)
+                continue
+            filtered_details.append(detail)
+        diagnostics = self._agent_filter_diagnostics(
+            all_details,
+            filtered_details,
+            max_context_len=max_context_len,
+            kept_count=len(kept),
+        )
+        if filtered_details:
+            self.logger.warning("agentic trajectory filtered: %s", self._format_agent_filter_diagnostics(diagnostics))
+        return kept, len(filtered_details), diagnostics
+
+    def _agent_sample_filter_detail(self, sample, token_len):
+        tool_result_count = sum(1 for message in sample.messages if message.get("role") == "tool")
+        assistant_count = sum(1 for message in sample.messages if message.get("role") == "assistant")
+        return {
+            "prompt_idx": sample.item.prompt_index,
+            "sample_idx": sample.item.sample_index,
+            "tokens": int(token_len),
+            "messages": len(sample.messages),
+            "assistant_messages": assistant_count,
+            "tool_results": tool_result_count,
+            "response_tokens": len(sample.response_tokens),
+            "trace_events": len(sample.trace),
+            "prompt": str(sample.item.prompt).replace("\n", "\\n")[:120],
+        }
+
+    def _agent_filter_diagnostics(self, all_details, filtered_details, *, max_context_len, kept_count):
+        token_lengths = sorted(detail["tokens"] for detail in all_details)
+        return {
+            "max_context_len": int(max_context_len),
+            "total": len(all_details),
+            "kept": int(kept_count),
+            "filtered": len(filtered_details),
+            "min_tokens": token_lengths[0] if token_lengths else 0,
+            "p50_tokens": self._percentile_value(token_lengths, 0.50),
+            "p90_tokens": self._percentile_value(token_lengths, 0.90),
+            "max_tokens": token_lengths[-1] if token_lengths else 0,
+            "top": sorted(filtered_details, key=lambda item: item["tokens"], reverse=True)[:5],
+        }
+
+    def _format_agent_filter_diagnostics(self, diagnostics):
+        if not diagnostics:
+            return "no context-length diagnostics available"
+        top = "; ".join(
+            "prompt_idx={prompt_idx} sample_idx={sample_idx} tokens={tokens} messages={messages} "
+            "assistant_messages={assistant_messages} tool_results={tool_results} response_tokens={response_tokens} "
+            "trace_events={trace_events} prompt='{prompt}'".format(**detail)
+            for detail in diagnostics.get("top", [])
+        )
+        return (
+            "max_context_len={max_context_len} total={total} kept={kept} filtered={filtered} "
+            "tokens[min/p50/p90/max]={min_tokens}/{p50_tokens}/{p90_tokens}/{max_tokens} top=[{top}]"
+        ).format(
+            max_context_len=diagnostics["max_context_len"],
+            total=diagnostics["total"],
+            kept=diagnostics["kept"],
+            filtered=diagnostics["filtered"],
+            min_tokens=diagnostics["min_tokens"],
+            p50_tokens=diagnostics["p50_tokens"],
+            p90_tokens=diagnostics["p90_tokens"],
+            max_tokens=diagnostics["max_tokens"],
+            top=top,
+        )
+
+    def _percentile_value(self, sorted_values, fraction):
+        if not sorted_values:
+            return 0
+        index = min(int(round((len(sorted_values) - 1) * fraction)), len(sorted_values) - 1)
+        return int(sorted_values[index])
+
+    def _agent_model_context_len(self):
+        try:
+            value = self.areno.model_context_len()
+        except (AttributeError, RuntimeError):
+            return None
+        if value is None:
+            return None
+        return int(value)
+
+    def _agent_trajectory_turns(self, ctx, trajectories):
+        from areno.api.agentic import AgentTrajectory, AgentTrajectoryTurn
+
+        del ctx
+        if trajectories is None:
+            return
+        if isinstance(trajectories, AgentTrajectoryTurn):
+            yield trajectories
+            return
+        if isinstance(trajectories, AgentTrajectory):
+            yield from trajectories.turns
+            return
+        for trajectory in trajectories:
+            if isinstance(trajectory, AgentTrajectoryTurn):
+                yield trajectory
+            elif isinstance(trajectory, AgentTrajectory):
+                yield from trajectory.turns
+            else:
+                yield from trajectory
+
+    def _find_agent_sample(self, samples, item):
+        if item.prompt_index < 0 or item.sample_index < 0:
+            return None
+        key = (item.prompt_index, item.sample_index)
+        for sample in samples:
+            if (sample.item.prompt_index, sample.item.sample_index) == key:
+                return sample
+        return None
 
     def _materialize_agentic_train_batch(self, tokenizer, prompt_batch, agent_batch):
         """Assemble TrainSequence rows from an agentic rollout batch."""

@@ -10,7 +10,17 @@ from areno.api.trainer import Trainer
 from areno.api.algorithms import AlgorithmSpec, get_algorithm, list_algorithms, register_algorithm
 from areno.api.config import ArenoConfig
 from areno.api.data import PromptBatch, PromptItem
-from areno.api.agentic import AgentBatch, AgentItem, AgentTrainBatch, LossMaskPolicy, RewardEvent, RewardRecord, RolloutSession
+from areno.api.agentic import (
+    AgentBatch,
+    AgentItem,
+    AgentTrainBatch,
+    AgentTrajectory,
+    AgentTrajectoryTurn,
+    LossMaskPolicy,
+    RewardEvent,
+    RewardRecord,
+    RolloutSession,
+)
 from areno.api.models import (
     SamplingParams,
     RolloutSequence,
@@ -34,6 +44,8 @@ __all__ = [
     "AgentBatch",
     "AgentItem",
     "AgentTrainBatch",
+    "AgentTrajectory",
+    "AgentTrajectoryTurn",
     "LossMaskPolicy",
     "RewardEvent",
     "RewardRecord",

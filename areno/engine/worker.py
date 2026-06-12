@@ -16,8 +16,6 @@ to the matching public method.
 from __future__ import annotations
 
 import queue
-import time
-from dataclasses import replace
 
 import torch
 import torch.distributed as dist
@@ -30,7 +28,7 @@ from areno.engine.data.sampling import _truncate_generated
 from areno.engine.protocol import Command, Op, RolloutPayload, SaveCheckpointPayload, WorkerResult
 from areno.engine.roles import RoleManager, WorkerRole
 from areno.engine.runtime.common import pad_rollout_rows
-from areno.engine.runtime.rollout import _empty_rollout, partial_tail_threshold
+from areno.engine.runtime.rollout import _empty_rollout
 from areno.engine.training import TrainingManager
 from areno.engine.parallel.context import get_tp_context
 from areno.models.registry import load_model_weights, save_model_weights
@@ -80,6 +78,7 @@ class ArenoWorker:
         self._infer_cache_spec: tuple[int, int, int, int, int] | None = None
         self._train_state_ready = False
         self._actor_on_device = True
+        self._current_request_ids: list[int | None] = []
         self.inference = InferenceManager(self)
         self.roles = RoleManager(self)
         self.training = TrainingManager(self)
@@ -95,6 +94,8 @@ class ArenoWorker:
             return self.infer_rollout(cmd.payload)
         if cmd.op is Op.ROLLOUT_SESSION_BEGIN:
             return self.rollout_session_begin(cmd.payload)
+        if cmd.op is Op.ROLLOUT_SESSION_SYNC:
+            return self.rollout_session_sync(cmd.payload)
         if cmd.op is Op.ROLLOUT_SESSION_END:
             return self.rollout_session_end(cmd.payload)
         if cmd.op is Op.TRAIN:
@@ -115,71 +116,45 @@ class ArenoWorker:
         """Delegate non-actor role lifecycle to `RoleManager`."""
         return self.roles.ensure_roles(payload)
 
-    def infer_rollout(self, payload: dict, finished_callback=None, partial_tail_ready_callback=None) -> RolloutOutput | None:
+    def infer_rollout(self, payload: dict, finished_callback=None, refill_callback=None) -> RolloutOutput | None:
         """Delegate rollout generation to `InferenceManager`."""
         return self.inference.infer_rollout(
             payload,
             finished_callback=finished_callback,
-            partial_tail_ready_callback=partial_tail_ready_callback,
+            refill_callback=refill_callback,
         )
 
-    def collect_rollout_commands(self, first_cmd: Command) -> list[Command]:
-        """Collect compatible commands until the worker batch fills or reaches DDL."""
-
-        first_payload = first_cmd.payload
-        if not _rollout_coalesce_enabled(first_payload):
-            return [first_cmd]
-        commands = [first_cmd]
-        queued_count = _rollout_global_count(first_payload)
-        target = _rollout_coalesce_target(first_payload) * len(first_payload.prompts_by_dp)
-        deadline = time.monotonic() + float(first_payload.coalesce_timeout_s)
-        while queued_count < target:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            try:
-                cmd = self._cmd_queue.get(timeout=remaining)
-            except queue.Empty:
-                break
-            if cmd.op is not Op.INFER_ROLLOUT or not _rollout_payloads_compatible(first_payload, cmd.payload):
-                self._deferred_commands.append(cmd)
-                break
-            commands.append(cmd)
-            queued_count += _rollout_global_count(cmd.payload)
-        return commands
-
-    def run_rollout_commands(self, commands: list[Command]) -> list[tuple[int | None, RolloutOutput | None]]:
-        """Run one coalesced rollout and split outputs back by request id."""
+    def run_rollout_command(self, command: Command) -> list[tuple[int | None, RolloutOutput | None]]:
+        """Run one rollout command and continuously refill from queued requests."""
 
         ctx = get_tp_context()
-        if len(commands) == 1:
-            payload = commands[0].payload
-            return [
-                (
-                    commands[0].request_id,
-                    self.infer_rollout(
-                        payload,
-                        partial_tail_ready_callback=lambda active_count: self._has_enough_waiting_rollouts(payload, active_count),
-                    ),
-                )
-            ]
-        merged, counts = _merge_rollout_payloads([cmd.payload for cmd in commands], ctx.dp_rank)
-        request_ids = [cmd.request_id for cmd in commands]
-        return self.run_coalesced_rollout_payload(merged, request_ids, counts)
+        payload = command.payload
+        counts = [len(payload.prompts_by_dp[ctx.dp_rank])]
+        request_ids = [command.request_id]
+        return self.run_continuous_rollout_payload(payload, request_ids, counts)
 
-    def run_coalesced_rollout_payload(
+    def run_continuous_rollout_payload(
         self,
         payload: RolloutPayload,
         request_ids: list[int | None],
         counts: list[int],
     ) -> list[tuple[int | None, RolloutOutput | None]]:
-        """Run one coordinator-coalesced rollout and split outputs by request id."""
+        """Run one rollout and append compatible queued requests while decoding."""
 
         ctx = get_tp_context()
-        ranges = _rollout_ranges(counts)
+        request_rows = _rollout_request_rows(counts)
         finished = [False] * sum(counts)
         finish_reasons = [""] * sum(counts)
         sent: set[int] = set()
+
+        def send_empty_requests() -> None:
+            for request_idx, count in enumerate(counts):
+                if request_idx in sent or count != 0:
+                    continue
+                request_id = request_ids[request_idx]
+                self._result_queue.put((self._rank, WorkerResult(ok=True, payload=_empty_rollout() if ctx.is_rank0 else None, request_id=request_id)))
+                self._current_request_ids = [pending_id for pending_id in self._current_request_ids if pending_id != request_id]
+                sent.add(request_idx)
 
         def send_finished(
             rows: torch.Tensor,
@@ -194,75 +169,131 @@ class ArenoWorker:
                 if 0 <= row_idx < len(finished):
                     finished[row_idx] = True
                     finish_reasons[row_idx] = finish_reason
-            for request_idx, (start, end) in enumerate(ranges):
-                if request_idx in sent or not all(finished[start:end]):
+            for request_idx, row_ids in enumerate(request_rows):
+                if request_idx in sent or not all(finished[row] for row in row_ids):
                     continue
                 result_payload = None
                 if ctx.is_rank0:
-                    result_payload = _build_rollout_from_tensor_rows(
+                    result_payload = _build_rollout_from_tensor_row_ids(
                         payload.prompts_by_dp[ctx.dp_rank],
                         generated,
                         logprobs,
                         response_lens,
                         finish_reasons,
-                        start,
-                        end,
+                        row_ids,
                         truncate_stop_token_ids,
                     )
                 request_id = request_ids[request_idx]
                 self._result_queue.put((self._rank, WorkerResult(ok=True, payload=result_payload, request_id=request_id)))
-                current_request_ids = getattr(self, "_current_request_ids", None)
-                if current_request_ids is not None:
-                    self._current_request_ids = [pending_id for pending_id in current_request_ids if pending_id != request_id]
+                self._current_request_ids = [pending_id for pending_id in self._current_request_ids if pending_id != request_id]
                 sent.add(request_idx)
 
-        output = self.infer_rollout(
-            payload,
-            finished_callback=send_finished,
-            partial_tail_ready_callback=lambda active_count: self._has_enough_waiting_rollouts(payload, active_count),
-        )
-        parts = _split_rollout_output(output, counts)
+        send_empty_requests()
+
+        def refill_waiting(state) -> list[int]:
+            new_prompt_indices: list[int] = []
+            while True:
+                cmd = self._next_refill_command()
+                if cmd is None:
+                    break
+                if cmd.op is not Op.INFER_ROLLOUT or not _rollout_payloads_compatible(payload, cmd.payload):
+                    self._deferred_commands.append(cmd)
+                    break
+                new_payload = cmd.payload
+                new_request_ids = [cmd.request_id]
+                new_counts = [len(new_payload.prompts_by_dp[ctx.dp_rank])]
+                prompts = [list(prompt) for prompt in new_payload.prompts_by_dp[ctx.dp_rank]]
+                prompt_indices = list(new_payload.prompt_indices_by_dp[ctx.dp_rank])
+                request_ids.extend(new_request_ids)
+                counts.extend(new_counts)
+                request_rows.append([])
+                self._current_request_ids = [*self._current_request_ids, *new_request_ids]
+                if not prompts:
+                    send_empty_requests()
+                    continue
+                appended_rows = state.append_prompts(prompts)
+                if payload.prompts_by_dp[ctx.dp_rank] is not state.prompts:
+                    payload.prompts_by_dp[ctx.dp_rank].extend(prompts)
+                payload.prompt_indices_by_dp[ctx.dp_rank].extend(prompt_indices)
+                request_rows[-1] = appended_rows
+                new_prompt_indices.extend(prompt_indices)
+                finished.extend(False for _ in prompts)
+                finish_reasons.extend("" for _ in prompts)
+            return new_prompt_indices
+
+        output = self.infer_rollout(payload, finished_callback=send_finished, refill_callback=refill_waiting)
+        parts = _split_rollout_output_by_rows(output, request_rows)
         return [(request_id, part) for idx, (request_id, part) in enumerate(zip(request_ids, parts, strict=True)) if idx not in sent]
 
-    def _has_enough_waiting_rollouts(self, payload: RolloutPayload, active_count: int) -> bool:
-        """Return true when queued compatible requests can usefully refill the tail."""
+    def _next_refill_command(self) -> Command | None:
+        """Fetch the next queued command consistently across TP ranks."""
 
         ctx = get_tp_context()
-        ready = False
+        cmd = None
         if ctx.is_rank0:
-            ready = self._waiting_rollout_count(payload, active_count) >= _rollout_refill_target(payload, active_count)
-        if ctx.group is not None:
-            flag = torch.tensor([1 if ready else 0], device=ctx.device, dtype=torch.int8)
-            dist.broadcast(flag, src=ctx.dp_rank * ctx.world_size, group=ctx.group)
-            ready = bool(flag.item())
-        return ready
-
-    def _waiting_rollout_count(self, payload: RolloutPayload, active_count: int) -> int:
-        """Count compatible waiting rollout rows, draining queue entries to deferred."""
-
-        count = 0
-        for cmd in self._deferred_commands:
-            if cmd.op is Op.INFER_ROLLOUT and _rollout_payloads_compatible(payload, cmd.payload):
-                count += _rollout_global_count(cmd.payload)
-                continue
-            return count
-        target = _rollout_refill_target(payload, active_count)
-        while count < target:
             try:
                 cmd = self._cmd_queue.get_nowait()
             except queue.Empty:
-                break
+                cmd = None
+        command_header = self._broadcast_tp_command_header(cmd)
+        if command_header is None:
+            return None
+        if not ctx.is_rank0:
+            # Rank 0 picked the command that the TP group will execute next.
+            # Sibling ranks may have stale deferred commands after prior async
+            # returns, so they must consume until the same request id appears
+            # instead of blindly taking the next local queue item.
+            cmd = self._pop_matching_refill_command(*command_header)
+        return cmd
+
+    def _broadcast_tp_command_header(self, cmd: Command | None) -> tuple[Op, int | None] | None:
+        """Broadcast the TP-rank0 refill command identity."""
+
+        ctx = get_tp_context()
+        request_id = -1
+        op_value = -1
+        has_command = 0
+        if cmd is not None:
+            has_command = 1
+            op_value = int(cmd.op.value)
+            request_id = -1 if cmd.request_id is None else int(cmd.request_id)
+        header = torch.tensor([has_command, op_value, request_id], device=ctx.device, dtype=torch.long)
+        if ctx.world_size > 1:
+            src = ctx.dp_rank * ctx.world_size
+            dist.broadcast(header, src=src, group=ctx.group)
+        if int(header[0].item()) == 0:
+            return None
+        return Op(int(header[1].item())), None if int(header[2].item()) < 0 else int(header[2].item())
+
+    def _pop_matching_refill_command(self, op: Op, request_id: int | None) -> Command:
+        """Consume local commands until the TP-rank0 command is found."""
+
+        while True:
+            cmd = self._cmd_queue.get(timeout=5.0)
+            if cmd.op is op and cmd.request_id == request_id:
+                return cmd
             self._deferred_commands.append(cmd)
-            if cmd.op is not Op.INFER_ROLLOUT or not _rollout_payloads_compatible(payload, cmd.payload):
-                break
-            count += _rollout_global_count(cmd.payload)
-        return count
 
     def rollout_session_begin(self, payload: None) -> None:
         """Prepare actor state for one or more rollout calls."""
 
         del payload
         self._prepare_actor_onloaded()
+
+    def rollout_session_sync(self, payload: None) -> None:
+        """Synchronize TP ranks before agentic request-driven rollout starts."""
+
+        del payload
+        ctx = get_tp_context()
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
+        if ctx.group is not None:
+            if ctx.device.type == "cuda":
+                dist.barrier(group=ctx.group, device_ids=[ctx.device.index if ctx.device.index is not None else torch.cuda.current_device()])
+            else:
+                dist.barrier(group=ctx.group)
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
 
     def rollout_session_end(self, payload: None) -> None:
         """Finalize rollout state before scoring or training starts."""
@@ -384,40 +415,6 @@ class ArenoWorker:
         return {"path": path} if path is not None else None
 
 
-def _rollout_coalesce_enabled(payload: RolloutPayload) -> bool:
-    """Return whether this rollout payload can wait for worker-local batching."""
-
-    return bool(float(payload.coalesce_timeout_s) > 0.0 and payload.cancel_flags is None)
-
-
-def _rollout_local_count(payload: RolloutPayload, dp_rank: int) -> int:
-    """Number of prompt rows this payload asks the current DP rank to run."""
-
-    return len(payload.prompts_by_dp[dp_rank])
-
-
-def _rollout_global_count(payload: RolloutPayload) -> int:
-    """Number of prompt rows in the request, independent of current DP rank."""
-
-    return sum(len(rows) for rows in payload.prompts_by_dp)
-
-
-def _rollout_coalesce_target(payload: RolloutPayload) -> int:
-    """Worker-local batch target for coalescing compatible rollout commands."""
-
-    return max(int(payload.coalesce_max_running_seqs or payload.max_running_seqs), 1)
-
-
-def _rollout_refill_target(payload: RolloutPayload, active_count: int) -> int:
-    """Global queued-row count needed before cutting the current active tail."""
-
-    del active_count
-    local_target = _rollout_coalesce_target(payload)
-    lower = max(1, (local_target + 7) // 8)
-    local_needed = max(lower, local_target // 2)
-    return local_needed * len(payload.prompts_by_dp)
-
-
 def _rollout_payloads_compatible(first: RolloutPayload, other: RolloutPayload) -> bool:
     """Return whether two rollout payloads can share one InferenceBatchState."""
 
@@ -425,6 +422,8 @@ def _rollout_payloads_compatible(first: RolloutPayload, other: RolloutPayload) -
         return False
     return (
         first.max_new_tokens == other.max_new_tokens
+        and first.max_cache_len >= other.max_cache_len
+        and first.max_blocks_per_seq >= other.max_blocks_per_seq
         and first.eos_token_id == other.eos_token_id
         and first.sampling_params == other.sampling_params
         and first.block_size == other.block_size
@@ -434,58 +433,6 @@ def _rollout_payloads_compatible(first: RolloutPayload, other: RolloutPayload) -
         and first.cancel_indices_by_dp is None
         and other.cancel_indices_by_dp is None
     )
-
-
-def _merge_rollout_payloads(payloads: list[RolloutPayload], current_dp_rank: int) -> tuple[RolloutPayload, list[int]]:
-    """Merge compatible rollout payloads into one worker batch."""
-
-    first = payloads[0]
-    dp_size = len(first.prompts_by_dp)
-    prompts_by_dp = [[] for _ in range(dp_size)]
-    prompt_indices_by_dp = [[] for _ in range(dp_size)]
-    cooldown_until_by_dp = [[] for _ in range(dp_size)]
-    counts_by_dp = [[0 for _ in payloads] for _ in range(dp_size)]
-    row_idx = 0
-    for request_idx, payload in enumerate(payloads):
-        for prompt, prompt_index, cooldown_until_s in _iter_rollout_payload_rows(payload):
-            dp_rank = row_idx % dp_size
-            prompts_by_dp[dp_rank].append(prompt)
-            prompt_indices_by_dp[dp_rank].append(prompt_index)
-            cooldown_until_by_dp[dp_rank].append(cooldown_until_s)
-            counts_by_dp[dp_rank][request_idx] += 1
-            row_idx += 1
-    local_capacity = max(int(first.coalesce_max_running_seqs or first.max_running_seqs), 1)
-    max_running_seqs = max(max((len(rows) for rows in prompts_by_dp), default=0), local_capacity)
-    max_cache_len = max(payload.max_cache_len for payload in payloads)
-    max_blocks_per_seq = max(payload.max_blocks_per_seq for payload in payloads)
-    max_prefill_tokens = max(payload.max_prefill_tokens for payload in payloads)
-    return replace(
-        first,
-        prompts_by_dp=prompts_by_dp,
-        prompt_indices_by_dp=prompt_indices_by_dp,
-        max_running_seqs=max_running_seqs,
-        max_cache_len=max_cache_len,
-        max_blocks_per_seq=max_blocks_per_seq,
-        max_prefill_tokens=max_prefill_tokens,
-        num_blocks=max_running_seqs * int(max_blocks_per_seq),
-        partial_tail_threshold=partial_tail_threshold(local_capacity, float(first.coalesce_timeout_s)),
-        partial_tail_min_tokens=max(int(payload.partial_tail_min_tokens) for payload in payloads),
-        partial_tail_cooldown_until_s_by_dp=cooldown_until_by_dp,
-    ), counts_by_dp[current_dp_rank]
-
-
-def _iter_rollout_payload_rows(payload: RolloutPayload):
-    """Yield prompt rows in the payload's original pre-DP-split order."""
-
-    dp_size = len(payload.prompts_by_dp)
-    total = _rollout_global_count(payload)
-    for original_idx in range(total):
-        dp_rank = original_idx % dp_size
-        local_idx = original_idx // dp_size
-        cooldown_until_s = 0.0
-        if payload.partial_tail_cooldown_until_s_by_dp is not None:
-            cooldown_until_s = float(payload.partial_tail_cooldown_until_s_by_dp[dp_rank][local_idx])
-        yield payload.prompts_by_dp[dp_rank][local_idx], payload.prompt_indices_by_dp[dp_rank][local_idx], cooldown_until_s
 
 
 def _split_rollout_output(output: RolloutOutput | None, counts: list[int]) -> list[RolloutOutput | None]:
@@ -502,8 +449,28 @@ def _split_rollout_output(output: RolloutOutput | None, counts: list[int]) -> li
     return parts
 
 
+def _split_rollout_output_by_rows(output: RolloutOutput | None, request_rows: list[list[int]]) -> list[RolloutOutput | None]:
+    """Split a merged worker rollout by explicit state row ids."""
+
+    if output is None:
+        return [None for _ in request_rows]
+    return [_slice_rollout_output_rows(output, rows) for rows in request_rows]
+
+
+def _rollout_request_rows(counts: list[int]) -> list[list[int]]:
+    """Return explicit state row ids for each request."""
+
+    rows = []
+    offset = 0
+    for count in counts:
+        end = offset + count
+        rows.append(list(range(offset, end)))
+        offset = end
+    return rows
+
+
 def _rollout_ranges(counts: list[int]) -> list[tuple[int, int]]:
-    """Return half-open row ranges for each coalesced request."""
+    """Return half-open row ranges for each request in the active rollout."""
 
     ranges = []
     offset = 0
@@ -512,6 +479,39 @@ def _rollout_ranges(counts: list[int]) -> list[tuple[int, int]]:
         ranges.append((offset, end))
         offset = end
     return ranges
+
+
+def _build_rollout_from_tensor_row_ids(
+    prompts: list[list[int]],
+    generated: torch.Tensor,
+    logprobs: torch.Tensor,
+    response_lens: torch.Tensor,
+    finish_reasons: list[str],
+    row_ids: list[int],
+    truncate_stop_token_ids: tuple[int, ...],
+) -> RolloutOutput:
+    """Build a RolloutOutput for non-contiguous completed tensor rows."""
+
+    if not row_ids:
+        return _empty_rollout()
+    prompt_ids = [prompts[row] for row in row_ids]
+    lengths = response_lens[row_ids].detach().cpu().tolist()
+    generated_rows = [row[: int(length)] for row, length in zip(generated[row_ids].detach().cpu().tolist(), lengths, strict=True)]
+    response_ids, truncated_finish_reasons = _truncate_generated(generated_rows, truncate_stop_token_ids)
+    finish_reason = [finish_reasons[row] or truncated_finish_reasons[idx] for idx, row in enumerate(row_ids)]
+    logprob_rows_cpu = logprobs[row_ids].detach().cpu().tolist()
+    logprob_rows = [torch.tensor(row[: len(response)], dtype=torch.float32) for row, response in zip(logprob_rows_cpu, response_ids, strict=True)]
+    input_ids, attention_mask, response_mask, padded_logprobs = pad_rollout_rows(prompt_ids, response_ids, logprob_rows)
+    return RolloutOutput(
+        prompt_ids=prompt_ids,
+        response_ids=response_ids,
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        response_mask=response_mask,
+        logprobs=padded_logprobs,
+        finish_reason=finish_reason,
+        metrics=None,
+    )
 
 
 def _build_rollout_from_tensor_rows(
@@ -557,6 +557,28 @@ def _slice_rollout_output(output: RolloutOutput, start: int, end: int) -> Rollou
     response_ids = output.response_ids[start:end]
     finish_reason = output.finish_reason[start:end]
     logprob_rows = [output.logprobs[idx, : len(output.response_ids[idx])].detach().cpu() for idx in range(start, end)]
+    input_ids, attention_mask, response_mask, logprobs = pad_rollout_rows(prompt_ids, response_ids, logprob_rows)
+    return RolloutOutput(
+        prompt_ids=prompt_ids,
+        response_ids=response_ids,
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        response_mask=response_mask,
+        logprobs=logprobs,
+        finish_reason=finish_reason,
+        metrics=output.metrics,
+    )
+
+
+def _slice_rollout_output_rows(output: RolloutOutput, rows: list[int]) -> RolloutOutput:
+    """Build a RolloutOutput view for explicit row ids."""
+
+    if not rows:
+        return _empty_rollout()
+    prompt_ids = [output.prompt_ids[row] for row in rows]
+    response_ids = [output.response_ids[row] for row in rows]
+    finish_reason = [output.finish_reason[row] for row in rows]
+    logprob_rows = [output.logprobs[row, : len(output.response_ids[row])].detach().cpu() for row in rows]
     input_ids, attention_mask, response_mask, logprobs = pad_rollout_rows(prompt_ids, response_ids, logprob_rows)
     return RolloutOutput(
         prompt_ids=prompt_ids,

@@ -32,7 +32,6 @@ from areno.api.backend.base import Backend, register_backend
 
 
 logger = logging.getLogger(__name__)
-ROLLOUT_COALESCE_WAIT_S = 10.0
 _SYS_PATH_LOCK = Lock()
 _SYS_PATH_PREFERRED = False
 
@@ -228,6 +227,24 @@ class ArenoBackend(Backend):
         del ctx
         await self._require_engine().begin_rollout_session_async()
 
+    async def sync_rollout_session_async(self, ctx: Context) -> None:
+        """Synchronize worker TP groups before agentic request rollout."""
+
+        del ctx
+        await self._require_engine().sync_rollout_session_async()
+
+    def dp_size(self, ctx: Context) -> int:
+        """Return the engine's effective DP size after backend initialization."""
+
+        del ctx
+        return int(self._require_engine().config.dp_size)
+
+    def model_context_len(self, ctx: Context) -> int | None:
+        """Return the checkpoint's max position embeddings from the loaded engine config."""
+
+        del ctx
+        return int(self._require_engine().config.model.max_position_embeddings)
+
     def end_rollout_session(self, ctx: Context) -> None:
         """Finalize rollout-only state before scoring or training."""
 
@@ -264,7 +281,6 @@ class ArenoBackend(Backend):
             max_prompt_len=options["max_prompt_len"],
             eos_token_id=options["eos_token_id"],
             decode_progress_interval_s=options["decode_progress_interval_s"],
-            coalesce_timeout_s=ROLLOUT_COALESCE_WAIT_S,
             sampling_params=options["sampling_params"],
         )
         results = []

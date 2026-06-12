@@ -14,7 +14,6 @@ coverage can be added without changing trainer boundaries.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import importlib.util
 import json
 import logging
@@ -35,7 +34,6 @@ if TYPE_CHECKING:
     from areno.api.models import SamplingParams
 
 logger = logging.getLogger(__name__)
-AGENTIC_PROXY_COALESCE_WAIT_S = 10.0
 
 
 @dataclass(slots=True)
@@ -143,6 +141,34 @@ class AgentTrainBatch:
 
 
 @dataclass(slots=True)
+class AgentTrajectoryTurn:
+    """One explicit agent turn returned by ``run_agent``."""
+
+    item: AgentItem
+    messages: list[dict[str, Any]]
+    response: Any | None = None
+    response_tokens: list[int] = field(default_factory=list)
+    response_logprobs: list[float] = field(default_factory=list)
+    model: str = "policy"
+    tools: list[dict[str, Any]] = field(default_factory=list)
+    tool_choice: Any = None
+
+    def __post_init__(self) -> None:
+        if self.response is None:
+            return
+        metadata = _chat_response_agentic_metadata(self.response)
+        self.response_tokens = list(metadata["response_tokens"])
+        self.response_logprobs = [float(value) for value in metadata["response_logprobs"]]
+
+
+@dataclass(slots=True)
+class AgentTrajectory:
+    """Explicit trajectories returned by ``run_agent`` for one rollout batch."""
+
+    turns: list[AgentTrajectoryTurn] = field(default_factory=list)
+
+
+@dataclass(slots=True)
 class _AgentSample:
     item: AgentItem
     messages: list[dict[str, Any]]
@@ -189,7 +215,7 @@ class _ChatBatchKey:
 
 @dataclass(slots=True)
 class _PendingChat:
-    item: AgentItem
+    item: AgentItem | None
     messages: list[dict[str, Any]]
     input_tokens: list[int]
     params: Any
@@ -202,8 +228,6 @@ class _PendingChat:
     future: asyncio.Future | None = None
     response: dict[str, Any] | None = None
     error: BaseException | None = None
-    prompt_index: int = -1
-    sample_recorded: bool = False
     cancelled: bool = False
 
 
@@ -256,19 +280,8 @@ class RolloutSession:
         self._timeout_s = float(timeout_s)
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
-        self._request_queue: asyncio.Queue[_PendingChat] | None = None
-        self._batch_task: asyncio.Task | None = None
-        self._deferred_pending: list[_PendingChat] = []
         self._loop: asyncio.AbstractEventLoop | None = None
-        self._lock = threading.Lock()
         self._closing = False
-        self._agent_items: list[AgentItem] = []
-        self._agent_items_by_prompt: dict[str, list[AgentItem]] = {}
-        self._agent_reuse_cursor_by_prompt: dict[str, int] = {}
-        self._next_item = 0
-        self._samples: list[_AgentSample] = []
-        self._filtered_items: set[tuple[int, int]] = set()
-        self._errors: list[str] = []
         self._base_url = ""
         self._proxy_enabled = bool(proxy)
 
@@ -285,8 +298,6 @@ class RolloutSession:
         await self._trainer.begin_rollout_session_async()
         if not self._proxy_enabled:
             return self
-        self._request_queue = asyncio.Queue()
-        self._batch_task = asyncio.create_task(self._batch_worker_loop(), name="areno-agentic-proxy-batcher")
         handler_cls = self._handler_cls()
         try:
             self._server = self._http_server_cls()(("127.0.0.1", 0), handler_cls)
@@ -296,7 +307,6 @@ class RolloutSession:
             self._thread = threading.Thread(target=self._server.serve_forever, name="areno-agentic-proxy", daemon=True)
             self._thread.start()
         except BaseException:
-            self._stop_batch_worker()
             await self._trainer.end_rollout_session_async()
             raise
         return self
@@ -312,7 +322,6 @@ class RolloutSession:
                 self._server.server_close()
             if self._thread is not None:
                 self._thread.join(timeout=2.0)
-            self._stop_batch_worker()
         finally:
             await self._trainer.end_rollout_session_async()
 
@@ -332,9 +341,10 @@ class RolloutSession:
     def finish_requests(self) -> None:
         """Compatibility no-op for agents that mark request submission done."""
 
-    def _stop_batch_worker(self) -> None:
-        if self._batch_task is not None:
-            self._batch_task.cancel()
+    async def sync_rollout_session_async(self) -> None:
+        """Synchronize backend rollout workers before the agent submits requests."""
+
+        await self._trainer.sync_rollout_session_async()
 
     def _http_server_cls(self) -> type[_AgenticHTTPServer]:
         return type(
@@ -343,101 +353,7 @@ class RolloutSession:
             {"request_queue_size": max(2048, self._max_running_prompts), "max_threads": 2048},
         )
 
-    def attach_batch(self, batch: AgentBatch) -> None:
-        """Attach the prompt/sample worklist expected for this session."""
-
-        with self._lock:
-            self._agent_items = list(batch.iter_samples())
-            self._agent_items_by_prompt = {}
-            self._agent_reuse_cursor_by_prompt = {}
-            for item in self._agent_items:
-                self._agent_items_by_prompt.setdefault(item.prompt, []).append(item)
-            self._next_item = 0
-            self._filtered_items = set()
-            logger.info(
-                "agentic session attached prompts=%d n_samples=%d expected_requests=%d max_running_prompts=%d local_max_running_prompts=%d dp_size=%d",
-                len(batch.records),
-                batch.n_samples,
-                len(self._agent_items),
-                self._max_running_prompts,
-                self._local_max_running_prompts,
-                self._dp_size,
-            )
-
-    async def get_train_batch(
-        self,
-        *,
-        reward_fn: Callable[[RewardRecord], float] | None = None,
-        normalize_rewards: bool | None = None,
-        require_finished: bool = True,
-    ) -> AgentTrainBatch:
-        """Convert collected agent samples into trainer-facing rows."""
-
-        del normalize_rewards
-        start = time.perf_counter()
-        if require_finished:
-            await self._wait_for_samples()
-        wait_done = time.perf_counter()
-        with self._lock:
-            samples = list(self._samples)
-            filtered_count = len(self._filtered_items)
-            errors = list(self._errors)
-            expected = len(self._agent_items)
-        logger.info("agentic session collected samples=%d filtered=%d expected=%d", len(samples), filtered_count, expected)
-        if errors:
-            raise RuntimeError("agent rollout proxy errors: " + "; ".join(errors[:3]))
-        if require_finished and len(samples) + filtered_count < expected:
-            raise RuntimeError(f"agent rollout produced {len(samples)} samples and filtered {filtered_count}, expected {expected}")
-
-        reward_records = [self._reward_record(sample) for sample in samples]
-        records_done = time.perf_counter()
-        rewards = None
-        if reward_fn is not None:
-            rewards = [float(reward_fn(record)) for record in reward_records]
-        rewards_done = time.perf_counter()
-        rows = self._build_train_rows(samples)
-        rows_done = time.perf_counter()
-        tool_call_count = sum(len(record.tool_calls) for record in reward_records)
-        tool_result_count = sum(len(record.tool_results) for record in reward_records)
-        message_count = sum(len(record.messages) for record in reward_records)
-        logger.info(
-            "agentic train batch built samples=%d tokens=%d messages=%d tool_calls=%d tool_results=%d wait_s=%.3f records_s=%.3f rewards_s=%.3f rows_s=%.3f total_s=%.3f",
-            len(samples),
-            rows.total_tokens,
-            message_count,
-            tool_call_count,
-            tool_result_count,
-            wait_done - start,
-            records_done - wait_done,
-            rewards_done - records_done,
-            rows_done - rewards_done,
-            rows_done - start,
-        )
-        return AgentTrainBatch(
-            token_rows=rows.token_rows,
-            response_masks=rows.response_masks,
-            loss_masks=rows.loss_masks,
-            rollout_logprobs=rows.rollout_logprobs,
-            rewards=rewards,
-            records=[sample.item.record for sample in samples],
-            reward_records=reward_records,
-        )
-
-    async def _wait_for_samples(self) -> None:
-        deadline = time.monotonic() + self._timeout_s
-        while True:
-            with self._lock:
-                sample_count = len(self._samples)
-                filtered_count = len(self._filtered_items)
-                expected = len(self._agent_items)
-                errors = list(self._errors)
-            if sample_count + filtered_count >= expected or errors:
-                return
-            if time.monotonic() >= deadline:
-                return
-            await asyncio.sleep(0.05)
-
-    def _reward_record(self, sample: _AgentSample) -> RewardRecord:
+    def reward_record(self, sample: _AgentSample) -> RewardRecord:
         answer = sample.item.record.get("answer", sample.item.record.get("solutions"))
         messages = list(sample.messages)
         messages.append({"role": "assistant", "content": sample.last_response_text})
@@ -481,7 +397,7 @@ class RolloutSession:
             enabled = self._loss_mask_policy.assistant_text
         return [bool(enabled)] * response_len
 
-    def _build_train_rows(self, samples: list[_AgentSample]) -> _AgentTrainRows:
+    def _train_rows_from_samples(self, samples: list[_AgentSample]) -> _AgentTrainRows:
         token_rows: list[list[int]] = []
         response_masks: list[list[bool]] = []
         loss_masks: list[list[bool]] = []
@@ -546,15 +462,9 @@ class RolloutSession:
         except ValueError as exc:
             _write_json(handler, 400, {"error": {"message": str(exc)}})
         except Exception as exc:
-            with self._lock:
-                self._errors.append(str(exc))
             _write_json(handler, 500, {"error": {"message": str(exc)}})
 
     async def _complete_chat(self, body: dict[str, Any]) -> dict[str, Any]:
-        # Bind every HTTP turn back to one prompt/sample pair. Multi-turn agents
-        # resend the same first user prompt, so this remains stable even when
-        # requests arrive out of order.
-        item = self._claim_item(body.get("messages") or [])
         messages = _normalize_messages(body.get("messages") or [])
         tools = list(body.get("tools") or [])
         tool_choice = body.get("tool_choice")
@@ -566,7 +476,7 @@ class RolloutSession:
         if body.get("top_p") is not None:
             params.top_p = float(body["top_p"])
         pending = _PendingChat(
-            item=item,
+            item=None,
             messages=messages,
             input_tokens=[],
             params=params,
@@ -576,104 +486,77 @@ class RolloutSession:
             tool_choice=tool_choice,
             created_at=time.monotonic(),
         )
-        if self._loop is None or self._request_queue is None:
+        if self._loop is None:
             raise RuntimeError("agent rollout proxy is not running")
-        pending.future = self._loop.create_future()
-        await self._request_queue.put(pending)
         try:
-            return await asyncio.wait_for(asyncio.shield(pending.future), timeout=self._timeout_s)
+            await asyncio.wait_for(asyncio.shield(self._run_chat_request(pending)), timeout=self._timeout_s)
         except asyncio.TimeoutError as exc:
             pending.cancelled = True
             raise TimeoutError("agent rollout proxy timed out waiting for completion")
+        if pending.error is not None:
+            raise pending.error
+        if pending.response is None:
+            raise RuntimeError("agent rollout proxy produced no response")
+        return pending.response
 
-    async def _batch_worker_loop(self) -> None:
-        while not self._closing:
-            try:
-                batch = await self._pop_chat_batch()
-            except asyncio.CancelledError:
-                raise
-            except BaseException as exc:
-                with self._lock:
-                    self._errors.append(str(exc))
-                continue
-            if not batch:
-                continue
-            await self._run_chat_batch(batch)
-
-    async def _pop_chat_batch(self) -> list[_PendingChat]:
-        if self._request_queue is None:
-            return []
-        first = self._deferred_pending.pop(0) if self._deferred_pending else await self._request_queue.get()
-        if first.cancelled:
-            return []
-        batch = [first]
-        deferred: list[_PendingChat] = []
-        deadline = first.created_at + AGENTIC_PROXY_COALESCE_WAIT_S
-        target = self._max_running_prompts
-        while len(batch) < target:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            try:
-                pending = await asyncio.wait_for(self._request_queue.get(), timeout=remaining)
-            except asyncio.TimeoutError:
-                break
-            if pending.cancelled:
-                continue
-            if pending.key == first.key:
-                batch.append(pending)
-            else:
-                deferred.append(pending)
-        self._deferred_pending[0:0] = deferred
-        return batch
-
-    async def _run_chat_batch(self, batch: list[_PendingChat]) -> None:
-        valid: list[_PendingChat] = []
+    async def _run_chat_request(self, pending: _PendingChat) -> None:
         tokenizer = self._trainer.get_tokenizer()
-        for pending in batch:
-            if pending.cancelled:
-                continue
-            try:
-                pending.input_tokens = _messages_to_prompt_tokens(
-                    tokenizer,
-                    pending.messages,
-                    tools=pending.tools,
-                    fallback_prompt=pending.item.prompt,
-                )
-                max_sequence_len = _max_sequence_len(pending.params)
-                if max_sequence_len is not None and len(pending.input_tokens) + int(pending.params.max_new_tokens) > max_sequence_len:
-                    # Overlong multi-turn contexts are dropped as filtered samples so
-                    # the rest of the rollout batch can keep training.
-                    self._mark_item_filtered_if_unrecorded(pending.item)
-                    response = _filtered_chat_response(
-                        model=pending.model,
-                        prompt_tokens=len(pending.input_tokens),
-                        max_sequence_len=max_sequence_len,
-                    )
-                    self._set_pending_response(pending, response)
-                    continue
-                valid.append(pending)
-            except BaseException as exc:
-                self._set_pending_error(pending, exc)
-        if not valid:
+        if pending.cancelled:
             return
         try:
-            results = await self._trainer.rollout_token_batch_async([pending.input_tokens for pending in valid], 1, valid[0].params)
-            for idx, pending in enumerate(valid):
-                sequence = results[idx].sequences[0] if idx < len(results) and results[idx].sequences else None
-                if sequence is None:
-                    self._record_chat_sample(pending, [], [])
-                else:
-                    self._record_chat_sample(pending, sequence.resp_tokens, sequence.resp_logprobs)
+            pending.input_tokens = _messages_to_prompt_tokens(
+                tokenizer,
+                pending.messages,
+                tools=pending.tools,
+                fallback_prompt=_first_user_text(pending.messages),
+            )
+            max_context_len = _max_context_len(pending.params)
+            if max_context_len is not None and len(pending.input_tokens) > max_context_len:
+                response = _filtered_chat_response(
+                    model=pending.model,
+                    prompt_tokens=len(pending.input_tokens),
+                    max_sequence_len=max_context_len,
+                )
+                self._set_pending_response(pending, response)
+                return
+            results = await self._trainer.rollout_token_batch_async([pending.input_tokens], 1, pending.params)
+            sequence = results[0].sequences[0] if results and results[0].sequences else None
+            if sequence is None:
+                self._set_pending_response(pending, self._build_chat_response(pending, _ResponseData([], [])))
+            else:
+                self._set_pending_response(
+                    pending,
+                    self._build_chat_response(
+                        pending,
+                        _ResponseData(response_tokens=sequence.resp_tokens, response_logprobs=sequence.resp_logprobs),
+                    ),
+                )
         except BaseException as exc:
-            for pending in valid:
-                self._set_pending_error(pending, exc)
+            self._set_pending_error(pending, exc)
 
-    def _record_chat_sample(self, pending: _PendingChat, response_ids: list[int], logprobs: list[float]) -> None:
-        if pending.sample_recorded or pending.cancelled:
-            return
-        response = _ResponseData(response_tokens=list(response_ids), response_logprobs=list(logprobs))
-        self._set_pending_response(pending, self._finish_pending_chat(pending, response))
+    def _sample_from_trajectory_turn(self, turn: AgentTrajectoryTurn) -> _AgentSample:
+        tokenizer = self._trainer.get_tokenizer()
+        input_tokens = _messages_to_prompt_tokens(
+            tokenizer,
+            turn.messages,
+            tools=turn.tools,
+            fallback_prompt=turn.item.prompt,
+        )
+        pending = _PendingChat(
+            item=turn.item,
+            messages=_normalize_messages(turn.messages),
+            input_tokens=input_tokens,
+            params=self._sampling_params,
+            key=_chat_batch_key(self._sampling_params),
+            model=turn.model,
+            tools=list(turn.tools),
+            tool_choice=turn.tool_choice,
+            created_at=time.monotonic(),
+        )
+        return self._sample_from_pending_chat(
+            pending,
+            _ResponseData(response_tokens=list(turn.response_tokens), response_logprobs=list(turn.response_logprobs)),
+        )
 
     def _set_pending_response(self, pending: _PendingChat, response: dict[str, Any]) -> None:
         if pending.cancelled:
@@ -691,16 +574,9 @@ class RolloutSession:
         if pending.future is not None and not pending.future.done():
             pending.future.set_exception(exc)
 
-    def _mark_item_filtered_if_unrecorded(self, item: AgentItem) -> None:
-        key = (item.prompt_index, item.sample_index)
-        if item.prompt_index < 0 or item.sample_index < 0:
-            return
-        with self._lock:
-            if any((sample.item.prompt_index, sample.item.sample_index) == key for sample in self._samples):
-                return
-            self._filtered_items.add(key)
-
-    def _finish_pending_chat(self, pending: _PendingChat, response: _ResponseData) -> dict[str, Any]:
+    def _sample_from_pending_chat(self, pending: _PendingChat, response: _ResponseData) -> _AgentSample:
+        if pending.item is None:
+            raise ValueError("explicit agent trajectory turn requires an AgentItem")
         tokenizer = self._trainer.get_tokenizer()
         content = tokenizer.decode(response.response_tokens)
         tool_parse = self._tool_call_parser.parse(content, pending.tools, pending.tool_choice)
@@ -731,31 +607,19 @@ class RolloutSession:
         # including prior assistant/tool messages. Those context tokens are
         # needed for scoring but are masked out of policy loss.
         self._set_sample_training_row(sample, pending.input_tokens)
-        with self._lock:
-            if not pending.sample_recorded:
-                existing = self._find_sample_for_item_locked(pending.item)
-                if existing is None:
-                    self._samples.append(sample)
-                else:
-                    self._append_sample_response(existing, sample)
-                pending.sample_recorded = True
-        return pending.response or self._build_pending_chat_response(
+        return sample
+
+    def _build_chat_response(self, pending: _PendingChat, response: _ResponseData) -> dict[str, Any]:
+        tokenizer = self._trainer.get_tokenizer()
+        content = tokenizer.decode(response.response_tokens)
+        tool_parse = self._tool_call_parser.parse(content, pending.tools, pending.tool_choice)
+        return self._build_pending_chat_response(
             pending,
             response.response_tokens,
+            response_logprobs=response.response_logprobs,
             content=content,
             tool_calls=tool_parse.tool_calls,
         )
-
-    def _find_sample_for_item_locked(self, item: AgentItem) -> _AgentSample | None:
-        """Find an existing trajectory for the same prompt/sample pair."""
-
-        if item.prompt_index < 0 or item.sample_index < 0:
-            return None
-        key = (item.prompt_index, item.sample_index)
-        for sample in self._samples:
-            if (sample.item.prompt_index, sample.item.sample_index) == key:
-                return sample
-        return None
 
     def _append_sample_response(self, existing: _AgentSample, new_sample: _AgentSample) -> None:
         """Append another model response to an existing multi-call trajectory."""
@@ -808,6 +672,7 @@ class RolloutSession:
         pending: _PendingChat,
         response_tokens: list[int],
         *,
+        response_logprobs: list[float] | None = None,
         content: str | None = None,
         tool_calls: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
@@ -834,32 +699,12 @@ class RolloutSession:
                 "completion_tokens": len(response_tokens),
                 "total_tokens": len(pending.input_tokens) + len(response_tokens),
             },
+            "areno": {
+                "input_tokens": list(pending.input_tokens),
+                "response_tokens": list(response_tokens),
+                "response_logprobs": list(response_logprobs or []),
+            },
         }
-
-    def _claim_item(self, messages: list[dict[str, Any]]) -> AgentItem:
-        prompt = _first_user_text(messages)
-        with self._lock:
-            # Prefer prompt-based reuse for multi-turn conversations; fall back
-            # to sequential assignment for one-shot agents and ad hoc requests.
-            item = self._reuse_item_for_prompt_locked(prompt)
-            if item is not None:
-                return item
-            if self._next_item < len(self._agent_items):
-                item = self._agent_items[self._next_item]
-                self._next_item += 1
-                return item
-            return AgentItem(record={"prompt": prompt}, prompt=prompt, input_tokens=[], prompt_index=-1, sample_index=-1)
-
-    def _reuse_item_for_prompt_locked(self, prompt: str) -> AgentItem | None:
-        if prompt and not self._agent_items_by_prompt and self._agent_items:
-            for item in self._agent_items:
-                self._agent_items_by_prompt.setdefault(item.prompt, []).append(item)
-        items = self._agent_items_by_prompt.get(prompt)
-        if not items:
-            return None
-        cursor = self._agent_reuse_cursor_by_prompt.get(prompt, 0)
-        self._agent_reuse_cursor_by_prompt[prompt] = cursor + 1
-        return items[cursor % len(items)]
 
 
 def load_agent_run_fn(path: str) -> Callable[[RolloutSession, AgentBatch], Any]:
@@ -878,6 +723,7 @@ def load_agent_run_fn(path: str) -> Callable[[RolloutSession, AgentBatch], Any]:
 
 
 def _messages_to_prompt_tokens(tokenizer, messages: list[dict[str, Any]], *, tools: list[dict[str, Any]] | None = None, fallback_prompt: str) -> list[int]:
+    messages = _normalize_messages(messages)
     if getattr(tokenizer, "chat_template", None):
         kwargs: dict[str, Any] = {"tokenize": True, "add_generation_prompt": True}
         if tools:
@@ -890,6 +736,29 @@ def _messages_to_prompt_tokens(tokenizer, messages: list[dict[str, Any]], *, too
             kwargs.pop("tools", None)
             return tokenizer.apply_chat_template(messages, **kwargs)
     return tokenizer.encode(_messages_to_text(messages) or fallback_prompt)
+
+
+def _chat_response_agentic_metadata(response: Any) -> dict[str, Any]:
+    """Extract Areno token/logprob metadata from a proxy chat response."""
+
+    metadata = None
+    if isinstance(response, dict):
+        metadata = response.get("areno")
+    else:
+        model_extra = getattr(response, "model_extra", None)
+        if isinstance(model_extra, dict):
+            metadata = model_extra.get("areno")
+        if metadata is None:
+            metadata = getattr(response, "areno", None)
+    if not isinstance(metadata, dict):
+        raise ValueError("chat response does not include Areno trajectory metadata")
+    response_tokens = metadata.get("response_tokens")
+    response_logprobs = metadata.get("response_logprobs")
+    if not isinstance(response_tokens, list) or not isinstance(response_logprobs, list):
+        raise ValueError("Areno trajectory metadata must include response_tokens and response_logprobs lists")
+    if len(response_tokens) != len(response_logprobs):
+        raise ValueError("Areno trajectory metadata response_tokens/response_logprobs length mismatch")
+    return metadata
 
 
 def _render_messages_for_display(tokenizer, messages: list[dict[str, Any]]) -> str:
@@ -909,11 +778,11 @@ def _render_messages_for_display(tokenizer, messages: list[dict[str, Any]]) -> s
     return _messages_to_text(messages)
 
 
-def _max_sequence_len(params: Any) -> int | None:
+def _max_context_len(params: Any) -> int | None:
     max_prompt_len = getattr(params, "max_prompt_len", None)
     if max_prompt_len is None:
         return None
-    return int(max_prompt_len) + int(getattr(params, "max_new_tokens"))
+    return int(max_prompt_len)
 
 
 def _filtered_chat_response(*, model: str, prompt_tokens: int, max_sequence_len: int) -> dict[str, Any]:
@@ -934,6 +803,11 @@ def _filtered_chat_response(*, model: str, prompt_tokens: int, max_sequence_len:
             "completion_tokens": 0,
             "total_tokens": prompt_tokens,
             "max_sequence_len": max_sequence_len,
+        },
+        "areno": {
+            "input_tokens": [],
+            "response_tokens": [],
+            "response_logprobs": [],
         },
     }
 
@@ -1079,12 +953,17 @@ def _chat_batch_key(params: Any) -> _ChatBatchKey:
 
 
 def _trainer_dp_size(trainer: Any) -> int:
-    config = getattr(trainer, "config", None)
-    world_size = int(getattr(config, "world_size", 1) or 1)
-    tp_size = int(getattr(config, "tp_size", 1) or 1)
-    if tp_size <= 0:
+    if trainer is None:
         return 1
-    return max(world_size // tp_size, 1)
+    try:
+        return max(int(trainer.dp_size()), 1)
+    except (AttributeError, RuntimeError):
+        config = trainer.config
+        world_size = int(config.world_size or 1)
+        tp_size = int(config.tp_size or 1)
+        if tp_size <= 0:
+            return 1
+        return max(world_size // tp_size, 1)
 
 
 def _ceil_div(a: int, b: int) -> int:
@@ -1093,11 +972,14 @@ def _ceil_div(a: int, b: int) -> int:
 
 def _write_json(handler: BaseHTTPRequestHandler, status: int, payload: dict[str, Any]) -> None:
     data = json.dumps(payload).encode("utf-8")
-    handler.send_response(status)
-    handler.send_header("content-type", "application/json")
-    handler.send_header("content-length", str(len(data)))
-    handler.end_headers()
-    handler.wfile.write(data)
+    try:
+        handler.send_response(status)
+        handler.send_header("content-type", "application/json")
+        handler.send_header("content-length", str(len(data)))
+        handler.end_headers()
+        handler.wfile.write(data)
+    except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+        logger.debug("agentic proxy client disconnected before response write")
 
 
 async def maybe_await(value):
@@ -1112,6 +994,8 @@ __all__ = [
     "AgentBatch",
     "AgentItem",
     "AgentTrainBatch",
+    "AgentTrajectory",
+    "AgentTrajectoryTurn",
     "LossMaskPolicy",
     "RewardEvent",
     "RewardRecord",

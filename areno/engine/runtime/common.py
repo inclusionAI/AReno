@@ -9,11 +9,14 @@ outputs before they reach the next forward pass.
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 import torch
 
 from areno.engine.data import TrainStats
+
+_CHECK_TOKEN_IDS = os.getenv("ARENO_CHECK_TOKEN_IDS", "0").lower() in {"1", "true", "yes", "on"}
 
 
 def ceil_div(a: int, b: int) -> int:
@@ -139,6 +142,8 @@ def _device_long(tensor: torch.Tensor, device: torch.device) -> torch.Tensor:
 def _check_token_ids(tokens: torch.Tensor, vocab_size: int, name: str) -> None:
     """Raise a descriptive error if any sampled token id is out of range."""
 
+    if not _CHECK_TOKEN_IDS:
+        return
     if tokens.numel() == 0:
         return
     invalid = (tokens < 0) | (tokens >= vocab_size)

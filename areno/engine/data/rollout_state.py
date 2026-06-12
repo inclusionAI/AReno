@@ -54,7 +54,21 @@ class InferenceBatchState:
         self._pending_seq_id = 0
         self._free_blocks = list(range(self.num_cache_blocks))
         self._seq_to_blocks: dict[int, list[int]] = {}
+        self._prefill_cursor_by_seq: dict[int, int] = {}
         self._last_active_ids: list[int] = []
+
+    def append_prompts(self, prompts: list[list[int]]) -> list[int]:
+        """Append newly arrived prompts and return their row ids."""
+
+        if not prompts:
+            return []
+        start = len(self.prompts)
+        self.prompts.extend(prompts)
+        self.generated.extend([] for _ in prompts)
+        self.logprobs.extend([] for _ in prompts)
+        self.finished.extend(False for _ in prompts)
+        self.finish_reason.extend("" for _ in prompts)
+        return list(range(start, start + len(prompts)))
 
     @property
     def max_cache_len(self) -> int:
@@ -67,6 +81,12 @@ class InferenceBatchState:
         """Maximum number of concurrently active sequences."""
 
         return self.max_running_seqs
+
+    @property
+    def has_pending_prompts(self) -> bool:
+        """Whether there are prompts that have not fully entered decode."""
+
+        return self._pending_seq_id < len(self.prompts)
 
     def build_prefill_payload(self) -> dict | None:
         """Admit as many pending prompts as the block and token budgets allow.
@@ -91,39 +111,87 @@ class InferenceBatchState:
         cache_block_offsets: list[int] = []
         active_ids: list[int] = []
 
-        while len(self._seq_to_blocks) < self.max_running_seqs and self._pending_seq_id < len(self.prompts):
+        while self._pending_seq_id < len(self.prompts):
             seq_id = self._pending_seq_id
+            if seq_id not in self._seq_to_blocks and len(self._seq_to_blocks) >= self.max_running_seqs:
+                break
             prompt = self.prompts[seq_id]
             if len(prompt) + self.max_new_tokens > self.max_cache_len:
                 raise ValueError("request exceeds configured max_cache_len")
-            # Reserve enough paged blocks up front to cover the entire prompt
-            # plus all decode steps so decode never needs to allocate.
-            needed_blocks = ceil_div(len(prompt) + self.max_new_tokens, self.kv_block_size)
-            if len(self._free_blocks) < needed_blocks:
+            cursor = self._prefill_cursor_by_seq.get(seq_id, 0)
+            remaining_budget = self.max_prefill_tokens - len(input_ids)
+            if remaining_budget <= 0:
                 break
-            if input_ids and len(input_ids) + len(prompt) > self.max_prefill_tokens:
+            chunk_len = min(len(prompt) - cursor, remaining_budget)
+            if chunk_len <= 0:
                 break
-            blocks = self._free_blocks[:needed_blocks]
-            del self._free_blocks[:needed_blocks]
-            self._seq_to_blocks[seq_id] = blocks
-            self._pending_seq_id += 1
-            input_ids.extend(prompt)
-            position_ids.extend(range(len(prompt)))
+            blocks = self._seq_to_blocks.get(seq_id)
+            if blocks is None:
+                blocks = []
+                self._seq_to_blocks[seq_id] = blocks
+            required_blocks = ceil_div(cursor + chunk_len, self.kv_block_size)
+            while len(blocks) < required_blocks:
+                if not self._free_blocks:
+                    if not input_ids:
+                        raise RuntimeError("paged KV cache exhausted during prefill")
+                    return None if not input_ids else self._prefill_payload(
+                        input_ids,
+                        position_ids,
+                        cu_seqlens,
+                        sample_indices,
+                        block_table,
+                        cache_block_ids,
+                        cache_block_offsets,
+                        active_ids,
+                    )
+                blocks.append(self._free_blocks.pop(0))
+            chunk = prompt[cursor : cursor + chunk_len]
+            input_ids.extend(chunk)
+            position_ids.extend(range(cursor, cursor + chunk_len))
             # Per-token mapping from this prompt's token index to (block, offset)
             # inside the paged KV cache.
-            for token_idx in range(len(prompt)):
+            for token_idx in range(cursor, cursor + chunk_len):
                 cache_block_ids.append(blocks[token_idx // self.kv_block_size])
                 cache_block_offsets.append(token_idx % self.kv_block_size)
             cu_seqlens.append(len(input_ids))
-            sample_indices.append(len(input_ids) - 1)
             # Pad the per-sequence block table to a uniform width so the model
             # can treat the entire batch as one rectangular tensor.
             block_table.append(_pad_blocks(blocks, self.max_blocks_per_seq))
-            active_ids.append(seq_id)
+            cursor += chunk_len
+            if cursor >= len(prompt):
+                sample_indices.append(len(input_ids) - 1)
+                active_ids.append(seq_id)
+                self._prefill_cursor_by_seq.pop(seq_id, None)
+                self._pending_seq_id += 1
+            else:
+                self._prefill_cursor_by_seq[seq_id] = cursor
+                break
 
         if not input_ids:
             return None
 
+        return self._prefill_payload(
+            input_ids,
+            position_ids,
+            cu_seqlens,
+            sample_indices,
+            block_table,
+            cache_block_ids,
+            cache_block_offsets,
+            active_ids,
+        )
+
+    def _prefill_payload(
+        self,
+        input_ids: list[int],
+        position_ids: list[int],
+        cu_seqlens: list[int],
+        sample_indices: list[int],
+        block_table: list[list[int]],
+        cache_block_ids: list[int],
+        cache_block_offsets: list[int],
+        active_ids: list[int],
+    ) -> dict:
         self._last_active_ids = active_ids
         return {
             "mode": "prefill",
@@ -131,11 +199,26 @@ class InferenceBatchState:
             "position_ids": torch.tensor(position_ids, dtype=torch.long),
             "sample_indices": torch.tensor(sample_indices, dtype=torch.long),
             "cu_seqlens": torch.tensor(cu_seqlens, dtype=torch.int32),
-            "max_seqlen": max(len(self.prompts[seq_id]) for seq_id in active_ids),
+            "max_seqlen": max((cu_seqlens[idx + 1] - cu_seqlens[idx] for idx in range(len(cu_seqlens) - 1)), default=0),
             "block_table": torch.tensor(block_table, dtype=torch.int32),
             "cache_block_ids": torch.tensor(cache_block_ids, dtype=torch.long),
             "cache_block_offsets": torch.tensor(cache_block_offsets, dtype=torch.long),
         }
+
+    def ensure_decode_blocks(self, seq_ids: list[int], next_positions: list[int]) -> None:
+        """Allocate one decode KV block for rows whose next token starts a block."""
+
+        for seq_id, next_position in zip(seq_ids, next_positions, strict=True):
+            if next_position < 0 or next_position % self.kv_block_size != 0:
+                continue
+            blocks = self._seq_to_blocks.get(int(seq_id))
+            if blocks is None:
+                continue
+            required_blocks = next_position // self.kv_block_size + 1
+            while len(blocks) < required_blocks:
+                if not self._free_blocks:
+                    raise RuntimeError("paged KV cache exhausted during decode")
+                blocks.append(self._free_blocks.pop(0))
 
     def to_rollout(self) -> RolloutOutput:
         """Materialize Python rollout state into padded tensors for the API."""

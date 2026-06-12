@@ -181,7 +181,9 @@ Agentic rollout
    completion. The agent receives a local OpenAI-compatible base URL from
    ``ctx.get_base_url()`` and can call ``/v1/chat/completions`` with tools.
    Use ``batch.iter_samples()`` to iterate the expanded
-   ``batch-size * n-samples`` agent tasks.
+   ``batch-size * n-samples`` agent tasks. The function returns an
+   ``AgentTrajectory`` dataclass containing one or more ``AgentTrajectoryTurn``
+   objects.
 
 ``--agent-timeout-s FLOAT``
    Timeout for agentic proxy requests and trajectory collection. Default:
@@ -193,11 +195,11 @@ Agentic rollout
    text and assistant tool-call spans are trainable by default.
 
 Agentic trajectories can contain multiple chat-completion turns for the same
-prompt/sample pair. Areno records the full OpenAI-style message list, tool
-calls, tool results, token ids, rollout logprobs, and loss masks for each
-completed trajectory. Tool-result/context spans are included in the token row
-for correct scoring but are masked from policy loss unless
-``--train-tool-results`` is set.
+prompt/sample pair. The agent owns the OpenAI-style message list and returns
+trajectory turns with the model response; Areno converts those turns into
+tool calls, tool results, token ids, rollout logprobs, and loss masks.
+Tool-result/context spans are included in the token row for correct scoring
+but are masked from policy loss unless ``--train-tool-results`` is set.
 
 Checkpointing and metrics
 ~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -360,9 +362,10 @@ Agentic Tic-Tac-Toe
      --max-new-tokens 32
 
 The agent function can use the OpenAI Python client against
-``ctx.get_base_url()``. Areno records tokens, rollout logprobs, parsed
-``tool_calls``, rewards, and loss masks, then feeds the resulting batch to the
-same policy trainer used by non-agentic rollouts.
+``ctx.get_base_url()`` and returns an ``AgentTrajectory``. Areno converts it
+to tokens, rollout logprobs, parsed ``tool_calls``, rewards, and loss masks,
+then feeds the resulting batch to the same policy trainer used by non-agentic
+rollouts.
 
 Help
 ----

@@ -1,6 +1,6 @@
 import importlib.util
 import asyncio
-import contextlib
+import logging
 import sys
 import time
 from pathlib import Path
@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import torch
 
 from areno.api.tool_call_parser import Gemma4ToolCallParser, JsonToolCallParser, MiniCPMToolCallParser, QwenToolCallParser
+from areno.api.trainers.policy_only import PolicyOnlyTrainer
 
 
 def _load_agentic_module():
@@ -22,6 +23,7 @@ def _load_agentic_module():
 
 agentic = _load_agentic_module()
 AgentBatch = agentic.AgentBatch
+AgentTrajectoryTurn = agentic.AgentTrajectoryTurn
 LossMaskPolicy = agentic.LossMaskPolicy
 RolloutSession = agentic.RolloutSession
 
@@ -59,22 +61,20 @@ def test_tool_call_json_can_be_masked_when_disabled():
     assert session._response_loss_mask(sample) == [False, False]
 
 
-def test_get_train_batch_trains_tool_call_tokens_by_default():
+def test_agentic_train_rows_train_tool_call_tokens_by_default():
     session = RolloutSession(None, sampling_params=None, loss_mask_policy=LossMaskPolicy())
     item = next(AgentBatch(records=[{"board": "b"}], prompts=["p"], input_tokens=[[1, 2]], n_samples=1).iter_samples())
     sample = _sample(item, '{"name": "move", "arguments": {"direction": "left"}}', [10, 11, 12])
     sample.response_kind = "assistant_tool_call"
-    session._agent_items = [item]
-    session._samples = [sample]
 
-    batch = asyncio.run(session.get_train_batch(reward_fn=lambda record: 0.5))
+    rows = session._train_rows_from_samples([sample])
+    record = session.reward_record(sample)
 
-    assert batch.token_rows == [[1, 2, 10, 11, 12]]
-    assert batch.response_masks == [[False, False, True, True, True]]
-    assert batch.loss_masks == [[False, False, True, True, True]]
-    assert batch.rollout_logprobs == [[0.0, 0.0, 0.0, 0.0, 0.0]]
-    assert batch.rewards == [0.5]
-    assert batch.reward_records[0].loss_mask == [True, True, True]
+    assert rows.token_rows == [[1, 2, 10, 11, 12]]
+    assert rows.response_masks == [[False, False, True, True, True]]
+    assert rows.loss_masks == [[False, False, True, True, True]]
+    assert rows.rollout_logprobs == [[0.0, 0.0, 0.0, 0.0, 0.0]]
+    assert record.loss_mask == [True, True, True]
 
 
 def test_tool_call_loss_mask_stops_before_tool_response_sentinel():
@@ -95,52 +95,30 @@ def test_tool_call_loss_mask_decodes_response_once():
     assert tokenizer.decode_calls == 1
 
 
-def test_get_train_batch_keeps_assistant_text_tokens_trainable():
+def test_agentic_train_rows_keep_assistant_text_tokens_trainable():
     session = RolloutSession(None, sampling_params=None, loss_mask_policy=LossMaskPolicy())
     item = next(AgentBatch(records=[{}], prompts=["p"], input_tokens=[[1]], n_samples=1).iter_samples())
     sample = _sample(item, "final answer", [20, 21])
-    session._agent_items = [item]
-    session._samples = [sample]
 
-    batch = asyncio.run(session.get_train_batch())
+    rows = session._train_rows_from_samples([sample])
+    record = session.reward_record(sample)
 
-    assert batch.response_masks == [[False, True, True]]
-    assert batch.loss_masks == [[False, True, True]]
-    assert batch.reward_records[0].loss_mask == [True, True]
-
-
-def test_claim_item_reuses_source_record_for_extra_agent_requests():
-    session = RolloutSession(None, sampling_params=None, loss_mask_policy=LossMaskPolicy())
-    batch = AgentBatch(records=[{"board": "b"}], prompts=["same prompt"], input_tokens=[[1]], n_samples=1)
-    session.attach_batch(batch)
-    messages = [{"role": "user", "content": "same prompt"}]
-
-    first = session._claim_item(messages)
-    second = session._claim_item(messages)
-
-    assert first.prompt_index == 0
-    assert second.prompt_index == 0
-    assert second.sample_index == 0
-    assert second.record == {"board": "b"}
+    assert rows.response_masks == [[False, True, True]]
+    assert rows.loss_masks == [[False, True, True]]
+    assert record.loss_mask == [True, True]
 
 
-def test_claim_item_matches_prompt_before_sequential_order():
-    """Out-of-order concurrent HTTP arrivals should not attach to the wrong source record."""
-
-    session = RolloutSession(None, sampling_params=None, loss_mask_policy=LossMaskPolicy())
-    batch = AgentBatch(
-        records=[{"task": "a"}, {"task": "b"}],
-        prompts=["prompt a", "prompt b"],
-        input_tokens=[[1], [2]],
-        n_samples=1,
+def test_agent_trajectory_turn_extracts_response_metadata():
+    item = next(AgentBatch(records=[{"task": "same"}], prompts=["same prompt"], input_tokens=[[1]], n_samples=1).iter_samples())
+    turn = AgentTrajectoryTurn(
+        item=item,
+        messages=[{"role": "user", "content": "same prompt"}],
+        response={"areno": {"response_tokens": [10, 11], "response_logprobs": [-0.1, -0.2]}},
     )
-    session.attach_batch(batch)
 
-    item = session._claim_item([{"role": "user", "content": "prompt b"}])
-
-    assert item.prompt == "prompt b"
-    assert item.record == {"task": "b"}
-    assert item.prompt_index == 1
+    assert turn.item.record == {"task": "same"}
+    assert turn.response_tokens == [10, 11]
+    assert turn.response_logprobs == [-0.1, -0.2]
 
 
 def test_messages_to_prompt_tokens_passes_tools_to_chat_template():
@@ -172,6 +150,30 @@ def test_normalize_messages_rewrites_null_tool_call_content_for_templates():
 
     assert tokens == [3]
     assert messages[1]["content"] == ""
+
+
+def test_explicit_trajectory_tokenization_normalizes_null_tool_call_content():
+    trainer = _FakeTrainer(world_size=1, tp_size=1)
+    trainer.tokenizer = _StrictContentTokenizer()
+    session = RolloutSession(trainer, sampling_params=_FakeSamplingParams(), loss_mask_policy=LossMaskPolicy())
+    item = next(AgentBatch(records=[{}], prompts=["p"], input_tokens=[[1]], n_samples=1).iter_samples())
+    turn = AgentTrajectoryTurn(
+        item=item,
+        messages=[
+            {"role": "user", "content": "choose"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{"id": "call-1", "type": "function", "function": {"name": "choose_square", "arguments": "{}"}}],
+            },
+            {"role": "tool", "tool_call_id": "call-1", "content": "{}"},
+        ],
+        response={"areno": {"response_tokens": [1], "response_logprobs": [-0.1]}},
+    )
+
+    sample = session._sample_from_trajectory_turn(turn)
+
+    assert sample.token_row == [3, 1]
 
 
 def test_messages_to_prompt_tokens_falls_back_when_template_rejects_tools():
@@ -222,24 +224,150 @@ def test_proxy_rollout_batches_queued_requests():
 
     async def run():
         session._loop = asyncio.get_running_loop()
-        session._request_queue = asyncio.Queue()
-        session._batch_task = asyncio.create_task(session._batch_worker_loop())
-        try:
-            return await asyncio.gather(
-                session._complete_chat({"model": "policy", "messages": [{"role": "user", "content": "p0"}]}),
-                session._complete_chat({"model": "policy", "messages": [{"role": "user", "content": "p1"}]}),
-            )
-        finally:
-            session._closing = True
-            session._batch_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await session._batch_task
+        return await asyncio.gather(
+            session._complete_chat({"model": "policy", "messages": [{"role": "user", "content": "p0"}]}),
+            session._complete_chat({"model": "policy", "messages": [{"role": "user", "content": "p1"}]}),
+        )
 
     responses = asyncio.run(run())
 
-    assert trainer.rollout_batches == [([[2], [2]], 1)]
+    assert trainer.rollout_batches == [([[2]], 1), ([[2]], 1)]
+    assert trainer.rollout_sync_count == 0
     assert [response["usage"]["completion_tokens"] for response in responses] == [1, 1]
-    assert len(session._samples) == 2
+    assert all(response["areno"]["response_logprobs"] == [-0.1] for response in responses)
+
+
+def test_explicit_trajectory_helper_builds_train_rows_without_prompt_claiming():
+    trainer = _FakeTrainer(world_size=1, tp_size=1)
+    session = RolloutSession(
+        trainer,
+        sampling_params=_FakeSamplingParams(),
+        loss_mask_policy=LossMaskPolicy(),
+        max_running_prompts=2,
+    )
+    batch = AgentBatch(records=[{"answer": "ok"}], prompts=["same prompt"], input_tokens=[[7]], n_samples=1)
+    item = next(batch.iter_samples())
+    response = {
+        "choices": [{"message": {"role": "assistant", "content": "100"}}],
+        "areno": {"response_tokens": [100], "response_logprobs": [-0.25]},
+    }
+
+    turn = AgentTrajectoryTurn(
+        item,
+        messages=[{"role": "user", "content": "same prompt"}],
+        response=response,
+    )
+    sample = session._sample_from_trajectory_turn(turn)
+    rows = session._train_rows_from_samples([sample])
+    record = session.reward_record(sample)
+
+    assert rows.token_rows == [[len("same prompt"), 100]]
+    assert rows.response_masks == [[False, True]]
+    assert rows.rollout_logprobs == [[0.0, -0.25]]
+    assert record.metadata == {"prompt_index": 0, "sample_index": 0}
+
+
+def test_openai_chat_completion_preserves_proxy_trajectory_metadata():
+    from openai.types.chat import ChatCompletion
+
+    item = next(AgentBatch(records=[{}], prompts=["p"], input_tokens=[[1]], n_samples=1).iter_samples())
+    response = ChatCompletion.model_validate(
+        {
+            "id": "chatcmpl-test",
+            "object": "chat.completion",
+            "created": 1,
+            "model": "policy",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "100"}, "finish_reason": "stop"}],
+            "areno": {"response_tokens": [100], "response_logprobs": [-0.1]},
+        }
+    )
+
+    turn = AgentTrajectoryTurn(item=item, messages=[{"role": "user", "content": "p"}], response=response)
+
+    assert turn.response_tokens == [100]
+    assert turn.response_logprobs == [-0.1]
+
+
+def test_agentic_overlong_trajectory_is_filtered_with_warning(caplog):
+    trainer = _FakeTrainer(world_size=1, tp_size=1)
+    session = RolloutSession(trainer, sampling_params=_FakeSamplingParams(), loss_mask_policy=LossMaskPolicy())
+    item0 = agentic.AgentItem(record={}, prompt="p0", input_tokens=[1], prompt_index=0, sample_index=0)
+    item1 = agentic.AgentItem(record={}, prompt="p1", input_tokens=[2], prompt_index=1, sample_index=0)
+    short = _sample(item0, "ok", [10])
+    long = _sample(item1, "too long", [20, 21, 22])
+    session._set_sample_training_row(short, [1])
+    session._set_sample_training_row(long, [2, 3, 4, 5])
+    params = _FakeSamplingParams()
+    params.max_prompt_len = 2
+    params.max_new_tokens = 2
+    policy = object.__new__(PolicyOnlyTrainer)
+    policy.logger = logging.getLogger("test.agentic.filter")
+    policy.areno = SimpleNamespace(model_context_len=lambda: 4)
+
+    with caplog.at_level(logging.WARNING):
+        kept, filtered, diagnostics = policy._filter_overlong_agent_samples(session, [short, long], params)
+
+    assert kept == [short]
+    assert filtered == 1
+    assert diagnostics["max_context_len"] == 4
+    assert diagnostics["filtered"] == 1
+    assert diagnostics["top"][0]["tokens"] == 7
+    assert "agentic trajectory filtered" in caplog.text
+    assert "max_context_len=4" in caplog.text
+
+
+def test_agentic_trajectory_filter_uses_total_context_not_prompt_limit():
+    trainer = _FakeTrainer(world_size=1, tp_size=1)
+    session = RolloutSession(trainer, sampling_params=_FakeSamplingParams(), loss_mask_policy=LossMaskPolicy())
+    item = agentic.AgentItem(record={}, prompt="p0", input_tokens=[1], prompt_index=0, sample_index=0)
+    sample = _sample(item, "fits total context", [10, 11, 12])
+    session._set_sample_training_row(sample, [1, 2, 3, 4, 5, 6, 7])
+    params = _FakeSamplingParams()
+    params.max_prompt_len = 2
+    params.max_new_tokens = 5
+    policy = object.__new__(PolicyOnlyTrainer)
+    policy.logger = logging.getLogger("test.agentic.filter")
+    policy.areno = SimpleNamespace(model_context_len=lambda: 10)
+
+    kept, filtered, diagnostics = policy._filter_overlong_agent_samples(session, [sample], params)
+
+    assert kept == [sample]
+    assert filtered == 0
+    assert diagnostics["max_context_len"] == 10
+
+
+def test_agentic_filter_diagnostics_formats_top_trajectories():
+    policy = object.__new__(PolicyOnlyTrainer)
+    diagnostics = {
+        "max_context_len": 8,
+        "total": 2,
+        "kept": 0,
+        "filtered": 2,
+        "min_tokens": 12,
+        "p50_tokens": 12,
+        "p90_tokens": 20,
+        "max_tokens": 20,
+        "top": [
+            {
+                "prompt_idx": 1,
+                "sample_idx": 0,
+                "tokens": 20,
+                "messages": 6,
+                "assistant_messages": 3,
+                "tool_results": 2,
+                "response_tokens": 5,
+                "trace_events": 4,
+                "prompt": "build kit",
+            }
+        ],
+    }
+
+    text = policy._format_agent_filter_diagnostics(diagnostics)
+
+    assert "max_context_len=8" in text
+    assert "tokens[min/p50/p90/max]=12/12/20/20" in text
+    assert "prompt_idx=1" in text
+    assert "tool_results=2" in text
 
 
 def test_proxy_client_cancellation_does_not_cancel_queued_rollout():
@@ -254,46 +382,18 @@ def test_proxy_client_cancellation_does_not_cancel_queued_rollout():
 
     async def run():
         session._loop = asyncio.get_running_loop()
-        session._request_queue = asyncio.Queue()
-        session._batch_task = asyncio.create_task(session._batch_worker_loop())
         task = asyncio.create_task(session._complete_chat({"model": "policy", "messages": [{"role": "user", "content": "p0"}]}))
         await asyncio.sleep(0)
         task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
+        try:
             await task
+        except asyncio.CancelledError:
+            pass
         await asyncio.sleep(0.1)
-        session._closing = True
-        session._batch_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await session._batch_task
 
     asyncio.run(run())
 
     assert trainer.rollout_batches == [([[2]], 1)]
-    assert len(session._samples) == 1
-
-
-def test_proxy_coalesce_deadline_starts_when_first_item_is_queued():
-    trainer = _FakeTrainer(world_size=1, tp_size=1)
-    session = RolloutSession(
-        trainer,
-        sampling_params=_FakeSamplingParams(),
-        loss_mask_policy=LossMaskPolicy(),
-        max_running_prompts=2,
-    )
-    first = _pending_chat(0, _FakeSamplingParams())
-    first.created_at = time.monotonic() - agentic.AGENTIC_PROXY_COALESCE_WAIT_S - 1.0
-    second = _pending_chat(1, _FakeSamplingParams())
-
-    async def run():
-        session._request_queue = asyncio.Queue()
-        await session._request_queue.put(first)
-        await session._request_queue.put(second)
-        return await session._pop_chat_batch()
-
-    batch = asyncio.run(run())
-
-    assert batch == [first]
 
 
 def test_rollout_session_context_owns_backend_lifecycle():
@@ -315,6 +415,42 @@ def test_rollout_session_context_owns_backend_lifecycle():
     assert trainer.rollout_session_events == ["begin", "end"]
 
 
+def test_rollout_session_uses_trainer_effective_dp_size():
+    trainer = _FakeTrainer(world_size=8, tp_size=4)
+    trainer.effective_dp_size = 4
+
+    session = RolloutSession(
+        trainer,
+        sampling_params=_FakeSamplingParams(),
+        loss_mask_policy=LossMaskPolicy(),
+        max_running_prompts=10,
+        proxy=False,
+    )
+
+    assert session._dp_size == 4
+    assert session._local_max_running_prompts == 3
+
+
+def test_rollout_session_sync_is_explicit_batch_level_hook():
+    trainer = _FakeTrainer(world_size=1, tp_size=1)
+
+    async def run_session():
+        session = RolloutSession(
+            trainer,
+            sampling_params=_FakeSamplingParams(),
+            loss_mask_policy=LossMaskPolicy(),
+            max_running_prompts=4,
+            proxy=False,
+        )
+        async with session:
+            await session.sync_rollout_session_async()
+
+    asyncio.run(run_session())
+
+    assert trainer.rollout_session_events == ["begin", "end"]
+    assert trainer.rollout_sync_count == 1
+
+
 def test_proxy_filters_prompt_exceeding_max_sequence_len_without_rollout():
     trainer = _FakeTrainer(world_size=1, tp_size=1)
     trainer.tokenizer = _FixedTokenizer(list(range(10)))
@@ -327,28 +463,18 @@ def test_proxy_filters_prompt_exceeding_max_sequence_len_without_rollout():
         loss_mask_policy=LossMaskPolicy(),
         max_running_prompts=1,
     )
-    batch = AgentBatch(records=[{"task": "long"}], prompts=["prompt"], input_tokens=[[1]], n_samples=1)
-    session.attach_batch(batch)
-
     async def run():
         session._loop = asyncio.get_running_loop()
-        session._request_queue = asyncio.Queue()
-        session._batch_task = asyncio.create_task(session._batch_worker_loop())
-        try:
-            return await session._complete_chat({"model": "policy", "messages": [{"role": "user", "content": "long prompt"}]})
-        finally:
-            session._closing = True
-            session._batch_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await session._batch_task
+        return await session._complete_chat({"model": "policy", "messages": [{"role": "user", "content": "long prompt"}]})
 
     response = asyncio.run(run())
-    train_batch = asyncio.run(session.get_train_batch())
 
     assert response["choices"][0]["finish_reason"] == "length"
-    assert response["usage"]["max_sequence_len"] == 9
+    assert response["usage"]["max_sequence_len"] == 5
+    assert response["areno"]["response_tokens"] == []
+    assert response["areno"]["response_logprobs"] == []
     assert trainer.rollout_batches == []
-    assert train_batch.token_rows == []
+    assert trainer.rollout_sync_count == 0
 
 
 def test_agentic_partial_with_logprobs_completes_http_request():
@@ -362,12 +488,10 @@ def test_agentic_partial_with_logprobs_completes_http_request():
     params = _FakeSamplingParams()
     pending = _pending_chat(0, params)
 
-    session._record_chat_sample(pending, [1, 2], [-0.3, -0.4])
+    response = session._build_chat_response(pending, agentic._ResponseData([1, 2], [-0.3, -0.4]))
 
-    assert pending.event.is_set()
-    assert pending.response is not None
-    assert len(session._samples) == 1
-    assert session._samples[0].response_logprobs == [-0.3, -0.4]
+    assert response["areno"]["response_tokens"] == [1, 2]
+    assert response["areno"]["response_logprobs"] == [-0.3, -0.4]
 
 
 def test_agentic_multi_turn_calls_merge_into_one_training_sample():
@@ -395,16 +519,16 @@ def test_agentic_multi_turn_calls_merge_into_one_training_sample():
         {"role": "user", "content": "step 2"},
     ]
 
-    session._record_chat_sample(first, [10, 11], [-0.1, -0.2])
-    session._record_chat_sample(second, [20], [-0.3])
-    batch = asyncio.run(session.get_train_batch(require_finished=False))
-    record = batch.reward_records[0]
+    first_sample = session._sample_from_pending_chat(first, agentic._ResponseData([10, 11], [-0.1, -0.2]))
+    second_sample = session._sample_from_pending_chat(second, agentic._ResponseData([20], [-0.3]))
+    session._append_sample_response(first_sample, second_sample)
+    rows = session._train_rows_from_samples([first_sample])
+    record = session.reward_record(first_sample)
 
-    assert len(session._samples) == 1
-    assert batch.token_rows == [[1, 2, 10, 11, 30, 31, 20]]
-    assert batch.response_masks == [[False, False, True, True, False, False, True]]
-    assert batch.loss_masks == [[False, False, True, True, False, False, True]]
-    assert batch.rollout_logprobs == [[0.0, 0.0, -0.1, -0.2, 0.0, 0.0, -0.3]]
+    assert rows.token_rows == [[1, 2, 10, 11, 30, 31, 20]]
+    assert rows.response_masks == [[False, False, True, True, False, False, True]]
+    assert rows.loss_masks == [[False, False, True, True, False, False, True]]
+    assert rows.rollout_logprobs == [[0.0, 0.0, -0.1, -0.2, 0.0, 0.0, -0.3]]
     assert record.tokens == [10, 11, 20]
     assert record.tool_results == [{"name": None, "tool_call_id": None, "content": "tool result"}]
     assert record.completion == "10 11\n20"
@@ -412,6 +536,59 @@ def test_agentic_multi_turn_calls_merge_into_one_training_sample():
     assert [event.type for event in record.trace].count("request") == 2
     assert [event.type for event in record.trace].count("tool_result") == 1
     assert record.source_record == {"task": "multi"}
+
+
+def test_agentic_interleaved_trajectories_do_not_cross_items():
+    """Interleaved agent turns must only merge with the matching AgentItem."""
+
+    trainer = _FakeTrainer(world_size=1, tp_size=1)
+    session = RolloutSession(
+        trainer,
+        sampling_params=_FakeSamplingParams(),
+        loss_mask_policy=LossMaskPolicy(),
+        max_running_prompts=4,
+    )
+    items = list(
+        AgentBatch(
+            records=[{"task": "a"}, {"task": "b"}],
+            prompts=["prompt-a", "prompt-b"],
+            input_tokens=[[1], [2]],
+            n_samples=1,
+        ).iter_samples()
+    )
+    turns = [
+        AgentTrajectoryTurn(items[0], messages=[{"role": "user", "content": "a-1"}], response={"areno": {"response_tokens": [10], "response_logprobs": [-0.1]}}),
+        AgentTrajectoryTurn(items[1], messages=[{"role": "user", "content": "b-1"}], response={"areno": {"response_tokens": [20], "response_logprobs": [-0.2]}}),
+        AgentTrajectoryTurn(
+            items[0],
+            messages=[{"role": "user", "content": "a-1"}, {"role": "assistant", "content": "10"}, {"role": "user", "content": "a-2"}],
+            response={"areno": {"response_tokens": [11], "response_logprobs": [-0.11]}},
+        ),
+        AgentTrajectoryTurn(
+            items[1],
+            messages=[{"role": "user", "content": "b-1"}, {"role": "assistant", "content": "20"}, {"role": "user", "content": "b-2"}],
+            response={"areno": {"response_tokens": [21], "response_logprobs": [-0.21]}},
+        ),
+    ]
+    policy = object.__new__(PolicyOnlyTrainer)
+    samples = []
+
+    for turn in turns:
+        sample = session._sample_from_trajectory_turn(turn)
+        existing = policy._find_agent_sample(samples, sample.item)
+        if existing is None:
+            samples.append(sample)
+        else:
+            session._append_sample_response(existing, sample)
+
+    records = [session.reward_record(sample) for sample in samples]
+
+    assert [(sample.item.prompt_index, sample.item.sample_index) for sample in samples] == [(0, 0), (1, 0)]
+    assert [sample.response_tokens for sample in samples] == [[10, 11], [20, 21]]
+    assert [record.source_record for record in records] == [{"task": "a"}, {"task": "b"}]
+    assert [record.final_answer for record in records] == ["11", "21"]
+    assert "b-" not in str(records[0].messages)
+    assert "a-" not in str(records[1].messages)
 
 
 def test_agentic_reward_record_renders_messages_with_chat_template():
@@ -425,7 +602,7 @@ def test_agentic_reward_record_renders_messages_with_chat_template():
         {"role": "tool", "content": "tool result"},
     ]
 
-    record = session._reward_record(sample)
+    record = session.reward_record(sample)
 
     assert record.completion == "answer"
     assert record.rendered_completion == "user:question|tool:tool result|assistant:answer"
@@ -453,15 +630,15 @@ def test_agentic_tool_request_returns_tool_call_and_reward_record():
     ]
     pending.tool_choice = {"type": "function", "function": {"name": "choose_move"}}
 
-    session._record_chat_sample(pending, [1, 2], [-0.3, -0.4])
-    response = pending.response
-    record = session._reward_record(session._samples[0])
+    response = session._build_chat_response(pending, agentic._ResponseData([1, 2], [-0.3, -0.4]))
+    sample = session._sample_from_pending_chat(pending, agentic._ResponseData([1, 2], [-0.3, -0.4]))
+    record = session.reward_record(sample)
 
     assert response["choices"][0]["finish_reason"] == "tool_calls"
     tool_call = response["choices"][0]["message"]["tool_calls"][0]
     assert tool_call["function"]["name"] == "choose_move"
     assert '"direction":"left"' in tool_call["function"]["arguments"]
-    assert session._samples[0].response_kind == "assistant_tool_call"
+    assert sample.response_kind == "assistant_tool_call"
     assert record.tool_calls == [{"name": "choose_move", "arguments": '{"direction":"left"}'}]
     assert record.loss_mask == [True, True]
 
@@ -777,13 +954,18 @@ class _ToolRejectingTokenizer(_FakeTokenizer):
 class _FakeTrainer:
     def __init__(self, *, world_size=2, tp_size=1):
         self.config = SimpleNamespace(world_size=world_size, tp_size=tp_size)
+        self.effective_dp_size = max(world_size // tp_size, 1)
         self.rollout_batches = []
         self.tokenizer = _FakeTokenizer()
         self.rollout_session_events = []
+        self.rollout_sync_count = 0
         self.rollout_delay_s = 0.0
 
     def get_tokenizer(self):
         return self.tokenizer
+
+    def dp_size(self):
+        return self.effective_dp_size
 
     def rollout_token_batch(self, prompt_tokens, n_samples, sampling_params):
         del sampling_params
@@ -807,6 +989,9 @@ class _FakeTrainer:
 
     async def begin_rollout_session_async(self):
         self.rollout_session_events.append("begin")
+
+    async def sync_rollout_session_async(self):
+        self.rollout_sync_count += 1
 
     async def end_rollout_session_async(self):
         self.rollout_session_events.append("end")

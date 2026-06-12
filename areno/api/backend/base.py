@@ -107,6 +107,23 @@ class Backend(ABC):
 
         self.begin_rollout_session(ctx)
 
+    async def sync_rollout_session_async(self, ctx: Context) -> None:
+        """Optional synchronization hook before request-driven rollout."""
+
+        del ctx
+
+    def dp_size(self, ctx: Context) -> int:
+        """Return the backend's effective data-parallel size."""
+
+        del ctx
+        return 1
+
+    def model_context_len(self, ctx: Context) -> int | None:
+        """Return the model's configured maximum context length when known."""
+
+        del ctx
+        return None
+
     def end_rollout_session(self, ctx: Context) -> None:
         """Finalize rollout state before scoring or training."""
 
