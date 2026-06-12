@@ -4,9 +4,9 @@ Inference CLI reference
 ``areno serve``
 
 Start an OpenAI-compatible HTTP server backed by the Areno inference engine.
-The server exposes ``/v1/chat/completions``, accepts standard chat-completion
-``tools`` fields, and keeps one rollout session open for the process lifetime
-so rollout state and CUDA graph state can be reused across requests.
+The server exposes ``/v1/chat/completions`` and keeps one rollout session open
+for the process lifetime so rollout state and CUDA graph state can be reused
+across requests.
 
 .. code-block:: bash
 
@@ -48,6 +48,9 @@ Options:
 
 ``--decode-progress-interval-s FLOAT``
    Worker decode progress log interval. Default: ``0.0``.
+
+``--eager-decode``
+   Disable decode CUDA graph and run rollout decode eagerly.
 
 ``world-size`` must be divisible by ``tp-size``.
 
@@ -137,14 +140,6 @@ Request fields
    * - ``seed``
      - ``int | None``
      - Deterministic sampling seed when sampling is enabled.
-   * - ``tools``
-     - ``list[Tool] | None``
-     - OpenAI-compatible function tools. Model-native tool-call text is parsed
-       into ``message.tool_calls`` for supported model families.
-   * - ``tool_choice``
-     - ``str | dict | None``
-     - Optional tool-choice directive, including a forced function name.
-
 ``ChatMessage`` fields:
 
 ``role``
@@ -179,24 +174,26 @@ progress:
 
 .. code-block:: text
 
-   rollout decode progress: dp=0/4 active=32 cuda_graph=True tokens_per_second=2810.7 window_tokens=28134 step=450/3071 cache_tokens=631
+   rollout decode progress: dp=0/4 active=32 cuda_graph=True tokens_per_second=2810.7
 
 ``tokens_per_second`` is the scheduled decode throughput for that DP worker in
 the reporting window. It excludes prefill and is not the same as end-to-end
-request throughput. ``window_tokens`` is the raw token count for the same
-window. ``cuda_graph=True`` means the worker used CUDA graph replay for at
-least one decode step in that window; ``False`` means the window ran eagerly.
+request throughput. ``cuda_graph=True`` means the worker used CUDA graph replay
+for at least one decode step in that window; ``False`` means the window ran
+eagerly.
 
 Tool calls
 ----------
 
-``areno serve`` supports the Chat Completions tool-call shape:
+Tool-call training uses the agentic rollout proxy rather than standalone
+``areno serve``. In an agent function, point an OpenAI client at
+``ctx.get_base_url()`` and pass Chat Completions ``tools`` and ``tool_choice``:
 
 .. code-block:: python
 
    from openai import OpenAI
 
-   client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="unused")
+   client = OpenAI(base_url=ctx.get_base_url(), api_key=ctx.api_key)
    response = client.chat.completions.create(
        model="areno",
        messages=[{"role": "user", "content": "Choose a move: left or right."}],
@@ -222,7 +219,9 @@ Tool calls
 
 Tool-call parsing is selected from the model/tokenizer family. Current parsers
 cover Qwen/Qwen3.5/MiniCPM-style ``<tool_call>`` blocks, Gemma4 tool-call
-blocks, and generic JSON tool-call output.
+blocks, and generic JSON tool-call output. The agent function returns the
+OpenAI response in an ``AgentTrajectoryTurn`` so the trainer can build
+token/logprob/reward/loss-mask rows.
 
 Help
 ----

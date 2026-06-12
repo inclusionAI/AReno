@@ -55,8 +55,9 @@ directly from Python.
           async with trainer.rollout_session(sampling_params=sampling, proxy=False):
               rollout = trainer.rollout_batch(["Solve 12 * 13."], n_samples=1, sampling_params=sampling)
 
-          # Runs one backend optimizer step.
-          stats = trainer.train(batch_data, loss_fn, mini_bs=1)
+          # Build TrainSequence rows and a loss function for your algorithm,
+          # then run one backend optimizer step.
+          # stats = trainer.train(batch_data, loss_fn, mini_bs=1)
 
           # Release metric writers and local resources.
           trainer.close()
@@ -208,16 +209,17 @@ directly from Python.
       ``proxy=True`` so the session starts a local OpenAI-compatible proxy.
 
       In proxy mode, agent code calls ``ctx.get_base_url()`` with a standard
-      OpenAI client, and Areno collects assistant text, assistant tool calls,
-      token ids, rollout logprobs, reward records, and loss masks. Assistant
-      text and assistant tool-call spans are trainable by default; tool-result
-      spans are masked unless enabled through ``LossMaskPolicy``.
+      OpenAI client. The proxy returns OpenAI responses with Areno token and
+      logprob metadata; ``run_agent`` returns explicit trajectory turns built
+      from those responses. Assistant text and assistant tool-call spans are
+      trainable by default; tool-result spans are masked unless enabled through
+      ``LossMaskPolicy``.
 
       :param SamplingParams sampling_params: Default generation controls.
       :param LossMaskPolicy | None loss_mask_policy: Optional span-level loss
          mask policy.
       :param int | None max_running_prompts: Global concurrent prompt budget.
-      :param float timeout_s: Proxy request and collection timeout.
+      :param float timeout_s: Proxy request and agent-function timeout.
       :param bool proxy: Whether to start the local OpenAI-compatible proxy.
       :returns: async ``RolloutSession`` context manager.
 
@@ -513,10 +515,10 @@ Agentic rollout with tools
 --------------------------
 
 This example shows the SDK pieces used by ``--agent-fn``. The agent calls a
-local OpenAI-compatible proxy with Chat Completions ``tools``. Areno parses
-model-native tool-call output for supported model families and returns an
-``AgentTrainBatch`` that can be passed to the same trainers/loss functions as
-regular rollouts.
+local OpenAI-compatible proxy with Chat Completions ``tools`` and returns
+explicit trajectories. Areno parses supported model-native tool-call output
+from those responses, then the trainer converts trajectories into the same
+token, logprob, reward, and loss-mask rows used by regular rollouts.
 
 .. code-block:: python
 
@@ -571,9 +573,8 @@ regular rollouts.
            )
 
        try:
-           return AgentTrajectory(
-               turns=list(await asyncio.gather(*(run_one(item) for item in batch.iter_samples())))
-           )
+           turns = await asyncio.gather(*(run_one(item) for item in batch.iter_samples()))
+           return [AgentTrajectory(turns=[turn]) for turn in turns]
        finally:
            await client.close()
 
@@ -584,7 +585,7 @@ regular rollouts.
        return 1.0
 
 
-   async def collect_agentic_batch(trainer, prompt_batch):
+   async def collect_agentic_trajectories(trainer, prompt_batch):
        agent_batch = AgentBatch.from_prompt_batch(prompt_batch, n_samples=4)
        async with trainer.rollout_session(
            sampling_params=SamplingParams(max_new_tokens=16, temperature=0.7),
@@ -601,5 +602,6 @@ regular rollouts.
    )
    trainer.init()
 
-   # In a full loop, load a PromptBatch with trainer.load_prompt_batches(...).
-   # Then call: agent_train_batch = asyncio.run(collect_agentic_batch(trainer, prompt_batch))
+   # In CLI training, --agent-fn returns these trajectories to the trainer.
+   # In a custom loop, load a PromptBatch and call:
+   # trajectories = asyncio.run(collect_agentic_trajectories(trainer, prompt_batch))

@@ -181,12 +181,13 @@ Agentic rollout
    completion. The agent receives a local OpenAI-compatible base URL from
    ``ctx.get_base_url()`` and can call ``/v1/chat/completions`` with tools.
    Use ``batch.iter_samples()`` to iterate the expanded
-   ``batch-size * n-samples`` agent tasks. The function returns an
-   ``AgentTrajectory`` dataclass containing one or more ``AgentTrajectoryTurn``
-   objects.
+   ``batch-size * n-samples`` agent tasks. The function returns explicit
+   trajectories: one ``AgentTrajectoryTurn``, one ``AgentTrajectory``, or an
+   iterable of either. Each turn must carry its ``AgentItem``, message list,
+   and OpenAI response.
 
 ``--agent-timeout-s FLOAT``
-   Timeout for agentic proxy requests and trajectory collection. Default:
+   Timeout for agentic proxy requests and the agent function. Default:
    ``300.0``.
 
 ``--train-tool-results``
@@ -196,8 +197,9 @@ Agentic rollout
 
 Agentic trajectories can contain multiple chat-completion turns for the same
 prompt/sample pair. The agent owns the OpenAI-style message list and returns
-trajectory turns with the model response; Areno converts those turns into
-tool calls, tool results, token ids, rollout logprobs, and loss masks.
+trajectory turns with the model response; Areno converts those turns into token
+rows, rollout logprobs, parsed assistant tool calls, reward records, and loss
+masks.
 Tool-result/context spans are included in the token row for correct scoring
 but are masked from policy loss unless ``--train-tool-results`` is set.
 
@@ -362,10 +364,10 @@ Agentic Tic-Tac-Toe
      --max-new-tokens 32
 
 The agent function can use the OpenAI Python client against
-``ctx.get_base_url()`` and returns an ``AgentTrajectory``. Areno converts it
-to tokens, rollout logprobs, parsed ``tool_calls``, rewards, and loss masks,
-then feeds the resulting batch to the same policy trainer used by non-agentic
-rollouts.
+``ctx.get_base_url()`` and returns explicit ``AgentTrajectory`` or
+``AgentTrajectoryTurn`` objects. Areno converts them to tokens, rollout
+logprobs, parsed ``tool_calls``, rewards, and loss masks, then feeds the
+resulting batch to the same policy trainer used by non-agentic rollouts.
 
 Help
 ----

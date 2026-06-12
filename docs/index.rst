@@ -23,7 +23,7 @@ areno
      <div class="areno-feature-card"><strong>Lightweight by design</strong><p>The core stack stays small: PyTorch plus focused CUDA/attention dependencies, without a separate serving framework or trainer framework in the hot path.</p></div>
      <div class="areno-feature-card"><strong>Train and infer together</strong><p>Rollout, scoring, optimizer steps, CUDA graph handling, agentic proxying, and checkpoint I/O live in one local engine for a direct post-training loop.</p></div>
      <div class="areno-feature-card"><strong>Kernel-first runtime</strong><p>Fused CUDA paths cover routing, token movement, top-k, embedding, activation, normalization, and MoE hot paths.</p></div>
-     <div class="areno-feature-card"><strong>Agentic by default</strong><p>Agent functions can call a local OpenAI-compatible proxy; areno records completions, tokens, logprobs, rewards, and loss masks for training.</p></div>
+     <div class="areno-feature-card"><strong>Agentic by default</strong><p>Agent functions call a local OpenAI-compatible proxy and return explicit trajectories; areno converts model responses to completions, tokens, logprobs, rewards, and loss masks for training.</p></div>
    </div>
 
 Quick start

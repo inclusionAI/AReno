@@ -29,7 +29,7 @@ AReno's mission is to make LLM RL **accessible** for a broad community of resear
 
 - ✨ **Plug-and-play**: various post-training methods are easily accessible via the `--algo` flag or the same `Trainer` class from Python, no cluster or launcher to set up.
 - 🪶 **Lightweight**: single self-contained package, no external training/inference backend, just PyTorch, FlashAttention, and a handful of other libraries.
-- 🧰 **Agentic RL ready**: run an agent function against AReno's local OpenAI-compatible proxy, record agent traces with tokens, logprobs, rewards, and loss masks, then train from the collected rollouts.
+- 🧰 **Agentic RL ready**: run an agent function against AReno's local OpenAI-compatible proxy, return explicit trajectories, and train from tokens, logprobs, rewards, and loss masks derived by the trainer.
 - 🧩 **Extensible**: easily register new algorithms, model adapters, reward functions, and hardware backends without changing the core.
 
 ## Installation
@@ -218,8 +218,8 @@ This starts a server with continuous batching; point any OpenAI client at
 
 Run an agentic rollout task by adding an agent function. The agent calls the
 local OpenAI-compatible endpoint, including `tools` and `tool_choice` when
-needed, while AReno records trainable assistant outputs and masks tool results
-by default:
+needed, and returns explicit `AgentTrajectoryTurn` objects. AReno converts
+those turns into trainable assistant outputs and masks tool results by default:
 
 ```bash
 python examples/agentic/tictactoe/dataset_generator.py \
