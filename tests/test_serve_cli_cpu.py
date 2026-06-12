@@ -34,6 +34,14 @@ def test_create_app_passes_eager_decode_runtime_config(monkeypatch):
     assert captured["runtime_config"].eager_decode is True
 
 
+def test_chat_completion_request_defaults_match_sampling_params():
+    request = serve_mod.ChatCompletionRequest(messages=[serve_mod.ChatMessage(role="user", content="hi")])
+
+    assert request.temperature == 1.0
+    assert request.top_p == 1.0
+    assert request.top_k == -1
+
+
 def test_serve_response_reuses_tool_call_parser():
     tokenizer = _TokenTokenizer({1: "<tool_call>", 2: '{"name":"choose_move","arguments":{"direction":"left"}}', 3: "</tool_call>"})
     request = serve_mod.ChatCompletionRequest(

@@ -121,13 +121,15 @@ Request fields
      - Alternative generated token budget.
    * - ``temperature``
      - ``float``
-     - Sampling temperature. Use ``0.0`` for greedy decoding.
+     - Sampling temperature. Defaults to ``1.0``; use ``0.0`` for greedy
+       decoding.
    * - ``top_p``
      - ``float``
      - Nucleus sampling threshold.
    * - ``top_k``
      - ``int``
-     - Top-k sampling threshold. ``0`` disables top-k filtering.
+     - Top-k sampling threshold. Defaults to ``-1``; non-positive values
+       disable top-k filtering.
    * - ``n``
      - ``int``
      - Number of completions per prompt.

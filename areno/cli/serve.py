@@ -50,9 +50,9 @@ class ChatCompletionRequest(BaseModel):
     tool_choice: Any = None
     max_tokens: int | None = Field(default=None, ge=1)
     max_completion_tokens: int | None = Field(default=None, ge=1)
-    temperature: float = Field(default=0.0, ge=0.0)
+    temperature: float = Field(default=1.0, ge=0.0)
     top_p: float = Field(default=1.0, ge=0.0, le=1.0)
-    top_k: int = Field(default=0, ge=0)
+    top_k: int = Field(default=-1, ge=-1)
     n: int = Field(default=1, ge=1)
     stream: bool = False
     stop: str | list[str] | None = None
