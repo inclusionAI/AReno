@@ -53,8 +53,7 @@ pip install areno --no-build-isolation
 pip install flash-attn flash-linear-attention
 ```
 
-`--no-build-isolation` is required so that pip uses your existing CUDA-enabled
-PyTorch instead of installing a CPU-only torch in an isolated build environment.
+`--no-build-isolation` is required so that pip uses your existing CUDA-enabled PyTorch instead of installing a CPU-only torch in an isolated build environment.
 
 **From source** (recommended if you want the examples or plan to contribute):
 
@@ -67,22 +66,16 @@ pip install flash-attn flash-linear-attention
 
 **Tips:**
 
-- Install `ninja` (`pip install ninja`) before building. With ninja, the CUDA
-  kernels compile in parallel (a few minutes); without it, compilation falls
-  back to a single core and is much slower.
-- Compiling the CUDA kernels takes a few minutes. If your machine has many CPU
-  cores but limited RAM, cap the parallel build jobs with `MAX_JOBS`:
+- Install `ninja` (`pip install ninja`) before building. With ninja, the CUDA kernels compile in parallel (a few minutes); Without it, compilation falls back to a single core and is much slower.
+- Compiling the CUDA kernels takes a few minutes. If your machine has many CPU cores but limited RAM, cap the parallel build jobs with `MAX_JOBS`:
   ```bash
   MAX_JOBS=4 pip install -e . --no-build-isolation
   ```
-- To install the Python package without building the CUDA extension (for
-  docs/metadata or a dry run), set `ARENO_BUILD_EXT=0`. The engine will not run
-  without the extension, but the install will succeed.
+- To install the Python package without building the CUDA extension (for docs/metadata or a dry run), set `ARENO_BUILD_EXT=0`. The engine will not run without the extension, but the installation will succeed.
 
 ## Quick Start
 
-With the SDK, RL loop is a short cycle of `Trainer` calls. Each step below maps a
-concept to the SDK call that performs it:
+With the SDK, RL loop is a short cycle of `Trainer` calls. Each step below maps a concept to the SDK call that performs it:
 
 ```mermaid
 flowchart LR
@@ -92,16 +85,11 @@ flowchart LR
     D["train<br/>optimizer step"] -->|repeat| B
 ```
 
-1. **Create the trainer** — construct a `Trainer` on the AReno backend and
-   `init()` it to load the tokenizer and start workers.
-2. **Roll out** — inside `rollout_session(...)`, `rollout_batch(...)` generates
-   on-policy completions for each prompt.
-3. **Score** — reward each completion and turn rewards into advantages (your
-   reward function, not AReno's).
-4. **Train** — pack the rollout into `TrainSequence` objects and call
-   `train(batch, loss_fn)` to run one optimizer step.
-5. **Repeat** — new weights produce new rollouts; loop until done, then
-   `close()`.
+1. **Create the trainer** — construct a `Trainer` on the AReno backend and `init()` it to load the tokenizer and start workers.
+2. **Roll out** — inside `rollout_session(...)`, `rollout_batch(...)` generates on-policy completions for each prompt.
+3. **Score** — reward each completion and turn rewards into advantages (your reward function, not AReno's).
+4. **Train** — pack the rollout into `TrainSequence` objects and call `train(batch, loss_fn)` to run one optimizer step.
+5. **Repeat** — new weights produce new rollouts; loop until done, then `close()`.
 
 ```python
 import asyncio
@@ -188,7 +176,11 @@ See the documentation for the full `Trainer` API.
 
 ## Command Line Interface (CLI)
 
-You can use the AReno Command Line Interface (CLI) to quickly get started with post-training without writing any Python. Run GSPO on a GSM8K-style dataset with a reward function:
+You can use the AReno Command Line Interface (CLI) to quickly get started with post-training without writing any Python.
+
+### Training
+
+Run GSPO on a GSM8K-style dataset with a reward function:
 
 ```bash
 areno train \
@@ -202,24 +194,7 @@ areno train \
 
 `--ckpt` and `--dataset-path` accept either local paths or Hugging Face repo IDs. Switch algorithms by changing `--algo` (e.g. `--algo grpo`, `--algo sft`).
 
-Serve a trained checkpoint behind an OpenAI-compatible endpoint:
-
-```bash
-areno serve \
-  --model-path /path/to/model \
-  --tp-size 1 \
-  --world-size 1 \
-  --port 8000
-```
-
-This starts a server with continuous batching; point any OpenAI client at
-`http://localhost:8000/v1/chat/completions`. Run `areno train --help` or
-`areno serve --help` for the full option surface.
-
-Run an agentic rollout task by adding an agent function. The agent calls the
-local OpenAI-compatible endpoint, including `tools` and `tool_choice` when
-needed, and returns explicit `AgentTrajectoryTurn` objects. AReno converts
-those turns into trainable assistant outputs and masks tool results by default:
+For Agentic RL, add `--agent-fn` to supply an agent function. The agent calls the local OpenAI-compatible endpoint, including `tools` and `tool_choice` when needed, and returns explicit `AgentTrajectoryTurn` objects. AReno converts those turns into trainable assistant outputs and masks tool results by default:
 
 ```bash
 python examples/agentic/tictactoe/dataset_generator.py \
@@ -240,6 +215,22 @@ areno train \
   --world-size 1
 ```
 
+For the full list of training options, run `areno train --help`.
+
+### Serving
+
+Serve a trained checkpoint as an OpenAI-compatible endpoint with continuous batching:
+
+```bash
+areno serve \
+  --model-path /path/to/model \
+  --tp-size 1 \
+  --world-size 1 \
+  --port 8000
+```
+
+Point any OpenAI client at `http://localhost:8000/v1/chat/completions` to start generating. For the full list of serving options, run `areno serve --help`.
+
 ## Development
 
 If you want to contribute to AReno or customize it for your own needs, read the [contribution guide](CONTRIBUTING.md) and make a development install:
@@ -252,7 +243,9 @@ pip install -e . --no-build-isolation
 
 New algorithms, model adapters, kernels, reward functions, and hardware backends all have first-class extension points, so most contributions land without forking the core.
 
-## Citation
+## Citation and Acknowledgement
+
+If you find the project helpful, please cite:
 
 ```bibtex
 @misc{areno2026,
@@ -263,6 +256,8 @@ New algorithms, model adapters, kernels, reward functions, and hardware backends
   license      = {Apache-2.0}
 }
 ```
+
+AReno's API design is inspired by [Tinker](https://github.com/ThinkingMachine/Tinker) from ThinkingMachines. We would like to express our gratitude for their pioneering work.
 
 ## License
 
