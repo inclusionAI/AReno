@@ -18,6 +18,17 @@ def _cuda_extensions():
     mode = os.environ.get("ARENO_BUILD_EXT", "1").lower()
     if mode in {"0", "false", "no", "off"}:
         return [], {}
+    try:
+        import psutil  # noqa: F401
+    except ImportError as exc:
+        raise RuntimeError(
+            "building areno.accel requires psutil to be installed before running "
+            "`pip install ... --no-build-isolation`. PyTorch's CUDA extension "
+            "builder imports psutil to size parallel compile jobs, and build "
+            "isolation is disabled so pip will not install build-time dependencies "
+            "for you. Fix: run `pip install psutil` in this environment, then "
+            "retry the AReno install."
+        ) from exc
     from torch.utils.cpp_extension import CUDA_HOME, BuildExtension, CUDAExtension
 
     if CUDA_HOME is None:
