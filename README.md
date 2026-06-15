@@ -50,8 +50,8 @@ AReno's mission is to make LLM RL **accessible** for a broad community of resear
 
 ```bash
 pip install psutil
-pip install areno --no-build-isolation
 pip install flash-attn flash-linear-attention
+pip install areno --no-build-isolation
 ```
 
 `--no-build-isolation` is required so that pip uses your existing CUDA-enabled PyTorch instead of installing a CPU-only torch in an isolated build environment.
@@ -63,14 +63,15 @@ Because build isolation is disabled, build-time helpers are not installed automa
 git clone https://github.com/inclusionAI/asystem-areno.git
 cd asystem-areno
 pip install psutil
-pip install -e . --no-build-isolation
 pip install flash-attn flash-linear-attention
+pip install -e . --no-build-isolation
 ```
 
 **Tips:**
 
 - Install `ninja` (`pip install ninja`) before building. With ninja, the CUDA kernels compile in parallel (a few minutes); Without it, compilation falls back to a single core and is much slower.
 - If installation fails with `No module named 'psutil'`, install it first (`pip install psutil`) and retry. This is required specifically for `--no-build-isolation` builds.
+- Install `flash-attn` before AReno so the local build can reuse the already-installed package. If building `flash-attn` from source is too slow for your environment, install a pre-built wheel from the [flash-attention releases](https://github.com/Dao-AILab/flash-attention/releases) that matches your Python, PyTorch, CUDA, and platform.
 - Compiling the CUDA kernels takes a few minutes. If your machine has many CPU cores but limited RAM, cap the parallel build jobs with `MAX_JOBS`:
   ```bash
   MAX_JOBS=4 pip install -e . --no-build-isolation
@@ -243,6 +244,7 @@ If you want to contribute to AReno or customize it for your own needs, read the 
 git clone https://github.com/inclusionAI/asystem-areno.git
 cd asystem-areno
 pip install psutil
+pip install flash-attn flash-linear-attention
 pip install -e . --no-build-isolation
 ```
 
