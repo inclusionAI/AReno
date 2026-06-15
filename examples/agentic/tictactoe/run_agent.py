@@ -41,10 +41,12 @@ async def run_agent(ctx, batch):
     """Run one tool-call model request for each board."""
 
     try:
-        from openai import AsyncOpenAI
         import httpx
+        from openai import AsyncOpenAI
     except ImportError as exc:
-        raise RuntimeError("The Tic-Tac-Toe agentic example requires `openai` and `httpx`. Install them with `pip install openai`.") from exc
+        raise RuntimeError(
+            "The Tic-Tac-Toe agentic example requires `openai` and `httpx`. Install them with `pip install openai`."
+        ) from exc
 
     items = list(batch.iter_samples())
     logger.info("Tic-Tac-Toe agent start requests=%d max_running_prompts=%d", len(items), ctx.max_running_prompts)

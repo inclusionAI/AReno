@@ -5,7 +5,6 @@ import sys
 
 from setuptools import setup
 
-
 _METADATA_COMMANDS = {"egg_info", "dist_info", "sdist"}
 
 
@@ -19,12 +18,11 @@ def _cuda_extensions():
     mode = os.environ.get("ARENO_BUILD_EXT", "1").lower()
     if mode in {"0", "false", "no", "off"}:
         return [], {}
-    from torch.utils.cpp_extension import BuildExtension, CUDAExtension, CUDA_HOME
+    from torch.utils.cpp_extension import CUDA_HOME, BuildExtension, CUDAExtension
 
     if CUDA_HOME is None:
         raise RuntimeError(
-            "building areno.accel requires CUDA_HOME; "
-            "set ARENO_BUILD_EXT=0 to build docs/metadata without CUDA"
+            "building areno.accel requires CUDA_HOME; set ARENO_BUILD_EXT=0 to build docs/metadata without CUDA"
         )
     return [
         CUDAExtension(

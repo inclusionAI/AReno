@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import re
-from functools import lru_cache
-from typing import Iterable
+from collections.abc import Iterable
+from functools import cache
 
 Board = list[list[str]]
 PLAYERS = ("X", "O")
@@ -158,7 +158,7 @@ def is_terminal(board: Board) -> bool:
     return winner(board) is not None or not legal_moves(board)
 
 
-@lru_cache(maxsize=None)
+@cache
 def _minimax(key: tuple[str, ...], player: str) -> int:
     board = _from_key(key)
     won = winner(board)

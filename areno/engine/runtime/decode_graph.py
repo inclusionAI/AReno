@@ -12,6 +12,7 @@ from __future__ import annotations
 import torch
 import torch.distributed as dist
 
+from areno.engine.runtime.common import ceil_div as ceil_div  # noqa: F401
 from areno.engine.runtime.metadata import InferMeta
 
 

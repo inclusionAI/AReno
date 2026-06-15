@@ -2,7 +2,7 @@
 
 ``areno_linear`` is a drop-in fused matmul + optional bias used where PyTorch's
 ``F.linear`` would otherwise dispatch to cuBLAS, and lets the autograd path
-re-use the extension's tuned backward. ``areno_grouped_linear`` performs
+reuse the extension's tuned backward. ``areno_grouped_linear`` performs
 per-expert matmuls over contiguous token groups (post-permute MoE layout)
 without launching one kernel per expert.
 """

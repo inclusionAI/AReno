@@ -845,7 +845,7 @@ def seg_la_fwd(q, k, v, s, decay_scales, meta, caches=None, softmax_scale=None):
         # Prefill / spec / MTP path. K and V dims are tiled into
         # K_SPLIT_DIM/V_SPLIT_DIM chunks so the (K, V) state slice fits in
         # SRAM at the chosen num_stages.
-        # prefill with partitoning q/k/v
+        # prefill with partitioning q/k/v
         # BLOCK should <= 64 with decouple
         K_SPLIT_DIM = 32
         # Bigger V split for larger batches where occupancy is already high.
@@ -986,7 +986,7 @@ def seg_la_fwd(q, k, v, s, decay_scales, meta, caches=None, softmax_scale=None):
     else:
         # Decode path: a wider K-split is OK since each program does very
         # little work, and we want to keep N small enough for cache locality.
-        # decode with partitoning q/k/v
+        # decode with partitioning q/k/v
         if bs <= 128:
             K_SPLIT_DIM = 128  # 128
             V_SPLIT_DIM = 32  # 32
@@ -1031,7 +1031,7 @@ def seg_la_fwd(q, k, v, s, decay_scales, meta, caches=None, softmax_scale=None):
             o = tmp[0]
 
     # if fallback:
-    #     # prefill/decode with partitoning v only
+    #     # prefill/decode with partitioning v only
     #     o = torch.empty(q.shape, device=q.device, dtype=q.dtype)
     #     if MAX_LENGTH == 1:
     #         # decode

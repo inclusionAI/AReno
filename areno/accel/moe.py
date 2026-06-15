@@ -11,7 +11,7 @@ expert-major layout consumed by ``areno_grouped_linear`` / the expert MLPs:
 * :func:`areno_moe_unpermute` performs the scatter-add back to token-major,
   applying the route weights along the way.
 
-Backward implementations re-use the inverse kernels so gradients are routed
+Backward implementations reuse the inverse kernels so gradients are routed
 through the same indirection tensors saved in the forward pass.
 """
 
