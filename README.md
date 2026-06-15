@@ -69,12 +69,21 @@ pip install -e . --no-build-isolation
 
 **Tips:**
 
-- Install `ninja` (`pip install ninja`) before building. With ninja, the CUDA kernels compile in parallel (a few minutes); Without it, compilation falls back to a single core and is much slower.
+- Install `ninja` (`pip install ninja`) before building so CUDA kernels compile in parallel.
 - If installation fails with `No module named 'psutil'`, install it first (`pip install psutil`) and retry. This is required specifically for `--no-build-isolation` builds.
 - Install `flash-attn` before AReno so the local build can reuse the already-installed package. If building `flash-attn` from source is too slow for your environment, install a pre-built wheel from the [flash-attention releases](https://github.com/Dao-AILab/flash-attention/releases) that matches your Python, PyTorch, CUDA, and platform.
-- Compiling the CUDA kernels takes a few minutes. If your machine has many CPU cores but limited RAM, cap the parallel build jobs with `MAX_JOBS`:
+- By default, source builds target the visible GPU architecture. To build for a specific GPU family or when building on a host where the target GPU is not visible, set `TORCH_CUDA_ARCH_LIST` explicitly. Common values are `9.0` for H100/H200, `8.0` for A100, and `8.9` for L40/RTX 4090:
+  ```bash
+  TORCH_CUDA_ARCH_LIST="9.0" MAX_JOBS=64 pip install -e . --no-build-isolation
+  ```
+- If your machine has many CPU cores but limited RAM, cap the parallel build jobs with `MAX_JOBS`:
   ```bash
   MAX_JOBS=4 pip install -e . --no-build-isolation
+  ```
+- For iterative CUDA development, enable `ccache` before rebuilding:
+  ```bash
+  export CC="ccache gcc"
+  export CXX="ccache g++"
   ```
 - To install the Python package without building the CUDA extension (for docs/metadata or a dry run), set `ARENO_BUILD_EXT=0`. The engine will not run without the extension, but the installation will succeed.
 
