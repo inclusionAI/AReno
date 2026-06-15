@@ -37,6 +37,24 @@ Install in an existing CUDA + PyTorch environment:
    pip install flash-attn flash-linear-attention
    pip install -e . --no-build-isolation
 
+Run a tiny training smoke test when you only want to verify the wiring:
+
+.. code-block:: bash
+
+   areno train \
+     --ckpt Qwen/Qwen3-0.6B \
+     --dataset-path gsm8k:main \
+     --dataset-loader-fn examples/math/dataset_loader.py \
+     --reward-fn-path examples/math/math_verify_reward.py \
+     --algo gspo \
+     --tp-size 1 \
+     --world-size 1 \
+     --batch-size 1
+
+This is a smoke/sanity task for wiring, not a quality benchmark. It requires a
+CUDA-capable NVIDIA GPU; CPU-only machines cannot run the AReno training
+engine.
+
 Run GSPO on a GSM8K-style dataset:
 
 .. code-block:: bash

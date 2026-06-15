@@ -194,6 +194,24 @@ You can use the AReno Command Line Interface (CLI) to quickly get started with p
 
 ### Training
 
+#### Tiny training smoke test
+
+Use this command when you only want to check that a machine can run one small official training task end to end:
+
+```bash
+areno train \
+  --ckpt Qwen/Qwen3-0.6B \
+  --dataset-path gsm8k:main \
+  --dataset-loader-fn examples/math/dataset_loader.py \
+  --reward-fn-path examples/math/math_verify_reward.py \
+  --algo gspo \
+  --tp-size 1 \
+  --world-size 1 \
+  --batch-size 1
+```
+
+This is a smoke/sanity task for the CLI, dataset loader, reward function, rollout, and training-step wiring. It is not a quality benchmark. It requires a CUDA-capable NVIDIA GPU; CPU-only machines can install the package for docs and metadata checks, but cannot run the AReno training engine. A successful run should reach rollout logs and a `train_stats=...` line without raising an exception.
+
 Run GSPO on a GSM8K-style dataset with a reward function:
 
 ```bash
