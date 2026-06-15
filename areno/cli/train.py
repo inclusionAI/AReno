@@ -436,7 +436,7 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
 @click.option("--ckpt", default=None, help="Actor model/tokenizer checkpoint path or Hugging Face repo ID.")
 @click.option("--dataset-path", default=None, help="Training dataset path, HF save_to_disk directory, or HF dataset ref.")
 @click.option("--dataset-loader-fn", default=None, help="Optional Python dataset loader function as file.py or file.py:function.")
-@click.option("--reward-fn-path", default=None, help="Python file defining reward_fn(example, completions).")
+@click.option("--reward-fn-path", default=None, help="Python file defining reward_fn(record).")
 @click.option("--ref-ckpt", default=None, help="Optional PPO/DPO reference model checkpoint path or Hugging Face repo ID.")
 @click.option("--reward-ckpt", default=None, help="Optional PPO reward model checkpoint path or Hugging Face repo ID.")
 @click.option("--critic-ckpt", default=None, help="Optional PPO critic model checkpoint path or Hugging Face repo ID.")

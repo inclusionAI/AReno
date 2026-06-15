@@ -469,17 +469,31 @@ class PolicyOnlyTrainer:
         """
 
         import areno.api
-        from areno.api.rewards import compute_group_advantages
+        from areno.api.rewards import compute_group_advantages, make_reward_record
 
         train_batch = []
         rewards_all = []
         rollout_logprobs = []
-        for item, result in zip(prompt_batch.items, rollout_results, strict=True):
+        for item_idx, (item, result) in enumerate(zip(prompt_batch.items, rollout_results, strict=True)):
             prefix_len = len(item.input_tokens)
             completions = [tokenizer.decode(seq.resp_tokens) for seq in result.sequences]
-            rewards = self.reward_fn(item.record, completions)
-            if len(rewards) != len(completions):
-                raise ValueError(f"reward_fn returned {len(rewards)} rewards for {len(completions)} completions")
+            rewards = [
+                float(
+                    self.reward_fn(
+                        make_reward_record(
+                            prompt=item.prompt,
+                            completion=completion,
+                            source_record=item.record,
+                            answer=item.solutions,
+                            tokens=item.input_tokens + seq.resp_tokens,
+                            logprobs=[0.0] * prefix_len + seq.resp_logprobs,
+                            loss_mask=[False] * prefix_len + [True] * len(seq.resp_tokens),
+                            metadata={"prompt_index": item_idx, "sample_index": sample_idx},
+                        )
+                    )
+                )
+                for sample_idx, (completion, seq) in enumerate(zip(completions, result.sequences, strict=True))
+            ]
             rewards_all += rewards
             # Group-relative advantage: A_i = (r_i - mean(r))/std(r); shared by
             # every response token of sample i.

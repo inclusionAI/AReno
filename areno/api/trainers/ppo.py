@@ -28,6 +28,7 @@ import numpy as np
 import areno.api
 from areno.api.trainers.policy_only import PolicyOnlyTrainer
 from areno.api.advantages import compute_gae
+from areno.api.rewards import make_reward_record
 from areno.api.roles import MissingRoleCapability, ModelRole
 
 
@@ -94,27 +95,32 @@ class PPOTrainer(PolicyOnlyTrainer):
         # we can issue a single batched forward to each role.
         token_rows: list[list[int]] = []
         row_meta = []
-        completions_by_prompt = []
-        for item, result in zip(prompt_batch.items, rollout_results, strict=True):
+        reward_records = []
+        for item_idx, (item, result) in enumerate(zip(prompt_batch.items, rollout_results, strict=True)):
             prefix_len = len(item.input_tokens)
             completions = [tokenizer.decode(seq.resp_tokens) for seq in result.sequences]
-            completions_by_prompt.append((item, completions))
-            for seq in result.sequences:
+            for sample_idx, (completion, seq) in enumerate(zip(completions, result.sequences, strict=True)):
                 tokens = item.input_tokens + seq.resp_tokens
                 token_rows.append(tokens)
                 row_meta.append((item, seq, prefix_len, len(seq.resp_tokens)))
+                reward_records.append(
+                    make_reward_record(
+                        prompt=item.prompt,
+                        completion=completion,
+                        source_record=item.record,
+                        answer=item.solutions,
+                        tokens=tokens,
+                        logprobs=[0.0] * prefix_len + seq.resp_logprobs,
+                        loss_mask=[False] * prefix_len + [True] * len(seq.resp_tokens),
+                        metadata={"prompt_index": item_idx, "sample_index": sample_idx},
+                    )
+                )
 
         # Reward scoring: either Python reward_fn or a backend-owned reward
         # role. Both produce one float per (prompt, sample) in row order.
         if self.reward_fn is not None:
             reward_start = time.perf_counter()
-            reward_iter = []
-            for item, completions in completions_by_prompt:
-                rewards = self.reward_fn(item.record, completions)
-                if len(rewards) != len(completions):
-                    raise ValueError(f"reward_fn returned {len(rewards)} rewards for {len(completions)} completions")
-                reward_iter.extend(float(reward) for reward in rewards)
-            rewards_all = reward_iter
+            rewards_all = [float(self.reward_fn(record)) for record in reward_records]
             self._last_ppo_stats["reward_score_time_s"] = time.perf_counter() - reward_start
         else:
             self.logger.info("role=reward stage=score_start rows=%d", len(token_rows))

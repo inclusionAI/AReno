@@ -35,6 +35,7 @@ from areno.api.openai_chat import (
     messages_to_text,
     normalize_messages,
 )
+from areno.api.rewards import RewardEvent, RewardRecord
 from areno.api.tool_call_parser import get_tool_call_parser, infer_tool_call_parser_name
 
 if TYPE_CHECKING:
@@ -101,37 +102,6 @@ class AgentBatch:
                     prompt_index=prompt_index,
                     sample_index=sample_index,
                 )
-
-
-class RewardEvent(BaseModel):
-    """Normalized event in an agent trajectory."""
-
-    type: Literal["request", "assistant_text", "assistant_tool_call", "tool_result", "finish", "error"]
-    text: str | None = None
-    name: str | None = None
-    arguments: dict[str, Any] | str | None = None
-    content: str | None = None
-    messages: list[dict[str, Any]] | None = None
-    metadata: dict[str, Any] = Field(default_factory=dict)
-
-
-class RewardRecord(BaseModel):
-    """Unified reward input for prompt and agentic rollouts."""
-
-    prompt: str
-    completion: str
-    rendered_completion: str | None = None
-    final_answer: str | None = None
-    answer: Any | None = None
-    messages: list[dict[str, Any]] = Field(default_factory=list)
-    trace: list[RewardEvent] = Field(default_factory=list)
-    tool_calls: list[dict[str, Any]] = Field(default_factory=list)
-    tool_results: list[dict[str, Any]] = Field(default_factory=list)
-    tokens: list[int] = Field(default_factory=list)
-    logprobs: list[float] = Field(default_factory=list)
-    loss_mask: list[bool] = Field(default_factory=list)
-    source_record: dict[str, Any] = Field(default_factory=dict)
-    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 @dataclass(slots=True)

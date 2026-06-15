@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from areno.api.config import ArenoConfig, coerce_backend_config, resolve_backend_type
 from areno.api.models import BackendType, SamplingParams, TrainSequence
@@ -90,11 +91,11 @@ class TokenizerApiTest(unittest.TestCase):
         """Reward functions are loaded from plain Python files at runtime."""
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp, "reward_file.py")
-            path.write_text("def reward_fn(example, completions):\n    return [len(c) for c in completions]\n", encoding="utf-8")
+            path.write_text("def reward_fn(record):\n    return len(record.completion)\n", encoding="utf-8")
 
             fn = load_reward_fn(str(path))
 
-        self.assertEqual(fn({}, ["a", "abc"]), [1, 3])
+        self.assertEqual(fn(SimpleNamespace(completion="abc")), 3)
 
     def test_load_reward_fn_requires_callable(self):
         """Misconfigured reward files should fail before training starts."""

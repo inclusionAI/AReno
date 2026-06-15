@@ -17,10 +17,9 @@ from areno.api.agentic import (
     AgentTrajectory,
     AgentTrajectoryTurn,
     LossMaskPolicy,
-    RewardEvent,
-    RewardRecord,
     RolloutSession,
 )
+from areno.api.rewards import RewardEvent, RewardRecord
 from areno.api.models import (
     SamplingParams,
     RolloutSequence,

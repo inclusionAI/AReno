@@ -14,8 +14,8 @@ from game import score_bundle  # noqa: E402
 def reward_fn(record) -> float:
     """Reward the final submitted bundle, with a small multi-turn tool-use bonus."""
 
-    source = dict(getattr(record, "source_record", {}) or {})
-    tool_calls = list(getattr(record, "tool_calls", []) or [])
+    source = dict(record.source_record)
+    tool_calls = list(record.tool_calls)
     names = [call.get("name") for call in tool_calls]
     submitted = _submitted_item_ids(tool_calls)
     score = score_bundle(source, submitted)
