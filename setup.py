@@ -72,9 +72,12 @@ def _set_default_cuda_arch_list() -> None:
     if not torch.cuda.is_available():
         return
     archs: set[str] = set()
-    for idx in range(torch.cuda.device_count()):
-        major, minor = torch.cuda.get_device_capability(idx)
-        archs.add(f"{major}.{minor}")
+    try:
+        for idx in range(torch.cuda.device_count()):
+            major, minor = torch.cuda.get_device_capability(idx)
+            archs.add(f"{major}.{minor}")
+    except Exception:
+        return
     if not archs:
         return
     arch_list = ";".join(sorted(archs))
