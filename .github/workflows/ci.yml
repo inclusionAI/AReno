@@ -41,6 +41,7 @@ jobs:
             pydantic \
             click \
             fastapi \
+            openai \
             uvicorn \
             safetensors \
             transformers \
