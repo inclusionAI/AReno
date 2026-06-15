@@ -11,6 +11,7 @@
 pip install psutil                         # required with --no-build-isolation
 pip install flash-attn flash-linear-attention
 pip install -e . --no-build-isolation         # --no-build-isolation: build against your installed torch
+TORCH_CUDA_ARCH_LIST="9.0" MAX_JOBS=64 pip install -e . --no-build-isolation  # target H100/H200 only
 ARENO_BUILD_EXT=0 pip install -e . --no-build-isolation   # skip CUDA build (metadata-only / dry run)
 
 # Train -- swap algorithm with --algo: sft | dpo | gspo | grpo | ppo
@@ -116,7 +117,7 @@ ______________________________________________________________________
 
 **Typing & imports**: explicit type hints; no wildcard imports; keep heavy optional deps imported inside functions.
 
-**Kernels**: when editing CUDA in `areno/accel/csrc/`, keep the `.cu` source and its Python wrapper in sync and rebuild with `pip install -e . --no-build-isolation`.
+**Kernels**: when editing CUDA in `areno/accel/csrc/`, keep the `.cu` source and its Python wrapper in sync and rebuild with `pip install -e . --no-build-isolation`. Source builds default to visible GPU architectures; set `TORCH_CUDA_ARCH_LIST` explicitly when cross-building or narrowing targets. For iterative kernel work, enable `ccache` with `CC="ccache gcc"` and `CXX="ccache g++"`.
 
 ______________________________________________________________________
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+import warnings
 
 from setuptools import setup
 
@@ -29,6 +30,7 @@ def _cuda_extensions():
             "for you. Fix: run `pip install psutil` in this environment, then "
             "retry the AReno install."
         ) from exc
+    _set_default_cuda_arch_list()
     from torch.utils.cpp_extension import CUDA_HOME, BuildExtension, CUDAExtension
 
     if CUDA_HOME is None:
@@ -56,6 +58,37 @@ def _cuda_extensions():
             },
         )
     ], {"build_ext": BuildExtension}
+
+
+def _set_default_cuda_arch_list() -> None:
+    """Default CUDA extension builds to the visible GPU architectures."""
+
+    if os.environ.get("TORCH_CUDA_ARCH_LIST"):
+        return
+    try:
+        import torch
+    except ImportError:
+        return
+    if not torch.cuda.is_available():
+        return
+    archs: set[str] = set()
+    try:
+        for idx in range(torch.cuda.device_count()):
+            major, minor = torch.cuda.get_device_capability(idx)
+            archs.add(f"{major}.{minor}")
+    except Exception:
+        return
+    if not archs:
+        return
+    arch_list = ";".join(sorted(archs))
+    os.environ["TORCH_CUDA_ARCH_LIST"] = arch_list
+    warnings.warn(
+        "TORCH_CUDA_ARCH_LIST is not set; building areno.accel only for "
+        f"visible CUDA architecture(s): {arch_list}. Set TORCH_CUDA_ARCH_LIST "
+        "explicitly to build for other GPUs.",
+        RuntimeWarning,
+        stacklevel=2,
+    )
 
 
 ext_modules, cmdclass = _cuda_extensions()

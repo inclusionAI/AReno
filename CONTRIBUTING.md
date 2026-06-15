@@ -128,6 +128,14 @@ Follow these steps:
    pip install pytest
    ```
 
+   Source builds default to the visible GPU architecture. Set
+   `TORCH_CUDA_ARCH_LIST` explicitly when cross-building or narrowing targets,
+   for example:
+
+   ```bash
+   TORCH_CUDA_ARCH_LIST="9.0" MAX_JOBS=64 pip install -e . --no-build-isolation
+   ```
+
 4. Develop on your branch. Keep changes surgical — touch only what the task
    requires and match the surrounding style.
 

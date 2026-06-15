@@ -62,3 +62,14 @@ the repository root:
    slow for your environment, install a pre-built wheel from the
    `flash-attention releases <https://github.com/Dao-AILab/flash-attention/releases>`_
    that matches your Python, PyTorch, CUDA, and platform.
+   When ``TORCH_CUDA_ARCH_LIST`` is not set, AReno targets the visible GPU
+   architectures. Set it explicitly when cross-building or narrowing the build
+   target. Common values include ``9.0`` for H100/H200, ``8.0`` for A100, and
+   ``8.9`` for L40/RTX 4090:
+
+   .. code-block:: bash
+
+      TORCH_CUDA_ARCH_LIST="9.0" MAX_JOBS=64 pip install -e . --no-build-isolation
+
+   For iterative CUDA work, configure ``ccache`` with ``CC="ccache gcc"`` and
+   ``CXX="ccache g++"`` before rebuilding.
