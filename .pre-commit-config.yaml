@@ -1,15 +1,9 @@
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.11.12
+    rev: v0.15.17
     hooks:
       - id: ruff
         args: [--fix]
         stages: [manual]
       - id: ruff-format
-        stages: [manual]
-  - repo: https://github.com/codespell-project/codespell
-    rev: v2.4.1
-    hooks:
-      - id: codespell
-        args: [--skip, "*.json,*.lock", --ignore-words-list, ""]
         stages: [manual]

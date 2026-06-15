@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 import argparse
-from collections import defaultdict
 import fnmatch
 import json
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -24,9 +24,15 @@ def main() -> None:
     parser.add_argument("base", type=Path, help="Reference checkpoint directory.")
     parser.add_argument("other", type=Path, help="Checkpoint directory to compare against the reference.")
     parser.add_argument("--top-k", type=int, default=30, help="Number of largest-difference tensors to print.")
-    parser.add_argument("--pattern", action="append", default=[], help="fnmatch pattern for keys to include; can be repeated.")
-    parser.add_argument("--device", default="auto", help="Device used for diff computation: auto, cpu, cuda, or cuda:N.")
-    parser.add_argument("--max-elements", type=int, default=0, help="Sample at most this many elements per tensor; 0 means full tensor.")
+    parser.add_argument(
+        "--pattern", action="append", default=[], help="fnmatch pattern for keys to include; can be repeated."
+    )
+    parser.add_argument(
+        "--device", default="auto", help="Device used for diff computation: auto, cpu, cuda, or cuda:N."
+    )
+    parser.add_argument(
+        "--max-elements", type=int, default=0, help="Sample at most this many elements per tensor; 0 means full tensor."
+    )
     args = parser.parse_args()
     device = resolve_device(args.device)
 
@@ -54,7 +60,9 @@ def main() -> None:
     print(f"base={args.base}")
     print(f"other={args.other}")
     print(f"device={device}")
-    print(f"common={len(common)} missing_in_other={len(missing_in_other)} extra_in_other={len(extra_in_other)} shape_mismatch={len(shape_mismatches)}")
+    print(
+        f"common={len(common)} missing_in_other={len(missing_in_other)} extra_in_other={len(extra_in_other)} shape_mismatch={len(shape_mismatches)}"
+    )
     print_section("missing_in_other", missing_in_other[: args.top_k])
     print_section("extra_in_other", extra_in_other[: args.top_k])
     if shape_mismatches:
@@ -126,7 +134,9 @@ def compare_tensors(
     return rows
 
 
-def compare_one(key: str, shape: tuple[int, ...], a: torch.Tensor, b: torch.Tensor, max_elements: int) -> dict[str, object]:
+def compare_one(
+    key: str, shape: tuple[int, ...], a: torch.Tensor, b: torch.Tensor, max_elements: int
+) -> dict[str, object]:
     if max_elements > 0 and a.numel() > max_elements:
         stride = max(1, a.numel() // max_elements)
         a = a.reshape(-1)[::stride][:max_elements]

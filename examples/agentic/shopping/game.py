@@ -136,7 +136,12 @@ def check_kit(record: dict[str, Any], item_ids: list[str]) -> dict[str, Any]:
         missing = [feature for feature in required if feature not in item["features"]]
         if missing:
             missing_features[item["category"]] = missing
-    valid = not missing_categories and not missing_features and total <= int(record["budget"]) and len(items) == len(record["categories"])
+    valid = (
+        not missing_categories
+        and not missing_features
+        and total <= int(record["budget"])
+        and len(items) == len(record["categories"])
+    )
     return {
         "valid": valid,
         "total_price": total,
