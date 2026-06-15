@@ -15,6 +15,8 @@ class ArenoCli(click.Group):
     """Click group that imports heavy subcommands only when selected."""
 
     _COMMANDS = {
+        "check": ("areno.cli.diagnostics", "check_command", "Check whether this machine is ready to run AReno."),
+        "env": ("areno.cli.diagnostics", "env_command", "Print an AReno environment/support report."),
         "train": ("areno.cli.train", "train_command", "Run SFT, DPO, GSPO, GRPO, or PPO training."),
         "serve": ("areno.cli.serve", "serve_command", "Serve an OpenAI-compatible chat API."),
     }

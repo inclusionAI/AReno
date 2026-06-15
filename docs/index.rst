@@ -37,6 +37,14 @@ Install in an existing CUDA + PyTorch environment:
    pip install flash-attn flash-linear-attention
    pip install -e . --no-build-isolation
 
+Check whether the environment is ready:
+
+.. code-block:: bash
+
+   areno check
+
+Use ``areno env --json`` when filing setup issues.
+
 Run a tiny training smoke test when you only want to verify the wiring:
 
 .. code-block:: bash
@@ -130,4 +138,5 @@ What areno owns
 
    cli/training
    cli/inference
+   cli/diagnostics
    sdk/trainer

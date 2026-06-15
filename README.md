@@ -57,6 +57,11 @@ pip install areno --no-build-isolation
 `--no-build-isolation` is required so that pip uses your existing CUDA-enabled PyTorch instead of installing a CPU-only torch in an isolated build environment.
 Because build isolation is disabled, build-time helpers are not installed automatically; `psutil` must already be present because PyTorch's CUDA extension builder imports it while sizing parallel compile jobs.
 
+After installation, run `areno check` for an actionable readiness check. Use
+`areno env --json` when opening an issue so maintainers can see the Python,
+CUDA, PyTorch, GPU, and extension state without guessing from low-level build
+errors.
+
 **From source** (recommended if you want the examples or plan to contribute):
 
 ```bash
@@ -191,6 +196,24 @@ See the documentation for the full `Trainer` API.
 ## Command Line Interface (CLI)
 
 You can use the AReno Command Line Interface (CLI) to quickly get started with post-training without writing any Python.
+
+### Diagnostics
+
+Check whether the current machine is ready to run AReno:
+
+```bash
+areno check
+```
+
+`areno check` prints `OK`, `WARN`, and `FAIL` statuses with concrete next steps for common setup issues such as missing CUDA, CPU-only PyTorch, missing `CUDA_HOME`, unavailable `nvcc`, missing optional runtime dependencies, or a missing `areno_accel` extension.
+
+For issue reports, collect a descriptive environment report:
+
+```bash
+areno env --json
+```
+
+The report includes AReno, Python, platform, PyTorch/CUDA, GPU, `nvcc`, dependency import status, and relevant environment variables.
 
 ### Training
 
