@@ -255,6 +255,10 @@ cd asystem-areno
 pip install psutil
 pip install flash-attn flash-linear-attention
 pip install -e . --no-build-isolation
+
+# Set up pre-commit hooks (formatting, linting, commit message checks)
+pip install pre-commit
+pre-commit install --install-hooks
 ```
 
 New algorithms, model adapters, kernels, reward functions, and hardware backends all have first-class extension points, so most contributions land without forking the core.
@@ -266,7 +270,7 @@ If you find the project helpful, please cite:
 ```bibtex
 @misc{areno2026,
   title        = {AReno: A Self-Contained, Full-Stack Toolkit for Single-Node LLM RL Post-Training},
-  author       = {Zibo He and Le Su and Zongyu Li},
+  author       = {Zibo He and Le Su and Zongyu Li and Xiaowei Zhu and Cheng Wang and Zhenxuan Pan},
   year         = {2026},
   url          = {https://github.com/inclusionAI/asystem-areno},
   license      = {Apache-2.0}
