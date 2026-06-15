@@ -9,8 +9,8 @@
 ```bash
 # Install (requires an existing Linux + NVIDIA GPU + CUDA + PyTorch >= 2.6 env)
 pip install psutil                         # required with --no-build-isolation
-pip install -e . --no-build-isolation         # --no-build-isolation: build against your installed torch
 pip install flash-attn flash-linear-attention
+pip install -e . --no-build-isolation         # --no-build-isolation: build against your installed torch
 ARENO_BUILD_EXT=0 pip install -e . --no-build-isolation   # skip CUDA build (metadata-only / dry run)
 
 # Train -- swap algorithm with --algo: sft | dpo | gspo | grpo | ppo

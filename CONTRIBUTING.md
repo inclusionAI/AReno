@@ -123,8 +123,9 @@ Follow these steps:
 
    ```bash
    pip install psutil
+   pip install flash-attn flash-linear-attention
    pip install -e . --no-build-isolation
-   pip install flash-attn flash-linear-attention pytest
+   pip install pytest
    ```
 
 4. Develop on your branch. Keep changes surgical — touch only what the task

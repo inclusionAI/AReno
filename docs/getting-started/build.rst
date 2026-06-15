@@ -47,8 +47,8 @@ the repository root:
 .. code-block:: bash
 
    pip install psutil
-   pip install -e . --no-build-isolation
    pip install flash-attn flash-linear-attention
+   pip install -e . --no-build-isolation
 
 .. note::
 
@@ -57,3 +57,8 @@ the repository root:
    builder imports it while sizing parallel compile jobs. ``flash-attn``,
    CUDA, and PyTorch must be ABI compatible. The editable install builds the
    ``areno_accel`` CUDA extension used by local kernels.
+   Install ``flash-attn`` before AReno so the local build can reuse the
+   already-installed package. If building ``flash-attn`` from source is too
+   slow for your environment, install a pre-built wheel from the
+   `flash-attention releases <https://github.com/Dao-AILab/flash-attention/releases>`_
+   that matches your Python, PyTorch, CUDA, and platform.
