@@ -122,6 +122,7 @@ Follow these steps:
    + PyTorch already present):
 
    ```bash
+   pip install psutil
    pip install -e . --no-build-isolation
    pip install flash-attn flash-linear-attention pytest
    ```

@@ -46,10 +46,14 @@ the repository root:
 
 .. code-block:: bash
 
+   pip install psutil
    pip install -e . --no-build-isolation
    pip install flash-attn flash-linear-attention
 
 .. note::
 
-   ``flash-attn``, CUDA, and PyTorch must be ABI compatible. The editable
-   install builds the ``areno_accel`` CUDA extension used by local kernels.
+   ``--no-build-isolation`` uses the packages already installed in your
+   environment. Install ``psutil`` first because PyTorch's CUDA extension
+   builder imports it while sizing parallel compile jobs. ``flash-attn``,
+   CUDA, and PyTorch must be ABI compatible. The editable install builds the
+   ``areno_accel`` CUDA extension used by local kernels.

@@ -33,6 +33,7 @@ Install in an existing CUDA + PyTorch environment:
 
 .. code-block:: bash
 
+   pip install psutil
    pip install -e . --no-build-isolation
    pip install flash-attn flash-linear-attention
 
