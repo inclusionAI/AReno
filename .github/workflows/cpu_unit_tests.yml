@@ -1,23 +1,41 @@
-name: CI
+name: CPU Unit Tests
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - "areno/**"
+      - "tests/**"
+      - "pyproject.toml"
+      - ".github/workflows/cpu_unit_tests.yml"
   pull_request:
     branches:
       - main
+    paths:
+      - "areno/**"
+      - "tests/**"
+      - "pyproject.toml"
+      - ".github/workflows/cpu_unit_tests.yml"
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: tests-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   unittest:
-    name: unittest
+    name: unittest / python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    if: github.event.pull_request.draft == false
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
     env:
       ARENO_CHECK_TOKEN_IDS: "1"
       PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
@@ -26,10 +44,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-${{ matrix.python-version }}-${{ hashFiles('pyproject.toml') }}
+          restore-keys: |
+            pip-${{ runner.os }}-${{ matrix.python-version }}-
 
       - name: Install CPU test dependencies
         run: |

@@ -1,0 +1,28 @@
+name: Check PR
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  check-pr-title:
+    name: check-pr-title
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Validate PR title follows conventional commits
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          pattern='^(feat|fix|docs|ci|chore|refactor|test|perf|build|style|revert)(\(.+\))?: .+'
+          if [[ ! "$PR_TITLE" =~ $pattern ]]; then
+            echo "::error::PR title must follow conventional commits: type(scope)?: description"
+            echo "::error::Got: $PR_TITLE"
+            echo "::error::Valid types: feat|fix|docs|ci|chore|refactor|test|perf|build|style|revert"
+            exit 1
+          fi
