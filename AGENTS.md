@@ -41,7 +41,7 @@ python -c "import torch; print('GPU:', torch.cuda.is_available())"
 
 - Read relevant files before modifying code; follow existing patterns in the same module.
 - Before using a symbol (function, class, type, constant), confirm it exists -- read its definition or `grep -r "name" areno/`; check `pyproject.toml` for a dependency. If you skip this, prefix the code with `# UNVERIFIED:`.
-- Use `from areno.api import Trainer` -- the public SDK surface. `from areno import Trainer` does **not** work.
+- Use `from areno import Trainer` -- the public SDK surface.
 - Add a CPU test under `tests/` for new algorithm / loss / config behavior.
 - Register new capabilities (algorithms, model adapters) instead of editing a factory.
 - Ask for decisions with short, structured options rather than broad open-ended questions.
@@ -143,7 +143,7 @@ ______________________________________________________________________
 
 - Each algorithm gets the narrowest config dataclass it needs (offline trainers omit rollout/reward fields by construction).
 - Public configs, exported symbols, and CLI options are public API -- add fields with defaults, deprecate before removing, avoid type changes.
-- The SDK entry is `from areno.api import Trainer`; keep the top-level package free of kernel-heavy imports.
+- The SDK entry is `from areno import Trainer`; keep top-level exports lazy so package import stays free of kernel-heavy imports.
 
 ______________________________________________________________________
 
