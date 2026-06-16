@@ -270,6 +270,11 @@ areno train \
   --world-size 1
 ```
 
+For a more realistic multi-turn software-engineering loop, see
+`examples/agentic/coding`. It uses SWE-bench-style local tasks, constrained
+Codex-style tools (`inspect_tree`, `read_file`, `rg`, `apply_patch`,
+`run_command`, `submit`), and an explicit trajectory-returning `run_agent.py`.
+
 For the full list of training options, run `areno train --help`.
 
 ### Serving

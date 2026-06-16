@@ -34,6 +34,12 @@ def test_create_app_passes_eager_decode_runtime_config(monkeypatch):
     assert captured["runtime_config"].eager_decode is True
 
 
+def test_serve_default_max_running_prompts_is_16():
+    option = next(param for param in serve_mod.serve_command.params if param.name == "max_running_prompts")
+
+    assert option.default == 16
+
+
 def test_chat_completion_request_defaults_match_sampling_params():
     request = serve_mod.ChatCompletionRequest(messages=[serve_mod.ChatMessage(role="user", content="hi")])
 

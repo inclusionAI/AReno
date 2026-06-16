@@ -442,7 +442,7 @@ def _first_eos_token_id(tokenizer: Any) -> int | None:
     eos = getattr(tokenizer, "eos_token_id", None)
     if isinstance(eos, int):
         return eos
-    if isinstance(eos, (list, tuple)) and eos:
+    if isinstance(eos, list | tuple) and eos:
         return int(eos[0])
     return None
 
@@ -452,7 +452,7 @@ def _stop_token_ids(tokenizer: Any) -> tuple[int, ...]:
     eos = getattr(tokenizer, "eos_token_id", None)
     if isinstance(eos, int):
         return (eos,)
-    if isinstance(eos, (list, tuple)):
+    if isinstance(eos, list | tuple):
         return tuple(int(value) for value in eos)
     return ()
 
@@ -479,7 +479,7 @@ def _normalize_stop(stop: str | list[str] | None) -> list[str]:
 @click.option(
     "--max-running-prompts",
     type=int,
-    default=128,
+    default=16,
     show_default=True,
     help="Maximum concurrent rollout prompts per request chunk.",
 )
