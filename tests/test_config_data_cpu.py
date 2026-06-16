@@ -4,8 +4,11 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
+import click
 import torch
+from click.testing import CliRunner
 
 from areno.api.data import PromptBatch, PromptItem
 from areno.api.trainer_config import RolloutTrainerConfig, TrainerConfig
@@ -164,6 +167,174 @@ class ConfigAndDataTest(unittest.TestCase):
 
         self.assertEqual(dataset, [{"prompt": "loaded"}])
 
+    def test_train_cli_preflight_rejects_missing_dataset_loader_file(self):
+        """Dataset loader path failures should be UsageError before backend init."""
+        missing = Path(tempfile.gettempdir()) / "areno_missing_loader.py"
+
+        with self.assertRaisesRegex(
+            click.UsageError,
+            r"--dataset-loader-fn file does not exist: .*areno_missing_loader.py; expected callable normalize",
+        ):
+            train_cli._trainer_config_from_options(
+                **_train_options(algo="sft", dataset_loader_fn=f"{missing}:normalize")
+            )
+
+    def test_train_cli_preflight_rejects_malformed_dataset_loader_spec(self):
+        """Malformed dataset loader specs should not escape as raw ValueError."""
+        with self.assertRaisesRegex(click.UsageError, r"Invalid --dataset-loader-fn value: :"):
+            train_cli._trainer_config_from_options(**_train_options(algo="sft", dataset_loader_fn=":"))
+
+    def test_train_cli_preflight_does_not_execute_hook_modules(self):
+        """Static preflight should not trigger module-level side effects."""
+        with tempfile.TemporaryDirectory() as tmp:
+            loader_path = Path(tmp) / "loader.py"
+            loader_path.write_text(
+                "def load_training_dataset(*args, **kwargs):\n    return []\n"
+                "raise RuntimeError('module executed during preflight')\n",
+                encoding="utf-8",
+            )
+
+            cfg = train_cli._trainer_config_from_options(
+                **_train_options(algo="sft", dataset_loader_fn=str(loader_path))
+            )
+
+        self.assertEqual(cfg.dataset_loader_fn, str(loader_path))
+
+    def test_train_cli_preflight_rejects_dataset_loader_missing_function(self):
+        """Dataset loader files should name the missing expected symbol."""
+        with tempfile.TemporaryDirectory() as tmp:
+            loader_path = Path(tmp) / "loader.py"
+            loader_path.write_text("def other():\n    return []\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                click.UsageError, r"--dataset-loader-fn .*loader.py must define callable normalize\(\.\.\.\)"
+            ):
+                train_cli._trainer_config_from_options(
+                    **_train_options(algo="sft", dataset_loader_fn=f"{loader_path}:normalize")
+                )
+
+    def test_train_cli_preflight_rejects_dataset_loader_non_callable(self):
+        """Dataset loader symbol must be callable."""
+        with tempfile.TemporaryDirectory() as tmp:
+            loader_path = Path(tmp) / "loader.py"
+            loader_path.write_text("load_training_dataset = 1\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                click.UsageError,
+                r"--dataset-loader-fn .*loader.py must define callable load_training_dataset\(\.\.\.\)",
+            ):
+                train_cli._trainer_config_from_options(**_train_options(algo="sft", dataset_loader_fn=str(loader_path)))
+
+    def test_train_cli_preflight_rejects_dataset_loader_without_dataset_path_arg(self):
+        """Dataset loader hook should accept at least the dataset path."""
+        with tempfile.TemporaryDirectory() as tmp:
+            loader_path = Path(tmp) / "loader.py"
+            loader_path.write_text("def load_training_dataset():\n    return []\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                click.UsageError,
+                r"--dataset-loader-fn .*loader.py must define callable load_training_dataset\(\.\.\.\)",
+            ):
+                train_cli._trainer_config_from_options(**_train_options(algo="sft", dataset_loader_fn=str(loader_path)))
+
+    def test_train_cli_preflight_rejects_missing_reward_file(self):
+        """Reward file failures should happen while constructing CLI config."""
+        missing = Path(tempfile.gettempdir()) / "areno_missing_reward.py"
+
+        with self.assertRaisesRegex(
+            click.UsageError,
+            r"--reward-fn-path file does not exist: .*areno_missing_reward.py; expected callable reward_fn\(record\)",
+        ):
+            train_cli._trainer_config_from_options(**_train_options(algo="gspo", reward_fn_path=str(missing)))
+
+    def test_train_cli_preflight_rejects_reward_file_without_callable_reward_fn(self):
+        """Reward files should define callable reward_fn(record)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            reward_path = Path(tmp) / "reward.py"
+            reward_path.write_text("reward_fn = 1\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                click.UsageError, r"--reward-fn-path .*reward.py must define callable reward_fn\(record\)"
+            ):
+                train_cli._trainer_config_from_options(**_train_options(algo="gspo", reward_fn_path=str(reward_path)))
+
+    def test_train_cli_preflight_rejects_reward_fn_without_record_arg(self):
+        """Reward hook should accept the training record argument."""
+        with tempfile.TemporaryDirectory() as tmp:
+            reward_path = Path(tmp) / "reward.py"
+            reward_path.write_text("def reward_fn():\n    return 0.0\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                click.UsageError, r"--reward-fn-path .*reward.py must define callable reward_fn\(record\)"
+            ):
+                train_cli._trainer_config_from_options(**_train_options(algo="gspo", reward_fn_path=str(reward_path)))
+
+    def test_train_cli_preflight_skips_unused_reward_file_for_offline_algorithms(self):
+        """SFT/DPO should not validate an unused reward hook path."""
+        missing = Path(tempfile.gettempdir()) / "areno_missing_unused_reward.py"
+
+        sft_cfg = train_cli._trainer_config_from_options(
+            **_train_options(algo="sft", reward_fn_path=str(missing), reward_ckpt=None)
+        )
+        dpo_cfg = train_cli._trainer_config_from_options(
+            **_train_options(algo="dpo", reward_fn_path=str(missing), reward_ckpt=None, ref_ckpt="reference")
+        )
+
+        self.assertEqual(sft_cfg.algo, "sft")
+        self.assertEqual(dpo_cfg.algo, "dpo")
+
+    def test_train_cli_preflight_rejects_agent_file_without_callable_run_agent(self):
+        """Agent hooks should fail before rollout/backend-heavy work."""
+        with tempfile.TemporaryDirectory() as tmp:
+            agent_path = Path(tmp) / "agent.py"
+            agent_path.write_text("def helper():\n    pass\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                click.UsageError, r"--agent-fn .*agent.py must define callable run_agent\(ctx, batch\)"
+            ):
+                train_cli._trainer_config_from_options(
+                    **_train_options(algo="gspo", reward_ckpt="reward-model", agent_fn=str(agent_path))
+                )
+
+    def test_train_cli_preflight_rejects_agent_fn_without_ctx_and_batch_args(self):
+        """Agent hook should accept both ctx and batch arguments."""
+        with tempfile.TemporaryDirectory() as tmp:
+            agent_path = Path(tmp) / "agent.py"
+            agent_path.write_text("def run_agent(ctx):\n    return []\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                click.UsageError, r"--agent-fn .*agent.py must define callable run_agent\(ctx, batch\)"
+            ):
+                train_cli._trainer_config_from_options(
+                    **_train_options(algo="gspo", reward_ckpt="reward-model", agent_fn=str(agent_path))
+                )
+
+    def test_train_command_reports_hook_usage_error_before_run(self):
+        """Malformed hooks should stop the CLI before backend/model setup."""
+        with tempfile.TemporaryDirectory() as tmp:
+            reward_path = Path(tmp) / "reward.py"
+            reward_path.write_text("def other(record):\n    return 0.0\n", encoding="utf-8")
+
+            with patch.object(train_cli, "run") as run_mock:
+                result = CliRunner().invoke(
+                    train_cli.train_command,
+                    [
+                        "--algo",
+                        "gspo",
+                        "--ckpt",
+                        "actor",
+                        "--dataset-path",
+                        "dataset",
+                        "--reward-fn-path",
+                        str(reward_path),
+                    ],
+                )
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("--reward-fn-path", result.output)
+        self.assertIn("reward_fn(record)", result.output)
+        run_mock.assert_not_called()
+
 
 def _train_args(**overrides):
     defaults = dict(
@@ -224,6 +395,10 @@ def _train_args(**overrides):
     )
     defaults.update(overrides)
     return SimpleNamespace(**defaults)
+
+
+def _train_options(**overrides):
+    return vars(_train_args(**overrides))
 
 
 if __name__ == "__main__":

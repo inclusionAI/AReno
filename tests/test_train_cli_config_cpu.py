@@ -148,7 +148,6 @@ def test_train_config_builds_policy_shape_for_gspo_and_grpo(algo, clip_attr, cli
     cfg = _trainer_config_from_options(
         **_options(
             algo=algo,
-            reward_fn_path="reward.py",
             n_samples=3,
             max_running_prompts=12,
             temperature=0.7,
@@ -161,7 +160,7 @@ def test_train_config_builds_policy_shape_for_gspo_and_grpo(algo, clip_attr, cli
     assert isinstance(cfg, PolicyTrainerConfig)
     assert type(cfg) is PolicyTrainerConfig
     assert cfg.algo == algo
-    assert cfg.reward_fn_path == "reward.py"
+    assert cfg.reward_fn_path is None
     assert cfg.n_samples == 3
     assert cfg.resolved_max_running_prompts() == 12
     assert cfg.temperature == 0.7
@@ -175,7 +174,6 @@ def test_train_config_builds_ppo_shape_and_role_checkpoints():
     cfg = _trainer_config_from_options(
         **_options(
             algo="ppo",
-            reward_fn_path="reward.py",
             ref_ckpt="reference",
             reward_ckpt="reward-model",
             critic_ckpt="critic",
@@ -372,7 +370,7 @@ def _options(**overrides):
         ckpt="actor",
         dataset_path="dataset",
         dataset_loader_fn=None,
-        reward_fn_path="reward.py",
+        reward_fn_path=None,
         save_path="save",
         save_interval=10,
         epochs=2,
@@ -409,7 +407,7 @@ def _options(**overrides):
         grpo_clip_eps=0.2,
         ref_ckpt=None,
         dpo_beta=0.1,
-        reward_ckpt=None,
+        reward_ckpt="reward-model",
         critic_ckpt=None,
         critic_lr=1e-5,
         use_kl_loss=True,
