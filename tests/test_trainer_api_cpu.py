@@ -4,9 +4,10 @@ import asyncio
 import unittest
 
 import areno.api.trainer as trainer_mod
+from areno import Trainer
 from areno.api.context import Context
 from areno.api.models import SamplingParams
-from areno.api.trainer import Trainer
+from areno.api.trainer import Trainer as ApiTrainer
 from tests.helpers import PatchedContext
 
 
@@ -26,6 +27,9 @@ def _encode_from_record_prompt(_tokenizer, prompt: str) -> list[int]:
 
 class TrainerPromptBatchTest(unittest.TestCase):
     """Prompt batching tests avoid backend initialization and tokenizer loading."""
+
+    def test_top_level_trainer_export_matches_api_trainer(self):
+        self.assertIs(Trainer, ApiTrainer)
 
     def test_load_prompt_batches_skips_long_prompts_and_keeps_records(self):
         """Overlong prompts should be skipped without dropping record metadata."""

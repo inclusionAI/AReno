@@ -52,6 +52,10 @@ def __getattr__(name: str):
         from areno.engine import data
 
         return getattr(data, name)
+    if name == "Trainer":
+        from areno.api.trainer import Trainer
+
+        return Trainer
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
@@ -64,4 +68,5 @@ __all__ = [
     "RuntimeConfig",
     "SamplingParams",
     "TrainStats",
+    "Trainer",
 ]
