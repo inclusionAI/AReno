@@ -11,6 +11,7 @@ The flow is:
        function), and runs the trainer to completion.
 """
 
+import ast
 import importlib.util
 import logging
 import shutil
@@ -101,6 +102,7 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
         _require_positive_float(args.lam, "--lam")
     if args.critic_warmup_steps < 0:
         raise click.UsageError("--critic-warmup-steps must be non-negative")
+    _preflight_task_hooks(args, algorithm)
     return _trainer_config_from_args(args)
 
 
@@ -254,6 +256,80 @@ def _format_optional(value, *, default: str = "none") -> str:
 
 def _style(text: str, *, color: bool, fg: str | None = None, bold: bool = False) -> str:
     return click.style(text, fg=fg, bold=bold) if color else text
+
+
+def _preflight_task_hooks(args, algorithm) -> None:
+    """Validate user task hook files before backend/model initialization."""
+
+    if args.dataset_loader_fn is not None:
+        try:
+            loader_path, fn_name = _split_loader_fn_spec(args.dataset_loader_fn)
+        except ValueError as exc:
+            raise click.UsageError(str(exc)) from exc
+        _validate_python_callable(
+            loader_path,
+            fn_name,
+            option_name="--dataset-loader-fn",
+            expected=f"{fn_name}(...)",
+            positional_args=1,
+        )
+    if algorithm.requires_rollout and args.reward_fn_path is not None:
+        _validate_python_callable(
+            Path(args.reward_fn_path).expanduser().resolve(),
+            "reward_fn",
+            option_name="--reward-fn-path",
+            expected="reward_fn(record)",
+            positional_args=1,
+        )
+    if args.agent_fn is not None:
+        _validate_python_callable(
+            Path(args.agent_fn).expanduser().resolve(),
+            "run_agent",
+            option_name="--agent-fn",
+            expected="run_agent(ctx, batch)",
+            positional_args=2,
+        )
+
+
+def _validate_python_callable(
+    path: Path,
+    symbol_name: str,
+    *,
+    option_name: str,
+    expected: str,
+    positional_args: int | None = None,
+) -> None:
+    if not path.exists():
+        raise click.UsageError(f"{option_name} file does not exist: {path}; expected callable {expected}")
+    if not path.is_file():
+        raise click.UsageError(f"{option_name} path is not a file: {path}; expected callable {expected}")
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    except (OSError, SyntaxError, UnicodeDecodeError) as exc:
+        raise click.UsageError(
+            f"{option_name} cannot parse Python file: {path}; expected callable {expected}; {type(exc).__name__}: {exc}"
+        ) from exc
+    function = _find_top_level_function(tree, symbol_name)
+    if function is None:
+        raise click.UsageError(f"{option_name} {path} must define callable {expected}")
+    if positional_args is not None and not _function_accepts_positional_args(function, positional_args):
+        raise click.UsageError(f"{option_name} {path} must define callable {expected}")
+
+
+def _find_top_level_function(tree: ast.Module, symbol_name: str) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.name == symbol_name:
+            return node
+    return None
+
+
+def _function_accepts_positional_args(function: ast.FunctionDef | ast.AsyncFunctionDef, count: int) -> bool:
+    args = function.args
+    positional_count = len(args.posonlyargs) + len(args.args)
+    required_count = positional_count - len(args.defaults)
+    if args.vararg is not None:
+        return required_count <= count
+    return required_count <= count <= positional_count
 
 
 def _trainer_config_from_args(args) -> TrainerConfig:

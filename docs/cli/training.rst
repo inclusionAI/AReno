@@ -54,7 +54,7 @@ Dataset and reward hooks
    ``file.py:function``.
 
 ``--reward-fn-path TEXT``
-   Python file defining ``reward_fn(example, completions)``.
+   Python file defining ``reward_fn(record)``.
 
 Use ``--dataset-loader-fn`` when the raw dataset does not already match the
 trainer schema. Without a loader, Areno passes dataset rows through unchanged.
@@ -63,8 +63,8 @@ Reward files should expose:
 
 .. code-block:: python
 
-   def reward_fn(example, completions):
-       return [0.0 for _ in completions]
+   def reward_fn(record):
+       return 0.0
 
 Algorithm selection
 ~~~~~~~~~~~~~~~~~~~
