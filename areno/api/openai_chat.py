@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 import uuid
 from typing import Any
@@ -20,8 +21,27 @@ def normalize_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         # the tool_calls payload.
         if item.get("content") is None:
             item["content"] = ""
+        if isinstance(item.get("tool_calls"), list):
+            item["tool_calls"] = [_normalize_message_tool_call(call) for call in item["tool_calls"]]
         normalized.append(item)
     return normalized
+
+
+def _normalize_message_tool_call(call: Any) -> Any:
+    if not isinstance(call, dict):
+        return call
+    item = dict(call)
+    function = item.get("function")
+    if isinstance(function, dict):
+        function = dict(function)
+        arguments = function.get("arguments")
+        if isinstance(arguments, str):
+            try:
+                function["arguments"] = json.loads(arguments or "{}")
+            except json.JSONDecodeError:
+                pass
+        item["function"] = function
+    return item
 
 
 def messages_to_prompt_tokens(
@@ -41,9 +61,36 @@ def messages_to_prompt_tokens(
         try:
             return tokenizer.apply_chat_template(messages, **kwargs)
         except TypeError:
+            if tools:
+                kwargs["tools"] = _normalize_tools_for_chat_template(tools)
+                try:
+                    return tokenizer.apply_chat_template(messages, **kwargs)
+                except TypeError:
+                    pass
             kwargs.pop("tools", None)
             return tokenizer.apply_chat_template(messages, **kwargs)
     return tokenizer.encode(messages_to_text(messages) or fallback_prompt)
+
+
+def _normalize_tools_for_chat_template(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized = []
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        item = dict(tool)
+        function = item.get("function")
+        if isinstance(function, dict):
+            function = dict(function)
+            parameters = function.get("parameters")
+            if not isinstance(parameters, dict):
+                function["parameters"] = {"type": "object", "properties": {}}
+            elif not isinstance(parameters.get("properties", {}), dict):
+                parameters = dict(parameters)
+                parameters["properties"] = {}
+                function["parameters"] = parameters
+            item["function"] = function
+        normalized.append(item)
+    return normalized
 
 
 def messages_to_text(messages: list[dict[str, Any]]) -> str:

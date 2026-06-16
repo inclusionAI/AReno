@@ -103,6 +103,7 @@ class QwenToolCallParser(JsonToolCallParser):
         calls: list[dict[str, Any]] = []
         for block in self._block_re.findall(content):
             calls.extend(_parse_json_tool_calls(block, tools, _chosen_tool_name(tools, tool_choice)))
+            calls.extend(_parse_angle_tool_calls(block, tools, tool_choice))
         if calls:
             normal = content[: content.find("<tool_call>")].strip()
             return ToolCallParseResult(normal_text=normal, tool_calls=calls)
@@ -145,13 +146,10 @@ class MiniCPMToolCallParser(JsonToolCallParser):
     name = "minicpm"
     _function_re = re.compile(r"<function\s+name=[\"']([^\"']+)[\"']\s*>(.*?)</function>", re.DOTALL | re.IGNORECASE)
     _param_re = re.compile(r"<param\s+name=[\"']([^\"']+)[\"']\s*>(.*?)</param>", re.DOTALL | re.IGNORECASE)
-    _tool_block_re = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL | re.IGNORECASE)
-    _angle_function_re = re.compile(r"<function=([^>\s]+)>\s*(.*?)</function>", re.DOTALL | re.IGNORECASE)
-    _angle_param_re = re.compile(r"<parameter=([^>\s]+)>\s*(.*?)</parameter>", re.DOTALL | re.IGNORECASE)
 
     def parse(self, content: str, tools: list[dict[str, Any]], tool_choice: Any) -> ToolCallParseResult:
         calls: list[dict[str, Any]] = []
-        calls.extend(self._parse_v46_tool_blocks(content, tools, tool_choice))
+        calls.extend(_parse_angle_tool_call_blocks(content, tools, tool_choice))
         for name, body in self._function_re.findall(content):
             if not _tool_name_allowed(name, tools, tool_choice):
                 continue
@@ -164,21 +162,6 @@ class MiniCPMToolCallParser(JsonToolCallParser):
             normal = content[:first_tool].strip() if first_tool is not None else ""
             return ToolCallParseResult(normal_text=normal, tool_calls=calls)
         return super().parse(content, tools, tool_choice)
-
-    def _parse_v46_tool_blocks(
-        self, content: str, tools: list[dict[str, Any]], tool_choice: Any
-    ) -> list[dict[str, Any]]:
-        calls: list[dict[str, Any]] = []
-        for block in self._tool_block_re.findall(content):
-            for name, body in self._angle_function_re.findall(block):
-                if not _tool_name_allowed(name, tools, tool_choice):
-                    continue
-                args = {
-                    key.strip(): _parse_minicpm_param_value(value.strip())
-                    for key, value in self._angle_param_re.findall(body)
-                }
-                calls.append(_openai_tool_call(name.strip(), args))
-        return calls
 
 
 def _safe_tokenizer(trainer: Any) -> Any:
@@ -441,6 +424,28 @@ def _parse_minicpm_param_value(value: str) -> Any:
         return float(value)
     except ValueError:
         return value
+
+
+_ANGLE_TOOL_BLOCK_RE = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL | re.IGNORECASE)
+_ANGLE_FUNCTION_RE = re.compile(r"<function=([^>\s]+)>\s*(.*?)</function>", re.DOTALL | re.IGNORECASE)
+_ANGLE_PARAM_RE = re.compile(r"<parameter=([^>\s]+)>\s*(.*?)</parameter>", re.DOTALL | re.IGNORECASE)
+
+
+def _parse_angle_tool_call_blocks(content: str, tools: list[dict[str, Any]], tool_choice: Any) -> list[dict[str, Any]]:
+    calls: list[dict[str, Any]] = []
+    for block in _ANGLE_TOOL_BLOCK_RE.findall(content):
+        calls.extend(_parse_angle_tool_calls(block, tools, tool_choice))
+    return calls
+
+
+def _parse_angle_tool_calls(content: str, tools: list[dict[str, Any]], tool_choice: Any) -> list[dict[str, Any]]:
+    calls: list[dict[str, Any]] = []
+    for name, body in _ANGLE_FUNCTION_RE.findall(content):
+        if not _tool_name_allowed(name, tools, tool_choice):
+            continue
+        args = {key.strip(): _parse_minicpm_param_value(value.strip()) for key, value in _ANGLE_PARAM_RE.findall(body)}
+        calls.append(_openai_tool_call(name.strip(), args))
+    return calls
 
 
 def _first_nonnegative(*values: int) -> int | None:

@@ -163,6 +163,29 @@ def test_normalize_messages_rewrites_null_tool_call_content_for_templates():
     assert messages[1]["content"] == ""
 
 
+def test_messages_to_prompt_tokens_normalizes_tool_call_arguments_for_templates():
+    tokenizer = _ToolCallArgumentsMappingTokenizer()
+    messages = [
+        {"role": "user", "content": "inspect"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "inspect_tree", "arguments": '{"path":".","max_depth":3}'},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call-1", "content": "{}"},
+    ]
+
+    tokens = agentic._messages_to_prompt_tokens(tokenizer, messages, tools=[], fallback_prompt="fallback")
+
+    assert tokens == [3]
+
+
 def test_explicit_trajectory_tokenization_normalizes_null_tool_call_content():
     trainer = _FakeTrainer(world_size=1, tp_size=1)
     trainer.tokenizer = _StrictContentTokenizer()
@@ -753,6 +776,47 @@ def test_qwen_tool_call_parser_supports_chat_completions_tools():
     assert '"direction":"right"' in parsed.tool_calls[0]["function"]["arguments"]
 
 
+def test_qwen_tool_call_parser_supports_angle_function_blocks():
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "inspect_tree",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "max_depth": {"type": "integer"},
+                    },
+                },
+            },
+        }
+    ]
+
+    parsed = QwenToolCallParser().parse(
+        "Let me start by inspecting the repository structure.\n"
+        "</think>\n\n"
+        "<tool_call>\n"
+        "<function=inspect_tree>\n"
+        "<parameter=path>\n"
+        ".\n"
+        "</parameter>\n"
+        "<parameter=max_depth>\n"
+        "3\n"
+        "</parameter>\n"
+        "</function>\n"
+        "</tool_call>",
+        tools,
+        "required",
+    )
+
+    assert parsed.normal_text == "Let me start by inspecting the repository structure.\n</think>"
+    assert len(parsed.tool_calls) == 1
+    assert parsed.tool_calls[0]["function"]["name"] == "inspect_tree"
+    assert '"path":"."' in parsed.tool_calls[0]["function"]["arguments"]
+    assert '"max_depth":3' in parsed.tool_calls[0]["function"]["arguments"]
+
+
 def test_gemma4_tool_call_parser_supports_chat_completions_tools():
     tools = [
         {
@@ -997,6 +1061,17 @@ class _StrictContentTokenizer(_FakeTokenizer):
         for message in messages:
             assert isinstance(message.get("content"), str)
         return [len(messages)]
+
+
+class _ToolCallArgumentsMappingTokenizer(_StrictContentTokenizer):
+    def apply_chat_template(self, messages, *, tokenize, add_generation_prompt, tools=None):
+        for message in messages:
+            for call in message.get("tool_calls") or []:
+                assert isinstance(call["function"]["arguments"], dict)
+                list(call["function"]["arguments"].items())
+        return super().apply_chat_template(
+            messages, tokenize=tokenize, add_generation_prompt=add_generation_prompt, tools=tools
+        )
 
 
 class _ToolRejectingTokenizer(_FakeTokenizer):
