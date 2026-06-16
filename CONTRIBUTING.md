@@ -136,10 +136,39 @@ Follow these steps:
    TORCH_CUDA_ARCH_LIST="9.0" MAX_JOBS=64 pip install -e . --no-build-isolation
    ```
 
-4. Develop on your branch. Keep changes surgical — touch only what the task
+4. Set up pre-commit hooks (formatting, linting, commit message checks):
+
+   ```bash
+   pip install pre-commit
+   pre-commit install --install-hooks
+   ```
+
+   This installs both `pre-commit` and `commit-msg` hooks. From now on, every
+   `git commit` will automatically check your staged files (ruff lint + format,
+   trailing whitespace, etc.) and validate your commit message follows
+   [Conventional Commits](https://www.conventionalcommits.org/) format.
+
+   You can also run hooks manually:
+
+   ```bash
+   pre-commit run          # check staged files
+   pre-commit run -a       # check all files
+   ```
+
+   Commit messages must use one of these prefixes:
+   `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `build`, `ci`,
+   `chore`, `revert`. For example:
+
+   ```
+   feat: add DAPO algorithm support
+   fix: correct gradient clipping in PPO loss
+   docs: update CLI reference for serve command
+   ```
+
+5. Develop on your branch. Keep changes surgical — touch only what the task
    requires and match the surrounding style.
 
-5. Make sure the tests pass. The CPU suite runs without a GPU and is the fast
+6. Make sure the tests pass. The CPU suite runs without a GPU and is the fast
    feedback loop:
 
    ```bash
@@ -149,7 +178,7 @@ Follow these steps:
    Add CPU tests under `tests/` for new algorithm, loss, or config behavior. Tests
    that require a GPU should be skipped cleanly when no GPU is available.
 
-6. Commit with a clear message, keep your branch synced, and push:
+7. Commit with a clear message, keep your branch synced, and push:
 
    ```bash
    git fetch upstream
@@ -157,7 +186,7 @@ Follow these steps:
    git push -u origin a-descriptive-name-for-my-changes
    ```
 
-7. Open the pull request from your fork. It's fine if maintainers request changes —
+8. Open the pull request from your fork. It's fine if maintainers request changes —
    it happens to everyone. Push updates to your branch and they'll appear in the PR.
 
 ### Checklist
