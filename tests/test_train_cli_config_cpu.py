@@ -1,10 +1,17 @@
 from __future__ import annotations
 
 import pytest
-from click import UsageError
+from click import UsageError, unstyle
+from click.testing import CliRunner
 
 from areno.api.trainer_config import DPOTrainerConfig, PolicyTrainerConfig, PPOTrainerConfig, TrainerConfig
-from areno.cli.train import _trainer_config_from_options
+from areno.cli import train as train_cli
+from areno.cli.train import (
+    _callable_name,
+    _format_summary_section,
+    _format_training_config_summary,
+    _trainer_config_from_options,
+)
 
 
 def test_train_config_requires_ckpt():
@@ -218,6 +225,145 @@ def test_train_config_ppo_preserves_reward_ckpt_as_role_checkpoint():
     assert isinstance(cfg, PPOTrainerConfig)
     assert cfg.reward_fn_path is None
     assert cfg.reward_ckpt == "reward-model"
+
+
+def test_training_config_summary_shows_resolved_values_and_warning():
+    cfg = _trainer_config_from_options(
+        **_options(
+            algo="gspo",
+            reward_fn_path=None,
+            reward_ckpt="reward-model",
+            save_path=None,
+            world_size=8,
+            tp_size=2,
+            batch_size=4,
+            n_samples=3,
+            max_running_prompts=None,
+            temperature=0.7,
+            top_k=20,
+            top_p=0.9,
+            lr=2e-6,
+            min_lr=0.0,
+            metrics_log_dir="/tmp/metrics",
+        )
+    )
+
+    summary = _format_training_config_summary(cfg, reward_ckpt="reward-model")
+
+    assert "AReno training config" in summary
+    assert "Algorithm\n---------" in summary
+    assert "name              gspo" in summary
+    assert "default_loss      gspo_loss_fn" in summary
+    assert "requires_rollout  yes" in summary
+    assert "ckpt            actor" in summary
+    assert "dataset_path    dataset" in summary
+    assert "reward_fn       none" in summary
+    assert "reward_ckpt     reward-model" in summary
+    assert "dp_size     4" in summary
+    assert "max_running_prompts  12" in summary
+    assert "sampling             greedy=no, temperature=0.7, top_k=20, top_p=0.9" in summary
+    assert "optimizer                    lr=2e-06, min_lr=0.0, decay=cosine/100" in summary
+    assert "metrics_log_dir  /tmp/metrics" in summary
+    assert "WARNING: no checkpoint output path configured (--save-path)" in summary
+
+
+def test_training_config_summary_can_colorize_output():
+    cfg = _trainer_config_from_options(**_options(algo="sft", reward_fn_path=None, reward_ckpt=None))
+
+    summary = _format_training_config_summary(cfg, color=True)
+
+    assert "\x1b[" in summary
+    assert "AReno training config" in summary
+
+
+def test_training_config_summary_wraps_for_narrow_terminals(monkeypatch):
+    monkeypatch.setattr(
+        train_cli.shutil, "get_terminal_size", lambda fallback: train_cli.shutil.os.terminal_size((48, 24))
+    )
+    cfg = _trainer_config_from_options(
+        **_options(
+            algo="sft",
+            reward_fn_path=None,
+            reward_ckpt=None,
+            metrics_log_dir="/tmp/areno/a/very/long/path/that/should/wrap",
+        )
+    )
+
+    summary = _format_training_config_summary(cfg)
+
+    lines = summary.splitlines()
+    row_idx = next(idx for idx, line in enumerate(lines) if line.startswith("  metrics_log_dir"))
+    assert lines[row_idx].startswith("  metrics_log_dir  ")
+    assert lines[row_idx + 1].startswith(" " * 19)
+
+
+def test_training_config_summary_marks_non_rollout_fields_not_applicable():
+    cfg = _trainer_config_from_options(**_options(algo="sft", reward_fn_path=None, reward_ckpt=None))
+
+    summary = _format_training_config_summary(cfg)
+
+    assert "name              sft" in summary
+    assert "requires_rollout  no" in summary
+    assert "reward_fn       n/a" in summary
+    assert "n_samples            n/a" in summary
+    assert "max_running_prompts  n/a" in summary
+    assert "sampling             n/a" in summary
+
+
+def test_training_config_summary_handles_invalid_tp_size_defensively():
+    cfg = TrainerConfig(algo="sft", ckpt="actor", dataset_path="dataset", tp_size=0, world_size=8)
+
+    summary = _format_training_config_summary(cfg)
+
+    assert "tp_size     0" in summary
+    assert "dp_size     n/a" in summary
+
+
+def test_training_config_summary_section_handles_empty_rows():
+    assert _format_summary_section("Empty", [], color=False) == ["", "Empty", "-----"]
+
+
+def test_training_config_summary_callable_name_handles_callable_objects():
+    class CallableLoss:
+        def __call__(self):
+            return None
+
+    assert _callable_name(CallableLoss()) == "CallableLoss"
+
+
+def test_train_command_prints_summary_before_run(monkeypatch):
+    events = []
+
+    def fake_run(config):
+        events.append(("run", config.algo))
+
+    monkeypatch.setattr(train_cli, "run", fake_run)
+
+    result = CliRunner().invoke(
+        train_cli.train_command,
+        [
+            "--algo",
+            "sft",
+            "--ckpt",
+            "actor",
+            "--dataset-path",
+            "dataset",
+            "--world-size",
+            "2",
+            "--tp-size",
+            "1",
+            "--save-path",
+            "out",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    output = unstyle(result.output)
+    assert output.startswith("AReno training config\n")
+    assert "dp_size     2" in output
+    assert "save_path        out" in output
+    assert "WARNING: no checkpoint output path configured" not in output
+    assert events == [("run", "sft")]
 
 
 def _options(**overrides):

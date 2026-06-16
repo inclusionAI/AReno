@@ -13,6 +13,8 @@ The flow is:
 
 import importlib.util
 import logging
+import shutil
+import textwrap
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -20,7 +22,13 @@ import click
 
 from areno.api.algorithms import get_algorithm
 from areno.api.defaults import DEFAULT_METRICS_LOG_DIR
-from areno.api.trainer_config import DPOTrainerConfig, PolicyTrainerConfig, PPOTrainerConfig, TrainerConfig
+from areno.api.trainer_config import (
+    DPOTrainerConfig,
+    PolicyTrainerConfig,
+    PPOTrainerConfig,
+    RolloutTrainerConfig,
+    TrainerConfig,
+)
 from areno.cli.model_refs import resolve_model_refs_for_config
 
 
@@ -99,6 +107,153 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
 def _require_positive_float(value: float, option_name: str) -> None:
     if value <= 0:
         raise click.UsageError(f"{option_name} must be positive")
+
+
+def _format_training_config_summary(
+    config: TrainerConfig, *, reward_ckpt: str | None = None, color: bool = False
+) -> str:
+    """Return a concise user-facing summary of the resolved train config."""
+
+    algorithm = get_algorithm(config.algo)
+    sections = [
+        (
+            "Algorithm",
+            [
+                ("name", algorithm.name),
+                ("default_loss", _callable_name(algorithm.default_loss_fn)),
+                ("requires_rollout", _format_bool(algorithm.requires_rollout)),
+            ],
+        ),
+        (
+            "Inputs",
+            [
+                ("ckpt", config.ckpt),
+                ("dataset_path", config.dataset_path),
+                ("dataset_loader", _format_optional(config.dataset_loader_fn)),
+                (
+                    "reward_fn",
+                    _format_optional(config.reward_fn_path) if isinstance(config, PolicyTrainerConfig) else "n/a",
+                ),
+                ("reward_ckpt", _format_optional(_reward_ckpt_for_summary(config, reward_ckpt))),
+                ("agent_fn", _format_optional(config.agent_fn)),
+            ],
+        ),
+        (
+            "Runtime",
+            [
+                ("world_size", str(config.world_size)),
+                ("tp_size", str(config.tp_size)),
+                ("dp_size", _resolved_dp_size_for_summary(config)),
+            ],
+        ),
+        ("Rollout", _rollout_summary_rows(config)),
+        (
+            "Training",
+            [
+                ("mini_bs", str(config.mini_bs)),
+                ("gradient_accumulation_steps", _format_optional(config.gradient_accumulation_steps, default="auto")),
+                (
+                    "optimizer",
+                    (
+                        f"lr={config.optimizer_lr}, min_lr={config.optimizer_min_lr}, "
+                        f"decay={config.lr_decay_style}/{config.lr_decay_steps}, "
+                        f"betas=({config.optimizer_beta1}, {config.optimizer_beta2}), "
+                        f"weight_decay={config.weight_decay}, adam_8bit={_format_bool(config.adam_8bit)}"
+                    ),
+                ),
+                ("grad_clip_norm", str(config.grad_clip_norm)),
+            ],
+        ),
+        (
+            "Outputs",
+            [
+                ("save_path", _format_optional(config.save_path)),
+                ("save_interval", str(config.save_interval)),
+                ("metrics_log_dir", _format_optional(config.metrics_log_dir)),
+            ],
+        ),
+    ]
+    lines = [_style("AReno training config", fg="bright_white", bold=True, color=color)]
+    for section, rows in sections:
+        lines.extend(_format_summary_section(section, rows, color=color))
+    if config.save_path is None:
+        lines.append(
+            _style("WARNING", fg="yellow", bold=True, color=color)
+            + ": no checkpoint output path configured (--save-path); checkpoints will not be saved."
+        )
+    return "\n".join(lines)
+
+
+def _print_training_config_summary(config: TrainerConfig, *, reward_ckpt: str | None = None) -> None:
+    click.echo(_format_training_config_summary(config, reward_ckpt=reward_ckpt, color=True), color=True)
+
+
+def _format_summary_section(section: str, rows: list[tuple[str, str]], *, color: bool) -> list[str]:
+    field_width = max([len("Field"), *(len(field) for field, _ in rows)])
+    terminal_width = shutil.get_terminal_size(fallback=(100, 24)).columns
+    value_width = max(20, terminal_width - field_width - 4)
+    label = _style(section, fg="bright_blue", bold=True, color=color)
+    rule = _style("-" * len(section), fg="bright_black", color=color)
+    lines = ["", label, rule]
+    for field, value in rows:
+        wrapped = textwrap.wrap(value, width=value_width, break_long_words=True, break_on_hyphens=False) or [""]
+        lines.append("  " + _style(field.ljust(field_width), fg="bright_black", color=color) + "  " + wrapped[0])
+        padding = "  " + " " * field_width + "  "
+        lines.extend(padding + line for line in wrapped[1:])
+    return lines
+
+
+def _rollout_summary_rows(config: TrainerConfig) -> list[tuple[str, str]]:
+    base = [
+        ("batch_size", str(config.batch_size)),
+        ("max_prompt_tokens", str(config.max_prompt_tokens)),
+        ("max_new_tokens", str(config.max_new_tokens)),
+    ]
+    if not isinstance(config, RolloutTrainerConfig):
+        return [
+            *base,
+            ("n_samples", "n/a"),
+            ("max_running_prompts", "n/a"),
+            ("sampling", "n/a"),
+        ]
+    return [
+        *base,
+        ("n_samples", str(config.n_samples)),
+        ("max_running_prompts", str(config.resolved_max_running_prompts())),
+        (
+            "sampling",
+            (
+                f"greedy={_format_bool(config.greedy)}, "
+                f"temperature={config.temperature}, top_k={config.top_k}, top_p={config.top_p}"
+            ),
+        ),
+    ]
+
+
+def _reward_ckpt_for_summary(config: TrainerConfig, reward_ckpt: str | None) -> str | None:
+    if isinstance(config, PPOTrainerConfig):
+        return config.reward_ckpt
+    return reward_ckpt
+
+
+def _callable_name(fn) -> str:
+    return getattr(fn, "__name__", type(fn).__name__)
+
+
+def _resolved_dp_size_for_summary(config: TrainerConfig) -> str:
+    return str(config.world_size // config.tp_size) if config.tp_size else "n/a"
+
+
+def _format_bool(value: bool) -> str:
+    return "yes" if value else "no"
+
+
+def _format_optional(value, *, default: str = "none") -> str:
+    return str(value) if value is not None else default
+
+
+def _style(text: str, *, color: bool, fg: str | None = None, bold: bool = False) -> str:
+    return click.style(text, fg=fg, bold=bold) if color else text
 
 
 def _trainer_config_from_args(args) -> TrainerConfig:
@@ -574,6 +729,7 @@ def train_command(**options) -> None:
 
     trainer_config = _trainer_config_from_options(**options)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    _print_training_config_summary(trainer_config, reward_ckpt=options.get("reward_ckpt"))
     run(trainer_config)
 
 
