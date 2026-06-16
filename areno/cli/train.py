@@ -63,11 +63,42 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
         raise click.UsageError("--max-running-prompts must be positive")
     if args.agent_timeout_s <= 0:
         raise click.UsageError("--agent-timeout-s must be positive")
+    _require_positive_float(args.lr, "--lr")
+    if args.min_lr < 0:
+        raise click.UsageError("--min-lr must be non-negative")
     if args.lr_decay_steps <= 0:
         raise click.UsageError("--lr-decay-steps must be positive")
+    _require_positive_float(args.adam_beta1, "--adam-beta1")
+    _require_positive_float(args.adam_beta2, "--adam-beta2")
+    if args.weight_decay < 0:
+        raise click.UsageError("--weight-decay must be non-negative")
+    _require_positive_float(args.grad_clip_norm, "--grad-clip-norm")
+    if algorithm.requires_rollout:
+        _require_positive_float(args.temperature, "--temperature")
+        _require_positive_float(args.top_p, "--top-p")
+    if algorithm.name == "gspo":
+        _require_positive_float(args.gspo_clip_eps, "--gspo-clip-eps")
+    if algorithm.name == "grpo":
+        _require_positive_float(args.grpo_clip_eps, "--grpo-clip-eps")
+    if algorithm.name == "dpo":
+        _require_positive_float(args.dpo_beta, "--dpo-beta")
+    if algorithm.name == "ppo":
+        _require_positive_float(args.critic_lr, "--critic-lr")
+        _require_positive_float(args.kl_loss_coef, "--kl-loss-coef")
+        _require_positive_float(args.clip_eps, "--clip-eps")
+        _require_positive_float(args.clip_ratio_c, "--clip-ratio-c")
+        _require_positive_float(args.value_clip_eps, "--value-clip-eps")
+        _require_positive_float(args.value_loss_coef, "--value-loss-coef")
+        _require_positive_float(args.gamma, "--gamma")
+        _require_positive_float(args.lam, "--lam")
     if args.critic_warmup_steps < 0:
         raise click.UsageError("--critic-warmup-steps must be non-negative")
     return _trainer_config_from_args(args)
+
+
+def _require_positive_float(value: float, option_name: str) -> None:
+    if value <= 0:
+        raise click.UsageError(f"{option_name} must be positive")
 
 
 def _trainer_config_from_args(args) -> TrainerConfig:

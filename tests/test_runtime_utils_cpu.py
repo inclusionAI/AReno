@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 import torch
 
+import areno.engine.runtime.common as runtime_common
 from areno.engine.api import _merge_dp_rank0_strided_results
 from areno.engine.data import RolloutOutput
 from areno.engine.runtime.common import (
@@ -103,11 +105,12 @@ class RuntimeCommonTest(unittest.TestCase):
         tensor = torch.tensor([1, 2], dtype=torch.int32)
 
         converted = _device_long(tensor, torch.device("cpu"))
-        _check_token_ids(converted, vocab_size=3, name="sample")
 
         self.assertEqual(converted.dtype, torch.long)
-        with self.assertRaisesRegex(RuntimeError, "sample out of vocab range"):
-            _check_token_ids(torch.tensor([0, 3]), vocab_size=3, name="sample")
+        with patch.object(runtime_common, "_CHECK_TOKEN_IDS", True):
+            _check_token_ids(converted, vocab_size=3, name="sample")
+            with self.assertRaisesRegex(RuntimeError, "sample out of vocab range"):
+                _check_token_ids(torch.tensor([0, 3]), vocab_size=3, name="sample")
 
 
 class DecodeGraphUtilityTest(unittest.TestCase):
