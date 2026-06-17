@@ -13,6 +13,16 @@ namespace {
 constexpr int kAttentionThreads = 256;
 constexpr int kAttentionTileN = 16;
 
+int64_t attention_tile_n(int64_t head_dim) {
+  if (head_dim <= 256) {
+    return 16;
+  }
+  if (head_dim <= 512) {
+    return 8;
+  }
+  return 4;
+}
+
 __device__ __forceinline__ int64_t find_sequence_id(const int32_t* __restrict__ cu_seqlens, int64_t num_seqs, int64_t token_idx) {
   int64_t lo = 0;
   int64_t hi = num_seqs;
@@ -38,6 +48,7 @@ __global__ void causal_attention_forward_kernel(
     int64_t q_len,
     int64_t k_len,
     int64_t head_dim,
+    int64_t tile_n,
     int64_t query_start,
     int64_t window_left,
     float softmax_scale) {
@@ -46,7 +57,7 @@ __global__ void causal_attention_forward_kernel(
   float* acc_s = q_s + head_dim;
   float* partial_s = acc_s + head_dim;
   float* k_tile = partial_s + blockDim.x;
-  float* v_tile = k_tile + kAttentionTileN * head_dim;
+  float* v_tile = k_tile + tile_n * head_dim;
 
   const int64_t row = blockIdx.x;
   const int64_t b = row / (heads * q_len);
@@ -69,10 +80,9 @@ __global__ void causal_attention_forward_kernel(
   float m = -std::numeric_limits<float>::infinity();
   float l = 0.0f;
 
-  for (int64_t tile_start = 0; tile_start < k_len; tile_start += kAttentionTileN) {
+  for (int64_t tile_start = 0; tile_start < k_len; tile_start += tile_n) {
     const int64_t remaining = k_len - tile_start;
-    const int64_t tile_len =
-        remaining < static_cast<int64_t>(kAttentionTileN) ? remaining : static_cast<int64_t>(kAttentionTileN);
+    const int64_t tile_len = remaining < tile_n ? remaining : tile_n;
     const int64_t tile_elements = tile_len * head_dim;
     for (int64_t idx = threadIdx.x; idx < tile_elements; idx += blockDim.x) {
       const int64_t ki = tile_start + idx / head_dim;
@@ -144,6 +154,7 @@ __global__ void varlen_causal_attention_forward_kernel(
     int64_t q_heads,
     int64_t kv_heads,
     int64_t head_dim,
+    int64_t tile_n,
     int64_t window_left,
     float softmax_scale) {
   extern __shared__ float shared[];
@@ -151,7 +162,7 @@ __global__ void varlen_causal_attention_forward_kernel(
   float* acc_s = q_s + head_dim;
   float* partial_s = acc_s + head_dim;
   float* k_tile = partial_s + blockDim.x;
-  float* v_tile = k_tile + kAttentionTileN * head_dim;
+  float* v_tile = k_tile + tile_n * head_dim;
 
   const int64_t row = blockIdx.x;
   const int64_t token_idx = row / q_heads;
@@ -174,10 +185,9 @@ __global__ void varlen_causal_attention_forward_kernel(
   float m = -std::numeric_limits<float>::infinity();
   float l = 0.0f;
 
-  for (int64_t tile_start = first_key; tile_start <= last_key; tile_start += kAttentionTileN) {
+  for (int64_t tile_start = first_key; tile_start <= last_key; tile_start += tile_n) {
     const int64_t remaining = last_key - tile_start + 1;
-    const int64_t tile_len =
-        remaining < static_cast<int64_t>(kAttentionTileN) ? remaining : static_cast<int64_t>(kAttentionTileN);
+    const int64_t tile_len = remaining < tile_n ? remaining : tile_n;
     const int64_t tile_elements = tile_len * head_dim;
     for (int64_t idx = threadIdx.x; idx < tile_elements; idx += blockDim.x) {
       const int64_t ki = tile_start + idx / head_dim;
@@ -718,7 +728,8 @@ torch::Tensor areno_causal_attention_forward_cuda(
   const at::cuda::OptionalCUDAGuard guard(device_of(q));
   auto out = torch::empty_like(q);
   const int64_t rows = q.size(0) * q.size(1) * q.size(2);
-  const int64_t shared_floats = 2 * q.size(3) + kAttentionThreads + 2 * kAttentionTileN * q.size(3);
+  const int64_t tile_n = attention_tile_n(q.size(3));
+  const int64_t shared_floats = 2 * q.size(3) + kAttentionThreads + 2 * tile_n * q.size(3);
   const size_t shared_bytes = static_cast<size_t>(shared_floats) * sizeof(float);
   AT_DISPATCH_FLOATING_TYPES_AND2(at::kHalf, at::kBFloat16, q.scalar_type(), "areno_causal_attention_forward", [&] {
     causal_attention_forward_kernel<scalar_t><<<static_cast<int>(rows), kAttentionThreads, shared_bytes, at::cuda::getCurrentCUDAStream()>>>(
@@ -731,6 +742,7 @@ torch::Tensor areno_causal_attention_forward_cuda(
         q.size(2),
         k.size(2),
         q.size(3),
+        tile_n,
         query_start,
         window_left,
         static_cast<float>(softmax_scale));
@@ -826,7 +838,8 @@ torch::Tensor areno_varlen_causal_attention_forward_cuda(
   const at::cuda::OptionalCUDAGuard guard(device_of(q));
   auto out = torch::empty_like(q);
   const int64_t rows = q.size(0) * q.size(1);
-  const int64_t shared_floats = 2 * q.size(2) + kAttentionThreads + 2 * kAttentionTileN * q.size(2);
+  const int64_t tile_n = attention_tile_n(q.size(2));
+  const int64_t shared_floats = 2 * q.size(2) + kAttentionThreads + 2 * tile_n * q.size(2);
   const size_t shared_bytes = static_cast<size_t>(shared_floats) * sizeof(float);
   AT_DISPATCH_FLOATING_TYPES_AND2(at::kHalf, at::kBFloat16, q.scalar_type(), "areno_varlen_causal_attention_forward", [&] {
     varlen_causal_attention_forward_kernel<scalar_t><<<static_cast<int>(rows), kAttentionThreads, shared_bytes, at::cuda::getCurrentCUDAStream()>>>(
@@ -840,6 +853,7 @@ torch::Tensor areno_varlen_causal_attention_forward_cuda(
         q.size(1),
         k.size(1),
         q.size(2),
+        tile_n,
         window_left,
         static_cast<float>(softmax_scale));
   });
