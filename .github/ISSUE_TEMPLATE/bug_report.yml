@@ -4,7 +4,7 @@ labels: ["bug"]
 body:
   - type: markdown
     attributes:
-      value: "Thanks for taking the time to file a bug report! Before submitting, please **search the [issue tracker](https://github.com/inclusionAI/asystem-areno/issues)** to make sure the bug was not already reported."
+      value: "Thanks for taking the time to file a bug report! Before submitting, please **search the [issue tracker](https://github.com/inclusionAI/AReno/issues)** to make sure the bug was not already reported."
 
   - type: checkboxes
     id: prerequisites

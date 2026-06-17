@@ -65,8 +65,8 @@ errors.
 **From source** (recommended if you want the examples or plan to contribute):
 
 ```bash
-git clone https://github.com/inclusionAI/asystem-areno.git
-cd asystem-areno
+git clone https://github.com/inclusionAI/AReno.git
+cd AReno
 pip install psutil
 pip install flash-attn flash-linear-attention
 pip install -e . --no-build-isolation
@@ -291,8 +291,8 @@ Point any OpenAI client at `http://localhost:8000/v1/chat/completions` to start 
 If you want to contribute to AReno or customize it for your own needs, read the [contribution guide](CONTRIBUTING.md) and make a development install:
 
 ```bash
-git clone https://github.com/inclusionAI/asystem-areno.git
-cd asystem-areno
+git clone https://github.com/inclusionAI/AReno.git
+cd AReno
 pip install psutil
 pip install flash-attn flash-linear-attention
 pip install -e . --no-build-isolation
@@ -313,7 +313,7 @@ If you find the project helpful, please cite:
   title        = {AReno: A Self-Contained, Full-Stack Toolkit for Single-Node LLM RL Post-Training},
   author       = {Zibo He and Le Su and Zongyu Li and Xiaowei Zhu and Cheng Wang and Zhenxuan Pan},
   year         = {2026},
-  url          = {https://github.com/inclusionAI/asystem-areno},
+  url          = {https://github.com/inclusionAI/AReno},
   license      = {Apache-2.0}
 }
 ```

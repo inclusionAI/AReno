@@ -4,7 +4,7 @@ labels: ["question"]
 body:
   - type: markdown
     attributes:
-      value: "Have a usage question? Please first skim the [README](https://github.com/inclusionAI/asystem-areno/blob/main/README.md) and the [docs](https://github.com/inclusionAI/asystem-areno/tree/main/docs), and search existing issues — your question may already be answered."
+      value: "Have a usage question? Please first skim the [README](https://github.com/inclusionAI/AReno/blob/main/README.md) and the [docs](https://github.com/inclusionAI/AReno/tree/main/docs), and search existing issues — your question may already be answered."
 
   - type: textarea
     id: question
