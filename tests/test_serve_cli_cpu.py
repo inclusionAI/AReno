@@ -29,9 +29,11 @@ def test_create_app_passes_eager_decode_runtime_config(monkeypatch):
         default_max_tokens=16,
         decode_progress_interval_s=0.0,
         eager_decode=True,
+        attn_backend="native",
     )
 
     assert captured["runtime_config"].eager_decode is True
+    assert captured["runtime_config"].attn_backend == "native"
 
 
 def test_chat_completion_request_defaults_match_sampling_params():

@@ -11,21 +11,24 @@ The backend serves two distinct modes signalled by `InferMeta.mode`:
   block table, and `flash_attn_with_kvcache` reads the full history for
   each sequence directly from the paged cache.
 
-An SDPA fallback handles QK head dims that flash-attn does not support.
+The ``native`` backend selects the areno_accel native attention path that
+shares forward math with training attention for logprob diagnostics.
+Unsupported flash-attn shapes fail with an actionable message instead of
+silently falling back.
 """
 
 from __future__ import annotations
 
 import torch
-import torch.nn.functional as F
-from flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
 from torch import nn
 
+from areno.accel.attention import areno_paged_causal_attention_decode, areno_varlen_causal_attention
 from areno.engine.layers.attention_backend.common import (
+    AttnBackend,
     build_attention_call,
-    expand_kv_heads,
     pad_last_dim,
-    sdpa_window_size,
+    require_flash_attention_supported,
+    use_native_attention,
 )
 from areno.engine.runtime.metadata import InferMeta
 
@@ -38,12 +41,11 @@ class FlashAttnInferBackend(nn.Module):
     fused KV-cache attention path.
     """
 
-    def __init__(self):
+    def __init__(self, attn_backend: AttnBackend = "flash"):
         """Bind flash-attn entrypoints once for the module instance."""
 
         super().__init__()
-        self.flash_attn_varlen_func = flash_attn_varlen_func
-        self.flash_attn_with_kvcache = flash_attn_with_kvcache
+        self.attn_backend = attn_backend
 
     def forward(
         self,
@@ -70,17 +72,17 @@ class FlashAttnInferBackend(nn.Module):
             # Persist freshly computed K/V for the prompt into paged cache.
             if update_cache:
                 _store_prefill_cache(k_flat, v_flat, k_cache, v_cache, meta)
-            if not call.flash_supported:
-                # SDPA fallback when flash-attn cannot serve this head dim.
-                out = _sdpa_prefill(
+            if use_native_attention(self.attn_backend):
+                out = _native_prefill(
                     q_flat,
                     k_flat,
                     v_flat,
                     meta,
-                    sdpa_window_size(call.window_size),
+                    call.window_size,
                     call.softmax_scale,
                 )
                 return out.view(q.shape[0], q.shape[1], q.shape[2], call.value_dim)
+            require_flash_attention_supported(call, mode="prefill attention")
             # cu_seqlens tells flash-attn where each packed sequence ends so
             # causal attention does not bleed across sequence boundaries.
             out = _flash_attn_varlen_no_compile(
@@ -107,20 +109,21 @@ class FlashAttnInferBackend(nn.Module):
             # when combining those masked splits. Keep local decode on the
             # single-split kvcache kernel; full attention can keep the heuristic.
             num_splits = 1 if call.window_size != (-1, -1) else 0
-            if not call.flash_supported:
-                # SDPA decode fallback: write the new token then materialize
-                # the full key/value matrices from the paged cache.
-                if update_cache:
-                    _store_decode_cache(k_flat, v_flat, k_cache, v_cache, meta)
-                out = _sdpa_decode(
+            if use_native_attention(self.attn_backend):
+                if not update_cache:
+                    raise ValueError("native decode requires update_cache=True")
+                out = _native_decode(
                     q=q_flat,
+                    k_update=k_flat,
+                    v_update=pad_last_dim(v_flat, v_cache_dim),
                     k_cache=k_cache,
                     v_cache=v_cache,
                     meta=meta,
-                    window_size=sdpa_window_size(call.window_size),
+                    window_size=call.window_size,
                     softmax_scale=call.softmax_scale,
                 )
                 return out.view(q.shape[0], q.shape[1], q.shape[2], call.value_dim)
+            require_flash_attention_supported(call, mode="decode attention")
             # When value head dim < cache head dim we pad to match the cache
             # layout that was sized to the QK head dim at prefill time.
             v_update = (
@@ -150,15 +153,17 @@ class FlashAttnInferBackend(nn.Module):
         raise ValueError(f"unsupported inference mode: {meta.mode}")
 
 
-def build_infer_attention_backend() -> FlashAttnInferBackend:
+def build_infer_attention_backend(attn_backend: AttnBackend = "flash") -> FlashAttnInferBackend:
     """Build the default inference attention backend."""
 
-    return FlashAttnInferBackend()
+    return FlashAttnInferBackend(attn_backend=attn_backend)
 
 
 @torch._dynamo.disable
 def _flash_attn_varlen_no_compile(*args, **kwargs) -> torch.Tensor:
     """Dynamo-opaque wrapper so torch.compile does not specialize flash-attn."""
+
+    from flash_attn import flash_attn_varlen_func
 
     return flash_attn_varlen_func(*args, **kwargs)
 
@@ -167,94 +172,73 @@ def _flash_attn_varlen_no_compile(*args, **kwargs) -> torch.Tensor:
 def _flash_attn_with_kvcache_no_compile(*args, **kwargs) -> torch.Tensor:
     """Dynamo-opaque wrapper for the kvcache-aware flash-attn entrypoint."""
 
+    from flash_attn import flash_attn_with_kvcache
+
     return flash_attn_with_kvcache(*args, **kwargs)
 
 
+def _window_left(window_size: tuple[int, int]) -> int | None:
+    if window_size == (-1, -1):
+        return None
+    if window_size[1] != 0:
+        raise ValueError("native attention backend only supports causal right window 0")
+    return int(window_size[0])
+
+
 @torch._dynamo.disable
-def _sdpa_prefill(
+def _native_prefill(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
     meta: InferMeta,
-    window_size: tuple[int, int] | None,
+    window_size: tuple[int, int],
     softmax_scale: float | None,
 ) -> torch.Tensor:
-    """Per-sequence SDPA prefill fallback used for unsupported QK head dims."""
+    """Per-sequence native prefill path shared with training attention."""
 
     if meta.cu_seqlens is None:
         raise ValueError("prefill inference requires cu_seqlens")
-    outs = []
-    # Iterate packed sequences using their start/end offsets.
-    cu = meta.cu_seqlens.tolist()
-    for start, end in zip(cu[:-1], cu[1:], strict=True):
-        q_seq = q[start:end].transpose(0, 1).unsqueeze(0)
-        # SDPA does not understand GQA; replicate KV heads up to Q head count.
-        k_seq = expand_kv_heads(k[start:end], q.shape[1]).transpose(0, 1).unsqueeze(0)
-        v_seq = expand_kv_heads(v[start:end], q.shape[1]).transpose(0, 1).unsqueeze(0)
-        if window_size is None:
-            out = F.scaled_dot_product_attention(q_seq, k_seq, v_seq, is_causal=True, scale=softmax_scale)
-        else:
-            # Build a banded causal mask covering only positions inside the
-            # sliding window when one is requested.
-            seqlen = end - start
-            rows = torch.arange(seqlen, device=q.device).view(seqlen, 1)
-            cols = torch.arange(seqlen, device=q.device).view(1, seqlen)
-            mask = cols <= rows
-            if window_size[0] >= 0:
-                mask = mask & (cols >= rows - int(window_size[0]))
-            out = F.scaled_dot_product_attention(
-                q_seq,
-                k_seq,
-                v_seq,
-                attn_mask=mask.view(1, 1, seqlen, seqlen),
-                scale=softmax_scale,
-            )
-        outs.append(out.squeeze(0).transpose(0, 1))
-    return torch.cat(outs, dim=0)
+    return areno_varlen_causal_attention(
+        q,
+        k,
+        v,
+        meta.cu_seqlens,
+        window_left=_window_left(window_size),
+        softmax_scale=softmax_scale,
+    )
 
 
-def _sdpa_decode(
+def _native_decode(
     q: torch.Tensor,
+    k_update: torch.Tensor,
+    v_update: torch.Tensor,
     k_cache: torch.Tensor,
     v_cache: torch.Tensor,
     meta: InferMeta,
-    window_size: tuple[int, int] | None,
+    window_size: tuple[int, int],
     softmax_scale: float | None,
 ) -> torch.Tensor:
-    """SDPA-based single-token decode fallback over the paged KV cache."""
+    """Native single-token decode path over the paged KV cache."""
 
     if meta.cache_seqlens is None or meta.block_table is None:
         raise ValueError("decode inference requires cache_seqlens and block_table")
     out_dtype = q.dtype
-    # Materialize each sequence's K/V history by gathering the paged blocks
-    # listed in its block_table (block_size becomes the second axis).
-    k = k_cache[meta.block_table.long()].flatten(1, 2).float()
-    v = v_cache[meta.block_table.long()].flatten(1, 2).float()
-    q = q.float()
-    q_heads = q.shape[1]
-    kv_heads = k.shape[2]
-    # Reshape Q into (batch, kv_heads, groups, head_dim) to match GQA layout.
-    groups = q_heads // kv_heads
-    q = q.view(q.shape[0], kv_heads, groups, q.shape[-1])
-    scale = softmax_scale if softmax_scale is not None else q.shape[-1] ** -0.5
-    # Mask out positions beyond each sequence's current length (and outside
-    # the sliding window when one was requested).
-    positions = torch.arange(k.shape[1], device=q.device).view(1, 1, 1, -1)
-    total_lens = (meta.cache_seqlens + 1).view(-1, 1, 1, 1)
-    mask = positions < total_lens
-    if window_size is not None and window_size[0] >= 0:
-        start = (total_lens - int(window_size[0]) - 1).clamp_min(0)
-        mask = mask & (positions >= start)
-    kv_mask = mask.view(mask.shape[0], mask.shape[-1], 1, 1)
-    k = k.masked_fill(~kv_mask, 0.0)
-    v = v.masked_fill(~kv_mask, 0.0)
-    k_t = k.permute(0, 2, 3, 1)
-    scores = torch.matmul(q, k_t) * scale
-    scores = scores.masked_fill(~mask, torch.finfo(scores.dtype).min)
-    probs = torch.softmax(scores, dim=-1)
-    v_t = v.permute(0, 2, 1, 3)
-    out = torch.matmul(probs, v_t)
-    return out.reshape(out.shape[0], q_heads, out.shape[-1]).to(dtype=out_dtype)
+    if meta.cache_seqlens.dtype != torch.int32:
+        raise ValueError("native decode requires int32 cache_seqlens")
+    if meta.block_table.dtype != torch.int32:
+        raise ValueError("native decode requires int32 block_table")
+    return areno_paged_causal_attention_decode(
+        q.contiguous(),
+        k_update.contiguous(),
+        v_update.contiguous(),
+        k_cache.contiguous(),
+        v_cache.contiguous(),
+        meta.block_table.contiguous(),
+        meta.cache_seqlens.contiguous(),
+        window_left=_window_left(window_size),
+        num_splits=8,
+        softmax_scale=softmax_scale,
+    ).to(dtype=out_dtype)
 
 
 def _store_prefill_cache(

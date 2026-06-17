@@ -9,11 +9,15 @@ groups consumed by the worker cluster.
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
 import torch
+
+FLASH_ATTENTION_MIN_CUDA_CAPABILITY = (8, 0)
+FLASH_ATTENTION_MAX_QK_HEAD_DIM = 256
 
 
 @dataclass(slots=True)
@@ -37,12 +41,42 @@ class RuntimeConfig:
     """Runtime allocation config for rollout decode and CUDA graphs."""
 
     kv_block_size: int = 256
+    attn_backend: Literal["flash", "native"] = "flash"
     activation_checkpointing: bool = True
     keep_rollout_state: bool = True
     eager_decode: bool = False
     decode_graph_buckets: list[int] = field(
         default_factory=lambda: [1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 56, 64, 96, 128, 192, 256]
     )
+
+    def __post_init__(self) -> None:
+        if self.attn_backend not in {"flash", "native"}:
+            raise ValueError("runtime.attn_backend must be one of: flash, native")
+
+    def resolve_attn_backend(self, *, model: ModelConfig, devices: list[int]) -> None:
+        """Switch flash-attn unsupported hardware or model shapes to native attention."""
+
+        if self.attn_backend != "flash":
+            return
+        reasons = [
+            reason
+            for reason in (
+                flash_attention_unsupported_gpu_reason(devices),
+                flash_attention_unsupported_model_reason(model),
+            )
+            if reason is not None
+        ]
+        if not reasons:
+            return
+        reason = "; ".join(reasons)
+        warnings.warn(
+            f"flash-attn does not support the detected runtime configuration ({reason}); "
+            "falling back to attn_backend='native'. Native attention is a compatibility path "
+            "and may be slower than flash-attn on supported GPUs.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        self.attn_backend = "native"
 
 
 @dataclass(slots=True)
@@ -117,6 +151,7 @@ class ModelConfig:
     linear_value_head_dim: int = 128
     linear_num_key_heads: int = 16
     linear_num_value_heads: int = 16
+    attn_backend: Literal["flash", "native"] = "flash"
 
     def validate_tp(self, tp_size: int) -> None:
         """Validate tensor-parallel divisibility required by local kernels."""
@@ -196,6 +231,51 @@ class EngineConfig:
             raise ValueError("runtime.kv_block_size must be >= 1")
         if self.runtime.kv_block_size % 256 != 0:
             raise ValueError("runtime.kv_block_size must be a multiple of 256 for FlashAttention paged KV")
+        self.runtime.resolve_attn_backend(model=self.model, devices=self.devices)
+        self.model.attn_backend = self.runtime.attn_backend
+
+
+def flash_attention_unsupported_model_reason(model: ModelConfig) -> str | None:
+    """Return a user-facing reason when a model shape cannot run flash-attn."""
+
+    dims = [("qk head dim", model.head_dim)]
+    if model.swa_head_dim is not None:
+        dims.append(("swa qk head dim", model.swa_head_dim))
+    if model.qk_nope_head_dim or model.qk_rope_head_dim:
+        dims.append(("qk head dim", model.qk_nope_head_dim + model.qk_rope_head_dim))
+    unsupported = [
+        f"{name} {dim}" for name, dim in dims if dim is not None and int(dim) > FLASH_ATTENTION_MAX_QK_HEAD_DIM
+    ]
+    if not unsupported:
+        return None
+    return ", ".join(unsupported)
+
+
+def flash_attention_unsupported_gpu_reason(devices: list[int] | None = None) -> str | None:
+    """Return a user-facing reason when visible GPUs cannot run flash-attn."""
+
+    if not torch.cuda.is_available():
+        return None
+    device_count = torch.cuda.device_count()
+    if device_count <= 0:
+        return None
+    selected_devices = devices if devices is not None else list(range(device_count))
+    unsupported: list[str] = []
+    for device in selected_devices:
+        if device < 0 or device >= device_count:
+            continue
+        major, minor = torch.cuda.get_device_capability(device)
+        capability = (int(major), int(minor))
+        if capability >= FLASH_ATTENTION_MIN_CUDA_CAPABILITY:
+            continue
+        try:
+            name = torch.cuda.get_device_name(device)
+        except Exception:
+            name = f"cuda:{device}"
+        unsupported.append(f"{name} cc {major}.{minor}")
+    if not unsupported:
+        return None
+    return ", ".join(unsupported)
 
 
 def _parse_dtype(value: str | None) -> torch.dtype:

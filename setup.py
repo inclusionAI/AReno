@@ -43,6 +43,7 @@ def _cuda_extensions():
             sources=[
                 "areno/accel/csrc/extension.cpp",
                 "areno/accel/csrc/activation.cu",
+                "areno/accel/csrc/attention.cu",
                 "areno/accel/csrc/conv.cu",
                 "areno/accel/csrc/embedding.cu",
                 "areno/accel/csrc/linear.cu",

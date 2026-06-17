@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 from areno.engine.data.tokenizer import load_tokenizer as load_tokenizer  # noqa: F401
 
@@ -45,12 +46,37 @@ def encode_generation_prompt(tokenizer, prompt: str) -> list[int]:
     """
 
     if _looks_chat_formatted(prompt) or not getattr(tokenizer, "chat_template", None):
-        return tokenizer.encode(prompt)
-    return tokenizer.apply_chat_template(
-        [{"role": "user", "content": prompt}],
-        tokenize=True,
-        add_generation_prompt=True,
+        return normalize_token_ids(tokenizer.encode(prompt))
+    return normalize_token_ids(
+        tokenizer.apply_chat_template(
+            [{"role": "user", "content": prompt}],
+            tokenize=True,
+            add_generation_prompt=True,
+        )
     )
+
+
+def normalize_token_ids(value: Any) -> list[int]:
+    """Convert tokenizer outputs to a plain list of integer token ids."""
+
+    if hasattr(value, "ids"):
+        value = value.ids
+    if hasattr(value, "input_ids"):
+        value = value.input_ids
+    if isinstance(value, list | tuple):
+        if value and hasattr(value[0], "ids"):
+            if len(value) != 1:
+                raise TypeError("expected one tokenized prompt, got a batch of encodings")
+            return normalize_token_ids(value[0])
+        if value and isinstance(value[0], list | tuple):
+            if len(value) != 1:
+                raise TypeError("expected one tokenized prompt, got a batch of token id lists")
+            return normalize_token_ids(value[0])
+        try:
+            return [int(token_id) for token_id in value]
+        except TypeError as exc:
+            raise TypeError(f"expected token ids, got {type(value).__name__}") from exc
+    raise TypeError(f"expected token ids or tokenizer Encoding, got {type(value).__name__}")
 
 
 def _looks_chat_formatted(prompt: str) -> bool:

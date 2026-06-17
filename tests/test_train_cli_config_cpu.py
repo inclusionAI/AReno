@@ -114,13 +114,17 @@ def test_train_config_validates_ppo_positive_fields(field, value, message):
 
 
 def test_train_config_builds_sft_shape_without_rollout_or_role_fields():
-    cfg = _trainer_config_from_options(**_options(algo="sft", reward_fn_path=None, reward_ckpt=None, min_lr=0.0))
+    cfg = _trainer_config_from_options(
+        **_options(algo="sft", reward_fn_path=None, reward_ckpt=None, min_lr=0.0, attn_backend="native")
+    )
 
     assert type(cfg) is TrainerConfig
     assert cfg.algo == "sft"
     assert cfg.ckpt == "actor"
     assert cfg.dataset_path == "dataset"
     assert cfg.optimizer_min_lr == 0.0
+    assert cfg.attn_backend == "native"
+    assert cfg.areno_config().runtime["attn_backend"] == "native"
     assert cfg.batch_size == 2
     assert cfg.mini_bs == 1
     assert not hasattr(cfg, "n_samples")
@@ -257,12 +261,28 @@ def test_training_config_summary_shows_resolved_values_and_warning():
     assert "dataset_path    dataset" in summary
     assert "reward_fn       none" in summary
     assert "reward_ckpt     reward-model" in summary
-    assert "dp_size     4" in summary
+    assert "dp_size       4" in summary
+    assert "attn_backend  flash" in summary
     assert "max_running_prompts  12" in summary
     assert "sampling             greedy=no, temperature=0.7, top_k=20, top_p=0.9" in summary
     assert "optimizer                    lr=2e-06, min_lr=0.0, decay=cosine/100" in summary
     assert "metrics_log_dir  /tmp/metrics" in summary
     assert "WARNING: no checkpoint output path configured (--save-path)" in summary
+
+
+def test_training_config_summary_warns_about_native_attention_fallback(monkeypatch):
+    cfg = _trainer_config_from_options(**_options(algo="sft", reward_fn_path=None, reward_ckpt=None, world_size=1))
+    monkeypatch.setattr(
+        train_cli,
+        "flash_attention_unsupported_gpu_reason",
+        lambda devices: "Tesla T4 cc 7.5",
+    )
+
+    summary = _format_training_config_summary(cfg)
+
+    assert summary.startswith("AReno training config\nWARNING: flash-attn does not support")
+    assert "AReno will use attn_backend='native'" in summary
+    assert "attn_backend  native (auto fallback from flash: Tesla T4 cc 7.5)" in summary
 
 
 def test_training_config_summary_can_colorize_output():
@@ -313,8 +333,8 @@ def test_training_config_summary_handles_invalid_tp_size_defensively():
 
     summary = _format_training_config_summary(cfg)
 
-    assert "tp_size     0" in summary
-    assert "dp_size     n/a" in summary
+    assert "tp_size       0" in summary
+    assert "dp_size       n/a" in summary
 
 
 def test_training_config_summary_section_handles_empty_rows():
@@ -358,7 +378,7 @@ def test_train_command_prints_summary_before_run(monkeypatch):
     assert result.exit_code == 0, result.output
     output = unstyle(result.output)
     assert output.startswith("AReno training config\n")
-    assert "dp_size     2" in output
+    assert "dp_size       2" in output
     assert "save_path        out" in output
     assert "WARNING: no checkpoint output path configured" not in output
     assert events == [("run", "sft")]
@@ -399,6 +419,7 @@ def _options(**overrides):
         activation_checkpointing=True,
         drop_rollout_state=False,
         eager_decode=False,
+        attn_backend="flash",
         metrics_log_dir=None,
         agent_fn=None,
         agent_timeout_s=300.0,

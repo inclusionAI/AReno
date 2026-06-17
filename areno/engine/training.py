@@ -67,8 +67,8 @@ class TrainingManager:
             worker._prepare_for_train()
         worker.model.train()
         data_pack_obj = data_pack_shards[ctx.dp_rank]
-        data_pack = to_device(data_pack_obj, worker.device)
-        data_pack = _pack_train_data(data_pack)
+        data_pack = _pack_train_data(data_pack_obj)
+        data_pack = to_device(data_pack, worker.device)
         data_pack["_sequence_parallel_enabled"] = worker.config.model.sequence_parallel
         data_pack["_activation_checkpointing_enabled"] = worker.config.runtime.activation_checkpointing
         tokens = data_pack["input_ids"].long()

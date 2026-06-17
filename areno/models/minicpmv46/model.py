@@ -105,7 +105,8 @@ class MiniCPMFullAttention(nn.Module):
             config.partial_rotary_factor,
             is_neox_style=True,
         )
-        self.train_backend = build_train_attention_backend()
+        self.attn_backend = config.attn_backend
+        self.train_backend = build_train_attention_backend(self.attn_backend)
         self.infer_backend: FlashAttnInferBackend | None = None
         self.k_cache = torch.tensor([])
         self.v_cache = torch.tensor([])
@@ -146,7 +147,7 @@ class MiniCPMFullAttention(nn.Module):
         if self.infer_backend is None:
             # Lazy-build the flash-attn inference backend the first time we
             # serve a request.
-            self.infer_backend = build_infer_attention_backend()
+            self.infer_backend = build_infer_attention_backend(self.attn_backend)
         return self.infer_backend(q, k, v, self.k_cache, self.v_cache, infer_meta)
 
     def set_kv_cache(self, k_cache: torch.Tensor, v_cache: torch.Tensor) -> None:

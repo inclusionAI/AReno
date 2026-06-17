@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import unittest
+from types import SimpleNamespace
 
 import areno.api.trainer as trainer_mod
 from areno import Trainer
@@ -121,7 +122,7 @@ class TrainerPromptBatchTest(unittest.TestCase):
 
         async def run_rollout():
             async with trainer.rollout_session(sampling_params=SamplingParams(), proxy=False):
-                return trainer.rollout_token_batch([[1, 2], [3]], 4, SamplingParams())
+                return trainer.rollout_token_batch([SimpleNamespace(ids=[1, 2]), [3]], 4, SamplingParams())
 
         result = asyncio.run(run_rollout())
 

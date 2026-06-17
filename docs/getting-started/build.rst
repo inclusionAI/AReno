@@ -47,19 +47,23 @@ the repository root:
 .. code-block:: bash
 
    pip install psutil
-   pip install flash-attn flash-linear-attention
+   pip install flash-linear-attention
    pip install -e . --no-build-isolation
 
 .. note::
 
    ``--no-build-isolation`` uses the packages already installed in your
    environment. Install ``psutil`` first because PyTorch's CUDA extension
-   builder imports it while sizing parallel compile jobs. ``flash-attn``,
-   CUDA, and PyTorch must be ABI compatible. The editable install builds the
-   ``areno_accel`` CUDA extension used by local kernels.
-   Install ``flash-attn`` before AReno so the local build can reuse the
-   already-installed package. If building ``flash-attn`` from source is too
-   slow for your environment, install a pre-built wheel from the
+   builder imports it while sizing parallel compile jobs. CUDA and PyTorch
+   must be ABI compatible. The editable install builds the ``areno_accel``
+   CUDA extension used by local kernels.
+   Install ``flash-attn`` before AReno only if you use the default
+   ``--attn-backend flash`` high-throughput path. ``flash-attn`` is optional
+   when running with ``--attn-backend native``; AReno automatically falls back
+   to native attention on flash-attn-unsupported GPUs such as Tesla T4 and
+   warns that native attention is a slower compatibility path. If building
+   ``flash-attn`` from source is too slow for your environment, install a
+   pre-built wheel from the
    `flash-attention releases <https://github.com/Dao-AILab/flash-attention/releases>`_
    that matches your Python, PyTorch, CUDA, and platform.
    When ``TORCH_CUDA_ARCH_LIST`` is not set, AReno targets the visible GPU

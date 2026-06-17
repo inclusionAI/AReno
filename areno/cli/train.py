@@ -31,6 +31,11 @@ from areno.api.trainer_config import (
     TrainerConfig,
 )
 from areno.cli.model_refs import resolve_model_refs_for_config
+from areno.engine.config import (
+    ModelConfig,
+    flash_attention_unsupported_gpu_reason,
+    flash_attention_unsupported_model_reason,
+)
 
 
 def _trainer_config_from_options(**options) -> TrainerConfig:
@@ -112,11 +117,16 @@ def _require_positive_float(value: float, option_name: str) -> None:
 
 
 def _format_training_config_summary(
-    config: TrainerConfig, *, reward_ckpt: str | None = None, color: bool = False
+    config: TrainerConfig,
+    *,
+    reward_ckpt: str | None = None,
+    model_config: ModelConfig | None = None,
+    color: bool = False,
 ) -> str:
     """Return a concise user-facing summary of the resolved train config."""
 
     algorithm = get_algorithm(config.algo)
+    attn_backend, attn_warning = _resolved_attn_backend_for_summary(config, model_config=model_config)
     sections = [
         (
             "Algorithm",
@@ -146,6 +156,7 @@ def _format_training_config_summary(
                 ("world_size", str(config.world_size)),
                 ("tp_size", str(config.tp_size)),
                 ("dp_size", _resolved_dp_size_for_summary(config)),
+                ("attn_backend", attn_backend),
             ],
         ),
         ("Rollout", _rollout_summary_rows(config)),
@@ -176,6 +187,8 @@ def _format_training_config_summary(
         ),
     ]
     lines = [_style("AReno training config", fg="bright_white", bold=True, color=color)]
+    if attn_warning is not None:
+        lines.append(_style("WARNING", fg="yellow", bold=True, color=color) + f": {attn_warning}")
     for section, rows in sections:
         lines.extend(_format_summary_section(section, rows, color=color))
     if config.save_path is None:
@@ -186,8 +199,13 @@ def _format_training_config_summary(
     return "\n".join(lines)
 
 
-def _print_training_config_summary(config: TrainerConfig, *, reward_ckpt: str | None = None) -> None:
-    click.echo(_format_training_config_summary(config, reward_ckpt=reward_ckpt, color=True), color=True)
+def _print_training_config_summary(
+    config: TrainerConfig, *, reward_ckpt: str | None = None, model_config: ModelConfig | None = None
+) -> None:
+    click.echo(
+        _format_training_config_summary(config, reward_ckpt=reward_ckpt, model_config=model_config, color=True),
+        color=True,
+    )
 
 
 def _format_summary_section(section: str, rows: list[tuple[str, str]], *, color: bool) -> list[str]:
@@ -236,6 +254,41 @@ def _reward_ckpt_for_summary(config: TrainerConfig, reward_ckpt: str | None) -> 
     if isinstance(config, PPOTrainerConfig):
         return config.reward_ckpt
     return reward_ckpt
+
+
+def _resolved_attn_backend_for_summary(
+    config: TrainerConfig, *, model_config: ModelConfig | None = None
+) -> tuple[str, str | None]:
+    if config.attn_backend != "flash":
+        return config.attn_backend, None
+    reasons = [
+        reason
+        for reason in (
+            flash_attention_unsupported_gpu_reason(list(range(config.world_size))),
+            flash_attention_unsupported_model_reason(model_config) if model_config is not None else None,
+        )
+        if reason is not None
+    ]
+    if not reasons:
+        return config.attn_backend, None
+    reason = "; ".join(reasons)
+    backend = f"native (auto fallback from flash: {reason})"
+    warning = (
+        f"flash-attn does not support the detected runtime configuration ({reason}); "
+        "AReno will use attn_backend='native'. Native attention is a compatibility path and may be slower."
+    )
+    return backend, warning
+
+
+def _model_config_for_summary(config: TrainerConfig) -> ModelConfig | None:
+    if not Path(config.ckpt).exists():
+        return None
+    try:
+        from areno.models.registry import config_from_hf
+
+        return config_from_hf(config.ckpt)
+    except Exception:
+        return None
 
 
 def _callable_name(fn) -> str:
@@ -364,6 +417,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             activation_checkpointing=args.activation_checkpointing,
             keep_rollout_state=not args.drop_rollout_state,
             eager_decode=args.eager_decode,
+            attn_backend=args.attn_backend,
             metrics_log_dir=args.metrics_log_dir,
             agent_fn=args.agent_fn,
             agent_timeout_s=args.agent_timeout_s,
@@ -399,6 +453,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             activation_checkpointing=args.activation_checkpointing,
             keep_rollout_state=not args.drop_rollout_state,
             eager_decode=args.eager_decode,
+            attn_backend=args.attn_backend,
             metrics_log_dir=args.metrics_log_dir,
             agent_fn=args.agent_fn,
             agent_timeout_s=args.agent_timeout_s,
@@ -439,6 +494,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             activation_checkpointing=args.activation_checkpointing,
             keep_rollout_state=not args.drop_rollout_state,
             eager_decode=args.eager_decode,
+            attn_backend=args.attn_backend,
             gspo_clip_eps=args.gspo_clip_eps,
             grpo_clip_eps=args.grpo_clip_eps,
             metrics_log_dir=args.metrics_log_dir,
@@ -480,6 +536,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
         activation_checkpointing=args.activation_checkpointing,
         keep_rollout_state=not args.drop_rollout_state,
         eager_decode=args.eager_decode,
+        attn_backend=args.attn_backend,
         gspo_clip_eps=args.gspo_clip_eps,
         grpo_clip_eps=args.grpo_clip_eps,
         metrics_log_dir=args.metrics_log_dir,
@@ -771,6 +828,13 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     help="Drop rollout state after each step to save GPU memory.",
 )
 @click.option("--eager-decode", is_flag=True, help="Disable decode CUDA graph and run rollout decode eagerly.")
+@click.option(
+    "--attn-backend",
+    type=click.Choice(["flash", "native"]),
+    default="flash",
+    show_default=True,
+    help="Attention backend. Use native for slower areno_accel attention consistency diagnostics.",
+)
 @click.option("--agent-fn", default=None, help="Python file defining async run_agent(ctx, batch) for agentic rollout.")
 @click.option(
     "--agent-timeout-s", type=float, default=300.0, show_default=True, help="Agentic rollout proxy request timeout."
@@ -805,7 +869,11 @@ def train_command(**options) -> None:
 
     trainer_config = _trainer_config_from_options(**options)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    _print_training_config_summary(trainer_config, reward_ckpt=options.get("reward_ckpt"))
+    _print_training_config_summary(
+        trainer_config,
+        reward_ckpt=options.get("reward_ckpt"),
+        model_config=_model_config_for_summary(trainer_config),
+    )
     run(trainer_config)
 
 

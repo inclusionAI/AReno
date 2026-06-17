@@ -159,6 +159,7 @@ def create_app(
     default_max_tokens: int,
     decode_progress_interval_s: float,
     eager_decode: bool = False,
+    attn_backend: Literal["flash", "native"] = "flash",
 ) -> FastAPI:
     """Construct the FastAPI app: load tokenizer/engine, install routes and lifecycle hooks."""
     if world_size < 1:
@@ -175,7 +176,7 @@ def create_app(
         tp_size=tp_size,
         dp_size=world_size // tp_size,
         devices=list(range(world_size)),
-        runtime_config=RuntimeConfig(eager_decode=bool(eager_decode)),
+        runtime_config=RuntimeConfig(eager_decode=bool(eager_decode), attn_backend=attn_backend),
         loss_fn=_serve_loss_fn,
     )
     state = ServeState(
@@ -442,7 +443,7 @@ def _first_eos_token_id(tokenizer: Any) -> int | None:
     eos = getattr(tokenizer, "eos_token_id", None)
     if isinstance(eos, int):
         return eos
-    if isinstance(eos, (list, tuple)) and eos:
+    if isinstance(eos, list | tuple) and eos:
         return int(eos[0])
     return None
 
@@ -452,7 +453,7 @@ def _stop_token_ids(tokenizer: Any) -> tuple[int, ...]:
     eos = getattr(tokenizer, "eos_token_id", None)
     if isinstance(eos, int):
         return (eos,)
-    if isinstance(eos, (list, tuple)):
+    if isinstance(eos, list | tuple):
         return tuple(int(value) for value in eos)
     return ()
 
@@ -492,6 +493,13 @@ def _normalize_stop(stop: str | list[str] | None) -> list[str]:
     help="Worker decode progress log interval.",
 )
 @click.option("--eager-decode", is_flag=True, help="Run decode in eager mode instead of CUDA graph replay.")
+@click.option(
+    "--attn-backend",
+    type=click.Choice(["flash", "native"]),
+    default="flash",
+    show_default=True,
+    help="Attention backend. Use native for slower areno_accel attention compatibility/logprob diagnostics.",
+)
 def serve_command(
     model_path: str,
     tp_size: int,
@@ -502,6 +510,7 @@ def serve_command(
     default_max_tokens: int,
     decode_progress_interval_s: float,
     eager_decode: bool,
+    attn_backend: Literal["flash", "native"],
 ) -> None:
     """Click entry point: build the app and hand it to uvicorn."""
     import uvicorn
@@ -515,6 +524,7 @@ def serve_command(
         default_max_tokens=default_max_tokens,
         decode_progress_interval_s=decode_progress_interval_s,
         eager_decode=eager_decode,
+        attn_backend=attn_backend,
     )
     uvicorn.run(app, host=host, port=port)
 

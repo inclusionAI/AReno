@@ -54,28 +54,21 @@ def packed_next_token_logprobs(
     # of the next token, then run the same TP kernel over those.
     flat_tokens = tokens.reshape(-1)
     cu_seqlens = cu_seqlens.to(device=tokens.device, dtype=torch.long)
-    action_count = int((cu_seqlens[1:] - cu_seqlens[:-1] - 1).clamp(min=0).sum().item())
+    # Training packs every row with at least one token, so the number of
+    # next-token action sites is total_tokens minus one tail token per row.
+    # Keep this as shape arithmetic to avoid a GPU sync from `.item()`.
+    action_count = max(flat_tokens.numel() - (cu_seqlens.numel() - 1), 0)
     selected = torch.empty(action_count, device=logits_shard.device, dtype=torch.float32)
     if action_count == 0:
         return selected
 
-    positions = torch.empty(action_count, device=tokens.device, dtype=torch.long)
-    labels = torch.empty(action_count, device=tokens.device, dtype=torch.long)
-    offset = 0
-    for seq_idx in range(cu_seqlens.numel() - 1):
-        start = int(cu_seqlens[seq_idx].item())
-        end = int(cu_seqlens[seq_idx + 1].item())
-        length = end - start
-        if length <= 1:
-            continue
-        count = length - 1
-        slc = slice(offset, offset + count)
-        # `positions[k]` is the index inside the packed sequence whose logits
-        # predict `labels[k]`. We drop the last position of each row because
-        # it has no next-token target.
-        positions[slc] = torch.arange(start, end - 1, device=tokens.device)
-        labels[slc] = flat_tokens[start + 1 : end]
-        offset += count
+    # `positions[k]` is the packed index whose logits predict `labels[k]`.
+    # Drop each sequence tail because it has no next-token target.
+    positions = torch.arange(flat_tokens.numel(), device=tokens.device)
+    keep = torch.ones(flat_tokens.numel(), device=tokens.device, dtype=torch.bool)
+    keep[cu_seqlens[1:] - 1] = False
+    positions = positions[keep]
+    labels = flat_tokens[positions + 1]
 
     for start in range(0, action_count, chunk_size):
         end = min(start + chunk_size, action_count)

@@ -40,6 +40,7 @@ class CausalSelfAttention(nn.Module):
         self.head_dim = config.head_dim
         self.num_heads = config.num_attention_heads
         self.num_kv_heads = config.num_key_value_heads
+        self.attn_backend = config.attn_backend
         # Local query head count after column-parallel sharding.
         self.local_heads = self.num_heads // ctx.world_size
         # Fused QKV column-parallel projection; ranks each own a contiguous
@@ -61,7 +62,7 @@ class CausalSelfAttention(nn.Module):
         # Optional per-head QK normalization (used by some recent models).
         self.q_norm = RMSNorm(config.head_dim, config.rms_norm_eps) if config.qk_norm else None
         self.k_norm = RMSNorm(config.head_dim, config.rms_norm_eps) if config.qk_norm else None
-        self.train_backend = build_train_attention_backend()
+        self.train_backend = build_train_attention_backend(self.attn_backend)
         # Inference backend and KV cache buffers are lazily attached: training
         # uses neither, and inference plumbs the cache in via set_kv_cache.
         self.infer_backend: FlashAttnInferBackend | None = None
@@ -117,7 +118,7 @@ class CausalSelfAttention(nn.Module):
         # Lazy backend init so the FlashAttention functions are only bound when
         # the layer actually serves an inference request.
         if self.infer_backend is None:
-            self.infer_backend = build_infer_attention_backend()
+            self.infer_backend = build_infer_attention_backend(self.attn_backend)
         out = self.infer_backend(q, k, v, self.k_cache, self.v_cache, infer_meta)
         out = out.contiguous().view(q.shape[0], q.shape[1], self.local_heads * self.head_dim)
         return self.o_proj(out)

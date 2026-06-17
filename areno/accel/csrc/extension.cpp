@@ -16,6 +16,49 @@ std::vector<torch::Tensor> areno_linear_backward_cuda(
     torch::Tensor input,
     torch::Tensor weight,
     bool use_bias);
+torch::Tensor areno_causal_attention_forward_cuda(
+    torch::Tensor q,
+    torch::Tensor k,
+    torch::Tensor v,
+    int64_t query_start,
+    int64_t window_left,
+    double softmax_scale);
+std::vector<torch::Tensor> areno_causal_attention_backward_cuda(
+    torch::Tensor grad_out,
+    torch::Tensor q,
+    torch::Tensor k,
+    torch::Tensor v,
+    torch::Tensor out,
+    int64_t query_start,
+    int64_t window_left,
+    double softmax_scale);
+torch::Tensor areno_varlen_causal_attention_forward_cuda(
+    torch::Tensor q,
+    torch::Tensor k,
+    torch::Tensor v,
+    torch::Tensor cu_seqlens,
+    int64_t window_left,
+    double softmax_scale);
+std::vector<torch::Tensor> areno_varlen_causal_attention_backward_cuda(
+    torch::Tensor grad_out,
+    torch::Tensor q,
+    torch::Tensor k,
+    torch::Tensor v,
+    torch::Tensor out,
+    torch::Tensor cu_seqlens,
+    int64_t window_left,
+    double softmax_scale);
+torch::Tensor areno_paged_causal_attention_decode_forward_cuda(
+    torch::Tensor q,
+    torch::Tensor k_update,
+    torch::Tensor v_update,
+    torch::Tensor k_cache,
+    torch::Tensor v_cache,
+    torch::Tensor block_table,
+    torch::Tensor cache_seqlens,
+    int64_t window_left,
+    int64_t num_splits,
+    double softmax_scale);
 torch::Tensor areno_grouped_linear_forward_cuda(
     torch::Tensor input,
     torch::Tensor weight,
@@ -134,6 +177,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("areno_d_softplus", &areno_d_softplus_cuda, "ARENO softplus backward");
   m.def("areno_linear_forward", &areno_linear_forward_cuda, "ARENO linear forward");
   m.def("areno_linear_backward", &areno_linear_backward_cuda, "ARENO linear backward");
+  m.def("areno_causal_attention_forward", &areno_causal_attention_forward_cuda, "ARENO causal attention forward");
+  m.def("areno_causal_attention_backward", &areno_causal_attention_backward_cuda, "ARENO causal attention backward");
+  m.def("areno_varlen_causal_attention_forward", &areno_varlen_causal_attention_forward_cuda, "ARENO varlen causal attention forward");
+  m.def("areno_varlen_causal_attention_backward", &areno_varlen_causal_attention_backward_cuda, "ARENO varlen causal attention backward");
+  m.def("areno_paged_causal_attention_decode_forward", &areno_paged_causal_attention_decode_forward_cuda, "ARENO paged causal attention decode forward");
   m.def("areno_grouped_linear_forward", &areno_grouped_linear_forward_cuda, "ARENO grouped linear forward");
   m.def("areno_grouped_linear_forward_counts", &areno_grouped_linear_forward_counts_cuda, "ARENO grouped linear forward with GPU counts");
   m.def("areno_grouped_linear_backward", &areno_grouped_linear_backward_cuda, "ARENO grouped linear backward");
