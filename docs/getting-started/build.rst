@@ -33,14 +33,44 @@ Compatibility matrix
 Docker
 ------
 
-Build the CUDA runtime image from the repository root:
+Docker is the setup escape hatch when you want to verify AReno before
+debugging local Python, PyTorch, or CUDA build state. Build the CUDA runtime
+image from the repository root, then run the same readiness check used by local
+installs:
 
 .. code-block:: bash
 
    docker build -t areno .
+   docker run --gpus all --rm -it areno areno check
 
 Use ``--build-arg PIP_INDEX_URL=...`` if your environment requires a package
 mirror.
+
+If you need local project files, model files, or a Hugging Face cache inside
+the container, mount them explicitly:
+
+.. code-block:: bash
+
+   docker run --gpus all --rm -it \
+     -v $PWD:/workspace \
+     -v $HOME/.cache/huggingface:/root/.cache/huggingface \
+     areno \
+     areno check
+
+Host checklist:
+
+.. code-block:: bash
+
+   nvidia-smi
+   docker run --gpus all --rm nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi
+   docker run --gpus all --rm areno areno check
+
+Docker gives you a known-good Python/PyTorch/CUDA user-space environment. It
+does not fix host-side requirements: the host still needs a working NVIDIA
+driver, NVIDIA Container Toolkit support for ``--gpus all``, and a driver new
+enough for the container CUDA runtime. Model downloads, Hugging Face tokens,
+cache paths, network access, disk space, and multi-node or custom networking
+remain user environment concerns and are outside the first Docker setup path.
 
 Python distributions
 --------------------

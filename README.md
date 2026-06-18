@@ -87,6 +87,33 @@ pip install flash-linear-attention
 pip install -e . --no-build-isolation
 ```
 
+**Docker setup escape hatch** (recommended when you want to verify AReno before debugging local build state):
+
+```bash
+docker build -t areno .
+docker run --gpus all --rm -it areno areno check
+```
+
+If you need local project files, model files, or a Hugging Face cache inside the container:
+
+```bash
+docker run --gpus all --rm -it \
+  -v $PWD:/workspace \
+  -v $HOME/.cache/huggingface:/root/.cache/huggingface \
+  areno \
+  areno check
+```
+
+Host checklist before blaming AReno setup:
+
+```bash
+nvidia-smi
+docker run --gpus all --rm nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi
+docker run --gpus all --rm areno areno check
+```
+
+Docker gives you a known-good Python/PyTorch/CUDA user-space install path and reuses the same `areno check` diagnostic flow. It does not replace host requirements: the host still needs a working NVIDIA driver, NVIDIA Container Toolkit support for `--gpus all`, and a driver new enough for the container CUDA runtime. Docker also does not solve model downloads, Hugging Face tokens, cache paths, network access, disk space, or multi-node networking; those remain user environment concerns.
+
 **Tips:**
 
 - Install `ninja` (`pip install ninja`) before building so CUDA kernels compile in parallel.
