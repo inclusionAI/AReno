@@ -4,16 +4,16 @@ from __future__ import annotations
 
 from typing import Any
 
-from areno.api.tokenizer import encode_generation_prompt
+from areno.api.tokenizer import encode_generation_prompt, normalize_token_ids
 
 
 def apply_chat_template(tokenizer, messages: list[dict[str, Any]]) -> list[int]:
     """Encode full chat messages, with a plain-text fallback for base tokenizers."""
 
     if getattr(tokenizer, "chat_template", None):
-        return tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=False)
+        return normalize_token_ids(tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=False))
     text = "\n".join(f"{item.get('role', 'user')}: {item.get('content', '')}" for item in messages)
-    return tokenizer.encode(text, add_special_tokens=True)
+    return normalize_token_ids(tokenizer.encode(text, add_special_tokens=True))
 
 
 def encode_prompt_value(tokenizer, prompt) -> list[int]:
@@ -21,7 +21,7 @@ def encode_prompt_value(tokenizer, prompt) -> list[int]:
 
     if isinstance(prompt, list):
         if getattr(tokenizer, "chat_template", None):
-            return tokenizer.apply_chat_template(prompt, tokenize=True, add_generation_prompt=True)
+            return normalize_token_ids(tokenizer.apply_chat_template(prompt, tokenize=True, add_generation_prompt=True))
         text = "\n".join(f"{item.get('role', 'user')}: {item.get('content', '')}" for item in prompt)
         return encode_generation_prompt(tokenizer, text)
     return encode_generation_prompt(tokenizer, prompt)
@@ -41,7 +41,7 @@ def response_to_tokens_and_mask(
 ) -> tuple[list[int], list[bool]]:
     """Append a response to pre-tokenized prompt ids and mask prompt tokens."""
 
-    response_ids = tokenizer.encode(response, add_special_tokens=False)
+    response_ids = normalize_token_ids(tokenizer.encode(response, add_special_tokens=False))
     if eos_token_id is not None and (not response_ids or response_ids[-1] != eos_token_id):
         response_ids.append(eos_token_id)
     return prompt_ids + response_ids, [True] * len(prompt_ids) + [False] * len(response_ids)
@@ -68,6 +68,6 @@ def first_value(record: dict[str, Any], keys: tuple[str, ...]):
 
     for key in keys:
         value = record.get(key)
-        if isinstance(value, (str, list)):
+        if isinstance(value, str | list):
             return value
     return None

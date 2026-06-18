@@ -9,21 +9,34 @@ Supports two activation layouts:
   `flash_attn_varlen_func` so packed batches without padding can be
   trained efficiently.
 
-When flash-attn cannot serve the QK head dim (>256) the backend falls back
-to a manual SDPA path that supports both layouts and sliding windows.
+The ``native`` backend keeps rollout prefill/decode on native kernels while
+training uses PyTorch's SDPA math backend to avoid the slow native backward
+diagnostic kernel.
+Unsupported flash-attn shapes fail with an actionable message instead of
+silently falling back.
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 import torch
 import torch.nn.functional as F
-from flash_attn import flash_attn_func, flash_attn_varlen_func
 from torch import nn
+from torch.nn.attention import SDPBackend, sdpa_kernel
 
-from areno.engine.layers.attention_backend.common import build_attention_call, expand_kv_heads, sdpa_window_size
+from areno.engine.layers.attention_backend.common import (
+    AttnBackend,
+    build_attention_call,
+    expand_kv_heads,
+    require_flash_attention_supported,
+    use_native_attention,
+)
 from areno.engine.runtime.metadata import TrainMeta
+
+_SDPA_MATH_QUERY_CHUNK = 512
 
 
 class TrainAttentionBackend(nn.Module, ABC):
@@ -45,10 +58,9 @@ class TrainAttentionBackend(nn.Module, ABC):
 class FlashAttnTrainAttentionBackend(TrainAttentionBackend):
     """FlashAttention backend shared by padded and varlen packed training."""
 
-    def __init__(self):
+    def __init__(self, attn_backend: AttnBackend = "flash"):
         super().__init__()
-        self.flash_attn_func = flash_attn_func
-        self.flash_attn_varlen_func = flash_attn_varlen_func
+        self.attn_backend = attn_backend
 
     def forward(
         self,
@@ -60,9 +72,10 @@ class FlashAttnTrainAttentionBackend(TrainAttentionBackend):
         softmax_scale: float | None = None,
     ) -> torch.Tensor:
         call = build_attention_call(q, k, v, window_size, softmax_scale)
-        if not call.flash_supported:
-            # Unsupported QK head dim: drop to SDPA fallback (slower).
-            return _sdpa_train(q, k, v, meta, sdpa_window_size(call.window_size), call.softmax_scale)
+        if use_native_attention(self.attn_backend):
+            out = _native_train(call.q, call.k, call.v, meta, call.window_size, call.softmax_scale)
+            return call.trim_value_dim(out)
+        require_flash_attention_supported(call, mode="training attention")
         if meta is not None and meta.cu_seqlens is not None:
             # Varlen packed path: tensors must be flattened to (T, H, D) so
             # cu_seqlens can carve out the per-sequence boundaries.
@@ -104,15 +117,17 @@ class FlashAttnTrainAttentionBackend(TrainAttentionBackend):
         return call.trim_value_dim(out)
 
 
-def build_train_attention_backend() -> TrainAttentionBackend:
+def build_train_attention_backend(attn_backend: AttnBackend = "flash") -> TrainAttentionBackend:
     """Build the default FlashAttention training backend."""
 
-    return FlashAttnTrainAttentionBackend()
+    return FlashAttnTrainAttentionBackend(attn_backend=attn_backend)
 
 
 @torch._dynamo.disable
 def _flash_attn_train_no_compile(*args, **kwargs) -> torch.Tensor:
     """Dynamo-opaque wrapper for the dense flash-attn training kernel."""
+
+    from flash_attn import flash_attn_func
 
     return flash_attn_func(*args, **kwargs)
 
@@ -121,85 +136,139 @@ def _flash_attn_train_no_compile(*args, **kwargs) -> torch.Tensor:
 def _flash_attn_varlen_train_no_compile(*args, **kwargs) -> torch.Tensor:
     """Dynamo-opaque wrapper for the packed varlen flash-attn training kernel."""
 
+    from flash_attn import flash_attn_varlen_func
+
     return flash_attn_varlen_func(*args, **kwargs)
 
 
 @torch._dynamo.disable
-def _sdpa_train(
+def _native_train(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
     meta: TrainMeta | None,
-    window_size: tuple[int, int] | None,
+    window_size: tuple[int, int],
     softmax_scale: float | None,
 ) -> torch.Tensor:
-    """Training fallback for QK head dimensions unsupported by flash-attn."""
+    """Training path for attn_backend=native using PyTorch SDPA math."""
 
+    if meta is not None and meta.sequence_parallel:
+        raise RuntimeError(
+            "native attention backend training does not support sequence parallelism with SDPA math yet. "
+            "Disable sequence parallelism for logprob diagnostics or use --attn-backend flash."
+        )
     if meta is not None and meta.cu_seqlens is not None:
-        # Packed-layout SDPA: iterate sequences and concatenate the outputs.
-        outs = []
-        cu = meta.cu_seqlens.tolist()
+        cu = meta.cu_seqlens.detach().cpu().tolist()
         q_flat = q.reshape(-1, q.shape[-2], q.shape[-1])
         k_flat = k.reshape(-1, k.shape[-2], k.shape[-1])
         v_flat = v.reshape(-1, v.shape[-2], v.shape[-1])
-        for start, end in zip(cu[:-1], cu[1:], strict=True):
-            outs.append(
-                _sdpa_sequence(q_flat[start:end], k_flat[start:end], v_flat[start:end], window_size, softmax_scale)
-            )
+        outs = [
+            _sdpa_math_sequence(q_flat[start:end], k_flat[start:end], v_flat[start:end], window_size, softmax_scale)
+            for start, end in zip(cu[:-1], cu[1:], strict=True)
+            if end > start
+        ]
         return torch.cat(outs, dim=0).view(q.shape)
-    # Padded SDPA: expand KV heads for GQA and reshape to (B, H, S, D).
     k = expand_kv_heads(k, q.shape[-2])
     v = expand_kv_heads(v, q.shape[-2])
-    q_seq = q.transpose(1, 2)
-    k_seq = k.transpose(1, 2)
-    v_seq = v.transpose(1, 2)
-    if window_size is None:
-        return F.scaled_dot_product_attention(q_seq, k_seq, v_seq, is_causal=True, scale=softmax_scale).transpose(1, 2)
-    # Build a banded causal mask covering only positions inside the window.
-    seqlen = q.shape[1]
-    rows = torch.arange(seqlen, device=q.device).view(seqlen, 1)
-    cols = torch.arange(seqlen, device=q.device).view(1, seqlen)
-    mask = cols <= rows
-    if window_size[0] >= 0:
-        mask = mask & (cols >= rows - int(window_size[0]))
-    return F.scaled_dot_product_attention(
-        q_seq,
-        k_seq,
-        v_seq,
-        attn_mask=mask.view(1, 1, seqlen, seqlen),
-        scale=softmax_scale,
-    ).transpose(1, 2)
+    return _sdpa_math_padded(q, k, v, window_size, softmax_scale)
 
 
-def _sdpa_sequence(
+@contextmanager
+def _sdpa_math_kernel() -> Iterator[None]:
+    with sdpa_kernel(SDPBackend.MATH):
+        yield
+
+
+def _sdpa_math_padded(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    window_size: tuple[int, int] | None,
+    window_size: tuple[int, int],
     softmax_scale: float | None,
 ) -> torch.Tensor:
-    """SDPA over a single varlen-packed sequence slice."""
+    q_seq = q.transpose(1, 2)
+    k_seq = k.transpose(1, 2)
+    v_seq = v.transpose(1, 2)
+    if q.shape[1] > _SDPA_MATH_QUERY_CHUNK:
+        return _sdpa_math_chunked(q_seq, k_seq, v_seq, window_size, softmax_scale).transpose(1, 2)
+    with _sdpa_math_kernel():
+        if window_size == (-1, -1):
+            out = F.scaled_dot_product_attention(q_seq, k_seq, v_seq, is_causal=True, scale=softmax_scale)
+        else:
+            out = F.scaled_dot_product_attention(
+                q_seq,
+                k_seq,
+                v_seq,
+                attn_mask=_causal_window_mask(q.shape[1], k.shape[1], window_size, q.device, 0),
+                scale=softmax_scale,
+            )
+    return out.transpose(1, 2)
 
-    # Expand KV heads to match Q heads (SDPA has no GQA support).
-    k = expand_kv_heads(k, q.shape[1])
-    v = expand_kv_heads(v, q.shape[1])
+
+def _sdpa_math_sequence(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    window_size: tuple[int, int],
+    softmax_scale: float | None,
+) -> torch.Tensor:
+    k = expand_kv_heads(k, q.shape[-2])
+    v = expand_kv_heads(v, q.shape[-2])
     q_seq = q.transpose(0, 1).unsqueeze(0)
     k_seq = k.transpose(0, 1).unsqueeze(0)
     v_seq = v.transpose(0, 1).unsqueeze(0)
-    if window_size is None:
-        out = F.scaled_dot_product_attention(q_seq, k_seq, v_seq, is_causal=True, scale=softmax_scale)
-    else:
-        seqlen = q.shape[0]
-        rows = torch.arange(seqlen, device=q.device).view(seqlen, 1)
-        cols = torch.arange(seqlen, device=q.device).view(1, seqlen)
-        mask = cols <= rows
-        if window_size[0] >= 0:
-            mask = mask & (cols >= rows - int(window_size[0]))
-        out = F.scaled_dot_product_attention(
-            q_seq,
-            k_seq,
-            v_seq,
-            attn_mask=mask.view(1, 1, seqlen, seqlen),
-            scale=softmax_scale,
-        )
+    if q.shape[0] > _SDPA_MATH_QUERY_CHUNK:
+        return _sdpa_math_chunked(q_seq, k_seq, v_seq, window_size, softmax_scale).squeeze(0).transpose(0, 1)
+    with _sdpa_math_kernel():
+        if window_size == (-1, -1):
+            out = F.scaled_dot_product_attention(q_seq, k_seq, v_seq, is_causal=True, scale=softmax_scale)
+        else:
+            out = F.scaled_dot_product_attention(
+                q_seq,
+                k_seq,
+                v_seq,
+                attn_mask=_causal_window_mask(q.shape[0], k.shape[0], window_size, q.device, 0),
+                scale=softmax_scale,
+            )
     return out.squeeze(0).transpose(0, 1)
+
+
+def _sdpa_math_chunked(
+    q_seq: torch.Tensor,
+    k_seq: torch.Tensor,
+    v_seq: torch.Tensor,
+    window_size: tuple[int, int],
+    softmax_scale: float | None,
+) -> torch.Tensor:
+    chunks = []
+    seqlen = q_seq.shape[-2]
+    with _sdpa_math_kernel():
+        for start in range(0, seqlen, _SDPA_MATH_QUERY_CHUNK):
+            end = min(start + _SDPA_MATH_QUERY_CHUNK, seqlen)
+            chunks.append(
+                F.scaled_dot_product_attention(
+                    q_seq[:, :, start:end],
+                    k_seq,
+                    v_seq,
+                    attn_mask=_causal_window_mask(end - start, k_seq.shape[-2], window_size, q_seq.device, start),
+                    scale=softmax_scale,
+                )
+            )
+    return torch.cat(chunks, dim=-2)
+
+
+def _causal_window_mask(
+    q_len: int,
+    k_len: int,
+    window_size: tuple[int, int],
+    device: torch.device,
+    query_start: int,
+) -> torch.Tensor:
+    if window_size != (-1, -1) and window_size[1] != 0:
+        raise ValueError("SDPA math training only supports causal right window 0")
+    rows = torch.arange(query_start, query_start + q_len, device=device).view(q_len, 1)
+    cols = torch.arange(k_len, device=device).view(1, k_len)
+    mask = cols <= rows
+    if window_size[0] >= 0:
+        mask = mask & (cols >= rows - int(window_size[0]))
+    return mask.view(1, 1, q_len, k_len)

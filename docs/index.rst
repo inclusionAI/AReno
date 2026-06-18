@@ -34,8 +34,13 @@ Install in an existing CUDA + PyTorch environment:
 .. code-block:: bash
 
    pip install psutil
-   pip install flash-attn flash-linear-attention
+   pip install flash-linear-attention
    pip install -e . --no-build-isolation
+
+Install ``flash-attn`` as an optional extra only when using the default
+``--attn-backend flash`` path. ``flash-attn`` is not required for
+``--attn-backend native`` or for GPUs such as Tesla T4 where AReno falls back
+to native attention.
 
 Check whether the environment is ready:
 

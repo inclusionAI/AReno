@@ -608,7 +608,7 @@ def _grouped_weight(module: nn.Module, expert_id: int) -> torch.Tensor:
     weights = getattr(module, "weight", None)
     if isinstance(weights, torch.Tensor) and weights.dim() == 3:
         return weights[expert_id]
-    if isinstance(weights, (list, tuple, nn.ParameterList)):
+    if isinstance(weights, list | tuple | nn.ParameterList):
         return weights[expert_id]
     raise AttributeError(f"cannot find grouped expert weight for expert {expert_id}")
 
@@ -693,7 +693,8 @@ class BailingSoftmaxAttention(nn.Module):
             1.0,
             is_neox_style=False,
         )
-        self.train_backend = build_train_attention_backend()
+        self.attn_backend = config.attn_backend
+        self.train_backend = build_train_attention_backend(self.attn_backend)
         self.infer_backend: FlashAttnInferBackend | None = None
         # KV cache slots populated by the runtime at engine setup.
         self.k_cache = torch.tensor([])
@@ -712,7 +713,7 @@ class BailingSoftmaxAttention(nn.Module):
             # Lazily build the inference backend so weight-only training paths
             # don't pay the cost.
             if self.infer_backend is None:
-                self.infer_backend = build_infer_attention_backend()
+                self.infer_backend = build_infer_attention_backend(self.attn_backend)
             out = self.infer_backend(q, k, v, self.k_cache, self.v_cache, infer_meta)
         else:
             out = self.train_backend(q, k, v, train_meta)

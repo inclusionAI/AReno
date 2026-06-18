@@ -167,6 +167,13 @@ Runtime memory and speed
 ``--eager-decode``
    Disable decode CUDA graph and run rollout decode eagerly.
 
+``--attn-backend [flash|native]``
+   Attention backend. Default: ``flash``. Use ``native`` to run without
+   ``flash-attn`` on the areno_accel native compatibility path. AReno
+   automatically falls back to ``native`` on flash-attn-unsupported GPUs such
+   as Tesla T4 and prints a warning. ``native`` is slower than ``flash`` on
+   supported GPUs.
+
 Training rollouts run inside a rollout session. The session owns actor
 onload/offload, rollout cache state, CUDA graph state, and cleanup between
 rollout and train phases. Direct prompt rollout and agentic rollout both use

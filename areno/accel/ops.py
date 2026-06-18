@@ -18,6 +18,11 @@ from typing import Any
 import torch
 
 from areno.accel.activations import areno_gelu_tanh_and_mul, areno_silu_and_mul
+from areno.accel.attention import (
+    areno_causal_attention,
+    areno_paged_causal_attention_decode,
+    areno_varlen_causal_attention,
+)
 from areno.accel.kernels.fused_moe import FusedMoeConfig
 from areno.accel.kernels.fused_moe import fused_experts as areno_fused_experts
 from areno.accel.kernels.fused_moe import is_available as fused_moe_is_available
@@ -76,6 +81,9 @@ __all__ = [
     "rms_norm_gate_fwd",
     "seg_la_fwd",
     "areno_gelu_tanh_and_mul",
+    "areno_causal_attention",
+    "areno_paged_causal_attention_decode",
+    "areno_varlen_causal_attention",
     "areno_silu_and_mul",
     "warn_once",
 ]

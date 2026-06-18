@@ -4,12 +4,13 @@
 
 ## Quick reference
 
-**Tech stack**: Python 3.10+ | CUDA | PyTorch ≥ 2.6 | FlashAttention | flash-linear-attention | Transformers | safetensors
+**Tech stack**: Python 3.10+ | CUDA | PyTorch ≥ 2.6 | optional FlashAttention | flash-linear-attention | Transformers | safetensors
 
 ```bash
 # Install (requires an existing Linux + NVIDIA GPU + CUDA + PyTorch >= 2.6 env)
 pip install psutil                         # required with --no-build-isolation
-pip install flash-attn flash-linear-attention
+pip install flash-linear-attention
+pip install flash-attn                     # optional unless using --attn-backend flash
 pip install -e . --no-build-isolation         # --no-build-isolation: build against your installed torch
 TORCH_CUDA_ARCH_LIST="9.0" MAX_JOBS=64 pip install -e . --no-build-isolation  # target H100/H200 only
 ARENO_BUILD_EXT=0 pip install -e . --no-build-isolation   # skip CUDA build (metadata-only / dry run)

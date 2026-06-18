@@ -52,6 +52,13 @@ Options:
 ``--eager-decode``
    Disable decode CUDA graph and run rollout decode eagerly.
 
+``--attn-backend [flash|native]``
+   Attention backend. Default: ``flash``. Use ``native`` to run without
+   ``flash-attn`` on the areno_accel native compatibility path. AReno
+   automatically falls back to ``native`` on flash-attn-unsupported GPUs such
+   as Tesla T4 and prints a warning. ``native`` is slower than ``flash`` on
+   supported GPUs.
+
 ``world-size`` must be divisible by ``tp-size``.
 
 Examples

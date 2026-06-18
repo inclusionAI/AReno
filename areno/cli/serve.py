@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import warnings
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -21,9 +22,14 @@ from areno.api.openai_chat import build_chat_completion_response, messages_to_pr
 from areno.api.tool_call_parser import ToolCallParser, get_tool_call_parser, infer_tool_call_parser_name
 from areno.cli.model_refs import resolve_model_ref
 from areno.engine import ArenoEngine
-from areno.engine.config import RuntimeConfig
+from areno.engine.config import (
+    RuntimeConfig,
+    flash_attention_unsupported_gpu_reason,
+    flash_attention_unsupported_model_reason,
+)
 from areno.engine.data import SamplingParams
 from areno.engine.data.tokenizer import load_tokenizer
+from areno.models.registry import config_from_hf
 
 
 def _serve_loss_fn(*_: Any) -> torch.Tensor:
@@ -159,6 +165,7 @@ def create_app(
     default_max_tokens: int,
     decode_progress_interval_s: float,
     eager_decode: bool = False,
+    attn_backend: Literal["flash", "native"] = "flash",
 ) -> FastAPI:
     """Construct the FastAPI app: load tokenizer/engine, install routes and lifecycle hooks."""
     if world_size < 1:
@@ -169,13 +176,20 @@ def create_app(
         raise ValueError("world_size must be divisible by tp_size")
 
     tokenizer = load_tokenizer(model_path)
+    attn_backend, attn_warning = _resolve_serve_attn_backend(
+        model_path=model_path,
+        attn_backend=attn_backend,
+        world_size=world_size,
+    )
+    if attn_warning is not None:
+        warnings.warn(attn_warning, RuntimeWarning, stacklevel=2)
     parser_trainer = _ToolParserTrainerShim(model_path=model_path, tokenizer=tokenizer)
     engine = ArenoEngine.from_pretrained(
         model_path,
         tp_size=tp_size,
         dp_size=world_size // tp_size,
         devices=list(range(world_size)),
-        runtime_config=RuntimeConfig(eager_decode=bool(eager_decode)),
+        runtime_config=RuntimeConfig(eager_decode=bool(eager_decode), attn_backend=attn_backend),
         loss_fn=_serve_loss_fn,
     )
     state = ServeState(
@@ -265,6 +279,41 @@ def create_app(
         return await _await_pending_response(state, raw_request, pending)
 
     return app
+
+
+def _resolve_serve_attn_backend(
+    *,
+    model_path: str,
+    attn_backend: Literal["flash", "native"],
+    world_size: int,
+) -> tuple[Literal["flash", "native"], str | None]:
+    """Apply flash-attn compatibility fallback before serve starts workers."""
+
+    if attn_backend != "flash":
+        return attn_backend, None
+    model_config = None
+    try:
+        model_config = config_from_hf(model_path)
+    except Exception:
+        # Engine startup still owns config loading errors. This preflight can
+        # still catch GPU-only fallback when model config is unavailable.
+        pass
+    reasons = [
+        reason
+        for reason in (
+            flash_attention_unsupported_gpu_reason(list(range(world_size))),
+            flash_attention_unsupported_model_reason(model_config) if model_config is not None else None,
+        )
+        if reason is not None
+    ]
+    if not reasons:
+        return "flash", None
+    reason = "; ".join(reasons)
+    warning = (
+        f"flash-attn does not support the detected serve runtime configuration ({reason}); "
+        "AReno will use attn_backend='native'. Native attention is a compatibility path and may be slower."
+    )
+    return "native", warning
 
 
 async def _run_request_task(app: FastAPI, item: PendingRequest) -> None:
@@ -442,7 +491,7 @@ def _first_eos_token_id(tokenizer: Any) -> int | None:
     eos = getattr(tokenizer, "eos_token_id", None)
     if isinstance(eos, int):
         return eos
-    if isinstance(eos, (list, tuple)) and eos:
+    if isinstance(eos, list | tuple) and eos:
         return int(eos[0])
     return None
 
@@ -452,7 +501,7 @@ def _stop_token_ids(tokenizer: Any) -> tuple[int, ...]:
     eos = getattr(tokenizer, "eos_token_id", None)
     if isinstance(eos, int):
         return (eos,)
-    if isinstance(eos, (list, tuple)):
+    if isinstance(eos, list | tuple):
         return tuple(int(value) for value in eos)
     return ()
 
@@ -492,6 +541,13 @@ def _normalize_stop(stop: str | list[str] | None) -> list[str]:
     help="Worker decode progress log interval.",
 )
 @click.option("--eager-decode", is_flag=True, help="Run decode in eager mode instead of CUDA graph replay.")
+@click.option(
+    "--attn-backend",
+    type=click.Choice(["flash", "native"]),
+    default="flash",
+    show_default=True,
+    help="Attention backend. Use native for slower areno_accel attention compatibility/logprob diagnostics.",
+)
 def serve_command(
     model_path: str,
     tp_size: int,
@@ -502,6 +558,7 @@ def serve_command(
     default_max_tokens: int,
     decode_progress_interval_s: float,
     eager_decode: bool,
+    attn_backend: Literal["flash", "native"],
 ) -> None:
     """Click entry point: build the app and hand it to uvicorn."""
     import uvicorn
@@ -515,6 +572,7 @@ def serve_command(
         default_max_tokens=default_max_tokens,
         decode_progress_interval_s=decode_progress_interval_s,
         eager_decode=eager_decode,
+        attn_backend=attn_backend,
     )
     uvicorn.run(app, host=host, port=port)
 

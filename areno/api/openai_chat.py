@@ -7,6 +7,7 @@ import time
 import uuid
 from typing import Any
 
+from areno.api.tokenizer import normalize_token_ids
 from areno.api.tool_call_parser import ToolCallParser
 
 
@@ -59,17 +60,17 @@ def messages_to_prompt_tokens(
         if tools:
             kwargs["tools"] = tools
         try:
-            return tokenizer.apply_chat_template(messages, **kwargs)
+            return normalize_token_ids(tokenizer.apply_chat_template(messages, **kwargs))
         except TypeError:
             if tools:
                 kwargs["tools"] = _normalize_tools_for_chat_template(tools)
                 try:
-                    return tokenizer.apply_chat_template(messages, **kwargs)
+                    return normalize_token_ids(tokenizer.apply_chat_template(messages, **kwargs))
                 except TypeError:
                     pass
             kwargs.pop("tools", None)
-            return tokenizer.apply_chat_template(messages, **kwargs)
-    return tokenizer.encode(messages_to_text(messages) or fallback_prompt)
+            return normalize_token_ids(tokenizer.apply_chat_template(messages, **kwargs))
+    return normalize_token_ids(tokenizer.encode(messages_to_text(messages) or fallback_prompt))
 
 
 def _normalize_tools_for_chat_template(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:

@@ -38,7 +38,6 @@ classifiers = [
 ]
 dependencies = [
   "torch>=2.6",
-  "flash-attn>=2.7",
   "flash-linear-attention>=0.2",
   "safetensors>=0.4",
   "transformers>=4.56",
@@ -51,6 +50,11 @@ dependencies = [
   "click>=8.1",
   "tqdm>=4.66",
   "uvicorn>=0.27",
+]
+
+[project.optional-dependencies]
+flash = [
+  "flash-attn>=2.7",
 ]
 
 [project.urls]

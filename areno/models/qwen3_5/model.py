@@ -126,7 +126,8 @@ class Qwen35FullAttention(nn.Module):
             config.partial_rotary_factor,
             is_neox_style=True,
         )
-        self.train_backend = build_train_attention_backend()
+        self.attn_backend = config.attn_backend
+        self.train_backend = build_train_attention_backend(self.attn_backend)
         self.infer_backend: FlashAttnInferBackend | None = None
         self.k_cache = torch.tensor([])
         self.v_cache = torch.tensor([])
@@ -173,7 +174,7 @@ class Qwen35FullAttention(nn.Module):
         if self.k_cache.numel() == 0 or self.v_cache.numel() == 0:
             raise RuntimeError("Qwen3.5 full attention inference requires KV cache")
         if self.infer_backend is None:
-            self.infer_backend = build_infer_attention_backend()
+            self.infer_backend = build_infer_attention_backend(self.attn_backend)
         return self.infer_backend(q, k, v, self.k_cache, self.v_cache, infer_meta)
 
     def set_kv_cache(self, k_cache: torch.Tensor, v_cache: torch.Tensor) -> None:

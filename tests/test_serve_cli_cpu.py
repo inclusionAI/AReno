@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from areno.api.tool_call_parser import QwenToolCallParser
 from areno.cli import serve as serve_mod
+from areno.engine.config import ModelConfig
 
 
 def test_create_app_passes_eager_decode_runtime_config(monkeypatch):
@@ -29,9 +32,49 @@ def test_create_app_passes_eager_decode_runtime_config(monkeypatch):
         default_max_tokens=16,
         decode_progress_interval_s=0.0,
         eager_decode=True,
+        attn_backend="native",
     )
 
     assert captured["runtime_config"].eager_decode is True
+    assert captured["runtime_config"].attn_backend == "native"
+
+
+def test_create_app_falls_back_to_native_for_flash_unsupported_model(monkeypatch):
+    captured = {}
+
+    class FakeEngine:
+        config = SimpleNamespace(model=SimpleNamespace(max_position_embeddings=1024))
+
+        @classmethod
+        def from_pretrained(cls, *args, **kwargs):
+            del args
+            captured["runtime_config"] = kwargs["runtime_config"]
+            return cls()
+
+    model_config = ModelConfig(
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        intermediate_size=16,
+        vocab_size=32,
+        head_dim=512,
+    )
+    monkeypatch.setattr(serve_mod, "load_tokenizer", lambda model_path: SimpleNamespace(eos_token_id=1))
+    monkeypatch.setattr(serve_mod, "ArenoEngine", FakeEngine)
+    monkeypatch.setattr(serve_mod, "config_from_hf", lambda model_path: model_config)
+    monkeypatch.setattr(serve_mod, "flash_attention_unsupported_gpu_reason", lambda devices: None)
+
+    with pytest.warns(RuntimeWarning, match="qk head dim 512.*attn_backend='native'.*slower"):
+        serve_mod.create_app(
+            model_path="model",
+            tp_size=1,
+            world_size=1,
+            max_running_prompts=4,
+            default_max_tokens=16,
+            decode_progress_interval_s=0.0,
+            attn_backend="flash",
+        )
+
+    assert captured["runtime_config"].attn_backend == "native"
 
 
 def test_chat_completion_request_defaults_match_sampling_params():

@@ -19,7 +19,7 @@ from areno.api.data import PromptBatch, PromptItem
 from areno.api.metrics import MetricsRecorder
 from areno.api.models import BackendType, RolloutResult, SamplingParams, TrainSequence
 from areno.api.roles import ModelRole
-from areno.api.tokenizer import encode_generation_prompt, eos_token_ids, load_tokenizer
+from areno.api.tokenizer import encode_generation_prompt, eos_token_ids, load_tokenizer, normalize_token_ids
 
 
 class Trainer:
@@ -268,7 +268,9 @@ class Trainer:
         if self._rollout_session_depth <= 0:
             raise RuntimeError("rollout_token_batch must be called inside `async with trainer.rollout_session(...)`")
         self._begin_step()
-        return self._backend.rollout_batch(self._ctx, prompt_tokens, n_samples, sampling_params)
+        return self._backend.rollout_batch(
+            self._ctx, _normalize_prompt_token_batch(prompt_tokens), n_samples, sampling_params
+        )
 
     async def rollout_token_batch_async(
         self,
@@ -284,7 +286,7 @@ class Trainer:
             )
         self._begin_step()
         rollout_async = getattr(self._backend, "rollout_batch_async")
-        return await rollout_async(self._ctx, prompt_tokens, n_samples, sampling_params)
+        return await rollout_async(self._ctx, _normalize_prompt_token_batch(prompt_tokens), n_samples, sampling_params)
 
     def rollout_session(
         self,
@@ -399,3 +401,7 @@ class Trainer:
 
         if self._metrics is not None:
             self._metrics.close()
+
+
+def _normalize_prompt_token_batch(prompt_tokens: list[list[int]]) -> list[list[int]]:
+    return [normalize_token_ids(row) for row in prompt_tokens]
