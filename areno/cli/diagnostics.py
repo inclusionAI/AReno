@@ -96,6 +96,9 @@ def collect_env() -> dict[str, Any]:
             "flash_linear_attention": _dependency_info("flash-linear-attention", "fla"),
             "areno_accel": _dependency_info(None, "areno.accel._areno_accel"),
         },
+        "install": {
+            "build_ext_disabled": _build_ext_disabled(),
+        },
         "env": {name: os.environ.get(name) for name in _ENV_VARS},
         "paths": {
             "metrics_log_dir": "/tmp/areno/tfevent",
@@ -195,6 +198,16 @@ def run_checks(report: dict[str, Any]) -> list[CheckResult]:
 
     accel = report["dependencies"]["areno_accel"]
     accel_imported = bool(accel["imported"])
+    build_ext_disabled = bool(report.get("install", {}).get("build_ext_disabled"))
+    if build_ext_disabled and not accel_imported:
+        results.append(
+            CheckResult(
+                "FAIL",
+                "ARENO_BUILD_EXT",
+                "ARENO_BUILD_EXT=0 skipped the runtime CUDA extension",
+                "Reinstall without ARENO_BUILD_EXT=0 before training or serving: pip install -e . --no-build-isolation",
+            )
+        )
     cuda_home = report["cuda"]["cuda_home"]
     results.append(_cuda_toolkit_result("CUDA_HOME", cuda_home or "not set", bool(cuda_home), accel_imported))
     nvcc = report["cuda"]["nvcc"]
@@ -363,6 +376,11 @@ def _package_version(name: str | None) -> str | None:
         return None
 
 
+def _build_ext_disabled() -> bool:
+    value = os.environ.get("ARENO_BUILD_EXT")
+    return value is not None and value.lower() in {"0", "false", "no", "off"}
+
+
 def _cuda_home() -> str | None:
     for name in ("CUDA_HOME", "CUDA_PATH"):
         value = os.environ.get(name)
@@ -458,6 +476,9 @@ def _print_env_report(report: dict[str, Any]) -> None:
         click.echo(f"    {name}: {status} (version={version})")
         if dep["error"]:
             click.echo(f"      {dep['error']}")
+    install = report.get("install", {})
+    click.echo("  Install:")
+    click.echo(f"    ARENO_BUILD_EXT disabled: {install.get('build_ext_disabled', False)}")
     click.echo("  Environment variables:")
     for name, value in report["env"].items():
         click.echo(f"    {name}={value if value is not None else '<unset>'}")

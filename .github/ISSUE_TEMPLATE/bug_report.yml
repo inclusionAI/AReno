@@ -72,6 +72,50 @@ body:
     validations:
       required: true
 
+  - type: dropdown
+    id: install-mode
+    attributes:
+      label: Install mode
+      description: How did you install AReno?
+      options:
+        - sdist / pip install areno
+        - wheel
+        - editable source / pip install -e .
+        - Docker
+        - other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: build-ext
+    attributes:
+      label: Was ARENO_BUILD_EXT=0 used?
+      description: This skips the runtime CUDA extension and is only valid for docs/metadata installs.
+      options:
+        - "No"
+        - "Yes"
+        - "Not sure"
+    validations:
+      required: true
+
+  - type: textarea
+    id: areno-env
+    attributes:
+      label: areno env --json
+      description: Paste the full output of `areno env --json`.
+      render: json
+    validations:
+      required: false
+
+  - type: textarea
+    id: areno-check
+    attributes:
+      label: areno check
+      description: Paste the full output of `areno check`.
+      render: shell
+    validations:
+      required: false
+
   - type: textarea
     id: context
     attributes:

@@ -5,6 +5,31 @@ This page covers the setup paths used by contributors and local operators:
 Docker images, editable installs, source/wheel distributions, and local
 installation.
 
+Compatibility matrix
+--------------------
+
+.. list-table::
+   :header-rows: 1
+
+   * - Environment
+     - Status
+     - Notes
+   * - Linux x86_64 + NVIDIA GPU
+     - Supported
+     - Primary training/serving target. Use CUDA-enabled PyTorch >= 2.6 and build ``areno_accel``.
+   * - Linux aarch64 / Grace-Blackwell
+     - Supported
+     - Install a matching ``aarch64`` CUDA PyTorch build first, then build AReno with ``--no-build-isolation``.
+   * - Windows WSL2 + NVIDIA GPU
+     - Supported
+     - Follow the Linux install path inside WSL2. Native Windows is not supported.
+   * - macOS Apple Silicon
+     - Metadata/docs only
+     - Use ``ARENO_BUILD_EXT=0`` for docs or packaging checks. Training/serving is not supported.
+   * - CPU-only environments
+     - Metadata/docs/tests only
+     - CPU-only PyTorch can run lightweight docs/tests, but cannot train or serve AReno models.
+
 Docker
 ------
 
@@ -77,3 +102,24 @@ the repository root:
 
    For iterative CUDA work, configure ``ccache`` with ``CC="ccache gcc"`` and
    ``CXX="ccache g++"`` before rebuilding.
+
+Post-install checklist
+----------------------
+
+Run the readiness check after every fresh install:
+
+.. code-block:: bash
+
+   areno check
+
+For setup reports, also collect a machine-readable environment bundle:
+
+.. code-block:: bash
+
+   areno env --json
+
+``areno check`` reports common build-time and runtime setup problems with next
+steps: missing or CPU-only PyTorch, unsupported PyTorch versions, missing
+``CUDA_HOME`` or ``nvcc``, missing build-time dependencies such as ``psutil``,
+unsupported platforms, and ``ARENO_BUILD_EXT=0`` installs that try to train or
+serve without the compiled ``areno_accel`` extension.

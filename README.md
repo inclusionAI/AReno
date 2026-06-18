@@ -46,6 +46,16 @@ AReno's mission is to make LLM RL **accessible** for a broad community of resear
 > instructions. DGX Spark and other Grace/Blackwell systems work, but install an
 > `aarch64` PyTorch build first.
 
+**Compatibility matrix:**
+
+| Environment | Status | Notes |
+| --- | --- | --- |
+| Linux x86_64 + NVIDIA GPU | Supported | Primary training/serving target. Use CUDA-enabled PyTorch >= 2.6 and build `areno_accel`. |
+| Linux aarch64 / Grace-Blackwell | Supported | Install a matching `aarch64` CUDA PyTorch build first; build from source with `--no-build-isolation`. |
+| Windows WSL2 + NVIDIA GPU | Supported | Follow the Linux install path inside WSL2. Native Windows is not supported. |
+| macOS Apple Silicon | Metadata/docs only | Use `ARENO_BUILD_EXT=0` for docs or packaging checks. Training/serving is not supported. |
+| CPU-only environments | Metadata/docs/tests only | CPU-only PyTorch can run lightweight docs/tests, but cannot train or serve AReno models. |
+
 **To install:**
 
 ```bash
@@ -58,10 +68,14 @@ pip install areno --no-build-isolation
 Because build isolation is disabled, build-time helpers are not installed automatically; `psutil` must already be present because PyTorch's CUDA extension builder imports it while sizing parallel compile jobs.
 Install `flash-attn` only when using the default high-throughput `--attn-backend flash` path. If you run with `--attn-backend native`, or AReno automatically falls back to native attention on Turing GPUs like T4, `flash-attn` is optional and does not need to be installed.
 
-After installation, run `areno check` for an actionable readiness check. Use
-`areno env --json` when opening an issue so maintainers can see the Python,
-CUDA, PyTorch, GPU, and extension state without guessing from low-level build
-errors.
+**Post-install readiness check:**
+
+```bash
+areno check
+areno env --json  # attach this to setup/support reports
+```
+
+`areno check` fails fast with next steps for common setup problems such as missing or CPU-only PyTorch, unsupported PyTorch versions, missing `CUDA_HOME`/`nvcc`, missing build-time dependencies, unsupported platforms, or a skipped `areno_accel` build. Use `areno env --json` when opening an issue so maintainers can see the Python, CUDA, PyTorch, GPU, and extension state without guessing from low-level build errors.
 
 **From source** (recommended if you want the examples or plan to contribute):
 
