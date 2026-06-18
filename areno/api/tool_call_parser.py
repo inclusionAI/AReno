@@ -385,21 +385,29 @@ def _find_matching_brace(text: str) -> int:
 
 def _parse_gemma4_args(args_text: str) -> dict[str, Any]:
     result: dict[str, Any] = {}
-    for part in re.split(r",\s*", args_text.strip()):
+    for part in _split_gemma4_top_level(args_text.strip()):
         if ":" not in part:
             continue
-        key, value = part.split(":", 1)
-        result[key.strip()] = _parse_gemma4_value(value.strip())
+        key, value = _split_gemma4_key_value(part)
+        if key:
+            result[key] = _parse_gemma4_value(value)
     return result
 
 
 def _parse_gemma4_value(value: str) -> Any:
+    value = value.strip()
     if value.startswith('<|"|>') and value.endswith('<|"|>'):
         return value[len('<|"|>') : -len('<|"|>')]
+    if value.startswith("{") and value.endswith("}"):
+        return _parse_gemma4_args(value[1:-1])
+    if value.startswith("[") and value.endswith("]"):
+        return [_parse_gemma4_value(item) for item in _split_gemma4_top_level(value[1:-1])]
     if value == "true":
         return True
     if value == "false":
         return False
+    if value == "null":
+        return None
     try:
         return int(value)
     except ValueError:
@@ -408,6 +416,48 @@ def _parse_gemma4_value(value: str) -> Any:
         return float(value)
     except ValueError:
         return value
+
+
+def _split_gemma4_key_value(part: str) -> tuple[str, str]:
+    key, value = part.split(":", 1)
+    return _strip_gemma4_key(key), value.strip()
+
+
+def _strip_gemma4_key(key: str) -> str:
+    key = key.strip()
+    if key.startswith('<|"|>') and key.endswith('<|"|>'):
+        return key[len('<|"|>') : -len('<|"|>')]
+    return key.strip("\"'")
+
+
+def _split_gemma4_top_level(text: str) -> list[str]:
+    parts: list[str] = []
+    start = 0
+    depth = 0
+    i = 0
+    while i < len(text):
+        if text.startswith('<|"|>', i):
+            i += len('<|"|>')
+            end = text.find('<|"|>', i)
+            if end == -1:
+                break
+            i = end + len('<|"|>')
+            continue
+        char = text[i]
+        if char in "[{":
+            depth += 1
+        elif char in "]}":
+            depth = max(0, depth - 1)
+        elif char == "," and depth == 0:
+            part = text[start:i].strip()
+            if part:
+                parts.append(part)
+            start = i + 1
+        i += 1
+    tail = text[start:].strip()
+    if tail:
+        parts.append(tail)
+    return parts
 
 
 def _parse_minicpm_param_value(value: str) -> Any:
