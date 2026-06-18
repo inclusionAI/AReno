@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from click.testing import CliRunner
 
+from areno.accel import _extension
 from areno.cli import diagnostics
 from areno.cli.main import main
 
@@ -59,6 +60,7 @@ def _ready_report(tmp_path: str) -> dict:
                 "error": None,
             },
         },
+        "install": {"build_ext_disabled": False},
         "env": {"CUDA_HOME": "/usr/local/cuda", "MAX_JOBS": "8"},
         "paths": {"metrics_log_dir": tmp_path, "hf_cache": tmp_path},
     }
@@ -118,6 +120,20 @@ class CliDiagnosticsTest(unittest.TestCase):
         self.assertIn("not required for runtime", result.output)
         self.assertIn("OK   nvcc", result.output)
 
+    def test_check_reports_build_ext_disabled_runtime_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            report = _ready_report(tmp)
+            report["install"]["build_ext_disabled"] = True
+            report["dependencies"]["areno_accel"]["imported"] = False
+            report["dependencies"]["areno_accel"]["error"] = "ModuleNotFoundError: missing extension"
+            with patch.object(diagnostics, "collect_env", return_value=report):
+                result = CliRunner().invoke(diagnostics.check_command)
+
+        self.assertEqual(result.exit_code, 1)
+        self.assertIn("FAIL ARENO_BUILD_EXT", result.output)
+        self.assertIn("ARENO_BUILD_EXT=0 skipped the runtime CUDA extension", result.output)
+        self.assertIn("Reinstall without ARENO_BUILD_EXT=0", result.output)
+
     def test_writable_path_check_warns_for_missing_parent(self):
         result = diagnostics._writable_path_check("cache", "/definitely/missing/areno/path")
 
@@ -156,6 +172,18 @@ class CliDiagnosticsTest(unittest.TestCase):
             info = diagnostics._nvidia_smi_driver_info()
 
         self.assertEqual(info["error"], "nvidia-smi returned empty output")
+
+    def test_runtime_extension_missing_error_is_actionable(self):
+        _extension._EXT = None
+        with (
+            patch.dict("os.environ", {"ARENO_BUILD_EXT": "0"}),
+            patch.object(_extension.importlib, "import_module", side_effect=ModuleNotFoundError("missing")),
+            self.assertRaises(RuntimeError) as exc,
+        ):
+            _extension.extension()
+        message = str(exc.exception)
+        self.assertIn("ARENO_BUILD_EXT=0", message)
+        self.assertIn("pip install -e . --no-build-isolation", message)
 
 
 if __name__ == "__main__":
