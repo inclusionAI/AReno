@@ -842,6 +842,45 @@ def test_gemma4_tool_call_parser_supports_chat_completions_tools():
     assert '"direction":"left"' in parsed.tool_calls[0]["function"]["arguments"]
 
 
+def test_gemma4_tool_call_parser_supports_nested_action_arrays():
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "choose_action",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "actions": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "action": {"type": "string"},
+                                    "direction": {"type": "string"},
+                                },
+                            },
+                        }
+                    },
+                },
+            },
+        }
+    ]
+
+    parsed = Gemma4ToolCallParser().parse(
+        '<|tool_call>call:choose_action{actions:[{action:<|"|>MOVE<|"|>,direction:<|"|>UP<|"|>},'
+        '{action:<|"|>ATTACK<|"|>,direction:<|"|>UP<|"|>}]}<tool_call|>',
+        tools,
+        "required",
+    )
+
+    assert len(parsed.tool_calls) == 1
+    assert (
+        parsed.tool_calls[0]["function"]["arguments"]
+        == '{"actions":[{"action":"MOVE","direction":"UP"},{"action":"ATTACK","direction":"UP"}]}'
+    )
+
+
 def test_minicpm_tool_call_parser_supports_xml_function_calls():
     tools = [
         {
