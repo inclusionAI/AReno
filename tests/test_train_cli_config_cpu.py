@@ -7,6 +7,7 @@ from click.testing import CliRunner
 from areno.api.trainer_config import DPOTrainerConfig, PolicyTrainerConfig, PPOTrainerConfig, TrainerConfig
 from areno.cli import train as train_cli
 from areno.cli.train import (
+    TRAIN_OPTION_GROUPS,
     _callable_name,
     _format_summary_section,
     _format_training_config_summary,
@@ -382,6 +383,64 @@ def test_train_command_prints_summary_before_run(monkeypatch):
     assert "save_path        out" in output
     assert "WARNING: no checkpoint output path configured" not in output
     assert events == [("run", "sft")]
+
+
+EXPECTED_HELP_SECTIONS = [
+    "Basic:",
+    "Rollout:",
+    "Train:",
+    "Checkpoint:",
+    "Observability:",
+]
+
+
+def _help_output() -> str:
+    result = CliRunner().invoke(train_cli.train_command, ["--help"])
+    assert result.exit_code == 0, result.output
+    return unstyle(result.output)
+
+
+def test_train_help_groups_sections_in_intent_order():
+    output = _help_output()
+
+    positions = []
+    for section in EXPECTED_HELP_SECTIONS:
+        assert section in output, f"missing help section: {section}"
+        positions.append(output.index(section))
+    assert positions == sorted(positions), "help sections out of intent order"
+
+
+def test_train_help_places_epochs_under_basic_not_checkpointing():
+    output = _help_output()
+
+    basic = output.index("Basic:")
+    next_section = output.index("Rollout:", basic)
+    epochs = output.index("--epochs", basic)
+    checkpoint = output.index("Checkpoint:")
+
+    # --epochs is a run-setup flag that belongs in Basic, not with the
+    # save flags in the Checkpoint group.
+    assert basic < epochs < next_section
+    assert "--epochs" not in output[checkpoint:]
+
+
+def test_train_help_remains_complete_and_groups_every_declared_option():
+    ctx = train_cli.click.Context(train_cli.train_command)
+    declared = {
+        param.name for param in train_cli.train_command.get_params(ctx) if param.get_help_record(ctx) is not None
+    }
+    grouped = [name for _, names in TRAIN_OPTION_GROUPS for name in names]
+
+    assert len(grouped) == len(set(grouped)), "an option is listed in more than one group"
+    # Every declared option is grouped except the auto-added --help, which the
+    # renderer keeps under a trailing catch-all so help output stays complete.
+    assert set(grouped) == declared - {"help"}
+
+    output = _help_output()
+    for param in train_cli.train_command.get_params(ctx):
+        record = param.get_help_record(ctx)
+        if record is not None:
+            assert record[0].split()[0].rstrip(",") in output, f"option dropped from help: {param.name}"
 
 
 def _options(**overrides):

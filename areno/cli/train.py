@@ -37,6 +37,125 @@ from areno.engine.config import (
     flash_attention_unsupported_model_reason,
 )
 
+# Group `areno train --help` flags by user intent rather than as one flat wall.
+# Each entry is (section title, option param names in display order). Every
+# declared option must appear in exactly one group; the help renderer keeps any
+# unlisted option (e.g. auto-added --help) under a trailing catch-all so the
+# help output stays complete. Keep these titles in sync with the section
+# headings in docs/cli/training.rst.
+TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    # Grouped by RL-loop phase: Basic (what to run + devices), Rollout
+    # (generate + score completions), Train (consume rollouts + update
+    # weights), then the produced artifacts (Checkpoint) and logs
+    # (Observability). Flags within Train are ordered by sub-area
+    # (batching/memory -> optimizer -> reference/critic models -> loss).
+    (
+        "Basic",
+        (
+            "algo",
+            "ckpt",
+            "dataset_path",
+            "dataset_loader_fn",
+            "epochs",
+            "world_size",
+            "tp_size",
+        ),
+    ),
+    (
+        "Rollout",
+        (
+            "batch_size",
+            "n_samples",
+            "max_running_prompts",
+            "max_prompt_tokens",
+            "max_new_tokens",
+            "temperature",
+            "top_k",
+            "top_p",
+            "greedy",
+            "eager_decode",
+            "drop_rollout_state",
+            "attn_backend",
+            "agent_fn",
+            "agent_timeout_s",
+            "train_tool_results",
+            "reward_fn_path",
+            "reward_ckpt",
+        ),
+    ),
+    (
+        "Train",
+        (
+            "mini_bs",
+            "gradient_accumulation_steps",
+            "activation_checkpointing",
+            "lr",
+            "min_lr",
+            "lr_decay_steps",
+            "lr_decay_style",
+            "adam_beta1",
+            "adam_beta2",
+            "adam_8bit",
+            "weight_decay",
+            "grad_clip_norm",
+            "ref_ckpt",
+            "critic_ckpt",
+            "critic_lr",
+            "critic_warmup_steps",
+            "gspo_clip_eps",
+            "grpo_clip_eps",
+            "dpo_beta",
+            "use_kl_loss",
+            "kl_loss_coef",
+            "kl_loss_type",
+            "clip_eps",
+            "clip_ratio_c",
+            "value_clip_eps",
+            "value_loss_coef",
+            "gamma",
+            "lam",
+        ),
+    ),
+    ("Checkpoint", ("save_path", "save_interval")),
+    ("Observability", ("metrics_log_dir",)),
+)
+
+
+class GroupedOptionsCommand(click.Command):
+    """A Click command that renders --help options under intent-based sections."""
+
+    def __init__(self, *args, option_groups: tuple[tuple[str, tuple[str, ...]], ...] = (), **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.option_groups = option_groups
+
+    def format_options(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
+        params = self.get_params(ctx)
+        params_by_name = {param.name: param for param in params}
+        grouped_names: set[str] = set()
+        for title, names in self.option_groups:
+            records = []
+            for name in names:
+                param = params_by_name.get(name)
+                if param is None:
+                    continue
+                record = param.get_help_record(ctx)
+                if record is not None:
+                    records.append(record)
+                    grouped_names.add(name)
+            if records:
+                with formatter.section(title):
+                    formatter.write_dl(records)
+        # Keep help complete: any option not placed in a group (notably the
+        # auto-added --help) is still shown under a trailing catch-all.
+        leftover = [
+            record
+            for param in params
+            if param.name not in grouped_names and (record := param.get_help_record(ctx)) is not None
+        ]
+        if leftover:
+            with formatter.section("Other options"):
+                formatter.write_dl(leftover)
+
 
 def _trainer_config_from_options(**options) -> TrainerConfig:
     """Build a typed trainer config from Click option values."""
@@ -753,6 +872,8 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
 
 @click.command(
     name="train",
+    cls=GroupedOptionsCommand,
+    option_groups=TRAIN_OPTION_GROUPS,
     context_settings={"help_option_names": ["-h", "--help"]},
     help="Run SFT, DPO, GSPO, GRPO, or PPO training with the areno backend.",
 )
