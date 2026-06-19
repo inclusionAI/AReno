@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Git tag to publish, for example 0.0.1"
+        description: "Git tag to publish, for example v0.0.2"
         required: true
         type: string
 
@@ -32,9 +32,12 @@ jobs:
           import os
           import re
 
+          # Tags use a leading `v` (e.g. v0.0.2). The PEP 440 package version
+          # written into pyproject.toml/sdist strips that prefix (-> 0.0.2),
+          # so the git tag and the distribution version stay in lockstep.
           tag = os.environ["RELEASE_TAG"]
-          if not re.fullmatch(r"[0-9]+(?:\.[0-9]+)*(?:[a-zA-Z0-9_.!+-]*)?", tag):
-              raise SystemExit(f"invalid release tag/version: {tag!r}")
+          if not re.fullmatch(r"v[0-9]+(?:\.[0-9]+)*(?:[a-zA-Z0-9_.!+-]*)?", tag):
+              raise SystemExit(f"invalid release tag (expected leading 'v', e.g. v0.0.2): {tag!r}")
           PY
           if ! git fetch --force origin "refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}"; then
             echo "::error::tag ${RELEASE_TAG} does not exist on origin"
@@ -46,7 +49,7 @@ jobs:
             exit 1
           fi
           git checkout --detach "${tag_commit}"
-          echo "RELEASE_VERSION=${RELEASE_TAG}" >> "${GITHUB_ENV}"
+          echo "RELEASE_VERSION=${RELEASE_TAG#v}" >> "${GITHUB_ENV}"
 
       - name: Set up Python
         uses: actions/setup-python@v5
