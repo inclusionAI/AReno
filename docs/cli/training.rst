@@ -381,6 +381,62 @@ The agent function can use the OpenAI Python client against
 logprobs, parsed ``tool_calls``, rewards, and loss masks, then feeds the
 resulting batch to the same policy trainer used by non-agentic rollouts.
 
+Agentic DuelGrid
+~~~~~~~~~~~~~~~~
+
+DuelGrid is a turn-based grid tactics example for agentic RLVR. The user
+controls ``U`` and the LLM controls ``A`` with JSON action sequences such as
+``MOVE``, ``ATTACK``, ``RANGED_ATTACK``, ``PICKUP``, and ``SHIELD``.
+
+.. code-block:: bash
+
+   python examples/agentic/duelgrid/dataset_generator.py \
+     --count 256 \
+     --output /tmp/areno-duelgrid.jsonl
+
+   areno train \
+     --ckpt Qwen/Qwen3-0.6B \
+     --dataset-path /tmp/areno-duelgrid.jsonl \
+     --dataset-loader-fn examples/agentic/duelgrid/dataset_loader.py \
+     --reward-fn-path examples/agentic/duelgrid/reward.py \
+     --agent-fn examples/agentic/duelgrid/run_agent.py \
+     --algo gspo \
+     --tp-size 1 \
+     --world-size 1
+
+The browser UI can replay the same rule engine:
+
+.. code-block:: bash
+
+   python examples/agentic/duelgrid/web_ui.py \
+     --base-url http://127.0.0.1:8000/v1 \
+     --api-key EMPTY \
+     --model policy
+
+Before GSPO/RLVR post-training, Gemma-E2B-it performs poorly in DuelGrid and
+often oscillates between nearby tiles. After training, it learns to collect
+health and energy pickups, chase the user, attack when it has position, and
+avoid trap tiles while spending its turn energy. The reward curve improves
+quickly early in training and then stabilizes after the policy has learned the
+game loop.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 1 1 1
+
+   * - Train before
+     - Reward
+     - Train after
+   * - .. image:: ../../examples/agentic/duelgrid/images/train_before.gif
+          :alt: Gemma-E2B-it before DuelGrid training
+          :width: 260px
+     - .. image:: ../../examples/agentic/duelgrid/images/train_reward.jpg
+          :alt: DuelGrid training reward curve
+          :width: 260px
+     - .. image:: ../../examples/agentic/duelgrid/images/train_after.gif
+          :alt: Gemma-E2B-it after DuelGrid training
+          :width: 260px
+
 Help
 ----
 
