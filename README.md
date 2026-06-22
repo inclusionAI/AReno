@@ -317,6 +317,18 @@ areno train \
   --world-size 1
 ```
 
+DuelGrid is a larger agentic demo with a browser game UI and multi-action
+turns. Before GSPO/RLVR post-training, Gemma-E2B-it performs poorly in this
+game and often moves back and forth without progress. After training, it learns
+to collect pickups, chase the user, attack when in range, and avoid trap tiles.
+
+| Train before | Reward | Train after |
+| --- | --- | --- |
+| <img src="examples/agentic/duelgrid/images/train_before.gif" alt="DuelGrid before training" width="260"> | <img src="examples/agentic/duelgrid/images/train_reward.jpg" alt="DuelGrid reward curve" width="260"> | <img src="examples/agentic/duelgrid/images/train_after.gif" alt="DuelGrid after training" width="260"> |
+
+See `examples/agentic/duelgrid` for the rule engine, fixed-path dataset loader,
+reward function, OpenAI-compatible agent, and browser UI.
+
 For the full list of training options, run `areno train --help`.
 
 ### Serving
