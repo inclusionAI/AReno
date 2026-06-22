@@ -397,6 +397,11 @@ Data classes
    :param dict | None optimizer: Advanced optimizer config passed to the
       engine.
    :param dict | None runtime: Advanced runtime config passed to the engine.
+      Set ``runtime={"attn_backend": "native"}`` to run without
+      ``flash-attn`` on the areno_accel native compatibility path. AReno also
+      falls back to native attention on flash-attn-unsupported GPUs such as
+      Tesla T4 and prints a warning. The default is ``"flash"`` for normal
+      high-throughput training on supported GPUs.
    :param int max_running_prompts: Concurrent rollout prompt limit.
    :param float decode_progress_interval_s: Worker decode progress log
       interval. Logs report per-DP scheduled decode throughput for the current

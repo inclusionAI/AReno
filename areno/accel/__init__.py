@@ -16,6 +16,11 @@ from areno.accel.activations import (
     areno_silu_and_mul,
     areno_softplus,
 )
+from areno.accel.attention import (
+    areno_causal_attention,
+    areno_paged_causal_attention_decode,
+    areno_varlen_causal_attention,
+)
 from areno.accel.conv import (
     areno_depthwise_causal_conv1d_silu,
     areno_depthwise_causal_conv1d_silu_decode,
@@ -34,6 +39,9 @@ __all__ = [
     "areno_depthwise_causal_conv1d_silu_decode",
     "areno_packed_depthwise_causal_conv1d_silu",
     "areno_gelu_tanh_and_mul",
+    "areno_causal_attention",
+    "areno_paged_causal_attention_decode",
+    "areno_varlen_causal_attention",
     "areno_grouped_topk_router",
     "areno_grouped_linear",
     "areno_linear",

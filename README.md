@@ -46,37 +46,84 @@ AReno's mission is to make LLM RL **accessible** for a broad community of resear
 > instructions. DGX Spark and other Grace/Blackwell systems work, but install an
 > `aarch64` PyTorch build first.
 
+**Compatibility matrix:**
+
+| Environment | Status | Notes |
+| --- | --- | --- |
+| Linux x86_64 + NVIDIA GPU | Supported | Primary training/serving target. Use CUDA-enabled PyTorch >= 2.6 and build `areno_accel`. |
+| Linux aarch64 / Grace-Blackwell | Supported | Install a matching `aarch64` CUDA PyTorch build first; build from source with `--no-build-isolation`. |
+| Windows WSL2 + NVIDIA GPU | Supported | Follow the Linux install path inside WSL2. Native Windows is not supported. |
+| macOS Apple Silicon | Metadata/docs only | Use `ARENO_BUILD_EXT=0` for docs or packaging checks. Training/serving is not supported. |
+| CPU-only environments | Metadata/docs/tests only | CPU-only PyTorch can run lightweight docs/tests, but cannot train or serve AReno models. |
+
 **To install:**
 
 ```bash
 pip install psutil
-pip install flash-attn flash-linear-attention
+pip install flash-linear-attention
 pip install areno --no-build-isolation
 ```
 
 `--no-build-isolation` is required so that pip uses your existing CUDA-enabled PyTorch instead of installing a CPU-only torch in an isolated build environment.
 Because build isolation is disabled, build-time helpers are not installed automatically; `psutil` must already be present because PyTorch's CUDA extension builder imports it while sizing parallel compile jobs.
+Install `flash-attn` only when using the default high-throughput `--attn-backend flash` path. If you run with `--attn-backend native`, or AReno automatically falls back to native attention on Turing GPUs like T4, `flash-attn` is optional and does not need to be installed.
 
-After installation, run `areno check` for an actionable readiness check. Use
-`areno env --json` when opening an issue so maintainers can see the Python,
-CUDA, PyTorch, GPU, and extension state without guessing from low-level build
-errors.
+**Post-install readiness check:**
+
+```bash
+areno check
+areno env --json  # attach this to setup/support reports
+```
+
+`areno check` fails fast with next steps for common setup problems such as missing or CPU-only PyTorch, unsupported PyTorch versions, missing `CUDA_HOME`/`nvcc`, missing build-time dependencies, unsupported platforms, or a skipped `areno_accel` build. Use `areno env --json` when opening an issue so maintainers can see the Python, CUDA, PyTorch, GPU, and extension state without guessing from low-level build errors.
 
 **From source** (recommended if you want the examples or plan to contribute):
 
 ```bash
-git clone https://github.com/inclusionAI/asystem-areno.git
-cd asystem-areno
+git clone https://github.com/inclusionAI/AReno.git
+cd AReno
 pip install psutil
-pip install flash-attn flash-linear-attention
+pip install flash-linear-attention
 pip install -e . --no-build-isolation
 ```
+
+**Docker setup escape hatch** (recommended when you want to verify AReno before debugging local build state):
+
+```bash
+docker build -t areno .
+docker run --gpus all --rm -it areno areno check
+```
+
+If you need local project files, model files, or a Hugging Face cache inside the container:
+
+```bash
+docker run --gpus all --rm -it \
+  -v $PWD:/workspace \
+  -v $HOME/.cache/huggingface:/root/.cache/huggingface \
+  areno \
+  areno check
+```
+
+Host checklist before blaming AReno setup:
+
+```bash
+nvidia-smi
+docker run --gpus all --rm nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi
+docker run --gpus all --rm areno areno check
+```
+
+Docker gives you a known-good Python/PyTorch/CUDA user-space install path and reuses the same `areno check` diagnostic flow. It does not replace host requirements: the host still needs a working NVIDIA driver, NVIDIA Container Toolkit support for `--gpus all`, and a driver new enough for the container CUDA runtime. Docker also does not solve model downloads, Hugging Face tokens, cache paths, network access, disk space, or multi-node networking; those remain user environment concerns.
 
 **Tips:**
 
 - Install `ninja` (`pip install ninja`) before building so CUDA kernels compile in parallel.
 - If installation fails with `No module named 'psutil'`, install it first (`pip install psutil`) and retry. This is required specifically for `--no-build-isolation` builds.
-- Install `flash-attn` before AReno so the local build can reuse the already-installed package. If building `flash-attn` from source is too slow for your environment, install a pre-built wheel from the [flash-attention releases](https://github.com/Dao-AILab/flash-attention/releases) that matches your Python, PyTorch, CUDA, and platform.
+- Install `flash-attn` before AReno only if you plan to use `--attn-backend flash`, the default high-throughput backend:
+  ```bash
+  pip install flash-attn
+  ```
+  If building `flash-attn` from source is too slow for your environment, install a pre-built wheel from the [flash-attention releases](https://github.com/Dao-AILab/flash-attention/releases) that matches your Python, PyTorch, CUDA, and platform.
+- If you use `--attn-backend native`, `flash-attn` is optional. AReno also automatically falls back to native attention on flash-attn-unsupported GPUs such as Tesla T4 and prints a warning that native attention is a slower compatibility path.
 - By default, source builds target the visible GPU architecture. To build for a specific GPU family or when building on a host where the target GPU is not visible, set `TORCH_CUDA_ARCH_LIST` explicitly. Common values are `9.0` for H100/H200, `8.0` for A100, and `8.9` for L40/RTX 4090:
   ```bash
   TORCH_CUDA_ARCH_LIST="9.0" MAX_JOBS=64 pip install -e . --no-build-isolation
@@ -275,6 +322,18 @@ For a more realistic multi-turn software-engineering loop, see
 Codex-style tools (`inspect_tree`, `read_file`, `rg`, `apply_patch`,
 `run_command`, `submit`), and an explicit trajectory-returning `run_agent.py`.
 
+DuelGrid is a larger agentic demo with a browser game UI and multi-action
+turns. Before GSPO/RLVR post-training, Gemma-E2B-it performs poorly in this
+game and often moves back and forth without progress. After training, it learns
+to collect pickups, chase the user, attack when in range, and avoid trap tiles.
+
+| Train before | Reward | Train after |
+| --- | --- | --- |
+| <img src="examples/agentic/duelgrid/images/train_before.gif" alt="DuelGrid before training" width="260"> | <img src="examples/agentic/duelgrid/images/train_reward.jpg" alt="DuelGrid reward curve" width="260"> | <img src="examples/agentic/duelgrid/images/train_after.gif" alt="DuelGrid after training" width="260"> |
+
+See `examples/agentic/duelgrid` for the rule engine, fixed-path dataset loader,
+reward function, OpenAI-compatible agent, and browser UI.
+
 For the full list of training options, run `areno train --help`.
 
 ### Serving
@@ -296,10 +355,12 @@ Point any OpenAI client at `http://localhost:8000/v1/chat/completions` to start 
 If you want to contribute to AReno or customize it for your own needs, read the [contribution guide](CONTRIBUTING.md) and make a development install:
 
 ```bash
-git clone https://github.com/inclusionAI/asystem-areno.git
-cd asystem-areno
+git clone https://github.com/inclusionAI/AReno.git
+cd AReno
 pip install psutil
-pip install flash-attn flash-linear-attention
+pip install flash-linear-attention
+# Optional: install flash-attn when developing against --attn-backend flash.
+pip install flash-attn
 pip install -e . --no-build-isolation
 
 # Set up pre-commit hooks (formatting, linting, commit message checks)
@@ -318,7 +379,7 @@ If you find the project helpful, please cite:
   title        = {AReno: A Self-Contained, Full-Stack Toolkit for Single-Node LLM RL Post-Training},
   author       = {Zibo He and Le Su and Zongyu Li and Xiaowei Zhu and Cheng Wang and Zhenxuan Pan},
   year         = {2026},
-  url          = {https://github.com/inclusionAI/asystem-areno},
+  url          = {https://github.com/inclusionAI/AReno},
   license      = {Apache-2.0}
 }
 ```

@@ -421,13 +421,16 @@ class PolicyOnlyTrainer:
         for prompt_idx, (item, result) in enumerate(zip(prompt_batch.items, rollout_results, strict=True)):
             for sample_idx, seq in enumerate(result.sequences):
                 self.logger.info(
-                    "epoch=%d step=%d prompt_idx=%d sample_idx=%d prompt=%r completion=%r tokens=%s",
+                    "epoch=%d step=%d prompt_idx=%d sample_idx=%d prompt=%r decoded_prompt=%r completion=%r "
+                    "prompt_tokens=%s response_tokens=%s",
                     epoch,
                     step,
                     prompt_idx,
                     sample_idx,
                     item.prompt,
+                    tokenizer.decode(item.input_tokens),
                     tokenizer.decode(seq.resp_tokens),
+                    item.input_tokens[:64],
                     seq.resp_tokens[:64],
                 )
                 logged += 1

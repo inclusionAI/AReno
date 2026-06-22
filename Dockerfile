@@ -13,6 +13,7 @@ ENV PIP_NO_CACHE_DIR=1 \
 RUN python -m pip install --index-url "${PIP_INDEX_URL}" --upgrade pip setuptools wheel packaging ninja
 
 RUN python -m pip install --index-url "${PIP_INDEX_URL}" \
+        "psutil" \
         "transformers==${TRANSFORMERS_VERSION}" \
         "datasets>=3.3.0" \
         "einops" \

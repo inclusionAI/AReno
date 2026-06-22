@@ -6,7 +6,7 @@ and improving the documentation are all immensely valuable.
 
 It also helps if you spread the word — reference AReno in blog posts about the
 projects it made possible, shout it out when it helps you, or simply ⭐️ the
-[repository](https://github.com/inclusionAI/asystem-areno) to say thank you.
+[repository](https://github.com/inclusionAI/AReno) to say thank you.
 
 ## AI usage policy
 
@@ -98,13 +98,13 @@ working on the same thing. If unsure, open an issue first to get feedback.
 
 Follow these steps:
 
-1. Fork the [repository](https://github.com/inclusionAI/asystem-areno) and clone
+1. Fork the [repository](https://github.com/inclusionAI/AReno) and clone
    your fork, adding the base repo as a remote:
 
    ```bash
-   git clone git@github.com:<your-handle>/asystem-areno.git
-   cd asystem-areno
-   git remote add upstream https://github.com/inclusionAI/asystem-areno.git
+   git clone git@github.com:<your-handle>/AReno.git
+   cd AReno
+   git remote add upstream https://github.com/inclusionAI/AReno.git
    # Pull from upstream, but never push to it — push only to your fork (origin)
    git remote set-url --push upstream no-pushing
    ```

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,8 +14,22 @@ from click.testing import CliRunner
 from areno.api.data import PromptBatch, PromptItem
 from areno.api.trainer_config import RolloutTrainerConfig, TrainerConfig
 from areno.cli import train as train_cli
-from areno.engine.config import EngineConfig, ModelConfig, RuntimeConfig, _parse_dtype
+from areno.engine.config import (
+    EngineConfig,
+    ModelConfig,
+    RuntimeConfig,
+    _parse_dtype,
+    flash_attention_unsupported_gpu_reason,
+    flash_attention_unsupported_model_reason,
+)
 from areno.engine.data import to_cpu, to_device
+from areno.engine.layers.attention_backend.common import (
+    build_attention_call,
+    expand_kv_heads,
+    require_flash_attention_supported,
+)
+from areno.engine.layers.attention_backend.infer import _native_prefill
+from areno.engine.runtime.metadata import InferMeta
 
 
 class ConfigAndDataTest(unittest.TestCase):
@@ -78,6 +93,152 @@ class ConfigAndDataTest(unittest.TestCase):
 
         self.assertEqual(cfg.dp_size, 2)
 
+    def test_runtime_config_attn_backend_propagates_to_model_config(self):
+        """The runtime attention backend should reach model layer construction."""
+        model = ModelConfig(num_attention_heads=4, num_key_value_heads=4, intermediate_size=16, vocab_size=32)
+
+        EngineConfig(model=model, tp_size=1, devices=[0], runtime=RuntimeConfig(attn_backend="native"))
+
+        self.assertEqual(model.attn_backend, "native")
+
+    def test_runtime_config_falls_back_to_native_on_turing_gpu(self):
+        """Turing GPUs like T4 should use native attention instead of flash-attn."""
+        model = ModelConfig(num_attention_heads=4, num_key_value_heads=4, intermediate_size=16, vocab_size=32)
+        runtime = RuntimeConfig(attn_backend="flash")
+
+        with (
+            patch("areno.engine.config.torch.cuda.is_available", return_value=True),
+            patch("areno.engine.config.torch.cuda.device_count", return_value=1),
+            patch("areno.engine.config.torch.cuda.get_device_capability", return_value=(7, 5)),
+            patch("areno.engine.config.torch.cuda.get_device_name", return_value="Tesla T4"),
+            self.assertWarnsRegex(RuntimeWarning, "falling back to attn_backend='native'.*slower"),
+        ):
+            cfg = EngineConfig(model=model, tp_size=1, devices=[0], runtime=runtime)
+
+        self.assertEqual(cfg.runtime.attn_backend, "native")
+        self.assertEqual(model.attn_backend, "native")
+
+    def test_flash_attention_supported_gpu_keeps_flash_backend(self):
+        """Ampere and newer GPUs should keep the explicit flash attention backend."""
+        model = ModelConfig(num_attention_heads=4, num_key_value_heads=4, intermediate_size=16, vocab_size=32)
+        runtime = RuntimeConfig(attn_backend="flash")
+
+        with (
+            patch("areno.engine.config.torch.cuda.is_available", return_value=True),
+            patch("areno.engine.config.torch.cuda.device_count", return_value=1),
+            patch("areno.engine.config.torch.cuda.get_device_capability", return_value=(8, 0)),
+        ):
+            cfg = EngineConfig(model=model, tp_size=1, devices=[0], runtime=runtime)
+
+        self.assertEqual(cfg.runtime.attn_backend, "flash")
+        self.assertEqual(model.attn_backend, "flash")
+
+    def test_runtime_config_falls_back_to_native_on_large_qk_head_dim(self):
+        """Gemma-style qk head dim 512 should use native attention instead of flash-attn."""
+        model = ModelConfig(
+            num_attention_heads=4,
+            num_key_value_heads=4,
+            intermediate_size=16,
+            vocab_size=32,
+            head_dim=512,
+        )
+        runtime = RuntimeConfig(attn_backend="flash")
+
+        with self.assertWarnsRegex(RuntimeWarning, "qk head dim 512.*attn_backend='native'"):
+            cfg = EngineConfig(model=model, tp_size=1, devices=[0], runtime=runtime)
+
+        self.assertEqual(cfg.runtime.attn_backend, "native")
+        self.assertEqual(model.attn_backend, "native")
+
+    def test_flash_attention_unsupported_model_reason_names_large_head_dim(self):
+        """The compatibility warning should identify unsupported model dimensions."""
+        model = ModelConfig(
+            num_attention_heads=4,
+            num_key_value_heads=4,
+            intermediate_size=16,
+            vocab_size=32,
+            head_dim=512,
+        )
+
+        self.assertEqual(flash_attention_unsupported_model_reason(model), "qk head dim 512")
+
+    def test_flash_attention_unsupported_gpu_reason_names_t4(self):
+        """The compatibility warning should identify unsupported visible GPUs."""
+        with (
+            patch("areno.engine.config.torch.cuda.is_available", return_value=True),
+            patch("areno.engine.config.torch.cuda.device_count", return_value=1),
+            patch("areno.engine.config.torch.cuda.get_device_capability", return_value=(7, 5)),
+            patch("areno.engine.config.torch.cuda.get_device_name", return_value="Tesla T4"),
+        ):
+            reason = flash_attention_unsupported_gpu_reason([0])
+
+        self.assertEqual(reason, "Tesla T4 cc 7.5")
+
+    def test_runtime_config_rejects_unknown_attn_backend(self):
+        """Invalid attention backend names should fail before worker startup."""
+        with self.assertRaisesRegex(ValueError, "attn_backend"):
+            RuntimeConfig(attn_backend="bogus")
+
+    def test_flash_attention_unsupported_shape_points_to_torch_backend(self):
+        """Unsupported flash-attn shapes should not silently fall back to SDPA."""
+        call = build_attention_call(
+            torch.empty(1, 1, 1, 257),
+            torch.empty(1, 1, 1, 257),
+            torch.empty(1, 1, 1, 257),
+            window_size=None,
+            softmax_scale=None,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "--attn-backend native.*slower"):
+            require_flash_attention_supported(call, mode="test attention")
+
+    def test_expand_kv_heads_uses_head_axis_for_varlen_layout(self):
+        """Native varlen paths pass tensors as [tokens, heads, dim]."""
+        kv = torch.arange(3 * 2 * 4).view(3, 2, 4)
+
+        expanded = expand_kv_heads(kv, 8)
+
+        self.assertEqual(tuple(expanded.shape), (3, 8, 4))
+        self.assertTrue(torch.equal(expanded[:, 0], kv[:, 0]))
+        self.assertTrue(torch.equal(expanded[:, 3], kv[:, 0]))
+        self.assertTrue(torch.equal(expanded[:, 4], kv[:, 1]))
+        self.assertTrue(torch.equal(expanded[:, 7], kv[:, 1]))
+
+    def test_native_prefill_uses_varlen_gqa_without_expanding_kv_heads(self):
+        """Gemma native prefill should leave GQA expansion to the varlen kernel."""
+        q = torch.zeros(3, 8, 4)
+        k = torch.zeros(3, 2, 4)
+        v = torch.zeros(3, 2, 4)
+        meta = InferMeta(mode="prefill", cu_seqlens=torch.tensor([0, 3], dtype=torch.int32), max_seqlen=3)
+        captured = {}
+
+        def fake_varlen(q_arg, k_arg, v_arg, cu_arg, *, window_left, softmax_scale):
+            captured["q_shape"] = tuple(q_arg.shape)
+            captured["k_shape"] = tuple(k_arg.shape)
+            captured["v_shape"] = tuple(v_arg.shape)
+            captured["cu"] = cu_arg.tolist()
+            captured["window_left"] = window_left
+            captured["softmax_scale"] = softmax_scale
+            return q_arg
+
+        with patch("areno.engine.layers.attention_backend.infer.areno_varlen_causal_attention", fake_varlen):
+            out = _native_prefill(q, k, v, meta, (-1, -1), None)
+
+        self.assertIs(out, q)
+        self.assertEqual(captured["q_shape"], (3, 8, 4))
+        self.assertEqual(captured["k_shape"], (3, 2, 4))
+        self.assertEqual(captured["v_shape"], (3, 2, 4))
+        self.assertEqual(captured["cu"], [0, 3])
+
+    def test_native_attention_backend_does_not_require_flash_attn_import(self):
+        """Native train/infer backends should construct without flash-attn installed."""
+        from areno.engine.layers.attention_backend.infer import build_infer_attention_backend
+        from areno.engine.layers.attention_backend.train import build_train_attention_backend
+
+        with patch.dict(sys.modules, {"flash_attn": None}):
+            build_train_attention_backend("native")
+            build_infer_attention_backend("native")
+
     def test_rollout_config_defaults_max_running_prompts_to_flat_batch(self):
         """Rollout concurrency defaults to batch_size * n_samples, not per-DP."""
         cfg = RolloutTrainerConfig(
@@ -121,6 +282,15 @@ class ConfigAndDataTest(unittest.TestCase):
         cfg = train_cli._trainer_config_from_args(args)
 
         self.assertFalse(cfg.keep_rollout_state)
+
+    def test_train_cli_attn_backend_reaches_backend_runtime_config(self):
+        """The train CLI attention backend flag should pass through SDK config."""
+        args = _train_args(algo="sft", attn_backend="native")
+
+        cfg = train_cli._trainer_config_from_args(args)
+
+        self.assertEqual(cfg.attn_backend, "native")
+        self.assertEqual(cfg.areno_config().runtime["attn_backend"], "native")
 
     def test_to_device_and_to_cpu_walk_nested_containers(self):
         """Device helpers should preserve nested container structure."""
@@ -371,6 +541,7 @@ def _train_args(**overrides):
         activation_checkpointing=True,
         drop_rollout_state=False,
         eager_decode=False,
+        attn_backend="flash",
         metrics_log_dir=None,
         agent_fn=None,
         agent_timeout_s=300.0,

@@ -56,6 +56,8 @@ def to_device(obj: Any, device: torch.device) -> Any:
     """Recursively move tensors inside Python containers to a device."""
 
     if isinstance(obj, torch.Tensor):
+        if obj.device == device:
+            return obj
         return obj.to(device, non_blocking=True)
     if isinstance(obj, dict):
         return {k: to_device(v, device) for k, v in obj.items()}

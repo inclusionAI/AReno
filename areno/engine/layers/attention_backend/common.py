@@ -1,18 +1,21 @@
-"""Shared utilities for FlashAttention backends.
+"""Shared utilities for attention backends.
 
 Defines the `AttentionCall` value object, which packages a set of Q/K/V
 tensors together with the FlashAttention-shaped parameters (normalized
 window, optional softmax scale, padded V head dim) so train and infer paths
 present identical kernel arguments. Also exposes the small helpers used to
 pad value heads, expand grouped-query KV heads, and translate window-size
-conventions between FlashAttention and SDPA.
+conventions.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 import torch
+
+AttnBackend = Literal["flash", "native"]
 
 
 @dataclass(frozen=True)
@@ -76,13 +79,6 @@ def flash_window_size(window_size: tuple[int, int] | None) -> tuple[int, int]:
     return window_size or (-1, -1)
 
 
-def sdpa_window_size(window_size: tuple[int, int]) -> tuple[int, int] | None:
-    """Convert FlashAttention's full-window sentinel back to SDPA semantics."""
-
-    # SDPA represents "no window" as None; flash-attn uses the (-1, -1) tuple.
-    return None if window_size == (-1, -1) else window_size
-
-
 def pad_last_dim(x: torch.Tensor, size: int) -> torch.Tensor:
     """Pad the value/cache head dim to the attention kernel head dim."""
 
@@ -98,10 +94,35 @@ def pad_last_dim(x: torch.Tensor, size: int) -> torch.Tensor:
 def expand_kv_heads(x: torch.Tensor, num_q_heads: int) -> torch.Tensor:
     """Repeat KV heads for grouped-query attention kernels."""
 
-    # SDPA fallback paths need physical KV head replication because they do
-    # not implement GQA natively; flash-attn handles GQA without expansion.
+    # Native attention paths need physical KV head replication because they
+    # operate after grouped-query heads have been expanded.
     num_kv_heads = x.shape[-2]
     if num_kv_heads == num_q_heads:
         return x
+    if num_q_heads < num_kv_heads or num_q_heads % num_kv_heads != 0:
+        raise ValueError(f"cannot expand {num_kv_heads} KV heads to {num_q_heads} query heads")
     repeat = num_q_heads // num_kv_heads
-    return x.repeat_interleave(repeat, dim=-2)
+    return (
+        x.unsqueeze(-2)
+        .expand(*x.shape[:-2], num_kv_heads, repeat, x.shape[-1])
+        .reshape(*x.shape[:-2], num_q_heads, x.shape[-1])
+        .contiguous()
+    )
+
+
+def use_native_attention(attn_backend: AttnBackend) -> bool:
+    """Return whether attention should bypass flash-attn and use native attention."""
+
+    return attn_backend == "native"
+
+
+def require_flash_attention_supported(call: AttentionCall, *, mode: str) -> None:
+    """Fail with an actionable message when flash-attn cannot handle the shape."""
+
+    if call.flash_supported:
+        return
+    raise RuntimeError(
+        f"flash attention does not support qk head dim {call.qk_head_dim} for {mode}. "
+        "Use --attn-backend native to run the native consistency attention backend instead; "
+        "this is slower and intended for compatibility or logprob diagnostics."
+    )

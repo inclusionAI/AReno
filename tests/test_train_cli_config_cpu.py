@@ -7,6 +7,7 @@ from click.testing import CliRunner
 from areno.api.trainer_config import DPOTrainerConfig, PolicyTrainerConfig, PPOTrainerConfig, TrainerConfig
 from areno.cli import train as train_cli
 from areno.cli.train import (
+    TRAIN_OPTION_GROUPS,
     _callable_name,
     _format_summary_section,
     _format_training_config_summary,
@@ -114,13 +115,17 @@ def test_train_config_validates_ppo_positive_fields(field, value, message):
 
 
 def test_train_config_builds_sft_shape_without_rollout_or_role_fields():
-    cfg = _trainer_config_from_options(**_options(algo="sft", reward_fn_path=None, reward_ckpt=None, min_lr=0.0))
+    cfg = _trainer_config_from_options(
+        **_options(algo="sft", reward_fn_path=None, reward_ckpt=None, min_lr=0.0, attn_backend="native")
+    )
 
     assert type(cfg) is TrainerConfig
     assert cfg.algo == "sft"
     assert cfg.ckpt == "actor"
     assert cfg.dataset_path == "dataset"
     assert cfg.optimizer_min_lr == 0.0
+    assert cfg.attn_backend == "native"
+    assert cfg.areno_config().runtime["attn_backend"] == "native"
     assert cfg.batch_size == 2
     assert cfg.mini_bs == 1
     assert not hasattr(cfg, "n_samples")
@@ -257,12 +262,28 @@ def test_training_config_summary_shows_resolved_values_and_warning():
     assert "dataset_path    dataset" in summary
     assert "reward_fn       none" in summary
     assert "reward_ckpt     reward-model" in summary
-    assert "dp_size     4" in summary
+    assert "dp_size       4" in summary
+    assert "attn_backend  flash" in summary
     assert "max_running_prompts  12" in summary
     assert "sampling             greedy=no, temperature=0.7, top_k=20, top_p=0.9" in summary
     assert "optimizer                    lr=2e-06, min_lr=0.0, decay=cosine/100" in summary
     assert "metrics_log_dir  /tmp/metrics" in summary
     assert "WARNING: no checkpoint output path configured (--save-path)" in summary
+
+
+def test_training_config_summary_warns_about_native_attention_fallback(monkeypatch):
+    cfg = _trainer_config_from_options(**_options(algo="sft", reward_fn_path=None, reward_ckpt=None, world_size=1))
+    monkeypatch.setattr(
+        train_cli,
+        "flash_attention_unsupported_gpu_reason",
+        lambda devices: "Tesla T4 cc 7.5",
+    )
+
+    summary = _format_training_config_summary(cfg)
+
+    assert summary.startswith("AReno training config\nWARNING: flash-attn does not support")
+    assert "AReno will use attn_backend='native'" in summary
+    assert "attn_backend  native (auto fallback from flash: Tesla T4 cc 7.5)" in summary
 
 
 def test_training_config_summary_can_colorize_output():
@@ -313,8 +334,8 @@ def test_training_config_summary_handles_invalid_tp_size_defensively():
 
     summary = _format_training_config_summary(cfg)
 
-    assert "tp_size     0" in summary
-    assert "dp_size     n/a" in summary
+    assert "tp_size       0" in summary
+    assert "dp_size       n/a" in summary
 
 
 def test_training_config_summary_section_handles_empty_rows():
@@ -358,10 +379,68 @@ def test_train_command_prints_summary_before_run(monkeypatch):
     assert result.exit_code == 0, result.output
     output = unstyle(result.output)
     assert output.startswith("AReno training config\n")
-    assert "dp_size     2" in output
+    assert "dp_size       2" in output
     assert "save_path        out" in output
     assert "WARNING: no checkpoint output path configured" not in output
     assert events == [("run", "sft")]
+
+
+EXPECTED_HELP_SECTIONS = [
+    "Basic:",
+    "Rollout:",
+    "Train:",
+    "Checkpoint:",
+    "Observability:",
+]
+
+
+def _help_output() -> str:
+    result = CliRunner().invoke(train_cli.train_command, ["--help"])
+    assert result.exit_code == 0, result.output
+    return unstyle(result.output)
+
+
+def test_train_help_groups_sections_in_intent_order():
+    output = _help_output()
+
+    positions = []
+    for section in EXPECTED_HELP_SECTIONS:
+        assert section in output, f"missing help section: {section}"
+        positions.append(output.index(section))
+    assert positions == sorted(positions), "help sections out of intent order"
+
+
+def test_train_help_places_epochs_under_basic_not_checkpointing():
+    output = _help_output()
+
+    basic = output.index("Basic:")
+    next_section = output.index("Rollout:", basic)
+    epochs = output.index("--epochs", basic)
+    checkpoint = output.index("Checkpoint:")
+
+    # --epochs is a run-setup flag that belongs in Basic, not with the
+    # save flags in the Checkpoint group.
+    assert basic < epochs < next_section
+    assert "--epochs" not in output[checkpoint:]
+
+
+def test_train_help_remains_complete_and_groups_every_declared_option():
+    ctx = train_cli.click.Context(train_cli.train_command)
+    declared = {
+        param.name for param in train_cli.train_command.get_params(ctx) if param.get_help_record(ctx) is not None
+    }
+    grouped = [name for _, names in TRAIN_OPTION_GROUPS for name in names]
+
+    assert len(grouped) == len(set(grouped)), "an option is listed in more than one group"
+    # Every declared option is grouped except the auto-added --help, which the
+    # renderer keeps under a trailing catch-all so help output stays complete.
+    assert set(grouped) == declared - {"help"}
+
+    output = _help_output()
+    for param in train_cli.train_command.get_params(ctx):
+        record = param.get_help_record(ctx)
+        if record is not None:
+            assert record[0].split()[0].rstrip(",") in output, f"option dropped from help: {param.name}"
 
 
 def _options(**overrides):
@@ -399,6 +478,7 @@ def _options(**overrides):
         activation_checkpointing=True,
         drop_rollout_state=False,
         eager_decode=False,
+        attn_backend="flash",
         metrics_log_dir=None,
         agent_fn=None,
         agent_timeout_s=300.0,

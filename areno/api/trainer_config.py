@@ -50,10 +50,15 @@ class TrainerConfig:
     activation_checkpointing: bool = True
     keep_rollout_state: bool = True
     eager_decode: bool = False
+    attn_backend: str = "flash"
     metrics_log_dir: str | None = DEFAULT_METRICS_LOG_DIR
     agent_fn: str | None = None
     agent_timeout_s: float = 300.0
     train_tool_results: bool = False
+
+    def __post_init__(self) -> None:
+        if self.attn_backend not in {"flash", "native"}:
+            raise ValueError("attn_backend must be one of: flash, native")
 
     def optimizer_config(self) -> dict:
         """Build the optimizer dict consumed by the backend config."""
@@ -85,6 +90,7 @@ class TrainerConfig:
                 "activation_checkpointing": self.activation_checkpointing,
                 "keep_rollout_state": self.keep_rollout_state,
                 "eager_decode": self.eager_decode,
+                "attn_backend": self.attn_backend,
             },
         )
 
@@ -120,6 +126,7 @@ class RolloutTrainerConfig(TrainerConfig):
                 "activation_checkpointing": self.activation_checkpointing,
                 "keep_rollout_state": self.keep_rollout_state,
                 "eager_decode": self.eager_decode,
+                "attn_backend": self.attn_backend,
             },
         )
 

@@ -350,6 +350,7 @@ class Gemma4Attention(nn.Module):
             else None
         )
         self.softmax_scale = config.attention_softmax_scale
+        self.attn_backend = config.attn_backend
         # Rotary frequency base and partial-rotary fraction may differ per
         # layer_type (full vs sliding may use different long-context settings).
         theta = _rope_theta(config, layer_type)
@@ -360,7 +361,7 @@ class Gemma4Attention(nn.Module):
             theta,
             partial,
         )
-        self.train_backend = build_train_attention_backend()
+        self.train_backend = build_train_attention_backend(self.attn_backend)
         self.infer_backend: FlashAttnInferBackend | None = None
         # KV cache slots are lazily bound; numel==0 means "not yet allocated".
         self.k_cache = torch.tensor([])
@@ -422,7 +423,7 @@ class Gemma4Attention(nn.Module):
             raise RuntimeError("inference requires per-layer KV cache tensors")
         if self.infer_backend is None:
             # Lazily instantiate once we know what we are running against.
-            self.infer_backend = build_infer_attention_backend()
+            self.infer_backend = build_infer_attention_backend(self.attn_backend)
         out = self.infer_backend(
             q,
             k,
