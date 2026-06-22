@@ -13,7 +13,11 @@ multi-turn coding-agent loop:
 The dataset uses familiar SWE-bench fields such as `instance_id`, `repo`,
 `base_commit`, `problem_statement`, `FAIL_TO_PASS`, and `PASS_TO_PASS`. The
 example also includes `files` and `test_commands` so it can run locally without
-network access or external repository checkout.
+network access or external repository checkout. `dataset.jsonl` contains 100
+self-contained records that range from easy one-file fixes to harder multi-file
+tasks, with the majority marked hard. The tasks use only local Python files and
+pytest commands; they do not require sandbox services, package installation, or
+network access.
 
 ## Tools
 
@@ -68,6 +72,7 @@ areno train \
   --world-size 1 \
   --batch-size 1 \
   --n-samples 2 \
+  --max-prompt-tokens 4096 \
   --max-new-tokens 256
 ```
 

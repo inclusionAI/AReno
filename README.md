@@ -318,9 +318,12 @@ areno train \
 ```
 
 For a more realistic multi-turn software-engineering loop, see
-`examples/agentic/coding`. It uses SWE-bench-style local tasks, constrained
+`examples/agentic/coding`. It uses a 100-record SWE-bench-style local dataset
+that ranges from easy to hard with most records marked hard, constrained
 Codex-style tools (`inspect_tree`, `read_file`, `rg`, `apply_patch`,
 `run_command`, `submit`), and an explicit trajectory-returning `run_agent.py`.
+The records are self-contained local Python tasks and do not require sandbox
+services, package installation, or network access.
 
 DuelGrid is a larger agentic demo with a browser game UI and multi-action
 turns. Before GSPO/RLVR post-training, Gemma-E2B-it performs poorly in this
