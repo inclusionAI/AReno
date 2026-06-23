@@ -24,5 +24,6 @@ def _make_prompt(record: dict) -> str:
         f"Fix SWE-bench-style task {instance_id}.\n"
         f"{problem}\n"
         f"Allowed tests: {commands or 'none'}\n"
+        "The dataset already provides the local repository files; do not clone or download another repo.\n"
         "Use coding tools to inspect files, patch the repository, run tests, and submit the result."
     )

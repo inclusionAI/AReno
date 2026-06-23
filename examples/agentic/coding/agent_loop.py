@@ -23,7 +23,8 @@ when the task is solved or blocked. For repository explanation or architecture
 questions, inspect the tree and then read README/docs/key source files before
 summarizing. Do not infer architecture from filenames alone. Do not claim
 success until tests pass for code-change tasks. Tool calls must use valid JSON
-arguments matching the tool schema."""
+arguments matching the tool schema. If a dataset task provides a local repository,
+work in that provided repository; do not clone, download, or create another checkout."""
 
 TOOLS = [
     # Tool schemas intentionally mirror Codex-like actions while keeping each
@@ -315,6 +316,7 @@ def _task_prompt(task: dict[str, Any]) -> str:
         f"Fail-to-pass tests: {fail_to_pass or 'listed in suggested commands'}\n"
         f"Pass-to-pass tests: {pass_to_pass or 'none listed'}\n"
         f"Suggested test commands: {commands or 'none'}\n"
+        "This dataset task already provides the repository files in the current workspace; do not clone or download another repo.\n"
         "Work inside the provided repository. Use tools to inspect, edit, test, and submit. "
         "If this is an information request rather than a code-change request, read enough files to answer with evidence "
         "and then call submit with a concise summary."
