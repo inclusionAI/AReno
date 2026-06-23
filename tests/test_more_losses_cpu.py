@@ -36,6 +36,48 @@ class SftLossTest(unittest.TestCase):
         self.assertEqual(float(stats["sft_target_tokens"]), 2.0)
         self.assertEqual(float(logprobs.grad[0]), 0.0)
 
+    def test_sft_accumulation_uses_global_token_mean_when_annotated(self):
+        """SFT accumulation should weight microbatches by target-token count."""
+        short_logprobs = torch.tensor([-1.0], requires_grad=True)
+        long_logprobs = torch.tensor([-3.0, -3.0, -3.0], requires_grad=True)
+
+        short_loss, _ = sft_loss_fn({"packed_response_mask": torch.tensor([True])}, short_logprobs)
+        long_loss, _ = sft_loss_fn({"packed_response_mask": torch.tensor([True, True, True])}, long_logprobs)
+        microbatch_mean = (short_loss + long_loss) / 2
+
+        annotated_short_loss, _ = sft_loss_fn(
+            {
+                "packed_response_mask": torch.tensor([True]),
+                "_sft_total_target_tokens": 4,
+                "_sft_grad_scale": 2,
+            },
+            short_logprobs,
+        )
+        annotated_long_loss, _ = sft_loss_fn(
+            {
+                "packed_response_mask": torch.tensor([True, True, True]),
+                "_sft_total_target_tokens": 4,
+                "_sft_grad_scale": 2,
+            },
+            long_logprobs,
+        )
+        global_token_mean = (annotated_short_loss + annotated_long_loss) / 2
+
+        self.assertAlmostEqual(float(microbatch_mean.detach()), 2.0, places=6)
+        self.assertAlmostEqual(float(global_token_mean.detach()), 2.5, places=6)
+
+    def test_sft_backend_annotations_group_target_tokens(self):
+        """Backend SFT annotations describe one optimizer-step accumulation group."""
+        from areno.api.backend.areno.backend import _annotate_sft_token_mean_packs
+
+        packs = [{}, {}]
+        _annotate_sft_token_mean_packs(packs, [1, 3], gradient_accumulation_steps=None)
+
+        self.assertEqual(packs[0]["_sft_total_target_tokens"], 4)
+        self.assertEqual(packs[1]["_sft_total_target_tokens"], 4)
+        self.assertEqual(packs[0]["_sft_grad_scale"], 2)
+        self.assertEqual(packs[1]["_sft_grad_scale"], 2)
+
 
 class DpoLossTest(unittest.TestCase):
     """DPO tests validate pair ordering and packed sequence aggregation."""

@@ -27,6 +27,7 @@ import torch
 from areno.api.backend.base import Backend, register_backend
 from areno.api.config import ArenoConfig
 from areno.api.context import Context
+from areno.api.loss_fns.sft import sft_loss_fn
 from areno.api.models import BackendType, RolloutResult, RolloutSequence, SamplingParams, TrainSequence
 from areno.api.roles import ModelRole
 
@@ -323,10 +324,19 @@ class ArenoBackend(Backend):
         # pack and the loss function is stamped onto each pack so the engine's
         # forward worker can call it without having to know about the loss API.
         packs = []
+        sft_target_counts = []
         for start in range(0, len(batch_data), mini_bs):
-            pack = _make_train_pack(batch_data[start : start + mini_bs])
+            seqs = batch_data[start : start + mini_bs]
+            pack = _make_train_pack(seqs)
             pack["_loss_fn"] = loss_fn
             packs.append(pack)
+            sft_target_counts.append(_sft_target_token_count(seqs))
+        if _is_sft_loss_fn(loss_fn):
+            _annotate_sft_token_mean_packs(
+                packs,
+                sft_target_counts,
+                gradient_accumulation_steps=gradient_accumulation_steps,
+            )
         stats_list = engine.step(packs, gradient_accumulation_steps=gradient_accumulation_steps)
         train_time_s = time.perf_counter() - train_start
         # `first_policy_metrics` keeps the per-step rollout/policy diagnostics
@@ -470,6 +480,47 @@ def _make_train_pack(seqs: list[TrainSequence]) -> dict[str, torch.Tensor]:
     if ref_logprobs is not None:
         pack["ref_logprobs"] = ref_logprobs
     return pack
+
+
+def _is_sft_loss_fn(loss_fn: Callable) -> bool:
+    """Return true for the built-in SFT loss, including simple partial wrappers."""
+
+    return loss_fn is sft_loss_fn or getattr(loss_fn, "func", None) is sft_loss_fn
+
+
+def _annotate_sft_token_mean_packs(
+    packs: list[dict],
+    target_counts: list[int],
+    *,
+    gradient_accumulation_steps: int | None,
+) -> None:
+    """Attach per-accumulation-group token normalizers for global token-mean SFT."""
+
+    if not packs:
+        return
+    accumulation_steps = len(packs) if gradient_accumulation_steps is None else max(int(gradient_accumulation_steps), 1)
+    for group_start in range(0, len(packs), accumulation_steps):
+        group_end = min(group_start + accumulation_steps, len(packs))
+        group_total = max(sum(target_counts[group_start:group_end]), 1)
+        group_size = group_end - group_start
+        for pack in packs[group_start:group_end]:
+            pack["_sft_total_target_tokens"] = group_total
+            pack["_sft_grad_scale"] = group_size
+
+
+def _sft_target_token_count(seqs: list[TrainSequence]) -> int:
+    """Count target tokens using the same next-token masks as packed training."""
+
+    count = 0
+    for seq in seqs:
+        length = min(len(seq.tokens), len(seq.prompt_mask))
+        for idx in range(1, length):
+            is_target = not bool(seq.prompt_mask[idx])
+            if seq.loss_mask:
+                is_target = is_target and idx < len(seq.loss_mask) and bool(seq.loss_mask[idx])
+            if is_target:
+                count += 1
+    return count
 
 
 def _pad_token_id(ctx: Context) -> int:
