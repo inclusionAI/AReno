@@ -72,7 +72,9 @@ class TrainerDatasetUtilityTest(unittest.TestCase):
         """Prompt/response SFT rows should train on response tokens plus EOS."""
         tokenizer = FakeTextTokenizer()
 
-        seq = sft_mod._record_to_train_sequence({"prompt": "q", "response": "a"}, tokenizer, max_seq_len=16)
+        seq = sft_mod._record_to_train_sequence(
+            {"prompt": "q", "response": "a"}, tokenizer, max_prompt_tokens=16, max_new_tokens=16
+        )
 
         self.assertIsNotNone(seq)
         self.assertEqual(seq.eos_token_id, 99)
@@ -84,7 +86,7 @@ class TrainerDatasetUtilityTest(unittest.TestCase):
         """Plain text SFT rows use the first token as context and train the rest."""
         tokenizer = FakeTextTokenizer()
 
-        seq = sft_mod._record_to_train_sequence({"text": "abc"}, tokenizer, max_seq_len=16)
+        seq = sft_mod._record_to_train_sequence({"text": "abc"}, tokenizer, max_prompt_tokens=16, max_new_tokens=16)
 
         self.assertEqual(seq.prompt_mask, [True, False, False])
 
@@ -92,9 +94,36 @@ class TrainerDatasetUtilityTest(unittest.TestCase):
         """Rows that cannot produce a next-token target should be filtered out."""
         tokenizer = FakeTextTokenizer()
 
-        seq = sft_mod._record_to_train_sequence({"text": "a"}, tokenizer, max_seq_len=16)
+        seq = sft_mod._record_to_train_sequence({"text": "a"}, tokenizer, max_prompt_tokens=16, max_new_tokens=16)
 
         self.assertIsNone(seq)
+
+    def test_sft_enforces_prompt_and_response_budgets_independently(self):
+        """SFT should reject over-budget prompts and responses separately."""
+        tokenizer = FakeTextTokenizer()
+
+        too_long_prompt = sft_mod._record_to_train_sequence(
+            {"prompt": "abc", "response": "d"},
+            tokenizer,
+            max_prompt_tokens=2,
+            max_new_tokens=10,
+        )
+        too_long_response = sft_mod._record_to_train_sequence(
+            {"prompt": "q", "response": "abc"},
+            tokenizer,
+            max_prompt_tokens=10,
+            max_new_tokens=3,
+        )
+        exact_budget = sft_mod._record_to_train_sequence(
+            {"prompt": "ab", "response": "cd"},
+            tokenizer,
+            max_prompt_tokens=2,
+            max_new_tokens=3,
+        )
+
+        self.assertIsNone(too_long_prompt)
+        self.assertIsNone(too_long_response)
+        self.assertIsNotNone(exact_budget)
 
     def test_sft_fit_raises_when_all_rows_are_filtered(self):
         """SFT should fail loudly instead of finishing with zero train steps."""

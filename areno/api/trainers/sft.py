@@ -52,12 +52,13 @@ class SFTTrainer:
     def _fit_initialized(self) -> None:
         tokenizer = self.areno.get_tokenizer()
         step = 0
-        # Reuse the existing prompt/new-token limits as a single teacher-forced
-        # sequence budget for offline examples.
-        max_seq_len = self.config.max_prompt_tokens + self.config.max_new_tokens
         for epoch in range(self.config.epochs):
             self.logger.info("epoch=%d stage=epoch_start", epoch)
-            for train_batch in self._iter_train_batches(tokenizer, max_seq_len=max_seq_len):
+            for train_batch in self._iter_train_batches(
+                tokenizer,
+                max_prompt_tokens=self.config.max_prompt_tokens,
+                max_new_tokens=self.config.max_new_tokens,
+            ):
                 if not train_batch:
                     continue
                 self.logger.info(
@@ -82,17 +83,22 @@ class SFTTrainer:
                 step += 1
             self.logger.info("epoch=%d stage=epoch_end", epoch)
 
-    def _iter_train_batches(self, tokenizer, *, max_seq_len: int):
+    def _iter_train_batches(self, tokenizer, *, max_prompt_tokens: int, max_new_tokens: int):
         # Dataset rows are converted lazily so large HF datasets do not need an
         # up-front tokenized copy. Rows that are empty, all-prompt, or exceed
-        # the configured max sequence length are dropped.
+        # the configured prompt or supervised-response budgets are dropped.
         batch = []
         skipped = 0
         accepted = 0
         total_rows = len(self.dataset)
         for index in range(total_rows):
             # Normalize each supported row schema into one TrainSequence.
-            seq = _record_to_train_sequence(self.dataset[index], tokenizer, max_seq_len=max_seq_len)
+            seq = _record_to_train_sequence(
+                self.dataset[index],
+                tokenizer,
+                max_prompt_tokens=max_prompt_tokens,
+                max_new_tokens=max_new_tokens,
+            )
             if seq is None:
                 skipped += 1
                 continue
@@ -106,8 +112,8 @@ class SFTTrainer:
         if accepted == 0:
             raise ValueError(
                 "SFT dataset produced no valid training rows after filtering: "
-                f"scanned {total_rows} row(s), skipped {skipped} as empty, overlong, or all-prompt examples. "
-                "Check dataset quality and sequence length limits."
+                f"scanned {total_rows} row(s), skipped {skipped} as empty, over-budget, or all-prompt examples. "
+                "Check dataset quality, --max-prompt-tokens, and --max-new-tokens."
             )
         if batch:
             yield batch
@@ -122,7 +128,7 @@ class SFTTrainer:
         self.logger.info("epoch=%d step=%d stage=save_checkpoint_end path=%s", epoch, step, saved_path)
 
 
-def _record_to_train_sequence(record: Any, tokenizer, *, max_seq_len: int):
+def _record_to_train_sequence(record: Any, tokenizer, *, max_prompt_tokens: int, max_new_tokens: int):
     """Normalize common SFT schemas into the backend training row format.
 
     `prompt_mask=True` means "do not train this source token"; the backend loss
@@ -148,7 +154,9 @@ def _record_to_train_sequence(record: Any, tokenizer, *, max_seq_len: int):
     else:
         raise ValueError("SFT dataset row must contain `messages`, `prompt`/`response`, or `text`")
 
-    if len(tokens) < 2 or len(tokens) > max_seq_len or not any(not item for item in prompt_mask[1:]):
+    prompt_tokens = sum(1 for item in prompt_mask if item)
+    response_tokens = sum(1 for item in prompt_mask[1:] if not item)
+    if len(tokens) < 2 or prompt_tokens > max_prompt_tokens or response_tokens > max_new_tokens or response_tokens == 0:
         return None
     zeros = [0.0] * len(tokens)
     # Dummy rollout fields keep the backend packer shared with RL trainers.
