@@ -319,7 +319,7 @@ def test_coding_loop_records_multiturn_trajectory_and_solves_task():
     assert all(turn.item is item for turn in turns)
 
 
-def test_coding_loop_plain_answer_becomes_implicit_submit():
+def test_coding_loop_plain_answer_requests_tool_call():
     agent_loop = _load_module("agent_loop")
     tools = _load_module("coding_tools")
     workspace = tools.CodingWorkspace.from_task(_add_task())
@@ -327,14 +327,15 @@ def test_coding_loop_plain_answer_becomes_implicit_submit():
     client = _FakeClient([_text_response("This repository trains and serves AReno models.")])
     try:
         messages, turns = asyncio.run(
-            agent_loop.run_single_task(client=client, item=item, workspace=workspace, model="policy")
+            agent_loop.run_single_task(client=client, item=item, workspace=workspace, model="policy", max_turns=1)
         )
     finally:
         workspace.close()
 
     assert len(turns) == 1
-    assert workspace.submitted == {"status": "solved", "summary": "This repository trains and serves AReno models."}
-    assert messages[-1]["name"] == "submit"
+    assert workspace.submitted is None
+    assert messages[-1]["role"] == "user"
+    assert "did not include a tool call" in messages[-1]["content"]
 
 
 def test_coding_loop_keeps_running_after_plain_answer_when_not_implicit_submit():
@@ -358,7 +359,6 @@ def test_coding_loop_keeps_running_after_plain_answer_when_not_implicit_submit()
                 model="policy",
                 messages=messages,
                 max_turns=2,
-                implicit_submit_on_plain_text=False,
             )
         )
     finally:
