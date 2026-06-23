@@ -602,9 +602,7 @@ class RolloutSession:
             response_logprobs=response.response_logprobs,
             trace=trace,
             response_kind=response_kind,
-            loss_mask_override=_tool_call_loss_mask(tokenizer, response.response_tokens)
-            if tool_calls
-            else None,
+            loss_mask_override=_tool_call_loss_mask(tokenizer, response.response_tokens) if tool_calls else None,
         )
         # The prompt tokens are the fully rendered chat context for this turn,
         # including prior assistant/tool messages. Those context tokens are
