@@ -13,7 +13,7 @@ def apply_chat_template(tokenizer, messages: list[dict[str, Any]]) -> list[int]:
     if getattr(tokenizer, "chat_template", None):
         return normalize_token_ids(tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=False))
     text = "\n".join(f"{item.get('role', 'user')}: {item.get('content', '')}" for item in messages)
-    return normalize_token_ids(tokenizer.encode(text, add_special_tokens=True))
+    return normalize_token_ids(tokenizer.encode(text, add_special_tokens=False))
 
 
 def encode_prompt_value(tokenizer, prompt) -> list[int]:
