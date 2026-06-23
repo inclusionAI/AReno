@@ -24,6 +24,24 @@ class SftLossTest(unittest.TestCase):
         self.assertIsNotNone(logprobs.grad)
         self.assertEqual(float(logprobs.grad[0, 0]), 0.0)
 
+    def test_sft_padded_loss_honors_loss_mask(self):
+        """Padded SFT should not train response tokens masked by loss_mask."""
+        data_pack = {
+            "prompt_mask": torch.tensor([[True, False, False, False]]),
+            "loss_mask": torch.tensor([[False, True, False, True]]),
+        }
+        logprobs = torch.tensor([[-1.0, -100.0, -3.0]], requires_grad=True)
+
+        loss, stats = sft_loss_fn(data_pack, logprobs)
+        loss.backward()
+
+        self.assertAlmostEqual(float(loss.detach()), 2.0, places=6)
+        self.assertEqual(float(stats["sft_target_tokens"]), 2.0)
+        self.assertIsNotNone(logprobs.grad)
+        self.assertAlmostEqual(float(logprobs.grad[0, 0]), -0.5, places=6)
+        self.assertEqual(float(logprobs.grad[0, 1]), 0.0)
+        self.assertAlmostEqual(float(logprobs.grad[0, 2]), -0.5, places=6)
+
     def test_sft_packed_loss_uses_response_mask(self):
         """Packed SFT should use the provided flattened response mask exactly."""
         data_pack = {"packed_response_mask": torch.tensor([False, True, True])}
@@ -35,6 +53,25 @@ class SftLossTest(unittest.TestCase):
         self.assertAlmostEqual(float(loss.detach()), 0.3, places=6)
         self.assertEqual(float(stats["sft_target_tokens"]), 2.0)
         self.assertEqual(float(logprobs.grad[0]), 0.0)
+
+    def test_sft_padded_and_packed_loss_masks_agree(self):
+        """Padded loss_mask and packed_response_mask should select the same tokens."""
+        padded_pack = {
+            "prompt_mask": torch.tensor([[True, False, False, False]]),
+            "loss_mask": torch.tensor([[False, True, False, True]]),
+        }
+        packed_pack = {"packed_response_mask": torch.tensor([True, False, True])}
+        padded_logprobs = torch.tensor([[-1.0, -100.0, -3.0]])
+        packed_logprobs = torch.tensor([-1.0, -100.0, -3.0])
+
+        padded_loss, padded_stats = sft_loss_fn(padded_pack, padded_logprobs)
+        packed_loss, packed_stats = sft_loss_fn(packed_pack, packed_logprobs)
+
+        self.assertAlmostEqual(float(padded_loss), float(packed_loss), places=6)
+        self.assertEqual(float(padded_stats["sft_target_tokens"]), float(packed_stats["sft_target_tokens"]))
+        self.assertAlmostEqual(
+            float(padded_stats["sft_logprob_mean"]), float(packed_stats["sft_logprob_mean"]), places=6
+        )
 
 
 class DpoLossTest(unittest.TestCase):
