@@ -126,6 +126,7 @@ class AgentTrajectoryTurn:
     response: Any | None = None
     response_tokens: list[int] = field(default_factory=list)
     response_logprobs: list[float] = field(default_factory=list)
+    parsed_tool_calls: list[dict[str, Any]] = field(default_factory=list)
     model: str = "policy"
     tools: list[dict[str, Any]] = field(default_factory=list)
     tool_choice: Any = None
@@ -136,6 +137,7 @@ class AgentTrajectoryTurn:
         metadata = _chat_response_agentic_metadata(self.response)
         self.response_tokens = list(metadata["response_tokens"])
         self.response_logprobs = [float(value) for value in metadata["response_logprobs"]]
+        self.parsed_tool_calls = _chat_response_message_tool_calls(self.response)
 
 
 @dataclass(slots=True)
@@ -155,6 +157,7 @@ class _AgentSample:
     response_logprobs: list[float]
     trace: list[RewardEvent]
     response_kind: Literal["assistant_text", "assistant_tool_call"] = "assistant_text"
+    last_tool_calls: list[dict[str, Any]] = field(default_factory=list)
     loss_mask_override: list[bool] | None = None
     token_row: list[int] = field(default_factory=list)
     response_mask_row: list[bool] = field(default_factory=list)
@@ -335,7 +338,10 @@ class RolloutSession:
     def reward_record(self, sample: _AgentSample) -> RewardRecord:
         answer = sample.item.record.get("answer", sample.item.record.get("solutions"))
         messages = list(sample.messages)
-        messages.append({"role": "assistant", "content": sample.last_response_text})
+        if sample.last_tool_calls:
+            messages.append({"role": "assistant", "content": "", "tool_calls": list(sample.last_tool_calls)})
+        else:
+            messages.append({"role": "assistant", "content": sample.last_response_text})
         tool_calls = [
             {"name": event.name, "arguments": event.arguments}
             for event in sample.trace
@@ -539,6 +545,7 @@ class RolloutSession:
         return self._sample_from_pending_chat(
             pending,
             _ResponseData(response_tokens=list(turn.response_tokens), response_logprobs=list(turn.response_logprobs)),
+            tool_calls=list(turn.parsed_tool_calls),
         )
 
     def _set_pending_response(self, pending: _PendingChat, response: dict[str, Any]) -> None:
@@ -557,20 +564,26 @@ class RolloutSession:
         if pending.future is not None and not pending.future.done():
             pending.future.set_exception(exc)
 
-    def _sample_from_pending_chat(self, pending: _PendingChat, response: _ResponseData) -> _AgentSample:
+    def _sample_from_pending_chat(
+        self,
+        pending: _PendingChat,
+        response: _ResponseData,
+        *,
+        tool_calls: list[dict[str, Any]] | None = None,
+    ) -> _AgentSample:
         if pending.item is None:
             raise ValueError("explicit agent trajectory turn requires an AgentItem")
         tokenizer = self._trainer.get_tokenizer()
         content = tokenizer.decode(response.response_tokens)
-        tool_parse = self._tool_call_parser.parse(content, pending.tools, pending.tool_choice)
-        response_kind = "assistant_tool_call" if tool_parse.tool_calls else _response_kind(content)
+        tool_calls = list(tool_calls or [])
+        response_kind = "assistant_tool_call" if tool_calls else "assistant_text"
         events = [
             RewardEvent(
                 type="assistant_tool_call",
                 name=tool_call["function"]["name"],
                 arguments=tool_call["function"]["arguments"],
             )
-            for tool_call in tool_parse.tool_calls
+            for tool_call in tool_calls
         ]
         if not events:
             events = [RewardEvent(type=response_kind, text=content)]
@@ -584,12 +597,13 @@ class RolloutSession:
             messages=pending.messages,
             response_text=content,
             last_response_text=content,
+            last_tool_calls=list(tool_calls),
             response_tokens=response.response_tokens,
             response_logprobs=response.response_logprobs,
             trace=trace,
             response_kind=response_kind,
             loss_mask_override=_tool_call_loss_mask(tokenizer, response.response_tokens)
-            if tool_parse.tool_calls
+            if tool_calls
             else None,
         )
         # The prompt tokens are the fully rendered chat context for this turn,
@@ -622,6 +636,7 @@ class RolloutSession:
                 else new_sample.response_text
             )
             existing.last_response_text = new_sample.response_text
+            existing.last_tool_calls = list(new_sample.last_tool_calls)
         existing.response_tokens.extend(new_sample.response_tokens)
         existing.response_logprobs.extend(new_sample.response_logprobs)
         existing.trace.extend(new_sample.trace)
@@ -731,6 +746,45 @@ def _chat_response_agentic_metadata(response: Any) -> dict[str, Any]:
     return metadata
 
 
+def _chat_response_message_tool_calls(response: Any) -> list[dict[str, Any]]:
+    """Extract proxy-parsed OpenAI tool calls from a chat response.
+
+    Explicit agent trajectories must trust the OpenAI-compatible response
+    surface. Tool-call parsing belongs in the proxy response builder, not in
+    the agent loop or trajectory ingestion path.
+    """
+
+    choices = _response_get(response, "choices") or []
+    if not choices:
+        return []
+    first_choice = choices[0]
+    message = _response_get(first_choice, "message") or {}
+    raw_calls = _response_get(message, "tool_calls") or []
+    calls = []
+    for raw_call in raw_calls:
+        function = _response_get(raw_call, "function") or {}
+        name = _response_get(function, "name")
+        if not name:
+            continue
+        arguments = _response_get(function, "arguments")
+        if not isinstance(arguments, str):
+            arguments = json.dumps(arguments or {}, ensure_ascii=False, sort_keys=True)
+        calls.append(
+            {
+                "id": _response_get(raw_call, "id") or f"call_{uuid.uuid4().hex}",
+                "type": _response_get(raw_call, "type") or "function",
+                "function": {"name": str(name), "arguments": arguments},
+            }
+        )
+    return calls
+
+
+def _response_get(obj: Any, key: str) -> Any:
+    if isinstance(obj, dict):
+        return obj.get(key)
+    return getattr(obj, key, None)
+
+
 def _render_messages_for_display(tokenizer, messages: list[dict[str, Any]]) -> str:
     """Render a message trajectory with the tokenizer chat template when available."""
 
@@ -792,28 +846,6 @@ def _messages_to_text(messages: list[dict[str, Any]]) -> str:
 
 def _first_user_text(messages: list[dict[str, Any]]) -> str:
     return first_user_text(messages)
-
-
-def _response_kind(content: str) -> Literal["assistant_text", "assistant_tool_call"]:
-    """Classify generated content for loss masking.
-
-    The non-streaming proxy currently receives plain text from the local model.
-    If that text is an OpenAI-style tool-call JSON object, treat the whole span
-    as a tool call so the default policy can mask it.
-    """
-
-    text = content.strip()
-    if not text:
-        return "assistant_text"
-    try:
-        obj = json.loads(text)
-    except json.JSONDecodeError:
-        return "assistant_text"
-    if isinstance(obj, dict) and ("tool_calls" in obj or ("name" in obj and "arguments" in obj)):
-        return "assistant_tool_call"
-    if isinstance(obj, list) and obj and all(isinstance(item, dict) and "name" in item for item in obj):
-        return "assistant_tool_call"
-    return "assistant_text"
 
 
 def _tool_call_loss_mask(tokenizer, response_tokens: list[int]) -> list[bool]:

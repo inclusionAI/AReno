@@ -130,6 +130,65 @@ def test_agent_trajectory_turn_extracts_response_metadata():
     assert turn.response_logprobs == [-0.1, -0.2]
 
 
+def test_agent_trajectory_uses_proxy_parsed_tool_calls_only():
+    trainer = _FakeTrainer(world_size=1, tp_size=1)
+    trainer.tokenizer = _LiteralTokenizer('<tool_call>{"name":"submit","arguments":{"status":"solved"}}</tool_call>')
+    session = RolloutSession(trainer, sampling_params=_FakeSamplingParams(), loss_mask_policy=LossMaskPolicy())
+    item = next(AgentBatch(records=[{}], prompts=["p"], input_tokens=[[1]], n_samples=1).iter_samples())
+    response = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": '<tool_call>{"name":"submit","arguments":{"status":"solved"}}</tool_call>',
+                }
+            }
+        ],
+        "areno": {"response_tokens": [10, 11], "response_logprobs": [-0.1, -0.2]},
+    }
+
+    turn = AgentTrajectoryTurn(item=item, messages=[{"role": "user", "content": "p"}], response=response)
+    sample = session._sample_from_trajectory_turn(turn)
+    record = session.reward_record(sample)
+
+    assert turn.parsed_tool_calls == []
+    assert sample.response_kind == "assistant_text"
+    assert record.tool_calls == []
+
+
+def test_agent_trajectory_accepts_proxy_parsed_tool_calls():
+    trainer = _FakeTrainer(world_size=1, tp_size=1)
+    trainer.tokenizer = _LiteralTokenizer('<tool_call>{"name":"submit","arguments":{"status":"solved"}}</tool_call>')
+    session = RolloutSession(trainer, sampling_params=_FakeSamplingParams(), loss_mask_policy=LossMaskPolicy())
+    item = next(AgentBatch(records=[{}], prompts=["p"], input_tokens=[[1]], n_samples=1).iter_samples())
+    response = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call-submit",
+                            "type": "function",
+                            "function": {"name": "submit", "arguments": '{"status":"solved"}'},
+                        }
+                    ],
+                }
+            }
+        ],
+        "areno": {"response_tokens": [10, 11], "response_logprobs": [-0.1, -0.2]},
+    }
+
+    turn = AgentTrajectoryTurn(item=item, messages=[{"role": "user", "content": "p"}], response=response)
+    sample = session._sample_from_trajectory_turn(turn)
+    record = session.reward_record(sample)
+
+    assert sample.response_kind == "assistant_tool_call"
+    assert record.tool_calls == [{"name": "submit", "arguments": '{"status":"solved"}'}]
+    assert record.messages[-1]["tool_calls"][0]["function"]["name"] == "submit"
+
+
 def test_messages_to_prompt_tokens_passes_tools_to_chat_template():
     tokenizer = _ToolAwareTokenizer()
     messages = [{"role": "user", "content": "choose"}]
@@ -691,15 +750,21 @@ def test_agentic_tool_request_returns_tool_call_and_reward_record():
     pending.tool_choice = {"type": "function", "function": {"name": "choose_move"}}
 
     response = session._build_chat_response(pending, agentic._ResponseData([1, 2], [-0.3, -0.4]))
-    sample = session._sample_from_pending_chat(pending, agentic._ResponseData([1, 2], [-0.3, -0.4]))
-    record = session.reward_record(sample)
-
     assert response["choices"][0]["finish_reason"] == "tool_calls"
     tool_call = response["choices"][0]["message"]["tool_calls"][0]
     assert tool_call["function"]["name"] == "choose_move"
     assert '"direction":"left"' in tool_call["function"]["arguments"]
+
+    sample = session._sample_from_pending_chat(
+        pending,
+        agentic._ResponseData([1, 2], [-0.3, -0.4]),
+        tool_calls=response["choices"][0]["message"]["tool_calls"],
+    )
+    record = session.reward_record(sample)
+
     assert sample.response_kind == "assistant_tool_call"
     assert record.tool_calls == [{"name": "choose_move", "arguments": '{"direction":"left"}'}]
+    assert record.messages[-1]["tool_calls"][0]["function"]["name"] == "choose_move"
     assert record.loss_mask == [True, True]
 
 
