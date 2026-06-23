@@ -30,6 +30,8 @@ def sft_loss_fn(data_pack, logprobs):
     # Padded layout: position t predicts token t+1, so prompt_mask[:, 1:]
     # aligns with the returned next-token logprobs tensor.
     response_mask = (~data_pack["prompt_mask"][:, 1:]).to(device=logprobs.device, dtype=logprobs.dtype)
+    if "loss_mask" in data_pack:
+        response_mask = response_mask * data_pack["loss_mask"][:, 1:].to(device=logprobs.device, dtype=logprobs.dtype)
     valid_count = response_mask.sum().clamp_min(1.0)
     logprob_sum = (logprobs * response_mask).sum()
     # Prompt and right-padding positions have zero weight in the loss.

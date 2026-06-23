@@ -28,7 +28,7 @@ from areno.engine.layers.attention_backend.common import (
     expand_kv_heads,
     require_flash_attention_supported,
 )
-from areno.engine.layers.attention_backend.infer import _native_prefill
+from areno.engine.layers.attention_backend.infer import FlashAttnInferBackend, _native_prefill
 from areno.engine.runtime.metadata import InferMeta
 
 
@@ -229,6 +229,42 @@ class ConfigAndDataTest(unittest.TestCase):
         self.assertEqual(captured["k_shape"], (3, 2, 4))
         self.assertEqual(captured["v_shape"], (3, 2, 4))
         self.assertEqual(captured["cu"], [0, 3])
+
+    def test_native_prefill_pads_value_dim_and_trims_output(self):
+        """Native prefill should match flash/decode behavior when V dim is smaller than QK."""
+        backend = FlashAttnInferBackend("native")
+        q = torch.zeros(1, 2, 2, 6)
+        k = torch.zeros(1, 2, 2, 6)
+        v = torch.zeros(1, 2, 2, 4)
+        k_cache = torch.zeros(1, 2, 2, 6)
+        v_cache = torch.zeros(1, 2, 2, 6)
+        meta = InferMeta(
+            mode="prefill",
+            cu_seqlens=torch.tensor([0, 2], dtype=torch.int32),
+            max_seqlen=2,
+            block_table=torch.zeros(1, 1, dtype=torch.int32),
+        )
+        captured = {}
+
+        def fake_native_prefill(q_arg, k_arg, v_arg, meta_arg, window_size, softmax_scale):
+            captured["q_shape"] = tuple(q_arg.shape)
+            captured["k_shape"] = tuple(k_arg.shape)
+            captured["v_shape"] = tuple(v_arg.shape)
+            captured["value_tail"] = v_arg[..., 4:].clone()
+            captured["meta"] = meta_arg
+            captured["window_size"] = window_size
+            captured["softmax_scale"] = softmax_scale
+            return torch.ones_like(v_arg)
+
+        with patch("areno.engine.layers.attention_backend.infer._native_prefill", fake_native_prefill):
+            out = backend(q, k, v, k_cache, v_cache, meta, update_cache=False)
+
+        self.assertEqual(captured["q_shape"], (2, 2, 6))
+        self.assertEqual(captured["k_shape"], (2, 2, 6))
+        self.assertEqual(captured["v_shape"], (2, 2, 6))
+        self.assertTrue(torch.equal(captured["value_tail"], torch.zeros(2, 2, 2)))
+        self.assertIs(captured["meta"], meta)
+        self.assertEqual(tuple(out.shape), (1, 2, 2, 4))
 
     def test_native_attention_backend_does_not_require_flash_attn_import(self):
         """Native train/infer backends should construct without flash-attn installed."""
