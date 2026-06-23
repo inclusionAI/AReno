@@ -74,8 +74,8 @@ class FlashAttnInferBackend(nn.Module):
                 _store_prefill_cache(k_flat, v_flat, k_cache, v_cache, meta)
             if use_native_attention(self.attn_backend):
                 out = _native_prefill(
-                    q_flat,
-                    k_flat,
+                    call.q,
+                    call.k,
                     call.v,
                     meta,
                     call.window_size,
