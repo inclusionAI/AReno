@@ -97,7 +97,6 @@ async def _run_interactive_session(
             max_turns=turn_limit,
             record_trajectory=False,
             on_event=lambda _event, message: _print_message(message, verbose=args.verbose, colors=colors),
-            implicit_submit_on_plain_text=False,
         )
         if workspace.submitted is None:
             print()

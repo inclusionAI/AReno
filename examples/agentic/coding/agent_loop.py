@@ -231,7 +231,6 @@ async def run_single_task(
         max_turns=turn_limit,
         record_trajectory=record_trajectory,
         on_event=on_event,
-        implicit_submit_on_plain_text=True,
     )
     return messages, turns
 
@@ -246,7 +245,6 @@ async def run_conversation_turns(
     max_turns: int,
     record_trajectory: bool = True,
     on_event: Any | None = None,
-    implicit_submit_on_plain_text: bool = True,
 ) -> list[AgentTrajectoryTurn]:
     """Continue an existing coding-agent conversation for up to ``max_turns`` model calls."""
 
@@ -269,29 +267,17 @@ async def run_conversation_turns(
         _emit(on_event, "assistant", assistant_message)
         call = _first_tool_call(assistant_message)
         if call is None:
-            if not implicit_submit_on_plain_text:
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": (
-                            "Your previous response did not include a tool call. Continue the agent loop by "
-                            "outputting exactly one tool call in the next assistant response: use an available "
-                            "inspect/read/search/edit/test tool, or call submit if the task is solved or blocked."
-                        ),
-                    }
-                )
-                continue
-            # Training can still accept a plain final answer as an implicit submission.
-            result = workspace.submit(status="solved", summary=assistant_message.get("content", ""))
-            tool_message = {
-                "role": "tool",
-                "tool_call_id": "implicit_submit",
-                "name": "submit",
-                "content": json.dumps(result, ensure_ascii=False, sort_keys=True),
-            }
-            messages.append(tool_message)
-            _emit(on_event, "tool", tool_message)
-            break
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "Your previous response did not include a tool call. Continue the agent loop by "
+                        "outputting exactly one tool call in the next assistant response: use an available "
+                        "inspect/read/search/edit/test tool, or call submit if the task is solved or blocked."
+                    ),
+                }
+            )
+            continue
         result = _execute_tool_call(workspace, call)
         tool_message = {
             "role": "tool",
