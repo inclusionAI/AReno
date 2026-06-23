@@ -788,6 +788,7 @@ def _response_get(obj: Any, key: str) -> Any:
 def _render_messages_for_display(tokenizer, messages: list[dict[str, Any]]) -> str:
     """Render a message trajectory with the tokenizer chat template when available."""
 
+    messages = _normalize_messages(messages)
     if getattr(tokenizer, "chat_template", None):
         try:
             rendered = tokenizer.apply_chat_template(
@@ -797,7 +798,7 @@ def _render_messages_for_display(tokenizer, messages: list[dict[str, Any]]) -> s
             )
             if isinstance(rendered, str):
                 return rendered
-        except TypeError:
+        except Exception:
             pass
     return _messages_to_text(messages)
 

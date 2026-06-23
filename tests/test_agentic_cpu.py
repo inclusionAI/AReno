@@ -245,6 +245,39 @@ def test_messages_to_prompt_tokens_normalizes_tool_call_arguments_for_templates(
     assert tokens == [3]
 
 
+def test_render_messages_for_display_normalizes_tool_call_arguments_for_templates():
+    class _DisplayToolCallArgumentsMappingTokenizer:
+        chat_template = "template"
+
+        def apply_chat_template(self, messages, *, tokenize, add_generation_prompt):
+            assert tokenize is False
+            assert add_generation_prompt is False
+            for message in messages:
+                for call in message.get("tool_calls") or []:
+                    assert isinstance(call["function"]["arguments"], dict)
+                    list(call["function"]["arguments"].items())
+            return "rendered"
+
+    messages = [
+        {"role": "user", "content": "inspect"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "inspect_tree", "arguments": '{"path":".","max_depth":3}'},
+                }
+            ],
+        },
+    ]
+
+    rendered = agentic._render_messages_for_display(_DisplayToolCallArgumentsMappingTokenizer(), messages)
+
+    assert rendered == "rendered"
+
+
 def test_explicit_trajectory_tokenization_normalizes_null_tool_call_content():
     trainer = _FakeTrainer(world_size=1, tp_size=1)
     trainer.tokenizer = _StrictContentTokenizer()
