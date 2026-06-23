@@ -118,11 +118,15 @@ class TrainerDatasetUtilityTest(unittest.TestCase):
         final_rendering = data_utils.apply_chat_template(tokenizer, messages)
         prompt_rendering = data_utils.apply_chat_template(tokenizer, messages[:1])
 
-        self.assertEqual(tokens, final_rendering)
+        self.assertEqual(tokens, final_rendering + [tokenizer.eos_token_id])
         self.assertEqual(len(tokens), len(prompt_mask))
-        self.assertNotIn(tokenizer.eos_token_id, tokens)
+        self.assertEqual(tokens[-1], tokenizer.eos_token_id)
+        self.assertFalse(prompt_mask[-1])
         self.assertEqual(prompt_mask[: len(prompt_rendering)], [True] * len(prompt_rendering))
-        self.assertEqual(prompt_mask[len(prompt_rendering) :], [False] * (len(final_rendering) - len(prompt_rendering)))
+        self.assertEqual(
+            prompt_mask[len(prompt_rendering) :],
+            [False] * (len(final_rendering) - len(prompt_rendering) + 1),
+        )
 
     def test_sft_fit_raises_when_all_rows_are_filtered(self):
         """SFT should fail loudly instead of finishing with zero train steps."""

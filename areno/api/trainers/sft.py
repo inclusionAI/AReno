@@ -175,6 +175,12 @@ def _messages_to_tokens_and_mask(messages: list[dict[str, Any]], tokenizer) -> t
         tokens.extend(delta)
         prompt_mask.extend([not is_target] * len(delta))
         previous = current
+    if not getattr(tokenizer, "chat_template", None) and messages:
+        is_last_assistant = str(messages[-1].get("role", "")).lower() == "assistant"
+        eos_token_id = getattr(tokenizer, "eos_token_id", None)
+        if is_last_assistant and eos_token_id is not None:
+            tokens.append(eos_token_id)
+            prompt_mask.append(False)
     return tokens, prompt_mask
 
 
