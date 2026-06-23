@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 
 from areno.api import data_utils
 from areno.api.trainers import dpo as dpo_mod
@@ -23,6 +24,45 @@ class FakeTextTokenizer:
         for message in messages:
             ids.extend(self.encode(f"{message.get('role')}:{message.get('content')}"))
         return ids
+
+
+class FakeSFTBackend:
+    """Backend double that records whether SFT attempted to train."""
+
+    def __init__(self):
+        self.closed = False
+        self.train_calls = 0
+
+    def init(self):
+        return None
+
+    def close(self):
+        self.closed = True
+
+    def get_tokenizer(self):
+        return FakeTextTokenizer()
+
+    def train(self, _batch, _loss_fn, *, mini_bs, gradient_accumulation_steps):
+        del mini_bs, gradient_accumulation_steps
+        self.train_calls += 1
+        return {}
+
+
+def _sft_config(**overrides):
+    """Return the minimal config shape SFTTrainer reads in CPU tests."""
+
+    defaults = {
+        "batch_size": 2,
+        "epochs": 1,
+        "gradient_accumulation_steps": 1,
+        "max_new_tokens": 2,
+        "max_prompt_tokens": 2,
+        "mini_bs": 1,
+        "save_interval": 1,
+        "save_path": None,
+    }
+    defaults.update(overrides)
+    return SimpleNamespace(**defaults)
 
 
 class TrainerDatasetUtilityTest(unittest.TestCase):
@@ -55,6 +95,23 @@ class TrainerDatasetUtilityTest(unittest.TestCase):
         seq = sft_mod._record_to_train_sequence({"text": "a"}, tokenizer, max_seq_len=16)
 
         self.assertIsNone(seq)
+
+    def test_sft_fit_raises_when_all_rows_are_filtered(self):
+        """SFT should fail loudly instead of finishing with zero train steps."""
+        backend = FakeSFTBackend()
+        trainer = sft_mod.SFTTrainer(
+            _sft_config(),
+            instance=backend,
+            dataset=[{"text": ""}, {"text": "a"}],
+            reward_fn=None,
+            loss_fn=lambda _pack, _logprobs: None,
+        )
+
+        with self.assertRaisesRegex(ValueError, "no valid training rows"):
+            trainer.fit()
+
+        self.assertEqual(backend.train_calls, 0)
+        self.assertTrue(backend.closed)
 
     def test_dpo_requires_explicit_prompt_chosen_rejected_schema(self):
         """DPO rows should not guess preference or prompt field aliases."""

@@ -88,18 +88,27 @@ class SFTTrainer:
         # the configured max sequence length are dropped.
         batch = []
         skipped = 0
-        for index in range(len(self.dataset)):
+        accepted = 0
+        total_rows = len(self.dataset)
+        for index in range(total_rows):
             # Normalize each supported row schema into one TrainSequence.
             seq = _record_to_train_sequence(self.dataset[index], tokenizer, max_seq_len=max_seq_len)
             if seq is None:
                 skipped += 1
                 continue
+            accepted += 1
             batch.append(seq)
             if len(batch) >= self.config.batch_size:
                 yield batch
                 batch = []
         if skipped:
             self.logger.info("stage=sft_dataset_filter skipped_long_or_empty=%d", skipped)
+        if accepted == 0:
+            raise ValueError(
+                "SFT dataset produced no valid training rows after filtering: "
+                f"scanned {total_rows} row(s), skipped {skipped} as empty, overlong, or all-prompt examples. "
+                "Check dataset quality and sequence length limits."
+            )
         if batch:
             yield batch
 
