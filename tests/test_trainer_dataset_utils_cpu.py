@@ -26,6 +26,16 @@ class FakeTextTokenizer:
         return ids
 
 
+class EosAddingFallbackTokenizer(FakeTextTokenizer):
+    """Tokenizer double whose fallback encode adds EOS for special-token calls."""
+
+    def encode(self, text, add_special_tokens=False):
+        ids = super().encode(text, add_special_tokens=False)
+        if add_special_tokens:
+            ids.append(self.eos_token_id)
+        return ids
+
+
 class FakeSFTBackend:
     """Backend double that records whether SFT attempted to train."""
 
@@ -95,6 +105,28 @@ class TrainerDatasetUtilityTest(unittest.TestCase):
         seq = sft_mod._record_to_train_sequence({"text": "a"}, tokenizer, max_seq_len=16)
 
         self.assertIsNone(seq)
+
+    def test_sft_fallback_chat_template_keeps_assistant_delta_scoped(self):
+        """Fallback chat rendering should not let EOS suffixes over-mark history."""
+        tokenizer = EosAddingFallbackTokenizer()
+        messages = [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "ok"},
+        ]
+
+        tokens, prompt_mask = sft_mod._messages_to_tokens_and_mask(messages, tokenizer)
+        final_rendering = data_utils.apply_chat_template(tokenizer, messages)
+        prompt_rendering = data_utils.apply_chat_template(tokenizer, messages[:1])
+
+        self.assertEqual(tokens, final_rendering + [tokenizer.eos_token_id])
+        self.assertEqual(len(tokens), len(prompt_mask))
+        self.assertEqual(tokens[-1], tokenizer.eos_token_id)
+        self.assertFalse(prompt_mask[-1])
+        self.assertEqual(prompt_mask[: len(prompt_rendering)], [True] * len(prompt_rendering))
+        self.assertEqual(
+            prompt_mask[len(prompt_rendering) :],
+            [False] * (len(final_rendering) - len(prompt_rendering) + 1),
+        )
 
     def test_sft_fit_raises_when_all_rows_are_filtered(self):
         """SFT should fail loudly instead of finishing with zero train steps."""
