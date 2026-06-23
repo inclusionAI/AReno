@@ -158,7 +158,7 @@ def _compact_messages(
     if len(messages) <= 3:
         return messages
     head = messages[:2]
-    recent = messages[-max(keep_recent, 1) :]
+    recent = messages[2:][-max(keep_recent, 1) :]
     while recent and recent[0].get("role") == "tool":
         recent = recent[1:]
     compacted = messages[2 : len(messages) - len(recent)]

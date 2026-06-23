@@ -14,6 +14,16 @@ from typing import Any
 MAX_OUTPUT_CHARS = 4000
 MAX_READ_CHARS = 6000
 DEFAULT_TIMEOUT_S = 10.0
+_IGNORED_REPO_PARTS = {
+    ".git",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    "node_modules",
+    ".venv",
+    "venv",
+}
 
 
 class ToolError(ValueError):
@@ -322,8 +332,9 @@ def _apply_file_hunks(original: list[str], lines: list[str], idx: int) -> tuple[
             continue
         saw_hunk = True
         old_start = _parse_hunk_start(lines[idx])
-        output.extend(original[cursor : old_start - 1])
-        cursor = old_start - 1
+        old_index = max(old_start - 1, 0)
+        output.extend(original[cursor:old_index])
+        cursor = old_index
         idx += 1
         while idx < len(lines) and not lines[idx].startswith("@@") and not lines[idx].startswith("--- "):
             line = lines[idx]
@@ -399,14 +410,13 @@ def _relative(root: Path, path: Path) -> str:
 
 def _is_visible_source(path: Path) -> bool:
     parts = set(path.parts)
-    if "__pycache__" in parts or ".git" in parts:
+    if parts & _IGNORED_REPO_PARTS:
         return False
     return not path.name.startswith(".")
 
 
 def _ignored_repo_path(path: Path) -> bool:
-    ignored = {".git", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", "node_modules", ".venv", "venv"}
-    return any(part in ignored for part in path.parts)
+    return any(part in _IGNORED_REPO_PARTS for part in path.parts)
 
 
 def _truncate(text: str, limit: int) -> str:

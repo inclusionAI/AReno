@@ -205,6 +205,7 @@ async def run_agentic_coding_loop(ctx, batch) -> AgentTrajectory:
         return AgentTrajectory(turns=[turn for turns in grouped for turn in turns])
     finally:
         await client.close()
+        await http_client.aclose()
 
 
 async def run_single_task(

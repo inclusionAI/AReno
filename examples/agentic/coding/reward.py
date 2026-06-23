@@ -19,11 +19,13 @@ def reward_fn(record) -> float:
         for result in tool_results
         if result.get("returncode") == 0 and isinstance(result.get("command"), str)
     }
-    all_tests_passed = bool(required_commands) and all(command in successful_commands for command in required_commands)
+    all_tests_passed = (
+        all(command in successful_commands for command in required_commands) if required_commands else True
+    )
     applied_patch = any(call.get("name") == "apply_patch" for call in tool_calls)
     if submitted == "solved" and all_tests_passed and applied_patch:
         return 1.0
-    if all_tests_passed:
+    if all_tests_passed and required_commands:
         return 0.5
     if submitted == "solved":
         return -0.5

@@ -51,10 +51,14 @@ def test_coding_tools_apply_patch_run_tests_and_reject_unsafe_paths():
     tools = _load_module("coding_tools")
     workspace = tools.CodingWorkspace.from_task(_add_task())
     try:
+        (workspace.root / "node_modules").mkdir()
+        (workspace.root / "node_modules" / "ignored.js").write_text("return a - b\n", encoding="utf-8")
         assert workspace.list_files()["files"] == ["calculator.py", "test_calculator.py"]
         assert "calculator.py" in "\n".join(workspace.inspect_tree()["tree"])
+        assert "node_modules" not in "\n".join(workspace.inspect_tree()["tree"])
         assert workspace.inspect_tree(str(workspace.root), max_depth=1)["tree"]
         assert "return a - b" in workspace.read_file("calculator.py")["content"]
+        assert workspace.rg("ignored.js")["matches"] == []
         assert workspace.rg("return a [-+] b")["matches"][0]["path"] == "calculator.py"
         replace = tools.run_tool(
             workspace,
@@ -93,6 +97,13 @@ def test_coding_tools_apply_patch_run_tests_and_reject_unsafe_paths():
             },
         )
         assert result == {"applied": True, "files": ["calculator.py"]}
+        new_file = tools.run_tool(
+            workspace,
+            "apply_patch",
+            {"patch": ("--- /dev/null\n+++ b/created.py\n@@ -0,0 +1,2 @@\n+def created():\n+    return 1\n")},
+        )
+        assert new_file == {"applied": True, "files": ["created.py"]}
+        assert "1: def created()" in workspace.read_file("created.py")["content"]
         test_result = workspace.run_command("python -m pytest test_calculator.py -q")
         assert test_result["returncode"] == 0
     finally:
@@ -143,6 +154,23 @@ def test_coding_reward_scores_successful_submitted_patch():
     record.tool_results[0]["content"] = json.dumps(
         {"command": "python -m pytest test_calculator.py -q", "returncode": 1}
     )
+    assert reward.reward_fn(record) == -0.5
+
+
+def test_coding_reward_allows_solved_patch_without_required_commands():
+    reward = _load_module("reward")
+    record = SimpleNamespace(
+        source_record={"test_commands": []},
+        tool_calls=[
+            {"name": "apply_patch", "arguments": {"patch": "..."}},
+            {"name": "submit", "arguments": {"status": "solved"}},
+        ],
+        tool_results=[],
+    )
+
+    assert reward.reward_fn(record) == 1.0
+
+    record.tool_calls = [{"name": "submit", "arguments": {"status": "solved"}}]
     assert reward.reward_fn(record) == -0.5
 
 
@@ -202,6 +230,22 @@ def test_coding_cli_auto_compacts_history_without_orphan_tool_messages():
     assert compacted[2]["content"].startswith("Compacted prior conversation")
     assert compacted[3]["role"] != "tool"
     assert compacted[-1]["content"] == "answer"
+
+
+def test_coding_cli_compaction_does_not_duplicate_head_when_keep_recent_is_large():
+    code_cli = _load_module("code_cli")
+    messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "initial task"},
+        {"role": "assistant", "content": "x" * 1000},
+        {"role": "user", "content": "next"},
+    ]
+
+    compacted = code_cli._compact_messages(messages, max_chars=200, keep_recent=99)
+
+    assert [message["content"] for message in compacted].count("system") == 1
+    assert [message["content"] for message in compacted].count("initial task") == 1
+    assert compacted[2]["content"].startswith("Compacted prior conversation")
 
 
 def test_coding_loop_rejects_non_object_tool_arguments():
