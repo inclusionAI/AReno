@@ -154,9 +154,11 @@ def _record_to_train_sequence(record: Any, tokenizer, *, max_prompt_tokens: int,
     else:
         raise ValueError("SFT dataset row must contain `messages`, `prompt`/`response`, or `text`")
 
-    prompt_tokens = sum(1 for item in prompt_mask if item)
-    response_tokens = sum(1 for item in prompt_mask[1:] if not item)
-    if len(tokens) < 2 or prompt_tokens > max_prompt_tokens or response_tokens > max_new_tokens or response_tokens == 0:
+    if len(tokens) < 2:
+        return None
+    prompt_tokens = prompt_mask.count(True)
+    response_tokens = prompt_mask[1:].count(False)
+    if prompt_tokens > max_prompt_tokens or response_tokens > max_new_tokens or response_tokens == 0:
         return None
     zeros = [0.0] * len(tokens)
     # Dummy rollout fields keep the backend packer shared with RL trainers.
