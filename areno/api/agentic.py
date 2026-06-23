@@ -545,7 +545,7 @@ class RolloutSession:
         return self._sample_from_pending_chat(
             pending,
             _ResponseData(response_tokens=list(turn.response_tokens), response_logprobs=list(turn.response_logprobs)),
-            tool_calls=list(turn.parsed_tool_calls),
+            tool_calls=turn.parsed_tool_calls,
         )
 
     def _set_pending_response(self, pending: _PendingChat, response: dict[str, Any]) -> None:
@@ -597,7 +597,7 @@ class RolloutSession:
             messages=pending.messages,
             response_text=content,
             last_response_text=content,
-            last_tool_calls=list(tool_calls),
+            last_tool_calls=tool_calls,
             response_tokens=response.response_tokens,
             response_logprobs=response.response_logprobs,
             trace=trace,
@@ -754,12 +754,14 @@ def _chat_response_message_tool_calls(response: Any) -> list[dict[str, Any]]:
     the agent loop or trajectory ingestion path.
     """
 
-    choices = _response_get(response, "choices") or []
-    if not choices:
+    choices = _response_get(response, "choices")
+    if not isinstance(choices, list) or not choices:
         return []
     first_choice = choices[0]
     message = _response_get(first_choice, "message") or {}
-    raw_calls = _response_get(message, "tool_calls") or []
+    raw_calls = _response_get(message, "tool_calls")
+    if not isinstance(raw_calls, list):
+        return []
     calls = []
     for raw_call in raw_calls:
         function = _response_get(raw_call, "function") or {}
@@ -768,7 +770,7 @@ def _chat_response_message_tool_calls(response: Any) -> list[dict[str, Any]]:
             continue
         arguments = _response_get(function, "arguments")
         if not isinstance(arguments, str):
-            arguments = json.dumps(arguments or {}, ensure_ascii=False, sort_keys=True)
+            arguments = json.dumps(arguments if arguments is not None else {}, ensure_ascii=False, sort_keys=True)
         calls.append(
             {
                 "id": _response_get(raw_call, "id") or f"call_{uuid.uuid4().hex}",
