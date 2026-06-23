@@ -157,6 +157,7 @@ class _AgentSample:
     response_logprobs: list[float]
     trace: list[RewardEvent]
     response_kind: Literal["assistant_text", "assistant_tool_call"] = "assistant_text"
+    last_tool_calls: list[dict[str, Any]] = field(default_factory=list)
     loss_mask_override: list[bool] | None = None
     token_row: list[int] = field(default_factory=list)
     response_mask_row: list[bool] = field(default_factory=list)
@@ -337,7 +338,10 @@ class RolloutSession:
     def reward_record(self, sample: _AgentSample) -> RewardRecord:
         answer = sample.item.record.get("answer", sample.item.record.get("solutions"))
         messages = list(sample.messages)
-        messages.append({"role": "assistant", "content": sample.last_response_text})
+        if sample.last_tool_calls:
+            messages.append({"role": "assistant", "content": "", "tool_calls": list(sample.last_tool_calls)})
+        else:
+            messages.append({"role": "assistant", "content": sample.last_response_text})
         tool_calls = [
             {"name": event.name, "arguments": event.arguments}
             for event in sample.trace
@@ -593,6 +597,7 @@ class RolloutSession:
             messages=pending.messages,
             response_text=content,
             last_response_text=content,
+            last_tool_calls=list(tool_calls),
             response_tokens=response.response_tokens,
             response_logprobs=response.response_logprobs,
             trace=trace,
@@ -631,6 +636,7 @@ class RolloutSession:
                 else new_sample.response_text
             )
             existing.last_response_text = new_sample.response_text
+            existing.last_tool_calls = list(new_sample.last_tool_calls)
         existing.response_tokens.extend(new_sample.response_tokens)
         existing.response_logprobs.extend(new_sample.response_logprobs)
         existing.trace.extend(new_sample.trace)

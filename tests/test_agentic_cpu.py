@@ -186,6 +186,7 @@ def test_agent_trajectory_accepts_proxy_parsed_tool_calls():
 
     assert sample.response_kind == "assistant_tool_call"
     assert record.tool_calls == [{"name": "submit", "arguments": '{"status":"solved"}'}]
+    assert record.messages[-1]["tool_calls"][0]["function"]["name"] == "submit"
 
 
 def test_messages_to_prompt_tokens_passes_tools_to_chat_template():
@@ -763,6 +764,7 @@ def test_agentic_tool_request_returns_tool_call_and_reward_record():
 
     assert sample.response_kind == "assistant_tool_call"
     assert record.tool_calls == [{"name": "choose_move", "arguments": '{"direction":"left"}'}]
+    assert record.messages[-1]["tool_calls"][0]["function"]["name"] == "choose_move"
     assert record.loss_mask == [True, True]
 
 
