@@ -324,14 +324,16 @@ class ArenoBackend(Backend):
         # pack and the loss function is stamped onto each pack so the engine's
         # forward worker can call it without having to know about the loss API.
         packs = []
-        sft_target_counts = []
+        is_sft = _is_sft_loss_fn(loss_fn)
+        sft_target_counts = [] if is_sft else None
         for start in range(0, len(batch_data), mini_bs):
             seqs = batch_data[start : start + mini_bs]
             pack = _make_train_pack(seqs)
             pack["_loss_fn"] = loss_fn
             packs.append(pack)
-            sft_target_counts.append(_sft_target_token_count(seqs))
-        if _is_sft_loss_fn(loss_fn):
+            if is_sft:
+                sft_target_counts.append(_sft_target_token_count(seqs))
+        if is_sft:
             _annotate_sft_token_mean_packs(
                 packs,
                 sft_target_counts,
@@ -515,9 +517,9 @@ def _sft_target_token_count(seqs: list[TrainSequence]) -> int:
     for seq in seqs:
         length = min(len(seq.tokens), len(seq.prompt_mask))
         for idx in range(1, length):
-            is_target = not bool(seq.prompt_mask[idx])
+            is_target = not seq.prompt_mask[idx]
             if seq.loss_mask:
-                is_target = is_target and idx < len(seq.loss_mask) and bool(seq.loss_mask[idx])
+                is_target = is_target and idx < len(seq.loss_mask) and seq.loss_mask[idx]
             if is_target:
                 count += 1
     return count
