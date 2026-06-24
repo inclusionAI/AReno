@@ -123,6 +123,13 @@ signal.
    as Tesla T4 and prints a warning. ``native`` is slower than ``flash`` on
    supported GPUs.
 
+``--disable-thinking``
+   Pass ``enable_thinking=False`` to tokenizer chat templates when supported.
+   This is useful for models whose tokenizer template exposes an explicit
+   thinking-mode switch, such as some reasoning/chat checkpoints. Tokenizers
+   that do not accept ``enable_thinking`` automatically fall back to their
+   normal chat-template call.
+
 Training rollouts run inside a rollout session. The session owns actor
 onload/offload, rollout cache state, CUDA graph state, and cleanup between
 rollout and train phases. Direct prompt rollout and agentic rollout both use

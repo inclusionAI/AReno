@@ -21,6 +21,7 @@ from typing import Any
 import areno.api
 from areno.api.data_utils import apply_chat_template, encode_prompt_value, response_to_tokens_and_mask
 from areno.api.roles import ModelRole
+from areno.api.tokenizer import configure_chat_template_enable_thinking
 
 
 class DPOTrainer:
@@ -62,6 +63,7 @@ class DPOTrainer:
 
     def _fit_initialized(self) -> None:
         tokenizer = self.areno.get_tokenizer()
+        configure_chat_template_enable_thinking(tokenizer, self.config.chat_template_enable_thinking)
         step = 0
         max_seq_len = self.config.max_prompt_tokens + self.config.max_new_tokens
         for epoch in range(self.config.epochs):

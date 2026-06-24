@@ -23,6 +23,7 @@ from typing import Any
 
 import areno.api
 from areno.api.data_utils import apply_chat_template, prompt_response_to_tokens_and_mask
+from areno.api.tokenizer import configure_chat_template_enable_thinking
 
 
 class SFTTrainer:
@@ -51,6 +52,7 @@ class SFTTrainer:
 
     def _fit_initialized(self) -> None:
         tokenizer = self.areno.get_tokenizer()
+        configure_chat_template_enable_thinking(tokenizer, self.config.chat_template_enable_thinking)
         step = 0
         for epoch in range(self.config.epochs):
             self.logger.info("epoch=%d stage=epoch_start", epoch)

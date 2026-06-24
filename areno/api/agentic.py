@@ -34,6 +34,7 @@ from areno.api.openai_chat import (
     normalize_messages,
 )
 from areno.api.rewards import RewardEvent, RewardRecord
+from areno.api.tokenizer import apply_chat_template_with_options
 from areno.api.tool_call_parser import get_tool_call_parser, infer_tool_call_parser_name
 
 if TYPE_CHECKING:
@@ -790,7 +791,8 @@ def _render_messages_for_display(tokenizer, messages: list[dict[str, Any]]) -> s
 
     if getattr(tokenizer, "chat_template", None):
         try:
-            rendered = tokenizer.apply_chat_template(
+            rendered = apply_chat_template_with_options(
+                tokenizer,
                 messages,
                 tokenize=False,
                 add_generation_prompt=False,
