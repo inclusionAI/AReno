@@ -192,6 +192,7 @@ class _ChatBatchKey:
     ignore_eos: bool
     skip_special_tokens: bool
     max_prompt_len: int | None
+    max_context_len: int | None
 
 
 @dataclass(slots=True)
@@ -806,6 +807,9 @@ def _render_messages_for_display(tokenizer, messages: list[dict[str, Any]]) -> s
 
 
 def _max_context_len(params: Any) -> int | None:
+    max_context_len = getattr(params, "max_context_len", None)
+    if max_context_len is not None:
+        return int(max_context_len)
     max_prompt_len = getattr(params, "max_prompt_len", None)
     if max_prompt_len is None:
         return None
@@ -937,6 +941,7 @@ def _chat_batch_key(params: Any) -> _ChatBatchKey:
         ignore_eos=bool(getattr(params, "ignore_eos", False)),
         skip_special_tokens=bool(getattr(params, "skip_special_tokens", True)),
         max_prompt_len=getattr(params, "max_prompt_len", None),
+        max_context_len=getattr(params, "max_context_len", None),
     )
 
 

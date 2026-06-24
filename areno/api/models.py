@@ -27,13 +27,16 @@ class SamplingParams(BaseModel):
     algorithm code can stay backend-agnostic. `greedy=True` overrides
     `temperature` on the backend side (temperature is forced to 0). `top_k=-1`
     disables top-k filtering; `max_prompt_len` is an upper bound the backend
-    can enforce when truncating long prompts.
+    can enforce when truncating long prompts. `max_context_len` caps full
+    agentic trajectory contexts, including the initial prompt and all generated
+    turns concatenated for training.
     """
 
     greedy: bool = Field(default=False)
     top_p: float = Field(default=1.0)
     top_k: int = Field(default=-1)
     max_new_tokens: int = Field(default=16)
+    max_context_len: int | None = Field(default=None)
     temperature: float = Field(default=1.0)
     stop: list[str] | None = Field(default=None)
     stop_token_ids: list[int] | None = Field(default=None)

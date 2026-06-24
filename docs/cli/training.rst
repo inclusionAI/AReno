@@ -97,6 +97,11 @@ signal.
 ``--max-new-tokens INTEGER``
    Maximum generated or supervised response tokens. Default: ``3071``.
 
+``--max-context-len INTEGER``
+   Maximum total context tokens for agentic rollout trajectories. This counts
+   the original prompt plus all generated assistant turns concatenated into
+   the training row. Defaults to the model context limit.
+
 ``--temperature FLOAT``
    Rollout sampling temperature. Default: ``1.0``.
 
@@ -162,6 +167,8 @@ rows, rollout logprobs, parsed assistant tool calls, reward records, and loss
 masks.
 Tool-result/context spans are included in the token row for correct scoring
 but are masked from policy loss unless ``--train-tool-results`` is set.
+When ``--max-context-len`` is set, filtering uses the full concatenated token
+row for the whole agentic trajectory, not only the latest chat-completion turn.
 
 ``--reward-fn-path TEXT``
    Python file defining ``reward_fn(record)``.

@@ -58,6 +58,7 @@ class PolicyOnlyTrainer:
             greedy=self.config.greedy,
             temperature=self.config.temperature,
             max_new_tokens=self.config.max_new_tokens,
+            max_context_len=getattr(self.config, "max_context_len", None),
             max_prompt_len=self.config.max_prompt_tokens,
             top_k=self.config.top_k,
             top_p=self.config.top_p,
@@ -327,13 +328,20 @@ class PolicyOnlyTrainer:
         return int(sorted_values[index])
 
     def _agent_model_context_len(self):
+        limits = []
+        config = getattr(self, "config", None)
+        config_limit = getattr(config, "max_context_len", None)
+        if config_limit is not None:
+            limits.append(int(config_limit))
         try:
             value = self.areno.model_context_len()
         except (AttributeError, RuntimeError):
+            value = None
+        if value is not None:
+            limits.append(int(value))
+        if not limits:
             return None
-        if value is None:
-            return None
-        return int(value)
+        return min(limits)
 
     def _agent_trajectory_turns(self, ctx, trajectories):
         from areno.api.agentic import AgentTrajectory, AgentTrajectoryTurn

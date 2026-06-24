@@ -344,7 +344,7 @@ directly from Python.
 Data classes
 ------------
 
-.. py:class:: areno.SamplingParams(greedy=False, top_p=1.0, top_k=-1, max_new_tokens=16, temperature=1.0, stop=None, stop_token_ids=None, ignore_eos=False, skip_special_tokens=True, max_prompt_len=None)
+.. py:class:: areno.SamplingParams(greedy=False, top_p=1.0, top_k=-1, max_new_tokens=16, max_context_len=None, temperature=1.0, stop=None, stop_token_ids=None, ignore_eos=False, skip_special_tokens=True, max_prompt_len=None)
 
    Generation controls used by rollout APIs.
 
@@ -353,6 +353,9 @@ Data classes
    :param float top_p: Nucleus sampling threshold.
    :param int top_k: Top-k sampling threshold. ``-1`` disables top-k filtering.
    :param int max_new_tokens: Maximum number of generated response tokens.
+   :param int | None max_context_len: Optional total context cap for agentic
+      trajectories. The cap is applied to the prompt plus all generated turns
+      concatenated into the trainable trajectory row.
    :param float temperature: Sampling temperature.
    :param list[str] | None stop: Stop strings.
    :param list[int] | None stop_token_ids: Stop token ids.

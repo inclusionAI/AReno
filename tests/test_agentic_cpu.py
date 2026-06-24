@@ -430,6 +430,7 @@ def test_agentic_overlong_trajectory_is_filtered_with_warning(caplog):
     params.max_new_tokens = 2
     policy = object.__new__(PolicyOnlyTrainer)
     policy.logger = logging.getLogger("test.agentic.filter")
+    policy.config = SimpleNamespace(max_context_len=None)
     policy.areno = SimpleNamespace(model_context_len=lambda: 4)
 
     with caplog.at_level(logging.WARNING):
@@ -455,6 +456,7 @@ def test_agentic_trajectory_filter_uses_total_context_not_prompt_limit():
     params.max_new_tokens = 5
     policy = object.__new__(PolicyOnlyTrainer)
     policy.logger = logging.getLogger("test.agentic.filter")
+    policy.config = SimpleNamespace(max_context_len=None)
     policy.areno = SimpleNamespace(model_context_len=lambda: 10)
 
     kept, filtered, diagnostics = policy._filter_overlong_agent_samples(session, [sample], params)
@@ -462,6 +464,49 @@ def test_agentic_trajectory_filter_uses_total_context_not_prompt_limit():
     assert kept == [sample]
     assert filtered == 0
     assert diagnostics["max_context_len"] == 10
+
+
+def test_agentic_trajectory_filter_respects_configured_max_context_len():
+    trainer = _FakeTrainer(world_size=1, tp_size=1)
+    session = RolloutSession(trainer, sampling_params=_FakeSamplingParams(), loss_mask_policy=LossMaskPolicy())
+    item = agentic.AgentItem(record={}, prompt="p0", input_tokens=[1], prompt_index=0, sample_index=0)
+    sample = _sample(item, "too long", [10, 11])
+    session._set_sample_training_row(sample, [1, 2, 3, 4])
+    params = _FakeSamplingParams()
+    policy = object.__new__(PolicyOnlyTrainer)
+    policy.logger = logging.getLogger("test.agentic.filter")
+    policy.config = SimpleNamespace(max_context_len=5)
+    policy.areno = SimpleNamespace(model_context_len=lambda: 100)
+
+    kept, filtered, diagnostics = policy._filter_overlong_agent_samples(session, [sample], params)
+
+    assert kept == []
+    assert filtered == 1
+    assert diagnostics["max_context_len"] == 5
+    assert diagnostics["top"][0]["tokens"] == 6
+
+
+def test_agentic_trajectory_filter_counts_concatenated_turns():
+    trainer = _FakeTrainer(world_size=1, tp_size=1)
+    session = RolloutSession(trainer, sampling_params=_FakeSamplingParams(), loss_mask_policy=LossMaskPolicy())
+    item = agentic.AgentItem(record={}, prompt="p0", input_tokens=[1], prompt_index=0, sample_index=0)
+    first = _sample(item, "first", [10])
+    second = _sample(item, "second", [20, 21])
+    session._set_sample_training_row(first, [1, 2])
+    session._set_sample_training_row(second, [1, 2, 10])
+    session._append_sample_response(first, second)
+    params = _FakeSamplingParams()
+    policy = object.__new__(PolicyOnlyTrainer)
+    policy.logger = logging.getLogger("test.agentic.filter")
+    policy.config = SimpleNamespace(max_context_len=4)
+    policy.areno = SimpleNamespace(model_context_len=lambda: 100)
+
+    kept, filtered, diagnostics = policy._filter_overlong_agent_samples(session, [first], params)
+
+    assert len(first.token_row) == 5
+    assert kept == []
+    assert filtered == 1
+    assert diagnostics["top"][0]["tokens"] == 5
 
 
 def test_agentic_filter_diagnostics_formats_top_trajectories():
@@ -1104,6 +1149,7 @@ class _FakeSamplingParams:
     ignore_eos = False
     skip_special_tokens = True
     max_prompt_len = None
+    max_context_len = None
 
     def model_copy(self):
         copied = _FakeSamplingParams()
@@ -1116,6 +1162,7 @@ class _FakeSamplingParams:
         copied.ignore_eos = self.ignore_eos
         copied.skip_special_tokens = self.skip_special_tokens
         copied.max_prompt_len = self.max_prompt_len
+        copied.max_context_len = self.max_context_len
         return copied
 
 

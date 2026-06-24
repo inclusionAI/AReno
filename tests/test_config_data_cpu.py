@@ -560,6 +560,7 @@ def _train_args(**overrides):
         gradient_accumulation_steps=None,
         max_prompt_tokens=128,
         max_new_tokens=16,
+        max_context_len=None,
         greedy=False,
         temperature=1.0,
         top_k=-1,

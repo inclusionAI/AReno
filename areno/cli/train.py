@@ -69,6 +69,7 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "max_running_prompts",
             "max_prompt_tokens",
             "max_new_tokens",
+            "max_context_len",
             "temperature",
             "top_k",
             "top_p",
@@ -193,6 +194,8 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
         raise click.UsageError("--max-prompt-tokens must be positive")
     if args.max_new_tokens <= 0:
         raise click.UsageError("--max-new-tokens must be positive")
+    if args.max_context_len is not None and args.max_context_len <= 0:
+        raise click.UsageError("--max-context-len must be positive")
     if algorithm.requires_rollout and args.max_running_prompts is not None and args.max_running_prompts <= 0:
         raise click.UsageError("--max-running-prompts must be positive")
     if args.agent_timeout_s <= 0:
@@ -352,6 +355,7 @@ def _rollout_summary_rows(config: TrainerConfig) -> list[tuple[str, str]]:
         ("batch_size", str(config.batch_size)),
         ("max_prompt_tokens", str(config.max_prompt_tokens)),
         ("max_new_tokens", str(config.max_new_tokens)),
+        ("max_context_len", _format_optional(config.max_context_len, default="model limit")),
     ]
     if not isinstance(config, RolloutTrainerConfig):
         return [
@@ -530,6 +534,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             gradient_accumulation_steps=args.gradient_accumulation_steps,
             max_prompt_tokens=args.max_prompt_tokens,
             max_new_tokens=args.max_new_tokens,
+            max_context_len=args.max_context_len,
             optimizer_lr=args.lr,
             optimizer_min_lr=args.min_lr,
             lr_decay_steps=args.lr_decay_steps,
@@ -567,6 +572,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             gradient_accumulation_steps=args.gradient_accumulation_steps,
             max_prompt_tokens=args.max_prompt_tokens,
             max_new_tokens=args.max_new_tokens,
+            max_context_len=args.max_context_len,
             optimizer_lr=args.lr,
             optimizer_min_lr=args.min_lr,
             lr_decay_steps=args.lr_decay_steps,
@@ -604,6 +610,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             gradient_accumulation_steps=args.gradient_accumulation_steps,
             max_prompt_tokens=args.max_prompt_tokens,
             max_new_tokens=args.max_new_tokens,
+            max_context_len=args.max_context_len,
             greedy=args.greedy,
             temperature=args.temperature,
             top_k=args.top_k,
@@ -647,6 +654,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         max_prompt_tokens=args.max_prompt_tokens,
         max_new_tokens=args.max_new_tokens,
+        max_context_len=args.max_context_len,
         greedy=args.greedy,
         temperature=args.temperature,
         top_k=args.top_k,
@@ -927,6 +935,15 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     default=3071,
     show_default=True,
     help="Maximum generated or supervised response tokens.",
+)
+@click.option(
+    "--max-context-len",
+    type=int,
+    default=None,
+    help=(
+        "Maximum total context tokens for agentic rollout trajectories. "
+        "Counts prompt plus all generated turns concatenated; defaults to the model limit."
+    ),
 )
 @click.option("--temperature", type=float, default=1.0, show_default=True, help="Rollout sampling temperature.")
 @click.option("--top-k", type=int, default=-1, show_default=True, help="Rollout top-k; -1 disables top-k filtering.")

@@ -53,6 +53,7 @@ def test_train_config_requires_world_size_divisible_by_tp_size():
         ("gradient_accumulation_steps", 0, "--gradient-accumulation-steps must be positive"),
         ("max_prompt_tokens", 0, "--max-prompt-tokens must be positive"),
         ("max_new_tokens", 0, "--max-new-tokens must be positive"),
+        ("max_context_len", 0, "--max-context-len must be positive"),
         ("max_running_prompts", 0, "--max-running-prompts must be positive"),
         ("agent_timeout_s", 0.0, "--agent-timeout-s must be positive"),
         ("lr", 0.0, "--lr must be positive"),
@@ -165,6 +166,7 @@ def test_train_config_builds_policy_shape_for_gspo_and_grpo(algo, clip_attr, cli
             algo=algo,
             n_samples=3,
             max_running_prompts=12,
+            max_context_len=512,
             temperature=0.7,
             top_k=10,
             top_p=0.9,
@@ -178,6 +180,7 @@ def test_train_config_builds_policy_shape_for_gspo_and_grpo(algo, clip_attr, cli
     assert cfg.reward_fn_path is None
     assert cfg.n_samples == 3
     assert cfg.resolved_max_running_prompts() == 12
+    assert cfg.max_context_len == 512
     assert cfg.temperature == 0.7
     assert cfg.top_k == 10
     assert cfg.top_p == 0.9
@@ -471,6 +474,7 @@ def _options(**overrides):
         gradient_accumulation_steps=None,
         max_prompt_tokens=128,
         max_new_tokens=16,
+        max_context_len=None,
         greedy=False,
         temperature=1.0,
         top_k=-1,

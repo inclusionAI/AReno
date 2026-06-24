@@ -38,6 +38,7 @@ class TrainerConfig:
     gradient_accumulation_steps: int | None = None
     max_prompt_tokens: int = 1024
     max_new_tokens: int = 3071
+    max_context_len: int | None = None
     optimizer_lr: float = 1.0e-6
     optimizer_min_lr: float = 1.0e-7
     lr_decay_steps: int = 1000
