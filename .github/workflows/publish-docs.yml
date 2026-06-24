@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: docs-${{ github.workflow }}-${{ github.ref }}
@@ -40,15 +40,56 @@ jobs:
       - name: Build docs
         run: |
           rm -rf dist/docs
-          python -m sphinx -W --keep-going -b html docs dist/docs
+          python -m sphinx -W --keep-going -b html -D html_copy_source=0 docs dist/docs
           touch dist/docs/.nojekyll
 
-      - name: Publish to gh-pages
-        uses: peaceiris/actions-gh-pages@v4
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_branch: gh-pages
-          publish_dir: dist/docs
-          force_orphan: true
-          enable_jekyll: false
-          commit_message: "docs: publish static site"
+      - name: Configure asystem deploy key
+        env:
+          ASYSTEM_DOCS_DEPLOY_KEY: ${{ secrets.ASYSTEM_DOCS_DEPLOY_KEY }}
+        run: |
+          if [ -z "${ASYSTEM_DOCS_DEPLOY_KEY}" ]; then
+            echo "::error::missing ASYSTEM_DOCS_DEPLOY_KEY secret"
+            exit 1
+          fi
+          mkdir -p ~/.ssh
+          printf '%s\n' "${ASYSTEM_DOCS_DEPLOY_KEY}" > ~/.ssh/asystem_docs_deploy_key
+          chmod 600 ~/.ssh/asystem_docs_deploy_key
+          ssh-keyscan github.com >> ~/.ssh/known_hosts
+          echo "GIT_SSH_COMMAND=ssh -i ${HOME}/.ssh/asystem_docs_deploy_key -o IdentitiesOnly=yes" >> "${GITHUB_ENV}"
+
+      - name: Prepare asystem site repository
+        run: |
+          rm -rf asystem-site
+          git init asystem-site
+          cd asystem-site
+          git remote add origin git@github.com:inclusionAI/asystem.git
+          if git fetch --depth=1 origin main; then
+            git checkout -B main origin/main
+          else
+            git checkout --orphan main
+            git rm -rf . || true
+          fi
+
+      - name: Copy docs into asystem/docs/areno
+        run: |
+          rm -rf dist/docs/.doctrees dist/docs/_sources
+          rm -rf asystem-site/docs/areno
+          mkdir -p asystem-site/docs/areno
+          cp -a dist/docs/. asystem-site/docs/areno/
+          if find asystem-site/docs/areno -type f \( -name "*.py" -o -name "pyproject.toml" -o -name "setup.py" \) | grep -q .; then
+            echo "::error::compiled docs output unexpectedly contains Python project files"
+            exit 1
+          fi
+
+      - name: Commit and push asystem docs
+        working-directory: asystem-site
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/areno
+          if git diff --cached --quiet; then
+            echo "No docs changes to publish."
+            exit 0
+          fi
+          git commit -m "docs: update AReno static site"
+          git push origin main
