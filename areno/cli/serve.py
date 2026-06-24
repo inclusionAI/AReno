@@ -19,6 +19,7 @@ from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from areno.api.openai_chat import build_chat_completion_response, messages_to_prompt_tokens
+from areno.api.tokenizer import configure_chat_template_enable_thinking
 from areno.api.tool_call_parser import ToolCallParser, get_tool_call_parser, infer_tool_call_parser_name
 from areno.cli.model_refs import resolve_model_ref
 from areno.engine import ArenoEngine
@@ -166,6 +167,7 @@ def create_app(
     decode_progress_interval_s: float,
     eager_decode: bool = False,
     attn_backend: Literal["flash", "native"] = "flash",
+    chat_template_enable_thinking: bool | None = None,
 ) -> FastAPI:
     """Construct the FastAPI app: load tokenizer/engine, install routes and lifecycle hooks."""
     if world_size < 1:
@@ -176,6 +178,7 @@ def create_app(
         raise ValueError("world_size must be divisible by tp_size")
 
     tokenizer = load_tokenizer(model_path)
+    configure_chat_template_enable_thinking(tokenizer, chat_template_enable_thinking)
     attn_backend, attn_warning = _resolve_serve_attn_backend(
         model_path=model_path,
         attn_backend=attn_backend,
@@ -548,6 +551,11 @@ def _normalize_stop(stop: str | list[str] | None) -> list[str]:
     show_default=True,
     help="Attention backend. Use native for slower areno_accel attention compatibility/logprob diagnostics.",
 )
+@click.option(
+    "--disable-thinking",
+    is_flag=True,
+    help="Pass enable_thinking=False to tokenizer chat templates when supported.",
+)
 def serve_command(
     model_path: str,
     tp_size: int,
@@ -559,6 +567,7 @@ def serve_command(
     decode_progress_interval_s: float,
     eager_decode: bool,
     attn_backend: Literal["flash", "native"],
+    disable_thinking: bool,
 ) -> None:
     """Click entry point: build the app and hand it to uvicorn."""
     import uvicorn
@@ -573,6 +582,7 @@ def serve_command(
         decode_progress_interval_s=decode_progress_interval_s,
         eager_decode=eager_decode,
         attn_backend=attn_backend,
+        chat_template_enable_thinking=False if disable_thinking else None,
     )
     uvicorn.run(app, host=host, port=port)
 

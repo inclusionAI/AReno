@@ -76,6 +76,7 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "eager_decode",
             "drop_rollout_state",
             "attn_backend",
+            "disable_thinking",
             "agent_fn",
             "agent_timeout_s",
             "train_tool_results",
@@ -276,6 +277,10 @@ def _format_training_config_summary(
                 ("tp_size", str(config.tp_size)),
                 ("dp_size", _resolved_dp_size_for_summary(config)),
                 ("attn_backend", attn_backend),
+                (
+                    "thinking",
+                    _format_optional(config.chat_template_enable_thinking, default="tokenizer default"),
+                ),
             ],
         ),
         ("Rollout", _rollout_summary_rows(config)),
@@ -508,6 +513,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
     # Each algorithm gets the narrowest config dataclass it needs; offline
     # trainers do not receive rollout/reward/GSPO fields by construction.
     algorithm = get_algorithm(args.algo)
+    chat_template_enable_thinking = False if args.disable_thinking else None
     if algorithm.name == "dpo":
         return DPOTrainerConfig(
             algo=algorithm.name,
@@ -541,6 +547,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             agent_fn=args.agent_fn,
             agent_timeout_s=args.agent_timeout_s,
             train_tool_results=args.train_tool_results,
+            chat_template_enable_thinking=chat_template_enable_thinking,
             ref_ckpt=args.ref_ckpt,
             dpo_beta=args.dpo_beta,
         )
@@ -577,6 +584,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             agent_fn=args.agent_fn,
             agent_timeout_s=args.agent_timeout_s,
             train_tool_results=args.train_tool_results,
+            chat_template_enable_thinking=chat_template_enable_thinking,
         )
     if algorithm.name != "ppo":
         return PolicyTrainerConfig(
@@ -620,6 +628,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             agent_fn=args.agent_fn,
             agent_timeout_s=args.agent_timeout_s,
             train_tool_results=args.train_tool_results,
+            chat_template_enable_thinking=chat_template_enable_thinking,
         )
     return PPOTrainerConfig(
         algo=algorithm.name,
@@ -676,6 +685,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
         agent_fn=args.agent_fn,
         agent_timeout_s=args.agent_timeout_s,
         train_tool_results=args.train_tool_results,
+        chat_template_enable_thinking=chat_template_enable_thinking,
     )
 
 
@@ -955,6 +965,11 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     default="flash",
     show_default=True,
     help="Attention backend. Use native for slower areno_accel attention consistency diagnostics.",
+)
+@click.option(
+    "--disable-thinking",
+    is_flag=True,
+    help="Pass enable_thinking=False to tokenizer chat templates when supported.",
 )
 @click.option("--agent-fn", default=None, help="Python file defining async run_agent(ctx, batch) for agentic rollout.")
 @click.option(

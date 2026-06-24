@@ -4,14 +4,16 @@ from __future__ import annotations
 
 from typing import Any
 
-from areno.api.tokenizer import encode_generation_prompt, normalize_token_ids
+from areno.api.tokenizer import apply_chat_template_with_options, encode_generation_prompt, normalize_token_ids
 
 
 def apply_chat_template(tokenizer, messages: list[dict[str, Any]]) -> list[int]:
     """Encode full chat messages, with a plain-text fallback for base tokenizers."""
 
     if getattr(tokenizer, "chat_template", None):
-        return normalize_token_ids(tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=False))
+        return normalize_token_ids(
+            apply_chat_template_with_options(tokenizer, messages, tokenize=True, add_generation_prompt=False)
+        )
     text = "\n".join(f"{item.get('role', 'user')}: {item.get('content', '')}" for item in messages)
     return normalize_token_ids(tokenizer.encode(text, add_special_tokens=False))
 
@@ -21,7 +23,9 @@ def encode_prompt_value(tokenizer, prompt) -> list[int]:
 
     if isinstance(prompt, list):
         if getattr(tokenizer, "chat_template", None):
-            return normalize_token_ids(tokenizer.apply_chat_template(prompt, tokenize=True, add_generation_prompt=True))
+            return normalize_token_ids(
+                apply_chat_template_with_options(tokenizer, prompt, tokenize=True, add_generation_prompt=True)
+            )
         text = "\n".join(f"{item.get('role', 'user')}: {item.get('content', '')}" for item in prompt)
         return encode_generation_prompt(tokenizer, text)
     return encode_generation_prompt(tokenizer, prompt)

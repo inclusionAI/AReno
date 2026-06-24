@@ -296,6 +296,8 @@ areno train \
 
 `--ckpt` and `--dataset-path` accept either local paths or Hugging Face repo IDs. Switch algorithms by changing `--algo` (e.g. `--algo grpo`, `--algo sft`).
 
+For models whose tokenizer chat template supports a thinking-mode switch, add `--disable-thinking` to pass `enable_thinking=False` during training prompt rendering. Tokenizers that do not support this argument automatically use their normal chat-template path.
+
 For Agentic RL, add `--agent-fn` to supply an agent function. The agent calls the local OpenAI-compatible endpoint, including `tools` and `tool_choice` when needed, and returns explicit `AgentTrajectoryTurn` objects. AReno converts those turns into trainable assistant outputs and masks tool results by default:
 
 ```bash
@@ -352,6 +354,8 @@ areno serve \
 ```
 
 Point any OpenAI client at `http://localhost:8000/v1/chat/completions` to start generating. For the full list of serving options, run `areno serve --help`.
+
+Use `--disable-thinking` with `areno serve` to pass `enable_thinking=False` to compatible tokenizer chat templates for request rendering.
 
 ## Development
 

@@ -14,6 +14,38 @@ from typing import Any
 
 from areno.engine.data.tokenizer import load_tokenizer as load_tokenizer  # noqa: F401
 
+_CHAT_TEMPLATE_ENABLE_THINKING_ATTR = "_areno_chat_template_enable_thinking"
+
+
+def configure_chat_template_enable_thinking(tokenizer, enable_thinking: bool | None) -> None:
+    """Store the optional chat-template thinking switch on a tokenizer.
+
+    ``None`` keeps the tokenizer default.  A boolean is passed to
+    ``apply_chat_template`` calls when the tokenizer/template supports it.
+    """
+
+    if enable_thinking is None:
+        if hasattr(tokenizer, _CHAT_TEMPLATE_ENABLE_THINKING_ATTR):
+            delattr(tokenizer, _CHAT_TEMPLATE_ENABLE_THINKING_ATTR)
+        return
+    setattr(tokenizer, _CHAT_TEMPLATE_ENABLE_THINKING_ATTR, bool(enable_thinking))
+
+
+def apply_chat_template_with_options(tokenizer, messages, **kwargs):
+    """Apply a tokenizer chat template with AReno-level optional kwargs."""
+
+    kwargs = dict(kwargs)
+    enable_thinking = getattr(tokenizer, _CHAT_TEMPLATE_ENABLE_THINKING_ATTR, None)
+    if enable_thinking is not None:
+        kwargs["enable_thinking"] = bool(enable_thinking)
+    try:
+        return tokenizer.apply_chat_template(messages, **kwargs)
+    except TypeError:
+        if "enable_thinking" not in kwargs:
+            raise
+        kwargs.pop("enable_thinking", None)
+        return tokenizer.apply_chat_template(messages, **kwargs)
+
 
 def eos_token_ids(model_path: str | Path, tokenizer) -> tuple[int, ...]:
     """Collect EOS ids from tokenizer and HF config.
@@ -48,7 +80,8 @@ def encode_generation_prompt(tokenizer, prompt: str) -> list[int]:
     if _looks_chat_formatted(prompt) or not getattr(tokenizer, "chat_template", None):
         return normalize_token_ids(tokenizer.encode(prompt))
     return normalize_token_ids(
-        tokenizer.apply_chat_template(
+        apply_chat_template_with_options(
+            tokenizer,
             [{"role": "user", "content": prompt}],
             tokenize=True,
             add_generation_prompt=True,
