@@ -133,6 +133,16 @@ def test_train_config_builds_sft_shape_without_rollout_or_role_fields():
     assert not hasattr(cfg, "ref_ckpt")
 
 
+def test_train_config_disable_thinking_sets_chat_template_option():
+    default_cfg = _trainer_config_from_options(**_options(algo="sft", reward_fn_path=None, reward_ckpt=None))
+    disabled_cfg = _trainer_config_from_options(
+        **_options(algo="sft", reward_fn_path=None, reward_ckpt=None, disable_thinking=True)
+    )
+
+    assert default_cfg.chat_template_enable_thinking is None
+    assert disabled_cfg.chat_template_enable_thinking is False
+
+
 def test_train_config_builds_dpo_shape_and_ref_ckpt():
     cfg = _trainer_config_from_options(
         **_options(algo="dpo", reward_fn_path=None, reward_ckpt=None, ref_ckpt="reference", dpo_beta=0.25)
@@ -479,6 +489,7 @@ def _options(**overrides):
         drop_rollout_state=False,
         eager_decode=False,
         attn_backend="flash",
+        disable_thinking=False,
         metrics_log_dir=None,
         agent_fn=None,
         agent_timeout_s=300.0,

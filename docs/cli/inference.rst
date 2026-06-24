@@ -59,6 +59,13 @@ Options:
    as Tesla T4 and prints a warning. ``native`` is slower than ``flash`` on
    supported GPUs.
 
+``--disable-thinking``
+   Pass ``enable_thinking=False`` to tokenizer chat templates when supported.
+   Use this when serving a model whose chat template supports a thinking-mode
+   switch and you want normal responses without reasoning spans. Tokenizers
+   that do not accept ``enable_thinking`` automatically fall back to their
+   normal chat-template call.
+
 ``world-size`` must be divisible by ``tp-size``.
 
 Examples
@@ -157,6 +164,7 @@ Request fields
    * - ``tool_choice``
      - ``str | dict | None``
      - Optional tool-choice directive, including a forced function name.
+
 ``ChatMessage`` fields:
 
 ``role``

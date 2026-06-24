@@ -578,6 +578,7 @@ def _train_args(**overrides):
         drop_rollout_state=False,
         eager_decode=False,
         attn_backend="flash",
+        disable_thinking=False,
         metrics_log_dir=None,
         agent_fn=None,
         agent_timeout_s=300.0,

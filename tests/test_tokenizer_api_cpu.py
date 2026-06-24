@@ -9,7 +9,13 @@ from types import SimpleNamespace
 from areno.api.config import ArenoConfig, coerce_backend_config, resolve_backend_type
 from areno.api.models import BackendType, SamplingParams, TrainSequence
 from areno.api.rewards import load_reward_fn
-from areno.api.tokenizer import _looks_chat_formatted, encode_generation_prompt, eos_token_ids, normalize_token_ids
+from areno.api.tokenizer import (
+    _looks_chat_formatted,
+    configure_chat_template_enable_thinking,
+    encode_generation_prompt,
+    eos_token_ids,
+    normalize_token_ids,
+)
 
 
 class FakeTokenizer:
@@ -28,6 +34,12 @@ class FakeTokenizer:
 
     def apply_chat_template(self, messages, tokenize, add_generation_prompt):
         self.templated.append((messages, tokenize, add_generation_prompt))
+        return [7, 8, 9]
+
+
+class ThinkingTokenizer(FakeTokenizer):
+    def apply_chat_template(self, messages, tokenize, add_generation_prompt, enable_thinking=None):
+        self.templated.append((messages, tokenize, add_generation_prompt, enable_thinking))
         return [7, 8, 9]
 
 
@@ -59,6 +71,24 @@ class TokenizerApiTest(unittest.TestCase):
         self.assertEqual(len(tokenizer.templated), 1)
         self.assertEqual(tokenizer.encoded, ["<start_of_turn>user\nhello"])
         self.assertTrue(_looks_chat_formatted("<|im_start|>user"))
+
+    def test_encode_generation_prompt_can_disable_chat_template_thinking(self):
+        tokenizer = ThinkingTokenizer()
+        configure_chat_template_enable_thinking(tokenizer, False)
+
+        templated = encode_generation_prompt(tokenizer, "plain prompt")
+
+        self.assertEqual(templated, [7, 8, 9])
+        self.assertEqual(tokenizer.templated[0][3], False)
+
+    def test_encode_generation_prompt_falls_back_when_thinking_kwarg_is_unsupported(self):
+        tokenizer = FakeTokenizer()
+        configure_chat_template_enable_thinking(tokenizer, False)
+
+        templated = encode_generation_prompt(tokenizer, "plain prompt")
+
+        self.assertEqual(templated, [7, 8, 9])
+        self.assertEqual(len(tokenizer.templated), 1)
 
     def test_normalize_token_ids_accepts_tokenizer_encoding_outputs(self):
         """Fast tokenizer Encoding and BatchEncoding-like outputs should become ids."""
