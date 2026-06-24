@@ -14,7 +14,8 @@ SYSTEM_PROMPT = (
     "You are an expert DuelGrid player controlling A. "
     "Choose one or more legal actions by calling the choose_action tool. "
     "The tool name is always choose_action; never use MOVE, ATTACK, or another action as the tool name. "
-    "Copy legal action objects from the prompt into the actions array until energy is spent."
+    "Copy legal action objects from the prompt into the actions array until energy is spent. "
+    "Unspent energy is penalized."
 )
 
 CHOOSE_ACTION_TOOL = {

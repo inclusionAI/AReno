@@ -36,6 +36,7 @@ ACTION_COSTS = {
     "PICKUP": 0,
     "WAIT": 0,
 }
+UNSPENT_ENERGY_PENALTY = 0.05
 
 DEFAULT_MAP = (
     "###########",
@@ -143,6 +144,7 @@ def format_prompt(state: State) -> str:
         "Goal:\nDefeat player U.\n\n"
         "Rules:\n"
         "- Choose a sequence of legal action objects from the Legal actions list.\n"
+        "- Use all useful A energy each turn; unspent energy is penalized.\n"
         "- You may use multiple actions in one turn until A energy is spent.\n"
         "- Energy costs: MOVE 1, ATTACK 1, RANGED_ATTACK 2, SHIELD 1, PICKUP 0, WAIT 0.\n"
         "- If using tool calls, the function name is choose_action; action names are arguments, not tool names.\n"
@@ -330,6 +332,9 @@ def step_turn(
         applied.append({"action": "WAIT"})
         if info.get("illegal"):
             return current, total_reward, done, {"illegal": True, "applied_actions": []}
+    energy_budget = _player(state, actor).energy
+    unspent_energy = max(0, energy_budget - spent_energy)
+    total_reward -= UNSPENT_ENERGY_PENALTY * unspent_energy
     refreshed = _end_turn(current, actor, state.turn)
     return (
         refreshed,
@@ -338,7 +343,8 @@ def step_turn(
         {
             "illegal": False,
             "spent_energy": spent_energy,
-            "energy_budget": _player(state, actor).energy,
+            "energy_budget": energy_budget,
+            "unspent_energy": unspent_energy,
             "applied_actions": applied,
         },
     )

@@ -66,7 +66,9 @@ For tool-call mode, the function name is always `choose_action`; `MOVE`,
 Energy costs are `MOVE=1`, `ATTACK=1`, `RANGED_ATTACK=2`, `SHIELD=1`,
 `PICKUP=0`, and `WAIT=0`; energy refreshes to that player's current max energy
 at the end of the turn. Picking up `E` increases max energy for future turns and
-refills to the new max.
+refills to the new max. The reward function subtracts a small penalty for each
+point of unspent turn energy, so one-action turns are discouraged when useful
+energy remains.
 
 Rewards are computed by the rule engine, so the same generated states can be
 used for supervised warmup, rollout collection, or GSPO/RLVR training.
