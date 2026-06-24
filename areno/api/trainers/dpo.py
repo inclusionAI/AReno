@@ -63,7 +63,7 @@ class DPOTrainer:
 
     def _fit_initialized(self) -> None:
         tokenizer = self.areno.get_tokenizer()
-        configure_chat_template_enable_thinking(tokenizer, self.config.chat_template_enable_thinking)
+        configure_chat_template_enable_thinking(tokenizer, getattr(self.config, "chat_template_enable_thinking", None))
         step = 0
         max_seq_len = self.config.max_prompt_tokens + self.config.max_new_tokens
         for epoch in range(self.config.epochs):

@@ -53,7 +53,7 @@ class PolicyOnlyTrainer:
         import areno.api
 
         tokenizer = self.areno.get_tokenizer()
-        configure_chat_template_enable_thinking(tokenizer, self.config.chat_template_enable_thinking)
+        configure_chat_template_enable_thinking(tokenizer, getattr(self.config, "chat_template_enable_thinking", None))
         sampling_params = areno.api.SamplingParams(
             greedy=self.config.greedy,
             temperature=self.config.temperature,
