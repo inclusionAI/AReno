@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 
 from areno.api import data_utils
 from areno.api.trainers import dpo as dpo_mod
@@ -25,6 +26,55 @@ class FakeTextTokenizer:
         return ids
 
 
+class EosAddingFallbackTokenizer(FakeTextTokenizer):
+    """Tokenizer double whose fallback encode adds EOS for special-token calls."""
+
+    def encode(self, text, add_special_tokens=False):
+        ids = super().encode(text, add_special_tokens=False)
+        if add_special_tokens:
+            ids.append(self.eos_token_id)
+        return ids
+
+
+class FakeSFTBackend:
+    """Backend double that records whether SFT attempted to train."""
+
+    def __init__(self):
+        self.closed = False
+        self.train_calls = 0
+
+    def init(self):
+        return None
+
+    def close(self):
+        self.closed = True
+
+    def get_tokenizer(self):
+        return FakeTextTokenizer()
+
+    def train(self, _batch, _loss_fn, *, mini_bs, gradient_accumulation_steps):
+        del mini_bs, gradient_accumulation_steps
+        self.train_calls += 1
+        return {}
+
+
+def _sft_config(**overrides):
+    """Return the minimal config shape SFTTrainer reads in CPU tests."""
+
+    defaults = {
+        "batch_size": 2,
+        "epochs": 1,
+        "gradient_accumulation_steps": 1,
+        "max_new_tokens": 2,
+        "max_prompt_tokens": 2,
+        "mini_bs": 1,
+        "save_interval": 1,
+        "save_path": None,
+    }
+    defaults.update(overrides)
+    return SimpleNamespace(**defaults)
+
+
 class TrainerDatasetUtilityTest(unittest.TestCase):
     """Dataset helper tests convert rows to TrainSequence without backend init."""
 
@@ -32,7 +82,9 @@ class TrainerDatasetUtilityTest(unittest.TestCase):
         """Prompt/response SFT rows should train on response tokens plus EOS."""
         tokenizer = FakeTextTokenizer()
 
-        seq = sft_mod._record_to_train_sequence({"prompt": "q", "response": "a"}, tokenizer, max_seq_len=16)
+        seq = sft_mod._record_to_train_sequence(
+            {"prompt": "q", "response": "a"}, tokenizer, max_prompt_tokens=16, max_new_tokens=16
+        )
 
         self.assertIsNotNone(seq)
         self.assertEqual(seq.eos_token_id, 99)
@@ -44,7 +96,7 @@ class TrainerDatasetUtilityTest(unittest.TestCase):
         """Plain text SFT rows use the first token as context and train the rest."""
         tokenizer = FakeTextTokenizer()
 
-        seq = sft_mod._record_to_train_sequence({"text": "abc"}, tokenizer, max_seq_len=16)
+        seq = sft_mod._record_to_train_sequence({"text": "abc"}, tokenizer, max_prompt_tokens=16, max_new_tokens=16)
 
         self.assertEqual(seq.prompt_mask, [True, False, False])
 
@@ -52,9 +104,75 @@ class TrainerDatasetUtilityTest(unittest.TestCase):
         """Rows that cannot produce a next-token target should be filtered out."""
         tokenizer = FakeTextTokenizer()
 
-        seq = sft_mod._record_to_train_sequence({"text": "a"}, tokenizer, max_seq_len=16)
+        seq = sft_mod._record_to_train_sequence({"text": "a"}, tokenizer, max_prompt_tokens=16, max_new_tokens=16)
 
         self.assertIsNone(seq)
+
+    def test_sft_enforces_prompt_and_response_budgets_independently(self):
+        """SFT should reject over-budget prompts and responses separately."""
+        tokenizer = FakeTextTokenizer()
+
+        too_long_prompt = sft_mod._record_to_train_sequence(
+            {"prompt": "abc", "response": "d"},
+            tokenizer,
+            max_prompt_tokens=2,
+            max_new_tokens=10,
+        )
+        too_long_response = sft_mod._record_to_train_sequence(
+            {"prompt": "q", "response": "abc"},
+            tokenizer,
+            max_prompt_tokens=10,
+            max_new_tokens=3,
+        )
+        exact_budget = sft_mod._record_to_train_sequence(
+            {"prompt": "ab", "response": "cd"},
+            tokenizer,
+            max_prompt_tokens=2,
+            max_new_tokens=3,
+        )
+
+        self.assertIsNone(too_long_prompt)
+        self.assertIsNone(too_long_response)
+        self.assertIsNotNone(exact_budget)
+
+    def test_sft_fallback_chat_template_keeps_assistant_delta_scoped(self):
+        """Fallback chat rendering should not let EOS suffixes over-mark history."""
+        tokenizer = EosAddingFallbackTokenizer()
+        messages = [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "ok"},
+        ]
+
+        tokens, prompt_mask = sft_mod._messages_to_tokens_and_mask(messages, tokenizer)
+        final_rendering = data_utils.apply_chat_template(tokenizer, messages)
+        prompt_rendering = data_utils.apply_chat_template(tokenizer, messages[:1])
+
+        self.assertEqual(tokens, final_rendering + [tokenizer.eos_token_id])
+        self.assertEqual(len(tokens), len(prompt_mask))
+        self.assertEqual(tokens[-1], tokenizer.eos_token_id)
+        self.assertFalse(prompt_mask[-1])
+        self.assertEqual(prompt_mask[: len(prompt_rendering)], [True] * len(prompt_rendering))
+        self.assertEqual(
+            prompt_mask[len(prompt_rendering) :],
+            [False] * (len(final_rendering) - len(prompt_rendering) + 1),
+        )
+
+    def test_sft_fit_raises_when_all_rows_are_filtered(self):
+        """SFT should fail loudly instead of finishing with zero train steps."""
+        backend = FakeSFTBackend()
+        trainer = sft_mod.SFTTrainer(
+            _sft_config(),
+            instance=backend,
+            dataset=[{"text": ""}, {"text": "a"}],
+            reward_fn=None,
+            loss_fn=lambda _pack, _logprobs: None,
+        )
+
+        with self.assertRaisesRegex(ValueError, "no valid training rows"):
+            trainer.fit()
+
+        self.assertEqual(backend.train_calls, 0)
+        self.assertTrue(backend.closed)
 
     def test_dpo_requires_explicit_prompt_chosen_rejected_schema(self):
         """DPO rows should not guess preference or prompt field aliases."""
