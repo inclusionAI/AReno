@@ -48,17 +48,18 @@ CHOOSE_SQUARE_TOOL = {
 class TicTacToeServer(ThreadingHTTPServer):
     """Small stateful HTTP server for one local Tic-Tac-Toe game."""
 
-    def __init__(self, server_address, request_handler, *, seed: int | None = None, llm_args):
+    def __init__(self, server_address, request_handler, *, seed: int | None = None, args):
         super().__init__(server_address, request_handler)
         self.rng = random.Random(seed)
         self.board = _empty_board()
         self.turn = "X"
-        self.llm_first = True
-        self.llm_player = "X"
+        self.agent_first = True
+        self.agent_player = "X"
+        self.agent_mode = args.agent_mode
         self.human_player = "O"
-        self.events = ["New game. LLM controls X and moves first."]
-        self.llm_args = llm_args
-        self.llm_client = _make_openai_client(llm_args)
+        self.events = [f"New game. {_agent_name(self)} controls X and moves first."]
+        self.args = args
+        self.openai_client = None
 
 
 class TicTacToeHandler(BaseHTTPRequestHandler):
@@ -79,8 +80,9 @@ class TicTacToeHandler(BaseHTTPRequestHandler):
         route = _route_path(self.path)
         if route == "new":
             body = self._read_json()
-            llm_first = body.get("llm_first") if isinstance(body, dict) else None
-            _reset(self.server, llm_first=llm_first)
+            agent_first = body.get("agent_first") if isinstance(body, dict) else None
+            agent_mode = body.get("agent_mode") if isinstance(body, dict) else None
+            _reset(self.server, agent_first=agent_first, agent_mode=agent_mode)
             self._send_json(_payload(self.server))
         elif route == "move":
             body = self._read_json()
@@ -140,17 +142,20 @@ def _empty_board() -> game.Board:
     return [[game.EMPTY for _ in range(3)] for _ in range(3)]
 
 
-def _reset(server: TicTacToeServer, *, llm_first: Any = None) -> None:
-    if llm_first is not None:
-        server.llm_first = bool(llm_first)
-    server.llm_player = "X" if server.llm_first else "O"
-    server.human_player = "O" if server.llm_first else "X"
+def _reset(server: TicTacToeServer, *, agent_first: Any = None, agent_mode: Any = None) -> None:
+    if agent_first is not None:
+        server.agent_first = bool(agent_first)
+    if agent_mode in {"llm", "best"}:
+        server.agent_mode = str(agent_mode)
+    server.agent_player = "X" if server.agent_first else "O"
+    server.human_player = "O" if server.agent_first else "X"
     server.board = _empty_board()
     server.turn = "X"
-    first = "LLM" if server.llm_first else "Player"
+    agent_name = _agent_name(server)
+    first = agent_name if server.agent_first else "Player"
     server.events = [
         f"Started a fresh Tic-Tac-Toe board. {first} moves first.",
-        f"You control {server.human_player}; LLM controls {server.llm_player}.",
+        f"You control {server.human_player}; {agent_name} controls {server.agent_player}.",
     ]
 
 
@@ -181,23 +186,36 @@ def _move(server: TicTacToeServer, square: Any, player: str) -> dict[str, Any]:
 
 
 def _agent_move(server: TicTacToeServer) -> dict[str, Any]:
-    if server.turn != server.llm_player or game.is_terminal(server.board):
+    if server.turn != server.agent_player or game.is_terminal(server.board):
         return _payload(server)
     try:
-        square = _llm_square(server)
+        square = _agent_square(server)
     except Exception as exc:  # noqa: BLE001
-        server.events.insert(0, f"LLM failed: {exc}")
+        server.events.insert(0, f"{_agent_name(server)} failed: {exc}")
         server.events = server.events[:8]
         return _payload(server)
-    return _move(server, square, server.llm_player)
+    return _move(server, square, server.agent_player)
+
+
+def _agent_square(server: TicTacToeServer) -> int:
+    if server.agent_mode == "best":
+        moves = _best_moves_for_player(server.board, server.agent_player)
+        if not moves:
+            raise ValueError("no legal best move available")
+        return server.rng.choice(moves)
+    return _llm_square(server)
 
 
 def _llm_square(server: TicTacToeServer) -> int:
-    response = server.llm_client.chat.completions.create(
-        model=server.llm_args.model,
+    if not server.args.base_url:
+        raise ValueError("LLM mode requires --base-url")
+    if server.openai_client is None:
+        server.openai_client = _make_openai_client(server.args)
+    response = server.openai_client.chat.completions.create(
+        model=server.args.model,
         messages=[
-            {"role": "system", "content": _system_prompt(server.llm_player)},
-            {"role": "user", "content": _turn_prompt(server.board, server.llm_player)},
+            {"role": "system", "content": _system_prompt(server.agent_player)},
+            {"role": "user", "content": _turn_prompt(server.board, server.agent_player)},
         ],
         tools=[CHOOSE_SQUARE_TOOL],
         tool_choice={"type": "function", "function": {"name": "choose_square"}},
@@ -213,6 +231,17 @@ def _llm_square(server: TicTacToeServer) -> int:
             args = json.loads(args)
         return int(args["square"])
     raise ValueError("response did not contain choose_square tool call")
+
+
+def _best_moves_for_player(board: game.Board, player: str) -> list[int]:
+    if player == "X":
+        return game.best_moves(board)
+    swapped = [["X" if cell == "O" else "O" if cell == "X" else cell for cell in row] for row in board]
+    return game.best_moves(swapped)
+
+
+def _agent_name(server: TicTacToeServer) -> str:
+    return "Best Move" if server.agent_mode == "best" else "LLM"
 
 
 def _system_prompt(player: str) -> str:
@@ -247,8 +276,10 @@ def _payload(server: TicTacToeServer) -> dict[str, Any]:
         "board": server.board,
         "turn": server.turn,
         "human_player": server.human_player,
-        "llm_player": server.llm_player,
-        "llm_first": server.llm_first,
+        "agent_player": server.agent_player,
+        "agent_first": server.agent_first,
+        "agent_mode": server.agent_mode,
+        "agent_name": _agent_name(server),
         "winner": game.winner(server.board),
         "terminal": game.is_terminal(server.board),
         "legal_moves": game.legal_moves(server.board),
@@ -284,7 +315,7 @@ h1{font-size:38px;line-height:1;margin:0 0 8px;color:#e05d2f;text-shadow:2px 2px
 .cell.x .mark{color:#252525;text-shadow:3px 3px 0 #9ddfd3}.cell.o .mark{color:#fff;text-shadow:0 0 0 #fff,3px 3px 0 #f08a4b,-2px -2px 0 #27313a,2px -2px 0 #27313a,-2px 2px 0 #27313a,2px 2px 0 #27313a}
 .cell.empty::after{content:attr(data-square);font-size:22px;font-weight:1000;color:rgba(39,49,58,.32)}
 .cell.drop{animation:pop .28s ease}@keyframes pop{0%{transform:scale(.72) rotate(-8deg)}70%{transform:scale(1.08) rotate(3deg)}100%{transform:scale(1) rotate(0)}}
-.stats,.actions,.first-control{display:flex;gap:10px;flex-wrap:wrap;margin-top:14px}.pill{background:#fff;border:3px solid #27313a;border-radius:999px;padding:8px 12px;font-weight:1000}
+.stats,.actions,.first-control,.mode-control{display:flex;gap:10px;flex-wrap:wrap;margin-top:14px}.pill{background:#fff;border:3px solid #27313a;border-radius:999px;padding:8px 12px;font-weight:1000}
 button{border:3px solid #27313a;border-radius:16px;background:#ffd166;box-shadow:4px 4px 0 #27313a;color:#27313a;font-weight:1000;padding:12px 14px;cursor:pointer}
 button:hover{transform:translateY(-1px)}button:disabled{filter:grayscale(.75);opacity:.55;cursor:not-allowed}.choice.active{background:#9be564}.label{font-weight:1000;color:#5d3d1d;align-self:center}
 .thinking{display:none;margin:10px 0;padding:10px 12px;border:3px solid #27313a;border-radius:16px;background:#dff6ff;font-weight:1000}.thinking.on{display:block}
@@ -306,8 +337,13 @@ button:hover{transform:translateY(-1px)}button:disabled{filter:grayscale(.75);op
     </div>
     <div class="first-control" aria-label="First move selector">
       <span class="label">First move</span>
-      <button class="choice active" id="llmFirst">LLM</button>
+      <button class="choice active" id="agentFirst">Agent</button>
       <button class="choice" id="playerFirst">Player</button>
+    </div>
+    <div class="mode-control" aria-label="Agent mode selector">
+      <span class="label">Agent mode</span>
+      <button class="choice active" id="llmMode">LLM</button>
+      <button class="choice" id="bestMode">Best Move</button>
     </div>
     <div class="actions">
       <button id="agent">Retry LLM Move</button>
@@ -320,14 +356,14 @@ button:hover{transform:translateY(-1px)}button:disabled{filter:grayscale(.75);op
       <li id="playerRule">You are O. X is the agent.</li>
       <li>Click a square or press keys 1-9 on your turn.</li>
       <li>First player to make three in a row, column, or diagonal wins.</li>
-      <li>The LLM must respond with a choose_square tool call.</li>
+      <li>LLM mode calls choose_square; Best Move mode uses minimax.</li>
     </ul>
     <div id="events" class="events"></div>
   </aside>
 </main>
 <script>
 const api = (path) => new URL(path, window.location.href).toString();
-let state = null, lastBoard = "", agentBusy = false, llmFirst = true;
+let state = null, lastBoard = "", agentBusy = false, agentFirst = true, agentMode = "llm";
 async function request(path, body){
   const opts = body ? {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)} : {};
   const res = await fetch(api(path), opts);
@@ -350,22 +386,25 @@ function render(){
     board.appendChild(div);
   });
   lastBoard = key;
-  llmFirst = Boolean(state.llm_first);
-  document.getElementById("llmFirst").classList.toggle("active", llmFirst);
-  document.getElementById("playerFirst").classList.toggle("active", !llmFirst);
-  document.getElementById("turn").textContent = agentBusy ? `${state.llm_player} thinking` : (state.terminal ? (state.winner ? `${state.winner} wins` : "Draw") : `${state.turn}'s turn`);
-  document.getElementById("mode").textContent = `You ${state.human_player} · LLM ${state.llm_player}`;
-  document.getElementById("playerRule").textContent = `You are ${state.human_player}. ${state.llm_player} is the agent.`;
-  document.getElementById("agent").disabled = agentBusy || state.turn !== state.llm_player || state.terminal;
-  document.getElementById("thinking").innerHTML = `${state.llm_player} is thinking<span class="dots"></span>`;
-  document.getElementById("thinking").classList.toggle("on", agentBusy);
+  agentFirst = Boolean(state.agent_first);
+  agentMode = state.agent_mode || "llm";
+  document.getElementById("agentFirst").classList.toggle("active", agentFirst);
+  document.getElementById("playerFirst").classList.toggle("active", !agentFirst);
+  document.getElementById("llmMode").classList.toggle("active", agentMode === "llm");
+  document.getElementById("bestMode").classList.toggle("active", agentMode === "best");
+  document.getElementById("turn").textContent = agentBusy ? `${state.agent_player} thinking` : (state.terminal ? (state.winner ? `${state.winner} wins` : "Draw") : `${state.turn}'s turn`);
+  document.getElementById("mode").textContent = `You ${state.human_player} · ${state.agent_name} ${state.agent_player}`;
+  document.getElementById("playerRule").textContent = `You are ${state.human_player}. ${state.agent_name} controls ${state.agent_player}.`;
+  document.getElementById("agent").disabled = agentBusy || state.turn !== state.agent_player || state.terminal;
+  document.getElementById("thinking").innerHTML = `${state.agent_player} is thinking<span class="dots"></span>`;
+  document.getElementById("thinking").classList.toggle("on", agentBusy && agentMode === "llm");
   document.getElementById("events").innerHTML = state.events.map(e => `<div class="event">${escapeHtml(e)}</div>`).join("");
 }
 async function maybeAgentMove(){
-  if(!state || state.turn !== state.llm_player || state.terminal || agentBusy) return;
+  if(!state || state.turn !== state.agent_player || state.terminal || agentBusy) return;
   agentBusy = true;
   render();
-  document.getElementById("agent").textContent = `${state.llm_player} is thinking...`;
+  document.getElementById("agent").textContent = agentMode === "best" ? "Best Move..." : `${state.agent_player} is thinking...`;
   try {
     await request("api/agent", {});
   } finally {
@@ -375,14 +414,21 @@ async function maybeAgentMove(){
   }
 }
 function escapeHtml(text){return text.replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#039;"}[c]));}
-function setFirst(nextLlmFirst){
-  llmFirst = nextLlmFirst;
-  document.getElementById("llmFirst").classList.toggle("active", llmFirst);
-  document.getElementById("playerFirst").classList.toggle("active", !llmFirst);
+function setFirst(nextAgentFirst){
+  agentFirst = nextAgentFirst;
+  document.getElementById("agentFirst").classList.toggle("active", agentFirst);
+  document.getElementById("playerFirst").classList.toggle("active", !agentFirst);
 }
-document.getElementById("llmFirst").onclick = () => setFirst(true);
+function setMode(nextAgentMode){
+  agentMode = nextAgentMode;
+  document.getElementById("llmMode").classList.toggle("active", agentMode === "llm");
+  document.getElementById("bestMode").classList.toggle("active", agentMode === "best");
+}
+document.getElementById("agentFirst").onclick = () => setFirst(true);
 document.getElementById("playerFirst").onclick = () => setFirst(false);
-document.getElementById("new").onclick = () => request("api/new", {llm_first: llmFirst});
+document.getElementById("llmMode").onclick = () => setMode("llm");
+document.getElementById("bestMode").onclick = () => setMode("best");
+document.getElementById("new").onclick = () => request("api/new", {agent_first: agentFirst, agent_mode: agentMode});
 document.getElementById("agent").onclick = () => request("api/agent", {});
 window.addEventListener("keydown", (e) => {
   const square = Number(e.key);
@@ -400,12 +446,13 @@ def main() -> None:
     parser.add_argument("--host", default=DEFAULT_HOST)
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--seed", type=int, default=None)
-    parser.add_argument("--base-url", required=True, help="OpenAI-compatible base URL for the LLM player.")
+    parser.add_argument("--agent-mode", choices=("llm", "best"), default="llm")
+    parser.add_argument("--base-url", default=None, help="OpenAI-compatible base URL for LLM mode.")
     parser.add_argument("--api-key", default="token")
     parser.add_argument("--model", default="policy")
     args = parser.parse_args()
 
-    server = TicTacToeServer((args.host, args.port), TicTacToeHandler, seed=args.seed, llm_args=args)
+    server = TicTacToeServer((args.host, args.port), TicTacToeHandler, seed=args.seed, args=args)
     url = f"http://{args.host}:{args.port}"
     print(f"Tic-Tac-Toe web UI running at {url}")
     print("Press Ctrl+C to stop.")

@@ -51,7 +51,14 @@ python examples/agentic/tictactoe/web_ui.py \
 ```
 
 Open `http://127.0.0.1:8767`. The UI supports mouse clicks, keyboard squares
-`1`-`9`, and switching whether the LLM or player moves first.
+`1`-`9`, switching whether the agent or player moves first, and switching the
+agent between LLM mode and minimax best-move mode.
+
+To run without an LLM server:
+
+```bash
+python examples/agentic/tictactoe/web_ui.py --agent-mode best
+```
 
 ## Run without Tool Calls
 
