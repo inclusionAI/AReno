@@ -12,7 +12,9 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 
 SYSTEM_PROMPT = (
     "You are a careful Tic-Tac-Toe player. You play X. "
-    "Choose exactly one legal square by calling the choose_square tool."
+    "Choose exactly one legal empty square by calling the choose_square tool. "
+    "Digits on the board are empty square labels, not marks. "
+    "Win immediately if possible; otherwise block any immediate O win."
 )
 
 CHOOSE_SQUARE_TOOL = {
