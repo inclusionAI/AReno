@@ -108,6 +108,12 @@ def test_create_app_falls_back_to_native_for_flash_unsupported_model(monkeypatch
     assert captured["runtime_config"].attn_backend == "native"
 
 
+def test_serve_default_max_running_prompts_is_16():
+    option = next(param for param in serve_mod.serve_command.params if param.name == "max_running_prompts")
+
+    assert option.default == 16
+
+
 def test_chat_completion_request_defaults_match_sampling_params():
     request = serve_mod.ChatCompletionRequest(messages=[serve_mod.ChatMessage(role="user", content="hi")])
 

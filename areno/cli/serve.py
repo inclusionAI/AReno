@@ -531,7 +531,7 @@ def _normalize_stop(stop: str | list[str] | None) -> list[str]:
 @click.option(
     "--max-running-prompts",
     type=int,
-    default=128,
+    default=16,
     show_default=True,
     help="Maximum concurrent rollout prompts per request chunk.",
 )
