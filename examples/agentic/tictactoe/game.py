@@ -44,8 +44,13 @@ def format_prompt(board: Board) -> str:
     """Build the one-step prompt for the tool-call agent."""
 
     return (
-        "You are playing Tic-Tac-Toe as X. Choose the best next square.\n"
-        "Empty squares are numbered 1 through 9. Call the choose_square tool with the selected square.\n\n"
+        "You are playing Tic-Tac-Toe as X. Choose the best legal next square.\n\n"
+        "Rules:\n"
+        "- X and O are already-placed marks.\n"
+        "- Digits 1 through 9 are empty square labels, not marks.\n"
+        "- Choose only one digit shown on the board by calling the choose_square tool.\n"
+        "- Win immediately if possible; otherwise block any immediate O win.\n"
+        "- Do not choose an occupied X or O square.\n\n"
         f"Board:\n{board_to_text(board)}\n\nMove:"
     )
 
@@ -54,8 +59,13 @@ def format_xml_prompt(board: Board) -> str:
     """Build the one-step prompt for the XML no-tool agent."""
 
     return (
-        "You are playing Tic-Tac-Toe as X. Choose the best next square.\n"
-        "Empty squares are numbered 1 through 9.\n"
+        "You are playing Tic-Tac-Toe as X. Choose the best legal next square.\n\n"
+        "Rules:\n"
+        "- X and O are already-placed marks.\n"
+        "- Digits 1 through 9 are empty square labels, not marks.\n"
+        "- Choose only one digit shown on the board.\n"
+        "- Win immediately if possible; otherwise block any immediate O win.\n"
+        "- Do not choose an occupied X or O square.\n\n"
         "Answer with exactly one XML tag such as <move>5</move>.\n\n"
         f"Board:\n{board_to_text(board)}\n\nMove:"
     )

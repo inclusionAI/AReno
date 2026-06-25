@@ -11,7 +11,10 @@ logger = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 SYSTEM_PROMPT = (
-    "You are a careful Tic-Tac-Toe player. You play X. Answer with exactly one XML tag such as <move>5</move>."
+    "You are a careful Tic-Tac-Toe player. You play X. "
+    "Digits on the board are empty square labels, not marks. "
+    "Choose exactly one legal empty square. Win immediately if possible; otherwise block any immediate O win. "
+    "Answer with exactly one XML tag such as <move>5</move>."
 )
 
 
