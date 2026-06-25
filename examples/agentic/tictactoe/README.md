@@ -12,6 +12,8 @@ variant. The environment is deterministic and self-contained.
 - `dataset_loader_no_tool.py`, `run_agent_no_tool.py`, and
   `reward_no_tool.py` define the XML no-tool variant.
 - `game.py` contains board validation, minimax best moves, and scoring.
+- `web_ui.py` serves a cartoon browser game backed by an OpenAI-compatible
+  tool-call model.
 
 ## Generate Boards
 
@@ -36,6 +38,20 @@ areno train \
   --n-samples 4 \
   --max-new-tokens 32
 ```
+
+## Play in the Web UI
+
+Start a policy server, then point the UI at its OpenAI-compatible endpoint:
+
+```bash
+python examples/agentic/tictactoe/web_ui.py \
+  --base-url http://127.0.0.1:8000/v1 \
+  --api-key token \
+  --model policy
+```
+
+Open `http://127.0.0.1:8767`. The UI supports mouse clicks, keyboard squares
+`1`-`9`, and switching whether the LLM or player moves first.
 
 ## Run without Tool Calls
 
