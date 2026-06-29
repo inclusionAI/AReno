@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,17 @@ class ToolError(ValueError):
 
 
 @dataclass(slots=True)
+class BackgroundTask:
+    """A long-running command owned by one coding workspace."""
+
+    task_id: str
+    command: str
+    output_path: Path
+    started_at: float
+    process: subprocess.Popen[str]
+
+
+@dataclass(slots=True)
 class CodingWorkspace:
     """Isolated workspace for one coding task."""
 
@@ -39,6 +51,8 @@ class CodingWorkspace:
     cleanup_on_close: bool = True
     submitted: dict[str, Any] | None = None
     command_history: list[dict[str, Any]] = field(default_factory=list)
+    background_tasks: dict[str, BackgroundTask] = field(default_factory=dict)
+    _background_seq: int = 0
 
     @classmethod
     def from_task(cls, task: dict[str, Any]) -> CodingWorkspace:
@@ -91,6 +105,7 @@ class CodingWorkspace:
         return cls(task=task, root=source, cleanup_on_close=False)
 
     def close(self) -> None:
+        self._terminate_background_tasks()
         if self.cleanup_on_close:
             shutil.rmtree(self.root, ignore_errors=True)
 
@@ -202,9 +217,16 @@ class CodingWorkspace:
             "append": bool(append),
         }
 
-    def run_command(self, command: str, timeout_s: float = DEFAULT_TIMEOUT_S) -> dict[str, Any]:
+    def run_command(
+        self,
+        command: str,
+        timeout_s: float = DEFAULT_TIMEOUT_S,
+        background: bool = False,
+    ) -> dict[str, Any]:
         if _is_dangerous_rm_command(command):
             raise ToolError(f"dangerous rm command is not allowed: {command}")
+        if background:
+            return self._start_background_command(command)
         timeout = min(max(float(timeout_s), 0.1), DEFAULT_TIMEOUT_S)
         proc = subprocess.run(
             command,
@@ -214,6 +236,7 @@ class CodingWorkspace:
             text=True,
             capture_output=True,
             timeout=timeout,
+            env=self._command_env(),
         )
         result = {
             "command": command,
@@ -221,8 +244,88 @@ class CodingWorkspace:
             "stdout": _truncate(proc.stdout, MAX_OUTPUT_CHARS),
             "stderr": _truncate(proc.stderr, MAX_OUTPUT_CHARS),
         }
+        visible_env = self._visible_command_env()
+        if visible_env:
+            result["env"] = visible_env
         self.command_history.append(result)
         return result
+
+    def read_background_output(self, task_id: str, start: int = 0, end: int | None = None) -> dict[str, Any]:
+        task = self.background_tasks.get(str(task_id))
+        if task is None:
+            raise ToolError(f"unknown background task: {task_id}")
+        start_idx = max(int(start), 0)
+        if end is None:
+            end_idx = start_idx + MAX_OUTPUT_CHARS
+        else:
+            end_idx = max(int(end), start_idx)
+        end_idx = min(end_idx, start_idx + MAX_READ_CHARS)
+        output = task.output_path.read_text(encoding="utf-8", errors="replace") if task.output_path.exists() else ""
+        chunk = output[start_idx:end_idx]
+        returncode = task.process.poll()
+        return {
+            "task_id": task.task_id,
+            "command": task.command,
+            "running": returncode is None,
+            "returncode": returncode,
+            "start": start_idx,
+            "end": start_idx + len(chunk),
+            "output_chars": len(output),
+            "output": chunk,
+        }
+
+    def _start_background_command(self, command: str) -> dict[str, Any]:
+        self._background_seq += 1
+        task_id = f"bg-{self._background_seq}"
+        output_dir = self.root / ".areno-background"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / f"{task_id}.log"
+        with output_path.open("w", encoding="utf-8") as output_handle:
+            process = subprocess.Popen(
+                command,
+                cwd=self.root,
+                shell=True,
+                text=True,
+                stdout=output_handle,
+                stderr=subprocess.STDOUT,
+                env=self._command_env(),
+            )
+        task = BackgroundTask(
+            task_id=task_id,
+            command=command,
+            output_path=output_path,
+            started_at=time.time(),
+            process=process,
+        )
+        self.background_tasks[task_id] = task
+        result: dict[str, Any] = {
+            "task_id": task_id,
+            "command": command,
+            "running": True,
+            "pid": process.pid,
+            "output_path": _relative(self.root, output_path),
+        }
+        visible_env = self._visible_command_env()
+        if visible_env:
+            result["env"] = visible_env
+        self.command_history.append(result)
+        return result
+
+    def _terminate_background_tasks(self) -> None:
+        for task in self.background_tasks.values():
+            if task.process.poll() is not None:
+                continue
+            task.process.terminate()
+            try:
+                task.process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                task.process.kill()
+
+    def _command_env(self) -> dict[str, str] | None:
+        return None
+
+    def _visible_command_env(self) -> dict[str, str]:
+        return {}
 
     def submit(self, status: str, summary: str = "") -> dict[str, Any]:
         self.submitted = {"status": str(status), "summary": str(summary)[:500]}
@@ -281,6 +384,13 @@ def run_tool(workspace: CodingWorkspace, name: str, arguments: dict[str, Any]) -
             return workspace.run_command(
                 command=str(arguments.get("command", "")),
                 timeout_s=float(arguments.get("timeout_s", DEFAULT_TIMEOUT_S)),
+                background=bool(arguments.get("background", False)),
+            )
+        if name == "read_background_output":
+            return workspace.read_background_output(
+                task_id=str(arguments.get("task_id", "")),
+                start=int(arguments.get("start", 0)),
+                end=int(arguments["end"]) if "end" in arguments and arguments.get("end") is not None else None,
             )
         if name == "submit":
             return workspace.submit(status=str(arguments.get("status", "")), summary=str(arguments.get("summary", "")))

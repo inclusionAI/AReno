@@ -30,13 +30,17 @@ The shared agent loop exposes constrained Codex-style tools:
 - `apply_patch`: unified diff patch application inside the workspace
 - `replace_text`: exact text replacement for simple file edits
 - `write_file`: create, overwrite, or append one workspace file
-- `run_command`: bounded shell/test command with timeout and output limits; destructive `rm` commands are blocked
+- `run_command`: bounded shell/test command with timeout and output limits; pass `background=true` for long-running commands
+- `read_background_output`: read a character range from a background command log and check whether it is still running
 - `submit`: final status and summary
 
 During training, paths are resolved inside the temporary workspace created from
 each task record. In the interactive CLI, paths are resolved inside the
 directory passed with `--repo`. Commands run inside the workspace with short
-timeouts and truncated outputs; destructive `rm` commands are blocked.
+timeouts and truncated outputs; destructive `rm` commands are blocked. For
+long-running commands, start `run_command` with `background=true`, use a short
+`sleep` command to wait, then poll a range of the log with
+`read_background_output`.
 
 ## Interactive Coding CLI
 
@@ -95,7 +99,9 @@ use each example's `dataset_generator.py` to create the training dataset before
 documenting the final train command. It runs samples under a process-wide lock
 so only one AReno agent task is active at a time. Tool-run subprocesses are
 pinned to `CUDA_VISIBLE_DEVICES=4,5,6,7` by the runner, so the model should call
-plain commands rather than adding GPU environment prefixes itself.
+plain commands rather than adding GPU environment prefixes itself. The prompt
+also tells the model to run AReno training commands in the background, wait with
+`sleep`, and inspect the background log before submitting.
 
 ```bash
 areno train \

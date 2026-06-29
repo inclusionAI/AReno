@@ -20,14 +20,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from agent_loop import run_conversation_turns  # noqa: E402
-from coding_tools import (  # noqa: E402
-    DEFAULT_TIMEOUT_S,
-    MAX_OUTPUT_CHARS,
-    CodingWorkspace,
-    ToolError,
-    _is_dangerous_rm_command,
-    _truncate,
-)
+from coding_tools import CodingWorkspace, ToolError  # noqa: E402
 
 from areno.api.agentic import AgentTrajectory  # noqa: E402
 
@@ -44,7 +37,10 @@ code, replace_text for simple exact replacements, write_file for creating or
 overwriting small files, apply unified diffs for structured edits, run tests, and call submit
 when the task is solved or blocked. Do not clone, download, or create another checkout:
 the runner has already cloned the requested AReno repository into your workspace.
-Keep edits scoped to the requested agentic example and its directly related docs/tests."""
+Keep edits scoped to the requested agentic example and its directly related docs/tests.
+Run AReno training or other long commands with run_command(background=true). Then
+use a short command such as sleep 5 to wait, and use read_background_output to
+inspect an output range from the background task before deciding the next step."""
 
 
 async def run_agent(ctx, batch) -> AgentTrajectory:
@@ -138,31 +134,13 @@ def _looks_like_commit(value: str) -> bool:
 class ArenoRepoWorkspace(CodingWorkspace):
     """Workspace that pins tool-run subprocesses to the AReno target GPUs."""
 
-    def run_command(self, command: str, timeout_s: float = DEFAULT_TIMEOUT_S) -> dict[str, Any]:
-        if _is_dangerous_rm_command(command):
-            raise ToolError(f"dangerous rm command is not allowed: {command}")
-        timeout = min(max(float(timeout_s), 0.1), DEFAULT_TIMEOUT_S)
+    def _command_env(self) -> dict[str, str]:
         env = dict(os.environ)
         env["CUDA_VISIBLE_DEVICES"] = TOOL_CUDA_VISIBLE_DEVICES
-        proc = subprocess.run(
-            command,
-            cwd=self.root,
-            shell=True,
-            check=False,
-            text=True,
-            capture_output=True,
-            timeout=timeout,
-            env=env,
-        )
-        result = {
-            "command": command,
-            "returncode": int(proc.returncode),
-            "stdout": _truncate(proc.stdout, MAX_OUTPUT_CHARS),
-            "stderr": _truncate(proc.stderr, MAX_OUTPUT_CHARS),
-            "env": {"CUDA_VISIBLE_DEVICES": TOOL_CUDA_VISIBLE_DEVICES},
-        }
-        self.command_history.append(result)
-        return result
+        return env
+
+    def _visible_command_env(self) -> dict[str, str]:
+        return {"CUDA_VISIBLE_DEVICES": TOOL_CUDA_VISIBLE_DEVICES}
 
 
 def _initial_messages(record: dict[str, Any]) -> list[dict[str, str]]:

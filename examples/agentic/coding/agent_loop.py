@@ -24,7 +24,9 @@ questions, inspect the tree and then read README/docs/key source files before
 summarizing. Do not infer architecture from filenames alone. Do not claim
 success until tests pass for code-change tasks. Tool calls must use valid JSON
 arguments matching the tool schema. If a dataset task provides a local repository,
-work in that provided repository; do not clone, download, or create another checkout."""
+work in that provided repository; do not clone, download, or create another checkout.
+For long-running commands, call run_command with background=true, then wait with
+sleep in the command if needed and read output ranges with read_background_output."""
 
 TOOLS = [
     # Tool schemas intentionally mirror Codex-like actions while keeping each
@@ -142,14 +144,37 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "run_command",
-            "description": "Run one shell/test command with a short timeout. Destructive rm commands are blocked.",
+            "description": (
+                "Run one shell/test command. Set background=true for long-running commands, then poll output with "
+                "read_background_output. Destructive rm commands are blocked."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "command": {"type": "string"},
                     "timeout_s": {"type": "number", "minimum": 0.1, "maximum": 10.0},
+                    "background": {"type": "boolean"},
                 },
                 "required": ["command"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_background_output",
+            "description": (
+                "Read a character range from a background command log and return whether the task is still running."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string"},
+                    "start": {"type": "integer", "minimum": 0},
+                    "end": {"type": "integer", "minimum": 0},
+                },
+                "required": ["task_id"],
                 "additionalProperties": False,
             },
         },
@@ -377,9 +402,9 @@ def _normalize_tool_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
             if isinstance(raw_value, str)
             else raw_value
         )
-        if key in {"count", "max_depth", "max_lines", "start_line"}:
+        if key in {"count", "end", "max_depth", "max_lines", "start", "start_line"}:
             value = _coerce_int_argument(value)
-        elif key in {"case_sensitive"}:
+        elif key in {"background", "case_sensitive"}:
             value = _coerce_bool_argument(value)
         normalized[key] = value
     return normalized
