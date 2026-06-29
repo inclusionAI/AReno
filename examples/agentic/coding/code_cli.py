@@ -77,17 +77,37 @@ async def _run_interactive_session(
 ) -> None:
     messages = initial_messages(task)
     next_input: str | None = None
+    last_prompt_tokens: int | None = None
     turn_limit = int(args.max_turns or task.get("max_turns") or 12)
     while True:
         if next_input is not None:
             messages.append({"role": "user", "content": next_input})
-        messages = _compact_messages(
-            messages,
-            max_chars=int(args.compact_chars),
-            keep_recent=int(args.compact_keep_messages),
-            colors=colors,
-        )
+        if (
+            last_prompt_tokens is not None
+            and int(args.compact_tokens) > 0
+            and last_prompt_tokens > int(args.compact_tokens)
+        ):
+            messages = _compact_messages(
+                messages,
+                prompt_tokens=last_prompt_tokens,
+                keep_recent=int(args.compact_keep_messages),
+                colors=colors,
+            )
+            last_prompt_tokens = None
         print(colors.dim("running coding agent...\n"))
+
+        def on_event(event: str, message: dict) -> None:
+            nonlocal last_prompt_tokens
+            if event == "usage":
+                prompt_tokens = message.get("prompt_tokens")
+                if prompt_tokens is not None:
+                    last_prompt_tokens = int(prompt_tokens)
+                if args.verbose:
+                    print(colors.section("usage"), flush=True)
+                    print(_format_json(message, colors=colors), flush=True)
+                return
+            _print_message(message, verbose=args.verbose, colors=colors)
+
         await run_conversation_turns(
             client=client,
             item=item,
@@ -96,7 +116,7 @@ async def _run_interactive_session(
             messages=messages,
             max_turns=turn_limit,
             record_trajectory=False,
-            on_event=lambda _event, message: _print_message(message, verbose=args.verbose, colors=colors),
+            on_event=on_event,
         )
         if workspace.submitted is None:
             print()
@@ -149,12 +169,10 @@ def _print_message(message: dict, *, verbose: bool, colors: _Colors) -> None:
 def _compact_messages(
     messages: list[dict],
     *,
-    max_chars: int,
+    prompt_tokens: int,
     keep_recent: int,
     colors: _Colors | None = None,
 ) -> list[dict]:
-    if max_chars <= 0 or _messages_chars(messages) <= max_chars:
-        return messages
     if len(messages) <= 3:
         return messages
     head = messages[:2]
@@ -167,13 +185,9 @@ def _compact_messages(
         "content": "Compacted prior conversation:\n" + _summarize_messages(compacted),
     }
     if colors is not None:
-        print(colors.dim(f"compacted conversation history from {_messages_chars(messages)} chars\n"), flush=True)
+        print(colors.dim(f"compacted conversation history from {prompt_tokens} prompt tokens\n"), flush=True)
     messages[:] = [*head, note, *recent]
     return messages
-
-
-def _messages_chars(messages: list[dict]) -> int:
-    return len(json.dumps(messages, ensure_ascii=False, sort_keys=True))
 
 
 def _summarize_messages(messages: list[dict]) -> str:
@@ -307,7 +321,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--api-key", default="areno-agentic", help="API key passed to the OpenAI client.")
     parser.add_argument("--model", default="policy", help="Model name passed to chat.completions.")
     parser.add_argument("--max-turns", type=int, default=None, help="Maximum tool-use turns.")
-    parser.add_argument("--compact-chars", type=int, default=24000, help="Auto-compact history above this size.")
+    parser.add_argument(
+        "--compact-tokens",
+        type=int,
+        default=24000,
+        help="Auto-compact history when the OpenAI-compatible server reports prompt_tokens above this value.",
+    )
     parser.add_argument(
         "--compact-keep-messages",
         type=int,

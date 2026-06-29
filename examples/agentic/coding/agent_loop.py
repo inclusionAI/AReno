@@ -263,6 +263,9 @@ async def run_conversation_turns(
             # AReno trains from explicit per-turn trajectories; no proxy-side
             # prompt matching is needed to reconstruct the multi-turn sample.
             turns.append(AgentTrajectoryTurn(item=item, messages=list(messages), response=response, tools=TOOLS))
+        usage = _response_usage(response)
+        if usage:
+            _emit(on_event, "usage", usage)
         assistant_message = _assistant_message_from_response(response)
         messages.append(assistant_message)
         # The standalone CLI uses this hook to stream model/tool activity as it happens.
@@ -337,6 +340,24 @@ def _assistant_message_from_response(response: Any) -> dict[str, Any]:
             for call in (message.tool_calls or [])[:1]
         ],
     }
+
+
+def _response_usage(response: Any) -> dict[str, int]:
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return {}
+    values = {
+        "prompt_tokens": _usage_value(usage, "prompt_tokens"),
+        "completion_tokens": _usage_value(usage, "completion_tokens"),
+        "total_tokens": _usage_value(usage, "total_tokens"),
+    }
+    return {key: int(value) for key, value in values.items() if value is not None}
+
+
+def _usage_value(usage: Any, key: str) -> Any:
+    if isinstance(usage, dict):
+        return usage.get(key)
+    return getattr(usage, key, None)
 
 
 def _first_tool_call(message: dict[str, Any]) -> dict[str, Any] | None:
