@@ -114,7 +114,6 @@ areno train \
   --world-size 4 \
   --mini-bs 1 \
   --agent-fn examples/agentic/coding/run_agent.py \
-  --save-path /pcache-mnt/rw/checkpoint/54229/462250/316390214/260624105554/coding \
   --drop-rollout-state \
   --max-running-prompts 4 \
   --batch-size 1 \

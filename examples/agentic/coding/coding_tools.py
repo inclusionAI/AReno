@@ -277,7 +277,7 @@ class CodingWorkspace:
     def _start_background_command(self, command: str) -> dict[str, Any]:
         self._background_seq += 1
         task_id = f"bg-{self._background_seq}"
-        output_dir = self.root / ".areno-background"
+        output_dir = self._background_output_dir()
         output_dir.mkdir(parents=True, exist_ok=True)
         output_path = output_dir / f"{task_id}.log"
         with output_path.open("w", encoding="utf-8") as output_handle:
@@ -303,7 +303,7 @@ class CodingWorkspace:
             "command": command,
             "running": True,
             "pid": process.pid,
-            "output_path": _relative(self.root, output_path),
+            "output_path": _display_path(self.root, output_path),
         }
         visible_env = self._visible_command_env()
         if visible_env:
@@ -326,6 +326,9 @@ class CodingWorkspace:
 
     def _visible_command_env(self) -> dict[str, str]:
         return {}
+
+    def _background_output_dir(self) -> Path:
+        return self.root / ".areno-background"
 
     def submit(self, status: str, summary: str = "") -> dict[str, Any]:
         self.submitted = {"status": str(status), "summary": str(summary)[:500]}
@@ -516,6 +519,13 @@ def _safe_path(root: Path, rel_path: str) -> Path:
 
 def _relative(root: Path, path: Path) -> str:
     return path.resolve().relative_to(root.resolve()).as_posix()
+
+
+def _display_path(root: Path, path: Path) -> str:
+    try:
+        return _relative(root, path)
+    except ValueError:
+        return path.resolve().as_posix()
 
 
 def _is_visible_source(path: Path) -> bool:

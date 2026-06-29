@@ -26,6 +26,7 @@ from areno.api.agentic import AgentTrajectory  # noqa: E402
 logger = logging.getLogger(__name__)
 
 DEFAULT_ARENO_SOURCE = "/home/admin/AReno"
+DEFAULT_OUTPUT_ROOT = "/tmp/areno-agentic-targets"
 TOOL_CUDA_VISIBLE_DEVICES = "4,5,6,7"
 _RUN_LOCK = asyncio.Lock()
 
@@ -38,7 +39,10 @@ the runner has already copied /home/admin/AReno into your workspace.
 Keep edits scoped to the requested agentic example and its directly related docs/tests.
 Run AReno training or other long commands with run_command(background=true). Then
 use a short command such as sleep 5 to wait, and use read_background_output to
-inspect an output range from the background task before deciding the next step."""
+inspect an output range from the background task before deciding the next step.
+Write generated datasets and logs under the task output directory shown in the
+user prompt; do not write them under the copied source workspace. Do not pass
+--save-path to areno train unless the user explicitly asks for checkpoint output."""
 
 
 async def run_agent(ctx, batch) -> AgentTrajectory:
@@ -122,6 +126,9 @@ class ArenoRepoWorkspace(CodingWorkspace):
     def _visible_command_env(self) -> dict[str, str]:
         return {"CUDA_VISIBLE_DEVICES": TOOL_CUDA_VISIBLE_DEVICES}
 
+    def _background_output_dir(self) -> Path:
+        return _output_dir(self.task)
+
 
 def _initial_messages(record: dict[str, Any]) -> list[dict[str, str]]:
     return [
@@ -142,11 +149,22 @@ def _task_prompt(record: dict[str, Any]) -> str:
     return (
         f"AReno repository task: {record.get('instance_id', record.get('id', 'unknown'))}\n"
         f"Repository source: {record.get('repo_path', DEFAULT_ARENO_SOURCE)}\n"
+        f"Output directory: {_output_dir(record)}\n"
         f"Target example: {target}\n\n"
         f"Goal:\n{record.get('problem_statement', record.get('instruction', ''))}\n\n"
         f"Expected artifacts:\n{expected_text}\n\n"
         f"Allowed tests: {commands or 'none'}\n"
         "The AReno repository has already been copied into the current workspace. "
+        "Keep the copied source workspace as the command working directory, but write generated datasets "
+        "and logs under the output directory above. Do not pass --save-path to areno train. "
         "Use the coding tools to inspect files, patch the repository, run the allowed tests when practical, "
         "and submit the result."
     )
+
+
+def _output_dir(record: dict[str, Any]) -> Path:
+    value = record.get("output_dir")
+    if value:
+        return Path(str(value)).expanduser().resolve()
+    instance_id = str(record.get("instance_id", record.get("id", "unknown"))).replace("/", "_")
+    return Path(DEFAULT_OUTPUT_ROOT, instance_id).resolve()
