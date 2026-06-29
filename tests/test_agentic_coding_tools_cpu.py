@@ -11,6 +11,7 @@ if str(CODING_DIR) not in sys.path:
     sys.path.insert(0, str(CODING_DIR))
 
 from coding_tools import CodingWorkspace, run_tool  # noqa: E402
+from dataset_loader import load_training_dataset  # noqa: E402
 
 
 def test_background_command_output_range(tmp_path):
@@ -45,3 +46,36 @@ def test_background_command_can_read_later_range(tmp_path):
     assert output["output"] == "3456"
     assert output["start"] == 3
     assert output["end"] == 7
+
+
+def test_dataset_loader_accepts_areno_target_records_without_files():
+    rows = [
+        {
+            "instance_id": "areno__target",
+            "problem_statement": "Prepare an AReno example.",
+            "prompt": "Use the cloned AReno repo.",
+            "test_commands": ["python -m py_compile examples/agentic/coding/run_agent.py"],
+        }
+    ]
+
+    loaded = load_training_dataset("unused.jsonl", default_loader=lambda _: rows)
+
+    assert loaded[0]["prompt"] == "Use the cloned AReno repo."
+    assert loaded[0]["test_commands"] == ["python -m py_compile examples/agentic/coding/run_agent.py"]
+    assert "files" not in loaded[0]
+
+
+def test_dataset_loader_keeps_local_file_records():
+    rows = [
+        {
+            "instance_id": "local__one",
+            "problem_statement": "Fix it.",
+            "files": {"main.py": "print('bad')"},
+            "test_commands": ["python -m pytest -q"],
+        }
+    ]
+
+    loaded = load_training_dataset("unused.jsonl", default_loader=lambda _: rows)
+
+    assert loaded[0]["files"] == {"main.py": "print('bad')"}
+    assert "Fix SWE-bench-style task local__one." in loaded[0]["prompt"]
