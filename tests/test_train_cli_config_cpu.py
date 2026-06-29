@@ -474,7 +474,7 @@ def _options(**overrides):
         gradient_accumulation_steps=None,
         max_prompt_tokens=128,
         max_new_tokens=16,
-        max_context_len=None,
+        max_context_len=32768,
         greedy=False,
         temperature=1.0,
         top_k=-1,

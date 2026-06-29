@@ -466,6 +466,14 @@ def test_agentic_trajectory_filter_uses_total_context_not_prompt_limit():
     assert diagnostics["max_context_len"] == 10
 
 
+def test_agentic_proxy_context_limit_does_not_fall_back_to_prompt_limit():
+    params = _FakeSamplingParams()
+    params.max_prompt_len = 2
+    params.max_context_len = None
+
+    assert agentic._max_context_len(params) is None
+
+
 def test_agentic_trajectory_filter_respects_configured_max_context_len():
     trainer = _FakeTrainer(world_size=1, tp_size=1)
     session = RolloutSession(trainer, sampling_params=_FakeSamplingParams(), loss_mask_policy=LossMaskPolicy())
@@ -626,11 +634,11 @@ def test_rollout_session_sync_is_explicit_batch_level_hook():
     assert trainer.rollout_sync_count == 1
 
 
-def test_proxy_filters_prompt_exceeding_max_sequence_len_without_rollout():
+def test_proxy_filters_prompt_exceeding_explicit_context_len_without_rollout():
     trainer = _FakeTrainer(world_size=1, tp_size=1)
     trainer.tokenizer = _FixedTokenizer(list(range(10)))
     params = _FakeSamplingParams()
-    params.max_prompt_len = 5
+    params.max_context_len = 5
     params.max_new_tokens = 4
     session = RolloutSession(
         trainer,

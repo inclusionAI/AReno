@@ -810,10 +810,7 @@ def _max_context_len(params: Any) -> int | None:
     max_context_len = getattr(params, "max_context_len", None)
     if max_context_len is not None:
         return int(max_context_len)
-    max_prompt_len = getattr(params, "max_prompt_len", None)
-    if max_prompt_len is None:
-        return None
-    return int(max_prompt_len)
+    return None
 
 
 def _filtered_chat_response(*, model: str, prompt_tokens: int, max_sequence_len: int) -> dict[str, Any]:

@@ -355,7 +355,7 @@ def _rollout_summary_rows(config: TrainerConfig) -> list[tuple[str, str]]:
         ("batch_size", str(config.batch_size)),
         ("max_prompt_tokens", str(config.max_prompt_tokens)),
         ("max_new_tokens", str(config.max_new_tokens)),
-        ("max_context_len", _format_optional(config.max_context_len, default="model limit")),
+        ("max_context_len", _format_optional(config.max_context_len, default="32768")),
     ]
     if not isinstance(config, RolloutTrainerConfig):
         return [
@@ -939,10 +939,11 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
 @click.option(
     "--max-context-len",
     type=int,
-    default=None,
+    default=32768,
+    show_default=True,
     help=(
         "Maximum total context tokens for agentic rollout trajectories. "
-        "Counts prompt plus all generated turns concatenated; defaults to the model limit."
+        "Counts prompt plus all generated turns concatenated."
     ),
 )
 @click.option("--temperature", type=float, default=1.0, show_default=True, help="Rollout sampling temperature.")

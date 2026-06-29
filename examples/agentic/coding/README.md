@@ -80,3 +80,39 @@ The reward is `1.0` when the trajectory applies a patch, runs every required
 test command successfully, and submits `solved`. It gives partial credit for
 passing tests without a final solved submission and negative reward for failed
 or unsupported trajectories.
+
+## AReno Repo Targets
+
+`areno_agentic_targets.jsonl` contains four higher-level AReno repository
+tasks. Each record asks the coding agent to prepare one agentic example for
+training from `/home/admin/Qwen3.5-4B`: DuelGrid, shopping, Tic-Tac-Toe, and
+the coding agent itself.
+
+Use `run_areno_agent.py` for these records. The runner clones AReno into a
+temporary workspace before the model sees the task, then reuses the same coding
+tools to inspect, patch, test, and submit. The target tasks ask the agent to
+use each example's `dataset_generator.py` to create the training dataset before
+documenting the final train command. It runs samples under a process-wide lock
+so only one AReno agent task is active at a time. Tool-run subprocesses are
+pinned to `CUDA_VISIBLE_DEVICES=4,5,6,7` by the runner, so the model should call
+plain commands rather than adding GPU environment prefixes itself.
+
+```bash
+areno train \
+  --ckpt /home/admin/Qwen3.5-4B/ \
+  --dataset-path ./examples/agentic/coding/dataset.jsonl \
+  --dataset-loader-fn examples/agentic/coding/dataset_loader.py \
+  --reward-fn-path examples/agentic/coding/reward.py \
+  --algo gspo \
+  --tp-size 4 \
+  --world-size 4 \
+  --mini-bs 1 \
+  --agent-fn examples/agentic/coding/run_agent.py \
+  --save-path /pcache-mnt/rw/checkpoint/54229/462250/316390214/260624105554/coding \
+  --drop-rollout-state \
+  --max-running-prompts 4 \
+  --batch-size 1 \
+  --n-samples 8 \
+  --max-new-tokens 2048 \
+  --max-context-len 32768
+```
