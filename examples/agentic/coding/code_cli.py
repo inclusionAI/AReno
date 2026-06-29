@@ -11,7 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from agent_loop import initial_messages, run_conversation_turns  # noqa: E402
+from agent_loop import TOOLS, initial_messages, run_conversation_turns  # noqa: E402
 from coding_tools import CodingWorkspace  # noqa: E402
 
 
@@ -30,10 +30,13 @@ async def _main_async(args: argparse.Namespace) -> int:
     try:
         print(colors.header("AReno coding agent"))
         print(f"{colors.label('workspace')} {workspace.root}")
+        print(f"{colors.label('tools')} {_tool_names()}")
         if args.verbose:
             print(f"{colors.label('task')} {task['problem_statement']}")
             if task["test_commands"]:
                 print(f"{colors.label('suggested tests')} {', '.join(task['test_commands'])}")
+            print(colors.label("tool details"))
+            print(_tool_details(colors=colors))
         await _run_interactive_session(
             client=client, item=item, workspace=workspace, args=args, task=task, colors=colors
         )
@@ -244,6 +247,20 @@ def _pretty_json(value: object, *, colors: _Colors, indent: int = 0) -> str:
     if isinstance(value, int | float) and not isinstance(value, bool):
         return colors.magenta(json.dumps(value, ensure_ascii=False))
     return json.dumps(value, ensure_ascii=False)
+
+
+def _tool_names() -> str:
+    return ", ".join(tool["function"]["name"] for tool in TOOLS)
+
+
+def _tool_details(*, colors: _Colors) -> str:
+    rows = []
+    for tool in TOOLS:
+        fn = tool["function"]
+        name = fn["name"]
+        description = fn.get("description", "")
+        rows.append(f"- {colors.bold(name)}: {description}")
+    return "\n".join(rows)
 
 
 def _color_enabled(mode: str) -> bool:
