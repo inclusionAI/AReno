@@ -1,9 +1,9 @@
 """AReno-repo coding-agent entrypoint for target-checkpoint tasks.
 
 Unlike ``run_agent.py``, this runner is for records that point at the real
-AReno repository. Each sample clones the requested repo/ref into a disposable
+AReno repository. Each sample copies the local AReno checkout into a disposable
 workspace first, then lets the shared coding tools inspect, patch, test, and
-submit inside that cloned checkout.
+submit inside that copied checkout.
 """
 
 from __future__ import annotations
@@ -12,7 +12,6 @@ import asyncio
 import logging
 import os
 import shutil
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -26,17 +25,16 @@ from areno.api.agentic import AgentTrajectory  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_ARENO_REPO = "https://github.com/inclusionAI/AReno.git"
-DEFAULT_ARENO_REF = "main"
+DEFAULT_ARENO_SOURCE = "/home/admin/AReno"
 TOOL_CUDA_VISIBLE_DEVICES = "4,5,6,7"
 _RUN_LOCK = asyncio.Lock()
 
-ARENO_SYSTEM_PROMPT = """You are a coding agent working in a cloned AReno repository.
+ARENO_SYSTEM_PROMPT = """You are a coding agent working in a copied AReno repository.
 Use one tool call per turn. Prefer inspect_tree/read_file/rg to understand the
 code, replace_text for simple exact replacements, write_file for creating or
 overwriting small files, apply unified diffs for structured edits, run tests, and call submit
 when the task is solved or blocked. Do not clone, download, or create another checkout:
-the runner has already cloned the requested AReno repository into your workspace.
+the runner has already copied /home/admin/AReno into your workspace.
 Keep edits scoped to the requested agentic example and its directly related docs/tests.
 Run AReno training or other long commands with run_command(background=true). Then
 use a short command such as sleep 5 to wait, and use read_background_output to
@@ -44,7 +42,7 @@ inspect an output range from the background task before deciding the next step."
 
 
 async def run_agent(ctx, batch) -> AgentTrajectory:
-    """Clone AReno for each sample, then run the shared coding-agent loop."""
+    """Copy AReno for each sample, then run the shared coding-agent loop."""
 
     try:
         import httpx
@@ -62,7 +60,7 @@ async def run_agent(ctx, batch) -> AgentTrajectory:
     client = AsyncOpenAI(base_url=ctx.get_base_url(), api_key=ctx.api_key, http_client=http_client, max_retries=0)
 
     async def run_one(item):
-        workspace = await asyncio.to_thread(_clone_workspace, item.record)
+        workspace = await asyncio.to_thread(_copy_workspace, item.record)
         try:
             messages = _initial_messages(item.record)
             return await run_conversation_turns(
@@ -87,48 +85,30 @@ async def run_agent(ctx, batch) -> AgentTrajectory:
         await http_client.aclose()
 
 
-def _clone_workspace(record: dict[str, Any]) -> CodingWorkspace:
-    repo_url = str(record.get("repo_url") or DEFAULT_ARENO_REPO)
-    repo_ref = str(record.get("repo_ref") or DEFAULT_ARENO_REF)
+def _copy_workspace(record: dict[str, Any]) -> CodingWorkspace:
+    source = Path(str(record.get("repo_path") or DEFAULT_ARENO_SOURCE)).expanduser().resolve()
+    if not source.is_dir():
+        raise ToolError(f"AReno source checkout does not exist: {source}")
     workspace = Path(tempfile.mkdtemp(prefix="areno-repo-agent-"))
     try:
-        clone_cmd = ["git", "clone", "--depth", "1"]
-        if repo_ref and not _looks_like_commit(repo_ref):
-            clone_cmd += ["--branch", repo_ref]
-        clone_cmd += [repo_url, str(workspace)]
-        subprocess.run(clone_cmd, check=True, text=True, capture_output=True, timeout=120)
-        if repo_ref and _looks_like_commit(repo_ref):
-            subprocess.run(
-                ["git", "fetch", "--depth", "1", "origin", repo_ref],
-                cwd=workspace,
-                check=True,
-                text=True,
-                capture_output=True,
-                timeout=120,
-            )
-            subprocess.run(
-                ["git", "checkout", "--detach", repo_ref],
-                cwd=workspace,
-                check=True,
-                text=True,
-                capture_output=True,
-                timeout=60,
-            )
+        shutil.copytree(
+            source,
+            workspace,
+            dirs_exist_ok=True,
+            ignore=shutil.ignore_patterns(
+                ".git",
+                "__pycache__",
+                ".pytest_cache",
+                ".mypy_cache",
+                ".ruff_cache",
+                "build",
+                "dist",
+            ),
+        )
         return ArenoRepoWorkspace(task=dict(record), root=workspace, cleanup_on_close=True)
-    except subprocess.TimeoutExpired as exc:
-        shutil.rmtree(workspace, ignore_errors=True)
-        raise ToolError(f"git clone timed out after {exc.timeout}s") from exc
-    except subprocess.CalledProcessError as exc:
-        shutil.rmtree(workspace, ignore_errors=True)
-        stderr = (exc.stderr or exc.stdout or "").strip()
-        raise ToolError(f"git clone failed: {stderr[:500]}") from exc
     except Exception:
         shutil.rmtree(workspace, ignore_errors=True)
         raise
-
-
-def _looks_like_commit(value: str) -> bool:
-    return len(value) >= 7 and all(char in "0123456789abcdefABCDEF" for char in value)
 
 
 class ArenoRepoWorkspace(CodingWorkspace):
@@ -161,12 +141,12 @@ def _task_prompt(record: dict[str, Any]) -> str:
     )
     return (
         f"AReno repository task: {record.get('instance_id', record.get('id', 'unknown'))}\n"
-        f"Repository: {record.get('repo_url', DEFAULT_ARENO_REPO)} @ {record.get('repo_ref', DEFAULT_ARENO_REF)}\n"
+        f"Repository source: {record.get('repo_path', DEFAULT_ARENO_SOURCE)}\n"
         f"Target example: {target}\n\n"
         f"Goal:\n{record.get('problem_statement', record.get('instruction', ''))}\n\n"
         f"Expected artifacts:\n{expected_text}\n\n"
         f"Allowed tests: {commands or 'none'}\n"
-        "The AReno repository has already been cloned into the current workspace. "
+        "The AReno repository has already been copied into the current workspace. "
         "Use the coding tools to inspect files, patch the repository, run the allowed tests when practical, "
         "and submit the result."
     )

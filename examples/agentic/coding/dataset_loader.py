@@ -40,6 +40,6 @@ def _make_target_prompt(record: dict) -> str:
         f"AReno repository task {instance_id}.\n"
         f"{problem}\n"
         f"Allowed tests: {commands or 'none'}\n"
-        "The agent runner will clone the requested AReno repository. Use coding tools to inspect files, "
+        "The agent runner will copy /home/admin/AReno into the current workspace. Use coding tools to inspect files, "
         "patch the repository, run allowed tests when practical, and submit the result."
     )

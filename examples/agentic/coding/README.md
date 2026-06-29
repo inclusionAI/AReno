@@ -92,7 +92,7 @@ tasks. Each record asks the coding agent to prepare one agentic example for
 training from `/home/admin/Qwen3.5-4B`: DuelGrid, shopping, Tic-Tac-Toe, and
 the coding agent itself.
 
-Use `run_areno_agent.py` for these records. The runner clones AReno into a
+Use `run_areno_agent.py` for these records. The runner copies `/home/admin/AReno` into a
 temporary workspace before the model sees the task, then reuses the same coding
 tools to inspect, patch, test, and submit. The target tasks ask the agent to
 use each example's `dataset_generator.py` to create the training dataset before
