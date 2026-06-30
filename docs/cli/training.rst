@@ -183,6 +183,63 @@ Reward files should expose:
 ``--reward-ckpt TEXT``
    Optional PPO reward model checkpoint path or Hugging Face repo ID.
 
+Parameter tuning
+~~~~~~~~~~~~~~~~
+
+``--tune-params``
+   Probe rollout and training memory before starting the real run, then fill
+   safe values for ``--max-running-prompts``, ``--batch-size`` and
+   ``--mini-bs``. This is intended for rollout-based algorithms such as GSPO,
+   GRPO and PPO, including agentic rollouts where the right concurrency is
+   hard to estimate by hand.
+
+The tuner uses dummy-loaded model weights and synthetic token rows, so it
+measures the selected model architecture, ``--world-size``/``--tp-size``,
+sequence lengths, CUDA graph setup, optimizer state, and train microbatch
+memory without consuming a real dataset row or writing checkpoints. It keeps
+the user-provided ``--tp-size``, ``--n-samples``, ``--adam-8bit``, sequence
+limits, model path, algorithm, and backend settings.
+
+Search is deliberately conservative:
+
+* rollout candidates are tried from larger to smaller
+  ``--max-running-prompts`` values;
+* training uses the rollout-selected concurrency to derive a batch size, then
+  tries larger to smaller ``--mini-bs`` values;
+* ``--drop-rollout-state`` is enabled for the tuned run so rollout memory does
+  not remain resident during the training probe or optimizer step.
+
+``--mem-frac FLOAT``
+   Target maximum GPU memory fraction for tuning. Default: ``0.9``. Lower this
+   when sharing a node or when the real reward/agent path has additional GPU
+   users.
+
+``--tune-max-samples INTEGER``
+   Upper bound for sampled rollout/train rows considered during tuning.
+   Default: ``256``. The rollout search does not try
+   ``--max-running-prompts`` above this value, and the derived train batch size
+   is capped by ``tune-max-samples / n-samples``.
+
+Example:
+
+.. code-block:: bash
+
+   areno train \
+     --ckpt /path/to/Qwen3.5-4B \
+     --dataset-path examples/agentic/coding/dataset.jsonl \
+     --dataset-loader-fn examples/agentic/coding/dataset_loader.py \
+     --reward-fn-path examples/agentic/coding/reward.py \
+     --agent-fn examples/agentic/coding/run_agent.py \
+     --algo gspo \
+     --world-size 8 \
+     --tp-size 4 \
+     --n-samples 8 \
+     --max-new-tokens 2048 \
+     --max-context-len 32768 \
+     --tune-params \
+     --mem-frac 0.9 \
+     --tune-max-samples 256
+
 Train
 ~~~~~
 
