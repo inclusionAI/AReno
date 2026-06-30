@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import types
+from unittest.mock import patch
 
 import areno
 from areno.api.algorithms import list_algorithms
@@ -29,32 +30,15 @@ def test_algorithm_and_model_registry_discovery_smoke():
     # Use a tiny plugin pack instead of importing bundled model modules here:
     # some adapters depend on optional CUDA/FLA packages that CPU smoke tests
     # should not require.
-    old_module = sys.modules.get("areno.models")
-    old_attr = getattr(areno, "models", None)
-    had_attr = hasattr(areno, "models")
-    old_adapters = dict(registry._ADAPTERS)
-    old_plugins_loaded = registry._PLUGINS_LOADED
     fake_module = types.ModuleType("areno.models")
     fake_module.register_models = lambda: registry.register_adapter(SmokeAdapter())
 
-    try:
-        sys.modules["areno.models"] = fake_module
-        areno.models = fake_module
-        registry._ADAPTERS.clear()
-        registry._PLUGINS_LOADED = False
-
+    with (
+        patch.dict(sys.modules, {"areno.models": fake_module}),
+        patch.object(areno, "models", fake_module, create=True),
+        patch.dict(registry._ADAPTERS, {}, clear=True),
+        patch.object(registry, "_PLUGINS_LOADED", False),
+    ):
         registry.load_model_plugins()
 
         assert sorted(registry._ADAPTERS) == ["smoke"]
-    finally:
-        if old_module is None:
-            sys.modules.pop("areno.models", None)
-        else:
-            sys.modules["areno.models"] = old_module
-        if had_attr:
-            areno.models = old_attr
-        else:
-            delattr(areno, "models")
-        registry._ADAPTERS.clear()
-        registry._ADAPTERS.update(old_adapters)
-        registry._PLUGINS_LOADED = old_plugins_loaded
