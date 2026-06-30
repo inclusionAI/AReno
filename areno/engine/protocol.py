@@ -33,6 +33,7 @@ class Op(Enum):
 
     TRAIN = auto()
     INFER_ROLLOUT = auto()
+    PROBE_ROLLOUT_CACHE = auto()
     ENSURE_ROLES = auto()
     SCORE_LOGPROBS = auto()
     SCORE_VALUES = auto()
@@ -85,6 +86,17 @@ class RolloutPayload:
     decode_progress_interval_s: float = 0.0
     cancel_flags: torch.Tensor | None = None
     cancel_indices_by_dp: list[list[int]] | None = None
+
+
+@dataclass(slots=True)
+class RolloutCacheProbePayload:
+    """Typed payload for Op.PROBE_ROLLOUT_CACHE."""
+
+    max_running_seqs: int
+    max_cache_len: int
+    max_blocks_per_seq: int
+    num_blocks: int
+    block_size: int
 
 
 @dataclass(slots=True)
@@ -536,7 +548,13 @@ def _worker_entry(
         for failed_request_id in request_ids:
             result_q.put((rank, WorkerResult(ok=False, error=error, request_id=failed_request_id)))
     finally:
-        destroy_process_group()
+        try:
+            destroy_process_group()
+        except Exception:
+            # CUDA OOM can leave NCCL in an error state. Worker teardown should
+            # not emit a second traceback or keep the coordinator from reaping
+            # the failed process.
+            pass
 
 
 def _close_queue(q: mp.Queue) -> None:

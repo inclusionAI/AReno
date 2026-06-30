@@ -280,7 +280,7 @@ async def run_conversation_turns(
                 }
             )
             continue
-        result = _execute_tool_call(workspace, call)
+        result = await asyncio.to_thread(_execute_tool_call, workspace, call)
         tool_message = {
             "role": "tool",
             "tool_call_id": call["id"],

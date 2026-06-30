@@ -64,6 +64,11 @@ class Backend(ABC):
 
         pass
 
+    def close(self) -> None:
+        """Release backend-owned resources."""
+
+        return None
+
     @abstractmethod
     def rollout_batch(
         self,
@@ -125,6 +130,19 @@ class Backend(ABC):
 
         del ctx
         return None
+
+    def probe_rollout_cache(
+        self,
+        ctx: Context,
+        *,
+        max_new_tokens: int,
+        max_running_prompts: int,
+        max_prompt_len: int,
+    ) -> float:
+        """Optionally allocate rollout cache/graphs without decoding."""
+
+        del ctx, max_new_tokens, max_running_prompts, max_prompt_len
+        raise NotImplementedError(f"{type(self).__name__} does not support rollout cache probing")
 
     def end_rollout_session(self, ctx: Context) -> None:
         """Finalize rollout state before scoring or training."""
