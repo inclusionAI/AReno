@@ -15,6 +15,7 @@ from areno.cli.auto_tune import (
     _dummy_response_tokens,
     _dummy_token_budgets,
     _dummy_train_rows,
+    _eos_token_id,
     _is_oom_error,
     _peak_cuda_memory_fraction,
     _probe_devices,
@@ -387,7 +388,7 @@ def test_auto_tune_rejects_non_rollout_configs() -> None:
     try:
         auto_tune_config(config, probe_fn=lambda _config, candidate, stage: AutoTuneMeasurement(candidate, 0.1, True))
     except ValueError as exc:
-        assert "--auto currently tunes rollout-based trainers only" in str(exc)
+        assert "--tune-params currently tunes rollout-based trainers only" in str(exc)
     else:
         raise AssertionError("expected ValueError")
 
@@ -671,6 +672,52 @@ def test_train_dummy_probe_preserves_original_oom_when_cleanup_fails(monkeypatch
         "close",
         "empty_cache",
     ]
+
+
+def test_dummy_probe_closes_trainer_when_init_fails(monkeypatch) -> None:
+    import areno.api
+
+    calls = []
+
+    class FakeTrainer:
+        def __init__(self, *args, **kwargs):
+            del args, kwargs
+
+        def init(self):
+            calls.append("init")
+            raise RuntimeError("CUDA out of memory during init")
+
+        def close(self):
+            calls.append("close")
+
+    monkeypatch.setattr(areno.api, "Trainer", FakeTrainer)
+    monkeypatch.setattr(auto_tune, "_probe_devices", lambda world_size: [0])
+    monkeypatch.setattr(auto_tune, "_reset_cuda_peak_stats", lambda devices: calls.append(("reset", devices)))
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: calls.append("empty_cache"))
+
+    config = PolicyTrainerConfig(algo="gspo", ckpt="actor", dataset_path="dataset")
+    candidate = AutoTuneCandidate(
+        tp_size=1,
+        batch_size=1,
+        n_samples=4,
+        mini_bs=1,
+        max_running_prompts=4,
+        adam_8bit=False,
+        keep_rollout_state=False,
+    )
+
+    measurement = auto_tune.probe_candidate_with_dummy_run(config, candidate, "rollout")
+
+    assert measurement.ok is False
+    assert measurement.error is not None
+    assert "CUDA out of memory during init" in measurement.error
+    assert calls == [("reset", [0]), "init", "close", "empty_cache"]
+
+
+def test_eos_token_id_accepts_sequence_values() -> None:
+    assert _eos_token_id(SimpleNamespace(eos_token_id=[128001, 128009])) == 128001
+    assert _eos_token_id(SimpleNamespace(eos_token_id=(2, 3))) == 2
+    assert _eos_token_id(SimpleNamespace(eos_token_id=[])) == 0
 
 
 def test_dummy_policy_loss_aligns_next_token_logprobs_with_response_advantages() -> None:

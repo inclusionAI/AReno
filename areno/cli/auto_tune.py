@@ -72,9 +72,9 @@ def auto_tune_config(
     if not 0 < float(mem_frac) <= 1:
         raise ValueError("--mem-frac must be in (0, 1]")
     if int(auto_max_samples) < 1:
-        raise ValueError("--auto-max-samples must be >= 1")
+        raise ValueError("--tune-max-samples must be >= 1")
     if not isinstance(config, RolloutTrainerConfig):
-        raise ValueError("--auto currently tunes rollout-based trainers only")
+        raise ValueError("--tune-params currently tunes rollout-based trainers only")
     probe = probe_fn or probe_candidate_with_dummy_run
     rollout_candidates = _rollout_candidates(config, auto_max_samples=auto_max_samples)
     logger.info(
@@ -406,8 +406,8 @@ def _run_dummy_probe(config: TrainerConfig, candidate: AutoTuneCandidate, *, sta
         metrics_log_dir=None,
     )
     _reset_cuda_peak_stats(devices)
-    trainer.init()
     try:
+        trainer.init()
         tokenizer = trainer.get_tokenizer()
         prompt_len, response_len = _dummy_token_budgets(
             max_prompt_tokens=probe_config.max_prompt_tokens,
@@ -538,6 +538,8 @@ def _dummy_train_rows(
 
 def _eos_token_id(tokenizer) -> int:
     token_id = getattr(tokenizer, "eos_token_id", None)
+    if isinstance(token_id, list | tuple):
+        return int(token_id[0]) if token_id else 0
     return int(token_id) if token_id is not None else 0
 
 
@@ -545,12 +547,12 @@ def _probe_devices(world_size: int) -> list[int]:
     import torch
 
     if not torch.cuda.is_available():
-        raise RuntimeError("--auto requires CUDA so it can measure GPU memory")
+        raise RuntimeError("--tune-params requires CUDA so it can measure GPU memory")
     visible = int(torch.cuda.device_count())
     required = int(world_size)
     if required > visible:
         raise RuntimeError(
-            f"--auto requires --world-size <= visible CUDA devices; got world_size={required}, visible_cuda_devices={visible}"
+            f"--tune-params requires --world-size <= visible CUDA devices; got world_size={required}, visible_cuda_devices={visible}"
         )
     return list(range(required))
 
