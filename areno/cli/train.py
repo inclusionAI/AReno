@@ -170,6 +170,8 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
     if args.dataset_path is None:
         raise click.UsageError("--dataset-path is required")
     algorithm = _algorithm_for_cli(args.algo)
+    if algorithm.name == "sft" and args.dataset_loader_fn is None:
+        raise click.UsageError("--dataset-loader-fn is required for --algo sft")
     if algorithm.requires_rollout and args.reward_fn_path is None and args.reward_ckpt is None:
         raise click.UsageError("--reward-fn-path or --reward-ckpt is required")
     if args.save_interval <= 0:

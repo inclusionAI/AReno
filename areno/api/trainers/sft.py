@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 import areno.api
-from areno.api.data_utils import apply_chat_template, prompt_response_to_tokens_and_mask
+from areno.api.data_utils import prompt_response_to_tokens_and_mask
 from areno.api.tokenizer import configure_chat_template_enable_thinking
 
 
@@ -131,7 +131,7 @@ class SFTTrainer:
 
 
 def _record_to_train_sequence(record: Any, tokenizer, *, max_prompt_tokens: int, max_new_tokens: int):
-    """Normalize common SFT schemas into the backend training row format.
+    """Normalize one loader-produced SFT row into backend training format.
 
     `prompt_mask=True` means "do not train this source token"; the backend loss
     is next-token aligned, so the loss function later uses positions after the
@@ -141,20 +141,16 @@ def _record_to_train_sequence(record: Any, tokenizer, *, max_prompt_tokens: int,
 
     record = dict(record)
     eos_token_id = tokenizer.eos_token_id if tokenizer.eos_token_id is not None else 0
-    if isinstance(record.get("messages"), list):
-        # Chat rows train only assistant turns.
-        tokens, prompt_mask = _messages_to_tokens_and_mask(record["messages"], tokenizer)
-    elif "prompt" in record and "response" in record:
-        # Prompt/response style rows train on the response suffix.
-        tokens, prompt_mask = prompt_response_to_tokens_and_mask(
-            record["prompt"], record["response"], tokenizer, eos_token_id
+    if "prompt" not in record or "response" not in record:
+        raise ValueError(
+            "SFT dataset loader must return rows with `prompt` and `response`; "
+            "normalize raw dataset fields in --dataset-loader-fn"
         )
-    elif isinstance(record.get("text"), str):
-        # Plain text rows train on every token after the first context token.
-        tokens = tokenizer.encode(record["text"], add_special_tokens=True)
-        prompt_mask = [True] + [False] * max(0, len(tokens) - 1)
-    else:
-        raise ValueError("SFT dataset row must contain `messages`, `prompt`/`response`, or `text`")
+    prompt = str(record["prompt"])
+    response = str(record["response"])
+    if not response:
+        return None
+    tokens, prompt_mask = prompt_response_to_tokens_and_mask(prompt, response, tokenizer, eos_token_id)
 
     if len(tokens) < 2:
         return None
@@ -171,29 +167,6 @@ def _record_to_train_sequence(record: Any, tokenizer, *, max_prompt_tokens: int,
         advantages=zeros,
         eos_token_id=eos_token_id,
     )
-
-
-def _messages_to_tokens_and_mask(messages: list[dict[str, Any]], tokenizer) -> tuple[list[int], list[bool]]:
-    # Chat SFT should only optimize assistant turns. We apply the chat template
-    # incrementally and mark the token delta introduced by each assistant
-    # message as target tokens; user/system/tool deltas remain prompt-masked.
-    tokens: list[int] = []
-    prompt_mask: list[bool] = []
-    previous: list[int] = []
-    for end in range(1, len(messages) + 1):
-        current = apply_chat_template(tokenizer, messages[:end])
-        delta = current[len(previous) :] if current[: len(previous)] == previous else current
-        is_target = str(messages[end - 1].get("role", "")).lower() == "assistant"
-        tokens.extend(delta)
-        prompt_mask.extend([not is_target] * len(delta))
-        previous = current
-    if not getattr(tokenizer, "chat_template", None) and messages:
-        is_last_assistant = str(messages[-1].get("role", "")).lower() == "assistant"
-        eos_token_id = getattr(tokenizer, "eos_token_id", None)
-        if is_last_assistant and eos_token_id is not None:
-            tokens.append(eos_token_id)
-            prompt_mask.append(False)
-    return tokens, prompt_mask
 
 
 __all__ = ["SFTTrainer"]

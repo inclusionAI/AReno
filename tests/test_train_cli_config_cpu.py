@@ -25,6 +25,11 @@ def test_train_config_requires_dataset_path():
         _trainer_config_from_options(**_options(dataset_path=None, algo="sft"))
 
 
+def test_train_config_requires_dataset_loader_for_sft():
+    with pytest.raises(UsageError, match="--dataset-loader-fn is required for --algo sft"):
+        _trainer_config_from_options(**_options(algo="sft", dataset_loader_fn=None))
+
+
 def test_train_config_requires_reward_source_for_rollout_algorithms():
     with pytest.raises(UsageError, match="--reward-fn-path or --reward-ckpt is required"):
         _trainer_config_from_options(**_options(algo="gspo", reward_fn_path=None, reward_ckpt=None))
@@ -380,6 +385,8 @@ def test_train_command_prints_summary_before_run(monkeypatch):
             "actor",
             "--dataset-path",
             "dataset",
+            "--dataset-loader-fn",
+            "examples/sft/alpaca/dataset_loader.py",
             "--world-size",
             "2",
             "--tp-size",
@@ -517,4 +524,6 @@ def _options(**overrides):
         critic_warmup_steps=20,
     )
     defaults.update(overrides)
+    if defaults["algo"] == "sft" and "dataset_loader_fn" not in overrides:
+        defaults["dataset_loader_fn"] = "examples/sft/alpaca/dataset_loader.py"
     return defaults

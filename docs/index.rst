@@ -167,6 +167,7 @@ What areno owns
    :caption: Reference
 
    cli/training
+   cli/dataset_loaders
    cli/inference
    cli/diagnostics
    sdk/trainer

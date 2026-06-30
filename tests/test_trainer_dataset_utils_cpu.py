@@ -26,16 +26,6 @@ class FakeTextTokenizer:
         return ids
 
 
-class EosAddingFallbackTokenizer(FakeTextTokenizer):
-    """Tokenizer double whose fallback encode adds EOS for special-token calls."""
-
-    def encode(self, text, add_special_tokens=False):
-        ids = super().encode(text, add_special_tokens=False)
-        if add_special_tokens:
-            ids.append(self.eos_token_id)
-        return ids
-
-
 class FakeSFTBackend:
     """Backend double that records whether SFT attempted to train."""
 
@@ -79,7 +69,7 @@ class TrainerDatasetUtilityTest(unittest.TestCase):
     """Dataset helper tests convert rows to TrainSequence without backend init."""
 
     def test_sft_prompt_response_row_masks_only_response_suffix(self):
-        """Prompt/response SFT rows should train on response tokens plus EOS."""
+        """SFT loader rows should train on response tokens plus EOS."""
         tokenizer = FakeTextTokenizer()
 
         seq = sft_mod._record_to_train_sequence(
@@ -92,19 +82,20 @@ class TrainerDatasetUtilityTest(unittest.TestCase):
         self.assertEqual(seq.prompt_mask.count(True), 1)
         self.assertTrue(any(not item for item in seq.prompt_mask[1:]))
 
-    def test_sft_text_row_trains_after_first_context_token(self):
-        """Plain text SFT rows use the first token as context and train the rest."""
+    def test_sft_rejects_raw_rows_that_loader_did_not_normalize(self):
+        """SFT requires the dataset loader to emit prompt/response rows."""
         tokenizer = FakeTextTokenizer()
 
-        seq = sft_mod._record_to_train_sequence({"text": "abc"}, tokenizer, max_prompt_tokens=16, max_new_tokens=16)
-
-        self.assertEqual(seq.prompt_mask, [True, False, False])
+        with self.assertRaisesRegex(ValueError, "dataset loader must return rows"):
+            sft_mod._record_to_train_sequence({"text": "abc"}, tokenizer, max_prompt_tokens=16, max_new_tokens=16)
 
     def test_sft_drops_rows_without_target_tokens(self):
         """Rows that cannot produce a next-token target should be filtered out."""
         tokenizer = FakeTextTokenizer()
 
-        seq = sft_mod._record_to_train_sequence({"text": "a"}, tokenizer, max_prompt_tokens=16, max_new_tokens=16)
+        seq = sft_mod._record_to_train_sequence(
+            {"prompt": "a", "response": ""}, tokenizer, max_prompt_tokens=16, max_new_tokens=16
+        )
 
         self.assertIsNone(seq)
 
@@ -135,35 +126,13 @@ class TrainerDatasetUtilityTest(unittest.TestCase):
         self.assertIsNone(too_long_response)
         self.assertIsNotNone(exact_budget)
 
-    def test_sft_fallback_chat_template_keeps_assistant_delta_scoped(self):
-        """Fallback chat rendering should not let EOS suffixes over-mark history."""
-        tokenizer = EosAddingFallbackTokenizer()
-        messages = [
-            {"role": "user", "content": "hello"},
-            {"role": "assistant", "content": "ok"},
-        ]
-
-        tokens, prompt_mask = sft_mod._messages_to_tokens_and_mask(messages, tokenizer)
-        final_rendering = data_utils.apply_chat_template(tokenizer, messages)
-        prompt_rendering = data_utils.apply_chat_template(tokenizer, messages[:1])
-
-        self.assertEqual(tokens, final_rendering + [tokenizer.eos_token_id])
-        self.assertEqual(len(tokens), len(prompt_mask))
-        self.assertEqual(tokens[-1], tokenizer.eos_token_id)
-        self.assertFalse(prompt_mask[-1])
-        self.assertEqual(prompt_mask[: len(prompt_rendering)], [True] * len(prompt_rendering))
-        self.assertEqual(
-            prompt_mask[len(prompt_rendering) :],
-            [False] * (len(final_rendering) - len(prompt_rendering) + 1),
-        )
-
     def test_sft_fit_raises_when_all_rows_are_filtered(self):
         """SFT should fail loudly instead of finishing with zero train steps."""
         backend = FakeSFTBackend()
         trainer = sft_mod.SFTTrainer(
             _sft_config(),
             instance=backend,
-            dataset=[{"text": ""}, {"text": "a"}],
+            dataset=[{"prompt": "q", "response": ""}, {"prompt": "q", "response": ""}],
             reward_fn=None,
             loss_fn=lambda _pack, _logprobs: None,
         )

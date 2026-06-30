@@ -603,6 +603,8 @@ def _train_args(**overrides):
         critic_warmup_steps=20,
     )
     defaults.update(overrides)
+    if defaults["algo"] == "sft" and "dataset_loader_fn" not in overrides:
+        defaults["dataset_loader_fn"] = "examples/sft/alpaca/dataset_loader.py"
     return SimpleNamespace(**defaults)
 
 

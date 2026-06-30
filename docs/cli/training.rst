@@ -56,7 +56,9 @@ Dataset references use ``repo/name``, ``repo/name:config``, or
    ``file.py:function``.
 
 Use ``--dataset-loader-fn`` when the raw dataset does not already match the
-trainer schema. Without a loader, Areno passes dataset rows through unchanged.
+trainer schema. Without a loader, Areno passes dataset rows through unchanged,
+except for SFT where a loader is required. See :doc:`dataset_loaders` for the
+per-algorithm loader contracts.
 
 ``--algo TEXT``
    Training algorithm registered in ``areno.api``. Default: ``gspo``.
@@ -332,6 +334,24 @@ GSPO math training
      --batch-size 2 \
      --n-samples 2 \
      --mini-bs 1
+
+SFT instruction tuning
+~~~~~~~~~~~~~~~~~~~~~~
+
+.. code-block:: bash
+
+   areno train \
+     --ckpt Qwen/Qwen3-0.6B \
+     --dataset-path yahma/alpaca-cleaned \
+     --dataset-loader-fn examples/sft/alpaca/dataset_loader.py \
+     --algo sft \
+     --tp-size 1 \
+     --world-size 1 \
+     --batch-size 2 \
+     --mini-bs 1
+
+SFT loaders must normalize raw rows to ``prompt`` and ``response`` dictionaries.
+The trainer performs tokenization and trains on the response suffix.
 
 DPO preference training
 ~~~~~~~~~~~~~~~~~~~~~~~
