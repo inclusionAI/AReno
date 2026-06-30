@@ -173,11 +173,14 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
     if args.dataset_path is None:
         raise click.UsageError("--dataset-path is required")
     algorithm = _algorithm_for_cli(args.algo)
-    if args.tune_params and not algorithm.requires_rollout:
+    tune_params = bool(getattr(args, "tune_params", False))
+    mem_frac = float(getattr(args, "mem_frac", 0.9))
+    tune_max_samples = int(getattr(args, "tune_max_samples", 256))
+    if tune_params and not algorithm.requires_rollout:
         raise click.UsageError("--tune-params currently supports rollout-based algorithms")
-    if args.mem_frac <= 0 or args.mem_frac > 1:
+    if mem_frac <= 0 or mem_frac > 1:
         raise click.UsageError("--mem-frac must be in (0, 1]")
-    if args.tune_max_samples <= 0:
+    if tune_max_samples <= 0:
         raise click.UsageError("--tune-max-samples must be positive")
     if algorithm.requires_rollout and args.reward_fn_path is None and args.reward_ckpt is None:
         raise click.UsageError("--reward-fn-path or --reward-ckpt is required")
