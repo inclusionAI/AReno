@@ -191,22 +191,98 @@ async def run_agentic_coding_loop(ctx, batch) -> AgentTrajectory:
     )
     client = AsyncOpenAI(base_url=ctx.get_base_url(), api_key=ctx.api_key, http_client=http_client, max_retries=0)
 
-    async def run_one(item):
-        # Training tasks are materialized into a disposable repo so model
-        # patches/tests cannot affect the source checkout running AReno.
-        workspace = CodingWorkspace.from_task(item.record)
-        try:
-            _, turns = await run_single_task(client=client, item=item, workspace=workspace, model="policy")
-            return turns
-        finally:
-            workspace.close()
-
+    # Materialize workspaces before the first model turn. Doing this inside
+    # each per-task loop staggers the first HTTP requests and prevents the
+    # rollout proxy from seeing a full batch.
+    workspaces = await asyncio.gather(*(asyncio.to_thread(CodingWorkspace.from_task, item.record) for item in items))
     try:
-        grouped = await asyncio.gather(*(run_one(item) for item in items))
-        return AgentTrajectory(turns=[turn for turns in grouped for turn in turns])
+        turns = await _run_training_tasks_by_turn(client=client, items=items, workspaces=workspaces, model="policy")
+        return AgentTrajectory(turns=turns)
     finally:
+        for workspace in workspaces:
+            workspace.close()
         await client.close()
         await http_client.aclose()
+
+
+async def _run_training_tasks_by_turn(
+    *,
+    client: Any,
+    items: list[Any],
+    workspaces: list[CodingWorkspace],
+    model: str,
+) -> list[AgentTrajectoryTurn]:
+    """Run coding tasks in lockstep turns so rollout requests batch together."""
+
+    states = [
+        {
+            "item": item,
+            "workspace": workspace,
+            "messages": initial_messages(workspace.task),
+            "turn_limit": int(workspace.task.get("max_turns") or 8),
+            "done": False,
+        }
+        for item, workspace in zip(items, workspaces, strict=True)
+    ]
+    turns: list[AgentTrajectoryTurn] = []
+    for turn_idx in range(max((int(state["turn_limit"]) for state in states), default=0)):
+        active = [state for state in states if not state["done"] and turn_idx < int(state["turn_limit"])]
+        if not active:
+            break
+        responses = await asyncio.gather(
+            *(
+                client.chat.completions.create(
+                    model=model,
+                    messages=state["messages"],
+                    tools=TOOLS,
+                    tool_choice="auto",
+                    stream=False,
+                )
+                for state in active
+            )
+        )
+        tool_tasks = []
+        tool_states = []
+        tool_calls = []
+        for state, response in zip(active, responses, strict=True):
+            turns.append(
+                AgentTrajectoryTurn(
+                    item=state["item"], messages=list(state["messages"]), response=response, tools=TOOLS
+                )
+            )
+            assistant_message = _assistant_message_from_response(response)
+            state["messages"].append(assistant_message)
+            call = _first_tool_call(assistant_message)
+            if call is None:
+                state["messages"].append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "Your previous response did not include a tool call. Continue the agent loop by "
+                            "outputting exactly one tool call in the next assistant response: use an available "
+                            "inspect/read/search/edit/test tool, or call submit if the task is solved or blocked."
+                        ),
+                    }
+                )
+                continue
+            tool_tasks.append(asyncio.to_thread(_execute_tool_call, state["workspace"], call))
+            tool_states.append(state)
+            tool_calls.append(call)
+        if not tool_tasks:
+            continue
+        tool_results = await asyncio.gather(*tool_tasks)
+        for state, call, result in zip(tool_states, tool_calls, tool_results, strict=True):
+            state["messages"].append(
+                {
+                    "role": "tool",
+                    "tool_call_id": call["id"],
+                    "name": call["function"]["name"],
+                    "content": json.dumps(result, ensure_ascii=False, sort_keys=True),
+                }
+            )
+            if call["function"]["name"] == "submit":
+                state["done"] = True
+    return turns
 
 
 async def run_single_task(
