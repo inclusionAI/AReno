@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import subprocess
 import sys
 import textwrap
@@ -12,7 +11,6 @@ def test_public_api_imports_do_not_load_engine_heavy_modules():
     script = textwrap.dedent(
         """
         import importlib
-        import json
         import sys
 
         for module_name in [
@@ -30,21 +28,12 @@ def test_public_api_imports_do_not_load_engine_heavy_modules():
             "areno.engine.inference",
             "areno.engine.worker",
         ]
-        print(json.dumps({name: name in sys.modules for name in heavy_modules}, sort_keys=True))
+        for name in heavy_modules:
+            assert name not in sys.modules, f"{name} was unexpectedly loaded"
         """
     )
 
-    result = subprocess.run(
+    subprocess.run(
         [sys.executable, "-c", script],
         check=True,
-        capture_output=True,
-        text=True,
     )
-
-    imported = json.loads(result.stdout.strip().splitlines()[-1])
-    assert imported == {
-        "areno.api.backend.areno": False,
-        "areno.engine.api": False,
-        "areno.engine.inference": False,
-        "areno.engine.worker": False,
-    }
