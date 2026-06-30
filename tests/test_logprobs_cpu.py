@@ -80,6 +80,15 @@ class LogprobTest(unittest.TestCase):
 
         self.assertTrue(torch.allclose(actual, expected, atol=1e-6))
 
+    def test_packed_next_token_logprobs_rejects_zero_length_segments(self):
+        """Packed scoring depends on strictly positive segment lengths."""
+        logits = torch.randn(1, 3, 4)
+        tokens = torch.tensor([0, 1, 2])
+        cu_seqlens = torch.tensor([0, 2, 2, 3])
+
+        with self.assertRaisesRegex(ValueError, "strictly increasing cu_seqlens"):
+            logprob_ops.packed_next_token_logprobs(logits, tokens, cu_seqlens)
+
     def test_empty_vocab_logprob_path_returns_empty_tensor(self):
         """Empty microbatches should return an empty tensor instead of failing."""
         logits = torch.empty(0, 3)

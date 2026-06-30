@@ -102,8 +102,9 @@ def _pack_train_data(data_pack: dict[str, Any]) -> dict[str, Any]:
     if int(lengths.numel()) != batch:
         return data_pack
 
-    # Token-axis bookkeeping. `cu_seqlens[i+1]` is the prefix sum of valid
-    # tokens up to row i, matching the FlashAttention varlen contract.
+    # Token-axis bookkeeping. Clamp to at least one token per row so
+    # `cu_seqlens` is strictly increasing; packed_next_token_logprobs relies on
+    # that invariant when vectorizing sequence-tail masking.
     lengths = lengths.to(device=input_ids.device, dtype=torch.long).clamp(min=1, max=input_ids.shape[1])
     total_tokens = int(lengths.sum().item())
     packed_ids = torch.empty(total_tokens, device=input_ids.device, dtype=input_ids.dtype)

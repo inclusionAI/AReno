@@ -54,6 +54,8 @@ def packed_next_token_logprobs(
     # of the next token, then run the same TP kernel over those.
     flat_tokens = tokens.reshape(-1)
     cu_seqlens = cu_seqlens.to(device=tokens.device, dtype=torch.long)
+    if cu_seqlens.numel() > 1 and bool(torch.any(cu_seqlens[1:] <= cu_seqlens[:-1])):
+        raise ValueError("packed_next_token_logprobs requires strictly increasing cu_seqlens")
     # Training packs every row with at least one token, so the number of
     # next-token action sites is total_tokens minus one tail token per row.
     # Keep this as shape arithmetic to avoid a GPU sync from `.item()`.
