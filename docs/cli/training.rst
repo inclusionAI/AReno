@@ -204,6 +204,8 @@ Search is deliberately conservative:
 
 * rollout candidates are tried from larger to smaller
   ``--max-running-prompts`` values;
+* if ``--max-running-prompts`` is explicitly provided, rollout probing is
+  skipped and that concurrency is used directly for training-parameter tuning;
 * training uses the rollout-selected concurrency to derive a batch size, then
   tries larger to smaller ``--mini-bs`` values;
 * ``--drop-rollout-state`` is enabled for the tuned run so rollout memory does

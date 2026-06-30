@@ -319,6 +319,30 @@ def test_auto_tune_logs_progress(monkeypatch) -> None:
     assert "auto tune selected" in text
 
 
+def test_auto_tune_skips_rollout_probe_when_max_running_prompts_is_explicit() -> None:
+    config = PolicyTrainerConfig(
+        algo="gspo",
+        ckpt="actor",
+        dataset_path="dataset",
+        batch_size=8,
+        n_samples=8,
+        mini_bs=8,
+        max_running_prompts=64,
+    )
+    stages = []
+
+    def fake_probe(_config, candidate, stage):
+        stages.append(stage)
+        assert candidate.max_running_prompts == 64
+        return AutoTuneMeasurement(candidate=candidate, peak_mem_frac=0.1, ok=True)
+
+    result = auto_tune_config(config, mem_frac=0.9, probe_fn=fake_probe)
+
+    assert stages == ["train"]
+    assert result.config.max_running_prompts == 64
+    assert result.config.batch_size == 8
+
+
 def test_auto_tune_does_not_change_user_tp_size() -> None:
     config = PolicyTrainerConfig(
         algo="gspo",

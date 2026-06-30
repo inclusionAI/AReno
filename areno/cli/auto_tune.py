@@ -76,7 +76,9 @@ def auto_tune_config(
     if not isinstance(config, RolloutTrainerConfig):
         raise ValueError("--tune-params currently tunes rollout-based trainers only")
     probe = probe_fn or probe_candidate_with_dummy_run
-    rollout_candidates = _rollout_candidates(config, auto_max_samples=auto_max_samples)
+    rollout_candidates = (
+        [] if config.max_running_prompts is not None else _rollout_candidates(config, auto_max_samples=auto_max_samples)
+    )
     logger.info(
         "auto tune start mem_frac=%.3f auto_max_samples=%d world_size=%d rollout_candidates=%d",
         mem_frac,
@@ -84,21 +86,27 @@ def auto_tune_config(
         config.world_size,
         len(rollout_candidates),
     )
-    rollout_result = _first_under_target_desc(
-        config,
-        rollout_candidates,
-        mem_frac=mem_frac,
-        probe=probe,
-        stage="rollout",
-    )
-    measurements = list(rollout_result.measurements)
-    logger.info(
-        "auto tune rollout selected %s",
-        _format_measurement(rollout_result.measurement),
-    )
+    if config.max_running_prompts is not None:
+        rollout_candidate = _template_candidate_from_user_rollout(config)
+        measurements = []
+        logger.info("auto tune rollout skipped user_max_running_prompts=%d", config.max_running_prompts)
+    else:
+        rollout_result = _first_under_target_desc(
+            config,
+            rollout_candidates,
+            mem_frac=mem_frac,
+            probe=probe,
+            stage="rollout",
+        )
+        measurements = list(rollout_result.measurements)
+        rollout_candidate = rollout_result.measurement.candidate
+        logger.info(
+            "auto tune rollout selected %s",
+            _format_measurement(rollout_result.measurement),
+        )
     train_result = _best_train_mini_bs(
         config,
-        rollout_result.measurement.candidate,
+        rollout_candidate,
         auto_max_samples=auto_max_samples,
         mem_frac=mem_frac,
         probe=probe,
@@ -235,6 +243,11 @@ def _default_template_candidate(config: RolloutTrainerConfig) -> AutoTuneCandida
         adam_8bit=bool(config.adam_8bit),
         keep_rollout_state=False,
     )
+
+
+def _template_candidate_from_user_rollout(config: RolloutTrainerConfig) -> AutoTuneCandidate:
+    template = _default_template_candidate(config)
+    return replace(template, max_running_prompts=int(config.max_running_prompts or 1))
 
 
 def _first_under_target_desc(
