@@ -16,6 +16,9 @@ from typing import Any, Literal
 
 import torch
 
+# AReno's flash path uses flash-attn features beyond the Turing-compatible
+# forward kernels, including paged KV/cache and training paths, so require
+# Ampere+ even though flash-attn 2.x has partial sm75 forward support.
 FLASH_ATTENTION_MIN_CUDA_CAPABILITY = (8, 0)
 FLASH_ATTENTION_MAX_QK_HEAD_DIM = 256
 
@@ -243,9 +246,16 @@ def flash_attention_unsupported_model_reason(model: ModelConfig) -> str | None:
         dims.append(("swa qk head dim", model.swa_head_dim))
     if model.qk_nope_head_dim or model.qk_rope_head_dim:
         dims.append(("qk head dim", model.qk_nope_head_dim + model.qk_rope_head_dim))
-    unsupported = [
-        f"{name} {dim}" for name, dim in dims if dim is not None and int(dim) > FLASH_ATTENTION_MAX_QK_HEAD_DIM
-    ]
+    unsupported = []
+    seen: set[str] = set()
+    for name, dim in dims:
+        if dim is None or int(dim) <= FLASH_ATTENTION_MAX_QK_HEAD_DIM:
+            continue
+        reason = f"{name} {dim}"
+        if reason in seen:
+            continue
+        seen.add(reason)
+        unsupported.append(reason)
     if not unsupported:
         return None
     return ", ".join(unsupported)

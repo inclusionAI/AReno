@@ -1,11 +1,10 @@
 """Shared utilities for attention backends.
 
 Defines the `AttentionCall` value object, which packages a set of Q/K/V
-tensors together with the FlashAttention-shaped parameters (normalized
-window, optional softmax scale, padded V head dim) so train and infer paths
-present identical kernel arguments. Also exposes the small helpers used to
-pad value heads, expand grouped-query KV heads, and translate window-size
-conventions.
+tensors together with the attention-call parameters (normalized window,
+optional softmax scale, padded V head dim) so train, prefill, and native
+fallback paths can share one shape contract. Also exposes the small helpers
+used to pad value heads and expand grouped-query KV heads.
 """
 
 from __future__ import annotations
