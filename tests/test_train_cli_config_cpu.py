@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 from click import UsageError, unstyle
 from click.testing import CliRunner
@@ -76,6 +78,21 @@ def test_train_config_requires_world_size_divisible_by_tp_size():
 def test_train_config_validates_common_positive_fields(field, value, message):
     with pytest.raises(UsageError, match=message):
         _trainer_config_from_options(**_options(algo="gspo", **{field: value}))
+
+
+def test_train_config_validates_tune_params_for_rollout_algorithms():
+    with pytest.raises(UsageError, match="--tune-params currently supports rollout-based algorithms"):
+        _trainer_config_from_options(**_options(algo="sft", reward_fn_path=None, reward_ckpt=None, tune_params=True))
+
+
+def test_train_config_validates_mem_frac():
+    with pytest.raises(UsageError, match=r"--mem-frac must be in \(0, 1\]"):
+        _trainer_config_from_options(**_options(algo="gspo", mem_frac=1.2))
+
+
+def test_train_config_validates_tune_max_samples():
+    with pytest.raises(UsageError, match="--tune-max-samples must be positive"):
+        _trainer_config_from_options(**_options(algo="gspo", tune_max_samples=0))
 
 
 def test_train_config_validates_grpo_clip_eps_only_for_grpo():
@@ -405,6 +422,83 @@ def test_train_command_prints_summary_before_run(monkeypatch):
     assert events == [("run", "sft")]
 
 
+def test_train_command_tunes_params_before_summary_and_run(monkeypatch):
+    from areno.cli.auto_tune import AutoTuneCandidate, AutoTuneMeasurement, AutoTuneResult
+
+    events = []
+
+    def fake_auto_tune(config, *, mem_frac, auto_max_samples):
+        events.append(("tune", config.batch_size, config.n_samples, config.mini_bs, mem_frac, auto_max_samples))
+        tuned = replace(
+            config,
+            tp_size=2,
+            batch_size=1,
+            n_samples=4,
+            mini_bs=2,
+            max_running_prompts=4,
+            adam_8bit=True,
+            keep_rollout_state=False,
+        )
+        return AutoTuneResult(
+            config=tuned,
+            measurement=AutoTuneMeasurement(
+                candidate=AutoTuneCandidate(
+                    tp_size=2,
+                    batch_size=1,
+                    n_samples=4,
+                    mini_bs=2,
+                    max_running_prompts=4,
+                    adam_8bit=True,
+                    keep_rollout_state=False,
+                ),
+                peak_mem_frac=0.81,
+                ok=True,
+            ),
+            measurements=(),
+        )
+
+    def fake_run(config):
+        events.append(
+            ("run", config.batch_size, config.n_samples, config.mini_bs, config.resolved_max_running_prompts())
+        )
+
+    monkeypatch.setattr("areno.cli.auto_tune.auto_tune_config", fake_auto_tune)
+    monkeypatch.setattr(train_cli, "run", fake_run)
+
+    result = CliRunner().invoke(
+        train_cli.train_command,
+        [
+            "--algo",
+            "gspo",
+            "--ckpt",
+            "actor",
+            "--dataset-path",
+            "dataset",
+            "--reward-ckpt",
+            "reward-model",
+            "--world-size",
+            "2",
+            "--tp-size",
+            "1",
+            "--tune-params",
+            "--mem-frac",
+            "0.82",
+            "--tune-max-samples",
+            "64",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    output = unstyle(result.output)
+    assert "AReno parameter tune selected: tp_size=2, batch_size=1, n_samples=4, mini_bs=2" in output
+    assert "adam_8bit=True, drop_rollout_state=True" in output
+    assert "tp_size       2" in output
+    assert "batch_size           1" in output
+    assert "n_samples            4" in output
+    assert "max_running_prompts  4" in output
+    assert events == [("tune", 32, 8, 16, 0.82, 64), ("run", 1, 4, 2, 4)]
+
+
 EXPECTED_HELP_SECTIONS = [
     "Basic:",
     "Rollout:",
@@ -472,6 +566,9 @@ def _options(**overrides):
         reward_fn_path=None,
         save_path="save",
         save_interval=10,
+        tune_params=False,
+        mem_frac=0.9,
+        tune_max_samples=256,
         epochs=2,
         tp_size=1,
         world_size=1,

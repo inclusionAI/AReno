@@ -298,6 +298,30 @@ areno train \
 
 For models whose tokenizer chat template supports a thinking-mode switch, add `--disable-thinking` to pass `enable_thinking=False` during training prompt rendering. Tokenizers that do not support this argument automatically use their normal chat-template path.
 
+For rollout-based algorithms, add `--tune-params` when you want AReno to probe
+rollout and train memory before the real run and fill conservative values for
+`--max-running-prompts`, `--batch-size`, and `--mini-bs`:
+
+```bash
+areno train \
+  --ckpt Qwen/Qwen3-0.6B \
+  --dataset-path gsm8k:main \
+  --dataset-loader-fn examples/math/dataset_loader.py \
+  --reward-fn-path examples/math/math_verify_reward.py \
+  --algo gspo \
+  --tp-size 1 \
+  --world-size 1 \
+  --n-samples 8 \
+  --tune-params \
+  --mem-frac 0.9 \
+  --tune-max-samples 256
+```
+
+The tuner uses dummy-loaded model weights and synthetic token rows, respects
+the configured sequence limits and tensor-parallel size, and enables
+`--drop-rollout-state` for the tuned run. See `docs/cli/training.rst` for the
+full tuning rules.
+
 For Agentic RL, add `--agent-fn` to supply an agent function. The agent calls the local OpenAI-compatible endpoint, including `tools` and `tool_choice` when needed, and returns explicit `AgentTrajectoryTurn` objects. AReno converts those turns into trainable assistant outputs and masks tool results by default:
 
 ```bash

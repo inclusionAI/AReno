@@ -67,6 +67,26 @@ def test_shopping_loader_and_reward_import_from_file_path_without_sys_path():
     assert reward.reward_fn(SimpleNamespace(source_record=source, tool_calls=[])) == -1.0
 
 
+def test_shopping_loader_fills_missing_required_features_from_kit_name():
+    loader = _load_module_without_sys_path("dataset_loader")
+    source = {
+        "id": 1,
+        "kit_name": "rain commute",
+        "categories": None,
+        "budget": 140,
+        "required_features_by_category": None,
+    }
+
+    records = loader.load_training_dataset("unused", default_loader=lambda _: [source])
+
+    assert records[0]["categories"] == ["jacket", "bottle"]
+    assert records[0]["required_features_by_category"] == {
+        "jacket": ["waterproof", "packable"],
+        "bottle": ["insulated", "leakproof"],
+    }
+    assert "jacket: waterproof, packable" in records[0]["prompt"]
+
+
 def test_shopping_tools_filter_inspect_and_check_catalog():
     game = _load_module("game")
 

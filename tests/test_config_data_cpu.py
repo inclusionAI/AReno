@@ -162,6 +162,20 @@ class ConfigAndDataTest(unittest.TestCase):
 
         self.assertEqual(flash_attention_unsupported_model_reason(model), "qk head dim 512")
 
+    def test_flash_attention_unsupported_model_reason_dedupes_qk_head_dim(self):
+        """Split QK dims should not duplicate a matching base head-dim reason."""
+        model = ModelConfig(
+            num_attention_heads=4,
+            num_key_value_heads=4,
+            intermediate_size=16,
+            vocab_size=32,
+            head_dim=512,
+            qk_nope_head_dim=384,
+            qk_rope_head_dim=128,
+        )
+
+        self.assertEqual(flash_attention_unsupported_model_reason(model), "qk head dim 512")
+
     def test_flash_attention_unsupported_gpu_reason_names_t4(self):
         """The compatibility warning should identify unsupported visible GPUs."""
         with (

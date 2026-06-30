@@ -76,6 +76,33 @@ areno train \
   --max-new-tokens 256
 ```
 
+For larger local checkpoints or higher concurrency, let AReno tune the rollout
+and train memory knobs before the real run:
+
+```bash
+areno train \
+  --ckpt /path/to/Qwen3.5-4B \
+  --dataset-path examples/agentic/coding/dataset.jsonl \
+  --dataset-loader-fn examples/agentic/coding/dataset_loader.py \
+  --reward-fn-path examples/agentic/coding/reward.py \
+  --agent-fn examples/agentic/coding/run_agent.py \
+  --algo gspo \
+  --tp-size 4 \
+  --world-size 8 \
+  --n-samples 8 \
+  --max-new-tokens 2048 \
+  --max-context-len 32768 \
+  --tune-params \
+  --mem-frac 0.9 \
+  --tune-max-samples 256
+```
+
+`--tune-params` keeps the user-provided tensor parallel size and sample count,
+then probes dummy rollout/train rows to choose conservative values for
+`--max-running-prompts`, `--batch-size`, and `--mini-bs`. This is useful for
+coding rollouts because agent turns, command output, and full trajectory
+contexts can vary substantially across samples.
+
 The reward is `1.0` when the trajectory applies a patch, runs every required
 test command successfully, and submits `solved`. It gives partial credit for
 passing tests without a final solved submission and negative reward for failed

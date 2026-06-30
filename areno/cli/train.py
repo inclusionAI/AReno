@@ -56,6 +56,9 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "ckpt",
             "dataset_path",
             "dataset_loader_fn",
+            "tune_params",
+            "mem_frac",
+            "tune_max_samples",
             "epochs",
             "world_size",
             "tp_size",
@@ -172,6 +175,15 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
     algorithm = _algorithm_for_cli(args.algo)
     if algorithm.name == "sft" and args.dataset_loader_fn is None:
         raise click.UsageError("--dataset-loader-fn is required for --algo sft")
+    tune_params = bool(getattr(args, "tune_params", False))
+    mem_frac = float(getattr(args, "mem_frac", 0.9))
+    tune_max_samples = int(getattr(args, "tune_max_samples", 256))
+    if tune_params and not algorithm.requires_rollout:
+        raise click.UsageError("--tune-params currently supports rollout-based algorithms")
+    if mem_frac <= 0 or mem_frac > 1:
+        raise click.UsageError("--mem-frac must be in (0, 1]")
+    if tune_max_samples <= 0:
+        raise click.UsageError("--tune-max-samples must be positive")
     if algorithm.requires_rollout and args.reward_fn_path is None and args.reward_ckpt is None:
         raise click.UsageError("--reward-fn-path or --reward-ckpt is required")
     if args.save_interval <= 0:
@@ -333,6 +345,23 @@ def _print_training_config_summary(
 ) -> None:
     click.echo(
         _format_training_config_summary(config, reward_ckpt=reward_ckpt, model_config=model_config, color=True),
+        color=True,
+    )
+
+
+def _print_auto_tune_summary(result) -> None:
+    measurement = result.measurement
+    if measurement is None:
+        return
+    candidate = measurement.candidate
+    click.echo(
+        _style("AReno parameter tune selected", fg="bright_green", bold=True, color=True)
+        + (
+            f": tp_size={candidate.tp_size}, batch_size={candidate.batch_size}, n_samples={candidate.n_samples}, "
+            f"mini_bs={candidate.mini_bs}, max_running_prompts={candidate.max_running_prompts}, "
+            f"adam_8bit={candidate.adam_8bit}, drop_rollout_state={not candidate.keep_rollout_state}, "
+            f"peak_mem_frac={measurement.peak_mem_frac:.4f}"
+        ),
         color=True,
     )
 
@@ -917,6 +946,27 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     "--metrics-log-dir", default=DEFAULT_METRICS_LOG_DIR, show_default=True, help="TensorBoard metrics log directory."
 )
 @click.option("--epochs", type=int, default=10, show_default=True, help="Number of dataset epochs to train.")
+@click.option(
+    "--tune-params",
+    "tune_params",
+    is_flag=True,
+    help="Tune rollout/train memory parameters with dummy probes before training.",
+)
+@click.option(
+    "--mem-frac",
+    type=float,
+    default=0.9,
+    show_default=True,
+    help="Target maximum GPU memory fraction for --tune-params probing.",
+)
+@click.option(
+    "--tune-max-samples",
+    "tune_max_samples",
+    type=int,
+    default=256,
+    show_default=True,
+    help="Maximum sampled rollout/train rows considered by --tune-params probing.",
+)
 @click.option("--tp-size", type=int, default=4, show_default=True, help="Tensor parallel size for the backend.")
 @click.option("--world-size", type=int, default=8, show_default=True, help="Total device count for the backend.")
 @click.option("--batch-size", type=int, default=32, show_default=True, help="Prompt/pair batch size.")
@@ -1024,6 +1074,16 @@ def train_command(**options) -> None:
 
     trainer_config = _trainer_config_from_options(**options)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    if options.get("tune_params"):
+        from areno.cli.auto_tune import auto_tune_config
+
+        result = auto_tune_config(
+            trainer_config,
+            mem_frac=options["mem_frac"],
+            auto_max_samples=options["tune_max_samples"],
+        )
+        trainer_config = result.config
+        _print_auto_tune_summary(result)
     _print_training_config_summary(
         trainer_config,
         reward_ckpt=options.get("reward_ckpt"),
