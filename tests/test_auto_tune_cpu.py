@@ -371,6 +371,16 @@ def test_auto_tune_treats_probe_worker_sigkill_as_oom() -> None:
     assert _is_oom_error(message)
 
 
+def test_auto_tune_treats_rollout_probe_nccl_resource_error_as_oom() -> None:
+    message = (
+        "rank 1 failed during Op.PROBE_ROLLOUT_CACHE:\n"
+        "torch.distributed.DistBackendError: NCCL error in NCCLUtils.hpp, unhandled system error. "
+        "ncclSystemError: System call or external library call failed or device error."
+    )
+
+    assert _is_oom_error(message)
+
+
 def test_auto_tune_rejects_non_rollout_configs() -> None:
     config = TrainerConfig(algo="sft", ckpt="actor", dataset_path="dataset")
 

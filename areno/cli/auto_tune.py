@@ -615,6 +615,15 @@ def _is_oom_error(message: str) -> bool:
             "worker exited without reporting result" in lowered
             and ("exitcode -9" in lowered or "during op.train" in lowered or "during op.probe_rollout_cache" in lowered)
         )
+        or (
+            "failed during op.probe_rollout_cache" in lowered
+            and (
+                "nccl" in lowered
+                or "device error" in lowered
+                or "external library call failed" in lowered
+                or "system call" in lowered
+            )
+        )
     )
 
 
