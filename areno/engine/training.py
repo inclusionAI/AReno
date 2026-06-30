@@ -68,6 +68,11 @@ class TrainingManager:
         worker.model.train()
         data_pack_obj = data_pack_shards[ctx.dp_rank]
         data_pack = _pack_train_data(data_pack_obj)
+        pack_loss_fn = data_pack.get("_loss_fn")
+        auto_tune_probe = callable(pack_loss_fn) and getattr(pack_loss_fn, "__name__", "") == "_dummy_policy_loss"
+        if auto_tune_probe and worker.device.type == "cuda":
+            torch.cuda.synchronize(worker.device)
+            torch.cuda.reset_peak_memory_stats(worker.device)
         data_pack = to_device(data_pack, worker.device)
         data_pack["_sequence_parallel_enabled"] = worker.config.model.sequence_parallel
         data_pack["_activation_checkpointing_enabled"] = worker.config.runtime.activation_checkpointing
@@ -109,6 +114,13 @@ class TrainingManager:
         else:
             current_lr = worker.optimizer.lr
         if ctx.is_rank0:
+            if auto_tune_probe and worker.device.type == "cuda":
+                torch.cuda.synchronize(worker.device)
+                total = torch.cuda.get_device_properties(worker.device).total_memory
+                peak = torch.cuda.max_memory_allocated(worker.device)
+                if metrics is None:
+                    metrics = {}
+                metrics["auto_tune_worker_peak_mem_frac"] = float(peak) / float(total)
             return {
                 "loss": float(loss.detach().cpu()),
                 "stepped": stepped,

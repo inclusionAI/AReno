@@ -27,7 +27,10 @@ def build_model_on_device(config: EngineConfig, device: torch.device) -> torch.n
     try:
         torch.set_default_dtype(config.model.dtype)
         with torch.device(device), skip_torch_init(enabled=config.model_path is not None and not config.dummy_load):
-            return build_model(config.model)
+            model = build_model(config.model)
+        if config.dummy_load:
+            _zero_model_parameters(model)
+        return model
     finally:
         torch.set_default_dtype(old_dtype)
 
@@ -61,6 +64,14 @@ def _noop_init(tensor: torch.Tensor, *_args, **_kwargs) -> torch.Tensor:
     """Replacement for `torch.nn.init.*` that returns the tensor unchanged."""
 
     return tensor
+
+
+def _zero_model_parameters(model: torch.nn.Module) -> None:
+    """Initialize dummy-loaded models deterministically with finite zeros."""
+
+    with torch.no_grad():
+        for param in model.parameters():
+            param.zero_()
 
 
 def unwrap_model(model: torch.nn.Module) -> torch.nn.Module:

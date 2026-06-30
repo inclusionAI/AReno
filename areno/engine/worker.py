@@ -23,10 +23,17 @@ import torch.distributed as dist
 from areno.engine.config import EngineConfig
 from areno.engine.data import RolloutOutput
 from areno.engine.data.sampling import _truncate_generated
-from areno.engine.inference import InferenceManager
+from areno.engine.inference import InferCacheSpec, InferenceManager
 from areno.engine.modeling import build_model_on_device, build_optimizer, param_grad
 from areno.engine.parallel.context import get_tp_context
-from areno.engine.protocol import Command, Op, RolloutPayload, SaveCheckpointPayload, WorkerResult
+from areno.engine.protocol import (
+    Command,
+    Op,
+    RolloutCacheProbePayload,
+    RolloutPayload,
+    SaveCheckpointPayload,
+    WorkerResult,
+)
 from areno.engine.roles import RoleManager, WorkerRole
 from areno.engine.runtime.common import pad_rollout_rows
 from areno.engine.runtime.decode_graph import DecodeGraph
@@ -93,6 +100,8 @@ class ArenoWorker:
             return self.ensure_roles(cmd.payload)
         if cmd.op is Op.INFER_ROLLOUT:
             return self.infer_rollout(cmd.payload)
+        if cmd.op is Op.PROBE_ROLLOUT_CACHE:
+            return self.probe_rollout_cache(cmd.payload)
         if cmd.op is Op.ROLLOUT_SESSION_BEGIN:
             return self.rollout_session_begin(cmd.payload)
         if cmd.op is Op.ROLLOUT_SESSION_SYNC:
@@ -124,6 +133,28 @@ class ArenoWorker:
             finished_callback=finished_callback,
             refill_callback=refill_callback,
         )
+
+    def probe_rollout_cache(self, payload: RolloutCacheProbePayload) -> float:
+        """Allocate rollout KV cache and capture decode graphs without decoding."""
+
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
+            torch.cuda.reset_peak_memory_stats(self.device)
+        self.inference._init_infer_cache(
+            InferCacheSpec(
+                max_running_seqs=int(payload.max_running_seqs),
+                max_cache_len=int(payload.max_cache_len),
+                num_blocks=int(payload.num_blocks),
+                block_size=int(payload.block_size),
+                max_blocks_per_seq=int(payload.max_blocks_per_seq),
+            )
+        )
+        if self.device.type != "cuda":
+            return 0.0
+        torch.cuda.synchronize(self.device)
+        total = torch.cuda.get_device_properties(self.device).total_memory
+        peak = torch.cuda.max_memory_allocated(self.device)
+        return float(peak) / float(total)
 
     def run_rollout_command(self, command: Command) -> list[tuple[int | None, RolloutOutput | None]]:
         """Run one rollout command and continuously refill from queued requests."""

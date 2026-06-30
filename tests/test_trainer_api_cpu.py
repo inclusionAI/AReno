@@ -32,6 +32,26 @@ class TrainerPromptBatchTest(unittest.TestCase):
     def test_top_level_trainer_export_matches_api_trainer(self):
         self.assertIs(Trainer, ApiTrainer)
 
+    def test_close_releases_backend(self):
+        trainer = Trainer(world_size=1, model_path="unused")
+
+        class BackendStub:
+            def __init__(self):
+                self.closed = False
+
+            def close(self):
+                self.closed = True
+
+        backend = BackendStub()
+        trainer._backend = backend
+        trainer._initialized = True
+
+        trainer.close()
+
+        self.assertTrue(backend.closed)
+        self.assertIsNone(trainer._backend)
+        self.assertFalse(trainer._initialized)
+
     def test_load_prompt_batches_skips_long_prompts_and_keeps_records(self):
         """Overlong prompts should be skipped without dropping record metadata."""
         trainer = Trainer(world_size=1, model_path="unused")

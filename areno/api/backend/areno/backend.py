@@ -131,6 +131,14 @@ class ArenoBackend(Backend):
             raise RuntimeError("ArenoBackend is not initialized")
         return self._engine
 
+    def close(self) -> None:
+        """Stop backend worker processes and release engine resources."""
+
+        engine = self._engine
+        self._engine = None
+        if engine is not None:
+            engine.close()
+
     def initialize(self, ctx: Context):
         _prefer_repo_areno()
         from areno import ArenoEngine, OptimizerConfig, RuntimeConfig
@@ -246,6 +254,23 @@ class ArenoBackend(Backend):
 
         del ctx
         return int(self._require_engine().config.model.max_position_embeddings)
+
+    def probe_rollout_cache(
+        self,
+        ctx: Context,
+        *,
+        max_new_tokens: int,
+        max_running_prompts: int,
+        max_prompt_len: int,
+    ) -> float:
+        """Allocate rollout cache and capture decode graphs without generating."""
+
+        del ctx
+        return self._require_engine().probe_rollout_cache(
+            max_new_tokens=max_new_tokens,
+            max_running_prompts=max_running_prompts,
+            max_prompt_len=max_prompt_len,
+        )
 
     def end_rollout_session(self, ctx: Context) -> None:
         """Finalize rollout-only state before scoring or training."""

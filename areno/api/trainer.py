@@ -154,6 +154,18 @@ class Trainer:
             raise RuntimeError("Trainer is not initialized")
         return self._backend.model_context_len(self._ctx)
 
+    def probe_rollout_cache(self, *, max_new_tokens: int, max_running_prompts: int, max_prompt_len: int) -> float:
+        """Allocate rollout KV cache/decode graphs without running rollout decode."""
+
+        if self._backend is None or self._ctx is None:
+            raise RuntimeError("Trainer is not initialized")
+        return self._backend.probe_rollout_cache(
+            self._ctx,
+            max_new_tokens=max_new_tokens,
+            max_running_prompts=max_running_prompts,
+            max_prompt_len=max_prompt_len,
+        )
+
     def end_rollout_session(self) -> None:
         """Finalize backend rollout state when a rollout group completes."""
 
@@ -397,10 +409,16 @@ class Trainer:
         return self._backend.save_checkpoint(self._ctx, path)
 
     def close(self) -> None:
-        """Release local resources such as metric writers."""
+        """Release backend workers and local resources such as metric writers."""
 
-        if self._metrics is not None:
-            self._metrics.close()
+        try:
+            if self._backend is not None:
+                self._backend.close()
+        finally:
+            self._backend = None
+            self._initialized = False
+            if self._metrics is not None:
+                self._metrics.close()
 
 
 def _normalize_prompt_token_batch(prompt_tokens: list[list[int]]) -> list[list[int]]:

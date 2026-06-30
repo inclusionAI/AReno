@@ -33,6 +33,7 @@ from areno.engine.protocol import (
     EnsureRolesPayload,
     Op,
     RoleSpecPayload,
+    RolloutCacheProbePayload,
     RolloutPayload,
     SaveCheckpointPayload,
     ScorePayload,
@@ -318,6 +319,37 @@ class ArenoEngine:
             )
         # Fast path for single-chunk inputs; otherwise concat per-chunk outputs.
         return outputs[0] if len(outputs) == 1 else _merge_rollouts(outputs)
+
+    def probe_rollout_cache(
+        self,
+        *,
+        max_new_tokens: int,
+        max_running_prompts: int,
+        max_prompt_len: int,
+    ) -> float:
+        """Allocate rollout KV cache and capture decode graphs without decoding."""
+
+        if max_running_prompts < 1:
+            raise ValueError("max_running_prompts must be >= 1")
+        if max_prompt_len < 1:
+            raise ValueError("max_prompt_len must be >= 1")
+        if max_new_tokens < 1:
+            raise ValueError("max_new_tokens must be >= 1")
+        dp_size = int(self.config.dp_size)
+        local_max_running = max(ceil_div(int(max_running_prompts), dp_size), 1)
+        max_cache_len = int(max_prompt_len) + int(max_new_tokens)
+        max_blocks_per_seq = ceil_div(max_cache_len, self.config.runtime.kv_block_size)
+        results = self.cluster.call(
+            Op.PROBE_ROLLOUT_CACHE,
+            RolloutCacheProbePayload(
+                max_running_seqs=local_max_running,
+                max_cache_len=max_cache_len,
+                max_blocks_per_seq=max_blocks_per_seq,
+                num_blocks=local_max_running * max_blocks_per_seq,
+                block_size=self.config.runtime.kv_block_size,
+            ),
+        )
+        return max(float(result or 0.0) for result in results) if results else 0.0
 
     async def generate_rollout_async(
         self,
