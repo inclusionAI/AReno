@@ -99,6 +99,20 @@ class TrainerDatasetUtilityTest(unittest.TestCase):
 
         self.assertIsNone(seq)
 
+    def test_sft_drops_rows_with_none_prompt_or_response(self):
+        """None values should not be converted to the literal token string."""
+        tokenizer = FakeTextTokenizer()
+
+        none_prompt = sft_mod._record_to_train_sequence(
+            {"prompt": None, "response": "answer"}, tokenizer, max_prompt_tokens=16, max_new_tokens=16
+        )
+        none_response = sft_mod._record_to_train_sequence(
+            {"prompt": "question", "response": None}, tokenizer, max_prompt_tokens=16, max_new_tokens=16
+        )
+
+        self.assertIsNone(none_prompt)
+        self.assertIsNone(none_response)
+
     def test_sft_enforces_prompt_and_response_budgets_independently(self):
         """SFT should reject over-budget prompts and responses separately."""
         tokenizer = FakeTextTokenizer()

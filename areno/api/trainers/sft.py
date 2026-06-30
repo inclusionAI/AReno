@@ -146,6 +146,8 @@ def _record_to_train_sequence(record: Any, tokenizer, *, max_prompt_tokens: int,
             "SFT dataset loader must return rows with `prompt` and `response`; "
             "normalize raw dataset fields in --dataset-loader-fn"
         )
+    if record["prompt"] is None or record["response"] is None:
+        return None
     prompt = str(record["prompt"])
     response = str(record["response"])
     if not response:
