@@ -246,16 +246,11 @@ def flash_attention_unsupported_model_reason(model: ModelConfig) -> str | None:
         dims.append(("swa qk head dim", model.swa_head_dim))
     if model.qk_nope_head_dim or model.qk_rope_head_dim:
         dims.append(("qk head dim", model.qk_nope_head_dim + model.qk_rope_head_dim))
-    unsupported = []
-    seen: set[str] = set()
-    for name, dim in dims:
-        if dim is None or int(dim) <= FLASH_ATTENTION_MAX_QK_HEAD_DIM:
-            continue
-        reason = f"{name} {dim}"
-        if reason in seen:
-            continue
-        seen.add(reason)
-        unsupported.append(reason)
+    unsupported = list(
+        dict.fromkeys(
+            f"{name} {dim}" for name, dim in dims if dim is not None and int(dim) > FLASH_ATTENTION_MAX_QK_HEAD_DIM
+        )
+    )
     if not unsupported:
         return None
     return ", ".join(unsupported)
