@@ -23,7 +23,7 @@ image = modal.Image.from_dockerfile(
     str(PROJECT_ROOT / "Dockerfile"),
     build_args={
         "ARENO_REPO_URL": REPO_URL,
-        "ARENO_BRANCH": os.environ.get(MODAL_BRANCH_ENV, ""),
+        "ARENO_BRANCH": os.environ.get(MODAL_BRANCH_ENV, "__local__"),
     },
 )
 

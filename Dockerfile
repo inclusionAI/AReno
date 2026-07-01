@@ -26,12 +26,12 @@ RUN python -m pip install --index-url "${PIP_INDEX_URL}" \
         "tqdm>=4.66"
 
 ARG ARENO_REPO_URL=https://github.com/inclusionAI/AReno.git
-ARG ARENO_BRANCH=
+ARG ARENO_BRANCH=__local__
 
 WORKDIR /workspace/areno
 COPY . /workspace/areno
 
-RUN if [[ -n "${ARENO_BRANCH}" ]]; then \
+RUN if [[ "${ARENO_BRANCH}" != "__local__" ]]; then \
         cd /workspace && \
         rm -rf /workspace/areno && \
         git clone --depth 1 --branch "${ARENO_BRANCH}" "${ARENO_REPO_URL}" /workspace/areno; \
