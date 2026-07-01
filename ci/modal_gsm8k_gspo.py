@@ -14,11 +14,18 @@ REPO_URL = "https://github.com/inclusionAI/AReno.git"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 REMOTE_REPO_DIR = Path("/workspace/areno")
 DEFAULT_CKPT = "Qwen/Qwen3.5-0.8B"
+MODAL_BRANCH_ENV = "ARENO_MODAL_BRANCH"
 
 
 app = modal.App(APP_NAME)
 
-image = modal.Image.from_dockerfile(str(PROJECT_ROOT / "Dockerfile")).apt_install("git")
+image = modal.Image.from_dockerfile(
+    str(PROJECT_ROOT / "Dockerfile"),
+    build_args={
+        "ARENO_REPO_URL": REPO_URL,
+        "ARENO_BRANCH": os.environ.get(MODAL_BRANCH_ENV, ""),
+    },
+)
 
 
 def _run(command: list[str], *, cwd: Path | None = None, env: dict[str, str] | None = None) -> None:
@@ -34,9 +41,7 @@ def _run(command: list[str], *, cwd: Path | None = None, env: dict[str, str] | N
 def run_gsm8k_gspo(branch: str, ckpt: str = DEFAULT_CKPT) -> None:
     """Run a short GSM8K GSPO train task on Modal."""
 
-    _run(["git", "remote", "set-url", "origin", REPO_URL], cwd=REMOTE_REPO_DIR)
-    _run(["git", "fetch", "--depth", "1", "origin", branch], cwd=REMOTE_REPO_DIR)
-    _run(["git", "checkout", "--force", "FETCH_HEAD"], cwd=REMOTE_REPO_DIR)
+    print(f"Running AReno branch built into image: {branch}", flush=True)
 
     env = os.environ.copy()
     env.setdefault("PYTHONUNBUFFERED", "1")
@@ -100,6 +105,7 @@ def _launch_with_modal_cli(args: argparse.Namespace) -> None:
     env["MODAL_TOKEN_ID"] = args.modal_token_id
     env["MODAL_TOKEN_SECRET"] = args.modal_token_secret
     env["ARENO_MODAL_LAUNCHED"] = "1"
+    env[MODAL_BRANCH_ENV] = args.branch
 
     script = Path(__file__).resolve()
     command = [
