@@ -70,6 +70,8 @@ def run_gsm8k_gspo(branch: str, ckpt: str = DEFAULT_CKPT) -> None:
             "1",
             "--max-running-prompts",
             "16",
+            "--max-new-tokens",
+            "1024",
             "--epochs",
             "1",
             "--drop-rollout-state",
