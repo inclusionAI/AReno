@@ -351,7 +351,9 @@ Observability
 ~~~~~~~~~~~~~~
 
 ``--metrics-log-dir TEXT``
-   TensorBoard metrics log directory.
+   TensorBoard metrics log directory. See :doc:`observability` for the
+   ``rollout/*``, ``train/*``, and ``time/*`` metric namespaces and debugging
+   log examples.
 
 Examples
 --------

@@ -168,6 +168,7 @@ What areno owns
 
    cli/training
    cli/dataset_loaders
+   cli/observability
    cli/inference
    cli/diagnostics
    sdk/trainer
