@@ -23,7 +23,8 @@ RUN python -m pip install --index-url "${PIP_INDEX_URL}" \
         "einops" \
         "safetensors>=0.4" \
         "accelerate" \
-        "tqdm>=4.66"
+        "tqdm>=4.66" \
+        "math-verify"
 
 ARG ARENO_REPO_URL=https://github.com/inclusionAI/AReno.git
 ARG ARENO_BRANCH=__local__
