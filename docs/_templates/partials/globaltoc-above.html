@@ -1,0 +1,33 @@
+{%- macro render_sidebar_logo(src, classname) -%}
+  {%- if src and src.startswith(('https://', 'http://')) -%}
+    <img class="{{ classname }}" src="{{ src }}" alt="{{ project }}" height="28" loading="lazy" />
+  {%- elif src -%}
+    <img class="{{ classname }}" src="{{ pathto(src, 1) }}" alt="{{ project }}" height="28" loading="lazy" />
+  {%- elif logo_url -%}
+    <img class="{{ classname }}" src="{{ logo_url }}" alt="{{ project }}" height="28" loading="lazy" />
+  {%- endif -%}
+{%- endmacro -%}
+
+<div class="sidebar-chrome">
+  <div class="sidebar-brand-row">
+    <a class="sidebar-brand" href="{% if theme_logo_target %}{{ theme_logo_target }}{% else %}{{ pathto(root_doc) }}{% endif %}">
+      {{ render_sidebar_logo(theme_light_logo, 'light-logo') }}
+      {{ render_sidebar_logo(theme_dark_logo, 'dark-logo') }}
+      <strong>{{ project }}</strong>
+    </a>
+    <div class="sidebar-theme">
+      {%- include "components/theme-switch.html" -%}
+    </div>
+  </div>
+
+  {%- if pathto('search') != '#' -%}
+  <form class="searchbox sidebar-searchbox flex items-center" action="{{ pathto('search') }}" method="get" role="search" aria-label="{{ _('Search documentation') }}">
+    <svg class="sidebar-search-icon" aria-hidden="true" focusable="false" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="11" cy="11" r="8"></circle>
+      <path d="m21 21-4.3-4.3"></path>
+    </svg>
+    <input type="search" name="q" placeholder="{{ _('Search documentation') }}" autocomplete="off" />
+    <kbd aria-hidden="true">⌘K</kbd>
+  </form>
+  {%- endif -%}
+</div>
