@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 import torch
 
@@ -89,6 +90,37 @@ class LogprobTest(unittest.TestCase):
             actual = logprob_ops.vocab_parallel_selected_logprobs(logits, labels)
 
         self.assertEqual(actual.numel(), 0)
+
+    def test_forward_selected_logprobs_chunks_vocab_exp(self):
+        """Forward-only selected logprobs should avoid full-vocab exp tensors."""
+        logits = torch.tensor(
+            [
+                [1.0, 2.0, -1.0, 0.25, 0.75],
+                [0.5, -0.25, 0.0, 3.0, -2.0],
+            ]
+        )
+        labels = torch.tensor([1, 3])
+        expected = torch.log_softmax(logits, dim=-1).gather(-1, labels[:, None]).squeeze(-1)
+        exp_widths = []
+        real_exp = torch.exp
+
+        def tracked_exp(value):
+            exp_widths.append(value.shape[-1])
+            return real_exp(value)
+
+        with patch.object(logprob_ops.torch, "exp", side_effect=tracked_exp):
+            actual = logprob_ops._selected_logprobs_components_forward(
+                logits,
+                labels,
+                vocab_start=0,
+                group=None,
+                world_size=1,
+                vocab_chunk_size=2,
+            )
+
+        self.assertTrue(torch.allclose(actual, expected, atol=1e-6))
+        self.assertTrue(exp_widths)
+        self.assertLessEqual(max(exp_widths), 2)
 
 
 if __name__ == "__main__":

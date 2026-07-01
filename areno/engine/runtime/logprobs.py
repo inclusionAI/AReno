@@ -103,8 +103,44 @@ def _vocab_parallel_selected_logprobs_forward(
     group,
     world_size: int,
 ) -> torch.Tensor:
-    out, _, _, _ = _selected_logprobs_components(logits_shard, labels, vocab_start, group, world_size, save_probs=False)
-    return out
+    return _selected_logprobs_components_forward(logits_shard, labels, vocab_start, group, world_size)
+
+
+def _selected_logprobs_components_forward(
+    logits_shard: torch.Tensor,
+    labels: torch.Tensor,
+    vocab_start: int,
+    group,
+    world_size: int,
+    *,
+    vocab_chunk_size: int = 8192,
+) -> torch.Tensor:
+    """Forward-only selected logprobs without materializing full-vocab probs."""
+
+    labels = labels.to(device=logits_shard.device, dtype=torch.long)
+    local_vocab = logits_shard.shape[-1]
+    local_labels = labels - int(vocab_start)
+    local_mask = (local_labels >= 0) & (local_labels < local_vocab)
+
+    local_max = logits_shard.max(dim=-1).values.float()
+    global_max = local_max.clone()
+    if world_size > 1:
+        dist.all_reduce(global_max, op=dist.ReduceOp.MAX, group=group)
+
+    exp_sum = torch.zeros_like(global_max, dtype=torch.float32)
+    for start in range(0, local_vocab, vocab_chunk_size):
+        end = min(start + vocab_chunk_size, local_vocab)
+        exp_sum += torch.exp(logits_shard[..., start:end].float() - global_max.unsqueeze(-1)).sum(dim=-1)
+    if world_size > 1:
+        dist.all_reduce(exp_sum, op=dist.ReduceOp.SUM, group=group)
+    logsumexp = global_max + exp_sum.log()
+
+    safe_labels = local_labels.clamp(min=0, max=max(local_vocab - 1, 0))
+    target = logits_shard.gather(-1, safe_labels.unsqueeze(-1)).squeeze(-1).float()
+    target = target.masked_fill(~local_mask, 0.0)
+    if world_size > 1:
+        dist.all_reduce(target, op=dist.ReduceOp.SUM, group=group)
+    return target - logsumexp
 
 
 def _selected_logprobs_components(
@@ -148,7 +184,7 @@ def _selected_logprobs_components(
     # resulting target value is zeroed via `local_mask` so the SUM-reduce
     # picks the correct rank's contribution.
     safe_labels = local_labels.clamp(min=0, max=max(local_vocab - 1, 0))
-    target = logits.gather(-1, safe_labels.unsqueeze(-1)).squeeze(-1)
+    target = logits_shard.gather(-1, safe_labels.unsqueeze(-1)).squeeze(-1).float()
     target = target.masked_fill(~local_mask, 0.0)
     if world_size > 1:
         dist.all_reduce(target, op=dist.ReduceOp.SUM, group=group)
