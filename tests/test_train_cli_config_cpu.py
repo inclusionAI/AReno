@@ -52,6 +52,7 @@ def test_train_config_requires_world_size_divisible_by_tp_size():
     [
         ("save_interval", 0, "--save-interval must be positive"),
         ("epochs", 0, "--epochs must be positive"),
+        ("max_steps", 0, "--max-steps must be positive"),
         ("tp_size", 0, "--tp-size must be positive"),
         ("world_size", 0, "--world-size must be positive"),
         ("batch_size", 0, "--batch-size must be positive"),
@@ -188,6 +189,7 @@ def test_train_config_builds_policy_shape_for_gspo_and_grpo(algo, clip_attr, cli
             algo=algo,
             n_samples=3,
             max_running_prompts=12,
+            max_steps=7,
             max_context_len=512,
             temperature=0.7,
             top_k=10,
@@ -202,6 +204,7 @@ def test_train_config_builds_policy_shape_for_gspo_and_grpo(algo, clip_attr, cli
     assert cfg.reward_fn_path is None
     assert cfg.n_samples == 3
     assert cfg.resolved_max_running_prompts() == 12
+    assert cfg.max_steps == 7
     assert cfg.max_context_len == 512
     assert cfg.temperature == 0.7
     assert cfg.top_k == 10
@@ -275,6 +278,7 @@ def test_training_config_summary_shows_resolved_values_and_warning():
             world_size=8,
             tp_size=2,
             batch_size=4,
+            max_steps=11,
             n_samples=3,
             max_running_prompts=None,
             temperature=0.7,
@@ -301,6 +305,7 @@ def test_training_config_summary_shows_resolved_values_and_warning():
     assert "attn_backend  flash" in summary
     assert "max_running_prompts  12" in summary
     assert "sampling             greedy=no, temperature=0.7, top_k=20, top_p=0.9" in summary
+    assert "max_steps                    11" in summary
     assert "optimizer                    lr=2e-06, min_lr=0.0, decay=cosine/100" in summary
     assert "metrics_log_dir  /tmp/metrics" in summary
     assert "WARNING: no checkpoint output path configured (--save-path)" in summary
@@ -570,6 +575,7 @@ def _options(**overrides):
         mem_frac=0.9,
         tune_max_samples=256,
         epochs=2,
+        max_steps=None,
         tp_size=1,
         world_size=1,
         batch_size=2,

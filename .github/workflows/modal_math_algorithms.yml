@@ -1,0 +1,53 @@
+name: Modal Math Algorithms
+
+on:
+  schedule:
+    - cron: "17 19 * * *"
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "AReno branch to checkout inside the Modal image."
+        required: false
+        default: main
+      ckpt:
+        description: "Checkpoint path or Hugging Face repo ID."
+        required: false
+        default: Qwen/Qwen3.5-0.8B
+      github_environment:
+        description: "GitHub Environment that stores Modal secrets."
+        required: false
+        default: modal
+
+permissions:
+  contents: read
+
+concurrency:
+  group: modal-math-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  math:
+    name: math / ${{ matrix.algo }}
+    strategy:
+      fail-fast: false
+      matrix:
+        algo: [gspo, ppo]
+    uses: ./.github/workflows/modal_train.yml
+    with:
+      branch: ${{ inputs.branch || 'main' }}
+      ckpt: ${{ inputs.ckpt || 'Qwen/Qwen3.5-0.8B' }}
+      algo: ${{ matrix.algo }}
+      dataset_path: gsm8k:main
+      dataset_loader_fn: examples/math/dataset_loader.py
+      reward_fn_path: examples/math/math_verify_reward.py
+      tp_size: "1"
+      world_size: "1"
+      batch_size: "2"
+      n_samples: "8"
+      mini_bs: "1"
+      max_running_prompts: "16"
+      max_new_tokens: "1024"
+      epochs: "1"
+      max_steps: "5"
+      github_environment: ${{ inputs.github_environment || 'modal' }}
+    secrets: inherit

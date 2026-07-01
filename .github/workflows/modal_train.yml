@@ -1,0 +1,307 @@
+name: Modal Train
+
+on:
+  workflow_call:
+    inputs:
+      branch:
+        description: "AReno branch to checkout inside the Modal image."
+        required: false
+        type: string
+        default: main
+      ckpt:
+        description: "Checkpoint path or Hugging Face repo ID."
+        required: false
+        type: string
+        default: Qwen/Qwen3.5-0.8B
+      algo:
+        description: "AReno algorithm name."
+        required: false
+        type: string
+        default: gspo
+      dataset_path:
+        description: "Dataset path passed to areno train."
+        required: false
+        type: string
+        default: gsm8k:main
+      dataset_loader_fn:
+        description: "Dataset loader path/function. Leave empty to omit."
+        required: false
+        type: string
+        default: examples/math/dataset_loader.py
+      reward_fn_path:
+        description: "Reward function path. Leave empty to omit."
+        required: false
+        type: string
+        default: examples/math/math_verify_reward.py
+      agent_fn:
+        description: "Optional agent function path. Leave empty to omit."
+        required: false
+        type: string
+        default: ""
+      tp_size:
+        description: "Tensor parallel size."
+        required: false
+        type: string
+        default: "1"
+      world_size:
+        description: "World size."
+        required: false
+        type: string
+        default: "1"
+      batch_size:
+        description: "Prompt batch size."
+        required: false
+        type: string
+        default: "2"
+      n_samples:
+        description: "Rollout samples per prompt."
+        required: false
+        type: string
+        default: "8"
+      mini_bs:
+        description: "Training microbatch size."
+        required: false
+        type: string
+        default: "1"
+      max_running_prompts:
+        description: "Max concurrent rollout prompts."
+        required: false
+        type: string
+        default: "16"
+      max_prompt_tokens:
+        description: "Optional max prompt tokens. Leave empty to omit."
+        required: false
+        type: string
+        default: ""
+      max_new_tokens:
+        description: "Max generated tokens."
+        required: false
+        type: string
+        default: "1024"
+      max_context_len:
+        description: "Optional total context limit. Leave empty to omit."
+        required: false
+        type: string
+        default: ""
+      epochs:
+        description: "Epoch count."
+        required: false
+        type: string
+        default: "1"
+      max_steps:
+        description: "Trainer step cap."
+        required: false
+        type: string
+        default: "5"
+      extra_train_args:
+        description: "Extra areno train args, shell-split by the launcher."
+        required: false
+        type: string
+        default: ""
+      keep_rollout_state:
+        description: "Set true to avoid adding --drop-rollout-state."
+        required: false
+        type: boolean
+        default: false
+      github_environment:
+        description: "GitHub Environment that stores Modal secrets."
+        required: false
+        type: string
+        default: modal
+    secrets:
+      MODAL_TOKEN_ID:
+        required: true
+      MODAL_TOKEN_SECRET:
+        required: true
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "AReno branch to checkout inside the Modal image."
+        required: false
+        default: main
+      ckpt:
+        description: "Checkpoint path or Hugging Face repo ID."
+        required: false
+        default: Qwen/Qwen3.5-0.8B
+      algo:
+        description: "AReno algorithm name."
+        required: false
+        default: gspo
+      dataset_path:
+        description: "Dataset path passed to areno train."
+        required: false
+        default: gsm8k:main
+      dataset_loader_fn:
+        description: "Dataset loader path/function. Leave empty to omit."
+        required: false
+        default: examples/math/dataset_loader.py
+      reward_fn_path:
+        description: "Reward function path. Leave empty to omit."
+        required: false
+        default: examples/math/math_verify_reward.py
+      agent_fn:
+        description: "Optional agent function path. Leave empty to omit."
+        required: false
+        default: ""
+      tp_size:
+        description: "Tensor parallel size."
+        required: false
+        default: "1"
+      world_size:
+        description: "World size."
+        required: false
+        default: "1"
+      batch_size:
+        description: "Prompt batch size."
+        required: false
+        default: "2"
+      n_samples:
+        description: "Rollout samples per prompt."
+        required: false
+        default: "8"
+      mini_bs:
+        description: "Training microbatch size."
+        required: false
+        default: "1"
+      max_running_prompts:
+        description: "Max concurrent rollout prompts."
+        required: false
+        default: "16"
+      max_prompt_tokens:
+        description: "Optional max prompt tokens. Leave empty to omit."
+        required: false
+        default: ""
+      max_new_tokens:
+        description: "Max generated tokens."
+        required: false
+        default: "1024"
+      max_context_len:
+        description: "Optional total context limit. Leave empty to omit."
+        required: false
+        default: ""
+      epochs:
+        description: "Epoch count."
+        required: false
+        default: "1"
+      max_steps:
+        description: "Trainer step cap."
+        required: false
+        default: "5"
+      extra_train_args:
+        description: "Extra areno train args, shell-split by the launcher."
+        required: false
+        default: ""
+      keep_rollout_state:
+        description: "Set true to avoid adding --drop-rollout-state."
+        required: false
+        type: boolean
+        default: false
+      github_environment:
+        description: "GitHub Environment that stores Modal secrets."
+        required: false
+        default: modal
+
+permissions:
+  contents: read
+
+concurrency:
+  group: modal-train-${{ github.workflow }}-${{ github.ref }}-${{ inputs.algo || 'gspo' }}
+  cancel-in-progress: false
+
+jobs:
+  train:
+    name: modal / ${{ inputs.algo || 'gspo' }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.github_environment || 'modal' }}
+    timeout-minutes: 45
+    env:
+      MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+      ARENO_MODAL_BRANCH: ${{ inputs.branch || 'main' }}
+      ARENO_MODAL_CKPT: ${{ inputs.ckpt || 'Qwen/Qwen3.5-0.8B' }}
+      ARENO_MODAL_ALGO: ${{ inputs.algo || 'gspo' }}
+      ARENO_MODAL_DATASET_PATH: ${{ inputs.dataset_path || 'gsm8k:main' }}
+      ARENO_MODAL_DATASET_LOADER_FN: ${{ inputs.dataset_loader_fn || 'examples/math/dataset_loader.py' }}
+      ARENO_MODAL_REWARD_FN_PATH: ${{ inputs.reward_fn_path || 'examples/math/math_verify_reward.py' }}
+      ARENO_MODAL_AGENT_FN: ${{ inputs.agent_fn || '' }}
+      ARENO_MODAL_TP_SIZE: ${{ inputs.tp_size || '1' }}
+      ARENO_MODAL_WORLD_SIZE: ${{ inputs.world_size || '1' }}
+      ARENO_MODAL_BATCH_SIZE: ${{ inputs.batch_size || '2' }}
+      ARENO_MODAL_N_SAMPLES: ${{ inputs.n_samples || '8' }}
+      ARENO_MODAL_MINI_BS: ${{ inputs.mini_bs || '1' }}
+      ARENO_MODAL_MAX_RUNNING_PROMPTS: ${{ inputs.max_running_prompts || '16' }}
+      ARENO_MODAL_MAX_PROMPT_TOKENS: ${{ inputs.max_prompt_tokens || '' }}
+      ARENO_MODAL_MAX_NEW_TOKENS: ${{ inputs.max_new_tokens || '1024' }}
+      ARENO_MODAL_MAX_CONTEXT_LEN: ${{ inputs.max_context_len || '' }}
+      ARENO_MODAL_EPOCHS: ${{ inputs.epochs || '1' }}
+      ARENO_MODAL_MAX_STEPS: ${{ inputs.max_steps || '5' }}
+      ARENO_MODAL_EXTRA_TRAIN_ARGS: ${{ inputs.extra_train_args || '' }}
+      ARENO_MODAL_KEEP_ROLLOUT_STATE: ${{ inputs.keep_rollout_state || false }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Modal client
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --upgrade modal
+
+      - name: Validate Modal secrets
+        id: modal-secrets
+        run: |
+          if [ -z "$MODAL_TOKEN_ID" ] || [ -z "$MODAL_TOKEN_SECRET" ]; then
+            echo "::notice::Skipping Modal train because MODAL_TOKEN_ID or MODAL_TOKEN_SECRET is not configured."
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "available=true" >> "$GITHUB_OUTPUT"
+
+      - name: Launch Modal train
+        if: steps.modal-secrets.outputs.available == 'true'
+        run: |
+          args=(
+            python ci/modal_gsm8k_gspo.py
+            --branch "$ARENO_MODAL_BRANCH"
+            --modal-token-id "$MODAL_TOKEN_ID"
+            --modal-token-secret "$MODAL_TOKEN_SECRET"
+            --ckpt "$ARENO_MODAL_CKPT"
+            --algo "$ARENO_MODAL_ALGO"
+            --dataset-path "$ARENO_MODAL_DATASET_PATH"
+            --dataset-loader-fn "$ARENO_MODAL_DATASET_LOADER_FN"
+            --reward-fn-path "$ARENO_MODAL_REWARD_FN_PATH"
+            --tp-size "$ARENO_MODAL_TP_SIZE"
+            --world-size "$ARENO_MODAL_WORLD_SIZE"
+            --batch-size "$ARENO_MODAL_BATCH_SIZE"
+            --n-samples "$ARENO_MODAL_N_SAMPLES"
+            --mini-bs "$ARENO_MODAL_MINI_BS"
+            --max-running-prompts "$ARENO_MODAL_MAX_RUNNING_PROMPTS"
+            --max-new-tokens "$ARENO_MODAL_MAX_NEW_TOKENS"
+            --epochs "$ARENO_MODAL_EPOCHS"
+            --max-steps "$ARENO_MODAL_MAX_STEPS"
+          )
+
+          if [ -n "$ARENO_MODAL_AGENT_FN" ]; then
+            args+=(--agent-fn "$ARENO_MODAL_AGENT_FN")
+          fi
+          if [ -n "$ARENO_MODAL_MAX_PROMPT_TOKENS" ]; then
+            args+=(--max-prompt-tokens "$ARENO_MODAL_MAX_PROMPT_TOKENS")
+          fi
+          if [ -n "$ARENO_MODAL_MAX_CONTEXT_LEN" ]; then
+            args+=(--max-context-len "$ARENO_MODAL_MAX_CONTEXT_LEN")
+          fi
+          if [ -n "$ARENO_MODAL_EXTRA_TRAIN_ARGS" ]; then
+            args+=(--extra-train-args "$ARENO_MODAL_EXTRA_TRAIN_ARGS")
+          fi
+          if [ "$ARENO_MODAL_KEEP_ROLLOUT_STATE" = "true" ]; then
+            args+=(--keep-rollout-state)
+          fi
+
+          printf 'Modal AReno train: branch=%s algo=%s dataset=%s ckpt=%s\n' \
+            "$ARENO_MODAL_BRANCH" "$ARENO_MODAL_ALGO" "$ARENO_MODAL_DATASET_PATH" "$ARENO_MODAL_CKPT"
+          "${args[@]}"
