@@ -60,6 +60,7 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "mem_frac",
             "tune_max_samples",
             "epochs",
+            "max_steps",
             "world_size",
             "tp_size",
         ),
@@ -190,6 +191,8 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
         raise click.UsageError("--save-interval must be positive")
     if args.epochs <= 0:
         raise click.UsageError("--epochs must be positive")
+    if args.max_steps is not None and args.max_steps <= 0:
+        raise click.UsageError("--max-steps must be positive")
     if args.tp_size <= 0:
         raise click.UsageError("--tp-size must be positive")
     if args.world_size <= 0:
@@ -304,6 +307,7 @@ def _format_training_config_summary(
         (
             "Training",
             [
+                ("max_steps", _format_optional(config.max_steps)),
                 ("mini_bs", str(config.mini_bs)),
                 ("gradient_accumulation_steps", _format_optional(config.gradient_accumulation_steps, default="auto")),
                 (
@@ -558,6 +562,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             save_path=args.save_path,
             save_interval=args.save_interval,
             epochs=args.epochs,
+            max_steps=args.max_steps,
             tp_size=args.tp_size,
             world_size=args.world_size,
             batch_size=args.batch_size,
@@ -596,6 +601,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             save_path=args.save_path,
             save_interval=args.save_interval,
             epochs=args.epochs,
+            max_steps=args.max_steps,
             tp_size=args.tp_size,
             world_size=args.world_size,
             batch_size=args.batch_size,
@@ -633,6 +639,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             save_path=args.save_path,
             save_interval=args.save_interval,
             epochs=args.epochs,
+            max_steps=args.max_steps,
             tp_size=args.tp_size,
             world_size=args.world_size,
             batch_size=args.batch_size,
@@ -677,6 +684,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
         save_path=args.save_path,
         save_interval=args.save_interval,
         epochs=args.epochs,
+        max_steps=args.max_steps,
         tp_size=args.tp_size,
         world_size=args.world_size,
         batch_size=args.batch_size,
@@ -946,6 +954,7 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     "--metrics-log-dir", default=DEFAULT_METRICS_LOG_DIR, show_default=True, help="TensorBoard metrics log directory."
 )
 @click.option("--epochs", type=int, default=10, show_default=True, help="Number of dataset epochs to train.")
+@click.option("--max-steps", type=int, default=None, help="Stop after this many trainer steps.")
 @click.option(
     "--tune-params",
     "tune_params",

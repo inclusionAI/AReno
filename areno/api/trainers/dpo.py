@@ -117,6 +117,9 @@ class DPOTrainer:
                 self.logger.info("epoch=%d step=%d train_stats=%s", epoch, step, result)
                 self._maybe_save(epoch, step)
                 step += 1
+                if self.config.max_steps is not None and step >= self.config.max_steps:
+                    self.logger.info("epoch=%d step=%d stage=max_steps_reached", epoch, step)
+                    return
             self.logger.info("epoch=%d stage=epoch_end", epoch)
 
     def _iter_train_batches(self, tokenizer, *, max_seq_len: int):

@@ -31,6 +31,7 @@ class TrainerConfig:
     save_path: str | None = None
     save_interval: int = 100
     epochs: int = 10
+    max_steps: int | None = None
     tp_size: int = 4
     world_size: int = 8
     batch_size: int = 32

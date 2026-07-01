@@ -68,6 +68,10 @@ Built-in algorithms: ``sft``, ``dpo``, ``gspo``, ``grpo``, ``ppo``.
 ``--epochs INTEGER``
    Number of dataset epochs to train. Default: ``10``.
 
+``--max-steps INTEGER``
+   Optional global trainer step cap. Training stops after this many step
+   indices have completed, even if the current epoch still has more batches.
+
 ``--world-size INTEGER``
    Total device count for the backend. Default: ``8``.
 

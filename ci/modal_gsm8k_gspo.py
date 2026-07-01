@@ -77,6 +77,8 @@ def run_gsm8k_gspo(branch: str, ckpt: str = DEFAULT_CKPT) -> None:
             "1024",
             "--epochs",
             "1",
+            "--max-steps",
+            "10",
             "--drop-rollout-state",
         ],
         cwd=REMOTE_REPO_DIR,
