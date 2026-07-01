@@ -12,7 +12,7 @@ import modal
 APP_NAME = "areno-gsm8k-gspo"
 REPO_URL = "https://github.com/inclusionAI/AReno.git"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-REMOTE_REPO_DIR = Path("/workspace/areno-run")
+REMOTE_REPO_DIR = Path("/workspace/areno")
 DEFAULT_CKPT = "Qwen/Qwen3.5-0.8B"
 
 
@@ -28,17 +28,15 @@ def _run(command: list[str], *, cwd: Path | None = None, env: dict[str, str] | N
 
 @app.function(
     image=image,
-    gpu="A100",
+    gpu="L4",
     timeout=60 * 60 * 3,
 )
 def run_gsm8k_gspo(branch: str, ckpt: str = DEFAULT_CKPT) -> None:
     """Run a short GSM8K GSPO train task on Modal."""
 
-    if REMOTE_REPO_DIR.exists():
-        _run(["rm", "-rf", str(REMOTE_REPO_DIR)])
-
-    _run(["git", "clone", "--depth", "1", "--branch", branch, REPO_URL, str(REMOTE_REPO_DIR)])
-    _run([sys.executable, "-m", "pip", "install", "-e", ".", "--no-build-isolation"], cwd=REMOTE_REPO_DIR)
+    _run(["git", "remote", "set-url", "origin", REPO_URL], cwd=REMOTE_REPO_DIR)
+    _run(["git", "fetch", "--depth", "1", "origin", branch], cwd=REMOTE_REPO_DIR)
+    _run(["git", "checkout", "--force", "FETCH_HEAD"], cwd=REMOTE_REPO_DIR)
 
     env = os.environ.copy()
     env.setdefault("PYTHONUNBUFFERED", "1")
