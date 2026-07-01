@@ -167,6 +167,7 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
     """Build a typed trainer config from Click option values."""
 
     args = SimpleNamespace(**options)
+    args.max_steps = getattr(args, "max_steps", None)
     # Required-argument checks live here so offline trainers can omit reward
     # inputs while RL algorithms still require a reward function or model.
     if args.ckpt is None:
@@ -551,6 +552,7 @@ def _function_accepts_positional_args(function: ast.FunctionDef | ast.AsyncFunct
 def _trainer_config_from_args(args) -> TrainerConfig:
     # Each algorithm gets the narrowest config dataclass it needs; offline
     # trainers do not receive rollout/reward/GSPO fields by construction.
+    args.max_steps = getattr(args, "max_steps", None)
     algorithm = get_algorithm(args.algo)
     chat_template_enable_thinking = False if args.disable_thinking else None
     if algorithm.name == "dpo":
