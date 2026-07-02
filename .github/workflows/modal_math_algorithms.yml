@@ -45,6 +45,7 @@ jobs:
       batch_size: "2"
       n_samples: "8"
       mini_bs: "1"
+      score_micro_bs: "1"
       max_running_prompts: "16"
       max_new_tokens: "1024"
       epochs: "1"

@@ -93,6 +93,7 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         "Train",
         (
             "mini_bs",
+            "score_micro_bs",
             "gradient_accumulation_steps",
             "activation_checkpointing",
             "lr",
@@ -168,6 +169,7 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
 
     args = SimpleNamespace(**options)
     args.max_steps = getattr(args, "max_steps", None)
+    args.score_micro_bs = getattr(args, "score_micro_bs", 8)
     # Required-argument checks live here so offline trainers can omit reward
     # inputs while RL algorithms still require a reward function or model.
     if args.ckpt is None:
@@ -206,6 +208,8 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
         raise click.UsageError("--n-samples must be positive")
     if args.mini_bs <= 0:
         raise click.UsageError("--mini-bs must be positive")
+    if args.score_micro_bs <= 0:
+        raise click.UsageError("--score-micro-bs must be positive")
     if args.gradient_accumulation_steps is not None and args.gradient_accumulation_steps <= 0:
         raise click.UsageError("--gradient-accumulation-steps must be positive")
     if args.max_prompt_tokens <= 0:
@@ -310,6 +314,7 @@ def _format_training_config_summary(
             [
                 ("max_steps", _format_optional(config.max_steps)),
                 ("mini_bs", str(config.mini_bs)),
+                ("score_micro_bs", str(config.score_micro_bs)),
                 ("gradient_accumulation_steps", _format_optional(config.gradient_accumulation_steps, default="auto")),
                 (
                     "optimizer",
@@ -553,6 +558,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
     # Each algorithm gets the narrowest config dataclass it needs; offline
     # trainers do not receive rollout/reward/GSPO fields by construction.
     args.max_steps = getattr(args, "max_steps", None)
+    args.score_micro_bs = getattr(args, "score_micro_bs", 8)
     algorithm = get_algorithm(args.algo)
     chat_template_enable_thinking = False if args.disable_thinking else None
     if algorithm.name == "dpo":
@@ -569,6 +575,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             world_size=args.world_size,
             batch_size=args.batch_size,
             mini_bs=args.mini_bs,
+            score_micro_bs=args.score_micro_bs,
             gradient_accumulation_steps=args.gradient_accumulation_steps,
             max_prompt_tokens=args.max_prompt_tokens,
             max_new_tokens=args.max_new_tokens,
@@ -608,6 +615,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             world_size=args.world_size,
             batch_size=args.batch_size,
             mini_bs=args.mini_bs,
+            score_micro_bs=args.score_micro_bs,
             gradient_accumulation_steps=args.gradient_accumulation_steps,
             max_prompt_tokens=args.max_prompt_tokens,
             max_new_tokens=args.max_new_tokens,
@@ -647,6 +655,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             batch_size=args.batch_size,
             n_samples=args.n_samples,
             mini_bs=args.mini_bs,
+            score_micro_bs=args.score_micro_bs,
             gradient_accumulation_steps=args.gradient_accumulation_steps,
             max_prompt_tokens=args.max_prompt_tokens,
             max_new_tokens=args.max_new_tokens,
@@ -692,6 +701,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
         batch_size=args.batch_size,
         n_samples=args.n_samples,
         mini_bs=args.mini_bs,
+        score_micro_bs=args.score_micro_bs,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         max_prompt_tokens=args.max_prompt_tokens,
         max_new_tokens=args.max_new_tokens,
@@ -985,6 +995,7 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     "--n-samples", type=int, default=8, show_default=True, help="Rollout samples per prompt for RL algorithms."
 )
 @click.option("--mini-bs", type=int, default=16, show_default=True, help="Backend training microbatch size.")
+@click.option("--score-micro-bs", type=int, default=8, show_default=True, help="Backend role scoring microbatch size.")
 @click.option(
     "--gradient-accumulation-steps",
     type=int,

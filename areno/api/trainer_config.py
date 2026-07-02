@@ -36,6 +36,7 @@ class TrainerConfig:
     world_size: int = 8
     batch_size: int = 32
     mini_bs: int = 16
+    score_micro_bs: int = 8
     gradient_accumulation_steps: int | None = None
     max_prompt_tokens: int = 1024
     max_new_tokens: int = 3071

@@ -408,9 +408,16 @@ class ArenoBackend(Backend):
         engine = self._require_engine()
         engine.ensure_roles(roles)
 
-    def score_logprobs(self, ctx: Context, role: str, token_rows: list[list[int]]) -> list[list[float]]:
+    def score_logprobs(
+        self, ctx: Context, role: str, token_rows: list[list[int]], *, microbatch_size: int = 8
+    ) -> list[list[float]]:
         engine = self._require_engine()
-        return engine.score_logprobs(role, token_rows, pad_token_id=_pad_token_id(ctx))
+        return engine.score_logprobs(
+            role,
+            token_rows,
+            pad_token_id=_pad_token_id(ctx),
+            microbatch_size=microbatch_size,
+        )
 
     def score_values(self, ctx: Context, role: str, token_rows: list[list[int]]) -> list[list[float]]:
         engine = self._require_engine()

@@ -51,6 +51,7 @@ class TrainJobConfig:
     batch_size: int
     n_samples: int
     mini_bs: int
+    score_micro_bs: int
     max_running_prompts: int | None
     max_prompt_tokens: int | None
     max_new_tokens: int | None
@@ -85,6 +86,8 @@ def _build_train_command(config: TrainJobConfig) -> list[str]:
         str(config.n_samples),
         "--mini-bs",
         str(config.mini_bs),
+        "--score-micro-bs",
+        str(config.score_micro_bs),
         "--epochs",
         str(config.epochs),
     ]
@@ -153,6 +156,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=2, help="Prompt batch size. Default: 2")
     parser.add_argument("--n-samples", type=int, default=8, help="Rollout samples per prompt. Default: 8")
     parser.add_argument("--mini-bs", type=int, default=1, help="Training microbatch size. Default: 1")
+    parser.add_argument("--score-micro-bs", type=int, default=8, help="Role scoring microbatch size. Default: 8")
     parser.add_argument("--max-running-prompts", type=int, default=16, help="Concurrent rollout prompts. Default: 16")
     parser.add_argument("--max-prompt-tokens", type=int, default=None, help="Optional max prompt tokens.")
     parser.add_argument("--max-new-tokens", type=int, default=1024, help="Max generated tokens. Default: 1024")
@@ -188,6 +192,7 @@ def _config_from_args(args: argparse.Namespace) -> TrainJobConfig:
         batch_size=args.batch_size,
         n_samples=args.n_samples,
         mini_bs=args.mini_bs,
+        score_micro_bs=args.score_micro_bs,
         max_running_prompts=args.max_running_prompts,
         max_prompt_tokens=args.max_prompt_tokens,
         max_new_tokens=args.max_new_tokens,

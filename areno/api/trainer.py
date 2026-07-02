@@ -364,7 +364,7 @@ class Trainer:
     def score_logprobs(self, role: str, token_rows: list[list[int]]) -> list[list[float]]:
         """Score fixed token sequences with a backend-owned model role."""
 
-        return self._backend.score_logprobs(self._ctx, role, token_rows)
+        return self._backend.score_logprobs(self._ctx, role, token_rows, microbatch_size=self.config.score_micro_bs)
 
     def score_values(self, role: str, token_rows: list[list[int]]) -> list[list[float]]:
         """Score per-token critic values with a backend-owned model role."""

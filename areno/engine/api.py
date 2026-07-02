@@ -519,7 +519,9 @@ class ArenoEngine:
         )
         self.cluster.call(Op.ENSURE_ROLES, payload)
 
-    def score_logprobs(self, role: str, token_rows: list[list[int]], *, pad_token_id: int) -> list[list[float]]:
+    def score_logprobs(
+        self, role: str, token_rows: list[list[int]], *, pad_token_id: int, microbatch_size: int = 8
+    ) -> list[list[float]]:
         """Score fixed token rows with a model role.
 
         Dispatches ``Op.SCORE_LOGPROBS`` (blocking). Returns per-token
@@ -535,6 +537,7 @@ class ArenoEngine:
                 role=role,
                 token_rows_by_dp=split_list_by_dp(token_rows, int(self.config.dp_size)),
                 pad_token_id=int(pad_token_id),
+                microbatch_size=int(microbatch_size),
             ),
         )
         return _merge_dp_rank0_strided_results(results, self.config.tp_size, int(self.config.dp_size))

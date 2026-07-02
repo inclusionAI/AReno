@@ -184,7 +184,7 @@ def _selected_logprobs_components(
     # resulting target value is zeroed via `local_mask` so the SUM-reduce
     # picks the correct rank's contribution.
     safe_labels = local_labels.clamp(min=0, max=max(local_vocab - 1, 0))
-    target = logits_shard.gather(-1, safe_labels.unsqueeze(-1)).squeeze(-1).float()
+    target = logits.gather(-1, safe_labels.unsqueeze(-1)).squeeze(-1)
     target = target.masked_fill(~local_mask, 0.0)
     if world_size > 1:
         dist.all_reduce(target, op=dist.ReduceOp.SUM, group=group)

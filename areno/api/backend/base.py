@@ -154,7 +154,9 @@ class Backend(ABC):
 
         self.end_rollout_session(ctx)
 
-    def score_logprobs(self, ctx: Context, role: str, token_rows: list[list[int]]) -> list[list[float]]:
+    def score_logprobs(
+        self, ctx: Context, role: str, token_rows: list[list[int]], *, microbatch_size: int = 8
+    ) -> list[list[float]]:
         """Score fixed token rows with a backend-owned role."""
 
         raise NotImplementedError(f"{type(self).__name__} does not support role logprob scoring")

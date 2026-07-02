@@ -58,6 +58,7 @@ def test_train_config_requires_world_size_divisible_by_tp_size():
         ("batch_size", 0, "--batch-size must be positive"),
         ("n_samples", 0, "--n-samples must be positive"),
         ("mini_bs", 0, "--mini-bs must be positive"),
+        ("score_micro_bs", 0, "--score-micro-bs must be positive"),
         ("gradient_accumulation_steps", 0, "--gradient-accumulation-steps must be positive"),
         ("max_prompt_tokens", 0, "--max-prompt-tokens must be positive"),
         ("max_new_tokens", 0, "--max-new-tokens must be positive"),
@@ -190,6 +191,7 @@ def test_train_config_builds_policy_shape_for_gspo_and_grpo(algo, clip_attr, cli
             n_samples=3,
             max_running_prompts=12,
             max_steps=7,
+            score_micro_bs=3,
             max_context_len=512,
             temperature=0.7,
             top_k=10,
@@ -205,6 +207,7 @@ def test_train_config_builds_policy_shape_for_gspo_and_grpo(algo, clip_attr, cli
     assert cfg.n_samples == 3
     assert cfg.resolved_max_running_prompts() == 12
     assert cfg.max_steps == 7
+    assert cfg.score_micro_bs == 3
     assert cfg.max_context_len == 512
     assert cfg.temperature == 0.7
     assert cfg.top_k == 10
@@ -306,6 +309,7 @@ def test_training_config_summary_shows_resolved_values_and_warning():
     assert "max_running_prompts  12" in summary
     assert "sampling             greedy=no, temperature=0.7, top_k=20, top_p=0.9" in summary
     assert "max_steps                    11" in summary
+    assert "score_micro_bs               8" in summary
     assert "optimizer                    lr=2e-06, min_lr=0.0, decay=cosine/100" in summary
     assert "metrics_log_dir  /tmp/metrics" in summary
     assert "WARNING: no checkpoint output path configured (--save-path)" in summary
@@ -576,6 +580,7 @@ def _options(**overrides):
         tune_max_samples=256,
         epochs=2,
         max_steps=None,
+        score_micro_bs=8,
         tp_size=1,
         world_size=1,
         batch_size=2,

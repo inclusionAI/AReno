@@ -326,10 +326,7 @@ class RoleManager:
         """Score token logprobs in bounded microbatches."""
 
         local = []
-        # Ref/old-policy scoring returns full vocab logits. Keep this at one
-        # sequence per forward so PPO can run on small GPUs without a large
-        # `(batch, sequence, vocab_shard)` allocation.
-        microbatch_size = 1
+        microbatch_size = _score_microbatch_size(payload.microbatch_size)
         for start in range(0, len(token_rows), microbatch_size):
             rows = token_rows[start : start + microbatch_size]
             tokens, lengths = _pad_token_rows(rows, self.worker.device, int(payload.pad_token_id))
