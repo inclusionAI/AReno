@@ -1,5 +1,5 @@
-Build and installation
-======================
+Installation
+============
 
 This page covers the setup paths used by contributors and local operators:
 Docker images, editable installs, source/wheel distributions, and local
