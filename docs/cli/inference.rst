@@ -1,3 +1,5 @@
+:orphan:
+
 Inference CLI reference
 =======================
 

@@ -15,6 +15,7 @@ html_theme = "shibuya"
 html_title = "AReno docs"
 html_static_path = ["_static"]
 html_css_files = ["areno.css"]
+html_js_files = ["areno-sidebar.js"]
 html_show_sourcelink = False
 
 html_theme_options = {
@@ -24,9 +25,10 @@ html_theme_options = {
     "ethical_ads_publisher": "",
     "github_url": "",
     "nav_links": [
-        {"title": "Quickstart", "url": "getting-started/build"},
-        {"title": "Training", "url": "cli/training"},
-        {"title": "Serving", "url": "cli/inference"},
-        {"title": "SDK", "url": "sdk/trainer"},
+        {"title": "Get Started", "url": "getting-started/welcome"},
+        {"title": "Concepts", "url": "concepts/training-loop"},
+        {"title": "Cookbook", "url": "cookbook/math-rlvr"},
+        {"title": "Reference", "url": "reference/cli"},
+        {"title": "Troubleshooting", "url": "troubleshooting/index"},
     ],
 }

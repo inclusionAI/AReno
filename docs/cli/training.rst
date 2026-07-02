@@ -1,3 +1,5 @@
+:orphan:
+
 Training CLI reference
 ======================
 
