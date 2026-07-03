@@ -6,11 +6,11 @@ and maintained by the AReno community.
   <a href="LICENSE"><img alt="License: Apache 2.0" src="https://img.shields.io/badge/License-Apache_2.0-blue.svg"></a>
   <a href="https://www.python.org/downloads/"><img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-blue.svg"></a>
   <a href="https://pytorch.org/"><img alt="PyTorch 2.6+" src="https://img.shields.io/badge/PyTorch-2.6%2B-ee4c2c.svg"></a>
+  <a href="https://asystem-ai.io/docs/areno/"><img alt="Documentation" src="https://img.shields.io/badge/documentation-AReno-2ea44f.svg"></a>
 </p>
 
-<!-- TODO: replace with the project logo when ready -->
 <p align="center">
-  <img alt="inclusionAI" src="https://raw.githubusercontent.com/inclusionAI/.github/main/assets/banner.png">
+  <img alt="AReno" src="docs/_static/asystem_areno_logo.svg" width="640">
 </p>
 
 ## AReno: ASystem Reinforcement Learning Nano
@@ -40,21 +40,10 @@ AReno's mission is to make LLM RL **accessible** for a broad community of resear
 - CUDA toolkit, with `CUDA_HOME` set (so `nvcc` is on the build path)
 - PyTorch >= 2.6, matching your installed CUDA version
 
-> **Other platforms:** Apple Silicon (M-series) and AMD GPUs are not supported —
-> the engine requires NVIDIA CUDA. On Windows, install under
-> [WSL2](https://learn.microsoft.com/windows/wsl/) and follow the Linux
-> instructions. DGX Spark and other Grace/Blackwell systems work, but install an
-> `aarch64` PyTorch build first.
-
-**Compatibility matrix:**
-
-| Environment | Status | Notes |
-| --- | --- | --- |
-| Linux x86_64 + NVIDIA GPU | Supported | Primary training/serving target. Use CUDA-enabled PyTorch >= 2.6 and build `areno_accel`. |
-| Linux aarch64 / Grace-Blackwell | Supported | Install a matching `aarch64` CUDA PyTorch build first; build from source with `--no-build-isolation`. |
-| Windows WSL2 + NVIDIA GPU | Supported | Follow the Linux install path inside WSL2. Native Windows is not supported. |
-| macOS Apple Silicon | Metadata/docs only | Use `ARENO_BUILD_EXT=0` for docs or packaging checks. Training/serving is not supported. |
-| CPU-only environments | Metadata/docs/tests only | CPU-only PyTorch can run lightweight docs/tests, but cannot train or serve AReno models. |
+> **Platform support:** AReno targets Linux with NVIDIA CUDA. Windows users
+> should use [WSL2](https://learn.microsoft.com/windows/wsl/). macOS, CPU-only,
+> and non-NVIDIA GPU environments are limited to metadata, docs, and lightweight
+> tests.
 
 **To install:**
 
