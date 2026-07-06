@@ -115,12 +115,6 @@ def read_hf_config(model_path: str | Path) -> dict:
         return json.load(f)
 
 
-def load_hf_config(model_path: str | Path) -> dict:
-    """Backward-compatible alias for callers that need the raw HF config."""
-
-    return read_hf_config(model_path)
-
-
 def load_model_plugins() -> None:
     """Load model plugin adapters from the repository's areno.models package."""
 
