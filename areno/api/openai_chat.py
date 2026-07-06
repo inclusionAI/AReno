@@ -139,8 +139,9 @@ def build_chat_completion_response(
     completion_tokens = 0
     for index, token_ids in enumerate(response_ids):
         raw_text = _decode(tokenizer, token_ids, skip_special_tokens=False)
+        display_text = _decode(tokenizer, token_ids, skip_special_tokens=True)
         reasoning_content = _extract_think_content(raw_text)
-        display_text = _strip_think_content(raw_text)
+        display_text = _strip_think_content(display_text)
         display_text, stop_hit = _trim_stop_strings(display_text, stop_strings)
         completion_tokens += len(token_ids)
         tool_calls = (
@@ -190,19 +191,21 @@ def _decode(tokenizer: Any, token_ids: list[int], *, skip_special_tokens: bool) 
 def _extract_think_content(text: str) -> str:
     start = text.find("<think>")
     end = text.find("</think>")
-    if start < 0 or end <= start:
-        return ""
-    return text[start + len("<think>") : end].strip()
+    if start >= 0 and end > start:
+        return text[start + len("<think>") : end].strip()
+    if start < 0 and end >= 0:
+        return text[:end].strip()
+    return ""
 
 
 def _strip_think_content(text: str) -> str:
     start = text.find("<think>")
     end = text.find("</think>")
     if start >= 0 and end > start:
-        return (text[:start] + text[end + len("</think>") :]).strip()
-    if end >= 0:
-        return text[end + len("</think>") :].strip()
-    return text
+        text = text[:start] + text[end + len("</think>") :]
+    elif start < 0 and end >= 0:
+        text = text[end + len("</think>") :]
+    return text.strip()
 
 
 def _trim_stop_strings(text: str, stop: list[str]) -> tuple[str, bool]:

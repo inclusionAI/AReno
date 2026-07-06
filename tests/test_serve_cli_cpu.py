@@ -167,8 +167,8 @@ def test_serve_text_response_splits_thinking_from_content():
         def decode(self, token_ids, *, skip_special_tokens=False):
             del token_ids
             if skip_special_tokens:
-                raise AssertionError("response content should use raw decode")
-            return "<think>plan the answer</think>\n\nFinal answer"
+                return "plan the answer</think>\n\nFinal answer"
+            return "plan the answer</think>\n\nFinal answer<|im_end|>"
 
     request = serve_mod.ChatCompletionRequest(
         model="areno",
