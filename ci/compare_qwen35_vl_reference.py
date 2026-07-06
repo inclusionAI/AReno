@@ -183,13 +183,56 @@ def _hf_visual(model: torch.nn.Module, inputs: dict[str, Any]) -> torch.Tensor:
     visual = _nested_attr(model, ("visual", "model.visual"))
     pixel_values = inputs["pixel_values"]
     image_grid_thw = inputs.get("image_grid_thw")
+    preferred_dim = _vision_out_hidden_size(model)
     try:
         out = visual(pixel_values, grid_thw=image_grid_thw)
     except TypeError:
         out = visual(pixel_values, image_grid_thw=image_grid_thw)
-    if isinstance(out, tuple):
-        out = out[0]
-    return out
+    return _select_tensor_output(out, preferred_last_dim=preferred_dim, label="hf_visual")
+
+
+def _vision_out_hidden_size(model: torch.nn.Module) -> int | None:
+    config = getattr(model, "config", None)
+    vision_config = getattr(config, "vision_config", None)
+    if vision_config is None and isinstance(config, dict):
+        vision_config = config.get("vision_config")
+    if vision_config is None:
+        return None
+    if isinstance(vision_config, dict):
+        value = vision_config.get("out_hidden_size") or vision_config.get("hidden_size")
+    else:
+        value = getattr(vision_config, "out_hidden_size", None) or getattr(vision_config, "hidden_size", None)
+    return int(value) if value is not None else None
+
+
+def _select_tensor_output(output: Any, *, preferred_last_dim: int | None, label: str) -> torch.Tensor:
+    candidates: list[tuple[str, torch.Tensor]] = []
+    _collect_tensor_outputs(output, label, candidates)
+    if not candidates:
+        raise TypeError(f"{label} returned no tensor-like outputs; got {type(output)!r}")
+    print(f"{label}_candidates: " + ", ".join(f"{name}={tuple(tensor.shape)}" for name, tensor in candidates))
+    if preferred_last_dim is not None:
+        for _, tensor in candidates:
+            if tensor.ndim >= 2 and int(tensor.shape[-1]) == preferred_last_dim:
+                return tensor
+    return candidates[0][1]
+
+
+def _collect_tensor_outputs(value: Any, name: str, out: list[tuple[str, torch.Tensor]]) -> None:
+    if isinstance(value, torch.Tensor):
+        out.append((name, value))
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            _collect_tensor_outputs(item, f"{name}.{key}", out)
+        return
+    if isinstance(value, tuple | list):
+        for idx, item in enumerate(value):
+            _collect_tensor_outputs(item, f"{name}[{idx}]", out)
+        return
+    for attr in ("last_hidden_state", "pooler_output", "hidden_states", "image_embeds"):
+        if hasattr(value, attr):
+            _collect_tensor_outputs(getattr(value, attr), f"{name}.{attr}", out)
 
 
 def _nested_attr(obj: Any, candidates: tuple[str, ...]) -> Any:
