@@ -429,6 +429,12 @@ class ConfigAndDataTest(unittest.TestCase):
         self.assertEqual(dataset, [{"source": "modelscope"}])
         self.assertEqual(calls, [(("gsm8k",), {"subset_name": "main", "split": "test", "trust_remote_code": True})])
 
+    def test_modelscope_dataset_loader_accepts_hf_dataset_return(self):
+        """Some ModelScope paths return HF Dataset objects directly."""
+        dataset = [{"source": "hf-direct"}]
+
+        self.assertIs(train_cli._modelscope_to_hf_dataset(dataset), dataset)
+
     def test_train_cli_preflight_rejects_missing_dataset_loader_file(self):
         """Dataset loader path failures should be UsageError before backend init."""
         missing = Path(tempfile.gettempdir()) / "areno_missing_loader.py"

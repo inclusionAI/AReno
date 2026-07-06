@@ -19,7 +19,7 @@ RUN python -m pip install --index-url "${PIP_INDEX_URL}" --upgrade pip setuptool
 RUN python -m pip install --index-url "${PIP_INDEX_URL}" \
         "psutil" \
         "transformers==${TRANSFORMERS_VERSION}" \
-        "datasets>=3.3.0" \
+        "datasets==4.0.0" \
         "einops" \
         "safetensors>=0.4" \
         "accelerate" \
