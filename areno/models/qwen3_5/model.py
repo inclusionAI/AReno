@@ -19,7 +19,6 @@ from torch import nn
 from areno.accel import (
     areno_linear,
     areno_topk_softmax,
-    areno_varlen_attention,
 )
 from areno.accel.ops import FusedMoeConfig, areno_fused_experts, areno_silu_and_mul, log_once
 from areno.engine.config import ModelConfig, _parse_dtype
@@ -760,7 +759,7 @@ class Qwen35VisionAttention(nn.Module):
             q = _apply_vision_rotary(q, rotary_pos_emb_cos, rotary_pos_emb_sin)
             k = _apply_vision_rotary(k, rotary_pos_emb_cos, rotary_pos_emb_sin)
         if cu_seqlens is not None:
-            out = areno_varlen_attention(q.contiguous(), k.contiguous(), v.contiguous(), cu_seqlens)
+            out = _qwen35_vision_varlen_sdpa_no_compile(q.contiguous(), k.contiguous(), v.contiguous(), cu_seqlens)
             return self.proj(out.reshape(seq_len, self.hidden_size))
         q = q.transpose(0, 1).unsqueeze(0)
         k = k.transpose(0, 1).unsqueeze(0)
@@ -809,6 +808,34 @@ def _vision_activation(x: torch.Tensor, name: str) -> torch.Tensor:
     if name == "silu":
         return F.silu(x)
     raise ValueError(f"unsupported Qwen3.5-VL vision activation {name!r}")
+
+
+@torch._dynamo.disable
+def _qwen35_vision_varlen_sdpa_no_compile(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+) -> torch.Tensor:
+    """Run non-causal varlen vision attention through PyTorch SDPA.
+
+    The native AReno varlen attention path is useful as a portable fallback,
+    but Qwen3.5-VL vision attention is short dense self-attention where PyTorch
+    SDPA can use optimized flash/mem-efficient kernels. Keeping this helper
+    Dynamo-opaque also avoids recompiles for request-dependent image grids.
+    """
+
+    outputs = []
+    bounds = cu_seqlens.detach().cpu().to(dtype=torch.long).tolist()
+    for start, end in zip(bounds, bounds[1:], strict=False):
+        q_i = q[start:end].transpose(0, 1).unsqueeze(0)
+        k_i = k[start:end].transpose(0, 1).unsqueeze(0)
+        v_i = v[start:end].transpose(0, 1).unsqueeze(0)
+        out_i = F.scaled_dot_product_attention(q_i, k_i, v_i, dropout_p=0.0, is_causal=False)
+        outputs.append(out_i.squeeze(0).transpose(0, 1))
+    if not outputs:
+        return q.new_empty(q.shape)
+    return torch.cat(outputs, dim=0)
 
 
 class Qwen35VisionBlock(nn.Module):
