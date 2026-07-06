@@ -1064,6 +1064,7 @@ class Qwen35ForCausalLM(nn.Module):
             logits_shard = self.lm_head(hidden_states)
         return CausalLMOutput(logits_shard=logits_shard, hidden_states=hidden_states)
 
+    @torch._dynamo.disable
     def _apply_multimodal_features(
         self,
         hidden_states: torch.Tensor,
@@ -1230,6 +1231,7 @@ class Qwen35VLForConditionalGeneration(nn.Module):
             features=self._project_pixel_values(features, input_ids.device, input_ids.shape[0]),
         )
 
+    @torch._dynamo.disable
     def _project_pixel_values(
         self,
         features: dict[str, Any] | list[dict[str, Any] | None] | None,
@@ -1259,6 +1261,7 @@ class Qwen35VLForConditionalGeneration(nn.Module):
             return features
         return projected[0] if batch == 1 else projected
 
+    @torch._dynamo.disable
     def _project_image_feature_rows(self, features: dict[str, Any], device: torch.device) -> torch.Tensor | None:
         if features.get("image_feature_rows") is not None:
             embeds = []
@@ -1274,6 +1277,7 @@ class Qwen35VLForConditionalGeneration(nn.Module):
             return torch.cat(embeds, dim=0) if embeds else None
         return self._project_pixel_feature(features, device)
 
+    @torch._dynamo.disable
     def _project_pixel_feature(self, row_features: dict[str, Any], device: torch.device) -> torch.Tensor | None:
         if row_features.get("pixel_values") is None:
             return None
