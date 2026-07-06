@@ -235,6 +235,57 @@ def test_serve_multimodal_encoder_uses_processor_for_image_data_url():
     assert "image_url" not in processor.messages[0]["content"][0]
 
 
+def test_serve_multimodal_encoder_passes_tools_to_processor_chat_template():
+    image = (
+        "data:image/png;base64,"
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADUlEQVR4nGP8z8BQDwAFgwJ/lwJw6QAAAABJRU5ErkJggg=="
+    )
+
+    class FakeProcessor:
+        image_token_id = 99
+
+        def apply_chat_template(self, messages, *, tokenize, add_generation_prompt, tools=None):
+            self.messages = messages
+            self.kwargs = {
+                "tokenize": tokenize,
+                "add_generation_prompt": add_generation_prompt,
+                "tools": tools,
+            }
+            return "<image> choose"
+
+        def __call__(self, *, text, images, return_tensors):
+            self.call_args = (text, len(images), return_tensors)
+            return {
+                "input_ids": torch.tensor([[1, 99, 2]]),
+                "image_embeds": torch.ones(1, 4),
+            }
+
+    tools = [{"type": "function", "function": {"name": "choose_square"}}]
+    processor = FakeProcessor()
+    messages = [
+        serve_mod.ChatMessage(
+            role="user",
+            content=[
+                {"type": "image_url", "image_url": {"url": image}},
+                {"type": "text", "text": "choose"},
+            ],
+        )
+    ]
+
+    tokens, features = serve_mod._encode_messages_with_features(
+        SimpleNamespace(eos_token_id=1),
+        processor,
+        messages,
+        tools=tools,
+    )
+
+    assert tokens == [1, 99, 2]
+    assert features["image_token_id"] == 99
+    assert processor.kwargs["tools"] == tools
+    assert processor.messages[0]["content"][0]["type"] == "image"
+    assert processor.call_args == (["<image> choose"], 1, "pt")
+
+
 def test_serve_multimodal_encoder_expands_qwen_image_grid_tokens():
     image = (
         "data:image/png;base64,"

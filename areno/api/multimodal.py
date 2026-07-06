@@ -35,15 +35,18 @@ def encode_multimodal_prompt(
 
     if processor is None:
         raise ValueError("image_base64 rows require a checkpoint processor")
-    prompt = str(record.get(prompt_key, ""))
     images = _load_record_images(record)
-    messages = [
-        {
-            "role": "user",
-            "content": [{"type": "image", "image": image} for image in images] + [{"type": "text", "text": prompt}],
-        }
-    ]
-    text = _processor_chat_text(processor, messages)
+    if isinstance(record.get("messages"), list):
+        messages = _normalize_image_messages(record["messages"])
+    else:
+        prompt = str(record.get(prompt_key, ""))
+        messages = [
+            {
+                "role": "user",
+                "content": [{"type": "image", "image": image} for image in images] + [{"type": "text", "text": prompt}],
+            }
+        ]
+    text = _processor_chat_text(processor, messages, tools=record.get("tools"))
     encoded = _encode_text_and_images(tokenizer, processor, text, images)
     input_ids = encoded.get("input_ids")
     if input_ids is None:
@@ -94,23 +97,51 @@ def _load_base64_image(value: str) -> Any:
     return Image.open(io.BytesIO(base64.b64decode(payload))).convert("RGB")
 
 
-def _processor_chat_text(processor: Any, messages: list[dict[str, Any]]) -> str:
+def _normalize_image_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized = []
+    for message in messages:
+        item = dict(message)
+        content = item.get("content")
+        if isinstance(content, list):
+            item["content"] = [_normalize_image_content_part(part) for part in content]
+        normalized.append(item)
+    return normalized
+
+
+def _normalize_image_content_part(part: Any) -> Any:
+    if not isinstance(part, dict) or part.get("type") != "image_url":
+        return part
+    image_url = part.get("image_url")
+    if not isinstance(image_url, dict) or "url" not in image_url:
+        raise ValueError("image_url content must be an object with a url field")
+    normalized = dict(part)
+    normalized["type"] = "image"
+    normalized["image"] = image_url["url"]
+    normalized.pop("image_url", None)
+    return normalized
+
+
+def _processor_chat_text(processor: Any, messages: list[dict[str, Any]], *, tools: Any = None) -> str:
     apply_chat_template = getattr(processor, "apply_chat_template", None)
     if callable(apply_chat_template):
-        try:
-            rendered = apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        except TypeError:
-            rendered = apply_chat_template(_messages_for_text_fallback(messages), tokenize=False, add_generation_prompt=True)
+        kwargs = {"tokenize": False, "add_generation_prompt": True}
+        if tools:
+            kwargs["tools"] = tools
+        rendered = apply_chat_template(messages, **kwargs)
         if isinstance(rendered, str):
             return rendered
     tokenizer = getattr(processor, "tokenizer", None)
     if tokenizer is not None and getattr(tokenizer, "chat_template", None):
+        kwargs = {"tokenize": False, "add_generation_prompt": True}
+        if tools:
+            kwargs["tools"] = tools
         return apply_chat_template_with_options(
             tokenizer,
             _messages_for_text_fallback(messages),
-            tokenize=False,
-            add_generation_prompt=True,
+            **kwargs,
         )
+    if tools:
+        raise ValueError("image input with tools requires a processor or tokenizer chat template that supports tools")
     return _messages_fallback_text(_messages_for_text_fallback(messages))
 
 

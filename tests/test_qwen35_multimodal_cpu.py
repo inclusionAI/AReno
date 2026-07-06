@@ -6,6 +6,7 @@ import torch
 from areno.api import TrainSequence
 from areno.api.backend.areno.backend import _make_train_pack
 from areno.api.multimodal import (
+    encode_multimodal_prompt,
     expand_image_tokens,
     image_token_counts_from_features,
     mrope_position_ids_from_image_grid,
@@ -62,6 +63,55 @@ def test_train_pack_preserves_multimodal_features():
 
     assert pack["features"][0]["image_token_id"] == 99
     assert torch.equal(pack["features"][0]["image_embeds"], image_embeds)
+
+
+def test_multimodal_prompt_passes_tools_to_processor_chat_template():
+    image = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADUlEQVR4nGP8z8BQDwAFgwJ/lwJw6QAAAABJRU5ErkJggg=="
+
+    class Processor:
+        image_token_id = 99
+
+        def apply_chat_template(self, messages, *, tokenize, add_generation_prompt, tools=None):
+            self.messages = messages
+            self.kwargs = {
+                "tokenize": tokenize,
+                "add_generation_prompt": add_generation_prompt,
+                "tools": tools,
+            }
+            return "<image> choose"
+
+        def __call__(self, *, text, images, return_tensors):
+            self.call_args = (text, len(images), return_tensors)
+            return {
+                "input_ids": torch.tensor([[1, 99, 2]]),
+                "image_embeds": torch.ones(1, 4),
+            }
+
+    tools = [{"type": "function", "function": {"name": "choose_square"}}]
+    processor = Processor()
+    tokens, features = encode_multimodal_prompt(
+        tokenizer=object(),
+        processor=processor,
+        record={
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image}"}},
+                        {"type": "text", "text": "choose"},
+                    ],
+                }
+            ],
+            "tools": tools,
+            "images_base64": [image],
+        },
+    )
+
+    assert tokens == [1, 99, 2]
+    assert features["image_token_id"] == 99
+    assert processor.kwargs["tools"] == tools
+    assert processor.messages[0]["content"][0]["type"] == "image"
+    assert processor.call_args == (["<image> choose"], 1, "pt")
 
 
 def test_packed_train_leaves_multimodal_features_dense():

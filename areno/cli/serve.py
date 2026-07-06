@@ -496,12 +496,10 @@ def _encode_messages_with_features(
             ),
             None,
         )
-    if tools:
-        raise ValueError("image input with tools is not supported yet")
     if processor is None:
         raise ValueError("image input requires a checkpoint processor")
     images = _load_message_images(payload)
-    text = _processor_chat_text(processor, payload)
+    text = _processor_chat_text(processor, payload, tools=tools)
     encoded = _encode_text_and_images(tokenizer, processor, text, images)
     input_ids = encoded.get("input_ids")
     if input_ids is None:
@@ -641,13 +639,18 @@ def _load_image_part(part: dict[str, Any]) -> Any:
     return Image.open(image_ref).convert("RGB")
 
 
-def _processor_chat_text(processor: Any, messages: list[dict[str, Any]]) -> str:
+def _processor_chat_text(processor: Any, messages: list[dict[str, Any]], *, tools: list[dict[str, Any]] | None = None) -> str:
     apply_chat_template = getattr(processor, "apply_chat_template", None)
     messages = _normalize_processor_multimodal_messages(messages)
     if callable(apply_chat_template):
-        rendered = apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        kwargs = {"tokenize": False, "add_generation_prompt": True}
+        if tools:
+            kwargs["tools"] = tools
+        rendered = apply_chat_template(messages, **kwargs)
         if isinstance(rendered, str):
             return rendered
+    if tools:
+        raise ValueError("image input with tools requires a processor chat template that supports tools")
     text_messages = [{**message, "content": _message_content(message.get("content"))} for message in messages]
     return _messages_fallback_text(text_messages)
 

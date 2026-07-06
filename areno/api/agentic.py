@@ -204,11 +204,11 @@ class _PendingChat:
     item: AgentItem | None
     messages: list[dict[str, Any]]
     input_tokens: list[int]
-    features: dict[str, Any] | None
     params: Any
     key: _ChatBatchKey
     model: str
     created_at: float
+    features: dict[str, Any] | None = None
     tools: list[dict[str, Any]] = field(default_factory=list)
     tool_choice: Any = None
     event: threading.Event = field(default_factory=threading.Event)
@@ -538,10 +538,9 @@ class RolloutSession:
     def _messages_to_tokens_and_features(self, pending: _PendingChat) -> tuple[list[int], dict[str, Any] | None]:
         tokenizer = self._trainer.get_tokenizer()
         if _messages_have_images(pending.messages):
-            if pending.tools:
-                raise ValueError("image input with tools is not supported yet")
             record = {
-                "prompt": _first_user_text(pending.messages),
+                "messages": pending.messages,
+                "tools": pending.tools,
                 "images_base64": _message_images_base64(pending.messages),
             }
             return encode_multimodal_prompt(tokenizer, self._trainer.get_processor(), record)
