@@ -405,11 +405,15 @@ class ConfigAndDataTest(unittest.TestCase):
         """--model-hub modelscope should route non-local dataset refs through ModelScope."""
         calls = []
 
+        class FakeMsDatasetResult:
+            def to_hf_dataset(self):
+                return [{"source": "modelscope"}]
+
         class FakeMsDataset:
             @staticmethod
             def load(*args, **kwargs):
                 calls.append((args, kwargs))
-                return [{"source": "modelscope"}]
+                return FakeMsDatasetResult()
 
         fake_modelscope = types.ModuleType("modelscope")
         fake_msdatasets = types.ModuleType("modelscope.msdatasets")
