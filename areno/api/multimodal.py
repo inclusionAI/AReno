@@ -2,10 +2,201 @@
 
 from __future__ import annotations
 
+import base64
+import io
 from collections.abc import Sequence
 from typing import Any
 
 import torch
+
+from areno.api.tokenizer import apply_chat_template_with_options, normalize_token_ids
+
+
+def record_has_image(record: dict[str, Any]) -> bool:
+    """Return true when a loader row contains raw image input."""
+
+    return record.get("image_base64") is not None or record.get("images_base64") is not None
+
+
+def encode_multimodal_prompt(
+    tokenizer: Any,
+    processor: Any,
+    record: dict[str, Any],
+    *,
+    prompt_key: str = "prompt",
+) -> tuple[list[int], dict[str, Any] | None]:
+    """Encode a loader row with base64 image fields into tokens and features.
+
+    Dataset loaders stay model-agnostic and return raw ``image_base64`` plus
+    text fields. This helper is the model boundary: it uses the current
+    checkpoint processor to produce token ids, image grids, pixel values, and
+    Qwen-style expanded image-token slots.
+    """
+
+    if processor is None:
+        raise ValueError("image_base64 rows require a checkpoint processor")
+    prompt = str(record.get(prompt_key, ""))
+    images = _load_record_images(record)
+    messages = [
+        {
+            "role": "user",
+            "content": [{"type": "image", "image": image} for image in images] + [{"type": "text", "text": prompt}],
+        }
+    ]
+    text = _processor_chat_text(processor, messages)
+    encoded = _encode_text_and_images(tokenizer, processor, text, images)
+    input_ids = encoded.get("input_ids")
+    if input_ids is None:
+        raise ValueError("processor did not return input_ids for image row")
+    features = {
+        key: value
+        for key, value in dict(encoded).items()
+        if key not in {"input_ids", "attention_mask", "token_type_ids"}
+    }
+    image_token_id = _image_token_id(tokenizer, processor)
+    if image_token_id is not None:
+        features["image_token_id"] = image_token_id
+    tokens = normalize_token_ids(input_ids[0].tolist())
+    counts = image_token_counts_from_features(features)
+    if counts:
+        if image_token_id is None:
+            raise ValueError("image rows require an image token id from tokenizer or processor")
+        tokens, _ = expand_image_tokens(tokens, image_token_id=image_token_id, image_token_counts=counts)
+        mrope_position_ids = mrope_position_ids_from_image_grid(
+            tokens,
+            image_token_id=image_token_id,
+            features=features,
+        )
+        if mrope_position_ids is not None:
+            features["mrope_position_ids"] = mrope_position_ids
+    return tokens, features or None
+
+
+def _load_record_images(record: dict[str, Any]) -> list[Any]:
+    values = record.get("images_base64")
+    if values is None:
+        values = record.get("image_base64")
+    if values is None:
+        raise ValueError("multimodal row must contain image_base64 or images_base64")
+    if isinstance(values, str):
+        values = [values]
+    return [_load_base64_image(value) for value in values]
+
+
+def _load_base64_image(value: str) -> Any:
+    try:
+        from PIL import Image
+    except ImportError as exc:
+        raise ValueError("image_base64 rows require Pillow") from exc
+    payload = str(value)
+    if payload.startswith("data:"):
+        _, _, payload = payload.partition(",")
+    return Image.open(io.BytesIO(base64.b64decode(payload))).convert("RGB")
+
+
+def _processor_chat_text(processor: Any, messages: list[dict[str, Any]]) -> str:
+    apply_chat_template = getattr(processor, "apply_chat_template", None)
+    if callable(apply_chat_template):
+        try:
+            rendered = apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        except TypeError:
+            rendered = apply_chat_template(_messages_for_text_fallback(messages), tokenize=False, add_generation_prompt=True)
+        if isinstance(rendered, str):
+            return rendered
+    tokenizer = getattr(processor, "tokenizer", None)
+    if tokenizer is not None and getattr(tokenizer, "chat_template", None):
+        return apply_chat_template_with_options(
+            tokenizer,
+            _messages_for_text_fallback(messages),
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+    return _messages_fallback_text(_messages_for_text_fallback(messages))
+
+
+def _messages_for_text_fallback(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out = []
+    for message in messages:
+        item = dict(message)
+        content = item.get("content")
+        if isinstance(content, list):
+            parts = []
+            for part in content:
+                if isinstance(part, dict):
+                    if part.get("type") == "image":
+                        parts.append({"type": "image"})
+                    elif part.get("type") == "text":
+                        parts.append({"type": "text", "text": str(part.get("text", ""))})
+                else:
+                    parts.append({"type": "text", "text": str(part)})
+            item["content"] = parts
+        out.append(item)
+    return out
+
+
+def _messages_fallback_text(messages: list[dict[str, Any]]) -> str:
+    lines = []
+    for message in messages:
+        content = message.get("content")
+        if isinstance(content, list):
+            text = "\n".join(str(part.get("text", "")) for part in content if isinstance(part, dict))
+        else:
+            text = str(content or "")
+        lines.append(f"{message['role']}: {text}")
+    lines.append("assistant:")
+    return "\n".join(lines)
+
+
+def _encode_text_and_images(tokenizer: Any, processor: Any, text: str, images: list[Any]) -> dict[str, Any]:
+    try:
+        return dict(processor(text=[text], images=images, return_tensors="pt"))
+    except TypeError as exc:
+        if "images" not in str(exc):
+            raise
+    image_processor = _image_processor_from_processor(processor)
+    text_encoded = tokenizer([text], return_tensors="pt")
+    image_encoded = image_processor(images=images, return_tensors="pt")
+    encoded = dict(image_encoded)
+    encoded["input_ids"] = text_encoded["input_ids"]
+    if text_encoded.get("attention_mask") is not None:
+        encoded["attention_mask"] = text_encoded["attention_mask"]
+    return encoded
+
+
+def _image_processor_from_processor(processor: Any):
+    nested = getattr(processor, "image_processor", None)
+    if nested is not None:
+        return nested
+    try:
+        from transformers import AutoImageProcessor
+    except ImportError as exc:
+        raise ValueError("image_base64 rows require transformers AutoImageProcessor") from exc
+    name_or_path = getattr(processor, "name_or_path", None)
+    if not name_or_path:
+        raise ValueError("image_base64 rows require an image processor")
+    return AutoImageProcessor.from_pretrained(name_or_path, trust_remote_code=True)
+
+
+def _image_token_id(tokenizer: Any, processor: Any) -> int | None:
+    for obj in (processor, tokenizer):
+        for attr in ("image_token_id", "image_token_index"):
+            value = getattr(obj, attr, None)
+            if isinstance(value, int):
+                return int(value)
+        token = getattr(obj, "image_token", None)
+        if isinstance(token, str):
+            convert = getattr(tokenizer, "convert_tokens_to_ids", None)
+            if callable(convert):
+                token_id = convert(token)
+                if isinstance(token_id, int) and token_id >= 0:
+                    return int(token_id)
+    convert = getattr(tokenizer, "convert_tokens_to_ids", None)
+    if callable(convert):
+        for token in ("<|image_pad|>", "<|image|>", "<image>"):
+            token_id = convert(token)
+            if isinstance(token_id, int) and token_id >= 0:
+                return int(token_id)
+    return None
 
 
 def image_token_counts_from_features(features: dict[str, Any] | None) -> list[int]:

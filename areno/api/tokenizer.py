@@ -12,6 +12,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from areno.engine.data.tokenizer import load_processor as load_processor  # noqa: F401
 from areno.engine.data.tokenizer import load_tokenizer as load_tokenizer  # noqa: F401
 
 _CHAT_TEMPLATE_ENABLE_THINKING_ATTR = "_areno_chat_template_enable_thinking"

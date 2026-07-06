@@ -24,9 +24,11 @@ from typing import Any
 import areno.api
 from areno.api.data_utils import prompt_response_to_tokens_and_mask
 from areno.api.multimodal import (
+    encode_multimodal_prompt,
     expand_image_tokens,
     image_token_counts_from_features,
     mrope_position_ids_from_image_grid,
+    record_has_image,
 )
 from areno.api.tokenizer import configure_chat_template_enable_thinking
 
@@ -57,12 +59,14 @@ class SFTTrainer:
 
     def _fit_initialized(self) -> None:
         tokenizer = self.areno.get_tokenizer()
+        processor = self.areno.get_processor()
         configure_chat_template_enable_thinking(tokenizer, getattr(self.config, "chat_template_enable_thinking", None))
         step = 0
         for epoch in range(self.config.epochs):
             self.logger.info("epoch=%d stage=epoch_start", epoch)
             for train_batch in self._iter_train_batches(
                 tokenizer,
+                processor,
                 max_prompt_tokens=self.config.max_prompt_tokens,
                 max_new_tokens=self.config.max_new_tokens,
             ):
@@ -93,7 +97,7 @@ class SFTTrainer:
                     return
             self.logger.info("epoch=%d stage=epoch_end", epoch)
 
-    def _iter_train_batches(self, tokenizer, *, max_prompt_tokens: int, max_new_tokens: int):
+    def _iter_train_batches(self, tokenizer, processor, *, max_prompt_tokens: int, max_new_tokens: int):
         # Dataset rows are converted lazily so large HF datasets do not need an
         # up-front tokenized copy. Rows that are empty, all-prompt, or exceed
         # the configured prompt or supervised-response budgets are dropped.
@@ -106,6 +110,7 @@ class SFTTrainer:
             seq = _record_to_train_sequence(
                 self.dataset[index],
                 tokenizer,
+                processor,
                 max_prompt_tokens=max_prompt_tokens,
                 max_new_tokens=max_new_tokens,
             )
@@ -138,7 +143,7 @@ class SFTTrainer:
         self.logger.info("epoch=%d step=%d stage=save_checkpoint_end path=%s", epoch, step, saved_path)
 
 
-def _record_to_train_sequence(record: Any, tokenizer, *, max_prompt_tokens: int, max_new_tokens: int):
+def _record_to_train_sequence(record: Any, tokenizer, processor=None, *, max_prompt_tokens: int, max_new_tokens: int):
     """Normalize one loader-produced SFT row into backend training format.
 
     `prompt_mask=True` means "do not train this source token"; the backend loss
@@ -149,6 +154,34 @@ def _record_to_train_sequence(record: Any, tokenizer, *, max_prompt_tokens: int,
 
     record = dict(record)
     eos_token_id = tokenizer.eos_token_id if tokenizer.eos_token_id is not None else 0
+    if record_has_image(record):
+        if "response" not in record:
+            raise ValueError("SFT image rows must contain `response`")
+        if record["response"] is None:
+            return None
+        response = str(record["response"])
+        if not response:
+            return None
+        prompt_tokens, features = encode_multimodal_prompt(tokenizer, processor, record)
+        try:
+            response_tokens = [int(token) for token in tokenizer.encode(response, add_special_tokens=False)]
+        except TypeError:
+            response_tokens = [int(token) for token in tokenizer.encode(response)]
+        response_tokens.append(eos_token_id)
+        tokens = prompt_tokens + response_tokens
+        prompt_mask = [True] * len(prompt_tokens) + [False] * len(response_tokens)
+        prompt_token_count = len(prompt_tokens)
+        if prompt_token_count > max_prompt_tokens or len(response_tokens) > max_new_tokens:
+            return None
+        zeros = [0.0] * len(tokens)
+        return areno.api.TrainSequence(
+            prompt_mask=prompt_mask,
+            tokens=tokens,
+            logprobs=zeros,
+            advantages=zeros,
+            features=features,
+            eos_token_id=eos_token_id,
+        )
     if "tokens" in record and "prompt_mask" in record:
         tokens = [int(token) for token in record["tokens"]]
         prompt_mask = [bool(item) for item in record["prompt_mask"]]

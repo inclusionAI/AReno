@@ -182,14 +182,18 @@ class ArenoBackend(Backend):
         prompt_tokens: list[list[int]],
         n_samples: int,
         sampling_params: SamplingParams,
+        prompt_features: list[dict | None] | None = None,
     ) -> list[RolloutResult]:
         engine = self._require_engine()
         if not prompt_tokens:
             return []
+        if prompt_features is not None and len(prompt_features) != len(prompt_tokens):
+            raise ValueError("prompt_features must have the same length as prompt_tokens")
         # Replicate each already-tokenized prompt `n_samples` times so the
         # engine treats each completion as independent while preserving the
         # `[prompt0_sample0, prompt0_sample1, ..., promptN_sampleK]` layout.
         flat_prompts = [ids for ids in prompt_tokens for _ in range(n_samples)]
+        flat_features = _replicate_prompt_features(prompt_features, n_samples)
         options = _rollout_options(ctx, sampling_params)
 
         if self._step_e2e_start is None:
@@ -199,6 +203,7 @@ class ArenoBackend(Backend):
         # Greedy decoding is implemented by forcing temperature to zero.
         rollout = engine.generate_rollout(
             flat_prompts,
+            prompt_features=flat_features,
             max_new_tokens=sampling_params.max_new_tokens,
             max_running_prompts=options["max_running_prompts"],
             max_prompt_len=options["max_prompt_len"],
@@ -290,19 +295,24 @@ class ArenoBackend(Backend):
         prompt_tokens: list[list[int]],
         n_samples: int,
         sampling_params: SamplingParams,
+        prompt_features: list[dict | None] | None = None,
     ) -> list[RolloutResult]:
         """Async rollout entry for serving/agentic callers."""
 
         engine = self._require_engine()
         if not prompt_tokens:
             return []
+        if prompt_features is not None and len(prompt_features) != len(prompt_tokens):
+            raise ValueError("prompt_features must have the same length as prompt_tokens")
         prompts = [tokens for tokens in prompt_tokens for _ in range(n_samples)]
+        flat_features = _replicate_prompt_features(prompt_features, n_samples)
         options = _rollout_options(ctx, sampling_params)
         if self._step_e2e_start is None:
             self._step_e2e_start = time.perf_counter()
             self._step_rollout_time_s = 0.0
         rollout = await engine.generate_rollout_async(
             prompts,
+            prompt_features=flat_features,
             max_new_tokens=sampling_params.max_new_tokens,
             max_running_prompts=options["max_running_prompts"],
             max_prompt_len=options["max_prompt_len"],
@@ -409,23 +419,40 @@ class ArenoBackend(Backend):
         engine.ensure_roles(roles)
 
     def score_logprobs(
-        self, ctx: Context, role: str, token_rows: list[list[int]], *, microbatch_size: int = 8
+        self,
+        ctx: Context,
+        role: str,
+        token_rows: list[list[int]],
+        *,
+        features: list[dict | None] | None = None,
+        microbatch_size: int = 8,
     ) -> list[list[float]]:
         engine = self._require_engine()
+        if features is not None and len(features) != len(token_rows):
+            raise ValueError("features must have the same length as token_rows")
         return engine.score_logprobs(
             role,
             token_rows,
             pad_token_id=_pad_token_id(ctx),
+            features=features,
             microbatch_size=microbatch_size,
         )
 
-    def score_values(self, ctx: Context, role: str, token_rows: list[list[int]]) -> list[list[float]]:
+    def score_values(
+        self, ctx: Context, role: str, token_rows: list[list[int]], *, features: list[dict | None] | None = None
+    ) -> list[list[float]]:
         engine = self._require_engine()
-        return engine.score_values(role, token_rows, pad_token_id=_pad_token_id(ctx))
+        if features is not None and len(features) != len(token_rows):
+            raise ValueError("features must have the same length as token_rows")
+        return engine.score_values(role, token_rows, pad_token_id=_pad_token_id(ctx), features=features)
 
-    def score_rewards(self, ctx: Context, role: str, token_rows: list[list[int]]) -> list[float]:
+    def score_rewards(
+        self, ctx: Context, role: str, token_rows: list[list[int]], *, features: list[dict | None] | None = None
+    ) -> list[float]:
         engine = self._require_engine()
-        return engine.score_rewards(role, token_rows, pad_token_id=_pad_token_id(ctx))
+        if features is not None and len(features) != len(token_rows):
+            raise ValueError("features must have the same length as token_rows")
+        return engine.score_rewards(role, token_rows, pad_token_id=_pad_token_id(ctx), features=features)
 
     def train_values(
         self,
@@ -517,6 +544,14 @@ def _make_train_pack(seqs: list[TrainSequence]) -> dict[str, torch.Tensor]:
     if any(feature is not None for feature in features):
         pack["features"] = features
     return pack
+
+
+def _replicate_prompt_features(features: list[dict | None] | None, n_samples: int) -> list[dict | None] | None:
+    """Repeat prompt-aligned multimodal side inputs in the same order as prompts."""
+
+    if features is None:
+        return None
+    return [feature for feature in features for _ in range(n_samples)]
 
 
 def _is_sft_loss_fn(loss_fn: Callable) -> bool:

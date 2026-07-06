@@ -539,7 +539,13 @@ class ArenoEngine:
         self.cluster.call(Op.ENSURE_ROLES, payload)
 
     def score_logprobs(
-        self, role: str, token_rows: list[list[int]], *, pad_token_id: int, microbatch_size: int = 8
+        self,
+        role: str,
+        token_rows: list[list[int]],
+        *,
+        pad_token_id: int,
+        features: list[dict[str, Any] | None] | None = None,
+        microbatch_size: int = 8,
     ) -> list[list[float]]:
         """Score fixed token rows with a model role.
 
@@ -550,18 +556,28 @@ class ArenoEngine:
 
         if not token_rows:
             return []
+        if features is not None and len(features) != len(token_rows):
+            raise ValueError("features must have the same length as token_rows")
         results = self.cluster.call(
             Op.SCORE_LOGPROBS,
             ScorePayload(
                 role=role,
                 token_rows_by_dp=split_list_by_dp(token_rows, int(self.config.dp_size)),
+                features_by_dp=split_list_by_dp(features, int(self.config.dp_size)) if features is not None else None,
                 pad_token_id=int(pad_token_id),
                 microbatch_size=int(microbatch_size),
             ),
         )
         return _merge_dp_rank0_strided_results(results, self.config.tp_size, int(self.config.dp_size))
 
-    def score_values(self, role: str, token_rows: list[list[int]], *, pad_token_id: int) -> list[list[float]]:
+    def score_values(
+        self,
+        role: str,
+        token_rows: list[list[int]],
+        *,
+        pad_token_id: int,
+        features: list[dict[str, Any] | None] | None = None,
+    ) -> list[list[float]]:
         """Score per-token values with a critic role.
 
         Dispatches ``Op.SCORE_VALUES`` (blocking). Same shape contract as
@@ -570,17 +586,27 @@ class ArenoEngine:
 
         if not token_rows:
             return []
+        if features is not None and len(features) != len(token_rows):
+            raise ValueError("features must have the same length as token_rows")
         results = self.cluster.call(
             Op.SCORE_VALUES,
             ScorePayload(
                 role=role,
                 token_rows_by_dp=split_list_by_dp(token_rows, int(self.config.dp_size)),
+                features_by_dp=split_list_by_dp(features, int(self.config.dp_size)) if features is not None else None,
                 pad_token_id=int(pad_token_id),
             ),
         )
         return _merge_dp_rank0_strided_results(results, self.config.tp_size, int(self.config.dp_size))
 
-    def score_rewards(self, role: str, token_rows: list[list[int]], *, pad_token_id: int) -> list[float]:
+    def score_rewards(
+        self,
+        role: str,
+        token_rows: list[list[int]],
+        *,
+        pad_token_id: int,
+        features: list[dict[str, Any] | None] | None = None,
+    ) -> list[float]:
         """Score sequence rewards with a reward model role.
 
         Dispatches ``Op.SCORE_REWARDS`` (blocking). Returns one scalar reward
@@ -589,11 +615,14 @@ class ArenoEngine:
 
         if not token_rows:
             return []
+        if features is not None and len(features) != len(token_rows):
+            raise ValueError("features must have the same length as token_rows")
         results = self.cluster.call(
             Op.SCORE_REWARDS,
             ScorePayload(
                 role=role,
                 token_rows_by_dp=split_list_by_dp(token_rows, int(self.config.dp_size)),
+                features_by_dp=split_list_by_dp(features, int(self.config.dp_size)) if features is not None else None,
                 pad_token_id=int(pad_token_id),
             ),
         )

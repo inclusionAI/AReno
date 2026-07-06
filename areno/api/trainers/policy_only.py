@@ -180,7 +180,15 @@ class PolicyOnlyTrainer:
             proxy=False,
         ):
             prompt_tokens = [item.input_tokens for item in prompt_batch.items]
-            return await self.areno.rollout_token_batch_async(prompt_tokens, self.config.n_samples, sampling_params)
+            prompt_features = [item.record.get("features") for item in prompt_batch.items]
+            if not any(feature is not None for feature in prompt_features):
+                prompt_features = None
+            return await self.areno.rollout_token_batch_async(
+                prompt_tokens,
+                self.config.n_samples,
+                sampling_params,
+                prompt_features=prompt_features,
+            )
 
     async def _run_agentic_rollout(self, sampling_params, prompt_batch):
         from areno.api.agentic import AgentBatch, AgentTrainBatch, maybe_await
@@ -243,6 +251,7 @@ class PolicyOnlyTrainer:
                 response_masks=rows.response_masks,
                 loss_masks=rows.loss_masks,
                 rollout_logprobs=rows.rollout_logprobs,
+                features=rows.features,
                 rewards=rewards,
                 records=[sample.item.record for sample in samples],
                 reward_records=reward_records,
@@ -399,13 +408,15 @@ class PolicyOnlyTrainer:
             group_rewards = [rewards_all[row_idx] for row_idx in row_indices]
             for row_idx, advantage in zip(row_indices, compute_group_advantages(group_rewards), strict=True):
                 advantages_by_row[row_idx] = float(advantage)
-        for row_idx, (tokens, response_mask, loss_mask, logprobs, reward) in enumerate(
+        row_features = getattr(agent_batch, "features", [None] * len(agent_batch.token_rows))
+        for row_idx, (tokens, response_mask, loss_mask, logprobs, reward, features) in enumerate(
             zip(
                 agent_batch.token_rows,
                 agent_batch.response_masks,
                 agent_batch.loss_masks,
                 agent_batch.rollout_logprobs,
                 rewards_all,
+                row_features,
                 strict=True,
             )
         ):
@@ -422,6 +433,7 @@ class PolicyOnlyTrainer:
                     tokens=tokens,
                     logprobs=logprobs,
                     advantages=advantages,
+                    features=features,
                     reward=float(reward),
                     eos_token_id=tokenizer.eos_token_id,
                 )
@@ -540,6 +552,7 @@ class PolicyOnlyTrainer:
                         # zero prefix keeps tensor lengths aligned with tokens.
                         logprobs=[0.0] * prefix_len + seq.resp_logprobs,
                         advantages=[0.0] * prefix_len + [advantage] * resp_len,
+                        features=item.record.get("features"),
                         reward=reward,
                         eos_token_id=tokenizer.eos_token_id,
                     )

@@ -130,6 +130,7 @@ class ScorePayload:
 
     role: str
     token_rows_by_dp: list[list[list[int]]]
+    features_by_dp: list[list[dict[str, Any] | None]] | None
     pad_token_id: int
     microbatch_size: int = 8
 
