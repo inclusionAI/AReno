@@ -389,6 +389,46 @@ def test_qwen35_vision_rotary_uses_hw_axis_order():
     assert torch.equal(rotated, expected)
 
 
+def test_qwen35_gdn_uses_projected_sequence_length_after_sp_gather():
+    pytest.importorskip("triton")
+    from areno.models.qwen3_5.model import Qwen35GatedDeltaNet
+
+    class ConstantProjection(torch.nn.Module):
+        def __init__(self, out_features: int):
+            super().__init__()
+            self.out_features = out_features
+
+        def forward(self, hidden_states):
+            return torch.zeros(hidden_states.shape[0], 12, self.out_features, dtype=hidden_states.dtype)
+
+    class IdentityProjection(torch.nn.Module):
+        def forward(self, hidden_states):
+            return hidden_states
+
+    model = Qwen35GatedDeltaNet.__new__(Qwen35GatedDeltaNet)
+    torch.nn.Module.__init__(model)
+    model.local_key_heads = 2
+    model.local_value_heads = 2
+    model.head_k_dim = 4
+    model.head_v_dim = 4
+    model.local_key_dim = 8
+    model.local_value_dim = 8
+    model.in_proj_qkvz = ConstantProjection(32)
+    model.in_proj_ba = ConstantProjection(4)
+    model.out_proj = IdentityProjection()
+    model.dt_bias = torch.nn.Parameter(torch.zeros(2))
+    model.A_log = torch.nn.Parameter(torch.zeros(2))
+
+    model._causal_conv = lambda x, train_meta, infer_meta: x
+    model._forward_train = lambda query, key, value, g, beta, train_meta: value
+    model._rmsnorm_gate = lambda out, z: out
+
+    hidden_states = torch.zeros(2, 3, 16)
+    out = model(hidden_states, torch.arange(12).unsqueeze(0).expand(2, -1), train_meta=None, infer_meta=None)
+
+    assert out.shape == (2, 12, 8)
+
+
 def test_prefill_multimodal_features_support_multiple_rows():
     features = _prefill_multimodal_features(
         [False, True, False, True],

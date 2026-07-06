@@ -141,11 +141,12 @@ class Qwen35FullAttention(nn.Module):
         train_meta: TrainMeta | None,
         infer_meta: InferMeta | None,
     ) -> torch.Tensor:
-        batch, seqlen, _ = hidden_states.shape
         q_size = self.local_heads * self.head_dim
         q_gate_size = q_size * (2 if self.attn_output_gate else 1)
         kv_size = self.local_kv_heads * self.head_dim
-        q_gate, k, v = self.qkv_proj(hidden_states).split((q_gate_size, kv_size, kv_size), dim=-1)
+        qkv = self.qkv_proj(hidden_states)
+        batch, seqlen, _ = qkv.shape
+        q_gate, k, v = qkv.split((q_gate_size, kv_size, kv_size), dim=-1)
         if self.attn_output_gate:
             q, gate = q_gate.view(batch, seqlen, self.local_heads, 2, self.head_dim).unbind(dim=3)
             gate = gate.reshape(batch, seqlen, q_size)
@@ -289,9 +290,9 @@ class Qwen35GatedDeltaNet(nn.Module):
         infer_meta: InferMeta | None,
     ) -> torch.Tensor:
         del position_ids
-        batch, seqlen, _ = hidden_states.shape
         qkvz = self.in_proj_qkvz(hidden_states)
         ba = self.in_proj_ba(hidden_states)
+        batch, seqlen, _ = qkvz.shape
         mixed_qkv = self._causal_conv(
             qkvz[..., : self.local_key_dim * 2 + self.local_value_dim], train_meta, infer_meta
         )
