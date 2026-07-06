@@ -23,7 +23,7 @@ from typing import Any
 
 import torch
 from PIL import Image
-from transformers import AutoModelForCausalLM, AutoProcessor
+from transformers import AutoImageProcessor, AutoModelForCausalLM, AutoProcessor
 
 try:
     from transformers import AutoModelForImageTextToText
@@ -57,7 +57,7 @@ def main() -> None:
     print("== load processor ==")
     processor = AutoProcessor.from_pretrained(ckpt, trust_remote_code=True)
     text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    encoded = processor(text=[text], images=[image], return_tensors="pt")
+    encoded = _encode_text_and_images(processor, text, [image])
     input_ids = encoded["input_ids"]
     features = {key: value for key, value in dict(encoded).items() if key not in {"input_ids", "attention_mask"}}
     image_token_id = _image_token_id(processor)
@@ -128,6 +128,30 @@ def _load_hf_model(path: Path, dtype: torch.dtype):
         except Exception as exc:  # noqa: BLE001
             last_error = exc
     raise RuntimeError("failed to load HF reference model") from last_error
+
+
+def _encode_text_and_images(processor: Any, text: str, images: list[Image.Image]) -> dict[str, Any]:
+    images_error: TypeError | None = None
+    try:
+        return dict(processor(text=[text], images=images, return_tensors="pt"))
+    except TypeError as exc:
+        if "images" not in str(exc):
+            raise
+        images_error = exc
+    image_processor = getattr(processor, "image_processor", None)
+    if image_processor is None:
+        name_or_path = getattr(processor, "name_or_path", None)
+        if not name_or_path:
+            raise ValueError("processor does not expose image_processor or name_or_path") from images_error
+        image_processor = AutoImageProcessor.from_pretrained(name_or_path, trust_remote_code=True)
+    text_encoded = processor([text], return_tensors="pt")
+    image_encoded = image_processor(images=images, return_tensors="pt")
+    encoded = dict(image_encoded)
+    encoded["input_ids"] = text_encoded["input_ids"]
+    attention_mask = text_encoded.get("attention_mask")
+    if attention_mask is not None:
+        encoded["attention_mask"] = attention_mask
+    return encoded
 
 
 def _image_token_id(processor: Any) -> int | None:
