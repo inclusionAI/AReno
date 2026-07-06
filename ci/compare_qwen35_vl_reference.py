@@ -93,6 +93,7 @@ def main() -> None:
 
     print("\n== compare visual embeddings ==")
     with torch.inference_mode():
+        _compare_visual_early_stages(hf_model, areno_model, hf_inputs, areno_features, dtype)
         hf_visual = _hf_visual(hf_model, hf_inputs)
         areno_visual = areno_model.visual(
             areno_features["pixel_values"].to(dtype=dtype),
@@ -103,6 +104,7 @@ def main() -> None:
     print("\n== compare full logits ==")
     with torch.inference_mode():
         hf_logits = hf_model(**hf_inputs).logits
+        areno_features = _match_feature_dtype(areno_features, areno_model)
         areno_logits = areno_model(areno_input_ids, features=areno_features).logits_shard
     _print_compare("logits_last", hf_logits[:, -1, :], areno_logits[:, -1, :])
     _print_topk("hf", hf_logits[0, -1], processor)
@@ -189,6 +191,58 @@ def _hf_visual(model: torch.nn.Module, inputs: dict[str, Any]) -> torch.Tensor:
     except TypeError:
         out = visual(pixel_values, image_grid_thw=image_grid_thw)
     return _select_tensor_output(out, preferred_last_dim=preferred_dim, label="hf_visual")
+
+
+def _compare_visual_early_stages(
+    hf_model: torch.nn.Module,
+    areno_model: torch.nn.Module,
+    hf_inputs: dict[str, Any],
+    areno_features: dict[str, Any],
+    dtype: torch.dtype,
+) -> None:
+    hf_visual = _nested_attr(hf_model, ("visual", "model.visual"))
+    areno_visual = areno_model.visual
+    pixel_values = hf_inputs["pixel_values"].to(dtype=dtype)
+    image_grid_thw = hf_inputs.get("image_grid_thw")
+    if not hasattr(hf_visual, "patch_embed") or not hasattr(areno_visual, "patch_embed"):
+        return
+
+    hf_patch = _select_tensor_output(hf_visual.patch_embed(pixel_values), preferred_last_dim=None, label="hf_patch")
+    areno_patch = areno_visual.patch_embed(areno_features["pixel_values"].to(dtype=dtype))
+    _print_compare("vision_patch", hf_patch, areno_patch)
+
+    try:
+        hf_pos = _hf_position_embeddings(hf_visual, image_grid_thw)
+        grid_thw = areno_visual._grid_list(areno_patch.shape[0], areno_features.get("image_grid_thw"))
+        areno_pos = areno_visual._position_embeddings(grid_thw, areno_patch.device, areno_patch.dtype)
+    except Exception as exc:  # noqa: BLE001
+        print(f"vision_pos: skipped ({type(exc).__name__}: {exc})")
+        return
+    _print_compare("vision_pos", hf_pos, areno_pos)
+    _print_compare("vision_patch_plus_pos", hf_patch + hf_pos, areno_patch + areno_pos)
+
+
+def _hf_position_embeddings(hf_visual: torch.nn.Module, image_grid_thw: torch.Tensor | None) -> torch.Tensor:
+    if image_grid_thw is None:
+        raise ValueError("image_grid_thw is required for HF position embedding comparison")
+    grid_list = image_grid_thw.detach().cpu().to(dtype=torch.long).reshape(-1, 3).tolist()
+    if hasattr(hf_visual, "fast_pos_embed_interpolate_from_list"):
+        return hf_visual.fast_pos_embed_interpolate_from_list(grid_list)
+    if hasattr(hf_visual, "fast_pos_embed_interpolate"):
+        return hf_visual.fast_pos_embed_interpolate(image_grid_thw)
+    raise AttributeError("HF visual model has no known Qwen position interpolation helper")
+
+
+def _match_feature_dtype(features: dict[str, Any], model: torch.nn.Module) -> dict[str, Any]:
+    try:
+        dtype = next(model.parameters()).dtype
+    except StopIteration:
+        return features
+    matched = dict(features)
+    for key, value in matched.items():
+        if isinstance(value, torch.Tensor) and value.is_floating_point():
+            matched[key] = value.to(dtype=dtype)
+    return matched
 
 
 def _vision_out_hidden_size(model: torch.nn.Module) -> int | None:
