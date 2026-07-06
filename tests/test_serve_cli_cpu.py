@@ -162,7 +162,7 @@ def test_serve_response_reuses_tool_call_parser():
     assert '"direction":"left"' in choice.message["tool_calls"][0]["function"]["arguments"]
 
 
-def test_serve_text_response_splits_thinking_from_content():
+def test_serve_text_response_preserves_decoded_content():
     class ThinkTokenizer:
         def decode(self, token_ids, *, skip_special_tokens=False):
             del token_ids
@@ -186,11 +186,11 @@ def test_serve_text_response_splits_thinking_from_content():
     )
 
     choice = response.choices[0]
-    assert choice.message["reasoning_content"] == "plan the answer"
-    assert choice.message["content"] == "Final answer"
+    assert "reasoning_content" not in choice.message
+    assert choice.message["content"] == "plan the answer</think>\n\nFinal answer"
 
 
-def test_serve_tool_call_response_preserves_reasoning_content():
+def test_serve_tool_call_response_does_not_attach_reasoning_content():
     tokenizer = _TokenTokenizer(
         {
             1: "<think>block the fork</think>",
@@ -223,7 +223,7 @@ def test_serve_tool_call_response_preserves_reasoning_content():
 
     choice = response.choices[0]
     assert choice.message["content"] is None
-    assert choice.message["reasoning_content"] == "block the fork"
+    assert "reasoning_content" not in choice.message
     assert choice.message["tool_calls"][0]["function"]["name"] == "choose_move"
 
 

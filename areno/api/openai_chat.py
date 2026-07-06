@@ -140,8 +140,6 @@ def build_chat_completion_response(
     for index, token_ids in enumerate(response_ids):
         raw_text = _decode(tokenizer, token_ids, skip_special_tokens=False)
         display_text = _decode(tokenizer, token_ids, skip_special_tokens=True)
-        reasoning_content = _extract_think_content(raw_text)
-        display_text = _strip_think_content(display_text)
         display_text, stop_hit = _trim_stop_strings(display_text, stop_strings)
         completion_tokens += len(token_ids)
         tool_calls = (
@@ -151,12 +149,8 @@ def build_chat_completion_response(
             tool_calls = tool_call_parser.parse(raw_text, tools, tool_choice).tool_calls
         finish_reason = "stop" if stop_hit or finish_reasons[index] == "stop" else "length"
         message: dict[str, Any] = {"role": "assistant", "content": display_text}
-        if reasoning_content:
-            message["reasoning_content"] = reasoning_content
         if tool_calls:
             message = {"role": "assistant", "content": None, "tool_calls": tool_calls}
-            if reasoning_content:
-                message["reasoning_content"] = reasoning_content
             finish_reason = "tool_calls"
         choices.append({"index": index, "message": message, "finish_reason": finish_reason})
 
@@ -186,26 +180,6 @@ def _decode(tokenizer: Any, token_ids: list[int], *, skip_special_tokens: bool) 
         return tokenizer.decode(token_ids, skip_special_tokens=skip_special_tokens)
     except TypeError:
         return tokenizer.decode(token_ids)
-
-
-def _extract_think_content(text: str) -> str:
-    start = text.find("<think>")
-    end = text.find("</think>")
-    if start >= 0 and end > start:
-        return text[start + len("<think>") : end].strip()
-    if start < 0 and end >= 0:
-        return text[:end].strip()
-    return ""
-
-
-def _strip_think_content(text: str) -> str:
-    start = text.find("<think>")
-    end = text.find("</think>")
-    if start >= 0 and end > start:
-        text = text[:start] + text[end + len("</think>") :]
-    elif start < 0 and end >= 0:
-        text = text[end + len("</think>") :]
-    return text.strip()
 
 
 def _trim_stop_strings(text: str, stop: list[str]) -> tuple[str, bool]:
