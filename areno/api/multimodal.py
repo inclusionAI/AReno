@@ -55,20 +55,41 @@ def expand_image_tokens(
     out_aligned = {name: [] for name in (aligned_sequences or {})}
     count_idx = 0
     image_token_id = int(image_token_id) if image_token_id is not None else None
-    for idx, token in enumerate(tokens):
+    idx = 0
+    while idx < len(tokens):
+        token = tokens[idx]
         repeat = 1
         if image_token_id is not None and int(token) == image_token_id and count_idx < len(image_token_counts):
-            repeat = int(image_token_counts[count_idx])
+            count = int(image_token_counts[count_idx])
+            if _has_existing_image_span(tokens, image_token_id, idx, count):
+                repeat = count
+                count_idx += 1
+                out_tokens.extend([int(token)] * repeat)
+                for name, values in (aligned_sequences or {}).items():
+                    out_aligned[name].extend(values[idx : idx + repeat])
+                idx += repeat
+                continue
+            repeat = count
             count_idx += 1
         out_tokens.extend([int(token)] * repeat)
         for name, values in (aligned_sequences or {}).items():
             out_aligned[name].extend([values[idx]] * repeat)
+        idx += 1
     if count_idx != len(image_token_counts):
         raise ValueError(
             "image feature count does not match prompt image token count: "
             f"features={len(image_token_counts)} prompt_tokens={count_idx}"
         )
     return out_tokens, out_aligned
+
+
+def _has_existing_image_span(tokens: Sequence[int], image_token_id: int, start: int, count: int) -> bool:
+    """Return true if a processor already expanded this image token span."""
+
+    end = start + count
+    if count <= 1 or end > len(tokens):
+        return False
+    return all(int(token) == image_token_id for token in tokens[start:end])
 
 
 def mrope_position_ids_from_image_grid(

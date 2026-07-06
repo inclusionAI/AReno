@@ -138,6 +138,27 @@ def test_qwen35_image_grid_expands_placeholder_tokens():
     assert aligned["prompt_mask"] == [True] * 65 + [False]
 
 
+def test_qwen35_image_grid_keeps_processor_expanded_image_tokens():
+    features = {
+        "image_token_id": 99,
+        "image_grid_thw": torch.tensor([[1, 16, 16]]),
+        "spatial_merge_size": 2,
+    }
+
+    counts = image_token_counts_from_features(features)
+    tokens, aligned = expand_image_tokens(
+        [1] + [99] * 64 + [2],
+        image_token_id=99,
+        image_token_counts=counts,
+        aligned_sequences={"prompt_mask": [True] * 66},
+    )
+
+    assert counts == [64]
+    assert len(tokens) == 66
+    assert tokens.count(99) == 64
+    assert aligned["prompt_mask"] == [True] * 66
+
+
 def test_qwen35_image_grid_builds_sglang_style_mrope_positions():
     features = {
         "image_token_id": 99,

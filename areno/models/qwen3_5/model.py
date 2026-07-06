@@ -730,8 +730,13 @@ class Qwen35VisionPatchEmbed(nn.Module):
     def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
         target_dtype = self.proj.weight.dtype
         if pixel_values.ndim == 2:
-            weight = self.proj.weight.reshape(self.hidden_size, -1)
-            return F.linear(pixel_values.to(dtype=target_dtype), weight, self.proj.bias)
+            pixel_values = pixel_values.view(
+                -1,
+                self.in_channels,
+                self.temporal_patch_size,
+                self.patch_size,
+                self.patch_size,
+            )
         if pixel_values.ndim == 4:
             pixel_values = pixel_values.unsqueeze(2).expand(-1, -1, self.temporal_patch_size, -1, -1)
         if pixel_values.ndim != 5:
