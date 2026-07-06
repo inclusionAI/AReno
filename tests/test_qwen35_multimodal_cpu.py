@@ -429,6 +429,48 @@ def test_qwen35_gdn_uses_projected_sequence_length_after_sp_gather():
     assert out.shape == (2, 12, 8)
 
 
+def test_qwen35_sequence_parallel_scatters_mrope_position_sequence_axis(monkeypatch):
+    pytest.importorskip("triton")
+    from types import SimpleNamespace
+
+    import areno.models.qwen3_5.model as qwen35
+
+    class RecorderLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.position_ids = None
+
+        def forward(self, hidden_states, position_ids, train_meta, infer_meta):
+            del train_meta, infer_meta
+            self.position_ids = position_ids
+            return hidden_states
+
+    def fake_scatter(x):
+        return x[:, : x.shape[1] // 2].contiguous()
+
+    monkeypatch.setattr(qwen35, "scatter_to_sequence_parallel_region", fake_scatter)
+
+    model = qwen35.Qwen35ForCausalLM.__new__(qwen35.Qwen35ForCausalLM)
+    torch.nn.Module.__init__(model)
+    layer = RecorderLayer()
+    model.layers = torch.nn.ModuleList([layer])
+    model.norm = torch.nn.Identity()
+    model.lm_head = torch.nn.Identity()
+
+    hidden_states = torch.zeros(2, 8, 4)
+    position_ids = torch.arange(3 * 2 * 8, dtype=torch.long).view(3, 2, 8)
+
+    model.forward_from_embeddings(
+        hidden_states,
+        position_ids,
+        train_meta=SimpleNamespace(sequence_parallel=True),
+        infer_meta=None,
+    )
+
+    assert layer.position_ids.shape == (3, 2, 4)
+    assert torch.equal(layer.position_ids, position_ids[:, :, :4])
+
+
 def test_prefill_multimodal_features_support_multiple_rows():
     features = _prefill_multimodal_features(
         [False, True, False, True],

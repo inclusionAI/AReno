@@ -1125,6 +1125,10 @@ class Qwen35ForCausalLM(nn.Module):
         use_sequence_parallel = bool(train_meta is not None and train_meta.sequence_parallel)
         if use_sequence_parallel:
             hidden_states = scatter_to_sequence_parallel_region(hidden_states)
+            if position_ids.dim() == 3:
+                position_ids = scatter_to_sequence_parallel_region(position_ids.permute(1, 2, 0)).permute(2, 0, 1)
+            else:
+                position_ids = scatter_to_sequence_parallel_region(position_ids)
         with sequence_parallel_region(use_sequence_parallel):
             for layer in self.layers:
                 if getattr(layer, "handles_activation_checkpointing", False):
