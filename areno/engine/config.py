@@ -128,6 +128,10 @@ class ModelConfig:
     moe_intermediate_size: int = 0
     num_shared_experts: int | None = None
     shared_expert_intermediate_size: int = 0
+    vision_config: dict[str, Any] | None = None
+    image_token_id: int | None = None
+    vision_start_token_id: int | None = None
+    vision_end_token_id: int | None = None
     moe_router_enable_expert_bias: bool = True
     norm_topk_prob: bool = True
     moe_router_dtype: torch.dtype = torch.float32

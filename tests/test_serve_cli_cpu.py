@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+import torch
 
 from areno.api.tokenizer import configure_chat_template_enable_thinking
 from areno.api.tool_call_parser import QwenToolCallParser
@@ -188,6 +189,54 @@ def test_serve_chat_template_can_disable_thinking():
 
     assert serve_mod._encode_messages(tokenizer, [serve_mod.ChatMessage(role="user", content="hello")]) == [1]
     assert tokenizer.calls[0][1]["enable_thinking"] is False
+
+
+def test_serve_multimodal_encoder_uses_processor_for_image_data_url():
+    image = (
+        "data:image/png;base64,"
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADUlEQVR4nGP8z8BQDwAFgwJ/lwJw6QAAAABJRU5ErkJggg=="
+    )
+
+    class FakeProcessor:
+        image_token_id = 99
+
+        def apply_chat_template(self, messages, *, tokenize, add_generation_prompt):
+            self.messages = messages
+            self.template_args = (tokenize, add_generation_prompt)
+            return "<image> describe"
+
+        def __call__(self, *, text, images, return_tensors):
+            self.call_args = (text, len(images), return_tensors)
+            return {
+                "input_ids": torch.tensor([[1, 99, 2]]),
+                "image_embeds": torch.ones(1, 4),
+            }
+
+    tokenizer = SimpleNamespace(eos_token_id=1)
+    processor = FakeProcessor()
+    messages = [
+        serve_mod.ChatMessage(
+            role="user",
+            content=[
+                {"type": "image_url", "image_url": {"url": image}},
+                {"type": "text", "text": "describe"},
+            ],
+        )
+    ]
+
+    tokens, features = serve_mod._encode_messages_with_features(tokenizer, processor, messages)
+
+    assert tokens == [1, 99, 2]
+    assert features["image_token_id"] == 99
+    assert torch.equal(features["image_embeds"], torch.ones(1, 4))
+    assert processor.call_args == (["<image> describe"], 1, "pt")
+
+
+def test_serve_multimodal_encoder_rejects_images_without_processor():
+    messages = [serve_mod.ChatMessage(role="user", content=[{"type": "image", "image": "/tmp/missing.png"}])]
+
+    with pytest.raises(ValueError, match="requires a checkpoint processor"):
+        serve_mod._encode_messages_with_features(SimpleNamespace(), None, messages)
 
 
 class _TokenTokenizer:

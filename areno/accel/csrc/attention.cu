@@ -242,6 +242,102 @@ __global__ void varlen_causal_attention_forward_kernel(
 }
 
 template <typename scalar_t>
+__global__ void varlen_attention_forward_kernel(
+    const scalar_t* __restrict__ q,
+    const scalar_t* __restrict__ k,
+    const scalar_t* __restrict__ v,
+    scalar_t* __restrict__ out,
+    const int32_t* __restrict__ cu_seqlens,
+    int64_t total_tokens,
+    int64_t num_seqs,
+    int64_t q_heads,
+    int64_t kv_heads,
+    int64_t head_dim,
+    int64_t tile_n,
+    float softmax_scale) {
+  extern __shared__ float shared[];
+  float* q_s = shared;
+  float* acc_s = q_s + head_dim;
+  float* partial_s = acc_s + head_dim;
+  float* k_tile = partial_s + blockDim.x;
+  float* v_tile = k_tile + tile_n * head_dim;
+
+  const int64_t row = blockIdx.x;
+  const int64_t token_idx = row / q_heads;
+  const int64_t h = row - token_idx * q_heads;
+  const int64_t kv_group = q_heads / kv_heads;
+  const int64_t kv_h = h / kv_group;
+  const int64_t seq_id = find_sequence_id(cu_seqlens, num_seqs, token_idx);
+  const int64_t first_key = static_cast<int64_t>(cu_seqlens[seq_id]);
+  const int64_t last_key = static_cast<int64_t>(cu_seqlens[seq_id + 1]) - 1;
+
+  const int64_t q_base = (token_idx * q_heads + h) * head_dim;
+  for (int64_t d = threadIdx.x; d < head_dim; d += blockDim.x) {
+    q_s[d] = static_cast<float>(q[q_base + d]);
+    acc_s[d] = 0.0f;
+  }
+  __syncthreads();
+
+  float m = -std::numeric_limits<float>::infinity();
+  float l = 0.0f;
+
+  for (int64_t tile_start = first_key; tile_start <= last_key; tile_start += tile_n) {
+    const int64_t remaining = last_key - tile_start + 1;
+    const int64_t tile_len = remaining < tile_n ? remaining : tile_n;
+    const int64_t tile_elements = tile_len * head_dim;
+    for (int64_t idx = threadIdx.x; idx < tile_elements; idx += blockDim.x) {
+      const int64_t ki = tile_start + idx / head_dim;
+      const int64_t d = idx % head_dim;
+      const int64_t kv_offset = (ki * kv_heads + kv_h) * head_dim + d;
+      k_tile[idx] = static_cast<float>(k[kv_offset]);
+      v_tile[idx] = static_cast<float>(v[kv_offset]);
+    }
+    __syncthreads();
+
+    for (int64_t tile_idx = 0; tile_idx < tile_len; ++tile_idx) {
+      float thread_dot = 0.0f;
+      for (int64_t d = threadIdx.x; d < head_dim; d += blockDim.x) {
+        thread_dot += q_s[d] * k_tile[tile_idx * head_dim + d];
+      }
+      partial_s[threadIdx.x] = thread_dot;
+      __syncthreads();
+
+      for (int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+        if (threadIdx.x < stride) {
+          partial_s[threadIdx.x] += partial_s[threadIdx.x + stride];
+        }
+        __syncthreads();
+      }
+
+      if (threadIdx.x == 0) {
+        const float score = partial_s[0] * softmax_scale;
+        const float new_m = fmaxf(m, score);
+        const float alpha = l == 0.0f ? 0.0f : expf(m - new_m);
+        const float beta = expf(score - new_m);
+        l = l * alpha + beta;
+        m = new_m;
+        partial_s[0] = alpha;
+        partial_s[1] = beta;
+        partial_s[2] = l;
+      }
+      __syncthreads();
+
+      const float alpha = partial_s[0];
+      const float beta = partial_s[1];
+      for (int64_t d = threadIdx.x; d < head_dim; d += blockDim.x) {
+        acc_s[d] = acc_s[d] * alpha + beta * v_tile[tile_idx * head_dim + d];
+      }
+      __syncthreads();
+    }
+  }
+
+  const float denom = partial_s[2];
+  for (int64_t d = threadIdx.x; d < head_dim; d += blockDim.x) {
+    out[q_base + d] = static_cast<scalar_t>(acc_s[d] / denom);
+  }
+}
+
+template <typename scalar_t>
 __global__ void causal_attention_backward_kernel(
     const scalar_t* __restrict__ grad_out,
     const scalar_t* __restrict__ q,
@@ -855,6 +951,53 @@ torch::Tensor areno_varlen_causal_attention_forward_cuda(
         q.size(2),
         tile_n,
         window_left,
+        static_cast<float>(softmax_scale));
+  });
+  return out;
+}
+
+torch::Tensor areno_varlen_attention_forward_cuda(
+    torch::Tensor q,
+    torch::Tensor k,
+    torch::Tensor v,
+    torch::Tensor cu_seqlens,
+    double softmax_scale) {
+  TORCH_CHECK(q.is_cuda(), "areno_varlen_attention q must be CUDA");
+  TORCH_CHECK(k.is_cuda(), "areno_varlen_attention k must be CUDA");
+  TORCH_CHECK(v.is_cuda(), "areno_varlen_attention v must be CUDA");
+  TORCH_CHECK(cu_seqlens.is_cuda(), "areno_varlen_attention cu_seqlens must be CUDA");
+  TORCH_CHECK(q.is_contiguous(), "areno_varlen_attention q must be contiguous");
+  TORCH_CHECK(k.is_contiguous(), "areno_varlen_attention k must be contiguous");
+  TORCH_CHECK(v.is_contiguous(), "areno_varlen_attention v must be contiguous");
+  TORCH_CHECK(cu_seqlens.is_contiguous(), "areno_varlen_attention cu_seqlens must be contiguous");
+  TORCH_CHECK(q.dim() == 3 && k.dim() == 3 && v.dim() == 3, "areno_varlen_attention expects 3D q/k/v");
+  TORCH_CHECK(cu_seqlens.dim() == 1, "areno_varlen_attention cu_seqlens must be 1D");
+  TORCH_CHECK(cu_seqlens.scalar_type() == at::kInt, "areno_varlen_attention cu_seqlens must be int32");
+  TORCH_CHECK(q.scalar_type() == k.scalar_type() && q.scalar_type() == v.scalar_type(), "areno_varlen_attention dtype mismatch");
+  TORCH_CHECK(q.size(0) == k.size(0) && q.size(0) == v.size(0), "areno_varlen_attention token count mismatch");
+  TORCH_CHECK(q.size(1) == k.size(1) && q.size(1) == v.size(1), "areno_varlen_attention head count mismatch");
+  TORCH_CHECK(q.size(2) == k.size(2) && q.size(2) == v.size(2), "areno_varlen_attention head dim mismatch");
+  TORCH_CHECK(cu_seqlens.size(0) >= 2, "areno_varlen_attention cu_seqlens must contain at least one sequence");
+
+  const at::cuda::OptionalCUDAGuard guard(device_of(q));
+  auto out = torch::empty_like(q);
+  const int64_t rows = q.size(0) * q.size(1);
+  const int64_t tile_n = attention_tile_n(q.size(2));
+  const int64_t shared_floats = 2 * q.size(2) + kAttentionThreads + 2 * tile_n * q.size(2);
+  const size_t shared_bytes = static_cast<size_t>(shared_floats) * sizeof(float);
+  AT_DISPATCH_FLOATING_TYPES_AND2(at::kHalf, at::kBFloat16, q.scalar_type(), "areno_varlen_attention_forward", [&] {
+    varlen_attention_forward_kernel<scalar_t><<<static_cast<int>(rows), kAttentionThreads, shared_bytes, at::cuda::getCurrentCUDAStream()>>>(
+        q.data_ptr<scalar_t>(),
+        k.data_ptr<scalar_t>(),
+        v.data_ptr<scalar_t>(),
+        out.data_ptr<scalar_t>(),
+        cu_seqlens.data_ptr<int32_t>(),
+        q.size(0),
+        cu_seqlens.size(0) - 1,
+        q.size(1),
+        k.size(1),
+        q.size(2),
+        tile_n,
         static_cast<float>(softmax_scale));
   });
   return out;

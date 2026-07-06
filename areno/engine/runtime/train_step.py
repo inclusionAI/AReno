@@ -101,6 +101,11 @@ def _pack_train_data(data_pack: dict[str, Any]) -> dict[str, Any]:
     batch = int(input_ids.shape[0])
     if int(lengths.numel()) != batch:
         return data_pack
+    if data_pack.get("features") is not None:
+        # Multimodal features are batch-aligned side inputs (for example
+        # per-row image embeddings). Keep the dense layout until each adapter
+        # can provide model-specific packed feature collation.
+        return data_pack
 
     # Token-axis bookkeeping. `cu_seqlens[i+1]` is the prefix sum of valid
     # tokens up to row i, matching the FlashAttention varlen contract.

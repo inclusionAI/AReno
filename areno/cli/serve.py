@@ -8,10 +8,13 @@ running so worker-side continuous batching can admit later requests.
 from __future__ import annotations
 
 import asyncio
+import base64
+import io
 import time
 import warnings
 from dataclasses import dataclass, field
 from typing import Any, Literal
+from urllib.parse import urlparse
 
 import click
 import torch
@@ -29,7 +32,7 @@ from areno.engine.config import (
     flash_attention_unsupported_model_reason,
 )
 from areno.engine.data import SamplingParams
-from areno.engine.data.tokenizer import load_tokenizer
+from areno.engine.data.tokenizer import load_processor, load_tokenizer
 from areno.models.registry import config_from_hf
 
 
@@ -121,6 +124,7 @@ class PendingRequest:
 
     request: ChatCompletionRequest
     prompt: list[int]
+    prompt_features: dict[str, Any] | None
     key: BatchKey
     future: asyncio.Future
     created_at: float = field(default_factory=time.monotonic)
@@ -136,6 +140,7 @@ class ServeState:
 
     model_path: str
     tokenizer: Any
+    processor: Any
     engine: ArenoEngine
     max_running_prompts: int
     default_max_tokens: int
@@ -178,6 +183,7 @@ def create_app(
         raise ValueError("world_size must be divisible by tp_size")
 
     tokenizer = load_tokenizer(model_path)
+    processor = load_processor(model_path)
     configure_chat_template_enable_thinking(tokenizer, chat_template_enable_thinking)
     attn_backend, attn_warning = _resolve_serve_attn_backend(
         model_path=model_path,
@@ -198,6 +204,7 @@ def create_app(
     state = ServeState(
         model_path=model_path,
         tokenizer=tokenizer,
+        processor=processor,
         engine=engine,
         max_running_prompts=max_running_prompts,
         default_max_tokens=default_max_tokens,
@@ -258,7 +265,15 @@ def create_app(
         if not request.messages:
             raise HTTPException(status_code=400, detail="messages must be non-empty")
 
-        prompt = _encode_messages(state.tokenizer, request.messages, tools=request.tools)
+        try:
+            prompt, prompt_features = _encode_messages_with_features(
+                state.tokenizer,
+                state.processor,
+                request.messages,
+                tools=request.tools,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         key = BatchKey(
             max_new_tokens=int(request.max_completion_tokens or request.max_tokens or state.default_max_tokens),
             temperature=float(request.temperature),
@@ -271,6 +286,7 @@ def create_app(
         pending = PendingRequest(
             request=request,
             prompt=prompt,
+            prompt_features=prompt_features,
             key=key,
             future=asyncio.get_running_loop().create_future(),
         )
@@ -336,6 +352,7 @@ async def _run_request_rollout(app: FastAPI, item: PendingRequest) -> ChatComple
     state: ServeState = app.state.areno_serve
     key = item.key
     prompts = [item.prompt for _ in range(int(item.request.n))]
+    prompt_features = [item.prompt_features for _ in prompts] if item.prompt_features is not None else None
     if item.cancelled or item.future.done():
         return None
 
@@ -352,6 +369,7 @@ async def _run_request_rollout(app: FastAPI, item: PendingRequest) -> ChatComple
             seed=key.seed,
             stop_token_ids=key.stop_token_ids,
         ),
+        prompt_features=prompt_features,
         decode_progress_interval_s=app.state.decode_progress_interval_s,
     )
     if item.future.done():
@@ -458,8 +476,45 @@ def _encode_messages(
     return messages_to_prompt_tokens(tokenizer, payload, tools=tools, fallback_prompt=_messages_fallback_text(payload))
 
 
-def _chat_message_payload(message: ChatMessage) -> dict[str, Any]:
-    payload: dict[str, Any] = {"role": message.role, "content": _message_content(message.content)}
+def _encode_messages_with_features(
+    tokenizer: Any,
+    processor: Any,
+    messages: list[ChatMessage],
+    *,
+    tools: list[dict[str, Any]] | None = None,
+) -> tuple[list[int], dict[str, Any] | None]:
+    payload = [_chat_message_payload(msg, preserve_content_parts=True) for msg in messages]
+    if not _messages_have_images(payload):
+        return (
+            messages_to_prompt_tokens(
+                tokenizer, payload, tools=tools, fallback_prompt=_messages_fallback_text(payload)
+            ),
+            None,
+        )
+    if tools:
+        raise ValueError("image input with tools is not supported yet")
+    if processor is None:
+        raise ValueError("image input requires a checkpoint processor")
+    images = _load_message_images(payload)
+    text = _processor_chat_text(processor, payload)
+    encoded = processor(text=[text], images=images, return_tensors="pt")
+    input_ids = encoded.get("input_ids")
+    if input_ids is None:
+        raise ValueError("processor did not return input_ids for image request")
+    features = {
+        key: value
+        for key, value in dict(encoded).items()
+        if key not in {"input_ids", "attention_mask", "token_type_ids"}
+    }
+    image_token_id = _image_token_id(tokenizer, processor)
+    if image_token_id is not None:
+        features["image_token_id"] = image_token_id
+    return input_ids[0].tolist(), features or None
+
+
+def _chat_message_payload(message: ChatMessage, *, preserve_content_parts: bool = False) -> dict[str, Any]:
+    content = message.content if preserve_content_parts else _message_content(message.content)
+    payload: dict[str, Any] = {"role": message.role, "content": content}
     if message.name is not None:
         payload["name"] = message.name
     if message.tool_call_id is not None:
@@ -487,6 +542,81 @@ def _message_content(content: str | list[Any] | None) -> str:
         else:
             parts.append(str(item))
     return "\n".join(part for part in parts if part)
+
+
+def _messages_have_images(messages: list[dict[str, Any]]) -> bool:
+    return any(_content_has_image(message.get("content")) for message in messages)
+
+
+def _content_has_image(content: Any) -> bool:
+    if not isinstance(content, list):
+        return False
+    return any(isinstance(item, dict) and item.get("type") in {"image", "image_url"} for item in content)
+
+
+def _load_message_images(messages: list[dict[str, Any]]) -> list[Any]:
+    images = []
+    for message in messages:
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for item in content:
+            if not isinstance(item, dict) or item.get("type") not in {"image", "image_url"}:
+                continue
+            images.append(_load_image_part(item))
+    if not images:
+        raise ValueError("image request did not include any image parts")
+    return images
+
+
+def _load_image_part(part: dict[str, Any]) -> Any:
+    try:
+        from PIL import Image
+    except ImportError as exc:
+        raise ValueError("image input requires Pillow") from exc
+    image_ref = part.get("image")
+    if image_ref is None:
+        image_url = part.get("image_url")
+        image_ref = image_url.get("url") if isinstance(image_url, dict) else image_url
+    if not image_ref:
+        raise ValueError("image part must include image or image_url.url")
+    if not isinstance(image_ref, str):
+        raise ValueError("image reference must be a string path, file URL, or data URL")
+    if image_ref.startswith("data:"):
+        _, _, payload = image_ref.partition(",")
+        return Image.open(io.BytesIO(base64.b64decode(payload))).convert("RGB")
+    parsed = urlparse(image_ref)
+    if parsed.scheme == "file":
+        return Image.open(parsed.path).convert("RGB")
+    if parsed.scheme in {"http", "https"}:
+        raise ValueError("HTTP image URLs are not supported yet; use a local path, file URL, or data URL")
+    return Image.open(image_ref).convert("RGB")
+
+
+def _processor_chat_text(processor: Any, messages: list[dict[str, Any]]) -> str:
+    apply_chat_template = getattr(processor, "apply_chat_template", None)
+    if callable(apply_chat_template):
+        rendered = apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        if isinstance(rendered, str):
+            return rendered
+    text_messages = [{**message, "content": _message_content(message.get("content"))} for message in messages]
+    return _messages_fallback_text(text_messages)
+
+
+def _image_token_id(tokenizer: Any, processor: Any) -> int | None:
+    for obj in (processor, tokenizer):
+        for attr in ("image_token_id", "image_token_index"):
+            value = getattr(obj, attr, None)
+            if isinstance(value, int):
+                return int(value)
+        token = getattr(obj, "image_token", None)
+        if isinstance(token, str):
+            convert = getattr(tokenizer, "convert_tokens_to_ids", None)
+            if callable(convert):
+                token_id = convert(token)
+                if isinstance(token_id, int) and token_id >= 0:
+                    return int(token_id)
+    return None
 
 
 def _first_eos_token_id(tokenizer: Any) -> int | None:

@@ -144,6 +144,27 @@ def _record_to_train_sequence(record: Any, tokenizer, *, max_prompt_tokens: int,
 
     record = dict(record)
     eos_token_id = tokenizer.eos_token_id if tokenizer.eos_token_id is not None else 0
+    if "tokens" in record and "prompt_mask" in record:
+        tokens = [int(token) for token in record["tokens"]]
+        prompt_mask = [bool(item) for item in record["prompt_mask"]]
+        if len(tokens) != len(prompt_mask):
+            raise ValueError("SFT encoded row `tokens` and `prompt_mask` must have the same length")
+        if len(tokens) < 2:
+            return None
+        prompt_tokens = prompt_mask.count(True)
+        response_tokens = prompt_mask[1:].count(False)
+        if prompt_tokens > max_prompt_tokens or response_tokens > max_new_tokens or response_tokens == 0:
+            return None
+        zeros = [0.0] * len(tokens)
+        return areno.api.TrainSequence(
+            prompt_mask=prompt_mask,
+            loss_mask=[bool(item) for item in record.get("loss_mask", [])],
+            tokens=tokens,
+            logprobs=zeros,
+            advantages=zeros,
+            features=record.get("features"),
+            eos_token_id=int(record.get("eos_token_id", eos_token_id)),
+        )
     if "prompt" not in record or "response" not in record:
         raise ValueError(
             "SFT dataset loader must return rows with `prompt` and `response`; "

@@ -21,6 +21,7 @@ from areno.accel.activations import areno_gelu_tanh_and_mul, areno_silu_and_mul
 from areno.accel.attention import (
     areno_causal_attention,
     areno_paged_causal_attention_decode,
+    areno_varlen_attention,
     areno_varlen_causal_attention,
 )
 from areno.accel.kernels.fused_moe import FusedMoeConfig
@@ -83,6 +84,7 @@ __all__ = [
     "areno_gelu_tanh_and_mul",
     "areno_causal_attention",
     "areno_paged_causal_attention_decode",
+    "areno_varlen_attention",
     "areno_varlen_causal_attention",
     "areno_silu_and_mul",
     "warn_once",

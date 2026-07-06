@@ -39,6 +39,12 @@ torch::Tensor areno_varlen_causal_attention_forward_cuda(
     torch::Tensor cu_seqlens,
     int64_t window_left,
     double softmax_scale);
+torch::Tensor areno_varlen_attention_forward_cuda(
+    torch::Tensor q,
+    torch::Tensor k,
+    torch::Tensor v,
+    torch::Tensor cu_seqlens,
+    double softmax_scale);
 std::vector<torch::Tensor> areno_varlen_causal_attention_backward_cuda(
     torch::Tensor grad_out,
     torch::Tensor q,
@@ -181,6 +187,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("areno_causal_attention_backward", &areno_causal_attention_backward_cuda, "ARENO causal attention backward");
   m.def("areno_varlen_causal_attention_forward", &areno_varlen_causal_attention_forward_cuda, "ARENO varlen causal attention forward");
   m.def("areno_varlen_causal_attention_backward", &areno_varlen_causal_attention_backward_cuda, "ARENO varlen causal attention backward");
+  m.def("areno_varlen_attention_forward", &areno_varlen_attention_forward_cuda, "ARENO varlen attention forward");
   m.def("areno_paged_causal_attention_decode_forward", &areno_paged_causal_attention_decode_forward_cuda, "ARENO paged causal attention decode forward");
   m.def("areno_grouped_linear_forward", &areno_grouped_linear_forward_cuda, "ARENO grouped linear forward");
   m.def("areno_grouped_linear_forward_counts", &areno_grouped_linear_forward_counts_cuda, "ARENO grouped linear forward with GPU counts");

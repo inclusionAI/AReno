@@ -513,6 +513,9 @@ def _make_train_pack(seqs: list[TrainSequence]) -> dict[str, torch.Tensor]:
         pack["values"] = values
     if ref_logprobs is not None:
         pack["ref_logprobs"] = ref_logprobs
+    features = [seq.features for seq in seqs]
+    if any(feature is not None for feature in features):
+        pack["features"] = features
     return pack
 
 
