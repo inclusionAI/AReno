@@ -157,6 +157,7 @@ class Qwen35FullAttention(nn.Module):
         v = v.view(batch, seqlen, self.local_kv_heads, self.head_dim)
         q = self.q_norm(q).to(dtype=q.dtype)
         k = self.k_norm(k).to(dtype=k.dtype)
+        position_ids = _align_position_ids_to_sequence_len(position_ids, seqlen)
         q, k = self.rope(q, k, position_ids)
         out = (
             self._forward_infer(q, k, v, infer_meta)
@@ -1078,6 +1079,24 @@ def _position_ids_from_features(
         length = min(int(item.shape[-1]), seqlen)
         base[:, row_idx, :length] = item[:, :length]
     return base
+
+
+def _align_position_ids_to_sequence_len(position_ids: torch.Tensor, seqlen: int) -> torch.Tensor:
+    current = int(position_ids.shape[-1])
+    if current == seqlen:
+        return position_ids
+    ctx = get_tp_context()
+    if ctx.world_size == 1:
+        raise ValueError(f"position_ids sequence length {current} does not match hidden sequence length {seqlen}")
+    if current * ctx.world_size == seqlen:
+        if position_ids.dim() == 3:
+            return gather_from_sequence_parallel_region(position_ids.permute(1, 2, 0)).permute(2, 0, 1)
+        return gather_from_sequence_parallel_region(position_ids)
+    if current == seqlen * ctx.world_size:
+        if position_ids.dim() == 3:
+            return scatter_to_sequence_parallel_region(position_ids.permute(1, 2, 0)).permute(2, 0, 1)
+        return scatter_to_sequence_parallel_region(position_ids)
+    raise ValueError(f"position_ids sequence length {current} does not match hidden sequence length {seqlen}")
 
 
 class Qwen35ForCausalLM(nn.Module):

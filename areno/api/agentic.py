@@ -398,10 +398,10 @@ class RolloutSession:
         total_tokens = 0
         for sample in samples:
             if sample.token_row:
-                token_rows.append(list(sample.token_row))
-                response_masks.append(list(sample.response_mask_row))
-                loss_masks.append(list(sample.loss_mask_row))
-                rollout_logprobs.append(list(sample.rollout_logprobs_row))
+                token_rows.append(sample.token_row)
+                response_masks.append(sample.response_mask_row)
+                loss_masks.append(sample.loss_mask_row)
+                rollout_logprobs.append(sample.rollout_logprobs_row)
                 features.append(sample.features)
                 total_tokens += len(sample.token_row)
                 continue
@@ -514,12 +514,14 @@ class RolloutSession:
                 )
                 self._set_pending_response(pending, response)
                 return
-            prompt_features = [pending.features] if pending.features is not None else None
+            rollout_kwargs = {}
+            if pending.features is not None:
+                rollout_kwargs["prompt_features"] = [pending.features]
             results = await self._trainer.rollout_token_batch_async(
                 [pending.input_tokens],
                 1,
                 pending.params,
-                prompt_features=prompt_features,
+                **rollout_kwargs,
             )
             sequence = results[0].sequences[0] if results and results[0].sequences else None
             if sequence is None:
@@ -816,6 +818,8 @@ def _render_messages_for_display(tokenizer, messages: list[dict[str, Any]]) -> s
     """Render a message trajectory with the tokenizer chat template when available."""
 
     messages = _normalize_messages(messages)
+    if _messages_have_images(messages):
+        return _messages_to_text(messages)
     if getattr(tokenizer, "chat_template", None):
         try:
             rendered = apply_chat_template_with_options(
@@ -873,6 +877,21 @@ def _normalize_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _messages_to_text(messages: list[dict[str, Any]]) -> str:
+    if _messages_have_images(messages):
+        parts = []
+        for message in messages:
+            content = message.get("content")
+            if isinstance(content, str):
+                parts.append(content)
+            elif isinstance(content, list):
+                for item in content:
+                    if not isinstance(item, dict):
+                        continue
+                    if item.get("type") in {"image", "image_url"}:
+                        parts.append("<image>")
+                    elif item.get("type") == "text" and item.get("text") is not None:
+                        parts.append(str(item["text"]))
+        return "\n".join(parts)
     return messages_to_text(messages)
 
 

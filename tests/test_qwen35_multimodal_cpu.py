@@ -471,6 +471,28 @@ def test_qwen35_sequence_parallel_scatters_mrope_position_sequence_axis(monkeypa
     assert torch.equal(layer.position_ids, position_ids[:, :, :4])
 
 
+def test_qwen35_full_attention_aligns_local_mrope_positions_to_projected_sequence(monkeypatch):
+    pytest.importorskip("triton")
+    from types import SimpleNamespace
+
+    import areno.models.qwen3_5.model as qwen35
+
+    monkeypatch.setattr(qwen35, "get_tp_context", lambda: SimpleNamespace(world_size=2))
+
+    def fake_gather(x):
+        return torch.cat([x, x + 100], dim=1)
+
+    monkeypatch.setattr(qwen35, "gather_from_sequence_parallel_region", fake_gather)
+
+    position_ids = torch.arange(3 * 2 * 4, dtype=torch.long).view(3, 2, 4)
+
+    aligned = qwen35._align_position_ids_to_sequence_len(position_ids, 8)
+
+    assert aligned.shape == (3, 2, 8)
+    assert torch.equal(aligned[:, :, :4], position_ids)
+    assert torch.equal(aligned[:, :, 4:], position_ids + 100)
+
+
 def test_prefill_multimodal_features_support_multiple_rows():
     features = _prefill_multimodal_features(
         [False, True, False, True],

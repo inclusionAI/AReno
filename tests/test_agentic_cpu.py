@@ -278,6 +278,32 @@ def test_render_messages_for_display_normalizes_tool_call_arguments_for_template
     assert rendered == "rendered"
 
 
+def test_render_messages_for_display_skips_template_for_image_payloads():
+    class _FailingTemplateTokenizer:
+        chat_template = "template"
+
+        def apply_chat_template(self, *args, **kwargs):
+            raise AssertionError("image reward display should not render large image payloads with chat templates")
+
+    image = "a" * 4096
+    messages = [
+        {"role": "system", "content": "system"},
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image}"}},
+                {"type": "text", "text": "choose"},
+            ],
+        },
+        {"role": "assistant", "content": "square five"},
+    ]
+
+    rendered = agentic._render_messages_for_display(_FailingTemplateTokenizer(), messages)
+
+    assert rendered == "system\n<image>\nchoose\nsquare five"
+    assert image not in rendered
+
+
 def test_explicit_trajectory_tokenization_normalizes_null_tool_call_content():
     trainer = _FakeTrainer(world_size=1, tp_size=1)
     trainer.tokenizer = _StrictContentTokenizer()
