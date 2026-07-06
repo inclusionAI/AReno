@@ -61,6 +61,8 @@ class TicTacToeServer(ThreadingHTTPServer):
         self.agent_mode = args.agent_mode
         self.human_player = "O"
         self.events = [f"New game. {_agent_name(self)} controls X and moves first."]
+        self.last_llm_thinking = ""
+        self.last_llm_content = ""
         self.args = args
         self.openai_client = None
 
@@ -160,6 +162,8 @@ def _reset(server: TicTacToeServer, *, agent_first: Any = None, agent_mode: Any 
         f"Started a fresh Tic-Tac-Toe board. {first} moves first.",
         f"You control {server.human_player}; {agent_name} controls {server.agent_player}.",
     ]
+    server.last_llm_thinking = ""
+    server.last_llm_content = ""
 
 
 def _move(server: TicTacToeServer, square: Any, player: str) -> dict[str, Any]:
@@ -234,7 +238,9 @@ def _llm_square(server: TicTacToeServer) -> int:
     )
     raw = response.model_dump() if hasattr(response, "model_dump") else response
     choices = raw.get("choices", []) if isinstance(raw, dict) else []
-    tool_calls = choices[0].get("message", {}).get("tool_calls", []) if choices else []
+    message = choices[0].get("message", {}) if choices else {}
+    server.last_llm_thinking, server.last_llm_content = _split_llm_message_content(message)
+    tool_calls = message.get("tool_calls", [])
     for call in tool_calls:
         if call.get("function", {}).get("name") != "choose_square":
             continue
@@ -243,6 +249,22 @@ def _llm_square(server: TicTacToeServer) -> int:
             args = json.loads(args)
         return int(args["square"])
     raise ValueError("response did not contain choose_square tool call")
+
+
+def _split_llm_message_content(message: dict[str, Any]) -> tuple[str, str]:
+    thinking = message.get("reasoning_content") or message.get("reasoning") or ""
+    content = message.get("content") or ""
+    if not isinstance(thinking, str):
+        thinking = json.dumps(thinking, ensure_ascii=False)
+    if not isinstance(content, str):
+        content = json.dumps(content, ensure_ascii=False)
+    start = content.find("<think>")
+    end = content.find("</think>")
+    if start >= 0 and end > start:
+        embedded = content[start + len("<think>") : end].strip()
+        thinking = f"{thinking.strip()}\n{embedded}".strip() if thinking.strip() else embedded
+        content = (content[:start] + content[end + len("</think>") :]).strip()
+    return thinking.strip(), content.strip()
 
 
 def _board_image_base64(board: game.Board) -> str:
@@ -302,6 +324,8 @@ def _payload(server: TicTacToeServer) -> dict[str, Any]:
         "terminal": game.is_terminal(server.board),
         "legal_moves": game.legal_moves(server.board),
         "events": server.events,
+        "last_llm_thinking": server.last_llm_thinking,
+        "last_llm_content": server.last_llm_content,
     }
 
 
@@ -339,6 +363,7 @@ button:hover{transform:translateY(-1px)}button:disabled{filter:grayscale(.75);op
 .thinking{display:none;margin:10px 0;padding:10px 12px;border:3px solid #27313a;border-radius:16px;background:#dff6ff;font-weight:1000}.thinking.on{display:block}
 .dots::after{content:"";animation:dots 1s steps(4,end) infinite}@keyframes dots{0%{content:""}25%{content:"."}50%{content:".."}75%{content:"..."}100%{content:""}}
 .rules{font-weight:800;line-height:1.45}.rules li{margin:7px 0}.events{display:grid;gap:8px;margin-top:14px}.event{background:#fff;border:3px solid #27313a;border-radius:14px;padding:10px;font-weight:800}
+.llm-trace{display:none;margin-top:14px;background:#fff;border:3px solid #27313a;border-radius:16px;overflow:hidden}.llm-trace.on{display:block}.trace-title{background:#27313a;color:#fff;padding:8px 11px;font-weight:1000}.trace-body{white-space:pre-wrap;max-height:190px;overflow:auto;padding:10px 11px;font:800 13px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;color:#27313a}.trace-answer{border-top:3px solid #27313a;background:#fff7df}
 @media(max-width:760px){.app{grid-template-columns:1fr}h1{font-size:32px}}
 </style>
 </head>
@@ -376,6 +401,12 @@ button:hover{transform:translateY(-1px)}button:disabled{filter:grayscale(.75);op
       <li>First player to make three in a row, column, or diagonal wins.</li>
       <li>LLM mode calls choose_square; Best Move mode uses minimax.</li>
     </ul>
+    <div id="llmTrace" class="llm-trace">
+      <div class="trace-title">LLM thinking</div>
+      <div id="llmThinkingText" class="trace-body"></div>
+      <div class="trace-title trace-answer">LLM answer text</div>
+      <div id="llmAnswerText" class="trace-body"></div>
+    </div>
     <div id="events" class="events"></div>
   </aside>
 </main>
@@ -416,6 +447,11 @@ function render(){
   document.getElementById("agent").disabled = agentBusy || state.turn !== state.agent_player || state.terminal;
   document.getElementById("thinking").innerHTML = `${state.agent_player} is thinking<span class="dots"></span>`;
   document.getElementById("thinking").classList.toggle("on", agentBusy && agentMode === "llm");
+  const thinkingText = state.last_llm_thinking || "";
+  const answerText = state.last_llm_content || "";
+  document.getElementById("llmTrace").classList.toggle("on", Boolean(thinkingText || answerText));
+  document.getElementById("llmThinkingText").textContent = thinkingText || "No thinking content returned.";
+  document.getElementById("llmAnswerText").textContent = answerText || "No assistant text returned; the model may have returned only a tool call.";
   document.getElementById("events").innerHTML = state.events.map(e => `<div class="event">${escapeHtml(e)}</div>`).join("");
 }
 async function maybeAgentMove(){

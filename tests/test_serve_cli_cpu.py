@@ -162,6 +162,43 @@ def test_serve_response_reuses_tool_call_parser():
     assert '"direction":"left"' in choice.message["tool_calls"][0]["function"]["arguments"]
 
 
+def test_serve_tool_call_response_preserves_reasoning_content():
+    tokenizer = _TokenTokenizer(
+        {
+            1: "<think>block the fork</think>",
+            2: "<tool_call>",
+            3: '{"name":"choose_move","arguments":{"direction":"left"}}',
+            4: "</tool_call>",
+        }
+    )
+    request = serve_mod.ChatCompletionRequest(
+        model="areno",
+        messages=[serve_mod.ChatMessage(role="user", content="choose")],
+        tools=[
+            {
+                "type": "function",
+                "function": {"name": "choose_move"},
+            }
+        ],
+        tool_choice={"type": "function", "function": {"name": "choose_move"}},
+    )
+
+    response = serve_mod._build_response_from(
+        tokenizer,
+        "model",
+        QwenToolCallParser(),
+        request,
+        [10, 11],
+        [[1, 2, 3, 4]],
+        ["stop"],
+    )
+
+    choice = response.choices[0]
+    assert choice.message["content"] is None
+    assert choice.message["reasoning_content"] == "block the fork"
+    assert choice.message["tool_calls"][0]["function"]["name"] == "choose_move"
+
+
 def test_serve_chat_template_receives_tools_and_tool_messages():
     tokenizer = _ToolAwareTokenizer()
     messages = [

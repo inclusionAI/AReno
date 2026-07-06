@@ -150,7 +150,10 @@ def build_chat_completion_response(
         finish_reason = "stop" if stop_hit or finish_reasons[index] == "stop" else "length"
         message: dict[str, Any] = {"role": "assistant", "content": display_text}
         if tool_calls:
+            reasoning_content = _extract_think_content(display_text)
             message = {"role": "assistant", "content": None, "tool_calls": tool_calls}
+            if reasoning_content:
+                message["reasoning_content"] = reasoning_content
             finish_reason = "tool_calls"
         choices.append({"index": index, "message": message, "finish_reason": finish_reason})
 
@@ -180,6 +183,14 @@ def _decode(tokenizer: Any, token_ids: list[int], *, skip_special_tokens: bool) 
         return tokenizer.decode(token_ids, skip_special_tokens=skip_special_tokens)
     except TypeError:
         return tokenizer.decode(token_ids)
+
+
+def _extract_think_content(text: str) -> str:
+    start = text.find("<think>")
+    end = text.find("</think>")
+    if start < 0 or end <= start:
+        return ""
+    return text[start + len("<think>") : end].strip()
 
 
 def _trim_stop_strings(text: str, stop: list[str]) -> tuple[str, bool]:
