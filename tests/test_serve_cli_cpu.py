@@ -162,6 +162,34 @@ def test_serve_response_reuses_tool_call_parser():
     assert '"direction":"left"' in choice.message["tool_calls"][0]["function"]["arguments"]
 
 
+def test_serve_text_response_splits_thinking_from_content():
+    class ThinkTokenizer:
+        def decode(self, token_ids, *, skip_special_tokens=False):
+            del token_ids
+            if skip_special_tokens:
+                raise AssertionError("response content should use raw decode")
+            return "<think>plan the answer</think>\n\nFinal answer"
+
+    request = serve_mod.ChatCompletionRequest(
+        model="areno",
+        messages=[serve_mod.ChatMessage(role="user", content="describe")],
+    )
+
+    response = serve_mod._build_response_from(
+        ThinkTokenizer(),
+        "model",
+        QwenToolCallParser(),
+        request,
+        [10, 11],
+        [[1, 2, 3]],
+        ["stop"],
+    )
+
+    choice = response.choices[0]
+    assert choice.message["reasoning_content"] == "plan the answer"
+    assert choice.message["content"] == "Final answer"
+
+
 def test_serve_tool_call_response_preserves_reasoning_content():
     tokenizer = _TokenTokenizer(
         {
