@@ -33,7 +33,7 @@ exist, the loader generates a tiny in-memory demo dataset.
 
 ```bash
 areno train \
-  --ckpt /home/admin/Qwen3.5-0.8B \
+  --ckpt Qwen/Qwen3.5-0.8B \
   --dataset-path /tmp/areno-vl-tictactoe/dataset.jsonl \
   --dataset-loader-fn examples/vl/tictactoe_image/dataset_loader.py \
   --algo sft \
@@ -50,7 +50,7 @@ areno train \
 
 ```bash
 areno train \
-  --ckpt /home/admin/Qwen3.5-0.8B \
+  --ckpt Qwen/Qwen3.5-0.8B \
   --dataset-path /tmp/areno-vl-tictactoe/dataset.jsonl \
   --dataset-loader-fn examples/vl/tictactoe_image/dataset_loader.py \
   --reward-fn-path examples/vl/tictactoe_image/reward.py \
@@ -71,7 +71,7 @@ areno train \
 
 ```bash
 areno train \
-  --ckpt /home/admin/Qwen3.5-0.8B \
+  --ckpt Qwen/Qwen3.5-0.8B \
   --dataset-path /tmp/areno-vl-tictactoe/dataset.jsonl \
   --dataset-loader-fn examples/vl/tictactoe_image/dataset_loader.py \
   --reward-fn-path examples/vl/tictactoe_image/reward.py \
@@ -97,7 +97,7 @@ normalizes `image_path` into a data URL before calling the rollout proxy.
 
 ```bash
 areno train \
-  --ckpt /home/admin/Qwen3.5-0.8B \
+  --ckpt Qwen/Qwen3.5-0.8B \
   --dataset-path /tmp/areno-vl-tictactoe/dataset.jsonl \
   --dataset-loader-fn examples/vl/tictactoe_image/dataset_loader.py \
   --reward-fn-path examples/vl/tictactoe_image/reward.py \
