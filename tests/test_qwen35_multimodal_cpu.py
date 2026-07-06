@@ -5,6 +5,8 @@ import torch
 
 from areno.api import TrainSequence
 from areno.api.backend.areno.backend import _make_train_pack
+from areno.api.multimodal import expand_image_tokens, image_token_counts_from_features
+from areno.api.trainers.sft import _record_to_train_sequence
 from areno.engine.data.rollout_state import _prefill_multimodal_features
 from areno.engine.runtime.train_step import _pack_train_data
 
@@ -108,6 +110,54 @@ def test_qwen35_multimodal_features_split_and_mask():
 
     assert rows[1]["image_embeds"].shape == (1, 4)
     assert mask.tolist() == [False, True, False]
+
+
+def test_qwen35_image_grid_expands_placeholder_tokens():
+    features = {
+        "image_token_id": 99,
+        "image_grid_thw": torch.tensor([[1, 16, 16]]),
+        "spatial_merge_size": 2,
+    }
+
+    counts = image_token_counts_from_features(features)
+    tokens, aligned = expand_image_tokens(
+        [1, 99, 2],
+        image_token_id=99,
+        image_token_counts=counts,
+        aligned_sequences={"prompt_mask": [True, True, False]},
+    )
+
+    assert counts == [64]
+    assert len(tokens) == 66
+    assert tokens.count(99) == 64
+    assert aligned["prompt_mask"] == [True] * 65 + [False]
+
+
+def test_sft_encoded_multimodal_row_expands_image_tokens():
+    class Tokenizer:
+        eos_token_id = 0
+
+    seq = _record_to_train_sequence(
+        {
+            "tokens": [1, 99, 2],
+            "prompt_mask": [True, True, False],
+            "loss_mask": [False, False, True],
+            "features": {
+                "image_token_id": 99,
+                "image_grid_thw": [[1, 16, 16]],
+                "spatial_merge_size": 2,
+            },
+        },
+        Tokenizer(),
+        max_prompt_tokens=128,
+        max_new_tokens=8,
+    )
+
+    assert seq is not None
+    assert len(seq.tokens) == 66
+    assert seq.tokens.count(99) == 64
+    assert seq.prompt_mask == [True] * 65 + [False]
+    assert seq.loss_mask == [False] * 65 + [True]
 
 
 def test_qwen35_vl_projects_pixel_values_to_image_embeds():

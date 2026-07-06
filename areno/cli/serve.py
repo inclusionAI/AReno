@@ -21,6 +21,7 @@ import torch
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from areno.api.multimodal import expand_image_tokens, image_token_counts_from_features
 from areno.api.openai_chat import build_chat_completion_response, messages_to_prompt_tokens
 from areno.api.tokenizer import configure_chat_template_enable_thinking
 from areno.api.tool_call_parser import ToolCallParser, get_tool_call_parser, infer_tool_call_parser_name
@@ -497,7 +498,7 @@ def _encode_messages_with_features(
         raise ValueError("image input requires a checkpoint processor")
     images = _load_message_images(payload)
     text = _processor_chat_text(processor, payload)
-    encoded = processor(text=[text], images=images, return_tensors="pt")
+    encoded = _encode_text_and_images(tokenizer, processor, text, images)
     input_ids = encoded.get("input_ids")
     if input_ids is None:
         raise ValueError("processor did not return input_ids for image request")
@@ -509,7 +510,43 @@ def _encode_messages_with_features(
     image_token_id = _image_token_id(tokenizer, processor)
     if image_token_id is not None:
         features["image_token_id"] = image_token_id
-    return input_ids[0].tolist(), features or None
+    counts = image_token_counts_from_features(features)
+    tokens = input_ids[0].tolist()
+    if counts:
+        if image_token_id is None:
+            raise ValueError("image input requires an image token id from tokenizer or processor")
+        tokens, _ = expand_image_tokens(tokens, image_token_id=image_token_id, image_token_counts=counts)
+    return tokens, features or None
+
+
+def _encode_text_and_images(tokenizer: Any, processor: Any, text: str, images: list[Any]) -> dict[str, Any]:
+    try:
+        return dict(processor(text=[text], images=images, return_tensors="pt"))
+    except TypeError as exc:
+        if "images" not in str(exc):
+            raise
+    image_processor = _image_processor_from_processor(processor)
+    text_encoded = tokenizer([text], return_tensors="pt")
+    image_encoded = image_processor(images=images, return_tensors="pt")
+    encoded = dict(image_encoded)
+    encoded["input_ids"] = text_encoded["input_ids"]
+    if text_encoded.get("attention_mask") is not None:
+        encoded["attention_mask"] = text_encoded["attention_mask"]
+    return encoded
+
+
+def _image_processor_from_processor(processor: Any):
+    nested = getattr(processor, "image_processor", None)
+    if nested is not None:
+        return nested
+    try:
+        from transformers import AutoImageProcessor
+    except ImportError as exc:
+        raise ValueError("image input requires transformers AutoImageProcessor") from exc
+    name_or_path = getattr(processor, "name_or_path", None)
+    if not name_or_path:
+        raise ValueError("image input requires an image processor")
+    return AutoImageProcessor.from_pretrained(name_or_path, trust_remote_code=True)
 
 
 def _chat_message_payload(message: ChatMessage, *, preserve_content_parts: bool = False) -> dict[str, Any]:
@@ -616,6 +653,12 @@ def _image_token_id(tokenizer: Any, processor: Any) -> int | None:
                 token_id = convert(token)
                 if isinstance(token_id, int) and token_id >= 0:
                     return int(token_id)
+    convert = getattr(tokenizer, "convert_tokens_to_ids", None)
+    if callable(convert):
+        for token in ("<|image_pad|>", "<|image|>", "<image>"):
+            token_id = convert(token)
+            if isinstance(token_id, int) and token_id >= 0:
+                return int(token_id)
     return None
 
 

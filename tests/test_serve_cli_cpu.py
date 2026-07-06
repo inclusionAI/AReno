@@ -232,6 +232,46 @@ def test_serve_multimodal_encoder_uses_processor_for_image_data_url():
     assert processor.call_args == (["<image> describe"], 1, "pt")
 
 
+def test_serve_multimodal_encoder_expands_qwen_image_grid_tokens():
+    image = (
+        "data:image/png;base64,"
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADUlEQVR4nGP8z8BQDwAFgwJ/lwJw6QAAAABJRU5ErkJggg=="
+    )
+
+    class FakeProcessor:
+        image_token_id = 99
+
+        def apply_chat_template(self, messages, *, tokenize, add_generation_prompt):
+            del messages, tokenize, add_generation_prompt
+            return "<image> describe"
+
+        def __call__(self, *, text, images, return_tensors):
+            del text, images, return_tensors
+            return {
+                "input_ids": torch.tensor([[1, 99, 2]]),
+                "pixel_values": torch.zeros(256, 1536),
+                "image_grid_thw": torch.tensor([[1, 16, 16]]),
+            }
+
+    tokens, features = serve_mod._encode_messages_with_features(
+        SimpleNamespace(eos_token_id=1),
+        FakeProcessor(),
+        [
+            serve_mod.ChatMessage(
+                role="user",
+                content=[
+                    {"type": "image_url", "image_url": {"url": image}},
+                    {"type": "text", "text": "describe"},
+                ],
+            )
+        ],
+    )
+
+    assert len(tokens) == 66
+    assert tokens.count(99) == 64
+    assert features["image_token_id"] == 99
+
+
 def test_serve_multimodal_encoder_rejects_images_without_processor():
     messages = [serve_mod.ChatMessage(role="user", content=[{"type": "image", "image": "/tmp/missing.png"}])]
 

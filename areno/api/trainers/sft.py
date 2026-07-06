@@ -23,6 +23,7 @@ from typing import Any
 
 import areno.api
 from areno.api.data_utils import prompt_response_to_tokens_and_mask
+from areno.api.multimodal import expand_image_tokens, image_token_counts_from_features
 from areno.api.tokenizer import configure_chat_template_enable_thinking
 
 
@@ -149,6 +150,26 @@ def _record_to_train_sequence(record: Any, tokenizer, *, max_prompt_tokens: int,
         prompt_mask = [bool(item) for item in record["prompt_mask"]]
         if len(tokens) != len(prompt_mask):
             raise ValueError("SFT encoded row `tokens` and `prompt_mask` must have the same length")
+        loss_mask = [bool(item) for item in record.get("loss_mask", [])]
+        if loss_mask and len(loss_mask) != len(tokens):
+            raise ValueError("SFT encoded row `loss_mask` must be empty or have the same length as `tokens`")
+        features = record.get("features")
+        image_counts = image_token_counts_from_features(features if isinstance(features, dict) else None)
+        if image_counts:
+            image_token_id = features.get("image_token_id") if isinstance(features, dict) else None
+            if image_token_id is None:
+                raise ValueError("SFT multimodal encoded rows require features.image_token_id")
+            aligned = {"prompt_mask": prompt_mask}
+            if loss_mask:
+                aligned["loss_mask"] = loss_mask
+            tokens, expanded = expand_image_tokens(
+                tokens,
+                image_token_id=int(image_token_id),
+                image_token_counts=image_counts,
+                aligned_sequences=aligned,
+            )
+            prompt_mask = [bool(item) for item in expanded["prompt_mask"]]
+            loss_mask = [bool(item) for item in expanded.get("loss_mask", [])]
         if len(tokens) < 2:
             return None
         prompt_tokens = prompt_mask.count(True)
@@ -158,11 +179,11 @@ def _record_to_train_sequence(record: Any, tokenizer, *, max_prompt_tokens: int,
         zeros = [0.0] * len(tokens)
         return areno.api.TrainSequence(
             prompt_mask=prompt_mask,
-            loss_mask=[bool(item) for item in record.get("loss_mask", [])],
+            loss_mask=loss_mask,
             tokens=tokens,
             logprobs=zeros,
             advantages=zeros,
-            features=record.get("features"),
+            features=features,
             eos_token_id=int(record.get("eos_token_id", eos_token_id)),
         )
     if "prompt" not in record or "response" not in record:
