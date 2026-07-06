@@ -159,7 +159,7 @@ def test_qwen35_image_grid_keeps_processor_expanded_image_tokens():
     assert aligned["prompt_mask"] == [True] * 66
 
 
-def test_qwen35_image_grid_builds_sglang_style_mrope_positions():
+def test_qwen35_image_grid_builds_expected_mrope_positions():
     features = {
         "image_token_id": 99,
         "image_grid_thw": torch.tensor([[1, 16, 16]]),
@@ -275,6 +275,34 @@ def test_qwen35_vision_merger_uses_exact_gelu_not_hidden_act():
 
     assert torch.allclose(actual, expected)
     assert not torch.allclose(actual, tanh_variant)
+
+
+def test_qwen35_vision_rotary_uses_hw_axis_order():
+    pytest.importorskip("triton")
+    from areno.models.qwen3_5.model import Qwen35VisionTransformer, _apply_vision_rotary
+
+    config = dict(_qwen35_vision_config())
+    config["hidden_size"] = 128
+    config["num_heads"] = 2
+    vision = Qwen35VisionTransformer(config, torch.float32)
+
+    cos, sin = vision._rot_pos_emb([(1, 2, 2)], torch.device("cpu"), torch.float32)
+
+    assert cos.shape == (4, 32)
+    assert sin.shape == (4, 32)
+    assert torch.allclose(cos[1, :16], torch.ones(16))
+    assert torch.allclose(sin[1, :16], torch.zeros(16))
+    assert not torch.allclose(cos[1, 16:], torch.ones(16))
+
+    q = torch.arange(4 * 2 * 64, dtype=torch.float32).view(4, 2, 64)
+    rotated = _apply_vision_rotary(q, cos, sin)
+    duplicated_cos = torch.cat((cos, cos), dim=-1)
+    duplicated_sin = torch.cat((sin, sin), dim=-1)
+    expected = (q * duplicated_cos[:, None, :]) + (
+        torch.cat((-q[..., 32:], q[..., :32]), dim=-1) * duplicated_sin[:, None, :]
+    )
+
+    assert torch.equal(rotated, expected)
 
 
 def test_prefill_multimodal_features_support_multiple_rows():

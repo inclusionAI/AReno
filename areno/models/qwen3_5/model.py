@@ -796,6 +796,9 @@ def _apply_vision_rotary(
     cos: torch.Tensor,
     sin: torch.Tensor,
 ) -> torch.Tensor:
+    if int(cos.shape[-1]) * 2 == int(tensor.shape[-1]):
+        cos = torch.cat((cos, cos), dim=-1)
+        sin = torch.cat((sin, sin), dim=-1)
     rotary_dim = int(cos.shape[-1])
     rotary = tensor[..., :rotary_dim]
     passthrough = tensor[..., rotary_dim:]
@@ -1012,9 +1015,8 @@ class Qwen35VisionTransformer(nn.Module):
         )
         positions = torch.arange(max_grid, device=device, dtype=torch.float32)
         freqs = torch.outer(positions, inv_freq)
-        emb = torch.cat((freqs, freqs), dim=-1).to(dtype=dtype)
-        cos = emb.cos()
-        sin = emb.sin()
+        cos = freqs.cos().to(dtype=dtype)
+        sin = freqs.sin().to(dtype=dtype)
         return cos[ids].flatten(1), sin[ids].flatten(1)
 
     @staticmethod
