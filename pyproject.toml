@@ -43,6 +43,7 @@ dependencies = [
   "transformers>=4.56",
   "huggingface-hub>=0.25",
   "modelscope>=1.20",
+  "addict>=2.4",
   "datasets>=3.3.0",
   "numpy",
   "tensorboard",
