@@ -259,6 +259,24 @@ def test_qwen35_vl_projects_pixel_values_to_image_embeds():
     assert projected["image_embeds"].shape == (1, 16)
 
 
+def test_qwen35_vision_merger_uses_exact_gelu_not_hidden_act():
+    pytest.importorskip("triton")
+    from areno.models.qwen3_5.model import Qwen35VisionMerger
+
+    merger = Qwen35VisionMerger(_qwen35_vision_config(), torch.float32)
+    hidden_states = torch.linspace(-1, 1, steps=32, dtype=torch.float32).view(4, 8)
+
+    with torch.no_grad():
+        normed = merger.norm(hidden_states).view(1, -1)
+        expected = merger.linear_fc2(torch.nn.functional.gelu(merger.linear_fc1(normed), approximate="none"))
+        tanh_variant = merger.linear_fc2(torch.nn.functional.gelu(merger.linear_fc1(normed), approximate="tanh"))
+
+    actual = merger(hidden_states)
+
+    assert torch.allclose(actual, expected)
+    assert not torch.allclose(actual, tanh_variant)
+
+
 def test_prefill_multimodal_features_support_multiple_rows():
     features = _prefill_multimodal_features(
         [False, True, False, True],

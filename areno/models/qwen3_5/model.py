@@ -880,7 +880,6 @@ class Qwen35VisionMerger(nn.Module):
         self.spatial_merge_size = int(vision_config.get("spatial_merge_size", 2))
         self.merge_unit = self.spatial_merge_size * self.spatial_merge_size
         intermediate_size = int(vision_config["intermediate_size"])
-        self.hidden_act = str(vision_config.get("hidden_act", "gelu_pytorch_tanh"))
         self.norm = nn.LayerNorm(self.hidden_size, eps=1e-6, dtype=dtype)
         self.linear_fc1 = nn.Linear(self.hidden_size * self.merge_unit, intermediate_size, bias=True, dtype=dtype)
         self.linear_fc2 = nn.Linear(intermediate_size, self.out_hidden_size, bias=True, dtype=dtype)
@@ -890,7 +889,7 @@ class Qwen35VisionMerger(nn.Module):
         if int(hidden_states.shape[0]) % self.merge_unit:
             raise ValueError("Qwen3.5-VL visual token count must be divisible by spatial_merge_size**2")
         hidden_states = hidden_states.view(-1, self.hidden_size * self.merge_unit)
-        return self.linear_fc2(_vision_activation(self.linear_fc1(hidden_states), self.hidden_act))
+        return self.linear_fc2(F.gelu(self.linear_fc1(hidden_states), approximate="none"))
 
 
 class Qwen35VisionTransformer(nn.Module):
