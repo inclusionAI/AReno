@@ -154,8 +154,8 @@ class Qwen35FullAttention(nn.Module):
             gate = None
         k = k.view(batch, seqlen, self.local_kv_heads, self.head_dim)
         v = v.view(batch, seqlen, self.local_kv_heads, self.head_dim)
-        q = self.q_norm(q)
-        k = self.k_norm(k)
+        q = self.q_norm(q).to(dtype=q.dtype)
+        k = self.k_norm(k).to(dtype=k.dtype)
         q, k = self.rope(q, k, position_ids)
         out = (
             self._forward_infer(q, k, v, infer_meta)
@@ -490,11 +490,10 @@ class Qwen35DecoderLayer(nn.Module):
         infer_meta: InferMeta | None,
     ) -> torch.Tensor:
         residual = hidden_states
-        hidden_states = residual + self.attention(
-            self.input_layernorm(hidden_states), position_ids, train_meta, infer_meta
-        )
+        normed = self.input_layernorm(hidden_states).to(dtype=residual.dtype)
+        hidden_states = residual + self.attention(normed, position_ids, train_meta, infer_meta)
         residual = hidden_states
-        hidden_states = residual + self.mlp(self.post_attention_layernorm(hidden_states))
+        hidden_states = residual + self.mlp(self.post_attention_layernorm(hidden_states).to(dtype=residual.dtype))
         return hidden_states
 
 
@@ -621,7 +620,9 @@ class Qwen35MoeDecoderLayer(Qwen35DecoderLayer):
         train_meta: TrainMeta | None,
         infer_meta: InferMeta | None,
     ) -> torch.Tensor:
-        return self.attention(self.input_layernorm(hidden_states), position_ids, train_meta, infer_meta)
+        return self.attention(
+            self.input_layernorm(hidden_states).to(dtype=hidden_states.dtype), position_ids, train_meta, infer_meta
+        )
 
     def forward(
         self,
@@ -641,7 +642,7 @@ class Qwen35MoeDecoderLayer(Qwen35DecoderLayer):
             infer_meta=infer_meta,
         )
         residual = hidden_states
-        hidden_states = residual + self.mlp(self.post_attention_layernorm(hidden_states))
+        hidden_states = residual + self.mlp(self.post_attention_layernorm(hidden_states).to(dtype=residual.dtype))
         return hidden_states
 
 
@@ -1137,7 +1138,7 @@ class Qwen35ForCausalLM(nn.Module):
                         train_meta=train_meta,
                         infer_meta=infer_meta,
                     )
-            hidden_states = self.norm(hidden_states)
+            hidden_states = self.norm(hidden_states).to(dtype=hidden_states.dtype)
             logits_shard = self.lm_head(hidden_states)
         return CausalLMOutput(logits_shard=logits_shard, hidden_states=hidden_states)
 
