@@ -230,6 +230,9 @@ def test_serve_multimodal_encoder_uses_processor_for_image_data_url():
     assert features["image_token_id"] == 99
     assert torch.equal(features["image_embeds"], torch.ones(1, 4))
     assert processor.call_args == (["<image> describe"], 1, "pt")
+    assert processor.messages[0]["content"][0]["type"] == "image"
+    assert processor.messages[0]["content"][0]["image"] == image
+    assert "image_url" not in processor.messages[0]["content"][0]
 
 
 def test_serve_multimodal_encoder_expands_qwen_image_grid_tokens():

@@ -643,12 +643,39 @@ def _load_image_part(part: dict[str, Any]) -> Any:
 
 def _processor_chat_text(processor: Any, messages: list[dict[str, Any]]) -> str:
     apply_chat_template = getattr(processor, "apply_chat_template", None)
+    messages = _normalize_processor_multimodal_messages(messages)
     if callable(apply_chat_template):
         rendered = apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         if isinstance(rendered, str):
             return rendered
     text_messages = [{**message, "content": _message_content(message.get("content"))} for message in messages]
     return _messages_fallback_text(text_messages)
+
+
+def _normalize_processor_multimodal_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Convert OpenAI image_url parts to the Transformers processor chat format."""
+
+    normalized = []
+    for message in messages:
+        item = dict(message)
+        content = item.get("content")
+        if isinstance(content, list):
+            item["content"] = [_normalize_processor_content_part(part) for part in content]
+        normalized.append(item)
+    return normalized
+
+
+def _normalize_processor_content_part(part: Any) -> Any:
+    if not isinstance(part, dict) or part.get("type") != "image_url":
+        return part
+    image_url = part.get("image_url")
+    if not isinstance(image_url, dict) or "url" not in image_url:
+        raise ValueError("image_url content must be an object with a url field")
+    normalized = dict(part)
+    normalized["type"] = "image"
+    normalized["image"] = image_url["url"]
+    normalized.pop("image_url", None)
+    return normalized
 
 
 def _image_token_id(tokenizer: Any, processor: Any) -> int | None:
