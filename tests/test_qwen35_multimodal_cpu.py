@@ -12,6 +12,7 @@ from areno.api.multimodal import (
 )
 from areno.api.trainers.sft import _record_to_train_sequence
 from areno.engine.data.rollout_state import _prefill_multimodal_features
+from areno.engine.layers.rotary import PartialRotaryEmbedding
 from areno.engine.runtime.train_step import _pack_train_data
 
 
@@ -154,6 +155,36 @@ def test_qwen35_image_grid_builds_sglang_style_mrope_positions():
     assert position_ids[:, 8].tolist() == [1, 1, 8]
     assert position_ids[:, 64].tolist() == [1, 8, 8]
     assert position_ids[:, -2:].tolist() == [[9, 10], [9, 10], [9, 10]]
+
+
+def test_qwen35_mrope_selects_axes_before_repeating_half_dim_cache():
+    rope = PartialRotaryEmbedding(
+        head_dim=8,
+        max_position=8,
+        theta=10000.0,
+        partial_rotary_factor=1.0,
+        is_neox_style=True,
+        mrope_section=(2, 1, 1),
+        mrope_interleaved=True,
+    )
+    position_ids = torch.tensor([[[1, 2]], [[3, 4]], [[5, 6]]], dtype=torch.long)
+
+    cos, sin = rope._cos_sin(position_ids, torch.float32)
+
+    half_dim = rope.rope_dim // 2
+    expected_half_cos = rope.cos_cached[:, :half_dim][position_ids]
+    expected_half_sin = rope.sin_cached[:, :half_dim][position_ids]
+    expected_cos = expected_half_cos[0].clone()
+    expected_sin = expected_half_sin[0].clone()
+    expected_cos[..., 1:3:3] = expected_half_cos[1, ..., 1:3:3]
+    expected_sin[..., 1:3:3] = expected_half_sin[1, ..., 1:3:3]
+    expected_cos[..., 2:3:3] = expected_half_cos[2, ..., 2:3:3]
+    expected_sin[..., 2:3:3] = expected_half_sin[2, ..., 2:3:3]
+    expected_cos = torch.cat((expected_cos, expected_cos), dim=-1).unsqueeze(2)
+    expected_sin = torch.cat((expected_sin, expected_sin), dim=-1).unsqueeze(2)
+
+    assert torch.equal(cos, expected_cos)
+    assert torch.equal(sin, expected_sin)
 
 
 def test_sft_encoded_multimodal_row_expands_image_tokens():

@@ -122,15 +122,17 @@ class PartialRotaryEmbedding(nn.Module):
             cos = self.cos_cached[position_ids].unsqueeze(2).to(dtype=dtype)
             sin = self.sin_cached[position_ids].unsqueeze(2).to(dtype=dtype)
             return cos, sin
-        cos = self.cos_cached[mrope_positions]
-        sin = self.sin_cached[mrope_positions]
+        half_dim = self.rope_dim // 2
+        cos = self.cos_cached[:, :half_dim][mrope_positions]
+        sin = self.sin_cached[:, :half_dim][mrope_positions]
         if self.mrope_interleaved:
             cos = _apply_interleaved_mrope(cos, self.mrope_section)
             sin = _apply_interleaved_mrope(sin, self.mrope_section)
         else:
-            sections = tuple(section * 2 for section in self.mrope_section)
-            cos = torch.cat([part[idx] for idx, part in enumerate(cos.split(sections, dim=-1))], dim=-1)
-            sin = torch.cat([part[idx] for idx, part in enumerate(sin.split(sections, dim=-1))], dim=-1)
+            cos = torch.cat([part[idx] for idx, part in enumerate(cos.split(self.mrope_section, dim=-1))], dim=-1)
+            sin = torch.cat([part[idx] for idx, part in enumerate(sin.split(self.mrope_section, dim=-1))], dim=-1)
+        cos = torch.cat((cos, cos), dim=-1)
+        sin = torch.cat((sin, sin), dim=-1)
         return cos.unsqueeze(2).to(dtype=dtype), sin.unsqueeze(2).to(dtype=dtype)
 
 
