@@ -917,8 +917,8 @@ def _load_modelscope_dataset_ref(name: str, config: str | None, split: str):
     except ImportError as exc:
         raise RuntimeError(f"ModelScope dataset loading requires modelscope dataset dependencies: {exc}") from exc
     if config is None:
-        return MsDataset.load(name, split=split).to_hf_dataset()
-    return MsDataset.load(name, subset_name=config, split=split).to_hf_dataset()
+        return MsDataset.load(name, split=split, trust_remote_code=True).to_hf_dataset()
+    return MsDataset.load(name, subset_name=config, split=split, trust_remote_code=True).to_hf_dataset()
 
 
 def _load_raw_dataset_files(builder: str, data_files, *, load_dataset):

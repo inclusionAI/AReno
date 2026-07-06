@@ -427,7 +427,7 @@ class ConfigAndDataTest(unittest.TestCase):
             )
 
         self.assertEqual(dataset, [{"source": "modelscope"}])
-        self.assertEqual(calls, [(("gsm8k",), {"subset_name": "main", "split": "test"})])
+        self.assertEqual(calls, [(("gsm8k",), {"subset_name": "main", "split": "test", "trust_remote_code": True})])
 
     def test_train_cli_preflight_rejects_missing_dataset_loader_file(self):
         """Dataset loader path failures should be UsageError before backend init."""
