@@ -27,7 +27,7 @@ from areno.api.multimodal import (
     mrope_position_ids_from_image_grid,
 )
 from areno.api.openai_chat import build_chat_completion_response, messages_to_prompt_tokens
-from areno.api.tokenizer import configure_chat_template_enable_thinking
+from areno.api.tokenizer import apply_chat_template_with_options, configure_chat_template_enable_thinking
 from areno.api.tool_call_parser import ToolCallParser, get_tool_call_parser, infer_tool_call_parser_name
 from areno.cli.model_refs import resolve_model_ref
 from areno.engine import ArenoEngine
@@ -190,6 +190,7 @@ def create_app(
     tokenizer = load_tokenizer(model_path)
     processor = load_processor(model_path)
     configure_chat_template_enable_thinking(tokenizer, chat_template_enable_thinking)
+    configure_chat_template_enable_thinking(processor, chat_template_enable_thinking)
     attn_backend, attn_warning = _resolve_serve_attn_backend(
         model_path=model_path,
         attn_backend=attn_backend,
@@ -646,7 +647,7 @@ def _processor_chat_text(processor: Any, messages: list[dict[str, Any]], *, tool
         kwargs = {"tokenize": False, "add_generation_prompt": True}
         if tools:
             kwargs["tools"] = tools
-        rendered = apply_chat_template(messages, **kwargs)
+        rendered = apply_chat_template_with_options(processor, messages, **kwargs)
         if isinstance(rendered, str):
             return rendered
     if tools:

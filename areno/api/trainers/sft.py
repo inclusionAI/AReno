@@ -61,6 +61,7 @@ class SFTTrainer:
         tokenizer = self.areno.get_tokenizer()
         processor = self.areno.get_processor()
         configure_chat_template_enable_thinking(tokenizer, getattr(self.config, "chat_template_enable_thinking", None))
+        configure_chat_template_enable_thinking(processor, getattr(self.config, "chat_template_enable_thinking", None))
         step = 0
         for epoch in range(self.config.epochs):
             self.logger.info("epoch=%d stage=epoch_start", epoch)

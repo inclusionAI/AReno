@@ -256,6 +256,46 @@ def test_serve_chat_template_can_disable_thinking():
     assert tokenizer.calls[0][1]["enable_thinking"] is False
 
 
+def test_serve_multimodal_processor_chat_template_can_disable_thinking():
+    image = (
+        "data:image/png;base64,"
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADUlEQVR4nGP8z8BQDwAFgwJ/lwJw6QAAAABJRU5ErkJggg=="
+    )
+
+    class FakeProcessor:
+        image_token_id = 99
+
+        def __init__(self):
+            self.calls = []
+
+        def apply_chat_template(self, messages, **kwargs):
+            self.calls.append((messages, dict(kwargs)))
+            return "<image> describe"
+
+        def __call__(self, *, text, images, return_tensors):
+            del text, images, return_tensors
+            return {
+                "input_ids": torch.tensor([[1, 99, 2]]),
+                "image_embeds": torch.ones(1, 4),
+            }
+
+    processor = FakeProcessor()
+    configure_chat_template_enable_thinking(processor, False)
+    messages = [
+        serve_mod.ChatMessage(
+            role="user",
+            content=[
+                {"type": "image_url", "image_url": {"url": image}},
+                {"type": "text", "text": "describe"},
+            ],
+        )
+    ]
+
+    serve_mod._encode_messages_with_features(SimpleNamespace(eos_token_id=1), processor, messages)
+
+    assert processor.calls[0][1]["enable_thinking"] is False
+
+
 def test_serve_multimodal_encoder_uses_processor_for_image_data_url():
     image = (
         "data:image/png;base64,"

@@ -127,7 +127,7 @@ def _processor_chat_text(processor: Any, messages: list[dict[str, Any]], *, tool
         kwargs = {"tokenize": False, "add_generation_prompt": True}
         if tools:
             kwargs["tools"] = tools
-        rendered = apply_chat_template(messages, **kwargs)
+        rendered = apply_chat_template_with_options(processor, messages, **kwargs)
         if isinstance(rendered, str):
             return rendered
     tokenizer = getattr(processor, "tokenizer", None)

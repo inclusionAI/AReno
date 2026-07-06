@@ -11,6 +11,7 @@ from areno.api.multimodal import (
     image_token_counts_from_features,
     mrope_position_ids_from_image_grid,
 )
+from areno.api.tokenizer import configure_chat_template_enable_thinking
 from areno.api.trainers.sft import _record_to_train_sequence
 from areno.engine.data.rollout_state import _prefill_multimodal_features
 from areno.engine.layers.rotary import PartialRotaryEmbedding
@@ -112,6 +113,39 @@ def test_multimodal_prompt_passes_tools_to_processor_chat_template():
     assert processor.kwargs["tools"] == tools
     assert processor.messages[0]["content"][0]["type"] == "image"
     assert processor.call_args == (["<image> choose"], 1, "pt")
+
+
+def test_multimodal_prompt_passes_disable_thinking_to_processor_chat_template():
+    image = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADUlEQVR4nGP8z8BQDwAFgwJ/lwJw6QAAAABJRU5ErkJggg=="
+
+    class Processor:
+        image_token_id = 99
+
+        def apply_chat_template(self, messages, **kwargs):
+            del messages
+            self.kwargs = dict(kwargs)
+            return "<image> choose"
+
+        def __call__(self, *, text, images, return_tensors):
+            del text, images, return_tensors
+            return {
+                "input_ids": torch.tensor([[1, 99, 2]]),
+                "image_embeds": torch.ones(1, 4),
+            }
+
+    processor = Processor()
+    configure_chat_template_enable_thinking(processor, False)
+
+    encode_multimodal_prompt(
+        tokenizer=object(),
+        processor=processor,
+        record={
+            "prompt": "choose",
+            "image_base64": image,
+        },
+    )
+
+    assert processor.kwargs["enable_thinking"] is False
 
 
 def test_packed_train_leaves_multimodal_features_dense():
