@@ -733,7 +733,10 @@ class InferenceManager:
         new_cache_seqlens = torch.tensor(
             [len(state.prompts[int(row)]) for row in new_rows.tolist()], device=self.device, dtype=torch.int32
         )
-        new_position_ids = new_cache_seqlens.to(torch.long)
+        new_position_deltas = torch.tensor(
+            state.decode_position_deltas(new_rows.detach().cpu().tolist()), device=self.device, dtype=torch.long
+        )
+        new_position_ids = new_cache_seqlens.to(torch.long) + new_position_deltas
         new_block_table = prefill.block_table.to(self.device, non_blocking=True).int()
         remove = torch.zeros(int(new_rows.numel()), device=self.device, dtype=torch.bool)
         finished = None

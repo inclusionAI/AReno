@@ -23,7 +23,11 @@ from typing import Any
 
 import areno.api
 from areno.api.data_utils import prompt_response_to_tokens_and_mask
-from areno.api.multimodal import expand_image_tokens, image_token_counts_from_features
+from areno.api.multimodal import (
+    expand_image_tokens,
+    image_token_counts_from_features,
+    mrope_position_ids_from_image_grid,
+)
 from areno.api.tokenizer import configure_chat_template_enable_thinking
 
 
@@ -170,6 +174,14 @@ def _record_to_train_sequence(record: Any, tokenizer, *, max_prompt_tokens: int,
             )
             prompt_mask = [bool(item) for item in expanded["prompt_mask"]]
             loss_mask = [bool(item) for item in expanded.get("loss_mask", [])]
+            mrope_position_ids = mrope_position_ids_from_image_grid(
+                tokens,
+                image_token_id=int(image_token_id),
+                features=features,
+            )
+            if mrope_position_ids is not None:
+                features = dict(features)
+                features["mrope_position_ids"] = mrope_position_ids
         if len(tokens) < 2:
             return None
         prompt_tokens = prompt_mask.count(True)

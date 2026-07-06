@@ -119,6 +119,8 @@ class ModelConfig:
     use_bias: bool = False
     layer_group_size: int = 1
     partial_rotary_factor: float = 1.0
+    mrope_section: tuple[int, int, int] | None = None
+    mrope_interleaved: bool = False
     num_experts: int | None = None
     num_experts_per_tok: int = 1
     n_group: int = 1

@@ -21,7 +21,11 @@ import torch
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from areno.api.multimodal import expand_image_tokens, image_token_counts_from_features
+from areno.api.multimodal import (
+    expand_image_tokens,
+    image_token_counts_from_features,
+    mrope_position_ids_from_image_grid,
+)
 from areno.api.openai_chat import build_chat_completion_response, messages_to_prompt_tokens
 from areno.api.tokenizer import configure_chat_template_enable_thinking
 from areno.api.tool_call_parser import ToolCallParser, get_tool_call_parser, infer_tool_call_parser_name
@@ -516,6 +520,13 @@ def _encode_messages_with_features(
         if image_token_id is None:
             raise ValueError("image input requires an image token id from tokenizer or processor")
         tokens, _ = expand_image_tokens(tokens, image_token_id=image_token_id, image_token_counts=counts)
+        mrope_position_ids = mrope_position_ids_from_image_grid(
+            tokens,
+            image_token_id=image_token_id,
+            features=features,
+        )
+        if mrope_position_ids is not None:
+            features["mrope_position_ids"] = mrope_position_ids
     return tokens, features or None
 
 

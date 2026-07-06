@@ -41,18 +41,6 @@ def _reference_attention(
     return torch.matmul(probs, v)
 
 
-def _reference_full_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, cu_seqlens: torch.Tensor) -> torch.Tensor:
-    outs = []
-    cu = cu_seqlens.to(device="cpu", dtype=torch.long).tolist()
-    for start, end in zip(cu[:-1], cu[1:], strict=True):
-        q_seg = q[start:end].transpose(0, 1).unsqueeze(0)
-        k_seg = k[start:end].transpose(0, 1).unsqueeze(0)
-        v_seg = v[start:end].transpose(0, 1).unsqueeze(0)
-        out = torch.nn.functional.scaled_dot_product_attention(q_seg, k_seg, v_seg, dropout_p=0.0, is_causal=False)
-        outs.append(out.squeeze(0).transpose(0, 1))
-    return torch.cat(outs, dim=0) if outs else q.new_empty(q.shape)
-
-
 def _reference_paged_decode_attention(
     q: torch.Tensor,
     k_cache: torch.Tensor,
@@ -219,38 +207,6 @@ def areno_varlen_causal_attention(
     if q.shape[2] != k.shape[2] or q.shape[2] != v.shape[2]:
         raise ValueError("areno_varlen_causal_attention head dim mismatch")
     return _ArenoVarlenCausalAttention.apply(q, k, v, cu_seqlens, _window_left(window_left), _scale(q, softmax_scale))
-
-
-@torch._dynamo.disable
-def areno_varlen_attention(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    cu_seqlens: torch.Tensor,
-    *,
-    softmax_scale: float | None = None,
-) -> torch.Tensor:
-    """Apply packed bidirectional attention to flat ``(tokens, heads, head_dim)`` tensors."""
-
-    if torch.is_grad_enabled() or not (q.is_cuda and k.is_cuda and v.is_cuda and cu_seqlens.is_cuda):
-        return _reference_full_attention(q, k, v, cu_seqlens)
-    if q.dim() != 3 or k.dim() != 3 or v.dim() != 3:
-        raise ValueError("areno_varlen_attention expects q/k/v tensors shaped (tokens, heads, head_dim)")
-    if cu_seqlens.dim() != 1 or cu_seqlens.dtype != torch.int32:
-        raise ValueError("areno_varlen_attention expects an int32 1D cu_seqlens tensor")
-    if q.shape[0] != k.shape[0] or q.shape[0] != v.shape[0]:
-        raise ValueError("areno_varlen_attention token count mismatch")
-    if q.shape[1] != k.shape[1] or q.shape[1] != v.shape[1]:
-        raise ValueError("areno_varlen_attention expects matching q/k/v head counts")
-    if q.shape[2] != k.shape[2] or q.shape[2] != v.shape[2]:
-        raise ValueError("areno_varlen_attention head dim mismatch")
-    return _extension().areno_varlen_attention_forward(
-        q.contiguous(),
-        k.contiguous(),
-        v.contiguous(),
-        cu_seqlens.contiguous(),
-        _scale(q, softmax_scale),
-    )
 
 
 class _ArenoPagedCausalAttentionDecode(torch.autograd.Function):

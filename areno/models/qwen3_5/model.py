@@ -125,6 +125,8 @@ class Qwen35FullAttention(nn.Module):
             config.rope_theta,
             config.partial_rotary_factor,
             is_neox_style=True,
+            mrope_section=config.mrope_section,
+            mrope_interleaved=config.mrope_interleaved,
         )
         self.attn_backend = config.attn_backend
         self.train_backend = build_train_attention_backend(self.attn_backend)
@@ -661,7 +663,9 @@ def _features_by_row(
 def _select_feature_row(features: dict[str, Any], row_idx: int, batch: int) -> dict[str, Any]:
     row = {}
     for key, value in features.items():
-        if isinstance(value, torch.Tensor) and value.ndim > 0 and int(value.shape[0]) == batch:
+        if key == "mrope_position_ids":
+            row[key] = value
+        elif isinstance(value, torch.Tensor) and value.ndim > 0 and int(value.shape[0]) == batch:
             row[key] = value[row_idx]
         elif isinstance(value, list) and len(value) == batch:
             row[key] = value[row_idx]
@@ -819,8 +823,7 @@ def _qwen35_vision_varlen_sdpa_no_compile(
 ) -> torch.Tensor:
     """Run non-causal varlen vision attention through PyTorch SDPA.
 
-    The native AReno varlen attention path is useful as a portable fallback,
-    but Qwen3.5-VL vision attention is short dense self-attention where PyTorch
+    Qwen3.5-VL vision attention is short dense self-attention where PyTorch
     SDPA can use optimized flash/mem-efficient kernels. Keeping this helper
     Dynamo-opaque also avoids recompiles for request-dependent image grids.
     """
@@ -872,6 +875,7 @@ class Qwen35VisionMerger(nn.Module):
         self.spatial_merge_size = int(vision_config.get("spatial_merge_size", 2))
         self.merge_unit = self.spatial_merge_size * self.spatial_merge_size
         intermediate_size = int(vision_config["intermediate_size"])
+        self.hidden_act = str(vision_config.get("hidden_act", "gelu_pytorch_tanh"))
         self.norm = nn.LayerNorm(self.hidden_size, eps=1e-6, dtype=dtype)
         self.linear_fc1 = nn.Linear(self.hidden_size * self.merge_unit, intermediate_size, bias=True, dtype=dtype)
         self.linear_fc2 = nn.Linear(intermediate_size, self.out_hidden_size, bias=True, dtype=dtype)
@@ -881,7 +885,7 @@ class Qwen35VisionMerger(nn.Module):
         if int(hidden_states.shape[0]) % self.merge_unit:
             raise ValueError("Qwen3.5-VL visual token count must be divisible by spatial_merge_size**2")
         hidden_states = hidden_states.view(-1, self.hidden_size * self.merge_unit)
-        return self.linear_fc2(F.gelu(self.linear_fc1(hidden_states), approximate="none"))
+        return self.linear_fc2(_vision_activation(self.linear_fc1(hidden_states), self.hidden_act))
 
 
 class Qwen35VisionTransformer(nn.Module):
@@ -953,10 +957,8 @@ class Qwen35VisionTransformer(nn.Module):
         dtype: torch.dtype,
     ) -> torch.Tensor:
         side = self.num_grid_per_side
-        h_idxs = (torch.arange(height, dtype=torch.float32, device=device) + 0.5) * (side / height) - 0.5
-        w_idxs = (torch.arange(width, dtype=torch.float32, device=device) + 0.5) * (side / width) - 0.5
-        h_idxs = h_idxs.clamp_(0, side - 1)
-        w_idxs = w_idxs.clamp_(0, side - 1)
+        h_idxs = torch.linspace(0, side - 1, height, dtype=torch.float32, device=device)
+        w_idxs = torch.linspace(0, side - 1, width, dtype=torch.float32, device=device)
         h_floor = h_idxs.to(torch.long)
         w_floor = w_idxs.to(torch.long)
         h_ceil = torch.clamp(h_floor + 1, max=side - 1)
@@ -1036,6 +1038,40 @@ def _tensor_feature(
     return value.to(device=device, dtype=dtype or value.dtype)
 
 
+def _position_ids_from_features(
+    features: dict[str, Any] | list[dict[str, Any] | None] | None,
+    *,
+    batch: int,
+    seqlen: int,
+    device: torch.device,
+) -> torch.Tensor | None:
+    if features is None:
+        return None
+    rows = _features_by_row(features, batch)
+    row_positions = [
+        _tensor_feature(row, "mrope_position_ids", device, torch.long) if row is not None else None for row in rows
+    ]
+    if not any(item is not None for item in row_positions):
+        return None
+    base = torch.arange(seqlen, device=device, dtype=torch.long).view(1, 1, -1).expand(3, batch, -1).clone()
+    for row_idx, item in enumerate(row_positions):
+        if item is None:
+            continue
+        if item.ndim == 3 and int(item.shape[0]) == 3 and int(item.shape[1]) == 1:
+            item = item[:, 0, :]
+        elif item.ndim == 3 and int(item.shape[0]) == 1 and int(item.shape[1]) == 3:
+            item = item[0]
+        elif item.ndim == 3 and int(item.shape[0]) == 3:
+            item = item[:, row_idx, :]
+        elif item.ndim != 2 or int(item.shape[0]) != 3:
+            raise ValueError(
+                "mrope_position_ids must have shape (3, seq_len), (3, batch, seq_len), or (batch, 3, seq_len)"
+            )
+        length = min(int(item.shape[-1]), seqlen)
+        base[:, row_idx, :length] = item[:, :length]
+    return base
+
+
 class Qwen35ForCausalLM(nn.Module):
     def __init__(self, config: ModelConfig):
         super().__init__()
@@ -1055,6 +1091,14 @@ class Qwen35ForCausalLM(nn.Module):
     ) -> CausalLMOutput:
         hidden_states = self.embed_tokens(input_ids)
         hidden_states = self._apply_multimodal_features(hidden_states, input_ids, features)
+        feature_position_ids = _position_ids_from_features(
+            features,
+            batch=int(input_ids.shape[0]),
+            seqlen=int(input_ids.shape[1]),
+            device=input_ids.device,
+        )
+        if feature_position_ids is not None:
+            position_ids = feature_position_ids
         return self.forward_from_embeddings(hidden_states, position_ids, train_meta, infer_meta)
 
     def forward_from_embeddings(
@@ -1345,6 +1389,15 @@ class Qwen35MoeForCausalLM(Qwen35ForCausalLM):
             layer.mlp.clear_infer_weights()
 
 
+def _mrope_section(rope: dict[str, Any]) -> tuple[int, int, int] | None:
+    section = rope.get("mrope_section")
+    if section is None:
+        return None
+    if len(section) != 3:
+        raise ValueError("Qwen3.5 mrope_section must contain three axis lengths")
+    return tuple(int(item) for item in section)
+
+
 class Qwen35Adapter(ModelAdapter):
     name = "qwen3_5"
 
@@ -1385,6 +1438,8 @@ class Qwen35Adapter(ModelAdapter):
             hidden_act=str(text.get("hidden_act", "silu")),
             layer_types=layer_types,
             partial_rotary_factor=float(rope.get("partial_rotary_factor", text.get("partial_rotary_factor", 0.25))),
+            mrope_section=_mrope_section(rope),
+            mrope_interleaved=bool(rope.get("mrope_interleaved", False)),
             sequence_parallel=bool(text.get("sequence_parallel", True)),
             attn_output_gate=bool(text.get("attn_output_gate", True)),
             linear_conv_kernel_dim=int(text.get("linear_conv_kernel_dim", 4)),
@@ -1505,6 +1560,8 @@ class Qwen35MoeAdapter(ModelAdapter):
             hidden_act=str(text.get("hidden_act", "silu")),
             layer_types=layer_types,
             partial_rotary_factor=float(rope.get("partial_rotary_factor", text.get("partial_rotary_factor", 0.25))),
+            mrope_section=_mrope_section(rope),
+            mrope_interleaved=bool(rope.get("mrope_interleaved", False)),
             sequence_parallel=False,
             attn_output_gate=bool(text.get("attn_output_gate", True)),
             linear_conv_kernel_dim=int(text.get("linear_conv_kernel_dim", 4)),

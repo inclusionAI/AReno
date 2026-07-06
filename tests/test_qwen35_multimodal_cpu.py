@@ -5,7 +5,11 @@ import torch
 
 from areno.api import TrainSequence
 from areno.api.backend.areno.backend import _make_train_pack
-from areno.api.multimodal import expand_image_tokens, image_token_counts_from_features
+from areno.api.multimodal import (
+    expand_image_tokens,
+    image_token_counts_from_features,
+    mrope_position_ids_from_image_grid,
+)
 from areno.api.trainers.sft import _record_to_train_sequence
 from areno.engine.data.rollout_state import _prefill_multimodal_features
 from areno.engine.runtime.train_step import _pack_train_data
@@ -133,6 +137,25 @@ def test_qwen35_image_grid_expands_placeholder_tokens():
     assert aligned["prompt_mask"] == [True] * 65 + [False]
 
 
+def test_qwen35_image_grid_builds_sglang_style_mrope_positions():
+    features = {
+        "image_token_id": 99,
+        "image_grid_thw": torch.tensor([[1, 16, 16]]),
+        "spatial_merge_size": 2,
+    }
+    counts = image_token_counts_from_features(features)
+    tokens, _ = expand_image_tokens([1, 99, 2, 3], image_token_id=99, image_token_counts=counts)
+
+    position_ids = mrope_position_ids_from_image_grid(tokens, image_token_id=99, features=features)
+
+    assert position_ids.shape == (3, len(tokens))
+    assert position_ids[:, 0].tolist() == [0, 0, 0]
+    assert position_ids[:, 1].tolist() == [1, 1, 1]
+    assert position_ids[:, 8].tolist() == [1, 1, 8]
+    assert position_ids[:, 64].tolist() == [1, 8, 8]
+    assert position_ids[:, -2:].tolist() == [[9, 10], [9, 10], [9, 10]]
+
+
 def test_sft_encoded_multimodal_row_expands_image_tokens():
     class Tokenizer:
         eos_token_id = 0
@@ -174,7 +197,6 @@ def test_qwen35_vl_projects_pixel_values_to_image_embeds():
         }
     )
     model = adapter.build(config)
-    input_ids = torch.tensor([[1, 99, 2]])
     features = {
         "pixel_values": torch.zeros(4, 3 * 1 * 2 * 2),
         "image_token_id": 99,
@@ -196,3 +218,16 @@ def test_prefill_multimodal_features_support_multiple_rows():
 
     assert features["image_token_mask"].tolist() == [False, True, False, True]
     assert len(features["image_feature_rows"]) == 2
+
+
+def test_prefill_multimodal_features_carries_mrope_positions():
+    mrope_positions = torch.arange(12, dtype=torch.long).view(3, 4)
+
+    features = _prefill_multimodal_features(
+        [False, False, False, False],
+        [],
+        [mrope_positions[:, :2], mrope_positions[:, 2:]],
+    )
+
+    assert "image_token_mask" not in features
+    assert torch.equal(features["mrope_position_ids"], mrope_positions)
