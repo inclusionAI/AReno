@@ -55,6 +55,7 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "algo",
             "ckpt",
             "dataset_path",
+            "model_hub",
             "dataset_loader_fn",
             "tune_params",
             "mem_frac",
@@ -170,12 +171,15 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
     args = SimpleNamespace(**options)
     args.max_steps = getattr(args, "max_steps", None)
     args.score_micro_bs = getattr(args, "score_micro_bs", 8)
+    args.model_hub = getattr(args, "model_hub", "hf")
     # Required-argument checks live here so offline trainers can omit reward
     # inputs while RL algorithms still require a reward function or model.
     if args.ckpt is None:
         raise click.UsageError("--ckpt is required")
     if args.dataset_path is None:
         raise click.UsageError("--dataset-path is required")
+    if args.model_hub not in {"hf", "modelscope"}:
+        raise click.UsageError("--model-hub must be one of: hf, modelscope")
     algorithm = _algorithm_for_cli(args.algo)
     if algorithm.name == "sft" and args.dataset_loader_fn is None:
         raise click.UsageError("--dataset-loader-fn is required for --algo sft")
@@ -286,6 +290,7 @@ def _format_training_config_summary(
             [
                 ("ckpt", config.ckpt),
                 ("dataset_path", config.dataset_path),
+                ("model_hub", config.model_hub),
                 ("dataset_loader", _format_optional(config.dataset_loader_fn)),
                 (
                     "reward_fn",
@@ -559,6 +564,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
     # trainers do not receive rollout/reward/GSPO fields by construction.
     args.max_steps = getattr(args, "max_steps", None)
     args.score_micro_bs = getattr(args, "score_micro_bs", 8)
+    args.model_hub = getattr(args, "model_hub", "hf")
     algorithm = get_algorithm(args.algo)
     chat_template_enable_thinking = False if args.disable_thinking else None
     if algorithm.name == "dpo":
@@ -566,6 +572,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             algo=algorithm.name,
             ckpt=args.ckpt,
             dataset_path=args.dataset_path,
+            model_hub=args.model_hub,
             dataset_loader_fn=args.dataset_loader_fn,
             save_path=args.save_path,
             save_interval=args.save_interval,
@@ -606,6 +613,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             algo=algorithm.name,
             ckpt=args.ckpt,
             dataset_path=args.dataset_path,
+            model_hub=args.model_hub,
             dataset_loader_fn=args.dataset_loader_fn,
             save_path=args.save_path,
             save_interval=args.save_interval,
@@ -644,6 +652,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             algo=algorithm.name,
             ckpt=args.ckpt,
             dataset_path=args.dataset_path,
+            model_hub=args.model_hub,
             dataset_loader_fn=args.dataset_loader_fn,
             reward_fn_path=args.reward_fn_path,
             save_path=args.save_path,
@@ -690,6 +699,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
         algo=algorithm.name,
         ckpt=args.ckpt,
         dataset_path=args.dataset_path,
+        model_hub=args.model_hub,
         dataset_loader_fn=args.dataset_loader_fn,
         reward_fn_path=args.reward_fn_path,
         save_path=args.save_path,
@@ -774,6 +784,7 @@ def run(trainer_config: TrainerConfig):
     dataset = _load_dataset_for_training(
         trainer_config.dataset_path,
         dataset_loader_fn=trainer_config.dataset_loader_fn,
+        model_hub=trainer_config.model_hub,
         load_dataset=load_dataset,
         load_from_disk=load_from_disk,
     )
@@ -802,9 +813,16 @@ def _reward_fn_path_for_config(config: TrainerConfig) -> str | None:
     return None
 
 
-def _load_dataset_for_training(dataset_path: str, *, dataset_loader_fn: str | None, load_dataset, load_from_disk):
+def _load_dataset_for_training(
+    dataset_path: str, *, model_hub: str = "hf", dataset_loader_fn: str | None, load_dataset, load_from_disk
+):
     def default_loader(path):
-        return _load_dataset_from_path(path, load_dataset=load_dataset, load_from_disk=load_from_disk)
+        return _load_dataset_from_path(
+            path,
+            model_hub=model_hub,
+            load_dataset=load_dataset,
+            load_from_disk=load_from_disk,
+        )
 
     if dataset_loader_fn is not None:
         loader_fn = _load_dataset_loader_fn(dataset_loader_fn)
@@ -841,7 +859,7 @@ def _split_loader_fn_spec(spec_text: str) -> tuple[Path, str]:
     return Path(spec_text).resolve(), "load_training_dataset"
 
 
-def _load_dataset_from_path(dataset_path: str, *, load_dataset, load_from_disk):
+def _load_dataset_from_path(dataset_path: str, *, model_hub: str = "hf", load_dataset, load_from_disk):
     # Existing local paths may be either HF `save_to_disk` outputs or raw
     # files. Non-existing values without a known suffix are treated as
     # Hugging Face dataset IDs such as `gsm8k:main` or `AI-MO/NuminaMath-TIR`.
@@ -858,25 +876,29 @@ def _load_dataset_from_path(dataset_path: str, *, load_dataset, load_from_disk):
     if path.exists() or path.suffix.lower() in _SUPPORTED_DATASET_SUFFIXES:
         builder = _dataset_builder_for_suffix(path.suffix)
         return _load_raw_dataset_files(builder, str(path), load_dataset=load_dataset)
-    return _load_hf_dataset_ref(dataset_path, load_dataset=load_dataset)
+    return _load_remote_dataset_ref(dataset_path, model_hub=model_hub, load_dataset=load_dataset)
 
 
 _SUPPORTED_DATASET_SUFFIXES = {".json", ".jsonl", ".parquet", ".csv", ".tsv", ".arrow"}
 
 
-def _load_hf_dataset_ref(dataset_ref: str, *, load_dataset):
-    # Keep one CLI arg while supporting common HF forms:
+def _load_remote_dataset_ref(dataset_ref: str, *, model_hub: str, load_dataset):
+    # Keep one CLI arg while supporting common remote-dataset forms:
     #   repo/name
     #   repo/name:config
     #   repo/name:config:split
     parts = dataset_ref.split(":")
     if len(parts) > 3:
-        raise ValueError(f"Invalid Hugging Face dataset reference for --dataset-path: {dataset_ref}")
+        raise ValueError(f"Invalid {model_hub} dataset reference for --dataset-path: {dataset_ref}")
     name = parts[0]
     config = parts[1] if len(parts) >= 2 and parts[1] else None
     split = parts[2] if len(parts) == 3 and parts[2] else "train"
     if not name:
-        raise ValueError(f"Invalid Hugging Face dataset reference for --dataset-path: {dataset_ref}")
+        raise ValueError(f"Invalid {model_hub} dataset reference for --dataset-path: {dataset_ref}")
+    if model_hub == "modelscope":
+        return _load_modelscope_dataset_ref(name, config, split)
+    if model_hub != "hf":
+        raise ValueError("model_hub must be one of: hf, modelscope")
     if config is None:
         try:
             return load_dataset(name, split=split)
@@ -887,6 +909,16 @@ def _load_hf_dataset_ref(dataset_ref: str, *, load_dataset):
                 raise
             return load_dataset(name, "main", split=split)
     return load_dataset(name, config, split=split)
+
+
+def _load_modelscope_dataset_ref(name: str, config: str | None, split: str):
+    try:
+        from modelscope.msdatasets import MsDataset
+    except ImportError as exc:
+        raise RuntimeError("ModelScope dataset loading requires the 'modelscope' package") from exc
+    if config is None:
+        return MsDataset.load(name, split=split)
+    return MsDataset.load(name, subset_name=config, split=split)
 
 
 def _load_raw_dataset_files(builder: str, data_files, *, load_dataset):
@@ -947,19 +979,26 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     help="Run SFT, DPO, GSPO, GRPO, or PPO training with the areno backend.",
 )
 @click.option("--algo", type=str, default="gspo", show_default=True, help="Training algorithm registered in areno.api.")
-@click.option("--ckpt", default=None, help="Actor model/tokenizer checkpoint path or Hugging Face repo ID.")
+@click.option("--ckpt", default=None, help="Actor model/tokenizer checkpoint path or remote model repo ID.")
 @click.option(
-    "--dataset-path", default=None, help="Training dataset path, HF save_to_disk directory, or HF dataset ref."
+    "--dataset-path", default=None, help="Training dataset path, HF save_to_disk directory, or remote dataset ref."
+)
+@click.option(
+    "--model-hub",
+    type=click.Choice(["hf", "modelscope"], case_sensitive=False),
+    default="hf",
+    show_default=True,
+    help="Remote hub for non-local model and dataset refs. Use 'modelscope' for ModelScope or 'hf' for Hugging Face.",
 )
 @click.option(
     "--dataset-loader-fn", default=None, help="Optional Python dataset loader function as file.py or file.py:function."
 )
 @click.option("--reward-fn-path", default=None, help="Python file defining reward_fn(record).")
 @click.option(
-    "--ref-ckpt", default=None, help="Optional PPO/DPO reference model checkpoint path or Hugging Face repo ID."
+    "--ref-ckpt", default=None, help="Optional PPO/DPO reference model checkpoint path or remote model repo ID."
 )
-@click.option("--reward-ckpt", default=None, help="Optional PPO reward model checkpoint path or Hugging Face repo ID.")
-@click.option("--critic-ckpt", default=None, help="Optional PPO critic model checkpoint path or Hugging Face repo ID.")
+@click.option("--reward-ckpt", default=None, help="Optional PPO reward model checkpoint path or remote model repo ID.")
+@click.option("--critic-ckpt", default=None, help="Optional PPO critic model checkpoint path or remote model repo ID.")
 @click.option("--save-path", default=None, help="Optional checkpoint output directory.")
 @click.option("--save-interval", type=int, default=100, show_default=True, help="Save checkpoint every N train steps.")
 @click.option(

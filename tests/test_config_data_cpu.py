@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -386,6 +387,43 @@ class ConfigAndDataTest(unittest.TestCase):
             )
 
         self.assertEqual(dataset, [{"prompt": "loaded"}])
+
+    def test_cli_remote_dataset_loader_uses_hugging_face_by_default(self):
+        """Remote dataset refs should keep using Hugging Face unless another hub is selected."""
+        calls = []
+
+        dataset = train_cli._load_dataset_from_path(
+            "gsm8k:main:test",
+            load_dataset=lambda *args, **kwargs: calls.append((args, kwargs)) or [{"source": "hf"}],
+            load_from_disk=lambda *_args, **_kwargs: None,
+        )
+
+        self.assertEqual(dataset, [{"source": "hf"}])
+        self.assertEqual(calls, [(("gsm8k", "main"), {"split": "test"})])
+
+    def test_cli_remote_dataset_loader_uses_modelscope_when_selected(self):
+        """--model-hub modelscope should route non-local dataset refs through ModelScope."""
+        calls = []
+
+        class FakeMsDataset:
+            @staticmethod
+            def load(*args, **kwargs):
+                calls.append((args, kwargs))
+                return [{"source": "modelscope"}]
+
+        fake_modelscope = types.ModuleType("modelscope")
+        fake_msdatasets = types.ModuleType("modelscope.msdatasets")
+        fake_msdatasets.MsDataset = FakeMsDataset
+        with patch.dict(sys.modules, {"modelscope": fake_modelscope, "modelscope.msdatasets": fake_msdatasets}):
+            dataset = train_cli._load_dataset_from_path(
+                "gsm8k:main:test",
+                model_hub="modelscope",
+                load_dataset=lambda *_args, **_kwargs: [{"source": "hf"}],
+                load_from_disk=lambda *_args, **_kwargs: None,
+            )
+
+        self.assertEqual(dataset, [{"source": "modelscope"}])
+        self.assertEqual(calls, [(("gsm8k",), {"subset_name": "main", "split": "test"})])
 
     def test_train_cli_preflight_rejects_missing_dataset_loader_file(self):
         """Dataset loader path failures should be UsageError before backend init."""

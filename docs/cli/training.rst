@@ -40,11 +40,16 @@ Basic
 Inputs, dataset loader, the algorithm and run length, and device counts.
 
 ``--ckpt TEXT``
-   Actor model/tokenizer checkpoint path or Hugging Face repo ID.
+   Actor model/tokenizer checkpoint path or remote model repo ID.
 
 ``--dataset-path TEXT``
-   Training dataset path, Hugging Face ``save_to_disk`` directory, or Hugging
-   Face dataset reference.
+   Training dataset path, Hugging Face ``save_to_disk`` directory, or remote
+   dataset reference.
+
+``--model-hub [hf|modelscope]``
+   Remote hub used when ``--ckpt``, role checkpoints, or ``--dataset-path`` are
+   not local paths. Use ``--model-hub hf`` for Hugging Face and
+   ``--model-hub modelscope`` for ModelScope. Default: ``hf``.
 
 Dataset references use ``repo/name``, ``repo/name:config``, or
 ``repo/name:config:split``. Examples: ``gsm8k:main`` and
@@ -189,7 +194,7 @@ Reward files should expose:
        return 0.0
 
 ``--reward-ckpt TEXT``
-   Optional PPO reward model checkpoint path or Hugging Face repo ID.
+   Optional PPO reward model checkpoint path or remote model repo ID.
 
 Parameter tuning
 ~~~~~~~~~~~~~~~~
@@ -297,10 +302,10 @@ in its description; flags for other algorithms are ignored.
    Policy gradient clipping norm. Default: ``1.0``.
 
 ``--ref-ckpt TEXT``
-   Optional PPO/DPO reference model checkpoint path or Hugging Face repo ID.
+   Optional PPO/DPO reference model checkpoint path or remote model repo ID.
 
 ``--critic-ckpt TEXT``
-   Optional PPO critic model checkpoint path or Hugging Face repo ID.
+   Optional PPO critic model checkpoint path or remote model repo ID.
 
 ``--critic-lr FLOAT``
    PPO critic optimizer learning rate. Default: ``1.0e-5``.

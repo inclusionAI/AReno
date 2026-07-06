@@ -283,7 +283,7 @@ areno train \
   --tp-size 4
 ```
 
-`--ckpt` and `--dataset-path` accept either local paths or Hugging Face repo IDs. Switch algorithms by changing `--algo` (e.g. `--algo grpo`, `--algo sft`).
+`--ckpt` and `--dataset-path` accept either local paths or remote repo IDs. By default, remote refs use Hugging Face. Add `--model-hub modelscope` to pull non-local model and dataset refs from ModelScope, or use `--model-hub hf` explicitly for Hugging Face. Switch algorithms by changing `--algo` (e.g. `--algo grpo`, `--algo sft`).
 
 For models whose tokenizer chat template supports a thinking-mode switch, add `--disable-thinking` to pass `enable_thinking=False` during training prompt rendering. Tokenizers that do not support this argument automatically use their normal chat-template path.
 

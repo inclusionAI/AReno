@@ -27,6 +27,7 @@ class TrainerConfig:
     algo: str
     ckpt: str
     dataset_path: str
+    model_hub: str = "hf"
     dataset_loader_fn: str | None = None
     save_path: str | None = None
     save_interval: int = 100
@@ -63,6 +64,8 @@ class TrainerConfig:
     def __post_init__(self) -> None:
         if self.attn_backend not in {"flash", "native"}:
             raise ValueError("attn_backend must be one of: flash, native")
+        if self.model_hub not in {"hf", "modelscope"}:
+            raise ValueError("model_hub must be one of: hf, modelscope")
 
     def optimizer_config(self) -> dict:
         """Build the optimizer dict consumed by the backend config."""

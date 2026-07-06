@@ -27,6 +27,11 @@ def test_train_config_requires_dataset_path():
         _trainer_config_from_options(**_options(dataset_path=None, algo="sft"))
 
 
+def test_train_config_validates_model_hub():
+    with pytest.raises(UsageError, match="--model-hub must be one of: hf, modelscope"):
+        _trainer_config_from_options(**_options(algo="sft", reward_fn_path=None, reward_ckpt=None, model_hub="bogus"))
+
+
 def test_train_config_requires_dataset_loader_for_sft():
     with pytest.raises(UsageError, match="--dataset-loader-fn is required for --algo sft"):
         _trainer_config_from_options(**_options(algo="sft", dataset_loader_fn=None))
@@ -148,6 +153,7 @@ def test_train_config_builds_sft_shape_without_rollout_or_role_fields():
     assert cfg.algo == "sft"
     assert cfg.ckpt == "actor"
     assert cfg.dataset_path == "dataset"
+    assert cfg.model_hub == "hf"
     assert cfg.optimizer_min_lr == 0.0
     assert cfg.attn_backend == "native"
     assert cfg.areno_config().runtime["attn_backend"] == "native"
@@ -166,6 +172,14 @@ def test_train_config_disable_thinking_sets_chat_template_option():
 
     assert default_cfg.chat_template_enable_thinking is None
     assert disabled_cfg.chat_template_enable_thinking is False
+
+
+def test_train_config_preserves_model_hub():
+    cfg = _trainer_config_from_options(
+        **_options(algo="sft", reward_fn_path=None, reward_ckpt=None, model_hub="modelscope")
+    )
+
+    assert cfg.model_hub == "modelscope"
 
 
 def test_train_config_builds_dpo_shape_and_ref_ckpt():
@@ -302,6 +316,7 @@ def test_training_config_summary_shows_resolved_values_and_warning():
     assert "requires_rollout  yes" in summary
     assert "ckpt            actor" in summary
     assert "dataset_path    dataset" in summary
+    assert "model_hub       hf" in summary
     assert "reward_fn       none" in summary
     assert "reward_ckpt     reward-model" in summary
     assert "dp_size       4" in summary
@@ -571,6 +586,7 @@ def _options(**overrides):
         algo="gspo",
         ckpt="actor",
         dataset_path="dataset",
+        model_hub="hf",
         dataset_loader_fn=None,
         reward_fn_path=None,
         save_path="save",
