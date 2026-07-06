@@ -28,7 +28,9 @@ def _snapshot_download(model_ref: str, *, model_hub: str) -> str:
         try:
             from huggingface_hub import snapshot_download
         except ImportError as exc:
-            raise RuntimeError(f"{model_ref!r} is not a local checkpoint path and huggingface_hub is unavailable") from exc
+            raise RuntimeError(
+                f"{model_ref!r} is not a local checkpoint path and huggingface_hub is unavailable"
+            ) from exc
         return snapshot_download(model_ref)
     if model_hub == "modelscope":
         try:
