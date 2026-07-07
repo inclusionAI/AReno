@@ -130,7 +130,8 @@ class TrainerPromptBatchTest(unittest.TestCase):
             async def end_rollout_session_async(self, _ctx):
                 self.end_rollout_session(_ctx)
 
-            def rollout_batch(self, _ctx, prompt_tokens, n_samples, _sampling_params):
+            def rollout_batch(self, _ctx, prompt_tokens, n_samples, _sampling_params, *, prompt_features=None):
+                del prompt_features
                 self.prompt_tokens = prompt_tokens
                 self.n_samples = n_samples
                 return []
@@ -197,7 +198,8 @@ class TrainerPromptBatchTest(unittest.TestCase):
             async def end_rollout_session_async(self, _ctx):
                 self.end_rollout_session(_ctx)
 
-            def rollout_batch(self, _ctx, _prompt_tokens, _n_samples, _sampling_params):
+            def rollout_batch(self, _ctx, _prompt_tokens, _n_samples, _sampling_params, *, prompt_features=None):
+                del prompt_features
                 return []
 
             def train(self, _ctx, _batch_data, _loss_fn, _mini_bs, _gradient_accumulation_steps):
@@ -223,7 +225,8 @@ class TrainerPromptBatchTest(unittest.TestCase):
         """Rollout callers must own the rollout session lifecycle explicitly."""
 
         class BackendStub:
-            def rollout_batch(self, _ctx, _prompt_tokens, _n_samples, _sampling_params):
+            def rollout_batch(self, _ctx, _prompt_tokens, _n_samples, _sampling_params, *, prompt_features=None):
+                del prompt_features
                 return []
 
         trainer = Trainer(world_size=1, model_path="unused")

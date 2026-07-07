@@ -42,6 +42,9 @@ class FakeSFTBackend:
     def get_tokenizer(self):
         return FakeTextTokenizer()
 
+    def get_processor(self):
+        return None
+
     def train(self, _batch, _loss_fn, *, mini_bs, gradient_accumulation_steps):
         del mini_bs, gradient_accumulation_steps
         self.train_calls += 1

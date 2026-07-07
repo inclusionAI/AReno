@@ -59,8 +59,7 @@ def _format_record(raw: dict, index: int) -> dict:
     return {
         "id": raw.get("id", f"vl-tictactoe-{index:05d}"),
         "prompt": str(
-            raw.get("prompt")
-            or "Describe the tic-tac-toe board and name the best next move for X in one sentence."
+            raw.get("prompt") or "Describe the tic-tac-toe board and name the best next move for X in one sentence."
         ),
         "response": response,
         "reference": str(raw.get("reference") or response),

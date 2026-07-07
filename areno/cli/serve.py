@@ -640,7 +640,9 @@ def _load_image_part(part: dict[str, Any]) -> Any:
     return Image.open(image_ref).convert("RGB")
 
 
-def _processor_chat_text(processor: Any, messages: list[dict[str, Any]], *, tools: list[dict[str, Any]] | None = None) -> str:
+def _processor_chat_text(
+    processor: Any, messages: list[dict[str, Any]], *, tools: list[dict[str, Any]] | None = None
+) -> str:
     apply_chat_template = getattr(processor, "apply_chat_template", None)
     messages = _normalize_processor_multimodal_messages(messages)
     if callable(apply_chat_template):

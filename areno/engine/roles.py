@@ -339,7 +339,10 @@ class RoleManager:
             rows = token_rows[start : start + microbatch_size]
             row_features = features[start : start + microbatch_size] if features is not None else None
             tokens, lengths = _pad_token_rows(rows, self.worker.device, int(payload.pad_token_id))
-            model_kwargs = {"input_ids": tokens, "train_meta": _dense_train_meta(tokens, sequence_parallel_enabled=False)}
+            model_kwargs = {
+                "input_ids": tokens,
+                "train_meta": _dense_train_meta(tokens, sequence_parallel_enabled=False),
+            }
             if row_features is not None:
                 model_kwargs["features"] = row_features
             out = model(**model_kwargs)
@@ -382,7 +385,10 @@ class RoleManager:
             rows = token_rows[start : start + microbatch_size]
             row_features = features[start : start + microbatch_size] if features is not None else None
             tokens, lengths = _pad_token_rows(rows, self.worker.device, int(payload.pad_token_id))
-            model_kwargs = {"input_ids": tokens, "train_meta": _dense_train_meta(tokens, sequence_parallel_enabled=False)}
+            model_kwargs = {
+                "input_ids": tokens,
+                "train_meta": _dense_train_meta(tokens, sequence_parallel_enabled=False),
+            }
             if row_features is not None:
                 model_kwargs["features"] = row_features
             out = role.model(**model_kwargs)
@@ -429,7 +435,10 @@ class RoleManager:
             rows = token_rows[start : start + microbatch_size]
             row_features = features[start : start + microbatch_size] if features is not None else None
             tokens, lengths = _pad_token_rows(rows, self.worker.device, int(payload.pad_token_id))
-            model_kwargs = {"input_ids": tokens, "train_meta": _dense_train_meta(tokens, sequence_parallel_enabled=False)}
+            model_kwargs = {
+                "input_ids": tokens,
+                "train_meta": _dense_train_meta(tokens, sequence_parallel_enabled=False),
+            }
             if row_features is not None:
                 model_kwargs["features"] = row_features
             out = role.model(**model_kwargs)

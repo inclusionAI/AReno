@@ -20,7 +20,9 @@ DEFAULT_COUNT = 128
 DEFAULT_SEED = 2026
 
 
-def generate_records(count: int = DEFAULT_COUNT, *, seed: int = DEFAULT_SEED, include_images: bool = True) -> list[dict]:
+def generate_records(
+    count: int = DEFAULT_COUNT, *, seed: int = DEFAULT_SEED, include_images: bool = True
+) -> list[dict]:
     """Generate reproducible, unique, legal boards where X is to move."""
 
     rng = random.Random(seed)
@@ -112,6 +114,7 @@ def _record_from_board(board: game.Board, idx: int, best_moves: list[int]) -> di
         "solutions": [str(move), response],
         "target_keywords": ["X", f"square {move}", square],
     }
+
 
 def _image_to_base64(image: Image.Image) -> str:
     buffer = io.BytesIO()

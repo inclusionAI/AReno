@@ -239,7 +239,9 @@ def _pack_multimodal_features(
     return packed
 
 
-def _row_image_token_mask(row: dict, row_tokens: torch.Tensor, row_idx: int, image_token_id: int | None) -> torch.Tensor:
+def _row_image_token_mask(
+    row: dict, row_tokens: torch.Tensor, row_idx: int, image_token_id: int | None
+) -> torch.Tensor:
     mask = row.get("image_token_mask")
     if mask is not None:
         mask = mask if isinstance(mask, torch.Tensor) else torch.as_tensor(mask)
