@@ -148,20 +148,50 @@ def test_multimodal_prompt_passes_disable_thinking_to_processor_chat_template():
     assert processor.kwargs["enable_thinking"] is False
 
 
-def test_packed_train_leaves_multimodal_features_dense():
+def test_packed_train_collates_multimodal_features():
+    first_embeds = torch.ones(1, 16)
+    second_embeds = torch.ones(2, 16) * 2
     pack = {
-        "input_ids": torch.tensor([[1, 99, 2]]),
-        "lengths": torch.tensor([3], dtype=torch.int32),
-        "prompt_mask": torch.tensor([[True, True, False]]),
-        "logprobs": torch.zeros(1, 3),
-        "advantages": torch.zeros(1, 3),
-        "features": [{"image_token_id": 99, "image_embeds": torch.ones(1, 16)}],
+        "input_ids": torch.tensor([[1, 99, 2, 0], [4, 99, 99, 5]]),
+        "lengths": torch.tensor([3, 4], dtype=torch.int32),
+        "prompt_mask": torch.tensor([[True, True, False, False], [True, True, True, False]]),
+        "logprobs": torch.zeros(2, 4),
+        "advantages": torch.zeros(2, 4),
+        "features": [
+            {
+                "image_token_id": 99,
+                "image_embeds": first_embeds,
+                "mrope_position_ids": torch.tensor([[0, 1], [0, 2], [0, 3]]),
+            },
+            {
+                "image_token_id": 99,
+                "image_embeds": second_embeds,
+                "mrope_position_ids": torch.tensor([[0, 1, 1], [0, 1, 2], [0, 1, 3]]),
+            },
+        ],
     }
 
     packed = _pack_train_data(pack)
 
-    assert packed is pack
-    assert "train_cu_seqlens" not in packed
+    assert packed is not pack
+    assert packed["input_ids"].tolist() == [[1, 99, 2, 4, 99, 99, 5]]
+    assert packed["train_cu_seqlens"].tolist() == [0, 3, 7]
+    assert packed["features"]["image_token_mask"].tolist() == [
+        False,
+        True,
+        False,
+        False,
+        True,
+        True,
+        False,
+    ]
+    assert packed["features"]["image_feature_rows"][0]["image_embeds"] is first_embeds
+    assert packed["features"]["image_feature_rows"][1]["image_embeds"] is second_embeds
+    assert packed["features"]["mrope_position_ids"].tolist() == [
+        [0, 1, 4, 0, 1, 1, 4],
+        [0, 2, 4, 0, 1, 2, 4],
+        [0, 3, 4, 0, 1, 3, 4],
+    ]
 
 
 def test_qwen35_vl_adapter_matches_vision_text_config():
@@ -427,21 +457,6 @@ def test_qwen35_gdn_uses_projected_sequence_length_after_sp_gather():
     out = model(hidden_states, torch.arange(12).unsqueeze(0).expand(2, -1), train_meta=None, infer_meta=None)
 
     assert out.shape == (2, 12, 8)
-
-
-def test_qwen35_gdn_dense_train_uses_native_dense_conv(monkeypatch):
-    pytest.importorskip("triton")
-    import areno.models.qwen3_5.model as qwen35
-
-    model = qwen35.Qwen35GatedDeltaNet.__new__(qwen35.Qwen35GatedDeltaNet)
-    calls = []
-    model._causal_conv_dense = lambda x: calls.append(x) or x
-
-    x = torch.zeros(2, 5, 3)
-    out = qwen35.Qwen35GatedDeltaNet._causal_conv(model, x, train_meta=None, infer_meta=None)
-
-    assert out is x
-    assert calls == [x]
 
 
 def test_qwen35_sequence_parallel_scatters_mrope_position_sequence_axis(monkeypatch):

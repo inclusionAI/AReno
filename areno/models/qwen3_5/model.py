@@ -53,6 +53,7 @@ from areno.models._shared.dynamo_wrappers import (
     _areno_rmsnorm_silu_gate_no_compile,
     _areno_sigmoid_no_compile,
     _areno_softplus_no_compile,
+    _fla_causal_conv1d_no_compile,
     _fla_chunk_gated_delta_rule_no_compile,
     _fla_fused_recurrent_gated_delta_rule_no_compile,
     _require_fla_gdn,
@@ -319,7 +320,10 @@ class Qwen35GatedDeltaNet(nn.Module):
             return self._causal_conv_infer(x, infer_meta)
         if train_meta is not None and train_meta.packed and train_meta.cu_seqlens is not None:
             return self._causal_conv_train_packed(x, train_meta.cu_seqlens)
-        return self._causal_conv_dense(x)
+        _require_fla_gdn()
+        log_once("qwen35_gdn_fla_conv", "using FLA causal-conv training kernel")
+        out = _fla_causal_conv1d_no_compile(x, weight=self.conv1d_weight.squeeze(1), activation="silu")
+        return out
 
     @torch._dynamo.disable
     def _causal_conv_train_packed(self, x: torch.Tensor, cu_seqlens: torch.Tensor) -> torch.Tensor:
