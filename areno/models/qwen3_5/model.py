@@ -320,6 +320,9 @@ class Qwen35GatedDeltaNet(nn.Module):
             return self._causal_conv_infer(x, infer_meta)
         if train_meta is not None and train_meta.packed and train_meta.cu_seqlens is not None:
             return self._causal_conv_train_packed(x, train_meta.cu_seqlens)
+        if torch.is_grad_enabled():
+            log_once("qwen35_gdn_torch_dense_conv", "using torch dense causal-conv training fallback")
+            return _torch_depthwise_causal_conv1d_silu(x, self.conv1d_weight)
         _require_fla_gdn()
         log_once("qwen35_gdn_fla_conv", "using FLA causal-conv training kernel")
         out = _fla_causal_conv1d_no_compile(x, weight=self.conv1d_weight.squeeze(1), activation="silu")
@@ -1648,6 +1651,20 @@ def _layer_types_from_interval(num_layers: int, full_attention_interval: int) ->
 @torch._dynamo.disable
 def _areno_linear_no_compile(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
     return areno_linear(x, weight, None)
+
+
+@torch._dynamo.disable
+def _torch_depthwise_causal_conv1d_silu(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    """Reference dense causal depthwise conv for multimodal training batches."""
+
+    if x.ndim != 3:
+        raise ValueError("dense causal conv expects shape (batch, seqlen, channels)")
+    batch, seqlen, channels = x.shape
+    kernel = int(weight.shape[-1])
+    x_t = x.transpose(1, 2).contiguous()
+    x_t = F.pad(x_t, (kernel - 1, 0))
+    out = F.conv1d(x_t, weight.to(dtype=x.dtype), bias=None, groups=channels)
+    return F.silu(out.transpose(1, 2).reshape(batch, seqlen, channels))
 
 
 @torch._dynamo.disable

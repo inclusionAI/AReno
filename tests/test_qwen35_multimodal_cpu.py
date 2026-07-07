@@ -429,6 +429,36 @@ def test_qwen35_gdn_uses_projected_sequence_length_after_sp_gather():
     assert out.shape == (2, 12, 8)
 
 
+def test_qwen35_dense_causal_conv_torch_fallback_matches_reference():
+    pytest.importorskip("triton")
+    import areno.models.qwen3_5.model as qwen35
+
+    x = torch.arange(2 * 5 * 3, dtype=torch.float32).view(2, 5, 3) / 10.0
+    weight = torch.tensor(
+        [
+            [[0.5, 1.0, -0.25]],
+            [[-1.0, 0.25, 0.5]],
+            [[0.75, -0.5, 0.125]],
+        ],
+        dtype=torch.float32,
+    )
+
+    actual = qwen35._torch_depthwise_causal_conv1d_silu(x, weight)
+
+    expected = torch.empty_like(x)
+    for batch in range(x.shape[0]):
+        for pos in range(x.shape[1]):
+            for channel in range(x.shape[2]):
+                value = 0.0
+                for kernel_idx in range(weight.shape[-1]):
+                    src = pos - (weight.shape[-1] - 1 - kernel_idx)
+                    if src >= 0:
+                        value += float(x[batch, src, channel] * weight[channel, 0, kernel_idx])
+                expected[batch, pos, channel] = torch.nn.functional.silu(torch.tensor(value))
+
+    assert torch.allclose(actual, expected)
+
+
 def test_qwen35_sequence_parallel_scatters_mrope_position_sequence_axis(monkeypatch):
     pytest.importorskip("triton")
     from types import SimpleNamespace
