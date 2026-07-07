@@ -1047,6 +1047,7 @@ def _tensor_feature(
     return value.to(device=device, dtype=dtype or value.dtype)
 
 
+@torch._dynamo.disable
 def _position_ids_from_features(
     features: dict[str, Any] | list[dict[str, Any] | None] | None,
     *,
