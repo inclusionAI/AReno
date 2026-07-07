@@ -156,3 +156,5 @@ ______________________________________________________________________
 - New / unstable algorithms enter `areno/experimental/` first and graduate to `api/` once stable.
 - A new model family is a directory under `areno/models/<family>/` registered through `areno/models/registry.py` -- no core changes needed.
 - Runtime-critical paths use areno-owned code in `areno/engine` and `areno/accel`, not third-party runtime deps.
+
+<!-- docs improvement for #144 -->
