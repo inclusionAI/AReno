@@ -171,7 +171,8 @@ class ModelConfig:
             raise ValueError("num_attention_heads must be divisible by tp_size")
         if self.num_key_value_heads % tp_size != 0:
             allow_replicated_kv = (
-                self.model_type in {"gemma4", "qwen3_moe", "qwen3_5_moe"} and tp_size % self.num_key_value_heads == 0
+                self.model_type in {"gemma4", "qwen3_moe", "qwen3_5", "qwen3_5_moe", "qwen3_5_vl", "qwen3_5_vl_moe"}
+                and tp_size % self.num_key_value_heads == 0
             )
             if not allow_replicated_kv:
                 raise ValueError("num_key_value_heads must be divisible by tp_size")
