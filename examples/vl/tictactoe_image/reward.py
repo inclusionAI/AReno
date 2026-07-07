@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import sys
 from pathlib import Path
@@ -16,7 +17,27 @@ def reward_fn(record: Any) -> float:
 
     source = record.source_record
     board = game.normalize_board(source["board"])
-    return game.score_move(board, _text_square(record.completion))
+    return game.score_move(board, _tool_square(record) or _text_square(record.completion))
+
+
+def _tool_square(record: Any) -> int | None:
+    for call in getattr(record, "tool_calls", []) or []:
+        name = call.get("name") if isinstance(call, dict) else None
+        if name != "choose_square":
+            continue
+        arguments = call.get("arguments")
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except json.JSONDecodeError:
+                return None
+        if isinstance(arguments, dict):
+            square = arguments.get("square")
+            try:
+                return int(square)
+            except (TypeError, ValueError):
+                return None
+    return None
 
 
 def _text_square(text: str) -> int | None:

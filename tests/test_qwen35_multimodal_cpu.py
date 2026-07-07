@@ -493,6 +493,31 @@ def test_qwen35_full_attention_aligns_local_mrope_positions_to_projected_sequenc
     assert torch.equal(aligned[:, :, 4:], position_ids + 100)
 
 
+def test_qwen35_feature_mrope_positions_continue_after_prompt_tail():
+    pytest.importorskip("triton")
+    import areno.models.qwen3_5.model as qwen35
+
+    positions = torch.tensor(
+        [
+            [0, 1, 1, 2],
+            [0, 1, 4, 5],
+            [0, 1, 2, 3],
+        ],
+        dtype=torch.long,
+    )
+
+    full = qwen35._position_ids_from_features(
+        [{"mrope_position_ids": positions}],
+        batch=1,
+        seqlen=7,
+        device=torch.device("cpu"),
+    )
+
+    assert full.shape == (3, 1, 7)
+    assert torch.equal(full[:, 0, :4], positions)
+    assert full[:, 0, 4:].tolist() == [[6, 7, 8], [6, 7, 8], [6, 7, 8]]
+
+
 def test_prefill_multimodal_features_support_multiple_rows():
     features = _prefill_multimodal_features(
         [False, True, False, True],

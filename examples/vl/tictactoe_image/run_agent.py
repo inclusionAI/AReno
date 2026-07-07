@@ -14,8 +14,31 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 
 SYSTEM_PROMPT = (
     "You are a careful vision-language Tic-Tac-Toe player. You play X. "
-    "Inspect the board image, describe the relevant threat, and name the best legal next move for X in one sentence."
+    "Inspect the board image and choose exactly one legal empty square by calling the choose_square tool. "
+    "Digits on the board are empty square labels, not marks. "
+    "Win immediately if possible; otherwise block any immediate O win."
 )
+
+CHOOSE_SQUARE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "choose_square",
+        "description": "Choose the next Tic-Tac-Toe square for X.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "square": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 9,
+                    "description": "The square number to place X in.",
+                }
+            },
+            "required": ["square"],
+            "additionalProperties": False,
+        },
+    },
+}
 
 
 async def run_agent(ctx, batch):
@@ -50,12 +73,21 @@ async def run_agent(ctx, batch):
                 ],
             },
         ]
+        tool_choice = {"type": "function", "function": {"name": "choose_square"}}
         response = await client.chat.completions.create(
             model="policy",
             messages=messages,
+            tools=[CHOOSE_SQUARE_TOOL],
+            tool_choice=tool_choice,
             stream=False,
         )
-        return AgentTrajectoryTurn(item=item, messages=messages, response=response)
+        return AgentTrajectoryTurn(
+            item=item,
+            messages=messages,
+            response=response,
+            tools=[CHOOSE_SQUARE_TOOL],
+            tool_choice=tool_choice,
+        )
 
     try:
         return AgentTrajectory(turns=list(await asyncio.gather(*(run_one(item) for item in items))))

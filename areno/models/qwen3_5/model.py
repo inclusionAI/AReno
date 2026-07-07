@@ -1078,6 +1078,12 @@ def _position_ids_from_features(
             )
         length = min(int(item.shape[-1]), seqlen)
         base[:, row_idx, :length] = item[:, :length]
+        if length < seqlen:
+            next_pos = int(item[:, :length].max().item()) + 1 if length > 0 else 0
+            tail_len = seqlen - length
+            base[:, row_idx, length:] = (
+                torch.arange(tail_len, device=device, dtype=torch.long).view(1, -1).expand(3, -1) + next_pos
+            )
     return base
 
 
