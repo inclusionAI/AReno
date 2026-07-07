@@ -424,20 +424,28 @@ class PolicyOnlyTrainer:
         ):
             if len(tokens) != len(response_mask) or len(tokens) != len(loss_mask) or len(tokens) != len(logprobs):
                 raise ValueError("agentic train batch has misaligned token/mask/logprob rows")
-            prompt_mask = [not item for item in response_mask]
+            prompt_len = _agentic_prompt_len(response_mask)
             advantage = advantages_by_row.get(row_idx, 0.0)
-            advantages = [advantage if is_loss else 0.0 for is_loss in loss_mask]
-            rollout_logprobs.extend(lp for lp, is_loss in zip(logprobs, loss_mask, strict=True) if is_loss)
+            effective_loss_mask = loss_mask if any(not item for item in loss_mask[prompt_len:]) else []
+            if effective_loss_mask:
+                rollout_logprobs.extend(lp for lp, is_loss in zip(logprobs, effective_loss_mask, strict=True) if is_loss)
+            else:
+                rollout_logprobs.extend(logprobs[prompt_len:])
             train_batch.append(
-                areno.api.TrainSequence(
-                    prompt_mask=prompt_mask,
-                    loss_mask=loss_mask,
+                areno.api.TrainSequence.model_construct(
+                    prompt_mask=[],
+                    loss_mask=effective_loss_mask,
                     tokens=tokens,
                     logprobs=logprobs,
-                    advantages=advantages,
+                    advantages=[],
+                    prompt_len=prompt_len,
+                    scalar_advantage=advantage,
                     features=features,
                     reward=float(reward),
                     eos_token_id=tokenizer.eos_token_id,
+                    returns=[],
+                    values=[],
+                    ref_logprobs=[],
                 )
             )
         return train_batch, rewards_all, rollout_logprobs
@@ -570,3 +578,10 @@ class PolicyOnlyTrainer:
         self.logger.info("epoch=%d step=%d stage=save_checkpoint_start path=%s", epoch, step, ckpt_path)
         saved_path = self.areno.save_checkpoint(ckpt_path)
         self.logger.info("epoch=%d step=%d stage=save_checkpoint_end path=%s", epoch, step, saved_path)
+
+
+def _agentic_prompt_len(response_mask: list[bool]) -> int:
+    for idx, is_response in enumerate(response_mask):
+        if is_response:
+            return idx
+    return len(response_mask)

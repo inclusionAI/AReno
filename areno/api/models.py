@@ -79,6 +79,8 @@ class TrainSequence(BaseModel):
     tokens: list[int] = Field(default_factory=list)
     logprobs: list[float] = Field(default_factory=list)
     advantages: list[float] = Field(default_factory=list)
+    prompt_len: int | None = Field(default=None)
+    scalar_advantage: float | None = Field(default=None)
     returns: list[float] = Field(default_factory=list)
     values: list[float] = Field(default_factory=list)
     ref_logprobs: list[float] = Field(default_factory=list)

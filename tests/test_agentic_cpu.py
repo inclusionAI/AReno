@@ -304,6 +304,33 @@ def test_render_messages_for_display_skips_template_for_image_payloads():
     assert image not in rendered
 
 
+def test_agentic_policy_train_sequence_uses_compact_prompt_and_advantage_rows():
+    from areno.api.backend.areno.backend import _make_train_pack
+    from areno.api.models import TrainSequence
+
+    seq = TrainSequence.model_construct(
+        prompt_mask=[],
+        loss_mask=[],
+        tokens=[1, 2, 3, 4],
+        logprobs=[0.0, 0.0, -0.1, -0.2],
+        advantages=[],
+        prompt_len=2,
+        scalar_advantage=1.5,
+        eos_token_id=0,
+        returns=[],
+        values=[],
+        ref_logprobs=[],
+        features=None,
+        reward=1.0,
+    )
+
+    pack = _make_train_pack([seq])
+
+    assert pack["prompt_mask"].tolist() == [[True, True, False, False]]
+    assert "loss_mask" not in pack
+    assert pack["advantages"].tolist() == [[0.0, 0.0, 1.5, 1.5]]
+
+
 def test_explicit_trajectory_tokenization_normalizes_null_tool_call_content():
     trainer = _FakeTrainer(world_size=1, tp_size=1)
     trainer.tokenizer = _StrictContentTokenizer()
