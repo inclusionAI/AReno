@@ -51,6 +51,7 @@ class Trainer:
         backend_type: BackendType | None = None,
         custom_config: BackendConfig | None = None,
         metrics_log_dir: str | None = None,
+        score_micro_bs: int = 8,
     ) -> None:
         """Create a trainer without starting backend workers.
 
@@ -69,6 +70,7 @@ class Trainer:
         self._initialized = False
         self._custom_config = coerce_backend_config(self._backend_type, custom_config)
         self._metrics = MetricsRecorder(metrics_log_dir) if metrics_log_dir else None
+        self._score_micro_bs = int(score_micro_bs)
         # Per-step wall-time bag accumulated by the rollout/train helpers
         # so `record_train_step` can flush a complete timing snapshot.
         self._metric_timings: dict[str, float] = {}
@@ -439,7 +441,7 @@ class Trainer:
             role,
             token_rows,
             features=features,
-            microbatch_size=self.config.score_micro_bs,
+            microbatch_size=self._score_micro_bs,
         )
 
     def score_values(
