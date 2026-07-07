@@ -885,9 +885,10 @@ class Qwen35VisionMerger(nn.Module):
         self.out_hidden_size = int(vision_config.get("out_hidden_size", self.hidden_size))
         self.spatial_merge_size = int(vision_config.get("spatial_merge_size", 2))
         self.merge_unit = self.spatial_merge_size * self.spatial_merge_size
-        intermediate_size = int(vision_config["intermediate_size"])
+        merged_size = self.hidden_size * self.merge_unit
+        intermediate_size = int(vision_config.get("merger_intermediate_size", merged_size))
         self.norm = nn.LayerNorm(self.hidden_size, eps=1e-6, dtype=dtype)
-        self.linear_fc1 = nn.Linear(self.hidden_size * self.merge_unit, intermediate_size, bias=True, dtype=dtype)
+        self.linear_fc1 = nn.Linear(merged_size, intermediate_size, bias=True, dtype=dtype)
         self.linear_fc2 = nn.Linear(intermediate_size, self.out_hidden_size, bias=True, dtype=dtype)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -1663,7 +1664,10 @@ class Qwen35MoeVLAdapter(Qwen35MoeAdapter):
         return (
             model_type in {"qwen3_5_vl_moe", "qwen3_5_moe_vl"}
             or any("Qwen3_5" in arch and ("VL" in arch or "Vision" in arch) and "Moe" in arch for arch in architectures)
-            or (has_vision_config and (model_type == "qwen3_5_moe" or text_model_type == "qwen3_5_moe"))
+            or (
+                has_vision_config
+                and (model_type == "qwen3_5_moe" or text_model_type in {"qwen3_5_moe", "qwen3_5_moe_text"})
+            )
         )
 
     def config_from_hf(self, hf_config: dict[str, Any]) -> ModelConfig:
