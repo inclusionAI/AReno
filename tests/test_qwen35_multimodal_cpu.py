@@ -34,6 +34,21 @@ def _qwen35_text_config() -> dict:
     }
 
 
+def _qwen35_moe_text_config() -> dict:
+    config = _qwen35_text_config()
+    config.update(
+        {
+            "model_type": "qwen3_5_moe",
+            "num_experts": 4,
+            "num_experts_per_tok": 2,
+            "moe_intermediate_size": 8,
+            "shared_expert_intermediate_size": 8,
+            "norm_topk_prob": True,
+        }
+    )
+    return config
+
+
 def _qwen35_vision_config() -> dict:
     return {
         "depth": 1,
@@ -213,6 +228,41 @@ def test_qwen35_vl_adapter_matches_vision_text_config():
     assert config.hidden_size == 16
     assert config.vision_config["out_hidden_size"] == 16
     assert config.image_token_id == 99
+
+
+def test_qwen35_moe_vl_adapter_matches_vision_moe_text_config():
+    pytest.importorskip("triton")
+    from areno.models.qwen3_5.model import (
+        Qwen35MoeAdapter,
+        Qwen35MoeForCausalLM,
+        Qwen35MoeVLAdapter,
+        Qwen35MoeVLForConditionalGeneration,
+        Qwen35VLAdapter,
+    )
+
+    hf_config = {
+        "model_type": "qwen3_5",
+        "architectures": ["Qwen3_5MoeVLForConditionalGeneration"],
+        "text_config": _qwen35_moe_text_config(),
+        "vision_config": _qwen35_vision_config(),
+        "image_token_id": 99,
+    }
+
+    adapter = Qwen35MoeVLAdapter()
+    assert adapter.match_hf_config(hf_config)
+    assert not Qwen35VLAdapter().match_hf_config(hf_config)
+    assert not Qwen35MoeAdapter().match_hf_config(hf_config)
+
+    config = adapter.config_from_hf(hf_config)
+    assert config.model_type == "qwen3_5_vl_moe"
+    assert config.enable_moe_block is True
+    assert config.num_experts == 4
+    assert config.vision_config["out_hidden_size"] == 16
+    assert config.image_token_id == 99
+
+    model = adapter.build(config)
+    assert isinstance(model, Qwen35MoeVLForConditionalGeneration)
+    assert isinstance(model.language_model, Qwen35MoeForCausalLM)
 
 
 def test_qwen35_multimodal_features_split_and_mask():

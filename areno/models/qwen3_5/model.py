@@ -1427,6 +1427,16 @@ class Qwen35MoeForCausalLM(Qwen35ForCausalLM):
             layer.mlp.clear_infer_weights()
 
 
+class Qwen35MoeVLForConditionalGeneration(Qwen35VLForConditionalGeneration):
+    def __init__(self, config: ModelConfig):
+        nn.Module.__init__(self)
+        if config.vision_config is None:
+            raise ValueError("Qwen3.5-MoE-VL requires vision_config")
+        self.config = config
+        self.language_model = Qwen35MoeForCausalLM(config)
+        self.visual = Qwen35VisionTransformer(config.vision_config, config.dtype)
+
+
 def _mrope_section(rope: dict[str, Any]) -> tuple[int, int, int] | None:
     section = rope.get("mrope_section")
     if section is None:
@@ -1517,9 +1527,11 @@ class Qwen35VLAdapter(Qwen35Adapter):
         text_model_type = str(text.get("model_type", "")).lower()
         has_vision_config = any(key in hf_config for key in ("vision_config", "visual", "vision_model_config"))
         return (
-            model_type in {"qwen3_5_vl", "qwen3_5_vision", "qwen3_5_vl_moe"}
-            or any("Qwen3_5" in arch and ("VL" in arch or "Vision" in arch) for arch in architectures)
-            or (has_vision_config and text_model_type in {"qwen3_5", "qwen3_5_text", "qwen3_5_moe"})
+            model_type in {"qwen3_5_vl", "qwen3_5_vision"}
+            or any(
+                "Qwen3_5" in arch and ("VL" in arch or "Vision" in arch) and "Moe" not in arch for arch in architectures
+            )
+            or (has_vision_config and text_model_type in {"qwen3_5", "qwen3_5_text"})
         )
 
     def config_from_hf(self, hf_config: dict[str, Any]) -> ModelConfig:
@@ -1559,6 +1571,9 @@ class Qwen35MoeAdapter(ModelAdapter):
 
     def match_hf_config(self, hf_config: dict[str, Any]) -> bool:
         architectures = set(hf_config.get("architectures") or [])
+        has_vision_config = any(key in hf_config for key in ("vision_config", "visual", "vision_model_config"))
+        if has_vision_config:
+            return False
         return (
             str(hf_config.get("model_type", "")).lower() == "qwen3_5_moe"
             or "Qwen3_5MoeForConditionalGeneration" in architectures
@@ -1634,6 +1649,53 @@ class Qwen35MoeAdapter(ModelAdapter):
         from areno.models.qwen3_5.checkpoint import save_qwen35_weights
 
         return save_qwen35_weights(model, output_path, source_path)
+
+
+class Qwen35MoeVLAdapter(Qwen35MoeAdapter):
+    name = "qwen3_5_vl_moe"
+
+    def match_hf_config(self, hf_config: dict[str, Any]) -> bool:
+        architectures = {str(item) for item in (hf_config.get("architectures") or [])}
+        model_type = str(hf_config.get("model_type", "")).lower()
+        text = hf_config.get("text_config") or {}
+        text_model_type = str(text.get("model_type", "")).lower()
+        has_vision_config = any(key in hf_config for key in ("vision_config", "visual", "vision_model_config"))
+        return (
+            model_type in {"qwen3_5_vl_moe", "qwen3_5_moe_vl"}
+            or any("Qwen3_5" in arch and ("VL" in arch or "Vision" in arch) and "Moe" in arch for arch in architectures)
+            or (has_vision_config and (model_type == "qwen3_5_moe" or text_model_type == "qwen3_5_moe"))
+        )
+
+    def config_from_hf(self, hf_config: dict[str, Any]) -> ModelConfig:
+        config = super().config_from_hf(hf_config)
+        config.model_type = self.name
+        config.vision_config = dict(hf_config.get("vision_config") or {})
+        if hf_config.get("image_token_id") is not None:
+            config.image_token_id = int(hf_config["image_token_id"])
+        if hf_config.get("vision_start_token_id") is not None:
+            config.vision_start_token_id = int(hf_config["vision_start_token_id"])
+        if hf_config.get("vision_end_token_id") is not None:
+            config.vision_end_token_id = int(hf_config["vision_end_token_id"])
+        return config
+
+    def build(self, config: ModelConfig) -> nn.Module:
+        return Qwen35MoeVLForConditionalGeneration(config)
+
+    @torch.no_grad()
+    def load_weights(self, model: nn.Module, model_path: str | Path) -> None:
+        if not isinstance(model, Qwen35MoeVLForConditionalGeneration):
+            raise TypeError(f"Qwen35MoeVLAdapter cannot load weights into {type(model)!r}")
+        from areno.models.qwen3_5.checkpoint import load_qwen35_vl_weights
+
+        load_qwen35_vl_weights(model, model_path)
+
+    @torch.no_grad()
+    def save_weights(self, model: nn.Module, output_path: str | Path, source_path: str | Path | None) -> str | None:
+        if not isinstance(model, Qwen35MoeVLForConditionalGeneration):
+            raise TypeError(f"Qwen35MoeVLAdapter cannot save weights from {type(model)!r}")
+        from areno.models.qwen3_5.checkpoint import save_qwen35_vl_weights
+
+        return save_qwen35_vl_weights(model, output_path, source_path)
 
 
 def _layer_types_from_interval(num_layers: int, full_attention_interval: int) -> list[str]:

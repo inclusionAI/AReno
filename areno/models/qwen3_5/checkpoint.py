@@ -38,8 +38,11 @@ from areno.models.qwen3_5.model import (
     Qwen35ForCausalLM,
     Qwen35FullAttention,
     Qwen35GatedDeltaNet,
+    Qwen35MoeVLForConditionalGeneration,
     Qwen35VLForConditionalGeneration,
 )
+
+Qwen35VLModel = Qwen35VLForConditionalGeneration | Qwen35MoeVLForConditionalGeneration
 
 LAYER_NORM_SPECS = (
     ReplicatedTensorSpec("{prefix}.input_layernorm.weight", "input_layernorm.weight"),
@@ -90,7 +93,7 @@ def load_qwen35_weights(model: Qwen35ForCausalLM, model_path: str | Path) -> Non
 
 
 @torch.no_grad()
-def load_qwen35_vl_weights(model: Qwen35VLForConditionalGeneration, model_path: str | Path) -> None:
+def load_qwen35_vl_weights(model: Qwen35VLModel, model_path: str | Path) -> None:
     load_qwen35_weights(model.language_model, model_path)
     index = SafetensorsIndex(model_path)
     try:
@@ -115,9 +118,7 @@ def save_qwen35_weights(
 
 
 @torch.no_grad()
-def save_qwen35_vl_weights(
-    model: Qwen35VLForConditionalGeneration, output_path: str | Path, source_path: str | Path | None
-) -> str | None:
+def save_qwen35_vl_weights(model: Qwen35VLModel, output_path: str | Path, source_path: str | Path | None) -> str | None:
     tensors = CheckpointTensorStore()
     prefix = model.language_model.config.checkpoint_prefix
     _save_embedding_norm_head(tensors, model.language_model, prefix)
@@ -130,7 +131,7 @@ def save_qwen35_vl_weights(
     return saved_path
 
 
-def _load_qwen35_visual(model: Qwen35VLForConditionalGeneration, index: SafetensorsIndex) -> None:
+def _load_qwen35_visual(model: Qwen35VLModel, index: SafetensorsIndex) -> None:
     prefix = "model.visual"
     if f"{prefix}.patch_embed.proj.weight" not in index.weight_map:
         raise KeyError("could not find Qwen3.5 visual tower weights under model.visual")
@@ -163,7 +164,7 @@ def _load_qwen35_visual(model: Qwen35VLForConditionalGeneration, index: Safetens
     _copy_param(visual.merger.norm.bias, index.get_tensor(f"{merger_prefix}.norm.bias"))
 
 
-def _save_qwen35_visual(tensors: dict[str, torch.Tensor | None], model: Qwen35VLForConditionalGeneration) -> None:
+def _save_qwen35_visual(tensors: dict[str, torch.Tensor | None], model: Qwen35VLModel) -> None:
     prefix = "model.visual"
     visual = model.visual
     tensors[f"{prefix}.patch_embed.proj.weight"] = rank0_tensor(visual.patch_embed.proj.weight)
