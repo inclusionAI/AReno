@@ -60,6 +60,8 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "tune_params",
             "mem_frac",
             "tune_max_samples",
+            "smoke_infer",
+            "smoke_train",
             "epochs",
             "max_steps",
             "world_size",
@@ -172,6 +174,10 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
     args.max_steps = getattr(args, "max_steps", None)
     args.score_micro_bs = getattr(args, "score_micro_bs", 8)
     args.model_hub = getattr(args, "model_hub", "hf")
+    smoke_infer = bool(getattr(args, "smoke_infer", False))
+    smoke_train = bool(getattr(args, "smoke_train", False))
+    if smoke_infer or smoke_train:
+        args.dataset_path = args.dataset_path or "__smoke__"
     # Required-argument checks live here so offline trainers can omit reward
     # inputs while RL algorithms still require a reward function or model.
     if args.ckpt is None:
@@ -186,13 +192,17 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
     tune_params = bool(getattr(args, "tune_params", False))
     mem_frac = float(getattr(args, "mem_frac", 0.9))
     tune_max_samples = int(getattr(args, "tune_max_samples", 256))
+    if smoke_infer and smoke_train:
+        raise click.UsageError("--smoke-infer and --smoke-train are mutually exclusive")
     if tune_params and not algorithm.requires_rollout:
         raise click.UsageError("--tune-params currently supports rollout-based algorithms")
+    if (smoke_infer or smoke_train) and not algorithm.requires_rollout:
+        raise click.UsageError("--smoke-infer and --smoke-train currently support rollout-based algorithms")
     if mem_frac <= 0 or mem_frac > 1:
         raise click.UsageError("--mem-frac must be in (0, 1]")
     if tune_max_samples <= 0:
         raise click.UsageError("--tune-max-samples must be positive")
-    if algorithm.requires_rollout and args.reward_fn_path is None and args.reward_ckpt is None:
+    if algorithm.requires_rollout and not (smoke_infer or smoke_train) and args.reward_fn_path is None and args.reward_ckpt is None:
         raise click.UsageError("--reward-fn-path or --reward-ckpt is required")
     if args.save_interval <= 0:
         raise click.UsageError("--save-interval must be positive")
@@ -379,6 +389,23 @@ def _print_auto_tune_summary(result) -> None:
         ),
         color=True,
     )
+
+
+def _print_smoke_summary(stage: str, measurement) -> None:
+    candidate = measurement.candidate
+    status = "ok" if measurement.ok else "failed"
+    message = (
+        _style(f"AReno smoke {stage} {status}", fg="bright_green" if measurement.ok else "red", bold=True, color=True)
+        + (
+            f": tp_size={candidate.tp_size}, batch_size={candidate.batch_size}, n_samples={candidate.n_samples}, "
+            f"mini_bs={candidate.mini_bs}, max_running_prompts={candidate.max_running_prompts}, "
+            f"adam_8bit={candidate.adam_8bit}, drop_rollout_state={not candidate.keep_rollout_state}, "
+            f"peak_mem_frac={measurement.peak_mem_frac:.4f}"
+        )
+    )
+    if measurement.error:
+        message += f", error={measurement.error}"
+    click.echo(message, color=True)
 
 
 def _format_summary_section(section: str, rows: list[tuple[str, str]], *, color: bool) -> list[str]:
@@ -1034,6 +1061,16 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     show_default=True,
     help="Maximum sampled rollout/train rows considered by --tune-params probing.",
 )
+@click.option(
+    "--smoke-infer",
+    is_flag=True,
+    help="Dummy-load the model and allocate rollout KV cache/decode CUDA graphs, then exit.",
+)
+@click.option(
+    "--smoke-train",
+    is_flag=True,
+    help="Dummy-load the model and run one minimal synthetic train step, then exit.",
+)
 @click.option("--tp-size", type=int, default=4, show_default=True, help="Tensor parallel size for the backend.")
 @click.option("--world-size", type=int, default=8, show_default=True, help="Total device count for the backend.")
 @click.option("--batch-size", type=int, default=32, show_default=True, help="Prompt/pair batch size.")
@@ -1142,6 +1179,15 @@ def train_command(**options) -> None:
 
     trainer_config = _trainer_config_from_options(**options)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    if options.get("smoke_infer") or options.get("smoke_train"):
+        from areno.cli.auto_tune import smoke_infer_config, smoke_train_config
+
+        stage = "infer" if options.get("smoke_infer") else "train"
+        measurement = smoke_infer_config(trainer_config) if stage == "infer" else smoke_train_config(trainer_config)
+        _print_smoke_summary(stage, measurement)
+        if not measurement.ok:
+            raise click.ClickException(measurement.error or f"smoke {stage} failed")
+        return
     if options.get("tune_params"):
         from areno.cli.auto_tune import auto_tune_config
 

@@ -20,17 +20,15 @@ and retry with adjusted parameters when the failure is likely recoverable.
    - `nvidia-smi --query-gpu=index,name,memory.total,memory.used,memory.free --format=csv`
    - `ps aux | grep -E "areno|python" | grep -v grep`
    - `df -h . /tmp`
-3. Before a real train/serve run, first try a dummy load or minimal load check
-   for the target checkpoint. The goal is to catch missing dependencies,
-   unsupported model adapters, tensor-parallel divisibility errors, checkpoint
-   shape mismatches, and basic CUDA startup failures before spending time on a
-   rollout or training step. Useful checks:
+3. Before a real train/serve run, first try a smoke check for the target
+   checkpoint. The goal is to catch missing dependencies, unsupported model
+   adapters, tensor-parallel divisibility errors, checkpoint shape mismatches,
+   CUDA graph capture failures, and basic CUDA startup failures before spending
+   time on a rollout or training step. Useful checks:
    - `areno check`
    - `areno env`
-   - a minimal `areno serve` on an unused port followed by `/v1/models`, then
-     stop it if the user asked for training
-   - a one-step `areno train --max-steps 1` with small batch settings if serve
-     is not appropriate
+   - `areno train ... --smoke-infer`
+   - `areno train ... --smoke-train`
 4. Prefer a small smoke test first:
    - one epoch or `--max-steps 1`
    - small `--batch-size`
@@ -82,6 +80,42 @@ areno train --ckpt <local-ckpt> --dataset-path /home/admin/math/data \
 
 Use `--save-path <dir> --save-interval 1 --max-steps 1` when the task asks to
 test checkpoint saving. Then test loading by using `--ckpt <dir>/step_000001`.
+
+## Smoke checks
+
+Use smoke checks before long train/serve jobs.
+
+`--smoke-infer` dummy-loads the model, allocates rollout KV cache, and captures
+decode CUDA graphs. It does not run decode. Use it to check model loading,
+tensor-parallel compatibility, max context length, flash/native attention
+compatibility, rollout KV memory, and CUDA graph capture. `--max-running-prompts`
+is the main capacity being tested here: pass the value intended for the real
+run. If `--max-running-prompts` is omitted, the smoke check uses the resolved
+rollout concurrency from `batch_size * n_samples`.
+
+Example:
+
+```bash
+areno train --ckpt <ckpt> --dataset-path __smoke__ --algo gspo \
+  --world-size 8 --tp-size 4 --batch-size 32 --n-samples 8 \
+  --mini-bs 16 --max-running-prompts 256 --max-new-tokens 1024 \
+  --smoke-infer
+```
+
+`--smoke-train` dummy-loads the model, skips real rollout/decode, offloads the
+rollout state before training, and runs one synthetic train probe. It uses a
+minimal train batch with `batch_size == mini_bs` and `n_samples == 1`, while
+preserving the requested `mini_bs`, sequence length, TP/world size, optimizer,
+activation checkpointing, and attention backend. Use it to check train memory,
+backward kernels, optimizer state, and checkpoint/model training compatibility.
+
+Example:
+
+```bash
+areno train --ckpt <ckpt> --dataset-path __smoke__ --algo gspo \
+  --world-size 8 --tp-size 4 --mini-bs 16 --max-new-tokens 1024 \
+  --smoke-train
+```
 
 ## Serving command shape
 
@@ -149,8 +183,8 @@ increase step overhead because rollout state must be rebuilt.
 If a run fails because an optional kernel package is missing, the agent may
 install the missing dependency in the current Python environment. Prefer a
 prebuilt wheel when one exists. Do not reinstall the whole project unless the
-user asks for it. After installing or changing dependencies, first rerun the
-dummy load/minimal load check before retrying the original long command.
+user asks for it. After installing or changing dependencies, first rerun
+`--smoke-infer` or `--smoke-train` before retrying the original long command.
 
 For `flash-attn`, first inspect the active runtime:
 
