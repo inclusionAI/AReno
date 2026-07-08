@@ -29,14 +29,19 @@ and retry with adjusted parameters when the failure is likely recoverable.
    - `areno env`
    - `areno train ... --smoke-infer`
    - `areno train ... --smoke-train`
-4. Prefer a small smoke test first:
+4. Prefer a small first smoke test only to catch basic startup problems:
    - one epoch or `--max-steps 1`
    - small `--batch-size`
-   - small `--n-samples`
+   - `--n-samples 8` for realistic RL rollout shape unless the user requests otherwise
    - conservative `--mini-bs`
    - a valid `--save-path` only when checkpoint save must be tested
-5. Read the error message, adjust one or two parameters, and retry.
-6. Call `submit` only after the command is running or has completed successfully,
+5. After the first smoke test succeeds, run additional smoke attempts with
+   larger `--max-running-prompts`, `--batch-size`, and/or `--mini-bs` to use as
+   much GPU memory as safely possible. Low GPU memory use usually means poor
+   throughput. Prefer finding the largest stable values under the available
+   memory instead of keeping tiny smoke parameters.
+6. Read the error message, adjust one or two parameters, and retry.
+7. Call `submit` only after the command is running or has completed successfully,
    or when the task is blocked by missing files, missing GPUs, invalid API
    credentials, or a non-recoverable dependency error.
 
@@ -69,8 +74,8 @@ Useful examples:
 areno train --ckpt Qwen/Qwen3.5-0.8B --dataset-path gsm8k:main \
   --dataset-loader-fn examples/math/dataset_loader.py \
   --reward-fn-path examples/math/math_verify_reward.py \
-  --algo gspo --world-size 1 --tp-size 1 --batch-size 1 --n-samples 2 \
-  --mini-bs 1 --max-running-prompts 2 --max-steps 1
+  --algo gspo --world-size 1 --tp-size 1 --batch-size 1 --n-samples 8 \
+  --mini-bs 1 --max-running-prompts 8 --max-steps 1
 ```
 
 ```bash
@@ -95,6 +100,13 @@ compatibility, rollout KV memory, and CUDA graph capture. `--max-running-prompts
 is the main capacity being tested here: pass the value intended for the real
 run. If `--max-running-prompts` is omitted, the smoke check uses the resolved
 rollout concurrency from `batch_size * n_samples`.
+
+For rollout-based algorithms, prefer `--n-samples 8` in smoke and real runs
+unless the user requests another value. Once the basic smoke check passes, try
+larger `--max-running-prompts` values to fill available GPU memory and improve
+throughput. A good smoke sequence is: start with the intended real-run
+`n_samples`, then increase `max_running_prompts` until memory is close to the
+target headroom or OOM, and keep the largest successful value.
 
 Example:
 
@@ -161,6 +173,13 @@ If rollout OOM happens, reduce `--max-running-prompts`, `--batch-size`,
 `--n-samples`, or max sequence length. If train OOM happens, reduce `--mini-bs`
 first. If model loading OOM happens, increase `--tp-size` or use fewer other GPU
 processes.
+
+If GPU memory remains far below capacity after smoke succeeds, do not stop at
+the tiny setting. Increase `--max-running-prompts` first for rollout
+utilization, then increase `--batch-size` if the dataset/algorithm supports it.
+For training utilization, increase `--mini-bs` until train memory is close to
+the safe target. Keep `--n-samples 8` as the normal RL baseline unless the user
+or task explicitly needs a different sampling count.
 
 `--drop-rollout-state` means the rollout engine state is released before
 training to save memory. It can help when train OOM occurs after rollout. It may
