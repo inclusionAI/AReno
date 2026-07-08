@@ -400,7 +400,7 @@ def _task_prompt(task: dict[str, Any]) -> str:
 
 def _assistant_message_from_response(response: Any) -> dict[str, Any]:
     message = response.choices[0].message
-    return {
+    assistant_message = {
         "role": "assistant",
         "content": message.content or "",
         "tool_calls": [
@@ -412,6 +412,10 @@ def _assistant_message_from_response(response: Any) -> dict[str, Any]:
             for call in (message.tool_calls or [])[:1]
         ],
     }
+    reasoning_content = getattr(message, "reasoning_content", None)
+    if reasoning_content:
+        assistant_message["reasoning_content"] = reasoning_content
+    return assistant_message
 
 
 def _first_tool_call(message: dict[str, Any]) -> dict[str, Any] | None:
