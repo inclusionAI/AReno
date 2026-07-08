@@ -19,6 +19,7 @@ DEFAULT_KNOWLEDGE_FILE = Path(__file__).resolve().parents[1] / "agentic" / "codi
 DEFAULT_KNOWLEDGE = DEFAULT_KNOWLEDGE_FILE.read_text(encoding="utf-8")
 CONFIG_FILE = Path.home() / ".areno" / "agent_config.json"
 DEFAULT_AGENT_TURN_LIMIT = 1_000_000
+JUDGE_CONTEXT_CHARS = 24000
 
 SYSTEM_TEMPLATE = """You are an AReno operations coding agent.
 
@@ -228,24 +229,143 @@ async def _main_async(args: argparse.Namespace) -> int:
         {"role": "user", "content": _job_prompt(args.instruction, workspace.root)},
     ]
     try:
-        await run_conversation_turns(
-            client=client,
-            item=item,
-            workspace=workspace,
-            model=args.model,
-            messages=messages,
-            max_turns=int(args.max_turns),
-            record_trajectory=False,
-            on_event=_print_event,
-        )
-        if workspace.submitted is None:
-            click.echo("agent stopped without submit")
-            return 2
-        click.echo(json.dumps(workspace.submitted, ensure_ascii=False, indent=2, sort_keys=True))
-        return 0 if workspace.submitted.get("status") == "solved" else 1
+        while True:
+            await run_conversation_turns(
+                client=client,
+                item=item,
+                workspace=workspace,
+                model=args.model,
+                messages=messages,
+                max_turns=int(args.max_turns),
+                record_trajectory=False,
+                on_event=_print_event,
+            )
+            if workspace.submitted is None:
+                click.echo("agent stopped without submit")
+                return 2
+            judgment = await _judge_goal_done(
+                client=client,
+                model=args.model,
+                instruction=args.instruction,
+                submitted=workspace.submitted,
+                messages=messages,
+                command_history=workspace.command_history,
+            )
+            click.echo("\njudge:")
+            click.echo(json.dumps(judgment, ensure_ascii=False, indent=2, sort_keys=True))
+            if judgment.get("done") is True:
+                click.echo(json.dumps(workspace.submitted, ensure_ascii=False, indent=2, sort_keys=True))
+                return 0 if workspace.submitted.get("status") == "solved" else 1
+            feedback = str(judgment.get("feedback") or judgment.get("reason") or "").strip()
+            if not feedback:
+                feedback = "The goal is not actually complete. Inspect the current state and continue."
+            workspace.submitted = None
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "A reviewer checked the previous submit and decided the goal is not actually done.\n\n"
+                        f"Reviewer feedback:\n{feedback}\n\n"
+                        "Continue from the existing context. Do more inspection or rerun adjusted commands, "
+                        "then call submit again only when the original user goal is actually complete."
+                    ),
+                }
+            )
     finally:
         await client.close()
         workspace.close()
+
+
+async def _judge_goal_done(
+    *,
+    client: Any,
+    model: str,
+    instruction: str,
+    submitted: dict[str, Any],
+    messages: list[dict[str, Any]],
+    command_history: list[dict[str, Any]],
+) -> dict[str, Any]:
+    response = await client.chat.completions.create(
+        model=model,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You are a strict reviewer for an AReno train/serve operations agent. "
+                    "Decide whether the original goal is actually complete. A submit is not enough by itself. "
+                    "Look for concrete evidence such as successful command output, a running verified server, "
+                    "a completed train step, a saved and reload-tested checkpoint when requested, or a truly "
+                    "non-recoverable blocker. Return JSON only with keys: done, reason, feedback."
+                ),
+            },
+            {
+                "role": "user",
+                "content": _judge_prompt(
+                    instruction=instruction,
+                    submitted=submitted,
+                    messages=messages,
+                    command_history=command_history,
+                ),
+            },
+        ],
+        stream=False,
+    )
+    content = (response.choices[0].message.content or "").strip()
+    try:
+        judgment = json.loads(_extract_json_object(content))
+    except json.JSONDecodeError:
+        return {
+            "done": False,
+            "reason": "reviewer returned non-JSON output",
+            "feedback": content[:2000] or "Reviewer output was empty; continue and verify the goal explicitly.",
+        }
+    if not isinstance(judgment, dict):
+        return {"done": False, "reason": "reviewer returned non-object JSON", "feedback": "Continue and verify the goal."}
+    judgment["done"] = bool(judgment.get("done"))
+    judgment["reason"] = str(judgment.get("reason") or "")
+    judgment["feedback"] = str(judgment.get("feedback") or "")
+    return judgment
+
+
+def _extract_json_object(content: str) -> str:
+    if content.startswith("```"):
+        lines = content.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        content = "\n".join(lines).strip()
+    start = content.find("{")
+    end = content.rfind("}")
+    if start >= 0 and end > start:
+        return content[start : end + 1]
+    return content
+
+
+def _judge_prompt(
+    *,
+    instruction: str,
+    submitted: dict[str, Any],
+    messages: list[dict[str, Any]],
+    command_history: list[dict[str, Any]],
+) -> str:
+    payload = {
+        "original_goal": instruction,
+        "submitted": submitted,
+        "recent_messages": _trim_for_judge(_json_dumps(messages[-24:])),
+        "recent_command_history": _trim_for_judge(_json_dumps(command_history[-20:])),
+    }
+    return _json_dumps(payload)
+
+
+def _json_dumps(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+
+
+def _trim_for_judge(text: str) -> str:
+    if len(text) <= JUDGE_CONTEXT_CHARS:
+        return text
+    return text[-JUDGE_CONTEXT_CHARS:]
 
 
 def _load_knowledge(path: Path) -> str:
