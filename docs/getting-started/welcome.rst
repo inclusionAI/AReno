@@ -7,15 +7,112 @@ AReno documentation
 
    <div class="areno-hero">
      <div class="areno-hero-copy">
-       <p class="areno-eyebrow">Local post-training and serving</p>
-       <h1>Train and serve local LLMs with one CUDA-native loop.</h1>
-       <p class="areno-lede">AReno keeps rollout, reward scoring, inference, optimizer steps, and checkpoint I/O in one compact engine for SFT, DPO, GSPO, GRPO, PPO, and agentic RL workflows.</p>
+       <p class="areno-eyebrow">Overview and path selection</p>
+       <h1>Understand AReno, choose a workflow, and run locally.</h1>
+       <p class="areno-lede">AReno is a local LLM post-training and serving toolkit for developers, researchers, students, and open-source contributors who want CUDA-native training, rollout, reward scoring, inference, optimizer steps, and checkpoint I/O in one project.</p>
        <div class="areno-hero-actions" aria-label="Primary documentation links">
         <a class="areno-button areno-button-primary" href="installation.html">Get started</a>
-        <a class="areno-button" href="../cli/training.html">Train a model</a>
+        <a class="areno-button" href="quickstart.html">Run the quickstart</a>
        </div>
      </div>
    </div>
+
+What is AReno
+-------------
+
+AReno is built for local post-training workflows that need the training loop,
+rollout, reward function, inference engine, optimizer step, and checkpoint I/O
+to work together in one codebase. It supports SFT, DPO, GSPO, GRPO, PPO, RLVR,
+agentic RL, and local serving workflows.
+
+Use this page to decide whether AReno fits your task and environment before you
+install dependencies or run commands.
+
+Environment boundary
+--------------------
+
+AReno training and serving require a CUDA-capable NVIDIA GPU. CPU-only machines
+and macOS machines are suitable for reading docs, metadata checks, packaging
+checks, and lightweight CPU tests, but they cannot run the AReno training or
+serving engine.
+
+``flash-attn`` is optional unless you use the default ``--attn-backend flash``
+path. Use ``--attn-backend native`` when you want to run without FlashAttention
+or when the local GPU is unsupported by FlashAttention.
+
+Who should use AReno
+--------------------
+
+AReno is a good fit if you want to:
+
+- run local post-training workflows such as RLVR, GSPO, GRPO, PPO, SFT, or DPO;
+- combine rollout, reward scoring, inference, optimization, and checkpoint I/O
+  without wiring together separate runtime pieces;
+- experiment with agentic RL, trajectory collection, tool calling, and reward
+  design through local OpenAI-compatible serving;
+- customize training loops through the SDK; or
+- learn from reproducible examples and contribute docs, examples, algorithms,
+  or fixes back to the open-source project.
+
+AReno may not be the best first choice if you only need CPU-only
+experimentation, hosted inference, pure SFT through a high-level abstraction, or
+production serving as the only goal.
+
+AReno vs related tools
+----------------------
+
+AReno overlaps with other LLM tooling, but it focuses on a different boundary:
+
+- Use TRL when you want a high-level training library integrated with the
+  Hugging Face ecosystem.
+- Use Unsloth when your main goal is efficient fine-tuning through its
+  supported optimization path.
+- Use Tinker when you want a managed or hosted training experience.
+- Use vLLM when your primary goal is production-grade high-throughput serving.
+- Use AReno when you want local CUDA-native post-training and serving workflows
+  where rollout, reward scoring, inference, optimization, and checkpoint I/O are
+  owned in one project.
+
+Choose your path
+----------------
+
+.. list-table::
+   :header-rows: 1
+   :widths: 22 36 42
+
+   * - Goal
+     - Start here
+     - What to expect
+   * - Install AReno
+     - :doc:`Installation <installation>`
+     - Prepare a CUDA-capable NVIDIA GPU environment and verify dependencies.
+   * - Run a training smoke test
+     - :doc:`Quickstart <quickstart>`
+     - Run a small local workflow before moving to larger training jobs.
+   * - Try RLVR
+     - :doc:`Math RLVR <../cookbook/math-rlvr>`
+     - Train with reward functions on a structured reasoning task.
+   * - Try agentic RL
+     - :doc:`TicTacToe Agentic RL <../cookbook/tictactoe-agentic-rl>`
+     - Collect trajectories through an agent function and train from interaction traces.
+   * - Explore the example gallery
+     - :doc:`Example Gallery <example-gallery>`
+     - Compare beginner, RLVR, and agentic RL examples before choosing one to run.
+   * - Serve a local model
+     - :doc:`Inference CLI <../cli/inference>`
+     - Start an OpenAI-compatible local chat-completions endpoint.
+   * - Customize with the SDK
+     - :doc:`SDK Trainer <../sdk/trainer>`
+     - Build custom rollout, reward, loss, and checkpoint logic.
+   * - Prepare datasets
+     - :doc:`Dataset Formats <../concepts/dataset-formats>`
+     - Learn the supported data shapes before wiring custom examples.
+   * - Understand core concepts
+     - :doc:`Training Loop <../concepts/training-loop>`
+     - Learn the training loop, dataset formats, reward functions, and chat templates.
+   * - Fix environment issues
+     - :doc:`Troubleshooting <../troubleshooting/index>`
+     - Diagnose CUDA, PyTorch, extension, installation, and runtime problems.
 
 Start
 -----
@@ -39,10 +136,6 @@ Start
        <p><code>areno check</code> reports common CUDA, PyTorch, extension, and platform setup issues with next steps.</p>
      </div>
    </div>
-
-``flash-attn`` is optional unless you use the default ``--attn-backend flash``
-path. Use ``--attn-backend native`` when you want to run without FlashAttention
-or when the local GPU is unsupported by FlashAttention.
 
 Core workflows
 --------------
