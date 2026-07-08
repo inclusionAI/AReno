@@ -20,14 +20,25 @@ and retry with adjusted parameters when the failure is likely recoverable.
    - `nvidia-smi --query-gpu=index,name,memory.total,memory.used,memory.free --format=csv`
    - `ps aux | grep -E "areno|python" | grep -v grep`
    - `df -h . /tmp`
-3. Prefer a small smoke test first:
+3. Before a real train/serve run, first try a dummy load or minimal load check
+   for the target checkpoint. The goal is to catch missing dependencies,
+   unsupported model adapters, tensor-parallel divisibility errors, checkpoint
+   shape mismatches, and basic CUDA startup failures before spending time on a
+   rollout or training step. Useful checks:
+   - `areno check`
+   - `areno env`
+   - a minimal `areno serve` on an unused port followed by `/v1/models`, then
+     stop it if the user asked for training
+   - a one-step `areno train --max-steps 1` with small batch settings if serve
+     is not appropriate
+4. Prefer a small smoke test first:
    - one epoch or `--max-steps 1`
    - small `--batch-size`
    - small `--n-samples`
    - conservative `--mini-bs`
    - a valid `--save-path` only when checkpoint save must be tested
-4. Read the error message, adjust one or two parameters, and retry.
-5. Call `submit` only after the command is running or has completed successfully,
+5. Read the error message, adjust one or two parameters, and retry.
+6. Call `submit` only after the command is running or has completed successfully,
    or when the task is blocked by missing files, missing GPUs, invalid API
    credentials, or a non-recoverable dependency error.
 
@@ -132,6 +143,72 @@ increase step overhead because rollout state must be rebuilt.
 - Reward function missing for RL algorithms: provide `--reward-fn-path` or
   `--reward-ckpt`.
 - SFT requires a dataset loader: provide `--dataset-loader-fn`.
+
+## Dependency repair
+
+If a run fails because an optional kernel package is missing, the agent may
+install the missing dependency in the current Python environment. Prefer a
+prebuilt wheel when one exists. Do not reinstall the whole project unless the
+user asks for it. After installing or changing dependencies, first rerun the
+dummy load/minimal load check before retrying the original long command.
+
+For `flash-attn`, first inspect the active runtime:
+
+```bash
+python - <<'PY'
+import platform, sys, torch
+print("python", sys.version)
+print("platform", platform.machine(), platform.system())
+print("torch", torch.__version__)
+print("cuda", torch.version.cuda)
+print("cxx11abi", torch._C._GLIBCXX_USE_CXX11_ABI)
+PY
+```
+
+Then list all currently available prebuilt GitHub release wheels and choose the
+one matching Python ABI, CUDA, Torch version, platform, and CXX11 ABI:
+
+```bash
+python - <<'PY'
+import json
+import urllib.request
+
+repo = "Dao-AILab/flash-attention"
+for page in range(1, 20):
+    url = f"https://api.github.com/repos/{repo}/releases?per_page=100&page={page}"
+    with urllib.request.urlopen(url, timeout=30) as response:
+        releases = json.load(response)
+    if not releases:
+        break
+    for release in releases:
+        for asset in release.get("assets", []):
+            name = asset.get("name", "")
+            if name.endswith(".whl"):
+                print(asset["browser_download_url"])
+PY
+```
+
+Install a selected wheel directly:
+
+```bash
+pip install --no-build-isolation --no-deps '<wheel-url>'
+```
+
+Known current release wheel URL patterns include:
+
+- FlashAttention 4 beta universal wheels:
+  - `https://github.com/Dao-AILab/flash-attention/releases/download/fa4-v4.0.0.beta20/flash_attn_4-4.0.0b20-py3-none-any.whl`
+  - `https://github.com/Dao-AILab/flash-attention/releases/download/fa4-v4.0.0.beta19/flash_attn_4-4.0.0b19-py3-none-any.whl`
+  - `https://github.com/Dao-AILab/flash-attention/releases/download/fa4-v4.0.0.beta18/flash_attn_4-4.0.0b18-py3-none-any.whl`
+- FlashAttention 2.8.3.post1 platform wheels use this release:
+  - `https://github.com/Dao-AILab/flash-attention/releases/tag/v2.8.3.post1`
+  - Example Python 3.10, CUDA 12, Torch 2.6, CXX11 ABI true, Linux x86_64:
+    `https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3.post1/flash_attn-2.8.3.post1%2Bcu12torch2.6cxx11abiTRUE-cp310-cp310-linux_x86_64.whl`
+  - Example Python 3.10, CUDA 12, Torch 2.6, CXX11 ABI false, Linux x86_64:
+    `https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3.post1/flash_attn-2.8.3.post1%2Bcu12torch2.6cxx11abiFALSE-cp310-cp310-linux_x86_64.whl`
+
+If no wheel matches exactly, stop and report the mismatch rather than starting a
+long source build unless the user explicitly asks for a source build.
 
 ## Safety
 
