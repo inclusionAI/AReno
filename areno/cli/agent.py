@@ -14,13 +14,20 @@ from types import SimpleNamespace
 from typing import Any
 
 import click
+from rich.console import Console, Group
+from rich.json import JSON
+from rich.panel import Panel
+from rich.rule import Rule
+from rich.syntax import Syntax
+from rich.table import Table
+from rich.text import Text
 
 DEFAULT_KNOWLEDGE_FILE = Path(__file__).resolve().parents[1] / "agentic" / "coding" / "ops_knowledge.md"
 DEFAULT_KNOWLEDGE = DEFAULT_KNOWLEDGE_FILE.read_text(encoding="utf-8")
 CONFIG_FILE = Path.home() / ".areno" / "agent_config.json"
 DEFAULT_AGENT_TURN_LIMIT = 1_000_000
 JUDGE_CONTEXT_CHARS = 24000
-PANEL_WIDTH = 88
+CONSOLE = Console(highlight=False)
 
 SYSTEM_TEMPLATE = """You are an AReno operations coding agent.
 
@@ -224,6 +231,7 @@ async def _main_async(args: argparse.Namespace) -> int:
     item = SimpleNamespace(record=task, prompt=args.instruction)
     workspace = CodingWorkspace.from_current_repo(task, args.repo)
     workspace.max_command_timeout_s = float(args.command_timeout_s)
+    workspace.command_output_callback = _print_command_output_event
     client = AsyncOpenAI(base_url=args.base_url, api_key=args.api_key, max_retries=0)
     messages = [
         {"role": "system", "content": SYSTEM_TEMPLATE.format(knowledge=knowledge)},
@@ -257,8 +265,8 @@ async def _main_async(args: argparse.Namespace) -> int:
             if judgment.get("done") is True:
                 _print_panel(
                     "done",
-                    json.dumps(workspace.submitted, ensure_ascii=False, indent=2, sort_keys=True),
-                    fg="green",
+                    _json_view(workspace.submitted),
+                    style="cyan",
                 )
                 return 0 if workspace.submitted.get("status") == "solved" else 1
             feedback = str(judgment.get("feedback") or judgment.get("reason") or "").strip()
@@ -430,76 +438,126 @@ def _print_event(event: str, payload: dict[str, Any]) -> None:
     if event == "assistant":
         content = payload.get("content")
         if content:
-            _print_panel("assistant", str(content), fg="cyan")
+            _print_panel("assistant", Text(str(content), style="bright_cyan"), style="cyan")
         calls = payload.get("tool_calls") or []
         if calls:
             call = calls[0]
             tool_name = call["function"]["name"]
             arguments = call["function"].get("arguments", "")
-            _print_panel(f"tool call: {tool_name}", _format_tool_arguments(tool_name, arguments), fg="magenta")
+            _print_panel(f"tool call: {tool_name}", _format_tool_arguments(tool_name, arguments), style="magenta")
     elif event == "tool":
         name = str(payload.get("name") or "tool")
-        _print_panel(f"tool result: {name}", _format_tool_result(name, str(payload.get("content", ""))), fg="blue")
+        _print_panel(f"tool result: {name}", _format_tool_result(name, str(payload.get("content", ""))), style="blue")
+
+
+def _print_command_output_event(event: dict[str, Any]) -> None:
+    kind = event.get("kind")
+    if kind == "start":
+        CONSOLE.print(Rule("[bold magenta]command output[/bold magenta]", style="magenta"))
+        CONSOLE.print(Text(str(event.get("command") or ""), style="magenta"))
+        CONSOLE.print(Text(f"timeout_s: {event.get('timeout_s')}", style="dim"))
+    elif kind == "line":
+        stream = str(event.get("stream") or "stdout")
+        line = str(event.get("line") or "").rstrip()
+        prefix_style = "red" if stream == "stderr" else "cyan"
+        line_style = "bright_red" if stream == "stderr" else "white"
+        text = Text()
+        text.append(f"{stream}> ", style=prefix_style)
+        text.append(line, style=line_style)
+        CONSOLE.print(text, soft_wrap=True)
+    elif kind == "end":
+        skipped = int(event.get("skipped_stream_lines") or 0)
+        returncode = event.get("returncode")
+        timed_out = bool(event.get("timed_out"))
+        style = "red" if timed_out or returncode not in (0, None) else "cyan"
+        summary = f"returncode={returncode}"
+        if timed_out:
+            summary += " timed_out=true"
+        if skipped:
+            summary += f" streamed_screened={skipped} skipped_lines"
+        CONSOLE.print(Rule(f"[bold {style}]{summary}[/bold {style}]", style=style))
 
 
 def _print_banner(instruction: str, root: Path, model: str) -> None:
-    body = f"model: {model}\nworkspace: {root}\ngoal: {instruction}"
-    _print_panel("areno agent", body, fg="green")
+    table = Table.grid(padding=(0, 1))
+    table.add_column(style="bold cyan", no_wrap=True)
+    table.add_column(style="white")
+    table.add_row("model", model)
+    table.add_row("workspace", str(root))
+    table.add_row("goal", instruction)
+    _print_panel("areno agent", table, style="cyan")
 
 
 def _print_judgment(judgment: dict[str, Any]) -> None:
     done = bool(judgment.get("done"))
     title = "judge: done" if done else "judge: continue"
-    body = json.dumps(judgment, ensure_ascii=False, indent=2, sort_keys=True)
-    _print_panel(title, body, fg="green" if done else "yellow")
+    _print_panel(title, _json_view(judgment), style="cyan" if done else "yellow")
 
 
-def _format_tool_arguments(tool_name: str, raw: str) -> str:
+def _format_tool_arguments(tool_name: str, raw: str) -> Any:
     try:
         parsed = json.loads(raw or "{}")
     except json.JSONDecodeError:
-        return raw
+        return Text(raw, style="white")
     if tool_name == "run_command":
         command = str(parsed.get("command", ""))
         timeout = parsed.get("timeout_s")
-        suffix = f"\ntimeout_s: {timeout}" if timeout is not None else ""
-        return f"$ {command}{suffix}"
-    return json.dumps(parsed, ensure_ascii=False, indent=2, sort_keys=True)
+        table = Table.grid(padding=(0, 1))
+        table.add_column(style="bold magenta", no_wrap=True)
+        table.add_column()
+        table.add_row("command", Syntax(command, "bash", theme="ansi_dark", word_wrap=True))
+        if timeout is not None:
+            table.add_row("timeout_s", str(timeout))
+        return table
+    return _json_view(parsed)
 
 
-def _format_tool_result(tool_name: str, raw: str) -> str:
+def _format_tool_result(tool_name: str, raw: str) -> Any:
     try:
         parsed = json.loads(raw or "{}")
     except json.JSONDecodeError:
-        return raw
+        return Text(raw, style="white")
     if tool_name == "run_command":
-        command = parsed.get("command", "")
-        returncode = parsed.get("returncode")
-        screened = parsed.get("screened")
-        output = parsed.get("output") or parsed.get("stdout") or parsed.get("stderr") or ""
-        header = f"$ {command}\nreturncode: {returncode}"
-        if screened:
-            header += "\noutput: screened"
-        return header + ("\n\n" + str(output) if output else "")
-    return json.dumps(parsed, ensure_ascii=False, indent=2, sort_keys=True)
+        return _format_run_command_result(parsed)
+    return _json_view(parsed)
 
 
-def _print_panel(title: str, body: str, *, fg: str) -> None:
-    click.echo()
-    click.secho("╭" + "─" * (PANEL_WIDTH - 2) + "╮", fg=fg)
-    label = f" {title} "
-    click.secho("│" + label[: PANEL_WIDTH - 2].ljust(PANEL_WIDTH - 2) + "│", fg=fg)
-    click.secho("├" + "─" * (PANEL_WIDTH - 2) + "┤", fg=fg)
-    for line in (body or "").splitlines() or [""]:
-        for chunk in _wrap_terminal_line(line, PANEL_WIDTH - 4):
-            click.echo(click.style("│ ", fg=fg) + chunk.ljust(PANEL_WIDTH - 4) + click.style(" │", fg=fg))
-    click.secho("╰" + "─" * (PANEL_WIDTH - 2) + "╯", fg=fg)
+def _format_run_command_result(parsed: dict[str, Any]) -> Any:
+    returncode = parsed.get("returncode")
+    timed_out = bool(parsed.get("timed_out"))
+    screened = bool(parsed.get("screened"))
+    status_style = "red" if timed_out or returncode not in (0, None) else "cyan"
+    table = Table.grid(padding=(0, 1))
+    table.add_column(style="bold blue", no_wrap=True)
+    table.add_column()
+    table.add_row("command", Syntax(str(parsed.get("command") or ""), "bash", theme="ansi_dark", word_wrap=True))
+    table.add_row("returncode", Text(str(returncode), style=status_style))
+    table.add_row("screened", "yes" if screened else "no")
+    table.add_row("streamed", str(parsed.get("streamed_lines", 0)))
+    skipped = int(parsed.get("skipped_stream_lines") or 0)
+    if skipped:
+        table.add_row("live_skipped", str(skipped))
+    if timed_out:
+        table.add_row("timed_out", Text("yes", style="red"))
+    output = str(parsed.get("output") or parsed.get("stdout") or parsed.get("stderr") or "")
+    if not output:
+        return table
+    output_panel = Panel(
+        Text(output, style="white"),
+        title="screened output" if screened else "output",
+        border_style="bright_black",
+        padding=(0, 1),
+    )
+    return Group(table, output_panel)
 
 
-def _wrap_terminal_line(line: str, width: int) -> list[str]:
-    if len(line) <= width:
-        return [line]
-    return [line[index : index + width] for index in range(0, len(line), width)]
+def _json_view(value: Any) -> Any:
+    return JSON(json.dumps(value, ensure_ascii=False, sort_keys=True, default=str))
+
+
+def _print_panel(title: str, body: Any, *, style: str) -> None:
+    CONSOLE.print()
+    CONSOLE.print(Panel(body, title=f"[bold {style}]{title}[/bold {style}]", border_style="bright_black", padding=(0, 1)))
 
 
 if __name__ == "__main__":

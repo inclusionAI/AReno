@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 from click import UsageError, unstyle
@@ -487,6 +488,7 @@ def test_train_command_tunes_params_before_summary_and_run(monkeypatch):
         )
 
     monkeypatch.setattr("areno.cli.auto_tune.auto_tune_config", fake_auto_tune)
+    monkeypatch.setattr(train_cli, "resolve_model_refs_for_config", lambda config: config)
     monkeypatch.setattr(train_cli, "run", fake_run)
 
     result = CliRunner().invoke(
@@ -521,6 +523,49 @@ def test_train_command_tunes_params_before_summary_and_run(monkeypatch):
     assert "n_samples            4" in output
     assert "max_running_prompts  4" in output
     assert events == [("tune", 32, 8, 16, 0.82, 64), ("run", 1, 4, 2, 4)]
+
+
+def test_train_command_smoke_resolves_model_ref_before_probe(monkeypatch):
+    events = []
+
+    def fake_resolve(config):
+        events.append(("resolve", config.ckpt))
+        config.ckpt = "/cache/actor"
+        return config
+
+    def fake_smoke(config):
+        events.append(("smoke", config.ckpt))
+        return SimpleNamespace(
+            ok=True,
+            error=None,
+            peak_mem_frac=0.1,
+            candidate=SimpleNamespace(
+                tp_size=1,
+                batch_size=1,
+                n_samples=1,
+                mini_bs=1,
+                max_running_prompts=1,
+                adam_8bit=False,
+                keep_rollout_state=False,
+            ),
+        )
+
+    monkeypatch.setattr(train_cli, "resolve_model_refs_for_config", fake_resolve)
+    monkeypatch.setattr("areno.cli.auto_tune.smoke_infer_config", fake_smoke)
+
+    result = CliRunner().invoke(
+        train_cli.train_command,
+        [
+            "--algo",
+            "gspo",
+            "--ckpt",
+            "actor",
+            "--smoke-infer",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert events == [("resolve", "actor"), ("smoke", "/cache/actor")]
 
 
 EXPECTED_HELP_SECTIONS = [

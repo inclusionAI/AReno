@@ -1182,6 +1182,7 @@ def train_command(**options) -> None:
     if options.get("smoke_infer") or options.get("smoke_train"):
         from areno.cli.auto_tune import smoke_infer_config, smoke_train_config
 
+        trainer_config = resolve_model_refs_for_config(trainer_config)
         stage = "infer" if options.get("smoke_infer") else "train"
         measurement = smoke_infer_config(trainer_config) if stage == "infer" else smoke_train_config(trainer_config)
         _print_smoke_summary(stage, measurement)
@@ -1191,6 +1192,7 @@ def train_command(**options) -> None:
     if options.get("tune_params"):
         from areno.cli.auto_tune import auto_tune_config
 
+        trainer_config = resolve_model_refs_for_config(trainer_config)
         result = auto_tune_config(
             trainer_config,
             mem_frac=options["mem_frac"],

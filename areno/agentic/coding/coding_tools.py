@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import os
+import queue
 import re
 import shutil
 import subprocess
 import tempfile
+import threading
+import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -17,6 +21,7 @@ DEFAULT_TIMEOUT_S = 10.0
 SCREENED_OUTPUT_CHARS = 6000
 SCREENED_HEAD_LINES = 80
 SCREENED_TAIL_LINES = 160
+STREAM_HEAD_LINES = 120
 IMPORTANT_OUTPUT_PATTERNS = (
     "error",
     "exception",
@@ -64,6 +69,7 @@ class CodingWorkspace:
     max_command_timeout_s: float = DEFAULT_TIMEOUT_S
     submitted: dict[str, Any] | None = None
     command_history: list[dict[str, Any]] = field(default_factory=list)
+    command_output_callback: Callable[[dict[str, Any]], None] | None = None
 
     @classmethod
     def from_task(cls, task: dict[str, Any]) -> CodingWorkspace:
@@ -231,26 +237,50 @@ class CodingWorkspace:
         if _is_dangerous_rm_command(command):
             raise ToolError(f"dangerous rm command is not allowed: {command}")
         timeout = min(max(float(timeout_s), 0.1), max(float(self.max_command_timeout_s), 0.1))
-        proc = subprocess.run(
+        self._emit_command_output({"kind": "start", "command": command, "timeout_s": timeout})
+        proc = subprocess.Popen(
             command,
             cwd=self.root,
             shell=True,
-            check=False,
             text=True,
-            capture_output=True,
-            timeout=timeout,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=1,
         )
-        screened = _screen_command_output(proc.stdout, proc.stderr)
+        stdout, stderr, timed_out, streamed_lines, skipped_stream_lines = _communicate_streaming(
+            proc,
+            timeout_s=timeout,
+            on_output=self._emit_command_output,
+        )
+        returncode = 124 if timed_out else int(proc.returncode or 0)
+        screened = _screen_command_output(stdout, stderr)
         result = {
             "command": command,
-            "returncode": int(proc.returncode),
+            "returncode": returncode,
             "output": screened["output"],
             "stdout": screened["stdout"],
             "stderr": screened["stderr"],
             "screened": screened["screened"],
+            "timed_out": timed_out,
+            "streamed_lines": streamed_lines,
+            "skipped_stream_lines": skipped_stream_lines,
         }
+        self._emit_command_output(
+            {
+                "kind": "end",
+                "command": command,
+                "returncode": returncode,
+                "timed_out": timed_out,
+                "streamed_lines": streamed_lines,
+                "skipped_stream_lines": skipped_stream_lines,
+            }
+        )
         self.command_history.append(result)
         return result
+
+    def _emit_command_output(self, event: dict[str, Any]) -> None:
+        if self.command_output_callback is not None:
+            self.command_output_callback(event)
 
     def submit(self, status: str, summary: str = "") -> dict[str, Any]:
         self.submitted = {"status": str(status), "summary": str(summary)[:500]}
@@ -451,6 +481,86 @@ def _truncate(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[:limit] + f"\n... truncated {len(text) - limit} chars ..."
+
+
+def _communicate_streaming(
+    proc: subprocess.Popen[str],
+    *,
+    timeout_s: float,
+    on_output: Callable[[dict[str, Any]], None],
+) -> tuple[str, str, bool, int, int]:
+    output_queue: queue.Queue[tuple[str, str | None]] = queue.Queue()
+    stdout_parts: list[str] = []
+    stderr_parts: list[str] = []
+    line_counts = {"stdout": 0, "stderr": 0}
+    streamed_lines = 0
+    skipped_stream_lines = 0
+
+    def read_stream(name: str, stream: Any) -> None:
+        try:
+            if stream is not None:
+                for line in stream:
+                    output_queue.put((name, line))
+        finally:
+            output_queue.put((name, None))
+
+    threads = [
+        threading.Thread(target=read_stream, args=("stdout", proc.stdout), daemon=True),
+        threading.Thread(target=read_stream, args=("stderr", proc.stderr), daemon=True),
+    ]
+    for thread in threads:
+        thread.start()
+
+    finished_streams: set[str] = set()
+    deadline = time.monotonic() + timeout_s
+    timed_out = False
+    while len(finished_streams) < 2:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            timed_out = True
+            proc.kill()
+            break
+        try:
+            stream_name, line = output_queue.get(timeout=min(0.1, remaining))
+        except queue.Empty:
+            continue
+        if line is None:
+            finished_streams.add(stream_name)
+            continue
+        if stream_name == "stdout":
+            stdout_parts.append(line)
+        else:
+            stderr_parts.append(line)
+        line_counts[stream_name] += 1
+        if _should_stream_line(line_counts[stream_name], line):
+            streamed_lines += 1
+            on_output({"kind": "line", "stream": stream_name, "line": line, "line_index": line_counts[stream_name]})
+        else:
+            skipped_stream_lines += 1
+
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=5)
+    for thread in threads:
+        thread.join(timeout=0.2)
+    while not output_queue.empty():
+        stream_name, line = output_queue.get_nowait()
+        if line is None:
+            continue
+        if stream_name == "stdout":
+            stdout_parts.append(line)
+        else:
+            stderr_parts.append(line)
+    return "".join(stdout_parts), "".join(stderr_parts), timed_out, streamed_lines, skipped_stream_lines
+
+
+def _should_stream_line(line_index: int, line: str) -> bool:
+    if line_index <= STREAM_HEAD_LINES:
+        return True
+    lowered = line.lower()
+    return any(pattern in lowered for pattern in IMPORTANT_OUTPUT_PATTERNS)
 
 
 def _screen_command_output(stdout: str, stderr: str) -> dict[str, Any]:
