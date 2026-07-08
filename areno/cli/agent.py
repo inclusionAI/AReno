@@ -38,6 +38,18 @@ Use exactly one tool call per assistant turn. Call submit with status=solved onl
 after a train/serve command has completed successfully or is clearly running and
 verified. Call submit with status=blocked only after a non-recoverable blocker.
 
+Train command policy:
+
+- For rollout/RL algorithms, use `--n-samples 8` by default unless the user
+  explicitly asks for another value.
+- Add `--drop-rollout-state` to train and train-smoke commands by default unless
+  the user explicitly asks to keep rollout state.
+- A tiny smoke command only proves startup. After it succeeds, do not submit yet
+  if the goal is a train run. Run additional smoke attempts with larger
+  `--max-running-prompts`, `--batch-size`, and/or `--mini-bs` to use available
+  GPU memory, then run the real train command with the largest stable settings.
+- If a smoke command underuses GPU memory, increase rollout concurrency first.
+
 Background knowledge:
 
 {knowledge}
@@ -307,7 +319,11 @@ async def _judge_goal_done(
                     "Decide whether the original goal is actually complete. A submit is not enough by itself. "
                     "Look for concrete evidence such as successful command output, a running verified server, "
                     "a completed train step, a saved and reload-tested checkpoint when requested, or a truly "
-                    "non-recoverable blocker. Return JSON only with keys: done, reason, feedback."
+                    "non-recoverable blocker. For rollout/RL train goals, do not accept a single tiny smoke "
+                    "success as complete unless the user only requested smoke. Check that the agent used "
+                    "--n-samples 8 by default, included --drop-rollout-state by default, and tried to increase "
+                    "GPU utilization after basic smoke success when memory headroom was available. Return JSON "
+                    "only with keys: done, reason, feedback."
                 ),
             },
             {
@@ -429,7 +445,13 @@ def _job_prompt(instruction: str, root: Path) -> str:
         f"User job: {instruction}\n\n"
         "Complete this job in the current environment. If the job asks for training, run a real small train "
         "or the requested train command and adjust parameters on recoverable failures. If the job asks for "
-        "serving, start the server and verify it with a local request when possible."
+        "serving, start the server and verify it with a local request when possible.\n\n"
+        "Operational requirements for train jobs:\n"
+        "- Use --n-samples 8 for RL/rollout algorithms unless the user provided another value.\n"
+        "- Include --drop-rollout-state by default unless the user asks to keep rollout state.\n"
+        "- Use smoke-infer/smoke-train before long runs, but do not treat one tiny smoke success as completion.\n"
+        "- After smoke succeeds, retry with larger max-running-prompts, batch-size, or mini-bs to fill GPU memory "
+        "safely before choosing final train settings."
     )
 
 
