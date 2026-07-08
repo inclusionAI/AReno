@@ -62,6 +62,7 @@ areno train \
   --n-samples <samples-per-prompt> \
   --mini-bs <train-microbatch> \
   --max-running-prompts <rollout-concurrency> \
+  --drop-rollout-state \
   --max-steps 1
 ```
 
@@ -75,7 +76,7 @@ areno train --ckpt Qwen/Qwen3.5-0.8B --dataset-path gsm8k:main \
   --dataset-loader-fn examples/math/dataset_loader.py \
   --reward-fn-path examples/math/math_verify_reward.py \
   --algo gspo --world-size 1 --tp-size 1 --batch-size 1 --n-samples 8 \
-  --mini-bs 1 --max-running-prompts 8 --max-steps 1
+  --mini-bs 1 --max-running-prompts 8 --drop-rollout-state --max-steps 1
 ```
 
 ```bash
@@ -83,7 +84,7 @@ areno train --ckpt <local-ckpt> --dataset-path /home/admin/math/data \
   --dataset-loader-fn examples/math/dataset_loader.py \
   --reward-fn-path examples/math/math_verify_reward.py \
   --algo gspo --world-size 8 --tp-size 4 --batch-size 32 --n-samples 8 \
-  --mini-bs 16 --max-running-prompts 256 --max-steps 1
+  --mini-bs 16 --max-running-prompts 256 --drop-rollout-state --max-steps 1
 ```
 
 Use `--save-path <dir> --save-interval 1 --max-steps 1` when the task asks to
@@ -114,7 +115,7 @@ Example:
 areno train --ckpt <ckpt> --dataset-path __smoke__ --algo gspo \
   --world-size 8 --tp-size 4 --batch-size 32 --n-samples 8 \
   --mini-bs 16 --max-running-prompts 256 --max-new-tokens 1024 \
-  --smoke-infer
+  --drop-rollout-state --smoke-infer
 ```
 
 `--smoke-train` dummy-loads the model, skips real rollout/decode, offloads the
@@ -129,7 +130,7 @@ Example:
 ```bash
 areno train --ckpt <ckpt> --dataset-path __smoke__ --algo gspo \
   --world-size 8 --tp-size 4 --mini-bs 16 --max-new-tokens 1024 \
-  --smoke-train
+  --drop-rollout-state --smoke-train
 ```
 
 ## Serving command shape
@@ -181,9 +182,11 @@ For training utilization, increase `--mini-bs` until train memory is close to
 the safe target. Keep `--n-samples 8` as the normal RL baseline unless the user
 or task explicitly needs a different sampling count.
 
-`--drop-rollout-state` means the rollout engine state is released before
-training to save memory. It can help when train OOM occurs after rollout. It may
-increase step overhead because rollout state must be rebuilt.
+Use `--drop-rollout-state` by default for train attempts unless the user asks to
+keep rollout state for performance experiments. It means the rollout engine
+state is released before training to save memory. It can help when train OOM
+occurs after rollout. It may increase step overhead because rollout state must
+be rebuilt.
 
 ## Recoverable failures and retries
 

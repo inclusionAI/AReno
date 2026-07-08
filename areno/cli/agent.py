@@ -15,7 +15,6 @@ from typing import Any
 
 import click
 from rich.console import Console, Group
-from rich.json import JSON
 from rich.panel import Panel
 from rich.rule import Rule
 from rich.syntax import Syntax
@@ -552,7 +551,12 @@ def _format_run_command_result(parsed: dict[str, Any]) -> Any:
 
 
 def _json_view(value: Any) -> Any:
-    return JSON(json.dumps(value, ensure_ascii=False, sort_keys=True, default=str))
+    return Syntax(
+        json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True, default=str),
+        "json",
+        theme="ansi_dark",
+        word_wrap=True,
+    )
 
 
 def _print_panel(title: str, body: Any, *, style: str) -> None:
