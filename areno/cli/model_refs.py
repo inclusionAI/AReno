@@ -8,7 +8,7 @@ from typing import TypeVar
 ConfigT = TypeVar("ConfigT")
 
 
-def resolve_model_ref(model_ref: str, cache: dict[str, str] | None = None, *, model_hub: str = "hf") -> str:
+def resolve_model_ref(model_ref: str, cache: dict[str, str] | None = None, *, model_hub: str = "modelscope") -> str:
     """Resolve a local path or remote model id to a local checkpoint directory."""
 
     path = Path(model_ref)
@@ -45,7 +45,7 @@ def resolve_model_refs_for_config(config: ConfigT) -> ConfigT:
     """Resolve all model references in a trainer config, sharing duplicate downloads."""
 
     cache: dict[str, str] = {}
-    model_hub = str(getattr(config, "model_hub", "hf"))
+    model_hub = str(getattr(config, "model_hub", "modelscope"))
     config.ckpt = resolve_model_ref(config.ckpt, cache, model_hub=model_hub)
     algo = str(getattr(config, "algo", "")).lower()
     if algo == "dpo" and getattr(config, "ref_ckpt", None) is not None:

@@ -27,7 +27,7 @@ class TrainerConfig:
     algo: str
     ckpt: str
     dataset_path: str
-    model_hub: str = "hf"
+    model_hub: str = "modelscope"
     dataset_loader_fn: str | None = None
     save_path: str | None = None
     save_interval: int = 100

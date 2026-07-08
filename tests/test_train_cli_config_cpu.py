@@ -153,7 +153,7 @@ def test_train_config_builds_sft_shape_without_rollout_or_role_fields():
     assert cfg.algo == "sft"
     assert cfg.ckpt == "actor"
     assert cfg.dataset_path == "dataset"
-    assert cfg.model_hub == "hf"
+    assert cfg.model_hub == "modelscope"
     assert cfg.optimizer_min_lr == 0.0
     assert cfg.attn_backend == "native"
     assert cfg.areno_config().runtime["attn_backend"] == "native"
@@ -316,7 +316,7 @@ def test_training_config_summary_shows_resolved_values_and_warning():
     assert "requires_rollout  yes" in summary
     assert "ckpt            actor" in summary
     assert "dataset_path    dataset" in summary
-    assert "model_hub       hf" in summary
+    assert "model_hub       modelscope" in summary
     assert "reward_fn       none" in summary
     assert "reward_ckpt     reward-model" in summary
     assert "dp_size       4" in summary
@@ -586,7 +586,7 @@ def _options(**overrides):
         algo="gspo",
         ckpt="actor",
         dataset_path="dataset",
-        model_hub="hf",
+        model_hub="modelscope",
         dataset_loader_fn=None,
         reward_fn_path=None,
         save_path="save",

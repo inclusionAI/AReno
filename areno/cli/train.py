@@ -173,7 +173,7 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
     args = SimpleNamespace(**options)
     args.max_steps = getattr(args, "max_steps", None)
     args.score_micro_bs = getattr(args, "score_micro_bs", 8)
-    args.model_hub = getattr(args, "model_hub", "hf")
+    args.model_hub = getattr(args, "model_hub", "modelscope")
     smoke_infer = bool(getattr(args, "smoke_infer", False))
     smoke_train = bool(getattr(args, "smoke_train", False))
     if smoke_infer or smoke_train:
@@ -591,7 +591,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
     # trainers do not receive rollout/reward/GSPO fields by construction.
     args.max_steps = getattr(args, "max_steps", None)
     args.score_micro_bs = getattr(args, "score_micro_bs", 8)
-    args.model_hub = getattr(args, "model_hub", "hf")
+    args.model_hub = getattr(args, "model_hub", "modelscope")
     algorithm = get_algorithm(args.algo)
     chat_template_enable_thinking = False if args.disable_thinking else None
     if algorithm.name == "dpo":
@@ -841,7 +841,7 @@ def _reward_fn_path_for_config(config: TrainerConfig) -> str | None:
 
 
 def _load_dataset_for_training(
-    dataset_path: str, *, model_hub: str = "hf", dataset_loader_fn: str | None, load_dataset, load_from_disk
+    dataset_path: str, *, model_hub: str = "modelscope", dataset_loader_fn: str | None, load_dataset, load_from_disk
 ):
     def default_loader(path):
         return _load_dataset_from_path(
@@ -886,10 +886,10 @@ def _split_loader_fn_spec(spec_text: str) -> tuple[Path, str]:
     return Path(spec_text).resolve(), "load_training_dataset"
 
 
-def _load_dataset_from_path(dataset_path: str, *, model_hub: str = "hf", load_dataset, load_from_disk):
+def _load_dataset_from_path(dataset_path: str, *, model_hub: str = "modelscope", load_dataset, load_from_disk):
     # Existing local paths may be either HF `save_to_disk` outputs or raw
     # files. Non-existing values without a known suffix are treated as
-    # Hugging Face dataset IDs such as `gsm8k:main` or `AI-MO/NuminaMath-TIR`.
+    # Remote dataset IDs such as `gsm8k:main` or `AI-MO/NuminaMath-TIR`.
     path = Path(dataset_path)
     if path.is_dir():
         try:
@@ -1020,7 +1020,7 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
 @click.option(
     "--model-hub",
     type=click.Choice(["hf", "modelscope"], case_sensitive=False),
-    default="hf",
+    default="modelscope",
     show_default=True,
     help="Remote hub for non-local model and dataset refs. Use 'modelscope' for ModelScope or 'hf' for Hugging Face.",
 )

@@ -60,6 +60,9 @@ areno train \
   --max-steps 1
 ```
 
+Remote model and dataset refs use ModelScope by default. Add `--model-hub hf`
+when the target checkpoint or dataset must be downloaded from Hugging Face.
+
 Useful examples:
 
 ```bash

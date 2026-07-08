@@ -114,6 +114,12 @@ def test_serve_default_max_running_prompts_is_16():
     assert option.default == 16
 
 
+def test_serve_default_model_hub_is_modelscope():
+    option = next(param for param in serve_mod.serve_command.params if param.name == "model_hub")
+
+    assert option.default == "modelscope"
+
+
 def test_chat_completion_request_defaults_match_sampling_params():
     request = serve_mod.ChatCompletionRequest(messages=[serve_mod.ChatMessage(role="user", content="hi")])
 

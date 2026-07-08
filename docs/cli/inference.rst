@@ -27,7 +27,12 @@ Serve chat completions.
 Options:
 
 ``--model-path TEXT``
-   Local checkpoint/tokenizer path or Hugging Face repo ID. Required.
+   Local checkpoint/tokenizer path or remote model repo ID. Required.
+
+``--model-hub [hf|modelscope]``
+   Remote hub used when ``--model-path`` is not a local path. Use
+   ``--model-hub hf`` for Hugging Face and ``--model-hub modelscope`` for
+   ModelScope. Default: ``modelscope``.
 
 ``--tp-size INTEGER``
    Tensor parallel size. Default: ``1``.
@@ -42,7 +47,7 @@ Options:
    HTTP bind port. Default: ``8000``.
 
 ``--max-running-prompts INTEGER``
-   Maximum concurrent rollout prompts per request chunk. Default: ``128``.
+   Maximum concurrent rollout prompts per request chunk. Default: ``16``.
 
 ``--default-max-tokens INTEGER``
    Default max generated tokens when requests omit a token budget. Default:

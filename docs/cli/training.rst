@@ -49,7 +49,7 @@ Inputs, dataset loader, the algorithm and run length, and device counts.
 ``--model-hub [hf|modelscope]``
    Remote hub used when ``--ckpt``, role checkpoints, or ``--dataset-path`` are
    not local paths. Use ``--model-hub hf`` for Hugging Face and
-   ``--model-hub modelscope`` for ModelScope. Default: ``hf``.
+   ``--model-hub modelscope`` for ModelScope. Default: ``modelscope``.
 
 Dataset references use ``repo/name``, ``repo/name:config``, or
 ``repo/name:config:split``. Examples: ``gsm8k:main`` and

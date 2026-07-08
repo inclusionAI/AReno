@@ -381,6 +381,7 @@ class ConfigAndDataTest(unittest.TestCase):
 
             dataset = train_cli._load_dataset_for_training(
                 "ignored",
+                model_hub="hf",
                 dataset_loader_fn=f"{loader_path}:normalize",
                 load_dataset=lambda *_args, **_kwargs: [{"raw": "loaded"}],
                 load_from_disk=lambda *_args, **_kwargs: None,
@@ -388,12 +389,40 @@ class ConfigAndDataTest(unittest.TestCase):
 
         self.assertEqual(dataset, [{"prompt": "loaded"}])
 
-    def test_cli_remote_dataset_loader_uses_hugging_face_by_default(self):
-        """Remote dataset refs should keep using Hugging Face unless another hub is selected."""
+    def test_cli_remote_dataset_loader_uses_modelscope_by_default(self):
+        """Remote dataset refs should use ModelScope unless another hub is selected."""
+        calls = []
+
+        class FakeMsDatasetResult:
+            def to_hf_dataset(self):
+                return [{"source": "modelscope"}]
+
+        class FakeMsDataset:
+            @staticmethod
+            def load(*args, **kwargs):
+                calls.append((args, kwargs))
+                return FakeMsDatasetResult()
+
+        fake_modelscope = types.ModuleType("modelscope")
+        fake_msdatasets = types.ModuleType("modelscope.msdatasets")
+        fake_msdatasets.MsDataset = FakeMsDataset
+        with patch.dict(sys.modules, {"modelscope": fake_modelscope, "modelscope.msdatasets": fake_msdatasets}):
+            dataset = train_cli._load_dataset_from_path(
+                "gsm8k:main:test",
+                load_dataset=lambda *_args, **_kwargs: [{"source": "hf"}],
+                load_from_disk=lambda *_args, **_kwargs: None,
+            )
+
+        self.assertEqual(dataset, [{"source": "modelscope"}])
+        self.assertEqual(calls, [(("gsm8k",), {"subset_name": "main", "split": "test", "trust_remote_code": True})])
+
+    def test_cli_remote_dataset_loader_uses_hugging_face_when_selected(self):
+        """--model-hub hf should route non-local dataset refs through Hugging Face datasets."""
         calls = []
 
         dataset = train_cli._load_dataset_from_path(
             "gsm8k:main:test",
+            model_hub="hf",
             load_dataset=lambda *args, **kwargs: calls.append((args, kwargs)) or [{"source": "hf"}],
             load_from_disk=lambda *_args, **_kwargs: None,
         )
