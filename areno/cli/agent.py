@@ -143,7 +143,10 @@ async def _refresh_knowledge_async(args: argparse.Namespace) -> int:
     context = _collect_refresh_context(repo)
     client = AsyncOpenAI(base_url=args.base_url, api_key=args.api_key, max_retries=0)
     try:
-        response = await client.chat.completions.create(
+        from areno.agentic.coding.agent_loop import create_chat_completion_with_retry
+
+        response = await create_chat_completion_with_retry(
+            client,
             model=args.model,
             messages=[
                 {
@@ -313,7 +316,10 @@ async def _judge_goal_done(
     messages: list[dict[str, Any]],
     command_history: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    response = await client.chat.completions.create(
+    from areno.agentic.coding.agent_loop import create_chat_completion_with_retry
+
+    response = await create_chat_completion_with_retry(
+        client,
         model=model,
         messages=[
             {

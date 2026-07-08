@@ -13,6 +13,8 @@ from areno.api.agentic import AgentTrajectory, AgentTrajectoryTurn
 
 logger = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARNING)
+MODEL_QUERY_RETRIES = 5
+MODEL_QUERY_BACKOFF_S = 1.0
 
 SYSTEM_PROMPT = """You are a coding agent working in an isolated repository.
 Use one tool call per turn. Prefer inspect_tree/read_file/rg to understand the
@@ -327,7 +329,8 @@ async def run_conversation_turns(
 
     turns: list[AgentTrajectoryTurn] = []
     for _ in range(max_turns):
-        response = await client.chat.completions.create(
+        response = await create_chat_completion_with_retry(
+            client,
             model=model,
             messages=messages,
             tools=TOOLS,
@@ -369,6 +372,37 @@ async def run_conversation_turns(
         if call["function"]["name"] == "submit":
             break
     return turns
+
+
+async def create_chat_completion_with_retry(client: Any, **kwargs: Any) -> Any:
+    """Query an OpenAI-compatible chat endpoint with bounded exponential backoff."""
+
+    last_error: Exception | None = None
+    for attempt in range(1, MODEL_QUERY_RETRIES + 1):
+        try:
+            return await client.chat.completions.create(**kwargs)
+        except Exception as exc:
+            last_error = exc
+            if attempt >= MODEL_QUERY_RETRIES or not _is_retryable_model_query_error(exc):
+                raise
+            delay = MODEL_QUERY_BACKOFF_S * (2 ** (attempt - 1))
+            logger.warning(
+                "model query failed; retrying attempt=%d/%d delay=%.1fs error=%s",
+                attempt,
+                MODEL_QUERY_RETRIES,
+                delay,
+                exc,
+            )
+            await asyncio.sleep(delay)
+    raise RuntimeError("model query failed without exception") from last_error
+
+
+def _is_retryable_model_query_error(exc: Exception) -> bool:
+    status_code = getattr(exc, "status_code", None)
+    if isinstance(status_code, int):
+        return status_code == 408 or status_code == 409 or status_code == 429 or status_code >= 500
+    name = type(exc).__name__.lower()
+    return any(token in name for token in ("timeout", "connection", "api", "http", "transport"))
 
 
 def initial_messages(task: dict[str, Any]) -> list[dict[str, Any]]:
