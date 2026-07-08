@@ -14,6 +14,30 @@ from typing import Any
 MAX_OUTPUT_CHARS = 4000
 MAX_READ_CHARS = 6000
 DEFAULT_TIMEOUT_S = 10.0
+SCREENED_OUTPUT_CHARS = 6000
+SCREENED_HEAD_LINES = 80
+SCREENED_TAIL_LINES = 160
+IMPORTANT_OUTPUT_PATTERNS = (
+    "error",
+    "exception",
+    "traceback",
+    "failed",
+    "failure",
+    "oom",
+    "out of memory",
+    "cuda",
+    "nan",
+    "warning",
+    "epoch=",
+    "stage=",
+    "metric=",
+    "train_stats",
+    "smoke",
+    "selected",
+    "saved",
+    "listening",
+    "running on",
+)
 _IGNORED_REPO_PARTS = {
     ".git",
     "__pycache__",
@@ -216,11 +240,14 @@ class CodingWorkspace:
             capture_output=True,
             timeout=timeout,
         )
+        screened = _screen_command_output(proc.stdout, proc.stderr)
         result = {
             "command": command,
             "returncode": int(proc.returncode),
-            "stdout": _truncate(proc.stdout, MAX_OUTPUT_CHARS),
-            "stderr": _truncate(proc.stderr, MAX_OUTPUT_CHARS),
+            "output": screened["output"],
+            "stdout": screened["stdout"],
+            "stderr": screened["stderr"],
+            "screened": screened["screened"],
         }
         self.command_history.append(result)
         return result
@@ -424,3 +451,55 @@ def _truncate(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[:limit] + f"\n... truncated {len(text) - limit} chars ..."
+
+
+def _screen_command_output(stdout: str, stderr: str) -> dict[str, Any]:
+    combined_parts = []
+    if stdout:
+        combined_parts.append("STDOUT:\n" + stdout)
+    if stderr:
+        combined_parts.append("STDERR:\n" + stderr)
+    combined = "\n\n".join(combined_parts)
+    screened_output = _screen_text(combined, SCREENED_OUTPUT_CHARS)
+    return {
+        "output": screened_output,
+        "stdout": _screen_text(stdout, MAX_OUTPUT_CHARS),
+        "stderr": _screen_text(stderr, MAX_OUTPUT_CHARS),
+        "screened": len(combined) > len(screened_output) or len(stdout) > MAX_OUTPUT_CHARS or len(stderr) > MAX_OUTPUT_CHARS,
+    }
+
+
+def _screen_text(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    lines = text.splitlines()
+    important = [line for line in lines if any(pattern in line.lower() for pattern in IMPORTANT_OUTPUT_PATTERNS)]
+    selected = [
+        *lines[:SCREENED_HEAD_LINES],
+        *([] if not important else ["... important lines ..."]),
+        *important[-SCREENED_TAIL_LINES:],
+        "... tail ...",
+        *lines[-SCREENED_TAIL_LINES:],
+    ]
+    compact = "\n".join(_dedupe_adjacent(selected))
+    return _truncate_middle(compact, limit)
+
+
+def _truncate_middle(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    marker = f"\n... screened {len(text) - limit} chars ...\n"
+    head = max((limit - len(marker)) // 2, 0)
+    tail = max(limit - len(marker) - head, 0)
+    return text[:head] + marker + text[-tail:]
+
+
+def _dedupe_adjacent(lines: list[str]) -> list[str]:
+    out = []
+    previous: str | None = None
+    for line in lines:
+        if line == previous:
+            continue
+        out.append(line)
+        previous = line
+    return out

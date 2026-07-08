@@ -20,6 +20,7 @@ DEFAULT_KNOWLEDGE = DEFAULT_KNOWLEDGE_FILE.read_text(encoding="utf-8")
 CONFIG_FILE = Path.home() / ".areno" / "agent_config.json"
 DEFAULT_AGENT_TURN_LIMIT = 1_000_000
 JUDGE_CONTEXT_CHARS = 24000
+PANEL_WIDTH = 88
 
 SYSTEM_TEMPLATE = """You are an AReno operations coding agent.
 
@@ -228,6 +229,7 @@ async def _main_async(args: argparse.Namespace) -> int:
         {"role": "system", "content": SYSTEM_TEMPLATE.format(knowledge=knowledge)},
         {"role": "user", "content": _job_prompt(args.instruction, workspace.root)},
     ]
+    _print_banner(args.instruction, workspace.root, args.model)
     try:
         while True:
             await run_conversation_turns(
@@ -251,10 +253,13 @@ async def _main_async(args: argparse.Namespace) -> int:
                 messages=messages,
                 command_history=workspace.command_history,
             )
-            click.echo("\njudge:")
-            click.echo(json.dumps(judgment, ensure_ascii=False, indent=2, sort_keys=True))
+            _print_judgment(judgment)
             if judgment.get("done") is True:
-                click.echo(json.dumps(workspace.submitted, ensure_ascii=False, indent=2, sort_keys=True))
+                _print_panel(
+                    "done",
+                    json.dumps(workspace.submitted, ensure_ascii=False, indent=2, sort_keys=True),
+                    fg="green",
+                )
                 return 0 if workspace.submitted.get("status") == "solved" else 1
             feedback = str(judgment.get("feedback") or judgment.get("reason") or "").strip()
             if not feedback:
@@ -425,14 +430,76 @@ def _print_event(event: str, payload: dict[str, Any]) -> None:
     if event == "assistant":
         content = payload.get("content")
         if content:
-            click.echo(f"\nassistant:\n{content}")
+            _print_panel("assistant", str(content), fg="cyan")
         calls = payload.get("tool_calls") or []
         if calls:
             call = calls[0]
-            click.echo(f"\nassistant -> {call['function']['name']}: {call['function'].get('arguments', '')}")
+            tool_name = call["function"]["name"]
+            arguments = call["function"].get("arguments", "")
+            _print_panel(f"tool call: {tool_name}", _format_tool_arguments(tool_name, arguments), fg="magenta")
     elif event == "tool":
-        click.echo(f"\ntool:{payload.get('name')}")
-        click.echo(payload.get("content", ""))
+        name = str(payload.get("name") or "tool")
+        _print_panel(f"tool result: {name}", _format_tool_result(name, str(payload.get("content", ""))), fg="blue")
+
+
+def _print_banner(instruction: str, root: Path, model: str) -> None:
+    body = f"model: {model}\nworkspace: {root}\ngoal: {instruction}"
+    _print_panel("areno agent", body, fg="green")
+
+
+def _print_judgment(judgment: dict[str, Any]) -> None:
+    done = bool(judgment.get("done"))
+    title = "judge: done" if done else "judge: continue"
+    body = json.dumps(judgment, ensure_ascii=False, indent=2, sort_keys=True)
+    _print_panel(title, body, fg="green" if done else "yellow")
+
+
+def _format_tool_arguments(tool_name: str, raw: str) -> str:
+    try:
+        parsed = json.loads(raw or "{}")
+    except json.JSONDecodeError:
+        return raw
+    if tool_name == "run_command":
+        command = str(parsed.get("command", ""))
+        timeout = parsed.get("timeout_s")
+        suffix = f"\ntimeout_s: {timeout}" if timeout is not None else ""
+        return f"$ {command}{suffix}"
+    return json.dumps(parsed, ensure_ascii=False, indent=2, sort_keys=True)
+
+
+def _format_tool_result(tool_name: str, raw: str) -> str:
+    try:
+        parsed = json.loads(raw or "{}")
+    except json.JSONDecodeError:
+        return raw
+    if tool_name == "run_command":
+        command = parsed.get("command", "")
+        returncode = parsed.get("returncode")
+        screened = parsed.get("screened")
+        output = parsed.get("output") or parsed.get("stdout") or parsed.get("stderr") or ""
+        header = f"$ {command}\nreturncode: {returncode}"
+        if screened:
+            header += "\noutput: screened"
+        return header + ("\n\n" + str(output) if output else "")
+    return json.dumps(parsed, ensure_ascii=False, indent=2, sort_keys=True)
+
+
+def _print_panel(title: str, body: str, *, fg: str) -> None:
+    click.echo()
+    click.secho("╭" + "─" * (PANEL_WIDTH - 2) + "╮", fg=fg)
+    label = f" {title} "
+    click.secho("│" + label[: PANEL_WIDTH - 2].ljust(PANEL_WIDTH - 2) + "│", fg=fg)
+    click.secho("├" + "─" * (PANEL_WIDTH - 2) + "┤", fg=fg)
+    for line in (body or "").splitlines() or [""]:
+        for chunk in _wrap_terminal_line(line, PANEL_WIDTH - 4):
+            click.echo(click.style("│ ", fg=fg) + chunk.ljust(PANEL_WIDTH - 4) + click.style(" │", fg=fg))
+    click.secho("╰" + "─" * (PANEL_WIDTH - 2) + "╯", fg=fg)
+
+
+def _wrap_terminal_line(line: str, width: int) -> list[str]:
+    if len(line) <= width:
+        return [line]
+    return [line[index : index + width] for index in range(0, len(line), width)]
 
 
 if __name__ == "__main__":

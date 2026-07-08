@@ -146,7 +146,7 @@ TOOLS = [
                 "type": "object",
                 "properties": {
                     "command": {"type": "string"},
-                    "timeout_s": {"type": "number", "minimum": 0.1, "maximum": 10.0},
+                    "timeout_s": {"type": "number", "minimum": 0.1, "maximum": 3600.0},
                 },
                 "required": ["command"],
                 "additionalProperties": False,
