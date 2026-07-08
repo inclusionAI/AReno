@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
+import binascii
 import json
 import os
 import subprocess
@@ -15,6 +17,8 @@ import click
 
 DEFAULT_KNOWLEDGE_FILE = Path(__file__).resolve().parents[1] / "agentic" / "coding" / "ops_knowledge.md"
 DEFAULT_KNOWLEDGE = DEFAULT_KNOWLEDGE_FILE.read_text(encoding="utf-8")
+CONFIG_FILE = Path.home() / ".areno" / "agent_config.json"
+DEFAULT_AGENT_TURN_LIMIT = 1_000_000
 
 SYSTEM_TEMPLATE = """You are an AReno operations coding agent.
 
@@ -33,11 +37,10 @@ Background knowledge:
 
 
 @click.command("agent", context_settings={"help_option_names": ["-h", "--help"]})
-@click.option("--base-url", default=None, help="OpenAI-compatible base URL. Defaults to OPENAI_BASE_URL.")
-@click.option("--model", default=None, help="Model name for the agent. Defaults to OPENAI_MODEL or policy.")
-@click.option("--api-key", default=None, help="API key. Defaults to OPENAI_API_KEY or EMPTY.")
-@click.option("--repo", default=".", type=click.Path(file_okay=False), help="Repository/workspace to operate in.")
-@click.option("--max-turns", default=24, show_default=True, help="Maximum model/tool turns.")
+@click.option("--set", "set_config", is_flag=True, help="Store agent connection config under ~/.areno and exit.")
+@click.option("--base-url", default=None, help="OpenAI-compatible base URL to store with --set.")
+@click.option("--model", default=None, help="Model name to store with --set.")
+@click.option("--api-key", default=None, help="API key to store with --set.")
 @click.option("--command-timeout-s", default=1800.0, show_default=True, help="Maximum timeout for run_command tools.")
 @click.option(
     "--knowledge-file",
@@ -53,11 +56,10 @@ Background knowledge:
 @click.argument("job", nargs=-1)
 def agent_command(
     *,
+    set_config: bool,
     base_url: str | None,
     model: str | None,
     api_key: str | None,
-    repo: str,
-    max_turns: int,
     command_timeout_s: float,
     knowledge_file: str,
     refresh_knowledge: bool,
@@ -65,9 +67,20 @@ def agent_command(
 ) -> None:
     """Ask an OpenAI-compatible coding agent to run an AReno train/serve job."""
 
-    resolved_base_url = base_url or os.environ.get("OPENAI_BASE_URL") or "http://127.0.0.1:8000/v1"
-    resolved_model = model or os.environ.get("OPENAI_MODEL") or "policy"
-    resolved_api_key = api_key or os.environ.get("OPENAI_API_KEY") or "EMPTY"
+    if set_config:
+        if refresh_knowledge or job:
+            raise click.UsageError("--set cannot be combined with --refresh-knowledge or a job")
+        _write_agent_config(base_url=base_url, model=model, api_key=api_key)
+        click.echo(f"stored agent config: {CONFIG_FILE}")
+        return
+    if base_url or model or api_key:
+        raise click.UsageError("--base-url, --model, and --api-key are only used with --set")
+
+    config = _load_agent_config()
+    resolved_base_url = config.get("base_url") or os.environ.get("OPENAI_BASE_URL") or "http://127.0.0.1:8000/v1"
+    resolved_model = config.get("model") or os.environ.get("OPENAI_MODEL") or "policy"
+    resolved_api_key = config.get("api_key") or os.environ.get("OPENAI_API_KEY") or "EMPTY"
+    repo = "."
     if refresh_knowledge:
         refresh_args = argparse.Namespace(
             base_url=resolved_base_url,
@@ -87,7 +100,7 @@ def agent_command(
         model=resolved_model,
         api_key=resolved_api_key,
         repo=repo,
-        max_turns=max_turns,
+        max_turns=DEFAULT_AGENT_TURN_LIMIT,
         command_timeout_s=command_timeout_s,
         knowledge_file=knowledge_file,
         instruction=instruction,
@@ -138,6 +151,54 @@ async def _refresh_knowledge_async(args: argparse.Namespace) -> int:
     knowledge_path.write_text(content + "\n", encoding="utf-8")
     click.echo(f"refreshed knowledge file with LLM: {knowledge_path}")
     return 0
+
+
+def _write_agent_config(*, base_url: str | None, model: str | None, api_key: str | None) -> None:
+    missing = [
+        name
+        for name, value in [
+            ("--base-url", base_url),
+            ("--model", model),
+            ("--api-key", api_key),
+        ]
+        if not value
+    ]
+    if missing:
+        raise click.UsageError("--set requires " + ", ".join(missing))
+    CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "base_url": _b64_encode(base_url or ""),
+        "model": _b64_encode(model or ""),
+        "api_key": _b64_encode(api_key or ""),
+    }
+    CONFIG_FILE.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.chmod(CONFIG_FILE, 0o600)
+
+
+def _load_agent_config() -> dict[str, str]:
+    if not CONFIG_FILE.exists():
+        return {}
+    try:
+        raw = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise click.ClickException(f"failed to read agent config {CONFIG_FILE}: {exc}") from exc
+    config: dict[str, str] = {}
+    for key in ("base_url", "model", "api_key"):
+        value = raw.get(key)
+        if value is not None:
+            config[key] = _b64_decode(str(value), key)
+    return config
+
+
+def _b64_encode(value: str) -> str:
+    return base64.b64encode(value.encode("utf-8")).decode("ascii")
+
+
+def _b64_decode(value: str, key: str) -> str:
+    try:
+        return base64.b64decode(value.encode("ascii"), validate=True).decode("utf-8")
+    except (binascii.Error, UnicodeDecodeError) as exc:
+        raise click.ClickException(f"invalid base64 value for {key} in {CONFIG_FILE}") from exc
 
 
 async def _main_async(args: argparse.Namespace) -> int:
