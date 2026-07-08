@@ -49,6 +49,10 @@ Train command policy:
   `--max-running-prompts`, `--batch-size`, and/or `--mini-bs` to use available
   GPU memory, then run the real train command with the largest stable settings.
 - If a smoke command underuses GPU memory, increase rollout concurrency first.
+- Before using remote model or dataset refs, check whether Hugging Face is
+  reachable. If Hugging Face is reachable and the requested ref is an HF ref,
+  use `--model-hub hf`. If Hugging Face is unreachable or times out, use
+  ModelScope with `--model-hub modelscope` instead.
 
 Background knowledge:
 
@@ -449,6 +453,8 @@ def _job_prompt(instruction: str, root: Path) -> str:
         "Operational requirements for train jobs:\n"
         "- Use --n-samples 8 for RL/rollout algorithms unless the user provided another value.\n"
         "- Include --drop-rollout-state by default unless the user asks to keep rollout state.\n"
+        "- Before remote downloads, check Hugging Face availability. If it is unavailable, use "
+        "--model-hub modelscope; if it is available and the requested ref is an HF ref, use --model-hub hf.\n"
         "- Use smoke-infer/smoke-train before long runs, but do not treat one tiny smoke success as completion.\n"
         "- After smoke succeeds, retry with larger max-running-prompts, batch-size, or mini-bs to fill GPU memory "
         "safely before choosing final train settings."

@@ -66,8 +66,23 @@ areno train \
   --max-steps 1
 ```
 
-Remote model and dataset refs use ModelScope by default. Add `--model-hub hf`
-when the target checkpoint or dataset must be downloaded from Hugging Face.
+Before using remote model or dataset refs, check whether Hugging Face is
+reachable. If Hugging Face is reachable and the requested ref is an HF ref, add
+`--model-hub hf`. If Hugging Face is unavailable or times out, use ModelScope
+with `--model-hub modelscope`.
+
+Fast Hugging Face availability check:
+
+```bash
+python - <<'PY'
+import urllib.request
+try:
+    with urllib.request.urlopen("https://huggingface.co", timeout=5) as response:
+        print("hf_available", response.status)
+except Exception as exc:
+    print("hf_unavailable", type(exc).__name__, exc)
+PY
+```
 
 Useful examples:
 
