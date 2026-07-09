@@ -21,7 +21,6 @@ DEFAULT_KNOWLEDGE = DEFAULT_KNOWLEDGE_FILE.read_text(encoding="utf-8")
 CONFIG_FILE = Path.home() / ".areno" / "agent_config.json"
 DEFAULT_AGENT_TURN_LIMIT = 1_000_000
 JUDGE_CONTEXT_CHARS = 24000
-PROMPT_PAUSE = "__areno_agent_pause__"
 
 SYSTEM_TEMPLATE = """You are an AReno operations coding agent.
 
@@ -338,53 +337,18 @@ async def _llm_questions_for_instruction(
 async def _prompt_value_async(question: str, *, default: str = "") -> str:
     if not sys.stdin.isatty():
         return default
-    _load_prompt_toolkit()
-    from prompt_toolkit.patch_stdout import patch_stdout
-
     suffix = f" [{default}]" if default else ""
-    print(f"{question}{suffix}", flush=True)
-    session = _create_prompt_session()
-    with patch_stdout():
-        value = await session.prompt_async("❯ ")
-    if value == PROMPT_PAUSE:
-        return default
+    value = await asyncio.to_thread(_read_stdin_line, f"{question}{suffix}\n> ")
     return str(value or default)
 
 
-def _load_prompt_toolkit() -> None:
+def _read_stdin_line(prompt: str) -> str:
+    sys.stdout.write(prompt)
+    sys.stdout.flush()
     try:
-        import prompt_toolkit  # noqa: F401
-    except ImportError as exc:
-        raise click.ClickException("the agent CLI requires prompt-toolkit; install project dependencies first") from exc
-
-
-def _create_prompt_session(*, model: str | None = None, cwd: Path | None = None) -> Any:
-    from prompt_toolkit import PromptSession
-    from prompt_toolkit.key_binding import KeyBindings
-    from prompt_toolkit.styles import Style
-
-    bindings = KeyBindings()
-
-    @bindings.add("escape")
-    def _pause(event: Any) -> None:
-        event.app.exit(result=PROMPT_PAUSE)
-
-    @bindings.add("c-c")
-    def _ctrl_c(event: Any) -> None:
-        event.app.exit(result=PROMPT_PAUSE)
-
-    return PromptSession(
-        key_bindings=bindings,
-        bottom_toolbar=lambda: _toolbar_html(model=model, cwd=cwd),
-        erase_when_done=True,
-        style=Style.from_dict({}),
-    )
-
-
-def _toolbar_html(*, model: str | None, cwd: Path | None) -> Any:
-    display_model = model or "agent"
-    display_cwd = _short_path(cwd or Path.cwd())
-    return f"agent | {display_model} | {display_cwd} | areno agent"
+        return sys.stdin.readline().strip()
+    except KeyboardInterrupt:
+        return ""
 
 
 def _run_agent_console(args: argparse.Namespace) -> int:
@@ -399,16 +363,12 @@ class AgentConsoleUI:
         self.args = args
 
     def run(self) -> int:
-        _load_prompt_toolkit()
-        from prompt_toolkit.patch_stdout import patch_stdout
-
-        with patch_stdout():
-            self.startup()
-            try:
-                return asyncio.run(_main_async(self.args, ui=self))
-            except BaseException as exc:  # noqa: BLE001 - surface uncaught agent failures before exiting.
-                self.write_panel("error", str(exc))
-                return 1
+        self.startup()
+        try:
+            return asyncio.run(_main_async(self.args, ui=self))
+        except BaseException as exc:  # noqa: BLE001 - surface uncaught agent failures before exiting.
+            self.write_panel("error", str(exc))
+            return 1
 
     def startup(self) -> None:
         root = Path(self.args.repo).resolve()
@@ -468,7 +428,7 @@ class AgentConsoleUI:
 
 
 class InteractiveAgentInput:
-    """Read Esc pauses and line hints without blocking the asyncio loop."""
+    """Read line hints without blocking the asyncio loop."""
 
     def __init__(self, ui: AgentConsoleUI, workspace: Any) -> None:
         self.ui = ui
@@ -482,9 +442,8 @@ class InteractiveAgentInput:
     def start(self) -> None:
         if not sys.stdin.isatty():
             return
-        _load_prompt_toolkit()
         self.ui.write(
-            "interactive: type a hint then Enter to send it on the next model turn; Esc pauses execution.",
+            "interactive: type a hint then Enter to send it on the next model turn.",
         )
         self.ui.write("\n")
         self._prompt_task = asyncio.create_task(self._prompt_loop())
@@ -543,24 +502,15 @@ class InteractiveAgentInput:
             self.ui.write_panel("user hint", hint)
 
     async def _prompt_loop(self) -> None:
-        from prompt_toolkit.patch_stdout import patch_stdout
-
-        session = _create_prompt_session(model=self.ui.args.model, cwd=Path(self.ui.args.repo).resolve())
         while not self._stop:
             try:
-                with patch_stdout():
-                    hint = await session.prompt_async("❯ ")
+                hint = await asyncio.to_thread(_read_stdin_line, "> ")
             except EOFError:
                 self.workspace.interrupt_requested = True
                 self._paused.set()
                 break
             except asyncio.CancelledError:
                 break
-            if hint == PROMPT_PAUSE:
-                self.workspace.interrupt_requested = True
-                self._paused.set()
-                self.ui.write("paused: current command will stop; enter a hint to continue.\n")
-                continue
             hint = str(hint).strip()
             if hint:
                 await self._hints.put(hint)
