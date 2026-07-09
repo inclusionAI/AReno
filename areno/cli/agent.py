@@ -40,7 +40,7 @@ RED = "\x1b[38;2;240;113;120m"
 MUTED = "\x1b[38;2;103;110;149m"
 WHITE = "\x1b[38;2;166;172;205m"
 GREEN = "\x1b[38;2;195;232;141m"
-AGENT_CONSOLE = Console(color_system="auto", force_terminal=sys.stdout.isatty())
+AGENT_CONSOLE = Console(color_system=None, force_terminal=False, no_color=True)
 
 SYSTEM_TEMPLATE = """You are an AReno operations coding agent.
 
@@ -559,6 +559,8 @@ class InteractiveAgentInput:
             self._prompt_task.cancel()
 
     async def apply_pending(self, messages: list[dict[str, Any]], phase: str = "before_turn") -> bool:
+        if phase == "assistant_no_tool":
+            return await self._wait_for_user_answer(messages)
         was_paused = await self._wait_if_paused()
         self._apply_queued_hints(messages)
         should_skip_current_tool = was_paused and phase == "after_assistant"
@@ -570,6 +572,16 @@ class InteractiveAgentInput:
         should_resume = self._resume_after_pause
         self._resume_after_pause = False
         return should_resume
+
+    async def _wait_for_user_answer(self, messages: list[dict[str, Any]]) -> bool:
+        if not sys.stdin.isatty():
+            return False
+        self.workspace.interrupt_requested = False
+        self._paused.set()
+        self.ui.console.print(Text("waiting for input: enter a value or hint to continue.", style="dim"))
+        await self._wait_if_paused()
+        self._apply_queued_hints(messages)
+        return True
 
     async def _wait_if_paused(self) -> bool:
         was_paused = False

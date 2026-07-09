@@ -350,6 +350,8 @@ async def run_conversation_turns(
         _emit(on_event, "assistant", assistant_message)
         call = _first_tool_call(assistant_message)
         if call is None:
+            if interaction_hook is not None and await interaction_hook(messages, "assistant_no_tool"):
+                continue
             messages.append(
                 {
                     "role": "user",
