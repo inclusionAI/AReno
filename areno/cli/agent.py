@@ -55,6 +55,8 @@ Train command policy:
 - Do not start smoke tuning from tiny settings unless the user only requested a
   startup check. Estimate the largest plausible `--max-running-prompts` and
   `--mini-bs`, try those first, and binary search down on recoverable OOM.
+- Do not tune `--max-new-tokens` to make smoke or train fit. Treat generation
+  length as a task quality target unless the user explicitly changes it.
 - If a large smoke command succeeds with lots of free memory, raise the upper
   bound and continue searching for the largest stable setting before the real
   train command.
@@ -481,7 +483,8 @@ async def _judge_goal_done(
                     "success as complete unless the user only requested smoke. Check that the agent used "
                     "--n-samples 8 by default, included --drop-rollout-state by default, kept batch_size * "
                     "n_samples aligned with --max-running-prompts, and searched from a large plausible smoke "
-                    "target with binary-search style retries on recoverable capacity failures. Return JSON "
+                    "target with binary-search style retries on recoverable capacity failures without tuning "
+                    "--max-new-tokens. Return JSON "
                     "only with keys: done, reason, feedback."
                 ),
             },
@@ -615,6 +618,8 @@ def _job_prompt(instruction: str, root: Path) -> str:
         "--model-hub modelscope; if it is available and the requested ref is an HF ref, use --model-hub hf.\n"
         "- Use smoke-infer/smoke-train before long runs. Start from the largest plausible settings you can infer, "
         "then binary search down on recoverable OOM. Do not treat one tiny smoke success as completion.\n"
+        "- Do not tune max-new-tokens to make smoke or train fit unless the user explicitly asks for shorter "
+        "generation length.\n"
         "- If large smoke succeeds with lots of free memory, raise the upper bound and continue searching before "
         "choosing final train settings."
     )

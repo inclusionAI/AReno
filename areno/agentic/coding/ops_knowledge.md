@@ -45,6 +45,8 @@ and retry with adjusted parameters when the failure is likely recoverable.
    - train/backward OOM: binary search `--mini-bs`.
    - full step OOM: reduce the dimension named by the failing phase first, then
      reduce `--batch-size` if needed.
+   - do not tune `--max-new-tokens` to make smoke or train fit. Treat it as part
+     of the task quality target unless the user explicitly changes it.
    - divisibility or unsupported-model errors are not capacity search problems;
      fix the invalid setting or report the blocker.
 6. If the large smoke target succeeds with substantial free memory, try a larger
@@ -193,7 +195,10 @@ Rollout memory is mainly controlled by:
   per train step. It should usually be no larger than `--max-running-prompts`.
   If it is much smaller than `--max-running-prompts`, the configured concurrency
   may sit idle; increase `--batch-size` when memory and dataset size allow it.
-- `--max-new-tokens` and prompt length: longer sequences require more KV cache.
+- `--max-new-tokens` and prompt length: longer sequences require more KV cache,
+  but `--max-new-tokens` should not be tuned by the agent to make a run fit.
+  Keep the requested/default value and tune concurrency or train microbatch
+  instead, unless the user explicitly asks to change generation length.
 - `--tp-size`: larger tensor parallel size usually lowers per-GPU model memory,
   but changes the valid divisibility constraints for heads/layers.
 
@@ -204,10 +209,11 @@ Training memory is mainly controlled by:
 - sequence length: longer rollout responses make train packs larger.
 - optimizer choice and whether rollout state is kept.
 
-If rollout OOM happens, reduce `--max-running-prompts`, `--batch-size`,
-`--n-samples`, or max sequence length. If train OOM happens, reduce `--mini-bs`
-first. If model loading OOM happens, increase `--tp-size` or use fewer other GPU
-processes.
+If rollout OOM happens, reduce `--max-running-prompts`, `--batch-size`, or
+`--n-samples` only when necessary. Do not reduce `--max-new-tokens` unless the
+user explicitly asks for a shorter generation length. If train OOM happens,
+reduce `--mini-bs` first. If model loading OOM happens, increase `--tp-size` or
+use fewer other GPU processes.
 
 For smoke tuning, search from the largest plausible setting first. If GPU memory
 remains far below capacity after smoke succeeds, increase `--max-running-prompts`
