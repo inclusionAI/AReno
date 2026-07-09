@@ -50,9 +50,9 @@ Train command policy:
 - Do not tune `--max-new-tokens` to make smoke or train fit. Treat generation
   length as a task quality target unless the user explicitly changes it.
 - For agentic train or serve tasks, if the user did not provide generation
-  length or context capacity, ask for `--max-new-tokens` and
-  `--max-context-len` before running commands. Do not silently assume defaults
-  for these two agentic limits.
+  length or context capacity, call the `request_user_input` tool to ask for
+  `--max-new-tokens` and `--max-context-len` before running commands. Do not
+  silently assume defaults for these two agentic limits.
 - Leave GPU memory headroom instead of choosing a configuration that uses nearly
   all memory.
 - For agentic train tasks, always set `--max-context-len` explicitly after the
@@ -310,6 +310,11 @@ class AgentConsoleUI:
     def done(self, submitted: dict[str, Any]) -> None:
         self.write_panel("done", _plain_status(submitted, keys=("status", "summary", "reason")))
 
+    def request_user_input(self, prompt: str) -> str:
+        if prompt:
+            self.write(prompt.rstrip() + "\n")
+        return _read_stdin_line("> ")
+
     def write_panel(self, title: str, body: str) -> None:
         self.write(_section_title(title) + "\n")
         self.write(str(body) + "\n")
@@ -317,95 +322,6 @@ class AgentConsoleUI:
     def write(self, text: str) -> None:
         sys.stdout.write(text)
         sys.stdout.flush()
-
-
-class InteractiveAgentInput:
-    """Read line hints without blocking the asyncio loop."""
-
-    def __init__(self, ui: AgentConsoleUI, workspace: Any) -> None:
-        self.ui = ui
-        self.workspace = workspace
-        self._hints: asyncio.Queue[str] = asyncio.Queue()
-        self._stop = False
-        self._paused = asyncio.Event()
-        self._resume_after_pause = False
-        self._prompt_task: asyncio.Task[None] | None = None
-
-    def start(self) -> None:
-        if not sys.stdin.isatty():
-            return
-        self.ui.write(
-            "interactive: type a hint then Enter to send it on the next model turn.",
-        )
-        self.ui.write("\n")
-        self._prompt_task = asyncio.create_task(self._prompt_loop())
-
-    def stop(self) -> None:
-        self._stop = True
-        if self._prompt_task is not None:
-            self._prompt_task.cancel()
-
-    async def apply_pending(self, messages: list[dict[str, Any]], phase: str = "before_turn") -> bool:
-        if phase == "assistant_no_tool":
-            return await self._wait_for_user_answer(messages)
-        was_paused = await self._wait_if_paused()
-        self._apply_queued_hints(messages)
-        should_skip_current_tool = was_paused and phase == "after_assistant"
-        if should_skip_current_tool:
-            self._resume_after_pause = True
-        return not should_skip_current_tool
-
-    def consume_resume_after_pause(self) -> bool:
-        should_resume = self._resume_after_pause
-        self._resume_after_pause = False
-        return should_resume
-
-    async def _wait_for_user_answer(self, messages: list[dict[str, Any]]) -> bool:
-        if not sys.stdin.isatty():
-            return False
-        self.workspace.interrupt_requested = False
-        self._paused.set()
-        self.ui.write("waiting for input: enter a value or hint to continue.\n")
-        await self._wait_if_paused()
-        self._apply_queued_hints(messages)
-        return True
-
-    async def _wait_if_paused(self) -> bool:
-        was_paused = False
-        while self._paused.is_set() and not self._stop:
-            was_paused = True
-            try:
-                hint = await asyncio.wait_for(self._hints.get(), timeout=0.1)
-            except TimeoutError:
-                continue
-            await self._hints.put(hint)
-            self._paused.clear()
-            self.workspace.interrupt_requested = False
-            break
-        return was_paused
-
-    def _apply_queued_hints(self, messages: list[dict[str, Any]]) -> None:
-        while True:
-            try:
-                hint = self._hints.get_nowait()
-            except asyncio.QueueEmpty:
-                break
-            messages.append({"role": "user", "content": f"User runtime hint:\n{hint}"})
-            self.ui.write_panel("user hint", hint)
-
-    async def _prompt_loop(self) -> None:
-        while not self._stop:
-            try:
-                hint = await asyncio.to_thread(_read_stdin_line, "> ")
-            except EOFError:
-                self.workspace.interrupt_requested = True
-                self._paused.set()
-                break
-            except asyncio.CancelledError:
-                break
-            hint = str(hint).strip()
-            if hint:
-                await self._hints.put(hint)
 
 
 async def _main_async(args: argparse.Namespace, *, ui: AgentConsoleUI) -> int:
@@ -430,14 +346,13 @@ async def _main_async(args: argparse.Namespace, *, ui: AgentConsoleUI) -> int:
     workspace = CodingWorkspace.from_current_repo(task, args.repo)
     workspace.max_command_timeout_s = float(args.command_timeout_s)
     workspace.command_output_callback = ui.command_output_event
-    interaction = InteractiveAgentInput(ui, workspace)
+    workspace.user_input_callback = ui.request_user_input
     client = AsyncOpenAI(base_url=args.base_url, api_key=args.api_key, max_retries=0)
     messages = [
         {"role": "system", "content": SYSTEM_TEMPLATE.format(knowledge=knowledge)},
         {"role": "user", "content": _job_prompt(args.instruction, workspace.root)},
     ]
     try:
-        interaction.start()
         while True:
             await run_conversation_turns(
                 client=client,
@@ -448,11 +363,8 @@ async def _main_async(args: argparse.Namespace, *, ui: AgentConsoleUI) -> int:
                 max_turns=int(args.max_turns),
                 record_trajectory=False,
                 on_event=ui.agent_event,
-                interaction_hook=interaction.apply_pending,
             )
             if workspace.submitted is None:
-                if interaction.consume_resume_after_pause():
-                    continue
                 ui.write_panel("stopped", "agent stopped without submit")
                 return 2
             judgment = await _judge_goal_done(
@@ -483,7 +395,6 @@ async def _main_async(args: argparse.Namespace, *, ui: AgentConsoleUI) -> int:
                 }
             )
     finally:
-        interaction.stop()
         await client.close()
         workspace.close()
 
@@ -515,8 +426,9 @@ async def _judge_goal_done(
                     "n_samples aligned with --max-running-prompts. Smoke checks are optional diagnostics; "
                     "do not require them unless the user asked for smoke validation or the submitted result "
                     "depends on a smoke-only check. For agentic train "
-                    "or serve tasks, check that missing max-new-tokens and max-context-len were asked before "
-                    "running and that --max-context-len was set explicitly for train. Return JSON "
+                    "or serve tasks, check that missing max-new-tokens and max-context-len were asked through "
+                    "the request_user_input tool before running and that --max-context-len was set explicitly "
+                    "for train. Return JSON "
                     "only with keys: done, reason, feedback."
                 ),
             },
@@ -652,8 +564,9 @@ def _job_prompt(instruction: str, root: Path) -> str:
         "when the target command would be expensive, or when debugging model/runtime compatibility.\n"
         "- Do not tune max-new-tokens to make smoke or train fit unless the user explicitly asks for shorter "
         "generation length.\n"
-        "- For agentic train or serve tasks, if the user did not provide max-new-tokens or max-context-len, ask "
-        "for those values before running commands. Do not silently assume these two agentic limits.\n"
+        "- For agentic train or serve tasks, if the user did not provide max-new-tokens or max-context-len, call "
+        "request_user_input for those values before running commands. Do not silently assume these two agentic "
+        "limits.\n"
         "- Leave headroom for CUDA graphs, allocator fragmentation, and transient buffers.\n"
         "- For agentic train tasks, always set --max-context-len explicitly after the user confirms it."
     )

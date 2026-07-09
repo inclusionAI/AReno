@@ -158,6 +158,21 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "request_user_input",
+            "description": "Ask the human user for one missing value or decision, then wait for a one-line answer.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "prompt": {"type": "string"},
+                },
+                "required": ["prompt"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "submit",
             "description": "Submit final coding-task status and a compact summary.",
             "parameters": {
