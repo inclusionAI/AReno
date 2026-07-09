@@ -20,29 +20,25 @@ and retry with adjusted parameters when the failure is likely recoverable.
    - `nvidia-smi --query-gpu=index,name,memory.total,memory.used,memory.free --format=csv`
    - `ps aux | grep -E "areno|python" | grep -v grep`
    - `df -h . /tmp`
-3. Before a real train/serve run, first try smoke checks for the target
-   checkpoint. The goal is to catch missing dependencies, unsupported model
-   adapters, tensor-parallel divisibility errors, checkpoint shape mismatches,
-   CUDA graph capture failures, and basic CUDA startup failures before spending
-   time on a rollout or training step. Useful checks:
+3. Smoke checks are available diagnostics, not a mandatory first step. Use them
+   when the user asks for validation, when a real run would be expensive, or
+   when a failure suggests missing dependencies, unsupported model adapters,
+   tensor-parallel divisibility errors, checkpoint shape mismatches, CUDA graph
+   capture failures, or basic CUDA startup failures. Useful checks:
    - `areno check`
    - `areno env`
    - `areno train ... --smoke-infer`
    - `areno train ... --smoke-train`
-4. Do not start smoke tuning from the smallest possible settings. Estimate the
-   largest plausible target from available GPU memory, GPU count, model size,
-   user-provided parameters, and nearby examples, then smoke-test that target
-   first. For rollout/RL, keep `--n-samples 8` unless the user requests another
-   value.
+4. For rollout/RL, keep `--n-samples 8` unless the user requests another value.
    Keep rollout demand and concurrency consistent: normally
    `batch_size * n_samples <= max_running_prompts`. If you raise
    `--max-running-prompts` to improve utilization, also raise `--batch-size`
    when the dataset and training memory allow it; otherwise the run may not
    produce enough requests to use the configured concurrency.
-5. If the large smoke target fails with a recoverable capacity error, binary
-   search the failing dimension instead of walking one step at a time:
-   - rollout/KV OOM: binary search `--max-running-prompts`.
-   - train/backward OOM: binary search `--mini-bs`.
+5. If a command fails with a recoverable capacity error, adjust the relevant
+   dimension first:
+   - rollout/KV OOM: reduce `--max-running-prompts`.
+   - train/backward OOM: reduce `--mini-bs`.
    - full step OOM: reduce the dimension named by the failing phase first, then
      reduce `--batch-size` if needed.
    - do not tune `--max-new-tokens` to make smoke or train fit. Treat it as part
@@ -53,19 +49,8 @@ and retry with adjusted parameters when the failure is likely recoverable.
      limits.
    - divisibility or unsupported-model errors are not capacity search problems;
      fix the invalid setting or report the blocker.
-6. If the large smoke target succeeds with substantial free memory, try a larger
-   upper bound and continue binary search until you have a largest stable value
-   or a clear practical cap. Low GPU memory use usually means poor throughput.
-   Prefer finding the largest stable settings under the available memory instead
-   of keeping tiny smoke parameters.
-   Keep this search short so the user does not wait on excessive smoke runs:
-   usually one large attempt plus at most two or three capacity retries is
-   enough before choosing a practical setting and moving on to the real command.
-   The smoke target must leave headroom: keep peak GPU memory at or below about
-   90% of total memory (`mem_frac <= 0.9`). If a smoke run exceeds that target
-   or leaves too little free memory, reduce the searched capacity parameter.
-7. Read the error message, adjust one or two parameters, and retry.
-8. Call `submit` only after the command is running or has completed successfully,
+6. Read the error message, adjust one or two parameters, and retry.
+7. Call `submit` only after the command is running or has completed successfully,
    or when the task is blocked by missing files, missing GPUs, invalid API
    credentials, or a non-recoverable dependency error.
 
@@ -121,7 +106,11 @@ test checkpoint saving. Then test loading by using `--ckpt <dir>/step_000001`.
 
 ## Smoke checks
 
-Use smoke checks before long train/serve jobs.
+Use smoke checks when they are useful for the user's goal. They are optional:
+run them for explicit smoke/validation requests, for risky long-running jobs
+where a quick preflight is valuable, or while diagnosing model/runtime/memory
+failures. Do not run smoke searches just to maximize GPU use unless the user
+asks for capacity tuning.
 
 For agentic train or serve tasks, `--max-new-tokens` and `--max-context-len`
 are user-facing quality and capacity decisions. If the user did not provide
@@ -142,15 +131,11 @@ run. If `--max-running-prompts` is omitted, the smoke check uses the resolved
 rollout concurrency from `batch_size * n_samples`.
 
 For rollout-based algorithms, prefer `--n-samples 8` in smoke and real runs
-unless the user requests another value. Start smoke-infer from the largest
-plausible real-run `--max-running-prompts` you can infer, not from a tiny value.
-If it OOMs, halve the interval and binary search for the largest value that
-passes. If it passes with lots of free memory, double or otherwise raise the
-upper bound and then binary search down after the first failure. Do not spend a
-long time chasing the absolute maximum: cap smoke-infer search to a few attempts
-and prefer a good-enough stable setting over keeping the user waiting. Treat
-about 90% GPU memory usage as the upper bound; do not choose settings that rely
-on using nearly all memory.
+unless the user requests another value. If you use `--smoke-infer`, pass the
+intended real-run `--max-running-prompts` when the user has given one. If the
+user only wants a quick compatibility check, use conservative small settings.
+Keep smoke attempts limited; the goal is to validate the path, not to benchmark
+the hardware limit.
 
 Example:
 
@@ -167,12 +152,10 @@ minimal train batch with `batch_size == mini_bs` and `n_samples == 1`, while
 preserving the requested `mini_bs`, sequence length, TP/world size, optimizer,
 activation checkpointing, and attention backend. Use it to check train memory,
 backward kernels, optimizer state, and checkpoint/model training compatibility.
-Start from the largest plausible `--mini-bs`; on train OOM, binary search down to
-the largest stable microbatch. If it passes with substantial free memory, raise
-the upper bound and continue searching. Keep smoke-train search short; after a
-large attempt and a few binary-search retries, use the best stable setting found.
-Do not accept a smoke-train setting that pushes peak GPU memory above about 90%
-of total memory.
+If you use `--smoke-train`, pass the intended `--mini-bs` when validating a
+target training configuration. If the user only wants a quick startup check, use
+small conservative values. On train OOM, reduce `--mini-bs` and leave memory
+headroom for allocator fragmentation, CUDA graphs, and transient buffers.
 
 Example:
 
@@ -232,17 +215,11 @@ user explicitly asks for a shorter generation length. If train OOM happens,
 reduce `--mini-bs` first. If model loading OOM happens, increase `--tp-size` or
 use fewer other GPU processes.
 
-For smoke tuning, search from the largest plausible setting first. If GPU memory
-remains far below capacity after smoke succeeds, increase `--max-running-prompts`
-first for rollout utilization, then increase `--batch-size` if the
-dataset/algorithm supports it. For training utilization, increase `--mini-bs`
-until train memory is close to the safe target. Use binary search after the first
-capacity failure. Keep `--n-samples 8` as the normal RL baseline unless the user
-or task explicitly needs a different sampling count.
-Do not run too many smoke attempts: one high initial attempt and two or three
-follow-up retries is normally enough. The goal is to avoid obviously bad
-settings, not to benchmark the exact hardware limit. Keep the chosen smoke and
-real settings within `mem_frac <= 0.9`; leave memory headroom for allocator
+When the user explicitly asks for capacity tuning, smoke checks can help
+validate candidate `--max-running-prompts` or `--mini-bs` settings. Otherwise,
+avoid capacity searches and prefer the user-provided or example-provided
+settings. Keep `--n-samples 8` as the normal RL baseline unless the user or task
+explicitly needs a different sampling count. Leave memory headroom for allocator
 fragmentation, CUDA graphs, and transient buffers.
 
 Use `--drop-rollout-state` by default for train attempts unless the user asks to
@@ -271,8 +248,9 @@ be rebuilt.
 If a run fails because an optional kernel package is missing, the agent may
 install the missing dependency in the current Python environment. Prefer a
 prebuilt wheel when one exists. Do not reinstall the whole project unless the
-user asks for it. After installing or changing dependencies, first rerun
-`--smoke-infer` or `--smoke-train` before retrying the original long command.
+user asks for it. After installing or changing dependencies, rerun a targeted
+check. A smoke check is useful when the changed dependency affects model load,
+CUDA graph capture, attention kernels, training kernels, or optimizer behavior.
 
 For `flash-attn`, first inspect the active runtime:
 

@@ -37,15 +37,14 @@ RED = "\x1b[38;2;240;113;120m"
 MUTED = "\x1b[38;2;103;110;149m"
 WHITE = "\x1b[38;2;166;172;205m"
 GREEN = "\x1b[38;2;195;232;141m"
-AGENT_CONSOLE = Console(color_system=None, force_terminal=False, no_color=True)
+AGENT_CONSOLE = Console(color_system="auto", force_terminal=None, no_color=None, highlight=False)
 
 SYSTEM_TEMPLATE = """You are an AReno operations coding agent.
 
 You can inspect and modify the current checkout and run shell commands through
 tools. Your task is to complete the user's train or serve request in this
-environment. Work iteratively: inspect the environment, choose the largest
-plausible smoke target, run it, read failures, and retry with adjusted
-parameters when possible.
+environment. Work iteratively: inspect the environment, read failures, and
+retry with adjusted parameters when possible.
 Use exactly one tool call per assistant turn. Call submit with status=solved only
 after a train/serve command has completed successfully or is clearly running and
 verified. Call submit with status=blocked only after a non-recoverable blocker.
@@ -61,20 +60,18 @@ Train command policy:
   `max_running_prompts >= batch_size * n_samples`, and if you raise
   `max-running-prompts` for utilization you should also consider raising
   `batch-size` so the batch can actually feed that concurrency.
-- Do not start smoke tuning from tiny settings unless the user only requested a
-  startup check. Estimate the largest plausible `--max-running-prompts` and
-  `--mini-bs`, try those first, and binary search down on recoverable OOM.
+- Smoke checks are optional diagnostics. Use `--smoke-infer` or
+  `--smoke-train` when the user asks for validation, when a long command would
+  be risky, or when debugging model/runtime compatibility. Do not run smoke
+  searches just to maximize hardware use unless the user requests tuning.
 - Do not tune `--max-new-tokens` to make smoke or train fit. Treat generation
   length as a task quality target unless the user explicitly changes it.
 - For agentic train or serve tasks, if the user did not provide generation
   length or context capacity, ask for `--max-new-tokens` and
   `--max-context-len` before running commands. Do not silently assume defaults
   for these two agentic limits.
-- If a large smoke command succeeds with lots of free memory, raise the upper
-  bound briefly, but do not run excessive smoke attempts. One large attempt plus
-  two or three capacity retries is usually enough before the real train command.
-- Keep smoke and final settings within `mem_frac <= 0.9`; leave GPU memory
-  headroom instead of choosing a configuration that uses nearly all memory.
+- Leave GPU memory headroom instead of choosing a configuration that uses nearly
+  all memory.
 - For agentic train tasks, always set `--max-context-len` explicitly after the
   user has confirmed the context cap.
 - Never use Hugging Face model hub. For remote model or dataset refs, always use
@@ -358,14 +355,13 @@ async def _prompt_value_async(question: str, *, default: str = "") -> str:
     if not sys.stdin.isatty():
         return default
     _load_prompt_toolkit()
-    from prompt_toolkit.formatted_text import HTML
     from prompt_toolkit.patch_stdout import patch_stdout
 
     suffix = f" [{default}]" if default else ""
-    AGENT_CONSOLE.print(Text(f"{question}{suffix}", style="dim"))
+    AGENT_CONSOLE.print(f"{question}{suffix}", markup=False)
     session = _create_prompt_session()
     with patch_stdout():
-        value = await session.prompt_async(HTML('<style fg="#89ddff">❯</style> '))
+        value = await session.prompt_async("❯ ")
     if value == PROMPT_PAUSE:
         return default
     return str(value or default)
@@ -397,36 +393,14 @@ def _create_prompt_session(*, model: str | None = None, cwd: Path | None = None)
         key_bindings=bindings,
         bottom_toolbar=lambda: _toolbar_html(model=model, cwd=cwd),
         erase_when_done=True,
-        style=Style.from_dict(
-            {
-                "bottom-toolbar": "bg:#11131a #a6accd",
-                "": "#a6accd",
-                "prompt": "#89ddff bold",
-            }
-        ),
+        style=Style.from_dict({}),
     )
 
 
 def _toolbar_html(*, model: str | None, cwd: Path | None) -> Any:
-    from html import escape
-
-    from prompt_toolkit.formatted_text import HTML
-
-    display_model = escape(model or "agent")
-    display_cwd = escape(_short_path(cwd or Path.cwd()))
-    return HTML(
-        '<style fg="#89ddff"> agent </style>'
-        '<style fg="#676e95"> TVD ▲ </style>'
-        f'<style fg="#c792ea">⣶ {display_model}</style>'
-        '<style fg="#676e95"> | </style>'
-        '<style fg="#a6accd">0.00%</style>'
-        '<style fg="#676e95"> | </style>'
-        '<style fg="#a6accd"> NRML </style>'
-        '<style fg="#676e95"> | </style>'
-        f'<style fg="#a6accd">{display_cwd}</style>'
-        '<style fg="#676e95"> | </style>'
-        '<style fg="#a6accd">areno agent</style>'
-    )
+    display_model = model or "agent"
+    display_cwd = _short_path(cwd or Path.cwd())
+    return f"agent | {display_model} | {display_cwd} | areno agent"
 
 
 def _run_agent_console(args: argparse.Namespace) -> int:
@@ -461,12 +435,16 @@ class AgentConsoleUI:
         if event == "assistant":
             content = payload.get("content")
             if content:
-                self.console.print(Text(str(content), style="#a6accd"), soft_wrap=True)
+                text = Text()
+                text.append("Think: ", style="#89ddff bold")
+                text.append(str(content), style="#a6accd")
+                self.console.print(text, soft_wrap=True)
             calls = payload.get("tool_calls") or []
             if calls:
                 call = calls[0]
                 tool_name = call["function"]["name"]
-                self.console.print(_tool_call_line(tool_name, call["function"].get("arguments", "")))
+                if tool_name != "run_command":
+                    self.console.print(_tool_call_line(tool_name, call["function"].get("arguments", "")))
         elif event == "tool":
             return
 
@@ -479,10 +457,8 @@ class AgentConsoleUI:
             text.append(command, style="#a6accd")
             self.console.print(text, soft_wrap=True)
         elif kind == "line":
-            stream = str(event.get("stream") or "stdout")
             line = str(event.get("line") or "").rstrip()
-            body_style = "#f07178" if stream == "stderr" else "#a6accd"
-            self.console.print(Text(line, style=body_style), soft_wrap=True)
+            self.console.print(Text.from_ansi(line), soft_wrap=True)
         elif kind == "end":
             skipped = int(event.get("skipped_stream_lines") or 0)
             returncode = event.get("returncode")
@@ -531,10 +507,8 @@ class InteractiveAgentInput:
             return
         _load_prompt_toolkit()
         self.ui.console.print(
-            Text(
-                "interactive: type a hint then Enter to send it on the next model turn; Esc pauses execution.",
-                style="dim",
-            )
+            "interactive: type a hint then Enter to send it on the next model turn; Esc pauses execution.",
+            markup=False,
         )
         self._prompt_task = asyncio.create_task(self._prompt_loop())
 
@@ -563,7 +537,7 @@ class InteractiveAgentInput:
             return False
         self.workspace.interrupt_requested = False
         self._paused.set()
-        self.ui.console.print(Text("waiting for input: enter a value or hint to continue.", style="dim"))
+        self.ui.console.print("waiting for input: enter a value or hint to continue.", markup=False)
         await self._wait_if_paused()
         self._apply_queued_hints(messages)
         return True
@@ -592,14 +566,13 @@ class InteractiveAgentInput:
             self.ui.write_panel("user hint", hint)
 
     async def _prompt_loop(self) -> None:
-        from prompt_toolkit.formatted_text import HTML
         from prompt_toolkit.patch_stdout import patch_stdout
 
         session = _create_prompt_session(model=self.ui.args.model, cwd=Path(self.ui.args.repo).resolve())
         while not self._stop:
             try:
                 with patch_stdout():
-                    hint = await session.prompt_async(HTML('<style fg="#89ddff">❯</style> '))
+                    hint = await session.prompt_async("❯ ")
             except EOFError:
                 self.workspace.interrupt_requested = True
                 self._paused.set()
@@ -609,9 +582,7 @@ class InteractiveAgentInput:
             if hint == PROMPT_PAUSE:
                 self.workspace.interrupt_requested = True
                 self._paused.set()
-                self.ui.console.print(
-                    Text("paused: current command will stop; enter a hint to continue.", style="#ffcb6b")
-                )
+                self.ui.console.print("paused: current command will stop; enter a hint to continue.", markup=False)
                 continue
             hint = str(hint).strip()
             if hint:
@@ -720,12 +691,11 @@ async def _judge_goal_done(
                     "Decide whether the original goal is actually complete. A submit is not enough by itself. "
                     "Look for concrete evidence such as successful command output, a running verified server, "
                     "a completed train step, a saved and reload-tested checkpoint when requested, or a truly "
-                    "non-recoverable blocker. For rollout/RL train goals, do not accept a single tiny smoke "
-                    "success as complete unless the user only requested smoke. Check that the agent used "
-                    "--n-samples 8 by default, included --drop-rollout-state by default, kept batch_size * "
-                    "n_samples aligned with --max-running-prompts, and searched from a large plausible smoke "
-                    "target with a bounded number of binary-search style retries on recoverable capacity "
-                    "failures without tuning --max-new-tokens or exceeding mem_frac 0.9. For agentic train "
+                    "non-recoverable blocker. For rollout/RL train goals, check that the agent used "
+                    "--n-samples 8 by default, included --drop-rollout-state by default, and kept batch_size * "
+                    "n_samples aligned with --max-running-prompts. Smoke checks are optional diagnostics; "
+                    "do not require them unless the user asked for smoke validation or the submitted result "
+                    "depends on a smoke-only check. For agentic train "
                     "or serve tasks, check that missing max-new-tokens and max-context-len were asked before "
                     "running and that --max-context-len was set explicitly for train. Return JSON "
                     "only with keys: done, reason, feedback."
@@ -859,17 +829,13 @@ def _job_prompt(instruction: str, root: Path) -> str:
         "increase batch-size too when the dataset and memory allow it.\n"
         "- Never use Hugging Face model hub. For remote model or dataset refs, always use --model-hub modelscope "
         "unless the user explicitly provides a local path.\n"
-        "- Use smoke-infer/smoke-train before long runs. Start from the largest plausible settings you can infer, "
-        "then binary search down on recoverable OOM. Do not treat one tiny smoke success as completion.\n"
+        "- Smoke checks are optional diagnostics. Use smoke-infer/smoke-train when the user asks for validation, "
+        "when the target command would be expensive, or when debugging model/runtime compatibility.\n"
         "- Do not tune max-new-tokens to make smoke or train fit unless the user explicitly asks for shorter "
         "generation length.\n"
         "- For agentic train or serve tasks, if the user did not provide max-new-tokens or max-context-len, ask "
         "for those values before running commands. Do not silently assume these two agentic limits.\n"
-        "- If large smoke succeeds with lots of free memory, raise the upper bound briefly, but avoid too many "
-        "smoke runs. One large attempt plus two or three capacity retries is usually enough before choosing "
-        "final train settings.\n"
-        "- Keep smoke and final settings within mem_frac <= 0.9 so CUDA graphs, allocator fragmentation, and "
-        "transient buffers have headroom.\n"
+        "- Leave headroom for CUDA graphs, allocator fragmentation, and transient buffers.\n"
         "- For agentic train tasks, always set --max-context-len explicitly after the user confirms it."
     )
 
