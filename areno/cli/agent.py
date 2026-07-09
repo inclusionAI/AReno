@@ -10,21 +10,11 @@ import json
 import os
 import re
 import subprocess
-import threading
-from collections import deque
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import click
-from prompt_toolkit.application import Application
-from prompt_toolkit.formatted_text import ANSI
-from prompt_toolkit.key_binding import KeyBindings
-from prompt_toolkit.layout import HSplit, Layout, VSplit, Window
-from prompt_toolkit.layout.controls import FormattedTextControl
-from prompt_toolkit.layout.margins import ScrollbarMargin
-from prompt_toolkit.styles import Style
-from prompt_toolkit.widgets import Box, Frame, Label
 
 DEFAULT_KNOWLEDGE_FILE = Path(__file__).resolve().parents[1] / "agentic" / "coding" / "ops_knowledge.md"
 DEFAULT_KNOWLEDGE = DEFAULT_KNOWLEDGE_FILE.read_text(encoding="utf-8")
@@ -34,14 +24,14 @@ JUDGE_CONTEXT_CHARS = 24000
 RESET = "\x1b[0m"
 DIM = "\x1b[2m"
 BOLD = "\x1b[1m"
-CYAN = "\x1b[38;2;34;211;238m"
-BLUE = "\x1b[38;2;96;165;250m"
-MAGENTA = "\x1b[38;2;217;70;239m"
-YELLOW = "\x1b[38;2;251;191;36m"
-RED = "\x1b[38;2;248;113;113m"
-MUTED = "\x1b[38;2;148;163;184m"
-WHITE = "\x1b[38;2;226;232;240m"
-GREEN = "\x1b[38;2;45;212;191m"
+CYAN = "\x1b[38;2;137;221;255m"
+BLUE = "\x1b[38;2;130;170;255m"
+MAGENTA = "\x1b[38;2;199;146;234m"
+YELLOW = "\x1b[38;2;255;203;107m"
+RED = "\x1b[38;2;240;113;120m"
+MUTED = "\x1b[38;2;103;110;149m"
+WHITE = "\x1b[38;2;166;172;205m"
+GREEN = "\x1b[38;2;195;232;141m"
 
 SYSTEM_TEMPLATE = """You are an AReno operations coding agent.
 
@@ -164,7 +154,7 @@ def agent_command(
         knowledge_file=knowledge_file,
         instruction=instruction,
     )
-    raise SystemExit(_run_agent_tui(args))
+    raise SystemExit(_run_agent_console(args))
 
 
 async def _refresh_knowledge_async(args: argparse.Namespace) -> int:
@@ -352,120 +342,24 @@ async def _llm_questions_for_instruction(
     return [question for question in questions if isinstance(question, dict)]
 
 
-def _run_agent_tui(args: argparse.Namespace) -> int:
-    app = AgentTuiApp(args)
-    result = app.run()
-    return int(result or 0)
+def _run_agent_console(args: argparse.Namespace) -> int:
+    ui = AgentConsoleUI(args)
+    return ui.run()
 
 
-class AgentTuiApp:
-    """prompt_toolkit interface for the local AReno operations agent."""
+class AgentConsoleUI:
+    """Pretty terminal output for the local AReno operations agent."""
 
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
-        self.exit_code = 1
-        self._log_chunks: deque[str] = deque()
-        self._log_chars = 0
-        self._log_text = ""
-        self._lock = threading.Lock()
-        self._agent_thread: threading.Thread | None = None
-        self.output_control = FormattedTextControl(lambda: ANSI(self._log_text), focusable=True)
-        self.output_window = Window(
-            content=self.output_control,
-            wrap_lines=True,
-            right_margins=[ScrollbarMargin(display_arrows=True)],
-            always_hide_cursor=True,
-        )
-        self.application = self._build_application()
 
     def run(self) -> int:
-        self._agent_thread = threading.Thread(target=self._run_agent_thread, name="areno-agent", daemon=True)
-        self._agent_thread.start()
-        result = self.application.run()
-        return int(result or self.exit_code or 0)
-
-    def _build_application(self) -> Application[int]:
-        bindings = KeyBindings()
-
-        @bindings.add("c-c")
-        @bindings.add("q")
-        def _quit(_event: Any) -> None:
-            self.application.exit(result=self.exit_code)
-
-        @bindings.add("pagedown")
-        def _page_down(_event: Any) -> None:
-            self.output_window.vertical_scroll += 20
-            self.application.invalidate()
-
-        @bindings.add("pageup")
-        def _page_up(_event: Any) -> None:
-            self.output_window.vertical_scroll = max(0, self.output_window.vertical_scroll - 20)
-            self.application.invalidate()
-
-        @bindings.add("end")
-        def _end(_event: Any) -> None:
-            self._scroll_to_end()
-            self.application.invalidate()
-
-        sidebar = HSplit(
-            [
-                Label(text="AReno Agent"),
-                Label(text=""),
-                Label(text=f"Model\n{self.args.model}"),
-                Label(text=""),
-                Label(text=f"Workspace\n{Path(self.args.repo).resolve()}"),
-                Label(text=""),
-                Label(text=f"Goal\n{self.args.instruction}"),
-            ]
-        )
-        root = HSplit(
-            [
-                Label(text=self._header_text()),
-                VSplit(
-                    [
-                        Box(Frame(sidebar, title="Run"), width=34, padding=1),
-                        Frame(self.output_window, title="Live Activity"),
-                    ]
-                ),
-                Label(text=" q / Ctrl-C: quit   |   output streams live   |   scroll: mouse / PageUp / PageDown "),
-            ]
-        )
-        style = Style.from_dict(
-            {
-                "frame.border": "#3b4758",
-                "label": "#c8d3df bg:#111820",
-                "text-area": "#d6dee8 bg:#0b0f14",
-                "window": "bg:#0b0f14",
-            }
-        )
-        return Application(
-            layout=Layout(root, focused_element=self.output_window),
-            key_bindings=bindings,
-            full_screen=True,
-            mouse_support=True,
-            refresh_interval=0.1,
-            style=style,
-        )
-
-    def _header_text(self) -> str:
-        return " AReno Operations Agent  |  model: " + self.args.model
-
-    def _run_agent_thread(self) -> None:
         self.write_panel("areno agent", _banner_text(self.args.instruction, Path(self.args.repo).resolve(), self.args.model))
         try:
-            self.exit_code = asyncio.run(_main_async(self.args, ui=self))
-        except BaseException as exc:  # noqa: BLE001 - surface uncaught agent failures in the TUI before exiting.
-            self.exit_code = 1
+            return asyncio.run(_main_async(self.args, ui=self))
+        except BaseException as exc:  # noqa: BLE001 - surface uncaught agent failures before exiting.
             self.write_panel("error", str(exc))
-        finally:
-            self._exit_from_thread()
-
-    def _exit_from_thread(self) -> None:
-        loop = getattr(self.application, "loop", None)
-        if loop is not None and loop.is_running():
-            loop.call_soon_threadsafe(lambda: self.application.exit(result=self.exit_code))
-        else:
-            self.application.exit(result=self.exit_code)
+            return 1
 
     def agent_event(self, event: str, payload: dict[str, Any]) -> None:
         if event == "assistant":
@@ -518,29 +412,10 @@ class AgentTuiApp:
         self.write(_text_panel(title, body))
 
     def write(self, text: str) -> None:
-        with self._lock:
-            self._log_chunks.append(text)
-            self._log_chars += len(text)
-            current = "".join(self._log_chunks)
-        self._set_output_text(current)
-
-    def _set_output_text(self, text: str) -> None:
-        def update() -> None:
-            self._log_text = text
-            self._scroll_to_end()
-            self.application.invalidate()
-
-        loop = getattr(self.application, "loop", None)
-        if loop is not None and loop.is_running():
-            loop.call_soon_threadsafe(update)
-        else:
-            update()
-
-    def _scroll_to_end(self) -> None:
-        self.output_window.vertical_scroll = max(0, self._log_text.count("\n"))
+        print(text, end="", flush=True)
 
 
-async def _main_async(args: argparse.Namespace, *, ui: AgentTuiApp) -> int:
+async def _main_async(args: argparse.Namespace, *, ui: AgentConsoleUI) -> int:
     try:
         from openai import AsyncOpenAI
     except ImportError as exc:
