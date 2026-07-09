@@ -8,6 +8,7 @@ import base64
 import binascii
 import json
 import os
+import re
 import subprocess
 import threading
 from collections import deque
@@ -17,17 +18,30 @@ from typing import Any
 
 import click
 from prompt_toolkit.application import Application
-from prompt_toolkit.document import Document
+from prompt_toolkit.formatted_text import ANSI
 from prompt_toolkit.key_binding import KeyBindings
-from prompt_toolkit.layout import HSplit, Layout
+from prompt_toolkit.layout import HSplit, Layout, VSplit, Window
+from prompt_toolkit.layout.controls import FormattedTextControl
+from prompt_toolkit.layout.margins import ScrollbarMargin
 from prompt_toolkit.styles import Style
-from prompt_toolkit.widgets import Frame, Label, TextArea
+from prompt_toolkit.widgets import Box, Frame, Label
 
 DEFAULT_KNOWLEDGE_FILE = Path(__file__).resolve().parents[1] / "agentic" / "coding" / "ops_knowledge.md"
 DEFAULT_KNOWLEDGE = DEFAULT_KNOWLEDGE_FILE.read_text(encoding="utf-8")
 CONFIG_FILE = Path.home() / ".areno" / "agent_config.json"
 DEFAULT_AGENT_TURN_LIMIT = 1_000_000
 JUDGE_CONTEXT_CHARS = 24000
+RESET = "\x1b[0m"
+DIM = "\x1b[2m"
+BOLD = "\x1b[1m"
+CYAN = "\x1b[38;2;34;211;238m"
+BLUE = "\x1b[38;2;96;165;250m"
+MAGENTA = "\x1b[38;2;217;70;239m"
+YELLOW = "\x1b[38;2;251;191;36m"
+RED = "\x1b[38;2;248;113;113m"
+MUTED = "\x1b[38;2;148;163;184m"
+WHITE = "\x1b[38;2;226;232;240m"
+GREEN = "\x1b[38;2;45;212;191m"
 
 SYSTEM_TEMPLATE = """You are an AReno operations coding agent.
 
@@ -61,6 +75,8 @@ Train command policy:
   two or three capacity retries is usually enough before the real train command.
 - Keep smoke and final settings within `mem_frac <= 0.9`; leave GPU memory
   headroom instead of choosing a configuration that uses nearly all memory.
+- For agentic train tasks, always set `--max-context-len` explicitly. If the
+  user does not provide one, use a practical cap such as 32768.
 - Never use Hugging Face model hub. For remote model or dataset refs, always use
   `--model-hub modelscope` unless the user explicitly provides a local path.
 
@@ -128,6 +144,15 @@ def agent_command(
     instruction = " ".join(job).strip()
     if not instruction:
         raise click.UsageError("provide a natural-language train/serve job, or use --refresh-knowledge")
+    instruction = asyncio.run(
+        _enrich_instruction_with_user_answers_async(
+            instruction,
+            base_url=resolved_base_url,
+            model=resolved_model,
+            api_key=resolved_api_key,
+            knowledge_file=knowledge_file,
+        )
+    )
 
     args = argparse.Namespace(
         base_url=resolved_base_url,
@@ -238,6 +263,95 @@ def _b64_decode(value: str, key: str) -> str:
         raise click.ClickException(f"invalid base64 value for {key} in {CONFIG_FILE}") from exc
 
 
+async def _enrich_instruction_with_user_answers_async(
+    instruction: str,
+    *,
+    base_url: str,
+    model: str,
+    api_key: str,
+    knowledge_file: str,
+) -> str:
+    questions = await _llm_questions_for_instruction(
+        instruction,
+        base_url=base_url,
+        model=model,
+        api_key=api_key,
+        knowledge_file=knowledge_file,
+    )
+    if not questions:
+        return instruction
+    click.echo("A few run parameters are missing. Press Enter to accept the recommended value.")
+    answers: list[str] = []
+    for question in questions[:6]:
+        key = str(question.get("key") or "preference").strip() or "preference"
+        prompt = str(question.get("question") or key).strip()
+        default = str(question.get("default") or "").strip()
+        if not prompt or not default:
+            continue
+        value = click.prompt(prompt, default=default, show_default=True)
+        value = str(value).strip()
+        if value:
+            answers.append(f"- {key}: {value}")
+    if not answers:
+        return instruction
+    return instruction + "\n\nUser-provided run preferences:\n" + "\n".join(answers)
+
+
+async def _llm_questions_for_instruction(
+    instruction: str,
+    *,
+    base_url: str,
+    model: str,
+    api_key: str,
+    knowledge_file: str,
+) -> list[dict[str, str]]:
+    try:
+        from openai import AsyncOpenAI
+    except ImportError:
+        return []
+    from areno.agentic.coding.agent_loop import create_chat_completion_with_retry
+
+    knowledge = _load_knowledge(Path(knowledge_file).expanduser())
+    client = AsyncOpenAI(base_url=base_url, api_key=api_key, max_retries=0)
+    try:
+        response = await create_chat_completion_with_retry(
+            client,
+            model=model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You prepare a short preflight questionnaire for an AReno train/serve operations agent. "
+                        "Read the user goal and ask only for parameters that are genuinely missing and materially "
+                        "affect running the command. Examples include checkpoint/model, dataset, algorithm, "
+                        "max_new_tokens, max_context_len for agentic training, GPU/TP preset, serve port, or save/load "
+                        "requirements. Do not ask questions already answered by the user. Do not ask more than six "
+                        "questions. Return JSON only: {\"questions\":[{\"key\":\"...\",\"question\":\"...\",\"default\":\"...\"}]}"
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": f"User goal:\n{instruction}\n\nRelevant AReno operations knowledge:\n{knowledge[:12000]}",
+                },
+            ],
+            stream=False,
+        )
+    except Exception as exc:  # noqa: BLE001 - preflight questions are helpful but non-critical.
+        click.echo(f"skipping LLM preflight questions: {exc}", err=True)
+        return []
+    finally:
+        await client.close()
+    content = (response.choices[0].message.content or "").strip()
+    try:
+        parsed = json.loads(_extract_json_object(content))
+    except json.JSONDecodeError:
+        return []
+    questions = parsed.get("questions") if isinstance(parsed, dict) else None
+    if not isinstance(questions, list):
+        return []
+    return [question for question in questions if isinstance(question, dict)]
+
+
 def _run_agent_tui(args: argparse.Namespace) -> int:
     app = AgentTuiApp(args)
     result = app.run()
@@ -247,16 +361,21 @@ def _run_agent_tui(args: argparse.Namespace) -> int:
 class AgentTuiApp:
     """prompt_toolkit interface for the local AReno operations agent."""
 
-    MAX_LOG_CHARS = 300_000
-
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
         self.exit_code = 1
         self._log_chunks: deque[str] = deque()
         self._log_chars = 0
+        self._log_text = ""
         self._lock = threading.Lock()
         self._agent_thread: threading.Thread | None = None
-        self.output = TextArea(text="", read_only=True, scrollbar=True, wrap_lines=True)
+        self.output_control = FormattedTextControl(lambda: ANSI(self._log_text), focusable=True)
+        self.output_window = Window(
+            content=self.output_control,
+            wrap_lines=True,
+            right_margins=[ScrollbarMargin(display_arrows=True)],
+            always_hide_cursor=True,
+        )
         self.application = self._build_application()
 
     def run(self) -> int:
@@ -273,22 +392,54 @@ class AgentTuiApp:
         def _quit(_event: Any) -> None:
             self.application.exit(result=self.exit_code)
 
+        @bindings.add("pagedown")
+        def _page_down(_event: Any) -> None:
+            self.output_window.vertical_scroll += 20
+            self.application.invalidate()
+
+        @bindings.add("pageup")
+        def _page_up(_event: Any) -> None:
+            self.output_window.vertical_scroll = max(0, self.output_window.vertical_scroll - 20)
+            self.application.invalidate()
+
+        @bindings.add("end")
+        def _end(_event: Any) -> None:
+            self._scroll_to_end()
+            self.application.invalidate()
+
+        sidebar = HSplit(
+            [
+                Label(text="AReno Agent"),
+                Label(text=""),
+                Label(text=f"Model\n{self.args.model}"),
+                Label(text=""),
+                Label(text=f"Workspace\n{Path(self.args.repo).resolve()}"),
+                Label(text=""),
+                Label(text=f"Goal\n{self.args.instruction}"),
+            ]
+        )
         root = HSplit(
             [
-                Label(text=self._summary_text()),
-                Frame(self.output, title="AReno Agent"),
-                Label(text="q / Ctrl-C: quit"),
+                Label(text=self._header_text()),
+                VSplit(
+                    [
+                        Box(Frame(sidebar, title="Run"), width=34, padding=1),
+                        Frame(self.output_window, title="Live Activity"),
+                    ]
+                ),
+                Label(text=" q / Ctrl-C: quit   |   output streams live   |   scroll: mouse / PageUp / PageDown "),
             ]
         )
         style = Style.from_dict(
             {
-                "frame.border": "#334155",
+                "frame.border": "#3b4758",
                 "label": "#c8d3df bg:#111820",
                 "text-area": "#d6dee8 bg:#0b0f14",
+                "window": "bg:#0b0f14",
             }
         )
         return Application(
-            layout=Layout(root, focused_element=self.output),
+            layout=Layout(root, focused_element=self.output_window),
             key_bindings=bindings,
             full_screen=True,
             mouse_support=True,
@@ -296,8 +447,8 @@ class AgentTuiApp:
             style=style,
         )
 
-    def _summary_text(self) -> str:
-        return f"model={self.args.model}  workspace={Path(self.args.repo).resolve()}  goal={self.args.instruction}"
+    def _header_text(self) -> str:
+        return " AReno Operations Agent  |  model: " + self.args.model
 
     def _run_agent_thread(self) -> None:
         self.write_panel("areno agent", _banner_text(self.args.instruction, Path(self.args.repo).resolve(), self.args.model))
@@ -334,13 +485,15 @@ class AgentTuiApp:
     def command_output_event(self, event: dict[str, Any]) -> None:
         kind = event.get("kind")
         if kind == "start":
-            self.write("\n=== command output ===\n")
-            self.write(f"$ {event.get('command') or ''}\n")
-            self.write(f"timeout_s: {event.get('timeout_s')}\n")
+            self.write(f"\n{MAGENTA}{BOLD}━━ command output ━━{RESET}\n")
+            self.write(f"{MAGENTA}$ {event.get('command') or ''}{RESET}\n")
+            self.write(f"{MUTED}timeout_s: {event.get('timeout_s')}{RESET}\n")
         elif kind == "line":
             stream = str(event.get("stream") or "stdout")
             line = str(event.get("line") or "").rstrip()
-            self.write(f"{stream}> {line}\n")
+            prefix = RED if stream == "stderr" else CYAN
+            body = RED if stream == "stderr" else WHITE
+            self.write(f"{prefix}{stream}>{RESET} {body}{line}{RESET}\n")
         elif kind == "end":
             skipped = int(event.get("skipped_stream_lines") or 0)
             returncode = event.get("returncode")
@@ -350,15 +503,16 @@ class AgentTuiApp:
                 summary += " timed_out=true"
             if skipped:
                 summary += f" streamed_screened={skipped} skipped_lines"
-            self.write(f"=== {summary} ===\n")
+            color = RED if timed_out or returncode not in (0, None) else GREEN
+            self.write(f"{color}{BOLD}━━ {summary} ━━{RESET}\n")
 
     def judgment(self, judgment: dict[str, Any]) -> None:
         done = bool(judgment.get("done"))
         title = "judge: done" if done else "judge: continue"
-        self.write_panel(title, _json_text(judgment))
+        self.write_panel(title, _pretty_value(judgment))
 
     def done(self, submitted: dict[str, Any]) -> None:
-        self.write_panel("done", _json_text(submitted))
+        self.write_panel("done", _pretty_value(submitted))
 
     def write_panel(self, title: str, body: str) -> None:
         self.write(_text_panel(title, body))
@@ -367,15 +521,13 @@ class AgentTuiApp:
         with self._lock:
             self._log_chunks.append(text)
             self._log_chars += len(text)
-            while self._log_chars > self.MAX_LOG_CHARS and self._log_chunks:
-                removed = self._log_chunks.popleft()
-                self._log_chars -= len(removed)
             current = "".join(self._log_chunks)
         self._set_output_text(current)
 
     def _set_output_text(self, text: str) -> None:
         def update() -> None:
-            self.output.buffer.set_document(Document(text, cursor_position=len(text)), bypass_readonly=True)
+            self._log_text = text
+            self._scroll_to_end()
             self.application.invalidate()
 
         loop = getattr(self.application, "loop", None)
@@ -383,6 +535,9 @@ class AgentTuiApp:
             loop.call_soon_threadsafe(update)
         else:
             update()
+
+    def _scroll_to_end(self) -> None:
+        self.output_window.vertical_scroll = max(0, self._log_text.count("\n"))
 
 
 async def _main_async(args: argparse.Namespace, *, ui: AgentTuiApp) -> int:
@@ -486,7 +641,8 @@ async def _judge_goal_done(
                     "--n-samples 8 by default, included --drop-rollout-state by default, kept batch_size * "
                     "n_samples aligned with --max-running-prompts, and searched from a large plausible smoke "
                     "target with a bounded number of binary-search style retries on recoverable capacity "
-                    "failures without tuning --max-new-tokens or exceeding mem_frac 0.9. Return JSON "
+                    "failures without tuning --max-new-tokens or exceeding mem_frac 0.9. For agentic train "
+                    "tasks, check that --max-context-len was set explicitly. Return JSON "
                     "only with keys: done, reason, feedback."
                 ),
             },
@@ -626,7 +782,9 @@ def _job_prompt(instruction: str, root: Path) -> str:
         "smoke runs. One large attempt plus two or three capacity retries is usually enough before choosing "
         "final train settings.\n"
         "- Keep smoke and final settings within mem_frac <= 0.9 so CUDA graphs, allocator fragmentation, and "
-        "transient buffers have headroom."
+        "transient buffers have headroom.\n"
+        "- For agentic train tasks, always set --max-context-len explicitly. If the user does not provide one, "
+        "use a practical cap such as 32768."
     )
 
 
@@ -642,11 +800,11 @@ def _format_tool_arguments(tool_name: str, raw: str) -> str:
     if tool_name == "run_command":
         command = str(parsed.get("command", ""))
         timeout = parsed.get("timeout_s")
-        rows = [f"command:\n{command}"]
+        rows = [f"{MUTED}command{RESET}:\n{WHITE}{command}{RESET}"]
         if timeout is not None:
-            rows.append(f"timeout_s: {timeout}")
+            rows.append(f"{MUTED}timeout_s{RESET}: {CYAN}{timeout}{RESET}")
         return "\n".join(rows)
-    return _json_text(parsed)
+    return _pretty_value(parsed)
 
 
 def _format_tool_result(tool_name: str, raw: str) -> str:
@@ -656,7 +814,7 @@ def _format_tool_result(tool_name: str, raw: str) -> str:
         return raw
     if tool_name == "run_command":
         return _format_run_command_result(parsed)
-    return _json_text(parsed)
+    return _pretty_value(parsed)
 
 
 def _format_run_command_result(parsed: dict[str, Any]) -> str:
@@ -664,29 +822,75 @@ def _format_run_command_result(parsed: dict[str, Any]) -> str:
     timed_out = bool(parsed.get("timed_out"))
     screened = bool(parsed.get("screened"))
     rows = [
-        f"command:\n{parsed.get('command') or ''}",
-        f"returncode: {returncode}",
-        f"screened: {'yes' if screened else 'no'}",
-        f"streamed: {parsed.get('streamed_lines', 0)}",
+        f"{MUTED}command{RESET}:\n{WHITE}{parsed.get('command') or ''}{RESET}",
+        f"{MUTED}returncode{RESET}: {_colored_scalar(returncode)}",
+        f"{MUTED}screened{RESET}: {_colored_scalar('yes' if screened else 'no')}",
+        f"{MUTED}streamed{RESET}: {_colored_scalar(parsed.get('streamed_lines', 0))}",
     ]
     skipped = int(parsed.get("skipped_stream_lines") or 0)
     if skipped:
-        rows.append(f"live_skipped: {skipped}")
+        rows.append(f"{MUTED}live_skipped{RESET}: {_colored_scalar(skipped)}")
     if timed_out:
-        rows.append("timed_out: yes")
+        rows.append(f"{MUTED}timed_out{RESET}: {RED}yes{RESET}")
     output = str(parsed.get("output") or parsed.get("stdout") or parsed.get("stderr") or "")
     if output:
         title = "screened output" if screened else "output"
-        rows.append(f"{title}:\n{output}")
+        rows.append(f"{MUTED}{title}{RESET}:\n{WHITE}{output}{RESET}")
     return "\n".join(rows)
 
 
-def _json_text(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True, default=str)
+def _pretty_value(value: Any, *, indent: int = 0) -> str:
+    prefix = " " * indent
+    if isinstance(value, dict):
+        if not value:
+            return f"{prefix}{MUTED}<empty>{RESET}"
+        rows: list[str] = []
+        for key, item in value.items():
+            label = f"{prefix}{BLUE}{key}{RESET}"
+            if isinstance(item, dict | list):
+                rows.append(f"{label}:")
+                rows.append(_pretty_value(item, indent=indent + 2))
+            else:
+                rows.append(f"{label}: {_colored_scalar(item)}")
+        return "\n".join(rows)
+    if isinstance(value, list):
+        if not value:
+            return f"{prefix}{MUTED}<empty>{RESET}"
+        rows = []
+        for idx, item in enumerate(value):
+            label = f"{prefix}{MUTED}[{idx}]{RESET}"
+            if isinstance(item, dict | list):
+                rows.append(f"{label}:")
+                rows.append(_pretty_value(item, indent=indent + 2))
+            else:
+                rows.append(f"{label}: {_colored_scalar(item)}")
+        return "\n".join(rows)
+    return f"{prefix}{_colored_scalar(value)}"
+
+
+def _colored_scalar(value: Any) -> str:
+    if value is None:
+        return f"{MUTED}null{RESET}"
+    if isinstance(value, bool):
+        return f"{GREEN if value else RED}{str(value).lower()}{RESET}"
+    if isinstance(value, int | float):
+        return f"{CYAN}{value}{RESET}"
+    text = str(value)
+    if "\n" in text:
+        return f"{WHITE}{text}{RESET}"
+    return f"{WHITE}{text}{RESET}"
 
 
 def _text_panel(title: str, body: str) -> str:
-    return f"\n--- {title} ---\n{body.rstrip()}\n--- end {title} ---\n"
+    clean = body.rstrip()
+    width = min(max(len(_strip_ansi(title)) + 8, 44), 96)
+    top = "╭" + "─" * (width - 2) + "╮"
+    bottom = "╰" + "─" * (width - 2) + "╯"
+    return f"\n{MUTED}{top}{RESET}\n{CYAN}{BOLD}│ {title}{RESET}\n{MUTED}├{'─' * (width - 2)}┤{RESET}\n{clean}\n{MUTED}{bottom}{RESET}\n"
+
+
+def _strip_ansi(text: str) -> str:
+    return re.sub(r"\x1b\[[0-9;]*m", "", text)
 
 
 if __name__ == "__main__":

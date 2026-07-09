@@ -82,6 +82,7 @@ areno train \
   --n-samples <samples-per-prompt> \
   --mini-bs <train-microbatch> \
   --max-running-prompts <rollout-concurrency> \
+  --max-context-len <agentic-context-cap> \
   --drop-rollout-state \
   --max-steps 1
 ```
@@ -98,7 +99,8 @@ areno train --ckpt Qwen/Qwen3.5-0.8B --dataset-path gsm8k:main \
   --dataset-loader-fn examples/math/dataset_loader.py \
   --reward-fn-path examples/math/math_verify_reward.py \
   --algo gspo --world-size 1 --tp-size 1 --batch-size 1 --n-samples 8 \
-  --mini-bs 1 --max-running-prompts 8 --drop-rollout-state --max-steps 1
+  --mini-bs 1 --max-running-prompts 8 --max-context-len 32768 \
+  --drop-rollout-state --max-steps 1
 ```
 
 ```bash
@@ -106,7 +108,8 @@ areno train --ckpt <local-ckpt> --dataset-path /home/admin/math/data \
   --dataset-loader-fn examples/math/dataset_loader.py \
   --reward-fn-path examples/math/math_verify_reward.py \
   --algo gspo --world-size 8 --tp-size 4 --batch-size 32 --n-samples 8 \
-  --mini-bs 16 --max-running-prompts 256 --drop-rollout-state --max-steps 1
+  --mini-bs 16 --max-running-prompts 256 --max-context-len 32768 \
+  --drop-rollout-state --max-steps 1
 ```
 
 Use `--save-path <dir> --save-interval 1 --max-steps 1` when the task asks to
@@ -115,6 +118,14 @@ test checkpoint saving. Then test loading by using `--ckpt <dir>/step_000001`.
 ## Smoke checks
 
 Use smoke checks before long train/serve jobs.
+
+For agentic train tasks, always set `--max-context-len` explicitly. Agentic
+rollouts can include multi-turn messages, tool calls, tool results, images, and
+long reasoning traces, so relying on the model's full context limit can make
+memory use and trajectory filtering unpredictable. Use the user-provided
+context cap when available; otherwise start with a practical value such as
+`--max-context-len 32768` for coding/agentic RL and keep `--max-new-tokens`
+unchanged.
 
 `--smoke-infer` dummy-loads the model, allocates rollout KV cache, and captures
 decode CUDA graphs. It does not run decode. Use it to check model loading,
