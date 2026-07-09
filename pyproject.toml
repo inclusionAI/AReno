@@ -48,6 +48,7 @@ dependencies = [
   "math-verify",
   "numpy",
   "openai",
+  "prompt-toolkit>=3.0",
   "rich>=13",
   "tensorboard",
   "pydantic>=2",

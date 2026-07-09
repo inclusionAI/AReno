@@ -6,17 +6,12 @@ import argparse
 import asyncio
 import base64
 import binascii
-import contextlib
 import json
 import os
-import queue
 import re
 import shutil
 import subprocess
 import sys
-import termios
-import threading
-import tty
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -289,7 +284,7 @@ async def _enrich_instruction_with_user_answers_async(
         default = str(question.get("default") or "").strip()
         if not prompt or not default:
             continue
-        value = click.prompt(prompt, default=default, show_default=True)
+        value = await _prompt_value_async(prompt, default=default)
         value = str(value).strip()
         if value:
             answers.append(f"- {key}: {value}")
@@ -355,6 +350,29 @@ async def _llm_questions_for_instruction(
     return [question for question in questions if isinstance(question, dict)]
 
 
+async def _prompt_value_async(question: str, *, default: str = "") -> str:
+    if not sys.stdin.isatty():
+        return default
+    _load_prompt_toolkit()
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.formatted_text import ANSI
+    from prompt_toolkit.patch_stdout import patch_stdout
+
+    suffix = f" [{default}]" if default else ""
+    click.echo(f"{MUTED}{question}{suffix}{RESET}")
+    session: Any = PromptSession()
+    with patch_stdout():
+        value = await session.prompt_async(ANSI(f"{CYAN}hint>{RESET} "))
+    return str(value or default)
+
+
+def _load_prompt_toolkit() -> None:
+    try:
+        import prompt_toolkit  # noqa: F401
+    except ImportError as exc:
+        raise click.ClickException("the agent CLI requires prompt-toolkit; install project dependencies first") from exc
+
+
 def _run_agent_console(args: argparse.Namespace) -> int:
     ui = AgentConsoleUI(args)
     return ui.run()
@@ -367,12 +385,16 @@ class AgentConsoleUI:
         self.args = args
 
     def run(self) -> int:
-        self.write_panel("areno agent", _banner_text(self.args.instruction, Path(self.args.repo).resolve(), self.args.model))
-        try:
-            return asyncio.run(_main_async(self.args, ui=self))
-        except BaseException as exc:  # noqa: BLE001 - surface uncaught agent failures before exiting.
-            self.write_panel("error", str(exc))
-            return 1
+        _load_prompt_toolkit()
+        from prompt_toolkit.patch_stdout import patch_stdout
+
+        with patch_stdout():
+            self.write_panel("areno agent", _banner_text(self.args.instruction, Path(self.args.repo).resolve(), self.args.model))
+            try:
+                return asyncio.run(_main_async(self.args, ui=self))
+            except BaseException as exc:  # noqa: BLE001 - surface uncaught agent failures before exiting.
+                self.write_panel("error", str(exc))
+                return 1
 
     def agent_event(self, event: str, payload: dict[str, Any]) -> None:
         if event == "assistant":
@@ -437,26 +459,26 @@ class InteractiveAgentInput:
     def __init__(self, ui: AgentConsoleUI, workspace: Any) -> None:
         self.ui = ui
         self.workspace = workspace
-        self._hints: queue.Queue[str] = queue.Queue()
-        self._stop = threading.Event()
-        self._paused = threading.Event()
-        self._prompt_visible = False
+        self._hints: asyncio.Queue[str] = asyncio.Queue()
+        self._stop = False
+        self._paused = asyncio.Event()
         self._resume_after_pause = False
-        self._thread: threading.Thread | None = None
+        self._prompt_task: asyncio.Task[None] | None = None
 
     def start(self) -> None:
         if not sys.stdin.isatty():
             return
+        _load_prompt_toolkit()
         self.ui.write(
             f"{MUTED}interactive: type a hint then Enter to send it on the next model turn; "
             f"press Esc to pause current execution.{RESET}\n"
         )
-        self._show_prompt()
-        self._thread = threading.Thread(target=self._read_input_loop, daemon=True)
-        self._thread.start()
+        self._prompt_task = asyncio.create_task(self._prompt_loop())
 
     def stop(self) -> None:
-        self._stop.set()
+        self._stop = True
+        if self._prompt_task is not None:
+            self._prompt_task.cancel()
 
     async def apply_pending(self, messages: list[dict[str, Any]], phase: str = "before_turn") -> bool:
         was_paused = await self._wait_if_paused()
@@ -473,14 +495,13 @@ class InteractiveAgentInput:
 
     async def _wait_if_paused(self) -> bool:
         was_paused = False
-        while self._paused.is_set() and not self._stop.is_set():
+        while self._paused.is_set() and not self._stop:
             was_paused = True
             try:
-                hint = self._hints.get_nowait()
-            except queue.Empty:
-                await asyncio.sleep(0.1)
+                hint = await asyncio.wait_for(self._hints.get(), timeout=0.1)
+            except TimeoutError:
                 continue
-            self._queue_hint(hint)
+            await self._hints.put(hint)
             self._paused.clear()
             self.workspace.interrupt_requested = False
             break
@@ -490,70 +511,43 @@ class InteractiveAgentInput:
         while True:
             try:
                 hint = self._hints.get_nowait()
-            except queue.Empty:
+            except asyncio.QueueEmpty:
                 break
             messages.append({"role": "user", "content": f"User runtime hint:\n{hint}"})
             self.ui.write_panel("user hint", hint)
 
-    def _queue_hint(self, hint: str) -> None:
-        self._hints.put(hint)
+    async def _prompt_loop(self) -> None:
+        from prompt_toolkit import PromptSession
+        from prompt_toolkit.formatted_text import ANSI
+        from prompt_toolkit.key_binding import KeyBindings
+        from prompt_toolkit.patch_stdout import patch_stdout
 
-    def _read_input_loop(self) -> None:
-        fd = sys.stdin.fileno()
-        with self._raw_terminal(fd):
-            buffer: list[str] = []
-            while not self._stop.is_set():
-                try:
-                    char = sys.stdin.read(1)
-                except OSError:
-                    break
-                if not char:
-                    break
-                if char == "\x1b":
-                    self.workspace.interrupt_requested = True
-                    self._paused.set()
-                    buffer.clear()
-                    self.ui.write(f"\n{YELLOW}{BOLD}paused{RESET} {MUTED}current command will stop; enter hint to continue.{RESET}\n")
-                    self._show_prompt()
-                    continue
-                if char in ("\r", "\n"):
-                    hint = "".join(buffer).strip()
-                    buffer.clear()
-                    if self._prompt_visible:
-                        self.ui.write("\n")
-                        self._prompt_visible = False
-                    if hint:
-                        self._hints.put(hint)
-                    elif self._paused.is_set():
-                        self._show_prompt()
-                    self._show_prompt()
-                    continue
-                if char in ("\x7f", "\b"):
-                    if buffer:
-                        buffer.pop()
-                        self.ui.write("\b \b")
-                    continue
-                if char.isprintable() or char in ("\t", " "):
-                    if not self._prompt_visible:
-                        self._show_prompt()
-                    buffer.append(char)
-                    self.ui.write(char)
+        bindings = KeyBindings()
 
-    def _show_prompt(self) -> None:
-        if not self._prompt_visible:
-            self.ui.write(f"{CYAN}hint>{RESET} ")
-            self._prompt_visible = True
+        @bindings.add("escape")
+        def _pause(event: Any) -> None:
+            self.workspace.interrupt_requested = True
+            self._paused.set()
+            event.app.current_buffer.reset()
+            self.ui.write(
+                f"\n{YELLOW}{BOLD}paused{RESET} "
+                f"{MUTED}current command will stop; enter hint to continue.{RESET}\n"
+            )
 
-    @staticmethod
-    @contextlib.contextmanager
-    def _raw_terminal(fd: int) -> Any:
-        old_settings = termios.tcgetattr(fd)
-        try:
-            tty.setcbreak(fd)
-            yield
-        finally:
-            with contextlib.suppress(termios.error):
-                termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+        session: Any = PromptSession(key_bindings=bindings)
+        while not self._stop:
+            try:
+                with patch_stdout():
+                    hint = await session.prompt_async(ANSI(f"{CYAN}hint>{RESET} "))
+            except (EOFError, KeyboardInterrupt):
+                self.workspace.interrupt_requested = True
+                self._paused.set()
+                break
+            except asyncio.CancelledError:
+                break
+            hint = str(hint).strip()
+            if hint:
+                await self._hints.put(hint)
 
 
 async def _main_async(args: argparse.Namespace, *, ui: AgentConsoleUI) -> int:
