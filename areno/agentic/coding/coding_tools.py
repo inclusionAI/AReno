@@ -246,6 +246,7 @@ class CodingWorkspace:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             bufsize=1,
+            env={**os.environ, "PYTHONUNBUFFERED": "1"},
         )
         stdout, stderr, timed_out, streamed_lines, skipped_stream_lines = _communicate_streaming(
             proc,

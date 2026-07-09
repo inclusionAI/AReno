@@ -8,6 +8,7 @@ import base64
 import binascii
 import json
 import os
+import queue
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -62,10 +63,8 @@ Train command policy:
   two or three capacity retries is usually enough before the real train command.
 - Keep smoke and final settings within `mem_frac <= 0.9`; leave GPU memory
   headroom instead of choosing a configuration that uses nearly all memory.
-- Before using remote model or dataset refs, check whether Hugging Face is
-  reachable. If Hugging Face is reachable and the requested ref is an HF ref,
-  use `--model-hub hf`. If Hugging Face is unreachable or times out, use
-  ModelScope with `--model-hub modelscope` instead.
+- Never use Hugging Face model hub. For remote model or dataset refs, always use
+  `--model-hub modelscope` unless the user explicitly provides a local path.
 
 Background knowledge:
 
@@ -287,6 +286,7 @@ class AgentTuiApp(App[int]):
         self.exit_code = 1
         self.summary: Static | None = None
         self.log_view: RichLog | None = None
+        self.pending_writes: queue.Queue[Any] = queue.Queue()
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -300,6 +300,7 @@ class AgentTuiApp(App[int]):
         self.log_view = self.query_one("#log", RichLog)
         self.title = "AReno Agent"
         self.sub_title = self.args.model
+        self.set_interval(0.05, self._flush_pending_writes)
         self.write_panel("areno agent", _banner_table(self.args.instruction, Path(self.args.repo).resolve(), self.args.model), "cyan")
         self.run_worker(self._run_agent_thread, thread=True, name="areno-agent")
 
@@ -375,14 +376,20 @@ class AgentTuiApp(App[int]):
         self.write(Panel(body, title=f"[bold {style}]{title}[/bold {style}]", border_style="bright_black", padding=(0, 1)))
 
     def write(self, renderable: Any) -> None:
-        try:
-            self.call_from_thread(self._write_from_ui, renderable)
-        except RuntimeError:
-            self._write_from_ui(renderable)
+        self.pending_writes.put(renderable)
 
-    def _write_from_ui(self, renderable: Any) -> None:
-        if self.log_view is not None:
+    def _flush_pending_writes(self) -> None:
+        if self.log_view is None:
+            return
+        wrote = False
+        for _ in range(1000):
+            try:
+                renderable = self.pending_writes.get_nowait()
+            except queue.Empty:
+                break
             self.log_view.write(renderable)
+            wrote = True
+        if wrote:
             self.log_view.scroll_end(animate=False)
             self.log_view.refresh()
 
@@ -618,8 +625,8 @@ def _job_prompt(instruction: str, root: Path) -> str:
         "- Keep batch_size * n_samples aligned with max-running-prompts. Usually set "
         "max-running-prompts >= batch_size * n_samples; if increasing max-running-prompts for throughput, "
         "increase batch-size too when the dataset and memory allow it.\n"
-        "- Before remote downloads, check Hugging Face availability. If it is unavailable, use "
-        "--model-hub modelscope; if it is available and the requested ref is an HF ref, use --model-hub hf.\n"
+        "- Never use Hugging Face model hub. For remote model or dataset refs, always use --model-hub modelscope "
+        "unless the user explicitly provides a local path.\n"
         "- Use smoke-infer/smoke-train before long runs. Start from the largest plausible settings you can infer, "
         "then binary search down on recoverable OOM. Do not treat one tiny smoke success as completion.\n"
         "- Do not tune max-new-tokens to make smoke or train fit unless the user explicitly asks for shorter "
