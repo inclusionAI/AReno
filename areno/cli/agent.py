@@ -60,13 +60,17 @@ Train command policy:
   `--mini-bs`, try those first, and binary search down on recoverable OOM.
 - Do not tune `--max-new-tokens` to make smoke or train fit. Treat generation
   length as a task quality target unless the user explicitly changes it.
+- For agentic train or serve tasks, if the user did not provide generation
+  length or context capacity, ask for `--max-new-tokens` and
+  `--max-context-len` before running commands. Do not silently assume defaults
+  for these two agentic limits.
 - If a large smoke command succeeds with lots of free memory, raise the upper
   bound briefly, but do not run excessive smoke attempts. One large attempt plus
   two or three capacity retries is usually enough before the real train command.
 - Keep smoke and final settings within `mem_frac <= 0.9`; leave GPU memory
   headroom instead of choosing a configuration that uses nearly all memory.
-- For agentic train tasks, always set `--max-context-len` explicitly. If the
-  user does not provide one, use a practical cap such as 32768.
+- For agentic train tasks, always set `--max-context-len` explicitly after the
+  user has confirmed the context cap.
 - Never use Hugging Face model hub. For remote model or dataset refs, always use
   `--model-hub modelscope` unless the user explicitly provides a local path.
 
@@ -315,7 +319,9 @@ async def _llm_questions_for_instruction(
                         "Read the user goal and ask only for parameters that are genuinely missing and materially "
                         "affect running the command. Examples include checkpoint/model, dataset, algorithm, "
                         "max_new_tokens, max_context_len for agentic training, GPU/TP preset, serve port, or save/load "
-                        "requirements. Do not ask questions already answered by the user. Do not ask more than six "
+                        "requirements. For agentic train or serve goals, you must ask for max_new_tokens and "
+                        "max_context_len if either is not already provided. Do not ask questions already answered by "
+                        "the user. Do not ask more than six "
                         "questions. Return JSON only: {\"questions\":[{\"key\":\"...\",\"question\":\"...\",\"default\":\"...\"}]}"
                     ),
                 },
@@ -517,7 +523,8 @@ async def _judge_goal_done(
                     "n_samples aligned with --max-running-prompts, and searched from a large plausible smoke "
                     "target with a bounded number of binary-search style retries on recoverable capacity "
                     "failures without tuning --max-new-tokens or exceeding mem_frac 0.9. For agentic train "
-                    "tasks, check that --max-context-len was set explicitly. Return JSON "
+                    "or serve tasks, check that missing max-new-tokens and max-context-len were asked before "
+                    "running and that --max-context-len was set explicitly for train. Return JSON "
                     "only with keys: done, reason, feedback."
                 ),
             },
@@ -653,13 +660,14 @@ def _job_prompt(instruction: str, root: Path) -> str:
         "then binary search down on recoverable OOM. Do not treat one tiny smoke success as completion.\n"
         "- Do not tune max-new-tokens to make smoke or train fit unless the user explicitly asks for shorter "
         "generation length.\n"
+        "- For agentic train or serve tasks, if the user did not provide max-new-tokens or max-context-len, ask "
+        "for those values before running commands. Do not silently assume these two agentic limits.\n"
         "- If large smoke succeeds with lots of free memory, raise the upper bound briefly, but avoid too many "
         "smoke runs. One large attempt plus two or three capacity retries is usually enough before choosing "
         "final train settings.\n"
         "- Keep smoke and final settings within mem_frac <= 0.9 so CUDA graphs, allocator fragmentation, and "
         "transient buffers have headroom.\n"
-        "- For agentic train tasks, always set --max-context-len explicitly. If the user does not provide one, "
-        "use a practical cap such as 32768."
+        "- For agentic train tasks, always set --max-context-len explicitly after the user confirms it."
     )
 
 

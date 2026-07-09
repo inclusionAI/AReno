@@ -47,6 +47,10 @@ and retry with adjusted parameters when the failure is likely recoverable.
      reduce `--batch-size` if needed.
    - do not tune `--max-new-tokens` to make smoke or train fit. Treat it as part
      of the task quality target unless the user explicitly changes it.
+   - for agentic train or serve tasks, if the user did not provide
+     `--max-new-tokens` or `--max-context-len`, ask for those values before
+     running commands. Do not silently assume defaults for these two agentic
+     limits.
    - divisibility or unsupported-model errors are not capacity search problems;
      fix the invalid setting or report the blocker.
 6. If the large smoke target succeeds with substantial free memory, try a larger
@@ -119,13 +123,15 @@ test checkpoint saving. Then test loading by using `--ckpt <dir>/step_000001`.
 
 Use smoke checks before long train/serve jobs.
 
-For agentic train tasks, always set `--max-context-len` explicitly. Agentic
-rollouts can include multi-turn messages, tool calls, tool results, images, and
-long reasoning traces, so relying on the model's full context limit can make
-memory use and trajectory filtering unpredictable. Use the user-provided
-context cap when available; otherwise start with a practical value such as
-`--max-context-len 32768` for coding/agentic RL and keep `--max-new-tokens`
-unchanged.
+For agentic train or serve tasks, `--max-new-tokens` and `--max-context-len`
+are user-facing quality and capacity decisions. If the user did not provide
+either value, ask for the missing value before running commands. Do not silently
+assume defaults for these two agentic limits, and do not tune
+`--max-new-tokens` to make a smoke or train command fit. For agentic train
+tasks, always set `--max-context-len` explicitly after the user confirms it.
+Agentic rollouts can include multi-turn messages, tool calls, tool results,
+images, and long reasoning traces, so relying on the model's full context limit
+can make memory use and trajectory filtering unpredictable.
 
 `--smoke-infer` dummy-loads the model, allocates rollout KV cache, and captures
 decode CUDA graphs. It does not run decode. Use it to check model loading,
