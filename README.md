@@ -253,6 +253,12 @@ Then describe the job in natural language:
 areno agent "Give me a complete command to run the math demo with n-samples=8, fitting the current GPU and using as much GPU memory as practical."
 ```
 
+From a source checkout, you can run the same agent without installing AReno:
+
+```bash
+./agent.sh "Give me a complete command to run the math demo with n-samples=8, fitting the current GPU and using as much GPU memory as practical."
+```
+
 The agent can ask follow-up questions through the terminal when a required
 parameter is missing, and it streams command output while it works.
 

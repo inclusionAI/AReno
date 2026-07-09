@@ -38,6 +38,13 @@ The agent can inspect GPUs, read example files, run ``areno check`` and
 ``areno train --help``, ask follow-up questions through the terminal when a
 required value is missing, and stream command output while it works.
 
+From a source checkout, use the repository-local wrapper when AReno is not
+installed:
+
+.. code-block:: bash
+
+   ./agent.sh "Give me a complete command to run the math demo with n-samples=8, fitting the current GPU and using as much GPU memory as practical."
+
 Refresh agent knowledge
 -----------------------
 
