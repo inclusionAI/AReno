@@ -23,6 +23,7 @@ DEFAULT_KNOWLEDGE = DEFAULT_KNOWLEDGE_FILE.read_text(encoding="utf-8")
 CONFIG_FILE = Path.home() / ".areno" / "agent_config.json"
 DEFAULT_AGENT_TURN_LIMIT = 1_000_000
 JUDGE_CONTEXT_CHARS = 24000
+PROMPT_PAUSE = "__areno_agent_pause__"
 RESET = "\x1b[0m"
 DIM = "\x1b[2m"
 BOLD = "\x1b[1m"
@@ -354,15 +355,16 @@ async def _prompt_value_async(question: str, *, default: str = "") -> str:
     if not sys.stdin.isatty():
         return default
     _load_prompt_toolkit()
-    from prompt_toolkit import PromptSession
     from prompt_toolkit.formatted_text import ANSI
     from prompt_toolkit.patch_stdout import patch_stdout
 
     suffix = f" [{default}]" if default else ""
     click.echo(f"{MUTED}{question}{suffix}{RESET}")
-    session: Any = PromptSession()
+    session = _create_prompt_session()
     with patch_stdout():
         value = await session.prompt_async(ANSI(f"{CYAN}hint>{RESET} "))
+    if value == PROMPT_PAUSE:
+        return default
     return str(value or default)
 
 
@@ -371,6 +373,39 @@ def _load_prompt_toolkit() -> None:
         import prompt_toolkit  # noqa: F401
     except ImportError as exc:
         raise click.ClickException("the agent CLI requires prompt-toolkit; install project dependencies first") from exc
+
+
+def _create_prompt_session() -> Any:
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.formatted_text import HTML
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.styles import Style
+
+    bindings = KeyBindings()
+
+    @bindings.add("escape")
+    def _pause(event: Any) -> None:
+        event.app.exit(result=PROMPT_PAUSE)
+
+    @bindings.add("c-c")
+    def _ctrl_c(event: Any) -> None:
+        event.app.exit(result=PROMPT_PAUSE)
+
+    return PromptSession(
+        key_bindings=bindings,
+        bottom_toolbar=lambda: HTML(
+            '<style bg="#1e1e2e" fg="#89ddff"> Enter </style>'
+            '<style fg="#a6accd"> queue hint </style>'
+            '<style bg="#1e1e2e" fg="#ffcb6b"> Esc/Ctrl-C </style>'
+            '<style fg="#a6accd"> pause current execution </style>'
+        ),
+        erase_when_done=False,
+        style=Style.from_dict(
+            {
+                "bottom-toolbar": "bg:#1e1e2e #a6accd",
+            }
+        ),
+    )
 
 
 def _run_agent_console(args: argparse.Namespace) -> int:
@@ -517,34 +552,28 @@ class InteractiveAgentInput:
             self.ui.write_panel("user hint", hint)
 
     async def _prompt_loop(self) -> None:
-        from prompt_toolkit import PromptSession
         from prompt_toolkit.formatted_text import ANSI
-        from prompt_toolkit.key_binding import KeyBindings
         from prompt_toolkit.patch_stdout import patch_stdout
 
-        bindings = KeyBindings()
-
-        @bindings.add("escape")
-        def _pause(event: Any) -> None:
-            self.workspace.interrupt_requested = True
-            self._paused.set()
-            event.app.current_buffer.reset()
-            self.ui.write(
-                f"\n{YELLOW}{BOLD}paused{RESET} "
-                f"{MUTED}current command will stop; enter hint to continue.{RESET}\n"
-            )
-
-        session: Any = PromptSession(key_bindings=bindings)
+        session = _create_prompt_session()
         while not self._stop:
             try:
                 with patch_stdout():
                     hint = await session.prompt_async(ANSI(f"{CYAN}hint>{RESET} "))
-            except (EOFError, KeyboardInterrupt):
+            except EOFError:
                 self.workspace.interrupt_requested = True
                 self._paused.set()
                 break
             except asyncio.CancelledError:
                 break
+            if hint == PROMPT_PAUSE:
+                self.workspace.interrupt_requested = True
+                self._paused.set()
+                self.ui.write(
+                    f"\n{YELLOW}{BOLD}paused{RESET} "
+                    f"{MUTED}current command will stop; enter hint to continue.{RESET}\n"
+                )
+                continue
             hint = str(hint).strip()
             if hint:
                 await self._hints.put(hint)
