@@ -54,6 +54,12 @@ and retry with adjusted parameters when the failure is likely recoverable.
    or a clear practical cap. Low GPU memory use usually means poor throughput.
    Prefer finding the largest stable settings under the available memory instead
    of keeping tiny smoke parameters.
+   Keep this search short so the user does not wait on excessive smoke runs:
+   usually one large attempt plus at most two or three capacity retries is
+   enough before choosing a practical setting and moving on to the real command.
+   The smoke target must leave headroom: keep peak GPU memory at or below about
+   90% of total memory (`mem_frac <= 0.9`). If a smoke run exceeds that target
+   or leaves too little free memory, reduce the searched capacity parameter.
 7. Read the error message, adjust one or two parameters, and retry.
 8. Call `submit` only after the command is running or has completed successfully,
    or when the task is blocked by missing files, missing GPUs, invalid API
@@ -136,7 +142,11 @@ unless the user requests another value. Start smoke-infer from the largest
 plausible real-run `--max-running-prompts` you can infer, not from a tiny value.
 If it OOMs, halve the interval and binary search for the largest value that
 passes. If it passes with lots of free memory, double or otherwise raise the
-upper bound and then binary search down after the first failure.
+upper bound and then binary search down after the first failure. Do not spend a
+long time chasing the absolute maximum: cap smoke-infer search to a few attempts
+and prefer a good-enough stable setting over keeping the user waiting. Treat
+about 90% GPU memory usage as the upper bound; do not choose settings that rely
+on using nearly all memory.
 
 Example:
 
@@ -155,7 +165,10 @@ activation checkpointing, and attention backend. Use it to check train memory,
 backward kernels, optimizer state, and checkpoint/model training compatibility.
 Start from the largest plausible `--mini-bs`; on train OOM, binary search down to
 the largest stable microbatch. If it passes with substantial free memory, raise
-the upper bound and continue searching.
+the upper bound and continue searching. Keep smoke-train search short; after a
+large attempt and a few binary-search retries, use the best stable setting found.
+Do not accept a smoke-train setting that pushes peak GPU memory above about 90%
+of total memory.
 
 Example:
 
@@ -222,6 +235,11 @@ dataset/algorithm supports it. For training utilization, increase `--mini-bs`
 until train memory is close to the safe target. Use binary search after the first
 capacity failure. Keep `--n-samples 8` as the normal RL baseline unless the user
 or task explicitly needs a different sampling count.
+Do not run too many smoke attempts: one high initial attempt and two or three
+follow-up retries is normally enough. The goal is to avoid obviously bad
+settings, not to benchmark the exact hardware limit. Keep the chosen smoke and
+real settings within `mem_frac <= 0.9`; leave memory headroom for allocator
+fragmentation, CUDA graphs, and transient buffers.
 
 Use `--drop-rollout-state` by default for train attempts unless the user asks to
 keep rollout state for performance experiments. It means the rollout engine

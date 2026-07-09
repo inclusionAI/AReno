@@ -58,8 +58,10 @@ Train command policy:
 - Do not tune `--max-new-tokens` to make smoke or train fit. Treat generation
   length as a task quality target unless the user explicitly changes it.
 - If a large smoke command succeeds with lots of free memory, raise the upper
-  bound and continue searching for the largest stable setting before the real
-  train command.
+  bound briefly, but do not run excessive smoke attempts. One large attempt plus
+  two or three capacity retries is usually enough before the real train command.
+- Keep smoke and final settings within `mem_frac <= 0.9`; leave GPU memory
+  headroom instead of choosing a configuration that uses nearly all memory.
 - Before using remote model or dataset refs, check whether Hugging Face is
   reachable. If Hugging Face is reachable and the requested ref is an HF ref,
   use `--model-hub hf`. If Hugging Face is unreachable or times out, use
@@ -381,6 +383,8 @@ class AgentTuiApp(App[int]):
     def _write_from_ui(self, renderable: Any) -> None:
         if self.log_view is not None:
             self.log_view.write(renderable)
+            self.log_view.scroll_end(animate=False)
+            self.log_view.refresh()
 
 
 async def _main_async(args: argparse.Namespace, *, ui: AgentTuiApp) -> int:
@@ -483,8 +487,8 @@ async def _judge_goal_done(
                     "success as complete unless the user only requested smoke. Check that the agent used "
                     "--n-samples 8 by default, included --drop-rollout-state by default, kept batch_size * "
                     "n_samples aligned with --max-running-prompts, and searched from a large plausible smoke "
-                    "target with binary-search style retries on recoverable capacity failures without tuning "
-                    "--max-new-tokens. Return JSON "
+                    "target with a bounded number of binary-search style retries on recoverable capacity "
+                    "failures without tuning --max-new-tokens or exceeding mem_frac 0.9. Return JSON "
                     "only with keys: done, reason, feedback."
                 ),
             },
@@ -620,8 +624,11 @@ def _job_prompt(instruction: str, root: Path) -> str:
         "then binary search down on recoverable OOM. Do not treat one tiny smoke success as completion.\n"
         "- Do not tune max-new-tokens to make smoke or train fit unless the user explicitly asks for shorter "
         "generation length.\n"
-        "- If large smoke succeeds with lots of free memory, raise the upper bound and continue searching before "
-        "choosing final train settings."
+        "- If large smoke succeeds with lots of free memory, raise the upper bound briefly, but avoid too many "
+        "smoke runs. One large attempt plus two or three capacity retries is usually enough before choosing "
+        "final train settings.\n"
+        "- Keep smoke and final settings within mem_frac <= 0.9 so CUDA graphs, allocator fragmentation, and "
+        "transient buffers have headroom."
     )
 
 
