@@ -206,8 +206,9 @@ def _write_agent_config(*, base_url: str | None, model: str | None, api_key: str
         "model": _b64_encode(model or ""),
         "api_key": _b64_encode(api_key or ""),
     }
-    CONFIG_FILE.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    os.chmod(CONFIG_FILE, 0o600)
+    fd = os.open(CONFIG_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
 def _load_agent_config() -> dict[str, str]:
@@ -260,7 +261,7 @@ class AgentConsoleUI:
         self.startup()
         try:
             return asyncio.run(_main_async(self.args, ui=self))
-        except BaseException as exc:  # noqa: BLE001 - surface uncaught agent failures before exiting.
+        except Exception as exc:
             self.write_panel("error", str(exc))
             return 1
 
@@ -462,7 +463,11 @@ async def _judge_goal_done(
             "feedback": content[:2000] or "Reviewer output was empty; continue and verify the goal explicitly.",
         }
     if not isinstance(judgment, dict):
-        return {"done": False, "reason": "reviewer returned non-object JSON", "feedback": "Continue and verify the goal."}
+        return {
+            "done": False,
+            "reason": "reviewer returned non-object JSON",
+            "feedback": "Continue and verify the goal.",
+        }
     judgment["done"] = bool(judgment.get("done"))
     judgment["reason"] = str(judgment.get("reason") or "")
     judgment["feedback"] = str(judgment.get("feedback") or "")
@@ -527,7 +532,9 @@ def _collect_refresh_context(repo: Path) -> str:
     rows = [f"Repository: {repo}"]
     examples_dir = repo / "examples"
     if examples_dir.exists():
-        rows.append("Examples tree:\n" + _run_context_command(["find", "examples", "-maxdepth", "3", "-type", "f"], repo))
+        rows.append(
+            "Examples tree:\n" + _run_context_command(["find", "examples", "-maxdepth", "3", "-type", "f"], repo)
+        )
     for command in commands:
         rows.append("$ " + " ".join(command))
         rows.append(_run_context_command(command, repo))

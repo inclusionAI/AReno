@@ -106,9 +106,8 @@ def test_run_command_streams_output_before_process_exits(tmp_path):
 
     workspace.command_output_callback = on_output
     start = time.monotonic()
-    command = (
-        f"{shlex.quote(sys.executable)} -c "
-        + shlex.quote("import sys, time; print('first', flush=True); time.sleep(0.4); print('second', flush=True)")
+    command = f"{shlex.quote(sys.executable)} -c " + shlex.quote(
+        "import sys, time; print('first', flush=True); time.sleep(0.4); print('second', flush=True)"
     )
 
     result = workspace.run_command(command, timeout_s=5)

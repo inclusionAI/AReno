@@ -682,7 +682,14 @@ def _run_command_streaming_pty(
             os.close(master_fd)
         except OSError:
             pass
-    return "".join(output_parts), "", timed_out, streamed_chunks, skipped_chunks, int((proc.returncode if proc else 1) or 0)
+    return (
+        "".join(output_parts),
+        "",
+        timed_out,
+        streamed_chunks,
+        skipped_chunks,
+        int((proc.returncode if proc else 1) or 0),
+    )
 
 
 def _should_stream_line(line_index: int, line: str) -> bool:
@@ -711,7 +718,9 @@ def _screen_command_output(stdout: str, stderr: str) -> dict[str, Any]:
         "output": screened_output,
         "stdout": _screen_text(stdout, MAX_OUTPUT_CHARS),
         "stderr": _screen_text(stderr, MAX_OUTPUT_CHARS),
-        "screened": len(combined) > len(screened_output) or len(stdout) > MAX_OUTPUT_CHARS or len(stderr) > MAX_OUTPUT_CHARS,
+        "screened": len(combined) > len(screened_output)
+        or len(stdout) > MAX_OUTPUT_CHARS
+        or len(stderr) > MAX_OUTPUT_CHARS,
     }
 
 

@@ -222,11 +222,17 @@ async def run_agentic_coding_loop(ctx, batch) -> AgentTrajectory:
     )
     client = AsyncOpenAI(base_url=ctx.get_base_url(), api_key=ctx.api_key, http_client=http_client, max_retries=0)
 
-    # Materialize workspaces before the first model turn. Doing this inside
-    # each per-task loop staggers the first HTTP requests and prevents the
-    # rollout proxy from seeing a full batch.
-    workspaces = await asyncio.gather(*(asyncio.to_thread(CodingWorkspace.from_task, item.record) for item in items))
+    workspaces: list[CodingWorkspace] = []
     try:
+        # Materialize workspaces before the first model turn. Doing this inside
+        # each per-task loop staggers the first HTTP requests and prevents the
+        # rollout proxy from seeing a full batch.
+        async def create_workspace(item: Any) -> CodingWorkspace:
+            workspace = await asyncio.to_thread(CodingWorkspace.from_task, item.record)
+            workspaces.append(workspace)
+            return workspace
+
+        workspaces = list(await asyncio.gather(*(create_workspace(item) for item in items)))
         turns = await _run_training_tasks_by_turn(client=client, items=items, workspaces=workspaces, model="policy")
         return AgentTrajectory(turns=turns)
     finally:
@@ -262,7 +268,8 @@ async def _run_training_tasks_by_turn(
             break
         responses = await asyncio.gather(
             *(
-                client.chat.completions.create(
+                create_chat_completion_with_retry(
+                    client,
                     model=model,
                     messages=state["messages"],
                     tools=TOOLS,

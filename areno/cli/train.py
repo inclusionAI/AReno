@@ -202,7 +202,12 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
         raise click.UsageError("--mem-frac must be in (0, 1]")
     if tune_max_samples <= 0:
         raise click.UsageError("--tune-max-samples must be positive")
-    if algorithm.requires_rollout and not (smoke_infer or smoke_train) and args.reward_fn_path is None and args.reward_ckpt is None:
+    if (
+        algorithm.requires_rollout
+        and not (smoke_infer or smoke_train)
+        and args.reward_fn_path is None
+        and args.reward_ckpt is None
+    ):
         raise click.UsageError("--reward-fn-path or --reward-ckpt is required")
     if args.save_interval <= 0:
         raise click.UsageError("--save-interval must be positive")
@@ -394,14 +399,13 @@ def _print_auto_tune_summary(result) -> None:
 def _print_smoke_summary(stage: str, measurement) -> None:
     candidate = measurement.candidate
     status = "ok" if measurement.ok else "failed"
-    message = (
-        _style(f"AReno smoke {stage} {status}", fg="bright_green" if measurement.ok else "red", bold=True, color=True)
-        + (
-            f": tp_size={candidate.tp_size}, batch_size={candidate.batch_size}, n_samples={candidate.n_samples}, "
-            f"mini_bs={candidate.mini_bs}, max_running_prompts={candidate.max_running_prompts}, "
-            f"adam_8bit={candidate.adam_8bit}, drop_rollout_state={not candidate.keep_rollout_state}, "
-            f"peak_mem_frac={measurement.peak_mem_frac:.4f}"
-        )
+    message = _style(
+        f"AReno smoke {stage} {status}", fg="bright_green" if measurement.ok else "red", bold=True, color=True
+    ) + (
+        f": tp_size={candidate.tp_size}, batch_size={candidate.batch_size}, n_samples={candidate.n_samples}, "
+        f"mini_bs={candidate.mini_bs}, max_running_prompts={candidate.max_running_prompts}, "
+        f"adam_8bit={candidate.adam_8bit}, drop_rollout_state={not candidate.keep_rollout_state}, "
+        f"peak_mem_frac={measurement.peak_mem_frac:.4f}"
     )
     if measurement.error:
         message += f", error={measurement.error}"
