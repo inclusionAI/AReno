@@ -18,6 +18,7 @@ from typing import Any
 
 import click
 from rich.console import Console, Group, RenderableType
+from rich.markdown import Markdown
 from rich.pretty import Pretty
 from rich.syntax import Syntax
 from rich.text import Text
@@ -380,9 +381,8 @@ def _load_prompt_toolkit() -> None:
         raise click.ClickException("the agent CLI requires prompt-toolkit; install project dependencies first") from exc
 
 
-def _create_prompt_session() -> Any:
+def _create_prompt_session(*, model: str | None = None, cwd: Path | None = None) -> Any:
     from prompt_toolkit import PromptSession
-    from prompt_toolkit.formatted_text import HTML
     from prompt_toolkit.key_binding import KeyBindings
     from prompt_toolkit.styles import Style
 
@@ -398,20 +398,37 @@ def _create_prompt_session() -> Any:
 
     return PromptSession(
         key_bindings=bindings,
-        bottom_toolbar=lambda: HTML(
-            '<style fg="#89ddff"> Enter </style>'
-            '<style fg="#a6accd">send hint</style>'
-            '<style fg="#676e95">  ·  </style>'
-            '<style fg="#c792ea">Esc/Ctrl-C</style>'
-            '<style fg="#a6accd"> pause execution</style>'
-        ),
+        bottom_toolbar=lambda: _toolbar_html(model=model, cwd=cwd),
         erase_when_done=True,
         style=Style.from_dict(
             {
                 "bottom-toolbar": "bg:#11131a #a6accd",
                 "": "#a6accd",
+                "prompt": "#89ddff bold",
             }
         ),
+    )
+
+
+def _toolbar_html(*, model: str | None, cwd: Path | None) -> Any:
+    from html import escape
+
+    from prompt_toolkit.formatted_text import HTML
+
+    display_model = escape(model or "agent")
+    display_cwd = escape(_short_path(cwd or Path.cwd()))
+    return HTML(
+        '<style fg="#89ddff"> agent </style>'
+        '<style fg="#676e95"> TVD ▲ </style>'
+        f'<style fg="#c792ea">⣶ {display_model}</style>'
+        '<style fg="#676e95"> | </style>'
+        '<style fg="#a6accd">0.00%</style>'
+        '<style fg="#676e95"> | </style>'
+        '<style fg="#a6accd"> NRML </style>'
+        '<style fg="#676e95"> | </style>'
+        f'<style fg="#a6accd">{display_cwd}</style>'
+        '<style fg="#676e95"> | </style>'
+        '<style fg="#a6accd">areno agent</style>'
     )
 
 
@@ -432,18 +449,24 @@ class AgentConsoleUI:
         from prompt_toolkit.patch_stdout import patch_stdout
 
         with patch_stdout():
-            self.write_panel("areno agent", _banner_renderable(self.args.instruction, Path(self.args.repo).resolve(), self.args.model))
+            self.startup()
             try:
                 return asyncio.run(_main_async(self.args, ui=self))
             except BaseException as exc:  # noqa: BLE001 - surface uncaught agent failures before exiting.
                 self.write_panel("error", str(exc))
                 return 1
 
+    def startup(self) -> None:
+        root = Path(self.args.repo).resolve()
+        self.console.print(_banner_renderable(self.args.instruction, root, self.args.model))
+        if sys.stdout.isatty():
+            self.console.print(_startup_help(), soft_wrap=True)
+
     def agent_event(self, event: str, payload: dict[str, Any]) -> None:
         if event == "assistant":
             content = payload.get("content")
             if content:
-                self.write_panel("assistant", str(content))
+                self.write_panel("assistant", Markdown(str(content)))
             calls = payload.get("tool_calls") or []
             if calls:
                 call = calls[0]
@@ -459,7 +482,10 @@ class AgentConsoleUI:
         if kind == "start":
             command = str(event.get("command") or "")
             self._print_header("shell", f"timeout: {event.get('timeout_s')}")
-            self.console.print(Syntax(command, "bash", theme="material", word_wrap=True), soft_wrap=True)
+            text = Text()
+            text.append("$ ", style="dim")
+            text.append(command, style="#a6accd")
+            self.console.print(text, soft_wrap=True)
         elif kind == "line":
             stream = str(event.get("stream") or "stdout")
             line = str(event.get("line") or "").rstrip()
@@ -572,7 +598,7 @@ class InteractiveAgentInput:
         from prompt_toolkit.formatted_text import HTML
         from prompt_toolkit.patch_stdout import patch_stdout
 
-        session = _create_prompt_session()
+        session = _create_prompt_session(model=self.ui.args.model, cwd=Path(self.ui.args.repo).resolve())
         while not self._stop:
             try:
                 with patch_stdout():
@@ -857,13 +883,44 @@ def _banner_text(instruction: str, root: Path, model: str) -> str:
 
 def _banner_renderable(instruction: str, root: Path, model: str) -> RenderableType:
     text = Text()
+    text.append("AReno operations agent\n", style="#89ddff bold")
     text.append("model: ", style="dim")
-    text.append(model, style="#89ddff")
-    text.append("\nworkspace: ", style="dim")
-    text.append(str(root), style="#a6accd")
-    text.append("\ngoal: ", style="dim")
+    text.append(model, style="#c792ea")
+    text.append("  workspace: ", style="dim")
+    text.append(_short_path(root), style="#a6accd")
+    text.append("\n")
+    text.append("goal: ", style="dim")
     text.append(instruction, style="#a6accd")
     return text
+
+
+def _startup_help() -> Text:
+    text = Text()
+    text.append("Use ", style="dim")
+    text.append("Enter", style="#89ddff")
+    text.append(" to queue guidance, ", style="dim")
+    text.append("Esc/Ctrl-C", style="#c792ea")
+    text.append(" to pause the current run.\n", style="dim")
+    text.append("Commands stream as they run. Tool results are summarized; full context stays in the session.\n", style="dim")
+    text.append("Agent shortcuts:\n", style="dim")
+    text.append("  ", style="dim")
+    text.append("smoke-infer / smoke-train", style="#89ddff")
+    text.append(" for memory checks, ", style="dim")
+    text.append("drop-rollout-state", style="#89ddff")
+    text.append(" for RL memory pressure, ", style="dim")
+    text.append("modelscope", style="#89ddff")
+    text.append(" for remote model refs.\n", style="dim")
+    return text
+
+
+def _short_path(path: Path, *, max_len: int = 34) -> str:
+    text = str(path.expanduser())
+    home = str(Path.home())
+    if text.startswith(home):
+        text = "~" + text[len(home) :]
+    if len(text) <= max_len:
+        return text
+    return "…" + text[-(max_len - 1) :]
 
 
 def _format_tool_arguments(tool_name: str, raw: str) -> RenderableType:
