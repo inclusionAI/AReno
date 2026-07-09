@@ -8,8 +8,6 @@ import base64
 import binascii
 import json
 import os
-import re
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -17,8 +15,6 @@ from types import SimpleNamespace
 from typing import Any
 
 import click
-from rich.console import Console
-from rich.text import Text
 
 DEFAULT_KNOWLEDGE_FILE = Path(__file__).resolve().parents[1] / "agentic" / "coding" / "ops_knowledge.md"
 DEFAULT_KNOWLEDGE = DEFAULT_KNOWLEDGE_FILE.read_text(encoding="utf-8")
@@ -26,18 +22,6 @@ CONFIG_FILE = Path.home() / ".areno" / "agent_config.json"
 DEFAULT_AGENT_TURN_LIMIT = 1_000_000
 JUDGE_CONTEXT_CHARS = 24000
 PROMPT_PAUSE = "__areno_agent_pause__"
-RESET = "\x1b[0m"
-DIM = "\x1b[2m"
-BOLD = "\x1b[1m"
-CYAN = "\x1b[38;2;137;221;255m"
-BLUE = "\x1b[38;2;130;170;255m"
-MAGENTA = "\x1b[38;2;199;146;234m"
-YELLOW = "\x1b[38;2;255;203;107m"
-RED = "\x1b[38;2;240;113;120m"
-MUTED = "\x1b[38;2;103;110;149m"
-WHITE = "\x1b[38;2;166;172;205m"
-GREEN = "\x1b[38;2;195;232;141m"
-AGENT_CONSOLE = Console(color_system="auto", force_terminal=None, no_color=None, highlight=False)
 
 SYSTEM_TEMPLATE = """You are an AReno operations coding agent.
 
@@ -358,7 +342,7 @@ async def _prompt_value_async(question: str, *, default: str = "") -> str:
     from prompt_toolkit.patch_stdout import patch_stdout
 
     suffix = f" [{default}]" if default else ""
-    AGENT_CONSOLE.print(f"{question}{suffix}", markup=False)
+    print(f"{question}{suffix}", flush=True)
     session = _create_prompt_session()
     with patch_stdout():
         value = await session.prompt_async("❯ ")
@@ -413,7 +397,6 @@ class AgentConsoleUI:
 
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
-        self.console = AGENT_CONSOLE
 
     def run(self) -> int:
         _load_prompt_toolkit()
@@ -429,22 +412,19 @@ class AgentConsoleUI:
 
     def startup(self) -> None:
         root = Path(self.args.repo).resolve()
-        self.console.print(_banner_renderable(self.args.instruction, root, self.args.model))
+        self.write(_banner_text(self.args.instruction, root, self.args.model) + "\n")
 
     def agent_event(self, event: str, payload: dict[str, Any]) -> None:
         if event == "assistant":
             content = payload.get("content")
             if content:
-                text = Text()
-                text.append("Think: ", style="#89ddff bold")
-                text.append(str(content), style="#a6accd")
-                self.console.print(text, soft_wrap=True)
+                self.write(f"Think: {content}\n")
             calls = payload.get("tool_calls") or []
             if calls:
                 call = calls[0]
                 tool_name = call["function"]["name"]
                 if tool_name != "run_command":
-                    self.console.print(_tool_call_line(tool_name, call["function"].get("arguments", "")))
+                    self.write(_tool_call_line(tool_name, call["function"].get("arguments", "")) + "\n")
         elif event == "tool":
             return
 
@@ -452,13 +432,10 @@ class AgentConsoleUI:
         kind = event.get("kind")
         if kind == "start":
             command = str(event.get("command") or "")
-            text = Text()
-            text.append("\n$ ", style="#89ddff")
-            text.append(command, style="#a6accd")
-            self.console.print(text, soft_wrap=True)
+            self.write(f"\n$ {command}\n")
         elif kind == "line":
             line = str(event.get("line") or "").rstrip()
-            self.console.print(Text.from_ansi(line), soft_wrap=True)
+            self.write(line + "\n")
         elif kind == "end":
             skipped = int(event.get("skipped_stream_lines") or 0)
             returncode = event.get("returncode")
@@ -471,8 +448,7 @@ class AgentConsoleUI:
                 summary += " timed_out=true"
             if skipped:
                 summary += f" streamed_screened={skipped} skipped_lines"
-            style = "#f07178" if timed_out or returncode not in (0, None) else "#89ddff"
-            self.console.print(Text(summary, style=style))
+            self.write(summary + "\n")
 
     def judgment(self, judgment: dict[str, Any]) -> None:
         done = bool(judgment.get("done"))
@@ -483,11 +459,12 @@ class AgentConsoleUI:
         self.write_panel("done", _plain_status(submitted, keys=("status", "summary", "reason")))
 
     def write_panel(self, title: str, body: str) -> None:
-        self.console.print(_section_title(title))
-        self.console.print(Text(str(body), style="#a6accd"), soft_wrap=True)
+        self.write(_section_title(title) + "\n")
+        self.write(str(body) + "\n")
 
     def write(self, text: str) -> None:
-        self.console.print(Text.from_ansi(text), end="")
+        sys.stdout.write(text)
+        sys.stdout.flush()
 
 
 class InteractiveAgentInput:
@@ -506,10 +483,10 @@ class InteractiveAgentInput:
         if not sys.stdin.isatty():
             return
         _load_prompt_toolkit()
-        self.ui.console.print(
+        self.ui.write(
             "interactive: type a hint then Enter to send it on the next model turn; Esc pauses execution.",
-            markup=False,
         )
+        self.ui.write("\n")
         self._prompt_task = asyncio.create_task(self._prompt_loop())
 
     def stop(self) -> None:
@@ -537,7 +514,7 @@ class InteractiveAgentInput:
             return False
         self.workspace.interrupt_requested = False
         self._paused.set()
-        self.ui.console.print("waiting for input: enter a value or hint to continue.", markup=False)
+        self.ui.write("waiting for input: enter a value or hint to continue.\n")
         await self._wait_if_paused()
         self._apply_queued_hints(messages)
         return True
@@ -582,7 +559,7 @@ class InteractiveAgentInput:
             if hint == PROMPT_PAUSE:
                 self.workspace.interrupt_requested = True
                 self._paused.set()
-                self.ui.console.print("paused: current command will stop; enter a hint to continue.", markup=False)
+                self.ui.write("paused: current command will stop; enter a hint to continue.\n")
                 continue
             hint = str(hint).strip()
             if hint:
@@ -844,19 +821,6 @@ def _banner_text(instruction: str, root: Path, model: str) -> str:
     return f"model: {model}\nworkspace: {root}\ngoal: {instruction}"
 
 
-def _banner_renderable(instruction: str, root: Path, model: str) -> Text:
-    text = Text()
-    text.append("AReno operations agent\n", style="#89ddff bold")
-    text.append("model: ", style="dim")
-    text.append(model, style="#c792ea")
-    text.append("  workspace: ", style="dim")
-    text.append(_short_path(root), style="#a6accd")
-    text.append("\n")
-    text.append("goal: ", style="dim")
-    text.append(instruction, style="#a6accd")
-    return text
-
-
 def _short_path(path: Path, *, max_len: int = 34) -> str:
     text = str(path.expanduser())
     home = str(Path.home())
@@ -867,7 +831,7 @@ def _short_path(path: Path, *, max_len: int = 34) -> str:
     return "…" + text[-(max_len - 1) :]
 
 
-def _tool_call_line(tool_name: str, raw: str) -> Text:
+def _tool_call_line(tool_name: str, raw: str) -> str:
     summary = ""
     try:
         parsed = json.loads(raw or "{}")
@@ -882,12 +846,9 @@ def _tool_call_line(tool_name: str, raw: str) -> Text:
             summary = str(parsed.get("pattern") or parsed.get("query") or "")
         elif tool_name == "run_command":
             summary = str(parsed.get("command") or "")
-    text = Text()
-    text.append("tool call: ", style="dim")
-    text.append(tool_name, style="#89ddff")
+    text = f"tool call: {tool_name}"
     if summary:
-        text.append(" ")
-        text.append(summary, style="dim")
+        text += f" {summary}"
     return text
 
 
@@ -903,88 +864,8 @@ def _plain_status(payload: dict[str, Any], *, keys: tuple[str, ...]) -> str:
     return "complete"
 
 
-def _section_title(title: str) -> Text:
-    text = Text()
-    text.append("\n")
-    text.append(title, style="#89ddff bold")
-    return text
-
-
-def _text_panel(title: str, body: str) -> str:
-    clean = body.rstrip()
-    width = _panel_width(title)
-    inner_width = width - 4
-    top = "╭" + "─" * (width - 2) + "╮"
-    bottom = "╰" + "─" * (width - 2) + "╯"
-    title_line = _panel_line(f"{CYAN}{BOLD}{title}{RESET}", inner_width)
-    body_lines = _wrap_panel_body(clean, inner_width)
-    middle = "\n".join(_panel_line(line, inner_width) for line in body_lines)
-    return (
-        f"\n{MUTED}{top}{RESET}\n"
-        f"{title_line}\n"
-        f"{MUTED}├{'─' * (width - 2)}┤{RESET}\n"
-        f"{middle}\n"
-        f"{MUTED}{bottom}{RESET}\n"
-    )
-
-
-def _panel_width(title: str) -> int:
-    term_width = shutil.get_terminal_size(fallback=(100, 24)).columns
-    max_width = max(44, min(term_width - 2, 120))
-    return max(min(max_width, term_width), min(max(len(_strip_ansi(title)) + 8, max_width), max_width))
-
-
-def _wrap_panel_body(body: str, width: int) -> list[str]:
-    if not body:
-        return [""]
-    rows: list[str] = []
-    for raw_line in body.splitlines():
-        rows.extend(_wrap_ansi_line(raw_line, width) or [""])
-    return rows
-
-
-def _wrap_ansi_line(line: str, width: int) -> list[str]:
-    if width <= 1 or _visible_len(line) <= width:
-        return [line]
-
-    rows: list[str] = []
-    current: list[str] = []
-    visible = 0
-    index = 0
-    ansi_pattern = re.compile(r"\x1b\[[0-9;]*m")
-    while index < len(line):
-        match = ansi_pattern.match(line, index)
-        if match:
-            current.append(match.group(0))
-            index = match.end()
-            continue
-        char = line[index]
-        if visible >= width:
-            rows.append("".join(current).rstrip())
-            current = []
-            visible = 0
-            if char == " ":
-                index += 1
-                continue
-        current.append(char)
-        visible += 1
-        index += 1
-    rows.append("".join(current).rstrip())
-    return rows
-
-
-def _panel_line(text: str, width: int) -> str:
-    visible = _visible_len(text)
-    padding = " " * max(width - visible, 0)
-    return f"{MUTED}│{RESET} {text}{RESET}{padding} {MUTED}│{RESET}"
-
-
-def _visible_len(text: str) -> int:
-    return len(_strip_ansi(text))
-
-
-def _strip_ansi(text: str) -> str:
-    return re.sub(r"\x1b\[[0-9;]*m", "", text)
+def _section_title(title: str) -> str:
+    return f"\n{title}"
 
 
 if __name__ == "__main__":
