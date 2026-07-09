@@ -465,22 +465,40 @@ class AgentConsoleUI:
         if event == "assistant":
             content = payload.get("content")
             if content:
-                self.write_panel("assistant", Markdown(str(content)))
+                self.write_panel("agent", Markdown(str(content)), direction="in", right=self.args.model)
             calls = payload.get("tool_calls") or []
             if calls:
                 call = calls[0]
                 tool_name = call["function"]["name"]
                 arguments = call["function"].get("arguments", "")
-                self.write_panel(f"tool call: {tool_name}", _format_tool_arguments(tool_name, arguments))
+                if tool_name != "run_command":
+                    summary = _tool_call_summary(tool_name, arguments)
+                    if tool_name in {"read_file", "inspect_tree", "rg", "search"}:
+                        self._print_header(tool_name, summary, direction="out")
+                    else:
+                        self.write_panel(
+                            tool_name,
+                            _format_tool_arguments(tool_name, arguments),
+                            direction="out",
+                            right=summary,
+                        )
         elif event == "tool":
             name = str(payload.get("name") or "tool")
-            self.write_panel(f"tool result: {name}", _format_tool_result(name, str(payload.get("content", ""))))
+            content = str(payload.get("content", ""))
+            if name == "run_command" and _run_command_was_streamed(content):
+                return
+            self.write_panel(
+                name,
+                _format_tool_result(name, content),
+                direction="in",
+                right=_tool_result_summary(name, content),
+            )
 
     def command_output_event(self, event: dict[str, Any]) -> None:
         kind = event.get("kind")
         if kind == "start":
             command = str(event.get("command") or "")
-            self._print_header("shell", f"timeout: {event.get('timeout_s')}")
+            self._print_header("shell", f"timeout: {event.get('timeout_s')}", direction="out")
             text = Text()
             text.append("$ ", style="dim")
             text.append(command, style="#a6accd")
@@ -488,10 +506,8 @@ class AgentConsoleUI:
         elif kind == "line":
             stream = str(event.get("stream") or "stdout")
             line = str(event.get("line") or "").rstrip()
-            prefix_style = "#f07178" if stream == "stderr" else "#89ddff"
             body_style = "#f07178" if stream == "stderr" else "#a6accd"
             text = Text()
-            text.append(f"{stream}> ", style=prefix_style)
             text.append(line, style=body_style)
             self.console.print(text, soft_wrap=True)
         elif kind == "end":
@@ -517,15 +533,22 @@ class AgentConsoleUI:
     def done(self, submitted: dict[str, Any]) -> None:
         self.write_panel("done", _pretty_value(submitted))
 
-    def write_panel(self, title: str, body: str | RenderableType) -> None:
-        self._print_header(title, "")
+    def write_panel(
+        self,
+        title: str,
+        body: str | RenderableType,
+        *,
+        direction: str = "in",
+        right: str = "",
+    ) -> None:
+        self._print_header(title, right, direction=direction)
         self.console.print(_renderable_from_body(body), soft_wrap=True)
 
     def write(self, text: str) -> None:
         self.console.print(Text.from_ansi(text), end="")
 
-    def _print_header(self, left: str, right: str = "") -> None:
-        self.console.print(_header_line(left, right, self.console.size.width))
+    def _print_header(self, left: str, right: str = "", *, direction: str = "in") -> None:
+        self.console.print(_header_line(left, right, self.console.size.width, direction=direction))
 
 
 class InteractiveAgentInput:
@@ -970,17 +993,60 @@ def _format_tool_result(tool_name: str, raw: str) -> RenderableType:
     return _format_mapping(parsed)
 
 
+def _tool_call_summary(tool_name: str, raw: str) -> str:
+    try:
+        parsed = json.loads(raw or "{}")
+    except json.JSONDecodeError:
+        return ""
+    if tool_name == "read_file":
+        return str(parsed.get("path") or "")
+    if tool_name in {"rg", "search"}:
+        parts = [str(parsed.get("pattern") or parsed.get("query") or "").strip()]
+        path = str(parsed.get("path") or "").strip()
+        if path and path != ".":
+            parts.append(path)
+        return " · ".join(part for part in parts if part)
+    if tool_name == "inspect_tree":
+        return str(parsed.get("path") or ".")
+    return ""
+
+
+def _tool_result_summary(tool_name: str, raw: str) -> str:
+    try:
+        parsed = json.loads(raw or "{}")
+    except json.JSONDecodeError:
+        return ""
+    if tool_name == "read_file":
+        path = str(parsed.get("path") or "")
+        start = parsed.get("start_line")
+        end = parsed.get("end_line")
+        if start is not None and end is not None:
+            return f"{path} · lines {start}-{end}"
+        return path
+    if tool_name == "inspect_tree":
+        tree = parsed.get("tree")
+        count = len(tree) if isinstance(tree, list) else 0
+        return f"{count} entries"
+    if tool_name in {"rg", "search"}:
+        matches = parsed.get("matches")
+        count = len(matches) if isinstance(matches, list) else 0
+        return f"{count} matches"
+    return ""
+
+
+def _run_command_was_streamed(raw: str) -> bool:
+    try:
+        parsed = json.loads(raw or "{}")
+    except json.JSONDecodeError:
+        return False
+    return int(parsed.get("streamed_lines") or 0) > 0
+
+
 def _format_read_file_result(parsed: dict[str, Any]) -> RenderableType:
     path = str(parsed.get("path") or "")
-    start = parsed.get("start_line")
-    end = parsed.get("end_line")
     content = str(parsed.get("content") or "")
     language = _language_for_path(path)
-    meta = Text()
-    meta.append(path or "<unknown>", style="#89ddff")
-    if start is not None and end is not None:
-        meta.append(f"  lines {start}-{end}", style="dim")
-    return Group(meta, Syntax(content, language, theme="material", line_numbers=False, word_wrap=True))
+    return Syntax(content, language, theme="material", line_numbers=False, word_wrap=True)
 
 
 def _format_tree_result(parsed: dict[str, Any]) -> RenderableType:
@@ -1155,9 +1221,12 @@ def _renderable_from_body(body: str | RenderableType) -> RenderableType:
     return body
 
 
-def _header_line(left: str, right: str, width: int) -> Text:
+def _header_line(left: str, right: str, width: int, *, direction: str = "in") -> Text:
+    arrow = "▶" if direction == "out" else "◀"
     left_text = Text()
-    left_text.append("▍ ", style="#89ddff")
+    left_text.append("▎", style="dim")
+    left_text.append(arrow, style="#89ddff")
+    left_text.append(" ", style="dim")
     left_text.append(left, style="#89ddff bold")
     right_text = Text(right.strip(), style="dim") if right.strip() else Text()
     line = Text()
