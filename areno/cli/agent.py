@@ -19,7 +19,6 @@ from typing import Any
 import click
 from rich.console import Console, Group, RenderableType
 from rich.markdown import Markdown
-from rich.pretty import Pretty
 from rich.syntax import Syntax
 from rich.text import Text
 
@@ -949,7 +948,7 @@ def _format_tool_arguments(tool_name: str, raw: str) -> RenderableType:
             timeout_text.append(str(timeout), style="#89ddff")
             rows.append(timeout_text)
         return Group(*rows)
-    return _pretty_value(parsed)
+    return _format_mapping(parsed)
 
 
 def _format_tool_result(tool_name: str, raw: str) -> RenderableType:
@@ -959,7 +958,55 @@ def _format_tool_result(tool_name: str, raw: str) -> RenderableType:
         return raw
     if tool_name == "run_command":
         return _format_run_command_result(parsed)
-    return _pretty_value(parsed)
+    if tool_name == "read_file":
+        return _format_read_file_result(parsed)
+    if tool_name == "inspect_tree":
+        return _format_tree_result(parsed)
+    if tool_name in {"rg", "search"}:
+        return _format_search_result(parsed)
+    return _format_mapping(parsed)
+
+
+def _format_read_file_result(parsed: dict[str, Any]) -> RenderableType:
+    path = str(parsed.get("path") or "")
+    start = parsed.get("start_line")
+    end = parsed.get("end_line")
+    content = str(parsed.get("content") or "")
+    language = _language_for_path(path)
+    meta = Text()
+    meta.append(path or "<unknown>", style="#89ddff")
+    if start is not None and end is not None:
+        meta.append(f"  lines {start}-{end}", style="dim")
+    return Group(meta, Syntax(content, language, theme="material", line_numbers=False, word_wrap=True))
+
+
+def _format_tree_result(parsed: dict[str, Any]) -> RenderableType:
+    tree = parsed.get("tree")
+    if not isinstance(tree, list):
+        return _format_mapping(parsed)
+    text = "\n".join(str(item) for item in tree)
+    rows: list[RenderableType] = [Syntax(text or "<empty>", "text", theme="material", word_wrap=True)]
+    if parsed.get("truncated"):
+        rows.append(Text("truncated", style="dim"))
+    return Group(*rows)
+
+
+def _format_search_result(parsed: dict[str, Any]) -> RenderableType:
+    matches = parsed.get("matches")
+    if not isinstance(matches, list):
+        return _format_mapping(parsed)
+    lines: list[str] = []
+    for match in matches[:80]:
+        if isinstance(match, dict):
+            path = match.get("path", "")
+            line = match.get("line", "")
+            text = match.get("text", "")
+            lines.append(f"{path}:{line}: {text}")
+        else:
+            lines.append(str(match))
+    if parsed.get("truncated"):
+        lines.append("<truncated>")
+    return Syntax("\n".join(lines) or "<no matches>", "text", theme="material", word_wrap=True)
 
 
 def _format_run_command_result(parsed: dict[str, Any]) -> RenderableType:
@@ -991,7 +1038,7 @@ def _format_run_command_result(parsed: dict[str, Any]) -> RenderableType:
 
 def _pretty_value(value: Any, *, indent: int = 0) -> RenderableType:
     if indent == 0:
-        return Pretty(value, indent_guides=True, expand_all=False)
+        return _format_mapping(value) if isinstance(value, dict) else Text(str(value), style="#a6accd")
     prefix = " " * indent
     if isinstance(value, dict):
         if not value:
@@ -1018,6 +1065,52 @@ def _pretty_value(value: Any, *, indent: int = 0) -> RenderableType:
                 rows.append(f"{label}: {_colored_scalar(item)}")
         return "\n".join(rows)
     return f"{prefix}{_colored_scalar(value)}"
+
+
+def _format_mapping(value: dict[str, Any]) -> RenderableType:
+    rows: list[RenderableType] = []
+    for key, item in value.items():
+        if key in {"content", "output", "stdout", "stderr"} and isinstance(item, str) and "\n" in item:
+            rows.append(Text(str(key), style="dim"))
+            rows.append(Syntax(item, "text", theme="material", word_wrap=True))
+            continue
+        if isinstance(item, dict):
+            rows.append(_kv_text(str(key), "<object>", value_style="dim"))
+            rows.append(_format_mapping(item))
+            continue
+        if isinstance(item, list):
+            rows.append(_kv_text(str(key), _compact_list(item)))
+            continue
+        rows.append(_kv_text(str(key), item))
+    return Group(*(rows or [Text("<empty>", style="dim")]))
+
+
+def _compact_list(value: list[Any], *, limit: int = 8) -> str:
+    items = [str(item) for item in value[:limit]]
+    suffix = f", … +{len(value) - limit}" if len(value) > limit else ""
+    return "[" + ", ".join(items) + suffix + "]"
+
+
+def _language_for_path(path: str) -> str:
+    suffix = Path(path).suffix.lower()
+    return {
+        ".py": "python",
+        ".json": "json",
+        ".jsonl": "json",
+        ".md": "markdown",
+        ".rst": "rst",
+        ".sh": "bash",
+        ".bash": "bash",
+        ".zsh": "bash",
+        ".toml": "toml",
+        ".yaml": "yaml",
+        ".yml": "yaml",
+        ".js": "javascript",
+        ".ts": "typescript",
+        ".tsx": "tsx",
+        ".css": "css",
+        ".html": "html",
+    }.get(suffix, "text")
 
 
 def _colored_scalar(value: Any) -> str:
