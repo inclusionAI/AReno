@@ -324,11 +324,14 @@ async def run_conversation_turns(
     max_turns: int,
     record_trajectory: bool = True,
     on_event: Any | None = None,
+    interaction_hook: Any | None = None,
 ) -> list[AgentTrajectoryTurn]:
     """Continue an existing coding-agent conversation for up to ``max_turns`` model calls."""
 
     turns: list[AgentTrajectoryTurn] = []
     for _ in range(max_turns):
+        if interaction_hook is not None and not await interaction_hook(messages):
+            break
         response = await create_chat_completion_with_retry(
             client,
             model=model,
@@ -370,6 +373,8 @@ async def run_conversation_turns(
         # from failed patches/tests using the same context a real coding agent sees.
         _emit(on_event, "tool", tool_message)
         if call["function"]["name"] == "submit":
+            break
+        if interaction_hook is not None and not await interaction_hook(messages):
             break
     return turns
 

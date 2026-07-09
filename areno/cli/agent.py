@@ -6,10 +6,17 @@ import argparse
 import asyncio
 import base64
 import binascii
+import contextlib
 import json
 import os
+import queue
 import re
+import shutil
 import subprocess
+import sys
+import termios
+import threading
+import tty
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -398,7 +405,10 @@ class AgentConsoleUI:
             skipped = int(event.get("skipped_stream_lines") or 0)
             returncode = event.get("returncode")
             timed_out = bool(event.get("timed_out"))
+            interrupted = bool(event.get("interrupted"))
             summary = f"returncode={returncode}"
+            if interrupted:
+                summary += " interrupted=true"
             if timed_out:
                 summary += " timed_out=true"
             if skipped:
@@ -419,6 +429,79 @@ class AgentConsoleUI:
 
     def write(self, text: str) -> None:
         print(text, end="", flush=True)
+
+
+class InteractiveAgentInput:
+    """Read Esc interrupts and line hints without blocking the asyncio loop."""
+
+    def __init__(self, ui: AgentConsoleUI, workspace: Any) -> None:
+        self.ui = ui
+        self.workspace = workspace
+        self._hints: queue.Queue[str] = queue.Queue()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if not sys.stdin.isatty():
+            return
+        self.ui.write(
+            f"{MUTED}interactive: type a hint then Enter to guide the next turn; press Esc to interrupt.{RESET}\n"
+        )
+        self._thread = threading.Thread(target=self._read_input_loop, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    async def apply_pending(self, messages: list[dict[str, Any]]) -> bool:
+        interrupted = bool(getattr(self.workspace, "interrupt_requested", False))
+        while True:
+            try:
+                hint = self._hints.get_nowait()
+            except queue.Empty:
+                break
+            messages.append({"role": "user", "content": f"User runtime hint:\n{hint}"})
+            self.ui.write_panel("user hint", hint)
+        return not interrupted
+
+    def _read_input_loop(self) -> None:
+        fd = sys.stdin.fileno()
+        with self._raw_terminal(fd):
+            buffer: list[str] = []
+            while not self._stop.is_set():
+                try:
+                    char = sys.stdin.read(1)
+                except OSError:
+                    break
+                if not char:
+                    break
+                if char == "\x1b":
+                    self.workspace.interrupt_requested = True
+                    self.ui.write(f"\n{RED}{BOLD}interrupt requested{RESET}\n")
+                    break
+                if char in ("\r", "\n"):
+                    hint = "".join(buffer).strip()
+                    buffer.clear()
+                    if hint:
+                        self._hints.put(hint)
+                    continue
+                if char in ("\x7f", "\b"):
+                    if buffer:
+                        buffer.pop()
+                    continue
+                if char.isprintable() or char in ("\t", " "):
+                    buffer.append(char)
+
+    @staticmethod
+    @contextlib.contextmanager
+    def _raw_terminal(fd: int) -> Any:
+        old_settings = termios.tcgetattr(fd)
+        try:
+            tty.setcbreak(fd)
+            yield
+        finally:
+            with contextlib.suppress(termios.error):
+                termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
 
 async def _main_async(args: argparse.Namespace, *, ui: AgentConsoleUI) -> int:
@@ -443,12 +526,14 @@ async def _main_async(args: argparse.Namespace, *, ui: AgentConsoleUI) -> int:
     workspace = CodingWorkspace.from_current_repo(task, args.repo)
     workspace.max_command_timeout_s = float(args.command_timeout_s)
     workspace.command_output_callback = ui.command_output_event
+    interaction = InteractiveAgentInput(ui, workspace)
     client = AsyncOpenAI(base_url=args.base_url, api_key=args.api_key, max_retries=0)
     messages = [
         {"role": "system", "content": SYSTEM_TEMPLATE.format(knowledge=knowledge)},
         {"role": "user", "content": _job_prompt(args.instruction, workspace.root)},
     ]
     try:
+        interaction.start()
         while True:
             await run_conversation_turns(
                 client=client,
@@ -459,7 +544,11 @@ async def _main_async(args: argparse.Namespace, *, ui: AgentConsoleUI) -> int:
                 max_turns=int(args.max_turns),
                 record_trajectory=False,
                 on_event=ui.agent_event,
+                interaction_hook=interaction.apply_pending,
             )
+            if workspace.interrupt_requested:
+                ui.write_panel("interrupted", "agent interrupted by Esc")
+                return 130
             if workspace.submitted is None:
                 ui.write_panel("stopped", "agent stopped without submit")
                 return 2
@@ -491,6 +580,7 @@ async def _main_async(args: argparse.Namespace, *, ui: AgentConsoleUI) -> int:
                 }
             )
     finally:
+        interaction.stop()
         await client.close()
         workspace.close()
 
@@ -703,6 +793,7 @@ def _format_tool_result(tool_name: str, raw: str) -> str:
 def _format_run_command_result(parsed: dict[str, Any]) -> str:
     returncode = parsed.get("returncode")
     timed_out = bool(parsed.get("timed_out"))
+    interrupted = bool(parsed.get("interrupted"))
     screened = bool(parsed.get("screened"))
     rows = [
         f"{MUTED}command{RESET}:\n{WHITE}{parsed.get('command') or ''}{RESET}",
@@ -713,6 +804,8 @@ def _format_run_command_result(parsed: dict[str, Any]) -> str:
     skipped = int(parsed.get("skipped_stream_lines") or 0)
     if skipped:
         rows.append(f"{MUTED}live_skipped{RESET}: {_colored_scalar(skipped)}")
+    if interrupted:
+        rows.append(f"{MUTED}interrupted{RESET}: {RED}yes{RESET}")
     if timed_out:
         rows.append(f"{MUTED}timed_out{RESET}: {RED}yes{RESET}")
     output = str(parsed.get("output") or parsed.get("stdout") or parsed.get("stderr") or "")
@@ -766,10 +859,75 @@ def _colored_scalar(value: Any) -> str:
 
 def _text_panel(title: str, body: str) -> str:
     clean = body.rstrip()
-    width = min(max(len(_strip_ansi(title)) + 8, 44), 96)
+    width = _panel_width(title)
+    inner_width = width - 4
     top = "╭" + "─" * (width - 2) + "╮"
     bottom = "╰" + "─" * (width - 2) + "╯"
-    return f"\n{MUTED}{top}{RESET}\n{CYAN}{BOLD}│ {title}{RESET}\n{MUTED}├{'─' * (width - 2)}┤{RESET}\n{clean}\n{MUTED}{bottom}{RESET}\n"
+    title_line = _panel_line(f"{CYAN}{BOLD}{title}{RESET}", inner_width)
+    body_lines = _wrap_panel_body(clean, inner_width)
+    middle = "\n".join(_panel_line(line, inner_width) for line in body_lines)
+    return (
+        f"\n{MUTED}{top}{RESET}\n"
+        f"{title_line}\n"
+        f"{MUTED}├{'─' * (width - 2)}┤{RESET}\n"
+        f"{middle}\n"
+        f"{MUTED}{bottom}{RESET}\n"
+    )
+
+
+def _panel_width(title: str) -> int:
+    term_width = shutil.get_terminal_size(fallback=(100, 24)).columns
+    max_width = max(44, min(term_width - 2, 120))
+    return max(min(max_width, term_width), min(max(len(_strip_ansi(title)) + 8, max_width), max_width))
+
+
+def _wrap_panel_body(body: str, width: int) -> list[str]:
+    if not body:
+        return [""]
+    rows: list[str] = []
+    for raw_line in body.splitlines():
+        rows.extend(_wrap_ansi_line(raw_line, width) or [""])
+    return rows
+
+
+def _wrap_ansi_line(line: str, width: int) -> list[str]:
+    if width <= 1 or _visible_len(line) <= width:
+        return [line]
+
+    rows: list[str] = []
+    current: list[str] = []
+    visible = 0
+    index = 0
+    ansi_pattern = re.compile(r"\x1b\[[0-9;]*m")
+    while index < len(line):
+        match = ansi_pattern.match(line, index)
+        if match:
+            current.append(match.group(0))
+            index = match.end()
+            continue
+        char = line[index]
+        if visible >= width:
+            rows.append("".join(current).rstrip())
+            current = []
+            visible = 0
+            if char == " ":
+                index += 1
+                continue
+        current.append(char)
+        visible += 1
+        index += 1
+    rows.append("".join(current).rstrip())
+    return rows
+
+
+def _panel_line(text: str, width: int) -> str:
+    visible = _visible_len(text)
+    padding = " " * max(width - visible, 0)
+    return f"{MUTED}│{RESET} {text}{RESET}{padding} {MUTED}│{RESET}"
+
+
+def _visible_len(text: str) -> int:
+    return len(_strip_ansi(text))
 
 
 def _strip_ansi(text: str) -> str:

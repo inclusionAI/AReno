@@ -70,6 +70,7 @@ class CodingWorkspace:
     submitted: dict[str, Any] | None = None
     command_history: list[dict[str, Any]] = field(default_factory=list)
     command_output_callback: Callable[[dict[str, Any]], None] | None = None
+    interrupt_requested: bool = False
 
     @classmethod
     def from_task(cls, task: dict[str, Any]) -> CodingWorkspace:
@@ -252,8 +253,10 @@ class CodingWorkspace:
             proc,
             timeout_s=timeout,
             on_output=self._emit_command_output,
+            should_interrupt=lambda: self.interrupt_requested,
         )
-        returncode = 124 if timed_out else int(proc.returncode or 0)
+        interrupted = self.interrupt_requested and timed_out
+        returncode = 130 if interrupted else 124 if timed_out else int(proc.returncode or 0)
         screened = _screen_command_output(stdout, stderr)
         result = {
             "command": command,
@@ -263,6 +266,7 @@ class CodingWorkspace:
             "stderr": screened["stderr"],
             "screened": screened["screened"],
             "timed_out": timed_out,
+            "interrupted": interrupted,
             "streamed_lines": streamed_lines,
             "skipped_stream_lines": skipped_stream_lines,
         }
@@ -272,6 +276,7 @@ class CodingWorkspace:
                 "command": command,
                 "returncode": returncode,
                 "timed_out": timed_out,
+                "interrupted": interrupted,
                 "streamed_lines": streamed_lines,
                 "skipped_stream_lines": skipped_stream_lines,
             }
@@ -489,6 +494,7 @@ def _communicate_streaming(
     *,
     timeout_s: float,
     on_output: Callable[[dict[str, Any]], None],
+    should_interrupt: Callable[[], bool] | None = None,
 ) -> tuple[str, str, bool, int, int]:
     output_queue: queue.Queue[tuple[str, str | None]] = queue.Queue()
     stdout_parts: list[str] = []
@@ -516,6 +522,10 @@ def _communicate_streaming(
     deadline = time.monotonic() + timeout_s
     timed_out = False
     while len(finished_streams) < 2:
+        if should_interrupt is not None and should_interrupt():
+            timed_out = True
+            proc.kill()
+            break
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             timed_out = True
