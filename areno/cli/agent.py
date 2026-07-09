@@ -21,6 +21,8 @@ DEFAULT_KNOWLEDGE = DEFAULT_KNOWLEDGE_FILE.read_text(encoding="utf-8")
 CONFIG_FILE = Path.home() / ".areno" / "agent_config.json"
 DEFAULT_AGENT_TURN_LIMIT = 1_000_000
 JUDGE_CONTEXT_CHARS = 24000
+ANSI_RESET = "\x1b[0m"
+ANSI_CYAN = "\x1b[36m"
 
 SYSTEM_TEMPLATE = """You are an AReno operations coding agent.
 
@@ -284,7 +286,7 @@ class AgentConsoleUI:
         kind = event.get("kind")
         if kind == "start":
             command = str(event.get("command") or "")
-            self.write(f"\n$ {command}\n")
+            self.write(f"\n{_cyan('$')} {command}\n")
         elif kind == "line":
             line = str(event.get("line") or "").rstrip()
             self.write(line + "\n")
@@ -605,7 +607,7 @@ def _tool_call_line(tool_name: str, raw: str) -> str:
             summary = str(parsed.get("pattern") or parsed.get("query") or "")
         elif tool_name == "run_command":
             summary = str(parsed.get("command") or "")
-    text = f"tool call: {tool_name}"
+    text = _cyan(f"tool call: {tool_name}")
     if summary:
         text += f" {summary}"
     return text
@@ -625,6 +627,12 @@ def _plain_status(payload: dict[str, Any], *, keys: tuple[str, ...]) -> str:
 
 def _section_title(title: str) -> str:
     return f"\n{title}"
+
+
+def _cyan(text: str) -> str:
+    if not sys.stdout.isatty():
+        return text
+    return f"{ANSI_CYAN}{text}{ANSI_RESET}"
 
 
 if __name__ == "__main__":
