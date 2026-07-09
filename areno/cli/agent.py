@@ -8,22 +8,20 @@ import base64
 import binascii
 import json
 import os
-import queue
 import subprocess
+import threading
+from collections import deque
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import click
-from rich.console import Group
-from rich.panel import Panel
-from rich.rule import Rule
-from rich.syntax import Syntax
-from rich.table import Table
-from rich.text import Text
-from textual.app import App, ComposeResult
-from textual.containers import Vertical
-from textual.widgets import Footer, Header, RichLog, Static
+from prompt_toolkit.application import Application
+from prompt_toolkit.document import Document
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.layout import HSplit, Layout
+from prompt_toolkit.styles import Style
+from prompt_toolkit.widgets import Frame, Label, TextArea
 
 DEFAULT_KNOWLEDGE_FILE = Path(__file__).resolve().parents[1] / "agentic" / "coding" / "ops_knowledge.md"
 DEFAULT_KNOWLEDGE = DEFAULT_KNOWLEDGE_FILE.read_text(encoding="utf-8")
@@ -246,152 +244,145 @@ def _run_agent_tui(args: argparse.Namespace) -> int:
     return int(result or 0)
 
 
-class AgentTuiApp(App[int]):
-    """Textual interface for the local AReno operations agent."""
+class AgentTuiApp:
+    """prompt_toolkit interface for the local AReno operations agent."""
 
-    CSS = """
-    Screen {
-        background: #0b0f14;
-    }
-
-    #root {
-        height: 100%;
-    }
-
-    #summary {
-        dock: top;
-        padding: 1 2;
-        color: #c8d3df;
-        background: #111820;
-        border: solid #334155;
-    }
-
-    #log {
-        height: 1fr;
-        padding: 0 1;
-        background: #0b0f14;
-        color: #d6dee8;
-        border: solid #263241;
-    }
-    """
-
-    BINDINGS = [
-        ("q", "quit", "Quit"),
-        ("ctrl+c", "quit", "Quit"),
-    ]
+    MAX_LOG_CHARS = 300_000
 
     def __init__(self, args: argparse.Namespace) -> None:
-        super().__init__()
         self.args = args
         self.exit_code = 1
-        self.summary: Static | None = None
-        self.log_view: RichLog | None = None
-        self.pending_writes: queue.Queue[Any] = queue.Queue()
+        self._log_chunks: deque[str] = deque()
+        self._log_chars = 0
+        self._lock = threading.Lock()
+        self._agent_thread: threading.Thread | None = None
+        self.output = TextArea(text="", read_only=True, scrollbar=True, wrap_lines=True)
+        self.application = self._build_application()
 
-    def compose(self) -> ComposeResult:
-        yield Header(show_clock=True)
-        with Vertical(id="root"):
-            yield Static(self._summary_text(), id="summary")
-            yield RichLog(id="log", wrap=True, highlight=False, markup=True)
-        yield Footer()
+    def run(self) -> int:
+        self._agent_thread = threading.Thread(target=self._run_agent_thread, name="areno-agent", daemon=True)
+        self._agent_thread.start()
+        result = self.application.run()
+        return int(result or self.exit_code or 0)
 
-    def on_mount(self) -> None:
-        self.summary = self.query_one("#summary", Static)
-        self.log_view = self.query_one("#log", RichLog)
-        self.title = "AReno Agent"
-        self.sub_title = self.args.model
-        self.set_interval(0.05, self._flush_pending_writes)
-        self.write_panel("areno agent", _banner_table(self.args.instruction, Path(self.args.repo).resolve(), self.args.model), "cyan")
-        self.run_worker(self._run_agent_thread, thread=True, name="areno-agent")
+    def _build_application(self) -> Application[int]:
+        bindings = KeyBindings()
 
-    def action_quit(self) -> None:
-        self.exit(result=self.exit_code)
+        @bindings.add("c-c")
+        @bindings.add("q")
+        def _quit(_event: Any) -> None:
+            self.application.exit(result=self.exit_code)
+
+        root = HSplit(
+            [
+                Label(text=self._summary_text()),
+                Frame(self.output, title="AReno Agent"),
+                Label(text="q / Ctrl-C: quit"),
+            ]
+        )
+        style = Style.from_dict(
+            {
+                "frame.border": "#334155",
+                "label": "#c8d3df bg:#111820",
+                "text-area": "#d6dee8 bg:#0b0f14",
+            }
+        )
+        return Application(
+            layout=Layout(root, focused_element=self.output),
+            key_bindings=bindings,
+            full_screen=True,
+            mouse_support=True,
+            refresh_interval=0.1,
+            style=style,
+        )
 
     def _summary_text(self) -> str:
         return f"model={self.args.model}  workspace={Path(self.args.repo).resolve()}  goal={self.args.instruction}"
 
     def _run_agent_thread(self) -> None:
+        self.write_panel("areno agent", _banner_text(self.args.instruction, Path(self.args.repo).resolve(), self.args.model))
         try:
             self.exit_code = asyncio.run(_main_async(self.args, ui=self))
         except BaseException as exc:  # noqa: BLE001 - surface uncaught agent failures in the TUI before exiting.
             self.exit_code = 1
-            self.write_panel("error", Text(str(exc), style="red"), "red")
+            self.write_panel("error", str(exc))
         finally:
-            self.call_from_thread(self.exit, result=self.exit_code)
+            self._exit_from_thread()
+
+    def _exit_from_thread(self) -> None:
+        loop = getattr(self.application, "loop", None)
+        if loop is not None and loop.is_running():
+            loop.call_soon_threadsafe(lambda: self.application.exit(result=self.exit_code))
+        else:
+            self.application.exit(result=self.exit_code)
 
     def agent_event(self, event: str, payload: dict[str, Any]) -> None:
         if event == "assistant":
             content = payload.get("content")
             if content:
-                self.write_panel("assistant", Text(str(content), style="bright_cyan"), "cyan")
+                self.write_panel("assistant", str(content))
             calls = payload.get("tool_calls") or []
             if calls:
                 call = calls[0]
                 tool_name = call["function"]["name"]
                 arguments = call["function"].get("arguments", "")
-                self.write_panel(f"tool call: {tool_name}", _format_tool_arguments(tool_name, arguments), "magenta")
+                self.write_panel(f"tool call: {tool_name}", _format_tool_arguments(tool_name, arguments))
         elif event == "tool":
             name = str(payload.get("name") or "tool")
-            self.write_panel(f"tool result: {name}", _format_tool_result(name, str(payload.get("content", ""))), "blue")
+            self.write_panel(f"tool result: {name}", _format_tool_result(name, str(payload.get("content", ""))))
 
     def command_output_event(self, event: dict[str, Any]) -> None:
         kind = event.get("kind")
         if kind == "start":
-            group = Group(
-                Rule("[bold magenta]command output[/bold magenta]", style="magenta"),
-                Text(str(event.get("command") or ""), style="magenta"),
-                Text(f"timeout_s: {event.get('timeout_s')}", style="dim"),
-            )
-            self.write(group)
+            self.write("\n=== command output ===\n")
+            self.write(f"$ {event.get('command') or ''}\n")
+            self.write(f"timeout_s: {event.get('timeout_s')}\n")
         elif kind == "line":
             stream = str(event.get("stream") or "stdout")
             line = str(event.get("line") or "").rstrip()
-            prefix_style = "red" if stream == "stderr" else "cyan"
-            line_style = "bright_red" if stream == "stderr" else "white"
-            text = Text()
-            text.append(f"{stream}> ", style=prefix_style)
-            text.append(line, style=line_style)
-            self.write(text)
+            self.write(f"{stream}> {line}\n")
         elif kind == "end":
             skipped = int(event.get("skipped_stream_lines") or 0)
             returncode = event.get("returncode")
             timed_out = bool(event.get("timed_out"))
-            style = "red" if timed_out or returncode not in (0, None) else "cyan"
             summary = f"returncode={returncode}"
             if timed_out:
                 summary += " timed_out=true"
             if skipped:
                 summary += f" streamed_screened={skipped} skipped_lines"
-            self.write(Rule(f"[bold {style}]{summary}[/bold {style}]", style=style))
+            self.write(f"=== {summary} ===\n")
 
     def judgment(self, judgment: dict[str, Any]) -> None:
         done = bool(judgment.get("done"))
         title = "judge: done" if done else "judge: continue"
-        self.write_panel(title, _json_view(judgment), "cyan" if done else "yellow")
+        self.write_panel(title, _json_text(judgment))
 
     def done(self, submitted: dict[str, Any]) -> None:
-        self.write_panel("done", _json_view(submitted), "cyan")
+        self.write_panel("done", _json_text(submitted))
 
-    def write_panel(self, title: str, body: Any, style: str) -> None:
-        self.write(Panel(body, title=f"[bold {style}]{title}[/bold {style}]", border_style="bright_black", padding=(0, 1)))
+    def write_panel(self, title: str, body: str) -> None:
+        self.write(_text_panel(title, body))
 
-    def write(self, renderable: Any) -> None:
-        self.pending_writes.put(renderable)
+    def write(self, text: str) -> None:
+        with self._lock:
+            self._log_chunks.append(text)
+            self._log_chars += len(text)
+            while self._log_chars > self.MAX_LOG_CHARS and self._log_chunks:
+                removed = self._log_chunks.popleft()
+                self._log_chars -= len(removed)
+            current = "".join(self._log_chunks)
+        self._set_output_text(current)
 
-    def _flush_pending_writes(self) -> None:
-        if self.log_view is None:
-            return
-        wrote = False
-        for _ in range(1000):
-            try:
-                renderable = self.pending_writes.get_nowait()
-            except queue.Empty:
-                break
-            self.log_view.write(renderable)
-            wrote = True
-        if wrote:
-            self.log_view.scroll_end(animate=False)
-            self.log_view.refresh()
+    def _set_output_text(self, text: str) -> None:
+        def update() -> None:
+            self.output.buffer.set_document(Document(text, cursor_position=len(text)), bypass_readonly=True)
+            self.application.invalidate()
+
+        loop = getattr(self.application, "loop", None)
+        if loop is not None and loop.is_running():
+            loop.call_soon_threadsafe(update)
+        else:
+            update()
 
 
 async def _main_async(args: argparse.Namespace, *, ui: AgentTuiApp) -> int:
@@ -434,7 +425,7 @@ async def _main_async(args: argparse.Namespace, *, ui: AgentTuiApp) -> int:
                 on_event=ui.agent_event,
             )
             if workspace.submitted is None:
-                ui.write_panel("stopped", Text("agent stopped without submit", style="yellow"), "yellow")
+                ui.write_panel("stopped", "agent stopped without submit")
                 return 2
             judgment = await _judge_goal_done(
                 client=client,
@@ -639,79 +630,64 @@ def _job_prompt(instruction: str, root: Path) -> str:
     )
 
 
-def _banner_table(instruction: str, root: Path, model: str) -> Table:
-    table = Table.grid(padding=(0, 1))
-    table.add_column(style="bold cyan", no_wrap=True)
-    table.add_column(style="white")
-    table.add_row("model", model)
-    table.add_row("workspace", str(root))
-    table.add_row("goal", instruction)
-    return table
+def _banner_text(instruction: str, root: Path, model: str) -> str:
+    return f"model: {model}\nworkspace: {root}\ngoal: {instruction}"
 
 
-def _format_tool_arguments(tool_name: str, raw: str) -> Any:
+def _format_tool_arguments(tool_name: str, raw: str) -> str:
     try:
         parsed = json.loads(raw or "{}")
     except json.JSONDecodeError:
-        return Text(raw, style="white")
+        return raw
     if tool_name == "run_command":
         command = str(parsed.get("command", ""))
         timeout = parsed.get("timeout_s")
-        table = Table.grid(padding=(0, 1))
-        table.add_column(style="bold magenta", no_wrap=True)
-        table.add_column()
-        table.add_row("command", Syntax(command, "bash", theme="ansi_dark", word_wrap=True))
+        rows = [f"command:\n{command}"]
         if timeout is not None:
-            table.add_row("timeout_s", str(timeout))
-        return table
-    return _json_view(parsed)
+            rows.append(f"timeout_s: {timeout}")
+        return "\n".join(rows)
+    return _json_text(parsed)
 
 
-def _format_tool_result(tool_name: str, raw: str) -> Any:
+def _format_tool_result(tool_name: str, raw: str) -> str:
     try:
         parsed = json.loads(raw or "{}")
     except json.JSONDecodeError:
-        return Text(raw, style="white")
+        return raw
     if tool_name == "run_command":
         return _format_run_command_result(parsed)
-    return _json_view(parsed)
+    return _json_text(parsed)
 
 
-def _format_run_command_result(parsed: dict[str, Any]) -> Any:
+def _format_run_command_result(parsed: dict[str, Any]) -> str:
     returncode = parsed.get("returncode")
     timed_out = bool(parsed.get("timed_out"))
     screened = bool(parsed.get("screened"))
-    status_style = "red" if timed_out or returncode not in (0, None) else "cyan"
-    table = Table.grid(padding=(0, 1))
-    table.add_column(style="bold blue", no_wrap=True)
-    table.add_column()
-    table.add_row("command", Syntax(str(parsed.get("command") or ""), "bash", theme="ansi_dark", word_wrap=True))
-    table.add_row("returncode", Text(str(returncode), style=status_style))
-    table.add_row("screened", "yes" if screened else "no")
-    table.add_row("streamed", str(parsed.get("streamed_lines", 0)))
+    rows = [
+        f"command:\n{parsed.get('command') or ''}",
+        f"returncode: {returncode}",
+        f"screened: {'yes' if screened else 'no'}",
+        f"streamed: {parsed.get('streamed_lines', 0)}",
+    ]
     skipped = int(parsed.get("skipped_stream_lines") or 0)
     if skipped:
-        table.add_row("live_skipped", str(skipped))
+        rows.append(f"live_skipped: {skipped}")
     if timed_out:
-        table.add_row("timed_out", Text("yes", style="red"))
+        rows.append("timed_out: yes")
     output = str(parsed.get("output") or parsed.get("stdout") or parsed.get("stderr") or "")
-    if not output:
-        return table
-    output_panel = Panel(
-        Text(output, style="white"),
-        title="screened output" if screened else "output",
-        border_style="bright_black",
-        padding=(0, 1),
-    )
-    return Group(table, output_panel)
+    if output:
+        title = "screened output" if screened else "output"
+        rows.append(f"{title}:\n{output}")
+    return "\n".join(rows)
 
 
-def _json_view(value: Any) -> Any:
-    return Syntax(
-        json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True, default=str),
-        "json",
-        theme="ansi_dark",
-        word_wrap=True,
-    )
+def _json_text(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True, default=str)
+
+
+def _text_panel(title: str, body: str) -> str:
+    return f"\n--- {title} ---\n{body.rstrip()}\n--- end {title} ---\n"
+
+
 if __name__ == "__main__":
     agent_command()
