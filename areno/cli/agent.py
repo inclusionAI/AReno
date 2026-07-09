@@ -272,7 +272,7 @@ class AgentConsoleUI:
         if event == "assistant":
             content = payload.get("content")
             if content:
-                self.write(f"Think: {content}\n")
+                self.write(f"{_cyan('Think:')} {content}\n")
             calls = payload.get("tool_calls") or []
             if calls:
                 call = calls[0]
@@ -290,6 +290,8 @@ class AgentConsoleUI:
         elif kind == "line":
             line = str(event.get("line") or "").rstrip()
             self.write(line + "\n")
+        elif kind == "chunk":
+            self.write(str(event.get("text") or ""))
         elif kind == "end":
             skipped = int(event.get("skipped_stream_lines") or 0)
             returncode = event.get("returncode")
@@ -619,14 +621,14 @@ def _plain_status(payload: dict[str, Any], *, keys: tuple[str, ...]) -> str:
         value = payload.get(key)
         if value is None or value == "":
             continue
-        rows.append(f"{key}: {value}")
+        rows.append(f"{_cyan(key + ':')} {value}")
     if rows:
         return "\n".join(rows)
     return "complete"
 
 
 def _section_title(title: str) -> str:
-    return f"\n{title}"
+    return f"\n{_cyan(title)}"
 
 
 def _cyan(text: str) -> str:

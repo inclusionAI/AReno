@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import os
+import pty
 import queue
 import re
+import select
 import shutil
 import subprocess
 import tempfile
@@ -241,24 +243,15 @@ class CodingWorkspace:
             raise ToolError(f"dangerous rm command is not allowed: {command}")
         timeout = min(max(float(timeout_s), 0.1), max(float(self.max_command_timeout_s), 0.1))
         self._emit_command_output({"kind": "start", "command": command, "timeout_s": timeout})
-        proc = subprocess.Popen(
+        stdout, stderr, timed_out, streamed_lines, skipped_stream_lines, returncode_value = _run_command_streaming(
             command,
             cwd=self.root,
-            shell=True,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            bufsize=1,
-            env={**os.environ, "PYTHONUNBUFFERED": "1"},
-        )
-        stdout, stderr, timed_out, streamed_lines, skipped_stream_lines = _communicate_streaming(
-            proc,
             timeout_s=timeout,
             on_output=self._emit_command_output,
             should_interrupt=lambda: self.interrupt_requested,
         )
         interrupted = self.interrupt_requested and timed_out
-        returncode = 130 if interrupted else 124 if timed_out else int(proc.returncode or 0)
+        returncode = 130 if interrupted else 124 if timed_out else int(returncode_value or 0)
         screened = _screen_command_output(stdout, stderr)
         result = {
             "command": command,
@@ -583,10 +576,126 @@ def _communicate_streaming(
     return "".join(stdout_parts), "".join(stderr_parts), timed_out, streamed_lines, skipped_stream_lines
 
 
+def _run_command_streaming(
+    command: str,
+    *,
+    cwd: Path,
+    timeout_s: float,
+    on_output: Callable[[dict[str, Any]], None],
+    should_interrupt: Callable[[], bool] | None = None,
+) -> tuple[str, str, bool, int, int, int]:
+    if os.name == "posix":
+        return _run_command_streaming_pty(
+            command,
+            cwd=cwd,
+            timeout_s=timeout_s,
+            on_output=on_output,
+            should_interrupt=should_interrupt,
+        )
+    proc = subprocess.Popen(
+        command,
+        cwd=cwd,
+        shell=True,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        bufsize=1,
+        env={**os.environ, "PYTHONUNBUFFERED": "1"},
+    )
+    stdout, stderr, timed_out, streamed_lines, skipped_stream_lines = _communicate_streaming(
+        proc,
+        timeout_s=timeout_s,
+        on_output=on_output,
+        should_interrupt=should_interrupt,
+    )
+    return stdout, stderr, timed_out, streamed_lines, skipped_stream_lines, int(proc.returncode or 0)
+
+
+def _run_command_streaming_pty(
+    command: str,
+    *,
+    cwd: Path,
+    timeout_s: float,
+    on_output: Callable[[dict[str, Any]], None],
+    should_interrupt: Callable[[], bool] | None = None,
+) -> tuple[str, str, bool, int, int, int]:
+    master_fd, slave_fd = pty.openpty()
+    proc: subprocess.Popen[bytes] | None = None
+    output_parts: list[str] = []
+    streamed_chunks = 0
+    skipped_chunks = 0
+    timed_out = False
+    try:
+        proc = subprocess.Popen(
+            command,
+            cwd=cwd,
+            shell=True,
+            stdin=subprocess.DEVNULL,
+            stdout=slave_fd,
+            stderr=slave_fd,
+            close_fds=True,
+            env={**os.environ, "PYTHONUNBUFFERED": "1", "TERM": os.environ.get("TERM") or "xterm-256color"},
+        )
+        os.close(slave_fd)
+        slave_fd = -1
+        deadline = time.monotonic() + timeout_s
+        while True:
+            if should_interrupt is not None and should_interrupt():
+                timed_out = True
+                proc.kill()
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                proc.kill()
+                break
+            ready, _, _ = select.select([master_fd], [], [], min(0.1, remaining))
+            if not ready:
+                if proc.poll() is not None:
+                    break
+                continue
+            try:
+                chunk = os.read(master_fd, 4096)
+            except OSError:
+                break
+            if not chunk:
+                break
+            text = chunk.decode("utf-8", errors="replace")
+            output_parts.append(text)
+            if _should_stream_chunk(streamed_chunks + skipped_chunks + 1, text):
+                streamed_chunks += 1
+                on_output({"kind": "chunk", "stream": "stdout", "text": text, "chunk_index": streamed_chunks})
+            else:
+                skipped_chunks += 1
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+    finally:
+        if slave_fd >= 0:
+            try:
+                os.close(slave_fd)
+            except OSError:
+                pass
+        try:
+            os.close(master_fd)
+        except OSError:
+            pass
+    return "".join(output_parts), "", timed_out, streamed_chunks, skipped_chunks, int((proc.returncode if proc else 1) or 0)
+
+
 def _should_stream_line(line_index: int, line: str) -> bool:
     if line_index <= STREAM_HEAD_LINES:
         return True
     lowered = line.lower()
+    return any(pattern in lowered for pattern in IMPORTANT_OUTPUT_PATTERNS)
+
+
+def _should_stream_chunk(chunk_index: int, text: str) -> bool:
+    if chunk_index <= STREAM_HEAD_LINES:
+        return True
+    lowered = text.lower()
     return any(pattern in lowered for pattern in IMPORTANT_OUTPUT_PATTERNS)
 
 

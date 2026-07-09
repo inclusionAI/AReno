@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import shlex
+import sys
+import time
 
 from areno.agentic.coding import agent_loop
+from areno.agentic.coding.coding_tools import CodingWorkspace
 
 
 class _FakeCompletions:
@@ -89,3 +93,28 @@ def test_no_tool_assistant_can_delegate_to_interaction_hook(tmp_path):
 
     assert phases == ["before_turn", "assistant_no_tool"]
     assert messages[-1] == {"role": "user", "content": "User runtime hint:\n128"}
+
+
+def test_run_command_streams_output_before_process_exits(tmp_path):
+    task = {"instance_id": "local", "repo": str(tmp_path)}
+    workspace = CodingWorkspace.from_current_repo(task, tmp_path)
+    events = []
+
+    def on_output(event):
+        if event["kind"] in {"line", "chunk"}:
+            events.append((event["kind"], event.get("line") or event.get("text"), time.monotonic()))
+
+    workspace.command_output_callback = on_output
+    start = time.monotonic()
+    command = (
+        f"{shlex.quote(sys.executable)} -c "
+        + shlex.quote("import sys, time; print('first', flush=True); time.sleep(0.4); print('second', flush=True)")
+    )
+
+    result = workspace.run_command(command, timeout_s=5)
+    end = time.monotonic()
+
+    assert result["returncode"] == 0
+    assert any("first" in str(payload) for _, payload, _ in events)
+    first_time = next(timestamp for _, payload, timestamp in events if "first" in str(payload))
+    assert first_time - start < end - first_time
