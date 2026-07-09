@@ -14,26 +14,29 @@ from types import SimpleNamespace
 from typing import Any
 
 import click
-from rich.console import Console, Group
+from rich.console import Group
 from rich.panel import Panel
 from rich.rule import Rule
 from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
+from textual.app import App, ComposeResult
+from textual.containers import Vertical
+from textual.widgets import Footer, Header, RichLog, Static
 
 DEFAULT_KNOWLEDGE_FILE = Path(__file__).resolve().parents[1] / "agentic" / "coding" / "ops_knowledge.md"
 DEFAULT_KNOWLEDGE = DEFAULT_KNOWLEDGE_FILE.read_text(encoding="utf-8")
 CONFIG_FILE = Path.home() / ".areno" / "agent_config.json"
 DEFAULT_AGENT_TURN_LIMIT = 1_000_000
 JUDGE_CONTEXT_CHARS = 24000
-CONSOLE = Console(highlight=False)
 
 SYSTEM_TEMPLATE = """You are an AReno operations coding agent.
 
 You can inspect and modify the current checkout and run shell commands through
 tools. Your task is to complete the user's train or serve request in this
-environment. Work iteratively: inspect the environment, choose a conservative
-command, run it, read failures, and retry with adjusted parameters when possible.
+environment. Work iteratively: inspect the environment, choose the largest
+plausible smoke target, run it, read failures, and retry with adjusted
+parameters when possible.
 Use exactly one tool call per assistant turn. Call submit with status=solved only
 after a train/serve command has completed successfully or is clearly running and
 verified. Call submit with status=blocked only after a non-recoverable blocker.
@@ -44,11 +47,17 @@ Train command policy:
   explicitly asks for another value.
 - Add `--drop-rollout-state` to train and train-smoke commands by default unless
   the user explicitly asks to keep rollout state.
-- A tiny smoke command only proves startup. After it succeeds, do not submit yet
-  if the goal is a train run. Run additional smoke attempts with larger
-  `--max-running-prompts`, `--batch-size`, and/or `--mini-bs` to use available
-  GPU memory, then run the real train command with the largest stable settings.
-- If a smoke command underuses GPU memory, increase rollout concurrency first.
+- For rollout/RL jobs, keep `batch_size * n_samples` aligned with
+  `--max-running-prompts`: the normal target is
+  `max_running_prompts >= batch_size * n_samples`, and if you raise
+  `max-running-prompts` for utilization you should also consider raising
+  `batch-size` so the batch can actually feed that concurrency.
+- Do not start smoke tuning from tiny settings unless the user only requested a
+  startup check. Estimate the largest plausible `--max-running-prompts` and
+  `--mini-bs`, try those first, and binary search down on recoverable OOM.
+- If a large smoke command succeeds with lots of free memory, raise the upper
+  bound and continue searching for the largest stable setting before the real
+  train command.
 - Before using remote model or dataset refs, check whether Hugging Face is
   reachable. If Hugging Face is reachable and the requested ref is an HF ref,
   use `--model-hub hf`. If Hugging Face is unreachable or times out, use
@@ -129,7 +138,7 @@ def agent_command(
         knowledge_file=knowledge_file,
         instruction=instruction,
     )
-    raise SystemExit(asyncio.run(_main_async(args)))
+    raise SystemExit(_run_agent_tui(args))
 
 
 async def _refresh_knowledge_async(args: argparse.Namespace) -> int:
@@ -228,7 +237,151 @@ def _b64_decode(value: str, key: str) -> str:
         raise click.ClickException(f"invalid base64 value for {key} in {CONFIG_FILE}") from exc
 
 
-async def _main_async(args: argparse.Namespace) -> int:
+def _run_agent_tui(args: argparse.Namespace) -> int:
+    app = AgentTuiApp(args)
+    result = app.run()
+    return int(result or 0)
+
+
+class AgentTuiApp(App[int]):
+    """Textual interface for the local AReno operations agent."""
+
+    CSS = """
+    Screen {
+        background: #0b0f14;
+    }
+
+    #root {
+        height: 100%;
+    }
+
+    #summary {
+        dock: top;
+        padding: 1 2;
+        color: #c8d3df;
+        background: #111820;
+        border: solid #334155;
+    }
+
+    #log {
+        height: 1fr;
+        padding: 0 1;
+        background: #0b0f14;
+        color: #d6dee8;
+        border: solid #263241;
+    }
+    """
+
+    BINDINGS = [
+        ("q", "quit", "Quit"),
+        ("ctrl+c", "quit", "Quit"),
+    ]
+
+    def __init__(self, args: argparse.Namespace) -> None:
+        super().__init__()
+        self.args = args
+        self.exit_code = 1
+        self.summary: Static | None = None
+        self.log_view: RichLog | None = None
+
+    def compose(self) -> ComposeResult:
+        yield Header(show_clock=True)
+        with Vertical(id="root"):
+            yield Static(self._summary_text(), id="summary")
+            yield RichLog(id="log", wrap=True, highlight=False, markup=True)
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.summary = self.query_one("#summary", Static)
+        self.log_view = self.query_one("#log", RichLog)
+        self.title = "AReno Agent"
+        self.sub_title = self.args.model
+        self.write_panel("areno agent", _banner_table(self.args.instruction, Path(self.args.repo).resolve(), self.args.model), "cyan")
+        self.run_worker(self._run_agent_thread, thread=True, name="areno-agent")
+
+    def action_quit(self) -> None:
+        self.exit(result=self.exit_code)
+
+    def _summary_text(self) -> str:
+        return f"model={self.args.model}  workspace={Path(self.args.repo).resolve()}  goal={self.args.instruction}"
+
+    def _run_agent_thread(self) -> None:
+        try:
+            self.exit_code = asyncio.run(_main_async(self.args, ui=self))
+        except BaseException as exc:  # noqa: BLE001 - surface uncaught agent failures in the TUI before exiting.
+            self.exit_code = 1
+            self.write_panel("error", Text(str(exc), style="red"), "red")
+        finally:
+            self.call_from_thread(self.exit, result=self.exit_code)
+
+    def agent_event(self, event: str, payload: dict[str, Any]) -> None:
+        if event == "assistant":
+            content = payload.get("content")
+            if content:
+                self.write_panel("assistant", Text(str(content), style="bright_cyan"), "cyan")
+            calls = payload.get("tool_calls") or []
+            if calls:
+                call = calls[0]
+                tool_name = call["function"]["name"]
+                arguments = call["function"].get("arguments", "")
+                self.write_panel(f"tool call: {tool_name}", _format_tool_arguments(tool_name, arguments), "magenta")
+        elif event == "tool":
+            name = str(payload.get("name") or "tool")
+            self.write_panel(f"tool result: {name}", _format_tool_result(name, str(payload.get("content", ""))), "blue")
+
+    def command_output_event(self, event: dict[str, Any]) -> None:
+        kind = event.get("kind")
+        if kind == "start":
+            group = Group(
+                Rule("[bold magenta]command output[/bold magenta]", style="magenta"),
+                Text(str(event.get("command") or ""), style="magenta"),
+                Text(f"timeout_s: {event.get('timeout_s')}", style="dim"),
+            )
+            self.write(group)
+        elif kind == "line":
+            stream = str(event.get("stream") or "stdout")
+            line = str(event.get("line") or "").rstrip()
+            prefix_style = "red" if stream == "stderr" else "cyan"
+            line_style = "bright_red" if stream == "stderr" else "white"
+            text = Text()
+            text.append(f"{stream}> ", style=prefix_style)
+            text.append(line, style=line_style)
+            self.write(text)
+        elif kind == "end":
+            skipped = int(event.get("skipped_stream_lines") or 0)
+            returncode = event.get("returncode")
+            timed_out = bool(event.get("timed_out"))
+            style = "red" if timed_out or returncode not in (0, None) else "cyan"
+            summary = f"returncode={returncode}"
+            if timed_out:
+                summary += " timed_out=true"
+            if skipped:
+                summary += f" streamed_screened={skipped} skipped_lines"
+            self.write(Rule(f"[bold {style}]{summary}[/bold {style}]", style=style))
+
+    def judgment(self, judgment: dict[str, Any]) -> None:
+        done = bool(judgment.get("done"))
+        title = "judge: done" if done else "judge: continue"
+        self.write_panel(title, _json_view(judgment), "cyan" if done else "yellow")
+
+    def done(self, submitted: dict[str, Any]) -> None:
+        self.write_panel("done", _json_view(submitted), "cyan")
+
+    def write_panel(self, title: str, body: Any, style: str) -> None:
+        self.write(Panel(body, title=f"[bold {style}]{title}[/bold {style}]", border_style="bright_black", padding=(0, 1)))
+
+    def write(self, renderable: Any) -> None:
+        try:
+            self.call_from_thread(self._write_from_ui, renderable)
+        except RuntimeError:
+            self._write_from_ui(renderable)
+
+    def _write_from_ui(self, renderable: Any) -> None:
+        if self.log_view is not None:
+            self.log_view.write(renderable)
+
+
+async def _main_async(args: argparse.Namespace, *, ui: AgentTuiApp) -> int:
     try:
         from openai import AsyncOpenAI
     except ImportError as exc:
@@ -249,13 +402,12 @@ async def _main_async(args: argparse.Namespace) -> int:
     item = SimpleNamespace(record=task, prompt=args.instruction)
     workspace = CodingWorkspace.from_current_repo(task, args.repo)
     workspace.max_command_timeout_s = float(args.command_timeout_s)
-    workspace.command_output_callback = _print_command_output_event
+    workspace.command_output_callback = ui.command_output_event
     client = AsyncOpenAI(base_url=args.base_url, api_key=args.api_key, max_retries=0)
     messages = [
         {"role": "system", "content": SYSTEM_TEMPLATE.format(knowledge=knowledge)},
         {"role": "user", "content": _job_prompt(args.instruction, workspace.root)},
     ]
-    _print_banner(args.instruction, workspace.root, args.model)
     try:
         while True:
             await run_conversation_turns(
@@ -266,10 +418,10 @@ async def _main_async(args: argparse.Namespace) -> int:
                 messages=messages,
                 max_turns=int(args.max_turns),
                 record_trajectory=False,
-                on_event=_print_event,
+                on_event=ui.agent_event,
             )
             if workspace.submitted is None:
-                click.echo("agent stopped without submit")
+                ui.write_panel("stopped", Text("agent stopped without submit", style="yellow"), "yellow")
                 return 2
             judgment = await _judge_goal_done(
                 client=client,
@@ -279,13 +431,9 @@ async def _main_async(args: argparse.Namespace) -> int:
                 messages=messages,
                 command_history=workspace.command_history,
             )
-            _print_judgment(judgment)
+            ui.judgment(judgment)
             if judgment.get("done") is True:
-                _print_panel(
-                    "done",
-                    _json_view(workspace.submitted),
-                    style="cyan",
-                )
+                ui.done(workspace.submitted)
                 return 0 if workspace.submitted.get("status") == "solved" else 1
             feedback = str(judgment.get("feedback") or judgment.get("reason") or "").strip()
             if not feedback:
@@ -331,8 +479,9 @@ async def _judge_goal_done(
                     "a completed train step, a saved and reload-tested checkpoint when requested, or a truly "
                     "non-recoverable blocker. For rollout/RL train goals, do not accept a single tiny smoke "
                     "success as complete unless the user only requested smoke. Check that the agent used "
-                    "--n-samples 8 by default, included --drop-rollout-state by default, and tried to increase "
-                    "GPU utilization after basic smoke success when memory headroom was available. Return JSON "
+                    "--n-samples 8 by default, included --drop-rollout-state by default, kept batch_size * "
+                    "n_samples aligned with --max-running-prompts, and searched from a large plausible smoke "
+                    "target with binary-search style retries on recoverable capacity failures. Return JSON "
                     "only with keys: done, reason, feedback."
                 ),
             },
@@ -459,72 +608,26 @@ def _job_prompt(instruction: str, root: Path) -> str:
         "Operational requirements for train jobs:\n"
         "- Use --n-samples 8 for RL/rollout algorithms unless the user provided another value.\n"
         "- Include --drop-rollout-state by default unless the user asks to keep rollout state.\n"
+        "- Keep batch_size * n_samples aligned with max-running-prompts. Usually set "
+        "max-running-prompts >= batch_size * n_samples; if increasing max-running-prompts for throughput, "
+        "increase batch-size too when the dataset and memory allow it.\n"
         "- Before remote downloads, check Hugging Face availability. If it is unavailable, use "
         "--model-hub modelscope; if it is available and the requested ref is an HF ref, use --model-hub hf.\n"
-        "- Use smoke-infer/smoke-train before long runs, but do not treat one tiny smoke success as completion.\n"
-        "- After smoke succeeds, retry with larger max-running-prompts, batch-size, or mini-bs to fill GPU memory "
-        "safely before choosing final train settings."
+        "- Use smoke-infer/smoke-train before long runs. Start from the largest plausible settings you can infer, "
+        "then binary search down on recoverable OOM. Do not treat one tiny smoke success as completion.\n"
+        "- If large smoke succeeds with lots of free memory, raise the upper bound and continue searching before "
+        "choosing final train settings."
     )
 
 
-def _print_event(event: str, payload: dict[str, Any]) -> None:
-    if event == "assistant":
-        content = payload.get("content")
-        if content:
-            _print_panel("assistant", Text(str(content), style="bright_cyan"), style="cyan")
-        calls = payload.get("tool_calls") or []
-        if calls:
-            call = calls[0]
-            tool_name = call["function"]["name"]
-            arguments = call["function"].get("arguments", "")
-            _print_panel(f"tool call: {tool_name}", _format_tool_arguments(tool_name, arguments), style="magenta")
-    elif event == "tool":
-        name = str(payload.get("name") or "tool")
-        _print_panel(f"tool result: {name}", _format_tool_result(name, str(payload.get("content", ""))), style="blue")
-
-
-def _print_command_output_event(event: dict[str, Any]) -> None:
-    kind = event.get("kind")
-    if kind == "start":
-        CONSOLE.print(Rule("[bold magenta]command output[/bold magenta]", style="magenta"))
-        CONSOLE.print(Text(str(event.get("command") or ""), style="magenta"))
-        CONSOLE.print(Text(f"timeout_s: {event.get('timeout_s')}", style="dim"))
-    elif kind == "line":
-        stream = str(event.get("stream") or "stdout")
-        line = str(event.get("line") or "").rstrip()
-        prefix_style = "red" if stream == "stderr" else "cyan"
-        line_style = "bright_red" if stream == "stderr" else "white"
-        text = Text()
-        text.append(f"{stream}> ", style=prefix_style)
-        text.append(line, style=line_style)
-        CONSOLE.print(text, soft_wrap=True)
-    elif kind == "end":
-        skipped = int(event.get("skipped_stream_lines") or 0)
-        returncode = event.get("returncode")
-        timed_out = bool(event.get("timed_out"))
-        style = "red" if timed_out or returncode not in (0, None) else "cyan"
-        summary = f"returncode={returncode}"
-        if timed_out:
-            summary += " timed_out=true"
-        if skipped:
-            summary += f" streamed_screened={skipped} skipped_lines"
-        CONSOLE.print(Rule(f"[bold {style}]{summary}[/bold {style}]", style=style))
-
-
-def _print_banner(instruction: str, root: Path, model: str) -> None:
+def _banner_table(instruction: str, root: Path, model: str) -> Table:
     table = Table.grid(padding=(0, 1))
     table.add_column(style="bold cyan", no_wrap=True)
     table.add_column(style="white")
     table.add_row("model", model)
     table.add_row("workspace", str(root))
     table.add_row("goal", instruction)
-    _print_panel("areno agent", table, style="cyan")
-
-
-def _print_judgment(judgment: dict[str, Any]) -> None:
-    done = bool(judgment.get("done"))
-    title = "judge: done" if done else "judge: continue"
-    _print_panel(title, _json_view(judgment), style="cyan" if done else "yellow")
+    return table
 
 
 def _format_tool_arguments(tool_name: str, raw: str) -> Any:
@@ -591,12 +694,5 @@ def _json_view(value: Any) -> Any:
         theme="ansi_dark",
         word_wrap=True,
     )
-
-
-def _print_panel(title: str, body: Any, *, style: str) -> None:
-    CONSOLE.print()
-    CONSOLE.print(Panel(body, title=f"[bold {style}]{title}[/bold {style}]", border_style="bright_black", padding=(0, 1)))
-
-
 if __name__ == "__main__":
     agent_command()

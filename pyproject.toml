@@ -49,6 +49,7 @@ dependencies = [
   "numpy",
   "openai",
   "rich>=13",
+  "textual>=0.85",
   "tensorboard",
   "pydantic>=2",
   "fastapi>=0.110",
