@@ -124,15 +124,6 @@ def agent_command(
     instruction = " ".join(job).strip()
     if not instruction:
         raise click.UsageError("provide a natural-language train/serve job, or use --refresh-knowledge")
-    instruction = asyncio.run(
-        _enrich_instruction_with_user_answers_async(
-            instruction,
-            base_url=resolved_base_url,
-            model=resolved_model,
-            api_key=resolved_api_key,
-            knowledge_file=knowledge_file,
-        )
-    )
 
     args = argparse.Namespace(
         base_url=resolved_base_url,
@@ -241,105 +232,6 @@ def _b64_decode(value: str, key: str) -> str:
         return base64.b64decode(value.encode("ascii"), validate=True).decode("utf-8")
     except (binascii.Error, UnicodeDecodeError) as exc:
         raise click.ClickException(f"invalid base64 value for {key} in {CONFIG_FILE}") from exc
-
-
-async def _enrich_instruction_with_user_answers_async(
-    instruction: str,
-    *,
-    base_url: str,
-    model: str,
-    api_key: str,
-    knowledge_file: str,
-) -> str:
-    questions = await _llm_questions_for_instruction(
-        instruction,
-        base_url=base_url,
-        model=model,
-        api_key=api_key,
-        knowledge_file=knowledge_file,
-    )
-    if not questions:
-        return instruction
-    click.echo("A few run parameters are missing. Press Enter to accept the recommended value.")
-    answers: list[str] = []
-    for question in questions[:6]:
-        key = str(question.get("key") or "preference").strip() or "preference"
-        prompt = str(question.get("question") or key).strip()
-        default = str(question.get("default") or "").strip()
-        if not prompt or not default:
-            continue
-        value = await _prompt_value_async(prompt, default=default)
-        value = str(value).strip()
-        if value:
-            answers.append(f"- {key}: {value}")
-    if not answers:
-        return instruction
-    return instruction + "\n\nUser-provided run preferences:\n" + "\n".join(answers)
-
-
-async def _llm_questions_for_instruction(
-    instruction: str,
-    *,
-    base_url: str,
-    model: str,
-    api_key: str,
-    knowledge_file: str,
-) -> list[dict[str, str]]:
-    try:
-        from openai import AsyncOpenAI
-    except ImportError:
-        return []
-    from areno.agentic.coding.agent_loop import create_chat_completion_with_retry
-
-    knowledge = _load_knowledge(Path(knowledge_file).expanduser())
-    client = AsyncOpenAI(base_url=base_url, api_key=api_key, max_retries=0)
-    try:
-        response = await create_chat_completion_with_retry(
-            client,
-            model=model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You prepare a short preflight questionnaire for an AReno train/serve operations agent. "
-                        "Read the user goal and ask only for parameters that are genuinely missing and materially "
-                        "affect running the command. Examples include checkpoint/model, dataset, algorithm, "
-                        "max_new_tokens, max_context_len for agentic training, GPU/TP preset, serve port, or save/load "
-                        "requirements. For agentic train or serve goals, you must ask for max_new_tokens and "
-                        "max_context_len if either is not already provided. Do not ask questions already answered by "
-                        "the user. Do not ask more than six "
-                        "questions. Return JSON only: {\"questions\":[{\"key\":\"...\",\"question\":\"...\",\"default\":\"...\"}]}"
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": f"User goal:\n{instruction}\n\nRelevant AReno operations knowledge:\n{knowledge[:12000]}",
-                },
-            ],
-            stream=False,
-        )
-    except Exception as exc:  # noqa: BLE001 - preflight questions are helpful but non-critical.
-        click.echo(f"skipping LLM preflight questions: {exc}", err=True)
-        return []
-    finally:
-        await client.close()
-    content = (response.choices[0].message.content or "").strip()
-    try:
-        parsed = json.loads(_extract_json_object(content))
-    except json.JSONDecodeError:
-        return []
-    questions = parsed.get("questions") if isinstance(parsed, dict) else None
-    if not isinstance(questions, list):
-        return []
-    return [question for question in questions if isinstance(question, dict)]
-
-
-async def _prompt_value_async(question: str, *, default: str = "") -> str:
-    if not sys.stdin.isatty():
-        return default
-    suffix = f" [{default}]" if default else ""
-    value = await asyncio.to_thread(_read_stdin_line, f"{question}{suffix}\n> ")
-    return str(value or default)
 
 
 def _read_stdin_line(prompt: str) -> str:
