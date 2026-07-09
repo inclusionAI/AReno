@@ -71,6 +71,7 @@ class CodingWorkspace:
     command_history: list[dict[str, Any]] = field(default_factory=list)
     command_output_callback: Callable[[dict[str, Any]], None] | None = None
     user_input_callback: Callable[[str], str] | None = None
+    response_callback: Callable[[str], None] | None = None
     interrupt_requested: bool = False
 
     @classmethod
@@ -298,6 +299,11 @@ class CodingWorkspace:
             return {"error": "user input is not available in this environment"}
         return {"response": self.user_input_callback(str(prompt))}
 
+    def response_to_user(self, message: str) -> dict[str, Any]:
+        if self.response_callback is not None:
+            self.response_callback(str(message))
+        return {"delivered": True, "message": str(message)}
+
     def run_all_tests(self) -> list[dict[str, Any]]:
         results = []
         for command in self.task.get("test_commands") or []:
@@ -354,6 +360,8 @@ def run_tool(workspace: CodingWorkspace, name: str, arguments: dict[str, Any]) -
             )
         if name in {"request_user_input", "require_user_input", "requre_userinput"}:
             return workspace.request_user_input(prompt=str(arguments.get("prompt", "")))
+        if name == "response_to_user":
+            return workspace.response_to_user(message=str(arguments.get("message", "")))
         if name == "submit":
             return workspace.submit(status=str(arguments.get("status", "")), summary=str(arguments.get("summary", "")))
         return {"error": f"unknown tool: {name}"}

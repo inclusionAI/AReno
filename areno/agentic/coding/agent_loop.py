@@ -173,6 +173,21 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "response_to_user",
+            "description": "Print a formal response to the terminal for the human user.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "message": {"type": "string"},
+                },
+                "required": ["message"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "submit",
             "description": "Submit final coding-task status and a compact summary.",
             "parameters": {

@@ -315,6 +315,9 @@ class AgentConsoleUI:
             self.write(prompt.rstrip() + "\n")
         return _read_stdin_line("> ")
 
+    def response_to_user(self, message: str) -> None:
+        self.write(str(message).rstrip() + "\n")
+
     def write_panel(self, title: str, body: str) -> None:
         self.write(_section_title(title) + "\n")
         self.write(str(body) + "\n")
@@ -347,6 +350,7 @@ async def _main_async(args: argparse.Namespace, *, ui: AgentConsoleUI) -> int:
     workspace.max_command_timeout_s = float(args.command_timeout_s)
     workspace.command_output_callback = ui.command_output_event
     workspace.user_input_callback = ui.request_user_input
+    workspace.response_callback = ui.response_to_user
     client = AsyncOpenAI(base_url=args.base_url, api_key=args.api_key, max_retries=0)
     messages = [
         {"role": "system", "content": SYSTEM_TEMPLATE.format(knowledge=knowledge)},
