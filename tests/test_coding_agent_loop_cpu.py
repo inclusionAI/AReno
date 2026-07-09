@@ -35,3 +35,13 @@ def test_chat_completion_retry_recovers_after_transient_failures(monkeypatch):
     assert response["ok"] is True
     assert client.chat.completions.calls == 3
     assert sleeps == [1.0, 2.0]
+
+
+def test_assistant_message_omits_empty_tool_calls():
+    message = type("Message", (), {"content": "Need one more value.", "tool_calls": None})()
+    choice = type("Choice", (), {"message": message})()
+    response = type("Response", (), {"choices": [choice]})()
+
+    assistant = agent_loop._assistant_message_from_response(response)
+
+    assert assistant == {"role": "assistant", "content": "Need one more value."}

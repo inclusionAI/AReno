@@ -18,10 +18,7 @@ from typing import Any
 
 import click
 from rich.console import Console, Group, RenderableType
-from rich.json import JSON
-from rich.panel import Panel
 from rich.pretty import Pretty
-from rich.rule import Rule
 from rich.syntax import Syntax
 from rich.text import Text
 
@@ -42,7 +39,7 @@ RED = "\x1b[38;2;240;113;120m"
 MUTED = "\x1b[38;2;103;110;149m"
 WHITE = "\x1b[38;2;166;172;205m"
 GREEN = "\x1b[38;2;195;232;141m"
-AGENT_CONSOLE = Console()
+AGENT_CONSOLE = Console(color_system="auto", force_terminal=sys.stdout.isatty())
 
 SYSTEM_TEMPLATE = """You are an AReno operations coding agent.
 
@@ -461,9 +458,8 @@ class AgentConsoleUI:
         kind = event.get("kind")
         if kind == "start":
             command = str(event.get("command") or "")
-            self.console.print(Rule("command output", style="bright_black"))
+            self._print_header("shell", f"timeout: {event.get('timeout_s')}")
             self.console.print(Syntax(command, "bash", theme="material", word_wrap=True), soft_wrap=True)
-            self.console.print(Text(f"timeout_s: {event.get('timeout_s')}", style="dim"))
         elif kind == "line":
             stream = str(event.get("stream") or "stdout")
             line = str(event.get("line") or "").rstrip()
@@ -486,7 +482,7 @@ class AgentConsoleUI:
             if skipped:
                 summary += f" streamed_screened={skipped} skipped_lines"
             style = "#f07178" if timed_out or returncode not in (0, None) else "#89ddff"
-            self.console.print(Rule(summary, style=style))
+            self.console.print(_shell_exit_line(summary, style=style))
 
     def judgment(self, judgment: dict[str, Any]) -> None:
         done = bool(judgment.get("done"))
@@ -497,20 +493,14 @@ class AgentConsoleUI:
         self.write_panel("done", _pretty_value(submitted))
 
     def write_panel(self, title: str, body: str | RenderableType) -> None:
-        self.console.print(
-            Panel(
-                _renderable_from_body(body),
-                title=title,
-                title_align="left",
-                border_style="bright_black",
-                style="#a6accd",
-                padding=(0, 1),
-                expand=True,
-            )
-        )
+        self._print_header(title, "")
+        self.console.print(_renderable_from_body(body), soft_wrap=True)
 
     def write(self, text: str) -> None:
         self.console.print(Text.from_ansi(text), end="")
+
+    def _print_header(self, left: str, right: str = "") -> None:
+        self.console.print(_header_line(left, right, self.console.size.width))
 
 
 class InteractiveAgentInput:
@@ -932,10 +922,7 @@ def _format_run_command_result(parsed: dict[str, Any]) -> RenderableType:
 
 def _pretty_value(value: Any, *, indent: int = 0) -> RenderableType:
     if indent == 0:
-        try:
-            return JSON(_json_dumps(value))
-        except Exception:
-            return Pretty(value)
+        return Pretty(value, indent_guides=True, expand_all=False)
     prefix = " " * indent
     if isinstance(value, dict):
         if not value:
@@ -990,6 +977,38 @@ def _renderable_from_body(body: str | RenderableType) -> RenderableType:
             return Text.from_ansi(body)
         return Text(body, style="#a6accd")
     return body
+
+
+def _header_line(left: str, right: str, width: int) -> Text:
+    left_text = Text()
+    left_text.append("▍ ", style="#89ddff")
+    left_text.append(left, style="#89ddff bold")
+    right_text = Text(right.strip(), style="dim") if right.strip() else Text()
+    line = Text()
+    line.append_text(left_text)
+    if right_text:
+        remaining = width - left_text.cell_len - right_text.cell_len
+        if remaining >= 3:
+            line.append(" ", style="default")
+            line.append("─" * (remaining - 2), style="dim")
+            line.append(" ", style="default")
+            line.append_text(right_text)
+            return line
+        line.append(" ", style="default")
+        line.append_text(right_text)
+        return line
+    remaining = width - left_text.cell_len
+    if remaining >= 2:
+        line.append(" ", style="default")
+        line.append("─" * (remaining - 1), style="dim")
+    return line
+
+
+def _shell_exit_line(summary: str, *, style: str) -> Text:
+    text = Text()
+    text.append("▎", style="dim")
+    text.append(f" {summary} ", style=f"{style} reverse")
+    return text
 
 
 def _text_panel(title: str, body: str) -> str:

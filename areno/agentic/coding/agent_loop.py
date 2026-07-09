@@ -444,15 +444,17 @@ def _assistant_message_from_response(response: Any) -> dict[str, Any]:
     assistant_message = {
         "role": "assistant",
         "content": message.content or "",
-        "tool_calls": [
-            {
-                "id": call.id,
-                "type": call.type,
-                "function": {"name": call.function.name, "arguments": call.function.arguments},
-            }
-            for call in (message.tool_calls or [])[:1]
-        ],
     }
+    tool_calls = [
+        {
+            "id": call.id,
+            "type": call.type,
+            "function": {"name": call.function.name, "arguments": call.function.arguments},
+        }
+        for call in (message.tool_calls or [])[:1]
+    ]
+    if tool_calls:
+        assistant_message["tool_calls"] = tool_calls
     reasoning_content = getattr(message, "reasoning_content", None)
     if reasoning_content:
         assistant_message["reasoning_content"] = reasoning_content
