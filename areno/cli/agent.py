@@ -17,6 +17,13 @@ from types import SimpleNamespace
 from typing import Any
 
 import click
+from rich.console import Console, Group, RenderableType
+from rich.json import JSON
+from rich.panel import Panel
+from rich.pretty import Pretty
+from rich.rule import Rule
+from rich.syntax import Syntax
+from rich.text import Text
 
 DEFAULT_KNOWLEDGE_FILE = Path(__file__).resolve().parents[1] / "agentic" / "coding" / "ops_knowledge.md"
 DEFAULT_KNOWLEDGE = DEFAULT_KNOWLEDGE_FILE.read_text(encoding="utf-8")
@@ -35,6 +42,7 @@ RED = "\x1b[38;2;240;113;120m"
 MUTED = "\x1b[38;2;103;110;149m"
 WHITE = "\x1b[38;2;166;172;205m"
 GREEN = "\x1b[38;2;195;232;141m"
+AGENT_CONSOLE = Console()
 
 SYSTEM_TEMPLATE = """You are an AReno operations coding agent.
 
@@ -355,14 +363,14 @@ async def _prompt_value_async(question: str, *, default: str = "") -> str:
     if not sys.stdin.isatty():
         return default
     _load_prompt_toolkit()
-    from prompt_toolkit.formatted_text import ANSI
+    from prompt_toolkit.formatted_text import HTML
     from prompt_toolkit.patch_stdout import patch_stdout
 
     suffix = f" [{default}]" if default else ""
-    click.echo(f"{MUTED}{question}{suffix}{RESET}")
+    AGENT_CONSOLE.print(Text(f"{question}{suffix}", style="dim"))
     session = _create_prompt_session()
     with patch_stdout():
-        value = await session.prompt_async(ANSI(f"{CYAN}hint>{RESET} "))
+        value = await session.prompt_async(HTML('<style fg="#89ddff">❯</style> '))
     if value == PROMPT_PAUSE:
         return default
     return str(value or default)
@@ -394,15 +402,17 @@ def _create_prompt_session() -> Any:
     return PromptSession(
         key_bindings=bindings,
         bottom_toolbar=lambda: HTML(
-            '<style bg="#1e1e2e" fg="#89ddff"> Enter </style>'
-            '<style fg="#a6accd"> queue hint </style>'
-            '<style bg="#1e1e2e" fg="#ffcb6b"> Esc/Ctrl-C </style>'
-            '<style fg="#a6accd"> pause current execution </style>'
+            '<style fg="#89ddff"> Enter </style>'
+            '<style fg="#a6accd">send hint</style>'
+            '<style fg="#676e95">  ·  </style>'
+            '<style fg="#c792ea">Esc/Ctrl-C</style>'
+            '<style fg="#a6accd"> pause execution</style>'
         ),
-        erase_when_done=False,
+        erase_when_done=True,
         style=Style.from_dict(
             {
-                "bottom-toolbar": "bg:#1e1e2e #a6accd",
+                "bottom-toolbar": "bg:#11131a #a6accd",
+                "": "#a6accd",
             }
         ),
     )
@@ -418,13 +428,14 @@ class AgentConsoleUI:
 
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
+        self.console = AGENT_CONSOLE
 
     def run(self) -> int:
         _load_prompt_toolkit()
         from prompt_toolkit.patch_stdout import patch_stdout
 
         with patch_stdout():
-            self.write_panel("areno agent", _banner_text(self.args.instruction, Path(self.args.repo).resolve(), self.args.model))
+            self.write_panel("areno agent", _banner_renderable(self.args.instruction, Path(self.args.repo).resolve(), self.args.model))
             try:
                 return asyncio.run(_main_async(self.args, ui=self))
             except BaseException as exc:  # noqa: BLE001 - surface uncaught agent failures before exiting.
@@ -449,15 +460,19 @@ class AgentConsoleUI:
     def command_output_event(self, event: dict[str, Any]) -> None:
         kind = event.get("kind")
         if kind == "start":
-            self.write(f"\n{MAGENTA}{BOLD}━━ command output ━━{RESET}\n")
-            self.write(f"{MAGENTA}$ {event.get('command') or ''}{RESET}\n")
-            self.write(f"{MUTED}timeout_s: {event.get('timeout_s')}{RESET}\n")
+            command = str(event.get("command") or "")
+            self.console.print(Rule("command output", style="bright_black"))
+            self.console.print(Syntax(command, "bash", theme="material", word_wrap=True), soft_wrap=True)
+            self.console.print(Text(f"timeout_s: {event.get('timeout_s')}", style="dim"))
         elif kind == "line":
             stream = str(event.get("stream") or "stdout")
             line = str(event.get("line") or "").rstrip()
-            prefix = RED if stream == "stderr" else CYAN
-            body = RED if stream == "stderr" else WHITE
-            self.write(f"{prefix}{stream}>{RESET} {body}{line}{RESET}\n")
+            prefix_style = "#f07178" if stream == "stderr" else "#89ddff"
+            body_style = "#f07178" if stream == "stderr" else "#a6accd"
+            text = Text()
+            text.append(f"{stream}> ", style=prefix_style)
+            text.append(line, style=body_style)
+            self.console.print(text, soft_wrap=True)
         elif kind == "end":
             skipped = int(event.get("skipped_stream_lines") or 0)
             returncode = event.get("returncode")
@@ -470,8 +485,8 @@ class AgentConsoleUI:
                 summary += " timed_out=true"
             if skipped:
                 summary += f" streamed_screened={skipped} skipped_lines"
-            color = RED if timed_out or returncode not in (0, None) else GREEN
-            self.write(f"{color}{BOLD}━━ {summary} ━━{RESET}\n")
+            style = "#f07178" if timed_out or returncode not in (0, None) else "#89ddff"
+            self.console.print(Rule(summary, style=style))
 
     def judgment(self, judgment: dict[str, Any]) -> None:
         done = bool(judgment.get("done"))
@@ -481,11 +496,21 @@ class AgentConsoleUI:
     def done(self, submitted: dict[str, Any]) -> None:
         self.write_panel("done", _pretty_value(submitted))
 
-    def write_panel(self, title: str, body: str) -> None:
-        self.write(_text_panel(title, body))
+    def write_panel(self, title: str, body: str | RenderableType) -> None:
+        self.console.print(
+            Panel(
+                _renderable_from_body(body),
+                title=title,
+                title_align="left",
+                border_style="bright_black",
+                style="#a6accd",
+                padding=(0, 1),
+                expand=True,
+            )
+        )
 
     def write(self, text: str) -> None:
-        print(text, end="", flush=True)
+        self.console.print(Text.from_ansi(text), end="")
 
 
 class InteractiveAgentInput:
@@ -504,9 +529,11 @@ class InteractiveAgentInput:
         if not sys.stdin.isatty():
             return
         _load_prompt_toolkit()
-        self.ui.write(
-            f"{MUTED}interactive: type a hint then Enter to send it on the next model turn; "
-            f"press Esc to pause current execution.{RESET}\n"
+        self.ui.console.print(
+            Text(
+                "interactive: type a hint then Enter to send it on the next model turn; Esc pauses execution.",
+                style="dim",
+            )
         )
         self._prompt_task = asyncio.create_task(self._prompt_loop())
 
@@ -552,14 +579,14 @@ class InteractiveAgentInput:
             self.ui.write_panel("user hint", hint)
 
     async def _prompt_loop(self) -> None:
-        from prompt_toolkit.formatted_text import ANSI
+        from prompt_toolkit.formatted_text import HTML
         from prompt_toolkit.patch_stdout import patch_stdout
 
         session = _create_prompt_session()
         while not self._stop:
             try:
                 with patch_stdout():
-                    hint = await session.prompt_async(ANSI(f"{CYAN}hint>{RESET} "))
+                    hint = await session.prompt_async(HTML('<style fg="#89ddff">❯</style> '))
             except EOFError:
                 self.workspace.interrupt_requested = True
                 self._paused.set()
@@ -569,9 +596,8 @@ class InteractiveAgentInput:
             if hint == PROMPT_PAUSE:
                 self.workspace.interrupt_requested = True
                 self._paused.set()
-                self.ui.write(
-                    f"\n{YELLOW}{BOLD}paused{RESET} "
-                    f"{MUTED}current command will stop; enter hint to continue.{RESET}\n"
+                self.ui.console.print(
+                    Text("paused: current command will stop; enter a hint to continue.", style="#ffcb6b")
                 )
                 continue
             hint = str(hint).strip()
@@ -839,7 +865,18 @@ def _banner_text(instruction: str, root: Path, model: str) -> str:
     return f"model: {model}\nworkspace: {root}\ngoal: {instruction}"
 
 
-def _format_tool_arguments(tool_name: str, raw: str) -> str:
+def _banner_renderable(instruction: str, root: Path, model: str) -> RenderableType:
+    text = Text()
+    text.append("model: ", style="dim")
+    text.append(model, style="#89ddff")
+    text.append("\nworkspace: ", style="dim")
+    text.append(str(root), style="#a6accd")
+    text.append("\ngoal: ", style="dim")
+    text.append(instruction, style="#a6accd")
+    return text
+
+
+def _format_tool_arguments(tool_name: str, raw: str) -> RenderableType:
     try:
         parsed = json.loads(raw or "{}")
     except json.JSONDecodeError:
@@ -847,14 +884,16 @@ def _format_tool_arguments(tool_name: str, raw: str) -> str:
     if tool_name == "run_command":
         command = str(parsed.get("command", ""))
         timeout = parsed.get("timeout_s")
-        rows = [f"{MUTED}command{RESET}:\n{WHITE}{command}{RESET}"]
+        rows: list[RenderableType] = [Text("command", style="dim"), Syntax(command, "bash", theme="material", word_wrap=True)]
         if timeout is not None:
-            rows.append(f"{MUTED}timeout_s{RESET}: {CYAN}{timeout}{RESET}")
-        return "\n".join(rows)
+            timeout_text = Text("timeout_s: ", style="dim")
+            timeout_text.append(str(timeout), style="#89ddff")
+            rows.append(timeout_text)
+        return Group(*rows)
     return _pretty_value(parsed)
 
 
-def _format_tool_result(tool_name: str, raw: str) -> str:
+def _format_tool_result(tool_name: str, raw: str) -> RenderableType:
     try:
         parsed = json.loads(raw or "{}")
     except json.JSONDecodeError:
@@ -864,32 +903,39 @@ def _format_tool_result(tool_name: str, raw: str) -> str:
     return _pretty_value(parsed)
 
 
-def _format_run_command_result(parsed: dict[str, Any]) -> str:
+def _format_run_command_result(parsed: dict[str, Any]) -> RenderableType:
     returncode = parsed.get("returncode")
     timed_out = bool(parsed.get("timed_out"))
     interrupted = bool(parsed.get("interrupted"))
     screened = bool(parsed.get("screened"))
-    rows = [
-        f"{MUTED}command{RESET}:\n{WHITE}{parsed.get('command') or ''}{RESET}",
-        f"{MUTED}returncode{RESET}: {_colored_scalar(returncode)}",
-        f"{MUTED}screened{RESET}: {_colored_scalar('yes' if screened else 'no')}",
-        f"{MUTED}streamed{RESET}: {_colored_scalar(parsed.get('streamed_lines', 0))}",
+    rows: list[RenderableType] = [
+        Text("command", style="dim"),
+        Syntax(str(parsed.get("command") or ""), "bash", theme="material", word_wrap=True),
+        _kv_text("returncode", returncode),
+        _kv_text("screened", "yes" if screened else "no"),
+        _kv_text("streamed", parsed.get("streamed_lines", 0)),
     ]
     skipped = int(parsed.get("skipped_stream_lines") or 0)
     if skipped:
-        rows.append(f"{MUTED}live_skipped{RESET}: {_colored_scalar(skipped)}")
+        rows.append(_kv_text("live_skipped", skipped))
     if interrupted:
-        rows.append(f"{MUTED}interrupted{RESET}: {RED}yes{RESET}")
+        rows.append(_kv_text("interrupted", "yes", value_style="#f07178"))
     if timed_out:
-        rows.append(f"{MUTED}timed_out{RESET}: {RED}yes{RESET}")
+        rows.append(_kv_text("timed_out", "yes", value_style="#f07178"))
     output = str(parsed.get("output") or parsed.get("stdout") or parsed.get("stderr") or "")
     if output:
         title = "screened output" if screened else "output"
-        rows.append(f"{MUTED}{title}{RESET}:\n{WHITE}{output}{RESET}")
-    return "\n".join(rows)
+        rows.append(Text(title, style="dim"))
+        rows.append(Syntax(output, "text", theme="material", word_wrap=True))
+    return Group(*rows)
 
 
-def _pretty_value(value: Any, *, indent: int = 0) -> str:
+def _pretty_value(value: Any, *, indent: int = 0) -> RenderableType:
+    if indent == 0:
+        try:
+            return JSON(_json_dumps(value))
+        except Exception:
+            return Pretty(value)
     prefix = " " * indent
     if isinstance(value, dict):
         if not value:
@@ -929,6 +975,21 @@ def _colored_scalar(value: Any) -> str:
     if "\n" in text:
         return f"{WHITE}{text}{RESET}"
     return f"{WHITE}{text}{RESET}"
+
+
+def _kv_text(key: str, value: Any, *, value_style: str = "#89ddff") -> Text:
+    text = Text()
+    text.append(f"{key}: ", style="dim")
+    text.append(str(value), style=value_style)
+    return text
+
+
+def _renderable_from_body(body: str | RenderableType) -> RenderableType:
+    if isinstance(body, str):
+        if "\x1b[" in body:
+            return Text.from_ansi(body)
+        return Text(body, style="#a6accd")
+    return body
 
 
 def _text_panel(title: str, body: str) -> str:
