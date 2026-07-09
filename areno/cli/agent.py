@@ -17,9 +17,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import click
-from rich.console import Console, Group, RenderableType
-from rich.markdown import Markdown
-from rich.syntax import Syntax
+from rich.console import Console
 from rich.text import Text
 
 DEFAULT_KNOWLEDGE_FILE = Path(__file__).resolve().parents[1] / "agentic" / "coding" / "ops_knowledge.md"
@@ -458,58 +456,33 @@ class AgentConsoleUI:
     def startup(self) -> None:
         root = Path(self.args.repo).resolve()
         self.console.print(_banner_renderable(self.args.instruction, root, self.args.model))
-        if sys.stdout.isatty():
-            self.console.print(_startup_help(), soft_wrap=True)
 
     def agent_event(self, event: str, payload: dict[str, Any]) -> None:
         if event == "assistant":
             content = payload.get("content")
             if content:
-                self.write_panel("agent", Markdown(str(content)), direction="in", right=self.args.model)
+                self.console.print(Text(str(content), style="#a6accd"), soft_wrap=True)
             calls = payload.get("tool_calls") or []
             if calls:
                 call = calls[0]
                 tool_name = call["function"]["name"]
-                arguments = call["function"].get("arguments", "")
-                if tool_name != "run_command":
-                    summary = _tool_call_summary(tool_name, arguments)
-                    if tool_name in {"read_file", "inspect_tree", "rg", "search"}:
-                        self._print_header(tool_name, summary, direction="out")
-                    else:
-                        self.write_panel(
-                            tool_name,
-                            _format_tool_arguments(tool_name, arguments),
-                            direction="out",
-                            right=summary,
-                        )
+                self.console.print(_tool_call_line(tool_name, call["function"].get("arguments", "")))
         elif event == "tool":
-            name = str(payload.get("name") or "tool")
-            content = str(payload.get("content", ""))
-            if name == "run_command" and _run_command_was_streamed(content):
-                return
-            self.write_panel(
-                name,
-                _format_tool_result(name, content),
-                direction="in",
-                right=_tool_result_summary(name, content),
-            )
+            return
 
     def command_output_event(self, event: dict[str, Any]) -> None:
         kind = event.get("kind")
         if kind == "start":
             command = str(event.get("command") or "")
-            self._print_header("shell", f"timeout: {event.get('timeout_s')}", direction="out")
             text = Text()
-            text.append("$ ", style="dim")
+            text.append("\n$ ", style="#89ddff")
             text.append(command, style="#a6accd")
             self.console.print(text, soft_wrap=True)
         elif kind == "line":
             stream = str(event.get("stream") or "stdout")
             line = str(event.get("line") or "").rstrip()
             body_style = "#f07178" if stream == "stderr" else "#a6accd"
-            text = Text()
-            text.append(line, style=body_style)
-            self.console.print(text, soft_wrap=True)
+            self.console.print(Text(line, style=body_style), soft_wrap=True)
         elif kind == "end":
             skipped = int(event.get("skipped_stream_lines") or 0)
             returncode = event.get("returncode")
@@ -523,32 +496,22 @@ class AgentConsoleUI:
             if skipped:
                 summary += f" streamed_screened={skipped} skipped_lines"
             style = "#f07178" if timed_out or returncode not in (0, None) else "#89ddff"
-            self.console.print(_shell_exit_line(summary, style=style))
+            self.console.print(Text(summary, style=style))
 
     def judgment(self, judgment: dict[str, Any]) -> None:
         done = bool(judgment.get("done"))
         title = "judge: done" if done else "judge: continue"
-        self.write_panel(title, _pretty_value(judgment))
+        self.write_panel(title, _plain_status(judgment, keys=("reason", "feedback")))
 
     def done(self, submitted: dict[str, Any]) -> None:
-        self.write_panel("done", _pretty_value(submitted))
+        self.write_panel("done", _plain_status(submitted, keys=("status", "summary", "reason")))
 
-    def write_panel(
-        self,
-        title: str,
-        body: str | RenderableType,
-        *,
-        direction: str = "in",
-        right: str = "",
-    ) -> None:
-        self._print_header(title, right, direction=direction)
-        self.console.print(_renderable_from_body(body), soft_wrap=True)
+    def write_panel(self, title: str, body: str) -> None:
+        self.console.print(_section_title(title))
+        self.console.print(Text(str(body), style="#a6accd"), soft_wrap=True)
 
     def write(self, text: str) -> None:
         self.console.print(Text.from_ansi(text), end="")
-
-    def _print_header(self, left: str, right: str = "", *, direction: str = "in") -> None:
-        self.console.print(_header_line(left, right, self.console.size.width, direction=direction))
 
 
 class InteractiveAgentInput:
@@ -915,7 +878,7 @@ def _banner_text(instruction: str, root: Path, model: str) -> str:
     return f"model: {model}\nworkspace: {root}\ngoal: {instruction}"
 
 
-def _banner_renderable(instruction: str, root: Path, model: str) -> RenderableType:
+def _banner_renderable(instruction: str, root: Path, model: str) -> Text:
     text = Text()
     text.append("AReno operations agent\n", style="#89ddff bold")
     text.append("model: ", style="dim")
@@ -925,25 +888,6 @@ def _banner_renderable(instruction: str, root: Path, model: str) -> RenderableTy
     text.append("\n")
     text.append("goal: ", style="dim")
     text.append(instruction, style="#a6accd")
-    return text
-
-
-def _startup_help() -> Text:
-    text = Text()
-    text.append("Use ", style="dim")
-    text.append("Enter", style="#89ddff")
-    text.append(" to queue guidance, ", style="dim")
-    text.append("Esc/Ctrl-C", style="#c792ea")
-    text.append(" to pause the current run.\n", style="dim")
-    text.append("Commands stream as they run. Tool results are summarized; full context stays in the session.\n", style="dim")
-    text.append("Agent shortcuts:\n", style="dim")
-    text.append("  ", style="dim")
-    text.append("smoke-infer / smoke-train", style="#89ddff")
-    text.append(" for memory checks, ", style="dim")
-    text.append("drop-rollout-state", style="#89ddff")
-    text.append(" for RL memory pressure, ", style="dim")
-    text.append("modelscope", style="#89ddff")
-    text.append(" for remote model refs.\n", style="dim")
     return text
 
 
@@ -957,302 +901,46 @@ def _short_path(path: Path, *, max_len: int = 34) -> str:
     return "…" + text[-(max_len - 1) :]
 
 
-def _format_tool_arguments(tool_name: str, raw: str) -> RenderableType:
+def _tool_call_line(tool_name: str, raw: str) -> Text:
+    summary = ""
     try:
         parsed = json.loads(raw or "{}")
     except json.JSONDecodeError:
-        return raw
-    if tool_name == "run_command":
-        command = str(parsed.get("command", ""))
-        timeout = parsed.get("timeout_s")
-        command_text = Text()
-        command_text.append("$ ", style="dim")
-        command_text.append(command, style="#a6accd")
-        rows: list[RenderableType] = [command_text]
-        if timeout is not None:
-            timeout_text = Text("timeout_s: ", style="dim")
-            timeout_text.append(str(timeout), style="#89ddff")
-            rows.append(timeout_text)
-        return Group(*rows)
-    return _format_mapping(parsed)
-
-
-def _format_tool_result(tool_name: str, raw: str) -> RenderableType:
-    try:
-        parsed = json.loads(raw or "{}")
-    except json.JSONDecodeError:
-        return raw
-    if tool_name == "run_command":
-        return _format_run_command_result(parsed)
-    if tool_name == "read_file":
-        return _format_read_file_result(parsed)
-    if tool_name == "inspect_tree":
-        return _format_tree_result(parsed)
-    if tool_name in {"rg", "search"}:
-        return _format_search_result(parsed)
-    return _format_mapping(parsed)
-
-
-def _tool_call_summary(tool_name: str, raw: str) -> str:
-    try:
-        parsed = json.loads(raw or "{}")
-    except json.JSONDecodeError:
-        return ""
-    if tool_name == "read_file":
-        return str(parsed.get("path") or "")
-    if tool_name in {"rg", "search"}:
-        parts = [str(parsed.get("pattern") or parsed.get("query") or "").strip()]
-        path = str(parsed.get("path") or "").strip()
-        if path and path != ".":
-            parts.append(path)
-        return " · ".join(part for part in parts if part)
-    if tool_name == "inspect_tree":
-        return str(parsed.get("path") or ".")
-    return ""
-
-
-def _tool_result_summary(tool_name: str, raw: str) -> str:
-    try:
-        parsed = json.loads(raw or "{}")
-    except json.JSONDecodeError:
-        return ""
-    if tool_name == "read_file":
-        path = str(parsed.get("path") or "")
-        start = parsed.get("start_line")
-        end = parsed.get("end_line")
-        if start is not None and end is not None:
-            return f"{path} · lines {start}-{end}"
-        return path
-    if tool_name == "inspect_tree":
-        tree = parsed.get("tree")
-        count = len(tree) if isinstance(tree, list) else 0
-        return f"{count} entries"
-    if tool_name in {"rg", "search"}:
-        matches = parsed.get("matches")
-        count = len(matches) if isinstance(matches, list) else 0
-        return f"{count} matches"
-    return ""
-
-
-def _run_command_was_streamed(raw: str) -> bool:
-    try:
-        parsed = json.loads(raw or "{}")
-    except json.JSONDecodeError:
-        return False
-    return int(parsed.get("streamed_lines") or 0) > 0
-
-
-def _format_read_file_result(parsed: dict[str, Any]) -> RenderableType:
-    path = str(parsed.get("path") or "")
-    content = str(parsed.get("content") or "")
-    language = _language_for_path(path)
-    return Syntax(content, language, theme="material", line_numbers=False, word_wrap=True)
-
-
-def _format_tree_result(parsed: dict[str, Any]) -> RenderableType:
-    tree = parsed.get("tree")
-    if not isinstance(tree, list):
-        return _format_mapping(parsed)
-    text = "\n".join(str(item) for item in tree)
-    rows: list[RenderableType] = [Syntax(text or "<empty>", "text", theme="material", word_wrap=True)]
-    if parsed.get("truncated"):
-        rows.append(Text("truncated", style="dim"))
-    return Group(*rows)
-
-
-def _format_search_result(parsed: dict[str, Any]) -> RenderableType:
-    matches = parsed.get("matches")
-    if not isinstance(matches, list):
-        return _format_mapping(parsed)
-    lines: list[str] = []
-    for match in matches[:80]:
-        if isinstance(match, dict):
-            path = match.get("path", "")
-            line = match.get("line", "")
-            text = match.get("text", "")
-            lines.append(f"{path}:{line}: {text}")
-        else:
-            lines.append(str(match))
-    if parsed.get("truncated"):
-        lines.append("<truncated>")
-    return Syntax("\n".join(lines) or "<no matches>", "text", theme="material", word_wrap=True)
-
-
-def _format_run_command_result(parsed: dict[str, Any]) -> RenderableType:
-    returncode = parsed.get("returncode")
-    timed_out = bool(parsed.get("timed_out"))
-    interrupted = bool(parsed.get("interrupted"))
-    screened = bool(parsed.get("screened"))
-    streamed = int(parsed.get("streamed_lines") or 0)
-    if streamed > 0:
-        parts = [f"returncode={returncode}", f"streamed={streamed}"]
-        if interrupted:
-            parts.append("interrupted=true")
-        if timed_out:
-            parts.append("timed_out=true")
-        skipped = int(parsed.get("skipped_stream_lines") or 0)
-        if skipped:
-            parts.append(f"screened={skipped}")
-        return Text(" ".join(parts), style="dim")
-    rows: list[RenderableType] = [
-        Text("command", style="dim"),
-        Syntax(str(parsed.get("command") or ""), "bash", theme="material", word_wrap=True),
-        _kv_text("returncode", returncode),
-        _kv_text("screened", "yes" if screened else "no"),
-        _kv_text("streamed", streamed),
-    ]
-    skipped = int(parsed.get("skipped_stream_lines") or 0)
-    if skipped:
-        rows.append(_kv_text("live_skipped", skipped))
-    if interrupted:
-        rows.append(_kv_text("interrupted", "yes", value_style="#f07178"))
-    if timed_out:
-        rows.append(_kv_text("timed_out", "yes", value_style="#f07178"))
-    output = str(parsed.get("output") or parsed.get("stdout") or parsed.get("stderr") or "")
-    if output:
-        title = "screened output" if screened else "output"
-        rows.append(Text(title, style="dim"))
-        rows.append(Syntax(output, "text", theme="material", word_wrap=True))
-    return Group(*rows)
-
-
-def _pretty_value(value: Any, *, indent: int = 0) -> RenderableType:
-    if indent == 0:
-        return _format_mapping(value) if isinstance(value, dict) else Text(str(value), style="#a6accd")
-    prefix = " " * indent
-    if isinstance(value, dict):
-        if not value:
-            return f"{prefix}{MUTED}<empty>{RESET}"
-        rows: list[str] = []
-        for key, item in value.items():
-            label = f"{prefix}{BLUE}{key}{RESET}"
-            if isinstance(item, dict | list):
-                rows.append(f"{label}:")
-                rows.append(_pretty_value(item, indent=indent + 2))
-            else:
-                rows.append(f"{label}: {_colored_scalar(item)}")
-        return "\n".join(rows)
-    if isinstance(value, list):
-        if not value:
-            return f"{prefix}{MUTED}<empty>{RESET}"
-        rows = []
-        for idx, item in enumerate(value):
-            label = f"{prefix}{MUTED}[{idx}]{RESET}"
-            if isinstance(item, dict | list):
-                rows.append(f"{label}:")
-                rows.append(_pretty_value(item, indent=indent + 2))
-            else:
-                rows.append(f"{label}: {_colored_scalar(item)}")
-        return "\n".join(rows)
-    return f"{prefix}{_colored_scalar(value)}"
-
-
-def _format_mapping(value: dict[str, Any]) -> RenderableType:
-    rows: list[RenderableType] = []
-    for key, item in value.items():
-        if key in {"content", "output", "stdout", "stderr"} and isinstance(item, str) and "\n" in item:
-            rows.append(Text(str(key), style="dim"))
-            rows.append(Syntax(item, "text", theme="material", word_wrap=True))
-            continue
-        if isinstance(item, dict):
-            rows.append(_kv_text(str(key), "<object>", value_style="dim"))
-            rows.append(_format_mapping(item))
-            continue
-        if isinstance(item, list):
-            rows.append(_kv_text(str(key), _compact_list(item)))
-            continue
-        rows.append(_kv_text(str(key), item))
-    return Group(*(rows or [Text("<empty>", style="dim")]))
-
-
-def _compact_list(value: list[Any], *, limit: int = 8) -> str:
-    items = [str(item) for item in value[:limit]]
-    suffix = f", … +{len(value) - limit}" if len(value) > limit else ""
-    return "[" + ", ".join(items) + suffix + "]"
-
-
-def _language_for_path(path: str) -> str:
-    suffix = Path(path).suffix.lower()
-    return {
-        ".py": "python",
-        ".json": "json",
-        ".jsonl": "json",
-        ".md": "markdown",
-        ".rst": "rst",
-        ".sh": "bash",
-        ".bash": "bash",
-        ".zsh": "bash",
-        ".toml": "toml",
-        ".yaml": "yaml",
-        ".yml": "yaml",
-        ".js": "javascript",
-        ".ts": "typescript",
-        ".tsx": "tsx",
-        ".css": "css",
-        ".html": "html",
-    }.get(suffix, "text")
-
-
-def _colored_scalar(value: Any) -> str:
-    if value is None:
-        return f"{MUTED}null{RESET}"
-    if isinstance(value, bool):
-        return f"{GREEN if value else RED}{str(value).lower()}{RESET}"
-    if isinstance(value, int | float):
-        return f"{CYAN}{value}{RESET}"
-    text = str(value)
-    if "\n" in text:
-        return f"{WHITE}{text}{RESET}"
-    return f"{WHITE}{text}{RESET}"
-
-
-def _kv_text(key: str, value: Any, *, value_style: str = "#89ddff") -> Text:
+        parsed = {}
+    if isinstance(parsed, dict):
+        if tool_name == "read_file":
+            summary = str(parsed.get("path") or "")
+        elif tool_name == "inspect_tree":
+            summary = str(parsed.get("path") or ".")
+        elif tool_name in {"rg", "search"}:
+            summary = str(parsed.get("pattern") or parsed.get("query") or "")
+        elif tool_name == "run_command":
+            summary = str(parsed.get("command") or "")
     text = Text()
-    text.append(f"{key}: ", style="dim")
-    text.append(str(value), style=value_style)
+    text.append("tool call: ", style="dim")
+    text.append(tool_name, style="#89ddff")
+    if summary:
+        text.append(" ")
+        text.append(summary, style="dim")
     return text
 
 
-def _renderable_from_body(body: str | RenderableType) -> RenderableType:
-    if isinstance(body, str):
-        if "\x1b[" in body:
-            return Text.from_ansi(body)
-        return Text(body, style="#a6accd")
-    return body
+def _plain_status(payload: dict[str, Any], *, keys: tuple[str, ...]) -> str:
+    rows: list[str] = []
+    for key in keys:
+        value = payload.get(key)
+        if value is None or value == "":
+            continue
+        rows.append(f"{key}: {value}")
+    if rows:
+        return "\n".join(rows)
+    return "complete"
 
 
-def _header_line(left: str, right: str, width: int, *, direction: str = "in") -> Text:
-    arrow = "▶" if direction == "out" else "◀"
-    left_text = Text()
-    left_text.append("▎", style="dim")
-    left_text.append(arrow, style="#89ddff")
-    left_text.append(" ", style="dim")
-    left_text.append(left, style="#89ddff bold")
-    right_text = Text(right.strip(), style="dim") if right.strip() else Text()
-    line = Text()
-    line.append_text(left_text)
-    if right_text:
-        remaining = width - left_text.cell_len - right_text.cell_len
-        if remaining >= 3:
-            line.append(" ", style="default")
-            line.append("─" * (remaining - 2), style="dim")
-            line.append(" ", style="default")
-            line.append_text(right_text)
-            return line
-        line.append(" ", style="default")
-        line.append_text(right_text)
-        return line
-    remaining = width - left_text.cell_len
-    if remaining >= 2:
-        line.append(" ", style="default")
-        line.append("─" * (remaining - 1), style="dim")
-    return line
-
-
-def _shell_exit_line(summary: str, *, style: str) -> Text:
+def _section_title(title: str) -> Text:
     text = Text()
-    text.append("▎", style="dim")
-    text.append(f" {summary} ", style=f"{style} reverse")
+    text.append("\n")
+    text.append(title, style="#89ddff bold")
     return text
 
 
