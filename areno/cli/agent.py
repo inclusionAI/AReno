@@ -942,7 +942,10 @@ def _format_tool_arguments(tool_name: str, raw: str) -> RenderableType:
     if tool_name == "run_command":
         command = str(parsed.get("command", ""))
         timeout = parsed.get("timeout_s")
-        rows: list[RenderableType] = [Text("command", style="dim"), Syntax(command, "bash", theme="material", word_wrap=True)]
+        command_text = Text()
+        command_text.append("$ ", style="dim")
+        command_text.append(command, style="#a6accd")
+        rows: list[RenderableType] = [command_text]
         if timeout is not None:
             timeout_text = Text("timeout_s: ", style="dim")
             timeout_text.append(str(timeout), style="#89ddff")
@@ -1014,12 +1017,23 @@ def _format_run_command_result(parsed: dict[str, Any]) -> RenderableType:
     timed_out = bool(parsed.get("timed_out"))
     interrupted = bool(parsed.get("interrupted"))
     screened = bool(parsed.get("screened"))
+    streamed = int(parsed.get("streamed_lines") or 0)
+    if streamed > 0:
+        parts = [f"returncode={returncode}", f"streamed={streamed}"]
+        if interrupted:
+            parts.append("interrupted=true")
+        if timed_out:
+            parts.append("timed_out=true")
+        skipped = int(parsed.get("skipped_stream_lines") or 0)
+        if skipped:
+            parts.append(f"screened={skipped}")
+        return Text(" ".join(parts), style="dim")
     rows: list[RenderableType] = [
         Text("command", style="dim"),
         Syntax(str(parsed.get("command") or ""), "bash", theme="material", word_wrap=True),
         _kv_text("returncode", returncode),
         _kv_text("screened", "yes" if screened else "no"),
-        _kv_text("streamed", parsed.get("streamed_lines", 0)),
+        _kv_text("streamed", streamed),
     ]
     skipped = int(parsed.get("skipped_stream_lines") or 0)
     if skipped:
