@@ -432,29 +432,61 @@ class AgentConsoleUI:
 
 
 class InteractiveAgentInput:
-    """Read Esc interrupts and line hints without blocking the asyncio loop."""
+    """Read Esc pauses and line hints without blocking the asyncio loop."""
 
     def __init__(self, ui: AgentConsoleUI, workspace: Any) -> None:
         self.ui = ui
         self.workspace = workspace
         self._hints: queue.Queue[str] = queue.Queue()
         self._stop = threading.Event()
+        self._paused = threading.Event()
+        self._prompt_visible = False
+        self._resume_after_pause = False
         self._thread: threading.Thread | None = None
 
     def start(self) -> None:
         if not sys.stdin.isatty():
             return
         self.ui.write(
-            f"{MUTED}interactive: type a hint then Enter to guide the next turn; press Esc to interrupt.{RESET}\n"
+            f"{MUTED}interactive: type a hint then Enter to send it on the next model turn; "
+            f"press Esc to pause current execution.{RESET}\n"
         )
+        self._show_prompt()
         self._thread = threading.Thread(target=self._read_input_loop, daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
         self._stop.set()
 
-    async def apply_pending(self, messages: list[dict[str, Any]]) -> bool:
-        interrupted = bool(getattr(self.workspace, "interrupt_requested", False))
+    async def apply_pending(self, messages: list[dict[str, Any]], phase: str = "before_turn") -> bool:
+        was_paused = await self._wait_if_paused()
+        self._apply_queued_hints(messages)
+        should_skip_current_tool = was_paused and phase == "after_assistant"
+        if should_skip_current_tool:
+            self._resume_after_pause = True
+        return not should_skip_current_tool
+
+    def consume_resume_after_pause(self) -> bool:
+        should_resume = self._resume_after_pause
+        self._resume_after_pause = False
+        return should_resume
+
+    async def _wait_if_paused(self) -> bool:
+        was_paused = False
+        while self._paused.is_set() and not self._stop.is_set():
+            was_paused = True
+            try:
+                hint = self._hints.get_nowait()
+            except queue.Empty:
+                await asyncio.sleep(0.1)
+                continue
+            self._queue_hint(hint)
+            self._paused.clear()
+            self.workspace.interrupt_requested = False
+            break
+        return was_paused
+
+    def _apply_queued_hints(self, messages: list[dict[str, Any]]) -> None:
         while True:
             try:
                 hint = self._hints.get_nowait()
@@ -462,7 +494,9 @@ class InteractiveAgentInput:
                 break
             messages.append({"role": "user", "content": f"User runtime hint:\n{hint}"})
             self.ui.write_panel("user hint", hint)
-        return not interrupted
+
+    def _queue_hint(self, hint: str) -> None:
+        self._hints.put(hint)
 
     def _read_input_loop(self) -> None:
         fd = sys.stdin.fileno()
@@ -477,20 +511,38 @@ class InteractiveAgentInput:
                     break
                 if char == "\x1b":
                     self.workspace.interrupt_requested = True
-                    self.ui.write(f"\n{RED}{BOLD}interrupt requested{RESET}\n")
-                    break
+                    self._paused.set()
+                    buffer.clear()
+                    self.ui.write(f"\n{YELLOW}{BOLD}paused{RESET} {MUTED}current command will stop; enter hint to continue.{RESET}\n")
+                    self._show_prompt()
+                    continue
                 if char in ("\r", "\n"):
                     hint = "".join(buffer).strip()
                     buffer.clear()
+                    if self._prompt_visible:
+                        self.ui.write("\n")
+                        self._prompt_visible = False
                     if hint:
                         self._hints.put(hint)
+                    elif self._paused.is_set():
+                        self._show_prompt()
+                    self._show_prompt()
                     continue
                 if char in ("\x7f", "\b"):
                     if buffer:
                         buffer.pop()
+                        self.ui.write("\b \b")
                     continue
                 if char.isprintable() or char in ("\t", " "):
+                    if not self._prompt_visible:
+                        self._show_prompt()
                     buffer.append(char)
+                    self.ui.write(char)
+
+    def _show_prompt(self) -> None:
+        if not self._prompt_visible:
+            self.ui.write(f"{CYAN}hint>{RESET} ")
+            self._prompt_visible = True
 
     @staticmethod
     @contextlib.contextmanager
@@ -546,10 +598,9 @@ async def _main_async(args: argparse.Namespace, *, ui: AgentConsoleUI) -> int:
                 on_event=ui.agent_event,
                 interaction_hook=interaction.apply_pending,
             )
-            if workspace.interrupt_requested:
-                ui.write_panel("interrupted", "agent interrupted by Esc")
-                return 130
             if workspace.submitted is None:
+                if interaction.consume_resume_after_pause():
+                    continue
                 ui.write_panel("stopped", "agent stopped without submit")
                 return 2
             judgment = await _judge_goal_done(

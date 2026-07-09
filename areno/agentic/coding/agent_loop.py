@@ -330,7 +330,7 @@ async def run_conversation_turns(
 
     turns: list[AgentTrajectoryTurn] = []
     for _ in range(max_turns):
-        if interaction_hook is not None and not await interaction_hook(messages):
+        if interaction_hook is not None and not await interaction_hook(messages, "before_turn"):
             break
         response = await create_chat_completion_with_retry(
             client,
@@ -361,6 +361,8 @@ async def run_conversation_turns(
                 }
             )
             continue
+        if interaction_hook is not None and not await interaction_hook(messages, "after_assistant"):
+            break
         result = await asyncio.to_thread(_execute_tool_call, workspace, call)
         tool_message = {
             "role": "tool",
@@ -374,7 +376,7 @@ async def run_conversation_turns(
         _emit(on_event, "tool", tool_message)
         if call["function"]["name"] == "submit":
             break
-        if interaction_hook is not None and not await interaction_hook(messages):
+        if interaction_hook is not None and not await interaction_hook(messages, "after_tool"):
             break
     return turns
 
