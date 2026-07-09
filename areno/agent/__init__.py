@@ -1,6 +1,6 @@
-"""Reusable coding-agent loop and tools."""
+"""Reusable local agent loop and tools."""
 
-from areno.agentic.coding.agent_loop import (
+from areno.agent.agent_loop import (
     SYSTEM_PROMPT,
     TOOLS,
     initial_messages,
@@ -8,7 +8,7 @@ from areno.agentic.coding.agent_loop import (
     run_conversation_turns,
     run_single_task,
 )
-from areno.agentic.coding.coding_tools import CodingWorkspace, run_tool
+from areno.agent.tools import CodingWorkspace, run_tool
 
 __all__ = [
     "TOOLS",

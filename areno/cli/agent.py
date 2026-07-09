@@ -16,7 +16,7 @@ from typing import Any
 
 import click
 
-DEFAULT_KNOWLEDGE_FILE = Path(__file__).resolve().parents[1] / "agentic" / "coding" / "ops_knowledge.md"
+DEFAULT_KNOWLEDGE_FILE = Path(__file__).resolve().parents[1] / "agent" / "ops_knowledge.md"
 DEFAULT_KNOWLEDGE = DEFAULT_KNOWLEDGE_FILE.read_text(encoding="utf-8")
 CONFIG_FILE = Path.home() / ".areno" / "agent_config.json"
 DEFAULT_AGENT_TURN_LIMIT = 1_000_000
@@ -151,7 +151,7 @@ async def _refresh_knowledge_async(args: argparse.Namespace) -> int:
     context = _collect_refresh_context(repo)
     client = AsyncOpenAI(base_url=args.base_url, api_key=args.api_key, max_retries=0)
     try:
-        from areno.agentic.coding.agent_loop import create_chat_completion_with_retry
+        from areno.agent.agent_loop import create_chat_completion_with_retry
 
         response = await create_chat_completion_with_retry(
             client,
@@ -338,8 +338,8 @@ async def _main_async(args: argparse.Namespace, *, ui: AgentConsoleUI) -> int:
     except ImportError as exc:
         raise SystemExit("The agent CLI requires `openai`. Install it with `pip install openai`.") from exc
 
-    from areno.agentic.coding.agent_loop import run_conversation_turns
-    from areno.agentic.coding.coding_tools import CodingWorkspace
+    from areno.agent.agent_loop import run_conversation_turns
+    from areno.agent.tools import CodingWorkspace
 
     knowledge = _load_knowledge(Path(args.knowledge_file).expanduser())
     task = {
@@ -417,7 +417,7 @@ async def _judge_goal_done(
     messages: list[dict[str, Any]],
     command_history: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    from areno.agentic.coding.agent_loop import create_chat_completion_with_retry
+    from areno.agent.agent_loop import create_chat_completion_with_retry
 
     response = await create_chat_completion_with_retry(
         client,

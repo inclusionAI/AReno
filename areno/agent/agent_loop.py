@@ -8,7 +8,7 @@ import logging
 import re
 from typing import Any
 
-from areno.agentic.coding.coding_tools import CodingWorkspace, run_tool
+from areno.agent.tools import CodingWorkspace, run_tool
 from areno.api.agentic import AgentTrajectory, AgentTrajectoryTurn
 
 logger = logging.getLogger(__name__)

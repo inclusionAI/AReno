@@ -5,8 +5,8 @@ import shlex
 import sys
 import time
 
-from areno.agentic.coding import agent_loop
-from areno.agentic.coding.coding_tools import CodingWorkspace
+from areno.agent import agent_loop
+from areno.agent.tools import CodingWorkspace
 
 
 class _FakeCompletions:

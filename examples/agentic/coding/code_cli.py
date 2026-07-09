@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
-from areno.agentic.coding import CodingWorkspace, initial_messages, run_conversation_turns
+from areno.agent import CodingWorkspace, initial_messages, run_conversation_turns
 
 
 async def _main_async(args: argparse.Namespace) -> int:

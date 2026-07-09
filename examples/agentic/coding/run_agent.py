@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from areno.agentic.coding import run_agentic_coding_loop
+from areno.agent import run_agentic_coding_loop
 
 
 async def run_agent(ctx, batch):
