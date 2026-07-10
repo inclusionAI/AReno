@@ -68,11 +68,20 @@ jobs:
           )
           try:
               with urllib.request.urlopen(request, timeout=10) as response:
-                  print(response.read().decode("utf-8"))
+                  body = response.read().decode("utf-8")
           except TimeoutError as exc:
               print(f"push admit audit request timed out after 10s: {exc}", file=sys.stderr)
               raise
           except urllib.error.HTTPError as exc:
               print(exc.read().decode("utf-8", errors="replace"), file=sys.stderr)
               raise
+
+          print(body)
+          result = json.loads(body)
+          if result.get("managed") and not result.get("admitted"):
+              alert = result.get("alert") or {}
+              if alert.get("sent") is False:
+                  print(f"push alert was not sent: {alert.get('message')}", file=sys.stderr)
+              print("push admit audit failed: managed user pushed an unadmitted revision", file=sys.stderr)
+              sys.exit(1)
           PY
