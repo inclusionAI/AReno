@@ -50,7 +50,7 @@ jobs:
                       digest.update(chunk)
               digest.update(b"\0")
 
-          repo = (os.environ.get("PUSH_ADMIT_REPO") or os.environ["GITHUB_REPOSITORY"]).strip().strip("/").rsplit("/", 1)[-1]
+          repo = (os.environ.get("PUSH_ADMIT_REPO") or os.environ["GITHUB_REPOSITORY"]).strip().strip("/").rsplit("/", 1)[-1].lower()
           payload = {
               "repo": repo,
               "branch": os.environ["GITHUB_REF_NAME"],
