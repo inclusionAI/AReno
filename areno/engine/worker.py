@@ -60,7 +60,8 @@ class ArenoWorker:
         self.model = build_model_on_device(config, self.device)
         if config.model_path is not None and not config.dummy_load:
             load_model_weights(self.model, config.model, config.model_path)
-        self.model = torch.compile(self.model)
+        if config.runtime.compile_model:
+            self.model = torch.compile(self.model)
         opt = config.optimizer
         self.optimizer = build_optimizer(self.model.parameters(), opt, ctx)
         self.grad_clip_norm = opt.grad_clip_norm

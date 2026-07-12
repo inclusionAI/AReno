@@ -119,6 +119,68 @@ class ConfigAndDataTest(unittest.TestCase):
         self.assertEqual(cfg.runtime.attn_backend, "native")
         self.assertEqual(model.attn_backend, "native")
 
+    def test_runtime_config_disables_compile_for_bf16_on_turing_gpu(self):
+        """T4 cannot compile BF16 backward graphs, so training should stay eager."""
+        model = ModelConfig(
+            num_attention_heads=4,
+            num_key_value_heads=4,
+            intermediate_size=16,
+            vocab_size=32,
+            dtype=torch.bfloat16,
+        )
+        runtime = RuntimeConfig(attn_backend="native", compile_model=True)
+
+        with (
+            patch("areno.engine.config.torch.cuda.is_available", return_value=True),
+            patch("areno.engine.config.torch.cuda.device_count", return_value=1),
+            patch("areno.engine.config.torch.cuda.get_device_capability", return_value=(7, 5)),
+            patch("areno.engine.config.torch.cuda.get_device_name", return_value="Tesla T4"),
+            self.assertWarnsRegex(RuntimeWarning, "torch.compile.*falling back to eager"),
+        ):
+            cfg = EngineConfig(model=model, tp_size=1, devices=[0], runtime=runtime)
+
+        self.assertFalse(cfg.runtime.compile_model)
+
+    def test_runtime_config_keeps_compile_for_bf16_on_ampere_gpu(self):
+        """Ampere and newer GPUs have native BF16 support and can keep compile enabled."""
+        model = ModelConfig(
+            num_attention_heads=4,
+            num_key_value_heads=4,
+            intermediate_size=16,
+            vocab_size=32,
+            dtype=torch.bfloat16,
+        )
+        runtime = RuntimeConfig(attn_backend="native", compile_model=True)
+
+        with (
+            patch("areno.engine.config.torch.cuda.is_available", return_value=True),
+            patch("areno.engine.config.torch.cuda.device_count", return_value=1),
+            patch("areno.engine.config.torch.cuda.get_device_capability", return_value=(8, 0)),
+        ):
+            cfg = EngineConfig(model=model, tp_size=1, devices=[0], runtime=runtime)
+
+        self.assertTrue(cfg.runtime.compile_model)
+
+    def test_runtime_config_keeps_compile_for_fp16_on_turing_gpu(self):
+        """The T4 restriction is specific to BF16 compilation."""
+        model = ModelConfig(
+            num_attention_heads=4,
+            num_key_value_heads=4,
+            intermediate_size=16,
+            vocab_size=32,
+            dtype=torch.float16,
+        )
+        runtime = RuntimeConfig(attn_backend="native", compile_model=True)
+
+        with (
+            patch("areno.engine.config.torch.cuda.is_available", return_value=True),
+            patch("areno.engine.config.torch.cuda.device_count", return_value=1),
+            patch("areno.engine.config.torch.cuda.get_device_capability", return_value=(7, 5)),
+        ):
+            cfg = EngineConfig(model=model, tp_size=1, devices=[0], runtime=runtime)
+
+        self.assertTrue(cfg.runtime.compile_model)
+
     def test_flash_attention_supported_gpu_keeps_flash_backend(self):
         """Ampere and newer GPUs should keep the explicit flash attention backend."""
         model = ModelConfig(num_attention_heads=4, num_key_value_heads=4, intermediate_size=16, vocab_size=32)

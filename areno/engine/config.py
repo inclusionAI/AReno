@@ -45,6 +45,7 @@ class RuntimeConfig:
 
     kv_block_size: int = 256
     attn_backend: Literal["flash", "native"] = "flash"
+    compile_model: bool = True
     activation_checkpointing: bool = True
     keep_rollout_state: bool = True
     eager_decode: bool = False
@@ -80,6 +81,22 @@ class RuntimeConfig:
             stacklevel=2,
         )
         self.attn_backend = "native"
+
+    def resolve_compile_model(self, *, model: ModelConfig, devices: list[int]) -> None:
+        """Disable torch.compile when the selected hardware cannot compile the model dtype."""
+
+        if not self.compile_model:
+            return
+        reason = torch_compile_unsupported_gpu_reason(model, devices)
+        if reason is None:
+            return
+        warnings.warn(
+            f"torch.compile does not support the detected runtime configuration ({reason}); "
+            "falling back to eager model execution.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        self.compile_model = False
 
 
 @dataclass(slots=True)
@@ -235,6 +252,7 @@ class EngineConfig:
         if self.runtime.kv_block_size % 256 != 0:
             raise ValueError("runtime.kv_block_size must be a multiple of 256 for FlashAttention paged KV")
         self.runtime.resolve_attn_backend(model=self.model, devices=self.devices)
+        self.runtime.resolve_compile_model(model=self.model, devices=self.devices)
         self.model.attn_backend = self.runtime.attn_backend
 
 
@@ -278,6 +296,34 @@ def flash_attention_unsupported_gpu_reason(devices: list[int] | None = None) -> 
         except Exception:
             name = f"cuda:{device}"
         unsupported.append(f"{name} cc {major}.{minor}")
+    if not unsupported:
+        return None
+    return ", ".join(unsupported)
+
+
+def torch_compile_unsupported_gpu_reason(model: ModelConfig, devices: list[int] | None = None) -> str | None:
+    """Return a reason when torch.compile cannot compile the model dtype on visible GPUs."""
+
+    if model.dtype is not torch.bfloat16:
+        return None
+    if not torch.cuda.is_available():
+        return None
+    device_count = torch.cuda.device_count()
+    if device_count <= 0:
+        return None
+    selected_devices = devices if devices is not None else list(range(device_count))
+    unsupported: list[str] = []
+    for device in selected_devices:
+        if device < 0 or device >= device_count:
+            continue
+        major, minor = torch.cuda.get_device_capability(device)
+        if (int(major), int(minor)) >= (8, 0):
+            continue
+        try:
+            name = torch.cuda.get_device_name(device)
+        except Exception:
+            name = f"cuda:{device}"
+        unsupported.append(f"{name} cc {major}.{minor} lacks native BF16 support")
     if not unsupported:
         return None
     return ", ".join(unsupported)
