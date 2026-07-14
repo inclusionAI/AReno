@@ -1406,8 +1406,45 @@ textarea:focus {
 
 .chatPanel {
   display: grid;
-  grid-template-rows: auto minmax(360px, 1fr) auto;
+  grid-template-rows: auto auto minmax(360px, 1fr) auto;
   min-height: 650px;
+}
+
+.agentHeaderActions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.agentTabs {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: max-content;
+  margin: 4px 0 0 clamp(28px, 5vw, 112px);
+  padding: 4px;
+  border: 1px solid var(--deck-line);
+  border-radius: 999px;
+  background: var(--deck-soft);
+}
+
+.agentTabs button {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border: 0;
+  border-radius: 999px;
+  padding: 7px 12px;
+  background: transparent;
+  color: var(--deck-muted);
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.agentTabs button.active {
+  background: var(--deck-panel);
+  color: var(--deck-ink);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.14);
 }
 
 .chatMessages {
@@ -1799,6 +1836,71 @@ textarea:focus {
   background: transparent;
   resize: none;
   font-size: 13px;
+}
+
+.agentHistory {
+  min-height: 360px;
+  max-height: 56vh;
+  overflow: auto;
+  padding: 28px clamp(28px, 5vw, 112px) 18px;
+}
+
+.agentHistoryHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+
+.agentHistoryHeader h3 {
+  margin: 0 0 4px;
+  font-size: 16px;
+}
+
+.agentHistoryHeader p {
+  margin: 0;
+  color: var(--deck-muted);
+  font-size: 12px;
+}
+
+.agentHistoryList {
+  display: grid;
+  gap: 10px;
+}
+
+.agentHistoryItem {
+  display: grid;
+  gap: 5px;
+  width: min(840px, 100%);
+  border: 1px solid var(--deck-line);
+  border-radius: 13px;
+  background: var(--deck-panel);
+  padding: 13px 15px;
+  text-align: left;
+}
+
+.agentHistoryItem.active {
+  border-color: rgba(56, 215, 255, 0.48);
+  box-shadow: 0 0 0 1px rgba(56, 215, 255, 0.18);
+}
+
+.agentHistoryItem strong {
+  color: var(--deck-ink);
+  font-size: 13px;
+}
+
+.agentHistoryItem span {
+  overflow: hidden;
+  color: var(--deck-muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agentHistoryItem small {
+  color: var(--deck-subtle);
+  font-size: 11px;
 }
 
 .agentOutput {

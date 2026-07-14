@@ -9,9 +9,11 @@ import {
   CircleStop,
   Cpu,
   FileText,
+  History,
   Layers,
   MessageSquare,
   Moon,
+  Plus,
   Play,
   RefreshCw,
   Send,
@@ -66,6 +68,8 @@ const defaultAgentMessages = [
 ];
 
 const AGENT_CHAT_STORAGE_KEY = "areno-dashboard-agent-chat";
+const AGENT_SESSIONS_STORAGE_KEY = "areno-dashboard-agent-chat-sessions";
+const AGENT_ACTIVE_SESSION_STORAGE_KEY = "areno-dashboard-agent-active-chat";
 const AGENT_DRAFT_STORAGE_KEY = "areno-dashboard-agent-draft";
 
 function loadAgentMessages() {
@@ -75,6 +79,36 @@ function loadAgentMessages() {
   } catch {
     return defaultAgentMessages;
   }
+}
+
+function createAgentSession(messages = defaultAgentMessages, title = "New chat") {
+  const now = Date.now();
+  return {
+    id: `chat-${now}-${Math.random().toString(16).slice(2)}`,
+    title,
+    createdAt: now,
+    updatedAt: now,
+    messages,
+  };
+}
+
+function loadAgentSessions() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(AGENT_SESSIONS_STORAGE_KEY) || "[]");
+    if (Array.isArray(parsed) && parsed.length) {
+      return parsed.map((session) => ({ ...session, messages: session.messages?.length ? session.messages : defaultAgentMessages }));
+    }
+  } catch {
+    // Fall through to migrate the legacy single-chat storage.
+  }
+  return [createAgentSession(loadAgentMessages(), "Default chat")];
+}
+
+function inferAgentSessionTitle(messages, fallback = "New chat") {
+  const firstUser = messages.find((message) => message.role === "user" && message.content);
+  if (!firstUser) return fallback;
+  const title = firstUser.content.replace(/\s+/g, " ").trim();
+  return title.length > 42 ? `${title.slice(0, 42)}...` : title;
 }
 
 const defaultTrainConfig = {
@@ -165,7 +199,9 @@ function App() {
   const [trainConfig, setTrainConfig] = useState(defaultTrainConfig);
   const [serveConfig, setServeConfig] = useState(defaultServeConfig);
   const [agentPrompt, setAgentPrompt] = useState(() => localStorage.getItem(AGENT_DRAFT_STORAGE_KEY) || "");
-  const [agentMessages, setAgentMessages] = useState(() => loadAgentMessages());
+  const [agentSessions, setAgentSessions] = useState(() => loadAgentSessions());
+  const [activeAgentSessionId, setActiveAgentSessionId] = useState(() => localStorage.getItem(AGENT_ACTIVE_SESSION_STORAGE_KEY) || "");
+  const [agentChatTab, setAgentChatTab] = useState("chat");
   const [agentProvider, setAgentProvider] = useState(() => {
     try {
       return JSON.parse(localStorage.getItem("areno-dashboard-agent-provider") || "{}");
@@ -191,6 +227,10 @@ function App() {
   const currentJobPage = Math.min(jobPage, jobPageCount);
   const pagedJobs = jobList.slice((currentJobPage - 1) * jobPageSize, currentJobPage * jobPageSize);
   const selectedJob = jobDetail.data?.job || (selectedJobId ? jobList.find((job) => job.id === selectedJobId) : null) || null;
+  const activeAgentSession = useMemo(() => {
+    return agentSessions.find((session) => session.id === activeAgentSessionId) || agentSessions[0] || createAgentSession();
+  }, [agentSessions, activeAgentSessionId]);
+  const agentMessages = activeAgentSession.messages || defaultAgentMessages;
 
   useEffect(() => {
     if (selectedJobId && jobList.length && !jobList.some((job) => job.id === selectedJobId)) {
@@ -212,8 +252,26 @@ function App() {
   }, [agentProvider]);
 
   useEffect(() => {
-    localStorage.setItem(AGENT_CHAT_STORAGE_KEY, JSON.stringify(agentMessages.slice(-80)));
-  }, [agentMessages]);
+    localStorage.setItem(AGENT_SESSIONS_STORAGE_KEY, JSON.stringify(agentSessions.slice(-40)));
+  }, [agentSessions]);
+
+  useEffect(() => {
+    if (!agentSessions.length) {
+      const session = createAgentSession();
+      setAgentSessions([session]);
+      setActiveAgentSessionId(session.id);
+      return;
+    }
+    if (!agentSessions.some((session) => session.id === activeAgentSessionId)) {
+      setActiveAgentSessionId(agentSessions[0].id);
+    }
+  }, [agentSessions, activeAgentSessionId]);
+
+  useEffect(() => {
+    if (activeAgentSessionId) {
+      localStorage.setItem(AGENT_ACTIVE_SESSION_STORAGE_KEY, activeAgentSessionId);
+    }
+  }, [activeAgentSessionId]);
 
   useEffect(() => {
     localStorage.setItem(AGENT_DRAFT_STORAGE_KEY, agentPrompt);
@@ -224,7 +282,7 @@ function App() {
     if (node) {
       node.scrollTop = node.scrollHeight;
     }
-  }, [agentMessages]);
+  }, [agentMessages, agentChatTab]);
 
   const pages = [
     { id: "jobs", label: "Jobs", icon: <Activity size={16} /> },
@@ -297,6 +355,36 @@ function App() {
       applyAgentEvent(assistantId, { type: "done" });
       setBusy("");
     }
+  }
+
+  function setAgentMessages(updater) {
+    const sessionId = activeAgentSession.id;
+    setAgentSessions((sessions) =>
+      sessions.map((session) => {
+        if (session.id !== sessionId) return session;
+        const currentMessages = session.messages || defaultAgentMessages;
+        const nextMessages = typeof updater === "function" ? updater(currentMessages) : updater;
+        return {
+          ...session,
+          messages: nextMessages,
+          updatedAt: Date.now(),
+          title: inferAgentSessionTitle(nextMessages, session.title),
+        };
+      })
+    );
+  }
+
+  function newAgentChat() {
+    const session = createAgentSession();
+    setAgentSessions((sessions) => [session, ...sessions]);
+    setActiveAgentSessionId(session.id);
+    setAgentPrompt("");
+    setAgentChatTab("chat");
+  }
+
+  function openAgentSession(sessionId) {
+    setActiveAgentSessionId(sessionId);
+    setAgentChatTab("chat");
   }
 
   async function streamAgentResponse({ prompt, job_id, provider, onEvent }) {
@@ -443,31 +531,47 @@ function App() {
               <h2>Agent Chat</h2>
               <p>{selectedJob ? `Context: ${selectedJob.name}` : "No job selected. The agent will use runtime context only."}</p>
             </div>
-            <button className="secondaryButton" onClick={() => setAgentSettingsOpen(true)}><Settings2 size={15} /> Settings</button>
+            <div className="agentHeaderActions">
+              <button className="secondaryButton" onClick={newAgentChat}><Plus size={15} /> New Chat</button>
+              <button className="secondaryButton" onClick={() => setAgentSettingsOpen(true)}><Settings2 size={15} /> Settings</button>
+            </div>
           </div>
-          <div className="chatMessages" ref={chatMessagesRef}>
-            {agentMessages.map((message, index) => (
-              <div key={`${message.role}-${index}`} className={classNames("chatBubble", message.role)}>
-                <span>{message.role}</span>
-                {message.events?.length ? <AgentEventList events={message.events} /> : <MarkdownBlock text={message.content} />}
-                {message.streaming && <div className="streamingHint">thinking...</div>}
+          <div className="agentTabs">
+            <button className={classNames(agentChatTab === "chat" && "active")} onClick={() => setAgentChatTab("chat")}>
+              <MessageSquare size={15} /> Chat
+            </button>
+            <button className={classNames(agentChatTab === "history" && "active")} onClick={() => setAgentChatTab("history")}>
+              <History size={15} /> History
+            </button>
+          </div>
+          {agentChatTab === "history" ? (
+            <AgentHistory sessions={agentSessions} activeId={activeAgentSession.id} onOpen={openAgentSession} onNew={newAgentChat} />
+          ) : (
+            <>
+              <div className="chatMessages" ref={chatMessagesRef}>
+                {agentMessages.map((message, index) => (
+                  <div key={`${message.id || message.role}-${index}`} className={classNames("chatBubble", message.role)}>
+                    <span>{message.role}</span>
+                    {message.events?.length ? <AgentEventList events={message.events} /> : <MarkdownBlock text={message.content} />}
+                    {message.streaming && <div className="streamingHint">thinking...</div>}
+                  </div>
+                ))}
               </div>
-            ))}
-          </div>
-          <div className="chatComposer">
-            <textarea
-              value={agentPrompt}
-              onChange={(event) => setAgentPrompt(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" && !event.shiftKey) {
-                  event.preventDefault();
-                  runAgent();
-                }
-              }}
-              placeholder="Ask about this job, metrics, GPU pressure, next command, or failure diagnosis..."
-            />
-            <button className="primaryButton" onClick={runAgent}><Send size={16} /> Send</button>
-          </div>
+              <div className="chatComposer">
+                <textarea
+                  value={agentPrompt}
+                  onChange={(event) => setAgentPrompt(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" && !event.shiftKey) {
+                      event.preventDefault();
+                      runAgent();
+                    }
+                  }}
+                />
+                <button className="primaryButton" onClick={runAgent}><Send size={16} /> Send</button>
+              </div>
+            </>
+          )}
           {agentSettingsOpen && (
             <Modal title="Agent Settings" onClose={() => setAgentSettingsOpen(false)}>
               <AgentProviderForm provider={agentProvider} setProvider={setAgentProvider} />
@@ -605,6 +709,36 @@ function AgentProviderForm({ provider, setProvider }) {
         <span>API key</span>
         <input type="password" value={provider.api_key || ""} onChange={(event) => setProvider({ ...provider, api_key: event.target.value })} />
       </label>
+    </div>
+  );
+}
+
+function AgentHistory({ sessions, activeId, onOpen, onNew }) {
+  return (
+    <div className="agentHistory">
+      <div className="agentHistoryHeader">
+        <div>
+          <h3>Chat History</h3>
+          <p>{sessions.length} saved conversations in this browser.</p>
+        </div>
+        <button className="secondaryButton" onClick={onNew}><Plus size={15} /> New Chat</button>
+      </div>
+      <div className="agentHistoryList">
+        {sessions.map((session) => {
+          const last = [...(session.messages || [])].reverse().find((message) => message.role === "user" || message.content);
+          return (
+            <button
+              key={session.id}
+              className={classNames("agentHistoryItem", session.id === activeId && "active")}
+              onClick={() => onOpen(session.id)}
+            >
+              <strong>{session.title || "New chat"}</strong>
+              <span>{last?.content || "No messages yet."}</span>
+              <small>{new Date(session.updatedAt || session.createdAt || Date.now()).toLocaleString()}</small>
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 }
