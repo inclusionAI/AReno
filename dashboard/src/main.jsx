@@ -347,6 +347,7 @@ function App() {
         prompt,
         job_id: selectedJob?.id || null,
         provider: agentProvider,
+        history: compactAgentHistory(agentMessages),
         onEvent: (event) => applyAgentEvent(assistantId, event),
       });
     } catch (err) {
@@ -387,11 +388,28 @@ function App() {
     setAgentChatTab("chat");
   }
 
-  async function streamAgentResponse({ prompt, job_id, provider, onEvent }) {
+  function compactAgentHistory(messages) {
+    return messages
+      .filter((message) => (message.role === "user" || message.role === "assistant") && !message.streaming)
+      .map((message) => ({ role: message.role, content: agentMessageText(message) }))
+      .filter((message) => message.content)
+      .slice(-10);
+  }
+
+  function agentMessageText(message) {
+    if (message.content) return message.content;
+    return (message.events || [])
+      .filter((event) => event.type === "content" || event.type === "reasoning")
+      .map((event) => event.text || "")
+      .join("\n")
+      .trim();
+  }
+
+  async function streamAgentResponse({ prompt, job_id, provider, history, onEvent }) {
     const response = await fetch(`${API_BASE}api/agent/stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt, job_id, provider }),
+        body: JSON.stringify({ prompt, job_id, provider, history }),
       });
     if (!response.ok || !response.body) {
       const text = await response.text();

@@ -945,6 +945,38 @@ def pid_is_running(pid: int) -> bool:
     return True
 
 
+def build_agent_messages(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    job = STATE.get_job(payload.get("job_id"))
+    context = job.to_summary_json() if job else {}
+    messages: list[dict[str, Any]] = [{"role": "system", "content": agent_system_prompt()}]
+    for item in normalize_agent_history(payload.get("history")):
+        messages.append(item)
+    messages.append(
+        {
+            "role": "user",
+            "content": json.dumps({"prompt": payload.get("prompt", ""), "job": context}, ensure_ascii=False),
+        }
+    )
+    return messages
+
+
+def normalize_agent_history(raw_history: Any) -> list[dict[str, str]]:
+    if not isinstance(raw_history, list):
+        return []
+    normalized: list[dict[str, str]] = []
+    for item in raw_history[-10:]:
+        if not isinstance(item, dict):
+            continue
+        role = item.get("role")
+        if role not in {"user", "assistant"}:
+            continue
+        content = str(item.get("content") or "").strip()
+        if not content:
+            continue
+        normalized.append({"role": role, "content": content[:8000]})
+    return normalized
+
+
 def agent_response(payload: dict[str, Any]) -> dict[str, Any]:
     provider = payload.get("provider") if isinstance(payload.get("provider"), dict) else {}
     base_url = str(provider.get("base_url") or os.environ.get("OPENAI_BASE_URL", "")).rstrip("/")
@@ -955,15 +987,7 @@ def agent_response(payload: dict[str, Any]) -> dict[str, Any]:
             "content": "Configure base URL, API key, and model before asking the agent.",
             "tool_calls": [],
         }
-    job = STATE.get_job(payload.get("job_id"))
-    context = job.to_summary_json() if job else {}
-    messages: list[dict[str, Any]] = [
-        {
-            "role": "system",
-            "content": agent_system_prompt(),
-        },
-        {"role": "user", "content": json.dumps({"prompt": payload.get("prompt", ""), "job": context}, ensure_ascii=False)},
-    ]
+    messages = build_agent_messages(payload)
     all_tool_calls: list[dict[str, Any]] = []
     all_tool_results: list[dict[str, Any]] = []
     try:
@@ -1017,15 +1041,7 @@ def agent_event_stream(payload: dict[str, Any]):
         yield {"type": "error", "content": "Configure base URL, API key, and model before asking the agent."}
         yield {"type": "done"}
         return
-    job = STATE.get_job(payload.get("job_id"))
-    context = job.to_summary_json() if job else {}
-    messages: list[dict[str, Any]] = [
-        {
-            "role": "system",
-            "content": agent_system_prompt(),
-        },
-        {"role": "user", "content": json.dumps({"prompt": payload.get("prompt", ""), "job": context}, ensure_ascii=False)},
-    ]
+    messages = build_agent_messages(payload)
     try:
         for round_index in range(6):
             body = {"model": model, "messages": messages, "tools": agent_tool_schemas(), "tool_choice": "auto", "stream": True}
