@@ -35,6 +35,124 @@ from areno.cli.dashboard_registry import GLOBAL_REGISTRY_FILE
 STATIC_DIR = Path(__file__).resolve().parent / "dist"
 STATE_FILE = ROOT / ".areno-dashboard-state.json"
 DEFAULT_METRICS_LOG_DIR = "/tmp/areno/tfevent"
+OPS_KNOWLEDGE_FILE = ROOT / "areno" / "agent" / "ops_knowledge.md"
+OPS_KNOWLEDGE_MAX_CHARS = 12000
+AGENT_COMMAND_KNOWLEDGE = """## Dashboard agent command contract
+
+When the user asks to start or prepare an AReno task, first decide whether it is
+a train task or a serve task. Use tools rather than guessing live runtime state.
+
+### Train command demos
+
+Minimal SFT shape:
+
+```bash
+areno train \
+  --ckpt <model-or-local-checkpoint> \
+  --dataset-path <dataset-or-file> \
+  --dataset-loader-fn <loader.py> \
+  --algo sft \
+  --world-size <gpu-count> \
+  --tp-size <tensor-parallel-size> \
+  --batch-size <global-batch> \
+  --mini-bs <train-microbatch> \
+  --max-steps <steps>
+```
+
+Minimal rollout/RL shape:
+
+```bash
+areno train \
+  --ckpt <model-or-local-checkpoint> \
+  --dataset-path <dataset-or-file> \
+  --dataset-loader-fn <loader.py> \
+  --reward-fn-path <reward.py> \
+  --algo gspo \
+  --world-size <gpu-count> \
+  --tp-size <tensor-parallel-size> \
+  --batch-size <prompts-per-step> \
+  --n-samples <samples-per-prompt> \
+  --mini-bs <train-microbatch> \
+  --max-running-prompts <rollout-concurrency> \
+  --drop-rollout-state \
+  --max-steps <steps>
+```
+
+Agentic rollout/RL adds:
+
+```bash
+  --agent-fn <run_agent.py> \
+  --max-context-len <trajectory-context-cap> \
+  --max-new-tokens <generation-cap>
+```
+
+Train required fields:
+- Always required: `ckpt`, `dataset_path`, `algo`, `world_size`, `tp_size`,
+  `batch_size`, `mini_bs`, and `max_steps`.
+- Usually required: `dataset_loader_fn`; omit only when the dataset path format
+  is known to be handled internally.
+- Required for rollout/RL algorithms such as `gspo`, `grpo`, and `ppo`:
+  `reward_fn_path` or another configured reward source, `n_samples`, and
+  `max_running_prompts`.
+- Required for agentic train: `agent_fn`, `max_context_len`, and
+  `max_new_tokens`. If the user did not provide `max_context_len` or
+  `max_new_tokens`, ask before running.
+- Required for DPO-style preference training: chosen/rejected preference data
+  through the dataset/loader, plus the selected DPO algorithm options.
+
+Train optional fields:
+- `model_hub`: use `modelscope` for remote refs unless the user gives a local
+  checkpoint.
+- `max_prompt_tokens`, `max_context_len`, `max_new_tokens`: sequence limits.
+  Do not silently shrink `max_new_tokens` to fit memory.
+- `save_path`, `save_interval`: checkpoint saving.
+- `metrics_log_dir`: TensorBoard metrics output directory.
+- `drop_rollout_state`: default to true for rollout/RL memory safety unless the
+  user is testing performance with rollout state kept.
+- optimizer/lr/weight-decay/precision/attention/backend flags: only set when
+  the user asks, examples require them, or a failure points to them.
+- smoke flags: `smoke_infer` and `smoke_train` are optional diagnostics.
+
+Parameter relationships:
+- Rollout request count is `batch_size * n_samples`; it should normally be no
+  larger than `max_running_prompts`.
+- Rollout/KV memory pressure is mainly controlled by `max_running_prompts`.
+- Training/backward memory pressure is mainly controlled by `mini_bs`.
+- Tensor parallel size must satisfy model divisibility constraints such as
+  key/value heads divisible by `tp_size`.
+
+### Serve command demo
+
+```bash
+areno serve \
+  --model-path <model-or-local-checkpoint> \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --world-size <gpu-count> \
+  --tp-size <tensor-parallel-size>
+```
+
+Serve required fields:
+- `model_path`, `world_size`, and `tp_size`.
+- `host` and `port` are required by the dashboard tool payload; use
+  `0.0.0.0:8000` unless the user asks otherwise or the port is occupied.
+
+Serve optional fields:
+- `model_hub`: use `modelscope` for remote refs unless the user gives a local
+  checkpoint.
+- `max_running_requests`, `max_num_batched_tokens`, `max_cache_len`,
+  `block_size`, `gpu_memory_utilization`, eager/cuda-graph/backend options:
+  tune only when needed for capacity, latency, or a specific failure.
+- `disable_thinking` and chat-template flags: use only when the user asks or
+  the model/template requires it.
+
+Good behavior:
+- For live analysis, call `list_jobs`, `get_job`, `fetch_metric`,
+  `get_runtime_env`, or log tools instead of relying on stale context.
+- For starting jobs, call `start_train`, `start_serve`, `smoke_train`, or
+  `smoke_infer` with explicit fields. Do not return a command string only when
+  the user asked you to actually start the task.
+"""
 TIME_SEGMENT_ORDER = [
     "rollout",
     "make_sample",
@@ -53,6 +171,7 @@ ENV_REPORT_CACHE: dict[str, Any] | None = None
 ENV_CHECKS_CACHE: list[Any] | None = None
 ENV_CHECK_COUNTS_CACHE: dict[str, int] | None = None
 ENV_CACHE_LOCK = threading.Lock()
+OPS_KNOWLEDGE_CACHE: str | None = None
 
 
 def now() -> str:
@@ -942,6 +1061,44 @@ def pid_is_running(pid: int) -> bool:
     return True
 
 
+def agent_system_prompt() -> str:
+    return (
+        "You are an AReno operations agent. Analyze jobs, metrics, logs, and runtime state. "
+        "Use dashboard tools when you need live data or when the user asks you to start/stop jobs. "
+        "Do not invent job status; inspect it with tools.\n\n"
+        f"{AGENT_COMMAND_KNOWLEDGE}\n\n"
+        "Operational context:\n"
+        f"{load_ops_knowledge()}"
+    )
+
+
+def load_ops_knowledge() -> str:
+    global OPS_KNOWLEDGE_CACHE
+    if OPS_KNOWLEDGE_CACHE is not None:
+        return OPS_KNOWLEDGE_CACHE
+    try:
+        text = OPS_KNOWLEDGE_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        text = ""
+    if not text:
+        text = fallback_ops_knowledge()
+    elif len(text) > OPS_KNOWLEDGE_MAX_CHARS:
+        text = text[:OPS_KNOWLEDGE_MAX_CHARS].rstrip() + "\n\n[truncated]"
+    OPS_KNOWLEDGE_CACHE = text
+    return OPS_KNOWLEDGE_CACHE
+
+
+def fallback_ops_knowledge() -> str:
+    return """- Prefer ModelScope for remote model/dataset refs: pass `--model-hub modelscope`.
+- Train memory is mainly controlled by `--mini-bs`; rollout/KV memory is mainly controlled by `--max-running-prompts`.
+- For rollout/RL, keep `--batch-size * --n-samples <= --max-running-prompts` when possible.
+- Use `--drop-rollout-state` for train attempts unless the user explicitly wants to keep rollout state.
+- For agentic tasks, ask for `--max-new-tokens` and `--max-context-len` if the user did not provide them.
+- Smoke checks are optional diagnostics: `--smoke-infer` validates model load/KV/CUDA graph; `--smoke-train` validates backward/optimizer memory.
+- Serve uses `areno serve --model-path <model>`, not `--ckpt`.
+- Do not guess live state. Use tools such as list_jobs, get_job, fetch_metric, get_runtime_env, start_train, start_serve, smoke_train, smoke_infer, and stop_job."""
+
+
 def agent_response(payload: dict[str, Any]) -> dict[str, Any]:
     provider = payload.get("provider") if isinstance(payload.get("provider"), dict) else {}
     base_url = str(provider.get("base_url") or os.environ.get("OPENAI_BASE_URL", "")).rstrip("/")
@@ -957,11 +1114,7 @@ def agent_response(payload: dict[str, Any]) -> dict[str, Any]:
     messages: list[dict[str, Any]] = [
         {
             "role": "system",
-            "content": (
-                "You are an AReno operations agent. Analyze jobs, metrics, logs, and runtime state. "
-                "Use dashboard tools when you need live data or when the user asks you to start/stop jobs. "
-                "Do not invent job status; inspect it with tools."
-            ),
+            "content": agent_system_prompt(),
         },
         {"role": "user", "content": json.dumps({"prompt": payload.get("prompt", ""), "job": context}, ensure_ascii=False)},
     ]
@@ -1023,11 +1176,7 @@ def agent_event_stream(payload: dict[str, Any]):
     messages: list[dict[str, Any]] = [
         {
             "role": "system",
-            "content": (
-                "You are an AReno operations agent. Analyze jobs, metrics, logs, and runtime state. "
-                "Use dashboard tools when you need live data or when the user asks you to start/stop jobs. "
-                "Do not invent job status; inspect it with tools."
-            ),
+            "content": agent_system_prompt(),
         },
         {"role": "user", "content": json.dumps({"prompt": payload.get("prompt", ""), "job": context}, ensure_ascii=False)},
     ]
