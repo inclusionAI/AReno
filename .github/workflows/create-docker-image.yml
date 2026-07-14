@@ -5,6 +5,10 @@ permissions: write-all
 on:
   workflow_dispatch:
     inputs:
+      ref:
+        description: "Git branch, tag, or SHA to build"
+        required: false
+        default: "main"
       image_name:
         description: "GHCR image name"
         required: true
@@ -32,6 +36,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
 
       - name: Set lowercase image owner
         run: echo "OWNER_LOWER=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
