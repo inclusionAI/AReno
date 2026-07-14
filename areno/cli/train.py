@@ -13,9 +13,11 @@ The flow is:
 
 import ast
 import importlib.util
+import json
 import logging
 import shutil
 import textwrap
+from dataclasses import fields
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -801,6 +803,7 @@ def run(trainer_config: TrainerConfig):
     from areno.api.trainer_factory import build_trainer
 
     trainer_config = resolve_model_refs_for_config(trainer_config)
+    _write_dashboard_run_config(trainer_config)
     loss_fn = _loss_fn_for_config(trainer_config)
     reward_fn_path = _reward_fn_path_for_config(trainer_config)
     reward_fn = load_reward_fn(reward_fn_path) if reward_fn_path else None
@@ -821,6 +824,147 @@ def run(trainer_config: TrainerConfig):
     )
     trainer = build_trainer(trainer_config, instance=api_trainer, dataset=dataset, reward_fn=reward_fn, loss_fn=loss_fn)
     trainer.fit()
+
+
+def _write_dashboard_run_config(config: TrainerConfig) -> None:
+    """Persist the same train settings summary that the CLI prints."""
+
+    if not config.metrics_log_dir:
+        return
+    import os
+
+    path = Path(config.metrics_log_dir)
+    path.mkdir(parents=True, exist_ok=True)
+    summary = _format_training_config_summary(config, color=False)
+    pid = os.getpid()
+    payload = {
+        "kind": "train",
+        "pid": pid,
+        "summary_text": summary,
+        "settings": _training_config_settings(config),
+    }
+    (path / f"areno_run_config.{pid}.txt").write_text(summary + "\n", encoding="utf-8")
+    (path / f"areno_run_config.{pid}.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def _training_config_settings(config: TrainerConfig) -> dict:
+    used: set[str] = set()
+
+    def section(title: str, names: list[str]) -> dict:
+        items = []
+        for name in names:
+            if not hasattr(config, name):
+                continue
+            used.add(name)
+            items.append({"key": name, "value": getattr(config, name)})
+        return {"title": title, "items": items}
+
+    sections = [
+        section(
+            "Basic",
+            [
+                "algo",
+                "ckpt",
+                "dataset_path",
+                "model_hub",
+                "dataset_loader_fn",
+                "epochs",
+                "max_steps",
+            ],
+        ),
+        section(
+            "Runtime",
+            [
+                "world_size",
+                "tp_size",
+                "attn_backend",
+                "eager_decode",
+                "activation_checkpointing",
+                "keep_rollout_state",
+                "chat_template_enable_thinking",
+            ],
+        ),
+        section(
+            "Rollout",
+            [
+                "batch_size",
+                "n_samples",
+                "max_running_prompts",
+                "max_prompt_tokens",
+                "max_new_tokens",
+                "max_context_len",
+                "greedy",
+                "temperature",
+                "top_k",
+                "top_p",
+                "agent_fn",
+                "agent_timeout_s",
+                "train_tool_results",
+                "reward_fn_path",
+                "reward_ckpt",
+            ],
+        ),
+        section(
+            "Train",
+            [
+                "mini_bs",
+                "score_micro_bs",
+                "gradient_accumulation_steps",
+            ],
+        ),
+        section(
+            "Optimizer",
+            [
+                "optimizer_lr",
+                "optimizer_min_lr",
+                "lr_decay_steps",
+                "lr_decay_style",
+                "optimizer_beta1",
+                "optimizer_beta2",
+                "weight_decay",
+                "grad_clip_norm",
+                "adam_8bit",
+            ],
+        ),
+        section(
+            "Roles and loss",
+            [
+                "ref_ckpt",
+                "critic_ckpt",
+                "critic_lr",
+                "critic_warmup_steps",
+                "gspo_clip_eps",
+                "grpo_clip_eps",
+                "dpo_beta",
+                "kl_coef",
+                "use_kl_loss",
+                "kl_loss_coef",
+                "kl_loss_type",
+                "clip_eps",
+                "clip_ratio_c",
+                "value_clip_eps",
+                "value_loss_coef",
+                "gamma",
+                "lam",
+            ],
+        ),
+        section("Checkpoint", ["save_path", "save_interval"]),
+        section("Observability", ["metrics_log_dir"]),
+    ]
+    extras = []
+    for field in fields(config):
+        if field.name not in used:
+            extras.append({"key": field.name, "value": getattr(config, field.name)})
+    if extras:
+        sections.append({"title": "Other", "items": extras})
+    if isinstance(config, RolloutTrainerConfig):
+        for item in sections:
+            if item["title"] == "Rollout":
+                item["items"].append(
+                    {"key": "resolved_max_running_prompts", "value": config.resolved_max_running_prompts()}
+                )
+                break
+    return {"sections": [item for item in sections if item["items"]]}
 
 
 def _loss_fn_for_config(config: TrainerConfig):
@@ -1208,6 +1352,14 @@ def train_command(**options) -> None:
         trainer_config,
         reward_ckpt=options.get("reward_ckpt"),
         model_config=_model_config_for_summary(trainer_config),
+    )
+    from areno.cli.dashboard_registry import register_dashboard_job
+
+    register_dashboard_job(
+        kind="train",
+        name=f"train {trainer_config.algo} {trainer_config.ckpt}",
+        config=_training_config_settings(trainer_config),
+        metrics_dir=trainer_config.metrics_log_dir,
     )
     run(trainer_config)
 

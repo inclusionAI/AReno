@@ -18,6 +18,7 @@ class ArenoCli(click.Group):
         "check": ("areno.cli.diagnostics", "check_command", "Check whether this machine is ready to run AReno."),
         "env": ("areno.cli.diagnostics", "env_command", "Print an AReno environment/support report."),
         "agent": ("areno.cli.agent", "agent_command", "Ask a coding agent to run an AReno train/serve job."),
+        "dashboard": ("areno.cli.dashboard", "dashboard_command", "Start or stop the AReno React dashboard."),
         "train": ("areno.cli.train", "train_command", "Run SFT, DPO, GSPO, GRPO, or PPO training."),
         "serve": ("areno.cli.serve", "serve_command", "Serve an OpenAI-compatible chat API."),
     }

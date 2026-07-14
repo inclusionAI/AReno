@@ -34,6 +34,8 @@ coverage.xml
 .mypy_cache/
 .ruff_cache/
 .tox/
+node_modules/
+dashboard/node_modules/
 
 # Jupyter / IPython
 .ipynb_checkpoints/
@@ -43,6 +45,9 @@ ipython_config.py
 # Training outputs, logs, and checkpoints
 runs/
 logs/
+.areno-dashboard.pid
+.areno-dashboard.log
+.areno-dashboard-state.json
 *.log
 events.out.tfevents.*
 wandb/

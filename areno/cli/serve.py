@@ -581,6 +581,25 @@ def serve_command(
     import uvicorn
 
     model_path = resolve_model_ref(model_path, model_hub=model_hub)
+    from areno.cli.dashboard_registry import register_dashboard_job
+
+    register_dashboard_job(
+        kind="serve",
+        name=f"serve {model_path}",
+        config={
+            "ckpt": model_path,
+            "model_hub": model_hub,
+            "tp_size": tp_size,
+            "world_size": world_size,
+            "host": host,
+            "port": port,
+            "max_running_prompts": max_running_prompts,
+            "default_max_tokens": default_max_tokens,
+            "eager_decode": eager_decode,
+            "attn_backend": attn_backend,
+        },
+        metrics_dir=None,
+    )
     app = create_app(
         model_path=model_path,
         tp_size=tp_size,

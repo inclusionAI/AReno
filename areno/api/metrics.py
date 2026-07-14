@@ -10,6 +10,11 @@ single small module makes it trivial to turn off (just pass
 
 from __future__ import annotations
 
+import json
+import os
+import time
+from pathlib import Path
+
 import numpy as np
 
 
@@ -19,7 +24,11 @@ class MetricsRecorder:
     def __init__(self, log_dir: str):
         """Create a writer under `log_dir`."""
 
+        self._log_dir = Path(log_dir)
+        self._log_dir.mkdir(parents=True, exist_ok=True)
         self._writer = create_tensorboard_writer(log_dir)
+        self._state_file = self._log_dir / f"dashboard_state.{os.getpid()}.json"
+        self._sample_file = self._log_dir / f"rollout_samples.{os.getpid()}.jsonl"
         self._closed = False
 
     def record_train_step(self, *, step: int, train_result, train_batch, timings: dict[str, float] | None = None):
@@ -30,6 +39,44 @@ class MetricsRecorder:
         # actually trained on.
         stats = collect_train_batch_stats(train_batch)
         record_training_stats(self._writer, stats, step, train_result, train_batch, timings=timings)
+
+    def record_rollout_sample(self, sample: dict) -> None:
+        """Record a representative decoded rollout sample beside TensorBoard events."""
+
+        sample = dict(sample)
+        sample.setdefault("pid", os.getpid())
+        with self._sample_file.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(sample, ensure_ascii=False) + "\n")
+
+    def record_dashboard_state(
+        self,
+        *,
+        stage: str,
+        step: int | None = None,
+        epoch: int | None = None,
+        role: str | None = None,
+        status: str = "running",
+        extra: dict | None = None,
+    ) -> None:
+        """Persist low-latency dashboard state without relying on TensorBoard parsing."""
+
+        payload = {
+            "pid": os.getpid(),
+            "stage": stage,
+            "status": status,
+            "updated_at": time.time(),
+        }
+        if step is not None:
+            payload["step"] = int(step)
+        if epoch is not None:
+            payload["epoch"] = int(epoch)
+        if role is not None:
+            payload["role"] = role
+        if extra:
+            payload.update(extra)
+        tmp_file = self._state_file.with_suffix(self._state_file.suffix + ".tmp")
+        tmp_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp_file.replace(self._state_file)
 
     def close(self) -> None:
         """Flush and close the underlying TensorBoard writer."""

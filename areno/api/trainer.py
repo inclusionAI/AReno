@@ -356,15 +356,38 @@ class Trainer:
         self.finish_step()
         return result
 
+    def record_rollout_sample(self, sample: dict[str, Any]) -> None:
+        """Persist a representative rollout sample when metrics recording is enabled."""
+
+        if self._metrics is not None:
+            self._metrics.record_rollout_sample(sample)
+
+    def record_dashboard_state(
+        self,
+        *,
+        stage: str,
+        step: int | None = None,
+        epoch: int | None = None,
+        role: str | None = None,
+        status: str = "running",
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        """Persist dashboard state independently from TensorBoard scalar events."""
+
+        if self._metrics is not None:
+            self._metrics.record_dashboard_state(stage=stage, step=step, epoch=epoch, role=role, status=status, extra=extra)
+
     def ensure_roles(self, roles: dict[str, ModelRole]) -> None:
         """Prepare backend-owned auxiliary model roles for algorithms like PPO."""
 
         self._backend.ensure_roles(self._ctx, roles)
 
-    def score_logprobs(self, role: str, token_rows: list[list[int]]) -> list[list[float]]:
+    def score_logprobs(
+        self, role: str, token_rows: list[list[int]], *, microbatch_size: int = 8
+    ) -> list[list[float]]:
         """Score fixed token sequences with a backend-owned model role."""
 
-        return self._backend.score_logprobs(self._ctx, role, token_rows, microbatch_size=self.config.score_micro_bs)
+        return self._backend.score_logprobs(self._ctx, role, token_rows, microbatch_size=microbatch_size)
 
     def score_values(self, role: str, token_rows: list[list[int]]) -> list[list[float]]:
         """Score per-token critic values with a backend-owned model role."""

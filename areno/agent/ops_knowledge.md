@@ -170,7 +170,7 @@ areno train --ckpt <ckpt> --dataset-path __smoke__ --algo gspo \
 Common serve command:
 
 ```bash
-areno serve --ckpt <model-or-local-checkpoint> --host 0.0.0.0 --port 8000 \
+areno serve --model-path <model-or-local-checkpoint> --host 0.0.0.0 --port 8000 \
   --world-size <gpu-count> --tp-size <tensor-parallel-size>
 ```
 

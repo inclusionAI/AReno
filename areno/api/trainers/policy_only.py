@@ -67,6 +67,7 @@ class PolicyOnlyTrainer:
         step = 0
         for epoch in range(self.config.epochs):
             self.logger.info("epoch=%d stage=epoch_start", epoch)
+            self.areno.record_dashboard_state(stage="epoch_start", epoch=epoch, step=step, role=self._policy_role_name())
             for prompt_batch in self.areno.load_prompt_batches(
                 self.dataset,
                 batch_size=self.config.batch_size,
@@ -74,9 +75,13 @@ class PolicyOnlyTrainer:
             ):
                 role = self._policy_role_name()
                 self.logger.info("epoch=%d step=%d role=%s stage=rollout_start", epoch, step, role)
+                self.areno.record_dashboard_state(stage="rollout_start", epoch=epoch, step=step, role=role)
+                self._dashboard_epoch = epoch
+                self._dashboard_step = step
                 if self._agentic_enabled():
                     agent_batch = asyncio.run(self._run_agentic_rollout(sampling_params, prompt_batch))
                     self.logger.info("epoch=%d step=%d role=%s stage=rollout_end", epoch, step, role)
+                    self.areno.record_dashboard_state(stage="rollout_end", epoch=epoch, step=step, role=role)
                     self._log_agentic_sample_completions(epoch, step, agent_batch)
                     train_batch, rewards_all, rollout_logprobs = self._materialize_agentic_train_batch(
                         tokenizer, prompt_batch, agent_batch
@@ -86,7 +91,8 @@ class PolicyOnlyTrainer:
                     #    matches `prompt_batch.items` so we can zip downstream.
                     rollout_results = asyncio.run(self._run_prompt_rollout(sampling_params, prompt_batch))
                     self.logger.info("epoch=%d step=%d role=%s stage=rollout_end", epoch, step, role)
-                    self._log_sample_completions(tokenizer, epoch, step, prompt_batch, rollout_results)
+                    self.areno.record_dashboard_state(stage="rollout_end", epoch=epoch, step=step, role=role)
+                    self._record_sample_completions(tokenizer, epoch, step, prompt_batch, rollout_results)
 
                     # 2+3) Score rewards and broadcast group-normalised
                     #      advantages down to per-token tensors.
@@ -112,14 +118,17 @@ class PolicyOnlyTrainer:
                     if not self._should_train_policy(step):
                         result = self._augment_train_stats({"actor_train_skipped": 1.0})
                         self.logger.info("epoch=%d step=%d role=%s stage=train_skip", epoch, step, role)
+                        self.areno.record_dashboard_state(stage="train_skip", epoch=epoch, step=step, role=role)
                         self.logger.info("epoch=%d step=%d train_stats=%s", epoch, step, result)
                         self.areno.finish_step()
                         step += 1
                         if self.config.max_steps is not None and step >= self.config.max_steps:
                             self.logger.info("epoch=%d step=%d stage=max_steps_reached", epoch, step)
+                            self.areno.record_dashboard_state(stage="max_steps_reached", epoch=epoch, step=step, role=role)
                             return
                         continue
                     self.logger.info("epoch=%d step=%d role=%s stage=train_start", epoch, step, role)
+                    self.areno.record_dashboard_state(stage="train_start", epoch=epoch, step=step, role=role)
                     train_start = time.perf_counter()
                     # 4) The actual gradient step happens inside the backend.
                     result = self.areno.train(
@@ -133,13 +142,16 @@ class PolicyOnlyTrainer:
                         result[f"{role}_train_wall_time_s"] = train_time_s
                     result = self._augment_train_stats(result)
                     self.logger.info("epoch=%d step=%d role=%s stage=train_end", epoch, step, role)
+                    self.areno.record_dashboard_state(stage="train_end", epoch=epoch, step=step, role=role)
                     self.logger.info("epoch=%d step=%d train_stats=%s", epoch, step, result)
                     self._maybe_save(epoch, step)
                 step += 1
                 if self.config.max_steps is not None and step >= self.config.max_steps:
                     self.logger.info("epoch=%d step=%d stage=max_steps_reached", epoch, step)
+                    self.areno.record_dashboard_state(stage="max_steps_reached", epoch=epoch, step=step, role=role)
                     return
             self.logger.info("epoch=%d stage=epoch_end", epoch)
+            self.areno.record_dashboard_state(stage="epoch_end", epoch=epoch, step=step, role=self._policy_role_name())
 
     def _policy_role_name(self) -> str:
         # GSPO/GRPO have a single trainable model called "policy"; PPO
@@ -428,27 +440,28 @@ class PolicyOnlyTrainer:
             )
         return train_batch, rewards_all, rollout_logprobs
 
-    def _log_sample_completions(self, tokenizer, epoch: int, step: int, prompt_batch, rollout_results) -> None:
-        # Diagnostics knob: setting ARENO_LOG_COMPLETIONS=N dumps up to N
-        # decoded completions per step so reward debugging is easier.
-        limit = int(os.getenv("ARENO_LOG_COMPLETIONS", "0"))
+    def _record_sample_completions(self, tokenizer, epoch: int, step: int, prompt_batch, rollout_results) -> None:
+        # Diagnostics knob: setting ARENO_LOG_COMPLETIONS=N records up to N
+        # decoded completions per step in the metrics directory.
+        limit = int(os.getenv("ARENO_LOG_COMPLETIONS", "1"))
         if limit <= 0:
             return
         logged = 0
         for prompt_idx, (item, result) in enumerate(zip(prompt_batch.items, rollout_results, strict=True)):
             for sample_idx, seq in enumerate(result.sequences):
-                self.logger.info(
-                    "epoch=%d step=%d prompt_idx=%d sample_idx=%d prompt=%r decoded_prompt=%r completion=%r "
-                    "prompt_tokens=%s response_tokens=%s",
-                    epoch,
-                    step,
-                    prompt_idx,
-                    sample_idx,
-                    item.prompt,
-                    tokenizer.decode(item.input_tokens),
-                    tokenizer.decode(seq.resp_tokens),
-                    item.input_tokens[:64],
-                    seq.resp_tokens[:64],
+                self.areno.record_rollout_sample(
+                    {
+                        "kind": "rollout",
+                        "epoch": epoch,
+                        "step": step,
+                        "prompt_idx": prompt_idx,
+                        "sample_idx": sample_idx,
+                        "prompt": item.prompt,
+                        "decoded_prompt": tokenizer.decode(item.input_tokens),
+                        "completion": tokenizer.decode(seq.resp_tokens),
+                        "prompt_tokens": item.input_tokens[:64],
+                        "response_tokens": seq.resp_tokens[:64],
+                    }
                 )
                 logged += 1
                 if logged >= limit:
@@ -457,7 +470,7 @@ class PolicyOnlyTrainer:
     def _log_agentic_sample_completions(self, epoch: int, step: int, agent_batch) -> None:
         # Match non-agentic rollout diagnostics so reward/debug workflows do
         # not depend on rollout mode.
-        limit = int(os.getenv("ARENO_LOG_COMPLETIONS", "0"))
+        limit = int(os.getenv("ARENO_LOG_COMPLETIONS", "1"))
         if limit <= 0:
             return
         for logged, record in enumerate(agent_batch.reward_records):
@@ -466,22 +479,24 @@ class PolicyOnlyTrainer:
             loss_mask = agent_batch.loss_masks[logged]
             token_row = agent_batch.token_rows[logged]
             first_loss_idx = next((idx for idx, enabled in enumerate(loss_mask) if enabled), -1)
-            self.logger.info(
-                "epoch=%d step=%d prompt_idx=%d sample_idx=%d prompt=%r messages=%s final_answer=%r tool_calls=%s tool_results=%s loss_mask_true=%d/%d first_loss_idx=%d loss_mask=%s tokens=%s",
-                epoch,
-                step,
-                prompt_idx,
-                sample_idx,
-                record.prompt,
-                record.messages,
-                record.final_answer,
-                record.tool_calls,
-                record.tool_results[:4],
-                sum(1 for enabled in loss_mask if enabled),
-                len(loss_mask),
-                first_loss_idx,
-                loss_mask[:64],
-                token_row[:64],
+            self.areno.record_rollout_sample(
+                {
+                    "kind": "agentic",
+                    "epoch": epoch,
+                    "step": step,
+                    "prompt_idx": prompt_idx,
+                    "sample_idx": sample_idx,
+                    "prompt": record.prompt,
+                    "messages": record.messages,
+                    "final_answer": record.final_answer,
+                    "tool_calls": record.tool_calls,
+                    "tool_results": record.tool_results[:4],
+                    "loss_mask_true": sum(1 for enabled in loss_mask if enabled),
+                    "loss_mask_total": len(loss_mask),
+                    "first_loss_idx": first_loss_idx,
+                    "loss_mask": loss_mask[:64],
+                    "tokens": token_row[:64],
+                }
             )
             if logged + 1 >= limit:
                 return
@@ -553,5 +568,7 @@ class PolicyOnlyTrainer:
             return
         ckpt_path = str(Path(self.config.save_path) / f"step_{step + 1:06d}")
         self.logger.info("epoch=%d step=%d stage=save_checkpoint_start path=%s", epoch, step, ckpt_path)
+        self.areno.record_dashboard_state(stage="save_checkpoint_start", epoch=epoch, step=step, role=self._policy_role_name())
         saved_path = self.areno.save_checkpoint(ckpt_path)
         self.logger.info("epoch=%d step=%d stage=save_checkpoint_end path=%s", epoch, step, saved_path)
+        self.areno.record_dashboard_state(stage="save_checkpoint_end", epoch=epoch, step=step, role=self._policy_role_name())
