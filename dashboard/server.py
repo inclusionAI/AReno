@@ -14,7 +14,6 @@ import signal
 import subprocess
 import sys
 import threading
-import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -28,11 +27,11 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from areno.cli.diagnostics import collect_env, run_checks
-from areno.cli.dashboard_registry import GLOBAL_REGISTRY_FILE
-from agent_context import agent_system_prompt
-from agent_files import AgentFileBrowser
+from agent_context import agent_system_prompt  # noqa: E402
+from agent_files import AgentFileBrowser  # noqa: E402
 
+from areno.cli.dashboard_registry import GLOBAL_REGISTRY_FILE  # noqa: E402
+from areno.cli.diagnostics import collect_env, run_checks  # noqa: E402
 
 STATIC_DIR = Path(__file__).resolve().parent / "dist"
 STATE_FILE = ROOT / ".areno-dashboard-state.json"
@@ -188,7 +187,7 @@ class DashboardState:
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
-                preexec_fn=os.setsid if hasattr(os, "setsid") else None,
+                start_new_session=True,
             )
         except Exception as exc:
             with self.lock:
@@ -244,7 +243,9 @@ class DashboardState:
         job._timeperf_keys.add(step)
         ordered = sorted(
             [{"name": name, "seconds": max(value, 0.0)} for name, value in segments.items() if value > 0],
-            key=lambda item: TIME_SEGMENT_ORDER.index(item["name"]) if item["name"] in TIME_SEGMENT_ORDER else len(TIME_SEGMENT_ORDER),
+            key=lambda item: TIME_SEGMENT_ORDER.index(item["name"])
+            if item["name"] in TIME_SEGMENT_ORDER
+            else len(TIME_SEGMENT_ORDER),
         )
         accounted = sum(item["seconds"] for item in ordered)
         if total > accounted:
@@ -446,7 +447,10 @@ class DashboardState:
             for job in self.jobs.values():
                 self._refresh_job_status(job)
             self._save_state()
-            return [job.to_summary_json() for job in sorted(self.jobs.values(), key=lambda item: item.created_at, reverse=True)]
+            return [
+                job.to_summary_json()
+                for job in sorted(self.jobs.values(), key=lambda item: item.created_at, reverse=True)
+            ]
 
     def _refresh_job_status(self, job: Job) -> None:
         if job.process is not None:
@@ -539,7 +543,9 @@ class DashboardState:
                         name=str(item.get("name") or f"{kind} pid {pid}"),
                         command=command_parts or split_command(command),
                         config=dict(item.get("config") or {}),
-                        metrics_dir=item.get("metrics_dir") or parse_command_option(command, "--metrics-log-dir") or DEFAULT_METRICS_LOG_DIR,
+                        metrics_dir=item.get("metrics_dir")
+                        or parse_command_option(command, "--metrics-log-dir")
+                        or DEFAULT_METRICS_LOG_DIR,
                         pid=pid,
                     )
                     job.launch_config = dict(job.config)
@@ -660,7 +666,9 @@ def build_train_command(config: dict[str, Any]) -> list[str]:
     }
     activation_checkpointing = config.get("activation_checkpointing")
     if activation_checkpointing not in (None, ""):
-        command.append("--activation-checkpointing" if bool_like(activation_checkpointing) else "--no-activation-checkpointing")
+        command.append(
+            "--activation-checkpointing" if bool_like(activation_checkpointing) else "--no-activation-checkpointing"
+        )
     use_kl_loss = config.get("use_kl_loss")
     if use_kl_loss not in (None, ""):
         command.append("--use-kl-loss" if bool_like(use_kl_loss) else "--no-use-kl-loss")
@@ -881,7 +889,10 @@ def normalize_time_segment_name(name: str) -> str | None:
 
 
 def runtime_env() -> dict[str, Any]:
-    repo = {"branch": run_text(["git", "branch", "--show-current"]).strip(), "commit": run_text(["git", "rev-parse", "--short", "HEAD"]).strip()}
+    repo = {
+        "branch": run_text(["git", "branch", "--show-current"]).strip(),
+        "commit": run_text(["git", "rev-parse", "--short", "HEAD"]).strip(),
+    }
     report, check_items, check_counts = cached_env_checks()
     gpus = []
     try:
@@ -894,11 +905,15 @@ def runtime_env() -> dict[str, Any]:
         )
         for line in output.splitlines():
             name, used, total, util = [part.strip() for part in line.split(",")]
-            gpus.append({"name": name, "memory_used_mb": int(used), "memory_total_mb": int(total), "utilization": int(util)})
+            gpus.append(
+                {"name": name, "memory_used_mb": int(used), "memory_total_mb": int(total), "utilization": int(util)}
+            )
     except Exception:
         pass
     if gpus:
-        gpu_summary = " / ".join(f"{gpu['name']} {gpu['memory_used_mb']}/{gpu['memory_total_mb']}MB" for gpu in gpus[:2])
+        gpu_summary = " / ".join(
+            f"{gpu['name']} {gpu['memory_used_mb']}/{gpu['memory_total_mb']}MB" for gpu in gpus[:2]
+        )
     else:
         gpu_summary = "not detected"
     return {
@@ -915,7 +930,10 @@ def runtime_env() -> dict[str, Any]:
 
 
 def run_text(command: list[str]) -> str:
-    return subprocess.check_output(command, cwd=ROOT, text=True, stderr=subprocess.DEVNULL, timeout=5)
+    try:
+        return subprocess.check_output(command, cwd=ROOT, text=True, stderr=subprocess.DEVNULL, timeout=5)
+    except Exception:
+        return ""
 
 
 def cached_env_checks() -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, int]]:
@@ -1001,7 +1019,11 @@ def agent_response(payload: dict[str, Any]) -> dict[str, Any]:
                     "tool_calls": all_tool_calls,
                     "tool_results": all_tool_results,
                 }
-            assistant_message = {"role": "assistant", "content": message.get("content") or None, "tool_calls": tool_calls}
+            assistant_message = {
+                "role": "assistant",
+                "content": message.get("content") or None,
+                "tool_calls": tool_calls,
+            }
             if message.get("reasoning_content"):
                 assistant_message["reasoning_content"] = message.get("reasoning_content")
             messages.append(assistant_message)
@@ -1029,7 +1051,11 @@ def agent_response(payload: dict[str, Any]) -> dict[str, Any]:
             "tool_results": all_tool_results,
         }
     except Exception as exc:
-        return {"content": f"Agent request failed: {exc}", "tool_calls": all_tool_calls, "tool_results": all_tool_results}
+        return {
+            "content": f"Agent request failed: {exc}",
+            "tool_calls": all_tool_calls,
+            "tool_results": all_tool_results,
+        }
 
 
 def agent_event_stream(payload: dict[str, Any]):
@@ -1044,13 +1070,23 @@ def agent_event_stream(payload: dict[str, Any]):
     messages = build_agent_messages(payload)
     try:
         for round_index in range(6):
-            body = {"model": model, "messages": messages, "tools": agent_tool_schemas(), "tool_choice": "auto", "stream": True}
+            body = {
+                "model": model,
+                "messages": messages,
+                "tools": agent_tool_schemas(),
+                "tool_choice": "auto",
+                "stream": True,
+            }
             message = yield from stream_chat_completion(base_url, api_key, body, round_index=round_index)
             tool_calls = message.get("tool_calls") or []
             if not tool_calls:
                 yield {"type": "done", "content": message.get("content") or ""}
                 return
-            assistant_message = {"role": "assistant", "content": message.get("content") or None, "tool_calls": tool_calls}
+            assistant_message = {
+                "role": "assistant",
+                "content": message.get("content") or None,
+                "tool_calls": tool_calls,
+            }
             if message.get("reasoning_content"):
                 assistant_message["reasoning_content"] = message.get("reasoning_content")
             messages.append(assistant_message)
@@ -1101,8 +1137,8 @@ def stream_chat_completion(base_url: str, api_key: str, body: dict[str, Any], *,
                 data = json.loads(data_text)
             except json.JSONDecodeError:
                 continue
-            delta = ((data.get("choices") or [{}])[0].get("delta") or {})
-            message = ((data.get("choices") or [{}])[0].get("message") or {})
+            delta = (data.get("choices") or [{}])[0].get("delta") or {}
+            message = (data.get("choices") or [{}])[0].get("message") or {}
             content_delta = delta.get("content")
             if content_delta:
                 content_parts.append(content_delta)
@@ -1114,13 +1150,14 @@ def stream_chat_completion(base_url: str, api_key: str, body: dict[str, Any], *,
             for chunk in delta.get("tool_calls") or []:
                 index = int(chunk.get("index", 0))
                 current = tool_calls_by_index.setdefault(
-                    index, {
+                    index,
+                    {
                         "index": index,
                         "round": round_index,
                         "id": chunk.get("id"),
                         "type": chunk.get("type") or "function",
                         "function": {"name": "", "arguments": ""},
-                    }
+                    },
                 )
                 if chunk.get("id"):
                     current["id"] = chunk["id"]
@@ -1447,7 +1484,7 @@ def execute_agent_tool(tool_call: dict[str, Any]) -> dict[str, Any]:
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args: Any) -> None:
-        sys.stderr.write("%s - %s\n" % (self.log_date_time_string(), fmt % args))
+        sys.stderr.write(f"{self.log_date_time_string()} - {fmt % args}\n")
 
     def do_GET(self) -> None:
         try:

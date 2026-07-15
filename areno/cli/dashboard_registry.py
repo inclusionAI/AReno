@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-GLOBAL_REGISTRY_FILE = Path("/tmp/areno/dashboard-jobs.json")
+GLOBAL_REGISTRY_FILE = Path.home() / ".areno" / "dashboard-jobs.json"
 
 
 def dashboard_registry_path(cwd: str | Path | None = None) -> Path:

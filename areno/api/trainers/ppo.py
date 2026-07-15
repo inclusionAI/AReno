@@ -27,6 +27,7 @@ import numpy as np
 
 import areno.api
 from areno.api.advantages import compute_gae
+from areno.api.dashboard import record_dashboard_state
 from areno.api.rewards import make_reward_record
 from areno.api.roles import MissingRoleCapability, ModelRole
 from areno.api.trainers.policy_only import PolicyOnlyTrainer
@@ -82,7 +83,8 @@ class PPOTrainer(PolicyOnlyTrainer):
         return step >= int(self.config.critic_warmup_steps)
 
     def _record_ppo_state(self, *, stage: str, role: str) -> None:
-        self.areno.record_dashboard_state(
+        record_dashboard_state(
+            self.areno,
             stage=stage,
             epoch=getattr(self, "_dashboard_epoch", None),
             step=getattr(self, "_dashboard_step", None),

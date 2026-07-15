@@ -48,7 +48,11 @@ class AgentFileBrowser:
                     "size": child.stat().st_size if child.is_file() else None,
                 }
             )
-        return {"cwd": self.cwd(), "path": str(folder.relative_to(self.root) if folder != self.root else "."), "entries": entries[:250]}
+        return {
+            "cwd": self.cwd(),
+            "path": str(folder.relative_to(self.root) if folder != self.root else "."),
+            "entries": entries[:250],
+        }
 
     def cd(self, path: str) -> dict[str, Any]:
         folder = self.resolve(path)
@@ -64,8 +68,17 @@ class AgentFileBrowser:
             raise ValueError(f"not a file: {file_path.relative_to(self.root)}")
         max_lines = max(1, min(max_lines, 500))
         start_line = max(1, start_line)
-        lines = file_path.read_text(encoding="utf-8", errors="replace").splitlines()
-        selected = lines[start_line - 1 : start_line - 1 + max_lines]
+        selected = []
+        end_line = start_line + max_lines - 1
+        try:
+            with file_path.open("r", encoding="utf-8", errors="replace") as handle:
+                for idx, line in enumerate(handle, start=1):
+                    if idx >= start_line:
+                        selected.append(line.rstrip("\r\n"))
+                    if idx >= end_line:
+                        break
+        except Exception as exc:
+            raise ValueError(f"failed to read file: {exc}") from exc
         content = "\n".join(f"{idx}: {line}" for idx, line in enumerate(selected, start=start_line))
         return {
             "path": str(file_path.relative_to(self.root)),
@@ -87,6 +100,7 @@ class AgentFileBrowser:
             "never",
             "--max-count",
             str(max_matches),
+            "--",
             pattern,
             str(search_path),
         ]
