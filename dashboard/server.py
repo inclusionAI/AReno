@@ -243,9 +243,11 @@ class DashboardState:
         job._timeperf_keys.add(step)
         ordered = sorted(
             [{"name": name, "seconds": max(value, 0.0)} for name, value in segments.items() if value > 0],
-            key=lambda item: TIME_SEGMENT_ORDER.index(item["name"])
-            if item["name"] in TIME_SEGMENT_ORDER
-            else len(TIME_SEGMENT_ORDER),
+            key=lambda item: (
+                TIME_SEGMENT_ORDER.index(item["name"])
+                if item["name"] in TIME_SEGMENT_ORDER
+                else len(TIME_SEGMENT_ORDER)
+            ),
         )
         accounted = sum(item["seconds"] for item in ordered)
         if total > accounted:
