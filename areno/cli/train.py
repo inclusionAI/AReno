@@ -844,7 +844,9 @@ def _write_dashboard_run_config(config: TrainerConfig) -> None:
         "settings": _training_config_settings(config),
     }
     (path / f"areno_run_config.{pid}.txt").write_text(summary + "\n", encoding="utf-8")
-    (path / f"areno_run_config.{pid}.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    (path / f"areno_run_config.{pid}.json").write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
 
 
 def _training_config_settings(config: TrainerConfig) -> dict:

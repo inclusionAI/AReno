@@ -375,16 +375,16 @@ class Trainer:
         """Persist dashboard state independently from TensorBoard scalar events."""
 
         if self._metrics is not None:
-            self._metrics.record_dashboard_state(stage=stage, step=step, epoch=epoch, role=role, status=status, extra=extra)
+            self._metrics.record_dashboard_state(
+                stage=stage, step=step, epoch=epoch, role=role, status=status, extra=extra
+            )
 
     def ensure_roles(self, roles: dict[str, ModelRole]) -> None:
         """Prepare backend-owned auxiliary model roles for algorithms like PPO."""
 
         self._backend.ensure_roles(self._ctx, roles)
 
-    def score_logprobs(
-        self, role: str, token_rows: list[list[int]], *, microbatch_size: int = 8
-    ) -> list[list[float]]:
+    def score_logprobs(self, role: str, token_rows: list[list[int]], *, microbatch_size: int = 8) -> list[list[float]]:
         """Score fixed token sequences with a backend-owned model role."""
 
         return self._backend.score_logprobs(self._ctx, role, token_rows, microbatch_size=microbatch_size)
