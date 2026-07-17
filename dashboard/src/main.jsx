@@ -1115,11 +1115,15 @@ function MetricChart({ jobId, metricsDir, refreshNonce }) {
   const [metricList, setMetricList] = useState([]);
   const [points, setPoints] = useState([]);
   const [metricLoading, setMetricLoading] = useState(false);
+  // Reset the selection only when the job changes; live polls (refreshNonce)
+  // must not wipe the user's chosen metric or clear the chart.
   useEffect(() => {
-    let cancelled = false;
     setMetricList([]);
     setPoints([]);
     setSelectedName("");
+  }, [jobId]);
+  useEffect(() => {
+    let cancelled = false;
     if (!jobId) return undefined;
     api(`/api/jobs/${jobId}/metrics`)
       .then((data) => {
@@ -1137,8 +1141,10 @@ function MetricChart({ jobId, metricsDir, refreshNonce }) {
   }, [jobId, refreshNonce]);
   useEffect(() => {
     let cancelled = false;
-    setPoints([]);
-    if (!jobId || !selectedName) return undefined;
+    if (!jobId || !selectedName) {
+      setPoints([]);
+      return undefined;
+    }
     setMetricLoading(true);
     api(`/api/jobs/${jobId}/metric?name=${encodeURIComponent(selectedName)}&limit=500`)
       .then((data) => {
@@ -1158,7 +1164,7 @@ function MetricChart({ jobId, metricsDir, refreshNonce }) {
     return () => {
       cancelled = true;
     };
-  }, [jobId, selectedName]);
+  }, [jobId, selectedName, refreshNonce]);
   const names = metricList.map((item) => item.name).sort();
   const activeName = selectedName && names.includes(selectedName) ? selectedName : names[0] || "";
   const visiblePoints = points.slice(-240);
