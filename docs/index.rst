@@ -5,7 +5,7 @@ AReno documentation
 
    <script>window.location.replace("getting-started/welcome.html");</script>
    <noscript>
-     <p>Continue to <a href="getting-started/welcome.html">Welcome</a>.</p>
+     <p>Continue to <a href="getting-started/welcome.html">Overview</a>.</p>
    </noscript>
 
 .. toctree::
@@ -13,9 +13,10 @@ AReno documentation
    :maxdepth: 1
    :caption: Get Started
 
-   Welcome <getting-started/welcome>
+   Overview <getting-started/welcome>
    getting-started/installation
    getting-started/quickstart
+   Example Gallery <getting-started/example-gallery>
 
 .. toctree::
    :hidden:
