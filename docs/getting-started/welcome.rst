@@ -25,11 +25,9 @@ Start
    <div class="areno-command-grid">
      <div class="areno-command-card">
        <p class="areno-card-kicker">Install</p>
-       <h3>Build against your CUDA PyTorch environment.</h3>
-      <pre><code>pip install psutil
-   pip install flash-linear-attention
-   pip install -e . --no-build-isolation</code></pre>
-       <p>Use <code>ARENO_BUILD_EXT=0</code> for metadata-only docs or package checks on CPU-only machines.</p>
+       <h3>Run one installer.</h3>
+      <pre><code>bash scripts/install.sh</code></pre>
+       <p>AReno prepares the environment, builds the CUDA runtime, verifies the result, and explains the next action if a step fails.</p>
      </div>
      <div class="areno-command-card">
        <p class="areno-card-kicker">Check</p>
@@ -40,9 +38,9 @@ Start
      </div>
    </div>
 
-``flash-attn`` is optional unless you use the default ``--attn-backend flash``
-path. Use ``--attn-backend native`` when you want to run without FlashAttention
-or when the local GPU is unsupported by FlashAttention.
+The installer selects the attention setup automatically: it prepares
+FlashAttention for supported GPUs and leaves older GPUs on AReno's native
+compatibility backend.
 
 Core workflows
 --------------
