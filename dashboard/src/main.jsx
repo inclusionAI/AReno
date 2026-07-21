@@ -1109,19 +1109,37 @@ function configValue(job, key) {
   return undefined;
 }
 
+function metricNamesFrom(metricList) {
+  return (metricList || []).map((item) => item.name).sort();
+}
+
+// Mirror the dropdown's fallback so the fetched series always matches the
+// option shown to the user, even when the previous selection disappears from a
+// refreshed metric list.
+function resolveActiveMetricName(names, selectedName) {
+  return selectedName && names.includes(selectedName) ? selectedName : names[0] || "";
+}
+
 function MetricChart({ jobId, metricsDir, refreshNonce }) {
   const [selectedName, setSelectedName] = useState("");
   const [smooth, setSmooth] = useState(0.6);
   const [metricList, setMetricList] = useState([]);
   const [points, setPoints] = useState([]);
   const [metricLoading, setMetricLoading] = useState(false);
-  // Reset the selection only when the job changes; live polls (refreshNonce)
-  // must not wipe the user's chosen metric or clear the chart.
-  useEffect(() => {
+  const [prevJobId, setPrevJobId] = useState(jobId);
+  // Reset the selection during render (not in an effect) when the job changes so
+  // the reset happens before any effect runs. This avoids a stale-name fetch and
+  // a stuck loading state on job switch, while live polls (refreshNonce) still
+  // keep the user's chosen metric and chart intact.
+  if (jobId !== prevJobId) {
+    setPrevJobId(jobId);
+    setSelectedName("");
     setMetricList([]);
     setPoints([]);
-    setSelectedName("");
-  }, [jobId]);
+    setMetricLoading(false);
+  }
+  const names = metricNamesFrom(metricList);
+  const effectiveName = resolveActiveMetricName(names, selectedName);
   useEffect(() => {
     let cancelled = false;
     if (!jobId) return undefined;
@@ -1141,12 +1159,13 @@ function MetricChart({ jobId, metricsDir, refreshNonce }) {
   }, [jobId, refreshNonce]);
   useEffect(() => {
     let cancelled = false;
-    if (!jobId || !selectedName) {
+    if (!jobId || !effectiveName) {
       setPoints([]);
+      setMetricLoading(false);
       return undefined;
     }
     setMetricLoading(true);
-    api(`/api/jobs/${jobId}/metric?name=${encodeURIComponent(selectedName)}&limit=500`)
+    api(`/api/jobs/${jobId}/metric?name=${encodeURIComponent(effectiveName)}&limit=500`)
       .then((data) => {
         if (cancelled) return;
         setPoints((data.points || []).filter((point) => Number.isFinite(Number(point.value))).map((point) => ({
@@ -1164,9 +1183,8 @@ function MetricChart({ jobId, metricsDir, refreshNonce }) {
     return () => {
       cancelled = true;
     };
-  }, [jobId, selectedName, refreshNonce]);
-  const names = metricList.map((item) => item.name).sort();
-  const activeName = selectedName && names.includes(selectedName) ? selectedName : names[0] || "";
+  }, [jobId, effectiveName, refreshNonce]);
+  const activeName = effectiveName;
   const visiblePoints = points.slice(-240);
   const smoothed = smoothTensorboard(visiblePoints, smooth);
   const plot = buildMetricPlot(visiblePoints, smoothed);
@@ -1692,4 +1710,9 @@ function EmptyState({ title, text }) {
   );
 }
 
-createRoot(document.getElementById("root")).render(<App />);
+const rootElement = typeof document !== "undefined" ? document.getElementById("root") : null;
+if (rootElement) {
+  createRoot(rootElement).render(<App />);
+}
+
+export { App, MetricChart, metricNamesFrom, resolveActiveMetricName };
