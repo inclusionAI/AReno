@@ -23,16 +23,12 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+from areno.cli.dashboard_registry import GLOBAL_REGISTRY_FILE
+from areno.cli.diagnostics import collect_env, run_checks
+from areno.dashboard.agent_context import agent_system_prompt
+from areno.dashboard.agent_files import AgentFileBrowser
 
-from agent_context import agent_system_prompt  # noqa: E402
-from agent_files import AgentFileBrowser  # noqa: E402
-
-from areno.cli.dashboard_registry import GLOBAL_REGISTRY_FILE  # noqa: E402
-from areno.cli.diagnostics import collect_env, run_checks  # noqa: E402
-
+ROOT = Path(os.environ.get("ARENO_DASHBOARD_ROOT", Path.cwd())).resolve()
 STATIC_DIR = Path(__file__).resolve().parent / "dist"
 STATE_FILE = ROOT / ".areno-dashboard-state.json"
 DEFAULT_METRICS_LOG_DIR = "/tmp/areno/tfevent"

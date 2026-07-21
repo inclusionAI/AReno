@@ -92,5 +92,8 @@ exclude = ["areno/accel/csrc"]
 where = ["."]
 include = ["areno*"]
 
+[tool.setuptools.package-data]
+"areno.dashboard" = ["dist/*", "dist/assets/*"]
+
 [project.scripts]
 areno = "areno.cli.main:main"

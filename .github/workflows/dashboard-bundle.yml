@@ -6,12 +6,14 @@ on:
       - main
     paths:
       - "dashboard/**"
+      - "areno/dashboard/**"
       - ".github/workflows/dashboard-bundle.yml"
   pull_request:
     branches:
       - main
     paths:
       - "dashboard/**"
+      - "areno/dashboard/**"
       - ".github/workflows/dashboard-bundle.yml"
   workflow_dispatch:
 
@@ -52,9 +54,9 @@ jobs:
 
       - name: Verify committed bundle
         run: |
-          if test -n "$(git status --porcelain -- dashboard/dist)"; then
-            echo "dashboard/dist is out of date; run 'pnpm --dir dashboard build' and commit the result."
-            git status --short -- dashboard/dist
-            git diff -- dashboard/dist
+          if test -n "$(git status --porcelain -- areno/dashboard/dist)"; then
+            echo "areno/dashboard/dist is out of date; run 'pnpm --dir dashboard build' and commit the result."
+            git status --short -- areno/dashboard/dist
+            git diff -- areno/dashboard/dist
             exit 1
           fi

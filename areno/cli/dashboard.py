@@ -15,20 +15,35 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
+def _package_root() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def _dashboard_dir() -> Path:
+    return _package_root() / "dashboard"
+
+
+def _runtime_root() -> Path:
+    source_root = _repo_root()
+    if (source_root / "pyproject.toml").is_file() and (source_root / "dashboard" / "package.json").is_file():
+        return source_root
+    return Path.cwd()
+
+
 def _dashboard_server() -> Path:
-    return _repo_root() / "dashboard" / "server.py"
+    return _dashboard_dir() / "server.py"
 
 
 def _dashboard_index() -> Path:
-    return _repo_root() / "dashboard" / "dist" / "index.html"
+    return _dashboard_dir() / "dist" / "index.html"
 
 
 def _pid_file() -> Path:
-    return _repo_root() / ".areno-dashboard.pid"
+    return _runtime_root() / ".areno-dashboard.pid"
 
 
 def _log_file() -> Path:
-    return _repo_root() / ".areno-dashboard.log"
+    return _runtime_root() / ".areno-dashboard.log"
 
 
 def _read_pid() -> int | None:
@@ -78,14 +93,18 @@ def dashboard_command(start: bool, stop: bool, host: str, port: int) -> None:
     if existing is not None and _is_running(existing):
         click.echo(f"dashboard already running: http://{host}:{port} pid={existing}")
         return
-    log_handle = _log_file().open("a", encoding="utf-8")
-    process = subprocess.Popen(
-        [sys.executable, str(server), "--host", host, "--port", str(port)],
-        cwd=_repo_root(),
-        stdout=log_handle,
-        stderr=subprocess.STDOUT,
-        start_new_session=True,
-    )
+    runtime_root = _runtime_root()
+    env = os.environ.copy()
+    env["ARENO_DASHBOARD_ROOT"] = str(runtime_root)
+    with _log_file().open("a", encoding="utf-8") as log_handle:
+        process = subprocess.Popen(
+            [sys.executable, "-m", "areno.dashboard.server", "--host", host, "--port", str(port)],
+            cwd=runtime_root,
+            env=env,
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
     _pid_file().write_text(str(process.pid), encoding="utf-8")
     click.echo(f"dashboard started: http://{host}:{port} pid={process.pid}")
 
@@ -94,8 +113,8 @@ def _ensure_dashboard_build() -> None:
     if _dashboard_index().exists():
         return
     dashboard_dir = _repo_root() / "dashboard"
-    if not dashboard_dir.exists():
-        raise click.ClickException(f"dashboard source not found: {dashboard_dir}")
+    if not (dashboard_dir / "package.json").is_file():
+        raise click.ClickException("dashboard static assets are missing; reinstall AReno from a complete distribution")
     click.echo("dashboard static build not found; running pnpm --dir dashboard build")
     try:
         subprocess.run(["pnpm", "--dir", "dashboard", "build"], cwd=_repo_root(), check=True)

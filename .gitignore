@@ -9,8 +9,8 @@ __pycache__/
 *.obj
 build/
 dist/
-!dashboard/dist/
-!dashboard/dist/**
+!areno/dashboard/dist/
+!areno/dashboard/dist/**
 *.egg-info/
 *.egg
 .eggs/
