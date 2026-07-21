@@ -12,7 +12,7 @@ from pathlib import Path
 def tensor_files(root: Path) -> list[Path]:
     index_files = sorted(root.glob("*.safetensors.index.json"))
     if index_files:
-        index = json.loads(index_files[0].read_text())
+        index = json.loads(index_files[0].read_text(encoding="utf-8"))
         return [root / name for name in sorted(set(index.get("weight_map", {}).values()))]
     return sorted(root.glob("*.safetensors"))
 
@@ -28,7 +28,7 @@ def main() -> int:
         from safetensors import safe_open
 
         config_path = args.checkpoint / "config.json"
-        config = json.loads(config_path.read_text()) if config_path.exists() else None
+        config = json.loads(config_path.read_text(encoding="utf-8")) if config_path.exists() else None
         tensors = []
         files = tensor_files(args.checkpoint)
         for path in files:

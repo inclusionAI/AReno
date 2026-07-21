@@ -47,7 +47,13 @@ def main() -> int:
         )
         result["checks"]["chat"] = {"ok": True, "response": chat}
     except Exception as exc:
-        result["error"] = f"{type(exc).__name__}: {exc}"
+        response_detail = ""
+        if hasattr(exc, "read"):
+            try:
+                response_detail = f"; response: {exc.read().decode('utf-8')}"
+            except Exception:
+                pass
+        result["error"] = f"{type(exc).__name__}: {exc}{response_detail}"
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 1
     print(json.dumps(result, ensure_ascii=False, indent=2))

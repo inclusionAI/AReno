@@ -12,7 +12,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("transcript", type=Path)
     args = parser.parse_args()
-    value = json.loads(args.transcript.read_text())
+    value = json.loads(args.transcript.read_text(encoding="utf-8"))
     messages = value.get("messages", value) if isinstance(value, dict) else value
     errors = []
     pending: list[str] = []

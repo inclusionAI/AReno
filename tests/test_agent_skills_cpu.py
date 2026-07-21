@@ -18,8 +18,13 @@ def test_repository_agent_skills_are_valid():
         timeout=60,
         check=False,
     )
-    result = json.loads(process.stdout)
+    if process.returncode != 0:
+        raise AssertionError(
+            f"validate_skills.py failed with exit code {process.returncode}\n"
+            f"STDOUT:\n{process.stdout}\n"
+            f"STDERR:\n{process.stderr}"
+        )
 
-    assert process.returncode == 0, result
+    result = json.loads(process.stdout)
     assert result["skill_count"] == 10
     assert result["script_count"] >= 15

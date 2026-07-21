@@ -41,9 +41,12 @@ def validate_skill(skill: Path, run_help: bool) -> list[str]:
     if len(meta.get("description", "")) < 40:
         errors.append(f"{skill_file}: description is too short to trigger reliably")
     for match in LINK.finditer(text):
-        target = skill / match.group("target")
+        target_text = match.group("target")
+        if target_text.startswith(("http://", "https://", "mailto:")):
+            continue
+        target = skill / target_text
         if not target.exists():
-            errors.append(f"{skill_file}: missing linked file {match.group('target')}")
+            errors.append(f"{skill_file}: missing linked file {target_text}")
     interface = skill / "agents" / "openai.yaml"
     if not interface.is_file():
         errors.append(f"{skill}: missing agents/openai.yaml")
@@ -53,17 +56,26 @@ def validate_skill(skill: Path, run_help: bool) -> list[str]:
             if key not in interface_text:
                 errors.append(f"{interface}: missing {key[:-1]}")
     for script in sorted((skill / "scripts").glob("*.py")) if (skill / "scripts").exists() else []:
-        compile(script.read_text(encoding="utf-8"), str(script), "exec")
+        try:
+            compile(script.read_text(encoding="utf-8"), str(script), "exec")
+        except Exception as exc:
+            errors.append(f"{script}: failed to compile: {exc}")
+            continue
         if run_help:
-            process = subprocess.run(
-                [sys.executable, str(script), "--help"],
-                capture_output=True,
-                text=True,
-                timeout=20,
-                check=False,
-            )
-            if process.returncode:
-                errors.append(f"{script}: --help exited {process.returncode}: {process.stderr.strip()}")
+            try:
+                process = subprocess.run(
+                    [sys.executable, str(script), "--help"],
+                    capture_output=True,
+                    text=True,
+                    timeout=20,
+                    check=False,
+                )
+                if process.returncode:
+                    errors.append(f"{script}: --help exited {process.returncode}: {process.stderr.strip()}")
+            except subprocess.TimeoutExpired:
+                errors.append(f"{script}: --help timed out after 20 seconds")
+            except Exception as exc:
+                errors.append(f"{script}: failed to run --help: {exc}")
     return errors
 
 

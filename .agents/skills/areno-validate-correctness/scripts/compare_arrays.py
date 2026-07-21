@@ -26,25 +26,28 @@ def main() -> int:
     parser.add_argument("--atol", type=float, default=1e-5)
     parser.add_argument("--rtol", type=float, default=1e-4)
     args = parser.parse_args()
-    left = list(flatten(json.loads(args.baseline.read_text())))
-    right = list(flatten(json.loads(args.candidate.read_text())))
-    diffs = [abs(a - b) for a, b in zip(left, right)]
-    finite = all(math.isfinite(value) for value in left + right)
-    passed = (
-        len(left) == len(right)
-        and finite
-        and all(diff <= args.atol + args.rtol * abs(a) for a, diff in zip(left, diffs))
-    )
-    result = {
-        "ok": passed,
-        "baseline_count": len(left),
-        "candidate_count": len(right),
-        "finite": finite,
-        "max_abs_diff": max(diffs, default=0.0),
-        "mean_abs_diff": sum(diffs) / len(diffs) if diffs else 0.0,
-    }
+    try:
+        left = list(flatten(json.loads(args.baseline.read_text(encoding="utf-8"))))
+        right = list(flatten(json.loads(args.candidate.read_text(encoding="utf-8"))))
+        diffs = [abs(a - b) for a, b in zip(left, right)]
+        finite = all(math.isfinite(value) for value in left + right)
+        passed = (
+            len(left) == len(right)
+            and finite
+            and all(diff <= args.atol + args.rtol * abs(a) for a, diff in zip(left, diffs))
+        )
+        result = {
+            "ok": passed,
+            "baseline_count": len(left),
+            "candidate_count": len(right),
+            "finite": finite,
+            "max_abs_diff": max(diffs, default=0.0),
+            "mean_abs_diff": sum(diffs) / len(diffs) if diffs else 0.0,
+        }
+    except Exception as exc:
+        result = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
     print(json.dumps(result, indent=2))
-    return 0 if passed else 1
+    return 0 if result["ok"] else 1
 
 
 if __name__ == "__main__":

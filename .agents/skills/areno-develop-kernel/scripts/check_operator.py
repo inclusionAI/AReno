@@ -42,13 +42,18 @@ def main() -> int:
         left.backward(gradient)
         right.backward(gradient)
         forward_ok = torch.allclose(left, right, atol=args.atol, rtol=args.rtol)
-        backward_ok = torch.allclose(left_input.grad, right_input.grad, atol=args.atol, rtol=args.rtol)
+        if left_input.grad is not None and right_input.grad is not None:
+            backward_ok = torch.allclose(left_input.grad, right_input.grad, atol=args.atol, rtol=args.rtol)
+            backward_max_abs = float((left_input.grad - right_input.grad).abs().max())
+        else:
+            backward_ok = False
+            backward_max_abs = None
         result = {
             "ok": bool(forward_ok and backward_ok),
             "forward_ok": bool(forward_ok),
             "backward_ok": bool(backward_ok),
             "forward_max_abs": float((left - right).abs().max()),
-            "backward_max_abs": float((left_input.grad - right_input.grad).abs().max()),
+            "backward_max_abs": backward_max_abs,
             "shape": shape,
             "dtype": args.dtype,
             "device": args.device,
