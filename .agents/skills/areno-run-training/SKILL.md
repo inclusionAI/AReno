@@ -17,8 +17,15 @@ Read [references/algorithm-matrix.md](references/algorithm-matrix.md). Inspect a
 
 ```bash
 python .agents/skills/areno-run-training/scripts/inspect_dataset.py \
-  --dataset-path <path-or-ref> [--loader examples/.../dataset_loader.py] --algo <algo>
+  --dataset-path <path-or-ref> --model-hub modelscope \
+  [--loader examples/.../dataset_loader.py] --algo <algo>
 ```
+
+Do not build or run the training command until this inspection returns
+`"ok": true`. If raw rollout rows lack `prompt` or `messages`, select a
+dataset loader and rerun the inspection with `--loader`; pass the same path to
+training as `--dataset-loader-fn`. For GSM8K-style `question`/`answer` rows,
+use `examples/math/dataset_loader.py`.
 
 Use [scripts/read_metrics.py](scripts/read_metrics.py) to inspect event keys or selected scalar series. Do not parse stdout as the metric source.
 
@@ -26,11 +33,12 @@ Use [scripts/read_metrics.py](scripts/read_metrics.py) to inspect event keys or 
 
 1. Record `git rev-parse HEAD`, environment facts from `areno env --json` and `areno check`, GPU state, checkpoint source, ModelScope dataset source, and resolved local paths.
 2. Classify SFT, DPO, rollout RL, or agentic RL. Read [references/data-contracts.md](references/data-contracts.md).
-3. Build the smallest command expressing the requested real workload. Preserve user-provided `max_new_tokens` and `max_context_len`.
-4. Use smoke or tune only when useful. Smoke is capacity evidence, not task completion.
-5. Run the real job. Confirm the requested trainer step advances. For rollout, inspect one coherent sample and reward.
-6. On failure, use [references/failure-triage.md](references/failure-triage.md). Fix the first causal error.
-7. If saving is requested, verify output and reload it through the intended adapter.
+3. Inspect both the raw schema and the normalized schema. Treat a missing rollout `prompt`/`messages` as a required-loader error, not a warning.
+4. Build the smallest command expressing the requested real workload. Preserve user-provided `max_new_tokens` and `max_context_len`, and include the verified loader with `--dataset-loader-fn`.
+5. Use smoke or tune only when useful. Smoke is capacity evidence, not task completion.
+6. Run the real job. Confirm the requested trainer step advances. For rollout, inspect one coherent sample and reward.
+7. On failure, use [references/failure-triage.md](references/failure-triage.md). Fix the first causal error.
+8. If saving is requested, verify output and reload it through the intended adapter.
 
 ## Capacity invariants
 

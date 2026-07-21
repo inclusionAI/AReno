@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 
-def default_loader(path: str) -> list[dict[str, Any]]:
+def default_loader(path: str, *, model_hub: str) -> list[dict[str, Any]]:
     source = Path(path)
     if source.is_file() and source.suffix in {".jsonl", ".json"}:
         text = source.read_text(encoding="utf-8")
@@ -25,12 +25,24 @@ def default_loader(path: str) -> list[dict[str, Any]]:
     if source.is_dir():
         return load_from_disk(str(source))
     name, _, config = path.partition(":")
+    if model_hub == "modelscope":
+        try:
+            from modelscope.msdatasets import MsDataset
+        except ImportError as exc:
+            raise RuntimeError("ModelScope dataset loading requires modelscope") from exc
+        kwargs = {"subset_name": config} if config else {}
+        dataset = MsDataset.load(name, split="train", trust_remote_code=True, **kwargs)
+        to_hf_dataset = getattr(dataset, "to_hf_dataset", None)
+        return to_hf_dataset() if callable(to_hf_dataset) else dataset
     return load_dataset(name, config or None, split="train")
 
 
-def load_rows(path: str, loader_path: str | None) -> Any:
+def load_rows(path: str, loader_path: str | None, *, model_hub: str) -> Any:
+    def load_default(dataset_path: str):
+        return default_loader(dataset_path, model_hub=model_hub)
+
     if not loader_path:
-        return default_loader(path)
+        return load_default(path)
     file_path = Path(loader_path)
     spec = importlib.util.spec_from_file_location("areno_skill_dataset_loader", file_path)
     if spec is None or spec.loader is None:
@@ -38,7 +50,7 @@ def load_rows(path: str, loader_path: str | None) -> Any:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     loader = getattr(module, "load_training_dataset")
-    return loader(path, default_loader=default_loader)
+    return loader(path, default_loader=load_default)
 
 
 def classify(row: dict[str, Any], algo: str) -> list[str]:
@@ -52,7 +64,13 @@ def classify(row: dict[str, Any], algo: str) -> list[str]:
         if not any(key in keys for key in alternatives):
             errors.append("SFT row has no supervised response field")
     elif "prompt" not in keys and "messages" not in keys:
-        errors.append("rollout row requires prompt or messages")
+        if {"question", "answer"} <= keys:
+            errors.append(
+                "rollout row requires prompt or messages; rerun with "
+                "--loader examples/math/dataset_loader.py for GSM8K-style rows"
+            )
+        else:
+            errors.append("rollout row requires prompt or messages; select and verify a dataset loader")
     return errors
 
 
@@ -72,11 +90,12 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset-path", required=True)
     parser.add_argument("--loader")
+    parser.add_argument("--model-hub", choices=("modelscope", "hf"), default="modelscope")
     parser.add_argument("--algo", choices=("sft", "dpo", "gspo", "grpo", "ppo"), required=True)
     parser.add_argument("--limit", type=int, default=3)
     args = parser.parse_args()
     try:
-        rows = load_rows(args.dataset_path, args.loader)
+        rows = load_rows(args.dataset_path, args.loader, model_hub=args.model_hub)
         count = len(rows)
         samples = [dict(rows[index]) for index in range(min(count, max(args.limit, 0)))]
         errors = [error for row in samples for error in classify(row, args.algo)]
