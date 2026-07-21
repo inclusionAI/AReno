@@ -24,6 +24,6 @@ python .agents/skills/areno-add-algorithm/scripts/inspect_algorithms.py
 4. Put batch/materialization logic in the trainer and tensor mathematics in `areno/api/loss_fns/` or advantage helpers.
 5. Register one `AlgorithmSpec`; load experimental implementations through `areno/experimental/` when appropriate.
 6. Add CPU tests for registration, config, masks, exact small-tensor math, and trainer dispatch.
-7. For rollout algorithms, verify bounded GPU rollout/train logprob consistency and gradients.
+7. Run the new algorithm end to end for at least two consecutive successful training steps using a real model and representative data. Verify finite losses, metrics, and gradients on both steps. For rollout algorithms, also verify bounded GPU rollout/train logprob consistency.
 
-Completion requires registry discovery, deterministic mathematical tests, trainer execution evidence, and role lifecycle checks where applicable.
+Completion requires registry discovery, deterministic mathematical tests, evidence from at least two successful end-to-end training steps, and role lifecycle checks where applicable. A one-step smoke train is useful for diagnosis but does not complete algorithm validation.
