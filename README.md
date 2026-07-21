@@ -34,7 +34,9 @@ AReno's mission is to make LLM RL **accessible** for a broad community of resear
 
 ## Installation
 
-Clone AReno and run the installer:
+### From source
+
+AReno currently requires Linux (x86_64 or aarch64) with an NVIDIA GPU and CUDA-enabled PyTorch 2.6 or newer; Windows users can use WSL2.
 
 ```bash
 git clone https://github.com/inclusionAI/AReno.git
@@ -42,74 +44,16 @@ cd AReno
 bash scripts/install.sh
 ```
 
-No installation options or prior setup decisions are required before running
-the script.
-Before changing Python, the script checks required system tools, rejects WSL1,
-and verifies that `nvidia-smi` can see a GPU. It then uses the active Python
-environment when appropriate. In preconfigured IDE environments where
-activation metadata is unavailable, it detects and reuses a Python interpreter
-that already provides PyTorch instead of creating an empty `.venv`; otherwise
-it prepares `.venv`. It then checks for a CUDA-enabled PyTorch 2.6 or newer
-build, installs the remaining dependencies in the required order, detects the
-CUDA build environment, builds AReno, and finishes by running `areno check`.
-The installer never installs or upgrades PyTorch because the correct build
-depends on the machine's CUDA platform. If PyTorch is missing or incompatible,
-it stops with guidance for the selected Python environment. Other installed
-packages are reused when they satisfy AReno's requirements; only missing or
-incompatible packages are installed or updated.
-If a step fails, it reports the failed stage, preserves the complete output in
-the user state directory (usually `~/.local/state/areno/install.log`), and
-prints suggestions specific to that failure.
+### Docker
 
-AReno training and serving target Linux with NVIDIA CUDA. The installer checks
-platform support before changing the environment. Windows users should run it
-inside [WSL2](https://learn.microsoft.com/windows/wsl/). The installer does not
-support macOS or CPU-only environments.
-
-To preview what the installer will do without making changes:
+Use our official [AReno image](https://ghcr.io/inclusionai/areno) `inclusionai/areno` container. Run:
 
 ```bash
-bash scripts/install.sh --dry-run
-```
-
-For setup or support reports:
-
-```bash
-areno check
-areno env --json  # attach this to setup/support reports
-```
-
-**Docker setup escape hatch** (recommended when you want to verify AReno before debugging local build state):
-
-```bash
-docker build -t areno .
-docker run --gpus all --rm -it areno areno check
-```
-
-If you need local project files, model files, or a Hugging Face cache inside the container:
-
-```bash
+# Please make sure the host has an NVIDIA driver and NVIDIA Container Toolkit.
 docker run --gpus all --rm -it \
-  -v $PWD:/workspace \
-  -v $HOME/.cache/huggingface:/root/.cache/huggingface \
-  areno \
+  ghcr.io/inclusionai/areno:v0.0.6 \
   areno check
 ```
-
-Host checklist before blaming AReno setup:
-
-```bash
-nvidia-smi
-docker run --gpus all --rm nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi
-docker run --gpus all --rm areno areno check
-```
-
-Docker gives you a known-good Python/PyTorch/CUDA user-space install path and reuses the same `areno check` diagnostic flow. It does not replace host requirements: the host still needs a working NVIDIA driver, NVIDIA Container Toolkit support for `--gpus all`, and a driver new enough for the container CUDA runtime. Docker also does not solve model downloads, Hugging Face tokens, cache paths, network access, disk space, or multi-node networking; those remain user environment concerns.
-
-The installer selects the attention setup automatically. It installs
-FlashAttention for supported GPUs and leaves older GPUs on AReno's native
-compatibility backend. Build helpers, visible GPU architectures, and CUDA
-variables are handled by the script.
 
 ## Quick Start
 
