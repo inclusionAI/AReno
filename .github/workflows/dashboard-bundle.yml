@@ -1,0 +1,60 @@
+name: Dashboard Bundle
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "dashboard/**"
+      - ".github/workflows/dashboard-bundle.yml"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "dashboard/**"
+      - ".github/workflows/dashboard-bundle.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dashboard-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bundle:
+    name: bundle is up to date
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.9.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: dashboard/pnpm-lock.yaml
+
+      - name: Install dashboard dependencies
+        run: pnpm --dir dashboard install --frozen-lockfile
+
+      - name: Build dashboard
+        run: pnpm --dir dashboard build
+
+      - name: Verify committed bundle
+        run: |
+          if test -n "$(git status --porcelain -- dashboard/dist)"; then
+            echo "dashboard/dist is out of date; run 'pnpm --dir dashboard build' and commit the result."
+            git status --short -- dashboard/dist
+            git diff -- dashboard/dist
+            exit 1
+          fi
