@@ -15,7 +15,7 @@ import torch.distributed.nn.functional as dist_nn
 from torch import nn
 
 from areno.engine.checkpoints.common import load_checkpoint_weights, save_checkpoint_weights
-from areno.engine.config import ModelConfig, _parse_dtype
+from areno.engine.config import ModelConfig
 from areno.engine.layers.attention import CausalSelfAttention
 from areno.engine.layers.linear import mark_tensor_parallel_parameter
 from areno.engine.layers.norm import RMSNorm
@@ -23,6 +23,8 @@ from areno.engine.parallel.context import get_tp_context
 from areno.engine.runtime.metadata import InferMeta, TrainMeta
 from areno.models.base import ModelAdapter
 from areno.models.olmo2.checkpoint import CHECKPOINT_SPEC
+from areno.models.olmo2.config import config_from_hf
+from areno.models.olmo2.semantics import post_norm_residual, projected_rms_norm
 from areno.models.qwen3.model import Qwen3ForCausalLM, QwenDecoderLayer
 
 
@@ -37,13 +39,11 @@ class Olmo2ProjectedRMSNorm(nn.Module):
         self.eps = eps
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        input_dtype = hidden_states.dtype
         squared_sum = hidden_states.float().square().sum(dim=-1, keepdim=True)
         ctx = get_tp_context()
         if ctx.world_size > 1:
             squared_sum = dist_nn.all_reduce(squared_sum, group=ctx.group)
-        scale = torch.rsqrt(squared_sum / self.global_size + self.eps)
-        return (hidden_states.float() * scale * self.weight).to(dtype=input_dtype)
+        return projected_rms_norm(hidden_states, squared_sum, self.weight, self.global_size, self.eps)
 
 
 class Olmo2SelfAttention(CausalSelfAttention):
@@ -100,10 +100,10 @@ class Olmo2DecoderLayer(QwenDecoderLayer):
     ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.self_attn(hidden_states, position_ids, train_meta, infer_meta)
-        hidden_states = residual + self.post_attention_layernorm(hidden_states)
+        hidden_states = post_norm_residual(residual, hidden_states, self.post_attention_layernorm)
         residual = hidden_states
         hidden_states = self.mlp(hidden_states)
-        return residual + self.post_feedforward_layernorm(hidden_states)
+        return post_norm_residual(residual, hidden_states, self.post_feedforward_layernorm)
 
 
 class Olmo2ForCausalLM(Qwen3ForCausalLM):
@@ -123,27 +123,7 @@ class Olmo2Adapter(ModelAdapter):
         return str(hf_config.get("model_type", "")).lower() == "olmo2"
 
     def config_from_hf(self, hf_config: dict[str, Any]) -> ModelConfig:
-        hidden_size = int(hf_config["hidden_size"])
-        num_attention_heads = int(hf_config["num_attention_heads"])
-        return ModelConfig(
-            model_type=self.name,
-            vocab_size=int(hf_config["vocab_size"]),
-            hidden_size=hidden_size,
-            intermediate_size=int(hf_config["intermediate_size"]),
-            num_hidden_layers=int(hf_config["num_hidden_layers"]),
-            num_attention_heads=num_attention_heads,
-            num_key_value_heads=int(hf_config.get("num_key_value_heads", num_attention_heads)),
-            head_dim=int(hf_config.get("head_dim", hidden_size // num_attention_heads)),
-            rms_norm_eps=float(hf_config.get("rms_norm_eps", 1e-5)),
-            rope_theta=float(hf_config.get("rope_theta", 10_000.0)),
-            max_position_embeddings=int(hf_config.get("max_position_embeddings", 2048)),
-            tie_word_embeddings=bool(hf_config.get("tie_word_embeddings", False)),
-            qkv_bias=bool(hf_config.get("attention_bias", False)),
-            qk_norm=False,
-            dtype=_parse_dtype(hf_config.get("torch_dtype") or hf_config.get("dtype")),
-            hidden_act=str(hf_config.get("hidden_act", "silu")),
-            sequence_parallel=bool(hf_config.get("sequence_parallel", True)),
-        )
+        return config_from_hf(hf_config)
 
     def build(self, config: ModelConfig) -> nn.Module:
         if config.hidden_act != "silu":
