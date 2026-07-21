@@ -7,6 +7,10 @@ description: Run, configure, retry, and validate AReno SFT, DPO, GSPO, GRPO, PPO
 
 Read repository `AGENTS.md`, `CODEMAP.md`, and current `areno train --help` before building a command.
 
+For remote model or dataset references, explicitly pass
+`--model-hub modelscope`. Do not substitute a Hugging Face download when the
+ModelScope asset is missing; request a valid ModelScope ID or local path.
+
 ## Select the path
 
 Read [references/algorithm-matrix.md](references/algorithm-matrix.md). Inspect a bounded dataset sample with:
@@ -20,7 +24,7 @@ Use [scripts/read_metrics.py](scripts/read_metrics.py) to inspect event keys or 
 
 ## Workflow
 
-1. Record `git rev-parse HEAD`, environment facts from `areno env --json` and `areno check`, GPU state, checkpoint source, and dataset source.
+1. Record `git rev-parse HEAD`, environment facts from `areno env --json` and `areno check`, GPU state, checkpoint source, ModelScope dataset source, and resolved local paths.
 2. Classify SFT, DPO, rollout RL, or agentic RL. Read [references/data-contracts.md](references/data-contracts.md).
 3. Build the smallest command expressing the requested real workload. Preserve user-provided `max_new_tokens` and `max_context_len`.
 4. Use smoke or tune only when useful. Smoke is capacity evidence, not task completion.

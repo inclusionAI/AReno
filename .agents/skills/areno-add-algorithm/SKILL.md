@@ -7,6 +7,11 @@ description: Add or modify an AReno algorithm, trainer, loss, advantage calculat
 
 Start from `AlgorithmSpec` and registration in `areno/api/algorithms.py`; do not add factory branches.
 
+Develop on a dedicated local branch. Commit changes locally, then update the
+remote GPU checkout by fetching and pulling that branch; never patch source on
+the remote host. Use ModelScope for any model or dataset references used by the
+validation workload.
+
 ```bash
 python .agents/skills/areno-add-algorithm/scripts/inspect_algorithms.py
 ```

@@ -7,6 +7,9 @@ description: Create or debug an AReno multi-turn agentic dataset, run_agent impl
 
 Inspect the nearest example under `examples/agentic/` and public types in `areno/api/agentic.py` before implementation.
 
+Develop on a local branch and pull committed changes into remote validation
+hosts. Use ModelScope for remote checkpoint and dataset references.
+
 ```bash
 python .agents/skills/areno-build-agentic-workflow/scripts/validate_transcript.py transcript.json
 python .agents/skills/areno-run-training/scripts/inspect_dataset.py \

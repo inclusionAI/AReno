@@ -7,6 +7,12 @@ description: Add or debug an AReno model family, including config conversion, mo
 
 Read `AGENTS.md`, `CODEMAP.md`, the nearest registered adapter, and the upstream reference implementation. External frameworks define semantics only unless AReno explicitly owns the dependency.
 
+Develop in a dedicated local branch and update a remote GPU checkout only by
+pulling that committed branch. Read
+[references/remote-validation.md](references/remote-validation.md). Obtain model
+assets from ModelScope as described in
+[references/modelscope-assets.md](references/modelscope-assets.md).
+
 ## Inventory first
 
 ```bash
@@ -26,7 +32,7 @@ Record architecture/config fields, tokenizer or processor class, tensor names/sh
 6. **Parallel/runtime:** validate requested TP, packed/sequence-parallel positions, lifecycle hooks, and CUDA graph decode.
 7. **Performance:** optimize only after prior gates pass. Read [references/kernel-policy.md](references/kernel-policy.md).
 
-For local development plus remote GPU execution, use [references/remote-validation.md](references/remote-validation.md). If `areno/accel` changes, install remotely with `pip install -e . --no-deps --no-build-isolation`; otherwise pull the branch without reinstalling.
+If `areno/accel` changes, install remotely with `pip install -e . --no-deps --no-build-isolation`; otherwise pull the branch without reinstalling.
 
 ## Completion evidence
 

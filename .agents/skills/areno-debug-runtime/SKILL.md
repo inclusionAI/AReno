@@ -7,6 +7,9 @@ description: Diagnose failed, hung, slow, OOM, NaN, illegal-memory-access, NCCL,
 
 Do not modify parameters or code until the lifecycle stage and first causal error are identified.
 
+When diagnosis requires a code fix, implement and commit it locally, then pull
+the branch on the remote reproduction host. Do not hot-patch the remote source.
+
 ## Primitives
 
 ```bash

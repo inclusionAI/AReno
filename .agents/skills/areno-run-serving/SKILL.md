@@ -7,6 +7,10 @@ description: Start, validate, debug, and stop an AReno OpenAI-compatible serving
 
 Read `AGENTS.md`, `CODEMAP.md`, and current `areno serve --help`. Serving uses `--model-path`, not training's `--ckpt`.
 
+For a remote model reference, pass `--model-hub modelscope`. If ModelScope
+cannot resolve it, report that failure or request a local model path instead of
+silently changing hubs.
+
 ## Workflow
 
 1. Record commit and inspect `areno env --json`, `areno check`, GPUs, model config, and adapter registration.
