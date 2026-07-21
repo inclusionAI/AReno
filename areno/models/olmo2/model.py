@@ -11,25 +11,56 @@ from pathlib import Path
 from typing import Any
 
 import torch
+import torch.distributed.nn.functional as dist_nn
 from torch import nn
 
 from areno.engine.checkpoints.common import load_checkpoint_weights, save_checkpoint_weights
 from areno.engine.config import ModelConfig, _parse_dtype
 from areno.engine.layers.attention import CausalSelfAttention
+from areno.engine.layers.linear import mark_tensor_parallel_parameter
 from areno.engine.layers.norm import RMSNorm
+from areno.engine.parallel.context import get_tp_context
 from areno.engine.runtime.metadata import InferMeta, TrainMeta
 from areno.models.base import ModelAdapter
 from areno.models.olmo2.checkpoint import CHECKPOINT_SPEC
 from areno.models.qwen3.model import Qwen3ForCausalLM, QwenDecoderLayer
 
 
+class Olmo2ProjectedRMSNorm(nn.Module):
+    """RMSNorm a TP-sharded projection using a global channel statistic."""
+
+    def __init__(self, local_size: int, global_size: int, eps: float):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(local_size, dtype=torch.float32))
+        mark_tensor_parallel_parameter(self.weight, True, sequence_parallel=False)
+        self.global_size = global_size
+        self.eps = eps
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        input_dtype = hidden_states.dtype
+        squared_sum = hidden_states.float().square().sum(dim=-1, keepdim=True)
+        ctx = get_tp_context()
+        if ctx.world_size > 1:
+            squared_sum = dist_nn.all_reduce(squared_sum, group=ctx.group)
+        scale = torch.rsqrt(squared_sum / self.global_size + self.eps)
+        return (hidden_states.float() * scale * self.weight).to(dtype=input_dtype)
+
+
 class Olmo2SelfAttention(CausalSelfAttention):
-    """OLMo 2 attention with RMSNorm over the full local Q/K projections."""
+    """OLMo 2 attention with RMSNorm over the full global Q/K projections."""
 
     def __init__(self, config: ModelConfig, layer_idx: int):
         super().__init__(config, layer_idx)
-        self.q_norm = RMSNorm(self.local_heads * self.head_dim, config.rms_norm_eps)
-        self.k_norm = RMSNorm(self.local_kv_heads * self.head_dim, config.rms_norm_eps)
+        self.q_norm = Olmo2ProjectedRMSNorm(
+            self.local_heads * self.head_dim,
+            config.num_attention_heads * config.head_dim,
+            config.rms_norm_eps,
+        )
+        self.k_norm = Olmo2ProjectedRMSNorm(
+            self.local_kv_heads * self.head_dim,
+            config.num_key_value_heads * config.head_dim,
+            config.rms_norm_eps,
+        )
 
     def forward(
         self,

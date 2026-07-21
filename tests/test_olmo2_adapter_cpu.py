@@ -4,7 +4,7 @@ import torch
 from torch import nn
 
 from areno.engine.config import ModelConfig
-from areno.models.olmo2.model import Olmo2Adapter, Olmo2DecoderLayer, Olmo2ForCausalLM
+from areno.models.olmo2.model import Olmo2Adapter, Olmo2DecoderLayer, Olmo2ForCausalLM, Olmo2ProjectedRMSNorm
 
 
 class _IdentityAttention(nn.Module):
@@ -62,6 +62,16 @@ def test_olmo2_build_uses_full_projected_qk_norms():
     assert isinstance(model, Olmo2ForCausalLM)
     assert tuple(model.layers[0].self_attn.q_norm.weight.shape) == (32,)
     assert tuple(model.layers[0].self_attn.k_norm.weight.shape) == (32,)
+
+
+def test_olmo2_projected_rmsnorm_matches_full_vector_reference():
+    norm = Olmo2ProjectedRMSNorm(local_size=4, global_size=4, eps=1e-6)
+    hidden = torch.tensor([[1.0, 2.0, 3.0, 4.0]])
+
+    output = norm(hidden)
+    expected = hidden * torch.rsqrt(hidden.square().mean(dim=-1, keepdim=True) + 1e-6)
+
+    torch.testing.assert_close(output, expected)
 
 
 def test_olmo2_decoder_applies_post_norm_before_residual_add():
