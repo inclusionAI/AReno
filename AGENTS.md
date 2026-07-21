@@ -95,7 +95,7 @@ areno/                     Core Python package (layered cli -> api -> engine -> 
 +-- experimental/          Incubation area for new algorithms
 
 examples/                  Runnable reward functions and dataset loaders
-skills/                    Claude Code skills
+.agents/skills/            Repository-local agent skills
 tests/                     CPU test suite (*_cpu.py)
 docs/                      Architecture notes, CLI/SDK guides
 ```
@@ -103,6 +103,10 @@ docs/                      Architecture notes, CLI/SDK guides
 For task-to-file and call-path pointers, use the
 [code navigation map](CODEMAP.md). This guide remains
 the source of working rules and repository conventions.
+
+Repository-local workflows live under `.agents/skills/`. Load only the skill
+whose description matches the current task; each skill points to executable
+scripts and detailed references as they become relevant.
 
 ______________________________________________________________________
 
