@@ -101,8 +101,8 @@ def test_reward_separates_invalid_partial_repeated_and_optimal_paths():
 
 
 def test_tool_schema_is_closed_and_bounded_episode_defaults_to_six_turns():
-    run_agent = _load_module("run_agent")
-    parameters = run_agent.GUESS_TOOL["function"]["parameters"]
+    game = _load_module("game")
+    parameters = game.GUESS_TOOL["function"]["parameters"]
 
     assert parameters["additionalProperties"] is False
     assert parameters["required"] == ["code"]
@@ -154,3 +154,44 @@ def test_episode_preserves_tool_order_and_stops_on_success_or_parser_failure():
         run_agent._run_episode(item, SimpleNamespace(chat=SimpleNamespace(completions=failed)))
     )
     assert len(failed_turns) == 1
+
+
+def test_tui_llm_mode_uses_openai_tool_call_and_solves(capsys):
+    tui = _load_module("tui")
+    captured = {}
+
+    class FakeCompletions:
+        def create(self, **kwargs):
+            captured.update(kwargs)
+            call = SimpleNamespace(
+                id="call-win",
+                type="function",
+                function=SimpleNamespace(name="guess_code", arguments='{"code":"0123"}'),
+            )
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content=None, tool_calls=[call]))]
+            )
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            captured["client"] = kwargs
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+    previous_openai = sys.modules.get("openai")
+    sys.modules["openai"] = SimpleNamespace(OpenAI=FakeOpenAI)
+    try:
+        args = SimpleNamespace(
+            max_guesses=6,
+            base_url="http://127.0.0.1:8000/v1",
+            api_key="token",
+            model="policy",
+        )
+        tui._run_llm("0123", args)
+    finally:
+        sys.modules.pop("openai", None)
+        if previous_openai is not None:
+            sys.modules["openai"] = previous_openai
+
+    assert captured["tool_choice"]["function"]["name"] == "guess_code"
+    assert captured["tools"] == [tui.GUESS_TOOL]
+    assert "ACCESS GRANTED" in capsys.readouterr().out

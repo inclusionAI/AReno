@@ -8,6 +8,26 @@ DIGITS = "0123456789"
 DEFAULT_CODE_LENGTH = 4
 DEFAULT_MAX_GUESSES = 6
 
+GUESS_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "guess_code",
+        "description": "Guess the hidden unique-digit code and receive Bulls and Cows clues.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "string",
+                    "pattern": "^[0-9]{4}$",
+                    "description": "Exactly four distinct digits; a leading zero is allowed.",
+                }
+            },
+            "required": ["code"],
+            "additionalProperties": False,
+        },
+    },
+}
+
 
 def normalize_code(value: object, *, code_length: int = DEFAULT_CODE_LENGTH) -> str:
     """Return a validated unique-digit code."""

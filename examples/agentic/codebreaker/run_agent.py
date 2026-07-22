@@ -11,7 +11,7 @@ from pathlib import Path
 from areno.api.agentic import AgentTrajectory, AgentTrajectoryTurn
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from game import score_guess  # noqa: E402
+from game import GUESS_TOOL, score_guess  # noqa: E402
 
 logger = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -20,27 +20,6 @@ SYSTEM_PROMPT = (
     "You are a rigorous codebreaker. On every turn call guess_code exactly once. "
     "Use prior tool clues, never repeat a guess, and do not answer in plain text."
 )
-
-GUESS_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "guess_code",
-        "description": "Guess the hidden unique-digit code and receive Bulls and Cows clues.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "code": {
-                    "type": "string",
-                    "pattern": "^[0-9]{4}$",
-                    "description": "Exactly four distinct digits; a leading zero is allowed.",
-                }
-            },
-            "required": ["code"],
-            "additionalProperties": False,
-        },
-    },
-}
-
 
 async def run_agent(ctx, batch):
     """Run bounded concurrent Codebreaker episodes and preserve exact model outputs."""

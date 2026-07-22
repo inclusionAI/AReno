@@ -17,6 +17,14 @@ rewritten into successful calls.
 python examples/agentic/codebreaker/tui.py --seed 7
 ```
 
+Point the same TUI at an OpenAI-compatible inference endpoint to let a model
+play. It preserves the complete assistant tool-call and tool-result history:
+
+```bash
+python examples/agentic/codebreaker/tui.py --agent --seed 7 \
+  --base-url http://127.0.0.1:8000/v1 --model policy --api-key token
+```
+
 ## Generate data
 
 ```bash
