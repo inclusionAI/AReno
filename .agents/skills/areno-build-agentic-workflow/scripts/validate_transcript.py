@@ -33,9 +33,13 @@ def main() -> int:
                 if not call_id or not isinstance(function, dict) or not function.get("name"):
                     errors.append(f"invalid tool call at message {index}")
                     continue
-                try:
-                    json.loads(function.get("arguments", "{}"))
-                except (TypeError, json.JSONDecodeError):
+                arguments = function.get("arguments", {})
+                if isinstance(arguments, str):
+                    try:
+                        json.loads(arguments)
+                    except json.JSONDecodeError:
+                        errors.append(f"non-JSON arguments for call {call_id}")
+                elif not isinstance(arguments, dict):
                     errors.append(f"non-JSON arguments for call {call_id}")
                 pending.append(call_id)
                 calls += 1
