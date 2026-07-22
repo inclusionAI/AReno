@@ -21,6 +21,7 @@ SYSTEM_PROMPT = (
     "Use prior tool clues and never repeat a guess. After the game ends, summarize the outcome without a tool call."
 )
 
+
 async def run_agent(ctx, batch):
     """Run bounded concurrent Codebreaker episodes and preserve exact model outputs."""
 
@@ -28,7 +29,9 @@ async def run_agent(ctx, batch):
         import httpx
         from openai import AsyncOpenAI
     except ImportError as exc:
-        raise RuntimeError("Codebreaker requires `openai` and `httpx`. Install them with `pip install openai`.") from exc
+        raise RuntimeError(
+            "Codebreaker requires `openai` and `httpx`. Install them with `pip install openai`."
+        ) from exc
 
     items = list(batch.iter_samples())
     max_connections = max(len(items), ctx.max_running_prompts)

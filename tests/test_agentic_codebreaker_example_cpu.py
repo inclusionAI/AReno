@@ -79,9 +79,12 @@ def test_agent_executes_strict_single_guess_and_does_not_fabricate_calls():
     assert run_agent._execute_guess(valid, record)["exact"] == 2
     assert run_agent._execute_guess({"tool_calls": []}, record) is None
     assert run_agent._execute_guess({"tool_calls": [valid["tool_calls"][0], valid["tool_calls"][0]]}, record) is None
-    assert run_agent._execute_guess(
-        {"tool_calls": [{"function": {"name": "guess_code", "arguments": "not-json"}}]}, record
-    ) is None
+    assert (
+        run_agent._execute_guess(
+            {"tool_calls": [{"function": {"name": "guess_code", "arguments": "not-json"}}]}, record
+        )
+        is None
+    )
 
 
 def test_reward_separates_invalid_partial_repeated_and_optimal_paths():
@@ -155,9 +158,7 @@ def test_episode_preserves_tool_order_and_stops_on_success_or_parser_failure():
     assert finish_messages[-1]["role"] == "user"
 
     failed = FakeCompletions([response()])
-    failed_turns = asyncio.run(
-        run_agent._run_episode(item, SimpleNamespace(chat=SimpleNamespace(completions=failed)))
-    )
+    failed_turns = asyncio.run(run_agent._run_episode(item, SimpleNamespace(chat=SimpleNamespace(completions=failed))))
     assert len(failed_turns) == 1
 
 
@@ -173,9 +174,7 @@ def test_tui_llm_mode_uses_openai_tool_call_and_solves(capsys):
                 type="function",
                 function=SimpleNamespace(name="guess_code", arguments='{"code":"0123"}'),
             )
-            return SimpleNamespace(
-                choices=[SimpleNamespace(message=SimpleNamespace(content=None, tool_calls=[call]))]
-            )
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=None, tool_calls=[call]))])
 
     class FakeOpenAI:
         def __init__(self, **kwargs):
