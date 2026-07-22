@@ -17,8 +17,8 @@ logger = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 SYSTEM_PROMPT = (
-    "You are a rigorous codebreaker. On every turn call guess_code exactly once. "
-    "Use prior tool clues, never repeat a guess, and do not answer in plain text."
+    "You are a rigorous codebreaker. On every guessing turn call guess_code exactly once. "
+    "Use prior tool clues and never repeat a guess. After the game ends, summarize the outcome without a tool call."
 )
 
 async def run_agent(ctx, batch):
@@ -76,7 +76,24 @@ async def _run_episode(item, client) -> list[AgentTrajectoryTurn]:
             logger.warning("Codebreaker model returned no executable guess_code call")
             break
         messages.extend(_tool_messages(assistant_message, tool_result))
-        if tool_result.get("solved") or not tool_result.get("valid"):
+        game_over = tool_result.get("solved") or not tool_result.get("valid") or guess_number == max_guesses
+        if game_over:
+            finish_messages = [
+                *messages,
+                {"role": "user", "content": "The game is over. Briefly summarize the outcome without calling a tool."},
+            ]
+            finish_response = await client.chat.completions.create(
+                model="policy",
+                messages=finish_messages,
+                stream=False,
+            )
+            turns.append(
+                AgentTrajectoryTurn(
+                    item=item,
+                    messages=finish_messages,
+                    response=finish_response,
+                )
+            )
             break
     return turns
 

@@ -138,16 +138,21 @@ def test_episode_preserves_tool_order_and_stops_on_success_or_parser_failure():
         prompt="crack it",
         record={"secret": "0123", "max_guesses": 20},
     )
-    completions = FakeCompletions([response("4567"), response("0123")])
+    completions = FakeCompletions([response("4567"), response("0123"), response()])
     client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
     turns = asyncio.run(run_agent._run_episode(item, client))
 
-    assert len(turns) == 2
+    assert len(turns) == 3
     second_messages = completions.messages[1]
     assert second_messages[-3]["role"] == "assistant"
     assert second_messages[-2]["role"] == "tool"
     assert second_messages[-2]["tool_call_id"] == "call-4567"
     assert second_messages[-1]["role"] == "user"
+    finish_messages = completions.messages[2]
+    assert finish_messages[-3]["role"] == "assistant"
+    assert finish_messages[-2]["role"] == "tool"
+    assert finish_messages[-2]["tool_call_id"] == "call-0123"
+    assert finish_messages[-1]["role"] == "user"
 
     failed = FakeCompletions([response()])
     failed_turns = asyncio.run(
