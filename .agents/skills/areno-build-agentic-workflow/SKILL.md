@@ -1,6 +1,6 @@
 ---
 name: areno-build-agentic-workflow
-description: Create or debug an AReno multi-turn agentic dataset, run_agent implementation, tool schemas, tool execution, reward, loss masks, or agentic training example. Use for text or multimodal agentic workflows, not ordinary single-turn rollout.
+description: Create or debug an AReno multi-turn agentic dataset, run_agent implementation, tool schemas, tool execution, reward, loss masks, interactive TUI game with OpenAI-compatible LLM inference, or agentic training example. Use for text or multimodal agentic workflows, not ordinary single-turn rollout.
 ---
 
 # Build an AReno Agentic Workflow
