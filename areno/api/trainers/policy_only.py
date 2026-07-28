@@ -22,6 +22,7 @@ from pathlib import Path
 import numpy as np
 
 from areno.api.dashboard import record_dashboard_state
+from areno.api.funnel import FunnelCounters
 from areno.api.tokenizer import configure_chat_template_enable_thinking
 
 
@@ -136,11 +137,18 @@ class PolicyOnlyTrainer:
                     record_dashboard_state(self.areno, stage="train_start", epoch=epoch, step=step, role=role)
                     train_start = time.perf_counter()
                     # 4) The actual gradient step happens inside the backend.
+                    funnel = self._build_rollout_funnel(
+                        step=step,
+                        prompt_batch=prompt_batch,
+                        train_batch=train_batch,
+                        rollout_results=None if self._agentic_enabled() else rollout_results,
+                    )
                     result = self.areno.train(
                         train_batch,
                         self.loss_fn,
                         mini_bs=self.config.mini_bs,
                         gradient_accumulation_steps=self.config.gradient_accumulation_steps,
+                        funnel=funnel,
                     )
                     train_time_s = time.perf_counter() - train_start
                     if isinstance(result, dict):
@@ -172,6 +180,38 @@ class PolicyOnlyTrainer:
         # Hook for PPO to attach role-specific stats (critic loss, KL,
         # reference forward-time, ...) before they reach the metric recorder.
         return result
+
+    def _build_rollout_funnel(self, *, step, prompt_batch, train_batch, rollout_results):
+        # Reconcile one RL update's sample funnel from counts already in hand at
+        # the train call site. Agentic rollouts pre-filter over-context-length
+        # trajectories, so `length_valid` reflects the post-filter batch; the
+        # non-agentic path has no post-rollout length filter.
+        drop_reasons: dict[str, list[str]] = {}
+        if prompt_batch.skipped_long:
+            drop_reasons["loaded"] = ["prompt_too_long"]
+        if rollout_results is None:
+            # Agentic: each kept prompt fans out to `n_samples` expected requests
+            # before the context-length filter removes over-long trajectories.
+            expected_requests = len(prompt_batch.items) * self.config.n_samples
+            generated = expected_requests
+            length_valid = len(train_batch)
+            if expected_requests > length_valid:
+                drop_reasons["length_valid"] = ["over_context_len"]
+        else:
+            generated = len(rollout_results)
+            length_valid = len(rollout_results)
+        trainable = sum(1 for seq in train_batch if any(not is_prompt for is_prompt in seq.prompt_mask))
+        return FunnelCounters(
+            step=step,
+            source="online_rl",
+            loaded=prompt_batch.scanned,
+            contract_valid=len(prompt_batch.items),
+            generated=generated,
+            length_valid=length_valid,
+            trainable_token_valid=trainable,
+            trained=len(train_batch),
+            drop_reasons=drop_reasons,
+        )
 
     def _agentic_enabled(self) -> bool:
         return bool(getattr(self.config, "agent_fn", None))

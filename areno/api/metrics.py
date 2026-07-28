@@ -17,6 +17,8 @@ from pathlib import Path
 
 import numpy as np
 
+from areno.api.funnel import FunnelCounters, build_funnel
+
 
 class MetricsRecorder:
     """Small TensorBoard facade used by `Trainer.train`."""
@@ -29,16 +31,44 @@ class MetricsRecorder:
         self._writer = create_tensorboard_writer(log_dir)
         self._state_file = self._log_dir / f"dashboard_state.{os.getpid()}.json"
         self._sample_file = self._log_dir / f"rollout_samples.{os.getpid()}.jsonl"
+        self._funnel_file = self._log_dir / f"sample_funnel.{os.getpid()}.jsonl"
         self._closed = False
 
-    def record_train_step(self, *, step: int, train_result, train_batch, timings: dict[str, float] | None = None):
-        """Record rollout, training, and timing metrics for one step."""
+    def record_train_step(
+        self,
+        *,
+        step: int,
+        train_result,
+        train_batch,
+        timings: dict[str, float] | None = None,
+        funnel: FunnelCounters | None = None,
+    ):
+        """Record rollout, training, and timing metrics for one step.
+
+        When ``funnel`` is provided the per-update sample-utilization counters
+        are also appended to ``sample_funnel.{pid}.jsonl`` alongside the
+        TensorBoard events.
+        """
 
         # `collect_train_batch_stats` extracts only the response-side numbers
         # (prompt tokens are masked out) so reported means match what the loss
         # actually trained on.
         stats = collect_train_batch_stats(train_batch)
         record_training_stats(self._writer, stats, step, train_result, train_batch, timings=timings)
+        if funnel is not None:
+            self.record_funnel(step=step, counters=funnel)
+
+    def record_funnel(self, *, step: int, counters: FunnelCounters) -> None:
+        """Append one per-update sample funnel record as a JSON line.
+
+        Only integer counts and short reason codes are written -- never sample
+        contents -- so the resulting JSONL is safe to print and tail.
+        """
+
+        payload = build_funnel(counters)
+        payload["pid"] = os.getpid()
+        with self._funnel_file.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
     def record_rollout_sample(self, sample: dict) -> None:
         """Record a representative decoded rollout sample beside TensorBoard events."""

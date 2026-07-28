@@ -24,6 +24,7 @@ from typing import Any
 import areno.api
 from areno.api.dashboard import record_dashboard_state
 from areno.api.data_utils import prompt_response_to_tokens_and_mask
+from areno.api.funnel import FunnelCounters
 from areno.api.tokenizer import configure_chat_template_enable_thinking
 
 
@@ -58,7 +59,7 @@ class SFTTrainer:
         for epoch in range(self.config.epochs):
             self.logger.info("epoch=%d stage=epoch_start", epoch)
             record_dashboard_state(self.areno, stage="epoch_start", epoch=epoch, step=step, role="policy")
-            for train_batch in self._iter_train_batches(
+            for train_batch, batch_loaded, batch_skipped in self._iter_train_batches(
                 tokenizer,
                 max_prompt_tokens=self.config.max_prompt_tokens,
                 max_new_tokens=self.config.max_new_tokens,
@@ -73,11 +74,23 @@ class SFTTrainer:
                 # The backend computes next-token logprobs for the supplied
                 # labels; `sft_loss_fn` selects only response/target positions
                 # using the prompt mask produced below.
+                funnel = FunnelCounters(
+                    step=step,
+                    source="sft",
+                    loaded=batch_loaded,
+                    contract_valid=batch_loaded - batch_skipped,
+                    generated=None,  # SFT has no rollout.
+                    length_valid=None,  # SFT has no rollout.
+                    trainable_token_valid=len(train_batch),
+                    trained=len(train_batch),
+                    drop_reasons={"contract_valid": ["empty_or_over_budget"]} if batch_skipped else {},
+                )
                 result = self.areno.train(
                     train_batch,
                     self.loss_fn,
                     mini_bs=self.config.mini_bs,
                     gradient_accumulation_steps=self.config.gradient_accumulation_steps,
+                    funnel=funnel,
                 )
                 train_time_s = time.perf_counter() - train_start
                 if isinstance(result, dict):
@@ -98,9 +111,13 @@ class SFTTrainer:
         # Dataset rows are converted lazily so large HF datasets do not need an
         # up-front tokenized copy. Rows that are empty, all-prompt, or exceed
         # the configured prompt or supervised-response budgets are dropped.
+        # Each yield also reports the rows scanned / skipped for *this* batch so
+        # the caller can build a per-update sample funnel without rescanning.
         batch = []
         skipped = 0
         accepted = 0
+        batch_scanned = 0
+        batch_skipped = 0
         total_rows = len(self.dataset)
         for index in range(total_rows):
             # Normalize each supported row schema into one TrainSequence.
@@ -110,14 +127,18 @@ class SFTTrainer:
                 max_prompt_tokens=max_prompt_tokens,
                 max_new_tokens=max_new_tokens,
             )
+            batch_scanned += 1
             if seq is None:
                 skipped += 1
+                batch_skipped += 1
                 continue
             accepted += 1
             batch.append(seq)
             if len(batch) >= self.config.batch_size:
-                yield batch
+                yield batch, batch_scanned, batch_skipped
                 batch = []
+                batch_scanned = 0
+                batch_skipped = 0
         if skipped:
             self.logger.info("stage=sft_dataset_filter skipped_long_or_empty=%d", skipped)
         if accepted == 0:
@@ -127,7 +148,7 @@ class SFTTrainer:
                 "Check dataset quality, --max-prompt-tokens, and --max-new-tokens."
             )
         if batch:
-            yield batch
+            yield batch, batch_scanned, batch_skipped
 
     def _maybe_save(self, epoch: int, step: int) -> None:
         # Keep the same step-based checkpoint cadence as the RL trainers.

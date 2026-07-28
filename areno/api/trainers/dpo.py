@@ -21,6 +21,7 @@ from typing import Any
 import areno.api
 from areno.api.dashboard import record_dashboard_state
 from areno.api.data_utils import apply_chat_template, encode_prompt_value, response_to_tokens_and_mask
+from areno.api.funnel import FunnelCounters
 from areno.api.roles import ModelRole
 from areno.api.tokenizer import configure_chat_template_enable_thinking
 
@@ -70,7 +71,9 @@ class DPOTrainer:
         for epoch in range(self.config.epochs):
             self.logger.info("epoch=%d stage=epoch_start", epoch)
             record_dashboard_state(self.areno, stage="epoch_start", epoch=epoch, step=step, role="policy")
-            for train_batch in self._iter_train_batches(tokenizer, max_seq_len=max_seq_len):
+            for train_batch, batch_scanned, batch_skipped in self._iter_train_batches(
+                tokenizer, max_seq_len=max_seq_len
+            ):
                 if not train_batch:
                     continue
                 self.logger.info(
@@ -108,11 +111,25 @@ class DPOTrainer:
                 train_start = time.perf_counter()
                 # The train batch rows are [chosen, rejected, ...]; dpo_loss_fn
                 # recovers pairs by row order inside each even-sized microbatch.
+                # Funnel counts sequences (two per pair); skipped pairs dropped
+                # both chosen and rejected rows so contract_valid == trained here.
+                funnel = FunnelCounters(
+                    step=step,
+                    source="dpo",
+                    loaded=batch_scanned * 2,
+                    contract_valid=(batch_scanned - batch_skipped) * 2,
+                    generated=None,  # DPO has no rollout.
+                    length_valid=None,  # DPO has no rollout.
+                    trainable_token_valid=len(train_batch),
+                    trained=len(train_batch),
+                    drop_reasons={"contract_valid": ["invalid_or_long"]} if batch_skipped else {},
+                )
                 result = self.areno.train(
                     train_batch,
                     self.loss_fn,
                     mini_bs=self.config.mini_bs,
                     gradient_accumulation_steps=self.config.gradient_accumulation_steps,
+                    funnel=funnel,
                 )
                 train_time_s = time.perf_counter() - train_start
                 if isinstance(result, dict):
@@ -134,22 +151,30 @@ class DPOTrainer:
 
     def _iter_train_batches(self, tokenizer, *, max_seq_len: int):
         # `batch_size` counts preference pairs; the emitted train batch has two
-        # rows per pair and always preserves chosen/rejected adjacency.
+        # rows per pair and always preserves chosen/rejected adjacency. Each
+        # yield also reports the pairs scanned / skipped for *this* batch so the
+        # caller can build a per-update sample funnel without rescanning.
         batch = []
         skipped = 0
+        batch_scanned = 0
+        batch_skipped = 0
         for index in range(len(self.dataset)):
             pair = _record_to_train_pair(self.dataset[index], tokenizer, max_seq_len=max_seq_len)
+            batch_scanned += 1
             if pair is None:
                 skipped += 1
+                batch_skipped += 1
                 continue
             batch.extend(pair)
             if len(batch) >= self.config.batch_size * 2:
-                yield batch
+                yield batch, batch_scanned, batch_skipped
                 batch = []
+                batch_scanned = 0
+                batch_skipped = 0
         if skipped:
             self.logger.info("stage=dpo_dataset_filter skipped_invalid_or_long=%d", skipped)
         if batch:
-            yield batch
+            yield batch, batch_scanned, batch_skipped
 
     def _maybe_save(self, epoch: int, step: int) -> None:
         if self.config.save_path is None or (step + 1) % self.config.save_interval != 0:

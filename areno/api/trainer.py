@@ -16,6 +16,7 @@ from areno.api.backend.base import Backend, get_backend_cls
 from areno.api.config import BackendConfig, coerce_backend_config, resolve_backend_type
 from areno.api.context import Context
 from areno.api.data import PromptBatch, PromptItem
+from areno.api.funnel import FunnelCounters
 from areno.api.metrics import MetricsRecorder
 from areno.api.models import BackendType, RolloutResult, SamplingParams, TrainSequence
 from areno.api.roles import ModelRole
@@ -326,12 +327,15 @@ class Trainer:
         loss_fn: Callable,
         mini_bs: int = 8,
         gradient_accumulation_steps: int | None = None,
+        funnel: FunnelCounters | None = None,
     ) -> dict[str, float]:
         """Run one backend training step with a caller-provided loss function.
 
         Returns whatever scalar metric dict the backend produces; when a
         `MetricsRecorder` is attached the dict and the accumulated step timings
-        are also dispatched to TensorBoard.
+        are also dispatched to TensorBoard. When ``funnel`` is provided the
+        per-update sample-utilization counters are persisted alongside the
+        TensorBoard events.
         """
 
         if not callable(loss_fn):
@@ -352,6 +356,7 @@ class Trainer:
                 train_result=result,
                 train_batch=batch_data,
                 timings=self._metric_timings,
+                funnel=funnel,
             )
         self.finish_step()
         return result

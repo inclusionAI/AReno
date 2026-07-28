@@ -175,3 +175,62 @@ When a trajectory is dropped for exceeding the model context window,
 counts, message counts, assistant turn counts, tool-result counts, and a short
 prompt preview. This is the fastest way to debug overlong agentic examples
 without dumping every token in every trajectory.
+
+Sample-utilization funnel
+--------------------------
+
+The ``areno funnel`` command reconciles, per training update, how many samples
+survive each stage of the pipeline and why the others were dropped::
+
+    loaded -> contract-valid -> generated -> length-valid
+           -> trainable-token-valid -> trained
+
+Each update appends one JSON line to ``sample_funnel.{pid}.jsonl`` under the
+``--metrics-log-dir`` directory (written by
+``areno.api.metrics.MetricsRecorder.record_funnel``). The CLI reads that file
+and renders a per-update and a cumulative view. It prints only integer counts
+and short drop-reason codes -- never prompt, completion, message, or other
+sample *contents*.
+
+.. code-block:: bash
+
+   areno funnel --metrics-log-dir /tmp/areno/tfevent
+   areno funnel --metrics-log-dir /tmp/areno/tfevent --pid 4242 --json
+
+Options:
+
+* ``--metrics-log-dir``: directory holding ``sample_funnel.{pid}.jsonl``
+  artifacts (default: the same directory ``areno train`` writes to).
+* ``--pid``: select a specific run by process id. Without it the most recently
+  modified ``sample_funnel.*.jsonl`` is used.
+* ``--json``: emit a machine-readable report instead of the human-readable
+  funnel.
+* ``--cumulative`` / ``--per-update``: show only one view (default: both).
+* ``--max-updates``: keep only the last N updates in the per-update view.
+
+Output fields (``--json``):
+
+* ``stages``: the six stage counts. Stages not applicable to a trainer are
+  ``null`` and render as ``n/a`` (SFT and DPO have no rollout, so
+  ``generated`` and ``length_valid`` are ``n/a``; non-agentic online-RL has no
+  post-rollout length filter, so ``length_valid`` mirrors ``generated``).
+* ``drop_reasons``: maps a stage to short reason codes such as
+  ``prompt_too_long``, ``empty_or_over_budget``, ``invalid_or_long``, and
+  ``over_context_len``.
+* ``warnings``: produced when stages do not reconcile -- for example when a
+  later stage reports more samples than an earlier one *within the same unit
+  domain*. The prompt-domain stages (``loaded``, ``contract_valid``) and the
+  completion-domain stages (``generated`` ... ``trained``) are checked
+  separately, because rollout fan-out (``n_samples``) legitimately makes the
+  generated count larger than the contract-valid count.
+
+Limitations:
+
+* SFT and DPO have no rollout stage; their ``generated`` and ``length_valid``
+  counts are not tracked (``n/a``) rather than fabricated.
+* For non-agentic online-RL there is no post-rollout length filter, so
+  ``length_valid`` equals ``generated``; the length-drop distinction only
+  appears for agentic rollouts that exceed the model context window.
+* ``trainable_token_valid`` for online-RL is derived from each row's
+  ``prompt_mask`` (at least one non-prompt position); it is an accounting aid,
+  not a re-derived engine metric.
