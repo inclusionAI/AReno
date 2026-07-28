@@ -280,6 +280,37 @@ class TransformDatasetTest(unittest.TestCase):
         self.assertEqual(summary.total_dropped, 1)
         self.assertEqual(summary.total_kept, 0)
 
+    def test_summary_asserts_specific_field_values(self):
+        """Assert emitted summary fields — not just exit status."""
+        data = [
+            {"question": "valid question here", "answer": "valid answer"},
+            {"question": "ab", "answer": "cd"},         # too short
+            {"question": "ok", "answer": ""},            # empty answer after mapping
+        ]
+        kept, summary = transform_dataset(
+            data,
+            field_mapping={"question": "prompt", "answer": "response"},
+            sample_filter={"require_fields": ["prompt", "response"], "min_prompt_chars": 5},
+        )
+        # Assert exact counts reconcile.
+        self.assertEqual(summary.total_in, 3)
+        self.assertEqual(summary.total_kept, 1)
+        self.assertEqual(summary.total_dropped, 2)
+        # Assert specific drop reasons are present with correct counts.
+        self.assertIn("prompt too short (2 < 5)", summary.drop_reasons)
+        self.assertEqual(summary.drop_reasons["prompt too short (2 < 5)"], 1)
+        self.assertIn("empty field: response", summary.drop_reasons)
+        self.assertEqual(summary.drop_reasons["empty field: response"], 1)
+        # Assert the kept record has correct field names.
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(kept[0]["prompt"], "valid question here")
+        self.assertEqual(kept[0]["response"], "valid answer")
+        # Assert the summary log lines contain the expected counts.
+        lines = summary.as_log_lines()
+        self.assertTrue(any("scanned=3" in line for line in lines))
+        self.assertTrue(any("kept=1" in line for line in lines))
+        self.assertTrue(any("dropped=2" in line for line in lines))
+
 
 class JsonOptionParsingTest(unittest.TestCase):
     """Tests for ``parse_json_option`` — CLI JSON string parsing."""
