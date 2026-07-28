@@ -237,6 +237,76 @@ p {
   background: rgba(167, 186, 210, 0.03);
 }
 
+.rewardComponentsPanel {
+  grid-column: 1 / -1;
+}
+
+.rewardComponents {
+  font-size: 13px;
+}
+
+.rewardComponentsTitle {
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.rewardComponentsEmpty {
+  color: var(--muted, #888);
+  line-height: 1.5;
+}
+
+.rewardComponentsTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+}
+
+.rewardComponentsTable th,
+.rewardComponentsTable td {
+  text-align: right;
+  padding: 4px 8px;
+  border-bottom: 1px solid rgba(167, 186, 210, 0.12);
+}
+
+.rewardComponentsTable th:first-child,
+.rewardComponentsTable td:first-child {
+  text-align: left;
+}
+
+.rewardComponentsDrilldown {
+  margin-top: 10px;
+}
+
+.rewardStepRow {
+  border-top: 1px solid rgba(167, 186, 210, 0.08);
+}
+
+.rewardStepToggle {
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 4px 0;
+  width: 100%;
+  text-align: left;
+}
+
+.rewardStepComponents {
+  list-style: none;
+  margin: 4px 0 8px;
+  padding: 0 0 0 12px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 4px;
+}
+
+.rewardStepComponents li {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
 .runtimeDeck {
   display: grid;
   grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);

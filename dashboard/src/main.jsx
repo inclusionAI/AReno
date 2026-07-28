@@ -787,6 +787,109 @@ function JobMetricsView({ job, refreshNonce }) {
       <div className="panel insetPanel">
         <TimePerfView rows={job?.timeperf || []} />
       </div>
+      <div className="panel insetPanel rewardComponentsPanel">
+        <RewardComponentsView jobId={job?.id} refreshNonce={refreshNonce} />
+      </div>
+    </div>
+  );
+}
+
+function RewardComponentsView({ jobId, refreshNonce }) {
+  const [snapshot, setSnapshot] = useState(null);
+  const [openStep, setOpenStep] = useState(null);
+  useEffect(() => {
+    let cancelled = false;
+    if (!jobId) {
+      setSnapshot(null);
+      return undefined;
+    }
+    api(`/api/jobs/${jobId}/reward-components`)
+      .then((data) => {
+        if (!cancelled) setSnapshot(data);
+      })
+      .catch(() => {
+        if (!cancelled) setSnapshot(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [jobId, refreshNonce]);
+
+  if (!snapshot) {
+    return <div className="rewardComponents">Loading reward components…</div>;
+  }
+  if (!snapshot.available || !snapshot.components?.length) {
+    return (
+      <div className="rewardComponents">
+        <div className="rewardComponentsTitle">Reward Components</div>
+        <div className="rewardComponentsEmpty">
+          No reward component artifact found. Write <code>reward_components.&lt;pid&gt;.jsonl</code> into the metrics dir.
+        </div>
+      </div>
+    );
+  }
+  const fmt = (value) => (value === null || value === undefined || !Number.isFinite(value) ? "-" : value.toFixed(4));
+  const pct = (value) => (Number.isFinite(value) ? `${(value * 100).toFixed(1)}%` : "-");
+  const steps = snapshot.steps || [];
+  return (
+    <div className="rewardComponents">
+      <div className="rewardComponentsTitle">Reward Components</div>
+      <table className="rewardComponentsTable">
+        <thead>
+          <tr>
+            <th>component</th>
+            <th>current</th>
+            <th>mean</th>
+            <th>zero%</th>
+            <th>outlier%</th>
+            <th>nf%</th>
+            <th>missing</th>
+            <th>contrib%</th>
+          </tr>
+        </thead>
+        <tbody>
+          {snapshot.components.map((comp) => (
+            <tr key={comp.name}>
+              <td>{comp.name}</td>
+              <td>{fmt(comp.current)}</td>
+              <td>{fmt(comp.mean)}</td>
+              <td>{pct(comp.zero_fraction)}</td>
+              <td>{pct(comp.outlier_fraction)}</td>
+              <td>{pct(comp.non_finite_fraction)}</td>
+              <td>{comp.missing_count}</td>
+              <td>{pct(comp.contribution_fraction)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <details className="rewardComponentsDrilldown">
+        <summary>Per-step drill-down (last {steps.length})</summary>
+        {steps.map((step) => {
+          const flagged = [...(step.non_finite || []), ...(step.missing || [])];
+          const isOpen = openStep === step.step;
+          return (
+            <div key={step.step} className="rewardStepRow">
+              <button
+                type="button"
+                className="rewardStepToggle"
+                onClick={() => setOpenStep(isOpen ? null : step.step)}
+              >
+                step {step.step} · total {fmt(step.total)}{flagged.length ? ` · [${flagged.join(", ")}]` : ""}
+              </button>
+              {isOpen ? (
+                <ul className="rewardStepComponents">
+                  {Object.entries(step.components || {}).map(([name, value]) => (
+                    <li key={name}>
+                      <span>{name}</span>
+                      <span>{fmt(value)}</span>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+            </div>
+          );
+        })}
+      </details>
     </div>
   );
 }

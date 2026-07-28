@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from areno.api.dashboard import analyze_reward_components
 from areno.cli.dashboard_registry import GLOBAL_REGISTRY_FILE
 from areno.cli.diagnostics import collect_env, run_checks
 from areno.dashboard.agent_context import agent_system_prompt
@@ -514,6 +515,23 @@ class DashboardState:
         ]
         points.sort(key=lambda point: int(point.get("step") or 0))
         return points[-max(1, min(limit, 5000)) :]
+
+    def reward_component_summary(self, job_id: str | None) -> dict[str, Any]:
+        """Aggregate a job's reward component artifact via the shared analyzer.
+
+        Read-only: resolves the job's metrics directory the same way
+        ``_load_metric_files`` does and delegates to
+        :func:`areno.api.dashboard.analyze_reward_components`.
+        """
+
+        job = self.get_job(job_id)
+        if job is None or not job.metrics_dir:
+            return {"components": [], "steps": [], "errors": [], "available": False}
+        path = (ROOT / job.metrics_dir).resolve()
+        snapshot, errors = analyze_reward_components(path)
+        snapshot["errors"] = errors
+        snapshot["available"] = bool(snapshot.get("components"))
+        return snapshot
 
     def scan_registered_jobs(self) -> None:
         registry_jobs = registered_job_items()
@@ -1494,6 +1512,9 @@ class Handler(BaseHTTPRequestHandler):
             elif path.startswith("/api/jobs/") and path.endswith("/metrics"):
                 job_id = path.split("/")[-2]
                 self.json({"metrics": STATE.metric_summaries(job_id)})
+            elif path.startswith("/api/jobs/") and path.endswith("/reward-components"):
+                job_id = path.split("/")[-2]
+                self.json(STATE.reward_component_summary(job_id))
             elif path.startswith("/api/jobs/") and path.endswith("/metric"):
                 job_id = path.split("/")[-2]
                 query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
