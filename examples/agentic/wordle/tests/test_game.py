@@ -196,9 +196,8 @@ class TestPromptFormatting:
         assert "Wordle" in prompt
         assert "6 attempts" in prompt
         assert "hello" not in prompt.lower()  # Target should not be revealed
-        assert "EXACT" in prompt
-        assert "PRESENT" in prompt
-        assert "ABSENT" in prompt
+        assert "Call guess_word" in prompt
+        assert "5-letter" in prompt
 
     def test_format_prompt_with_guesses(self):
         """Test prompt includes previous guesses."""
