@@ -69,6 +69,48 @@ class NonFiniteReport:
             "non_finite_grad_norm": self.global_grad_norm if not math.isnan(self.global_grad_norm) else -1.0,
         }
 
+    def to_json_dict(self) -> dict[str, Any]:
+        """Full structured dict for JSON file export (not limited to numeric types)."""
+        import math
+        return {
+            "step": self.step,
+            "phase": self.phase,
+            "loss": self.loss_value,
+            "global_grad_norm": self.global_grad_norm,
+            "learning_rate": self.learning_rate,
+            "gpu_memory_gb": self.gpu_memory_gb,
+            "last_checkpoint": self.last_checkpoint,
+            "events": [
+                {
+                    "name": e.name,
+                    "layer": e.layer,
+                    "is_gradient": e.is_gradient,
+                    "nan_count": e.nan_count,
+                    "inf_count": e.inf_count,
+                    "total_elements": e.total_elements,
+                    "nan_ratio": round(e.nan_count / e.total_elements, 4) if e.total_elements > 0 else 0.0,
+                    "inf_ratio": round(e.inf_count / e.total_elements, 4) if e.total_elements > 0 else 0.0,
+                    "grad_norm": e.grad_norm,
+                }
+                for e in self.events
+            ],
+            "causes": self.causes,
+            "suggestions": self.suggestions,
+            "total_nan": sum(e.nan_count for e in self.events),
+            "total_inf": sum(e.inf_count for e in self.events),
+            "affected_layers": sorted(set(e.layer for e in self.events if e.layer not in ("loss", "optimizer"))),
+        }
+
+    def to_json_file(self, output_dir: str = "non_finite_reports") -> str:
+        """Write full report to a JSON file. Returns the file path."""
+        import os, json
+        os.makedirs(output_dir, exist_ok=True)
+        fname = f"step_{self.step}_{self.phase}.json"
+        fpath = os.path.join(output_dir, fname)
+        with open(fpath, "w") as f:
+            json.dump(self.to_json_dict(), f, indent=2, default=str)
+        return fpath
+
     def format_terminal(self) -> str:
         lines = [
             "=" * 56,
@@ -128,6 +170,13 @@ class NonFiniteReport:
         for i, s in enumerate(self.suggestions, 1):
             lines.append(f"  {i}. {s}")
         lines.append("")
+        # Write JSON file
+        try:
+            json_path = self.to_json_file()
+            lines.append(f"")
+            lines.append(f"JSON REPORT: {json_path}")
+        except Exception:
+            pass
         lines.append("=" * 56)
         return "\n".join(lines)
 
