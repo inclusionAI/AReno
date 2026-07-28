@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -44,7 +45,7 @@ def register_dashboard_job(
         "kind": kind,
         "name": name,
         "pid": os.getpid(),
-        "command": command or [],
+        "command": command or sys.argv,
         "config": config or {},
         "metrics_dir": metrics_dir,
         "cwd": str(Path.cwd()),
@@ -272,3 +273,75 @@ def format_table(columns: list[str], rows: list[list[str]]) -> str:
             padded.append(cell.ljust(widths[i]))
         lines.append("  ".join(padded))
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Run config reader (per-run resolved settings)
+# ---------------------------------------------------------------------------
+
+
+def read_run_config(metrics_dir: str | Path, pid: int) -> dict[str, Any] | None:
+    """Read ``areno_run_config.<pid>.json`` inside *metrics_dir*.
+
+    Returns the raw dict with keys ``kind``, ``pid``, ``summary_text``,
+    and ``settings``, or ``None`` when the file is missing or malformed.
+    """
+    config_file = Path(metrics_dir) / f"areno_run_config.{pid}.json"
+    try:
+        return json.loads(config_file.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# TensorBoard scalar reader
+# ---------------------------------------------------------------------------
+
+
+def read_tensorboard_scalars(
+    metrics_dir: str | Path,
+    pid: int | None = None,
+) -> dict[str, list[tuple[int, float]]]:
+    """Read scalar time-series from TensorBoard event files in *metrics_dir*.
+
+    Returns a dict mapping tag name (e.g. ``"rollout/rewards_mean"``) to a
+    list of ``(step, value)`` tuples.  When *pid* is given, only event files
+    whose name contains ``.<pid>.`` are considered.
+
+    Returns an empty dict when no event files are found, TensorBoard is not
+    installed, or every file is unreadable.
+    """
+    try:
+        from tensorboard.backend.event_processing.event_accumulator import EventAccumulator  # type: ignore[import-untyped]
+    except ImportError:
+        return {}
+
+    path = Path(metrics_dir)
+    if not path.is_dir():
+        return {}
+
+    event_files = sorted(path.rglob("events.out.tfevents.*"), key=lambda f: f.stat().st_mtime)
+    if pid is not None:
+        pid_marker = f".{pid}."
+        event_files = [f for f in event_files if pid_marker in f.name or f.parent.name == f"pid-{pid}"]
+
+    scalars: dict[str, list[tuple[int, float]]] = {}
+    for event_file in event_files:
+        try:
+            accumulator = EventAccumulator(str(event_file), size_guidance={"scalars": 10000})
+            accumulator.Reload()
+        except Exception:
+            continue
+        for tag in accumulator.Tags().get("scalars", []):
+            try:
+                events = accumulator.Scalars(tag)
+            except Exception:
+                continue
+            for event in events:
+                try:
+                    value = float(event.value)
+                except (TypeError, ValueError):
+                    continue
+                scalars.setdefault(tag, []).append((int(event.step), value))
+
+    return scalars
