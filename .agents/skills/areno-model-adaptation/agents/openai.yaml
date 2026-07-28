@@ -1,0 +1,4 @@
+interface:
+  display_name: "Adapt an AReno Model"
+  short_description: "Implement and validate AReno model families"
+  default_prompt: "Adapt this model to AReno and prove load, inference, training, save, and reload."
