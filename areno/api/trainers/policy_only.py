@@ -71,6 +71,7 @@ class PolicyOnlyTrainer:
             record_dashboard_state(
                 self.areno, stage="epoch_start", epoch=epoch, step=step, role=self._policy_role_name()
             )
+            self.areno.feed_stall_stage("epoch_start")
             for prompt_batch in self.areno.load_prompt_batches(
                 self.dataset,
                 batch_size=self.config.batch_size,
@@ -79,12 +80,14 @@ class PolicyOnlyTrainer:
                 role = self._policy_role_name()
                 self.logger.info("epoch=%d step=%d role=%s stage=rollout_start", epoch, step, role)
                 record_dashboard_state(self.areno, stage="rollout_start", epoch=epoch, step=step, role=role)
+                self.areno.feed_stall_stage("rollout_start")
                 self._dashboard_epoch = epoch
                 self._dashboard_step = step
                 if self._agentic_enabled():
                     agent_batch = asyncio.run(self._run_agentic_rollout(sampling_params, prompt_batch))
                     self.logger.info("epoch=%d step=%d role=%s stage=rollout_end", epoch, step, role)
                     record_dashboard_state(self.areno, stage="rollout_end", epoch=epoch, step=step, role=role)
+                    self.areno.feed_stall_stage("rollout_end")
                     self._log_agentic_sample_completions(epoch, step, agent_batch)
                     train_batch, rewards_all, rollout_logprobs = self._materialize_agentic_train_batch(
                         tokenizer, prompt_batch, agent_batch
@@ -95,6 +98,7 @@ class PolicyOnlyTrainer:
                     rollout_results = asyncio.run(self._run_prompt_rollout(sampling_params, prompt_batch))
                     self.logger.info("epoch=%d step=%d role=%s stage=rollout_end", epoch, step, role)
                     record_dashboard_state(self.areno, stage="rollout_end", epoch=epoch, step=step, role=role)
+                    self.areno.feed_stall_stage("rollout_end")
                     self._record_sample_completions(tokenizer, epoch, step, prompt_batch, rollout_results)
 
                     # 2+3) Score rewards and broadcast group-normalised
@@ -122,6 +126,7 @@ class PolicyOnlyTrainer:
                         result = self._augment_train_stats({"actor_train_skipped": 1.0})
                         self.logger.info("epoch=%d step=%d role=%s stage=train_skip", epoch, step, role)
                         record_dashboard_state(self.areno, stage="train_skip", epoch=epoch, step=step, role=role)
+                        self.areno.feed_stall_stage("train_skip")
                         self.logger.info("epoch=%d step=%d train_stats=%s", epoch, step, result)
                         self.areno.finish_step()
                         step += 1
@@ -130,10 +135,12 @@ class PolicyOnlyTrainer:
                             record_dashboard_state(
                                 self.areno, stage="max_steps_reached", epoch=epoch, step=step, role=role
                             )
+                            self.areno.feed_stall_stage("max_steps_reached")
                             return
                         continue
                     self.logger.info("epoch=%d step=%d role=%s stage=train_start", epoch, step, role)
                     record_dashboard_state(self.areno, stage="train_start", epoch=epoch, step=step, role=role)
+                    self.areno.feed_stall_stage("train_start")
                     train_start = time.perf_counter()
                     # 4) The actual gradient step happens inside the backend.
                     result = self.areno.train(
@@ -148,15 +155,18 @@ class PolicyOnlyTrainer:
                     result = self._augment_train_stats(result)
                     self.logger.info("epoch=%d step=%d role=%s stage=train_end", epoch, step, role)
                     record_dashboard_state(self.areno, stage="train_end", epoch=epoch, step=step, role=role)
+                    self.areno.feed_stall_stage("train_end")
                     self.logger.info("epoch=%d step=%d train_stats=%s", epoch, step, result)
                     self._maybe_save(epoch, step)
                 step += 1
                 if self.config.max_steps is not None and step >= self.config.max_steps:
                     self.logger.info("epoch=%d step=%d stage=max_steps_reached", epoch, step)
                     record_dashboard_state(self.areno, stage="max_steps_reached", epoch=epoch, step=step, role=role)
+                    self.areno.feed_stall_stage("max_steps_reached")
                     return
             self.logger.info("epoch=%d stage=epoch_end", epoch)
             record_dashboard_state(self.areno, stage="epoch_end", epoch=epoch, step=step, role=self._policy_role_name())
+            self.areno.feed_stall_stage("epoch_end")
 
     def _policy_role_name(self) -> str:
         # GSPO/GRPO have a single trainable model called "policy"; PPO
@@ -576,8 +586,10 @@ class PolicyOnlyTrainer:
         record_dashboard_state(
             self.areno, stage="save_checkpoint_start", epoch=epoch, step=step, role=self._policy_role_name()
         )
+        self.areno.feed_stall_stage("save_checkpoint_start")
         saved_path = self.areno.save_checkpoint(ckpt_path)
         self.logger.info("epoch=%d step=%d stage=save_checkpoint_end path=%s", epoch, step, saved_path)
         record_dashboard_state(
             self.areno, stage="save_checkpoint_end", epoch=epoch, step=step, role=self._policy_role_name()
         )
+        self.areno.feed_stall_stage("save_checkpoint_end")

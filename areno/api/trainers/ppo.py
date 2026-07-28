@@ -90,6 +90,7 @@ class PPOTrainer(PolicyOnlyTrainer):
             step=getattr(self, "_dashboard_step", None),
             role=role,
         )
+        self.areno.feed_stall_stage(stage)
 
     def _materialize_train_batch(self, tokenizer, prompt_batch, rollout_results):
         self._last_ppo_stats = {}

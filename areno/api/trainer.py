@@ -20,6 +20,7 @@ from areno.api.metrics import MetricsRecorder
 from areno.api.models import BackendType, RolloutResult, SamplingParams, TrainSequence
 from areno.api.roles import ModelRole
 from areno.api.tokenizer import encode_generation_prompt, eos_token_ids, load_tokenizer, normalize_token_ids
+from areno.engine.runtime.stall_watch import StallWatchConfig, StallWatcher, make_stall_watcher
 
 
 class Trainer:
@@ -38,11 +39,18 @@ class Trainer:
         backend_type: BackendType | None = None,
         custom_config: BackendConfig | None = None,
         metrics_log_dir: str | None = None,
+        stall_watch: StallWatchConfig | None = None,
     ) -> None:
         """Create a trainer without starting backend workers.
 
         Call `init()` before rollout or training. `world_size` is the total
         number of devices/workers visible to the selected backend.
+
+        ``stall_watch`` is an optional ``StallWatchConfig``; when provided and
+        enabled (``interval_s > 0``) the trainer ticks stage progress at the
+        same boundaries used by ``record_dashboard_state`` and appends stall
+        diagnostics to the ``train_stats`` dict returned by ``train``.
+        ``None`` or a disabled config leaves behaviour identical to before.
         """
 
         self._tokenizer = None
@@ -62,6 +70,12 @@ class Trainer:
         self._step_wall_start: float | None = None
         self._rollout_session_depth = 0
         self._rollout_wall_start: float | None = None
+        # Validate stall-watch config before any model/worker initialisation so
+        # misconfigured runs fail fast. `make_stall_watcher` returns None for a
+        # disabled or missing config, keeping the default path no-op.
+        if stall_watch is not None:
+            stall_watch.validate()
+        self._stall_watcher = make_stall_watcher(stall_watch)
 
     def init(self) -> None:
         """Load tokenizer, create backend context, and initialize workers."""
@@ -77,6 +91,10 @@ class Trainer:
         self._backend = backend_cls()
         self._backend.initialize(self._ctx)
         self._initialized = True
+        # Loading finished: tick the ``loading`` stage so the stall watcher
+        # starts its idle timer from the point workers are ready, not from
+        # trainer construction.
+        self.tick_stall("loading")
 
     def get_tokenizer(self) -> Any:
         """Return the initialized tokenizer for prompt and completion handling."""
@@ -353,6 +371,15 @@ class Trainer:
                 train_batch=batch_data,
                 timings=self._metric_timings,
             )
+        # Surface any stage that has been idle longer than the configured stall
+        # threshold. Warnings are appended to `train_stats` (dict fields) and
+        # also flow into the dashboard state file via `record_dashboard_state`.
+        stall_warnings = self.check_stall()
+        if stall_warnings and isinstance(result, dict):
+            latest = stall_warnings[-1]
+            result["stall_stage"] = latest.stage
+            result["stall_wait_s"] = round(latest.wait_s, 3)
+            result["stall_threshold_s"] = latest.threshold_s
         self.finish_step()
         return result
 
@@ -361,6 +388,40 @@ class Trainer:
 
         if self._metrics is not None:
             self._metrics.record_rollout_sample(sample)
+
+    def tick_stall(self, stage: str) -> None:
+        """Feed a logical stage progress event to the stall watcher.
+
+        No-op when the watcher is disabled or absent, so trainer loops can call
+        this unconditionally at every stage boundary without per-stage guards.
+        """
+
+        watcher = self._stall_watcher
+        if watcher is not None:
+            watcher.tick(stage)
+
+    def feed_stall_stage(self, dashboard_stage: str) -> None:
+        """Map a concrete dashboard stage string to a logical stage and tick.
+
+        Used by trainer loops to mirror ``record_dashboard_state(stage=...)``
+        calls into the stall watcher without duplicating the stage mapping.
+        """
+
+        watcher = self._stall_watcher
+        if watcher is not None:
+            watcher.feed_stage_event(dashboard_stage)
+
+    def check_stall(self) -> list:
+        """Return and emit stall warnings for stages idle past the threshold.
+
+        Returns an empty list when the watcher is disabled. The returned
+        ``StallWarning`` objects are also emitted through the configured sink.
+        """
+
+        watcher = self._stall_watcher
+        if watcher is None:
+            return []
+        return watcher.check()
 
     def record_dashboard_state(
         self,

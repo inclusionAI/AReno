@@ -58,6 +58,7 @@ class SFTTrainer:
         for epoch in range(self.config.epochs):
             self.logger.info("epoch=%d stage=epoch_start", epoch)
             record_dashboard_state(self.areno, stage="epoch_start", epoch=epoch, step=step, role="policy")
+            self.areno.feed_stall_stage("epoch_start")
             for train_batch in self._iter_train_batches(
                 tokenizer,
                 max_prompt_tokens=self.config.max_prompt_tokens,
@@ -69,6 +70,7 @@ class SFTTrainer:
                     "epoch=%d step=%d role=policy stage=train_start rows=%d", epoch, step, len(train_batch)
                 )
                 record_dashboard_state(self.areno, stage="train_start", epoch=epoch, step=step, role="policy")
+                self.areno.feed_stall_stage("train_start")
                 train_start = time.perf_counter()
                 # The backend computes next-token logprobs for the supplied
                 # labels; `sft_loss_fn` selects only response/target positions
@@ -84,15 +86,18 @@ class SFTTrainer:
                     result["policy_train_wall_time_s"] = train_time_s
                 self.logger.info("epoch=%d step=%d role=policy stage=train_end rows=%d", epoch, step, len(train_batch))
                 record_dashboard_state(self.areno, stage="train_end", epoch=epoch, step=step, role="policy")
+                self.areno.feed_stall_stage("train_end")
                 self.logger.info("epoch=%d step=%d train_stats=%s", epoch, step, result)
                 self._maybe_save(epoch, step)
                 step += 1
                 if self.config.max_steps is not None and step >= self.config.max_steps:
                     self.logger.info("epoch=%d step=%d stage=max_steps_reached", epoch, step)
                     record_dashboard_state(self.areno, stage="max_steps_reached", epoch=epoch, step=step, role="policy")
+                    self.areno.feed_stall_stage("max_steps_reached")
                     return
             self.logger.info("epoch=%d stage=epoch_end", epoch)
             record_dashboard_state(self.areno, stage="epoch_end", epoch=epoch, step=step, role="policy")
+            self.areno.feed_stall_stage("epoch_end")
 
     def _iter_train_batches(self, tokenizer, *, max_prompt_tokens: int, max_new_tokens: int):
         # Dataset rows are converted lazily so large HF datasets do not need an
@@ -136,9 +141,11 @@ class SFTTrainer:
         ckpt_path = str(Path(self.config.save_path) / f"step_{step + 1:06d}")
         self.logger.info("epoch=%d step=%d stage=save_checkpoint_start path=%s", epoch, step, ckpt_path)
         record_dashboard_state(self.areno, stage="save_checkpoint_start", epoch=epoch, step=step, role="policy")
+        self.areno.feed_stall_stage("save_checkpoint_start")
         saved_path = self.areno.save_checkpoint(ckpt_path)
         self.logger.info("epoch=%d step=%d stage=save_checkpoint_end path=%s", epoch, step, saved_path)
         record_dashboard_state(self.areno, stage="save_checkpoint_end", epoch=epoch, step=step, role="policy")
+        self.areno.feed_stall_stage("save_checkpoint_end")
 
 
 def _record_to_train_sequence(record: Any, tokenizer, *, max_prompt_tokens: int, max_new_tokens: int):

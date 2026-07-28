@@ -129,7 +129,7 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         ),
     ),
     ("Checkpoint", ("save_path", "save_interval")),
-    ("Observability", ("metrics_log_dir",)),
+    ("Observability", ("metrics_log_dir", "stall_warn_interval_s", "stall_warn_min_interval_s", "stall_warn_stages")),
 )
 
 
@@ -274,7 +274,42 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
     if args.critic_warmup_steps < 0:
         raise click.UsageError("--critic-warmup-steps must be non-negative")
     _preflight_task_hooks(args, algorithm)
-    return _trainer_config_from_args(args)
+    config = _trainer_config_from_args(args)
+    # Apply stall-watch CLI options onto the config. These fields live on the
+    # base ``TrainerConfig`` so all algorithm-specific subclasses inherit them;
+    # assigning here avoids threading three extra kwargs through every config
+    # constructor in ``_trainer_config_from_args``.
+    config.stall_warn_interval_s = float(args.stall_warn_interval_s)
+    config.stall_warn_min_interval_s = float(args.stall_warn_min_interval_s)
+    config.stall_warn_stages = tuple(
+        stage.strip() for stage in args.stall_warn_stages.split(",") if stage.strip()
+    )
+    _validate_stall_watch_options(config)
+    return config
+
+
+def _validate_stall_watch_options(config: TrainerConfig) -> None:
+    """Early stall-watch validation before model/worker initialization.
+
+    Surfaces actionable Click usage errors for negative intervals,
+    min > interval, or unknown stage names.
+    """
+
+    if config.stall_warn_interval_s < 0:
+        raise click.UsageError("--stall-warn-interval-s must be non-negative; use 0 to disable")
+    if config.stall_warn_min_interval_s < 0:
+        raise click.UsageError("--stall-warn-min-interval-s must be non-negative")
+    if 0 < config.stall_warn_interval_s < config.stall_warn_min_interval_s:
+        raise click.UsageError(
+            f"--stall-warn-min-interval-s ({config.stall_warn_min_interval_s}) must not exceed "
+            f"--stall-warn-interval-s ({config.stall_warn_interval_s}) when enabled"
+        )
+    valid_stages = {"loading", "data", "rollout", "reward", "training"}
+    unknown = [stage for stage in config.stall_warn_stages if stage not in valid_stages]
+    if unknown:
+        raise click.UsageError(
+            f"--stall-warn-stages contains unknown stage(s) {unknown}; valid stages are {sorted(valid_stages)}"
+        )
 
 
 def _require_positive_float(value: float, option_name: str) -> None:
@@ -814,6 +849,7 @@ def run(trainer_config: TrainerConfig):
         backend_type=areno.api.Areno,
         metrics_log_dir=trainer_config.metrics_log_dir,
         custom_config=trainer_config.areno_config(),
+        stall_watch=trainer_config.stall_watch_config(),
     )
     dataset = _load_dataset_for_training(
         trainer_config.dataset_path,
@@ -1324,6 +1360,30 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
 @click.option("--value-loss-coef", type=float, default=0.5, show_default=True, help="PPO value loss coefficient.")
 @click.option("--gamma", type=float, default=1.0, show_default=True, help="PPO GAE discount.")
 @click.option("--lam", type=float, default=0.95, show_default=True, help="PPO GAE lambda.")
+@click.option(
+    "--stall-warn-interval-s",
+    "stall_warn_interval_s",
+    type=float,
+    default=0.0,
+    show_default=True,
+    help="Warn when a stage (loading/data/rollout/reward/training) has no progress for this many seconds. 0 disables.",
+)
+@click.option(
+    "--stall-warn-min-interval-s",
+    "stall_warn_min_interval_s",
+    type=float,
+    default=30.0,
+    show_default=True,
+    help="Minimum seconds between repeated stall warnings for the same stage (rate limit).",
+)
+@click.option(
+    "--stall-warn-stages",
+    "stall_warn_stages",
+    type=str,
+    default="loading,data,rollout,reward,training",
+    show_default=True,
+    help="Comma-separated logical stages to track for stall warnings.",
+)
 def train_command(**options) -> None:
     """Click entrypoint for training."""
 

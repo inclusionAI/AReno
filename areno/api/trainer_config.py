@@ -60,12 +60,33 @@ class TrainerConfig:
     agent_timeout_s: float = 300.0
     train_tool_results: bool = False
     chat_template_enable_thinking: bool | None = None
+    # Stall watcher: when ``stall_warn_interval_s > 0`` the trainer emits a
+    # rate-limited warning when a stage (loading/data/rollout/reward/training)
+    # has had no progress event for that many seconds. Defaults disable it.
+    stall_warn_interval_s: float = 0.0
+    stall_warn_min_interval_s: float = 30.0
+    stall_warn_stages: tuple[str, ...] = (
+        "loading",
+        "data",
+        "rollout",
+        "reward",
+        "training",
+    )
 
     def __post_init__(self) -> None:
         if self.attn_backend not in {"flash", "native"}:
             raise ValueError("attn_backend must be one of: flash, native")
         if self.model_hub not in {"hf", "modelscope"}:
             raise ValueError("model_hub must be one of: hf, modelscope")
+        if self.stall_warn_interval_s < 0:
+            raise ValueError("stall_warn_interval_s must be non-negative; use 0 to disable")
+        if self.stall_warn_min_interval_s < 0:
+            raise ValueError("stall_warn_min_interval_s must be non-negative")
+        if 0 < self.stall_warn_interval_s < self.stall_warn_min_interval_s:
+            raise ValueError(
+                f"stall_warn_min_interval_s ({self.stall_warn_min_interval_s}) must not exceed "
+                f"stall_warn_interval_s ({self.stall_warn_interval_s}) when the watcher is enabled"
+            )
 
     def optimizer_config(self) -> dict:
         """Build the optimizer dict consumed by the backend config."""
@@ -99,6 +120,23 @@ class TrainerConfig:
                 "eager_decode": self.eager_decode,
                 "attn_backend": self.attn_backend,
             },
+        )
+
+    def stall_watch_config(self):
+        """Build a ``StallWatchConfig`` from the scalar stall fields.
+
+        Returns ``None`` when the watcher is disabled (``interval_s == 0``),
+        so callers can pass the result directly to ``Trainer(stall_watch=...)``.
+        """
+
+        from areno.engine.runtime.stall_watch import StallWatchConfig
+
+        if self.stall_warn_interval_s <= 0:
+            return None
+        return StallWatchConfig(
+            interval_s=self.stall_warn_interval_s,
+            min_interval_s=self.stall_warn_min_interval_s,
+            stages=tuple(self.stall_warn_stages),
         )
 
 

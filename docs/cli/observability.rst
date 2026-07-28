@@ -175,3 +175,59 @@ When a trajectory is dropped for exceeding the model context window,
 counts, message counts, assistant turn counts, tool-result counts, and a short
 prompt preview. This is the fastest way to debug overlong agentic examples
 without dumping every token in every trajectory.
+
+Stage stall warnings
+--------------------
+
+Long post-training runs can stall inside a single stage (loading, data,
+rollout, reward, or training) without producing any visible log progress.
+AReno can emit a rate-limited warning when a stage has had no progress event
+for a configurable number of seconds. Warnings never stop the run; they only
+surface diagnostics through the ``areno`` logger and the ``train_stats`` dict.
+
+Enable the watcher with ``--stall-warn-interval-s``. A value of ``0`` (the
+default) disables it entirely and preserves the previous behaviour.
+
+.. code-block:: bash
+
+   areno train ... --stall-warn-interval-s 300 --stall-warn-min-interval-s 30
+
+Options:
+
+* ``--stall-warn-interval-s``: idle seconds after which a stage is considered
+  stalled. ``0`` disables the watcher. AReno validates this before model or
+  worker initialisation, so an invalid value fails fast with an actionable
+  error.
+* ``--stall-warn-min-interval-s``: minimum seconds between two warnings for the
+  same stage. Prevents log spam when a long stall persists across many train
+  steps. Must not exceed ``--stall-warn-interval-s`` when the watcher is
+  enabled.
+* ``--stall-warn-stages``: comma-separated subset of logical stages to track.
+  Defaults to ``loading,data,rollout,reward,training``. Unknown names are
+  rejected at validation time.
+
+When a stall is detected the ``areno.stall_watch`` logger emits a single
+``WARNING`` line, and the latest warning is attached to the step's
+``train_stats``:
+
+.. code-block:: text
+
+   stall stage=rollout wait_s=312.4 threshold_s=300.0
+
+.. list-table::
+   :header-rows: 1
+   :widths: 28 72
+
+   * - ``train_stats`` field
+     - Meaning
+   * - ``stall_stage``
+     - Logical stage name that triggered the warning.
+   * - ``stall_wait_s``
+     - Seconds elapsed since the last progress event for that stage.
+   * - ``stall_threshold_s``
+     - Configured idle threshold that was exceeded.
+
+The watcher is a pure-Python object fed explicitly by the trainer loops at the
+same boundaries that already call ``record_dashboard_state``; it spawns no
+background thread and uses no external database. See
+:doc:`/troubleshooting/stall` for common causes.
