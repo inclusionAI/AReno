@@ -107,8 +107,21 @@ class NonFiniteReport:
         os.makedirs(output_dir, exist_ok=True)
         fname = f"step_{self.step}_{self.phase}.json"
         fpath = os.path.join(output_dir, fname)
+        data = self.to_json_dict()
+        # Replace NaN/Inf with null for valid JSON
+        def _sanitize(obj):
+            import math
+            if isinstance(obj, float):
+                if math.isnan(obj) or math.isinf(obj):
+                    return None
+                return obj
+            if isinstance(obj, dict):
+                return {k: _sanitize(v) for k, v in obj.items()}
+            if isinstance(obj, list):
+                return [_sanitize(v) for v in obj]
+            return obj
         with open(fpath, "w") as f:
-            json.dump(self.to_json_dict(), f, indent=2, default=str)
+            json.dump(_sanitize(data), f, indent=2)
         return fpath
 
     def format_terminal(self) -> str:
