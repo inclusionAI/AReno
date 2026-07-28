@@ -121,6 +121,15 @@ class RolloutTrainerConfig(TrainerConfig):
     dedup_min_unique: int | None = None
     dedup_max_resample: int | None = None
 
+    def __post_init__(self) -> None:
+        TrainerConfig.__post_init__(self)
+        if self.n_samples < 1:
+            raise ValueError("n_samples must be >= 1")
+        if self.dedup_min_unique is not None and self.dedup_min_unique < 1:
+            raise ValueError("dedup_min_unique must be >= 1")
+        if self.dedup_max_resample is not None and self.dedup_max_resample < 0:
+            raise ValueError("dedup_max_resample must be >= 0")
+
     def resolved_max_running_prompts(self) -> int:
         """Return explicit or full-batch rollout concurrency."""
 
