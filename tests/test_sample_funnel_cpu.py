@@ -169,7 +169,7 @@ class FunnelCliTest(unittest.TestCase):
         self.assertIn("step=1", result.output)
         self.assertIn("Cumulative", result.output)
         # Cumulative trained = 30 + 28
-        self.assertIn("60", result.output)
+        self.assertIn("58", result.output)
         # Drop reason surfaced under the contract-valid stage.
         self.assertIn("empty_or_over_budget", result.output)
 
@@ -259,8 +259,8 @@ class FunnelCliTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = __import__("pathlib").Path(tmp)
-            _write_funnel_file(tmp_path, [_sft_record(0, 8, 8, 8, pid=111)])
-            _write_funnel_file(tmp_path, [_sft_record(0, 4, 4, 4, pid=222)])
+            _write_funnel_file(tmp_path, [_sft_record(0, 8, 8, 8, pid=111)], pid=111)
+            _write_funnel_file(tmp_path, [_sft_record(0, 4, 4, 4, pid=222)], pid=222)
             result = CliRunner().invoke(funnel_command, ["--metrics-log-dir", str(tmp_path), "--pid", "222", "--json"])
         self.assertEqual(result.exit_code, 0, msg=result.output)
         report = json.loads(result.output)
