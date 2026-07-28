@@ -147,12 +147,14 @@ def compute_component_statistics(
         else:
             total_rewards.append(None)
 
+        current_len = len(total_rewards)
         components = sample.get("reward_components")
         if components:
             for name, value in components.items():
-                component_values.setdefault(name, [None] * len(total_rewards))
+                if name not in component_values:
+                    component_values[name] = []
                 # Backfill previous samples where this component didn't exist.
-                while len(component_values[name]) < len(total_rewards) - 1:
+                while len(component_values[name]) < current_len - 1:
                     component_values[name].append(None)
                 if value is not None and not (isinstance(value, float) and math.isnan(value)):
                     component_values[name].append(float(value))

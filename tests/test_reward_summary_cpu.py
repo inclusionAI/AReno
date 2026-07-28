@@ -77,8 +77,8 @@ class RewardStatsTest(unittest.TestCase):
 
     def test_outlier_detection(self):
         """Values beyond threshold * std from the mean are outliers."""
-        # [0, 0, 0, 0, 100] — mean=20, std≈40, 100 is > 3 std away
-        stats = compute_reward_statistics([0.0, 0.0, 0.0, 0.0, 100.0], outlier_threshold=3.0)
+        # [0, 0, 0, 0, 100] — mean=20, std=40 (biased), |100-20|=80 > 1*40
+        stats = compute_reward_statistics([0.0, 0.0, 0.0, 0.0, 100.0], outlier_threshold=1.0)
         self.assertGreater(stats.outlier_fraction, 0.0)
         # With a very high threshold, no outliers.
         stats_loose = compute_reward_statistics([0.0, 0.0, 0.0, 0.0, 100.0], outlier_threshold=100.0)
@@ -287,7 +287,7 @@ class RewardSummaryCliTest(unittest.TestCase):
     def test_cli_step_filter(self):
         with tempfile.TemporaryDirectory() as tmp:
             _write_jsonl(tmp, [
-                {"step": 0, "epoch": 0, "prompt_idx": 0, "sample_idx": 0,
+                {"step": i, "epoch": 0, "prompt_idx": 0, "sample_idx": 0,
                  "reward": float(i), "reward_components": None}
                 for i in range(10)
             ])
@@ -320,9 +320,9 @@ class RewardSummaryCliTest(unittest.TestCase):
                  "reward": float(v), "reward_components": None}
                 for i, v in enumerate([0.0, 0.0, 0.0, 0.0, 100.0])
             ])
-            # threshold=3 → outliers expected
+            # threshold=1 → outliers expected (mean=20, std=40, |100-20|=80 > 1*40)
             r1 = CliRunner().invoke(
-                reward_summary_command, ["--metrics-log-dir", tmp, "--json", "--outlier-threshold", "3"],
+                reward_summary_command, ["--metrics-log-dir", tmp, "--json", "--outlier-threshold", "1"],
             )
             self.assertEqual(r1.exit_code, 0)
             p1 = json.loads(r1.output)
