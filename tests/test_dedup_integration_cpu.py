@@ -15,11 +15,9 @@ import os
 import tempfile
 import unittest
 
-import click
 from click.testing import CliRunner
 
 from areno.cli.dedup import dedup_command
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -34,9 +32,7 @@ _JSONL_WITH_DUPES = (
 )
 
 _JSONL_NO_DUPES = (
-    '{"prompt": "unique question one"}\n'
-    '{"prompt": "unique question two"}\n'
-    '{"prompt": "unique question three"}\n'
+    '{"prompt": "unique question one"}\n{"prompt": "unique question two"}\n{"prompt": "unique question three"}\n'
 )
 
 _JSONL_NEAR_DUPES = (
@@ -48,11 +44,13 @@ _JSONL_NEAR_DUPES = (
 
 _JSON_EMPTY_ARRAY = "[]"
 
-_JSON_ARRAY_WITH_DUPES = json.dumps([
-    {"prompt": "hello world"},
-    {"prompt": "hello world"},
-    {"prompt": "unique"},
-])
+_JSON_ARRAY_WITH_DUPES = json.dumps(
+    [
+        {"prompt": "hello world"},
+        {"prompt": "hello world"},
+        {"prompt": "unique"},
+    ]
+)
 
 
 def _write_temp_file(content: str, suffix: str = ".jsonl") -> str:
@@ -149,25 +147,18 @@ class TestCLIScopeModes(unittest.TestCase):
 
     def setUp(self):
         self.runner = CliRunner()
-        self.path = _write_temp_file(
-            '{"prompt": "same", "answer": "A"}\n'
-            '{"prompt": "same", "answer": "B"}\n'
-        )
+        self.path = _write_temp_file('{"prompt": "same", "answer": "A"}\n{"prompt": "same", "answer": "B"}\n')
 
     def tearDown(self):
         os.unlink(self.path)
 
     def test_prompt_scope_finds_duplicate(self):
-        result = self.runner.invoke(
-            dedup_command, ["--data-path", self.path, "--scope", "prompt"]
-        )
+        result = self.runner.invoke(dedup_command, ["--data-path", self.path, "--scope", "prompt"])
         self.assertEqual(result.exit_code, 0)
         self.assertIn("Duplicate records: 1", result.output)
 
     def test_full_scope_no_duplicate(self):
-        result = self.runner.invoke(
-            dedup_command, ["--data-path", self.path, "--scope", "full"]
-        )
+        result = self.runner.invoke(dedup_command, ["--data-path", self.path, "--scope", "full"])
         self.assertEqual(result.exit_code, 0)
         self.assertIn("Duplicate groups: 0", result.output)
 

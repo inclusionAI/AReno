@@ -19,15 +19,12 @@ from __future__ import annotations
 import unittest
 
 from areno.dedup import (
-    DuplicateGroup,
-    DuplicateReport,
     find_duplicates,
     format_duplicate_report,
     jaccard_similarity,
     normalize_text,
     shingle_signature,
 )
-
 
 # ---------------------------------------------------------------------------
 # Text normalisation

@@ -33,8 +33,9 @@ from __future__ import annotations
 import hashlib
 import re
 import unicodedata
-from dataclasses import dataclass, field
-from typing import Any, Iterator, Literal, Sequence
+from collections.abc import Sequence
+from dataclasses import dataclass
+from typing import Any, Literal
 
 # ---------------------------------------------------------------------------
 # Text normalisation
@@ -324,9 +325,7 @@ def _find_exact_duplicates(texts: list[str], total: int) -> DuplicateReport:
 
     groups: list[DuplicateGroup] = []
     duplicate_count = 0
-    for group_id, (fp, indices) in enumerate(
-        (item for item in fp_to_indices.items() if len(item[1]) > 1)
-    ):
+    for group_id, (fp, indices) in enumerate(item for item in fp_to_indices.items() if len(item[1]) > 1):
         groups.append(
             DuplicateGroup(
                 group_id=group_id,
