@@ -224,6 +224,53 @@ def _format_count(value: int | None) -> str:
     return "n/a" if value is None else str(value)
 
 
+# Fixed width (in cells) of the ASCII bar so columns line up across stages.
+_BAR_WIDTH = 24
+# Fractional block characters, from empty to full, for sub-cell resolution.
+_BAR_FRACTIONS = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉", "█"]
+
+
+def _bar(value: int | None, baseline: int | None) -> str:
+    """Render a horizontal ASCII bar for one funnel stage.
+
+    The bar length is proportional to ``value / baseline`` and is capped at the
+    full width. ``n/a`` (value is None) renders as a blank dash so the funnel
+    shape stays readable for trainers that skip a stage.
+    """
+
+    if value is None:
+        return "—" * (_BAR_WIDTH // 2)
+    if not baseline or baseline <= 0:
+        # No baseline in this domain yet (e.g. loaded is 0); show a single
+        # cell so a fully-dropped update still has a visible row.
+        return "·"
+    scaled = (value / baseline) * _BAR_WIDTH
+    full = int(scaled)
+    remainder = scaled - full
+    # Pick the nearest fractional block, snapping tiny remainders down.
+    frac_idx = 0
+    if remainder >= 0.0625:
+        frac_idx = min(8, int(round(remainder * 8)) + 1) - 1
+    bar = "█" * full + (_BAR_FRACTIONS[frac_idx] if frac_idx else "")
+    # Pad on the right with spaces so the numeric column stays aligned even
+    # when bars have different lengths.
+    return bar.ljust(_BAR_WIDTH)
+
+
+def _baselines(stages: dict[str, int | None]) -> int | None:
+    """Return the largest tracked count as the single 100% bar baseline.
+
+    A single shared baseline makes the funnel read top-to-bottom: the widest
+    stage (usually ``loaded`` for SFT/DPO, ``generated`` for online-RL after
+    fan-out) fills the bar, and every later stage is proportional to it, so
+    drops are visible as a narrowing bar rather than each domain restarting
+    at full width.
+    """
+
+    tracked = [v for v in stages.values() if v is not None]
+    return max(tracked) if tracked else None
+
+
 def _print_report(report: dict[str, Any]) -> None:
     cumulative = report.get("cumulative")
     pid = report.get("pid")
@@ -259,9 +306,13 @@ def _print_funnel_entry(
     step: Any, source: str, stages: dict[str, int | None], drop_reasons: dict[str, list[str]]
 ) -> None:
     click.echo(f"  step={step}  source={source}")
+    baseline = _baselines(stages)
     for stage in STAGE_ORDER:
         label = _STAGE_LABELS[stage]
-        count = _format_count(stages.get(stage))
-        click.echo(f"    {label:<22} {count}")
+        value = stages.get(stage)
+        count = _format_count(value)
+        bar = _bar(value, baseline)
+        # label (22) | bar (24) | count (right-aligned within 6)
+        click.echo(f"    {label:<22} {bar} {count:>6}")
         for reason in drop_reasons.get(stage, []):
             click.echo(f"        drop: {reason}")

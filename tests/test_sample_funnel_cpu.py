@@ -101,6 +101,44 @@ class FunnelCoreTest(unittest.TestCase):
             self.assertNotIn(forbidden, payload["stages"])
 
 
+class FunnelBarTest(unittest.TestCase):
+    """ASCII bar rendering is proportional and visually stable."""
+
+    def test_bar_full_when_value_equals_baseline(self):
+        from areno.cli.funnel import _bar
+
+        # The baseline stage always fills the full width (24 cells), no padding.
+        full = _bar(50, 50)
+        self.assertEqual(len(full.rstrip()), 24)
+        self.assertIn("█", full)
+
+    def test_bar_shorter_when_value_below_baseline(self):
+        from areno.cli.funnel import _bar
+
+        # 4 out of 8 baseline -> 12 of 24 cells, strictly shorter than full.
+        full = _bar(8, 8)
+        partial = _bar(4, 8)
+        self.assertLess(len(partial.rstrip()), len(full.rstrip()))
+        self.assertEqual(len(partial.rstrip()), 12)
+
+    def test_bar_na_for_untracked_stage(self):
+        from areno.cli.funnel import _bar
+
+        # n/a stages render a dash placeholder, not a proportion bar.
+        self.assertTrue(_bar(None, 10).startswith("—"))
+
+    def test_baseline_is_global_max(self):
+        from areno.cli.funnel import _baselines
+
+        stages = {"loaded": 16, "contract_valid": 15, "generated": 45,
+                  "length_valid": 45, "trainable_token_valid": 45, "trained": 45}
+        # online-RL fans out, so generated (45) is the global max baseline.
+        self.assertEqual(_baselines(stages), 45)
+        stages_sft = {"loaded": 64, "contract_valid": 60, "generated": None,
+                      "length_valid": None, "trainable_token_valid": 58, "trained": 58}
+        self.assertEqual(_baselines(stages_sft), 64)
+
+
 # --------------------------------------------------------------------------
 # CLI tests via CliRunner with synthetic on-disk funnel artifacts
 # --------------------------------------------------------------------------
