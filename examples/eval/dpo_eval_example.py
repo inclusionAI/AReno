@@ -1,0 +1,150 @@
+"""DPO training with periodic evaluation -- runnable example.
+
+This example demonstrates the periodic evaluation feature for DPO training.
+It creates a small synthetic dataset of preference pairs, runs a few training
+steps with eval enabled, and logs the eval metrics to TensorBoard.
+
+Usage::
+
+    python examples/eval/dpo_eval_example.py
+
+Requirements: the ``datasets`` library and a tokenizer-aware model checkpoint.
+Note that DPO eval requires a frozen reference policy role (``"ref"``) to
+pre-compute reference logprobs before each evaluate() call.
+"""
+
+from __future__ import annotations
+
+import logging
+import tempfile
+from functools import partial
+from types import SimpleNamespace
+
+from areno.api.metrics import MetricsRecorder
+from areno.api.trainers.dpo import DPOTrainer
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+
+
+class _ExampleTokenizer:
+    """Minimal tokeniser for the offline example."""
+
+    eos_token_id = 0
+    chat_template = None
+
+    def encode(self, text, add_special_tokens=False):
+        del add_special_tokens
+        return [ord(ch) % 50 + 1 for ch in text]
+
+    def apply_chat_template(self, messages, tokenize, add_generation_prompt=False):
+        del tokenize, add_generation_prompt
+        ids: list[int] = []
+        for message in messages:
+            ids.extend(self.encode(f"{message.get('role')}:{message.get('content')}"))
+        return ids
+
+
+class _ExampleBackend:
+    """Backend double for the offline DPO example.
+
+    Supports all DPOTrainer requirements: train, evaluate, score_logprobs,
+    ensure_roles, save_checkpoint, and get_tokenizer.
+    """
+
+    def __init__(self, metrics=None):
+        self.train_calls = 0
+        self.eval_calls = 0
+        self.ref_score_calls = 0
+        self._metrics = metrics
+
+    def init(self):
+        pass
+
+    def close(self):
+        pass
+
+    def get_tokenizer(self):
+        return _ExampleTokenizer()
+
+    def train(self, _batch, _loss_fn, *, mini_bs, gradient_accumulation_steps):
+        del mini_bs, gradient_accumulation_steps
+        self.train_calls += 1
+        return {"dpo_loss": 0.69, "total_loss": 0.69, "dpo_accuracy": 0.75}
+
+    def evaluate(self, batch_data, _loss_fn, *, mini_bs, gradient_accumulation_steps=None):
+        del mini_bs, gradient_accumulation_steps
+        self.eval_calls += 1
+        return {"dpo_loss": 0.5, "dpo_accuracy": 0.8, "dpo_margin": 0.3}
+
+    def save_checkpoint(self, _ctx, path):
+        return path
+
+    def score_logprobs(self, role, token_rows, microbatch_size=None):
+        del role, microbatch_size
+        self.ref_score_calls += 1
+        return [[-0.1 * float(i + 1) for i in range(len(row))] for row in token_rows]
+
+    def ensure_roles(self, roles):
+        pass
+
+
+def main() -> None:
+    log_dir = tempfile.mkdtemp(prefix="dpo_eval_example_")
+    metrics = MetricsRecorder(log_dir)
+
+    # Build a synthetic training dataset (short texts to fit token budgets).
+    train_data = [
+        {"prompt": "2+2?", "chosen": "4", "rejected": "5"},
+        {"prompt": "1+1?", "chosen": "2", "rejected": "3"},
+        {"prompt": "3+3?", "chosen": "6", "rejected": "7"},
+        {"prompt": "4+4?", "chosen": "8", "rejected": "9"},
+    ]
+
+    # Build a synthetic evaluation dataset.
+    eval_data = [
+        {"prompt": "5+5?", "chosen": "10", "rejected": "11"},
+        {"prompt": "6+6?", "chosen": "12", "rejected": "13"},
+    ]
+
+    config = SimpleNamespace(
+        batch_size=2,
+        epochs=1,
+        gradient_accumulation_steps=1,
+        max_new_tokens=10,
+        max_prompt_tokens=10,
+        mini_bs=2,
+        save_interval=100,
+        save_path=None,
+        max_steps=None,
+        eval_dataset_path="synthetic_dpo_eval",  # non-None enables eval
+        eval_interval=2,
+        eval_batches=0,
+        model_hub="hf",
+        dataset_loader_fn=None,
+        dpo_beta=0.1,
+        score_micro_bs=2,
+        ref_ckpt=None,
+        ckpt="/fake/ckpt",
+    )
+
+    backend = _ExampleBackend(metrics=metrics)
+    loss_fn = partial(lambda _pack, _logprobs, *, beta: None, beta=config.dpo_beta)
+    trainer = DPOTrainer(config, instance=backend, dataset=train_data, reward_fn=None, loss_fn=loss_fn)
+
+    # Inject eval dataset directly to skip file loading.
+    trainer._eval_dataset = eval_data
+
+    print("=== DPO training with periodic evaluation ===")
+    trainer.fit()
+
+    metrics.close()
+
+    print(f"\nTrain calls       : {backend.train_calls}")
+    print(f"Eval calls        : {backend.eval_calls}")
+    print(f"Ref score calls   : {backend.ref_score_calls}")
+    print(f"TensorBoard logs written to: {log_dir}")
+    print("Run: tensorboard --logdir", log_dir)
+
+
+if __name__ == "__main__":
+    main()

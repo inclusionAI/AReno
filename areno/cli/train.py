@@ -129,7 +129,7 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         ),
     ),
     ("Checkpoint", ("save_path", "save_interval")),
-    ("Observability", ("metrics_log_dir",)),
+    ("Observability", ("metrics_log_dir", "eval_dataset_path", "eval_interval", "eval_batches")),
 )
 
 
@@ -176,6 +176,9 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
     args.max_steps = getattr(args, "max_steps", None)
     args.score_micro_bs = getattr(args, "score_micro_bs", 8)
     args.model_hub = getattr(args, "model_hub", "modelscope")
+    args.eval_dataset_path = getattr(args, "eval_dataset_path", None)
+    args.eval_interval = getattr(args, "eval_interval", 0)
+    args.eval_batches = getattr(args, "eval_batches", 0)
     smoke_infer = bool(getattr(args, "smoke_infer", False))
     smoke_train = bool(getattr(args, "smoke_train", False))
     if smoke_infer or smoke_train:
@@ -273,6 +276,17 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
         _require_positive_float(args.lam, "--lam")
     if args.critic_warmup_steps < 0:
         raise click.UsageError("--critic-warmup-steps must be non-negative")
+    if args.eval_dataset_path is not None:
+        path = Path(args.eval_dataset_path).expanduser().resolve()
+        if not path.exists():
+            raise click.UsageError(
+                f"--eval-dataset-path does not exist: {path}"
+            )
+        args.eval_dataset_path = str(path)
+    if args.eval_interval < 0:
+        raise click.UsageError("--eval-interval must be non-negative")
+    if args.eval_batches < 0:
+        raise click.UsageError("--eval-batches must be non-negative")
     _preflight_task_hooks(args, algorithm)
     return _trainer_config_from_args(args)
 
@@ -598,6 +612,9 @@ def _trainer_config_from_args(args) -> TrainerConfig:
     args.max_steps = getattr(args, "max_steps", None)
     args.score_micro_bs = getattr(args, "score_micro_bs", 8)
     args.model_hub = getattr(args, "model_hub", "modelscope")
+    args.eval_dataset_path = getattr(args, "eval_dataset_path", None)
+    args.eval_interval = getattr(args, "eval_interval", 0)
+    args.eval_batches = getattr(args, "eval_batches", 0)
     algorithm = get_algorithm(args.algo)
     chat_template_enable_thinking = False if args.disable_thinking else None
     if algorithm.name == "dpo":
@@ -638,6 +655,9 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             agent_timeout_s=args.agent_timeout_s,
             train_tool_results=args.train_tool_results,
             chat_template_enable_thinking=chat_template_enable_thinking,
+            eval_dataset_path=args.eval_dataset_path,
+            eval_interval=args.eval_interval,
+            eval_batches=args.eval_batches,
             ref_ckpt=args.ref_ckpt,
             dpo_beta=args.dpo_beta,
         )
@@ -679,6 +699,9 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             agent_timeout_s=args.agent_timeout_s,
             train_tool_results=args.train_tool_results,
             chat_template_enable_thinking=chat_template_enable_thinking,
+            eval_dataset_path=args.eval_dataset_path,
+            eval_interval=args.eval_interval,
+            eval_batches=args.eval_batches,
         )
     if algorithm.name != "ppo":
         return PolicyTrainerConfig(
@@ -1187,6 +1210,13 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
 @click.option("--save-interval", type=int, default=100, show_default=True, help="Save checkpoint every N train steps.")
 @click.option(
     "--metrics-log-dir", default=DEFAULT_METRICS_LOG_DIR, show_default=True, help="TensorBoard metrics log directory."
+)
+@click.option("--eval-dataset-path", default=None, help="Optional evaluation dataset path.")
+@click.option(
+    "--eval-interval", type=int, default=0, show_default=True, help="Evaluate every N training steps. 0 disables periodic eval."
+)
+@click.option(
+    "--eval-batches", type=int, default=0, show_default=True, help="Max eval batches per evaluation. 0 means full dataset."
 )
 @click.option("--epochs", type=int, default=10, show_default=True, help="Number of dataset epochs to train.")
 @click.option("--max-steps", type=int, default=None, help="Stop after this many trainer steps.")

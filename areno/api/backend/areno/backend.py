@@ -400,6 +400,78 @@ class ArenoBackend(Backend):
             result["step_e2e_time_s"] = step_e2e_time_s
         return result
 
+    def evaluate(
+        self,
+        ctx: Context,
+        batch_data: list[TrainSequence],
+        loss_fn: Callable,
+        mini_bs: int,
+        gradient_accumulation_steps: int | None = None,
+    ) -> dict[str, float]:
+        """Forward-only eval pass: build packs, score logprobs, compute loss.
+
+        Uses ``engine.score_logprobs("actor", ...)`` so only the current
+        policy model runs a forward pass — no backward, no optimizer step.
+        Metrics are averaged across microbatches.
+        """
+        engine = self._require_engine()
+        if not callable(loss_fn):
+            raise ValueError("ArenoBackend requires a callable loss_fn")
+
+        # Build data packs (same layout as train so loss_fn works unmodified).
+        packs = []
+        for start in range(0, len(batch_data), mini_bs):
+            seqs = batch_data[start : start + mini_bs]
+            packs.append(_make_train_pack(seqs))
+
+        metrics: dict[str, float] = {}
+        losses = []
+        for pack in packs:
+            # Extract per-row token lists for score_logprobs.
+            tokens = pack["input_ids"]  # (B, max_len) int64
+            lengths = pack["lengths"]   # (B,) int32
+            token_rows = []
+            for b in range(tokens.shape[0]):
+                L = int(lengths[b].item())
+                token_rows.append(tokens[b, :L].tolist())
+
+            # Forward pass on the current policy model (no training).
+            logprob_rows = engine.score_logprobs(
+                "actor",
+                token_rows,
+                pad_token_id=_pad_token_id(ctx),
+                microbatch_size=int(mini_bs),
+            )
+
+            # Reconstruct a (B, max_len-1) tensor matching next_token_logprobs.
+            B, max_len = tokens.shape
+            logprobs = torch.zeros(B, max_len - 1, dtype=torch.float32)
+            for b, row in enumerate(logprob_rows):
+                L = len(row)  # == lengths[b] - 1
+                logprobs[b, :L] = torch.tensor(row, dtype=torch.float32)
+
+            loss_out = loss_fn(pack, logprobs)
+            if isinstance(loss_out, tuple):
+                loss_val, pack_metrics = loss_out
+            else:
+                loss_val = loss_out
+                pack_metrics = {}
+
+            losses.append(float(loss_val.detach() if isinstance(loss_val, torch.Tensor) else loss_val))
+            for key, value in pack_metrics.items():
+                value_float = float(value.detach() if isinstance(value, torch.Tensor) else value)
+                metrics[key] = metrics.get(key, 0.0) + value_float
+
+        # Average per-pack accumulations.
+        num_packs = len(packs)
+        if num_packs > 1:
+            for key in list(metrics.keys()):
+                metrics[key] = metrics[key] / num_packs
+
+        result = {"loss": sum(losses) / max(len(losses), 1)}
+        result.update(metrics)
+        return result
+
     def save_checkpoint(self, ctx: Context, path: str) -> str:
         engine = self._require_engine()
         return engine.save_checkpoint(path)

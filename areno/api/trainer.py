@@ -11,6 +11,8 @@ import time
 from collections.abc import Callable, Iterable
 from typing import Any
 
+import torch
+
 from areno.api.agentic import LossMaskPolicy, RolloutSession
 from areno.api.backend.base import Backend, get_backend_cls
 from areno.api.config import BackendConfig, coerce_backend_config, resolve_backend_type
@@ -355,6 +357,30 @@ class Trainer:
             )
         self.finish_step()
         return result
+
+    def evaluate(
+        self,
+        batch_data: list[TrainSequence],
+        loss_fn: Callable,
+        mini_bs: int = 8,
+        gradient_accumulation_steps: int | None = None,
+    ) -> dict[str, float]:
+        """Run a forward-only evaluation pass on a held-out dataset.
+
+        Wraps the backend call in ``torch.no_grad()``. Does **not** advance
+        ``global_step``, does **not** record TensorBoard metrics, and does
+        **not** touch the optimizer. The backend is responsible for switching
+        the model to ``eval()`` and back to ``train()`` before returning.
+        """
+
+        if not self._initialized:
+            raise RuntimeError("Trainer is not initialized")
+        if not callable(loss_fn):
+            raise TypeError("loss_fn must be callable")
+        with torch.no_grad():
+            return self._backend.evaluate(
+                self._ctx, batch_data, loss_fn, mini_bs, gradient_accumulation_steps
+            )
 
     def record_rollout_sample(self, sample: dict[str, Any]) -> None:
         """Persist a representative rollout sample when metrics recording is enabled."""

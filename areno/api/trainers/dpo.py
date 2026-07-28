@@ -47,6 +47,27 @@ class DPOTrainer:
             "ref": ModelRole("ref", config.ref_ckpt or config.ckpt, trainable=False),
         }
 
+    @property
+    def _eval_enabled(self) -> bool:
+        return self.config.eval_dataset_path is not None
+
+    def _load_eval_dataset(self) -> list:
+        """Lazily load the evaluation dataset, caching on first call."""
+        if hasattr(self, "_eval_dataset"):
+            return self._eval_dataset
+        from datasets import load_dataset, load_from_disk
+
+        from areno.cli.train import _load_dataset_for_training
+
+        self._eval_dataset = _load_dataset_for_training(
+            self.config.eval_dataset_path,
+            dataset_loader_fn=getattr(self.config, "dataset_loader_fn", None),
+            model_hub=self.config.model_hub,
+            load_dataset=load_dataset,
+            load_from_disk=load_from_disk,
+        )
+        return self._eval_dataset
+
     def fit(self) -> None:
         self.areno.init()
         self._ensure_roles()
@@ -61,6 +82,126 @@ class DPOTrainer:
         self.areno.ensure_roles(self.roles)
         for role in self.roles.values():
             self.logger.info("role=%s stage=init_end trainable=%s", role.name, role.trainable)
+
+    def _run_eval(self, step: int) -> None:
+        """Execute one DPO evaluation pass: load data, tokenize pairs, pre-compute
+        reference logprobs, batch evaluate with ``dpo_loss_fn``, and record
+        aggregated metrics under the ``eval/`` TensorBoard namespace.
+
+        Each pair (chosen/rejected) is converted to two ``TrainSequence`` rows.
+        Before calling ``trainer.evaluate()``, the frozen reference policy
+        scores all token rows so ``dpo_loss_fn`` can compare chosen-vs-rejected
+        logprob margins against the reference margins.
+        """
+        import time
+
+        eval_dataset = self._load_eval_dataset()
+        if len(eval_dataset) == 0:
+            raise ValueError("eval dataset is empty")
+
+        tokenizer = self.areno.get_tokenizer()
+        max_seq_len = self.config.max_prompt_tokens + self.config.max_new_tokens
+
+        total_loss = 0.0
+        total_accuracy_sum = 0.0
+        total_margin_sum = 0.0
+        total_pairs = 0
+        eval_start = time.perf_counter()
+
+        eval_pairs: list = []
+        num_batches = 0
+        for record in eval_dataset:
+            pair = _record_to_train_pair(record, tokenizer, max_seq_len=max_seq_len)
+            if pair is None:
+                continue
+            # pair is [chosen_seq, rejected_seq]
+            eval_pairs.append(pair)
+            if len(eval_pairs) >= self.config.batch_size:
+                # Flatten pairs into [chosen, rejected, chosen, rejected, ...].
+                eval_batch = []
+                for p in eval_pairs:
+                    eval_batch.extend(p)
+
+                # Pre-compute reference logprobs for all sequences.
+                tokens = [seq.tokens for seq in eval_batch]
+                ref_logprob_rows = self.areno.score_logprobs(
+                    "ref", tokens, microbatch_size=self.config.score_micro_bs
+                )
+                for seq, ref_lp in zip(eval_batch, ref_logprob_rows):
+                    seq.ref_logprobs = [float(v) for v in ref_lp]
+                    seq.values = [0.0] * len(seq.tokens)
+                    seq.returns = [0.0] * len(seq.tokens)
+
+                result = self.areno.evaluate(
+                    eval_batch,
+                    self.loss_fn,
+                    mini_bs=self.config.mini_bs,
+                    gradient_accumulation_steps=self.config.gradient_accumulation_steps,
+                )
+                total_loss += result.get("dpo_loss", 0.0)
+                total_accuracy_sum += result.get("dpo_accuracy", 0.0)
+                total_margin_sum += result.get("dpo_margin", 0.0)
+                total_pairs += len(eval_pairs)
+                num_batches += 1
+                eval_pairs = []
+                if self.config.eval_batches > 0 and num_batches >= self.config.eval_batches:
+                    break
+
+        # Process any remaining incomplete batch.
+        if eval_pairs and (self.config.eval_batches == 0 or num_batches < self.config.eval_batches):
+            eval_batch = []
+            for p in eval_pairs:
+                eval_batch.extend(p)
+
+            tokens = [seq.tokens for seq in eval_batch]
+            ref_logprob_rows = self.areno.score_logprobs(
+                "ref", tokens, microbatch_size=self.config.score_micro_bs
+            )
+            for seq, ref_lp in zip(eval_batch, ref_logprob_rows):
+                seq.ref_logprobs = [float(v) for v in ref_lp]
+                seq.values = [0.0] * len(seq.tokens)
+                seq.returns = [0.0] * len(seq.tokens)
+
+            result = self.areno.evaluate(
+                eval_batch,
+                self.loss_fn,
+                mini_bs=self.config.mini_bs,
+                gradient_accumulation_steps=self.config.gradient_accumulation_steps,
+            )
+            total_loss += result.get("dpo_loss", 0.0)
+            total_accuracy_sum += result.get("dpo_accuracy", 0.0)
+            total_margin_sum += result.get("dpo_margin", 0.0)
+            total_pairs += len(eval_pairs)
+            num_batches += 1
+
+        if total_pairs == 0:
+            raise ValueError("eval dataset produced no valid pairs")
+
+        final_metrics: dict[str, float] = {}
+        if num_batches > 0:
+            final_metrics["dpo_loss"] = total_loss / num_batches
+            final_metrics["dpo_accuracy"] = total_accuracy_sum / num_batches
+            final_metrics["dpo_margin"] = total_margin_sum / num_batches
+        else:
+            final_metrics["dpo_loss"] = 0.0
+            final_metrics["dpo_accuracy"] = 0.0
+            final_metrics["dpo_margin"] = 0.0
+        final_metrics["sample_count"] = float(total_pairs * 2)
+        final_metrics["duration_s"] = time.perf_counter() - eval_start
+
+        if self.areno._metrics is not None:
+            self.areno._metrics.record_eval_step(step=step, eval_result=final_metrics)
+
+        self.logger.info(
+            "step=%d stage=eval_end eval_loss=%.4f accuracy=%.4f margin=%.4f sample_count=%d duration_s=%.3f",
+            step,
+            final_metrics["dpo_loss"],
+            final_metrics["dpo_accuracy"],
+            final_metrics["dpo_margin"],
+            int(final_metrics["sample_count"]),
+            final_metrics["duration_s"],
+        )
+        record_dashboard_state(self.areno, stage="eval_end", step=step)
 
     def _fit_initialized(self) -> None:
         tokenizer = self.areno.get_tokenizer()
@@ -125,10 +266,19 @@ class DPOTrainer:
                 self.logger.info("epoch=%d step=%d train_stats=%s", epoch, step, result)
                 self._maybe_save(epoch, step)
                 step += 1
+                # Interval evaluation: triggered every eval_interval training steps.
+                if self._eval_enabled and self.config.eval_interval > 0 and step % self.config.eval_interval == 0:
+                    self._run_eval(step)
                 if self.config.max_steps is not None and step >= self.config.max_steps:
                     self.logger.info("epoch=%d step=%d stage=max_steps_reached", epoch, step)
                     record_dashboard_state(self.areno, stage="max_steps_reached", epoch=epoch, step=step, role="policy")
+                    # End-of-training evaluation triggered before exiting at max_steps.
+                    if self._eval_enabled:
+                        self._run_eval(step)
                     return
+            # End-of-epoch evaluation: triggers regardless of interval alignment.
+            if self._eval_enabled:
+                self._run_eval(step)
             self.logger.info("epoch=%d stage=epoch_end", epoch)
             record_dashboard_state(self.areno, stage="epoch_end", epoch=epoch, step=step, role="policy")
 

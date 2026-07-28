@@ -40,6 +40,17 @@ class MetricsRecorder:
         stats = collect_train_batch_stats(train_batch)
         record_training_stats(self._writer, stats, step, train_result, train_batch, timings=timings)
 
+    def record_eval_step(self, *, step: int, eval_result: dict[str, float]) -> None:
+        """Write evaluation metrics under the `eval/` TensorBoard namespace.
+
+        Callers aggregate metrics across eval batches before calling this
+        method so that a single eval step produces one consistent scalar
+        point in TensorBoard.
+        """
+        for key, value in eval_result.items():
+            self._writer.add_scalar(f"eval/{key}", value, step)
+        self._writer.flush()
+
     def record_rollout_sample(self, sample: dict) -> None:
         """Record a representative decoded rollout sample beside TensorBoard events."""
 

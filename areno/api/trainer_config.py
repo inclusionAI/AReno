@@ -60,6 +60,9 @@ class TrainerConfig:
     agent_timeout_s: float = 300.0
     train_tool_results: bool = False
     chat_template_enable_thinking: bool | None = None
+    eval_dataset_path: str | None = None
+    eval_interval: int = 0
+    eval_batches: int = 0
 
     def __post_init__(self) -> None:
         if self.attn_backend not in {"flash", "native"}:
