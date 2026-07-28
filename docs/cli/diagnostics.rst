@@ -78,3 +78,49 @@ Checks include:
 
 ``WARN`` items usually indicate degraded or incomplete setup. ``FAIL`` items
 mean AReno is not ready to run the CUDA training/inference engine.
+
+Preflight model references
+--------------------------
+
+``areno check --model-ref`` validates a model checkpoint directory or remote
+hub reference *before* expensive model or worker initialisation. It checks
+local directory readability, ``config.json`` parseability, tokenizer file
+presence, and safetensors shard integrity — all without loading weights or
+tokenizers.
+
+.. code-block:: bash
+
+   areno check --model-ref /path/to/model --model-hub modelscope
+
+For remote references (repo IDs), it verifies the hub client
+(``modelscope`` or ``huggingface_hub``) is installed and reports local cache
+status without making network requests.
+
+Use ``--json`` for machine-readable output:
+
+.. code-block:: bash
+
+   areno check --model-ref /path/to/model --json
+
+Output fields:
+
+* **status**: ``ok``, ``not_found``, ``permission``, ``network``, or ``format``
+* **stage**: where the check stopped (``local``, ``config``, ``tokenizer``,
+  ``weights``, ``remote``)
+* **missing_artifacts**: exact list of missing files
+* **next_step**: actionable suggestion to resolve the failure
+
+Example failure output:
+
+.. code-block:: text
+
+   AReno check: not ready
+
+   FAIL model preflight (tokenizer)  /path/to/model
+        no valid tokenizer file set found | missing: tokenizer.json, ...
+   Next:
+     Download tokenizer files into /path/to/model
+
+``areno train --preflight`` and ``areno serve --preflight`` run the same
+validation automatically before starting. The flag is disabled by default to
+preserve backward compatibility.

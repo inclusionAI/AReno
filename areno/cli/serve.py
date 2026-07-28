@@ -22,6 +22,7 @@ from areno.api.openai_chat import build_chat_completion_response, messages_to_pr
 from areno.api.tokenizer import configure_chat_template_enable_thinking
 from areno.api.tool_call_parser import ToolCallParser, get_tool_call_parser, infer_tool_call_parser_name
 from areno.cli.model_refs import resolve_model_ref
+from areno.cli.preflight import format_preflight_text, preflight_model_ref
 from areno.engine import ArenoEngine
 from areno.engine.config import (
     RuntimeConfig,
@@ -563,6 +564,11 @@ def _normalize_stop(stop: str | list[str] | None) -> list[str]:
     is_flag=True,
     help="Pass enable_thinking=False to tokenizer chat templates when supported.",
 )
+@click.option(
+    "--preflight",
+    is_flag=True,
+    help="Validate model reference before starting serve (no weights loaded).",
+)
 def serve_command(
     model_path: str,
     model_hub: Literal["hf", "modelscope"],
@@ -576,9 +582,17 @@ def serve_command(
     eager_decode: bool,
     attn_backend: Literal["flash", "native"],
     disable_thinking: bool,
+    preflight: bool,
 ) -> None:
     """Click entry point: build the app and hand it to uvicorn."""
     import uvicorn
+
+    if preflight:
+        pf = preflight_model_ref(model_path, model_hub=model_hub)
+        if pf.status != "ok":
+            click.echo(format_preflight_text(pf), err=True)
+            raise click.ClickException("model preflight failed; fix the above issues and retry.")
+        click.echo(f"OK   model preflight ({pf.stage})  {pf.model_ref}")
 
     model_path = resolve_model_ref(model_path, model_hub=model_hub)
     from areno.cli.dashboard_registry import register_dashboard_job

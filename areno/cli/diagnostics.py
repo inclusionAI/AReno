@@ -13,13 +13,15 @@ import platform
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from importlib import import_module
 from importlib import metadata as importlib_metadata
 from pathlib import Path
 from typing import Any
 
 import click
+
+from areno.cli.preflight import PreflightResult, preflight_model_ref
 
 _ENV_VARS = (
     "CUDA_HOME",
@@ -46,11 +48,39 @@ def env_command(as_json: bool) -> None:
 
 
 @click.command(name="check", context_settings={"help_option_names": ["-h", "--help"]})
-def check_command() -> None:
+@click.option("--model-ref", default=None, help="Preflight a model checkpoint path or remote repo ID.")
+@click.option(
+    "--model-hub",
+    type=click.Choice(["hf", "modelscope"], case_sensitive=False),
+    default="modelscope",
+    show_default=True,
+    help="Hub for remote model refs when using --model-ref.",
+)
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON instead of human-readable text.")
+def check_command(model_ref: str | None, model_hub: str, as_json: bool) -> None:
     """Check whether this machine is ready to run AReno."""
 
     report = collect_env()
     results = run_checks(report)
+
+    preflight_results: list[PreflightResult] = []
+    if model_ref is not None:
+        pf = preflight_model_ref(model_ref, model_hub=model_hub)
+        preflight_results.append(pf)
+        results.append(_preflight_to_check_result(pf))
+
+    if as_json:
+        payload: dict[str, Any] = {
+            "checks": [
+                {"status": r.status, "name": r.name, "detail": r.detail, "next_step": r.next_step}
+                for r in results
+            ],
+        }
+        if preflight_results:
+            payload["preflight"] = [asdict(pr) for pr in preflight_results]
+        click.echo(json.dumps(payload, indent=2, sort_keys=True))
+        return
+
     failed = any(result.status == "FAIL" for result in results)
     click.echo(f"AReno check: {'not ready' if failed else 'ready'}")
     click.echo()
@@ -482,3 +512,15 @@ def _print_env_report(report: dict[str, Any]) -> None:
     click.echo("  Environment variables:")
     for name, value in report["env"].items():
         click.echo(f"    {name}={value if value is not None else '<unset>'}")
+
+
+def _preflight_to_check_result(pf: PreflightResult) -> CheckResult:
+    """Convert a :class:`PreflightResult` into a :class:`CheckResult` for display."""
+
+    name = f"model preflight ({pf.stage})"
+    detail = pf.detail
+    if pf.missing_artifacts:
+        detail += f" | missing: {', '.join(pf.missing_artifacts)}"
+    if pf.status == "ok":
+        return CheckResult("OK", name, detail)
+    return CheckResult("FAIL", name, detail, pf.next_step)

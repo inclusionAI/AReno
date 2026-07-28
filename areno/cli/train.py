@@ -33,6 +33,7 @@ from areno.api.trainer_config import (
     TrainerConfig,
 )
 from areno.cli.model_refs import resolve_model_refs_for_config
+from areno.cli.preflight import format_preflight_text, preflight_model_refs_for_config
 from areno.engine.config import (
     ModelConfig,
     flash_attention_unsupported_gpu_reason,
@@ -1301,6 +1302,11 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
 )
 @click.option("--train-tool-results", is_flag=True, help="Include tool-result spans in agentic policy loss.")
 @click.option(
+    "--preflight",
+    is_flag=True,
+    help="Validate model references before starting training (no weights loaded).",
+)
+@click.option(
     "--gspo-clip-eps", type=float, default=3.0e-4, show_default=True, help="GSPO sequence-ratio clipping epsilon."
 )
 @click.option("--grpo-clip-eps", type=float, default=0.2, show_default=True, help="GRPO token-ratio clipping epsilon.")
@@ -1329,6 +1335,17 @@ def train_command(**options) -> None:
 
     trainer_config = _trainer_config_from_options(**options)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+
+    if options.get("preflight"):
+        preflight_results = preflight_model_refs_for_config(trainer_config)
+        failed = [r for r in preflight_results if r.status != "ok"]
+        if failed:
+            for r in failed:
+                click.echo(format_preflight_text(r), err=True)
+            raise click.ClickException("model preflight failed; fix the above issues and retry.")
+        for r in preflight_results:
+            if r.status == "ok":
+                click.echo(f"OK   model preflight ({r.stage})  {r.model_ref}")
     if options.get("smoke_infer") or options.get("smoke_train"):
         from areno.cli.auto_tune import smoke_infer_config, smoke_train_config
 
