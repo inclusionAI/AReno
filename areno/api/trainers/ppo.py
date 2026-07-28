@@ -28,6 +28,7 @@ import numpy as np
 import areno.api
 from areno.api.advantages import compute_gae
 from areno.api.dashboard import record_dashboard_state
+from areno.api.health_check import configure_health_check_if_supported
 from areno.api.rewards import make_reward_record
 from areno.api.roles import MissingRoleCapability, ModelRole
 from areno.api.trainers.policy_only import PolicyOnlyTrainer
@@ -433,7 +434,7 @@ class PPOTrainer(PolicyOnlyTrainer):
         # backend is up but before the first rollout/train cycle.
         self.areno.init()
         self._ensure_roles()
-        self.areno.configure_health_check(getattr(self.config, "health_check", None))
+        configure_health_check_if_supported(self.areno, getattr(self.config, "health_check", None))
         try:
             self._fit_initialized()
         finally:

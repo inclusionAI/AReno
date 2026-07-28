@@ -676,3 +676,17 @@ def _new_run_id() -> str:
     """
 
     return uuid.uuid4().hex[:12]
+
+
+def configure_health_check_if_supported(instance: Any, config: HealthCheckConfig | None) -> None:
+    """Attach the health checker to a trainer instance if it supports it.
+
+    Trainer implementations call this from ``fit()``. The SDK ``Trainer`` exposes
+    ``configure_health_check``; stubs/backends used in tests that do not carry
+    this method are silently skipped so the health check is opt-in and never
+    breaks a trainer that runs without it.
+    """
+
+    configure = getattr(instance, "configure_health_check", None)
+    if callable(configure):
+        configure(config)

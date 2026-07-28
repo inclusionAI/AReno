@@ -287,7 +287,9 @@ class TrainerHookTest(unittest.TestCase):
 
             class BackendStub:
                 def train(self, ctx, batch, loss_fn, mini_bs, grad_accum):
-                    return {"loss": 2.0, "metrics": {"grad_zero_ratio": 0.0}}
+                    # Mirror ArenoBackend.train's flat result shape: loss and
+                    # each metric are top-level scalars (no nested "metrics" key).
+                    return {"loss": 2.0, "grad_zero_ratio": 0.0}
 
             trainer._backend = BackendStub()
             batch = [_seq(prompt_len=2, resp_len=4, reward=0.3)]
@@ -309,7 +311,7 @@ class TrainerHookTest(unittest.TestCase):
 
             class BackendStub:
                 def train(self, ctx, batch, loss_fn, mini_bs, grad_accum):
-                    return {"loss": 2.0, "metrics": {}}
+                    return {"loss": 2.0}
 
             trainer._backend = BackendStub()
             batch = [_seq(prompt_len=2, resp_len=4)]

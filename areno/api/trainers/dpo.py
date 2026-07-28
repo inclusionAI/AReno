@@ -21,6 +21,7 @@ from typing import Any
 import areno.api
 from areno.api.dashboard import record_dashboard_state
 from areno.api.data_utils import apply_chat_template, encode_prompt_value, response_to_tokens_and_mask
+from areno.api.health_check import configure_health_check_if_supported
 from areno.api.roles import ModelRole
 from areno.api.tokenizer import configure_chat_template_enable_thinking
 
@@ -50,7 +51,7 @@ class DPOTrainer:
     def fit(self) -> None:
         self.areno.init()
         self._ensure_roles()
-        self.areno.configure_health_check(getattr(self.config, "health_check", None))
+        configure_health_check_if_supported(self.areno, getattr(self.config, "health_check", None))
         try:
             self._fit_initialized()
         finally:

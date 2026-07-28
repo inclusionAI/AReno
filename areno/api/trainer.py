@@ -511,6 +511,24 @@ def _normalize_prompt_token_batch(prompt_tokens: list[list[int]]) -> list[list[i
     return [normalize_token_ids(row) for row in prompt_tokens]
 
 
+def _extract_grad_zero_ratio(train_result: Any) -> float | None:
+    """Read the gradient-zero ratio from a backend train result.
+
+    `ArenoBackend.train` flattens per-step metrics to top-level scalars
+    (`{"loss": ..., "grad_zero_ratio": ...}`). Some callers/tests group them
+    under a nested ``"metrics"`` dict; support both shapes.
+    """
+
+    if not isinstance(train_result, dict):
+        return None
+    value = train_result.get("grad_zero_ratio")
+    if value is None:
+        nested = train_result.get("metrics")
+        if isinstance(nested, dict):
+            value = nested.get("grad_zero_ratio")
+    return value
+
+
 class TrainingHealthChecker:
     """Coordinator-side startup-window health checker (Issue #249).
 
@@ -563,12 +581,14 @@ class TrainingHealthChecker:
         self._signals.total_batches += len(train_batch)
         self._signals.skipped_long += self._pending_skipped
         self._pending_skipped = 0
-        # Backend-reported signals.
+        # Backend-reported signals. `ArenoBackend.train` returns a flat dict
+# (`{"loss": ..., "grad_zero_ratio": ...}`); fall back to a nested
+# `train_result["metrics"]["grad_zero_ratio"]` for callers that group
+# diagnostics under a "metrics" key.
         loss = train_result.get("loss") if isinstance(train_result, dict) else None
         if loss is not None:
             self._signals.losses.append(float(loss))
-        metrics = train_result.get("metrics", {}) if isinstance(train_result, dict) else {}
-        gz = metrics.get("grad_zero_ratio")
+        gz = _extract_grad_zero_ratio(train_result)
         if gz is not None:
             self._signals.grad_zero_ratios.append(float(gz))
         self._steps_seen += 1
