@@ -27,7 +27,6 @@ from contextlib import redirect_stderr
 from areno.engine.oom_diagnostics import (
     OOMStage,
     build_oom_guidance,
-    detect_stage,
     diagnose_oom_from_exception,
     format_oom_guidance,
     is_oom_error,
@@ -101,25 +100,23 @@ def _build_snapshot_from_fake(config: FakeTrainerConfig) -> dict:
 
 OOM_MODEL_LOADING = (
     "RuntimeError: CUDA out of memory. Tried to allocate 2.00 GiB.\n"
-    "  File \"areno/engine/modeling.py\", line 30, in build_model_on_device\n"
+    '  File "areno/engine/modeling.py", line 30, in build_model_on_device\n'
     "    model = build_model(config.model)"
 )
 
 OOM_ROLLOUT = (
     "RuntimeError: CUDA out of memory. Tried to allocate 512.00 MiB.\n"
-    "  File \"areno/engine/inference.py\", line 500, in infer_rollout\n"
+    '  File "areno/engine/inference.py", line 500, in infer_rollout\n'
     "    self._init_infer_cache(spec)"
 )
 
 OOM_TRAINING = (
     "RuntimeError: CUDA out of memory. Tried to allocate 1.00 GiB.\n"
-    "  File \"areno/engine/training.py\", line 94, in _train_step\n"
+    '  File "areno/engine/training.py", line 94, in _train_step\n'
     "    (loss / max(grad_scale, 1)).backward()"
 )
 
-NON_OOM_ERROR = (
-    "ValueError: invalid argument: tp_size must divide num_attention_heads"
-)
+NON_OOM_ERROR = "ValueError: invalid argument: tp_size must divide num_attention_heads"
 
 
 # ---------------------------------------------------------------------------

@@ -18,16 +18,13 @@ from __future__ import annotations
 import unittest
 
 from areno.engine.oom_diagnostics import (
-    OOMGuidance,
     OOMStage,
-    OOMSuggestion,
     build_oom_guidance,
     detect_stage,
     diagnose_oom_from_exception,
     format_oom_guidance,
     is_oom_error,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures

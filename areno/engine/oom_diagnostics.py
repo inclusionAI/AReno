@@ -26,7 +26,7 @@ Design principles (from issue #244):
 from __future__ import annotations
 
 import logging
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
@@ -282,8 +282,7 @@ def _build_model_loading_suggestions(cfg: dict[str, Any]) -> list[OOMSuggestion]
                 option="--adam-8bit",
                 current_value=adam_8bit,
                 recommended_action=(
-                    "Enable --adam-8bit to use 8-bit Adam moment states, which "
-                    "roughly halves optimizer memory."
+                    "Enable --adam-8bit to use 8-bit Adam moment states, which roughly halves optimizer memory."
                 ),
                 priority=4,
             )
@@ -320,8 +319,7 @@ def _build_rollout_suggestions(cfg: dict[str, Any]) -> list[OOMSuggestion]:
                     option="--batch-size / --n-samples",
                     current_value=f"batch_size={batch_size}, n_samples={n_samples} (total={total})",
                     recommended_action=(
-                        "Reduce --batch-size or --n-samples to lower the total number "
-                        "of concurrent rollout sequences."
+                        "Reduce --batch-size or --n-samples to lower the total number of concurrent rollout sequences."
                     ),
                     priority=1,
                 )
@@ -376,10 +374,7 @@ def _build_rollout_suggestions(cfg: dict[str, Any]) -> list[OOMSuggestion]:
             OOMSuggestion(
                 option="--tp-size",
                 current_value=tp_size,
-                recommended_action=(
-                    f"Increase --tp-size (currently {tp_size}) to shard KV-cache "
-                    "across more GPUs."
-                ),
+                recommended_action=(f"Increase --tp-size (currently {tp_size}) to shard KV-cache across more GPUs."),
                 priority=5,
             )
         )
@@ -440,15 +435,13 @@ def _build_training_suggestions(cfg: dict[str, Any]) -> list[OOMSuggestion]:
                 option="--adam-8bit",
                 current_value=adam_8bit,
                 recommended_action=(
-                    "Enable --adam-8bit to use 8-bit Adam moment states, which "
-                    "roughly halves optimizer memory."
+                    "Enable --adam-8bit to use 8-bit Adam moment states, which roughly halves optimizer memory."
                 ),
                 priority=3,
             )
         )
 
     max_new_tokens = cfg.get("max_new_tokens")
-    max_prompt_tokens = cfg.get("max_prompt_tokens")
     if max_new_tokens is not None and isinstance(max_new_tokens, int) and max_new_tokens > 0:
         suggestions.append(
             OOMSuggestion(
