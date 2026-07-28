@@ -218,6 +218,7 @@ class ArenoBackend(Backend):
                         RolloutSequence(
                             resp_tokens=tokens,
                             resp_logprobs=rollout.logprobs[i, : len(tokens)].tolist(),
+                            finish_reason=rollout.finish_reason[i] if i < len(rollout.finish_reason) else "",
                         )
                         for i, tokens in enumerate(rollout.response_ids[start:end], start=start)
                     ]
@@ -320,6 +321,7 @@ class ArenoBackend(Backend):
                         RolloutSequence(
                             resp_tokens=tokens,
                             resp_logprobs=rollout.logprobs[i, : len(tokens)].tolist(),
+                            finish_reason=rollout.finish_reason[i] if i < len(rollout.finish_reason) else "",
                         )
                         for i, tokens in enumerate(rollout.response_ids[start:end], start=start)
                     ]

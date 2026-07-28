@@ -362,6 +362,12 @@ class Trainer:
         if self._metrics is not None:
             self._metrics.record_rollout_sample(sample)
 
+    def record_completion_summary(self, summary: dict[str, Any]) -> None:
+        """Persist a per-step completion quality summary when metrics recording is enabled."""
+
+        if self._metrics is not None:
+            self._metrics.record_completion_summary(summary)
+
     def record_dashboard_state(
         self,
         *,

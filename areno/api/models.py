@@ -55,6 +55,7 @@ class RolloutSequence(BaseModel):
 
     resp_tokens: list[int] = Field(default_factory=list)
     resp_logprobs: list[float] = Field(default_factory=list)
+    finish_reason: str = Field(default="")
 
 
 class RolloutResult(BaseModel):

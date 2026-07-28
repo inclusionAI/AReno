@@ -29,6 +29,7 @@ class MetricsRecorder:
         self._writer = create_tensorboard_writer(log_dir)
         self._state_file = self._log_dir / f"dashboard_state.{os.getpid()}.json"
         self._sample_file = self._log_dir / f"rollout_samples.{os.getpid()}.jsonl"
+        self._completion_summary_file = self._log_dir / f"completion_summary.{os.getpid()}.jsonl"
         self._closed = False
 
     def record_train_step(self, *, step: int, train_result, train_batch, timings: dict[str, float] | None = None):
@@ -47,6 +48,14 @@ class MetricsRecorder:
         sample.setdefault("pid", os.getpid())
         with self._sample_file.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(sample, ensure_ascii=False) + "\n")
+
+    def record_completion_summary(self, summary: dict) -> None:
+        """Record a per-step completion quality summary as JSONL."""
+
+        summary = dict(summary)
+        summary.setdefault("pid", os.getpid())
+        with self._completion_summary_file.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(summary, ensure_ascii=False) + "\n")
 
     def record_dashboard_state(
         self,
@@ -219,3 +228,24 @@ def record_training_stats(writer, stats, step, train_res, train_batch, timings: 
         if key in metric_timings:
             writer.add_scalar(f"time/{key}", metric_timings[key], step)
     writer.flush()
+
+
+def compute_percentile(sorted_values: list[float] | list[int], fraction: float) -> float:
+    """Compute the *fraction*-th percentile from a pre-sorted list.
+
+    ``fraction`` uses the [0, 1] convention (0.50 = median).  Returns 0.0
+    for an empty list so callers don't have to guard against empty inputs
+    separately.
+    """
+
+    if not sorted_values:
+        return 0.0
+    n = len(sorted_values)
+    if n == 1:
+        return float(sorted_values[0])
+    # Linear-interpolation rank (same convention as numpy's default).
+    rank = fraction * (n - 1)
+    lo = int(rank)
+    hi = min(lo + 1, n - 1)
+    frac = rank - lo
+    return float(sorted_values[lo] * (1 - frac) + sorted_values[hi] * frac)
