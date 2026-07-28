@@ -151,6 +151,23 @@ class SampleFilterTest(unittest.TestCase):
         keep, reason = check_sample_filter(record, {"max_prompt_chars": 50})
         self.assertTrue(keep)
 
+    def test_length_check_skipped_when_field_missing(self):
+        """When prompt field is absent, min/max length checks should not fire."""
+        record = {"other": "data"}
+        keep1, _ = check_sample_filter(record, {"min_prompt_chars": 5})
+        keep2, _ = check_sample_filter(record, {"max_prompt_chars": 5})
+        keep3, _ = check_sample_filter(record, {"min_response_chars": 5})
+        self.assertTrue(keep1)
+        self.assertTrue(keep2)
+        self.assertTrue(keep3)
+
+    def test_non_string_prompt_skips_length_check(self):
+        """A list-type prompt (chat messages) should skip text-length checks."""
+        record = {"prompt": [{"role": "user", "content": "hi"}]}
+        keep, reason = check_sample_filter(record, {"min_prompt_chars": 100})
+        self.assertTrue(keep)
+        self.assertIsNone(reason)
+
 
 class TransformDatasetTest(unittest.TestCase):
     """Integration tests for the full ``transform_dataset`` pipeline."""

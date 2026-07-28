@@ -168,20 +168,20 @@ def check_sample_filter(
             return False, f"empty field: {fname}"
 
     min_prompt = filter_config.get("min_prompt_chars")
-    if min_prompt is not None:
-        prompt_val = record.get("prompt", "")
+    if min_prompt is not None and "prompt" in record:
+        prompt_val = record["prompt"]
         if isinstance(prompt_val, str) and len(prompt_val) < min_prompt:
             return False, f"prompt too short ({len(prompt_val)} < {min_prompt})"
 
     max_prompt = filter_config.get("max_prompt_chars")
-    if max_prompt is not None:
-        prompt_val = record.get("prompt", "")
+    if max_prompt is not None and "prompt" in record:
+        prompt_val = record["prompt"]
         if isinstance(prompt_val, str) and len(prompt_val) > max_prompt:
             return False, f"prompt too long ({len(prompt_val)} > {max_prompt})"
 
     min_response = filter_config.get("min_response_chars")
-    if min_response is not None:
-        resp_val = record.get("response", "")
+    if min_response is not None and "response" in record:
+        resp_val = record["response"]
         if isinstance(resp_val, str) and len(resp_val) < min_response:
             return False, f"response too short ({len(resp_val)} < {min_response})"
 
