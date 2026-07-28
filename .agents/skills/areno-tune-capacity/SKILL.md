@@ -23,3 +23,26 @@ python .agents/skills/areno-tune-capacity/scripts/check_capacity.py \
 6. Run a bounded real workload if the overall user goal is a working task.
 
 Preserve `max_new_tokens` and `max_context_len`. Read [references/parameter-relations.md](references/parameter-relations.md) before adjusting multiple dimensions.
+
+## Capacity Recommendations
+
+Generate conservative, balanced, and throughput-oriented override sets from
+measured or estimated memory data **without starting a training run**:
+
+```bash
+# With measured profile data (from --smoke-infer or --tune-params)
+python .agents/skills/areno-tune-capacity/scripts/recommend_capacity.py \
+  --tp-size 4 --world-size 8 --batch-size 32 --n-samples 8 --mini-bs 16 \
+  --peak-mem-frac 0.82 --json
+
+# Without profile data (fallback estimation from GPU memory and model size)
+python .agents/skills/areno-tune-capacity/scripts/recommend_capacity.py \
+  --tp-size 4 --world-size 8 --batch-size 32 --n-samples 8 --mini-bs 16 \
+  --gpu-memory-gb 80 --model-params-billions 7.0 \
+  --output-dir /tmp/areno-overrides
+```
+
+Each recommendation is validated against AReno config constraints and exported
+as an override file. The recommender never submits a training run. Read
+[references/recommendation-strategy.md](references/recommendation-strategy.md)
+for the full adjustment rules table and memory estimation formulas.

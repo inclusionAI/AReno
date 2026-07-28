@@ -255,6 +255,36 @@ Example:
      --mem-frac 0.9 \
      --tune-max-samples 256
 
+Capacity recommendations
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+The ``areno-tune-capacity`` skill includes a recommendation script that
+generates conservative, balanced, and throughput-oriented override sets from
+measured or estimated memory data **without starting a training run**. Each
+override set is validated against AReno's ``RolloutTrainerConfig`` constraints.
+
+Unlike ``--tune-params``, the recommender does not probe the GPU. It takes
+existing profile data (from ``--smoke-infer``, ``--tune-params``, or manual
+monitoring) or falls back to GPU memory and model size estimation to produce
+three candidate configurations for comparison.
+
+.. code-block:: bash
+
+   # With measured profile data
+   python .agents/skills/areno-tune-capacity/scripts/recommend_capacity.py \
+     --tp-size 4 --world-size 8 --batch-size 32 --n-samples 8 --mini-bs 16 \
+     --peak-mem-frac 0.82 --json
+
+   # Without profile data (fallback estimation)
+   python .agents/skills/areno-tune-capacity/scripts/recommend_capacity.py \
+     --tp-size 4 --world-size 8 --batch-size 32 --n-samples 8 --mini-bs 16 \
+     --gpu-memory-gb 80 --model-params-billions 7.0 \
+     --output-dir /tmp/areno-overrides
+
+Use ``--output-dir`` to export override JSON files that can be mapped to
+``areno train`` command-line arguments. The recommender never submits a
+training run.
+
 Train
 ~~~~~
 
