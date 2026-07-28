@@ -116,6 +116,7 @@ class AgentTrainBatch:
     rewards: list[float] | None
     records: list[dict[str, Any]]
     reward_records: list[RewardRecord]
+    filtered_count: int = 0
 
 
 @dataclass(slots=True)

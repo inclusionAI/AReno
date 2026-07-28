@@ -175,3 +175,86 @@ When a trajectory is dropped for exceeding the model context window,
 counts, message counts, assistant turn counts, tool-result counts, and a short
 prompt preview. This is the fastest way to debug overlong agentic examples
 without dumping every token in every trajectory.
+
+Completion quality summary
+--------------------------
+
+After a training run, use ``areno completion-summary`` to report
+completion-length distribution, empty count, length-limit count, filtered
+count, and generated tokens per second per update, distinguishing single-turn
+(``rollout``) and agentic generation.
+
+.. code-block:: bash
+
+   areno completion-summary --metrics-log-dir /tmp/areno/tfevent
+
+Add ``--json`` for machine-readable output:
+
+.. code-block:: bash
+
+   areno completion-summary --metrics-log-dir /tmp/areno/tfevent --json
+
+Use ``--pid`` to filter by process ID when multiple runs share the same
+metrics directory:
+
+.. code-block:: bash
+
+   areno completion-summary --metrics-log-dir /tmp/areno/tfevent --pid 12345
+
+The primary data source is ``completion_summary.{pid}.jsonl``, written by
+``MetricsRecorder.record_completion_summary()`` after each rollout step.
+Each line is a JSON object with the following fields:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 70
+
+   * - Field
+     - Description
+   * - ``epoch`` / ``step``
+     - Epoch and global step index.
+   * - ``kind``
+     - ``"rollout"`` (single-turn) or ``"agentic"``.
+   * - ``total_completions``
+     - Number of completions generated in this step.
+   * - ``total_generated_tokens``
+     - Sum of all completion token lengths.
+   * - ``empty_count``
+     - Completions with zero response tokens.
+   * - ``length_limit_count``
+     - Completions whose ``finish_reason`` is ``"length"`` (hit
+       ``max_new_tokens`` without a stop token). For agentic, this is an
+       approximate count based on trajectory context length.
+   * - ``stop_count``
+     - Completions with ``finish_reason == "stop"``. Set to ``-1`` for
+       agentic (per-turn finish reasons are not tracked in v1).
+   * - ``tool_calls_count``
+     - Completions with ``finish_reason == "tool_calls"``. Set to ``-1``
+       for agentic.
+   * - ``filtered_count``
+     - Agentic samples dropped for exceeding ``max_context_len``. Always
+       ``0`` for single-turn.
+   * - ``completion_length_min`` / ``_max`` / ``_mean`` / ``_p50`` / ``_p90``
+     - Distribution of completion lengths.
+   * - ``completion_lengths``
+     - Full per-completion length list (for cross-step aggregation).
+   * - ``rollout_time_s``
+     - Wall-clock time for the rollout phase of this step.
+   * - ``tokens_per_second``
+     - ``total_generated_tokens / rollout_time_s``.
+
+**Fallback mode.** If ``completion_summary.*.jsonl`` is absent (e.g. from
+runs before this feature was added), the command falls back to
+``rollout_samples.{pid}.jsonl`` and computes partial statistics. Because
+``response_tokens`` is truncated to 64 in the sample log and only a limited
+number of completions are recorded per step, length numbers are approximate
+and unavailable fields are reported as ``N/A``.
+
+**Limitations.**
+
+- Agentic ``stop_count`` and ``tool_calls_count`` are not tracked in v1
+  because per-turn ``finish_reason`` is not propagated through the agentic
+  rollout path.
+- The command reads from local JSONL files only; no external database or
+  sandbox is required.
+- Completion text is never printed — only counts and length distributions.

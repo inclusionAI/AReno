@@ -82,20 +82,28 @@ class PolicyOnlyTrainer:
                 self._dashboard_epoch = epoch
                 self._dashboard_step = step
                 if self._agentic_enabled():
+                    rollout_start = time.perf_counter()
                     agent_batch = asyncio.run(self._run_agentic_rollout(sampling_params, prompt_batch))
+                    rollout_time_s = time.perf_counter() - rollout_start
                     self.logger.info("epoch=%d step=%d role=%s stage=rollout_end", epoch, step, role)
                     record_dashboard_state(self.areno, stage="rollout_end", epoch=epoch, step=step, role=role)
                     self._log_agentic_sample_completions(epoch, step, agent_batch)
+                    summary = self._compute_agentic_completion_summary(epoch, step, agent_batch, rollout_time_s)
+                    self.areno.record_completion_summary(summary)
                     train_batch, rewards_all, rollout_logprobs = self._materialize_agentic_train_batch(
                         tokenizer, prompt_batch, agent_batch
                     )
                 else:
                     # 1) Sample n_samples completions per prompt; ordering
                     #    matches `prompt_batch.items` so we can zip downstream.
+                    rollout_start = time.perf_counter()
                     rollout_results = asyncio.run(self._run_prompt_rollout(sampling_params, prompt_batch))
+                    rollout_time_s = time.perf_counter() - rollout_start
                     self.logger.info("epoch=%d step=%d role=%s stage=rollout_end", epoch, step, role)
                     record_dashboard_state(self.areno, stage="rollout_end", epoch=epoch, step=step, role=role)
                     self._record_sample_completions(tokenizer, epoch, step, prompt_batch, rollout_results)
+                    summary = self._compute_single_turn_completion_summary(epoch, step, rollout_results, rollout_time_s)
+                    self.areno.record_completion_summary(summary)
 
                     # 2+3) Score rewards and broadcast group-normalised
                     #      advantages down to per-token tensors.
@@ -263,6 +271,7 @@ class PolicyOnlyTrainer:
                 rewards=rewards,
                 records=[sample.item.record for sample in samples],
                 reward_records=reward_records,
+                filtered_count=filtered_count,
             )
 
     def _filter_overlong_agent_samples(self, ctx, samples, sampling_params):
@@ -444,6 +453,89 @@ class PolicyOnlyTrainer:
                 )
             )
         return train_batch, rewards_all, rollout_logprobs
+
+    def _compute_single_turn_completion_summary(
+        self, epoch: int, step: int, rollout_results, rollout_time_s: float
+    ) -> dict:
+        """Compute per-step completion quality stats for single-turn rollouts."""
+
+        completion_lengths: list[int] = []
+        finish_reasons: list[str] = []
+        for result in rollout_results:
+            for seq in result.sequences:
+                completion_lengths.append(len(seq.resp_tokens))
+                finish_reasons.append(seq.finish_reason or "unknown")
+        total_completions = len(completion_lengths)
+        total_generated_tokens = sum(completion_lengths)
+        empty_count = sum(1 for length in completion_lengths if length == 0)
+        length_limit_count = sum(1 for fr in finish_reasons if fr == "length")
+        stop_count = sum(1 for fr in finish_reasons if fr == "stop")
+        tool_calls_count = sum(1 for fr in finish_reasons if fr == "tool_calls")
+        sorted_lengths = sorted(completion_lengths)
+        tokens_per_second = total_generated_tokens / rollout_time_s if rollout_time_s > 0 else 0.0
+        return {
+            "epoch": epoch,
+            "step": step,
+            "kind": "rollout",
+            "total_completions": total_completions,
+            "total_generated_tokens": total_generated_tokens,
+            "empty_count": empty_count,
+            "length_limit_count": length_limit_count,
+            "stop_count": stop_count,
+            "tool_calls_count": tool_calls_count,
+            "filtered_count": 0,
+            "completion_length_min": min(completion_lengths) if completion_lengths else 0,
+            "completion_length_max": max(completion_lengths) if completion_lengths else 0,
+            "completion_length_mean": float(np.mean(completion_lengths)) if completion_lengths else 0.0,
+            "completion_length_p50": self._percentile_value(sorted_lengths, 0.50),
+            "completion_length_p90": self._percentile_value(sorted_lengths, 0.90),
+            "completion_lengths": completion_lengths,
+            "rollout_time_s": rollout_time_s,
+            "tokens_per_second": tokens_per_second,
+        }
+
+    def _compute_agentic_completion_summary(
+        self, epoch: int, step: int, agent_batch, rollout_time_s: float
+    ) -> dict:
+        """Compute per-step completion quality stats for agentic rollouts."""
+
+        completion_lengths: list[int] = []
+        for loss_mask in agent_batch.loss_masks:
+            completion_lengths.append(sum(1 for enabled in loss_mask if enabled))
+        total_completions = len(completion_lengths)
+        total_generated_tokens = sum(completion_lengths)
+        empty_count = sum(1 for length in completion_lengths if length == 0)
+        filtered_count = getattr(agent_batch, "filtered_count", 0)
+        # Approximate length-limit detection: compare trajectory token length
+        # to the configured max context length.
+        max_ctx = self._agent_model_context_len()
+        length_limit_count = 0
+        if max_ctx is not None:
+            for token_row in agent_batch.token_rows:
+                if len(token_row) >= max_ctx:
+                    length_limit_count += 1
+        sorted_lengths = sorted(completion_lengths)
+        tokens_per_second = total_generated_tokens / rollout_time_s if rollout_time_s > 0 else 0.0
+        return {
+            "epoch": epoch,
+            "step": step,
+            "kind": "agentic",
+            "total_completions": total_completions,
+            "total_generated_tokens": total_generated_tokens,
+            "empty_count": empty_count,
+            "length_limit_count": length_limit_count,
+            "stop_count": -1,
+            "tool_calls_count": -1,
+            "filtered_count": filtered_count,
+            "completion_length_min": min(completion_lengths) if completion_lengths else 0,
+            "completion_length_max": max(completion_lengths) if completion_lengths else 0,
+            "completion_length_mean": float(np.mean(completion_lengths)) if completion_lengths else 0.0,
+            "completion_length_p50": self._percentile_value(sorted_lengths, 0.50),
+            "completion_length_p90": self._percentile_value(sorted_lengths, 0.90),
+            "completion_lengths": completion_lengths,
+            "rollout_time_s": rollout_time_s,
+            "tokens_per_second": tokens_per_second,
+        }
 
     def _record_sample_completions(self, tokenizer, epoch: int, step: int, prompt_batch, rollout_results) -> None:
         # Diagnostics knob: setting ARENO_LOG_COMPLETIONS=N records up to N
