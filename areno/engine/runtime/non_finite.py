@@ -53,26 +53,20 @@ class NonFiniteReport:
         self.suggestions = _infer_suggestions(self)
 
     def to_dict(self) -> dict[str, Any]:
+        # Only numeric values safe for _merge_metrics (no strings/lists)
+        import math
+        total_nan = sum(e.nan_count for e in self.events)
+        total_inf = sum(e.inf_count for e in self.events)
+        affected_layers = len(set(e.layer for e in self.events if e.layer not in ("loss", "optimizer")))
         return {
-            "non_finite_step": self.step,
-            "non_finite_loss": self.loss_value,
-            "non_finite_phase": self.phase,
-            "non_finite_events": [
-                {
-                    "name": e.name,
-                    "layer": e.layer,
-                    "is_gradient": e.is_gradient,
-                    "nan_count": e.nan_count,
-                    "inf_count": e.inf_count,
-                    "total_elements": e.total_elements,
-                    "grad_norm": e.grad_norm,
-                }
-                for e in self.events
-            ],
+            "non_finite_step": float(self.step),
+            "non_finite_loss": self.loss_value if not math.isnan(self.loss_value) else -1.0,
+            "non_finite_total_nan": float(total_nan),
+            "non_finite_total_inf": float(total_inf),
+            "non_finite_affected_layers": float(affected_layers),
+            "non_finite_event_count": float(len(self.events)),
             "non_finite_lr": self.learning_rate,
-            "non_finite_grad_norm": self.global_grad_norm,
-            "non_finite_causes": self.causes,
-            "non_finite_suggestions": self.suggestions,
+            "non_finite_grad_norm": self.global_grad_norm if not math.isnan(self.global_grad_norm) else -1.0,
         }
 
     def format_terminal(self) -> str:
@@ -87,7 +81,11 @@ class NonFiniteReport:
             "",
             "ANOMALIES DETECTED",
         ]
-        for evt in self.events:
+        max_show = 5
+        for i, evt in enumerate(self.events):
+            if i >= max_show:
+                break
+
             pct = (evt.nan_count + evt.inf_count) / max(evt.total_elements, 1) * 100
             tag = "GRAD" if evt.is_gradient else "PARAM"
             lines.append(f"  [{tag}] {evt.name}")
@@ -110,6 +108,17 @@ class NonFiniteReport:
             shown = [f"{v:.4f}" if not math.isnan(v) else "NaN"
                      for v in self.recent_losses[-5:]]
             lines.append(f"  Recent losses: [{', '.join(shown)}]")
+        if len(self.events) > max_show:
+            lines.append(f"  ... and {len(self.events) - max_show} more events (showing first {max_show})")
+            # 汇总统计
+            grad_events = sum(1 for e in self.events if e.is_gradient)
+            param_events = sum(1 for e in self.events if not e.is_gradient)
+            total_nan = sum(e.nan_count for e in self.events)
+            total_inf = sum(e.inf_count for e in self.events)
+            affected_layers = set(e.layer for e in self.events if e.layer not in ("loss", "optimizer"))
+            lines.append(f"  SUMMARY: {grad_events} gradient + {param_events} parameter events")
+            lines.append(f"  Total NaN: {total_nan:,}  Total Inf: {total_inf:,}")
+            lines.append(f"  Affected layers: {len(affected_layers)} ({', '.join(list(affected_layers)[:3])}{'...' if len(affected_layers) > 3 else ''})")
         lines.append("")
         lines.append("LIKELY CAUSES")
         for i, c in enumerate(self.causes, 1):
@@ -185,24 +194,17 @@ def detect_non_finite(
                     grad_norm=g_norm,
                 ))
 
-    for group_idx, group in enumerate(optimizer.param_groups):
-        for p_idx, p in enumerate(group["params"]):
-            if p not in optimizer.state:
-                continue
-            state = optimizer.state[p]
-            for sname, sval in state.items():
-                if not isinstance(sval, torch.Tensor):
-                    continue
-                s_nan = int(torch.isnan(sval).sum().item())
-                s_inf = int(torch.isinf(sval).sum().item())
-                if s_nan > 0 or s_inf > 0:
-                    events.append(NonFiniteEvent(
-                        name=f"opt.state[{group_idx}][{p_idx}].{sname}",
-                        layer="optimizer",
-                        nan_count=s_nan,
-                        inf_count=s_inf,
-                        total_elements=sval.numel(),
-                    ))
+    for group_idx, p_idx, sname, sval in _safe_optimizer_state(optimizer):
+        s_nan = int(torch.isnan(sval).sum().item())
+        s_inf = int(torch.isinf(sval).sum().item())
+        if s_nan > 0 or s_inf > 0:
+            events.append(NonFiniteEvent(
+                name=f"opt.state[{group_idx}][{p_idx}].{sname}",
+                layer="optimizer",
+                nan_count=s_nan,
+                inf_count=s_inf,
+                total_elements=sval.numel(),
+            ))
 
     if not loss_is_bad and not events:
         return None
@@ -306,6 +308,33 @@ def _infer_suggestions(report: NonFiniteReport) -> list[str]:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _safe_optimizer_state(optimizer) -> list[tuple[int, int, str, torch.Tensor]]:
+    """Yield (group_idx, param_idx, state_name, tensor) from any optimizer."""
+    entries = []
+    try:
+        # 标准 PyTorch optimizer
+        for group_idx, group in enumerate(optimizer.param_groups):
+            for p_idx, p in enumerate(group["params"]):
+                if p not in optimizer.state:
+                    continue
+                state = optimizer.state[p]
+                for sname, sval in state.items():
+                    if isinstance(sval, torch.Tensor):
+                        entries.append((group_idx, p_idx, sname, sval))
+    except AttributeError:
+        # 自定义优化器 (如 AdamWFP32Master)
+        try:
+            state = getattr(optimizer, "state", {})
+            for pid, sdict in state.items():
+                if not isinstance(sdict, dict):
+                    continue
+                for sname, sval in sdict.items():
+                    if isinstance(sval, torch.Tensor):
+                        entries.append((0, 0, sname, sval))
+        except Exception:
+            pass
+    return entries
 
 def _extract_layer(name: str) -> str:
     parts = name.split(".")
