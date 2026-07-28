@@ -443,12 +443,16 @@ class ArenoBackend(Backend):
                 microbatch_size=int(mini_bs),
             )
 
-            # Reconstruct a (B, max_len-1) tensor matching next_token_logprobs.
+            # Reconstruct a (B, max_len-1) next-token logprobs tensor.
+            # score_logprobs returns N values (one per input token, including
+            # position 0). Skip position 0 to produce N-1 next-token logprobs
+            # that align with the loss function's prompt_mask[:, 1:] layout.
             B, max_len = tokens.shape
             logprobs = torch.zeros(B, max_len - 1, dtype=torch.float32)
             for b, row in enumerate(logprob_rows):
-                L = len(row)  # == lengths[b] - 1
-                logprobs[b, :L] = torch.tensor(row, dtype=torch.float32)
+                nxt = row[1:]  # drop position-0 dummy logprob
+                L = len(nxt)   # == len(row) - 1
+                logprobs[b, :L] = torch.tensor(nxt, dtype=torch.float32)
 
             loss_out = loss_fn(pack, logprobs)
             if isinstance(loss_out, tuple):

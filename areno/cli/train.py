@@ -374,6 +374,17 @@ def _format_training_config_summary(
             ],
         ),
     ]
+    if getattr(config, "eval_dataset_path", None) is not None:
+        sections.append(
+            (
+                "Evaluation",
+                [
+                    ("eval_dataset_path", str(config.eval_dataset_path)),
+                    ("eval_interval", str(config.eval_interval)),
+                    ("eval_batches", _format_optional(config.eval_batches, default="full dataset")),
+                ],
+            )
+        )
     lines = [_style("AReno training config", fg="bright_white", bold=True, color=color)]
     if attn_warning is not None:
         lines.append(_style("WARNING", fg="yellow", bold=True, color=color) + f": {attn_warning}")
@@ -975,7 +986,7 @@ def _training_config_settings(config: TrainerConfig) -> dict:
             ],
         ),
         section("Checkpoint", ["save_path", "save_interval"]),
-        section("Observability", ["metrics_log_dir"]),
+        section("Observability", ["metrics_log_dir", "eval_dataset_path", "eval_interval", "eval_batches"]),
     ]
     extras = []
     for field in fields(config):
