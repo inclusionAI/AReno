@@ -74,9 +74,12 @@ def test_generator_produces_valid_starting_boards():
     seen = set()
     for record in records:
         board = game.normalize_board(record["board"])
-        key = tuple(cell for row in board for cell in row)
-        assert key not in seen
-        seen.add(key)
+        # Uniqueness is on the replay seed (each seed => its own episode); the
+        # starting board is a deterministic function of the seed, so this also
+        # implies distinct (board, seed) samples. Boards themselves may repeat
+        # across records once the 2-tile board space is sampled out.
+        assert record["seed"] not in seen
+        seen.add(record["seed"])
         assert not game.is_terminal(board)
         assert game.legal_moves(board)
         assert isinstance(record["seed"], int)

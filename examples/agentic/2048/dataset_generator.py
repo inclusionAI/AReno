@@ -31,7 +31,12 @@ def generate_records(
 
     rng = random.Random(seed)
     records: list[dict] = []
-    seen: set[tuple[int, ...]] = set()
+    # Dedup on the replay seed (equivalently (board, seed)): a starting board is
+    # a function of its seed, and the seed also drives episode spawns at reward
+    # time, so two records sharing a board but differing in seed are distinct
+    # training samples. This avoids the ~480-board ceiling that 2-tile spawns
+    # would impose if we deduped on the board alone.
+    seen_seeds: set[int] = set()
     attempts = 0
     while len(records) < count:
         attempts += 1
@@ -39,10 +44,9 @@ def generate_records(
             raise RuntimeError("could not generate enough unique 2048 boards")
         board_seed = rng.randrange(0, 2**31)
         board = _spawn_board(board_seed, spawns)
-        key = tuple(cell for row in board for cell in row)
-        if key in seen or game.is_terminal(board):
+        if board_seed in seen_seeds or game.is_terminal(board):
             continue
-        seen.add(key)
+        seen_seeds.add(board_seed)
         baseline = game.random_episode(board, seed=board_seed, cap=cap, trials=trials)
         records.append(
             {
