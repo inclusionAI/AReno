@@ -362,6 +362,28 @@ class Trainer:
         if self._metrics is not None:
             self._metrics.record_rollout_sample(sample)
 
+    def record_reward_metrics(
+        self,
+        *,
+        step: int,
+        epoch: int,
+        prompt_idx: int,
+        sample_idx: int,
+        reward: float,
+        reward_components: dict[str, float] | None = None,
+    ) -> None:
+        """Persist per-sample reward data for offline distribution summarisation."""
+
+        if self._metrics is not None:
+            self._metrics.record_reward_metrics(
+                step=step,
+                epoch=epoch,
+                prompt_idx=prompt_idx,
+                sample_idx=sample_idx,
+                reward=reward,
+                reward_components=reward_components,
+            )
+
     def record_dashboard_state(
         self,
         *,

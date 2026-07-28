@@ -29,6 +29,7 @@ class MetricsRecorder:
         self._writer = create_tensorboard_writer(log_dir)
         self._state_file = self._log_dir / f"dashboard_state.{os.getpid()}.json"
         self._sample_file = self._log_dir / f"rollout_samples.{os.getpid()}.jsonl"
+        self._reward_metrics_file = self._log_dir / f"reward_metrics.{os.getpid()}.jsonl"
         self._closed = False
 
     def record_train_step(self, *, step: int, train_result, train_batch, timings: dict[str, float] | None = None):
@@ -47,6 +48,35 @@ class MetricsRecorder:
         sample.setdefault("pid", os.getpid())
         with self._sample_file.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(sample, ensure_ascii=False) + "\n")
+
+    def record_reward_metrics(
+        self,
+        *,
+        step: int,
+        epoch: int,
+        prompt_idx: int,
+        sample_idx: int,
+        reward: float,
+        reward_components: dict[str, float] | None = None,
+    ) -> None:
+        """Persist one per-sample reward record for offline summarisation.
+
+        Each line is a JSON object written to ``reward_metrics.{pid}.jsonl``
+        in the metrics log directory.  The ``reward_components`` key is
+        ``null`` when the reward function returned a plain float and a
+        component dict when the function returned one.
+        """
+        payload = {
+            "pid": os.getpid(),
+            "step": int(step),
+            "epoch": int(epoch),
+            "prompt_idx": int(prompt_idx),
+            "sample_idx": int(sample_idx),
+            "reward": float(reward),
+            "reward_components": reward_components,
+        }
+        with self._reward_metrics_file.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
     def record_dashboard_state(
         self,
@@ -219,3 +249,27 @@ def record_training_stats(writer, stats, step, train_res, train_batch, timings: 
         if key in metric_timings:
             writer.add_scalar(f"time/{key}", metric_timings[key], step)
     writer.flush()
+
+
+def load_reward_samples(log_dir: str, *, step: int | None = None) -> list[dict]:
+    """Load reward metric records from ``reward_metrics.*.jsonl`` files.
+
+    Scans ``log_dir`` for all ``reward_metrics.*.jsonl`` files, parses each
+    line as JSON, and returns the list of sample dicts.  When ``step`` is
+    provided only records matching that step are returned.
+    """
+    log_path = Path(log_dir)
+    if not log_path.is_dir():
+        return []
+    samples: list[dict] = []
+    for jsonl_path in sorted(log_path.glob("reward_metrics.*.jsonl")):
+        with jsonl_path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                record = json.loads(line)
+                if step is not None and record.get("step") != step:
+                    continue
+                samples.append(record)
+    return samples

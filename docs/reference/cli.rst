@@ -9,6 +9,7 @@ Command pages:
 * :doc:`/cli/training`
 * :doc:`/cli/inference`
 * :doc:`/cli/agent`
+* :doc:`/cli/reward-summary`
 * :doc:`/cli/dataset_loaders`
 * :doc:`/cli/observability`
 * :doc:`/cli/diagnostics`

@@ -87,7 +87,7 @@ class PolicyOnlyTrainer:
                     record_dashboard_state(self.areno, stage="rollout_end", epoch=epoch, step=step, role=role)
                     self._log_agentic_sample_completions(epoch, step, agent_batch)
                     train_batch, rewards_all, rollout_logprobs = self._materialize_agentic_train_batch(
-                        tokenizer, prompt_batch, agent_batch
+                        tokenizer, epoch, step, prompt_batch, agent_batch
                     )
                 else:
                     # 1) Sample n_samples completions per prompt; ordering
@@ -100,7 +100,7 @@ class PolicyOnlyTrainer:
                     # 2+3) Score rewards and broadcast group-normalised
                     #      advantages down to per-token tensors.
                     train_batch, rewards_all, rollout_logprobs = self._materialize_train_batch(
-                        tokenizer, prompt_batch, rollout_results
+                        tokenizer, epoch, step, prompt_batch, rollout_results
                     )
 
                 if rewards_all:
@@ -395,7 +395,7 @@ class PolicyOnlyTrainer:
                 return sample
         return None
 
-    def _materialize_agentic_train_batch(self, tokenizer, prompt_batch, agent_batch):
+    def _materialize_agentic_train_batch(self, tokenizer, epoch, step, prompt_batch, agent_batch):
         """Assemble TrainSequence rows from an agentic rollout batch."""
 
         import areno.api
@@ -416,6 +416,20 @@ class PolicyOnlyTrainer:
             group_rewards = [rewards_all[row_idx] for row_idx in row_indices]
             for row_idx, advantage in zip(row_indices, compute_group_advantages(group_rewards), strict=True):
                 advantages_by_row[row_idx] = float(advantage)
+        # Persist per-sample reward metrics for offline summarisation.
+        if hasattr(self.areno, "record_reward_metrics"):
+            for row_idx, reward in enumerate(rewards_all):
+                record = agent_batch.reward_records[row_idx] if row_idx < len(agent_batch.reward_records) else None
+                prompt_idx = int(record.metadata.get("prompt_index", row_idx)) if record else row_idx
+                sample_idx = int(record.metadata.get("sample_index", 0)) if record else 0
+                self.areno.record_reward_metrics(
+                    step=step,
+                    epoch=epoch,
+                    prompt_idx=prompt_idx,
+                    sample_idx=sample_idx,
+                    reward=reward,
+                    reward_components=None,
+                )
         for row_idx, (tokens, response_mask, loss_mask, logprobs, reward) in enumerate(
             zip(
                 agent_batch.token_rows,
@@ -506,7 +520,7 @@ class PolicyOnlyTrainer:
             if logged + 1 >= limit:
                 return
 
-    def _materialize_train_batch(self, tokenizer, prompt_batch, rollout_results):
+    def _materialize_train_batch(self, tokenizer, epoch, step, prompt_batch, rollout_results):
         """Assemble TrainSequence rows for one rollout batch.
 
         Steps:
@@ -519,7 +533,7 @@ class PolicyOnlyTrainer:
         """
 
         import areno.api
-        from areno.api.rewards import compute_group_advantages, make_reward_record
+        from areno.api.rewards import compute_group_advantages, make_reward_record, normalize_reward_result
 
         train_batch = []
         rewards_all = []
@@ -527,24 +541,35 @@ class PolicyOnlyTrainer:
         for item_idx, (item, result) in enumerate(zip(prompt_batch.items, rollout_results, strict=True)):
             prefix_len = len(item.input_tokens)
             completions = [tokenizer.decode(seq.resp_tokens) for seq in result.sequences]
-            rewards = [
-                float(
-                    self.reward_fn(
-                        make_reward_record(
-                            prompt=item.prompt,
-                            completion=completion,
-                            source_record=item.record,
-                            answer=item.solutions,
-                            tokens=item.input_tokens + seq.resp_tokens,
-                            logprobs=[0.0] * prefix_len + seq.resp_logprobs,
-                            loss_mask=[False] * prefix_len + [True] * len(seq.resp_tokens),
-                            metadata={"prompt_index": item_idx, "sample_index": sample_idx},
-                        )
+            reward_details: list[tuple[float, dict[str, float] | None]] = []
+            for sample_idx, (completion, seq) in enumerate(zip(completions, result.sequences, strict=True)):
+                raw = self.reward_fn(
+                    make_reward_record(
+                        prompt=item.prompt,
+                        completion=completion,
+                        source_record=item.record,
+                        answer=item.solutions,
+                        tokens=item.input_tokens + seq.resp_tokens,
+                        logprobs=[0.0] * prefix_len + seq.resp_logprobs,
+                        loss_mask=[False] * prefix_len + [True] * len(seq.resp_tokens),
+                        metadata={"prompt_index": item_idx, "sample_index": sample_idx},
                     )
                 )
-                for sample_idx, (completion, seq) in enumerate(zip(completions, result.sequences, strict=True))
-            ]
+                total, components = normalize_reward_result(raw)
+                reward_details.append((total, components))
+            rewards = [total for total, _ in reward_details]
             rewards_all += rewards
+            # Persist per-sample reward metrics for offline summarisation.
+            if hasattr(self.areno, "record_reward_metrics"):
+                for sample_idx, (total, components) in enumerate(reward_details):
+                    self.areno.record_reward_metrics(
+                        step=step,
+                        epoch=epoch,
+                        prompt_idx=item_idx,
+                        sample_idx=sample_idx,
+                        reward=total,
+                        reward_components=components,
+                    )
             # Group-relative advantage: A_i = (r_i - mean(r))/std(r); shared by
             # every response token of sample i.
             advantages = compute_group_advantages(rewards)

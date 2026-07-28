@@ -91,7 +91,7 @@ class PPOTrainer(PolicyOnlyTrainer):
             role=role,
         )
 
-    def _materialize_train_batch(self, tokenizer, prompt_batch, rollout_results):
+    def _materialize_train_batch(self, tokenizer, epoch, step, prompt_batch, rollout_results):
         self._last_ppo_stats = {}
         train_batch = []
         rewards_all = []
@@ -127,13 +127,21 @@ class PPOTrainer(PolicyOnlyTrainer):
 
         # Reward scoring: either Python reward_fn or a backend-owned reward
         # role. Both produce one float per (prompt, sample) in row order.
+        reward_components_list: list[dict[str, float] | None] = []
         if self.reward_fn is not None:
+            from areno.api.rewards import normalize_reward_result
+
             self._record_ppo_state(stage="score_start", role="reward")
             reward_start = time.perf_counter()
-            rewards_all = [float(self.reward_fn(record)) for record in reward_records]
+            rewards_all = []
+            for record in reward_records:
+                total, components = normalize_reward_result(self.reward_fn(record))
+                rewards_all.append(total)
+                reward_components_list.append(components)
             self._last_ppo_stats["reward_score_time_s"] = time.perf_counter() - reward_start
             self._record_ppo_state(stage="score_end", role="reward")
         else:
+            reward_components_list = [None] * len(reward_records)
             self.logger.info("role=reward stage=score_start rows=%d", len(token_rows))
             self._record_ppo_state(stage="score_start", role="reward")
             reward_start = time.perf_counter()
@@ -143,6 +151,20 @@ class PPOTrainer(PolicyOnlyTrainer):
             self._last_ppo_stats["reward_score_time_s"] = time.perf_counter() - reward_start
             self.logger.info("role=reward stage=score_end rows=%d", len(token_rows))
             self._record_ppo_state(stage="score_end", role="reward")
+
+        # Persist per-sample reward metrics for offline summarisation.
+        if hasattr(self.areno, "record_reward_metrics"):
+            for row_idx, (reward, components) in enumerate(zip(rewards_all, reward_components_list, strict=True)):
+                prompt_idx = int(reward_records[row_idx].metadata.get("prompt_index", row_idx))
+                sample_idx = int(reward_records[row_idx].metadata.get("sample_index", 0))
+                self.areno.record_reward_metrics(
+                    step=step,
+                    epoch=epoch,
+                    prompt_idx=prompt_idx,
+                    sample_idx=sample_idx,
+                    reward=float(reward),
+                    reward_components=components,
+                )
 
         # Forward ref/actor/critic over every row in a single batched call per
         # role so the backend can amortise activation memory and kernel launch
@@ -270,7 +292,7 @@ class PPOTrainer(PolicyOnlyTrainer):
         self._record_ppo_state(stage="advantage_end", role="critic")
         return train_batch, rewards_all, rollout_logprobs
 
-    def _materialize_agentic_train_batch(self, tokenizer, prompt_batch, agent_batch):
+    def _materialize_agentic_train_batch(self, tokenizer, epoch, step, prompt_batch, agent_batch):
         del prompt_batch
         self._last_ppo_stats = {}
         train_batch = []
@@ -294,6 +316,25 @@ class PPOTrainer(PolicyOnlyTrainer):
             self._last_ppo_stats["reward_score_time_s"] = time.perf_counter() - reward_start
             self.logger.info("role=reward stage=score_end rows=%d", len(token_rows))
             self._record_ppo_state(stage="score_end", role="reward")
+
+        # Persist per-sample reward metrics for offline summarisation.
+        if hasattr(self.areno, "record_reward_metrics"):
+            for row_idx, reward in enumerate(rewards_all):
+                record = (
+                    agent_batch.reward_records[row_idx]
+                    if row_idx < len(agent_batch.reward_records)
+                    else None
+                )
+                prompt_idx = int(record.metadata.get("prompt_index", row_idx)) if record else row_idx
+                sample_idx = int(record.metadata.get("sample_index", 0)) if record else 0
+                self.areno.record_reward_metrics(
+                    step=step,
+                    epoch=epoch,
+                    prompt_idx=prompt_idx,
+                    sample_idx=sample_idx,
+                    reward=float(reward),
+                    reward_components=None,
+                )
 
         self.logger.info("role=ref stage=logprob_score_start rows=%d", len(token_rows))
         self._record_ppo_state(stage="logprob_score_start", role="ref")

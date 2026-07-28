@@ -86,6 +86,27 @@ def load_reward_fn(path: str) -> Callable[[RewardRecord], float]:
     return reward_fn
 
 
+def normalize_reward_result(raw: float | dict[str, float]) -> tuple[float, dict[str, float] | None]:
+    """Normalize a reward_fn return value into ``(total, components)``.
+
+    ``reward_fn`` may return a plain ``float`` (the original contract) or a
+    ``dict[str, float]`` whose keys are named reward components.  When a dict
+    is returned the values are summed to produce the scalar total used by
+    the training loop, and the individual component values are preserved for
+    artifact logging and reward-distribution summarisation.
+
+    Returns ``(total, components_or_None)``:
+        - ``total`` is always a ``float``.
+        - ``components`` is the original dict when one was returned, or
+          ``None`` for plain-float returns (so callers can distinguish
+          "no components" from "one component named total").
+    """
+    if isinstance(raw, dict):
+        components = {str(k): float(v) for k, v in raw.items()}
+        return sum(components.values()), components
+    return float(raw), None
+
+
 def make_reward_record(
     *,
     prompt: str,
