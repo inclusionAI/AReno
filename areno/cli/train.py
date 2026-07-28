@@ -68,6 +68,8 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "max_steps",
             "world_size",
             "tp_size",
+            "gpu_warn_mem_free_pct",
+            "gpu_warn_util_pct",
         ),
     ),
     (
@@ -223,6 +225,10 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
         raise click.UsageError("--world-size must be positive")
     if args.world_size % args.tp_size != 0:
         raise click.UsageError("--world-size must be divisible by --tp-size")
+    if not (0 <= args.gpu_warn_mem_free_pct <= 100):
+        raise click.UsageError("--gpu-warn-mem-free-pct must be in [0, 100]")
+    if not (0 <= args.gpu_warn_util_pct <= 100):
+        raise click.UsageError("--gpu-warn-util-pct must be in [0, 100]")
     if args.batch_size <= 0:
         raise click.UsageError("--batch-size must be positive")
     if algorithm.requires_rollout and args.n_samples <= 0:
@@ -791,6 +797,33 @@ def _trainer_config_from_args(args) -> TrainerConfig:
     )
 
 
+def _warn_gpu_occupancy(config: TrainerConfig, *, mem_free_warn_pct: int, util_warn_pct: int) -> None:
+    """Check GPU occupancy before launch and print warnings to stderr.
+
+    Never raises — on CPU-only machines or when nvidia-smi is unavailable the
+    check is silently skipped.
+    """
+
+    devices = list(range(config.world_size))
+    from areno.engine.runtime.gpu_check import (
+        check_gpu_occupancy,
+        format_gpu_warnings,
+        query_gpu_status,
+    )
+
+    statuses = query_gpu_status(devices)
+    if not statuses:
+        return
+    warnings = check_gpu_occupancy(
+        statuses,
+        mem_free_warn_pct=mem_free_warn_pct,
+        util_warn_pct=util_warn_pct,
+    )
+    if warnings:
+        text = format_gpu_warnings(warnings, statuses)
+        click.echo(text, err=True)
+
+
 def run(trainer_config: TrainerConfig):
     """Build the trainer chosen by `--algo` and run `.fit()` to completion."""
 
@@ -1223,6 +1256,20 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
 )
 @click.option("--tp-size", type=int, default=4, show_default=True, help="Tensor parallel size for the backend.")
 @click.option("--world-size", type=int, default=8, show_default=True, help="Total device count for the backend.")
+@click.option(
+    "--gpu-warn-mem-free-pct",
+    type=int,
+    default=10,
+    show_default=True,
+    help="Warn before launch when a selected GPU has free memory below this percentage.",
+)
+@click.option(
+    "--gpu-warn-util-pct",
+    type=int,
+    default=90,
+    show_default=True,
+    help="Warn before launch when a selected GPU utilization exceeds this percentage.",
+)
 @click.option("--batch-size", type=int, default=32, show_default=True, help="Prompt/pair batch size.")
 @click.option(
     "--n-samples", type=int, default=8, show_default=True, help="Rollout samples per prompt for RL algorithms."
@@ -1362,6 +1409,11 @@ def train_command(**options) -> None:
         name=f"train {trainer_config.algo} {trainer_config.ckpt}",
         config=_training_config_settings(trainer_config),
         metrics_dir=trainer_config.metrics_log_dir,
+    )
+    _warn_gpu_occupancy(
+        trainer_config,
+        mem_free_warn_pct=options["gpu_warn_mem_free_pct"],
+        util_warn_pct=options["gpu_warn_util_pct"],
     )
     run(trainer_config)
 
