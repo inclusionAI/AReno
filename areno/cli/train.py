@@ -607,6 +607,9 @@ def _trainer_config_from_args(args) -> TrainerConfig:
     args.max_steps = getattr(args, "max_steps", None)
     args.score_micro_bs = getattr(args, "score_micro_bs", 8)
     args.model_hub = getattr(args, "model_hub", "modelscope")
+    args.gpu_stats = getattr(args, "gpu_stats", False)
+    args.gpu_stats_interval_s = getattr(args, "gpu_stats_interval_s", 5.0)
+    args.gpu_stats_history = getattr(args, "gpu_stats_history", 1000)
     algorithm = get_algorithm(args.algo)
     chat_template_enable_thinking = False if args.disable_thinking else None
     if algorithm.name == "dpo":
@@ -855,7 +858,10 @@ def run(trainer_config: TrainerConfig):
     finally:
         if sampler is not None:
             _flush_gpu_stats(sampler, trainer_config)
-            click.echo(sampler.summary_text())
+            try:
+                click.echo(sampler.summary_text())
+            except Exception as exc:
+                click.echo(f"WARNING: GPU stats summary formatting failed: {type(exc).__name__}: {exc}", err=True)
 
 
 def _write_dashboard_run_config(config: TrainerConfig) -> None:
@@ -885,41 +891,51 @@ def _maybe_start_gpu_sampler(config: TrainerConfig):
     """Start the GPU stats sampler when ``--gpu-stats`` is enabled, else None.
 
     Returns ``None`` (no-op, current behavior unchanged) when sampling is off.
-    The sampler streams each tick to ``gpu_stats.{pid}.jsonl`` when a
-    ``metrics_log_dir`` is configured; with no directory it still collects an
-    in-memory history so a stdout summary can be printed at run end. A missing
-    ``nvidia-smi`` makes ``start()`` a clean no-op that records the reason.
+    The sampler atomically refreshes ``gpu_stats.{pid}.jsonl`` with its bounded
+    history when a ``metrics_log_dir`` is configured; with no directory it
+    still collects an in-memory history for the stdout summary. A missing
+    ``nvidia-smi`` makes ``start()`` a clean no-op with a diagnostic reason.
     """
 
     if not config.gpu_stats:
         return None
-    from areno.cli.gpu_stats import GPUSampler
-
     import os
+
+    from areno.cli.gpu_stats import GPUSampler, visible_device_selectors
 
     jsonl_path = None
     if config.metrics_log_dir:
-        Path(config.metrics_log_dir).mkdir(parents=True, exist_ok=True)
         jsonl_path = str(Path(config.metrics_log_dir) / f"gpu_stats.{os.getpid()}.jsonl")
-    sampler = GPUSampler(
-        interval_s=config.gpu_stats_interval_s,
-        max_history=config.gpu_stats_history,
-        jsonl_path=jsonl_path,
-    )
-    sampler.start()
-    return sampler
+    try:
+        sampler = GPUSampler(
+            interval_s=config.gpu_stats_interval_s,
+            max_history=config.gpu_stats_history,
+            device_selectors=visible_device_selectors(config.world_size),
+            jsonl_path=jsonl_path,
+        )
+        sampler.start()
+        return sampler
+    except Exception as exc:
+        click.echo(f"WARNING: GPU stats startup failed: {type(exc).__name__}: {exc}", err=True)
+        return None
 
 
 def _flush_gpu_stats(sampler, config: TrainerConfig) -> None:
-    """Stop the sampler and persist a structured summary JSON when possible."""
+    """Best-effort shutdown and summary persistence that never masks training."""
 
-    sampler.stop()
-    if config.metrics_log_dir:
-        import os
+    try:
+        sampler.stop()
+    except Exception as exc:
+        click.echo(f"WARNING: GPU stats shutdown failed: {type(exc).__name__}: {exc}", err=True)
+    try:
+        if config.metrics_log_dir:
+            import os
 
-        Path(config.metrics_log_dir).mkdir(parents=True, exist_ok=True)
-        summary_path = Path(config.metrics_log_dir) / f"gpu_stats_summary.{os.getpid()}.json"
-        sampler.write_summary(str(summary_path))
+            Path(config.metrics_log_dir).mkdir(parents=True, exist_ok=True)
+            summary_path = Path(config.metrics_log_dir) / f"gpu_stats_summary.{os.getpid()}.json"
+            sampler.write_summary(str(summary_path))
+    except Exception as exc:
+        click.echo(f"WARNING: GPU stats summary write failed: {type(exc).__name__}: {exc}", err=True)
 
 
 def _training_config_settings(config: TrainerConfig) -> dict:
@@ -1267,11 +1283,17 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     help="Sample per-device GPU memory, utilization, and temperature during training and write a per-run history + summary.",
 )
 @click.option(
-    "--gpu-stats-interval-s", type=float, default=5.0, show_default=True,
+    "--gpu-stats-interval-s",
+    type=float,
+    default=5.0,
+    show_default=True,
     help="GPU stats sampling interval in seconds (used with --gpu-stats).",
 )
 @click.option(
-    "--gpu-stats-history", type=int, default=1000, show_default=True,
+    "--gpu-stats-history",
+    type=int,
+    default=1000,
+    show_default=True,
     help="Maximum retained GPU stats samples (used with --gpu-stats).",
 )
 @click.option("--epochs", type=int, default=10, show_default=True, help="Number of dataset epochs to train.")

@@ -366,6 +366,17 @@ Observability
    ``rollout/*``, ``train/*``, and ``time/*`` metric namespaces and debugging
    log examples.
 
+``--gpu-stats``
+   Enable bounded per-device GPU memory, utilization, and temperature history
+   for this run. Disabled by default.
+
+``--gpu-stats-interval-s FLOAT``
+   Sampling interval in seconds. Must be positive. Default: ``5.0``.
+
+``--gpu-stats-history INTEGER``
+   Maximum number of per-device samples retained both in memory and in the
+   run's JSONL artifact. Must be positive. Default: ``1000``.
+
 Examples
 --------
 

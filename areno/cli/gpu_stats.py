@@ -1,20 +1,10 @@
-"""Sample per-device GPU memory, utilization, and temperature history for a run.
+"""Bounded per-device GPU telemetry for one CLI training run.
 
-Issue #257: AReno needs to track GPU memory and utilization history for a
-training run as a focused capability. This module owns the *sampling* half: a
-background daemon thread polls ``nvidia-smi`` at a bounded interval, keeps a
-bounded in-memory history, and exposes human-readable + structured summaries.
-It degrades to a no-op when NVIDIA tooling is unavailable.
-
-The module is deliberately engine-agnostic and never imports ``torch``: the
-training hot path (`trainer.fit()`, rollout, loss) is untouched. The CLI
-(``areno/cli/train.py``) owns the lifecycle — start before ``fit()``, stop and
-flush after. Tests inject a fake ``sample_fn`` so the core logic runs on CPU.
-
-Artifact convention mirrors the existing per-run-per-pid files AReno already
-writes into ``metrics_log_dir`` (e.g. ``areno_run_config.{pid}.json``):
-``gpu_stats.{pid}.jsonl`` (one line per tick/device) and
-``gpu_stats_summary.{pid}.json``.
+The sampler stays outside the trainer hot path: a daemon thread polls
+``nvidia-smi``, maps physical GPUs to the run's logical CUDA device order, and
+atomically refreshes a bounded JSONL snapshot beside AReno's other run
+artifacts. Sampling and artifact failures are recorded for diagnostics but
+never raised into the training loop.
 """
 
 from __future__ import annotations
@@ -29,23 +19,24 @@ import subprocess
 import threading
 import time
 from collections import deque
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, replace
-from typing import Callable
+from pathlib import Path
 
-# nvidia-smi fields requested for every tick. Order is fixed so the CSV parser
-# can read it positionally while still tolerating missing trailing columns.
-_NVIDIA_SMI_QUERY = (
-    "--query-gpu=index,name,memory.used,memory.total,utilization.gpu,temperature.gpu"
-)
+_NVIDIA_SMI_QUERY = "--query-gpu=index,uuid,name,memory.used,memory.total,utilization.gpu,temperature.gpu"
 _NVIDIA_SMI_FORMAT = "--format=csv,noheader,nounits"
-
-# Hard ceiling on a single nvidia-smi call so a wedged tool cannot stall a run.
 _NVIDIA_SMI_TIMEOUT_S = 10.0
+_MAX_ERROR_TEXT = 300
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class GPUSample:
-    """One per-device reading at one instant."""
+    """One per-device reading at one wall-clock instant.
+
+    ``index`` is the logical CUDA index used by the run. ``physical_index`` and
+    ``uuid`` preserve the nvidia-smi identity so multi-GPU mappings remain
+    auditable when ``CUDA_VISIBLE_DEVICES`` reorders devices.
+    """
 
     timestamp_s: float
     index: int
@@ -54,23 +45,19 @@ class GPUSample:
     mem_total_mb: int | None
     util_pct: int | None
     temp_c: int | None
+    physical_index: int | None = None
+    uuid: str | None = None
 
 
 class GPUSampler:
-    """Background sampler with bounded history linked to one run.
-
-    Construction is cheap; ``start()`` launches a daemon thread, ``stop()``
-    joins it. Read access (``history``/summaries) is intended after ``stop()``
-    so the worker thread is no longer mutating; a lock still guards the deque
-    snapshot for safety.
-    """
+    """Background sampler with bounded in-memory and on-disk history."""
 
     def __init__(
         self,
         *,
         interval_s: float,
         max_history: int,
-        devices: list[int] | None = None,
+        device_selectors: Sequence[str] | None = None,
         sample_fn: Callable[[], list[GPUSample]] | None = None,
         jsonl_path: str | None = None,
     ):
@@ -80,9 +67,9 @@ class GPUSampler:
             raise ValueError("max_history must be positive")
         self._interval_s = float(interval_s)
         self._max_history = int(max_history)
-        self._devices = set(devices) if devices is not None else None
-        # ``sample_fn=None`` selects the real nvidia-smi path; tests pass a fake
-        # to exercise parsing/aggregation without a GPU or subprocess.
+        self._device_selectors = (
+            None if device_selectors is None else tuple(str(item).strip() for item in device_selectors)
+        )
         self._uses_default_sampler = sample_fn is None
         self._sample_fn = sample_fn or self._default_sample_once
         self._history: deque[GPUSample] = deque(maxlen=self._max_history)
@@ -90,181 +77,161 @@ class GPUSampler:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._reason: str | None = None
+        self._failure: dict[str, str] | None = None
         self._active = False
-        # When set, each tick's samples are appended here immediately (durably
-        # streamed, not buffered until stop) so a crash mid-run loses at most
-        # the in-flight frame. The handle is opened in start() and closed in
-        # stop(); writes are flushed per tick.
-        self._jsonl_path = jsonl_path
-        self._jsonl_handle = None
+        self._jsonl_path = Path(jsonl_path) if jsonl_path is not None else None
 
     @property
     def reason(self) -> str | None:
-        """Why sampling produced nothing (e.g. missing nvidia-smi), else None."""
+        """Why telemetry is unavailable or partial, else ``None``."""
 
         return self._reason
 
     @property
     def devices(self) -> list[int]:
-        """Sorted device indices actually retained, after any device filtering."""
+        """Sorted logical CUDA indices retained in the bounded history."""
 
         with self._lock:
-            return sorted({s.index for s in self._history})
+            return sorted({sample.index for sample in self._history})
 
     def start(self) -> None:
-        """Launch the daemon thread, or mark the sampler inactive with a reason."""
+        """Launch the daemon thread, or record a clean unavailable state."""
 
         if self._active:
             return
-        # Only the default path depends on nvidia-smi existing; an injected
-        # sample_fn (tests, or a future NVML shim) bypasses the probe.
         if self._uses_default_sampler and shutil.which("nvidia-smi") is None:
-            self._reason = "nvidia-smi not found"
+            self._record_failure("discovery", "nvidia-smi not found")
             return
-        if self._jsonl_path is not None:
-            # Mirror the append semantics of rollout_samples.{pid}.jsonl: open
-            # once, stream per tick, close on stop. Directory must exist (the
-            # CLI creates metrics_log_dir before starting the sampler).
-            self._jsonl_handle = open(self._jsonl_path, "a", encoding="utf-8")
         self._stop.clear()
         self._thread = threading.Thread(target=self._run, name="areno-gpu-stats", daemon=True)
         self._thread.start()
         self._active = True
 
     def stop(self) -> None:
-        """Signal the worker to stop and join it. Idempotent / finally-safe."""
+        """Request shutdown without ever blocking longer than one query timeout."""
 
-        if not self._active:
-            self._stop.set()
-            self._close_jsonl()
-            return
         self._stop.set()
-        if self._thread is not None:
-            # Give the worker one interval to observe the event plus margin.
-            self._thread.join(timeout=self._interval_s + 5.0)
-        self._close_jsonl()
-        self._active = False
-
-    def _close_jsonl(self) -> None:
-        """Close the streamed JSONL handle if open. Idempotent."""
-
-        if self._jsonl_handle is not None:
-            try:
-                self._jsonl_handle.close()
-            finally:
-                self._jsonl_handle = None
+        thread = self._thread
+        if thread is None:
+            self._active = False
+            return
+        thread.join(timeout=_NVIDIA_SMI_TIMEOUT_S + 1.0)
+        self._active = thread.is_alive()
+        if self._active:
+            self._record_failure("shutdown", f"sampler thread did not stop within {_NVIDIA_SMI_TIMEOUT_S + 1.0:.1f}s")
 
     def is_active(self) -> bool:
-        """Whether a sampling thread is currently running."""
+        """Whether a sampling thread is currently alive."""
 
-        return self._active
+        thread = self._thread
+        return bool(self._active and thread is not None and thread.is_alive())
 
     def history(self) -> list[GPUSample]:
-        """Return a point-in-time snapshot copy of the bounded history."""
+        """Return a point-in-time copy of the bounded history."""
 
         with self._lock:
             return list(self._history)
 
     def dump_jsonl(self, path: str) -> int:
-        """Write the full history as one JSON line per (tick, device) sample.
+        """Atomically replace ``path`` with the bounded history snapshot."""
 
-        Returns the number of lines written. Append semantics match the other
-        per-pid JSONL artifacts under ``metrics_log_dir``.
-        """
-
-        lines = self.history()
-        with open(path, "a", encoding="utf-8") as handle:
-            for sample in lines:
-                handle.write(json.dumps(asdict(sample), ensure_ascii=False) + "\n")
-        return len(lines)
+        samples = self.history()
+        _write_jsonl_snapshot(Path(path), samples)
+        return len(samples)
 
     def write_summary(self, path: str) -> dict:
-        """Write a structured per-run summary JSON and return it."""
+        """Atomically write a structured per-run summary and return it."""
 
         payload = self.summary()
-        with open(path, "w", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+        _atomic_write_text(Path(path), json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
         return payload
 
     def summary(self) -> dict:
-        """Build the structured per-run summary dict (no I/O)."""
+        """Build the structured per-run summary without performing I/O."""
 
         history = self.history()
         per_device: dict[str, dict] = {}
-        for index in sorted({s.index for s in history}):
-            rows = [s for s in history if s.index == index]
-            mems = [s.mem_used_mb for s in rows if s.mem_used_mb is not None]
-            mem_totals = [s.mem_total_mb for s in rows if s.mem_total_mb is not None]
-            utils = [s.util_pct for s in rows if s.util_pct is not None]
-            temps = [s.temp_c for s in rows if s.temp_c is not None]
+        for index in sorted({sample.index for sample in history}):
+            rows = [sample for sample in history if sample.index == index]
+            mems = [sample.mem_used_mb for sample in rows if sample.mem_used_mb is not None]
+            mem_totals = [sample.mem_total_mb for sample in rows if sample.mem_total_mb is not None]
+            utils = [sample.util_pct for sample in rows if sample.util_pct is not None]
+            temps = [sample.temp_c for sample in rows if sample.temp_c is not None]
+            first = rows[0]
             per_device[str(index)] = {
+                "physical_index": first.physical_index,
+                "uuid": first.uuid,
+                "name": first.name,
                 "peak_mem_used_mb": max(mems) if mems else None,
                 "mem_total_mb": mem_totals[0] if mem_totals else None,
                 "mean_util_pct": round(statistics.fmean(utils)) if utils else None,
                 "max_temp_c": max(temps) if temps else None,
                 "n_samples": len(rows),
             }
-        timestamps = [s.timestamp_s for s in history]
-        duration_s = (max(timestamps) - min(timestamps)) if len(timestamps) >= 2 else 0.0
+        timestamps = [sample.timestamp_s for sample in history]
+        duration_s = max(timestamps) - min(timestamps) if len(timestamps) >= 2 else 0.0
         return {
             "pid": os.getpid(),
             "interval_s": self._interval_s,
             "max_history": self._max_history,
             "n_samples": len(history),
             "duration_s": round(duration_s, 3),
-            "devices": sorted({s.index for s in history}),
+            "devices": sorted({sample.index for sample in history}),
+            "device_selectors": list(self._device_selectors or ()),
             "reason": self._reason,
+            "failure": self._failure,
             "per_device": per_device,
         }
 
     def summary_text(self) -> str:
-        """Return a human-readable summary block for the CLI."""
+        """Return a compact human-readable CLI summary."""
 
         summary = self.summary()
         lines = ["AReno GPU stats"]
-        if summary["reason"]:
-            lines.append(f"  {summary['reason']} — GPU sampling disabled for this run.")
-            return "\n".join(lines)
-        n_devices = len(summary["devices"])
-        if n_devices == 0:
-            lines.append("  No GPU samples recorded for this run.")
+        if not summary["devices"]:
+            reason = summary["reason"] or "No GPU samples recorded for this run."
+            lines.append(f"  {reason}")
             return "\n".join(lines)
         lines.append(
-            f"  Devices  {n_devices}    Samples  {summary['n_samples']}"
+            f"  Devices  {len(summary['devices'])}    Samples  {summary['n_samples']}"
             f"  (interval={summary['interval_s']}s, history_cap={summary['max_history']},"
             f" duration={summary['duration_s']}s)"
         )
-        for index in sorted(summary["devices"]):
-            row = summary["per_device"][str(index)]
-            lines.append(_format_device_line(index, row))
+        for index in summary["devices"]:
+            lines.append(_format_device_line(index, summary["per_device"][str(index)]))
+        if summary["reason"]:
+            lines.append(f"  WARNING: {summary['reason']}")
         return "\n".join(lines)
-
-    # --- internals -----------------------------------------------------------
 
     def _run(self) -> None:
         while not self._stop.is_set():
             try:
-                samples = self._sample_fn()
-            except Exception:
-                # Any sampler failure is a degrade, never a training crash.
-                samples = []
-            if self._devices is not None:
-                samples = [s for s in samples if s.index in self._devices]
-            with self._lock:
-                self._history.extend(samples)
-            if self._jsonl_handle is not None:
-                # Stream each tick's frame immediately so an abrupt exit loses
-                # at most the in-flight frame, not the whole run's history.
-                for sample in samples:
-                    self._jsonl_handle.write(json.dumps(asdict(sample), ensure_ascii=False) + "\n")
-                self._jsonl_handle.flush()
-            # Event.wait is interruptible: returns True if set during the wait.
+                samples = map_visible_devices(self._sample_fn(), self._device_selectors)
+                if self._device_selectors is not None and len(samples) < len(self._device_selectors):
+                    matched = {str(sample.physical_index) for sample in samples}
+                    self._record_failure(
+                        "mapping",
+                        f"matched {len(samples)}/{len(self._device_selectors)} selectors; "
+                        f"selectors={list(self._device_selectors)!r}, physical_indices={sorted(matched)!r}",
+                    )
+                with self._lock:
+                    self._history.extend(samples)
+                    snapshot = list(self._history)
+            except Exception as exc:
+                self._record_failure("sampling", f"{type(exc).__name__}: {exc}")
+                snapshot = None
+            if self._jsonl_path is not None and snapshot is not None:
+                try:
+                    _write_jsonl_snapshot(self._jsonl_path, snapshot)
+                except Exception as exc:
+                    self._record_failure("artifact", f"{type(exc).__name__}: {exc}")
             if self._stop.wait(self._interval_s):
                 break
 
     def _default_sample_once(self) -> list[GPUSample]:
         smi = shutil.which("nvidia-smi")
         if smi is None:
+            self._record_failure("discovery", "nvidia-smi not found")
             return []
         try:
             proc = subprocess.run(
@@ -274,55 +241,124 @@ class GPUSampler:
                 capture_output=True,
                 timeout=_NVIDIA_SMI_TIMEOUT_S,
             )
-        except Exception:
+        except subprocess.TimeoutExpired:
+            self._record_failure("query", f"nvidia-smi timed out after {_NVIDIA_SMI_TIMEOUT_S:.1f}s")
+            return []
+        except OSError as exc:
+            self._record_failure("query", f"{type(exc).__name__}: {exc}")
             return []
         if proc.returncode != 0:
+            detail = proc.stderr.strip() or f"exit status {proc.returncode}"
+            self._record_failure("query", detail)
             return []
-        now = time.perf_counter()
-        return [replace(sample, timestamp_s=now) for sample in parse_nvidia_smi_csv(proc.stdout)]
+        samples = parse_nvidia_smi_csv(proc.stdout)
+        if not samples:
+            self._record_failure("parse", "nvidia-smi returned no parseable GPU rows")
+            return []
+        now = time.time()
+        return [replace(sample, timestamp_s=now) for sample in samples]
+
+    def _record_failure(self, stage: str, message: str) -> None:
+        detail = " ".join(str(message).split())[:_MAX_ERROR_TEXT]
+        self._failure = {"stage": stage, "message": detail}
+        self._reason = f"GPU stats {stage} failed: {detail}"
+
+
+def visible_device_selectors(world_size: int, environ: dict[str, str] | None = None) -> list[str]:
+    """Resolve the physical device selectors used by this AReno run.
+
+    CUDA accepts physical indices and GPU/MIG UUIDs in ``CUDA_VISIBLE_DEVICES``.
+    When it is unset, AReno's logical ranks map to the first ``world_size``
+    physical indices.
+    """
+
+    env = os.environ if environ is None else environ
+    configured = env.get("CUDA_VISIBLE_DEVICES")
+    if configured is None:
+        return [str(index) for index in range(world_size)]
+    selectors = [token.strip() for token in configured.split(",") if token.strip()]
+    return selectors[:world_size]
+
+
+def map_visible_devices(samples: Sequence[GPUSample], selectors: Sequence[str] | None) -> list[GPUSample]:
+    """Filter physical samples and assign the run's logical CUDA indices."""
+
+    if selectors is None:
+        return list(samples)
+    mapped: list[GPUSample] = []
+    for logical_index, selector in enumerate(selectors):
+        match = next((sample for sample in samples if _matches_selector(sample, selector)), None)
+        if match is None:
+            continue
+        physical_index = match.physical_index if match.physical_index is not None else match.index
+        mapped.append(replace(match, index=logical_index, physical_index=physical_index))
+    return mapped
 
 
 def parse_nvidia_smi_csv(stdout: str) -> list[GPUSample]:
-    """Parse ``nvidia-smi --query-gpu=... --format=csv,noheader,nounits`` output.
-
-    Positional columns are ``index,name,memory.used,memory.total,
-    utilization.gpu,temperature.gpu``. Missing trailing columns (e.g. a board
-    with no temperature sensor) yield ``None`` for that field rather than
-    dropping the sample. Rows whose index cannot be parsed are skipped.
-    Timestamps are zero here; the caller stamps them.
-    """
+    """Parse index, UUID, name, memory, utilization, and temperature CSV rows."""
 
     samples: list[GPUSample] = []
     for row in csv.reader(io.StringIO(stdout)):
         if not row:
             continue
-        index = _safe_int(row[0])
-        if index is None:
+        physical_index = _safe_int(row[0])
+        if physical_index is None:
             continue
         samples.append(
             GPUSample(
                 timestamp_s=0.0,
-                index=index,
-                name=row[1].strip() if len(row) > 1 else None,
-                mem_used_mb=_safe_int(row[2]) if len(row) > 2 else None,
-                mem_total_mb=_safe_int(row[3]) if len(row) > 3 else None,
-                util_pct=_safe_int(row[4]) if len(row) > 4 else None,
-                temp_c=_safe_int(row[5]) if len(row) > 5 else None,
+                index=physical_index,
+                physical_index=physical_index,
+                uuid=_optional_text(row, 1),
+                name=_optional_text(row, 2),
+                mem_used_mb=_safe_int_at(row, 3),
+                mem_total_mb=_safe_int_at(row, 4),
+                util_pct=_safe_int_at(row, 5),
+                temp_c=_safe_int_at(row, 6),
             )
         )
     return samples
 
 
+def _matches_selector(sample: GPUSample, selector: str) -> bool:
+    if selector.isdigit():
+        physical_index = sample.physical_index if sample.physical_index is not None else sample.index
+        return physical_index == int(selector)
+    uuid = sample.uuid or ""
+    return bool(uuid) and (uuid == selector or uuid.startswith(selector) or selector.startswith(uuid))
+
+
+def _optional_text(row: Sequence[str], index: int) -> str | None:
+    if len(row) <= index:
+        return None
+    text = row[index].strip()
+    return text or None
+
+
+def _safe_int_at(row: Sequence[str], index: int) -> int | None:
+    return _safe_int(row[index]) if len(row) > index else None
+
+
 def _safe_int(value: str | None) -> int | None:
     if value is None:
         return None
-    text = value.strip()
-    if not text:
-        return None
     try:
-        return int(text)
+        return int(value.strip())
     except ValueError:
         return None
+
+
+def _write_jsonl_snapshot(path: Path, samples: Sequence[GPUSample]) -> None:
+    text = "".join(json.dumps(asdict(sample), ensure_ascii=False) + "\n" for sample in samples)
+    _atomic_write_text(path, text)
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(text, encoding="utf-8")
+    tmp_path.replace(path)
 
 
 def _format_device_line(index: int, row: dict) -> str:
@@ -332,13 +368,15 @@ def _format_device_line(index: int, row: dict) -> str:
     used = row.get("peak_mem_used_mb")
     total = row.get("mem_total_mb")
     if used is not None and total is not None:
-        mem = f"{used}/{total} MB"
+        memory = f"{used}/{total} MB"
     elif used is not None:
-        mem = f"{used} MB"
+        memory = f"{used} MB"
     else:
-        mem = "? MB"
+        memory = "? MB"
+    physical = row.get("physical_index")
+    mapping = f" (physical {physical})" if physical is not None and physical != index else ""
     return (
-        f"  device {index}  peak_mem {mem}   "
+        f"  device {index}{mapping}  peak_mem {memory}   "
         f"mean_util {maybe(row.get('mean_util_pct'), '%')}   "
         f"max_temp {maybe(row.get('max_temp_c'), 'C')}"
     )

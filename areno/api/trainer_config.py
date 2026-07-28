@@ -57,8 +57,8 @@ class TrainerConfig:
     attn_backend: str = "flash"
     metrics_log_dir: str | None = DEFAULT_METRICS_LOG_DIR
     # Issue #257: off-by-default periodic GPU memory/utilization/temperature
-    # sampling. Defaults preserve current behavior (no sampling). Validation of
-    # the two numeric bounds happens in the CLI layer alongside other positives.
+    # sampling. Defaults preserve current behavior (no sampling); bounds are
+    # validated here and translated to Click usage errors by the CLI layer.
     gpu_stats: bool = False
     gpu_stats_interval_s: float = 5.0
     gpu_stats_history: int = 1000
@@ -72,6 +72,10 @@ class TrainerConfig:
             raise ValueError("attn_backend must be one of: flash, native")
         if self.model_hub not in {"hf", "modelscope"}:
             raise ValueError("model_hub must be one of: hf, modelscope")
+        if self.gpu_stats_interval_s <= 0:
+            raise ValueError("gpu_stats_interval_s must be positive")
+        if self.gpu_stats_history <= 0:
+            raise ValueError("gpu_stats_history must be positive")
 
     def optimizer_config(self) -> dict:
         """Build the optimizer dict consumed by the backend config."""

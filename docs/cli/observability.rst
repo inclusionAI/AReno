@@ -145,6 +145,77 @@ The writer lives in ``areno.api.metrics``. It records three namespaces:
    Stage timings when available: ``time/rollout``, ``time/reward``,
    ``time/advantage``, and ``time/train``.
 
+GPU history
+-----------
+
+Pass ``--gpu-stats`` to sample the GPUs used by a CLI training run without
+adding work to rollout or optimizer steps:
+
+.. code-block:: bash
+
+   areno train \
+     --algo sft \
+     --ckpt Qwen/Qwen3-0.6B \
+     --dataset-path tatsu-lab/alpaca \
+     --model-hub hf \
+     --dataset-loader-fn examples/sft/alpaca/dataset_loader.py \
+     --world-size 1 \
+     --tp-size 1 \
+     --batch-size 1 \
+     --mini-bs 1 \
+     --max-prompt-tokens 128 \
+     --max-new-tokens 64 \
+     --attn-backend native \
+     --max-steps 2 \
+     --gpu-stats \
+     --gpu-stats-interval-s 1 \
+     --gpu-stats-history 120 \
+     --metrics-log-dir /tmp/areno/gpu-check
+
+The feature is disabled by default. ``--gpu-stats-interval-s`` must be
+positive and defaults to ``5.0``. ``--gpu-stats-history`` must be positive,
+defaults to ``1000``, and bounds both the in-memory history and the JSONL
+snapshot. With multiple visible GPUs, each tick contributes one sample per
+device, so the bound is a total row count rather than a per-device count.
+
+AReno follows ``CUDA_VISIBLE_DEVICES`` order. For example,
+``CUDA_VISIBLE_DEVICES=3,1`` maps logical ``device 0`` to physical GPU 3 and
+logical ``device 1`` to physical GPU 1. GPU UUID selectors are also supported.
+The summary preserves logical index, physical index, UUID, and model name.
+MIG UUIDs depend on whether the installed driver exposes them through
+``nvidia-smi --query-gpu``; unsupported selectors produce no matching sample
+and are visible in ``device_selectors`` in the summary.
+
+Two per-process artifacts are refreshed under ``--metrics-log-dir``:
+
+``gpu_stats.<pid>.jsonl``
+   A bounded, atomically replaced snapshot with one JSON object per retained
+   device sample. Fields are ``timestamp_s`` (Unix time), logical ``index``,
+   ``physical_index``, ``uuid``, ``name``, ``mem_used_mb``,
+   ``mem_total_mb``, ``util_pct``, and ``temp_c``.
+
+``gpu_stats_summary.<pid>.json``
+   Run metadata and per-device aggregates including peak used memory, total
+   memory, mean utilization, maximum temperature, sample count, device
+   mapping, duration, and any sampling failure stage/message.
+
+The command also prints a human-readable summary when training exits. Missing
+``nvidia-smi``, query failures, shutdown timeouts, and artifact write failures
+degrade to a diagnostic warning; they do not replace the original training
+exception.
+
+For a deterministic CPU-only boundary check, run:
+
+.. code-block:: bash
+
+   python -m pytest \
+     tests/test_gpu_stats_cpu.py::test_cli_lifecycle_writes_bounded_artifacts_with_fake_sampler \
+     tests/test_train_cli_config_cpu.py::test_train_config_validates_common_positive_fields
+
+The first test exercises the successful CLI lifecycle with two fake GPUs and
+bounded local artifacts. The second suite includes invalid zero values for
+both GPU-stat bounds.
+
 Agentic diagnostics
 -------------------
 
