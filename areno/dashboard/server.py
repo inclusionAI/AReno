@@ -80,6 +80,21 @@ def _duration_seconds(created_at: Any, updated_at: Any) -> float | None:
     return max(0.0, end - start)
 
 
+def _launch_value(launch: Any, key: str, default: Any = "") -> Any:
+    """Read a value from launch_config, handling both flat dict and sections format."""
+    if not isinstance(launch, dict):
+        return default
+    if key in launch:
+        return launch[key] or default
+    for section in launch.get("sections", []):
+        if not isinstance(section, dict):
+            continue
+        for item in section.get("items", []):
+            if isinstance(item, dict) and item.get("key") == key:
+                return item.get("value", default)
+    return default
+
+
 class Job:
     def __init__(
         self,
@@ -183,9 +198,9 @@ class Job:
             "returncode": self.returncode,
             "pid": self.pid,
             "perf": self.perf,
-            "algo": launch.get("algo", ""),
-            "ckpt": launch.get("ckpt") or launch.get("model_path", ""),
-            "dataset_path": launch.get("dataset_path", ""),
+            "algo": _launch_value(launch, "algo"),
+            "ckpt": _launch_value(launch, "ckpt") or _launch_value(launch, "model_path"),
+            "dataset_path": _launch_value(launch, "dataset_path"),
         }
 
 

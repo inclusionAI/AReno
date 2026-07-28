@@ -18,6 +18,8 @@ import time
 from pathlib import Path
 from uuid import uuid4
 
+from areno.dashboard.server import _launch_value
+
 
 STATES = ["running", "succeeded", "failed", "stopped", "exited"]
 ALGOS = ["sft", "dpo", "gspo", "grpo", "ppo"]
@@ -27,9 +29,31 @@ MODELS = [
     "Qwen/Qwen3-4B",
     "Qwen/Qwen2.5-0.5B",
 ]
-DATASETS = ["gsm8k:main", "yahma/alpaca-cleaned:train", "openai/gsm8k", "math"]
+DATASETS = ["gsm8k:main", "yahma/alpaca-cleaned:train", "openai/gsm8k", "math", "tictactoe.jsonl"]
 
 DEFAULT_OUTPUT = Path(".areno-dashboard-state.json")
+
+
+def _make_sections_launch(launch_items):
+    """Build a sections-format launch config matching real CLI output."""
+    sections = []
+    current_title = "Basic"
+    current_items = []
+    for key, value in launch_items:
+        if key in ("world_size", "tp_size", "attn_backend"):
+            if current_items:
+                sections.append({"title": current_title, "items": current_items})
+            current_title = "Runtime"
+            current_items = []
+        elif key in ("batch_size", "n_samples", "max_running_prompts", "max_new_tokens"):
+            if current_items:
+                sections.append({"title": current_title, "items": current_items})
+            current_title = "Rollout"
+            current_items = []
+        current_items.append({"key": key, "value": value})
+    if current_items:
+        sections.append({"title": current_title, "items": current_items})
+    return {"sections": sections}
 
 
 def make_job(index: int) -> dict:
@@ -42,12 +66,26 @@ def make_job(index: int) -> dict:
     created_ts = now_ts - random.randint(60, 86400 * 7)
     updated_ts = created_ts + random.randint(10, 3600)
     step = random.randint(0, 200)
+    # Half the jobs use sections format (like real CLI), half use flat dict (like dashboard launcher)
+    use_sections = random.random() < 0.5
 
     if kind == "serve":
-        launch = {"model_path": model, "host": "0.0.0.0", "port": 8000}
+        if use_sections:
+            launch = _make_sections_launch([("model_path", model), ("host", "0.0.0.0"), ("port", 8000)])
+        else:
+            launch = {"model_path": model, "host": "0.0.0.0", "port": 8000}
         name = f"serve {model}"
     else:
-        launch = {"algo": algo, "ckpt": model, "dataset_path": dataset}
+        if use_sections:
+            launch = _make_sections_launch([
+                ("algo", algo), ("ckpt", model), ("dataset_path", dataset),
+                ("model_hub", "modelscope"),
+                ("world_size", random.choice([1, 2, 4])),
+                ("tp_size", random.choice([1, 2])),
+                ("attn_backend", "flash"),
+            ])
+        else:
+            launch = {"algo": algo, "ckpt": model, "dataset_path": dataset, "model_hub": "modelscope"}
         name = f"train {algo} {model}"
 
     return {
@@ -87,7 +125,8 @@ def main() -> None:
     args.output.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"Wrote {args.count} synthetic jobs to {args.output}")
     print(f"States: {', '.join(sorted(set(j['status'] for j in jobs)))}")
-    print(f"Algorithms: {', '.join(sorted(set(j['launch'].get('algo', '') for j in jobs if j['launch'].get('algo'))))}")
+    algos = sorted(set(filter(None, (_launch_value(j['launch'], 'algo') for j in jobs))))
+    print(f"Algorithms: {', '.join(algos)}")
     print(f"Types: {', '.join(sorted(set(j['kind'] for j in jobs)))}")
 
 

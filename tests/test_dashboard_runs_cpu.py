@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from areno.dashboard.server import Job, _parse_time, _duration_seconds
+from areno.dashboard.server import Job, _parse_time, _duration_seconds, _launch_value
 
 
 class ParseTimeTest(unittest.TestCase):
@@ -136,6 +136,103 @@ class SummaryJsonTest(unittest.TestCase):
         self.assertEqual(summary["algo"], "gspo")
         self.assertEqual(summary["ckpt"], "Qwen/Qwen3-0.6B")
         self.assertEqual(summary["dataset_path"], "gsm8k:main")
+
+
+class LaunchValueTest(unittest.TestCase):
+    """_launch_value reads from both flat dict and sections format."""
+
+    def test_flat_dict(self):
+        launch = {"algo": "gspo", "ckpt": "Qwen/Qwen3-0.6B"}
+        self.assertEqual(_launch_value(launch, "algo"), "gspo")
+        self.assertEqual(_launch_value(launch, "ckpt"), "Qwen/Qwen3-0.6B")
+
+    def test_sections_format(self):
+        """CLI-registered jobs store launch config as sections arrays."""
+        launch = {
+            "sections": [
+                {"title": "Basic", "items": [
+                    {"key": "algo", "value": "gspo"},
+                    {"key": "ckpt", "value": "Qwen/Qwen3-0.6B"},
+                    {"key": "dataset_path", "value": "tictactoe.jsonl"},
+                ]},
+                {"title": "Runtime", "items": [
+                    {"key": "tp_size", "value": 2},
+                ]},
+            ]
+        }
+        self.assertEqual(_launch_value(launch, "algo"), "gspo")
+        self.assertEqual(_launch_value(launch, "ckpt"), "Qwen/Qwen3-0.6B")
+        self.assertEqual(_launch_value(launch, "dataset_path"), "tictactoe.jsonl")
+        self.assertEqual(_launch_value(launch, "tp_size"), 2)
+
+    def test_missing_key_returns_default(self):
+        self.assertEqual(_launch_value({"sections": []}, "algo"), "")
+        self.assertEqual(_launch_value({}, "algo"), "")
+
+    def test_none_launch(self):
+        self.assertEqual(_launch_value(None, "algo"), "")
+
+    def test_serve_sections_with_model_path(self):
+        launch = {
+            "sections": [
+                {"title": "Basic", "items": [
+                    {"key": "model_path", "value": "Qwen/Qwen3-0.6B"},
+                ]},
+            ]
+        }
+        self.assertEqual(_launch_value(launch, "model_path"), "Qwen/Qwen3-0.6B")
+
+
+class SummarySectionsFormatTest(unittest.TestCase):
+    """to_summary_json works with sections-format launch_config (CLI jobs)."""
+
+    def test_sections_format_summary(self):
+        job = _make_job()
+        job.launch_config = {
+            "sections": [
+                {"title": "Basic", "items": [
+                    {"key": "algo", "value": "gspo"},
+                    {"key": "ckpt", "value": "Qwen/Qwen3-0.6B"},
+                    {"key": "dataset_path", "value": "tictactoe.jsonl"},
+                ]},
+            ]
+        }
+        summary = job.to_summary_json()
+        self.assertEqual(summary["algo"], "gspo")
+        self.assertEqual(summary["ckpt"], "Qwen/Qwen3-0.6B")
+        self.assertEqual(summary["dataset_path"], "tictactoe.jsonl")
+
+    def test_serve_sections_format_summary(self):
+        job = _make_job(kind="serve")
+        job.launch_config = {
+            "sections": [
+                {"title": "Basic", "items": [
+                    {"key": "model_path", "value": "Qwen/Qwen3-0.6B"},
+                ]},
+            ]
+        }
+        summary = job.to_summary_json()
+        self.assertEqual(summary["ckpt"], "Qwen/Qwen3-0.6B")
+        self.assertEqual(summary["algo"], "")
+
+    def test_from_json_with_sections_launch(self):
+        """A job restored from JSON with sections launch retains summary fields."""
+        job = _make_job()
+        job.launch_config = {
+            "sections": [
+                {"title": "Basic", "items": [
+                    {"key": "algo", "value": "dpo"},
+                    {"key": "ckpt", "value": "Qwen/Qwen2.5-0.5B"},
+                    {"key": "dataset_path", "value": "alpaca.jsonl"},
+                ]},
+            ]
+        }
+        payload = job.to_json()
+        restored = Job.from_json(payload)
+        summary = restored.to_summary_json()
+        self.assertEqual(summary["algo"], "dpo")
+        self.assertEqual(summary["ckpt"], "Qwen/Qwen2.5-0.5B")
+        self.assertEqual(summary["dataset_path"], "alpaca.jsonl")
 
 
 if __name__ == "__main__":
