@@ -16,6 +16,7 @@ from areno.api.backend.base import Backend, get_backend_cls
 from areno.api.config import BackendConfig, coerce_backend_config, resolve_backend_type
 from areno.api.context import Context
 from areno.api.data import PromptBatch, PromptItem
+from areno.api.data_profile import DataProfileReport, StageProfiler
 from areno.api.metrics import MetricsRecorder
 from areno.api.models import BackendType, RolloutResult, SamplingParams, TrainSequence
 from areno.api.roles import ModelRole
@@ -260,6 +261,80 @@ class Trainer:
                 skipped_long=skipped_long,
                 total_skipped_long=total_skipped_long,
             )
+
+    def load_prompt_batches_profiled(
+        self,
+        dataset,
+        *,
+        batch_size: int,
+        max_prompt_tokens: int,
+        prompt_key: str = "prompt",
+        solutions_key: str = "solutions",
+        profile_slow_threshold_s: float = 1.0,
+    ) -> Iterable[tuple[PromptBatch, DataProfileReport]]:
+        """Like ``load_prompt_batches`` but yields per-batch profiling reports.
+
+        Stages timed: ``record_access`` (dataset row access), ``contract_conversion``
+        (field extraction / validation), ``tokenize``, ``filter`` (length check),
+        and ``batch`` (boundary marker — no measurable cost, marks batch
+        boundaries only).
+
+        Scope: covers the ``load_prompt_batches`` path used by
+        ``PolicyOnlyTrainer`` (GSPO/GRPO) and ``PPOTrainer``.  SFT/DPO use
+        independent data paths and are not covered.
+        """
+
+        profiler = StageProfiler(enabled=True, slow_threshold_s=profile_slow_threshold_s)
+        wall_start = time.perf_counter()
+        cursor = 0
+        total_skipped_long = 0
+        total_scanned = 0
+        while cursor < len(dataset):
+            items = []
+            scanned = 0
+            skipped_long = 0
+            while len(items) < batch_size and cursor < len(dataset):
+                with profiler.stage("record_access", index=cursor):
+                    record = dataset[cursor]
+                cursor += 1
+                scanned += 1
+                total_scanned += 1
+                with profiler.stage("contract_conversion", index=cursor - 1):
+                    if prompt_key not in record:
+                        raise ValueError(
+                            f"dataset row must contain `{prompt_key}`; use --dataset-loader-fn to normalize raw rows"
+                        )
+                    prompt = record[prompt_key]
+                with profiler.stage("tokenize", index=cursor - 1):
+                    input_tokens = encode_generation_prompt(self._tokenizer, prompt)
+                with profiler.stage("filter", index=cursor - 1, tokens=len(input_tokens)):
+                    if len(input_tokens) > max_prompt_tokens:
+                        skipped_long += 1
+                        total_skipped_long += 1
+                        continue
+                items.append(
+                    PromptItem(
+                        prompt=prompt,
+                        solutions=record[solutions_key] if solutions_key in record else None,
+                        input_tokens=input_tokens,
+                        record=dict(record),
+                    )
+                )
+            if not items:
+                break
+            with profiler.stage("batch"):
+                pass  # Boundary marker only — no measurable cost.
+            report = profiler.build_report(
+                records_scanned=total_scanned,
+                records_skipped_long=total_skipped_long,
+                wall_seconds=time.perf_counter() - wall_start,
+            )
+            yield PromptBatch(
+                items=items,
+                scanned=scanned,
+                skipped_long=skipped_long,
+                total_skipped_long=total_skipped_long,
+            ), report
 
     def rollout_batch(self, prompts: list[str], n_samples: int, sampling_params: SamplingParams) -> list[RolloutResult]:
         """Generate `n_samples` completions for each prompt in order."""

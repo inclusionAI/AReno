@@ -129,7 +129,7 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         ),
     ),
     ("Checkpoint", ("save_path", "save_interval")),
-    ("Observability", ("metrics_log_dir",)),
+    ("Observability", ("metrics_log_dir", "profile_dataset_stages", "profile_slow_threshold_s")),
 )
 
 
@@ -273,6 +273,9 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
         _require_positive_float(args.lam, "--lam")
     if args.critic_warmup_steps < 0:
         raise click.UsageError("--critic-warmup-steps must be non-negative")
+    profile_slow_threshold_s = float(getattr(args, "profile_slow_threshold_s", 1.0))
+    if profile_slow_threshold_s < 0:
+        raise click.UsageError("--profile-slow-threshold-s must be non-negative")
     _preflight_task_hooks(args, algorithm)
     return _trainer_config_from_args(args)
 
@@ -600,6 +603,8 @@ def _trainer_config_from_args(args) -> TrainerConfig:
     args.model_hub = getattr(args, "model_hub", "modelscope")
     algorithm = get_algorithm(args.algo)
     chat_template_enable_thinking = False if args.disable_thinking else None
+    profile_dataset_stages = bool(getattr(args, "profile_dataset_stages", False))
+    profile_slow_threshold_s = float(getattr(args, "profile_slow_threshold_s", 1.0))
     if algorithm.name == "dpo":
         return DPOTrainerConfig(
             algo=algorithm.name,
@@ -640,6 +645,8 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             chat_template_enable_thinking=chat_template_enable_thinking,
             ref_ckpt=args.ref_ckpt,
             dpo_beta=args.dpo_beta,
+            profile_dataset_stages=profile_dataset_stages,
+            profile_slow_threshold_s=profile_slow_threshold_s,
         )
     if algorithm.name == "sft":
         return TrainerConfig(
@@ -679,6 +686,8 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             agent_timeout_s=args.agent_timeout_s,
             train_tool_results=args.train_tool_results,
             chat_template_enable_thinking=chat_template_enable_thinking,
+            profile_dataset_stages=profile_dataset_stages,
+            profile_slow_threshold_s=profile_slow_threshold_s,
         )
     if algorithm.name != "ppo":
         return PolicyTrainerConfig(
@@ -727,6 +736,8 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             agent_timeout_s=args.agent_timeout_s,
             train_tool_results=args.train_tool_results,
             chat_template_enable_thinking=chat_template_enable_thinking,
+            profile_dataset_stages=profile_dataset_stages,
+            profile_slow_threshold_s=profile_slow_threshold_s,
         )
     return PPOTrainerConfig(
         algo=algorithm.name,
@@ -788,6 +799,8 @@ def _trainer_config_from_args(args) -> TrainerConfig:
         agent_timeout_s=args.agent_timeout_s,
         train_tool_results=args.train_tool_results,
         chat_template_enable_thinking=chat_template_enable_thinking,
+        profile_dataset_stages=profile_dataset_stages,
+        profile_slow_threshold_s=profile_slow_threshold_s,
     )
 
 
@@ -1324,6 +1337,20 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
 @click.option("--value-loss-coef", type=float, default=0.5, show_default=True, help="PPO value loss coefficient.")
 @click.option("--gamma", type=float, default=1.0, show_default=True, help="PPO GAE discount.")
 @click.option("--lam", type=float, default=0.95, show_default=True, help="PPO GAE lambda.")
+@click.option(
+    "--profile-dataset-stages",
+    "profile_dataset_stages",
+    is_flag=True,
+    help="Measure per-stage dataset preprocessing time (record_access, contract_conversion, tokenize, filter, batch). Default off.",
+)
+@click.option(
+    "--profile-slow-threshold-s",
+    "profile_slow_threshold_s",
+    type=float,
+    default=1.0,
+    show_default=True,
+    help="Seconds above which a record is flagged slow (bounded id only, never prompt text).",
+)
 def train_command(**options) -> None:
     """Click entrypoint for training."""
 

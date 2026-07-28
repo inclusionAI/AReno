@@ -71,11 +71,7 @@ class PolicyOnlyTrainer:
             record_dashboard_state(
                 self.areno, stage="epoch_start", epoch=epoch, step=step, role=self._policy_role_name()
             )
-            for prompt_batch in self.areno.load_prompt_batches(
-                self.dataset,
-                batch_size=self.config.batch_size,
-                max_prompt_tokens=self.config.max_prompt_tokens,
-            ):
+            for prompt_batch in self._iter_prompt_batches():
                 role = self._policy_role_name()
                 self.logger.info("epoch=%d step=%d role=%s stage=rollout_start", epoch, step, role)
                 record_dashboard_state(self.areno, stage="rollout_start", epoch=epoch, step=step, role=role)
@@ -157,6 +153,26 @@ class PolicyOnlyTrainer:
                     return
             self.logger.info("epoch=%d stage=epoch_end", epoch)
             record_dashboard_state(self.areno, stage="epoch_end", epoch=epoch, step=step, role=self._policy_role_name())
+
+    def _iter_prompt_batches(self):
+        """Yield prompt batches, switching to profiled variant when enabled."""
+
+        if getattr(self.config, "profile_dataset_stages", False):
+            threshold = getattr(self.config, "profile_slow_threshold_s", 1.0)
+            for batch, report in self.areno.load_prompt_batches_profiled(
+                self.dataset,
+                batch_size=self.config.batch_size,
+                max_prompt_tokens=self.config.max_prompt_tokens,
+                profile_slow_threshold_s=threshold,
+            ):
+                self.logger.info("stage=data_profile\n%s", report.render_human())
+                yield batch
+        else:
+            yield from self.areno.load_prompt_batches(
+                self.dataset,
+                batch_size=self.config.batch_size,
+                max_prompt_tokens=self.config.max_prompt_tokens,
+            )
 
     def _policy_role_name(self) -> str:
         # GSPO/GRPO have a single trainable model called "policy"; PPO
