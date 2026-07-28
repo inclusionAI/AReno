@@ -13,13 +13,22 @@ import platform
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from importlib import import_module
 from importlib import metadata as importlib_metadata
 from pathlib import Path
 from typing import Any
 
 import click
+
+from areno.cli.disk_guard import (
+    DiskMonitor,
+    DiskMonitorConfig,
+    build_disk_monitor_from_config,
+    disk_budget_to_json,
+    estimate_disk_usage,
+    format_disk_budget_text,
+)
 
 _ENV_VARS = (
     "CUDA_HOME",
@@ -46,8 +55,37 @@ def env_command(as_json: bool) -> None:
 
 
 @click.command(name="check", context_settings={"help_option_names": ["-h", "--help"]})
-def check_command() -> None:
+@click.option("--disk-budget", is_flag=True, help="Estimate disk space for a training run before starting.")
+@click.option("--save-path", default=None, help="Checkpoint output directory for --disk-budget estimation.")
+@click.option("--metrics-log-dir", default=None, help="Metrics/log directory for --disk-budget estimation.")
+@click.option("--epochs", type=int, default=10, show_default=True, help="Training epochs for --disk-budget estimation.")
+@click.option("--save-interval", type=int, default=100, show_default=True, help="Checkpoint interval for --disk-budget estimation.")
+@click.option("--max-steps", type=int, default=None, help="Max training steps for --disk-budget estimation (overrides --epochs).")
+@click.option("--include-checkpoints", is_flag=True, help="Include checkpoint sizes in --disk-budget estimation.")
+@click.option("--disk-json", "disk_as_json", is_flag=True, help="Emit disk budget as machine-readable JSON.")
+def check_command(
+    disk_budget: bool,
+    save_path: str | None,
+    metrics_log_dir: str | None,
+    epochs: int,
+    save_interval: int,
+    max_steps: int | None,
+    include_checkpoints: bool,
+    disk_as_json: bool,
+) -> None:
     """Check whether this machine is ready to run AReno."""
+
+    if disk_budget:
+        _run_disk_budget_check(
+            save_path=save_path,
+            metrics_log_dir=metrics_log_dir,
+            epochs=epochs,
+            save_interval=save_interval,
+            max_steps=max_steps,
+            include_checkpoints=include_checkpoints,
+            as_json=disk_as_json,
+        )
+        return
 
     report = collect_env()
     results = run_checks(report)
@@ -482,3 +520,50 @@ def _print_env_report(report: dict[str, Any]) -> None:
     click.echo("  Environment variables:")
     for name, value in report["env"].items():
         click.echo(f"    {name}={value if value is not None else '<unset>'}")
+
+
+def _run_disk_budget_check(
+    *,
+    save_path: str | None,
+    metrics_log_dir: str | None,
+    epochs: int,
+    save_interval: int,
+    max_steps: int | None,
+    include_checkpoints: bool,
+    as_json: bool,
+) -> None:
+    """Run a standalone disk-budget preflight and print the result."""
+
+    paths: list[str] = []
+    if save_path:
+        paths.append(save_path)
+    if metrics_log_dir:
+        paths.append(metrics_log_dir)
+    if not paths:
+        paths = ["."]
+
+    total_steps = max_steps if max_steps is not None else epochs * 1000
+
+    ckpt_size = 0
+    ckpt_dir = save_path or metrics_log_dir
+    if ckpt_dir and Path(ckpt_dir).is_dir():
+        for f in Path(ckpt_dir).glob("*.safetensors"):
+            ckpt_size += f.stat().st_size
+
+    config = DiskMonitorConfig(include_checkpoints=include_checkpoints)
+    monitor = DiskMonitor(
+        config=config,
+        paths=paths,
+        total_steps=total_steps,
+        checkpoint_size_bytes=ckpt_size,
+        save_interval=save_interval,
+    )
+    budget = monitor.estimate_budget()
+
+    if as_json:
+        click.echo(disk_budget_to_json(budget))
+        return
+
+    click.echo(format_disk_budget_text(budget))
+    if not budget.sufficient:
+        raise click.exceptions.Exit(1)

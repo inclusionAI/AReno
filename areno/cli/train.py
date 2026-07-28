@@ -33,6 +33,7 @@ from areno.api.trainer_config import (
     TrainerConfig,
 )
 from areno.cli.model_refs import resolve_model_refs_for_config
+from areno.cli.disk_guard import DiskMonitor, DiskMonitorConfig, build_disk_monitor_from_config
 from areno.engine.config import (
     ModelConfig,
     flash_attention_unsupported_gpu_reason,
@@ -791,7 +792,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
     )
 
 
-def run(trainer_config: TrainerConfig):
+def run(trainer_config: TrainerConfig, *, disk_monitor_config: DiskMonitorConfig | None = None):
     """Build the trainer chosen by `--algo` and run `.fit()` to completion."""
 
     # Heavy dependencies are imported lazily so `python train.py --help`
@@ -823,6 +824,10 @@ def run(trainer_config: TrainerConfig):
         load_from_disk=load_from_disk,
     )
     trainer = build_trainer(trainer_config, instance=api_trainer, dataset=dataset, reward_fn=reward_fn, loss_fn=loss_fn)
+    if disk_monitor_config is not None:
+        trainer._disk_monitor = build_disk_monitor_from_config(
+            trainer_config, disk_monitor_config=disk_monitor_config
+        )
     trainer.fit()
 
 
@@ -1190,6 +1195,11 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
 )
 @click.option("--epochs", type=int, default=10, show_default=True, help="Number of dataset epochs to train.")
 @click.option("--max-steps", type=int, default=None, help="Stop after this many trainer steps.")
+@click.option("--disk-monitor", is_flag=True, help="Monitor disk space during training and stop when critically low.")
+@click.option("--disk-warn-percent", type=float, default=5.0, show_default=True, help="Disk free-space warning threshold (percent of total).")
+@click.option("--disk-stop-percent", type=float, default=1.0, show_default=True, help="Disk free-space stop threshold (percent of total).")
+@click.option("--disk-warn-gb", type=float, default=None, help="Absolute disk warning threshold in GB (overrides percent if stricter).")
+@click.option("--disk-stop-gb", type=float, default=None, help="Absolute disk stop threshold in GB (overrides percent if stricter).")
 @click.option(
     "--tune-params",
     "tune_params",
@@ -1363,7 +1373,15 @@ def train_command(**options) -> None:
         config=_training_config_settings(trainer_config),
         metrics_dir=trainer_config.metrics_log_dir,
     )
-    run(trainer_config)
+    disk_monitor_config = None
+    if options.get("disk_monitor"):
+        disk_monitor_config = DiskMonitorConfig(
+            warn_percent=options.get("disk_warn_percent", 5.0),
+            stop_percent=options.get("disk_stop_percent", 1.0),
+            warn_gb=options.get("disk_warn_gb"),
+            stop_gb=options.get("disk_stop_gb"),
+        )
+    run(trainer_config, disk_monitor_config=disk_monitor_config)
 
 
 def main() -> None:

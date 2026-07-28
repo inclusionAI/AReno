@@ -41,6 +41,7 @@ class DPOTrainer:
         # leave the backend-facing loss signature as loss_fn(data_pack, logprobs).
         self.loss_fn = partial(loss_fn, beta=config.dpo_beta)
         self.logger = logging.getLogger(f"{self.__class__.__module__}.{self.__class__.__name__}")
+        self._disk_monitor = None
         self.roles = {
             # DPO only needs a frozen reference policy; no rollout, reward, or
             # critic roles are involved.
@@ -129,6 +130,19 @@ class DPOTrainer:
                     self.logger.info("epoch=%d step=%d stage=max_steps_reached", epoch, step)
                     record_dashboard_state(self.areno, stage="max_steps_reached", epoch=epoch, step=step, role="policy")
                     return
+                if self._disk_monitor is not None:
+                    disk_status = self._disk_monitor.check(step)
+                    if disk_status == "stop":
+                        self.logger.critical(
+                            "epoch=%d step=%d stage=disk_full_stop free_gb=%.2f",
+                            epoch, step, self._disk_monitor.last_free_bytes / 1e9,
+                        )
+                        record_dashboard_state(
+                            self.areno, stage="disk_full_stop", epoch=epoch, step=step,
+                            role="policy", status="stopped",
+                            extra={"free_gb": self._disk_monitor.last_free_bytes / 1e9},
+                        )
+                        return
             self.logger.info("epoch=%d stage=epoch_end", epoch)
             record_dashboard_state(self.areno, stage="epoch_end", epoch=epoch, step=step, role="policy")
 
