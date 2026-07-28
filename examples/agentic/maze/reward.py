@@ -15,7 +15,9 @@ import game  # noqa: E402
 def reward_fn(record: Any) -> float:
     """Score one maze episode by replaying all act tool calls."""
 
-    state = dataset_generator.record_to_state(record.source_record)
+    source = record.source_record
+    raw = source.get("state", source)
+    state = dataset_generator.record_to_state(raw)
     actions = _extract_actions(record)
     total, _metrics = game.compute_trajectory_reward(state, actions)
     return total

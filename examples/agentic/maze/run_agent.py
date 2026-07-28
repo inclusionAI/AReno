@@ -77,9 +77,10 @@ async def run_agent(ctx, batch):
     client = AsyncOpenAI(base_url=ctx.get_base_url(), api_key=ctx.api_key, http_client=http_client, max_retries=0)
 
     async def run_one(item):
-        state = game.make_state_from_record(item.record)
-        radius = item.record.get("view_radius", 1)
-        max_turns = min(item.record.get("max_steps", DEFAULT_MAX_TURNS), DEFAULT_MAX_TURNS)
+        record = item.record.get("state", item.record)
+        state = game.make_state_from_record(record)
+        radius = record.get("view_radius", 1)
+        max_turns = min(record.get("max_steps", DEFAULT_MAX_TURNS), DEFAULT_MAX_TURNS)
         turns: list[AgentTrajectoryTurn] = []
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
