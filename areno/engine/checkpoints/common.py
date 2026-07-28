@@ -454,7 +454,9 @@ def copy_source_passthrough_weights(source_path: str | Path, output_path: str | 
 
     output_index["metadata"]["total_size"] = total_size
     output_index["weight_map"] = output_weight_map
-    output_index_path.write_text(json.dumps(output_index, indent=2, sort_keys=True) + "\n")
+    from areno.cli.atomic_io import atomic_write_json
+
+    atomic_write_json(output_index_path, output_index, sort_keys=True)
 
 
 def _protected_prefix_from_top_level(spec: TopLevelSpec) -> str:

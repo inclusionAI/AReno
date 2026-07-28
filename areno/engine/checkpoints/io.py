@@ -631,21 +631,20 @@ def write_hf_safetensors_checkpoint(
     for metadata in all_metadata:
         total_size += int(metadata["total_size"])
         weight_map.update(metadata["weight_map"])
-    with (path / "model.safetensors.index.json").open("w", encoding="utf-8") as f:
-        json.dump(
-            {
-                "metadata": {
-                    "total_size": total_size,
-                    # Marker used by SafetensorsIndex to skip NCCL broadcast.
-                    "areno_checkpoint_writer": "distributed_tp",
-                },
-                "weight_map": weight_map,
+    from areno.cli.atomic_io import atomic_write_json
+
+    atomic_write_json(
+        path / "model.safetensors.index.json",
+        {
+            "metadata": {
+                "total_size": total_size,
+                # Marker used by SafetensorsIndex to skip NCCL broadcast.
+                "areno_checkpoint_writer": "distributed_tp",
             },
-            f,
-            indent=2,
-            sort_keys=True,
-        )
-        f.write("\n")
+            "weight_map": weight_map,
+        },
+        sort_keys=True,
+    )
     return str(path)
 
 

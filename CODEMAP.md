@@ -52,6 +52,7 @@ backend-only view.
 | Task | Start here | Nearby verification |
 | --- | --- | --- |
 | Change train or serve CLI behavior | `areno/cli/train.py` or `areno/cli/serve.py` | `tests/test_train_cli_config_cpu.py` or `tests/test_serve_cli_cpu.py` |
+| Change preflight or atomic IO | `areno/cli/preflight_io.py` or `areno/cli/atomic_io.py` | `tests/test_preflight_io_cpu.py` or `tests/test_atomic_io_cpu.py` |
 | Change SDK rollout or training behavior | `areno/api/trainer.py`, then follow the `Backend` call | `tests/test_trainer_api_cpu.py` and `tests/test_protocol_cpu.py` |
 | Add or change an algorithm or loss | `areno/api/algorithms.py`, `areno/api/trainers/`, and `areno/api/loss_fns/` | `tests/test_algorithms_cpu.py` and `tests/test_losses_rewards_cpu.py` |
 | Add or change a model family | `areno/models/base.py`, `areno/models/registry.py`, then the closest family under `areno/models/` | `tests/test_registry_cpu.py` and `tests/test_registry_discovery_cpu.py` |

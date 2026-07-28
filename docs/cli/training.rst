@@ -366,6 +366,31 @@ Observability
    ``rollout/*``, ``train/*``, and ``time/*`` metric namespaces and debugging
    log examples.
 
+Preflight I/O checks
+~~~~~~~~~~~~~~~~~~~~~
+
+Before training starts, ``areno train`` probes every configured output
+directory (``--save-path`` and ``--metrics-log-dir``) for writability.
+The probe creates a uniquely-named temporary file, writes to it, flushes,
+renames it, and then deletes it.  This catches read-only directories,
+full disks, and quota errors before expensive model or worker
+initialization.
+
+If the probe fails, the command exits with a ``UsageError`` that
+identifies the failing directory, the operation that failed (``create``,
+``write``, ``flush``, ``rename``, or ``cleanup``), and the underlying
+error message.
+
+``--preflight-io / --no-preflight-io``
+   Enable or disable the output-directory writability probe.  Enabled by
+   default.  Use ``--no-preflight-io`` to skip the probe entirely.
+
+``--preflight-probe-prefix TEXT``
+   Filename prefix for preflight probe files.  Default:
+   ``.areno_preflight_``.  Probe files are always cleaned up after the
+   check; this option exists for environments with custom filesystem
+   policies.
+
 Examples
 --------
 

@@ -55,8 +55,8 @@ def _read_registry(path: Path) -> dict[str, Any]:
 def _write_registry(path: Path, data: dict[str, Any]) -> None:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp.replace(path)
+        from areno.cli.atomic_io import atomic_write_json
+
+        atomic_write_json(path, data, ensure_ascii=False)
     except Exception:
         pass

@@ -274,7 +274,9 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
     if args.critic_warmup_steps < 0:
         raise click.UsageError("--critic-warmup-steps must be non-negative")
     _preflight_task_hooks(args, algorithm)
-    return _trainer_config_from_args(args)
+    config = _trainer_config_from_args(args)
+    _preflight_output_directories(args, config)
+    return config
 
 
 def _require_positive_float(value: float, option_name: str) -> None:
@@ -549,6 +551,31 @@ def _preflight_task_hooks(args, algorithm) -> None:
             expected="run_agent(ctx, batch)",
             positional_args=2,
         )
+
+
+def _preflight_output_directories(args, config: TrainerConfig) -> None:
+    """Probe output directories for writability before expensive initialization."""
+
+    from areno.cli.preflight_io import PreflightConfig, format_probe_results, probe_paths
+
+    paths: list[tuple[str, str]] = []
+    if config.save_path is not None:
+        paths.append(("checkpoint", config.save_path))
+    if config.metrics_log_dir is not None:
+        paths.append(("metrics", config.metrics_log_dir))
+    if not paths:
+        return
+
+    preflight_cfg = PreflightConfig(
+        enabled=getattr(args, "preflight_io", True),
+        probe_prefix=getattr(args, "preflight_probe_prefix", ".areno_preflight_"),
+    )
+    results = probe_paths(paths, config=preflight_cfg)
+    failures = [r for r in results if not r.ok]
+    if failures:
+        msg = "Preflight directory check failed:\n\n"
+        msg += format_probe_results(failures)
+        raise click.UsageError(msg)
 
 
 def _validate_python_callable(
@@ -833,6 +860,8 @@ def _write_dashboard_run_config(config: TrainerConfig) -> None:
         return
     import os
 
+    from areno.cli.atomic_io import atomic_write_json, atomic_write_text
+
     path = Path(config.metrics_log_dir)
     path.mkdir(parents=True, exist_ok=True)
     summary = _format_training_config_summary(config, color=False)
@@ -843,10 +872,8 @@ def _write_dashboard_run_config(config: TrainerConfig) -> None:
         "summary_text": summary,
         "settings": _training_config_settings(config),
     }
-    (path / f"areno_run_config.{pid}.txt").write_text(summary + "\n", encoding="utf-8")
-    (path / f"areno_run_config.{pid}.json").write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-    )
+    atomic_write_text(path / f"areno_run_config.{pid}.txt", summary + "\n")
+    atomic_write_json(path / f"areno_run_config.{pid}.json", payload, ensure_ascii=False)
 
 
 def _training_config_settings(config: TrainerConfig) -> dict:
@@ -1185,6 +1212,17 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
 @click.option("--critic-ckpt", default=None, help="Optional PPO critic model checkpoint path or remote model repo ID.")
 @click.option("--save-path", default=None, help="Optional checkpoint output directory.")
 @click.option("--save-interval", type=int, default=100, show_default=True, help="Save checkpoint every N train steps.")
+@click.option(
+    "--preflight-io/--no-preflight-io",
+    default=True,
+    help="Enable output-directory writability probe before training.",
+)
+@click.option(
+    "--preflight-probe-prefix",
+    default=".areno_preflight_",
+    show_default=True,
+    help="Filename prefix for preflight probe files.",
+)
 @click.option(
     "--metrics-log-dir", default=DEFAULT_METRICS_LOG_DIR, show_default=True, help="TensorBoard metrics log directory."
 )

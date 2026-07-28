@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import tempfile
 import types
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from click.testing import CliRunner
@@ -135,10 +137,14 @@ class CliDiagnosticsTest(unittest.TestCase):
         self.assertIn("Reinstall without ARENO_BUILD_EXT=0", result.output)
 
     def test_writable_path_check_warns_for_missing_parent(self):
+        # A non-existent path should WARN (checking nearest existing parent)
+        # without creating the directory — no side effects in areno check.
         result = diagnostics._writable_path_check("cache", "/definitely/missing/areno/path")
 
         self.assertEqual(result.status, "WARN")
         self.assertIn("mkdir -p", result.next_step)
+        # Verify the directory was NOT created as a side effect.
+        self.assertFalse(Path("/definitely/missing/areno/path").exists())
 
     def test_writable_path_check_warns_for_existing_file(self):
         with tempfile.NamedTemporaryFile() as tmp_file:
@@ -146,6 +152,23 @@ class CliDiagnosticsTest(unittest.TestCase):
 
         self.assertEqual(result.status, "WARN")
         self.assertIn("exists but is a file", result.detail)
+
+    def test_writable_path_check_ok_for_writable_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = diagnostics._writable_path_check("cache", tmp)
+            self.assertEqual(result.status, "OK")
+
+    def test_writable_path_check_fails_for_readonly_dir(self):
+        d = tempfile.mkdtemp()
+        readonly = os.path.join(d, "readonly")
+        os.mkdir(readonly)
+        os.chmod(readonly, 0o444)
+        try:
+            result = diagnostics._writable_path_check("cache", readonly)
+            self.assertEqual(result.status, "FAIL")
+            self.assertIn("failed operation", result.detail)
+        finally:
+            os.chmod(readonly, 0o755)
 
     def test_version_check_pads_short_versions(self):
         self.assertTrue(diagnostics._version_at_least("3", (2, 6)))

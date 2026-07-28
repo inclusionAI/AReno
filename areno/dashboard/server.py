@@ -582,9 +582,9 @@ class DashboardState:
     def _save_state(self) -> None:
         try:
             payload = {"jobs": [job.to_json() for job in self.jobs.values()]}
-            tmp_file = STATE_FILE.with_suffix(".json.tmp")
-            tmp_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-            tmp_file.replace(STATE_FILE)
+            from areno.cli.atomic_io import atomic_write_json
+
+            atomic_write_json(STATE_FILE, payload, ensure_ascii=False)
         except Exception:
             pass
 

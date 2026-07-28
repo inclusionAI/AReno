@@ -261,7 +261,26 @@ def _writable_path_check(label: str, path_text: str) -> CheckResult:
             f"{path} (exists but is a file, not a directory)",
             "Remove the file or choose a different directory path.",
         )
-    parent = path if path.is_dir() else _nearest_existing_parent(path)
+
+    # For the diagnostics command, we use a lightweight check that does NOT
+    # create directories (unlike the train preflight probe).  If the directory
+    # already exists, verify it with a real write probe.  If it doesn't exist,
+    # fall back to checking the nearest existing parent's writability.
+    if path.is_dir():
+        from areno.cli.preflight_io import probe_directory_writability
+
+        result = probe_directory_writability(path, stage=label)
+        if result.ok:
+            return CheckResult("OK", f"{label} writable", str(path))
+        return CheckResult(
+            "FAIL",
+            f"{label} writable",
+            f"{path} (failed operation: {result.operation}; {result.error or ''})",
+            "Check directory permissions or choose a writable path.",
+        )
+
+    # Path doesn't exist yet — check nearest existing parent without creating.
+    parent = _nearest_existing_parent(path)
     ok = os.access(parent, os.W_OK)
     return _result(
         ok,

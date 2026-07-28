@@ -691,8 +691,155 @@ def _options(**overrides):
         gamma=1.0,
         lam=0.95,
         critic_warmup_steps=20,
+        preflight_io=True,
+        preflight_probe_prefix=".areno_preflight_",
     )
     defaults.update(overrides)
     if defaults["algo"] == "sft" and "dataset_loader_fn" not in overrides:
         defaults["dataset_loader_fn"] = "examples/sft/alpaca/dataset_loader.py"
     return defaults
+
+
+# ---------------------------------------------------------------------------
+# Preflight output-directory writability probe tests
+# ---------------------------------------------------------------------------
+
+import os
+import tempfile
+from pathlib import Path
+
+
+def test_preflight_accepts_writable_dirs():
+    """Writable save_path and metrics_log_dir should pass preflight."""
+    with tempfile.TemporaryDirectory() as save_dir, tempfile.TemporaryDirectory() as metrics_dir:
+        cfg = _trainer_config_from_options(
+            **_options(algo="gspo", save_path=save_dir, metrics_log_dir=metrics_dir)
+        )
+        assert cfg.save_path == save_dir
+
+
+def test_preflight_rejects_readonly_save_path():
+    """Read-only save_path should raise UsageError."""
+    d = tempfile.mkdtemp()
+    readonly = Path(d) / "readonly"
+    readonly.mkdir()
+    os.chmod(readonly, 0o444)
+    try:
+        with pytest.raises(UsageError, match="Preflight directory check failed"):
+            _trainer_config_from_options(
+                **_options(algo="gspo", save_path=str(readonly), metrics_log_dir=None)
+            )
+    finally:
+        os.chmod(readonly, 0o755)
+
+
+def test_preflight_rejects_readonly_metrics_log_dir():
+    """Read-only metrics_log_dir should raise UsageError."""
+    d = tempfile.mkdtemp()
+    readonly = Path(d) / "readonly_metrics"
+    readonly.mkdir()
+    os.chmod(readonly, 0o444)
+    try:
+        with pytest.raises(UsageError, match="Preflight directory check failed"):
+            _trainer_config_from_options(
+                **_options(algo="gspo", save_path=None, metrics_log_dir=str(readonly))
+            )
+    finally:
+        os.chmod(readonly, 0o755)
+
+
+def test_preflight_skips_when_save_path_is_none():
+    """save_path=None should skip checkpoint directory probe."""
+    cfg = _trainer_config_from_options(
+        **_options(algo="gspo", save_path=None, metrics_log_dir=None)
+    )
+    assert cfg.save_path is None
+
+
+def test_preflight_skips_when_metrics_log_dir_is_none():
+    """metrics_log_dir=None should skip metrics directory probe."""
+    with tempfile.TemporaryDirectory() as save_dir:
+        cfg = _trainer_config_from_options(
+            **_options(algo="gspo", save_path=save_dir, metrics_log_dir=None)
+        )
+        assert cfg.metrics_log_dir is None
+
+
+def test_preflight_no_io_flag_skips_probe():
+    """--no-preflight-io should skip the probe entirely."""
+    d = tempfile.mkdtemp()
+    readonly = Path(d) / "readonly"
+    readonly.mkdir()
+    os.chmod(readonly, 0o444)
+    try:
+        # With preflight disabled, a read-only dir should NOT raise.
+        cfg = _trainer_config_from_options(
+            **_options(
+                algo="gspo",
+                save_path=str(readonly),
+                metrics_log_dir=None,
+                preflight_io=False,
+            )
+        )
+        assert cfg.save_path == str(readonly)
+    finally:
+        os.chmod(readonly, 0o755)
+
+
+def test_preflight_error_message_contains_stage_and_path():
+    """Error message should mention the stage and the path."""
+    d = tempfile.mkdtemp()
+    readonly = Path(d) / "readonly"
+    readonly.mkdir()
+    os.chmod(readonly, 0o444)
+    try:
+        with pytest.raises(UsageError) as exc_info:
+            _trainer_config_from_options(
+                **_options(algo="gspo", save_path=str(readonly), metrics_log_dir=None)
+            )
+        msg = str(exc_info.value)
+        assert "checkpoint" in msg
+        assert str(readonly) in msg
+    finally:
+        os.chmod(readonly, 0o755)
+
+
+def test_train_command_preflight_fails_before_backend_init(monkeypatch):
+    """End-to-end: preflight failure should prevent backend initialization."""
+
+    run_called = False
+
+    def fake_run(_config):
+        nonlocal run_called
+        run_called = True
+
+    monkeypatch.setattr(train_cli, "run", fake_run)
+    monkeypatch.setattr(
+        train_cli, "resolve_model_refs_for_config", lambda c: c
+    )
+    monkeypatch.setattr(
+        "areno.cli.dashboard_registry.register_dashboard_job", lambda **kw: None
+    )
+
+    d = tempfile.mkdtemp()
+    readonly = Path(d) / "readonly"
+    readonly.mkdir()
+    os.chmod(readonly, 0o444)
+    try:
+        result = CliRunner().invoke(
+            train_cli.train_command,
+            [
+                "--algo", "gspo",
+                "--ckpt", "actor",
+                "--dataset-path", "dataset",
+                "--tp-size", "1",
+                "--world-size", "1",
+                "--save-path", str(readonly),
+                "--metrics-log-dir", "/tmp/areno/test_preflight",
+            ],
+        )
+        assert result.exit_code != 0
+        assert "Preflight directory check failed" in result.output
+        assert not run_called
+    finally:
+        os.chmod(readonly, 0o755)

@@ -17,6 +17,8 @@ from pathlib import Path
 
 import numpy as np
 
+from areno.cli.atomic_io import atomic_write_text
+
 
 class MetricsRecorder:
     """Small TensorBoard facade used by `Trainer.train`."""
@@ -74,9 +76,7 @@ class MetricsRecorder:
             payload["role"] = role
         if extra:
             payload.update(extra)
-        tmp_file = self._state_file.with_suffix(self._state_file.suffix + ".tmp")
-        tmp_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp_file.replace(self._state_file)
+        atomic_write_text(self._state_file, json.dumps(payload, ensure_ascii=False, indent=2))
 
     def close(self) -> None:
         """Flush and close the underlying TensorBoard writer."""

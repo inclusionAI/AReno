@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import json
+import os
+import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
 
 from areno.api import metrics as metrics_mod
 from areno.api.metrics import (
@@ -65,6 +70,69 @@ class MetricsUtilityTest(unittest.TestCase):
             metrics_mod.create_tensorboard_writer = old_factory
 
         self.assertEqual(writer.close_count, 1)
+
+
+class MetricsAtomicWriteTest(unittest.TestCase):
+    """Verify that MetricsRecorder uses atomic writes for dashboard state."""
+
+    def _make_recorder(self, log_dir: str) -> MetricsRecorder:
+        class FakeWriter:
+            def __init__(self):
+                self.close_count = 0
+
+            def close(self):
+                self.close_count += 1
+
+            def add_scalar(self, *args, **kwargs):
+                pass
+
+            def flush(self):
+                pass
+
+        writer = FakeWriter()
+        old_factory = metrics_mod.create_tensorboard_writer
+        metrics_mod.create_tensorboard_writer = lambda _log_dir: writer
+        try:
+            return MetricsRecorder(log_dir)
+        finally:
+            metrics_mod.create_tensorboard_writer = old_factory
+
+    def test_record_dashboard_state_uses_atomic_write(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            recorder = self._make_recorder(tmp)
+            recorder.record_dashboard_state(stage="train", step=1)
+            state_file = Path(tmp) / f"dashboard_state.{os.getpid()}.json"
+            self.assertTrue(state_file.exists())
+            data = json.loads(state_file.read_text())
+            self.assertEqual(data["stage"], "train")
+            self.assertEqual(data["step"], 1)
+            # No .tmp file left behind.
+            self.assertFalse((Path(str(state_file) + ".tmp")).exists())
+            recorder.close()
+
+    def test_record_dashboard_state_cleans_temp_on_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            recorder = self._make_recorder(tmp)
+            state_file = Path(tmp) / f"dashboard_state.{os.getpid()}.json"
+            tmp_file = Path(str(state_file) + ".tmp")
+
+            from areno.cli.atomic_io import atomic_write_text
+            original = atomic_write_text
+
+            def fail_atomic_write(path, content, **kwargs):
+                if str(path) == str(state_file):
+                    raise OSError("simulated failure")
+                return original(path, content, **kwargs)
+
+            with mock.patch("areno.api.metrics.atomic_write_text", fail_atomic_write):
+                try:
+                    recorder.record_dashboard_state(stage="train", step=1)
+                except OSError:
+                    pass
+
+            # No .tmp file left behind even on failure.
+            self.assertFalse(tmp_file.exists())
+            recorder.close()
 
 
 if __name__ == "__main__":

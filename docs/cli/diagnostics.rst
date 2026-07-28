@@ -74,7 +74,7 @@ Checks include:
 * ``CUDA_HOME`` and ``nvcc``
 * optional runtime dependency imports
 * ``areno_accel`` import
-* writable cache/log locations
+* writable cache/log locations (verified via real create→write→flush→rename→cleanup probe, not just permission bits)
 
 ``WARN`` items usually indicate degraded or incomplete setup. ``FAIL`` items
 mean AReno is not ready to run the CUDA training/inference engine.
