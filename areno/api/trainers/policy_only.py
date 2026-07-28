@@ -618,6 +618,12 @@ class PolicyOnlyTrainer:
                         "epoch=? step=? completion_validation metrics=%s",
                         vr.metrics,
                     )
+                if not result.sequences:
+                    raise RuntimeError(
+                        "all completions for prompt were empty or invalid; "
+                        f"dropped={len(vr.dropped_indices)} policy=filter "
+                        f"prompt_preview={item.prompt[:200]!r}"
+                    )
 
             rewards = [
                 float(
