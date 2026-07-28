@@ -433,6 +433,7 @@ class PPOTrainer(PolicyOnlyTrainer):
         # backend is up but before the first rollout/train cycle.
         self.areno.init()
         self._ensure_roles()
+        self.areno.configure_health_check(getattr(self.config, "health_check", None))
         try:
             self._fit_initialized()
         finally:

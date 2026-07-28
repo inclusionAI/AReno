@@ -175,3 +175,87 @@ When a trajectory is dropped for exceeding the model context window,
 counts, message counts, assistant turn counts, tool-result counts, and a short
 prompt preview. This is the fastest way to debug overlong agentic examples
 without dumping every token in every trajectory.
+
+Startup health check (Issue #249)
+---------------------------------
+
+AReno can run automatic pass/warn/fail health checks over the first training
+updates to catch silent degeneration early (zero effective tokens, constant
+reward where variation is required, non-changing loss, excessive skipped
+batches). It is off by default and reuses the existing metric stream
+(``collect_train_batch_stats`` for sample-side signals, the backend train result
+for ``loss`` / ``grad_zero_ratio``) — no parallel collection path.
+
+Enable it from the CLI:
+
+.. code-block:: bash
+
+   areno train --algo gspo --ckpt ... --dataset-path ... \
+     --health-check-enabled --health-check-window 20 --health-check-on-fail warn
+
+Flags:
+
+* ``--health-check-enabled`` — turn on the check (default off; full backward
+  compatibility).
+* ``--health-check-window`` — startup window length in training updates
+  (default 20). The check evaluates once when this many updates complete.
+* ``--health-check-on-fail`` — ``warn`` (default, log only) or ``fail`` (raise
+  and abort the run when the summary is FAIL).
+* ``--health-check-require-reward-variation`` / ``--health-check-allow-constant-reward`
+  — whether reward must vary. Disable for tasks with legitimately constant
+  reward (anti-false-positive).
+
+Invalid thresholds are rejected at config validation time, before workers
+spawn.
+
+Output channels (all written only when the check is enabled):
+
+* Console logs under the ``areno.health_check`` logger — one line per check
+  (``name``, ``status``, ``stage``, ``msg``, ``metric_ref``) and a trailing
+  ``SUMMARY=...`` line.
+* A structured artifact JSON at
+  ``<metrics-log-dir>/health_check/<run_id>.json`` with ``summary``, per-check
+  ``stage``/``status``/``message``/``metric_ref``/``input``, window metadata,
+  and ``original_errors``.
+* ``health/*`` TensorBoard scalars (``health/summary``, plus one per check)
+  written through the same ``MetricsRecorder`` writer as ``rollout/*`` and
+  ``train/*``.
+
+The four checks and their signals:
+
+* ``effective_tokens`` (stage=trainer) — sum of prompt-mask-filtered response
+  lengths; zero across the window fails, a low per-batch mean warns.
+* ``reward_variance`` (stage=trainer) — reward std; with variation required,
+  ``std==0`` fails and a low std warns. ``require_variation=false`` passes
+  constant reward. NaN reward fails and records the original error.
+* ``loss_change`` (stage=trainer) — first/last loss delta; ``delta==0`` with
+  ≥2 samples fails; a low delta warns. NaN loss fails. A single-step window
+  warns (unreliable delta).
+* ``skipped_batches`` (stage=rollout) — combines the rollout ``skipped_long``
+  ratio and the backend ``grad_zero_ratio`` proxy; the more severe sub-signal
+  wins. A zero-batch window fails pointing at the data/input contract.
+
+Failure messages reference only ``stage``, the triggering config field
+(``input``), and a ``metric_ref`` into the existing TensorBoard namespace —
+never training-sample text. The original error (e.g. a NaN detection) is kept
+on the report rather than swallowed.
+
+Example artifact:
+
+.. code-block:: json
+
+   {
+     "run_id": "a1b2c3d4e5f6",
+     "window": {"updates": 20, "completed_at_step": 20},
+     "summary": "WARN",
+     "checks": [
+       {"name": "effective_tokens", "stage": "trainer", "status": "PASS",
+        "message": "effective tokens ok (min_batch=512, mean=512.0)",
+        "metric_ref": "metrics/rollout/response_len_mean", "input": "-"},
+       {"name": "reward_variance", "stage": "trainer", "status": "WARN",
+        "message": "low reward std=3.0e-07 < min_std_warn=1.0e-06",
+        "metric_ref": "metrics/rollout/rewards_std",
+        "input": "reward_variance.min_std_warn"}
+     ],
+     "original_errors": []
+   }

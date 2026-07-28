@@ -10,9 +10,11 @@ before changing training parameters:
    areno env --json
 
 Use this section when setup, CUDA, PyTorch, FlashAttention, ``areno_accel``,
-OOM, timeout, reward, tool-call, or agentic rollout issues block progress.
+OOM, timeout, reward, tool-call, agentic rollout, or health-check issues
+block progress.
 
 Troubleshooting pages:
 
 * :doc:`faq`
 * :doc:`report-issue`
+* :doc:`health-check`

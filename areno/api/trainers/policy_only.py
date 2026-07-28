@@ -45,6 +45,7 @@ class PolicyOnlyTrainer:
 
     def fit(self) -> None:
         self.areno.init()
+        self.areno.configure_health_check(getattr(self.config, "health_check", None))
         try:
             self._fit_initialized()
         finally:
@@ -118,6 +119,7 @@ class PolicyOnlyTrainer:
                 if train_batch:
                     # PPO uses this hook to skip actor updates during the
                     # critic-only warmup window; GSPO/GRPO always train.
+                    self.areno.record_rollout_skipped(getattr(prompt_batch, "skipped_long", 0))
                     if not self._should_train_policy(step):
                         result = self._augment_train_stats({"actor_train_skipped": 1.0})
                         self.logger.info("epoch=%d step=%d role=%s stage=train_skip", epoch, step, role)

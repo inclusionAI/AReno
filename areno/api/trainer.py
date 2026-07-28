@@ -7,8 +7,11 @@ one `Trainer`, calls ``init()`` once, and then loops:
 ref/reward/critic models become available behind the backend boundary.
 """
 
+import json
+import logging
 import time
 from collections.abc import Callable, Iterable
+from pathlib import Path
 from typing import Any
 
 from areno.api.agentic import LossMaskPolicy, RolloutSession
@@ -16,7 +19,14 @@ from areno.api.backend.base import Backend, get_backend_cls
 from areno.api.config import BackendConfig, coerce_backend_config, resolve_backend_type
 from areno.api.context import Context
 from areno.api.data import PromptBatch, PromptItem
-from areno.api.metrics import MetricsRecorder
+from areno.api.health_check import (
+    HealthCheckConfig,
+    HealthCheckError,
+    HealthReport,
+    WindowSignals,
+    run_health_check,
+)
+from areno.api.metrics import MetricsRecorder, collect_train_batch_stats
 from areno.api.models import BackendType, RolloutResult, SamplingParams, TrainSequence
 from areno.api.roles import ModelRole
 from areno.api.tokenizer import encode_generation_prompt, eos_token_ids, load_tokenizer, normalize_token_ids
@@ -62,6 +72,10 @@ class Trainer:
         self._step_wall_start: float | None = None
         self._rollout_session_depth = 0
         self._rollout_wall_start: float | None = None
+        # Optional startup-window health checker (Issue #249). Stays `None`
+        # unless `configure_health_check` is called with an enabled config, so
+        # the default run path never pays for it.
+        self._health_checker: TrainingHealthChecker | None = None
 
     def init(self) -> None:
         """Load tokenizer, create backend context, and initialize workers."""
@@ -353,6 +367,10 @@ class Trainer:
                 train_batch=batch_data,
                 timings=self._metric_timings,
             )
+        if self._health_checker is not None:
+            self._health_checker.observe(
+                step=self._ctx.global_step, train_result=result, train_batch=batch_data
+            )
         self.finish_step()
         return result
 
@@ -431,6 +449,46 @@ class Trainer:
 
         return self._backend.save_checkpoint(self._ctx, path)
 
+    def configure_health_check(
+        self,
+        config: HealthCheckConfig | None,
+        *,
+        artifact_dir: str | None = None,
+    ) -> None:
+        """Attach (or detach) the startup-window health checker.
+
+        ``config`` or ``config.enabled=False`` detaches the checker so
+        ``train()`` short-circuits and produces no artifact / metric / log.
+        ``artifact_dir`` defaults to ``<metrics_log_dir>/health_check`` and is
+        only used when a checker is actually attached.
+
+        Called by trainer implementations at the top of ``fit()``; not part of
+        the rollout/train hot path.
+        """
+
+        if config is None or not config.enabled:
+            self._health_checker = None
+            return
+        if self._ctx is None:
+            raise RuntimeError("Trainer is not initialized; call init() before configure_health_check()")
+        sink = artifact_dir
+        if sink is None:
+            base = self._metrics.log_dir if self._metrics is not None else None
+            sink = str(Path(base) / "health_check") if base is not None else None
+        self._health_checker = TrainingHealthChecker(config, sink=sink, metrics=self._metrics)
+
+    def record_rollout_skipped(self, skipped_long: int) -> None:
+        """Feed rollout-side overlong-prompt skip counts into the health window.
+
+        Optional: trainers that hold a `PromptBatch` with a ``skipped_long``
+        field call this so the skipped-batches check sees the real count. When
+        never called, the window assumes zero rollout skips for that step,
+        which is correct for batches that contained no overlong prompts.
+        """
+
+        if self._health_checker is not None:
+            self._health_checker.record_skipped(skipped_long)
+
     def close(self) -> None:
         """Release backend workers and local resources such as metric writers."""
 
@@ -442,7 +500,155 @@ class Trainer:
             self._initialized = False
             if self._metrics is not None:
                 self._metrics.close()
+            # Finalize the health window early if the run ends before the
+            # configured startup window completes.
+            if self._health_checker is not None:
+                self._health_checker.finalize_early()
+                self._health_checker = None
 
 
 def _normalize_prompt_token_batch(prompt_tokens: list[list[int]]) -> list[list[int]]:
     return [normalize_token_ids(row) for row in prompt_tokens]
+
+
+class TrainingHealthChecker:
+    """Coordinator-side startup-window health checker (Issue #249).
+
+    Accumulates per-step signals from `Trainer.train()` (reusing
+    `collect_train_batch_stats` for the sample-side signals and the backend
+    train result for `loss` / `grad_zero_ratio`), evaluates the window once it
+    fills, and writes a structured artifact + human-readable log + `health/*`
+    TensorBoard scalars. `on_fail='warn'` (default) only logs; `on_fail='fail'`
+    raises `HealthCheckError` carrying stage + input (never sample text).
+    """
+
+    _STATUS_VALUE = {"pass": 0, "warn": 1, "fail": 2}
+
+    def __init__(
+        self,
+        config: HealthCheckConfig,
+        *,
+        sink: str | None,
+        metrics: MetricsRecorder | None = None,
+    ) -> None:
+        self._config = config
+        self._sink = Path(sink) if sink is not None else None
+        if self._sink is not None:
+            self._sink.mkdir(parents=True, exist_ok=True)
+        self._metrics = metrics
+        self._logger = logging.getLogger("areno.health_check")
+        self._signals = WindowSignals()
+        self._steps_seen = 0
+        self._completed_at_step = 0
+        self._finalized = False
+        self._pending_skipped = 0
+
+    def record_skipped(self, skipped_long: int) -> None:
+        """Accumulate rollout-side overlong-prompt skips for the current step."""
+
+        self._pending_skipped += int(skipped_long)
+
+    def observe(self, *, step: int, train_result: dict, train_batch: list[TrainSequence]) -> None:
+        """Feed one training step's signals; evaluate when the window fills."""
+
+        if self._finalized:
+            return
+        # Reuse the existing sample-side summarizer so reward / response-length
+        # signals are computed exactly as `MetricsRecorder` computes them.
+        stats = collect_train_batch_stats(train_batch)
+        self._signals.rewards.extend(float(r) for r in stats.get("rewards", []))
+        response_lens = stats.get("response_len", [])
+        # Per-batch effective token count = sum of response lengths this step.
+        self._signals.effective_tokens_per_batch.append(int(sum(response_lens)))
+        self._signals.total_batches += len(train_batch)
+        self._signals.skipped_long += self._pending_skipped
+        self._pending_skipped = 0
+        # Backend-reported signals.
+        loss = train_result.get("loss") if isinstance(train_result, dict) else None
+        if loss is not None:
+            self._signals.losses.append(float(loss))
+        metrics = train_result.get("metrics", {}) if isinstance(train_result, dict) else {}
+        gz = metrics.get("grad_zero_ratio")
+        if gz is not None:
+            self._signals.grad_zero_ratios.append(float(gz))
+        self._steps_seen += 1
+        self._completed_at_step = step
+        if self._steps_seen >= self._config.startup_window_updates:
+            self._evaluate()
+
+    def finalize_early(self) -> None:
+        """Evaluate the partial window if the run ends before it fills."""
+
+        if self._finalized or self._steps_seen == 0:
+            self._finalized = True
+            return
+        self._evaluate()
+
+    def _evaluate(self) -> None:
+        """Run the pure checks, emit outputs, and optionally raise."""
+
+        if self._finalized:
+            return
+        self._finalized = True
+        report = run_health_check(
+            self._config,
+            self._signals,
+            completed_at_step=self._completed_at_step,
+        )
+        if report is None:
+            return
+        self._write_artifact(report)
+        self._emit_metrics(report)
+        self._log_report(report)
+        if report.summary == "fail" and self._config.on_fail == "fail":
+            stages = sorted({c.stage for c in report.checks if c.status == "fail"})
+            inputs = [c.input for c in report.checks if c.status == "fail" and c.input != "-"]
+            detail = "; ".join(c.message for c in report.checks if c.status == "fail")
+            raise HealthCheckError(
+                f"health-check FAIL stage={stages} input={inputs} detail={detail}"
+            )
+
+    def _write_artifact(self, report: HealthReport) -> None:
+        if self._sink is None:
+            return
+        path = self._sink / f"{report.run_id}.json"
+        path.write_text(
+            json.dumps(report.to_json(), ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+    def _emit_metrics(self, report: HealthReport) -> None:
+        # Emit through the shared TensorBoard writer when one is attached, so
+        # the `health/*` namespace lives alongside `rollout/*` and `train/*`.
+        if self._metrics is None:
+            return
+        step = report.completed_at_step
+        self._metrics.add_scalar("health/summary", float(self._STATUS_VALUE[report.summary]), step)
+        for check in report.checks:
+            self._metrics.add_scalar(
+                f"health/{check.name}", float(self._STATUS_VALUE[check.status]), step
+            )
+
+    def _log_report(self, report: HealthReport) -> None:
+        window = self._config.startup_window_updates
+        self._logger.info(
+            "stage=health_check startup_window=%d updates completed_at_step=%d",
+            window,
+            report.completed_at_step,
+        )
+        for check in report.checks:
+            self._logger.info(
+                "stage=health_check name=%s status=%s stage=%s msg=%s metric_ref=%s",
+                check.name,
+                check.status,
+                check.stage,
+                check.message,
+                check.metric_ref,
+            )
+        artifact = (
+            str(self._sink / f"{report.run_id}.json") if self._sink is not None else "n/a"
+        )
+        self._logger.info(
+            "stage=health_check SUMMARY=%s artifact=%s",
+            report.summary,
+            artifact,
+        )

@@ -14,6 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from areno.api.defaults import DEFAULT_METRICS_LOG_DIR
+from areno.api.health_check import HealthCheckConfig
 
 
 @dataclass(slots=True)
@@ -60,6 +61,11 @@ class TrainerConfig:
     agent_timeout_s: float = 300.0
     train_tool_results: bool = False
     chat_template_enable_thinking: bool | None = None
+    # Startup-window health check (Issue #249). ``None`` keeps the legacy
+    # behavior; an enabled `HealthCheckConfig` turns on automatic pass/warn/fail
+    # checks over the first `startup_window_updates` training updates. Defaults
+    # to disabled for full backward compatibility.
+    health_check: HealthCheckConfig | None = None
 
     def __post_init__(self) -> None:
         if self.attn_backend not in {"flash", "native"}:

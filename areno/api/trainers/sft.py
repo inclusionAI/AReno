@@ -46,6 +46,7 @@ class SFTTrainer:
 
     def fit(self) -> None:
         self.areno.init()
+        self.areno.configure_health_check(getattr(self.config, "health_check", None))
         try:
             self._fit_initialized()
         finally:
