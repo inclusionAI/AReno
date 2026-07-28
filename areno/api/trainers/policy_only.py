@@ -158,7 +158,13 @@ class PolicyOnlyTrainer:
                     return
                 if self._disk_monitor is not None:
                     disk_status = self._disk_monitor.check(step)
-                    if disk_status == "stop":
+                    if disk_status == "warn":
+                        record_dashboard_state(
+                            self.areno, stage="disk_space_warn", epoch=epoch, step=step,
+                            role=role,
+                            extra={"free_gb": self._disk_monitor.last_free_bytes / 1e9},
+                        )
+                    elif disk_status == "stop":
                         self.logger.critical(
                             "epoch=%d step=%d stage=disk_full_stop free_gb=%.2f",
                             epoch, step, self._disk_monitor.last_free_bytes / 1e9,
