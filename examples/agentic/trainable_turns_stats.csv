@@ -1,0 +1,37 @@
+fixture,desc,mode,mask_tool_call_args,total_response_tokens,trainable_tokens,masked_response_tokens
+simple,text -> tool_call -> text (single tool),all_assistant,False,111,111,0
+simple,text -> tool_call -> text (single tool),all_assistant,True,111,95,16
+simple,text -> tool_call -> text (single tool),last_assistant,False,111,38,73
+simple,text -> tool_call -> text (single tool),last_assistant,True,111,38,73
+simple,text -> tool_call -> text (single tool),final_answer,False,111,38,73
+simple,text -> tool_call -> text (single tool),final_answer,True,111,38,73
+double_tool,text -> tool_call -> tool_call -> text (consecutive tools),all_assistant,False,134,134,0
+double_tool,text -> tool_call -> tool_call -> text (consecutive tools),all_assistant,True,134,107,27
+double_tool,text -> tool_call -> tool_call -> text (consecutive tools),last_assistant,False,134,29,105
+double_tool,text -> tool_call -> tool_call -> text (consecutive tools),last_assistant,True,134,29,105
+double_tool,text -> tool_call -> tool_call -> text (consecutive tools),final_answer,False,134,29,105
+double_tool,text -> tool_call -> tool_call -> text (consecutive tools),final_answer,True,134,29,105
+multi_step,text -> tool_call -> text -> tool_call -> text,all_assistant,False,228,228,0
+multi_step,text -> tool_call -> text -> tool_call -> text,all_assistant,True,228,171,57
+multi_step,text -> tool_call -> text -> tool_call -> text,last_assistant,False,228,26,202
+multi_step,text -> tool_call -> text -> tool_call -> text,last_assistant,True,228,26,202
+multi_step,text -> tool_call -> text -> tool_call -> text,final_answer,False,228,26,202
+multi_step,text -> tool_call -> text -> tool_call -> text,final_answer,True,228,26,202
+no_tools,"text only (degenerate, no tool calls)",all_assistant,False,59,59,0
+no_tools,"text only (degenerate, no tool calls)",all_assistant,True,59,59,0
+no_tools,"text only (degenerate, no tool calls)",last_assistant,False,59,59,0
+no_tools,"text only (degenerate, no tool calls)",last_assistant,True,59,59,0
+no_tools,"text only (degenerate, no tool calls)",final_answer,False,59,59,0
+no_tools,"text only (degenerate, no tool calls)",final_answer,True,59,59,0
+bare_trailing,"text -> tool_call (trailing bare call, zero signal for final_answer)",all_assistant,False,84,84,0
+bare_trailing,"text -> tool_call (trailing bare call, zero signal for final_answer)",all_assistant,True,84,60,24
+bare_trailing,"text -> tool_call (trailing bare call, zero signal for final_answer)",last_assistant,False,84,55,29
+bare_trailing,"text -> tool_call (trailing bare call, zero signal for final_answer)",last_assistant,True,84,31,53
+bare_trailing,"text -> tool_call (trailing bare call, zero signal for final_answer)",final_answer,False,84,0,84
+bare_trailing,"text -> tool_call (trailing bare call, zero signal for final_answer)",final_answer,True,84,0,84
+deep_trajectory,text -> tool -> text -> tool -> text -> tool -> text (3 tools),all_assistant,False,306,306,0
+deep_trajectory,text -> tool -> text -> tool -> text -> tool -> text (3 tools),all_assistant,True,306,244,62
+deep_trajectory,text -> tool -> text -> tool -> text -> tool -> text (3 tools),last_assistant,False,306,38,268
+deep_trajectory,text -> tool -> text -> tool -> text -> tool -> text (3 tools),last_assistant,True,306,38,268
+deep_trajectory,text -> tool -> text -> tool -> text -> tool -> text (3 tools),final_answer,False,306,38,268
+deep_trajectory,text -> tool -> text -> tool -> text -> tool -> text (3 tools),final_answer,True,306,38,268

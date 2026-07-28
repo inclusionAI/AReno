@@ -1,0 +1,326 @@
+[
+  {
+    "fixture": "simple",
+    "desc": "text -> tool_call -> text (single tool)",
+    "mode": "all_assistant",
+    "mask_tool_call_args": false,
+    "total_response_tokens": 111,
+    "trainable_tokens": 111,
+    "masked_response_tokens": 0
+  },
+  {
+    "fixture": "simple",
+    "desc": "text -> tool_call -> text (single tool)",
+    "mode": "all_assistant",
+    "mask_tool_call_args": true,
+    "total_response_tokens": 111,
+    "trainable_tokens": 95,
+    "masked_response_tokens": 16
+  },
+  {
+    "fixture": "simple",
+    "desc": "text -> tool_call -> text (single tool)",
+    "mode": "last_assistant",
+    "mask_tool_call_args": false,
+    "total_response_tokens": 111,
+    "trainable_tokens": 38,
+    "masked_response_tokens": 73
+  },
+  {
+    "fixture": "simple",
+    "desc": "text -> tool_call -> text (single tool)",
+    "mode": "last_assistant",
+    "mask_tool_call_args": true,
+    "total_response_tokens": 111,
+    "trainable_tokens": 38,
+    "masked_response_tokens": 73
+  },
+  {
+    "fixture": "simple",
+    "desc": "text -> tool_call -> text (single tool)",
+    "mode": "final_answer",
+    "mask_tool_call_args": false,
+    "total_response_tokens": 111,
+    "trainable_tokens": 38,
+    "masked_response_tokens": 73
+  },
+  {
+    "fixture": "simple",
+    "desc": "text -> tool_call -> text (single tool)",
+    "mode": "final_answer",
+    "mask_tool_call_args": true,
+    "total_response_tokens": 111,
+    "trainable_tokens": 38,
+    "masked_response_tokens": 73
+  },
+  {
+    "fixture": "double_tool",
+    "desc": "text -> tool_call -> tool_call -> text (consecutive tools)",
+    "mode": "all_assistant",
+    "mask_tool_call_args": false,
+    "total_response_tokens": 134,
+    "trainable_tokens": 134,
+    "masked_response_tokens": 0
+  },
+  {
+    "fixture": "double_tool",
+    "desc": "text -> tool_call -> tool_call -> text (consecutive tools)",
+    "mode": "all_assistant",
+    "mask_tool_call_args": true,
+    "total_response_tokens": 134,
+    "trainable_tokens": 107,
+    "masked_response_tokens": 27
+  },
+  {
+    "fixture": "double_tool",
+    "desc": "text -> tool_call -> tool_call -> text (consecutive tools)",
+    "mode": "last_assistant",
+    "mask_tool_call_args": false,
+    "total_response_tokens": 134,
+    "trainable_tokens": 29,
+    "masked_response_tokens": 105
+  },
+  {
+    "fixture": "double_tool",
+    "desc": "text -> tool_call -> tool_call -> text (consecutive tools)",
+    "mode": "last_assistant",
+    "mask_tool_call_args": true,
+    "total_response_tokens": 134,
+    "trainable_tokens": 29,
+    "masked_response_tokens": 105
+  },
+  {
+    "fixture": "double_tool",
+    "desc": "text -> tool_call -> tool_call -> text (consecutive tools)",
+    "mode": "final_answer",
+    "mask_tool_call_args": false,
+    "total_response_tokens": 134,
+    "trainable_tokens": 29,
+    "masked_response_tokens": 105
+  },
+  {
+    "fixture": "double_tool",
+    "desc": "text -> tool_call -> tool_call -> text (consecutive tools)",
+    "mode": "final_answer",
+    "mask_tool_call_args": true,
+    "total_response_tokens": 134,
+    "trainable_tokens": 29,
+    "masked_response_tokens": 105
+  },
+  {
+    "fixture": "multi_step",
+    "desc": "text -> tool_call -> text -> tool_call -> text",
+    "mode": "all_assistant",
+    "mask_tool_call_args": false,
+    "total_response_tokens": 228,
+    "trainable_tokens": 228,
+    "masked_response_tokens": 0
+  },
+  {
+    "fixture": "multi_step",
+    "desc": "text -> tool_call -> text -> tool_call -> text",
+    "mode": "all_assistant",
+    "mask_tool_call_args": true,
+    "total_response_tokens": 228,
+    "trainable_tokens": 171,
+    "masked_response_tokens": 57
+  },
+  {
+    "fixture": "multi_step",
+    "desc": "text -> tool_call -> text -> tool_call -> text",
+    "mode": "last_assistant",
+    "mask_tool_call_args": false,
+    "total_response_tokens": 228,
+    "trainable_tokens": 26,
+    "masked_response_tokens": 202
+  },
+  {
+    "fixture": "multi_step",
+    "desc": "text -> tool_call -> text -> tool_call -> text",
+    "mode": "last_assistant",
+    "mask_tool_call_args": true,
+    "total_response_tokens": 228,
+    "trainable_tokens": 26,
+    "masked_response_tokens": 202
+  },
+  {
+    "fixture": "multi_step",
+    "desc": "text -> tool_call -> text -> tool_call -> text",
+    "mode": "final_answer",
+    "mask_tool_call_args": false,
+    "total_response_tokens": 228,
+    "trainable_tokens": 26,
+    "masked_response_tokens": 202
+  },
+  {
+    "fixture": "multi_step",
+    "desc": "text -> tool_call -> text -> tool_call -> text",
+    "mode": "final_answer",
+    "mask_tool_call_args": true,
+    "total_response_tokens": 228,
+    "trainable_tokens": 26,
+    "masked_response_tokens": 202
+  },
+  {
+    "fixture": "no_tools",
+    "desc": "text only (degenerate, no tool calls)",
+    "mode": "all_assistant",
+    "mask_tool_call_args": false,
+    "total_response_tokens": 59,
+    "trainable_tokens": 59,
+    "masked_response_tokens": 0
+  },
+  {
+    "fixture": "no_tools",
+    "desc": "text only (degenerate, no tool calls)",
+    "mode": "all_assistant",
+    "mask_tool_call_args": true,
+    "total_response_tokens": 59,
+    "trainable_tokens": 59,
+    "masked_response_tokens": 0
+  },
+  {
+    "fixture": "no_tools",
+    "desc": "text only (degenerate, no tool calls)",
+    "mode": "last_assistant",
+    "mask_tool_call_args": false,
+    "total_response_tokens": 59,
+    "trainable_tokens": 59,
+    "masked_response_tokens": 0
+  },
+  {
+    "fixture": "no_tools",
+    "desc": "text only (degenerate, no tool calls)",
+    "mode": "last_assistant",
+    "mask_tool_call_args": true,
+    "total_response_tokens": 59,
+    "trainable_tokens": 59,
+    "masked_response_tokens": 0
+  },
+  {
+    "fixture": "no_tools",
+    "desc": "text only (degenerate, no tool calls)",
+    "mode": "final_answer",
+    "mask_tool_call_args": false,
+    "total_response_tokens": 59,
+    "trainable_tokens": 59,
+    "masked_response_tokens": 0
+  },
+  {
+    "fixture": "no_tools",
+    "desc": "text only (degenerate, no tool calls)",
+    "mode": "final_answer",
+    "mask_tool_call_args": true,
+    "total_response_tokens": 59,
+    "trainable_tokens": 59,
+    "masked_response_tokens": 0
+  },
+  {
+    "fixture": "bare_trailing",
+    "desc": "text -> tool_call (trailing bare call, zero signal for final_answer)",
+    "mode": "all_assistant",
+    "mask_tool_call_args": false,
+    "total_response_tokens": 84,
+    "trainable_tokens": 84,
+    "masked_response_tokens": 0
+  },
+  {
+    "fixture": "bare_trailing",
+    "desc": "text -> tool_call (trailing bare call, zero signal for final_answer)",
+    "mode": "all_assistant",
+    "mask_tool_call_args": true,
+    "total_response_tokens": 84,
+    "trainable_tokens": 60,
+    "masked_response_tokens": 24
+  },
+  {
+    "fixture": "bare_trailing",
+    "desc": "text -> tool_call (trailing bare call, zero signal for final_answer)",
+    "mode": "last_assistant",
+    "mask_tool_call_args": false,
+    "total_response_tokens": 84,
+    "trainable_tokens": 55,
+    "masked_response_tokens": 29
+  },
+  {
+    "fixture": "bare_trailing",
+    "desc": "text -> tool_call (trailing bare call, zero signal for final_answer)",
+    "mode": "last_assistant",
+    "mask_tool_call_args": true,
+    "total_response_tokens": 84,
+    "trainable_tokens": 31,
+    "masked_response_tokens": 53
+  },
+  {
+    "fixture": "bare_trailing",
+    "desc": "text -> tool_call (trailing bare call, zero signal for final_answer)",
+    "mode": "final_answer",
+    "mask_tool_call_args": false,
+    "total_response_tokens": 84,
+    "trainable_tokens": 0,
+    "masked_response_tokens": 84
+  },
+  {
+    "fixture": "bare_trailing",
+    "desc": "text -> tool_call (trailing bare call, zero signal for final_answer)",
+    "mode": "final_answer",
+    "mask_tool_call_args": true,
+    "total_response_tokens": 84,
+    "trainable_tokens": 0,
+    "masked_response_tokens": 84
+  },
+  {
+    "fixture": "deep_trajectory",
+    "desc": "text -> tool -> text -> tool -> text -> tool -> text (3 tools)",
+    "mode": "all_assistant",
+    "mask_tool_call_args": false,
+    "total_response_tokens": 306,
+    "trainable_tokens": 306,
+    "masked_response_tokens": 0
+  },
+  {
+    "fixture": "deep_trajectory",
+    "desc": "text -> tool -> text -> tool -> text -> tool -> text (3 tools)",
+    "mode": "all_assistant",
+    "mask_tool_call_args": true,
+    "total_response_tokens": 306,
+    "trainable_tokens": 244,
+    "masked_response_tokens": 62
+  },
+  {
+    "fixture": "deep_trajectory",
+    "desc": "text -> tool -> text -> tool -> text -> tool -> text (3 tools)",
+    "mode": "last_assistant",
+    "mask_tool_call_args": false,
+    "total_response_tokens": 306,
+    "trainable_tokens": 38,
+    "masked_response_tokens": 268
+  },
+  {
+    "fixture": "deep_trajectory",
+    "desc": "text -> tool -> text -> tool -> text -> tool -> text (3 tools)",
+    "mode": "last_assistant",
+    "mask_tool_call_args": true,
+    "total_response_tokens": 306,
+    "trainable_tokens": 38,
+    "masked_response_tokens": 268
+  },
+  {
+    "fixture": "deep_trajectory",
+    "desc": "text -> tool -> text -> tool -> text -> tool -> text (3 tools)",
+    "mode": "final_answer",
+    "mask_tool_call_args": false,
+    "total_response_tokens": 306,
+    "trainable_tokens": 38,
+    "masked_response_tokens": 268
+  },
+  {
+    "fixture": "deep_trajectory",
+    "desc": "text -> tool -> text -> tool -> text -> tool -> text (3 tools)",
+    "mode": "final_answer",
+    "mask_tool_call_args": true,
+    "total_response_tokens": 306,
+    "trainable_tokens": 38,
+    "masked_response_tokens": 268
+  }
+]
