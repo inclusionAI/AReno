@@ -644,7 +644,7 @@ class PolicyOnlyTrainer:
                 completions, kept_tokens, vr = validate_completions(
                     completions,
                     [seq.resp_tokens for seq in result.sequences],
-                    policy="filter",
+                    policy=policy,
                     eos_token_ids=eos_ids,
                     special_token_ids=special_ids,
                     quarantine_path=quarantine_path,
