@@ -128,6 +128,10 @@ class WeightedMixedDataset:
         for source in self.sources:
             if not isinstance(source.name, str) or not source.name.strip():
                 raise ValueError("dataset mix source name must be a non-empty string")
+            if source.name != source.name.strip():
+                raise ValueError("dataset mix source name must not have surrounding whitespace")
+            if not source.name.isprintable():
+                raise ValueError(f"dataset mix source name contains non-printable characters: {source.name!r}")
             if source.name in names:
                 raise ValueError(f"duplicate dataset mix source name: {source.name}")
             names.add(source.name)
@@ -154,13 +158,16 @@ class WeightedMixedDataset:
         if any(weight == 0.0 for weight in scaled_weights):
             raise ValueError("dataset mix weights have an unsupported numeric range")
         scaled_total = sum(scaled_weights)
-        self._normalized_weights = tuple(weight / scaled_total for weight in scaled_weights)
+        normalized_weights = tuple(weight / scaled_total for weight in scaled_weights)
+        if any(weight == 0.0 for weight in normalized_weights):
+            raise ValueError("dataset mix weights have an unsupported numeric range")
+        self._normalized_weights = normalized_weights
 
     def set_epoch(self, epoch: int) -> None:
         """Build the deterministic schedule for one epoch."""
 
-        if epoch < 0:
-            raise ValueError("dataset mix epoch must be non-negative")
+        if isinstance(epoch, bool) or not isinstance(epoch, int) or epoch < 0:
+            raise ValueError("dataset mix epoch must be a non-negative integer")
         if epoch == self.epoch and self._entries:
             return
         self.epoch = epoch
@@ -183,9 +190,7 @@ class WeightedMixedDataset:
 
             row_index = orders[source_index][positions[source_index]]
             positions[source_index] += 1
-            entries.append(
-                _DatasetMixEntry(source_index=source_index, row_index=row_index, cycle=cycles[source_index])
-            )
+            entries.append(_DatasetMixEntry(source_index=source_index, row_index=row_index, cycle=cycles[source_index]))
             if positions[source_index] < len(orders[source_index]):
                 continue
 
@@ -257,9 +262,7 @@ class WeightedMixedDataset:
             )
         schedule_hash = hashlib.sha256()
         for entry in self._entries:
-            schedule_hash.update(
-                f"{self.sources[entry.source_index].name}:{entry.row_index}:{entry.cycle}\n".encode()
-            )
+            schedule_hash.update(f"{self.sources[entry.source_index].name}:{entry.row_index}:{entry.cycle}\n".encode())
         return {
             "version": 1,
             "seed": self.seed,

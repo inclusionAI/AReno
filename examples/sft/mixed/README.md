@@ -40,7 +40,9 @@ cycle sample bound.
 Before model or worker initialization, AReno validates both sources and prints
 the planned source counts. It also writes
 `dataset_mix_plan.<pid>.json` under the metrics directory without including
-prompt or response contents.
+prompt or response contents. During training,
+`stage=dataset_mix_progress` logs cumulative per-source counts and observed
+proportions for rows whose optimizer step completed.
 
 For a boundary-input example, change a weight to `0`; validation then fails
 with `weight must be finite and positive`.

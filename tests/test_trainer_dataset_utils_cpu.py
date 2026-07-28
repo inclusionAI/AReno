@@ -215,11 +215,17 @@ class TrainerDatasetUtilityTest(unittest.TestCase):
             loss_fn=lambda _pack, _logprobs: None,
         )
 
-        trainer.fit()
+        with self.assertLogs("areno.api.trainers.sft.SFTTrainer", level="INFO") as logs:
+            trainer.fit()
 
         self.assertEqual(backend.train_calls, 1)
         self.assertEqual(backend.train_rows, 2)
         self.assertTrue(backend.closed)
+        progress_log = next(message for message in logs.output if "stage=dataset_mix_progress" in message)
+        self.assertIn("'rows_trained': 2", progress_log)
+        self.assertIn("'name': 'math'", progress_log)
+        self.assertIn("'name': 'code'", progress_log)
+        self.assertIn("'observed_proportion': 0.5", progress_log)
 
     def test_dpo_requires_explicit_prompt_chosen_rejected_schema(self):
         """DPO rows should not guess preference or prompt field aliases."""

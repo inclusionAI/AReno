@@ -94,7 +94,9 @@ Both mixing forms currently support map-style datasets only, and the shared
 
 The manifest requires ``version: 1``, an integer ``seed``, an explicit
 ``exhaustion`` policy, and at least two uniquely named sources with finite,
-positive weights. Weights are normalized automatically:
+positive weights. Unknown version-1 manifest or source fields are rejected so
+misspelled settings cannot silently fall back to defaults. Weights are
+normalized automatically:
 
 .. code-block:: json
 
@@ -125,7 +127,9 @@ policies have deliberately different consumption behavior:
 The seed controls source selection and per-source ordering. AReno derives a
 different deterministic ordering for each epoch. Source identity is attached
 under the reserved ``__areno_meta__`` field. The run prints a sample-free
-summary, logs the plan for each epoch, and writes
+summary, logs the plan for each epoch, logs cumulative
+``stage=dataset_mix_progress`` counts and observed proportions for rows that
+successfully completed training, and writes
 ``dataset_mix_plan.<pid>.json`` to ``--metrics-log-dir``.
 
 The map-style implementation precomputes an index schedule for the current

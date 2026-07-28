@@ -330,10 +330,16 @@ def _dataset_mix_manifest_from_sources(source_specs: tuple[str, ...]) -> dict:
     for index, spec in enumerate(source_specs):
         source_text, separator, weight_text = spec.rpartition(":")
         name, name_separator, dataset_path = source_text.partition("=")
-        name = name.strip()
-        dataset_path = dataset_path.strip()
-        if not separator or not name_separator or not name or not dataset_path or not weight_text.strip():
+        if (
+            not separator
+            or not name_separator
+            or not name.strip()
+            or not dataset_path.strip()
+            or not weight_text.strip()
+        ):
             raise ValueError(f"entry {index + 1} must use NAME=PATH:WEIGHT")
+        name = _normalize_dataset_mix_source_name(name, f"entry {index + 1} name")
+        dataset_path = _normalize_dataset_mix_source_path(dataset_path, f"entry {index + 1} path")
         if name in names:
             raise ValueError(f"duplicate source name: {name}")
         names.add(name)
@@ -345,9 +351,7 @@ def _dataset_mix_manifest_from_sources(source_specs: tuple[str, ...]) -> dict:
             raise ValueError(f"source '{name}' weight must be finite and positive")
         sources.append({"name": name, "path": dataset_path, "weight": weight})
 
-    max_weight = max(source["weight"] for source in sources)
-    if any(source["weight"] / max_weight == 0.0 for source in sources):
-        raise ValueError("source weights have an unsupported numeric range")
+    _validate_dataset_mix_weight_range([source["weight"] for source in sources], "source weights")
     return {
         "version": 1,
         "seed": 42,
@@ -356,6 +360,34 @@ def _dataset_mix_manifest_from_sources(source_specs: tuple[str, ...]) -> dict:
         "max_samples_per_epoch": None,
         "sources": sources,
     }
+
+
+def _normalize_dataset_mix_source_name(name: str, label: str) -> str:
+    normalized = name.strip()
+    if not normalized:
+        raise ValueError(f"{label} must be a non-empty string")
+    if not normalized.isprintable():
+        raise ValueError(f"{label} must not contain non-printable characters")
+    return normalized
+
+
+def _normalize_dataset_mix_source_path(dataset_path: str, label: str) -> str:
+    normalized = dataset_path.strip()
+    if not normalized:
+        raise ValueError(f"{label} must be a non-empty string")
+    if not normalized.isprintable():
+        raise ValueError(f"{label} must not contain non-printable characters")
+    return normalized
+
+
+def _validate_dataset_mix_weight_range(weights: list[float], label: str) -> None:
+    max_weight = max(weights)
+    scaled_weights = [weight / max_weight for weight in weights]
+    if any(weight == 0.0 for weight in scaled_weights):
+        raise ValueError(f"{label} have an unsupported numeric range")
+    scaled_total = sum(scaled_weights)
+    if any(weight / scaled_total == 0.0 for weight in scaled_weights):
+        raise ValueError(f"{label} have an unsupported numeric range")
 
 
 def _format_training_config_summary(
@@ -1149,6 +1181,17 @@ def _read_dataset_mix_manifest(config_path: str | Path) -> dict:
         raise ValueError(f"{path}: invalid JSON at line {exc.lineno}, column {exc.colno}") from exc
     if not isinstance(payload, dict):
         raise ValueError(f"{path}: top-level value must be an object")
+    allowed_fields = {
+        "version",
+        "seed",
+        "exhaustion",
+        "shuffle_within_sources",
+        "max_samples_per_epoch",
+        "sources",
+    }
+    unknown_fields = sorted(set(payload) - allowed_fields)
+    if unknown_fields:
+        raise ValueError(f"{path}: unsupported field(s): {', '.join(unknown_fields)}")
     version = payload.get("version")
     if isinstance(version, bool) or not isinstance(version, int) or version != 1:
         raise ValueError(f"{path}: version must be 1")
@@ -1179,16 +1222,21 @@ def _read_dataset_mix_manifest(config_path: str | Path) -> dict:
         prefix = f"{path}: sources[{index}]"
         if not isinstance(source, dict):
             raise ValueError(f"{prefix} must be an object")
+        unknown_source_fields = sorted(set(source) - {"name", "path", "weight"})
+        if unknown_source_fields:
+            raise ValueError(f"{prefix} has unsupported field(s): {', '.join(unknown_source_fields)}")
         name = source.get("name")
         dataset_path = source.get("path")
         weight = source.get("weight")
-        if not isinstance(name, str) or not name.strip():
+        if not isinstance(name, str):
             raise ValueError(f"{prefix}.name must be a non-empty string")
+        name = _normalize_dataset_mix_source_name(name, f"{prefix}.name")
         if name in names:
             raise ValueError(f"{path}: duplicate source name: {name}")
         names.add(name)
-        if not isinstance(dataset_path, str) or not dataset_path.strip():
+        if not isinstance(dataset_path, str):
             raise ValueError(f"{prefix}.path must be a non-empty string")
+        dataset_path = _normalize_dataset_mix_source_path(dataset_path, f"{prefix}.path")
         try:
             numeric_weight = float(weight)
         except (OverflowError, TypeError, ValueError):
@@ -1196,9 +1244,13 @@ def _read_dataset_mix_manifest(config_path: str | Path) -> dict:
         if isinstance(weight, bool) or not math.isfinite(numeric_weight) or numeric_weight <= 0:
             raise ValueError(f"{prefix}.weight must be finite and positive")
         normalized_sources.append({"name": name, "path": dataset_path, "weight": numeric_weight})
-    max_weight = max(source["weight"] for source in normalized_sources)
-    if any(source["weight"] / max_weight == 0.0 for source in normalized_sources):
-        raise ValueError(f"{path}: source weights have an unsupported numeric range")
+    try:
+        _validate_dataset_mix_weight_range(
+            [source["weight"] for source in normalized_sources],
+            "source weights",
+        )
+    except ValueError as exc:
+        raise ValueError(f"{path}: {exc}") from exc
 
     return {
         "version": 1,

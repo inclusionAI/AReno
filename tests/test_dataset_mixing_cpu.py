@@ -41,6 +41,18 @@ def test_weighted_mix_is_deterministic_for_seed_and_epoch():
     assert _identity(first) != _identity(second)
 
 
+@pytest.mark.parametrize("epoch", [True, 1.5, "1", -1])
+def test_weighted_mix_rejects_invalid_epoch(epoch):
+    dataset = WeightedMixedDataset(
+        [_source("first", 2, 1), _source("second", 2, 1)],
+        seed=42,
+        exhaustion="renormalize",
+    )
+
+    with pytest.raises(ValueError, match="non-negative integer"):
+        dataset.set_epoch(epoch)
+
+
 def test_renormalize_emits_every_record_once():
     dataset = WeightedMixedDataset(
         [_source("small", 2, 0.8), _source("large", 7, 0.2)],
@@ -180,6 +192,37 @@ def test_weighted_mix_rejects_unrepresentable_weight_range():
         )
 
 
+def test_weighted_mix_rejects_weights_that_underflow_during_final_normalization():
+    with pytest.raises(ValueError, match="unsupported numeric range"):
+        WeightedMixedDataset(
+            [
+                _source("smallest", 1, 5e-324),
+                _source("large-a", 1, 1.0),
+                _source("large-b", 1, 1.0),
+            ],
+            seed=1,
+            exhaustion="renormalize",
+        )
+
+
+def test_weighted_mix_rejects_non_printable_source_names():
+    with pytest.raises(ValueError, match="non-printable"):
+        WeightedMixedDataset(
+            [_source("safe", 1, 1), _source("forged\nlog", 1, 1)],
+            seed=1,
+            exhaustion="renormalize",
+        )
+
+
+def test_weighted_mix_rejects_ambiguous_source_name_whitespace():
+    with pytest.raises(ValueError, match="surrounding whitespace"):
+        WeightedMixedDataset(
+            [_source("safe", 1, 1), _source(" padded ", 1, 1)],
+            seed=1,
+            exhaustion="renormalize",
+        )
+
+
 def test_mix_manifest_loads_two_local_sft_sources_through_shared_loader(tmp_path):
     first = tmp_path / "first.jsonl"
     second = tmp_path / "second.jsonl"
@@ -258,6 +301,11 @@ def test_dataset_source_shorthand_rejects_invalid_entries(source_specs, message)
         train_cli._dataset_mix_manifest_from_sources(source_specs)
 
 
+def test_dataset_source_shorthand_rejects_log_injection_name():
+    with pytest.raises(ValueError, match="non-printable"):
+        train_cli._dataset_mix_manifest_from_sources(("safe=org/first:1", "forged\nsummary=org/second:1"))
+
+
 def test_dataset_source_shorthand_loads_remote_sources_through_shared_loader(tmp_path):
     loader = tmp_path / "loader.py"
     loader.write_text(
@@ -296,6 +344,82 @@ def test_mix_manifest_requires_integer_version_one(tmp_path, version):
         train_cli._read_dataset_mix_manifest(manifest)
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "version": 1,
+            "seed": 1,
+            "exhaustion": "renormalize",
+            "shufle_within_sources": False,
+            "sources": [
+                {"name": "first", "path": "first", "weight": 1},
+                {"name": "second", "path": "second", "weight": 1},
+            ],
+        },
+        {
+            "version": 1,
+            "seed": 1,
+            "exhaustion": "renormalize",
+            "sources": [
+                {"name": "first", "path": "first", "weight": 1, "weigth": 2},
+                {"name": "second", "path": "second", "weight": 1},
+            ],
+        },
+    ],
+)
+def test_mix_manifest_rejects_unknown_fields_instead_of_ignoring_typos(tmp_path, payload):
+    manifest = tmp_path / "mix.json"
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="unsupported field"):
+        train_cli._read_dataset_mix_manifest(manifest)
+
+
+def test_mix_manifest_normalizes_source_name_and_path_whitespace(tmp_path):
+    manifest = tmp_path / "mix.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "seed": 1,
+                "exhaustion": "renormalize",
+                "sources": [
+                    {"name": " first ", "path": " org/first ", "weight": 1},
+                    {"name": "second", "path": "org/second", "weight": 1},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    parsed = train_cli._read_dataset_mix_manifest(manifest)
+
+    assert parsed["sources"][0] == {"name": "first", "path": "org/first", "weight": 1.0}
+
+
+def test_mix_manifest_rejects_final_weight_normalization_underflow(tmp_path):
+    manifest = tmp_path / "mix.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "seed": 1,
+                "exhaustion": "renormalize",
+                "sources": [
+                    {"name": "smallest", "path": "smallest", "weight": 5e-324},
+                    {"name": "large-a", "path": "large-a", "weight": 1.0},
+                    {"name": "large-b", "path": "large-b", "weight": 1.0},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="unsupported numeric range"):
+        train_cli._read_dataset_mix_manifest(manifest)
+
+
 def test_mix_loader_reports_incompatible_source_without_sample_contents(tmp_path):
     manifest = tmp_path / "mix.json"
     manifest.write_text(
@@ -326,6 +450,11 @@ def test_mix_loader_reports_incompatible_source_without_sample_contents(tmp_path
             load_dataset=load_dataset,
             load_from_disk=lambda _path: None,
         )
+
+
+def test_dataset_source_shorthand_rejects_log_injection_path():
+    with pytest.raises(ValueError, match="non-printable"):
+        train_cli._dataset_mix_manifest_from_sources(("safe=org/first:1", "second=org/forged\npath:1"))
 
 
 def test_mix_validation_checks_later_rows_before_backend_initialization(tmp_path):

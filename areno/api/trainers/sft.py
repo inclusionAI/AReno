@@ -18,11 +18,14 @@ from __future__ import annotations
 
 import logging
 import time
+from collections import Counter
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 import areno.api
 from areno.api.dashboard import record_dashboard_state
+from areno.api.data import DATASET_MIX_METADATA_KEY
 from areno.api.data_utils import prompt_response_to_tokens_and_mask
 from areno.api.tokenizer import configure_chat_template_enable_thinking
 
@@ -55,6 +58,7 @@ class SFTTrainer:
         tokenizer = self.areno.get_tokenizer()
         configure_chat_template_enable_thinking(tokenizer, getattr(self.config, "chat_template_enable_thinking", None))
         step = 0
+        trained_mix_counts: Counter[str] = Counter()
         for epoch in range(self.config.epochs):
             set_epoch = getattr(self.dataset, "set_epoch", None)
             if callable(set_epoch):
@@ -64,7 +68,7 @@ class SFTTrainer:
                 self.logger.info("epoch=%d stage=dataset_mix_plan dataset_mix=%s", epoch, mix_summary())
             self.logger.info("epoch=%d stage=epoch_start", epoch)
             record_dashboard_state(self.areno, stage="epoch_start", epoch=epoch, step=step, role="policy")
-            for train_batch in self._iter_train_batches(
+            for train_batch, batch_mix_counts in self._iter_train_batches(
                 tokenizer,
                 max_prompt_tokens=self.config.max_prompt_tokens,
                 max_new_tokens=self.config.max_new_tokens,
@@ -91,6 +95,14 @@ class SFTTrainer:
                 self.logger.info("epoch=%d step=%d role=policy stage=train_end rows=%d", epoch, step, len(train_batch))
                 record_dashboard_state(self.areno, stage="train_end", epoch=epoch, step=step, role="policy")
                 self.logger.info("epoch=%d step=%d train_stats=%s", epoch, step, result)
+                if batch_mix_counts:
+                    trained_mix_counts.update(batch_mix_counts)
+                    self.logger.info(
+                        "epoch=%d step=%d stage=dataset_mix_progress dataset_mix=%s",
+                        epoch,
+                        step,
+                        _dataset_mix_progress(trained_mix_counts),
+                    )
                 self._maybe_save(epoch, step)
                 step += 1
                 if self.config.max_steps is not None and step >= self.config.max_steps:
@@ -105,13 +117,15 @@ class SFTTrainer:
         # up-front tokenized copy. Rows that are empty, all-prompt, or exceed
         # the configured prompt or supervised-response budgets are dropped.
         batch = []
+        batch_mix_counts: Counter[str] = Counter()
         skipped = 0
         accepted = 0
         total_rows = len(self.dataset)
         for index in range(total_rows):
             # Normalize each supported row schema into one TrainSequence.
+            record = self.dataset[index]
             seq = _record_to_train_sequence(
-                self.dataset[index],
+                record,
                 tokenizer,
                 max_prompt_tokens=max_prompt_tokens,
                 max_new_tokens=max_new_tokens,
@@ -121,9 +135,13 @@ class SFTTrainer:
                 continue
             accepted += 1
             batch.append(seq)
+            source_name = _dataset_mix_source_name(record)
+            if source_name is not None:
+                batch_mix_counts[source_name] += 1
             if len(batch) >= self.config.batch_size:
-                yield batch
+                yield batch, batch_mix_counts
                 batch = []
+                batch_mix_counts = Counter()
         if skipped:
             self.logger.info("stage=sft_dataset_filter skipped_long_or_empty=%d", skipped)
         if accepted == 0:
@@ -133,7 +151,7 @@ class SFTTrainer:
                 "Check dataset quality, --max-prompt-tokens, and --max-new-tokens."
             )
         if batch:
-            yield batch
+            yield batch, batch_mix_counts
 
     def _maybe_save(self, epoch: int, step: int) -> None:
         # Keep the same step-based checkpoint cadence as the RL trainers.
@@ -186,6 +204,31 @@ def _record_to_train_sequence(record: Any, tokenizer, *, max_prompt_tokens: int,
         advantages=zeros,
         eos_token_id=eos_token_id,
     )
+
+
+def _dataset_mix_source_name(record: Any) -> str | None:
+    if not isinstance(record, Mapping):
+        return None
+    metadata = record.get(DATASET_MIX_METADATA_KEY)
+    if not isinstance(metadata, Mapping):
+        return None
+    source_name = metadata.get("source")
+    return source_name if isinstance(source_name, str) else None
+
+
+def _dataset_mix_progress(counts: Counter[str]) -> dict[str, Any]:
+    total = sum(counts.values())
+    return {
+        "rows_trained": total,
+        "sources": [
+            {
+                "name": name,
+                "rows_trained": counts[name],
+                "observed_proportion": counts[name] / total,
+            }
+            for name in sorted(counts)
+        ],
+    }
 
 
 __all__ = ["SFTTrainer"]
