@@ -48,3 +48,34 @@ class PromptBatch:
         """Return raw prompt strings in batch order for rollout."""
 
         return [item.prompt for item in self.items]
+
+
+# ---------------------------------------------------------------------------
+# Conversation normalization re-export
+# ---------------------------------------------------------------------------
+# The implementation lives in ``areno.engine.data.conversation_normalizer``
+# to keep the engine data layer self-contained.  We re-export the public
+# API here so callers that already import from ``areno.api.data`` can use
+# it without a second import path.
+
+from areno.engine.data.conversation_normalizer import (  # noqa: E402
+    BatchNormalizeReport,
+    ConversationValidationError,
+    NormalizeResult,
+    normalize_conversation,
+    normalize_dataset,
+    normalize_dataset_iter,
+    normalize_role,
+)
+
+__all__ = [
+    "PromptItem",
+    "PromptBatch",
+    "BatchNormalizeReport",
+    "ConversationValidationError",
+    "NormalizeResult",
+    "normalize_conversation",
+    "normalize_dataset",
+    "normalize_dataset_iter",
+    "normalize_role",
+]
