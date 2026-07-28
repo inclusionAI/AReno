@@ -271,7 +271,29 @@ class TrainerHookTest(unittest.TestCase):
         import areno.api.trainer as trainer_mod
         from areno.api.context import Context
 
-        trainer = trainer_mod.Trainer(world_size=1, model_path="unused", metrics_log_dir=str(tmp_path))
+        trainer = trainer_mod.Trainer(world_size=1, model_path="unused")
+        # Stub MetricsRecorder so the test never builds a real TensorBoard
+        # writer (which depends on torch and has version-specific behavior).
+        # The health-checker only needs `log_dir` + `add_scalar` from it.
+        tmp_path = str(tmp_path)
+
+        class FakeMetrics:
+            log_dir = tmp_path
+            scalars = []
+
+            def add_scalar(self, tag, value, step):
+                self.scalars.append((tag, value, step))
+
+            def record_train_step(self, *, step, train_result, train_batch, timings=None):
+                pass
+
+            def record_dashboard_state(self, **kwargs):
+                pass
+
+            def close(self):
+                pass
+
+        trainer._metrics = FakeMetrics()
         # Real Context (no torch dependency) so global_step advances normally.
         trainer._ctx = Context(world_size=1, model_path="unused", tokenizer=None)
         trainer.configure_health_check(cfg)

@@ -368,9 +368,7 @@ class Trainer:
                 timings=self._metric_timings,
             )
         if self._health_checker is not None:
-            self._health_checker.observe(
-                step=self._ctx.global_step, train_result=result, train_batch=batch_data
-            )
+            self._health_checker.observe(step=self._ctx.global_step, train_result=result, train_batch=batch_data)
         self.finish_step()
         return result
 
@@ -582,9 +580,9 @@ class TrainingHealthChecker:
         self._signals.skipped_long += self._pending_skipped
         self._pending_skipped = 0
         # Backend-reported signals. `ArenoBackend.train` returns a flat dict
-# (`{"loss": ..., "grad_zero_ratio": ...}`); fall back to a nested
-# `train_result["metrics"]["grad_zero_ratio"]` for callers that group
-# diagnostics under a "metrics" key.
+        # (`{"loss": ..., "grad_zero_ratio": ...}`); fall back to a nested
+        # `train_result["metrics"]["grad_zero_ratio"]` for callers that group
+        # diagnostics under a "metrics" key.
         loss = train_result.get("loss") if isinstance(train_result, dict) else None
         if loss is not None:
             self._signals.losses.append(float(loss))
@@ -624,17 +622,13 @@ class TrainingHealthChecker:
             stages = sorted({c.stage for c in report.checks if c.status == "fail"})
             inputs = [c.input for c in report.checks if c.status == "fail" and c.input != "-"]
             detail = "; ".join(c.message for c in report.checks if c.status == "fail")
-            raise HealthCheckError(
-                f"health-check FAIL stage={stages} input={inputs} detail={detail}"
-            )
+            raise HealthCheckError(f"health-check FAIL stage={stages} input={inputs} detail={detail}")
 
     def _write_artifact(self, report: HealthReport) -> None:
         if self._sink is None:
             return
         path = self._sink / f"{report.run_id}.json"
-        path.write_text(
-            json.dumps(report.to_json(), ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        path.write_text(json.dumps(report.to_json(), ensure_ascii=False, indent=2), encoding="utf-8")
 
     def _emit_metrics(self, report: HealthReport) -> None:
         # Emit through the shared TensorBoard writer when one is attached, so
@@ -644,9 +638,7 @@ class TrainingHealthChecker:
         step = report.completed_at_step
         self._metrics.add_scalar("health/summary", float(self._STATUS_VALUE[report.summary]), step)
         for check in report.checks:
-            self._metrics.add_scalar(
-                f"health/{check.name}", float(self._STATUS_VALUE[check.status]), step
-            )
+            self._metrics.add_scalar(f"health/{check.name}", float(self._STATUS_VALUE[check.status]), step)
 
     def _log_report(self, report: HealthReport) -> None:
         window = self._config.startup_window_updates
@@ -664,9 +656,7 @@ class TrainingHealthChecker:
                 check.message,
                 check.metric_ref,
             )
-        artifact = (
-            str(self._sink / f"{report.run_id}.json") if self._sink is not None else "n/a"
-        )
+        artifact = str(self._sink / f"{report.run_id}.json") if self._sink is not None else "n/a"
         self._logger.info(
             "stage=health_check SUMMARY=%s artifact=%s",
             report.summary,

@@ -154,39 +154,24 @@ class HealthCheckConfig:
         # this is before `Trainer.init()` spawns workers, satisfying the issue's
         # "validate those inputs before expensive initialization".
         if self.startup_window_updates < 1:
-            raise HealthCheckConfigError(
-                "startup_window_updates must be >= 1, got "
-                f"{self.startup_window_updates!r}"
-            )
+            raise HealthCheckConfigError(f"startup_window_updates must be >= 1, got {self.startup_window_updates!r}")
         if self.on_fail not in ("warn", "fail"):
-            raise HealthCheckConfigError(
-                "on_fail must be one of: warn, fail, got " f"{self.on_fail!r}"
-            )
+            raise HealthCheckConfigError(f"on_fail must be one of: warn, fail, got {self.on_fail!r}")
         etc = self.effective_tokens
         if etc.min_per_batch < 0:
-            raise HealthCheckConfigError(
-                f"effective_tokens.min_per_batch must be >= 0, got {etc.min_per_batch!r}"
-            )
+            raise HealthCheckConfigError(f"effective_tokens.min_per_batch must be >= 0, got {etc.min_per_batch!r}")
         rvc = self.reward_variance
         if rvc.min_std_warn < 0 or rvc.min_std_fail < 0:
-            raise HealthCheckConfigError(
-                "reward_variance thresholds must be non-negative"
-            )
+            raise HealthCheckConfigError("reward_variance thresholds must be non-negative")
         if rvc.min_std_warn < rvc.min_std_fail:
-            raise HealthCheckConfigError(
-                "reward_variance.min_std_warn must be >= min_std_fail"
-            )
+            raise HealthCheckConfigError("reward_variance.min_std_warn must be >= min_std_fail")
         lcc = self.loss_change
         if lcc.mode not in ("absolute", "relative"):
-            raise HealthCheckConfigError(
-                f"loss_change.mode must be one of: absolute, relative, got {lcc.mode!r}"
-            )
+            raise HealthCheckConfigError(f"loss_change.mode must be one of: absolute, relative, got {lcc.mode!r}")
         if lcc.min_abs_delta_warn < 0 or lcc.min_abs_delta_fail < 0:
             raise HealthCheckConfigError("loss_change thresholds must be non-negative")
         if lcc.min_abs_delta_warn < lcc.min_abs_delta_fail:
-            raise HealthCheckConfigError(
-                "loss_change.min_abs_delta_warn must be >= min_abs_delta_fail"
-            )
+            raise HealthCheckConfigError("loss_change.min_abs_delta_warn must be >= min_abs_delta_fail")
         sbc = self.skipped_batches
         for name, value in (
             ("max_ratio_warn", sbc.max_ratio_warn),
@@ -195,18 +180,11 @@ class HealthCheckConfig:
             ("max_grad_zero_ratio_fail", sbc.max_grad_zero_ratio_fail),
         ):
             if not 0.0 <= value <= 1.0:
-                raise HealthCheckConfigError(
-                    f"skipped_batches.{name} must be in [0, 1], got {value!r}"
-                )
+                raise HealthCheckConfigError(f"skipped_batches.{name} must be in [0, 1], got {value!r}")
         if sbc.max_ratio_warn > sbc.max_ratio_fail:
-            raise HealthCheckConfigError(
-                "skipped_batches.max_ratio_warn must be <= max_ratio_fail"
-            )
+            raise HealthCheckConfigError("skipped_batches.max_ratio_warn must be <= max_ratio_fail")
         if sbc.max_grad_zero_ratio_warn > sbc.max_grad_zero_ratio_fail:
-            raise HealthCheckConfigError(
-                "skipped_batches.max_grad_zero_ratio_warn must be "
-                "<= max_grad_zero_ratio_fail"
-            )
+            raise HealthCheckConfigError("skipped_batches.max_grad_zero_ratio_warn must be <= max_grad_zero_ratio_fail")
 
 
 @dataclass(slots=True)
@@ -298,9 +276,7 @@ def _std(values: list[float]) -> float:
     return math.sqrt(var)
 
 
-def check_effective_tokens(
-    cfg: HealthCheckConfig, signals: WindowSignals
-) -> CheckResult:
+def check_effective_tokens(cfg: HealthCheckConfig, signals: WindowSignals) -> CheckResult:
     """Classify the effective-token signal.
 
     fail: every batch in the window had zero effective tokens (when
@@ -328,10 +304,7 @@ def check_effective_tokens(
             name=name,
             stage=_STAGE[name],
             status="fail",
-            message=(
-                "zero effective tokens across the whole window "
-                f"(batches={len(per_batch)})"
-            ),
+            message=(f"zero effective tokens across the whole window (batches={len(per_batch)})"),
             metric_ref=_METRIC_REF[name],
             input="effective_tokens.fail_if_zero",
         )
@@ -341,10 +314,7 @@ def check_effective_tokens(
             name=name,
             stage=_STAGE[name],
             status="warn",
-            message=(
-                f"low effective tokens: mean={mean_tokens:.1f} < "
-                f"min_per_batch={etc.min_per_batch}"
-            ),
+            message=(f"low effective tokens: mean={mean_tokens:.1f} < min_per_batch={etc.min_per_batch}"),
             metric_ref=_METRIC_REF[name],
             input="effective_tokens.min_per_batch",
         )
@@ -358,9 +328,7 @@ def check_effective_tokens(
     )
 
 
-def check_reward_variance(
-    cfg: HealthCheckConfig, signals: WindowSignals
-) -> CheckResult:
+def check_reward_variance(cfg: HealthCheckConfig, signals: WindowSignals) -> CheckResult:
     """Classify the reward-variance signal.
 
     require_variation=False → pass (legitimately constant reward). NaN reward →
@@ -471,10 +439,7 @@ def check_loss_change(cfg: HealthCheckConfig, signals: WindowSignals) -> CheckRe
             name=name,
             stage=_STAGE[name],
             status="warn",
-            message=(
-                "loss change unreliable: window has <2 loss samples "
-                f"(n={len(losses)})"
-            ),
+            message=(f"loss change unreliable: window has <2 loss samples (n={len(losses)})"),
             metric_ref=_METRIC_REF[name],
             input="startup_window_updates",
         )
@@ -489,10 +454,7 @@ def check_loss_change(cfg: HealthCheckConfig, signals: WindowSignals) -> CheckRe
             name=name,
             stage=_STAGE[name],
             status="fail",
-            message=(
-                f"loss unchanged across window (first={first}, last={last}, "
-                f"n={len(losses)})"
-            ),
+            message=(f"loss unchanged across window (first={first}, last={last}, n={len(losses)})"),
             metric_ref=_METRIC_REF[name],
             input="loss_change.min_abs_delta_fail",
         )
@@ -501,10 +463,7 @@ def check_loss_change(cfg: HealthCheckConfig, signals: WindowSignals) -> CheckRe
             name=name,
             stage=_STAGE[name],
             status="warn",
-            message=(
-                f"loss barely changed: delta={delta:.3e} < "
-                f"min_abs_delta_warn={lcc.min_abs_delta_warn:.3e}"
-            ),
+            message=(f"loss barely changed: delta={delta:.3e} < min_abs_delta_warn={lcc.min_abs_delta_warn:.3e}"),
             metric_ref=_METRIC_REF[name],
             input="loss_change.min_abs_delta_warn",
         )
@@ -518,9 +477,7 @@ def check_loss_change(cfg: HealthCheckConfig, signals: WindowSignals) -> CheckRe
     )
 
 
-def check_skipped_batches(
-    cfg: HealthCheckConfig, signals: WindowSignals
-) -> CheckResult:
+def check_skipped_batches(cfg: HealthCheckConfig, signals: WindowSignals) -> CheckResult:
     """Classify the skipped-batch signal.
 
     Ratio = skipped_long / total_batches. Zero denominator → fail (data/input
@@ -569,10 +526,7 @@ def check_skipped_batches(
             status = _worse(status, "warn")
     if status == "fail":
         if ratio > sbc.max_ratio_fail:
-            message = (
-                f"skipped ratio too high: {ratio:.3f} > "
-                f"max_ratio_fail={sbc.max_ratio_fail:.3f}"
-            )
+            message = f"skipped ratio too high: {ratio:.3f} > max_ratio_fail={sbc.max_ratio_fail:.3f}"
             input_ref = "skipped_batches.max_ratio_fail"
         else:
             message = (
