@@ -815,15 +815,26 @@ def run(trainer_config: TrainerConfig):
         metrics_log_dir=trainer_config.metrics_log_dir,
         custom_config=trainer_config.areno_config(),
     )
-    dataset = _load_dataset_for_training(
-        trainer_config.dataset_path,
-        dataset_loader_fn=trainer_config.dataset_loader_fn,
-        model_hub=trainer_config.model_hub,
-        load_dataset=load_dataset,
-        load_from_disk=load_from_disk,
-    )
-    trainer = build_trainer(trainer_config, instance=api_trainer, dataset=dataset, reward_fn=reward_fn, loss_fn=loss_fn)
-    trainer.fit()
+    try:
+        dataset = _load_dataset_for_training(
+            trainer_config.dataset_path,
+            dataset_loader_fn=trainer_config.dataset_loader_fn,
+            model_hub=trainer_config.model_hub,
+            load_dataset=load_dataset,
+            load_from_disk=load_from_disk,
+        )
+        trainer = build_trainer(
+            trainer_config, instance=api_trainer, dataset=dataset, reward_fn=reward_fn, loss_fn=loss_fn
+        )
+        trainer.fit()
+    except KeyboardInterrupt:
+        # Print a concise message instead of a full traceback, then re-raise
+        # so the process exits with a non-zero status.  The finally block
+        # below still runs, guaranteeing metrics are flushed.
+        click.echo("Training interrupted by user (Ctrl+C). Flushing metrics...", err=True)
+        raise
+    finally:
+        api_trainer.close()
 
 
 def _write_dashboard_run_config(config: TrainerConfig) -> None:

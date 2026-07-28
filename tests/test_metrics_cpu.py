@@ -66,6 +66,92 @@ class MetricsUtilityTest(unittest.TestCase):
 
         self.assertEqual(writer.close_count, 1)
 
+    def test_close_calls_flush_before_close(self):
+        """close() should call flush() before close() on the underlying writer."""
+
+        class FakeWriter:
+            def __init__(self):
+                self.call_order: list[str] = []
+                self.flush_count = 0
+                self.close_count = 0
+
+            def flush(self):
+                self.call_order.append("flush")
+                self.flush_count += 1
+
+            def close(self):
+                self.call_order.append("close")
+                self.close_count += 1
+
+        writer = FakeWriter()
+        old_factory = metrics_mod.create_tensorboard_writer
+        metrics_mod.create_tensorboard_writer = lambda _log_dir: writer
+        try:
+            recorder = MetricsRecorder("/tmp/areno-test")
+            recorder.close()
+        finally:
+            metrics_mod.create_tensorboard_writer = old_factory
+
+        self.assertEqual(writer.flush_count, 1)
+        self.assertEqual(writer.close_count, 1)
+        self.assertEqual(writer.call_order, ["flush", "close"])
+
+    def test_close_survives_flush_failure(self):
+        """close() should still call writer.close() even if flush() raises."""
+
+        class FakeWriter:
+            def __init__(self):
+                self.close_count = 0
+                self.flush_called = False
+
+            def flush(self):
+                self.flush_called = True
+                raise OSError("disk full")
+
+            def close(self):
+                self.close_count += 1
+
+        writer = FakeWriter()
+        old_factory = metrics_mod.create_tensorboard_writer
+        metrics_mod.create_tensorboard_writer = lambda _log_dir: writer
+        try:
+            recorder = MetricsRecorder("/tmp/areno-test")
+            # Should not raise despite flush failure.
+            recorder.close()
+        finally:
+            metrics_mod.create_tensorboard_writer = old_factory
+
+        self.assertTrue(writer.flush_called)
+        self.assertEqual(writer.close_count, 1)
+
+    def test_close_idempotent_with_flush(self):
+        """Multiple close() calls should only flush and close the writer once."""
+
+        class FakeWriter:
+            def __init__(self):
+                self.flush_count = 0
+                self.close_count = 0
+
+            def flush(self):
+                self.flush_count += 1
+
+            def close(self):
+                self.close_count += 1
+
+        writer = FakeWriter()
+        old_factory = metrics_mod.create_tensorboard_writer
+        metrics_mod.create_tensorboard_writer = lambda _log_dir: writer
+        try:
+            recorder = MetricsRecorder("/tmp/areno-test")
+            recorder.close()
+            recorder.close()
+            recorder.close()
+        finally:
+            metrics_mod.create_tensorboard_writer = old_factory
+
+        self.assertEqual(writer.flush_count, 1)
+        self.assertEqual(writer.close_count, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -7,6 +7,7 @@ one `Trainer`, calls ``init()`` once, and then loops:
 ref/reward/critic models become available behind the backend boundary.
 """
 
+import logging
 import time
 from collections.abc import Callable, Iterable
 from typing import Any
@@ -432,7 +433,13 @@ class Trainer:
         return self._backend.save_checkpoint(self._ctx, path)
 
     def close(self) -> None:
-        """Release backend workers and local resources such as metric writers."""
+        """Release backend workers and local resources such as metric writers.
+
+        The backend is closed first, then metric writers.  If the metric
+        writer close itself fails (e.g. disk full during flush), the failure
+        is logged and **does not** mask the original exception from
+        ``backend.close()``.
+        """
 
         try:
             if self._backend is not None:
@@ -441,7 +448,28 @@ class Trainer:
             self._backend = None
             self._initialized = False
             if self._metrics is not None:
-                self._metrics.close()
+                try:
+                    self._metrics.close()
+                except Exception:
+                    logging.getLogger(__name__).warning(
+                        "Metrics recorder close failed during trainer shutdown",
+                        exc_info=True,
+                    )
+
+    def __enter__(self) -> Trainer:
+        """Return the trainer for context-manager usage."""
+
+        return self
+
+    def __exit__(self, _exc_type, _exc, _tb) -> None:
+        """Close the trainer on context-manager exit.
+
+        Returns ``None`` (falsy) so that any active exception propagates
+        unchanged — the cleanup in :meth:`close` never masks the original
+        error.
+        """
+
+        self.close()
 
 
 def _normalize_prompt_token_batch(prompt_tokens: list[list[int]]) -> list[list[int]]:

@@ -339,7 +339,38 @@ directly from Python.
 
       Release local resources such as metric writers.
 
+      ``close()`` first flushes the TensorBoard writer (best-effort) and then
+      closes it.  The method is idempotent — calling it multiple times is
+      safe.  If the underlying writer ``flush()`` fails (e.g. disk full), the
+      failure is logged and ``close()`` still proceeds to close the writer,
+      ensuring no resource leaks.  Metrics-close failures never mask an
+      exception from ``backend.close()``.
+
       :returns: ``None``
+
+   .. rubric:: Context manager usage
+
+   ``Trainer`` supports the ``with`` statement.  ``__exit__`` calls
+   ``close()``, guaranteeing that metric writers are flushed and closed on
+   **every** exit path — normal completion, uncaught exceptions, and
+   ``KeyboardInterrupt``.  The original exception is always propagated
+   unchanged.
+
+   .. code-block:: python
+
+      import areno
+      from areno import Trainer
+
+      with Trainer(
+          world_size=1,
+          model_path="Qwen/Qwen3.5-4B",
+          backend_type=areno.Areno,
+          custom_config=areno.ArenoConfig(tp_size=1),
+          metrics_log_dir="/tmp/areno/tfevent",
+      ) as trainer:
+          trainer.init()
+          # ... rollout and train calls ...
+          # close() is called automatically even if an exception occurs.
 
 Data classes
 ------------

@@ -249,5 +249,120 @@ class TrainerPromptBatchTest(unittest.TestCase):
         self.assertEqual(trainer._ctx.global_step, 0)
 
 
+class TrainerContextManagerTest(unittest.TestCase):
+    """Tests for Trainer context-manager protocol and close() exception isolation."""
+
+    def _make_trainer_with_backend(self, *, backend=None, metrics=None):
+        trainer = Trainer(world_size=1, model_path="unused")
+        trainer._backend = backend
+        trainer._initialized = True
+        if metrics is not None:
+            trainer._metrics = metrics
+        return trainer
+
+    def test_context_manager_closes_on_normal_exit(self):
+        """Trainer.__exit__ should call close() on normal context exit."""
+
+        class BackendStub:
+            def __init__(self):
+                self.closed = False
+
+            def close(self):
+                self.closed = True
+
+        backend = BackendStub()
+        trainer = self._make_trainer_with_backend(backend=backend)
+
+        with trainer:
+            pass
+
+        self.assertTrue(backend.closed)
+        self.assertIsNone(trainer._backend)
+
+    def test_context_manager_closes_on_exception(self):
+        """Trainer.__exit__ should call close() and propagate the original exception."""
+
+        class BackendStub:
+            def __init__(self):
+                self.closed = False
+
+            def close(self):
+                self.closed = True
+
+        backend = BackendStub()
+        trainer = self._make_trainer_with_backend(backend=backend)
+
+        with self.assertRaises(ValueError):
+            with trainer:
+                raise ValueError("boom")
+
+        self.assertTrue(backend.closed)
+        self.assertIsNone(trainer._backend)
+
+    def test_context_manager_closes_on_keyboard_interrupt(self):
+        """Trainer.__exit__ should call close() and propagate KeyboardInterrupt."""
+
+        class BackendStub:
+            def __init__(self):
+                self.closed = False
+
+            def close(self):
+                self.closed = True
+
+        backend = BackendStub()
+        trainer = self._make_trainer_with_backend(backend=backend)
+
+        with self.assertRaises(KeyboardInterrupt):
+            with trainer:
+                raise KeyboardInterrupt()
+
+        self.assertTrue(backend.closed)
+        self.assertIsNone(trainer._backend)
+
+    def test_close_is_idempotent(self):
+        """Multiple close() calls should not raise."""
+
+        class BackendStub:
+            def __init__(self):
+                self.closed = False
+
+            def close(self):
+                self.closed = True
+
+        backend = BackendStub()
+        trainer = self._make_trainer_with_backend(backend=backend)
+
+        trainer.close()
+        trainer.close()
+        trainer.close()
+
+        self.assertTrue(backend.closed)
+        self.assertIsNone(trainer._backend)
+
+    def test_close_metrics_failure_does_not_mask_backend_exception(self):
+        """If metrics close() fails, the backend exception should still propagate."""
+
+        class BackendStub:
+            def close(self):
+                raise RuntimeError("backend close failed")
+
+        class FailingMetrics:
+            def __init__(self):
+                self.close_count = 0
+
+            def close(self):
+                self.close_count += 1
+                raise OSError("metrics close failed")
+
+        metrics = FailingMetrics()
+        trainer = self._make_trainer_with_backend(backend=BackendStub(), metrics=metrics)
+
+        with self.assertRaises(RuntimeError) as ctx:
+            trainer.close()
+
+        self.assertIn("backend close failed", str(ctx.exception))
+        self.assertEqual(metrics.close_count, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

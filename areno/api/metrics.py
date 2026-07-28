@@ -11,6 +11,7 @@ single small module makes it trivial to turn off (just pass
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 from pathlib import Path
@@ -79,11 +80,23 @@ class MetricsRecorder:
         tmp_file.replace(self._state_file)
 
     def close(self) -> None:
-        """Flush and close the underlying TensorBoard writer."""
+        """Flush and close the underlying TensorBoard writer.
+
+        The flush is best-effort: if it fails (e.g. disk full), we still
+        attempt to close the writer so that no resource leaks.  The original
+        exception from ``close`` is never masked by a flush failure.
+        """
 
         if self._closed:
             return
         self._closed = True
+        try:
+            self._writer.flush()
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "Metrics writer flush failed during close; attempting close anyway",
+                exc_info=True,
+            )
         self._writer.close()
 
     def __enter__(self) -> MetricsRecorder:

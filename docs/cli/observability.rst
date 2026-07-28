@@ -145,6 +145,27 @@ The writer lives in ``areno.api.metrics``. It records three namespaces:
    Stage timings when available: ``time/rollout``, ``time/reward``,
    ``time/advantage``, and ``time/train``.
 
+Metric flush on every exit path
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The CLI training command (``areno train``) wraps the training loop in a
+``try/finally`` block that guarantees the TensorBoard writer is flushed and
+closed on **every** exit path:
+
+* **Normal completion** — metrics are flushed and the writer is closed after
+  the final training step.
+* **KeyboardInterrupt (Ctrl+C)** — a concise message is printed to stderr
+  (``Training interrupted by user (Ctrl+C). Flushing metrics...``), the writer
+  is flushed, and the process exits with a non-zero status.  No full traceback
+  is printed.
+* **Application failure** — the writer is flushed and closed before the
+  original exception propagates.
+
+This means TensorBoard can always read the last committed metric record,
+even after an interrupted or crashed run.  The flush itself is best-effort:
+if the writer ``flush()`` fails (e.g. disk full), the failure is logged but
+does not block ``close()`` or mask the original exception.
+
 Agentic diagnostics
 -------------------
 
