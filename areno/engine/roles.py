@@ -12,6 +12,7 @@ from areno.engine.optim import AdamW8bit, AdamWFP32Master
 from areno.engine.parallel.context import get_tp_context
 from areno.engine.protocol import EnsureRolesPayload, ScorePayload, TrainValuesPayload
 from areno.engine.runtime.logprobs import next_token_logprobs
+from areno.engine.runtime.non_finite import check_loss_non_finite, detect_non_finite
 from areno.engine.runtime.train_step import _dense_train_meta
 from areno.models.registry import config_from_hf, load_model_weights
 
