@@ -1,0 +1,71 @@
+# Issue #187 原文: Build a partially observable maze agentic RL demo
+
+> 原始链接: https://github.com/inclusionAI/AReno/issues/187
+> 创建者: [xsuler](https://github.com/xsuler) (Collaborator)
+> 创建时间: 2026-07-27
+> 状态: Open
+> 标签: `kind/feature` `area/agentic` `priority/backlog`
+
+---
+
+## Motivation
+
+AReno users need **build a partially observable maze agentic RL demo** as a focused, independently reviewable capability. The current workflow either lacks this behavior or requires one-off user code, which makes post-training runs harder to operate, compare, and reproduce.
+
+## Proposed feature
+
+Generate seeded solvable mazes containing walls, keys, doors, and a goal. Reveal only a bounded local view and expose one-step movement actions; never expose the hidden map through tool output.
+
+The implementation should use AReno's existing public contracts and local artifact formats. Any new public option must have a safe default that preserves current behavior, a clear validation error, and both human-readable and structured output when the feature is exposed through the CLI.
+
+### Expected user flow
+
+1. The user enables or invokes the feature with explicit inputs.
+2. AReno validates those inputs before expensive model or worker initialization.
+3. The feature produces an observable result through existing logs, metrics, artifacts, CLI output, or the dashboard.
+4. Failure identifies the affected stage and input without exposing full training samples or hiding the original error.
+
+### Likely implementation areas
+
+Start with `examples/agentic/`, `areno/api/agentic.py`, and focused CPU tests. Keep the change narrow; reuse existing data, metric, lifecycle, and registry contracts rather than introducing a parallel subsystem.
+
+### Minimal example
+
+Provide one tiny deterministic example or fixture that can run without external databases. Agentic examples must also avoid network services and sandbox requirements. The example must demonstrate the successful path and at least one invalid or boundary input.
+
+## Non-goals
+
+- Replacing AReno's trainer, rollout engine, local dashboard storage, or public SDK architecture.
+- Adding an external database, hosted control plane, or mandatory heavyweight dependency.
+- Automatically changing user configuration, deleting artifacts, or terminating unrelated processes.
+- Solving adjacent features that can be reviewed as separate issues.
+
+## Reference
+
+Use only existing AReno dependencies unless a small new dependency is separately justified. The repository's current implementation and contracts are the primary reference; no research-paper implementation is required for this issue.
+
+## Alternatives considered
+
+- Keep the behavior in project-specific loaders, reward hooks, or shell scripts. This does not provide one consistent contract, diagnostics, or reusable tests.
+- Build a separate service for the feature. That would add deployment and storage complexity to a capability that can operate on AReno's existing local artifacts.
+- Fold the work into a broad runtime or dashboard rewrite. A focused addition is easier to review, test, and adopt without changing unrelated behavior.
+
+## Testing requirements
+
+- Add focused CPU tests for the core logic, malformed input, boundary values, disabled/default behavior, and deterministic output.
+- Add an integration-style test using tiny local fixtures where the feature crosses modules.
+- For distributed or GPU-only behavior, isolate orchestration logic behind fakes and document the minimal GPU validation that remains.
+- Assert emitted metric/artifact fields and error messages, not only exit status.
+- Verify existing behavior is unchanged when the feature is not enabled.
+
+## Documentation requirements
+
+Document the user-facing option or command, input contract, defaults, output fields, limitations, and one copyable example. Update the relevant skill or troubleshooting page if this changes an operator workflow.
+
+## Acceptance criteria
+
+- [ ] Cover multiple sizes and layouts, impossible moves, required-key doors, action exhaustion, deterministic replay, and metrics for success, path length, invalid moves, and excess steps over a shortest-path oracle.
+- [ ] The implementation uses existing AReno contracts and introduces no external database or mandatory sandbox.
+- [ ] Default behavior remains backward compatible.
+- [ ] Focused automated tests cover success, invalid input, and one boundary/failure path.
+- [ ] User documentation includes a minimal runnable example and explains observable output.
