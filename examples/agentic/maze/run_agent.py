@@ -91,13 +91,17 @@ async def run_agent(ctx, batch):
             if state.done:
                 break
             tool_choice = {"type": "function", "function": {"name": "act"}}
-            response = await client.chat.completions.create(
-                model="policy",
-                messages=messages,
-                tools=[ACT_TOOL],
-                tool_choice=tool_choice,
-                stream=False,
-            )
+            try:
+                response = await client.chat.completions.create(
+                    model="policy",
+                    messages=messages,
+                    tools=[ACT_TOOL],
+                    tool_choice=tool_choice,
+                    stream=False,
+                )
+            except Exception as exc:
+                logger.warning("Maze agent rollout request failed, ending episode early: %s", exc)
+                break
             message = response.choices[0].message
             tool_calls = [call for call in (message.tool_calls or []) if call.function.name == "act"][:1]
             assistant_message = {
