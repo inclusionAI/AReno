@@ -60,12 +60,15 @@ class TrainerConfig:
     agent_timeout_s: float = 300.0
     train_tool_results: bool = False
     chat_template_enable_thinking: bool | None = None
+    length_bucket_seed: int | None = None
 
     def __post_init__(self) -> None:
         if self.attn_backend not in {"flash", "native"}:
             raise ValueError("attn_backend must be one of: flash, native")
         if self.model_hub not in {"hf", "modelscope"}:
             raise ValueError("model_hub must be one of: hf, modelscope")
+        if self.length_bucket_seed is not None and self.length_bucket_seed < 0:
+            raise ValueError("length_bucket_seed must be non-negative or None")
 
     def optimizer_config(self) -> dict:
         """Build the optimizer dict consumed by the backend config."""

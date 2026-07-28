@@ -98,6 +98,22 @@ class SFTTrainer:
         # Dataset rows are converted lazily so large HF datasets do not need an
         # up-front tokenized copy. Rows that are empty, all-prompt, or exceed
         # the configured prompt or supervised-response budgets are dropped.
+        #
+        # When ``length_bucket_seed`` is set, rows are pre-scanned, collected
+        # into ``TrainSequence`` objects, and then bucketed by
+        # ``len(seq.tokens)`` (prompt + target) so similar-length rows land in
+        # the same batch.  The lazy sequential path is used when the seed is
+        # ``None`` (the default).
+        seed = getattr(self.config, "length_bucket_seed", None)
+        if seed is not None:
+            yield from self._iter_train_batches_bucketed(
+                tokenizer,
+                max_prompt_tokens=max_prompt_tokens,
+                max_new_tokens=max_new_tokens,
+                seed=seed,
+            )
+            return
+
         batch = []
         skipped = 0
         accepted = 0
@@ -128,6 +144,52 @@ class SFTTrainer:
             )
         if batch:
             yield batch
+
+    def _iter_train_batches_bucketed(
+        self, tokenizer, *, max_prompt_tokens: int, max_new_tokens: int, seed: int
+    ):
+        """Length-bucketed SFT batch iteration.
+
+        Pre-scans the dataset, builds ``TrainSequence`` for every valid row,
+        then groups by ``len(seq.tokens)`` (full prompt + target) so the
+        per-batch max length stays low and padding is reduced.
+        """
+
+        from areno.api.length_bucketing import bucketed_batch_indices
+
+        seqs: list = []
+        skipped = 0
+        total_rows = len(self.dataset)
+        for index in range(total_rows):
+            seq = _record_to_train_sequence(
+                self.dataset[index],
+                tokenizer,
+                max_prompt_tokens=max_prompt_tokens,
+                max_new_tokens=max_new_tokens,
+            )
+            if seq is None:
+                skipped += 1
+                continue
+            seqs.append(seq)
+
+        if skipped:
+            self.logger.info("stage=sft_dataset_filter skipped_long_or_empty=%d", skipped)
+        if not seqs:
+            raise ValueError(
+                "SFT dataset produced no valid training rows after filtering: "
+                f"scanned {total_rows} row(s), skipped {skipped} as empty, over-budget, or all-prompt examples. "
+                "Check dataset quality, --max-prompt-tokens, and --max-new-tokens."
+            )
+
+        lengths = [len(seq.tokens) for seq in seqs]
+        index_batches = bucketed_batch_indices(
+            indices=list(range(len(seqs))),
+            lengths=lengths,
+            batch_size=self.config.batch_size,
+            seed=seed,
+        )
+        for batch_indices in index_batches:
+            yield [seqs[i] for i in batch_indices]
 
     def _maybe_save(self, epoch: int, step: int) -> None:
         # Keep the same step-based checkpoint cadence as the RL trainers.

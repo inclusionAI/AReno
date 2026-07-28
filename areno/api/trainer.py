@@ -212,6 +212,7 @@ class Trainer:
         max_prompt_tokens: int,
         prompt_key: str = "prompt",
         solutions_key: str = "solutions",
+        length_bucket_seed: int | None = None,
     ) -> Iterable[PromptBatch]:
         """Yield tokenized prompt batches from a dataset-like object.
 
@@ -219,7 +220,50 @@ class Trainer:
         original record is preserved on each `PromptItem` so reward functions
         can read task-specific fields. The cursor advances even when records
         are skipped, so the iterator eventually walks the entire dataset.
+
+        When *length_bucket_seed* is ``None`` (the default), batches are formed
+        in dataset order — fully backward compatible.  When an integer seed is
+        provided, the dataset is pre-scanned and tokenized up front, items are
+        sorted by prompt length, grouped into buckets, shuffled within and
+        across buckets, then chunked into batches.  This reduces padding when
+        batch items have similar lengths.  All tokenized prompts are held in
+        memory during the pre-scan; acceptable for typical post-training
+        datasets but may be significant for very large ones.
+
+        In bucketed mode the ``scanned``/``skipped_long`` counters on each
+        ``PromptBatch`` reflect only the items in that batch (filtering was
+        done during the pre-scan), while ``total_skipped_long`` carries the
+        pre-scan cumulative count on every batch.
         """
+
+        if length_bucket_seed is None:
+            yield from self._load_prompt_batches_sequential(
+                dataset,
+                batch_size=batch_size,
+                max_prompt_tokens=max_prompt_tokens,
+                prompt_key=prompt_key,
+                solutions_key=solutions_key,
+            )
+            return
+        yield from self._load_prompt_batches_bucketed(
+            dataset,
+            batch_size=batch_size,
+            max_prompt_tokens=max_prompt_tokens,
+            prompt_key=prompt_key,
+            solutions_key=solutions_key,
+            length_bucket_seed=length_bucket_seed,
+        )
+
+    def _load_prompt_batches_sequential(
+        self,
+        dataset,
+        *,
+        batch_size: int,
+        max_prompt_tokens: int,
+        prompt_key: str,
+        solutions_key: str,
+    ) -> Iterable[PromptBatch]:
+        """Sequential, lazy batching — the original implementation."""
 
         cursor = 0
         total_skipped_long = 0
@@ -258,6 +302,63 @@ class Trainer:
                 items=items,
                 scanned=scanned,
                 skipped_long=skipped_long,
+                total_skipped_long=total_skipped_long,
+            )
+
+    def _load_prompt_batches_bucketed(
+        self,
+        dataset,
+        *,
+        batch_size: int,
+        max_prompt_tokens: int,
+        prompt_key: str,
+        solutions_key: str,
+        length_bucket_seed: int,
+    ) -> Iterable[PromptBatch]:
+        """Length-bucketed batching — pre-scan, sort, shuffle, chunk."""
+
+        from areno.api.length_bucketing import bucketed_batch_indices
+
+        # Pre-scan: tokenize every row, collect valid PromptItems.
+        items: list[PromptItem] = []
+        total_skipped_long = 0
+        for cursor in range(len(dataset)):
+            record = dataset[cursor]
+            if prompt_key not in record:
+                raise ValueError(
+                    f"dataset row must contain `{prompt_key}`; use --dataset-loader-fn to normalize raw rows"
+                )
+            prompt = record[prompt_key]
+            input_tokens = encode_generation_prompt(self._tokenizer, prompt)
+            if len(input_tokens) > max_prompt_tokens:
+                total_skipped_long += 1
+                continue
+            items.append(
+                PromptItem(
+                    prompt=prompt,
+                    solutions=record[solutions_key] if solutions_key in record else None,
+                    input_tokens=input_tokens,
+                    record=dict(record),
+                )
+            )
+
+        if not items:
+            return
+
+        lengths = [len(item.input_tokens) for item in items]
+        index_batches = bucketed_batch_indices(
+            indices=list(range(len(items))),
+            lengths=lengths,
+            batch_size=batch_size,
+            seed=length_bucket_seed,
+        )
+
+        for batch_indices in index_batches:
+            batch_items = [items[i] for i in batch_indices]
+            yield PromptBatch(
+                items=batch_items,
+                scanned=len(batch_items),
+                skipped_long=0,
                 total_skipped_long=total_skipped_long,
             )
 

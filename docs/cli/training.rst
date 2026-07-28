@@ -115,6 +115,34 @@ signal.
    the original prompt plus all generated assistant turns concatenated into
    the training row. Defaults to the model context limit.
 
+``--length-bucket-seed INTEGER``
+   Enable length-bucketed batching with the given integer seed. When set,
+   the dataset is pre-scanned and tokenized up front, items are sorted by
+   length, grouped into buckets, and shuffled within and across buckets
+   before forming batches. This reduces padding when batch items have
+   similar lengths. Default: disabled (sequential batching).
+
+   Note: when enabled, all tokenized prompts are held in memory during
+   the pre-scan. This is acceptable for typical post-training datasets
+   but may be significant for very large datasets.
+
+   Observable output: when enabled, the training config summary printed at
+   startup shows ``length_bucket_seed=42`` under the Rollout section
+   (instead of ``disabled``). During training, each batch will contain
+   similar-length prompts, reducing wasted padding tokens. The
+   ``total_skipped_long`` counter on each ``PromptBatch`` reflects the
+   cumulative count from the pre-scan (over-length prompts filtered before
+   batching).
+
+   Example::
+
+      areno train \
+        --ckpt Qwen/Qwen3-0.6B \
+        --dataset-path gsm8k:main \
+        --algo gspo \
+        --batch-size 32 \
+        --length-bucket-seed 42
+
 ``--temperature FLOAT``
    Rollout sampling temperature. Default: ``1.0``.
 

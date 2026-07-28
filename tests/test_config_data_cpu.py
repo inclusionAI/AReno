@@ -754,6 +754,7 @@ def _train_args(**overrides):
         gamma=1.0,
         lam=1.0,
         critic_warmup_steps=20,
+        length_bucket_seed=None,
     )
     defaults.update(overrides)
     if defaults["algo"] == "sft" and "dataset_loader_fn" not in overrides:
