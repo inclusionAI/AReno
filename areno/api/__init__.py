@@ -17,7 +17,7 @@ from areno.api.agentic import (
 )
 from areno.api.algorithms import AlgorithmSpec, get_algorithm, list_algorithms, register_algorithm
 from areno.api.config import ArenoConfig
-from areno.api.data import PromptBatch, PromptItem
+from areno.api.data import DedupResult, PromptBatch, PromptItem, detect_duplicates, normalize_completion
 from areno.api.loss_fns import dpo_loss_fn, grpo_loss_fn, gspo_loss_fn, ppo_loss_fn, sft_loss_fn
 from areno.api.models import (
     BackendType,
@@ -38,6 +38,7 @@ __all__ = [
     "Trainer",
     "AlgorithmSpec",
     "ArenoConfig",
+    "DedupResult",
     "PromptBatch",
     "PromptItem",
     "AgentBatch",
@@ -59,6 +60,8 @@ __all__ = [
     "list_algorithms",
     "register_algorithm",
     "dpo_loss_fn",
+    "detect_duplicates",
+    "normalize_completion",
     "gspo_loss_fn",
     "grpo_loss_fn",
     "ppo_loss_fn",

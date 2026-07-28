@@ -112,6 +112,14 @@ class RolloutTrainerConfig(TrainerConfig):
     top_k: int = -1
     top_p: float = 1.0
     max_running_prompts: int | None = None
+    # --- Duplicate resampling (issue #209) ---
+    # When True, rollout groups with normalized duplicate completions are
+    # re-sampled up to ``dedup_max_resample`` extra requests or until
+    # ``dedup_min_unique`` unique completions are obtained.  Disabled by
+    # default so existing behavior is unchanged.
+    dedup_enabled: bool = False
+    dedup_min_unique: int | None = None
+    dedup_max_resample: int | None = None
 
     def resolved_max_running_prompts(self) -> int:
         """Return explicit or full-batch rollout concurrency."""
@@ -119,6 +127,20 @@ class RolloutTrainerConfig(TrainerConfig):
         if self.max_running_prompts is not None:
             return self.max_running_prompts
         return max(self.batch_size * self.n_samples, 1)
+
+    def resolved_dedup_min_unique(self) -> int:
+        """Return the effective minimum-unique target for dedup."""
+
+        if self.dedup_min_unique is not None:
+            return self.dedup_min_unique
+        return self.n_samples
+
+    def resolved_dedup_max_resample(self) -> int:
+        """Return the effective hard cap on extra resample requests."""
+
+        if self.dedup_max_resample is not None:
+            return self.dedup_max_resample
+        return self.n_samples
 
     def areno_config(self):
         """Build backend config including rollout cache capacity."""

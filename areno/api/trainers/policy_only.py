@@ -95,6 +95,13 @@ class PolicyOnlyTrainer:
                     rollout_results = asyncio.run(self._run_prompt_rollout(sampling_params, prompt_batch))
                     self.logger.info("epoch=%d step=%d role=%s stage=rollout_end", epoch, step, role)
                     record_dashboard_state(self.areno, stage="rollout_end", epoch=epoch, step=step, role=role)
+                    # 1a) Optional duplicate resampling (issue #209): replace
+                    #     normalized duplicate completions with fresh samples
+                    #     up to a bounded budget.  Skipped by default.
+                    if getattr(self.config, "dedup_enabled", False):
+                        rollout_results = self._resample_duplicates(
+                            tokenizer, sampling_params, prompt_batch, rollout_results
+                        )
                     self._record_sample_completions(tokenizer, epoch, step, prompt_batch, rollout_results)
 
                     # 2+3) Score rewards and broadcast group-normalised
@@ -198,6 +205,85 @@ class PolicyOnlyTrainer:
         ):
             prompt_tokens = [item.input_tokens for item in prompt_batch.items]
             return await self.areno.rollout_token_batch_async(prompt_tokens, self.config.n_samples, sampling_params)
+
+    def _resample_duplicates(self, tokenizer, sampling_params, prompt_batch, rollout_results):
+        """Replace normalized duplicate completions with fresh samples.
+
+        For each prompt group, decode completions, detect duplicates, and
+        request replacement samples for duplicate positions up to a bounded
+        budget.  The method preserves group/sample identity: only the
+        duplicate-indexed sequences are replaced; unique ones are untouched.
+
+        Exhausted budgets leave remaining duplicates in place so downstream
+        training still receives a full ``n_samples`` set per prompt.
+        """
+
+        import areno.api
+
+        target_unique = self.config.resolved_dedup_min_unique()
+        max_resample = self.config.resolved_dedup_max_resample()
+        total_duplicates = 0
+        total_resample_requests = 0
+        total_unique = 0
+        total_samples = 0
+
+        for item_idx, (item, result) in enumerate(zip(prompt_batch.items, rollout_results, strict=True)):
+            completions = [tokenizer.decode(seq.resp_tokens) for seq in result.sequences]
+            dedup = areno.api.detect_duplicates(
+                completions,
+                target_unique=target_unique,
+                max_resample=max_resample,
+            )
+            total_duplicates += dedup.duplicate_count
+            total_unique += dedup.unique_count
+            total_samples += dedup.total_count
+            total_resample_requests += dedup.resample_requested
+
+            if not dedup.duplicate_indices or dedup.resample_requested == 0:
+                continue
+
+            # Request replacement samples for the duplicate positions.
+            # We ask for ``resample_requested`` new samples and distribute
+            # them across the duplicate indices.  If a replacement is itself
+            # a duplicate of an existing unique completion, it still counts
+            # against the budget -- the loop does not recurse.
+            dup_indices = dedup.duplicate_indices[: dedup.resample_requested]
+            if not dup_indices:
+                continue
+            prompt_tokens = [item.input_tokens for _ in dup_indices]
+            replacements = asyncio.run(
+                self._run_resample_rollout(sampling_params, prompt_tokens, len(dup_indices))
+            )
+            # ``replacements`` is a list[RolloutResult], one per prompt (each
+            # with ``len(dup_indices)`` sequences).  Since we sent one prompt
+            # repeated, the single result holds all replacement sequences.
+            if replacements and replacements[0].sequences:
+                repl_seqs = replacements[0].sequences
+                for repl_idx, dup_idx in enumerate(dup_indices):
+                    if repl_idx < len(repl_seqs):
+                        result.sequences[dup_idx] = repl_seqs[repl_idx]
+
+        # Log dedup metrics for observability.
+        if total_samples > 0:
+            self.logger.info(
+                "dedup duplicates=%d unique=%d total=%d ratio=%.4f resample_requests=%d",
+                total_duplicates,
+                total_unique,
+                total_samples,
+                total_duplicates / total_samples,
+                total_resample_requests,
+            )
+        return rollout_results
+
+    async def _run_resample_rollout(self, sampling_params, prompt_tokens, n_samples):
+        """Run a small supplementary rollout for resample replacements."""
+
+        async with self.areno.rollout_session(
+            sampling_params=sampling_params,
+            max_running_prompts=max(self.config.resolved_max_running_prompts(), n_samples),
+            proxy=False,
+        ):
+            return await self.areno.rollout_token_batch_async(prompt_tokens, n_samples, sampling_params)
 
     async def _run_agentic_rollout(self, sampling_params, prompt_batch):
         from areno.api.agentic import AgentBatch, AgentTrainBatch, maybe_await
