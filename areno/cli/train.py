@@ -129,7 +129,7 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         ),
     ),
     ("Checkpoint", ("save_path", "save_interval")),
-    ("Observability", ("metrics_log_dir",)),
+    ("Observability", ("metrics_log_dir", "summary", "summary_json")),
 )
 
 
@@ -638,6 +638,8 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             agent_timeout_s=args.agent_timeout_s,
             train_tool_results=args.train_tool_results,
             chat_template_enable_thinking=chat_template_enable_thinking,
+            summary_enabled=args.summary,
+            summary_json=args.summary_json,
             ref_ckpt=args.ref_ckpt,
             dpo_beta=args.dpo_beta,
         )
@@ -679,6 +681,8 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             agent_timeout_s=args.agent_timeout_s,
             train_tool_results=args.train_tool_results,
             chat_template_enable_thinking=chat_template_enable_thinking,
+            summary_enabled=args.summary,
+            summary_json=args.summary_json,
         )
     if algorithm.name != "ppo":
         return PolicyTrainerConfig(
@@ -727,6 +731,8 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             agent_timeout_s=args.agent_timeout_s,
             train_tool_results=args.train_tool_results,
             chat_template_enable_thinking=chat_template_enable_thinking,
+            summary_enabled=args.summary,
+            summary_json=args.summary_json,
         )
     return PPOTrainerConfig(
         algo=algorithm.name,
@@ -788,6 +794,8 @@ def _trainer_config_from_args(args) -> TrainerConfig:
         agent_timeout_s=args.agent_timeout_s,
         train_tool_results=args.train_tool_results,
         chat_template_enable_thinking=chat_template_enable_thinking,
+        summary_enabled=args.summary,
+        summary_json=args.summary_json,
     )
 
 
@@ -1324,6 +1332,17 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
 @click.option("--value-loss-coef", type=float, default=0.5, show_default=True, help="PPO value loss coefficient.")
 @click.option("--gamma", type=float, default=1.0, show_default=True, help="PPO GAE discount.")
 @click.option("--lam", type=float, default=0.95, show_default=True, help="PPO GAE lambda.")
+@click.option(
+    "--summary/--no-summary",
+    default=True,
+    show_default=True,
+    help="Print a structured terminal summary when a run ends.",
+)
+@click.option(
+    "--summary-json",
+    is_flag=True,
+    help="Emit the run-end summary as JSON instead of human-readable text.",
+)
 def train_command(**options) -> None:
     """Click entrypoint for training."""
 

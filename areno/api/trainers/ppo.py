@@ -433,9 +433,20 @@ class PPOTrainer(PolicyOnlyTrainer):
         # backend is up but before the first rollout/train cycle.
         self.areno.init()
         self._ensure_roles()
+        outcome = "success"
+        error_msgs: list[str] = []
         try:
             self._fit_initialized()
+        except KeyboardInterrupt:
+            outcome = "interrupted"
+            error_msgs.append("KeyboardInterrupt")
+            raise
+        except Exception as exc:
+            outcome = "error"
+            error_msgs.append(f"{type(exc).__name__}: {exc}")
+            raise
         finally:
+            self._print_run_summary(outcome, error_msgs)
             self.areno.close()
 
     def _score_logprobs(self, role: str, token_rows: list[list[int]]) -> list[list[float]]:

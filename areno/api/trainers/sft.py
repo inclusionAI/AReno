@@ -25,6 +25,7 @@ import areno.api
 from areno.api.dashboard import record_dashboard_state
 from areno.api.data_utils import prompt_response_to_tokens_and_mask
 from areno.api.tokenizer import configure_chat_template_enable_thinking
+from areno.cli.run_summary import RunSummaryData
 
 
 class SFTTrainer:
@@ -43,15 +44,48 @@ class SFTTrainer:
         self.dataset = dataset
         self.loss_fn = loss_fn
         self.logger = logging.getLogger(f"{self.__class__.__module__}.{self.__class__.__name__}")
+        self._summary_data = RunSummaryData(
+            algo=getattr(config, "algo", ""),
+            model=getattr(config, "ckpt", ""),
+        )
+        self._run_start_time: float | None = None
 
     def fit(self) -> None:
         self.areno.init()
+        outcome = "success"
+        error_msgs: list[str] = []
         try:
             self._fit_initialized()
+        except KeyboardInterrupt:
+            outcome = "interrupted"
+            error_msgs.append("KeyboardInterrupt")
+            raise
+        except Exception as exc:
+            outcome = "error"
+            error_msgs.append(f"{type(exc).__name__}: {exc}")
+            raise
         finally:
+            self._print_run_summary(outcome, error_msgs)
             self.areno.close()
 
+    def _print_run_summary(self, outcome: str, errors: list[str]) -> None:
+        """Print a structured terminal summary when a run ends."""
+        from areno.cli.run_summary import print_run_summary
+
+        data = self._summary_data
+        data.outcome = outcome
+        data.duration_s = (
+            time.perf_counter() - self._run_start_time
+            if self._run_start_time is not None
+            else 0.0
+        )
+        data.errors = errors
+        enabled = getattr(self.config, "summary_enabled", True)
+        json_output = getattr(self.config, "summary_json", False)
+        print_run_summary(data, enabled=enabled, json_output=json_output)
+
     def _fit_initialized(self) -> None:
+        self._run_start_time = time.perf_counter()
         tokenizer = self.areno.get_tokenizer()
         configure_chat_template_enable_thinking(tokenizer, getattr(self.config, "chat_template_enable_thinking", None))
         step = 0
@@ -86,6 +120,14 @@ class SFTTrainer:
                 record_dashboard_state(self.areno, stage="train_end", epoch=epoch, step=step, role="policy")
                 self.logger.info("epoch=%d step=%d train_stats=%s", epoch, step, result)
                 self._maybe_save(epoch, step)
+                # Update run-end summary data.
+                sd = self._summary_data
+                sd.final_step = step + 1
+                sd.final_epoch = epoch
+                sd.samples_processed += len(train_batch)
+                sd.samples_trained += len(train_batch)
+                if isinstance(result, dict):
+                    sd.metrics = {k: v for k, v in result.items() if isinstance(v, (int, float))}
                 step += 1
                 if self.config.max_steps is not None and step >= self.config.max_steps:
                     self.logger.info("epoch=%d step=%d stage=max_steps_reached", epoch, step)

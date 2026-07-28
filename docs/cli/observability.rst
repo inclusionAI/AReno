@@ -175,3 +175,118 @@ When a trajectory is dropped for exceeding the model context window,
 counts, message counts, assistant turn counts, tool-result counts, and a short
 prompt preview. This is the fastest way to debug overlong agentic examples
 without dumping every token in every trajectory.
+
+Run-end terminal summary
+------------------------
+
+When a training run finishes—whether it succeeds, is interrupted by
+``Ctrl-C``, or fails with an exception—AReno prints a compact summary block to
+stderr.  The summary includes the outcome, wall-clock duration, final step and
+epoch, sample counts, the last recorded metrics, and a bounded list of error
+messages (at most five).  The original traceback (if any) is preserved and
+printed *before* the summary so it is never lost.
+
+The feature is enabled by default.  Two CLI flags control it:
+
+``--summary`` / ``--no-summary``
+   Enable or disable the run-end summary (default: enabled).
+
+``--summary-json``
+   Emit the summary as a single JSON object instead of human-readable text
+   (default: off).  Useful for piping into log aggregators or downstream
+   scripts.
+
+Minimal example
+~~~~~~~~~~~~~~~
+
+.. code-block:: bash
+
+   areno train --algo sft --model /path/to/model --dataset /path/to/data
+
+When the run ends you will see (on stderr):
+
+.. code-block:: text
+
+   ============================================
+     AReno Training Summary
+   --------------------------------------------
+     Outcome:    success
+     Duration:   1h 23m 45s
+     Algorithm:  sft
+     Model:      /path/to/model
+     Steps: 500  |  Epochs: 3
+   --------------------------------------------
+     Samples: 4800 trained, 0 skipped, 4800 processed
+   --------------------------------------------
+     Metrics:
+     loss                      0.0312
+     lr                        1.5e-05
+   ============================================
+
+If the run is interrupted with ``Ctrl-C``, the outcome line changes to
+``interrupted``.  If it fails, the outcome is ``error`` and an ``Errors
+(bounded)`` section lists up to five error messages after the traceback.
+
+To get machine-readable JSON instead:
+
+.. code-block:: bash
+
+   areno train --algo sft --model /path/to/model --dataset /path/to/data --summary-json
+
+Output (on stderr):
+
+.. code-block:: json
+
+   {
+     "outcome": "success",
+     "duration_s": 5025.3,
+     "algo": "sft",
+     "model": "/path/to/model",
+     "final_step": 500,
+     "final_epoch": 3,
+     "metrics": {
+       "loss": 0.0312,
+       "lr": 1.5e-05
+     },
+     "samples": {
+       "processed": 4800,
+       "trained": 4800,
+       "skipped": 0
+     },
+     "errors": []
+   }
+
+Observable fields
+~~~~~~~~~~~~~~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 28 72
+
+   * - Field
+     - Meaning
+   * - ``outcome``
+     - One of ``success``, ``interrupted``, or ``error``.
+   * - ``duration_s``
+     - Wall-clock duration in seconds (rounded to 3 decimals in JSON).
+   * - ``algo``
+     - Algorithm name (e.g. ``sft``, ``dpo``, ``ppo``).
+   * - ``model``
+     - Model path used for the run (truncated in text mode if longer than
+       28 characters).
+   * - ``final_step`` / ``final_epoch``
+     - Last completed optimizer step and epoch.
+   * - ``metrics``
+     - Final recorded metric values (empty ``{}`` if no metrics were
+       recorded; text mode shows ``(none)``).
+   * - ``samples.processed`` / ``samples.trained`` / ``samples.skipped``
+     - Number of rows processed by the data loader, actually used in
+       training, and skipped (e.g. for exceeding length limits).
+   * - ``errors``
+     - Up to five error message strings (empty list on success).
+
+To disable the summary entirely:
+
+.. code-block:: bash
+
+   areno train --algo sft --model /path/to/model --dataset /path/to/data --no-summary
