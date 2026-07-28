@@ -7,6 +7,7 @@ as close to the target as possible.
 
 from __future__ import annotations
 
+import random
 import re
 from collections.abc import Iterable
 
@@ -179,3 +180,120 @@ def strip_chat_special_tokens(text: str) -> str:
     """Remove chat-template sentinels that may trail generated text."""
 
     return _CHAT_SPECIAL_RE.sub(" ", text)
+
+
+# ---------------------------------------------------------------------------
+# Random-policy baseline, trace replay, and evaluation metrics.
+# ---------------------------------------------------------------------------
+
+
+def random_baseline(
+    numbers: list[int], target: int, *, seed: int = 0
+) -> tuple[int, int, str]:
+    """Pick two random numbers and a random operation.
+
+    Returns ``(a, b, op)``.  Useful as a baseline to compare against
+    a trained policy.
+    """
+
+    rng = random.Random(seed)
+    nums = normalize_numbers(numbers)
+    idx_a, idx_b = rng.sample(range(len(nums)), 2)
+    a, b = nums[idx_a], nums[idx_b]
+    op = rng.choice(OPERATIONS)
+    return a, b, op
+
+
+def random_baseline_score(
+    numbers: list[int], target: int, *, seed: int = 0, trials: int = 100
+) -> float:
+    """Average reward of a random policy over *trials* samples."""
+
+    scores = []
+    for i in range(trials):
+        a, b, op = random_baseline(numbers, target, seed=seed + i)
+        scores.append(score_move(numbers, target, a, b, op))
+    return sum(scores) / len(scores) if scores else 0.0
+
+
+def format_trace(
+    numbers: list[int], target: int, a: int, b: int, op: str
+) -> str:
+    """Render one move as a human-readable trace line.
+
+    Example output::
+
+        Puzzle: numbers=[1, 5, 10, 25], target=525
+        Move:   25 * 10 = 250
+        Score:  0.4762 (distance=275)
+    """
+
+    result = calculate(a, b, op)
+    score = score_move(numbers, target, a, b, op)
+    if result is None:
+        result_str = "invalid"
+        distance_str = "n/a"
+    else:
+        result_str = str(result)
+        distance_str = str(abs(result - target))
+    return (
+        f"Puzzle: numbers={numbers}, target={target}\n"
+        f"Move:   {a} {op} {b} = {result_str}\n"
+        f"Score:  {score:.4f} (distance={distance_str})"
+    )
+
+
+def evaluate_moves(
+    numbers: list[int],
+    target: int,
+    moves: list[tuple[int | None, int | None, str | None]],
+) -> dict:
+    """Evaluate a batch of moves and return aggregate metrics.
+
+    Returns a dict with:
+    - ``total``: number of moves
+    - ``exact_solves``: moves that exactly hit the target
+    - ``invalid_actions``: moves with invalid operation or unavailable numbers
+    - ``valid_actions``: moves that are legal but may not hit target
+    - ``exact_solve_rate``: exact_solves / total
+    - ``invalid_action_rate``: invalid_actions / total
+    - ``mean_reward``: average reward across all moves
+    - ``best_reward``: best reward across all moves
+    """
+
+    total = len(moves)
+    exact = 0
+    invalid = 0
+    valid = 0
+    rewards: list[float] = []
+
+    for a, b, op in moves:
+        score = score_move(numbers, target, a, b, op)
+        rewards.append(score)
+        if score == 1.0:
+            exact += 1
+        if score < 0:
+            invalid += 1
+        else:
+            valid += 1
+
+    return {
+        "total": total,
+        "exact_solves": exact,
+        "invalid_actions": invalid,
+        "valid_actions": valid,
+        "exact_solve_rate": exact / total if total else 0.0,
+        "invalid_action_rate": invalid / total if total else 0.0,
+        "mean_reward": sum(rewards) / len(rewards) if rewards else 0.0,
+        "best_reward": max(rewards) if rewards else 0.0,
+    }
+
+
+def oracle_solve(numbers: list[int], target: int) -> float:
+    """Return the best achievable score (oracle solver).
+
+    For single-step Countdown, the oracle simply tries all valid
+    two-number combinations and returns the highest score.
+    """
+
+    return best_score(numbers, target)
