@@ -278,11 +278,12 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
         raise click.UsageError("--critic-warmup-steps must be non-negative")
     if args.eval_dataset_path is not None:
         path = Path(args.eval_dataset_path).expanduser().resolve()
-        if not path.exists():
+        if path.suffix.lower() in _SUPPORTED_DATASET_SUFFIXES and not path.exists():
             raise click.UsageError(
                 f"--eval-dataset-path does not exist: {path}"
             )
-        args.eval_dataset_path = str(path)
+        if path.exists():
+            args.eval_dataset_path = str(path)
     if args.eval_interval < 0:
         raise click.UsageError("--eval-interval must be non-negative")
     if args.eval_batches < 0:
