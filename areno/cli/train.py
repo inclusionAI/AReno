@@ -828,6 +828,22 @@ def run(trainer_config: TrainerConfig, *, disk_monitor_config: DiskMonitorConfig
         trainer._disk_monitor = build_disk_monitor_from_config(
             trainer_config, disk_monitor_config=disk_monitor_config
         )
+        if trainer._disk_monitor is not None:
+            import logging as _logging
+            _logging.getLogger("areno.cli.train").info(
+                "disk_monitor enabled: paths=%s warn_gb=%.1f stop_gb=%.1f",
+                trainer._disk_monitor._paths,
+                trainer._disk_monitor._warn_bytes / 1e9,
+                trainer._disk_monitor._stop_bytes / 1e9,
+            )
+        else:
+            import logging as _logging
+            _logging.getLogger("areno.cli.train").warning(
+                "disk_monitor config was set but build_disk_monitor_from_config returned None "
+                "(save_path=%s, metrics_log_dir=%s)",
+                getattr(trainer_config, "save_path", None),
+                getattr(trainer_config, "metrics_log_dir", None),
+            )
     trainer.fit()
 
 
