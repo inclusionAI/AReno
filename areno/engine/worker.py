@@ -37,6 +37,12 @@ from areno.engine.protocol import (
 from areno.engine.roles import RoleManager, WorkerRole
 from areno.engine.runtime.common import pad_rollout_rows
 from areno.engine.runtime.decode_graph import DecodeGraph
+from areno.engine.runtime.load_progress import (
+    ModelLoadTracker,
+    STAGE_DEVICE_PLACEMENT,
+    STAGE_WEIGHT_SHARD_READING,
+    STAGE_WORKER_DISTRIBUTION,
+)
 from areno.engine.runtime.rollout import _empty_rollout
 from areno.engine.training import TrainingManager
 from areno.models.registry import load_model_weights, save_model_weights
@@ -55,11 +61,16 @@ class ArenoWorker:
         self.config = config
         ctx = get_tp_context()
         self.device = ctx.device
+        # Rank 0 emits per-stage load progress; other ranks stay silent to
+        # avoid duplicate lines across the TP group (issue #230).
+        load_tracker = ModelLoadTracker(rank0=ctx.rank == 0)
         # Build the actor model directly on the shard's device, then wrap in
         # torch.compile so subsequent forward calls use the compiled graph.
-        self.model = build_model_on_device(config, self.device)
+        with load_tracker.stage(STAGE_DEVICE_PLACEMENT, detail=str(self.device)):
+            self.model = build_model_on_device(config, self.device)
         if config.model_path is not None and not config.dummy_load:
-            load_model_weights(self.model, config.model, config.model_path)
+            with load_tracker.stage(STAGE_WEIGHT_SHARD_READING, detail=config.model_path):
+                load_model_weights(self.model, config.model, config.model_path)
         if config.runtime.compile_model:
             self.model = torch.compile(self.model)
         opt = config.optimizer
@@ -88,9 +99,10 @@ class ArenoWorker:
         self._train_state_ready = False
         self._actor_on_device = True
         self._current_request_ids: list[int | None] = []
-        self.inference = InferenceManager(self)
-        self.roles = RoleManager(self)
-        self.training = TrainingManager(self)
+        with load_tracker.stage(STAGE_WORKER_DISTRIBUTION):
+            self.inference = InferenceManager(self)
+            self.roles = RoleManager(self)
+            self.training = TrainingManager(self)
         if config.train_loss_fn is None:
             raise ValueError("ArenoEngine requires train_loss_fn")
         self.loss_fn = config.train_loss_fn

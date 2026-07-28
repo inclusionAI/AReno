@@ -12,6 +12,12 @@ from areno.engine.optim import AdamW8bit, AdamWFP32Master
 from areno.engine.parallel.context import get_tp_context
 from areno.engine.protocol import EnsureRolesPayload, ScorePayload, TrainValuesPayload
 from areno.engine.runtime.logprobs import next_token_logprobs
+from areno.engine.runtime.load_progress import (
+    ModelLoadTracker,
+    STAGE_CONFIG_TOKENIZER,
+    STAGE_DEVICE_PLACEMENT,
+    STAGE_WEIGHT_SHARD_READING,
+)
 from areno.engine.runtime.train_step import _dense_train_meta
 from areno.models.registry import config_from_hf, load_model_weights
 
@@ -181,7 +187,10 @@ class WorkerRole:
     ) -> WorkerRole:
         """Construct a role from a HF-style checkpoint at `path`."""
 
-        model_config = config_from_hf(path)
+        # Rank 0 reports role-loading progress; other ranks stay silent (#230).
+        tracker = ModelLoadTracker(rank0=get_tp_context().rank == 0)
+        with tracker.stage(STAGE_CONFIG_TOKENIZER, detail=path):
+            model_config = config_from_hf(path)
         role_config = EngineConfig(
             model=model_config,
             model_path=path,
@@ -193,9 +202,11 @@ class WorkerRole:
             devices=devices,
             dummy_load=False,
         )
-        model = build_model_on_device(role_config, device)
+        with tracker.stage(STAGE_DEVICE_PLACEMENT, detail=str(device)):
+            model = build_model_on_device(role_config, device)
         if source_model is None:
-            load_model_weights(model, model_config, path)
+            with tracker.stage(STAGE_WEIGHT_SHARD_READING, detail=path):
+                load_model_weights(model, model_config, path)
         else:
             model.load_state_dict(unwrap_model(source_model).state_dict())
         checkpoint_head_out = _maybe_reward_head_out_features(path) if critic else None
