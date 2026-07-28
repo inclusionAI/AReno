@@ -791,6 +791,63 @@ def _trainer_config_from_args(args) -> TrainerConfig:
     )
 
 
+def _build_oom_config_snapshot(trainer_config: TrainerConfig) -> dict:
+    """Extract resolved option values for OOM diagnostics."""
+
+    snapshot = {
+        "tp_size": trainer_config.tp_size,
+        "world_size": trainer_config.world_size,
+        "dp_size": trainer_config.world_size // trainer_config.tp_size if trainer_config.tp_size else None,
+        "batch_size": trainer_config.batch_size,
+        "mini_bs": trainer_config.mini_bs,
+        "max_new_tokens": trainer_config.max_new_tokens,
+        "max_prompt_tokens": trainer_config.max_prompt_tokens,
+        "attn_backend": trainer_config.attn_backend,
+        "activation_checkpointing": trainer_config.activation_checkpointing,
+        "keep_rollout_state": trainer_config.keep_rollout_state,
+        "drop_rollout_state": not trainer_config.keep_rollout_state,
+        "eager_decode": trainer_config.eager_decode,
+        "adam_8bit": trainer_config.adam_8bit,
+        "model_path": trainer_config.ckpt,
+        "compile_model": True,
+        "gradient_accumulation_steps": trainer_config.gradient_accumulation_steps,
+        "dummy_load": False,
+    }
+    if hasattr(trainer_config, "n_samples"):
+        snapshot["n_samples"] = trainer_config.n_samples
+    if hasattr(trainer_config, "max_running_prompts"):
+        snapshot["max_running_prompts"] = trainer_config.resolved_max_running_prompts()
+    return snapshot
+
+
+def _print_oom_guidance(error: BaseException, trainer_config: TrainerConfig) -> None:
+    """Print stage-specific OOM guidance after the original error."""
+
+    from areno.engine.oom_diagnostics import diagnose_oom_from_exception, is_oom_error
+
+    if not is_oom_error(error):
+        return
+    guidance_text = diagnose_oom_from_exception(error, _build_oom_config_snapshot(trainer_config))
+    if guidance_text:
+        click.echo("", err=True)
+        click.echo(guidance_text, err=True)
+
+
+def _print_oom_guidance_from_text(error_text: str, trainer_config: TrainerConfig) -> None:
+    """Print stage-specific OOM guidance from an error message string."""
+
+    lowered = error_text.lower()
+    if "out of memory" not in lowered:
+        return
+    from areno.engine.oom_diagnostics import detect_stage, format_oom_guidance
+
+    stage = detect_stage(error_text)
+    guidance_text = format_oom_guidance(stage, _build_oom_config_snapshot(trainer_config))
+    if guidance_text:
+        click.echo("", err=True)
+        click.echo(guidance_text, err=True)
+
+
 def run(trainer_config: TrainerConfig):
     """Build the trainer chosen by `--algo` and run `.fit()` to completion."""
 
@@ -823,7 +880,11 @@ def run(trainer_config: TrainerConfig):
         load_from_disk=load_from_disk,
     )
     trainer = build_trainer(trainer_config, instance=api_trainer, dataset=dataset, reward_fn=reward_fn, loss_fn=loss_fn)
-    trainer.fit()
+    try:
+        trainer.fit()
+    except BaseException as exc:
+        _print_oom_guidance(exc, trainer_config)
+        raise
 
 
 def _write_dashboard_run_config(config: TrainerConfig) -> None:
@@ -1337,6 +1398,7 @@ def train_command(**options) -> None:
         measurement = smoke_infer_config(trainer_config) if stage == "infer" else smoke_train_config(trainer_config)
         _print_smoke_summary(stage, measurement)
         if not measurement.ok:
+            _print_oom_guidance_from_text(measurement.error or "", trainer_config)
             raise click.ClickException(measurement.error or f"smoke {stage} failed")
         return
     if options.get("tune_params"):

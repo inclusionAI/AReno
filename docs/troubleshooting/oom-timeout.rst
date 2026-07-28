@@ -19,3 +19,80 @@ tests, sleeps, browser work, and sandbox actions can dominate rollout wall
 time before the model is called again.
 
 See :doc:`/cli/observability` for timing and metric interpretation.
+
+Stage-specific OOM guidance
+---------------------------
+
+When a CUDA out-of-memory error occurs, AReno automatically detects which
+stage the error happened in and prints actionable suggestions to stderr
+**after** the original error traceback.  The original error is never replaced
+or hidden.
+
+Three stages are recognised:
+
+1. **Model loading** — OOM during weight construction or checkpoint loading.
+2. **Rollout generation** — OOM during inference, KV-cache allocation, or
+   decode CUDA graph capture.
+3. **Training** — OOM during forward, backward, or optimizer stepping.
+
+The guidance output looks like::
+
+   CUDA OOM during training. Suggestions (in priority order):
+
+     1. Reduce --mini-bs (currently 16) to shrink the training microbatch ...
+        Option: --mini-bs  (current value: 16)
+     2. Add --drop-rollout-state to release rollout state before training ...
+        Option: --drop-rollout-state  (current value: False)
+     ...
+
+   See https://github.com/inclusionAI/AReno/blob/main/docs/cli/training.rst#troubleshooting-oom
+   for detailed OOM troubleshooting.
+
+Suggestions are ordered by priority and only include options relevant to the
+failing stage.  Each suggestion shows the AReno option name and the resolved
+value currently in effect so the user knows exactly what to change.
+
+Suggestion summary by stage:
+
+**Model loading**
+
+* Increase ``--tp-size`` to shard the model across more GPUs.
+* Reduce data-parallel size or increase ``--tp-size`` within the same
+  ``--world-size``.
+* Try ``--attn-backend native`` if flash-attn workspace allocations
+  contribute (slower but lower peak workspace memory).
+* Disable ``torch.compile`` via runtime config to avoid compile-time memory
+  overhead.
+* Enable ``--adam-8bit`` to use 8-bit Adam moment states.
+
+**Rollout generation**
+
+* Reduce ``--max-running-prompts`` to lower concurrent decode memory and
+  KV-cache footprint.
+* Reduce ``--batch-size`` or ``--n-samples`` to lower total concurrent
+  rollout sequences.
+* Reduce ``--max-new-tokens`` to shorten maximum generation length.
+* Add ``--eager-decode`` to disable decode CUDA graph capture.
+* Add ``--drop-rollout-state`` to release rollout state after rollout.
+* Increase ``--tp-size`` to shard KV-cache across more GPUs.
+
+**Training**
+
+* Reduce ``--mini-bs`` to shrink the training microbatch.
+* Enable ``--activation-checkpointing`` to trade compute for memory.
+* Add ``--drop-rollout-state`` to free GPU memory before backward pass.
+* Enable ``--adam-8bit`` to reduce optimizer memory.
+* Reduce ``--max-new-tokens`` to shorten training sequences.
+* Increase ``--gradient-accumulation-steps`` and further reduce
+  ``--mini-bs``.
+* Increase ``--tp-size`` to shard gradients and optimizer states.
+
+The guidance is purely informational.  AReno does not automatically mutate
+configuration or retry the run.  When the OOM stage cannot be determined
+(e.g., ambiguous traceback), no guidance is emitted and the original error
+passes through unchanged, preserving backward compatibility.
+
+For programmatic access, the :mod:`areno.engine.oom_diagnostics` module
+exposes ``build_oom_guidance()``, ``format_oom_guidance()``,
+``detect_stage()``, ``is_oom_error()``, and ``diagnose_oom_from_exception()``
+with both human-readable and structured (``OOMGuidance.to_dict()``) output.
