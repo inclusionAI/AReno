@@ -75,6 +75,14 @@ Options:
 
 ``world-size`` must be divisible by ``tp-size``.
 
+``--resource-check [skip|warn|block]``
+   Preflight host file-descriptor, process-count, and shared-memory limits
+   against a documented demand estimate for ``world_size``/``tp_size`` before
+   any worker starts. ``warn`` (default) prints a stderr diagnostic only when a
+   probed limit is below demand and never aborts; ``block`` aborts the run on a
+   failed probe; ``skip`` disables the check. See :doc:`diagnostics` for the
+   probe contract, output fields, and limitations.
+
 Examples
 --------
 
