@@ -1,4 +1,4 @@
-"""Reward function for the multi-turn maze tool-call example."""
+"""Reward function for the maze tool-call example."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ import game  # noqa: E402
 
 
 def reward_fn(record: Any) -> float:
-    """Score one maze episode by replaying all act tool calls."""
+    """Score one maze episode by replaying the act tool call actions."""
 
     source = record.source_record
     raw = source.get("state", source)
@@ -24,9 +24,8 @@ def reward_fn(record: Any) -> float:
 
 
 def _extract_actions(record: Any) -> list[dict[str, str] | None]:
-    """Pull the ordered list of act tool-call arguments from the record."""
+    """Pull the ordered action list from the act tool call."""
 
-    actions: list[dict[str, str] | None] = []
     for call in getattr(record, "tool_calls", []) or []:
         if not isinstance(call, dict):
             continue
@@ -37,10 +36,20 @@ def _extract_actions(record: Any) -> list[dict[str, str] | None]:
             try:
                 args = json.loads(args)
             except json.JSONDecodeError:
+                return []
+        if not isinstance(args, dict):
+            continue
+        raw_actions = args.get("actions", [])
+        if not isinstance(raw_actions, list):
+            continue
+        actions: list[dict[str, str] | None] = []
+        for item in raw_actions:
+            if isinstance(item, dict):
+                actions.append({
+                    "action": str(item.get("action", "")),
+                    "direction": str(item.get("direction", "")),
+                })
+            else:
                 actions.append(None)
-                continue
-        if isinstance(args, dict):
-            actions.append({"action": str(args.get("action", "")), "direction": str(args.get("direction", ""))})
-        else:
-            actions.append(None)
-    return actions
+        return actions
+    return []

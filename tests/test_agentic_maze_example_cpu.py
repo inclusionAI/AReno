@@ -559,11 +559,9 @@ def test_reward_fn_reaching_goal():
         "agent_pos": [1, 1],
         "max_steps": 5,
     }
-    state = generator.record_to_state(record)
-    # Simulate tool calls
     record_obj = SimpleNamespace(
         source_record=record,
-        tool_calls=[{"name": "act", "arguments": {"action": "move", "direction": "RIGHT"}}],
+        tool_calls=[{"name": "act", "arguments": {"actions": [{"action": "move", "direction": "RIGHT"}]}}],
     )
 
     result = reward.reward_fn(record_obj)
@@ -586,10 +584,10 @@ def test_reward_fn_invalid_moves():
     }
     record_obj = SimpleNamespace(
         source_record=record,
-        tool_calls=[
-            {"name": "act", "arguments": {"action": "move", "direction": "UP"}},
-            {"name": "act", "arguments": {"action": "move", "direction": "LEFT"}},
-        ],
+        tool_calls=[{"name": "act", "arguments": {"actions": [
+            {"action": "move", "direction": "UP"},
+            {"action": "move", "direction": "LEFT"},
+        ]}}],
     )
 
     result = reward.reward_fn(record_obj)
@@ -614,7 +612,7 @@ def test_reward_fn_ignores_non_act_tool_calls():
         source_record=record,
         tool_calls=[
             {"name": "look", "arguments": {}},
-            {"name": "act", "arguments": {"action": "move", "direction": "RIGHT"}},
+            {"name": "act", "arguments": {"actions": [{"action": "move", "direction": "RIGHT"}]}},
         ],
     )
 
