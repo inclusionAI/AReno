@@ -141,6 +141,11 @@ class Job:
             "samples": self.samples[-50:],
             "timeperf": self.timeperf[-80:],
             "perf": self.perf,
+            "diagnosis": (
+                _diagnose_failure(self.logs, self.stage or "")
+                if self.status in {"failed", "exited", "stopped"}
+                else None
+            ),
         }
 
     def to_summary_json(self) -> dict[str, Any]:
@@ -925,6 +930,152 @@ def runtime_env() -> dict[str, Any]:
         "python": sys.version.split()[0],
         "cwd": str(ROOT),
     }
+
+
+# ---------------------------------------------------------------------------
+# Failure diagnosis – scan captured logs for the likely root cause
+# ---------------------------------------------------------------------------
+
+_TEARDOWN_FRAMES = frozenset(
+    {"atexit", "__del__", "close()", "cleanup", "_shutdown", "worker teardown", "signal_handler"}
+)
+_ERROR_LINE_RE = re.compile(
+    r"^\s*(Traceback|RuntimeError|Error|Exception|KeyError|\.Error)", re.IGNORECASE
+)
+_TRACEBACK_HEADER = "Traceback (most recent call last):"
+_OOM_PATTERNS = ("cuda out of memory", "outofmemoryerror")
+_MODEL_LOAD_PATTERNS = ("can't load", "safetensors", "file not found", "checkpoint")
+_DATA_PATTERNS = ("dataset", "keyerror", "tokenizer")
+_DISTRIBUTED_PATTERNS = ("nccl", "barrier")
+_CONTEXT_PAD = 5
+
+
+def _diagnose_failure(logs: list[str], stage: str = "") -> dict[str, Any]:
+    """Scan *logs* for the earliest actionable error and return a diagnosis.
+
+    Returns ``{"identified": True, "type": ..., "error": ..., ...}`` when
+    an error is found, or ``{"identified": False}`` when no pattern matches.
+    """
+    if not logs:
+        return {"identified": False}
+
+    # ---- Collect any traceback span (may be filtered as teardown later) ----------
+    tb_start = -1
+    tb_end = -1  # exclusive end index
+    tb_lines: list[str] = []
+    tb_final_error = ""
+    tb_is_teardown = False
+    for i, line in enumerate(logs):
+        if _TRACEBACK_HEADER in line:
+            tb_start = i
+            for j in range(i, len(logs)):
+                tb_lines.append(logs[j])
+                m = re.match(r"^\s*(\S+Error|RuntimeError|Exception)(?::\s*(.*))?$", logs[j])
+                if m:
+                    tb_final_error = logs[j].strip()
+                    tb_end = j + 1
+                    break
+            # Also set tb_end if no final error line found
+            if tb_end == -1:
+                tb_end = min(len(logs), tb_start + len(tb_lines))
+            tb_is_teardown = any(
+                marker in frame_line for frame_line in tb_lines for marker in _TEARDOWN_FRAMES
+            )
+            break
+
+    # ---- OOM (check before traceback — OOM may appear just above the traceback) ---
+    for i, line in enumerate(logs):
+        lower = line.lower()
+        if any(p in lower for p in _OOM_PATTERNS):
+            start_ctx = max(0, i - _CONTEXT_PAD)
+            end_ctx = min(len(logs), i + _CONTEXT_PAD + 1)
+            return {
+                "identified": True,
+                "type": "oom",
+                "error": line.strip(),
+                "phase": stage or "",
+                "context": logs[start_ctx:end_ctx],
+            }
+
+    # ---- actionable traceback (check before keywords for first-error-wins) -----
+    if tb_start >= 0 and not tb_is_teardown and tb_final_error:
+        error_line_idx = tb_end - 1
+        start_ctx = max(0, error_line_idx - _CONTEXT_PAD)
+        end_ctx = min(len(logs), error_line_idx + _CONTEXT_PAD + 1)
+        if start_ctx > tb_start:
+            start_ctx = tb_start
+        return {
+            "identified": True,
+            "type": "traceback",
+            "error": tb_final_error,
+            "phase": stage or "",
+            "context": logs[start_ctx:end_ctx],
+        }
+
+    # ---- single-pass keyword scan, skipping already-consumed traceback span -----
+    for i, line in enumerate(logs):
+        # Skip this line if it falls inside a teardown traceback span
+        if tb_is_teardown and tb_start <= i < tb_end:
+            continue
+
+        lower = line.lower()
+
+        # Model load failure
+        if any(p in lower for p in _MODEL_LOAD_PATTERNS) and _ERROR_LINE_RE.match(line):
+            start_ctx = max(0, i - _CONTEXT_PAD)
+            end_ctx = min(len(logs), i + _CONTEXT_PAD + 1)
+            return {
+                "identified": True,
+                "type": "model_load",
+                "error": line.strip(),
+                "phase": stage or "",
+                "context": logs[start_ctx:end_ctx],
+            }
+
+        # Data error
+        if any(p in lower for p in _DATA_PATTERNS) and _ERROR_LINE_RE.match(line):
+            start_ctx = max(0, i - _CONTEXT_PAD)
+            end_ctx = min(len(logs), i + _CONTEXT_PAD + 1)
+            return {
+                "identified": True,
+                "type": "data",
+                "error": line.strip(),
+                "phase": stage or "",
+                "context": logs[start_ctx:end_ctx],
+            }
+
+        # NCCL / distributed
+        if any(p in lower for p in _DISTRIBUTED_PATTERNS) and (
+            "error" in lower or "fail" in lower or "timeout" in lower
+        ):
+            start_ctx = max(0, i - _CONTEXT_PAD)
+            end_ctx = min(len(logs), i + _CONTEXT_PAD + 1)
+            return {
+                "identified": True,
+                "type": "distributed",
+                "error": line.strip(),
+                "phase": stage or "",
+                "context": logs[start_ctx:end_ctx],
+            }
+
+    # ---- fallback: any RuntimeError / Error line ---------------------------------
+    for i, line in enumerate(logs):
+        if tb_is_teardown and tb_start <= i < tb_end:
+            continue
+        if ("RuntimeError:" in line or "Error:" in line) and not any(
+            marker in line for marker in _TEARDOWN_FRAMES
+        ):
+            start_ctx = max(0, i - _CONTEXT_PAD)
+            end_ctx = min(len(logs), i + _CONTEXT_PAD + 1)
+            return {
+                "identified": True,
+                "type": "generic",
+                "error": line.strip(),
+                "phase": stage or "",
+                "context": logs[start_ctx:end_ctx],
+            }
+
+    return {"identified": False}
 
 
 def run_text(command: list[str]) -> str:

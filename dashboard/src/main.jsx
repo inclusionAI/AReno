@@ -4,6 +4,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
   Activity,
+  AlertTriangle,
   Bot,
   Box,
   CircleStop,
@@ -652,6 +653,7 @@ function App() {
           <Timeline job={selectedJob} />
           <JobMetricsView job={selectedJob} refreshNonce={refreshNonce} />
           <SampleView samples={selectedJob?.samples || []} />
+          {selectedJob?.diagnosis && <DiagnosisCard diagnosis={selectedJob.diagnosis} />}
           <div className="split">
             <ConfigView config={selectedJob?.config} launch={selectedJob?.launch} />
             <LogView logs={selectedJob?.logs || []} />
@@ -1472,6 +1474,55 @@ function formatConfigValue(value) {
   if (Array.isArray(value)) return value.join(" ");
   if (typeof value === "object") return JSON.stringify(value);
   return String(value);
+}
+
+const DIAGNOSIS_TYPE_LABELS = {
+  traceback: "Python Error",
+  oom: "Out of Memory",
+  model_load: "Model Load Failure",
+  data: "Data Error",
+  distributed: "Distributed Failure",
+  generic: "Runtime Error",
+};
+
+function DiagnosisCard({ diagnosis }) {
+  if (!diagnosis || !diagnosis.identified) {
+    if (diagnosis && !diagnosis.identified) {
+      return (
+        <div className="card">
+          <div className="cardTitle"><AlertTriangle size={14} /> Diagnosis</div>
+          <p className="muted">Could not identify the failure cause from captured logs.</p>
+          <p className="muted">See full logs below for manual inspection.</p>
+        </div>
+      );
+    }
+    return null;
+  }
+
+  return (
+    <div className="card diagnosisCard">
+      <div className="cardTitle"><AlertTriangle size={14} /> Diagnosis</div>
+      <div className="diagnosisGrid">
+        <span className="diagLabel">Error</span>
+        <span className="diagValue">
+          <span className={`badge badge-${diagnosis.type}`}>{DIAGNOSIS_TYPE_LABELS[diagnosis.type] || diagnosis.type}</span>
+          {" "}{diagnosis.error}
+        </span>
+        {diagnosis.phase && (
+          <>
+            <span className="diagLabel">Phase</span>
+            <span className="diagValue">{diagnosis.phase}</span>
+          </>
+        )}
+      </div>
+      {diagnosis.context && diagnosis.context.length > 0 && (
+        <div className="diagContext">
+          <div className="diagContextTitle">Nearby logs</div>
+          <pre className="diagLogLines">{diagnosis.context.join("\n")}</pre>
+        </div>
+      )}
+    </div>
+  );
 }
 
 function LogView({ logs }) {

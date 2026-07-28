@@ -2094,3 +2094,59 @@ textarea:focus {
     text-align: left;
   }
 }
+
+/* ---- Diagnosis card ---- */
+.diagnosisCard {
+  --error-color: oklch(0.6 0.19 22);
+  border-left: 3px solid var(--error-color);
+  margin-top: 0;
+}
+.diagnosisGrid {
+  display: grid;
+  grid-template-columns: 80px 1fr;
+  gap: 8px 12px;
+  margin: 8px 0;
+  font-size: 13px;
+}
+.diagLabel {
+  color: var(--muted-color, #888);
+  font-weight: 500;
+}
+.diagValue {
+  font-family: var(--mono-font, monospace);
+  word-break: break-all;
+}
+.diagnosisCard .badge {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  margin-right: 6px;
+}
+.badge-traceback { background: oklch(0.6 0.19 22 / 0.15); color: oklch(0.6 0.19 22); }
+.badge-oom { background: oklch(0.55 0.15 40 / 0.15); color: oklch(0.55 0.15 40); }
+.badge-model_load { background: oklch(0.5 0.12 260 / 0.15); color: oklch(0.5 0.12 260); }
+.badge-data { background: oklch(0.5 0.12 260 / 0.15); color: oklch(0.5 0.12 260); }
+.badge-distributed { background: oklch(0.45 0.12 280 / 0.15); color: oklch(0.45 0.12 280); }
+.badge-generic { background: var(--surface-hover, oklch(0.3 0 0 / 0.1)); color: var(--text-color, #ccc); }
+.diagContext { margin-top: 10px; }
+.diagContextTitle {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted-color, #888);
+  margin-bottom: 4px;
+}
+.diagLogLines {
+  background: var(--surface-raised, oklch(0.1 0 0));
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-size: 12px;
+  line-height: 1.5;
+  max-height: 200px;
+  overflow-y: auto;
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
