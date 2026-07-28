@@ -727,6 +727,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             agent_timeout_s=args.agent_timeout_s,
             train_tool_results=args.train_tool_results,
             chat_template_enable_thinking=chat_template_enable_thinking,
+            empty_completion_policy=args.empty_completion_policy,
         )
     return PPOTrainerConfig(
         algo=algorithm.name,
@@ -788,6 +789,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
         agent_timeout_s=args.agent_timeout_s,
         train_tool_results=args.train_tool_results,
         chat_template_enable_thinking=chat_template_enable_thinking,
+        empty_completion_policy=args.empty_completion_policy,
     )
 
 
@@ -904,6 +906,7 @@ def _training_config_settings(config: TrainerConfig) -> dict:
                 "train_tool_results",
                 "reward_fn_path",
                 "reward_ckpt",
+                "empty_completion_policy",
             ],
         ),
         section(
@@ -1300,6 +1303,13 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     "--agent-timeout-s", type=float, default=300.0, show_default=True, help="Agentic rollout proxy request timeout."
 )
 @click.option("--train-tool-results", is_flag=True, help="Include tool-result spans in agentic policy loss.")
+@click.option(
+    "--empty-completion-policy",
+    type=click.Choice(["off", "filter"], case_sensitive=False),
+    default="off",
+    show_default=True,
+    help="How to handle empty or invalid model completions: 'off' (preserve current behavior) or 'filter' (drop them before reward/training).",
+)
 @click.option(
     "--gspo-clip-eps", type=float, default=3.0e-4, show_default=True, help="GSPO sequence-ratio clipping epsilon."
 )

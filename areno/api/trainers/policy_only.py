@@ -242,6 +242,42 @@ class PolicyOnlyTrainer:
                     f"{self._format_agent_filter_diagnostics(filter_diagnostics)}"
                 )
             reward_records = [ctx.reward_record(sample) for sample in samples]
+
+            # Validate completions before they reach reward_fn; drops empty,
+            # whitespace, special-token-only, and immediate-EOS responses when
+            # the policy is active.  When policy is "off" (default) this is a
+            # no-op that returns the inputs unchanged.
+            agent_policy = getattr(self.config, "empty_completion_policy", "off")
+            if agent_policy != "off":
+                from areno.engine.runtime.completion_validator import validate_completions
+
+                agent_eos_ids = self._completion_eos_ids(ctx._trainer.get_tokenizer())
+                agent_special_ids = self._completion_special_token_ids(ctx._trainer.get_tokenizer())
+                agent_completions = [record.completion for record in reward_records]
+                agent_resp_tokens = [record.tokens for record in reward_records]
+                agent_quarantine = None
+                if self.config.save_path:
+                    agent_quarantine = str(Path(self.config.save_path) / "empty_completions.jsonl")
+                kept_completions, _, agent_vr = validate_completions(
+                    agent_completions,
+                    agent_resp_tokens,
+                    policy=agent_policy,
+                    eos_token_ids=agent_eos_ids,
+                    special_token_ids=agent_special_ids,
+                    quarantine_path=agent_quarantine,
+                )
+                # Filter samples and reward_records to only kept rows.
+                kept_idx_set = set(agent_vr.kept_indices)
+                samples = [s for i, s in enumerate(samples) if i in kept_idx_set]
+                reward_records = [r for i, r in enumerate(reward_records) if i in kept_idx_set]
+                if not samples:
+                    raise RuntimeError(
+                        "all agent trajectories had empty or invalid completions; "
+                        f"dropped={len(agent_vr.dropped_indices)} policy={agent_policy}"
+                    )
+                if agent_vr.metrics:
+                    self.logger.info("agentic completion_validation metrics=%s", agent_vr.metrics)
+
             rewards = [float(self.reward_fn(record)) for record in reward_records]
             rows = ctx._train_rows_from_samples(samples)
             tool_call_count = sum(len(record.tool_calls) for record in reward_records)
@@ -506,6 +542,21 @@ class PolicyOnlyTrainer:
             if logged + 1 >= limit:
                 return
 
+    def _completion_eos_ids(self, tokenizer) -> tuple[int, ...]:
+        """Collect all EOS token ids from tokenizer and model config."""
+
+        from areno.api.tokenizer import eos_token_ids
+
+        model_path = self.areno._ctx.model_path if self.areno._ctx is not None else ""
+        return eos_token_ids(model_path, tokenizer)
+
+    def _completion_special_token_ids(self, tokenizer) -> tuple[int, ...]:
+        """Extract special token ids from tokenizer for completion validation."""
+
+        from areno.engine.runtime.completion_validator import get_special_token_ids
+
+        return get_special_token_ids(tokenizer)
+
     def _materialize_train_batch(self, tokenizer, prompt_batch, rollout_results):
         """Assemble TrainSequence rows for one rollout batch.
 
@@ -521,12 +572,53 @@ class PolicyOnlyTrainer:
         import areno.api
         from areno.api.rewards import compute_group_advantages, make_reward_record
 
+        # Lazily collect EOS and special-token ids once for completion validation.
+        policy = getattr(self.config, "empty_completion_policy", "off")
+        eos_ids: tuple[int, ...] = ()
+        special_ids: tuple[int, ...] = ()
+        if policy != "off":
+            eos_ids = self._completion_eos_ids(tokenizer)
+            special_ids = self._completion_special_token_ids(tokenizer)
+
         train_batch = []
         rewards_all = []
         rollout_logprobs = []
         for item_idx, (item, result) in enumerate(zip(prompt_batch.items, rollout_results, strict=True)):
             prefix_len = len(item.input_tokens)
             completions = [tokenizer.decode(seq.resp_tokens) for seq in result.sequences]
+
+            # Validate completions before they reach reward_fn; drops empty,
+            # whitespace, special-token-only, and immediate-EOS responses when
+            # the policy is active.  When policy is "off" (default) this is a
+            # no-op that returns the inputs unchanged.
+            if policy != "off":
+                from areno.engine.runtime.completion_validator import validate_completions
+
+                quarantine_path = None
+                if self.config.save_path:
+                    quarantine_path = str(Path(self.config.save_path) / "empty_completions.jsonl")
+                completions, kept_tokens, vr = validate_completions(
+                    completions,
+                    [seq.resp_tokens for seq in result.sequences],
+                    policy="filter",
+                    eos_token_ids=eos_ids,
+                    special_token_ids=special_ids,
+                    quarantine_path=quarantine_path,
+                    prompt=item.prompt,
+                )
+                # Rebuild sequences list to only kept rows so downstream
+                # reward, advantage, and train_batch construction stays aligned.
+                result = areno.api.RolloutResult(
+                    sequences=[
+                        result.sequences[idx] for idx in vr.kept_indices
+                    ]
+                )
+                if vr.metrics:
+                    self.logger.info(
+                        "epoch=? step=? completion_validation metrics=%s",
+                        vr.metrics,
+                    )
+
             rewards = [
                 float(
                     self.reward_fn(

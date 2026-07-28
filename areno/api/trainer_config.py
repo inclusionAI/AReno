@@ -112,6 +112,9 @@ class RolloutTrainerConfig(TrainerConfig):
     top_k: int = -1
     top_p: float = 1.0
     max_running_prompts: int | None = None
+    # Empty / invalid completion handling.  "off" (default) preserves existing
+    # behavior; "filter" drops them before reward/training.
+    empty_completion_policy: str = "off"
 
     def resolved_max_running_prompts(self) -> int:
         """Return explicit or full-batch rollout concurrency."""
