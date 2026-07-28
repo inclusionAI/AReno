@@ -36,7 +36,7 @@ python .agents/skills/areno-debug-runtime/scripts/collect_evidence.py
 python .agents/skills/areno-debug-runtime/scripts/collect_evidence.py --traceback-file crash.log
 
 # Collect with command context and JSON output
-python .agents/skills/areno-debug-runtime/scripts/collect_evidence.py areno train --ckpt ./model --algo gspo --output-dir ./evidence/ --json
+python .agents/skills/areno-debug-runtime/scripts/collect_evidence.py --output-dir ./evidence/ --json -- areno train --ckpt ./model --algo gspo
 
 # Skip GPU collection on non-CUDA hosts
 python .agents/skills/areno-debug-runtime/scripts/collect_evidence.py --no-gpu

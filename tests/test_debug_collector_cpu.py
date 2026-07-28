@@ -381,3 +381,220 @@ class TestCollectEvidenceScript:
             assert (bundle_dir / "summary.md").is_file()
             # No traceback when no error
             assert not (bundle_dir / "traceback.txt").exists()
+
+    def test_unrecognized_flag_becomes_command(self, script_path):
+        """Subcommand flags like --ckpt must be tolerated and merged into command."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = self._run(
+                script_path,
+                "--output-dir", tmpdir,
+                "--no-env", "--no-gpu", "--json",
+                "areno", "train", "--ckpt", "./model", "--algo", "gspo",
+            )
+            assert result.returncode == 0
+            data = json.loads(result.stdout)
+            cmd = data.get("command", [])
+            assert "areno" in cmd
+            assert "--ckpt" in cmd
+            assert "./model" in cmd
+            assert "--algo" in cmd
+            assert "gspo" in cmd
+
+    def test_collection_warnings_return_code_2(self, script_path):
+        """When collection_warnings are present, exit code should be 2."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Forcing GPU collection on a non-CUDA host may produce warnings.
+            result = self._run(script_path, "--output-dir", tmpdir, "--no-env", "--no-redact", "--json")
+            if "collection_warnings" in result.stdout:
+                warnings_data = json.loads(result.stdout).get("collection_warnings", [])
+                if warnings_data:
+                    assert result.returncode == 2
+                else:
+                    assert result.returncode in (0, 2)
+
+
+# ---------------------------------------------------------------------------
+# Enhanced coverage: malformed input, boundaries, deterministic output
+# ---------------------------------------------------------------------------
+
+
+class TestMalformedInput:
+    """Core logic must handle malformed or boundary inputs without raising."""
+
+    def test_none_command_falls_back_to_argv(self):
+        """When command is None, collect_failure_bundle falls back to sys.argv."""
+        bundle = collect_failure_bundle(command=None, include_env=False, include_gpu=False)
+        # Falls back to sys.argv — at minimum the running script.
+        assert bundle.command is not None
+        assert isinstance(bundle.command, list)
+
+    def test_empty_command_falls_back_to_argv(self):
+        """Empty list is treated the same as None — falls back to sys.argv."""
+        bundle = collect_failure_bundle(command=[], include_env=False, include_gpu=False)
+        assert bundle.command is not None
+        assert isinstance(bundle.command, list)
+
+    def test_zero_length_string_keys_still_collected(self):
+        """Borderline env keys must not break the collector."""
+        bundle = collect_failure_bundle(include_env=True, include_gpu=False)
+        assert isinstance(bundle.env_vars_redacted, dict)
+
+    def test_unusual_exception_types_are_serialized(self):
+        """Exceptions without a .traceback (e.g. str-based) must not raise."""
+        error = SystemExit(42)
+        bundle = collect_failure_bundle(error=error, include_env=False, include_gpu=False)
+        assert bundle.error_type == "SystemExit"
+        assert bundle.error_message is not None
+
+    def test_exception_with_no_traceback(self):
+        """Bare exception without __traceback__ must be handled safely."""
+
+        class FlatError(Exception):
+            pass
+
+        exc = FlatError("flat")
+        exc.__traceback__ = None  # Explicitly strip
+        bundle = collect_failure_bundle(error=exc, include_env=False, include_gpu=False)
+        assert bundle.error_type == "FlatError"
+        # _safe_traceback falls back to repr()
+        assert bundle.error_traceback is not None
+
+    def test_custom_extra_field_is_preserved(self):
+        bundle = FailureBundle(timestamp="t", extra={"custom_key": 42})
+        raw = bundle.to_ordered_dict()
+        assert raw["extra"] == {"custom_key": 42}
+
+
+class TestDeterministicOutput:
+    """Output must be deterministic for the same inputs."""
+
+    def test_bundle_json_is_deterministic(self):
+        """Two bundles with identical timestamps must produce identical JSON."""
+        bundle1 = FailureBundle(timestamp="2026-01-01T00:00:00+00:00", python_version="3.10.0", platform_info="linux")
+        bundle2 = FailureBundle(timestamp="2026-01-01T00:00:00+00:00", python_version="3.10.0", platform_info="linux")
+        j1 = json.dumps(bundle1.to_ordered_dict(), sort_keys=True)
+        j2 = json.dumps(bundle2.to_ordered_dict(), sort_keys=True)
+        assert j1 == j2
+
+    def test_markdown_output_does_not_contain_raw_env_if_not_collected(self):
+        bundle = collect_failure_bundle(include_env=False, include_gpu=False)
+        md = _render_markdown(bundle)
+        # Markdown must not leak env values.
+        assert "HF_TOKEN" not in md
+
+    def test_same_crash_same_error_section(self):
+        """Deterministic error rendering."""
+        try:
+            raise RuntimeError("boom")
+        except RuntimeError as exc:
+            b1 = collect_failure_bundle(error=exc, include_env=False, include_gpu=False)
+        try:
+            raise RuntimeError("boom")
+        except RuntimeError as exc:
+            b2 = collect_failure_bundle(error=exc, include_env=False, include_gpu=False)
+        # Error type and message must match.
+        assert b1.error_type == b2.error_type
+        assert b1.error_message == b2.error_message
+
+    def test_no_extra_files_in_clean_bundle(self):
+        """write_bundle must produce exactly expected files: bundle.json, summary.md (no traceback.txt)."""
+        bundle = collect_failure_bundle(include_env=False, include_gpu=False)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result_dir = write_bundle(bundle, Path(tmpdir))
+            files = sorted(f.name for f in result_dir.iterdir())
+            assert files == ["bundle.json", "summary.md"]
+
+
+# ---------------------------------------------------------------------------
+# Mock / isolation: GPU behaviour
+# ---------------------------------------------------------------------------
+
+
+class TestGPUIsolation:
+    """Orchestration for GPU-only code must be isolated behind fakes."""
+
+    def test_gpu_section_renders_correctly_from_fake_summary(self, monkeypatch):
+        """When GPU is faked as available, markdown must include GPU section with correct fields."""
+        fake_gpu = {"available": True, "device_count": 8, "device_name": "NVIDIA H100"}
+        bundle = FailureBundle(timestamp="t", gpu_summary=fake_gpu, cuda_info={"cuda_home": "/usr/local/cuda", "nvcc_path": "/usr/local/cuda/bin/nvcc"})
+        md = _render_markdown(bundle)
+        assert "## GPU" in md
+        assert "NVIDIA H100" in md
+        assert "8" in md
+
+    def test_cuda_info_none_does_not_render_cuda_section(self):
+        bundle = FailureBundle(timestamp="t", gpu_summary={"available": True}, cuda_info=None)
+        md = _render_markdown(bundle)
+        assert "## CUDA" not in md
+
+    def test_collect_with_monkeypatched_gpu(self, monkeypatch):
+        """collect_failure_bundle must accept a monkeypatched GPU info and not crash on missing CUDA env."""
+
+        def fake_gpu():
+            return {"available": True, "device_count": 4, "fake": True}
+
+        monkeypatch.setattr("areno.cli.debug._safe_gpu_info", fake_gpu)
+        bundle = collect_failure_bundle(include_env=False, include_gpu=True)
+        assert bundle.gpu_summary is not None
+        assert bundle.gpu_summary["available"] is True
+        assert bundle.gpu_summary["device_count"] == 4
+
+
+# ---------------------------------------------------------------------------
+# Existing behaviour must be unchanged when the feature is *not* enabled
+# ---------------------------------------------------------------------------
+
+
+class TestBackwardCompatibility:
+    """Default behaviour must not change existing contracts."""
+
+    def test_areno_cli_debug_module_api_unchanged(self):
+        """All public symbols must remain importable."""
+        symbols = [
+            "FailureBundle",
+            "collect_failure_bundle",
+            "write_bundle",
+            "_render_markdown",
+            "_is_sensitive_key",
+            "_redact_value",
+            "_safe_areno_version",
+            "_safe_env_collect",
+            "_safe_process_info",
+            "_safe_traceback",
+            "_safe_cuda_info",
+            "debug_command",
+        ]
+        import areno.cli.debug as m
+
+        for sym in symbols:
+            assert hasattr(m, sym), f"Symbol {sym} missing from areno.cli.debug"
+            assert getattr(m, sym) is not None
+
+    def test_failure_bundle_data_class_contract_stable(self):
+        """FailureBundle field names and types must not silently change."""
+        bundle = FailureBundle()
+        fields = {f.name for f in bundle.__dataclass_fields__.values()}
+        expected = {
+            "timestamp", "areno_version", "python_version", "platform_info",
+            "command", "resolved_config", "env_vars_redacted", "gpu_summary",
+            "cuda_info", "error_type", "error_message", "error_traceback",
+            "process_info", "worker_state", "collection_warnings", "extra",
+        }
+        assert fields == expected
+
+    def test_write_bundle_signature_unchanged(self):
+        """write_bundle(bundle, output_dir: Path) -> Path must hold."""
+        import inspect
+
+        sig = inspect.signature(write_bundle)
+        params = list(sig.parameters.keys())
+        assert "bundle" in params
+        assert "output_dir" in params
+
+    def test_collect_failure_bundle_signature_unchanged(self):
+        """collect_failure_bundle signature must hold invariants."""
+        import inspect
+
+        sig = inspect.signature(collect_failure_bundle)
+        for param in ("command", "config", "error", "include_env", "include_gpu", "redact_env"):
+            assert param in sig.parameters

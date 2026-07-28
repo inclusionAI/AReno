@@ -1,0 +1,71 @@
+{
+  "timestamp": "2026-07-28T08:07:01.444838+00:00",
+  "areno_version": "0.0.6",
+  "python_version": "3.14.6 (v3.14.6:c63aec69bd5, Jun 10 2026, 08:07:54) [Clang 21.0.0 (clang-2100.1.1.101)]",
+  "platform_info": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+  "command": [
+    "areno",
+    "train",
+    "--ckpt",
+    "./model",
+    "--algo",
+    "gspo"
+  ],
+  "resolved_config": null,
+  "env_vars_redacted": {
+    "COMMAND_MODE": "unix2003",
+    "CUDA_DEVICE_MAX_CONNECTIONS": "1",
+    "FIG_TERM": "1",
+    "HOME": "/Users/naxida",
+    "JAVA_HOME": "/Library/Java/JavaVirtualMachines/jdk-21.jdk/Contents/Home",
+    "JEDITERM_SOURCE": "/Users/naxida/Desktop/AReno/.venv/bin/activate",
+    "JEDITERM_SOURCE_ARGS": "",
+    "LANG": "C.UTF-8",
+    "LC_CTYPE": "UTF-8",
+    "LOGNAME": "naxida",
+    "MAVEN_HOME": "/Users/naxida/enviroment/maven/apache-maven-3.6.3",
+    "OLDPWD": "/Users/naxida/Desktop/AReno",
+    "OSLogRateLimit": "64",
+    "PATH": "/Users/naxida/Desktop/AReno/.venv/bin:/Users/naxida/.local/bin:/Users/naxida/.antfamily:/Users/naxida/enviroment/maven/apache-maven-3.6.3/bin:/Library/Java/JavaVirtualMachines/jdk-21.jdk/Contents/Home/bin:/Users/naxida/enviroment/node/node-v24.18.0/usr/local/bin:/Users/naxida/enviroment/git/bin:/Users/naxida/.utoo-proxy:/Library/Frameworks/Python.framework/Versions/3.14/bin:/usr/local/bin:/System/Cryptexes/App/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/local/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/appleinternal/bin:/pkg/env/global/bin:/opt/homebrew/bin",
+    "PKG_CONFIG_PATH": "/Users/naxida/Desktop/AReno/.venv/lib/pkgconfig",
+    "PROCESS_LAUNCHED_BY_CW": "1",
+    "PROCESS_LAUNCHED_BY_Q": "1",
+    "PS1": "(.venv) %n@%m %1~ %# ",
+    "PWD": "/Users/naxida/Desktop/AReno",
+    "SHELL": "/bin/zsh",
+    "SHLVL": "1",
+    "SSH_AUTH_SOCK": "/var/run/com.apple.launchd.eSNTnULeHY/Listeners",
+    "TERM": "xterm-256color",
+    "TERMINAL_EMULATOR": "JetBrains-JediTerm",
+    "TERM_SESSION_ID": "cbc8500a-c519-4b68-ba90-fffe4d4c3a58",
+    "TMPDIR": "/var/folders/04/ytyr_05s2h7_x8v6ddzx3t6h0000gn/T/",
+    "TORCHINDUCTOR_CACHE_DIR": "/var/folders/04/ytyr_05s2h7_x8v6ddzx3t6h0000gn/T/torchinductor_naxida",
+    "USER": "naxida",
+    "VIRTUAL_ENV": "/Users/naxida/Desktop/AReno/.venv",
+    "VIRTUAL_ENV_PROMPT": ".venv",
+    "XPC_FLAGS": "0x0",
+    "XPC_SERVICE_NAME": "0",
+    "_": "/Users/naxida/Desktop/AReno/.venv/bin/python",
+    "__CFBundleIdentifier": "com.jetbrains.pycharm",
+    "__CF_USER_TEXT_ENCODING": "0x1F5:0x19:0x34"
+  },
+  "gpu_summary": {
+    "available": false
+  },
+  "cuda_info": {
+    "cuda_home": null,
+    "nvcc_path": null
+  },
+  "error_type": null,
+  "error_message": null,
+  "error_traceback": null,
+  "process_info": {
+    "pid": 40738,
+    "ppid": 39301,
+    "cwd": "/Users/naxida/Desktop/AReno",
+    "executable": "/Users/naxida/Desktop/AReno/.venv/bin/python"
+  },
+  "worker_state": null,
+  "collection_warnings": [],
+  "extra": {}
+}
