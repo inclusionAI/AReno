@@ -30,6 +30,7 @@ class TrainerConfig:
     model_hub: str = "modelscope"
     dataset_loader_fn: str | None = None
     dataset_mix_config: str | None = field(default=None, kw_only=True)
+    dataset_sources: tuple[str, ...] = field(default=(), kw_only=True)
     save_path: str | None = None
     save_interval: int = 100
     epochs: int = 10
@@ -63,12 +64,21 @@ class TrainerConfig:
     chat_template_enable_thinking: bool | None = None
 
     def __post_init__(self) -> None:
-        if self.dataset_path is None and self.dataset_mix_config is None:
-            raise ValueError("dataset_path is required unless dataset_mix_config is provided")
-        if self.dataset_path is not None and self.dataset_mix_config is not None:
-            raise ValueError("dataset_path and dataset_mix_config are mutually exclusive")
-        if self.dataset_mix_config is not None and self.algo != "sft":
-            raise ValueError("dataset_mix_config currently supports algo='sft' only")
+        dataset_inputs = sum(
+            (
+                self.dataset_path is not None,
+                self.dataset_mix_config is not None,
+                bool(self.dataset_sources),
+            )
+        )
+        if dataset_inputs == 0:
+            raise ValueError("one of dataset_path, dataset_mix_config, or dataset_sources is required")
+        if dataset_inputs > 1:
+            raise ValueError("dataset_path, dataset_mix_config, and dataset_sources are mutually exclusive")
+        if self.dataset_sources and len(self.dataset_sources) < 2:
+            raise ValueError("dataset_sources must contain at least two entries")
+        if (self.dataset_mix_config is not None or self.dataset_sources) and self.algo != "sft":
+            raise ValueError("dataset mixing currently supports algo='sft' only")
         if self.attn_backend not in {"flash", "native"}:
             raise ValueError("attn_backend must be one of: flash, native")
         if self.model_hub not in {"hf", "modelscope"}:

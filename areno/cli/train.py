@@ -62,6 +62,7 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "ckpt",
             "dataset_path",
             "dataset_mix_config",
+            "dataset_sources",
             "model_hub",
             "dataset_loader_fn",
             "tune_params",
@@ -183,6 +184,7 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
     args.model_hub = getattr(args, "model_hub", "modelscope")
     dataset_mix_config = getattr(args, "dataset_mix_config", None)
     args.dataset_mix_config = str(dataset_mix_config) if dataset_mix_config is not None else None
+    args.dataset_sources = tuple(getattr(args, "dataset_sources", ()))
     smoke_infer = bool(getattr(args, "smoke_infer", False))
     smoke_train = bool(getattr(args, "smoke_train", False))
     if smoke_infer or smoke_train:
@@ -191,19 +193,29 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
     # inputs while RL algorithms still require a reward function or model.
     if args.ckpt is None:
         raise click.UsageError("--ckpt is required")
-    if args.dataset_path is None and args.dataset_mix_config is None:
-        raise click.UsageError("--dataset-path is required unless --dataset-mix-config is provided")
-    if args.dataset_path is not None and args.dataset_mix_config is not None:
-        raise click.UsageError("--dataset-path and --dataset-mix-config are mutually exclusive")
+    dataset_inputs = sum(
+        (
+            args.dataset_path is not None,
+            args.dataset_mix_config is not None,
+            bool(args.dataset_sources),
+        )
+    )
+    if dataset_inputs == 0:
+        raise click.UsageError("one of --dataset-path, --dataset-mix-config, or repeated --dataset-source is required")
+    if dataset_inputs > 1:
+        raise click.UsageError("--dataset-path, --dataset-mix-config, and --dataset-source are mutually exclusive")
     if args.model_hub not in {"hf", "modelscope"}:
         raise click.UsageError("--model-hub must be one of: hf, modelscope")
     algorithm = _algorithm_for_cli(args.algo)
     if algorithm.name == "sft" and args.dataset_loader_fn is None:
         raise click.UsageError("--dataset-loader-fn is required for --algo sft")
-    if args.dataset_mix_config is not None:
+    if args.dataset_mix_config is not None or args.dataset_sources:
         if algorithm.name != "sft":
-            raise click.UsageError("--dataset-mix-config currently supports --algo sft only")
-        _preflight_dataset_mix_config(args.dataset_mix_config)
+            raise click.UsageError("dataset mixing currently supports --algo sft only")
+        if args.dataset_mix_config is not None:
+            _preflight_dataset_mix_config(args.dataset_mix_config)
+        else:
+            _preflight_dataset_sources(args.dataset_sources)
     tune_params = bool(getattr(args, "tune_params", False))
     mem_frac = float(getattr(args, "mem_frac", 0.9))
     tune_max_samples = int(getattr(args, "tune_max_samples", 256))
@@ -302,6 +314,50 @@ def _preflight_dataset_mix_config(config_path: str) -> None:
         raise click.UsageError(f"invalid --dataset-mix-config: {exc}") from exc
 
 
+def _preflight_dataset_sources(source_specs: tuple[str, ...]) -> None:
+    try:
+        _dataset_mix_manifest_from_sources(source_specs)
+    except ValueError as exc:
+        raise click.UsageError(f"invalid --dataset-source: {exc}") from exc
+
+
+def _dataset_mix_manifest_from_sources(source_specs: tuple[str, ...]) -> dict:
+    if len(source_specs) < 2:
+        raise ValueError("repeat the option at least twice using NAME=PATH:WEIGHT")
+
+    sources = []
+    names: set[str] = set()
+    for index, spec in enumerate(source_specs):
+        source_text, separator, weight_text = spec.rpartition(":")
+        name, name_separator, dataset_path = source_text.partition("=")
+        name = name.strip()
+        dataset_path = dataset_path.strip()
+        if not separator or not name_separator or not name or not dataset_path or not weight_text.strip():
+            raise ValueError(f"entry {index + 1} must use NAME=PATH:WEIGHT")
+        if name in names:
+            raise ValueError(f"duplicate source name: {name}")
+        names.add(name)
+        try:
+            weight = float(weight_text)
+        except (OverflowError, ValueError):
+            weight = math.nan
+        if not math.isfinite(weight) or weight <= 0:
+            raise ValueError(f"source '{name}' weight must be finite and positive")
+        sources.append({"name": name, "path": dataset_path, "weight": weight})
+
+    max_weight = max(source["weight"] for source in sources)
+    if any(source["weight"] / max_weight == 0.0 for source in sources):
+        raise ValueError("source weights have an unsupported numeric range")
+    return {
+        "version": 1,
+        "seed": 42,
+        "exhaustion": "renormalize",
+        "shuffle_within_sources": True,
+        "max_samples_per_epoch": None,
+        "sources": sources,
+    }
+
+
 def _format_training_config_summary(
     config: TrainerConfig,
     *,
@@ -327,7 +383,14 @@ def _format_training_config_summary(
             [
                 ("ckpt", config.ckpt),
                 ("dataset_path", _format_optional(config.dataset_path)),
-                ("dataset_mix", _format_optional(config.dataset_mix_config)),
+                (
+                    "dataset_mix",
+                    (
+                        f"{len(config.dataset_sources)} command-line sources"
+                        if config.dataset_sources
+                        else _format_optional(config.dataset_mix_config)
+                    ),
+                ),
                 ("model_hub", config.model_hub),
                 ("dataset_loader", _format_optional(config.dataset_loader_fn)),
                 (
@@ -620,6 +683,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
     args.score_micro_bs = getattr(args, "score_micro_bs", 8)
     args.model_hub = getattr(args, "model_hub", "modelscope")
     args.dataset_mix_config = getattr(args, "dataset_mix_config", None)
+    args.dataset_sources = tuple(getattr(args, "dataset_sources", ()))
     algorithm = get_algorithm(args.algo)
     chat_template_enable_thinking = False if args.disable_thinking else None
     if algorithm.name == "dpo":
@@ -630,6 +694,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             model_hub=args.model_hub,
             dataset_loader_fn=args.dataset_loader_fn,
             dataset_mix_config=args.dataset_mix_config,
+            dataset_sources=args.dataset_sources,
             save_path=args.save_path,
             save_interval=args.save_interval,
             epochs=args.epochs,
@@ -672,6 +737,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             model_hub=args.model_hub,
             dataset_loader_fn=args.dataset_loader_fn,
             dataset_mix_config=args.dataset_mix_config,
+            dataset_sources=args.dataset_sources,
             save_path=args.save_path,
             save_interval=args.save_interval,
             epochs=args.epochs,
@@ -712,6 +778,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             model_hub=args.model_hub,
             dataset_loader_fn=args.dataset_loader_fn,
             dataset_mix_config=args.dataset_mix_config,
+            dataset_sources=args.dataset_sources,
             reward_fn_path=args.reward_fn_path,
             save_path=args.save_path,
             save_interval=args.save_interval,
@@ -760,6 +827,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
         model_hub=args.model_hub,
         dataset_loader_fn=args.dataset_loader_fn,
         dataset_mix_config=args.dataset_mix_config,
+        dataset_sources=args.dataset_sources,
         reward_fn_path=args.reward_fn_path,
         save_path=args.save_path,
         save_interval=args.save_interval,
@@ -837,6 +905,15 @@ def run(trainer_config: TrainerConfig):
             load_dataset=load_dataset,
             load_from_disk=load_from_disk,
         )
+    elif trainer_config.dataset_sources:
+        mixed_dataset = _load_dataset_sources_for_training(
+            trainer_config.dataset_sources,
+            model_hub=trainer_config.model_hub,
+            dataset_loader_fn=trainer_config.dataset_loader_fn,
+            load_dataset=load_dataset,
+            load_from_disk=load_from_disk,
+        )
+    if mixed_dataset is not None:
         click.echo(_format_dataset_mix_summary(mixed_dataset.summary()))
 
     trainer_config = resolve_model_refs_for_config(trainer_config)
@@ -854,7 +931,7 @@ def run(trainer_config: TrainerConfig):
     )
     if mixed_dataset is None:
         if trainer_config.dataset_path is None:
-            raise ValueError("dataset_path is required when dataset_mix_config is not set")
+            raise ValueError("dataset_path is required when dataset mixing is not configured")
         dataset = _load_dataset_for_training(
             trainer_config.dataset_path,
             dataset_loader_fn=trainer_config.dataset_loader_fn,
@@ -911,6 +988,7 @@ def _training_config_settings(config: TrainerConfig) -> dict:
                 "ckpt",
                 "dataset_path",
                 "dataset_mix_config",
+                "dataset_sources",
                 "model_hub",
                 "dataset_loader_fn",
                 "epochs",
@@ -1141,13 +1219,51 @@ def _load_mixed_dataset_for_training(
     load_from_disk,
 ) -> WeightedMixedDataset:
     manifest = _read_dataset_mix_manifest(config_path)
+    return _load_mixed_dataset_from_manifest(
+        manifest,
+        source_path_resolver=lambda source_path: _resolve_mix_source_path(Path(config_path), source_path),
+        model_hub=model_hub,
+        dataset_loader_fn=dataset_loader_fn,
+        load_dataset=load_dataset,
+        load_from_disk=load_from_disk,
+    )
+
+
+def _load_dataset_sources_for_training(
+    source_specs: tuple[str, ...],
+    *,
+    model_hub: str,
+    dataset_loader_fn: str | None,
+    load_dataset,
+    load_from_disk,
+) -> WeightedMixedDataset:
+    manifest = _dataset_mix_manifest_from_sources(source_specs)
+    return _load_mixed_dataset_from_manifest(
+        manifest,
+        source_path_resolver=lambda source_path: source_path,
+        model_hub=model_hub,
+        dataset_loader_fn=dataset_loader_fn,
+        load_dataset=load_dataset,
+        load_from_disk=load_from_disk,
+    )
+
+
+def _load_mixed_dataset_from_manifest(
+    manifest: dict,
+    *,
+    source_path_resolver,
+    model_hub: str,
+    dataset_loader_fn: str | None,
+    load_dataset,
+    load_from_disk,
+) -> WeightedMixedDataset:
     sources = []
     try:
         loader_fn = _load_dataset_loader_fn(dataset_loader_fn) if dataset_loader_fn is not None else None
     except Exception as exc:
         raise ValueError(f"stage=dataset_mix_loader input={dataset_loader_fn}: {exc}") from exc
     for source in manifest["sources"]:
-        source_path = _resolve_mix_source_path(Path(config_path), source["path"])
+        source_path = source_path_resolver(source["path"])
         try:
             dataset = _load_dataset_for_training(
                 source_path,
@@ -1159,7 +1275,9 @@ def _load_mixed_dataset_for_training(
             )
             _validate_sft_mix_source(source["name"], dataset)
         except Exception as exc:
-            raise ValueError(f"stage=dataset_mix_validation source={source['name']} input={source['path']}: {exc}") from exc
+            raise ValueError(
+                f"stage=dataset_mix_validation source={source['name']} input={source['path']}: {exc}"
+            ) from exc
         sources.append(DatasetMixSource(name=source["name"], dataset=dataset, weight=source["weight"]))
     return WeightedMixedDataset(
         sources,
@@ -1394,7 +1512,17 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     "--dataset-mix-config",
     type=click.Path(path_type=Path, dir_okay=False),
     default=None,
-    help="JSON manifest for deterministic weighted SFT dataset mixing; mutually exclusive with --dataset-path.",
+    help="JSON manifest for deterministic weighted SFT dataset mixing.",
+)
+@click.option(
+    "--dataset-source",
+    "dataset_sources",
+    multiple=True,
+    metavar="NAME=PATH:WEIGHT",
+    help=(
+        "Weighted SFT dataset source; repeat at least twice. Uses seed 42, "
+        "renormalize exhaustion, and source shuffling by default."
+    ),
 )
 @click.option(
     "--model-hub",

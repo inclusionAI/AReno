@@ -227,6 +227,66 @@ def test_mix_manifest_loads_two_local_sft_sources_through_shared_loader(tmp_path
     assert {row[DATASET_MIX_METADATA_KEY]["source"] for row in dataset} == {"math", "code"}
 
 
+def test_dataset_source_shorthand_preserves_remote_ref_colons():
+    manifest = train_cli._dataset_mix_manifest_from_sources(
+        (
+            "math=gsm8k:main:train:0.7",
+            "code=org/code-dataset:default:train:0.3",
+        )
+    )
+
+    assert manifest["seed"] == 42
+    assert manifest["exhaustion"] == "renormalize"
+    assert manifest["shuffle_within_sources"] is True
+    assert manifest["sources"] == [
+        {"name": "math", "path": "gsm8k:main:train", "weight": 0.7},
+        {"name": "code", "path": "org/code-dataset:default:train", "weight": 0.3},
+    ]
+
+
+@pytest.mark.parametrize(
+    ("source_specs", "message"),
+    [
+        (("one=dataset:1",), "at least twice"),
+        (("broken", "two=dataset:1"), "NAME=PATH:WEIGHT"),
+        (("same=one:1", "same=two:1"), "duplicate source name"),
+        (("one=dataset:nan", "two=dataset:1"), "finite and positive"),
+    ],
+)
+def test_dataset_source_shorthand_rejects_invalid_entries(source_specs, message):
+    with pytest.raises(ValueError, match=message):
+        train_cli._dataset_mix_manifest_from_sources(source_specs)
+
+
+def test_dataset_source_shorthand_loads_remote_sources_through_shared_loader(tmp_path):
+    loader = tmp_path / "loader.py"
+    loader.write_text(
+        "def load_training_dataset(dataset_path, *, default_loader, **kwargs):\n"
+        "    return [\n"
+        "        {'prompt': row['instruction'], 'response': row['output']}\n"
+        "        for row in default_loader(dataset_path)\n"
+        "    ]\n",
+        encoding="utf-8",
+    )
+    loaded = []
+
+    def load_dataset(name, **_kwargs):
+        loaded.append(name)
+        return [{"instruction": name, "output": "ok"}]
+
+    dataset = train_cli._load_dataset_sources_for_training(
+        ("first=org/first:0.7", "second=org/second:0.3"),
+        model_hub="hf",
+        dataset_loader_fn=str(loader),
+        load_dataset=load_dataset,
+        load_from_disk=lambda _path: None,
+    )
+
+    assert loaded == ["org/first", "org/second"]
+    assert {row["prompt"] for row in dataset} == {"org/first", "org/second"}
+    assert {row[DATASET_MIX_METADATA_KEY]["source"] for row in dataset} == {"first", "second"}
+
+
 @pytest.mark.parametrize("version", [True, 1.0, 2])
 def test_mix_manifest_requires_integer_version_one(tmp_path, version):
     manifest = tmp_path / "mix.json"

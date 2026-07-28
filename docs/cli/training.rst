@@ -69,9 +69,28 @@ per-algorithm loader contracts.
 
 ``--dataset-mix-config PATH``
    JSON manifest for deterministic weighted SFT dataset mixing. This option is
-   mutually exclusive with ``--dataset-path``. The first implementation
-   supports map-style datasets only, and the shared ``--dataset-loader-fn`` is
-   applied independently to each source.
+   mutually exclusive with ``--dataset-path`` and ``--dataset-source``.
+
+``--dataset-source NAME=PATH:WEIGHT``
+   Command-line shorthand for a weighted SFT source. Repeat the option at least
+   twice. It is mutually exclusive with ``--dataset-path`` and
+   ``--dataset-mix-config``:
+
+   .. code-block:: bash
+
+      areno train \
+        --algo sft \
+        --ckpt Qwen/Qwen3-0.6B \
+        --model-hub hf \
+        --dataset-source alpaca_cleaned=yahma/alpaca-cleaned:0.7 \
+        --dataset-source stanford_alpaca=tatsu-lab/alpaca:0.3 \
+        --dataset-loader-fn examples/sft/alpaca/dataset_loader.py
+
+   The shorthand uses seed ``42``, ``renormalize`` exhaustion, and source
+   shuffling. Use ``--dataset-mix-config`` when those settings must be changed.
+
+Both mixing forms currently support map-style datasets only, and the shared
+``--dataset-loader-fn`` is applied independently to each source.
 
 The manifest requires ``version: 1``, an integer ``seed``, an explicit
 ``exhaustion`` policy, and at least two uniquely named sources with finite,

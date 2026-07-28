@@ -25,7 +25,7 @@ def test_train_config_requires_ckpt():
 
 
 def test_train_config_requires_dataset_path():
-    with pytest.raises(UsageError, match="--dataset-path is required"):
+    with pytest.raises(UsageError, match="one of --dataset-path, --dataset-mix-config"):
         _trainer_config_from_options(**_options(dataset_path=None, algo="sft"))
 
 
@@ -61,14 +61,58 @@ def test_train_config_accepts_dataset_mix_manifest_for_sft(tmp_path):
     assert config.dataset_mix_config == str(manifest)
 
 
-def test_train_config_rejects_dataset_path_with_mix_manifest(tmp_path):
+def test_train_config_accepts_repeated_dataset_sources_for_sft():
+    config = _trainer_config_from_options(
+        **_options(
+            algo="sft",
+            dataset_path=None,
+            dataset_sources=(
+                "alpaca_cleaned=yahma/alpaca-cleaned:0.7",
+                "stanford_alpaca=tatsu-lab/alpaca:0.3",
+            ),
+        )
+    )
+
+    assert config.dataset_path is None
+    assert config.dataset_mix_config is None
+    assert config.dataset_sources == (
+        "alpaca_cleaned=yahma/alpaca-cleaned:0.7",
+        "stanford_alpaca=tatsu-lab/alpaca:0.3",
+    )
+
+
+def test_train_config_requires_at_least_two_dataset_sources():
+    with pytest.raises(UsageError, match="repeat the option at least twice"):
+        _trainer_config_from_options(
+            **_options(
+                algo="sft",
+                dataset_path=None,
+                dataset_sources=("only=repo/dataset:1",),
+            )
+        )
+
+
+def test_train_config_rejects_dataset_source_with_other_dataset_input(tmp_path):
     manifest = tmp_path / "mix.json"
     manifest.write_text("{}", encoding="utf-8")
 
     with pytest.raises(UsageError, match="mutually exclusive"):
         _trainer_config_from_options(
-            **_options(algo="sft", dataset_path="dataset", dataset_mix_config=str(manifest))
+            **_options(
+                algo="sft",
+                dataset_path=None,
+                dataset_mix_config=str(manifest),
+                dataset_sources=("first=one:1", "second=two:1"),
+            )
         )
+
+
+def test_train_config_rejects_dataset_path_with_mix_manifest(tmp_path):
+    manifest = tmp_path / "mix.json"
+    manifest.write_text("{}", encoding="utf-8")
+
+    with pytest.raises(UsageError, match="mutually exclusive"):
+        _trainer_config_from_options(**_options(algo="sft", dataset_path="dataset", dataset_mix_config=str(manifest)))
 
 
 def test_train_config_rejects_mix_manifest_for_non_sft(tmp_path):
@@ -89,9 +133,7 @@ def test_train_config_rejects_mix_manifest_for_non_sft(tmp_path):
     )
 
     with pytest.raises(UsageError, match="currently supports --algo sft only"):
-        _trainer_config_from_options(
-            **_options(algo="gspo", dataset_path=None, dataset_mix_config=str(manifest))
-        )
+        _trainer_config_from_options(**_options(algo="gspo", dataset_path=None, dataset_mix_config=str(manifest)))
 
 
 def test_sdk_config_enforces_dataset_mix_contract():
@@ -535,6 +577,41 @@ def test_train_command_prints_summary_before_run(monkeypatch):
     assert "save_path        out" in output
     assert "WARNING: no checkpoint output path configured" not in output
     assert events == [("run", "sft")]
+
+
+def test_train_command_accepts_repeated_dataset_source_options(monkeypatch):
+    captured = []
+    monkeypatch.setattr(train_cli, "run", captured.append)
+
+    result = CliRunner().invoke(
+        train_cli.train_command,
+        [
+            "--algo",
+            "sft",
+            "--ckpt",
+            "actor",
+            "--model-hub",
+            "hf",
+            "--dataset-source",
+            "alpaca_cleaned=yahma/alpaca-cleaned:0.7",
+            "--dataset-source",
+            "stanford_alpaca=tatsu-lab/alpaca:0.3",
+            "--dataset-loader-fn",
+            "examples/sft/alpaca/dataset_loader.py",
+            "--world-size",
+            "1",
+            "--tp-size",
+            "1",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "dataset_mix" in unstyle(result.output)
+    assert "2 command-line sources" in unstyle(result.output)
+    assert captured[0].dataset_sources == (
+        "alpaca_cleaned=yahma/alpaca-cleaned:0.7",
+        "stanford_alpaca=tatsu-lab/alpaca:0.3",
+    )
 
 
 def test_train_command_tunes_params_before_summary_and_run(monkeypatch):
