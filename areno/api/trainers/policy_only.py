@@ -263,6 +263,7 @@ class PolicyOnlyTrainer:
                 rewards=rewards,
                 records=[sample.item.record for sample in samples],
                 reward_records=reward_records,
+                spans=rows.spans,
             )
 
     def _filter_overlong_agent_samples(self, ctx, samples, sampling_params):

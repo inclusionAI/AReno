@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from areno.api.data import LossSpan
 from areno.api.tokenizer import apply_chat_template_with_options, encode_generation_prompt, normalize_token_ids
 
 
@@ -49,6 +50,28 @@ def response_to_tokens_and_mask(
     if eos_token_id is not None and (not response_ids or response_ids[-1] != eos_token_id):
         response_ids.append(eos_token_id)
     return prompt_ids + response_ids, [True] * len(prompt_ids) + [False] * len(response_ids)
+
+
+def spans_from_prompt_mask(prompt_mask: list[bool]) -> list[LossSpan]:
+    """Derive minimal ``LossSpan`` annotations from an SFT ``prompt_mask``.
+
+    Consecutive ``True`` values become a ``"prompt"`` span (``loss=False``);
+    consecutive ``False`` values become a ``"response"`` span (``loss=True``).
+    All spans use turn 0 because SFT packs a single prompt-response pair.
+    """
+
+    if not prompt_mask:
+        return []
+    spans: list[LossSpan] = []
+    start = 0
+    current = prompt_mask[0]
+    for i in range(1, len(prompt_mask)):
+        if prompt_mask[i] != current:
+            spans.append(LossSpan(role="prompt" if current else "response", start=start, end=i, loss=not current))
+            start = i
+            current = prompt_mask[i]
+    spans.append(LossSpan(role="prompt" if current else "response", start=start, end=len(prompt_mask), loss=not current))
+    return spans
 
 
 def has_any(record: dict[str, Any], keys: tuple[str, ...]) -> bool:

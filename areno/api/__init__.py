@@ -17,8 +17,10 @@ from areno.api.agentic import (
 )
 from areno.api.algorithms import AlgorithmSpec, get_algorithm, list_algorithms, register_algorithm
 from areno.api.config import ArenoConfig
-from areno.api.data import PromptBatch, PromptItem
+from areno.api.data import LossMaskExplanation, LossSpan, PromptBatch, PromptItem
+from areno.api.data_utils import spans_from_prompt_mask
 from areno.api.loss_fns import dpo_loss_fn, grpo_loss_fn, gspo_loss_fn, ppo_loss_fn, sft_loss_fn
+from areno.api.loss_mask_explainer import explain_loss_mask
 from areno.api.models import (
     BackendType,
     RolloutResult,
@@ -40,6 +42,8 @@ __all__ = [
     "ArenoConfig",
     "PromptBatch",
     "PromptItem",
+    "LossSpan",
+    "LossMaskExplanation",
     "AgentBatch",
     "AgentItem",
     "AgentTrainBatch",
@@ -63,4 +67,6 @@ __all__ = [
     "grpo_loss_fn",
     "ppo_loss_fn",
     "sft_loss_fn",
+    "explain_loss_mask",
+    "spans_from_prompt_mask",
 ]

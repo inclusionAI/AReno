@@ -26,6 +26,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
+from areno.api.data import LossSpan
 from areno.api.openai_chat import (
     build_chat_completion_response,
     first_user_text,
@@ -116,6 +117,7 @@ class AgentTrainBatch:
     rewards: list[float] | None
     records: list[dict[str, Any]]
     reward_records: list[RewardRecord]
+    spans: list[list[LossSpan]] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -164,6 +166,7 @@ class _AgentSample:
     response_mask_row: list[bool] = field(default_factory=list)
     loss_mask_row: list[bool] = field(default_factory=list)
     rollout_logprobs_row: list[float] = field(default_factory=list)
+    spans: list[LossSpan] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -179,6 +182,7 @@ class _AgentTrainRows:
     loss_masks: list[list[bool]]
     rollout_logprobs: list[list[float]]
     total_tokens: int
+    spans: list[list[LossSpan]] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -389,6 +393,7 @@ class RolloutSession:
         response_masks: list[list[bool]] = []
         loss_masks: list[list[bool]] = []
         rollout_logprobs: list[list[float]] = []
+        all_spans: list[list[LossSpan]] = []
         total_tokens = 0
         for sample in samples:
             if sample.token_row:
@@ -396,6 +401,7 @@ class RolloutSession:
                 response_masks.append(list(sample.response_mask_row))
                 loss_masks.append(list(sample.loss_mask_row))
                 rollout_logprobs.append(list(sample.rollout_logprobs_row))
+                all_spans.append(list(sample.spans))
                 total_tokens += len(sample.token_row)
                 continue
             prompt_len = len(sample.item.input_tokens)
@@ -405,6 +411,7 @@ class RolloutSession:
             response_masks.append([False] * prompt_len + [True] * response_len)
             loss_masks.append([False] * prompt_len + self._response_loss_mask(sample))
             rollout_logprobs.append([0.0] * prompt_len + list(sample.response_logprobs))
+            all_spans.append(self._build_sample_spans(sample, prompt_len, turn=0))
             total_tokens += len(token_row)
         return _AgentTrainRows(
             token_rows=token_rows,
@@ -412,6 +419,7 @@ class RolloutSession:
             loss_masks=loss_masks,
             rollout_logprobs=rollout_logprobs,
             total_tokens=total_tokens,
+            spans=all_spans,
         )
 
     def _handler_cls(self):
@@ -645,17 +653,32 @@ class RolloutSession:
         # Append only the suffix so the training row becomes one trajectory
         # instead of duplicating the shared prefix for every tool call.
         prefix_len = _common_prefix_len(existing.token_row, new_sample.token_row)
+        old_row_len = len(existing.token_row)
+        next_turn = max((s.turn for s in existing.spans), default=-1) + 1
         if prefix_len < len(new_sample.token_row):
             existing.token_row.extend(new_sample.token_row[prefix_len:])
             existing.response_mask_row.extend(new_sample.response_mask_row[prefix_len:])
             existing.loss_mask_row.extend(new_sample.loss_mask_row[prefix_len:])
             existing.rollout_logprobs_row.extend(new_sample.rollout_logprobs_row[prefix_len:])
+            # Clip and re-offset the new sample's spans to the appended suffix.
+            for span in new_sample.spans:
+                if span.end <= prefix_len:
+                    continue
+                clipped_start = max(span.start, prefix_len)
+                existing.spans.append(LossSpan(
+                    role=span.role,
+                    start=old_row_len + clipped_start - prefix_len,
+                    end=old_row_len + span.end - prefix_len,
+                    loss=span.loss,
+                    turn=next_turn,
+                ))
         elif not existing.token_row:
             existing.token_row = list(existing.item.input_tokens) + list(existing.response_tokens)
             prompt_len = len(existing.item.input_tokens)
             existing.response_mask_row = [False] * prompt_len + [True] * len(existing.response_tokens)
             existing.loss_mask_row = [False] * prompt_len + self._response_loss_mask(existing)
             existing.rollout_logprobs_row = [0.0] * prompt_len + list(existing.response_logprobs)
+            existing.spans = self._build_sample_spans(existing, prompt_len, turn=0)
         old_mask = existing.loss_mask_override
         if old_mask is None:
             old_mask = self._response_loss_mask_for_span(old_response_kind, old_response_len)
@@ -665,15 +688,45 @@ class RolloutSession:
         existing.loss_mask_override = list(old_mask) + list(new_mask)
         existing.response_kind = new_sample.response_kind
 
+    def _build_sample_spans(self, sample: _AgentSample, prompt_len: int, *, turn: int) -> list[LossSpan]:
+        """Build ``LossSpan`` annotations for one sample's training row.
+
+        The prompt portion is a single ``"prompt"`` span with ``loss=False``.
+        The response portion is split at loss-mask boundaries: segments with
+        ``loss=True`` use ``sample.response_kind`` as role; segments with
+        ``loss=False`` use ``"tool_result"`` when a ``loss_mask_override`` is
+        present (indicating ``_tool_call_loss_mask`` suppressed tool-result
+        sentinels), otherwise the role stays ``response_kind``.
+        """
+
+        spans = [LossSpan(role="prompt", start=0, end=prompt_len, loss=False, turn=turn)]
+        loss_mask = self._response_loss_mask(sample)
+        has_override = sample.loss_mask_override is not None
+        if not loss_mask:
+            return spans
+        start = 0
+        current = loss_mask[0]
+        for i in range(1, len(loss_mask)):
+            if loss_mask[i] != current:
+                role = sample.response_kind if current else ("tool_result" if has_override else sample.response_kind)
+                spans.append(LossSpan(role=role, start=prompt_len + start, end=prompt_len + i, loss=current, turn=turn))
+                start = i
+                current = loss_mask[i]
+        role = sample.response_kind if current else ("tool_result" if has_override else sample.response_kind)
+        spans.append(LossSpan(role=role, start=prompt_len + start, end=prompt_len + len(loss_mask), loss=current, turn=turn))
+        return spans
+
     def _set_sample_training_row(self, sample: _AgentSample, prompt_tokens: list[int]) -> None:
         response_mask = [True] * len(sample.response_tokens)
         loss_mask = self._response_loss_mask(sample)
         # response_mask marks generated tokens; loss_mask is stricter and can
         # suppress tool-result or other non-policy spans.
+        prompt_len = len(prompt_tokens)
         sample.token_row = list(prompt_tokens) + list(sample.response_tokens)
-        sample.response_mask_row = [False] * len(prompt_tokens) + response_mask
-        sample.loss_mask_row = [False] * len(prompt_tokens) + loss_mask
-        sample.rollout_logprobs_row = [0.0] * len(prompt_tokens) + list(sample.response_logprobs)
+        sample.response_mask_row = [False] * prompt_len + response_mask
+        sample.loss_mask_row = [False] * prompt_len + loss_mask
+        sample.rollout_logprobs_row = [0.0] * prompt_len + list(sample.response_logprobs)
+        sample.spans = self._build_sample_spans(sample, prompt_len, turn=0)
 
     def _build_pending_chat_response(
         self,
