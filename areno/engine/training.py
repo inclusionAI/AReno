@@ -12,6 +12,7 @@ from areno.engine.modeling import param_grad
 from areno.engine.parallel.context import get_tp_context
 from areno.engine.protocol import TrainPayload
 from areno.engine.runtime.logprobs import next_token_logprobs, packed_next_token_logprobs
+from areno.engine.runtime.non_finite import check_loss_non_finite, detect_non_finite
 from areno.engine.runtime.train_step import (
     _clip_grad_norm,
     _grad_norm,
@@ -91,6 +92,7 @@ class TrainingManager:
             loss = loss_out
         if not isinstance(loss, torch.Tensor):
             raise TypeError("train_loss_fn must return a torch.Tensor")
+        _non_finite_loss = check_loss_non_finite(loss)
         (loss / max(grad_scale, 1)).backward()
         self._accumulate_main_gradients()
         stepped = allow_step
@@ -102,6 +104,23 @@ class TrainingManager:
             self._finalize_router_expert_bias()
             grad_norm = _grad_norm(worker.model.parameters())
             grad_zero_metrics = _grad_zero_metrics(worker.model.parameters())
+            # --- Non-finite deep detection (#238) ---
+            if _non_finite_loss or worker._global_step % 100 == 0:
+                _nf_report = detect_non_finite(
+                    model=worker.model,
+                    optimizer=worker.optimizer,
+                    loss=loss,
+                    grad_norm=grad_norm or 0.0,
+                    step=worker._global_step,
+                    lr=worker.optimizer.lr,
+                    phase="actor",
+                )
+                if _nf_report is not None:
+                    import sys
+                    print(_nf_report.format_terminal(), file=sys.stderr, flush=True)
+                    if metrics is None:
+                        metrics = {}
+                    metrics.update(_nf_report.to_dict())
             if worker.grad_clip_norm is not None:
                 _clip_grad_norm(worker.model.parameters(), grad_norm, worker.grad_clip_norm)
             current_lr = self._lr_for_step(worker._global_step + 1)
