@@ -823,7 +823,21 @@ def run(trainer_config: TrainerConfig):
         load_from_disk=load_from_disk,
     )
     trainer = build_trainer(trainer_config, instance=api_trainer, dataset=dataset, reward_fn=reward_fn, loss_fn=loss_fn)
-    trainer.fit()
+    from areno.engine.shutdown import GracefulShutdown, ShutdownStage
+
+    with GracefulShutdown() as shutdown:
+        try:
+            shutdown.set_stage(ShutdownStage.TRAINING)
+            trainer.fit()
+        except KeyboardInterrupt:
+            if shutdown.shutdown_requested:
+                shutdown.begin_shutdown()
+                click.echo(
+                    f"\nGraceful shutdown: {shutdown.info.reason if shutdown.info else 'interrupted'}",
+                    err=True,
+                )
+            else:
+                raise
 
 
 def _write_dashboard_run_config(config: TrainerConfig) -> None:
