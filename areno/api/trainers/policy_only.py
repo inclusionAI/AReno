@@ -619,11 +619,15 @@ class PolicyOnlyTrainer:
                         vr.metrics,
                     )
                 if not result.sequences:
-                    raise RuntimeError(
+                    self.logger.warning(
                         "all completions for prompt were empty or invalid; "
-                        f"dropped={len(vr.dropped_indices)} policy=filter "
-                        f"prompt_preview={item.prompt[:200]!r}"
+                        "skipping this prompt (dropped=%d policy=filter "
+                        "prompt_preview=%r). Consider disabling "
+                        "--empty-completion-policy if this happens frequently.",
+                        len(vr.dropped_indices),
+                        item.prompt[:200],
                     )
+                    continue
 
             rewards = [
                 float(

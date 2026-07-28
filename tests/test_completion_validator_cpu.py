@@ -527,8 +527,8 @@ class MaterializeTrainBatchIntegrationTest(unittest.TestCase):
         for c in seen_completions:
             self.assertTrue(len(c) > 0)
 
-    def test_filter_all_invalid_raises_runtime_error(self):
-        """When all samples are invalid, should raise RuntimeError with stage and input info."""
+    def test_filter_all_invalid_skips_prompt(self):
+        """When all samples are invalid, should skip the prompt with a warning, not crash."""
         trainer, tokenizer = self._make_trainer(policy="filter")
         prompt_batch = self._make_prompt_batch(n_prompts=1)
         rollout_results = self._make_rollout_results(
@@ -540,13 +540,12 @@ class MaterializeTrainBatchIntegrationTest(unittest.TestCase):
             self.fail("reward_fn should not be called when all completions are invalid")
 
         trainer.reward_fn = reward_fn
-        with self.assertRaises(RuntimeError) as ctx:
-            trainer._materialize_train_batch(tokenizer, prompt_batch, rollout_results)
-        # Error message should identify the affected stage and input without
-        # exposing full training samples.
-        self.assertIn("all completions for prompt were empty or invalid", str(ctx.exception))
-        self.assertIn("dropped=4", str(ctx.exception))
-        self.assertIn("prompt_preview=", str(ctx.exception))
+        train_batch, rewards_all, _ = trainer._materialize_train_batch(
+            tokenizer, prompt_batch, rollout_results
+        )
+        # Should skip the prompt entirely, producing empty train_batch.
+        self.assertEqual(len(train_batch), 0)
+        self.assertEqual(len(rewards_all), 0)
 
     def test_filter_mixed_valid_invalid_advantages_correct(self):
         """After filtering, advantages should be computed only over valid samples."""
