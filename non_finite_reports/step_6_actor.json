@@ -1,0 +1,67 @@
+{
+  "step": 6,
+  "phase": "actor",
+  "loss": null,
+  "global_grad_norm": null,
+  "learning_rate": 1e-06,
+  "gpu_memory_gb": 4.11,
+  "last_checkpoint": null,
+  "events": [
+    {
+      "name": "embed_tokens.weight",
+      "layer": "embed_tokens",
+      "is_gradient": true,
+      "nan_count": 77791232,
+      "inf_count": 0,
+      "total_elements": 77791232,
+      "nan_ratio": 1.0,
+      "inf_ratio": 0.0,
+      "grad_norm": null
+    },
+    {
+      "name": "embed_tokens.weight.grad",
+      "layer": "embed_tokens",
+      "is_gradient": true,
+      "nan_count": 124928,
+      "inf_count": 0,
+      "total_elements": 124928,
+      "nan_ratio": 1.0,
+      "inf_ratio": 0.0,
+      "grad_norm": null
+    },
+    {
+      "name": "layers.0.input_layernorm.weight",
+      "layer": "layers.0",
+      "is_gradient": true,
+      "nan_count": 1024,
+      "inf_count": 0,
+      "total_elements": 1024,
+      "nan_ratio": 1.0,
+      "inf_ratio": 0.0,
+      "grad_norm": null
+    },
+    {
+      "name": "layers.0.self_attn.qkv_proj.weight",
+      "layer": "layers.0",
+      "is_gradient": true,
+      "nan_count": 2097152,
+      "inf_count": 0,
+      "total_elements": 2097152,
+      "nan_ratio": 1.0,
+      "inf_ratio": 0.0,
+      "grad_norm": null
+    }
+  ],
+  "causes": [
+    "NaN propagated from layer.0 to all parameters"
+  ],
+  "suggestions": [
+    "Rollback to last clean checkpoint"
+  ],
+  "total_nan": 80014336,
+  "total_inf": 0,
+  "affected_layers": [
+    "embed_tokens",
+    "layers.0"
+  ]
+}

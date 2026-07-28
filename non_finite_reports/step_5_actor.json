@@ -1,0 +1,122 @@
+{
+  "step": 5,
+  "phase": "actor",
+  "loss": null,
+  "global_grad_norm": null,
+  "learning_rate": 1e-06,
+  "gpu_memory_gb": 4.07,
+  "last_checkpoint": null,
+  "events": [
+    {
+      "name": "embed_tokens.weight.grad",
+      "layer": "embed_tokens",
+      "is_gradient": true,
+      "nan_count": 475136,
+      "inf_count": 0,
+      "total_elements": 475136,
+      "nan_ratio": 1.0,
+      "inf_ratio": 0.0,
+      "grad_norm": null
+    },
+    {
+      "name": "layers.0.input_layernorm.weight",
+      "layer": "layers.0",
+      "is_gradient": true,
+      "nan_count": 1024,
+      "inf_count": 0,
+      "total_elements": 1024,
+      "nan_ratio": 1.0,
+      "inf_ratio": 0.0,
+      "grad_norm": null
+    },
+    {
+      "name": "layers.0.self_attn.qkv_proj.weight.grad",
+      "layer": "layers.0",
+      "is_gradient": true,
+      "nan_count": 2097152,
+      "inf_count": 0,
+      "total_elements": 2097152,
+      "nan_ratio": 1.0,
+      "inf_ratio": 0.0,
+      "grad_norm": null
+    },
+    {
+      "name": "layers.0.self_attn.o_proj.weight.grad",
+      "layer": "layers.0",
+      "is_gradient": true,
+      "nan_count": 1048576,
+      "inf_count": 0,
+      "total_elements": 1048576,
+      "nan_ratio": 1.0,
+      "inf_ratio": 0.0,
+      "grad_norm": null
+    },
+    {
+      "name": "layers.0.self_attn.q_norm.weight.grad",
+      "layer": "layers.0",
+      "is_gradient": true,
+      "nan_count": 128,
+      "inf_count": 0,
+      "total_elements": 128,
+      "nan_ratio": 1.0,
+      "inf_ratio": 0.0,
+      "grad_norm": null
+    },
+    {
+      "name": "layers.0.self_attn.k_norm.weight.grad",
+      "layer": "layers.0",
+      "is_gradient": true,
+      "nan_count": 128,
+      "inf_count": 0,
+      "total_elements": 128,
+      "nan_ratio": 1.0,
+      "inf_ratio": 0.0,
+      "grad_norm": null
+    },
+    {
+      "name": "layers.0.post_attention_layernorm.weight.grad",
+      "layer": "layers.0",
+      "is_gradient": true,
+      "nan_count": 1024,
+      "inf_count": 0,
+      "total_elements": 1024,
+      "nan_ratio": 1.0,
+      "inf_ratio": 0.0,
+      "grad_norm": null
+    },
+    {
+      "name": "layers.0.mlp.gate_up_proj.weight.grad",
+      "layer": "layers.0",
+      "is_gradient": true,
+      "nan_count": 3145728,
+      "inf_count": 0,
+      "total_elements": 3145728,
+      "nan_ratio": 1.0,
+      "inf_ratio": 0.0,
+      "grad_norm": null
+    },
+    {
+      "name": "layers.0.mlp.down_proj.weight.grad",
+      "layer": "layers.0",
+      "is_gradient": true,
+      "nan_count": 1572864,
+      "inf_count": 0,
+      "total_elements": 1572864,
+      "nan_ratio": 1.0,
+      "inf_ratio": 0.0,
+      "grad_norm": null
+    }
+  ],
+  "causes": [
+    "Single-layer anomaly -> layers.0"
+  ],
+  "suggestions": [
+    "Check input data range/distribution for that layer"
+  ],
+  "total_nan": 8341760,
+  "total_inf": 0,
+  "affected_layers": [
+    "embed_tokens",
+    "layers.0"
+  ]
+}
