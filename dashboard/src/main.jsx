@@ -1853,7 +1853,6 @@ function CompareRunsPanel({ jobList, refreshJobs }) {
           {/* Metrics Comparison */}
           <div className="compareSection">
             <h3>Metrics Comparison ({metrics.length} metrics)</h3>
-            <p className="compareHint">Diff = Job A - Job B. Positive means A is higher; negative means B is higher.</p>
             {metrics.length > 0 ? (
               <table className="compareTable">
                 <thead>
@@ -1861,7 +1860,7 @@ function CompareRunsPanel({ jobList, refreshJobs }) {
                     <th>Metric</th>
                     <th>Job A (latest)</th>
                     <th>Job B (latest)</th>
-                    <th>Diff (A - B)</th>
+                    <th>Diff</th>
                     <th>Note</th>
                   </tr>
                 </thead>
