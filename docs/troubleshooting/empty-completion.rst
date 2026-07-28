@@ -55,52 +55,29 @@ Policies
 ``--empty-completion-policy filter``
    Invalid completions are dropped before ``reward_fn``.  Valid completions
    in the same prompt group are preserved and used for reward and advantage
-   computation.
+   computation.  If all completions for a prompt are invalid, the prompt is
+   skipped with a warning.
 
-Observable output
+``--empty-completion-policy resample``
+   Invalid completions trigger re-generation of the entire prompt group
+   (all ``n_samples`` completions) up to ``--empty-completion-resample-budget``
+   times (default 3).  After the budget is exhausted, any remaining invalid
+   completions are filtered.  Only supported for standard GSPO/GRPO and PPO
+   training; agentic mode uses ``filter`` semantics.
+
+Resample behavior
 ~~~~~~~~~~~~~~~~~
 
-When filtering is active, each training step emits log lines like:
+When ``--empty-completion-policy resample`` is active, each prompt group is
+validated before ``reward_fn``:
 
-.. code-block:: text
+1. Check all completions in the group.
+2. If any are invalid, re-run rollout for that prompt (replacing all
+   ``n_samples`` completions).
+3. Repeat up to ``--empty-completion-resample-budget`` times.
+4. After the budget is exhausted, apply ``filter`` as a fallback.
 
-   completion_validation metrics={'completion_total': 8.0, 'completion_valid': 5.0, 'completion_invalid': 3.0, 'completion_invalid_empty': 2.0, 'completion_invalid_whitespace': 1.0, 'completion_filtered': 3.0}
-
-When ``--save-path`` is set, dropped completions are also written to:
-
-.. code-block:: text
-
-   {save_path}/empty_completions.jsonl
-
-Each line is a JSON record with the following fields:
-
-==================  =========================================
-Field               Description
-==================  =========================================
-``index``           Position in the original batch
-``invalid_type``    One of the four classification types
-``completion``      Decoded text (truncated to 500 chars)
-``resp_token_count`` Number of response tokens
-``prompt``          Original prompt text (truncated to 500 chars)
-``policy``          The active policy (``filter``)
-==================  =========================================
-
-Covered algorithms
-~~~~~~~~~~~~~~~~~~
-
-The feature applies to all algorithms that perform rollout and reward
-scoring:
-
-* **GSPO** / **GRPO** (standard and agentic modes)
-* **PPO**
-
-SFT and DPO do not use rollout and are unaffected.
-
-Configuration
-~~~~~~~~~~~~~
-
-The policy is stored in ``RolloutTrainerConfig`` and inherited by
-``PolicyTrainerConfig`` (GSPO/GRPO) and ``PPOTrainerConfig`` (PPO):
+The resample budget is configured via:
 
 .. code-block:: python
 
@@ -110,7 +87,103 @@ The policy is stored in ``RolloutTrainerConfig`` and inherited by
        algo="gspo",
        ckpt="Qwen/Qwen3-0.6B",
        dataset_path="gsm8k:main",
-       empty_completion_policy="filter",  # "off" (default) or "filter"
+       empty_completion_policy="resample",
+       empty_completion_resample_budget=5,  # default 3
+   )
+
+Log output reference
+~~~~~~~~~~~~~~~~~~~~
+
+The following log messages may appear depending on the active policy and
+outcome.  All messages are emitted at INFO or WARNING level.
+
+**Normal operation (filter)**
+
+.. code-block:: text
+
+   completion_validation metrics={'completion_total': 8.0, 'completion_valid': 5.0,
+     'completion_invalid': 3.0, 'completion_invalid_empty': 2.0,
+     'completion_invalid_whitespace': 1.0, 'completion_filtered': 3.0}
+
+**All completions invalid (filter)**
+
+.. code-block:: text
+
+   WARNING  all completions for prompt were empty or invalid; skipping this prompt
+            (dropped=4 policy=filter prompt_preview='What is 1+1?').
+            Consider disabling --empty-completion-policy if this happens frequently.
+
+**Resample attempt in progress**
+
+.. code-block:: text
+
+   resample attempt 1/3: re-generating prompt with 2 invalid completions
+
+**Resample succeeded**
+
+.. code-block:: text
+
+   resample succeeded after 2 attempt(s)
+
+**Resample exhausted (falling back to filter)**
+
+.. code-block:: text
+
+   WARNING  resample exhausted after 3 attempt(s): 2 completions still invalid,
+            falling back to filter
+
+**PPO-specific variants** use the prefix ``ppo resample`` instead of
+``resample``.
+
+**Agentic path** uses ``agentic completion_validation metrics=...``.
+
+Quarantine file
+~~~~~~~~~~~~~~~
+
+When ``--save-path`` is set, dropped completions are written to:
+
+.. code-block:: text
+
+   {save_path}/empty_completions.jsonl
+
+Each line is a JSON record:
+
+==================  =========================================
+Field               Description
+==================  =========================================
+``index``           Position in the original batch
+``invalid_type``    One of ``empty`` / ``whitespace`` / ``immediate_eos`` / ``special_token``
+``completion``      Decoded text (truncated to 500 chars)
+``resp_token_count`` Number of response tokens
+``prompt``          Original prompt text (truncated to 500 chars)
+``policy``          The active policy
+==================  =========================================
+
+Covered algorithms
+~~~~~~~~~~~~~~~~~~
+
+The feature applies to all algorithms that perform rollout and reward
+scoring:
+
+* **GSPO** / **GRPO** — ``filter`` and ``resample``
+* **PPO** — ``filter`` and ``resample``
+* **Agentic** (GSPO/GRPO + ``--agent-fn``) — ``filter`` only
+
+SFT and DPO do not use rollout and are unaffected.
+
+Configuration
+~~~~~~~~~~~~~
+
+.. code-block:: python
+
+   from areno.api.trainer_config import PolicyTrainerConfig
+
+   config = PolicyTrainerConfig(
+       algo="gspo",
+       ckpt="Qwen/Qwen3-0.6B",
+       dataset_path="gsm8k:main",
+       empty_completion_policy="filter",            # "off" (default), "filter", "resample"
+       empty_completion_resample_budget=3,          # max re-generation attempts
    )
 
 Limitations
@@ -137,9 +210,14 @@ Limitations
   numerically safe but eliminates the group-normalization benefit for that
   prompt.
 
-* **No resample.** The current implementation only supports ``filter``.
-  Bounded regeneration (``resample``) is not yet available and may be added in
-  a future release.
+* **Resample replaces the entire group.** When resample re-generates, all
+  ``n_samples`` completions for the prompt are replaced, not just the invalid
+  ones.  Previously valid completions are discarded.
+
+* **Agentic mode does not support resample.** Agentic trajectories involve
+  multi-turn tool interactions; re-running the entire agent loop is not
+  supported.  Agentic mode uses ``filter`` semantics even when
+  ``--empty-completion-policy resample`` is set.
 
 Testing
 ~~~~~~~

@@ -1305,10 +1305,10 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
 @click.option("--train-tool-results", is_flag=True, help="Include tool-result spans in agentic policy loss.")
 @click.option(
     "--empty-completion-policy",
-    type=click.Choice(["off", "filter"], case_sensitive=False),
+    type=click.Choice(["off", "filter", "resample"], case_sensitive=False),
     default="off",
     show_default=True,
-    help="How to handle empty or invalid model completions: 'off' (preserve current behavior) or 'filter' (drop them before reward/training).",
+    help="How to handle empty or invalid model completions: 'off' (preserve current behavior), 'filter' (drop them), or 'resample' (re-generate up to budget times).",
 )
 @click.option(
     "--gspo-clip-eps", type=float, default=3.0e-4, show_default=True, help="GSPO sequence-ratio clipping epsilon."

@@ -599,6 +599,44 @@ class MaterializeTrainBatchIntegrationTest(unittest.TestCase):
         self.assertEqual(len(train_batch), 2)
         self.assertEqual(len(rewards_all), 2)
 
+    def test_resample_policy_all_valid_no_retry(self):
+        """With resample policy and all valid completions, no retry should occur."""
+        trainer, tokenizer = self._make_trainer(policy="resample")
+        trainer.config = SimpleNamespace(
+            empty_completion_policy="resample",
+            empty_completion_resample_budget=3,
+            save_path=None,
+        )
+        prompt_batch = self._make_prompt_batch(n_prompts=1)
+        rollout_results = self._make_rollout_results(
+            n_prompts=1, n_samples=4,
+            invalid_indices={},  # all valid
+        )
+
+        def reward_fn(record):
+            return 1.0
+
+        trainer.reward_fn = reward_fn
+        train_batch, rewards_all, _ = trainer._materialize_train_batch(
+            tokenizer, prompt_batch, rollout_results
+        )
+
+        self.assertEqual(len(train_batch), 4)
+        self.assertEqual(len(rewards_all), 4)
+
+    def test_resample_metrics(self):
+        """Resample policy should produce resample-specific metrics."""
+        completions = ["ok", ""]
+        resp_tokens = [[1], []]
+        _, _, vr = validate_completions(
+            completions, resp_tokens, policy="resample",
+            eos_token_ids=(0,), special_token_ids=(0,),
+            resample_budget=5,
+        )
+        self.assertIn("completion_resample_candidates", vr.metrics)
+        self.assertEqual(vr.metrics["completion_resample_candidates"], 1.0)
+        self.assertEqual(vr.metrics["completion_resample_budget"], 5.0)
+
 
 if __name__ == "__main__":
     unittest.main()

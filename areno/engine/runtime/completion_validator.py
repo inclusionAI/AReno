@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 InvalidType = Literal["empty", "whitespace", "special_token", "immediate_eos"]
-Policy = Literal["off", "filter"]
+Policy = Literal["off", "filter", "resample"]
 
 
 @dataclass(slots=True)
@@ -118,6 +118,7 @@ def validate_completions(
     policy: Policy = "off",
     eos_token_ids: tuple[int, ...] = (),
     special_token_ids: tuple[int, ...] = (),
+    resample_budget: int = 3,
     quarantine_path: str | Path | None = None,
     prompt: str | None = None,
 ) -> tuple[list[str], list[list[int]], ValidationResult]:
@@ -195,6 +196,9 @@ def validate_completions(
 
     if policy == "filter":
         metrics["completion_filtered"] = float(len(result.dropped_indices))
+    elif policy == "resample":
+        metrics["completion_resample_candidates"] = float(len(result.dropped_indices))
+        metrics["completion_resample_budget"] = float(resample_budget)
 
     result.metrics = metrics
 

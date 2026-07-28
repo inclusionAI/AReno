@@ -100,7 +100,7 @@ class PolicyOnlyTrainer:
                     # 2+3) Score rewards and broadcast group-normalised
                     #      advantages down to per-token tensors.
                     train_batch, rewards_all, rollout_logprobs = self._materialize_train_batch(
-                        tokenizer, prompt_batch, rollout_results
+                        tokenizer, prompt_batch, rollout_results, sampling_params=sampling_params
                     )
 
                 if rewards_all:
@@ -557,7 +557,17 @@ class PolicyOnlyTrainer:
 
         return get_special_token_ids(tokenizer)
 
-    def _materialize_train_batch(self, tokenizer, prompt_batch, rollout_results):
+    async def _run_prompt_rollout_for_tokens(self, sampling_params, prompt_tokens):
+        """Run rollout for a list of token lists, returning RolloutResult list."""
+
+        async with self.areno.rollout_session(
+            sampling_params=sampling_params,
+            max_running_prompts=self.config.resolved_max_running_prompts(),
+            proxy=False,
+        ):
+            return await self.areno.rollout_token_batch_async(prompt_tokens, self.config.n_samples, sampling_params)
+
+    def _materialize_train_batch(self, tokenizer, prompt_batch, rollout_results, *, sampling_params=None):
         """Assemble TrainSequence rows for one rollout batch.
 
         Steps:
@@ -593,6 +603,40 @@ class PolicyOnlyTrainer:
             # no-op that returns the inputs unchanged.
             if policy != "off":
                 from areno.engine.runtime.completion_validator import validate_completions
+
+                # resample: re-generate invalid completions up to budget times.
+                if policy == "resample" and sampling_params is not None:
+                    budget = getattr(self.config, "empty_completion_resample_budget", 3)
+                    for attempt in range(budget):
+                        _, _, check_vr = validate_completions(
+                            completions,
+                            [seq.resp_tokens for seq in result.sequences],
+                            policy="filter",
+                            eos_token_ids=eos_ids,
+                            special_token_ids=special_ids,
+                        )
+                        if not check_vr.dropped_indices:
+                            if attempt > 0:
+                                self.logger.info(
+                                    "resample succeeded after %d attempt(s)",
+                                    attempt,
+                                )
+                            break
+                        self.logger.info(
+                            "resample attempt %d/%d: re-generating prompt with %d invalid completions",
+                            attempt + 1, budget, len(check_vr.dropped_indices),
+                        )
+                        new_result = asyncio.run(
+                            self._run_prompt_rollout_for_tokens(sampling_params, [item.input_tokens])
+                        )
+                        result = new_result[0]
+                        completions = [tokenizer.decode(seq.resp_tokens) for seq in result.sequences]
+                    else:
+                        self.logger.warning(
+                            "resample exhausted after %d attempt(s): %d completions still invalid, "
+                            "falling back to filter",
+                            budget, len(check_vr.dropped_indices),
+                        )
 
                 quarantine_path = None
                 if self.config.save_path:
