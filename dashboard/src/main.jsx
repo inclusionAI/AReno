@@ -1121,25 +1121,38 @@ function resolveActiveMetricName(names, selectedName) {
 }
 
 function MetricChart({ jobId, metricsDir, refreshNonce }) {
-  const [selectedName, setSelectedName] = useState("");
+  // Issue #265: plot several metrics on one chart with toggles, legend, hover
+  // values, optional dual axes, view-only normalization, and downsampling.
+  // Backward-compat (C2): defaults keep the original single-metric behavior --
+  // `selected` holds exactly one name unless the user opts into more.
+  const [selected, setSelected] = useState([]);
   const [smooth, setSmooth] = useState(0.6);
   const [metricList, setMetricList] = useState([]);
-  const [points, setPoints] = useState([]);
+  const [seriesByKey, setSeriesByKey] = useState({});
+  const [errors, setErrors] = useState({});
   const [metricLoading, setMetricLoading] = useState(false);
   const [prevJobId, setPrevJobId] = useState(jobId);
+  const [normalize, setNormalize] = useState(false);
+  const [downsampleTarget] = useState(480);
+  const [hoverStep, setHoverStep] = useState(null);
   // Reset the selection during render (not in an effect) when the job changes so
   // the reset happens before any effect runs. This avoids a stale-name fetch and
   // a stuck loading state on job switch, while live polls (refreshNonce) still
   // keep the user's chosen metric and chart intact.
   if (jobId !== prevJobId) {
     setPrevJobId(jobId);
-    setSelectedName("");
+    setSelected([]);
     setMetricList([]);
-    setPoints([]);
+    setSeriesByKey({});
+    setErrors({});
     setMetricLoading(false);
+    setHoverStep(null);
   }
   const names = metricNamesFrom(metricList);
-  const effectiveName = resolveActiveMetricName(names, selectedName);
+  // Safe default (C2): when nothing is selected yet, fall back to the first
+  // available metric -- exactly the original single-metric view.
+  const effectiveSelected = selected.length ? selected.filter((name) => names.includes(name)) : names.slice(0, 1);
+  const order = effectiveSelected;
   useEffect(() => {
     let cancelled = false;
     if (!jobId) return undefined;
@@ -1148,7 +1161,7 @@ function MetricChart({ jobId, metricsDir, refreshNonce }) {
         if (cancelled) return;
         const list = data.metrics || [];
         setMetricList(list);
-        setSelectedName((current) => current || list[0]?.name || "");
+        setSelected((current) => (current.length ? current : list[0]?.name ? [list[0].name] : []));
       })
       .catch(() => {
         if (!cancelled) setMetricList([]);
@@ -1157,25 +1170,45 @@ function MetricChart({ jobId, metricsDir, refreshNonce }) {
       cancelled = true;
     };
   }, [jobId, refreshNonce]);
+  // Fetch every selected metric in parallel. allSettled (not all) so one failed
+  // metric is reported by name (C3) without blanking the whole chart.
   useEffect(() => {
     let cancelled = false;
-    if (!jobId || !effectiveName) {
-      setPoints([]);
+    if (!jobId || !order.length) {
+      setSeriesByKey({});
+      setErrors({});
       setMetricLoading(false);
       return undefined;
     }
     setMetricLoading(true);
-    api(`/api/jobs/${jobId}/metric?name=${encodeURIComponent(effectiveName)}&limit=500`)
-      .then((data) => {
+    Promise.allSettled(
+      order.map((name) =>
+        api(`/api/jobs/${jobId}/metric?name=${encodeURIComponent(name)}&limit=500`)
+          .then((data) => ({
+            name,
+            points: (data.points || []).filter((point) => Number.isFinite(Number(point.value))).map((point) => ({
+              ...point,
+              step: Number(point.step || 0),
+              value: Number(point.value),
+            })),
+          })),
+      ),
+    )
+      .then((results) => {
         if (cancelled) return;
-        setPoints((data.points || []).filter((point) => Number.isFinite(Number(point.value))).map((point) => ({
-          ...point,
-          step: Number(point.step || 0),
-          value: Number(point.value),
-        })));
-      })
-      .catch(() => {
-        if (!cancelled) setPoints([]);
+        const nextSeries = {};
+        const nextErrors = {};
+        results.forEach((result, index) => {
+          const name = order[index];
+          if (result.status === "fulfilled") {
+            nextSeries[name] = result.value.points;
+          } else {
+            // Identify the failing stage (fetch) and input (metric name) per C3.
+            nextErrors[name] = `fetch failed: ${result.reason?.message || result.reason || "unknown"}`;
+          }
+        });
+        setSeriesByKey(nextSeries);
+        setErrors(nextErrors);
       })
       .finally(() => {
         if (!cancelled) setMetricLoading(false);
@@ -1183,46 +1216,232 @@ function MetricChart({ jobId, metricsDir, refreshNonce }) {
     return () => {
       cancelled = true;
     };
-  }, [jobId, effectiveName, refreshNonce]);
-  const activeName = effectiveName;
-  const visiblePoints = points.slice(-240);
-  const smoothed = smoothTensorboard(visiblePoints, smooth);
-  const plot = buildMetricPlot(visiblePoints, smoothed);
+  }, [jobId, order.join(","), refreshNonce]);
+  const hasData = order.some((name) => (seriesByKey[name] || []).length > 0);
+  const toggleMetric = (name) => {
+    setSelected((current) => {
+      if (current.includes(name)) return current.filter((entry) => entry !== name);
+      return [...current, name];
+    });
+    setHoverStep(null);
+  };
+  const prepared = useMemo(() => {
+    const keyed = {};
+    order.forEach((name) => {
+      const pts = seriesByKey[name] || [];
+      keyed[name] = downsampleLttb(pts, downsampleTarget);
+    });
+    const axes = assignAxes(keyed, order);
+    const plots = buildMultiMetricPlot(keyed, order, { normalize, axes, smooth });
+    return { keyed, axes, plots };
+  }, [seriesByKey, order, normalize, downsampleTarget]);
+  // Single-metric backward-compat path: when exactly one metric is selected,
+  // reuse the original smoothed/raw rendering so the legacy look is preserved.
+  const single = order.length === 1 ? seriesByKey[order[0]] || [] : null;
+  // Hover (F4): map the pointer x to the nearest step shared across series.
+  const svgRef = useRef(null);
+  const allSteps = useMemo(
+    () => Array.from(new Set(order.flatMap((name) => (seriesByKey[name] || []).map((p) => p.step)))).sort((a, b) => a - b),
+    [seriesByKey, order],
+  );
+  const onMove = (event) => {
+    const svg = svgRef.current;
+    if (!svg || !allSteps.length) return;
+    const rect = svg.getBoundingClientRect();
+    const x = ((event.clientX - rect.left) / rect.width) * 720;
+    const stepMin = allSteps[0];
+    const stepMax = allSteps[allSteps.length - 1];
+    const step = Math.round((x / 720) * (stepMax - stepMin) + stepMin);
+    setHoverStep(allSteps.reduce((best, s) => (Math.abs(s - step) < Math.abs(best - step) ? s : best), allSteps[0]));
+  };
+  const hoverRows = hoverStep === null ? [] : order
+    .map((name) => {
+      const point = (prepared.keyed[name] || []).find((p) => p.step === hoverStep);
+      return point ? { name, value: point.rawValue ?? point.value, step: hoverStep } : null;
+    })
+    .filter(Boolean);
   return (
     <div className="chart">
       <div className="chartHeader">
         <span><Activity size={14} /> TensorBoard scalars</span>
         <div className="chartControls">
-          <select value={activeName} onChange={(event) => setSelectedName(event.target.value)}>
-            {names.length === 0 ? <option value="">no metrics</option> : names.map((name) => <option key={name}>{name}</option>)}
-          </select>
+          <label className="metricMultiToggle">
+            <input type="checkbox" checked={normalize} onChange={(event) => setNormalize(event.target.checked)} />
+            normalize
+          </label>
           <label>
             smooth {smooth.toFixed(2)}
             <input type="range" min="0" max="0.99" step="0.01" value={smooth} onChange={(event) => setSmooth(Number(event.target.value))} />
           </label>
+          <MetricSelector names={names} selected={effectiveSelected} onToggle={toggleMetric} />
         </div>
       </div>
-      {visiblePoints.length === 0 ? (
+      {!hasData ? (
         <div className="plotEmpty">{metricLoading ? "Loading selected metric..." : "No TensorBoard scalar points loaded yet."}</div>
+      ) : single ? (
+        <SingleMetricPlot points={single} smooth={smooth} hoverStep={hoverStep} hoverRows={hoverRows} svgRef={svgRef} onMove={onMove} onLeave={() => setHoverStep(null)} name={order[0]} />
       ) : (
-        <svg className="metricPlot" viewBox="0 0 720 180" role="img">
-          <g className="plotGrid">
-            {[0, 1, 2, 3].map((item) => <line key={item} x1="0" x2="720" y1={30 + item * 42} y2={30 + item * 42} />)}
-          </g>
-          <polyline className="rawLine" points={plot.raw} />
-          <polyline className="smoothLine" points={plot.smooth} />
-          {visiblePoints.slice(-24).map((point, index) => (
-            <circle key={`${point.step}-${index}`} cx={plot.coords[index + Math.max(0, visiblePoints.length - 24)]?.x || 0} cy={plot.coords[index + Math.max(0, visiblePoints.length - 24)]?.y || 0} r="2.2">
-              <title>{`${activeName} step ${point.step}: ${point.value}`}</title>
-            </circle>
-          ))}
-        </svg>
+        <MultiMetricPlot
+          order={order}
+          plots={prepared.plots}
+          smooth={smooth}
+          normalize={normalize}
+          errors={errors}
+          hoverStep={hoverStep}
+          hoverRows={hoverRows}
+          svgRef={svgRef}
+          onMove={onMove}
+          onLeave={() => setHoverStep(null)}
+        />
       )}
       <div className="plotFooter">
-        <span>{activeName || "metric"} · {points.length} points</span>
-        <span>{metricsDir || "no metrics dir"} · {plot.minLabel} to {plot.maxLabel}</span>
+        <span>{order.join(", ") || "metric"} · {Object.values(seriesByKey).reduce((sum, pts) => sum + pts.length, 0)} points</span>
+        <span>{metricsDir || "no metrics dir"}{normalize ? " · normalized view" : ""}</span>
       </div>
     </div>
+  );
+}
+
+function MetricSelector({ names, selected, onToggle }) {
+  // Hand-rolled dropdown multi-select: a button shows how many metrics are
+  // active; clicking opens a checkbox popover. Native <select> cannot do
+  // "dropdown + multi-select", so this stays dependency-free. Toggling any
+  // number of metrics onto one chart is F1.
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef(null);
+  useEffect(() => {
+    if (!open) return undefined;
+    const onDocClick = (event) => {
+      if (wrapRef.current && !wrapRef.current.contains(event.target)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onDocClick);
+    return () => document.removeEventListener("mousedown", onDocClick);
+  }, [open]);
+  if (!names.length) return null;
+  return (
+    <div className="metricDropdown" ref={wrapRef}>
+      <button type="button" className="metricDropdownBtn" onClick={() => setOpen((v) => !v)}>
+        <Activity size={13} />
+        {selected.length ? `${selected.length} selected` : "select metrics"}
+        <span className="metricDropdownCaret">{open ? "▴" : "▾"}</span>
+      </button>
+      {open && (
+        <div className="metricDropdownPanel">
+          {names.map((name) => {
+            const checked = selected.includes(name);
+            const idx = selected.indexOf(name);
+            return (
+              <div
+                key={name}
+                className={classNames("metricDropdownItem", checked && "metricDropdownItemActive")}
+                role="checkbox"
+                tabIndex={0}
+                aria-checked={checked}
+                onClick={() => onToggle(name)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    onToggle(name);
+                  }
+                }}
+              >
+                <i className="metricSwatch" style={{ background: checked ? metricColor(idx) : "transparent", borderColor: checked ? metricColor(idx) : undefined }} />
+                <span title={name}>{name}</span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SingleMetricPlot({ points, smooth, hoverStep, hoverRows, svgRef, onMove, onLeave, name }) {
+  // Single-metric path: keeps the original smoothed/raw rendering, but uses the
+  // first palette color so the line matches the selector swatch (issue #265
+  // wants consistent colors across toggles/legend). A hover value card (F4) is
+  // added so a single line also reports the value at the hovered step.
+  const color = metricColor(0);
+  const visiblePoints = points.slice(-240);
+  const smoothed = smoothTensorboard(visiblePoints, smooth);
+  const plot = buildMetricPlot(visiblePoints, smoothed);
+  const hoverIndex = hoverStep === null ? null : visiblePoints.findIndex((p) => p.step === hoverStep);
+  return (
+    <>
+      <svg className="metricPlot" viewBox="0 0 720 180" role="img" ref={svgRef} onMouseMove={onMove} onMouseLeave={onLeave}>
+        <g className="plotGrid">
+          {[0, 1, 2, 3].map((item) => <line key={item} x1="0" x2="720" y1={30 + item * 42} y2={30 + item * 42} />)}
+        </g>
+        <polyline className="metricRawLine" points={plot.raw} stroke={color} opacity={0.5} />
+        <polyline className="metricSmoothLine" points={plot.smooth} stroke={color} />
+        {visiblePoints.slice(-24).map((point, index) => (
+          <circle key={`${point.step}-${index}`} cx={plot.coords[index + Math.max(0, visiblePoints.length - 24)]?.x || 0} cy={plot.coords[index + Math.max(0, visiblePoints.length - 24)]?.y || 0} r="2.2" fill={color} stroke="var(--deck-canvas)" strokeWidth="1.2">
+            <title>{`${name} step ${point.step}: ${point.value}`}</title>
+          </circle>
+        ))}
+        {hoverIndex !== null && hoverIndex >= 0 && (
+          <circle className="hoverPoint" cx={plot.coords[hoverIndex]?.x || 0} cy={plot.coords[hoverIndex]?.y || 0} r="3" />
+        )}
+      </svg>
+      {hoverRows.length > 0 && (
+        <div className="metricHoverCard">
+          <div className="metricHoverStep">step {hoverStep}</div>
+          {hoverRows.map((row) => (
+            <div key={row.name}>{row.name}: {compactNumber(row.value)}</div>
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
+function MultiMetricPlot({ order, plots, smooth, normalize, errors, hoverStep, hoverRows, svgRef, onMove, onLeave }) {
+  const hasRightAxis = plots.some((p) => p.axisIndex === 1);
+  return (
+    <>
+      <svg className="metricPlot" viewBox="0 0 720 180" role="img" ref={svgRef} onMouseMove={onMove} onMouseLeave={onLeave}>
+        <g className="plotGrid">
+          {[0, 1, 2, 3].map((item) => <line key={item} x1="0" x2="720" y1={30 + item * 42} y2={30 + item * 42} />)}
+        </g>
+        {plots.map((p, i) => (
+          <g key={p.key}>
+            {!normalize && <polyline className="metricRawLine" points={p.rawPoly} stroke={metricColor(i)} opacity={0.5} />}
+            <polyline className="metricSmoothLine" points={p.smoothPoly} stroke={metricColor(i)} />
+            {p.coords.map((c) => (c.step === hoverStep ? <circle key={`h${c.step}`} cx={c.x} cy={c.y} r="3" className="hoverPoint" /> : null))}
+            {p.coords.map((c, ci) => (
+              <circle key={`t${ci}`} cx={c.x} cy={c.y} r="0">
+                <title>{`${p.key} step ${c.step}: ${c.value}`}</title>
+              </circle>
+            ))}
+          </g>
+        ))}
+        {hoverStep !== null && plots[0] && (
+          <line className="hoverGuide" x1={plots[0].coords.find((c) => c.step === hoverStep)?.x || 0} x2={plots[0].coords.find((c) => c.step === hoverStep)?.x || 0} y1="0" y2="180" />
+        )}
+      </svg>
+      <div className="metricLegend">
+        {plots.map((p, i) => (
+          <span key={p.key} className="metricLegendItem">
+            <i className="metricSwatch" style={{ background: metricColor(i) }} />
+            {p.key}
+            <span className="metricAxisTag">{p.axisIndex === 0 ? "L" : "R"}</span>
+            <span className="metricRange">{p.minLabel}–{p.maxLabel}</span>
+          </span>
+        ))}
+        {order.filter((name) => errors[name]).map((name) => (
+          <span key={name} className="metricError">{name}: {errors[name]}</span>
+        ))}
+      </div>
+      {hoverRows.length > 0 && (
+        <div className="metricHoverCard">
+          <div className="metricHoverStep">step {hoverStep}</div>
+          {hoverRows.map((row) => (
+            <div key={row.name}>{row.name}: {compactNumber(row.value)}</div>
+          ))}
+        </div>
+      )}
+      {hasRightAxis && <span className="metricAxisHint">L = left axis · R = right axis</span>}
+    </>
   );
 }
 
@@ -1264,6 +1483,123 @@ function compactNumber(value) {
   if (!Number.isFinite(value)) return "n/a";
   if (Math.abs(value) >= 1000 || Math.abs(value) < 0.001) return value.toExponential(2);
   return value.toFixed(4).replace(/0+$/, "").replace(/\.$/, "");
+}
+
+// --- Multi-metric plotting helpers (issue #265) ----------------------------
+// These are pure functions so they can be exercised by a node-only test harness
+// without a DOM. They never mutate the passed-in points; view-only transforms
+// (normalization, downsampling) produce new arrays and leave stored data intact.
+
+// Okabe-Ito colorblind-safe palette; assigned to series in selection order.
+const METRIC_PALETTE = ["#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7", "#999999"];
+function metricColor(index) {
+  return METRIC_PALETTE[index % METRIC_PALETTE.length];
+}
+
+// Largest-triangle-three-buckets downsample: keeps the visual shape of a
+// time-ordered series while capping point count at `target`. Pure and
+// non-mutating; returns the original array when already small enough.
+function downsampleLttb(points, target) {
+  const n = points.length;
+  if (!Number.isFinite(target) || target < 2 || n <= target) return points;
+  const sampled = [points[0]];
+  const bucketSize = (n - 2) / (target - 2);
+  let prev = points[0];
+  for (let i = 0; i < target - 2; i += 1) {
+    const start = Math.floor(i * bucketSize) + 1;
+    const end = Math.floor((i + 1) * bucketSize) + 1;
+    const nextStart = Math.floor((i + 1) * bucketSize) + 1;
+    const avgStep = (points[Math.min(nextStart, n - 1)].step + points[Math.min(nextStart + 1, n - 1)].step) / 2;
+    const avgValue = (points[Math.min(nextStart, n - 1)].value + points[Math.min(nextStart + 1, n - 1)].value) / 2;
+    let maxArea = -1;
+    let chosen = points[start];
+    for (let j = start; j < end && j < n - 1; j += 1) {
+      const area = Math.abs((avgStep - prev.step) * (points[j].value - avgValue) - (avgStep - points[j].step) * (prev.value - avgValue)) / 2;
+      if (area > maxArea) {
+        maxArea = area;
+        chosen = points[j];
+      }
+    }
+    sampled.push(chosen);
+    prev = chosen;
+  }
+  sampled.push(points[n - 1]);
+  return sampled;
+}
+
+// View-only normalization: scales each series' values into [0,1] for plotting
+// when scales differ wildly. Returns a NEW array; the input points are not
+// touched, so stored data is never modified.
+function normalizeSeries(points) {
+  if (!points.length) return points;
+  const min = Math.min(...points.map((p) => p.value));
+  const max = Math.max(...points.map((p) => p.value));
+  const span = Math.max(max - min, 1e-9);
+  return points.map((p) => ({ ...p, value: (p.value - min) / span, rawValue: p.value }));
+}
+
+// Pick a Y-axis (0 = left, 1 = right) for each series. The first selected
+// series always owns the left axis; a later series goes right when its value
+// range differs from the first by more than an order of magnitude.
+function assignAxes(seriesByKey, order) {
+  if (order.length <= 1) return new Map(order.map((k) => [k, 0]));
+  const firstRange = rangeOf(seriesByKey[order[0]]);
+  const axes = new Map([[order[0], 0]]);
+  for (let i = 1; i < order.length; i += 1) {
+    const r = rangeOf(seriesByKey[order[i]]);
+    const sameScale = firstRange.min && firstRange.max && r.min && r.max
+      && Math.log10(Math.max(firstRange.max, r.max) / Math.max(Math.min(firstRange.min, r.min), 1e-12)) <= 1;
+    axes.set(order[i], sameScale ? 0 : 1);
+  }
+  return axes;
+}
+
+function rangeOf(points) {
+  if (!points || !points.length) return { min: 0, max: 0 };
+  const values = points.map((p) => p.value).filter(Number.isFinite);
+  if (!values.length) return { min: 0, max: 0 };
+  return { min: Math.min(...values), max: Math.max(...values) };
+}
+
+// Build SVG coordinates for many series sharing an x-axis (step) but split
+// across up to two y-axes. Returns, per series, the polyline points string,
+// the y-axis it uses, and the true raw min/max labels (unmodified by any
+// view-only normalization).
+function buildMultiMetricPlot(seriesByKey, order, { normalize, axes, smooth }) {
+  const stepMin = Math.min(...order.flatMap((k) => seriesByKey[k].map((p) => p.step)));
+  const stepMax = Math.max(...order.flatMap((k) => seriesByKey[k].map((p) => p.step)));
+  const stepSpan = Math.max(stepMax - stepMin, 1);
+  const leftKeys = order.filter((k) => (axes.get(k) ?? 0) === 0);
+  const rightKeys = order.filter((k) => (axes.get(k) ?? 0) === 1);
+  const yRange = (keys) => {
+    const mapped = keys.flatMap((k) => (normalize ? normalizeSeries(seriesByKey[k]) : seriesByKey[k]).map((p) => p.value));
+    if (!mapped.length) return { min: 0, max: 1 };
+    return { min: Math.min(...mapped), max: Math.max(...mapped) };
+  };
+  const leftRange = yRange(leftKeys);
+  const rightRange = yRange(rightKeys);
+  const H = 180, PAD_T = 12, PAD_B = 12, PAD_L = 10, PAD_R = 700;
+  const xOf = (step) => ((step - stepMin) / stepSpan) * (PAD_R - PAD_L) + PAD_L;
+  const yOf = (value, range) => H - PAD_B - ((value - range.min) / Math.max(range.max - range.min, 1e-9)) * (H - PAD_T - PAD_B);
+  return order.map((k) => {
+    const pts = normalize ? normalizeSeries(seriesByKey[k]) : seriesByKey[k];
+    const range = (axes.get(k) ?? 0) === 0 ? leftRange : rightRange;
+    const mapPts = (src) => src.map((p) => ({ x: xOf(p.step), y: yOf(p.value, range), step: p.step, value: p.value }));
+    const coords = mapPts(pts);
+    const smoothedVals = smoothTensorboard(pts, smooth);
+    const smoothCoords = mapPts(smoothedVals);
+    const toPoly = (cs) => cs.map((c) => `${c.x.toFixed(1)},${c.y.toFixed(1)}`).join(" ");
+    const raw = rangeOf(seriesByKey[k]);
+    return {
+      key: k,
+      axisIndex: axes.get(k) ?? 0,
+      coords,
+      rawPoly: toPoly(coords),
+      smoothPoly: toPoly(smoothCoords),
+      minLabel: compactNumber(raw.min),
+      maxLabel: compactNumber(raw.max),
+    };
+  });
 }
 
 function TimePerfView({ rows }) {

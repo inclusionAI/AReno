@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import os
 import signal
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import click
 
@@ -122,3 +124,70 @@ def _ensure_dashboard_build() -> None:
         raise click.ClickException("pnpm is required to build dashboard static assets") from exc
     except subprocess.CalledProcessError as exc:
         raise click.ClickException(f"dashboard build failed with exit code {exc.returncode}") from exc
+
+
+def _load_dashboard_state() -> Any:
+    """Import the dashboard state lazily so `areno metrics` does not pull torch."""
+    from areno.dashboard.server import STATE
+
+    return STATE
+
+
+@click.command("metrics")
+@click.option("--job", "job_id", required=True, help="Job id whose metrics to export.")
+@click.option(
+    "--names",
+    "names_csv",
+    required=True,
+    help="Comma-separated metric names to plot together (e.g. train/loss,train/reward).",
+)
+@click.option("--limit", default=500, show_default=True, type=int, help="Max points per metric (1..5000).")
+@click.option("--json", "as_json", is_flag=True, help="Emit structured JSON instead of human-readable text.")
+def metrics_command(job_id: str, names_csv: str, limit: int, as_json: bool) -> None:
+    """Export one or more training metrics for a job (issue #265 CLI surface).
+
+    Reuses the dashboard's existing metric_series contract. Default output is
+    human-readable; --json gives structured output. Validation failures name the
+    affected stage and input without exposing training samples.
+    """
+
+    # Validate inputs before touching state (cheap, fails fast).
+    if not job_id:
+        raise click.UsageError("--job is required")
+    requested = [name.strip() for name in names_csv.split(",") if name.strip()]
+    if not requested:
+        raise click.UsageError("--names must list at least one metric name")
+    if limit < 1 or limit > 5000:
+        raise click.UsageError(f"--limit must be between 1 and 5000, got {limit}")
+
+    state = _load_dashboard_state()
+    job = state.get_job(job_id)
+    if job is None:
+        raise click.ClickException(f"job not found: {job_id}")
+
+    # Reject names that do not exist for this job so a typo is diagnosed, not
+    # silently skipped.
+    available = {item["name"] for item in state.metric_summaries(job_id)}
+    missing = [name for name in requested if name not in available]
+    if missing:
+        raise click.ClickException(f"unknown metric names for job {job_id}: {', '.join(missing)}")
+
+    collected = []
+    for name in requested:
+        points = state.metric_series(job_id, name, limit=limit)
+        collected.append({"name": name, "point_count": len(points), "points": points})
+
+    if as_json:
+        click.echo(
+            json.dumps({"job_id": job_id, "limit": limit, "metrics": collected}, ensure_ascii=False, indent=2)
+        )
+        return
+
+    # Human-readable: one block per metric, step/value aligned.
+    click.echo(f"job: {job_id}  limit: {limit}")
+    for entry in collected:
+        click.echo(f"\n# {entry['name']}  ({entry['point_count']} points)")
+        for point in entry["points"]:
+            step = point.get("step")
+            value = point.get("value")
+            click.echo(f"  step {step:>6}  {value}")

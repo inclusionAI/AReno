@@ -145,6 +145,136 @@ The writer lives in ``areno.api.metrics``. It records three namespaces:
    Stage timings when available: ``time/rollout``, ``time/reward``,
    ``time/advantage``, and ``time/train``.
 
+Dashboard: plotting multiple metrics together
+---------------------------------------------
+
+The AReno dashboard (``areno dashboard --start``) renders TensorBoard scalars
+with hand-written SVG, no charting dependency. The metrics panel lets you plot
+several metrics on one chart so post-training runs are easier to compare.
+
+User-facing controls (all default to the previous single-metric behavior — the
+feature is strictly opt-in):
+
+- **Metric multi-select** (top-right of the panel): toggle any number of metrics
+  onto one chart. With exactly one selected, the panel renders exactly as
+  before (backward compatible).
+- **legend**: each series is labeled with its name, axis (``L`` left / ``R``
+  right), and true value range. Legend entries are click-to-toggle.
+- **hover values**: moving the pointer across the chart snaps to the nearest
+  step and shows a card listing every series' value at that step.
+- **dual axes**: when selected series differ in scale by more than an order of
+  magnitude, the largest-scale series uses a right Y-axis and the rest use the
+  left. The assignment is automatic.
+- **normalize** (checkbox, off by default): view-only scaling of every series
+  into ``[0, 1]`` so differently-scaled series can be compared by shape. This
+  only affects the rendered pixels — stored metric data is never modified, and
+  the legend keeps showing the true min/max range.
+- **smooth** (existing slider): EMA smoothing, unchanged from before.
+- **downsampling**: large series (more than 480 points) are downsampled with
+  largest-triangle-three-buckets for display only. Stored data and the footer
+  point count are unaffected.
+
+Colors use the colorblind-safe Okabe-Ito palette, assigned in selection order.
+
+Input contract and limitations:
+
+- The dashboard reuses the existing read-only endpoint
+  ``GET /api/jobs/<id>/metric?name=<metric>&limit=<n>``. Multi-metric rendering
+  issues one such request per selected metric; there is no new endpoint and no
+  backend change.
+- A failed fetch for one metric is reported by name (for example
+  ``train/lr: fetch failed: ...``) without blanking the rest of the chart.
+
+CLI export
+~~~~~~~~~~
+
+``areno metrics`` exports one or more metrics for a job, reusing the same
+``metric_series`` contract as the dashboard. It validates inputs (job id,
+metric names, limit) before any heavy work and reports failures by naming the
+affected input. Default output is human-readable; ``--json`` gives structured
+output. No GPU or server process is required.
+
+.. code-block:: text
+
+   usage: areno metrics --job JOB --names NAMES [--limit N] [--json]
+
+Input contract:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 22 78
+
+   * - Option
+     - Meaning
+   * - ``--job`` (required)
+     - Job id whose metrics to export.
+   * - ``--names`` (required)
+     - Comma-separated metric names, e.g. ``train/loss,train/reward``.
+   * - ``--limit``
+     - Max points per metric, clamped to ``1..5000`` (default ``500``).
+   * - ``--json``
+     - Emit structured JSON instead of human-readable text.
+
+Defaults: ``--limit 500``, human-readable text. Selecting a single metric
+reproduces the existing single-metric series exactly.
+
+Output fields (``--json``):
+
+.. list-table::
+   :header-rows: 1
+   :widths: 28 72
+
+   * - Field
+     - Meaning
+   * - ``job_id``
+     - The job id passed in.
+   * - ``limit``
+     - The clamped limit used.
+   * - ``metrics[].name``
+     - Metric name (one entry per requested name, in request order).
+   * - ``metrics[].point_count``
+     - Number of points returned for that metric.
+   * - ``metrics[].points[].step`` / ``value`` / ``time``
+     - One point per recorded step (same shape as the dashboard endpoint).
+
+Example (human-readable):
+
+.. code-block:: text
+
+   $ areno metrics --job <id> --names train/loss,train/reward --limit 3
+   job: <id>  limit: 3
+
+   # train/loss  (3 points)
+     step     57  0.6957
+     step     58  0.7113
+     step     59  0.6816
+
+   # train/reward  (3 points)
+     step     57  4.9981
+     step     58  5.0
+     step     59  5.0
+
+Failure paths identify the affected input:
+
+.. code-block:: text
+
+   $ areno metrics --job nope --names train/loss
+   Error: job not found: nope
+
+   $ areno metrics --job <id> --names train/loss,typo/tag
+   Error: unknown metric names for job <id>: typo/tag
+
+   $ areno metrics --job <id> --names train/loss --limit 99999
+   Error: --limit must be between 1 and 5000, got 99999
+
+Limitations:
+
+- Metrics are read from the job's ``metrics_dir`` (TensorBoard scalars and
+  ``*.jsonl`` sidecar files). The CLI reads the local dashboard state; it does
+  not connect to a running dashboard server.
+- Downsampling and normalization are dashboard-display transforms; the CLI
+  exports the raw recorded points up to ``--limit``.
+
 Agentic diagnostics
 -------------------
 

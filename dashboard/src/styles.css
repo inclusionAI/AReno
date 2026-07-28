@@ -829,6 +829,167 @@ p {
   border-radius: var(--radius-md);
 }
 
+/* --- Multi-metric chart (issue #265) --- */
+.metricDropdown {
+  position: relative;
+  display: inline-block;
+}
+
+.metricDropdownBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--deck-line);
+  border-radius: var(--radius-sm);
+  background: #0b1118;
+  color: var(--deck-text);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.metricDropdownCaret {
+  margin-left: 4px;
+  color: var(--deck-muted);
+}
+
+.metricDropdownPanel {
+  position: absolute;
+  z-index: 5;
+  top: calc(100% + 2px);
+  left: 0;
+  min-width: 220px;
+  max-height: 220px;
+  overflow-y: auto;
+  border: 1px solid var(--deck-line);
+  border-radius: var(--radius-sm);
+  background: #0b1118;
+  padding: 4px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4);
+}
+
+.metricDropdownItem {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border-radius: var(--radius-sm);
+  color: var(--deck-text);
+  font-size: 11px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.metricDropdownItem:hover {
+  background: #111a24;
+}
+
+.metricDropdownItem > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.metricDropdownItem input[type="checkbox"] {
+  margin: 0;
+  accent-color: var(--deck-cyan);
+}
+
+.metricSwatch {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  border: 1px solid rgba(167, 186, 210, 0.3);
+  flex-shrink: 0;
+}
+
+.metricMultiToggle {
+  cursor: pointer;
+}
+
+.metricRawLine,
+.metricSmoothLine {
+  fill: none;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.metricSmoothLine {
+  stroke-width: 2.2;
+}
+
+.hoverPoint {
+  fill: var(--deck-text);
+  stroke: var(--deck-canvas);
+  stroke-width: 1.2;
+}
+
+.hoverGuide {
+  stroke: rgba(167, 186, 210, 0.35);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+}
+
+.metricLegend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--deck-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.metricLegendItem {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.metricAxisTag {
+  font-size: 9px;
+  font-weight: 700;
+  padding: 0 4px;
+  border: 1px solid var(--deck-line);
+  border-radius: var(--radius-sm);
+  color: var(--deck-muted);
+}
+
+.metricRange {
+  color: var(--deck-muted);
+  opacity: 0.8;
+}
+
+.metricError {
+  color: #e07b7b;
+}
+
+.metricHoverCard {
+  position: relative;
+  margin-top: 6px;
+  padding: 6px 8px;
+  background: #0b1118;
+  border: 1px solid var(--deck-line);
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  color: var(--deck-text);
+  font-variant-numeric: tabular-nums;
+}
+
+.metricHoverStep {
+  color: var(--deck-muted);
+  margin-bottom: 2px;
+}
+
+.metricAxisHint {
+  display: block;
+  margin-top: 4px;
+  font-size: 10px;
+  color: var(--deck-muted);
+}
+
 .timePerf {
   margin-bottom: 12px;
   border: 1px solid var(--deck-line);
