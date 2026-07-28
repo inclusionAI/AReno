@@ -32,12 +32,19 @@ from areno.api.trainer_config import (
     RolloutTrainerConfig,
     TrainerConfig,
 )
+from areno.cli.diagnostics import (
+    RESOURCE_FAIL,
+    format_resource_preflight,
+    preflight_host_resources,
+)
 from areno.cli.model_refs import resolve_model_refs_for_config
 from areno.engine.config import (
     ModelConfig,
     flash_attention_unsupported_gpu_reason,
     flash_attention_unsupported_model_reason,
 )
+
+RESOURCE_CHECK_CHOICES = ("skip", "warn", "block")
 
 # Group `areno train --help` flags by user intent rather than as one flat wall.
 # Each entry is (section title, option param names in display order). Every
@@ -68,6 +75,7 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "max_steps",
             "world_size",
             "tp_size",
+            "resource_check",
         ),
     ),
     (
@@ -223,6 +231,7 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
         raise click.UsageError("--world-size must be positive")
     if args.world_size % args.tp_size != 0:
         raise click.UsageError("--world-size must be divisible by --tp-size")
+    _preflight_host_resources(args.world_size, args.tp_size, policy=_resource_check_policy(args))
     if args.batch_size <= 0:
         raise click.UsageError("--batch-size must be positive")
     if algorithm.requires_rollout and args.n_samples <= 0:
@@ -548,6 +557,37 @@ def _preflight_task_hooks(args, algorithm) -> None:
             option_name="--agent-fn",
             expected="run_agent(ctx, batch)",
             positional_args=2,
+        )
+
+
+def _resource_check_policy(args) -> str:
+    """Resolve the host-resource preflight policy from CLI args, default 'warn'."""
+
+    return str(getattr(args, "resource_check", "warn") or "warn")
+
+
+def _preflight_host_resources(world_size: int, tp_size: int, *, policy: str) -> None:
+    """Run host resource preflight before backend/model initialization.
+
+    `skip` is a no-op. `warn` (default) emits a stderr diagnostics block only
+    when a probed limit is below demand (FAIL) and never aborts, so existing
+    stdout/behavior stays backward compatible; platforms where a probe is
+    simply unavailable (e.g. macOS shmmax) stay silent. `block` raises a
+    ``UsageError`` on any FAIL, before any worker is spawned.
+    """
+
+    if policy == "skip":
+        return
+    results = preflight_host_resources(world_size, tp_size, policy=policy)
+    failures = [r for r in results if r.status == RESOURCE_FAIL]
+    if failures:
+        click.echo(format_resource_preflight(results), err=True)
+    if policy == "block" and failures:
+        failed = [r.name for r in failures]
+        raise click.UsageError(
+            "host resource limits are below the estimated demand for this run "
+            f"(world_size={world_size}, tp_size={tp_size}); failing probes: {failed}. "
+            "Raise the limits, re-run with --resource-check warn to ignore, or see the next-step hints above."
         )
 
 
@@ -1324,6 +1364,14 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
 @click.option("--value-loss-coef", type=float, default=0.5, show_default=True, help="PPO value loss coefficient.")
 @click.option("--gamma", type=float, default=1.0, show_default=True, help="PPO GAE discount.")
 @click.option("--lam", type=float, default=0.95, show_default=True, help="PPO GAE lambda.")
+@click.option(
+    "--resource-check",
+    type=click.Choice(RESOURCE_CHECK_CHOICES, case_sensitive=False),
+    default="warn",
+    show_default=True,
+    help="Preflight host fd/process/shm limits vs run demand before workers start. "
+    "warn (default) prints and never aborts; block aborts on a failed probe; skip disables.",
+)
 def train_command(**options) -> None:
     """Click entrypoint for training."""
 

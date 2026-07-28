@@ -22,6 +22,7 @@ from areno.api.openai_chat import build_chat_completion_response, messages_to_pr
 from areno.api.tokenizer import configure_chat_template_enable_thinking
 from areno.api.tool_call_parser import ToolCallParser, get_tool_call_parser, infer_tool_call_parser_name
 from areno.cli.model_refs import resolve_model_ref
+from areno.cli.diagnostics import RESOURCE_FAIL, format_resource_preflight, preflight_host_resources
 from areno.engine import ArenoEngine
 from areno.engine.config import (
     RuntimeConfig,
@@ -319,6 +320,29 @@ def _resolve_serve_attn_backend(
     return "native", warning
 
 
+def _preflight_host_resources(world_size: int, tp_size: int, *, policy: str) -> None:
+    """Run host resource preflight before engine/worker initialization.
+
+    Mirrors the train CLI: `skip` is a no-op, `warn` (default) emits a stderr
+    diagnostics block only on a FAIL and never aborts (preserving existing
+    behavior); `block` raises before workers start.
+    """
+
+    if policy == "skip":
+        return
+    results = preflight_host_resources(world_size, tp_size, policy=policy)
+    failures = [r for r in results if r.status == RESOURCE_FAIL]
+    if failures:
+        click.echo(format_resource_preflight(results), err=True)
+    if policy == "block" and failures:
+        failed = [r.name for r in failures]
+        raise click.UsageError(
+            "host resource limits are below the estimated demand for this serve run "
+            f"(world_size={world_size}, tp_size={tp_size}); failing probes: {failed}. "
+            "Raise the limits, re-run with --resource-check warn to ignore, or see the next-step hints above."
+        )
+
+
 async def _run_request_task(app: FastAPI, item: PendingRequest) -> None:
     """Run one HTTP request as an independent concurrent rollout call."""
 
@@ -563,6 +587,14 @@ def _normalize_stop(stop: str | list[str] | None) -> list[str]:
     is_flag=True,
     help="Pass enable_thinking=False to tokenizer chat templates when supported.",
 )
+@click.option(
+    "--resource-check",
+    type=click.Choice(["skip", "warn", "block"], case_sensitive=False),
+    default="warn",
+    show_default=True,
+    help="Preflight host fd/process/shm limits vs run demand before workers start. "
+    "warn (default) prints and never aborts; block aborts on a failed probe; skip disables.",
+)
 def serve_command(
     model_path: str,
     model_hub: Literal["hf", "modelscope"],
@@ -576,10 +608,12 @@ def serve_command(
     eager_decode: bool,
     attn_backend: Literal["flash", "native"],
     disable_thinking: bool,
+    resource_check: str,
 ) -> None:
     """Click entry point: build the app and hand it to uvicorn."""
     import uvicorn
 
+    _preflight_host_resources(world_size, tp_size, policy=resource_check)
     model_path = resolve_model_ref(model_path, model_hub=model_hub)
     from areno.cli.dashboard_registry import register_dashboard_job
 

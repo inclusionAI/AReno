@@ -32,6 +32,20 @@ _ENV_VARS = (
     "HF_HUB_CACHE",
 )
 
+# Resource demand estimates for multi-process train/serve runs. These are
+# deliberately conservative upper bounds -- a false warning is cheap, a silent
+# FD/shm exhaustion mid-run is not. Constants are module-level so they are easy
+# to tune and surface in diagnostics output; they are not public API.
+_BASE_FDS_PER_WORKER = 64
+_SHM_BASELINE_BYTES = 1 << 30  # 1 GiB per tensor-parallel group; NCCL + CUDA IPC.
+_SHMMAX_PATH = "/proc/sys/kernel/shmmax"
+
+# Severity reused across the host-resource preflight; the diagnostics `check`
+# command uses OK/WARN/FAIL, which maps cleanly to normal/warning/blocking.
+RESOURCE_OK = "OK"
+RESOURCE_WARN = "WARN"
+RESOURCE_FAIL = "FAIL"
+
 
 @click.command(name="env", context_settings={"help_option_names": ["-h", "--help"]})
 @click.option("--json", "as_json", is_flag=True, help="Emit a machine-readable JSON support report.")
@@ -482,3 +496,227 @@ def _print_env_report(report: dict[str, Any]) -> None:
     click.echo("  Environment variables:")
     for name, value in report["env"].items():
         click.echo(f"    {name}={value if value is not None else '<unset>'}")
+
+
+def collect_host_limits() -> dict[str, Any]:
+    """Probe OS-level per-process resource limits without touching the engine.
+
+    Returns a dict with `file_descriptors`, `processes`, and `shared_memory`
+    entries. Each entry carries `available` (bool), `soft`/`hard` (for rlimits),
+    `value` (the effective limit used for comparison), and `error` when a probe
+    could not run. A probe that is unavailable on the current platform degrades
+    to a warning rather than a failure -- the preflight must not block runs on
+    platforms (e.g. macOS/Windows) where a limit simply does not exist.
+    """
+
+    return {
+        "file_descriptors": _fd_limit(),
+        "processes": _nproc_limit(),
+        "shared_memory": _shmmax_limit(),
+    }
+
+
+def _fd_limit() -> dict[str, Any]:
+    try:
+        import resource
+
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    except (OSError, ValueError) as exc:
+        return _unavailable(f"{type(exc).__name__}: {exc}")
+    return _rlimit_entry(soft, hard)
+
+
+def _nproc_limit() -> dict[str, Any]:
+    try:
+        import resource
+
+        soft, hard = resource.getrlimit(resource.RLIMIT_NPROC)
+    except (OSError, ValueError) as exc:
+        return _unavailable(f"{type(exc).__name__}: {exc}")
+    except AttributeError:
+        # RLIMIT_NPROC is not defined on every platform; degrade to a warning.
+        return _unavailable("RLIMIT_NPROC unavailable")
+    return _rlimit_entry(soft, hard)
+
+
+def _rlimit_entry(soft: Any, hard: Any) -> dict[str, Any]:
+    """Build a probe entry from a (soft, hard) rlimit pair.
+
+    `RLIM_INFINITY` means the limit is unbounded -- that satisfies any demand,
+    so the probe is `available` with `unbounded=True` rather than unavailable.
+    A finite soft limit is the effective value used for comparison.
+    """
+
+    import resource
+
+    soft_finite = soft != resource.RLIM_INFINITY
+    hard_finite = hard != resource.RLIM_INFINITY
+    if not soft_finite and not hard_finite:
+        return {
+            "available": True,
+            "unbounded": True,
+            "soft": soft,
+            "hard": hard,
+            "value": None,
+            "error": None,
+        }
+    value = soft if soft_finite else hard
+    return {
+        "available": True,
+        "unbounded": False,
+        "soft": soft,
+        "hard": hard,
+        "value": int(value),
+        "error": None,
+    }
+
+
+def _unavailable(error: str) -> dict[str, Any]:
+    return {
+        "available": False,
+        "unbounded": False,
+        "soft": None,
+        "hard": None,
+        "value": None,
+        "error": error,
+    }
+
+
+def _shmmax_limit() -> dict[str, Any]:
+    try:
+        text = Path(_SHMMAX_PATH).read_text(encoding="utf-8").strip()
+        value = int(text)
+    except (OSError, ValueError) as exc:
+        # /proc/sys/kernel/shmmax is Linux-only; absence is expected elsewhere.
+        return _unavailable(f"{type(exc).__name__}: {exc}")
+    return {"available": True, "unbounded": False, "soft": value, "hard": value, "value": value, "error": None}
+
+
+def estimate_resource_demand(world_size: int, tp_size: int) -> dict[str, int]:
+    """Return a documented upper-bound estimate of resource demand for one run.
+
+    - file descriptors: per-worker base plus one socket per cross-rank peer for
+      the NCCL/tensor-parallel mesh; sum across all `world_size` workers.
+    - processes: `world_size` worker ranks plus the driver process.
+    - shared memory: baseline per tensor-parallel group, scaled by `tp_size`.
+
+    The estimate is intentionally conservative -- it triggers a warning rather
+    than undershooting a real NCCL/CUDA IPC requirement mid-run.
+    """
+
+    if world_size < 1:
+        raise ValueError("world_size must be >= 1")
+    if tp_size < 1:
+        raise ValueError("tp_size must be >= 1")
+    cross_rank_peers = world_size * (world_size - 1)
+    return {
+        "file_descriptors": _BASE_FDS_PER_WORKER * world_size + cross_rank_peers,
+        "processes": world_size + 1,
+        "shared_memory": _SHM_BASELINE_BYTES * tp_size,
+    }
+
+
+def preflight_host_resources(
+    world_size: int,
+    tp_size: int,
+    *,
+    policy: str = "warn",
+    limits: dict[str, Any] | None = None,
+) -> list[CheckResult]:
+    """Compare observed host limits against documented per-run demand.
+
+    Returns one `CheckResult` per resource dimension (file descriptors,
+    processes, shared memory). `policy` is one of skip/warn/block; it does not
+    change the returned severities -- the caller decides whether a FAIL under
+    `block` should abort. Probes that are unavailable degrade to WARN so the
+    preflight never blocks a run on a platform that simply lacks the limit.
+
+    `limits` is injectable for deterministic tests; production callers omit it
+    so `collect_host_limits()` probes the real host.
+    """
+
+    if policy not in {"skip", "warn", "block"}:
+        raise ValueError(f"resource-check policy must be skip/warn/block, got {policy!r}")
+    if limits is None:
+        limits = collect_host_limits()
+    demand = estimate_resource_demand(world_size, tp_size)
+    return [
+        _fd_result(limits["file_descriptors"], demand["file_descriptors"]),
+        _nproc_result(limits["processes"], demand["processes"]),
+        _shmmax_result(limits["shared_memory"], demand["shared_memory"]),
+    ]
+
+
+def _fd_result(observed: dict[str, Any], required: int) -> CheckResult:
+    return _resource_result(
+        observed,
+        required,
+        name="file descriptors (RLIMIT_NOFILE)",
+        unit="",
+        adjust="raise the soft limit before launching workers, e.g. `ulimit -n 65536`",
+    )
+
+
+def _nproc_result(observed: dict[str, Any], required: int) -> CheckResult:
+    return _resource_result(
+        observed,
+        required,
+        name="processes (RLIMIT_NPROC)",
+        unit="",
+        adjust="raise the soft limit or run from a shell without a low nproc ulimit, e.g. `ulimit -u 32768`",
+    )
+
+
+def _shmmax_result(observed: dict[str, Any], required: int) -> CheckResult:
+    return _resource_result(
+        observed,
+        required,
+        name="shared memory (kernel.shmmax)",
+        unit=" bytes",
+        adjust="raise the system limit, e.g. `sudo sysctl -w kernel.shmmax=<required>`",
+    )
+
+
+def _resource_result(
+    observed: dict[str, Any],
+    required: int,
+    *,
+    name: str,
+    unit: str,
+    adjust: str,
+) -> CheckResult:
+    if not observed.get("available"):
+        error = observed.get("error") or "probe unavailable"
+        return CheckResult(
+            RESOURCE_WARN,
+            name,
+            f"probe unavailable ({error}); required{unit}={required}",
+            f"Limit not observable on this platform; {adjust} if the run fails with fd/shmem exhaustion.",
+        )
+    if observed.get("unbounded"):
+        return CheckResult(RESOURCE_OK, name, f"observed=unbounded required{unit}={required}")
+    value = int(observed["value"])
+    delta = value - required
+    detail = f"observed{unit}={value} required{unit}={required} delta{unit}={delta}"
+    if value >= required:
+        return CheckResult(RESOURCE_OK, name, detail)
+    return CheckResult(RESOURCE_FAIL, name, detail, adjust)
+
+
+def format_resource_preflight(results: list[CheckResult]) -> str:
+    """Render resource preflight results as a concise human-readable block."""
+
+    lines = ["Host resource preflight:"]
+    for result in results:
+        lines.append(f"  {result.status:<4} {result.name}")
+        if result.detail:
+            lines.append(f"       {result.detail}")
+        if result.next_step and result.status in {RESOURCE_WARN, RESOURCE_FAIL}:
+            lines.append(f"       -> {result.next_step}")
+    return "\n".join(lines)
+
+
+def should_block_on_resources(results: list[CheckResult]) -> bool:
+    """True if any resource preflight result is a blocking failure."""
+
+    return any(result.status == RESOURCE_FAIL for result in results)
