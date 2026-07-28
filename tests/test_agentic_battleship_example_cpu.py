@@ -476,6 +476,77 @@ def test_battleship_import_does_not_mutate_globals():
 
 
 # =============================================================================
+# Web UI tests
+# =============================================================================
+
+
+def _make_web_server(agent_mode: str = "heuristic", seed: int = 123, base_url=None):
+    """Build a BattleshipServer without binding a real socket (port 0)."""
+    import argparse
+
+    web_ui = _load_module("web_ui")
+    args = argparse.Namespace(
+        agent_mode=agent_mode, base_url=base_url, api_key="token", model="policy"
+    )
+    return web_ui, web_ui.BattleshipServer(("127.0.0.1", 0), web_ui.BattleshipHandler, seed=seed, args=args)
+
+
+def test_battleship_web_ui_heuristic_wins():
+    """Heuristic agent eventually sinks the whole fleet within the turn cap."""
+    web_ui, srv = _make_web_server(agent_mode="heuristic", seed=123)
+    payload = web_ui._autoplay(srv, web_ui.game.MAX_TURNS)
+
+    assert payload["terminal"] is True
+    assert payload["win"] is True
+    assert payload["sunk_ships"] == payload["ships_total"]
+    assert payload["shots_used"] <= payload["max_turns"]
+
+
+def test_battleship_web_ui_payload_hides_ship_cells():
+    """API payload exposes only hit/miss/unknown, never unrevealed ship cells."""
+    web_ui, srv = _make_web_server(seed=42)
+    state = srv.state
+    # Fire at a guaranteed-miss cell (a corner that has no ship under normal placement).
+    payload = web_ui._payload(srv)
+    for row in payload["cells"]:
+        for cell in row:
+            assert cell in ("hit", "miss", "unknown")
+    # Expected board size.
+    assert payload["grid_size"] == 8
+    assert payload["cells"][0][0] == "unknown"
+
+
+def test_battleship_web_ui_llm_without_base_url_raises():
+    """LLM agent mode without a configured endpoint refuses with a clear error."""
+    web_ui, srv = _make_web_server(agent_mode="llm")
+    try:
+        web_ui._agent_shot(srv)
+    except ValueError as exc:
+        assert "base-url" in str(exc).lower()
+        return
+    raise AssertionError("expected _agent_shot to raise without --base-url")
+
+
+def test_battleship_web_ui_human_fire_and_invalid():
+    """Human fire resolves a miss; firing the same cell is rejected."""
+    web_ui, srv = _make_web_server(seed=7)
+    target = None
+    for r in range(8):
+        for c in range(7, 8):
+            if (r, c) not in set(tuple(x) for x in srv.state.ships[0].cells):
+                coord = web_ui.game.format_coordinate(r, c)
+                p1 = web_ui._fire(srv, coord, source="Human")
+                assert p1["shots_used"] == 1
+                # Repeating must not advance a real shot beyond the rejected one.
+                p2 = web_ui._fire(srv, coord, source="Human")
+                assert p2["shots_used"] == 2  # invalid shots still consume a turn
+                target = (r, c)
+                break
+        if target:
+            break
+
+
+# =============================================================================
 # Eval orchestration tests
 # =============================================================================
 

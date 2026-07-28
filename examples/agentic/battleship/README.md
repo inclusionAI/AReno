@@ -25,6 +25,7 @@ The agent sees only its own view: hits (X), misses (o), and unknown cells (.). T
 | `reward.py` | Reward function for RL |
 | `run_agent.py` | Multi-turn agent loop |
 | `evaluate.py` | Baseline comparison harness |
+| `web_ui.py` | Cartoon browser game backed by an OpenAI-compatible tool-call model |
 
 ## Quick Start
 
@@ -63,6 +64,30 @@ python examples/agentic/battleship/evaluate.py \
 python examples/agentic/battleship/evaluate.py \
   --fleets /tmp/battleship.jsonl \
   --player fake
+```
+
+### 4. Play in the Web UI
+
+Start a policy server, then point the UI at its OpenAI-compatible endpoint:
+
+```bash
+areno serve --model-path /path/to/model --port 8000 --world-size 1
+python examples/agentic/battleship/web_ui.py \
+  --base-url http://127.0.0.1:8000/v1 \
+  --api-key token \
+  --model policy
+```
+
+Open `http://127.0.0.1:8768`. The UI supports clicking cells to fire, an
+"Agent Fires Once" button, "Auto-play" to run the agent to completion, a
+seed input to replay a fixed fleet, and switching the agent between **LLM**
+mode (uses the `fire` tool against your server) and **Heuristic** mode
+(hunt/target strategy, no server needed).
+
+To run without an LLM server:
+
+```bash
+python examples/agentic/battleship/web_ui.py --agent-mode heuristic
 ```
 
 ## Observable Output
