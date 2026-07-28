@@ -48,6 +48,19 @@ class MetricsRecorder:
         with self._sample_file.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(sample, ensure_ascii=False) + "\n")
 
+    @property
+    def log_dir(self) -> str:
+        """Return the configured TensorBoard log directory."""
+
+        return str(self._log_dir)
+
+    def add_scalar(self, tag: str, value: float, step: int) -> None:
+        """Forward a scalar to the underlying writer (shared `health/*` namespace)."""
+
+        if self._closed:
+            return
+        self._writer.add_scalar(tag, value, step)
+
     def record_dashboard_state(
         self,
         *,

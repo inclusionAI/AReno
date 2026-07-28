@@ -25,6 +25,7 @@ import click
 
 from areno.api.algorithms import get_algorithm
 from areno.api.defaults import DEFAULT_METRICS_LOG_DIR
+from areno.api.health_check import HealthCheckConfig, HealthCheckConfigError
 from areno.api.trainer_config import (
     DPOTrainerConfig,
     PolicyTrainerConfig,
@@ -130,6 +131,15 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ),
     ("Checkpoint", ("save_path", "save_interval")),
     ("Observability", ("metrics_log_dir",)),
+    (
+        "Health Check",
+        (
+            "health_check_enabled",
+            "health_check_window",
+            "health_check_on_fail",
+            "health_check_require_reward_variation",
+        ),
+    ),
 )
 
 
@@ -592,6 +602,32 @@ def _function_accepts_positional_args(function: ast.FunctionDef | ast.AsyncFunct
     return required_count <= count <= positional_count
 
 
+def _health_check_config_from_args(args) -> HealthCheckConfig | None:
+    """Build an optional `HealthCheckConfig` from CLI options.
+
+    Returns ``None`` (→ legacy behavior) unless ``--health-check-enabled`` was
+    passed. Construction triggers `HealthCheckConfig.__post_init__` validation,
+    which surfaces invalid thresholds as `click.UsageError` before any worker
+    is spawned.
+    """
+
+    if not getattr(args, "health_check_enabled", False):
+        return None
+    from areno.api.health_check import HealthCheckConfig, RewardVarianceCheckConfig
+
+    try:
+        return HealthCheckConfig(
+            enabled=True,
+            startup_window_updates=int(args.health_check_window),
+            on_fail=args.health_check_on_fail,
+            reward_variance=RewardVarianceCheckConfig(
+                require_variation=bool(args.health_check_require_reward_variation),
+            ),
+        )
+    except HealthCheckConfigError as exc:
+        raise click.UsageError(str(exc)) from exc
+
+
 def _trainer_config_from_args(args) -> TrainerConfig:
     # Each algorithm gets the narrowest config dataclass it needs; offline
     # trainers do not receive rollout/reward/GSPO fields by construction.
@@ -634,6 +670,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             eager_decode=args.eager_decode,
             attn_backend=args.attn_backend,
             metrics_log_dir=args.metrics_log_dir,
+            health_check=_health_check_config_from_args(args),
             agent_fn=args.agent_fn,
             agent_timeout_s=args.agent_timeout_s,
             train_tool_results=args.train_tool_results,
@@ -675,6 +712,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             eager_decode=args.eager_decode,
             attn_backend=args.attn_backend,
             metrics_log_dir=args.metrics_log_dir,
+            health_check=_health_check_config_from_args(args),
             agent_fn=args.agent_fn,
             agent_timeout_s=args.agent_timeout_s,
             train_tool_results=args.train_tool_results,
@@ -723,6 +761,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             gspo_clip_eps=args.gspo_clip_eps,
             grpo_clip_eps=args.grpo_clip_eps,
             metrics_log_dir=args.metrics_log_dir,
+            health_check=_health_check_config_from_args(args),
             agent_fn=args.agent_fn,
             agent_timeout_s=args.agent_timeout_s,
             train_tool_results=args.train_tool_results,
@@ -770,6 +809,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
         gspo_clip_eps=args.gspo_clip_eps,
         grpo_clip_eps=args.grpo_clip_eps,
         metrics_log_dir=args.metrics_log_dir,
+        health_check=_health_check_config_from_args(args),
         ref_ckpt=args.ref_ckpt,
         reward_ckpt=args.reward_ckpt,
         critic_ckpt=args.critic_ckpt,
@@ -1324,6 +1364,31 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
 @click.option("--value-loss-coef", type=float, default=0.5, show_default=True, help="PPO value loss coefficient.")
 @click.option("--gamma", type=float, default=1.0, show_default=True, help="PPO GAE discount.")
 @click.option("--lam", type=float, default=0.95, show_default=True, help="PPO GAE lambda.")
+@click.option(
+    "--health-check-enabled",
+    is_flag=True,
+    help="Run automatic pass/warn/fail health checks over the first --health-check-window updates (Issue #249). Default off.",
+)
+@click.option(
+    "--health-check-window",
+    type=int,
+    default=20,
+    show_default=True,
+    help="Startup window length in training updates for the health check.",
+)
+@click.option(
+    "--health-check-on-fail",
+    type=click.Choice(["warn", "fail"]),
+    default="warn",
+    show_default=True,
+    help="Behavior when the health check summary is FAIL: warn only (default) or raise to abort.",
+)
+@click.option(
+    "--health-check-require-reward-variation/--health-check-allow-constant-reward",
+    default=True,
+    show_default=True,
+    help="Whether reward must vary. Disable for tasks with legitimately constant reward (anti-false-positive).",
+)
 def train_command(**options) -> None:
     """Click entrypoint for training."""
 
