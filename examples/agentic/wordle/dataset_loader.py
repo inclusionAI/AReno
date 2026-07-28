@@ -44,7 +44,7 @@ def _format_record(raw: dict, index: int, *, xml: bool) -> dict:
 
     return {
         "id": raw.get("id", f"game-{index:05d}"),
-        "prompt": game.format_xml_prompt(initial_game) if xml else game.format_prompt(initial_game),
+        "prompt": game.format_prompt(initial_game),
         "game": initial_game,
         "target": target,
         "max_guesses": max_guesses,

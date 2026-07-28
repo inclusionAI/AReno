@@ -15,12 +15,12 @@ def reward_fn(record: Any) -> float:
     """
     Score one completion by extracting the guess_word tool call.
 
-    Reward scheme:
-    - +1.0: Correctly guessed the word
-    - +0.5: Made progress (at least one letter in correct position)
-    - +0.2: Valid word but no progress
-    - -1.0: Invalid word (not in word list)
-    - 0.0: Game lost (exhausted all guesses)
+    Reward scheme (tool-based):
+    - +1.0  -> +1.5: Correctly guessed the word (bonus for fewer guesses)
+    - +0.3  -> +0.9: Partial progress (some letters in correct position)
+    - +0.1  -> +0.2: Valid word, letters present but wrong position
+    -  0.0:       Valid word but no letters match
+    - -0.5:       No valid tool call or invalid word
     """
     source = record.source_record
     target = source.get("target", "")
@@ -28,37 +28,33 @@ def reward_fn(record: Any) -> float:
 
     guess = _tool_guess(record)
     if guess is None:
-        # No valid tool call
-        return -1.0
+        # Model didn't call guess_word tool
+        return -0.5
 
     # Check if guess is valid
     if not game.is_valid_word(guess):
-        return -1.0
+        return -0.5
 
     # Check if guess is correct
     if guess == target:
-        # Bonus for winning
         num_guesses = len(current_game.get("guesses", [])) + 1
         efficiency_bonus = (game.MAX_GUESSES - num_guesses) / game.MAX_GUESSES * 0.5
         return 1.0 + efficiency_bonus
 
-    # Check for partial progress (at least one letter in correct position)
+    # Check for partial progress
     try:
         feedback = game.check_guess(guess, target)
         exact_count = sum(1 for f in feedback if f == game.LetterStatus.EXACT)
         present_count = sum(1 for f in feedback if f == game.LetterStatus.PRESENT)
 
         if exact_count > 0:
-            # Made progress towards solution
-            return 0.5 + (exact_count * 0.1) + (present_count * 0.05)
+            return 0.3 + (exact_count * 0.2) + (present_count * 0.05)
         elif present_count > 0:
-            # Some letters are in the word but wrong position
-            return 0.2 + (present_count * 0.05)
+            return 0.1 + (present_count * 0.05)
         else:
-            # Valid word but no letters in common
             return 0.0
     except Exception:
-        return -1.0
+        return -0.5
 
 
 def _tool_guess(record: Any) -> str | None:

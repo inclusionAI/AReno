@@ -10,18 +10,12 @@ from areno.api.agentic import AgentTrajectory, AgentTrajectoryTurn
 logger = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
+# CRITICAL: Keep prompt SHORT and DIRECT like tictactoe.
+# Qwen3-0.6B is small; long prompts confuse it.
 SYSTEM_PROMPT = (
-    "You are a careful Wordle player. Your goal is to guess a 5-letter hidden word "
-    "in 6 attempts or fewer.\n\n"
-    "After each guess, you will receive feedback for each letter:\n"
-    "  - EXACT (green): Correct letter in correct position\n"
-    "  - PRESENT (yellow): Correct letter in wrong position\n"
-    "  - ABSENT (gray): Letter not in the word\n\n"
-    "Important rules for repeated letters:\n"
-    "  - If the target has one 'E' and you guess 'E' twice, only one gets EXACT or PRESENT.\n"
-    "  - The other 'E' will be marked ABSENT if all instances are already matched.\n\n"
-    "Choose your next guess by calling the guess_word tool. "
-    "Your guess must be a valid 5-letter English word from the word list."
+    "You are playing Wordle. Guess the 5-letter word by calling guess_word. "
+    "After each guess you get feedback. "
+    "You have 6 attempts. Call guess_word with a valid 5-letter English word."
 )
 
 GUESS_WORD_TOOL = {
@@ -46,7 +40,7 @@ GUESS_WORD_TOOL = {
 
 
 async def run_agent(ctx, batch):
-    """Run one tool-call model request for each game."""
+    """Run one tool-call model request for each Wordle game."""
 
     try:
         import httpx
@@ -70,7 +64,8 @@ async def run_agent(ctx, batch):
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": item.prompt},
         ]
-        tool_choice = {"type": "function", "function": {"name": "guess_word"}}
+        # Use tool_choice="required" to force the model to always call a tool
+        tool_choice = "required"
         response = await client.chat.completions.create(
             model="policy",
             messages=messages,

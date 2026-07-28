@@ -403,44 +403,28 @@ def num_guesses(game: WordleGame) -> int:
 def format_prompt(game: WordleGame) -> str:
     """
     Build the prompt for the Wordle agent.
+    Keep it concise so small models (Qwen3-0.6B) can follow.
     """
     lines = [
-        "You are playing Wordle, a word guessing game.",
-        f"You have {MAX_GUESSES} attempts to guess a {WORD_LENGTH}-letter hidden word.",
+        f"Wordle: Guess the {WORD_LENGTH}-letter word.",
+        f"You have {MAX_GUESSES} attempts.",
         "",
-        "Rules:",
-        "- Each guess must be a valid 5-letter English word.",
-        "- After each guess, you receive feedback for each letter:",
-        "  - [G] or EXACT: Correct letter in correct position (green)",
-        "  - [Y] or PRESENT: Correct letter in wrong position (yellow)",
-        "  - [?] or ABSENT: Letter not in the word (gray)",
-        "- Repeated letters are handled correctly:",
-        "  - If the target has one 'E' and you guess 'E' twice, only one gets [G] or [Y].",
-        "  - The other 'E' will be marked [?] if all instances are already matched.",
-        "",
+        "Feedback: [G]=correct position, [Y]=wrong position, [?]=not in word.",
     ]
 
-    # Add previous guesses and feedback
     if game["guesses"]:
-        lines.append("Previous guesses and feedback:")
+        lines.append("")
+        lines.append("Previous guesses:")
         for guess, feedback in zip(game["guesses"], game["feedbacks"]):
             feedback_str = format_feedback(feedback)
             lines.append(f"  {guess.upper()} -> {feedback_str}")
-        lines.append("")
 
-    # Add remaining attempts
     remaining = MAX_GUESSES - num_guesses(game)
-    lines.append(f"You have {remaining} attempt(s) remaining.")
     lines.append("")
+    lines.append(f"Attempts left: {remaining}")
 
-    # Add the guess instruction
     if game["state"] == GameState.IN_PROGRESS:
-        lines.append("Enter your next guess by calling the guess_word tool.")
-        lines.append("Your guess must be a valid 5-letter word.")
-    elif game["state"] == GameState.WON:
-        lines.append(f"Congratulations! You guessed the word: {game['target'].upper()}")
-    else:
-        lines.append(f"Game over! The word was: {game['target'].upper()}")
+        lines.append("Call guess_word with a valid 5-letter word.")
 
     return "\n".join(lines)
 
@@ -450,31 +434,22 @@ def format_xml_prompt(game: WordleGame) -> str:
     Build the prompt for the Wordle agent without tools.
     """
     lines = [
-        "You are playing Wordle, a word guessing game.",
-        f"You have {MAX_GUESSES} attempts to guess a {WORD_LENGTH}-letter hidden word.",
+        f"Wordle: Guess the {WORD_LENGTH}-letter word.",
+        f"You have {MAX_GUESSES} attempts.",
         "",
-        "Rules:",
-        "- Each guess must be a valid 5-letter English word.",
-        "- After each guess, you receive feedback for each letter:",
-        "  - EXACT: Correct letter in correct position (green)",
-        "  - PRESENT: Correct letter in wrong position (yellow)",
-        "  - ABSENT: Letter not in the word (gray)",
-        "",
+        "Feedback: [G]=correct position, [Y]=wrong position, [?]=not in word.",
     ]
 
-    # Add previous guesses and feedback
     if game["guesses"]:
-        lines.append("Previous guesses and feedback:")
+        lines.append("")
+        lines.append("Previous guesses:")
         for guess, feedback in zip(game["guesses"], game["feedbacks"]):
             lines.append(f"  {guess.upper()} -> {feedback}")
-        lines.append("")
 
-    # Add remaining attempts
     remaining = MAX_GUESSES - num_guesses(game)
-    lines.append(f"You have {remaining} attempt(s) remaining.")
     lines.append("")
-    lines.append("Answer with exactly one XML tag such as <guess>WORLD</guess>.")
-    lines.append("Your guess must be a valid 5-letter word.")
+    lines.append(f"Attempts left: {remaining}")
+    lines.append('Answer with <guess>WORD</guess>.')
 
     return "\n".join(lines)
 
