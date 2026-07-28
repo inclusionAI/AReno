@@ -37,6 +37,9 @@ def main() -> int:
 
     error: BaseException | None = None
     if parsed.traceback_file is not None:
+        if not parsed.traceback_file.is_file():
+            print(f"Error: traceback file not found: {parsed.traceback_file}", file=sys.stderr)
+            return 1
         error_str = _safe_traceback_from_file(parsed.traceback_file)
         if error_str is not None:
             error = RuntimeError(error_str)
