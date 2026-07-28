@@ -56,6 +56,12 @@ class TrainerConfig:
     eager_decode: bool = False
     attn_backend: str = "flash"
     metrics_log_dir: str | None = DEFAULT_METRICS_LOG_DIR
+    # Issue #257: off-by-default periodic GPU memory/utilization/temperature
+    # sampling. Defaults preserve current behavior (no sampling). Validation of
+    # the two numeric bounds happens in the CLI layer alongside other positives.
+    gpu_stats: bool = False
+    gpu_stats_interval_s: float = 5.0
+    gpu_stats_history: int = 1000
     agent_fn: str | None = None
     agent_timeout_s: float = 300.0
     train_tool_results: bool = False

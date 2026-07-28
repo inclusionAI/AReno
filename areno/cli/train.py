@@ -129,7 +129,7 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         ),
     ),
     ("Checkpoint", ("save_path", "save_interval")),
-    ("Observability", ("metrics_log_dir",)),
+    ("Observability", ("metrics_log_dir", "gpu_stats", "gpu_stats_interval_s", "gpu_stats_history")),
 )
 
 
@@ -176,6 +176,10 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
     args.max_steps = getattr(args, "max_steps", None)
     args.score_micro_bs = getattr(args, "score_micro_bs", 8)
     args.model_hub = getattr(args, "model_hub", "modelscope")
+    # Issue #257 GPU stats options default off / to safe bounds when omitted.
+    args.gpu_stats = getattr(args, "gpu_stats", False)
+    args.gpu_stats_interval_s = getattr(args, "gpu_stats_interval_s", 5.0)
+    args.gpu_stats_history = getattr(args, "gpu_stats_history", 1000)
     smoke_infer = bool(getattr(args, "smoke_infer", False))
     smoke_train = bool(getattr(args, "smoke_train", False))
     if smoke_infer or smoke_train:
@@ -243,6 +247,10 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
         raise click.UsageError("--max-running-prompts must be positive")
     if args.agent_timeout_s <= 0:
         raise click.UsageError("--agent-timeout-s must be positive")
+    if args.gpu_stats_interval_s <= 0:
+        raise click.UsageError("--gpu-stats-interval-s must be positive")
+    if args.gpu_stats_history <= 0:
+        raise click.UsageError("--gpu-stats-history must be positive")
     _require_positive_float(args.lr, "--lr")
     if args.min_lr < 0:
         raise click.UsageError("--min-lr must be non-negative")
@@ -356,6 +364,7 @@ def _format_training_config_summary(
                 ("save_path", _format_optional(config.save_path)),
                 ("save_interval", str(config.save_interval)),
                 ("metrics_log_dir", _format_optional(config.metrics_log_dir)),
+                ("gpu_stats", "on" if config.gpu_stats else "off"),
             ],
         ),
     ]
@@ -634,6 +643,9 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             eager_decode=args.eager_decode,
             attn_backend=args.attn_backend,
             metrics_log_dir=args.metrics_log_dir,
+            gpu_stats=args.gpu_stats,
+            gpu_stats_interval_s=args.gpu_stats_interval_s,
+            gpu_stats_history=args.gpu_stats_history,
             agent_fn=args.agent_fn,
             agent_timeout_s=args.agent_timeout_s,
             train_tool_results=args.train_tool_results,
@@ -675,6 +687,9 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             eager_decode=args.eager_decode,
             attn_backend=args.attn_backend,
             metrics_log_dir=args.metrics_log_dir,
+            gpu_stats=args.gpu_stats,
+            gpu_stats_interval_s=args.gpu_stats_interval_s,
+            gpu_stats_history=args.gpu_stats_history,
             agent_fn=args.agent_fn,
             agent_timeout_s=args.agent_timeout_s,
             train_tool_results=args.train_tool_results,
@@ -723,6 +738,9 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             gspo_clip_eps=args.gspo_clip_eps,
             grpo_clip_eps=args.grpo_clip_eps,
             metrics_log_dir=args.metrics_log_dir,
+            gpu_stats=args.gpu_stats,
+            gpu_stats_interval_s=args.gpu_stats_interval_s,
+            gpu_stats_history=args.gpu_stats_history,
             agent_fn=args.agent_fn,
             agent_timeout_s=args.agent_timeout_s,
             train_tool_results=args.train_tool_results,
@@ -770,6 +788,9 @@ def _trainer_config_from_args(args) -> TrainerConfig:
         gspo_clip_eps=args.gspo_clip_eps,
         grpo_clip_eps=args.grpo_clip_eps,
         metrics_log_dir=args.metrics_log_dir,
+        gpu_stats=args.gpu_stats,
+        gpu_stats_interval_s=args.gpu_stats_interval_s,
+        gpu_stats_history=args.gpu_stats_history,
         ref_ckpt=args.ref_ckpt,
         reward_ckpt=args.reward_ckpt,
         critic_ckpt=args.critic_ckpt,
@@ -823,7 +844,18 @@ def run(trainer_config: TrainerConfig):
         load_from_disk=load_from_disk,
     )
     trainer = build_trainer(trainer_config, instance=api_trainer, dataset=dataset, reward_fn=reward_fn, loss_fn=loss_fn)
-    trainer.fit()
+    # Issue #257: optionally stream per-device GPU memory/utilization/temperature
+    # history during the actual training loop only (not the model-load prep
+    # before `fit()`). The sampler is a daemon thread off the hot path; we stop,
+    # flush a structured summary JSON, and print a one-line CLI summary after
+    # `fit()` returns — even on failure, via the finally block.
+    sampler = _maybe_start_gpu_sampler(trainer_config)
+    try:
+        trainer.fit()
+    finally:
+        if sampler is not None:
+            _flush_gpu_stats(sampler, trainer_config)
+            click.echo(sampler.summary_text())
 
 
 def _write_dashboard_run_config(config: TrainerConfig) -> None:
@@ -847,6 +879,47 @@ def _write_dashboard_run_config(config: TrainerConfig) -> None:
     (path / f"areno_run_config.{pid}.json").write_text(
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
+
+
+def _maybe_start_gpu_sampler(config: TrainerConfig):
+    """Start the GPU stats sampler when ``--gpu-stats`` is enabled, else None.
+
+    Returns ``None`` (no-op, current behavior unchanged) when sampling is off.
+    The sampler streams each tick to ``gpu_stats.{pid}.jsonl`` when a
+    ``metrics_log_dir`` is configured; with no directory it still collects an
+    in-memory history so a stdout summary can be printed at run end. A missing
+    ``nvidia-smi`` makes ``start()`` a clean no-op that records the reason.
+    """
+
+    if not config.gpu_stats:
+        return None
+    from areno.cli.gpu_stats import GPUSampler
+
+    import os
+
+    jsonl_path = None
+    if config.metrics_log_dir:
+        Path(config.metrics_log_dir).mkdir(parents=True, exist_ok=True)
+        jsonl_path = str(Path(config.metrics_log_dir) / f"gpu_stats.{os.getpid()}.jsonl")
+    sampler = GPUSampler(
+        interval_s=config.gpu_stats_interval_s,
+        max_history=config.gpu_stats_history,
+        jsonl_path=jsonl_path,
+    )
+    sampler.start()
+    return sampler
+
+
+def _flush_gpu_stats(sampler, config: TrainerConfig) -> None:
+    """Stop the sampler and persist a structured summary JSON when possible."""
+
+    sampler.stop()
+    if config.metrics_log_dir:
+        import os
+
+        Path(config.metrics_log_dir).mkdir(parents=True, exist_ok=True)
+        summary_path = Path(config.metrics_log_dir) / f"gpu_stats_summary.{os.getpid()}.json"
+        sampler.write_summary(str(summary_path))
 
 
 def _training_config_settings(config: TrainerConfig) -> dict:
@@ -951,7 +1024,7 @@ def _training_config_settings(config: TrainerConfig) -> dict:
             ],
         ),
         section("Checkpoint", ["save_path", "save_interval"]),
-        section("Observability", ["metrics_log_dir"]),
+        section("Observability", ["metrics_log_dir", "gpu_stats", "gpu_stats_interval_s", "gpu_stats_history"]),
     ]
     extras = []
     for field in fields(config):
@@ -1187,6 +1260,19 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
 @click.option("--save-interval", type=int, default=100, show_default=True, help="Save checkpoint every N train steps.")
 @click.option(
     "--metrics-log-dir", default=DEFAULT_METRICS_LOG_DIR, show_default=True, help="TensorBoard metrics log directory."
+)
+@click.option(
+    "--gpu-stats",
+    is_flag=True,
+    help="Sample per-device GPU memory, utilization, and temperature during training and write a per-run history + summary.",
+)
+@click.option(
+    "--gpu-stats-interval-s", type=float, default=5.0, show_default=True,
+    help="GPU stats sampling interval in seconds (used with --gpu-stats).",
+)
+@click.option(
+    "--gpu-stats-history", type=int, default=1000, show_default=True,
+    help="Maximum retained GPU stats samples (used with --gpu-stats).",
 )
 @click.option("--epochs", type=int, default=10, show_default=True, help="Number of dataset epochs to train.")
 @click.option("--max-steps", type=int, default=None, help="Stop after this many trainer steps.")
