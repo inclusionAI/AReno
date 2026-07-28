@@ -44,6 +44,7 @@ AReno documentation
 
    CLI Reference <reference/cli>
    SDK Reference <sdk/trainer>
+   Skill SDK <sdk/skill-sdk>
    Supported Models <models/supported>
 
 .. toctree::
