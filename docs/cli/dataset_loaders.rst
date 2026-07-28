@@ -65,3 +65,48 @@ Agentic loaders also return ``prompt`` plus task metadata consumed by
 ``run_agent.py`` and ``reward.py``. Examples include
 ``examples/agentic/coding/dataset_loader.py`` and
 ``examples/agentic/shopping/dataset_loader.py``.
+
+Field mapping and sample filtering
+----------------------------------
+
+When a dataset uses non-standard field names (e.g. ``question`` instead of
+``prompt``), you can avoid writing a custom ``--dataset-loader-fn`` by using
+``--field-mapping``, ``--constant-fields``, and ``--sample-filter``. These
+options are applied **after** the loader runs and **before** the trainer
+sees the data.
+
+**``--field-mapping``** renames fields declaratively:
+
+.. code-block:: bash
+
+   areno train --algo sft \
+     --dataset-path my_data.jsonl \
+     --dataset-loader-fn examples/sft/alpaca/dataset_loader.py \
+     --field-mapping '{"question": "prompt", "answer": "response"}'
+
+**``--constant-fields``** injects fixed key/value pairs into every record
+without overwriting existing fields:
+
+.. code-block:: bash
+
+   --constant-fields '{"task_type": "math"}'
+
+**``--sample-filter``** drops records that do not meet the criteria:
+
+.. code-block:: bash
+
+   --sample-filter '{"require_fields": ["prompt", "response"], "min_prompt_chars": 5}'
+
+Supported filter keys:
+
+- ``require_fields`` (list[str]): all must be present and non-empty.
+- ``min_prompt_chars`` (int): minimum character length of ``prompt``.
+- ``max_prompt_chars`` (int): maximum character length of ``prompt``.
+- ``min_response_chars`` (int): minimum character length of ``response``.
+
+When any of these options is active, AReno prints a summary line showing
+how many records were scanned, kept, and dropped (with per-reason counts).
+No sample text is logged — only structural counts.
+
+**Backward compatibility:** when none of these options are provided, the
+dataset passes through unchanged. Existing commands behave identically.

@@ -24,6 +24,7 @@ from types import SimpleNamespace
 import click
 
 from areno.api.algorithms import get_algorithm
+from areno.api.data_utils import parse_json_option, transform_dataset
 from areno.api.defaults import DEFAULT_METRICS_LOG_DIR
 from areno.api.trainer_config import (
     DPOTrainerConfig,
@@ -59,6 +60,9 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "dataset_path",
             "model_hub",
             "dataset_loader_fn",
+            "field_mapping",
+            "constant_fields",
+            "sample_filter",
             "tune_params",
             "mem_frac",
             "tune_max_samples",
@@ -600,6 +604,9 @@ def _trainer_config_from_args(args) -> TrainerConfig:
     args.model_hub = getattr(args, "model_hub", "modelscope")
     algorithm = get_algorithm(args.algo)
     chat_template_enable_thinking = False if args.disable_thinking else None
+    field_mapping = parse_json_option(getattr(args, "field_mapping", None), "--field-mapping")
+    constant_fields = parse_json_option(getattr(args, "constant_fields", None), "--constant-fields")
+    sample_filter = parse_json_option(getattr(args, "sample_filter", None), "--sample-filter")
     if algorithm.name == "dpo":
         return DPOTrainerConfig(
             algo=algorithm.name,
@@ -607,6 +614,9 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             dataset_path=args.dataset_path,
             model_hub=args.model_hub,
             dataset_loader_fn=args.dataset_loader_fn,
+            field_mapping=field_mapping,
+            constant_fields=constant_fields,
+            sample_filter=sample_filter,
             save_path=args.save_path,
             save_interval=args.save_interval,
             epochs=args.epochs,
@@ -648,6 +658,9 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             dataset_path=args.dataset_path,
             model_hub=args.model_hub,
             dataset_loader_fn=args.dataset_loader_fn,
+            field_mapping=field_mapping,
+            constant_fields=constant_fields,
+            sample_filter=sample_filter,
             save_path=args.save_path,
             save_interval=args.save_interval,
             epochs=args.epochs,
@@ -687,6 +700,9 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             dataset_path=args.dataset_path,
             model_hub=args.model_hub,
             dataset_loader_fn=args.dataset_loader_fn,
+            field_mapping=field_mapping,
+            constant_fields=constant_fields,
+            sample_filter=sample_filter,
             reward_fn_path=args.reward_fn_path,
             save_path=args.save_path,
             save_interval=args.save_interval,
@@ -734,6 +750,9 @@ def _trainer_config_from_args(args) -> TrainerConfig:
         dataset_path=args.dataset_path,
         model_hub=args.model_hub,
         dataset_loader_fn=args.dataset_loader_fn,
+        field_mapping=field_mapping,
+        constant_fields=constant_fields,
+        sample_filter=sample_filter,
         reward_fn_path=args.reward_fn_path,
         save_path=args.save_path,
         save_interval=args.save_interval,
@@ -822,6 +841,27 @@ def run(trainer_config: TrainerConfig):
         load_dataset=load_dataset,
         load_from_disk=load_from_disk,
     )
+    # Apply optional field mapping, constant-field injection, and sample
+    # filtering before the dataset enters the trainer.  When none of these
+    # options are configured the dataset is returned unchanged.
+    if (
+        trainer_config.field_mapping
+        or trainer_config.constant_fields
+        or trainer_config.sample_filter
+    ):
+        dataset, summary = transform_dataset(
+            dataset,
+            field_mapping=trainer_config.field_mapping,
+            constant_fields=trainer_config.constant_fields,
+            sample_filter=trainer_config.sample_filter,
+        )
+        for line in summary.as_log_lines():
+            click.echo(line)
+        if summary.total_kept == 0:
+            raise click.UsageError(
+                "All samples were filtered out. Check --field-mapping, "
+                "--constant-fields, and --sample-filter settings."
+            )
     trainer = build_trainer(trainer_config, instance=api_trainer, dataset=dataset, reward_fn=reward_fn, loss_fn=loss_fn)
     trainer.fit()
 
@@ -1176,6 +1216,24 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
 )
 @click.option(
     "--dataset-loader-fn", default=None, help="Optional Python dataset loader function as file.py or file.py:function."
+)
+@click.option(
+    "--field-mapping",
+    default=None,
+    help='JSON object mapping source field names to target names, e.g. \'{"question": "prompt", "answer": "response"}\'.',
+)
+@click.option(
+    "--constant-fields",
+    default=None,
+    help='JSON object of constant fields to inject into every record, e.g. \'{"task_type": "math"}\'.',
+)
+@click.option(
+    "--sample-filter",
+    default=None,
+    help=(
+        'JSON object for sample filtering, e.g. '
+        '\'{"require_fields": ["prompt", "response"], "min_prompt_chars": 5}\'.'
+    ),
 )
 @click.option("--reward-fn-path", default=None, help="Python file defining reward_fn(record).")
 @click.option(
