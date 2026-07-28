@@ -36,6 +36,7 @@ class TrainerConfig:
     tp_size: int = 4
     world_size: int = 8
     batch_size: int = 32
+    token_budget: int | None = None
     mini_bs: int = 16
     score_micro_bs: int = 8
     gradient_accumulation_steps: int | None = None
@@ -66,6 +67,8 @@ class TrainerConfig:
             raise ValueError("attn_backend must be one of: flash, native")
         if self.model_hub not in {"hf", "modelscope"}:
             raise ValueError("model_hub must be one of: hf, modelscope")
+        if self.token_budget is not None and self.token_budget <= 0:
+            raise ValueError("token_budget must be a positive integer or None")
 
     def optimizer_config(self) -> dict:
         """Build the optimizer dict consumed by the backend config."""

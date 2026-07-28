@@ -74,6 +74,7 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         "Rollout",
         (
             "batch_size",
+            "token_budget",
             "n_samples",
             "max_running_prompts",
             "max_prompt_tokens",
@@ -225,6 +226,9 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
         raise click.UsageError("--world-size must be divisible by --tp-size")
     if args.batch_size <= 0:
         raise click.UsageError("--batch-size must be positive")
+    _token_budget = getattr(args, "token_budget", None)
+    if _token_budget is not None and _token_budget <= 0:
+        raise click.UsageError("--token-budget must be a positive integer or omitted")
     if algorithm.requires_rollout and args.n_samples <= 0:
         raise click.UsageError("--n-samples must be positive")
     if args.mini_bs <= 0:
@@ -432,6 +436,7 @@ def _format_summary_section(section: str, rows: list[tuple[str, str]], *, color:
 def _rollout_summary_rows(config: TrainerConfig) -> list[tuple[str, str]]:
     base = [
         ("batch_size", str(config.batch_size)),
+        ("token_budget", _format_optional(getattr(config, "token_budget", None), default="disabled")),
         ("max_prompt_tokens", str(config.max_prompt_tokens)),
         ("max_new_tokens", str(config.max_new_tokens)),
         ("max_context_len", _format_optional(config.max_context_len, default="model limit")),
@@ -614,6 +619,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             tp_size=args.tp_size,
             world_size=args.world_size,
             batch_size=args.batch_size,
+            token_budget=getattr(args, "token_budget", None),
             mini_bs=args.mini_bs,
             score_micro_bs=args.score_micro_bs,
             gradient_accumulation_steps=args.gradient_accumulation_steps,
@@ -655,6 +661,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             tp_size=args.tp_size,
             world_size=args.world_size,
             batch_size=args.batch_size,
+            token_budget=getattr(args, "token_budget", None),
             mini_bs=args.mini_bs,
             score_micro_bs=args.score_micro_bs,
             gradient_accumulation_steps=args.gradient_accumulation_steps,
@@ -695,6 +702,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             tp_size=args.tp_size,
             world_size=args.world_size,
             batch_size=args.batch_size,
+            token_budget=getattr(args, "token_budget", None),
             n_samples=args.n_samples,
             mini_bs=args.mini_bs,
             score_micro_bs=args.score_micro_bs,
@@ -742,6 +750,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
         tp_size=args.tp_size,
         world_size=args.world_size,
         batch_size=args.batch_size,
+        token_budget=getattr(args, "token_budget", None),
         n_samples=args.n_samples,
         mini_bs=args.mini_bs,
         score_micro_bs=args.score_micro_bs,
@@ -890,6 +899,7 @@ def _training_config_settings(config: TrainerConfig) -> dict:
             "Rollout",
             [
                 "batch_size",
+                "token_budget",
                 "n_samples",
                 "max_running_prompts",
                 "max_prompt_tokens",
@@ -1224,6 +1234,15 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
 @click.option("--tp-size", type=int, default=4, show_default=True, help="Tensor parallel size for the backend.")
 @click.option("--world-size", type=int, default=8, show_default=True, help="Total device count for the backend.")
 @click.option("--batch-size", type=int, default=32, show_default=True, help="Prompt/pair batch size.")
+@click.option(
+    "--token-budget",
+    type=int,
+    default=None,
+    help="Max tokens per batch for dynamic batching; when set, batches are formed by token count "
+    "instead of fixed item count. Defaults to None (fixed batch-size mode). "
+    "Rule of thumb: set to average_prompt_token_length * batch_size. "
+    "For example, if prompts average 200 tokens and batch-size is 32, use --token-budget 6400.",
+)
 @click.option(
     "--n-samples", type=int, default=8, show_default=True, help="Rollout samples per prompt for RL algorithms."
 )

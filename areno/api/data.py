@@ -1,9 +1,11 @@
 """Lightweight dataclasses that flow through the rollout/training pipeline.
 
 `PromptItem` is the unit produced by `Trainer.load_prompt_batches` after
-tokenising a dataset row. `PromptBatch` groups a fixed-size set of items
-together and carries diagnostic counters so the trainer can surface how many
-records were skipped for exceeding the prompt-length budget.
+tokenising a dataset row. `PromptBatch` groups a set of items together and
+carries diagnostic counters so the trainer can surface how many records were
+skipped for exceeding the prompt-length budget. When token-budget-based
+dynamic batching is enabled, `total_tokens` reports the sum of prompt token
+counts in each batch for observability.
 """
 
 from __future__ import annotations
@@ -35,13 +37,15 @@ class PromptBatch:
     `scanned` is how many raw dataset rows were inspected to build this batch
     (including skips), `skipped_long` is how many were dropped this round, and
     `total_skipped_long` accumulates the drop count across the epoch so the
-    metric logger can report it as a cumulative counter.
+    metric logger can report it as a cumulative counter. `total_tokens` reports
+    the sum of prompt token counts in this batch for token-budget observability.
     """
 
     items: list[PromptItem]
     scanned: int
     skipped_long: int
     total_skipped_long: int
+    total_tokens: int = 0
 
     @property
     def prompts(self) -> list[str]:

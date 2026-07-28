@@ -97,6 +97,53 @@ signal.
 ``--batch-size INTEGER``
    Prompt or pair batch size. Default: ``32``.
 
+``--token-budget INTEGER``
+   Maximum prompt tokens per batch for dynamic batching. When set, batches
+   are formed by accumulating token counts until the budget is reached,
+   instead of using a fixed item count. Short examples can be grouped more
+   densely than long ones. A single item that exceeds the budget forms its
+   own batch and emits a warning. ``--batch-size`` still acts as a hard
+   upper bound on items per batch. For SFT, the budget counts full
+   sequence tokens (prompt + response). For DPO, the budget counts both
+   chosen and rejected tokens together so a preference pair is never split
+   across batches. Default: ``None`` (disabled, uses fixed
+   ``--batch-size`` mode).
+
+   **Setting token-budget**
+
+   The optimal value depends on model size, GPU memory, and data
+   distribution. Use the following guidelines:
+
+   * **Rule of thumb**: set to ``average_prompt_token_length * batch_size``.
+     For example, if prompts average 200 tokens and ``--batch-size`` is 32,
+     use ``--token-budget 6400``. This keeps the average batch close to the
+     original size while allowing short examples to pack more densely and
+     long examples to pack more sparsely.
+   * **Data with uniform length**: ``--token-budget`` is usually unnecessary;
+     the fixed ``--batch-size`` mode is sufficient.
+   * **Data with highly variable length**: set ``--token-budget`` to prevent
+     OOM on long-example batches and improve GPU utilisation on
+     short-example batches.
+   * **OOM errors**: set ``--token-budget`` slightly below the token total
+     of the batch that triggered OOM.
+   * **Low GPU utilisation** (many short prompts): set ``--token-budget`` to
+     ``average_prompt_token_length * batch_size * 1.5`` to allow denser
+     packing.
+
+   ``--batch-size`` always remains a hard cap on the number of items per
+   batch, even when ``--token-budget`` is active.
+
+   Example::
+
+      areno train \
+          --ckpt Qwen/Qwen3-0.6B \
+          --dataset-path gsm8k:main \
+          --dataset-loader-fn examples/math/dataset_loader.py \
+          --reward-fn-path examples/math/math_verify_reward.py \
+          --algo gspo \
+          --token-budget 8192 \
+          --batch-size 64
+
 ``--n-samples INTEGER``
    Rollout samples per prompt for RL algorithms. Default: ``8``.
 
