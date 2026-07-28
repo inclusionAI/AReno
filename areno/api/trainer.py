@@ -308,6 +308,7 @@ class Trainer:
         max_running_prompts: int | None = None,
         timeout_s: float = 300.0,
         proxy: bool = True,
+        retry_config: Any | None = None,
     ) -> RolloutSession:
         """Create an async rollout session, optionally with an OpenAI-compatible proxy."""
 
@@ -318,6 +319,7 @@ class Trainer:
             max_running_prompts=max_running_prompts,
             timeout_s=timeout_s,
             proxy=proxy,
+            retry_config=retry_config,
         )
 
     def train(

@@ -89,6 +89,12 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "disable_thinking",
             "agent_fn",
             "agent_timeout_s",
+            "retry_max_retries",
+            "retryable_model_errors",
+            "retryable_tool_errors",
+            "retryable_invalid_args",
+            "retry_backoff_base_s",
+            "retry_backoff_max_s",
             "train_tool_results",
             "reward_fn_path",
             "reward_ckpt",
@@ -243,6 +249,12 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
         raise click.UsageError("--max-running-prompts must be positive")
     if args.agent_timeout_s <= 0:
         raise click.UsageError("--agent-timeout-s must be positive")
+    if args.retry_max_retries < 0:
+        raise click.UsageError("--retry-max-retries must be non-negative")
+    if args.retry_backoff_base_s <= 0:
+        raise click.UsageError("--retry-backoff-base-s must be positive")
+    if args.retry_backoff_max_s <= 0:
+        raise click.UsageError("--retry-backoff-max-s must be positive")
     _require_positive_float(args.lr, "--lr")
     if args.min_lr < 0:
         raise click.UsageError("--min-lr must be non-negative")
@@ -443,7 +455,7 @@ def _rollout_summary_rows(config: TrainerConfig) -> list[tuple[str, str]]:
             ("max_running_prompts", "n/a"),
             ("sampling", "n/a"),
         ]
-    return [
+    rows = [
         *base,
         ("n_samples", str(config.n_samples)),
         ("max_running_prompts", str(config.resolved_max_running_prompts())),
@@ -455,6 +467,19 @@ def _rollout_summary_rows(config: TrainerConfig) -> list[tuple[str, str]]:
             ),
         ),
     ]
+    if config.agent_fn and config.retry_max_retries > 0:
+        rows.append(
+            (
+                "retry",
+                (
+                    f"max_retries={config.retry_max_retries}, "
+                    f"model_errors={_format_bool(config.retryable_model_errors)}, "
+                    f"tool_errors={_format_bool(config.retryable_tool_errors)}, "
+                    f"backoff=[{config.retry_backoff_base_s}s .. {config.retry_backoff_max_s}s]"
+                ),
+            ),
+        )
+    return rows
 
 
 def _reward_ckpt_for_summary(config: TrainerConfig, reward_ckpt: str | None) -> str | None:
@@ -636,6 +661,12 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             metrics_log_dir=args.metrics_log_dir,
             agent_fn=args.agent_fn,
             agent_timeout_s=args.agent_timeout_s,
+            retry_max_retries=args.retry_max_retries,
+            retryable_model_errors=args.retryable_model_errors,
+            retryable_tool_errors=args.retryable_tool_errors,
+            retryable_invalid_args=args.retryable_invalid_args,
+            retry_backoff_base_s=args.retry_backoff_base_s,
+            retry_backoff_max_s=args.retry_backoff_max_s,
             train_tool_results=args.train_tool_results,
             chat_template_enable_thinking=chat_template_enable_thinking,
             ref_ckpt=args.ref_ckpt,
@@ -677,6 +708,12 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             metrics_log_dir=args.metrics_log_dir,
             agent_fn=args.agent_fn,
             agent_timeout_s=args.agent_timeout_s,
+            retry_max_retries=args.retry_max_retries,
+            retryable_model_errors=args.retryable_model_errors,
+            retryable_tool_errors=args.retryable_tool_errors,
+            retryable_invalid_args=args.retryable_invalid_args,
+            retry_backoff_base_s=args.retry_backoff_base_s,
+            retry_backoff_max_s=args.retry_backoff_max_s,
             train_tool_results=args.train_tool_results,
             chat_template_enable_thinking=chat_template_enable_thinking,
         )
@@ -725,6 +762,12 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             metrics_log_dir=args.metrics_log_dir,
             agent_fn=args.agent_fn,
             agent_timeout_s=args.agent_timeout_s,
+            retry_max_retries=args.retry_max_retries,
+            retryable_model_errors=args.retryable_model_errors,
+            retryable_tool_errors=args.retryable_tool_errors,
+            retryable_invalid_args=args.retryable_invalid_args,
+            retry_backoff_base_s=args.retry_backoff_base_s,
+            retry_backoff_max_s=args.retry_backoff_max_s,
             train_tool_results=args.train_tool_results,
             chat_template_enable_thinking=chat_template_enable_thinking,
         )
@@ -786,6 +829,12 @@ def _trainer_config_from_args(args) -> TrainerConfig:
         critic_warmup_steps=args.critic_warmup_steps,
         agent_fn=args.agent_fn,
         agent_timeout_s=args.agent_timeout_s,
+        retry_max_retries=args.retry_max_retries,
+        retryable_model_errors=args.retryable_model_errors,
+        retryable_tool_errors=args.retryable_tool_errors,
+        retryable_invalid_args=args.retryable_invalid_args,
+        retry_backoff_base_s=args.retry_backoff_base_s,
+        retry_backoff_max_s=args.retry_backoff_max_s,
         train_tool_results=args.train_tool_results,
         chat_template_enable_thinking=chat_template_enable_thinking,
     )
@@ -901,6 +950,12 @@ def _training_config_settings(config: TrainerConfig) -> dict:
                 "top_p",
                 "agent_fn",
                 "agent_timeout_s",
+                "retry_max_retries",
+                "retryable_model_errors",
+                "retryable_tool_errors",
+                "retryable_invalid_args",
+                "retry_backoff_base_s",
+                "retry_backoff_max_s",
                 "train_tool_results",
                 "reward_fn_path",
                 "reward_ckpt",
@@ -1298,6 +1353,30 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
 @click.option("--agent-fn", default=None, help="Python file defining async run_agent(ctx, batch) for agentic rollout.")
 @click.option(
     "--agent-timeout-s", type=float, default=300.0, show_default=True, help="Agentic rollout proxy request timeout."
+)
+@click.option(
+    "--retry-max-retries", type=int, default=0, show_default=True,
+    help="Max retry attempts per task for recoverable agent execution failures (0=disabled).",
+)
+@click.option(
+    "--retryable-model-errors/--no-retryable-model-errors", default=True, show_default=True,
+    help="Retry agent rollout on transient model request errors (HTTP 5xx/timeout/connection).",
+)
+@click.option(
+    "--retryable-tool-errors/--no-retryable-tool-errors", default=True, show_default=True,
+    help="Retry agent turn on tool execution failures.",
+)
+@click.option(
+    "--retryable-invalid-args/--no-retryable-invalid-args", default=False, show_default=True,
+    help="Retry agent turn on invalid tool arguments.",
+)
+@click.option(
+    "--retry-backoff-base-s", type=float, default=1.0, show_default=True,
+    help="Base exponential backoff seconds between agent retry attempts.",
+)
+@click.option(
+    "--retry-backoff-max-s", type=float, default=30.0, show_default=True,
+    help="Maximum exponential backoff seconds between agent retry attempts.",
 )
 @click.option("--train-tool-results", is_flag=True, help="Include tool-result spans in agentic policy loss.")
 @click.option(

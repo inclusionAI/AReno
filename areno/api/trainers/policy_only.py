@@ -183,6 +183,21 @@ class PolicyOnlyTrainer:
             tool_results=bool(getattr(self.config, "train_tool_results", False)),
         )
 
+    def _build_retry_config(self):
+        from areno.api.agentic import RetryConfig
+
+        max_retries = int(getattr(self.config, "retry_max_retries", 0))
+        if max_retries <= 0:
+            return None
+        return RetryConfig(
+            max_retries=max_retries,
+            retryable_model_errors=bool(getattr(self.config, "retryable_model_errors", True)),
+            retryable_tool_errors=bool(getattr(self.config, "retryable_tool_errors", True)),
+            retryable_invalid_args=bool(getattr(self.config, "retryable_invalid_args", False)),
+            backoff_base_s=float(getattr(self.config, "retry_backoff_base_s", 1.0)),
+            backoff_max_s=float(getattr(self.config, "retry_backoff_max_s", 30.0)),
+        )
+
     def _get_agent_run_fn(self):
         from areno.api.agentic import load_agent_run_fn
 
@@ -200,7 +215,7 @@ class PolicyOnlyTrainer:
             return await self.areno.rollout_token_batch_async(prompt_tokens, self.config.n_samples, sampling_params)
 
     async def _run_agentic_rollout(self, sampling_params, prompt_batch):
-        from areno.api.agentic import AgentBatch, AgentTrainBatch, maybe_await
+        from areno.api.agentic import AgentBatch, AgentTrainBatch, RetryConfig, maybe_await
 
         agent_batch = AgentBatch.from_prompt_batch(prompt_batch, n_samples=self.config.n_samples)
         self.logger.info(
@@ -210,11 +225,13 @@ class PolicyOnlyTrainer:
             len(agent_batch),
             self.config.resolved_max_running_prompts(),
         )
+        retry_config = self._build_retry_config()
         async with self.areno.rollout_session(
             sampling_params=sampling_params,
             loss_mask_policy=self._loss_mask_policy(),
             max_running_prompts=self.config.resolved_max_running_prompts(),
             timeout_s=self.config.agent_timeout_s,
+            retry_config=retry_config,
         ) as ctx:
             await ctx.sync_rollout_session_async()
             trajectories = await maybe_await(self._get_agent_run_fn()(ctx, agent_batch))

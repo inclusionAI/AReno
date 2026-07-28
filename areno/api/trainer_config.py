@@ -60,6 +60,12 @@ class TrainerConfig:
     agent_timeout_s: float = 300.0
     train_tool_results: bool = False
     chat_template_enable_thinking: bool | None = None
+    retry_max_retries: int = 0
+    retryable_model_errors: bool = True
+    retryable_tool_errors: bool = True
+    retryable_invalid_args: bool = False
+    retry_backoff_base_s: float = 1.0
+    retry_backoff_max_s: float = 30.0
 
     def __post_init__(self) -> None:
         if self.attn_backend not in {"flash", "native"}:

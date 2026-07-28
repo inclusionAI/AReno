@@ -6,6 +6,8 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from areno.api.tool_call_parser import (
     Gemma4ToolCallParser,
     JsonToolCallParser,
@@ -26,8 +28,10 @@ def _load_agentic_module():
 
 agentic = _load_agentic_module()
 AgentBatch = agentic.AgentBatch
+AgentFailure = agentic.AgentFailure
 AgentTrajectoryTurn = agentic.AgentTrajectoryTurn
 LossMaskPolicy = agentic.LossMaskPolicy
+RetryConfig = agentic.RetryConfig
 RolloutSession = agentic.RolloutSession
 
 
@@ -1327,3 +1331,214 @@ def _pending_chat(idx, params):
         model="policy",
         created_at=time.monotonic(),
     )
+
+
+# ---------------------------------------------------------------------------
+# Retry / failure classification tests  (issue #243)
+# ---------------------------------------------------------------------------
+
+
+def test_retry_config_defaults():
+    config = RetryConfig()
+    assert config.max_retries == 0
+    assert config.retryable_model_errors is True
+    assert config.retryable_tool_errors is True
+    assert config.retryable_invalid_args is False
+    assert config.backoff_base_s == 1.0
+    assert config.backoff_max_s == 30.0
+
+
+def test_retry_config_disabled_by_default():
+    config = RetryConfig()
+    assert config.max_retries == 0
+    assert not agentic._classify_model_error(RuntimeError("fail"), config)
+    assert not agentic._classify_model_error(RuntimeError("fail"), RetryConfig(max_retries=0))
+    assert not agentic._classify_model_error(RuntimeError("fail"), None)
+
+
+def test_retry_config_disabled_backward_compatible():
+    """A RolloutSession without retry_config must behave exactly as before."""
+    trainer = _FakeTrainer(world_size=1, tp_size=1)
+    session = RolloutSession(
+        trainer,
+        sampling_params=_FakeSamplingParams(),
+        loss_mask_policy=LossMaskPolicy(),
+        max_running_prompts=2,
+    )
+    assert session._retry_config is None
+
+    async def run():
+        session._loop = asyncio.get_running_loop()
+        return await session._complete_chat(
+            {"model": "policy", "messages": [{"role": "user", "content": "p0"}]}
+        )
+
+    response = asyncio.run(run())
+    assert response["usage"]["completion_tokens"] == 1
+
+
+def test_agent_failure_classification():
+    failure = AgentFailure(category="model_request", reason="timeout", recoverable=True)
+    assert failure.category == "model_request"
+    assert failure.reason == "timeout"
+    assert failure.recoverable is True
+    assert failure.retries_used == 0
+
+    failure = AgentFailure(category="tool_execution", reason="invalid path", turn_index=2, retries_used=2)
+    assert failure.category == "tool_execution"
+    assert failure.turn_index == 2
+    assert failure.retries_used == 2
+
+
+def test_classify_model_error_http_status():
+    config = RetryConfig(max_retries=3)
+
+    class _FakeHTTPError(RuntimeError):
+        status_code = 503
+
+    assert agentic._classify_model_error(_FakeHTTPError("service unavailable"), config)
+
+    class _FakeHTTP429(RuntimeError):
+        status_code = 429
+
+    assert agentic._classify_model_error(_FakeHTTP429("rate limit"), config)
+
+    class _FakeHTTP400(RuntimeError):
+        status_code = 400
+
+    assert not agentic._classify_model_error(_FakeHTTP400("bad request"), config)
+
+
+def test_classify_model_error_exception_name():
+    config = RetryConfig(max_retries=3)
+
+    assert agentic._classify_model_error(TimeoutError("timed out"), config)
+    assert agentic._classify_model_error(ConnectionError("connection refused"), config)
+
+    class _TransportError(RuntimeError):
+        pass
+
+    assert agentic._classify_model_error(_TransportError("transport closed"), config)
+    assert not agentic._classify_model_error(ValueError("invalid"), config)
+
+
+def test_classify_model_error_disabled_retry():
+    config = RetryConfig(max_retries=3, retryable_model_errors=False)
+
+    class _FakeHTTP503(RuntimeError):
+        status_code = 503
+
+    assert not agentic._classify_model_error(_FakeHTTP503("unavailable"), config)
+    assert not agentic._classify_model_error(TimeoutError("timeout"), config)
+
+
+def test_retry_recovers_from_transient_model_error():
+    """A transient error must trigger a retry and succeed on the second attempt."""
+    trainer = _FakeRetryableTrainer(world_size=1, tp_size=1)
+    trainer.rollout_fail_count = 1  # fail once, succeed on retry
+    session = RolloutSession(
+        trainer,
+        sampling_params=_FakeSamplingParams(),
+        loss_mask_policy=LossMaskPolicy(),
+        max_running_prompts=1,
+        retry_config=RetryConfig(max_retries=2, backoff_base_s=0.01, backoff_max_s=0.1),
+    )
+
+    async def run():
+        session._loop = asyncio.get_running_loop()
+        return await session._complete_chat(
+            {"model": "policy", "messages": [{"role": "user", "content": "p0"}]}
+        )
+
+    response = asyncio.run(run())
+    assert response["usage"]["completion_tokens"] == 1
+    assert trainer.rollout_call_count == 2
+
+
+def test_retry_exhausted_raises_last_error():
+    """All attempts fail, the last error must propagate to the caller."""
+    trainer = _FakeRetryableTrainer(world_size=1, tp_size=1)
+    trainer.rollout_fail_count = 99  # always fail
+    session = RolloutSession(
+        trainer,
+        sampling_params=_FakeSamplingParams(),
+        loss_mask_policy=LossMaskPolicy(),
+        max_running_prompts=1,
+        retry_config=RetryConfig(max_retries=2, backoff_base_s=0.01, backoff_max_s=0.1),
+    )
+
+    async def run():
+        session._loop = asyncio.get_running_loop()
+        return await session._complete_chat(
+            {"model": "policy", "messages": [{"role": "user", "content": "p0"}]}
+        )
+
+    with pytest.raises(ConnectionError, match="connection refused by rollout backend"):
+        asyncio.run(run())
+
+
+def test_rollout_session_proxy_accepts_retry_config():
+    trainer = _FakeTrainer(world_size=1, tp_size=1)
+    session = RolloutSession(
+        trainer,
+        sampling_params=_FakeSamplingParams(),
+        loss_mask_policy=LossMaskPolicy(),
+        max_running_prompts=4,
+        retry_config=RetryConfig(max_retries=3),
+    )
+    assert session._retry_config is not None
+    assert session._retry_config.max_retries == 3
+
+
+def test_policy_only_trainer_build_retry_config():
+    config = SimpleNamespace(
+        retry_max_retries=5,
+        retryable_model_errors=True,
+        retryable_tool_errors=False,
+        retryable_invalid_args=False,
+        retry_backoff_base_s=2.0,
+        retry_backoff_max_s=60.0,
+    )
+    policy = object.__new__(PolicyOnlyTrainer)
+    policy.config = config
+    rc = policy._build_retry_config()
+    assert rc is not None
+    assert rc.max_retries == 5
+    assert rc.retryable_model_errors is True
+    assert rc.retryable_tool_errors is False
+    assert rc.backoff_base_s == 2.0
+    assert rc.backoff_max_s == 60.0
+
+
+def test_policy_only_trainer_build_retry_config_returns_none_when_disabled():
+    config = SimpleNamespace(
+        retry_max_retries=0,
+        retryable_model_errors=True,
+        retryable_tool_errors=True,
+        retryable_invalid_args=False,
+        retry_backoff_base_s=1.0,
+        retry_backoff_max_s=30.0,
+    )
+    policy = object.__new__(PolicyOnlyTrainer)
+    policy.config = config
+    assert policy._build_retry_config() is None
+
+
+def test_agent_failure_repr():
+    failure = AgentFailure(category="budget_exhausted", reason="max retries reached", turn_index=3)
+    assert "budget_exhausted" in repr(failure) or str(failure)
+
+
+class _FakeRetryableTrainer(_FakeTrainer):
+    """Trainer stub that fails a configurable number of times then succeeds."""
+
+    def __init__(self, *, world_size=2, tp_size=1):
+        super().__init__(world_size=world_size, tp_size=tp_size)
+        self.rollout_fail_count = 0
+        self.rollout_call_count = 0
+
+    async def rollout_token_batch_async(self, prompt_tokens, n_samples, sampling_params):
+        self.rollout_call_count += 1
+        if self.rollout_call_count <= self.rollout_fail_count:
+            raise ConnectionError("connection refused by rollout backend")
+        return self.rollout_token_batch(prompt_tokens, n_samples, sampling_params)

@@ -44,6 +44,33 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
+class AgentFailure:
+    """Classifies one agent execution failure for retry accounting."""
+
+    category: Literal["model_request", "invalid_tool_args", "tool_execution", "budget_exhausted"]
+    reason: str
+    turn_index: int = -1
+    recoverable: bool = True
+    retries_used: int = 0
+
+
+@dataclass(slots=True)
+class RetryConfig:
+    """Bounded per-task retry policy for recoverable agent execution failures.
+
+    When ``max_retries`` is zero (default), retry is disabled and the
+    feature is entirely backward-compatible.
+    """
+
+    max_retries: int = 0
+    retryable_model_errors: bool = True
+    retryable_tool_errors: bool = True
+    retryable_invalid_args: bool = False
+    backoff_base_s: float = 1.0
+    backoff_max_s: float = 30.0
+
+
+@dataclass(slots=True)
 class LossMaskPolicy:
     """Controls which agent trajectory spans contribute to policy loss."""
 
@@ -251,6 +278,7 @@ class RolloutSession:
         max_running_prompts: int | None = None,
         timeout_s: float = 300.0,
         proxy: bool = True,
+        retry_config: RetryConfig | None = None,
     ) -> None:
         self._trainer = trainer
         self._sampling_params = sampling_params
@@ -268,6 +296,7 @@ class RolloutSession:
         self._closing = False
         self._base_url = ""
         self._proxy_enabled = bool(proxy)
+        self._retry_config = retry_config
 
     @property
     def max_running_prompts(self) -> int:
@@ -491,39 +520,63 @@ class RolloutSession:
         return pending.response
 
     async def _run_chat_request(self, pending: _PendingChat) -> None:
-        tokenizer = self._trainer.get_tokenizer()
-        if pending.cancelled:
-            return
-        try:
-            pending.input_tokens = _messages_to_prompt_tokens(
-                tokenizer,
-                pending.messages,
-                tools=pending.tools,
-                fallback_prompt=_first_user_text(pending.messages),
-            )
-            max_context_len = _max_context_len(pending.params)
-            if max_context_len is not None and len(pending.input_tokens) > max_context_len:
-                response = _filtered_chat_response(
-                    model=pending.model,
-                    prompt_tokens=len(pending.input_tokens),
-                    max_sequence_len=max_context_len,
-                )
-                self._set_pending_response(pending, response)
+        retry = self._retry_config
+        max_attempts = (retry.max_retries + 1) if retry is not None and retry.max_retries > 0 else 1
+        for attempt in range(1, max_attempts + 1):
+            if pending.cancelled:
                 return
-            results = await self._trainer.rollout_token_batch_async([pending.input_tokens], 1, pending.params)
-            sequence = results[0].sequences[0] if results and results[0].sequences else None
-            if sequence is None:
-                self._set_pending_response(pending, self._build_chat_response(pending, _ResponseData([], [])))
-            else:
-                self._set_pending_response(
-                    pending,
-                    self._build_chat_response(
-                        pending,
-                        _ResponseData(response_tokens=sequence.resp_tokens, response_logprobs=sequence.resp_logprobs),
-                    ),
+            self._set_pending_response(pending, None, is_retry_reset=True)
+            self._set_pending_error(pending, None, is_retry_reset=True)
+            try:
+                await self._run_chat_attempt(pending)
+                return
+            except BaseException as exc:
+                if attempt >= max_attempts or not _classify_model_error(exc, retry):
+                    self._set_pending_error(pending, exc)
+                    return
+                delay = min(
+                    retry.backoff_base_s * (2.0 ** (attempt - 1)) if retry else 0.0,
+                    retry.backoff_max_s if retry else 0.0,
                 )
-        except BaseException as exc:
-            self._set_pending_error(pending, exc)
+                logger.warning(
+                    "agent rollout retry attempt=%d/%d delay=%.1fs error=%s error_type=%s",
+                    attempt,
+                    max_attempts - 1,
+                    delay,
+                    exc,
+                    type(exc).__name__,
+                )
+                await asyncio.sleep(delay)
+
+    async def _run_chat_attempt(self, pending: _PendingChat) -> None:
+        tokenizer = self._trainer.get_tokenizer()
+        pending.input_tokens = _messages_to_prompt_tokens(
+            tokenizer,
+            pending.messages,
+            tools=pending.tools,
+            fallback_prompt=_first_user_text(pending.messages),
+        )
+        max_context_len = _max_context_len(pending.params)
+        if max_context_len is not None and len(pending.input_tokens) > max_context_len:
+            response = _filtered_chat_response(
+                model=pending.model,
+                prompt_tokens=len(pending.input_tokens),
+                max_sequence_len=max_context_len,
+            )
+            self._set_pending_response(pending, response)
+            return
+        results = await self._trainer.rollout_token_batch_async([pending.input_tokens], 1, pending.params)
+        sequence = results[0].sequences[0] if results and results[0].sequences else None
+        if sequence is None:
+            self._set_pending_response(pending, self._build_chat_response(pending, _ResponseData([], [])))
+        else:
+            self._set_pending_response(
+                pending,
+                self._build_chat_response(
+                    pending,
+                    _ResponseData(response_tokens=sequence.resp_tokens, response_logprobs=sequence.resp_logprobs),
+                ),
+            )
 
     def _sample_from_trajectory_turn(self, turn: AgentTrajectoryTurn) -> _AgentSample:
         tokenizer = self._trainer.get_tokenizer()
@@ -550,16 +603,24 @@ class RolloutSession:
             tool_calls=turn.parsed_tool_calls,
         )
 
-    def _set_pending_response(self, pending: _PendingChat, response: dict[str, Any]) -> None:
-        if pending.cancelled:
+    def _set_pending_response(self, pending: _PendingChat, response: dict[str, Any] | None, *, is_retry_reset: bool = False) -> None:
+        if not is_retry_reset and pending.cancelled:
+            return
+        if is_retry_reset:
+            pending.response = None
+            pending.event.clear()
             return
         pending.response = response
         pending.event.set()
         if pending.future is not None and not pending.future.done():
             pending.future.set_result(response)
 
-    def _set_pending_error(self, pending: _PendingChat, exc: BaseException) -> None:
-        if pending.cancelled:
+    def _set_pending_error(self, pending: _PendingChat, exc: BaseException | None, *, is_retry_reset: bool = False) -> None:
+        if not is_retry_reset and pending.cancelled:
+            return
+        if is_retry_reset:
+            pending.error = None
+            pending.event.clear()
             return
         pending.error = exc
         pending.event.set()
@@ -983,13 +1044,30 @@ async def maybe_await(value):
     return value
 
 
+def _classify_model_error(exc: BaseException, retry_config: RetryConfig | None) -> bool:
+    """Return True if *exc* is a recoverable model request error.
+
+    Considers HTTP 5xx, 408/409/429, connection errors, and transport
+    errors as recoverable when ``retryable_model_errors`` is enabled.
+    """
+    if retry_config is None or not retry_config.retryable_model_errors:
+        return False
+    status_code = getattr(exc, "status_code", None)
+    if isinstance(status_code, int):
+        return status_code in (408, 409, 429) or status_code >= 500
+    name = type(exc).__name__.lower()
+    return any(token in name for token in ("timeout", "connection", "broken", "transport"))
+
+
 __all__ = [
     "AgentBatch",
+    "AgentFailure",
     "AgentItem",
     "AgentTrainBatch",
     "AgentTrajectory",
     "AgentTrajectoryTurn",
     "LossMaskPolicy",
+    "RetryConfig",
     "RewardEvent",
     "RewardRecord",
     "RolloutSession",
