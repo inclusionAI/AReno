@@ -1,0 +1,4 @@
+interface:
+  display_name: "Develop an AReno Kernel"
+  short_description: "Implement and validate accelerated operators"
+  default_prompt: "Implement this AReno operator and verify forward, backward, graph capture, and performance."

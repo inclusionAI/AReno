@@ -1,0 +1,4 @@
+interface:
+  display_name: "Profile AReno Performance"
+  short_description: "Measure AReno stage and GPU bottlenecks"
+  default_prompt: "Profile this AReno workload with a bounded matched baseline and identify the bottleneck."

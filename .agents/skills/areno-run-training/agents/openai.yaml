@@ -1,0 +1,4 @@
+interface:
+  display_name: "Run AReno Training"
+  short_description: "Configure and validate AReno training jobs"
+  default_prompt: "Run the requested AReno training workload and verify real progress."
