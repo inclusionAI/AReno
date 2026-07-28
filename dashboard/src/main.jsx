@@ -286,6 +286,7 @@ function App() {
 
   const pages = [
     { id: "jobs", label: "Jobs", icon: <Activity size={16} /> },
+    { id: "compare", label: "Compare", icon: <Layers size={16} /> },
     { id: "runtime", label: "Runtime", icon: <Server size={16} /> },
     { id: "launcher", label: "Launcher", icon: <Play size={16} /> },
     { id: "agent", label: "Agent", icon: <Bot size={16} /> },
@@ -294,6 +295,7 @@ function App() {
     jobs: selectedJob
       ? [selectedJob.name, `${selectedJob.kind} · ${selectedJob.status} · step ${selectedJob.step ?? 0}`]
       : ["Jobs", "Open an AReno train or serve task to inspect metrics, samples, config, and logs."],
+    compare: ["Compare Two Runs", "Select two jobs to compare config, metrics, and timing side by side."],
     runtime: ["Runtime Environment", "Review areno check, areno env, dependencies, GPU state, and repository context."],
     launcher: ["Task Launcher", "Start low-intrusion AReno train or serve subprocesses from explicit configs."],
     agent: ["Agent Console", "Chat with an operations agent using the selected job context."],
@@ -512,6 +514,9 @@ function App() {
   }
 
   function renderPage() {
+    if (activePage === "compare") {
+      return <CompareRunsPanel jobList={jobList} refreshJobs={() => jobs.refresh()} />;
+    }
     if (activePage === "runtime") {
       return (
         <div className="tabGrid">
@@ -1713,6 +1718,235 @@ function EmptyState({ title, text }) {
 const rootElement = typeof document !== "undefined" ? document.getElementById("root") : null;
 if (rootElement) {
   createRoot(rootElement).render(<App />);
+}
+
+// ---------------------------------------------------------------------------
+// Compare Two Runs Panel
+// ---------------------------------------------------------------------------
+
+function CompareRunsPanel({ jobList, refreshJobs }) {
+  const [jobAId, setJobAId] = useState("");
+  const [jobBId, setJobBId] = useState("");
+  const [compareResult, setCompareResult] = useState(null);
+  const [showIdentical, setShowIdentical] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  async function fetchComparison() {
+    if (!jobAId || !jobBId) return;
+    setLoading(true);
+    setError("");
+    try {
+      const data = await api(`/api/compare?job_a=${jobAId}&job_b=${jobBId}`);
+      setCompareResult(data);
+    } catch (err) {
+      setError(err.message || "Failed to fetch comparison");
+      setCompareResult(null);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  const canCompare = jobAId && jobBId && !loading;
+  const config = compareResult?.config;
+  const metrics = compareResult?.metrics || [];
+  const timing = compareResult?.timing || {};
+
+  return (
+    <section className="panel">
+      <div className="panelHeader">
+        <div>
+          <h2>Compare Two Runs</h2>
+          <p>Select two jobs to compare config, metrics, and timing side by side.</p>
+        </div>
+        <button className="secondaryButton" onClick={refreshJobs} title="Refresh job list">
+          <RefreshCw size={15} /> Refresh
+        </button>
+      </div>
+
+      <div className="compareSelector">
+        <div className="compareSelectGroup">
+          <label>Job A</label>
+          <select value={jobAId} onChange={(e) => setJobAId(e.target.value)}>
+            <option value="">— Select a job —</option>
+            {jobList.map((job) => (
+              <option key={job.id} value={job.id}>
+                {job.name} · {job.status} · step {job.step ?? 0}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="compareSelectGroup">
+          <label>Job B</label>
+          <select value={jobBId} onChange={(e) => setJobBId(e.target.value)}>
+            <option value="">— Select a job —</option>
+            {jobList.map((job) => (
+              <option key={job.id} value={job.id}>
+                {job.name} · {job.status} · step {job.step ?? 0}
+              </option>
+            ))}
+          </select>
+        </div>
+        <button className="primaryButton" disabled={!canCompare} onClick={fetchComparison}>
+          {loading ? "Comparing..." : "Compare"}
+        </button>
+      </div>
+
+      {error && <div className="notice errorNotice">{error}</div>}
+
+      {compareResult && !compareResult.comparable && (
+        <div className="notice">{compareResult.reason || "These jobs are not directly comparable."}</div>
+      )}
+
+      {compareResult && compareResult.comparable && (
+        <div className="compareResults">
+          {/* Config Differences */}
+          <div className="compareSection">
+            <h3>Config Differences ({config?.different?.length || 0} changed)</h3>
+            {config?.different?.length > 0 && (
+              <table className="compareTable">
+                <thead>
+                  <tr>
+                    <th>Setting</th>
+                    <th>Job A</th>
+                    <th>Job B</th>
+                    <th>Note</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {config.different.map((item) => (
+                    <tr key={item.key}>
+                      <td className="mono">{item.key}</td>
+                      <td>{item.value_a === null ? "—" : String(item.value_a)}</td>
+                      <td>{item.value_b === null ? "—" : String(item.value_b)}</td>
+                      <td className="compareNote">{item.note || ""}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+            {config?.different?.length === 0 && <p>No differing settings found.</p>}
+
+            <button className="secondaryButton compareToggle" onClick={() => setShowIdentical(!showIdentical)}>
+              {showIdentical ? "Hide" : "Show"} identical settings ({config?.identical?.length || 0})
+            </button>
+            {showIdentical && config?.identical?.length > 0 && (
+              <table className="compareTable identicalTable">
+                <thead>
+                  <tr>
+                    <th>Setting</th>
+                    <th>Value (both jobs)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {config.identical.map((item) => (
+                    <tr key={item.key}>
+                      <td className="mono">{item.key}</td>
+                      <td>{String(item.value)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+
+          {/* Metrics Comparison */}
+          <div className="compareSection">
+            <h3>Metrics Comparison ({metrics.length} metrics)</h3>
+            {metrics.length > 0 ? (
+              <table className="compareTable">
+                <thead>
+                  <tr>
+                    <th>Metric</th>
+                    <th>Job A (latest)</th>
+                    <th>Job B (latest)</th>
+                    <th>Diff</th>
+                    <th>Note</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {metrics.map((metric) => (
+                    <tr key={metric.name} className={!metric.comparable ? "nonComparable" : ""}>
+                      <td className="mono">{metric.name}</td>
+                      <td>
+                        {metric.value_a !== null ? String(metric.value_a) : "—"}
+                        {metric.step_a !== null && <span className="stepLabel"> @{metric.step_a}</span>}
+                      </td>
+                      <td>
+                        {metric.value_b !== null ? String(metric.value_b) : "—"}
+                        {metric.step_b !== null && <span className="stepLabel"> @{metric.step_b}</span>}
+                      </td>
+                      <td className={metric.diff !== null && metric.diff < 0 ? "diffPositive" : metric.diff !== null && metric.diff > 0 ? "diffNegative" : ""}>
+                        {metric.diff !== null ? (metric.diff > 0 ? "+" : "") + metric.diff : "—"}
+                      </td>
+                      <td className="compareNote">{metric.note || ""}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : (
+              <p>No metrics available for either job.</p>
+            )}
+          </div>
+
+          {/* Timing Comparison */}
+          <div className="compareSection">
+            <h3>Timing Comparison</h3>
+            <table className="compareTable">
+              <thead>
+                <tr>
+                  <th>Metric</th>
+                  <th>Job A</th>
+                  <th>Job B</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Steps completed</td>
+                  <td>{timing.job_a?.total_steps ?? "—"}</td>
+                  <td>{timing.job_b?.total_steps ?? "—"}</td>
+                </tr>
+                <tr>
+                  <td>Avg total / step</td>
+                  <td>{timing.job_a?.avg_total_s != null ? `${timing.job_a.avg_total_s}s` : "—"}</td>
+                  <td>{timing.job_b?.avg_total_s != null ? `${timing.job_b.avg_total_s}s` : "—"}</td>
+                </tr>
+                <tr>
+                  <td>Avg rollout / step</td>
+                  <td>{timing.job_a?.avg_rollout_s != null ? `${timing.job_a.avg_rollout_s}s` : "—"}</td>
+                  <td>{timing.job_b?.avg_rollout_s != null ? `${timing.job_b.avg_rollout_s}s` : "—"}</td>
+                </tr>
+                <tr>
+                  <td>Avg train / step</td>
+                  <td>{timing.job_a?.avg_train_s != null ? `${timing.job_a.avg_train_s}s` : "—"}</td>
+                  <td>{timing.job_b?.avg_train_s != null ? `${timing.job_b.avg_train_s}s` : "—"}</td>
+                </tr>
+                <tr>
+                  <td>Avg other / step</td>
+                  <td>{timing.job_a?.avg_other_s != null ? `${timing.job_a.avg_other_s}s` : "—"}</td>
+                  <td>{timing.job_b?.avg_other_s != null ? `${timing.job_b.avg_other_s}s` : "—"}</td>
+                </tr>
+                <tr>
+                  <td>Total duration</td>
+                  <td>{timing.job_a?.duration_s != null ? `${timing.job_a.duration_s}s` : "—"}</td>
+                  <td>{timing.job_b?.duration_s != null ? `${timing.job_b.duration_s}s` : "—"}</td>
+                </tr>
+              </tbody>
+            </table>
+
+            {timing.job_a?.note && <div className="compareNote">{timing.job_a.note}</div>}
+            {timing.job_b?.note && <div className="compareNote">{timing.job_b.note}</div>}
+            {timing.comparison?.note && <div className="notice compareWarning">{timing.comparison.note}</div>}
+            {timing.comparison?.avg_total_diff_s != null && (
+              <div className="compareSummary">
+                Step time difference: <strong>{timing.comparison.avg_total_diff_s > 0 ? "+" : ""}{timing.comparison.avg_total_diff_s}s</strong> per step
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </section>
+  );
 }
 
 export { App, MetricChart, metricNamesFrom, resolveActiveMetricName };

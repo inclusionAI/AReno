@@ -515,6 +515,214 @@ class DashboardState:
         points.sort(key=lambda point: int(point.get("step") or 0))
         return points[-max(1, min(limit, 5000)) :]
 
+    # -- Compare two jobs ---------------------------------------------------
+
+    # Fields extracted from launch_config for side-by-side comparison.
+    COMPARE_CONFIG_KEYS = [
+        "algo", "ckpt", "model_hub", "world_size", "tp_size",
+        "batch_size", "mini_bs", "n_samples", "max_new_tokens",
+        "max_prompt_tokens", "max_context_len", "max_running_prompts",
+        "lr", "min_lr", "lr_decay_style", "weight_decay", "grad_clip_norm",
+        "attn_backend", "dataset_path", "dataset_loader_fn", "reward_fn_path",
+        "agent_fn", "epochs", "max_steps", "save_path", "save_interval",
+        "drop_rollout_state", "adam_8bit", "greedy", "temperature",
+    ]
+
+    # Keys that are only meaningful for RL algorithms (gspo, grpo, ppo).
+    RL_ONLY_KEYS = {"n_samples", "reward_fn_path", "agent_fn", "drop_rollout_state"}
+
+    def compare_jobs(self, job_a_id: str | None, job_b_id: str | None) -> dict[str, Any]:
+        """Compare two jobs and return a structured side-by-side comparison."""
+
+        # -- validation ---------------------------------------------------
+        if not job_a_id or not job_b_id:
+            raise ValueError("job_a and job_b are required")
+
+        job_a = self.get_job(job_a_id)
+        job_b = self.get_job(job_b_id)
+
+        if job_a is None:
+            raise ValueError(f"job {job_a_id} not found")
+        if job_b is None:
+            raise ValueError(f"job {job_b_id} not found")
+
+        # -- summary info -------------------------------------------------
+        def _job_summary(job: Job) -> dict[str, Any]:
+            return {
+                "id": job.id,
+                "name": job.name,
+                "status": job.status,
+                "step": job.step,
+                "kind": job.kind,
+                "created_at": job.created_at,
+                "updated_at": job.updated_at,
+            }
+
+        result: dict[str, Any] = {
+            "job_a": _job_summary(job_a),
+            "job_b": _job_summary(job_b),
+            "comparable": True,
+            "reason": None,
+        }
+
+        if job_a_id == job_b_id:
+            result["comparable"] = False
+            result["reason"] = "same job"
+            result["config"] = {"identical": [], "different": []}
+            result["metrics"] = []
+            result["timing"] = {}
+            return result
+
+        # -- config comparison -------------------------------------------
+        config_a = dict(job_a.launch_config or job_a.config or {})
+        config_b = dict(job_b.launch_config or job_b.config or {})
+        algo_a = str(config_a.get("algo", "")).lower()
+        algo_b = str(config_b.get("algo", "")).lower()
+
+        identical: list[dict[str, Any]] = []
+        different: list[dict[str, Any]] = []
+
+        for key in self.COMPARE_CONFIG_KEYS:
+            val_a = config_a.get(key)
+            val_b = config_b.get(key)
+
+            # Skip if both are None/empty.
+            if val_a in (None, "") and val_b in (None, ""):
+                continue
+
+            if val_a == val_b:
+                identical.append({"key": key, "value": val_a})
+            else:
+                note = None
+                # Explain RL-only fields when one side is SFT.
+                if key in self.RL_ONLY_KEYS:
+                    if algo_a in {"sft", "dpo"} and val_a in (None, ""):
+                        note = f"only applicable to RL algorithms; job A uses {algo_a}"
+                    elif algo_b in {"sft", "dpo"} and val_b in (None, ""):
+                        note = f"only applicable to RL algorithms; job B uses {algo_b}"
+                different.append({
+                    "key": key,
+                    "value_a": val_a if val_a not in (None, "") else None,
+                    "value_b": val_b if val_b not in (None, "") else None,
+                    "note": note,
+                })
+
+        result["config"] = {"identical": identical, "different": different}
+
+        # -- metrics comparison ------------------------------------------
+        summaries_a = {item["name"]: item for item in self.metric_summaries(job_a_id)}
+        summaries_b = {item["name"]: item for item in self.metric_summaries(job_b_id)}
+        all_metric_names = sorted(set(summaries_a) | set(summaries_b))
+
+        metrics_comparison: list[dict[str, Any]] = []
+        for name in all_metric_names:
+            sa = summaries_a.get(name)
+            sb = summaries_b.get(name)
+            entry: dict[str, Any] = {
+                "name": name,
+                "value_a": None, "step_a": None,
+                "value_b": None, "step_b": None,
+                "diff": None, "comparable": False, "note": None,
+            }
+            if sa:
+                entry["value_a"] = sa["latest_value"]
+                entry["step_a"] = sa["latest_step"]
+            if sb:
+                entry["value_b"] = sb["latest_value"]
+                entry["step_b"] = sb["latest_step"]
+
+            if sa and sb:
+                entry["comparable"] = True
+                try:
+                    entry["diff"] = round(float(sa["latest_value"]) - float(sb["latest_value"]), 6)
+                except (TypeError, ValueError):
+                    entry["diff"] = None
+            elif sa and not sb:
+                entry["note"] = f"metric only in job A ({algo_a})"
+            elif sb and not sa:
+                entry["note"] = f"metric only in job B ({algo_b})"
+
+            metrics_comparison.append(entry)
+
+        result["metrics"] = metrics_comparison
+
+        # -- timing comparison -------------------------------------------
+        def _timing_stats(job: Job) -> dict[str, Any]:
+            # Duration is computed independently of timeperf entries.
+            duration = None
+            try:
+                created = dt.datetime.fromisoformat(job.created_at)
+                updated = dt.datetime.fromisoformat(job.updated_at)
+                duration = round((updated - created).total_seconds(), 1)
+            except Exception:
+                pass
+
+            timeperf = job.timeperf or []
+            if not timeperf:
+                return {
+                    "latest_step": job.step,
+                    "total_steps": 0,
+                    "avg_rollout_s": None,
+                    "avg_train_s": None,
+                    "avg_other_s": None,
+                    "avg_total_s": None,
+                    "duration_s": duration,
+                    "note": "no timing data available",
+                }
+            rollout_vals = [r.get("rollout_s", 0) for r in timeperf if r.get("rollout_s")]
+            train_vals = [r.get("train_s", 0) for r in timeperf if r.get("train_s")]
+            other_vals = [r.get("other_s", 0) for r in timeperf if r.get("other_s")]
+            total_vals = [r.get("total_s", 0) for r in timeperf if r.get("total_s")]
+
+            def _avg(vals: list) -> float | None:
+                return round(sum(vals) / len(vals), 2) if vals else None
+
+            return {
+                "latest_step": max(r.get("step", 0) for r in timeperf),
+                "total_steps": len(timeperf),
+                "avg_rollout_s": _avg(rollout_vals),
+                "avg_train_s": _avg(train_vals),
+                "avg_other_s": _avg(other_vals),
+                "avg_total_s": _avg(total_vals),
+                "duration_s": duration,
+                "note": None,
+            }
+
+        timing_a = _timing_stats(job_a)
+        timing_b = _timing_stats(job_b)
+
+        # Add notes for non-comparable timing.
+        if timing_a["avg_rollout_s"] is None and algo_a in {"sft", "dpo"}:
+            timing_a["note"] = f"rollout timing N/A for {algo_a}"
+        if timing_b["avg_rollout_s"] is None and algo_b in {"sft", "dpo"}:
+            timing_b["note"] = f"rollout timing N/A for {algo_b}"
+
+        # Compute timing comparison.
+        steps_diff = timing_a["total_steps"] - timing_b["total_steps"]
+        comparison_note = None
+        if abs(steps_diff) > 3:
+            comparison_note = (
+                f"job A ran {timing_a['total_steps']} steps, "
+                f"job B ran {timing_b['total_steps']} steps; "
+                "timing comparison may be less reliable"
+            )
+
+        avg_total_diff = None
+        if timing_a["avg_total_s"] is not None and timing_b["avg_total_s"] is not None:
+            avg_total_diff = round(timing_a["avg_total_s"] - timing_b["avg_total_s"], 2)
+
+        result["timing"] = {
+            "job_a": timing_a,
+            "job_b": timing_b,
+            "comparison": {
+                "avg_total_diff_s": avg_total_diff,
+                "steps_diff": steps_diff,
+                "note": comparison_note,
+            },
+        }
+
+        return result
+
     def scan_registered_jobs(self) -> None:
         registry_jobs = registered_job_items()
         if not registry_jobs:
@@ -1489,6 +1697,14 @@ class Handler(BaseHTTPRequestHandler):
             path = self.route_path()
             if path == "/api/env":
                 self.json(runtime_env())
+            elif path == "/api/compare":
+                query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+                job_a_id = (query.get("job_a") or [None])[0]
+                job_b_id = (query.get("job_b") or [None])[0]
+                try:
+                    self.json(STATE.compare_jobs(job_a_id, job_b_id))
+                except ValueError as exc:
+                    self.error(str(exc), HTTPStatus.BAD_REQUEST)
             elif path == "/api/jobs":
                 self.json({"jobs": STATE.list_jobs()})
             elif path.startswith("/api/jobs/") and path.endswith("/metrics"):

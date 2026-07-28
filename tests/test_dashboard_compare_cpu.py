@@ -1,0 +1,435 @@
+"""CPU tests for the dashboard compare-two-runs feature.
+
+These tests do not require a GPU.  They build deterministic ``Job`` fixtures
+with mock metrics and timeperf, then call :meth:`DashboardState.compare_jobs`
+directly.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from areno.dashboard.server import DashboardState, Job
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+def _make_job(
+    job_id: str,
+    algo: str = "gspo",
+    ckpt: str = "Qwen/Qwen3.5-0.8B",
+    step: int = 0,
+    metrics: list[dict] | None = None,
+    timeperf: list[dict] | None = None,
+    extra_config: dict | None = None,
+) -> Job:
+    """Create a deterministic Job for testing."""
+    config = {
+        "algo": algo,
+        "ckpt": ckpt,
+        "world_size": 2,
+        "tp_size": 2,
+        "batch_size": 2,
+        "n_samples": 4,
+        "lr": 1e-06,
+    }
+    if extra_config:
+        config.update(extra_config)
+
+    job = Job(
+        kind="train",
+        name=f"train {algo} {ckpt}",
+        command=["areno", "train", "--algo", algo, "--ckpt", ckpt],
+        config=config,
+        metrics_dir=None,
+    )
+    job.id = job_id
+    job.launch_config = dict(config)
+    job.config = dict(config)
+    job.status = "exited"
+    job.step = step
+    job.metrics = metrics or []
+    job.timeperf = timeperf or []
+    return job
+
+
+def _state_with_jobs(jobs: list[Job]) -> DashboardState:
+    """Create a DashboardState with pre-populated jobs (no file I/O)."""
+    state = DashboardState()
+    state.jobs = {job.id: job for job in jobs}
+    return state
+
+
+# ---------------------------------------------------------------------------
+# Success paths
+# ---------------------------------------------------------------------------
+
+class TestCompareSuccess:
+    """Tests for the happy path with two comparable jobs."""
+
+    def test_compare_two_normal_jobs(self):
+        """Two GSPO jobs with different config and metrics produce a correct diff."""
+        job_a = _make_job(
+            "job-a", algo="gspo", step=13,
+            metrics=[
+                {"name": "loss", "value": 0.65, "step": 13, "time": "t"},
+                {"name": "reward_mean", "value": 0.324, "step": 13, "time": "t"},
+            ],
+            timeperf=[
+                {"step": i, "rollout_s": 37.0, "train_s": 14.5, "other_s": 0.0, "total_s": 51.5, "time": "t"}
+                for i in range(14)
+            ],
+            extra_config={"n_samples": 4, "max_new_tokens": 1024},
+        )
+        job_b = _make_job(
+            "job-b", algo="gspo", step=11,
+            metrics=[
+                {"name": "loss", "value": 0.80, "step": 11, "time": "t"},
+                {"name": "reward_mean", "value": 0.45, "step": 11, "time": "t"},
+            ],
+            timeperf=[
+                {"step": i, "rollout_s": 36.6, "train_s": 13.7, "other_s": 0.1, "total_s": 50.4, "time": "t"}
+                for i in range(12)
+            ],
+            extra_config={"n_samples": 4, "max_new_tokens": 512},
+        )
+        state = _state_with_jobs([job_a, job_b])  # noqa: F841
+        state = _state_with_jobs([job_a, job_b])
+        result = state.compare_jobs("job-a", "job-b")
+
+        assert result["comparable"] is True
+        assert result["job_a"]["id"] == "job-a"
+        assert result["job_b"]["id"] == "job-b"
+
+        # Config: max_new_tokens differs.
+        diff_keys = {item["key"]: item for item in result["config"]["different"]}
+        assert "max_new_tokens" in diff_keys
+        assert diff_keys["max_new_tokens"]["value_a"] == 1024
+        assert diff_keys["max_new_tokens"]["value_b"] == 512
+
+        # Config: ckpt is identical.
+        identical_keys = {item["key"] for item in result["config"]["identical"]}
+        assert "ckpt" in identical_keys
+        assert "algo" in identical_keys
+
+        # Metrics: loss diff and reward_mean diff.
+        metrics_by_name = {m["name"]: m for m in result["metrics"]}
+        assert "loss" in metrics_by_name
+        assert metrics_by_name["loss"]["comparable"] is True
+        assert metrics_by_name["loss"]["diff"] == round(0.65 - 0.80, 6)
+        assert metrics_by_name["reward_mean"]["comparable"] is True
+
+        # Timing.
+        assert result["timing"]["job_a"]["total_steps"] == 14
+        assert result["timing"]["job_b"]["total_steps"] == 12
+        assert result["timing"]["comparison"]["steps_diff"] == 2
+
+    def test_compare_gspo_vs_sft(self):
+        """GSPO vs SFT: RL-only fields get notes, no reward metrics on SFT side."""
+        job_a = _make_job(
+            "gspo-job", algo="gspo", step=5,
+            metrics=[{"name": "reward_mean", "value": 0.5, "step": 5, "time": "t"}],
+            timeperf=[
+                {"step": i, "rollout_s": 10.0, "train_s": 5.0, "other_s": 0.0, "total_s": 15.0, "time": "t"}
+                for i in range(6)
+            ],
+        )
+        job_b = _make_job(
+            "sft-job", algo="sft", step=5,
+            metrics=[{"name": "loss", "value": 1.2, "step": 5, "time": "t"}],
+            timeperf=[
+                {"step": i, "rollout_s": 0.0, "train_s": 20.0, "other_s": 0.0, "total_s": 20.0, "time": "t"}
+                for i in range(6)
+            ],
+            extra_config={"n_samples": None, "reward_fn_path": None},
+        )
+        state = _state_with_jobs([job_a, job_b])
+        result = state.compare_jobs("gspo-job", "sft-job")
+
+        # Config: algo differs, RL-only fields have notes.
+        diff_keys = {item["key"]: item for item in result["config"]["different"]}
+        assert diff_keys["algo"]["value_a"] == "gspo"
+        assert diff_keys["algo"]["value_b"] == "sft"
+
+        # n_samples should be in different with a note for SFT.
+        if "n_samples" in diff_keys:
+            assert diff_keys["n_samples"]["note"] is not None
+            assert "sft" in diff_keys["n_samples"]["note"].lower()
+
+        # Metrics: reward_mean only in gspo.
+        metrics_by_name = {m["name"]: m for m in result["metrics"]}
+        assert "reward_mean" in metrics_by_name
+        assert metrics_by_name["reward_mean"]["comparable"] is False
+        assert metrics_by_name["reward_mean"]["note"] is not None
+
+        # Timing: rollout for SFT is null.
+        assert result["timing"]["job_b"]["avg_rollout_s"] is None
+
+    def test_compare_identical_config(self):
+        """Two jobs with the same config: all compared fields in identical."""
+        job_a = _make_job("a", algo="sft", step=5)
+        job_b = _make_job("b", algo="sft", step=10)
+        state = _state_with_jobs([job_a, job_b])
+        result = state.compare_jobs("a", "b")
+
+        assert len(result["config"]["different"]) == 0
+        assert len(result["config"]["identical"]) > 0
+
+
+# ---------------------------------------------------------------------------
+# Invalid inputs
+# ---------------------------------------------------------------------------
+
+class TestCompareInvalid:
+    """Tests for invalid inputs that should raise ValueError."""
+
+    def test_compare_missing_job_a(self):
+        state = _state_with_jobs([])
+        with pytest.raises(ValueError, match="job_a and job_b are required"):
+            state.compare_jobs(None, "some-id")
+
+    def test_compare_missing_job_b(self):
+        state = _state_with_jobs([])
+        with pytest.raises(ValueError, match="job_a and job_b are required"):
+            state.compare_jobs("some-id", None)
+
+    def test_compare_nonexistent_job(self):
+        job = _make_job("real-job")
+        state = _state_with_jobs([job])
+        with pytest.raises(ValueError, match="not found"):
+            state.compare_jobs("real-job", "fake-job")
+
+
+# ---------------------------------------------------------------------------
+# Boundary / edge cases
+# ---------------------------------------------------------------------------
+
+class TestCompareBoundary:
+    """Tests for boundary conditions."""
+
+    def test_compare_same_job(self):
+        """Comparing a job with itself returns comparable=False."""
+        job = _make_job("solo", step=5)
+        state = _state_with_jobs([job])
+        result = state.compare_jobs("solo", "solo")
+
+        assert result["comparable"] is False
+        assert result["reason"] == "same job"
+
+    def test_compare_no_metrics(self):
+        """Both jobs have zero metrics: empty metrics list, not error."""
+        job_a = _make_job("a", step=0)
+        job_b = _make_job("b", step=0)
+        state = _state_with_jobs([job_a, job_b])
+        result = state.compare_jobs("a", "b")
+
+        assert result["metrics"] == []
+
+    def test_compare_unequal_steps_with_note(self):
+        """Jobs with very different step counts get a reliability note."""
+        job_a = _make_job(
+            "a", step=10,
+            timeperf=[{"step": i, "rollout_s": 10.0, "train_s": 5.0, "other_s": 0.0, "total_s": 15.0, "time": "t"} for i in range(11)],
+        )
+        job_b = _make_job(
+            "b", step=3,
+            timeperf=[{"step": i, "rollout_s": 8.0, "train_s": 4.0, "other_s": 0.0, "total_s": 12.0, "time": "t"} for i in range(4)],
+        )
+        state = _state_with_jobs([job_a, job_b])
+        result = state.compare_jobs("a", "b")
+
+        assert result["timing"]["comparison"]["steps_diff"] == 7
+        assert result["timing"]["comparison"]["note"] is not None
+        assert "less reliable" in result["timing"]["comparison"]["note"].lower()
+
+    def test_compare_no_timeperf(self):
+        """Job with no timeperf: timing shows nulls with note."""
+        job_a = _make_job("a", step=5, timeperf=[])
+        job_b = _make_job("b", step=10, timeperf=[])
+        state = _state_with_jobs([job_a, job_b])
+        result = state.compare_jobs("a", "b")
+
+        assert result["timing"]["job_a"]["total_steps"] == 0
+        assert result["timing"]["job_a"]["avg_total_s"] is None
+        assert result["timing"]["job_a"]["note"] == "no timing data available"
+
+    def test_compare_empty_config(self):
+        """Job with empty config: config section handles missing fields."""
+        job_a = Job(kind="train", name="empty-a", command=[], config={}, metrics_dir=None)
+        job_a.id = "empty-a"
+        job_a.status = "exited"
+        job_a.launch_config = {}
+
+        job_b = Job(kind="train", name="empty-b", command=[], config={}, metrics_dir=None)
+        job_b.id = "empty-b"
+        job_b.status = "exited"
+        job_b.launch_config = {}
+
+        state = _state_with_jobs([job_a, job_b])
+        result = state.compare_jobs("empty-a", "empty-b")
+
+        assert result["comparable"] is True
+        assert result["config"]["identical"] == []
+        assert result["config"]["different"] == []
+
+
+# ---------------------------------------------------------------------------
+# Active-run and backward-compatibility tests
+# ---------------------------------------------------------------------------
+
+class TestCompareActiveAndCompat:
+    """Tests for active (running) jobs and backward compatibility."""
+
+    def test_compare_active_running_jobs(self):
+        """Comparing two running jobs should work (active writes scenario)."""
+        job_a = _make_job("a", algo="gspo", step=3,
+            metrics=[{"name": "loss", "value": 1.2, "step": 3, "time": "t"}],
+            timeperf=[{"step": i, "rollout_s": 10.0, "train_s": 5.0, "other_s": 0.0, "total_s": 15.0, "time": "t"} for i in range(4)],
+        )
+        job_a.status = "running"
+        job_a.stage = "rollout"
+
+        job_b = _make_job("b", algo="gspo", step=2,
+            metrics=[{"name": "loss", "value": 1.5, "step": 2, "time": "t"}],
+            timeperf=[{"step": i, "rollout_s": 12.0, "train_s": 6.0, "other_s": 0.0, "total_s": 18.0, "time": "t"} for i in range(3)],
+        )
+        job_b.status = "running"
+        job_b.stage = "train"
+
+        state = _state_with_jobs([job_a, job_b])
+        result = state.compare_jobs("a", "b")
+
+        assert result["comparable"] is True
+        assert result["job_a"]["status"] == "running"
+        assert result["job_b"]["status"] == "running"
+        # Metrics should still be compared even when jobs are active.
+        metrics_by_name = {m["name"]: m for m in result["metrics"]}
+        assert "loss" in metrics_by_name
+        assert metrics_by_name["loss"]["comparable"] is True
+
+    def test_compare_duration_calculated(self):
+        """Duration is computed from created_at and updated_at."""
+        job_a = _make_job("a", step=5,
+            timeperf=[{"step": 0, "rollout_s": 10.0, "train_s": 5.0, "other_s": 0.0, "total_s": 15.0, "time": "t"}],
+        )
+        job_a.created_at = "2026-07-28T10:00:00+00:00"
+        job_a.updated_at = "2026-07-28T10:05:00+00:00"
+
+        job_b = _make_job("b", step=5,
+            timeperf=[{"step": 0, "rollout_s": 12.0, "train_s": 6.0, "other_s": 0.0, "total_s": 18.0, "time": "t"}],
+        )
+        job_b.created_at = "2026-07-28T10:00:00+00:00"
+        job_b.updated_at = "2026-07-28T10:10:00+00:00"
+
+        state = _state_with_jobs([job_a, job_b])
+        result = state.compare_jobs("a", "b")
+
+        assert result["timing"]["job_a"]["duration_s"] == 300.0
+        assert result["timing"]["job_b"]["duration_s"] == 600.0
+
+    def test_existing_behavior_unchanged(self):
+        """When compare is not invoked, existing methods work identically."""
+        job_a = _make_job("a", step=5,
+            metrics=[{"name": "loss", "value": 0.5, "step": 5, "time": "t"}],
+            timeperf=[{"step": i, "rollout_s": 10.0, "train_s": 5.0, "other_s": 0.0, "total_s": 15.0, "time": "t"} for i in range(6)],
+        )
+        job_b = _make_job("b", step=3)
+        state = _state_with_jobs([job_a, job_b])
+
+        # Existing API methods should produce the same results as before.
+        summaries = state.metric_summaries("a")
+        assert len(summaries) == 1
+        assert summaries[0]["name"] == "loss"
+
+        series = state.metric_series("a", "loss")
+        assert len(series) == 1
+
+        job_list = state.list_jobs()
+        assert len(job_list) == 2
+
+        job = state.get_job("a")
+        assert job is not None
+        assert job.id == "a"
+
+        # get_job for nonexistent returns None (not an exception).
+        assert state.get_job("nonexistent") is None
+
+
+# ---------------------------------------------------------------------------
+# CLI compare command tests
+# ---------------------------------------------------------------------------
+
+class TestCompareCLI:
+    """Tests for the `areno compare` CLI command."""
+
+    def test_cli_compare_human_format(self, monkeypatch):
+        """CLI produces human-readable output by default."""
+        from click.testing import CliRunner
+        from areno.cli.compare import compare_command
+
+        job_a = _make_job("a", algo="gspo", step=5,
+            metrics=[{"name": "loss", "value": 0.65, "step": 5, "time": "t"}],
+        )
+        job_b = _make_job("b", algo="sft", step=5,
+            metrics=[{"name": "loss", "value": 0.80, "step": 5, "time": "t"}],
+        )
+
+        original_init = DashboardState.__init__
+        def _mock_init(self, *args, **kwargs):
+            original_init(self, *args, **kwargs)
+            self.jobs = {"a": job_a, "b": job_b}
+        monkeypatch.setattr("areno.dashboard.server.DashboardState.__init__", _mock_init)
+        monkeypatch.setattr("areno.cli.compare._try_dashboard_api", lambda *a: None)
+
+        runner = CliRunner()
+        result = runner.invoke(compare_command, ["--job-a", "a", "--job-b", "b"])
+        assert result.exit_code == 0
+        assert "Job A" in result.output
+        assert "Job B" in result.output
+        assert "loss" in result.output
+
+    def test_cli_compare_json_format(self, monkeypatch):
+        """CLI produces structured JSON with --format json."""
+        from click.testing import CliRunner
+        from areno.cli.compare import compare_command
+
+        job_a = _make_job("a", algo="gspo", step=3)
+        job_b = _make_job("b", algo="sft", step=3)
+
+        original_init = DashboardState.__init__
+        def _mock_init(self, *args, **kwargs):
+            original_init(self, *args, **kwargs)
+            self.jobs = {"a": job_a, "b": job_b}
+        monkeypatch.setattr("areno.dashboard.server.DashboardState.__init__", _mock_init)
+        monkeypatch.setattr("areno.cli.compare._try_dashboard_api", lambda *a: None)
+
+        runner = CliRunner()
+        result = runner.invoke(compare_command, ["--job-a", "a", "--job-b", "b", "--format", "json"])
+        assert result.exit_code == 0
+        import json as _json
+        # Strip any stderr lines that CliRunner may mix into output.
+        output_lines = [line for line in result.output.strip().splitlines() if not line.startswith("dashboard")]
+        parsed = _json.loads("\n".join(output_lines))
+        assert parsed["comparable"] is True
+        assert parsed["job_a"]["id"] == "a"
+
+    def test_cli_compare_invalid_job(self, monkeypatch):
+        """CLI exits with error for non-existent job."""
+        from click.testing import CliRunner
+        from areno.cli.compare import compare_command
+
+        original_init = DashboardState.__init__
+        def _mock_init(self, *args, **kwargs):
+            original_init(self, *args, **kwargs)
+            self.jobs = {}
+        monkeypatch.setattr("areno.dashboard.server.DashboardState.__init__", _mock_init)
+        monkeypatch.setattr("areno.cli.compare._try_dashboard_api", lambda *a: None)
+
+        runner = CliRunner()
+        result = runner.invoke(compare_command, ["--job-a", "x", "--job-b", "y"])
+        assert result.exit_code != 0

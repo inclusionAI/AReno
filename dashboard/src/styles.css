@@ -2094,3 +2094,152 @@ textarea:focus {
     text-align: left;
   }
 }
+
+/* ---------- Compare Two Runs ---------- */
+
+.compareSelector {
+  display: flex;
+  align-items: flex-end;
+  gap: 16px;
+  margin-bottom: 20px;
+  flex-wrap: wrap;
+}
+
+.compareSelectGroup {
+  flex: 1;
+  min-width: 200px;
+}
+
+.compareSelectGroup label {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 6px;
+  color: var(--text-secondary);
+}
+
+.compareSelectGroup select {
+  width: 100%;
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 14px;
+}
+
+.primaryButton {
+  padding: 9px 20px;
+  border-radius: 8px;
+  border: none;
+  background: #4f8cff;
+  color: #fff;
+  font-weight: 600;
+  cursor: pointer;
+  font-size: 14px;
+  white-space: nowrap;
+}
+
+.primaryButton:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.primaryButton:not(:disabled):hover {
+  background: #3a78f0;
+}
+
+.compareResults {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.compareSection h3 {
+  font-size: 15px;
+  font-weight: 700;
+  margin-bottom: 12px;
+  color: var(--text);
+}
+
+.compareTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  margin-bottom: 12px;
+}
+
+.compareTable th,
+.compareTable td {
+  padding: 8px 12px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+
+.compareTable th {
+  font-weight: 600;
+  color: var(--text-secondary);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.compareTable .mono {
+  font-family: var(--mono-font, "SF Mono", "Fira Code", monospace);
+  font-size: 12px;
+}
+
+.compareTable .stepLabel {
+  color: var(--text-tertiary, #999);
+  font-size: 11px;
+  margin-left: 4px;
+}
+
+.compareTable tr.nonComparable td {
+  opacity: 0.6;
+}
+
+.diffPositive {
+  color: #2d8f4f;
+  font-weight: 600;
+}
+
+.diffNegative {
+  color: #d44;
+  font-weight: 600;
+}
+
+.compareNote {
+  font-size: 12px;
+  color: var(--text-tertiary, #999);
+  font-style: italic;
+}
+
+.identicalTable {
+  opacity: 0.7;
+  margin-top: 8px;
+}
+
+.compareToggle {
+  margin-top: 8px;
+  font-size: 13px;
+}
+
+.compareWarning {
+  margin-top: 8px;
+  font-size: 13px;
+}
+
+.compareSummary {
+  margin-top: 12px;
+  padding: 10px 14px;
+  background: var(--surface);
+  border-radius: 8px;
+  font-size: 14px;
+}
+
+.errorNotice {
+  background: #fef3f3;
+  color: #d44;
+  border: 1px solid #f0c0c0;
+}
