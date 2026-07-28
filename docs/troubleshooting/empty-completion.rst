@@ -113,6 +113,34 @@ The policy is stored in ``RolloutTrainerConfig`` and inherited by
        empty_completion_policy="filter",  # "off" (default) or "filter"
    )
 
+Limitations
+~~~~~~~~~~~
+
+* **Rollout only.** The validator inspects completions produced by the model
+  during RL rollout.  It does **not** filter empty or invalid records in
+  supervised datasets (SFT/DPO).  Pre-filter your training data for those
+  algorithms.
+
+* **Quarantine file growth.** The ``empty_completions.jsonl`` file is appended
+  to on every step.  It is not rotated or truncated automatically.  Monitor
+  disk usage for long-running jobs.
+
+* **Special-token classification depends on the tokenizer.** The
+  ``special_token`` check uses ``tokenizer.all_special_ids`` and
+  ``tokenizer.added_tokens_encoder``.  Different tokenizer versions or
+  configurations may expose different special token sets, which can affect
+  whether a completion is classified as ``special_token``.
+
+* **GRPO/GSPO group size.** Filtering reduces the number of completions per
+  prompt group.  If a group shrinks to a single completion,
+  ``compute_group_advantages`` returns zero advantage (std=0), which is
+  numerically safe but eliminates the group-normalization benefit for that
+  prompt.
+
+* **No resample.** The current implementation only supports ``filter``.
+  Bounded regeneration (``resample``) is not yet available and may be added in
+  a future release.
+
 Testing
 ~~~~~~~
 
