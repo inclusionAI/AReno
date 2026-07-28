@@ -288,7 +288,10 @@ def test_train_config_ppo_preserves_reward_ckpt_as_role_checkpoint():
     assert cfg.reward_ckpt == "reward-model"
 
 
-def test_training_config_summary_shows_resolved_values_and_warning():
+def test_training_config_summary_shows_resolved_values_and_warning(monkeypatch):
+    # Keep this general summary fixture deterministic on CPU and GPU runners.
+    # The dedicated fallback test below owns the T4/unsupported-GPU behavior.
+    monkeypatch.setattr(train_cli, "flash_attention_unsupported_gpu_reason", lambda _devices: None)
     cfg = _trainer_config_from_options(
         **_options(
             algo="gspo",
