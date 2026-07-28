@@ -105,12 +105,16 @@ class DiskMonitor:
         filesystem; intermediate calls return ``"ok"`` without I/O.
         """
 
-        if step - self._last_check_step < self._config.check_interval_steps and step > 0:
+        if self._last_check_step >= 0 and (step - self._last_check_step) < self._config.check_interval_steps:
             return "ok"
         self._last_check_step = step
 
         free = _min_free_bytes(self._paths)
         self.last_free_bytes = free
+        logger.info(
+            "disk_space: step=%d free=%.2f GB warn_threshold=%.2f GB stop_threshold=%.2f GB",
+            step, free / 1e9, self._warn_bytes / 1e9, self._stop_bytes / 1e9,
+        )
 
         if free <= self._stop_bytes:
             return "stop"
