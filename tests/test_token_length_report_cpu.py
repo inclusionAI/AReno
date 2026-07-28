@@ -295,5 +295,147 @@ class BackwardCompatibilityTest(unittest.TestCase):
         self.assertEqual(batch.prompts, [item.prompt for item in items])
 
 
+class TokenLengthReportIntegrationTest(unittest.TestCase):
+    """Integration test: load JSONL fixture → tokenize with mock → compute → assert.
+
+    Exercises the full compute pipeline (PromptItem construction →
+    compute_token_length_report → as_dict → JSON serialize) with a tiny
+    deterministic fixture and a mock tokenizer. No real HuggingFace model
+    or GPU required.
+    """
+
+    def _load_fixture(self) -> list[PromptItem]:
+        """Build PromptItems from hand-crafted records with known token lengths.
+
+        Using _MockTokenizer (word-count encoding), the prompt and response
+        token lengths are deterministic:
+
+            prompt tokens:   [2, 4, 6, 8, 3]
+            response tokens: [2, 3, 4, 2, 1]
+            total tokens:    [4, 7, 10, 10, 4]
+        """
+        records = [
+            ("hello world", "yes no"),
+            ("the quick brown fox", "a b c"),
+            ("a b c d e f", "foo bar baz qux"),
+            ("one two three four five six seven eight", "alpha beta"),
+            ("x y z", "p"),
+        ]
+        items = []
+        for prompt_text, answer_text in records:
+            prompt_ids = list(range(len(prompt_text.split())))
+            items.append(
+                PromptItem(
+                    prompt=prompt_text,
+                    solutions=None,
+                    input_tokens=prompt_ids,
+                    record={"answer": answer_text},
+                )
+            )
+        return items
+
+    def test_integration_prompt_and_response_stats(self):
+        """Verify prompt, response, and total length stats with known values."""
+        items = self._load_fixture()
+        tok = _MockTokenizer()
+        report = compute_token_length_report(items, max_context=5, response_field="answer", tokenizer=tok)
+        d = report.as_dict()
+
+        # Prompt lengths: [2, 4, 6, 8, 3]
+        self.assertEqual(d["prompt_stats"]["count"], 5)
+        self.assertEqual(d["prompt_stats"]["min"], 2)
+        self.assertEqual(d["prompt_stats"]["max"], 8)
+
+        # Response lengths: [2, 3, 4, 2, 1]
+        self.assertEqual(d["response_stats"]["min"], 1)
+        self.assertEqual(d["response_stats"]["max"], 4)
+
+        # Total lengths: [4, 7, 10, 10, 4]
+        self.assertEqual(d["total_stats"]["min"], 4)
+        self.assertEqual(d["total_stats"]["max"], 10)
+
+        # Over-context (total > 5): 7, 10, 10 → 3 out of 5 = 60%
+        self.assertEqual(d["over_context_count"], 3)
+        self.assertAlmostEqual(d["over_context_pct"], 60.0, places=1)
+        self.assertEqual(d["retained_under_policy"]["drop"], 2)
+        self.assertEqual(d["retained_under_policy"]["truncate"], 5)
+
+        # Must be JSON-serializable end-to-end
+        json.dumps(d)
+
+    def test_integration_jsonl_file_to_report(self):
+        """Read a real JSONL file, build PromptItems, compute, and verify."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "fixture.jsonl"
+            records = [
+                {"prompt": "hello world", "answer": "yes no"},
+                {"prompt": "the quick brown fox", "answer": "a b c"},
+                {"prompt": "x y z", "answer": "p"},
+            ]
+            with path.open("w", encoding="utf-8") as f:
+                for rec in records:
+                    f.write(json.dumps(rec) + "\n")
+
+            # Load JSONL the same way _run_token_report does
+            tok = _MockTokenizer()
+            items = []
+            with path.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    record = json.loads(line)
+                    prompt_text = record.get("prompt", "")
+                    items.append(
+                        PromptItem(
+                            prompt=prompt_text,
+                            solutions=None,
+                            input_tokens=list(range(len(prompt_text.split()))),
+                            record=record,
+                        )
+                    )
+
+            report = compute_token_length_report(items, max_context=100, response_field="answer", tokenizer=tok)
+            d = report.as_dict()
+
+            self.assertEqual(d["total_samples"], 3)
+            self.assertEqual(d["prompt_stats"]["count"], 3)
+            # prompt lengths: [2, 4, 3]
+            self.assertEqual(d["prompt_stats"]["min"], 2)
+            self.assertEqual(d["prompt_stats"]["max"], 4)
+            # response lengths: [2, 3, 1]
+            self.assertEqual(d["response_stats"]["min"], 1)
+            self.assertEqual(d["response_stats"]["max"], 3)
+
+    def test_integration_boundary_empty_file(self):
+        """An empty JSONL file should produce zero items and raise ValueError."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "empty.jsonl"
+            path.write_text("\n\n\n", encoding="utf-8")
+
+            items = []
+            with path.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    items.append(json.loads(line))
+
+            self.assertEqual(len(items), 0)
+            with self.assertRaisesRegex(ValueError, "empty"):
+                compute_token_length_report(items)
+
+    def test_integration_disabled_by_default(self):
+        """The feature is opt-in — compute_token_length_report is never called
+        unless the user explicitly invokes it. Verify that PromptItem and
+        PromptBatch work normally without the report."""
+        items = self._load_fixture()
+        # Normal usage without report — just build a PromptBatch
+        batch = PromptBatch(items=items, scanned=5, skipped_long=0, total_skipped_long=0)
+        self.assertEqual(len(batch.items), 5)
+        self.assertEqual(batch.prompts[0], "hello world")
+        self.assertEqual(batch.scanned, 5)
+
+
 if __name__ == "__main__":
     unittest.main()
