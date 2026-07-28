@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import argparse
 import fnmatch
 import json
+import pathlib
+import sys
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / "scripts"))
+from areno_skill_sdk import build_parser
 
 
 @dataclass
@@ -18,7 +22,7 @@ class TensorRef:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Compare same-name tensors between two HF safetensors checkpoints.")
+    parser = build_parser("Compare same-name tensors between two HF safetensors checkpoints.")
     parser.add_argument("base", type=Path, help="Reference checkpoint directory.")
     parser.add_argument("other", type=Path, help="Checkpoint directory to compare against the reference.")
     parser.add_argument("--top-k", type=int, default=30, help="Number of largest-difference tensors to print.")

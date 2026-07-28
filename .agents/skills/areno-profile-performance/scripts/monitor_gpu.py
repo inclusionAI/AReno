@@ -3,13 +3,17 @@
 
 from __future__ import annotations
 
-import argparse
 import csv
 import io
 import json
+import pathlib
 import subprocess
+import sys
 import time
 from pathlib import Path
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / "scripts"))
+from areno_skill_sdk import build_parser
 
 GPU_QUERY = "index,uuid,name,utilization.gpu,memory.used,memory.total,power.draw"
 PROCESS_QUERY = "gpu_uuid,pid,process_name,used_gpu_memory"
@@ -84,7 +88,7 @@ def sample(target_pids: set[int]) -> dict:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
+    parser = build_parser("Sample NVIDIA GPU utilization, memory, and target-process residency.")
     parser.add_argument("--pid", type=int, action="append", default=[], help="Target PID; may be repeated")
     parser.add_argument("--no-children", action="store_true", help="Do not include descendants of target PIDs")
     parser.add_argument("--duration", type=float, default=60.0)

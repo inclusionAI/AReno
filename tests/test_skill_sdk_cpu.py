@@ -353,3 +353,35 @@ def test_check_capacity_help_still_works():
     proc = _run(CHECK_CAPACITY, "--help")
     assert proc.returncode == 0
     assert "--batch-size" in proc.stdout
+
+
+# ---------------------------------------------------------------------------
+# P2/P3 migrated scripts: build_parser preserves flags + validation behavior
+# ---------------------------------------------------------------------------
+
+MONITOR_GPU = ROOT / ".agents/skills/areno-profile-performance/scripts/monitor_gpu.py"
+COMPARE_CKPT = ROOT / ".agents/skills/areno-model-adaptation/scripts/compare_ckpt_diff.py"
+
+
+def test_monitor_gpu_help_preserves_flags():
+    proc = _run(MONITOR_GPU, "--help")
+    assert proc.returncode == 0
+    for flag in ("--pid", "--duration", "--interval", "--output", "--no-children"):
+        assert flag in proc.stdout
+    # The description is now wired through build_parser.
+    assert "Sample NVIDIA GPU" in proc.stdout
+
+
+def test_monitor_gpu_invalid_duration_uses_parser_error_exit_code():
+    """Pre-migration behavior: parser.error -> exit 2, message on stderr."""
+    proc = _run(MONITOR_GPU, "--duration", "-1")
+    assert proc.returncode == 2
+    assert "must be positive" in proc.stderr
+
+
+def test_compare_ckpt_diff_help_preserves_positional_and_flags():
+    proc = _run(COMPARE_CKPT, "--help")
+    assert proc.returncode == 0
+    for token in ("base", "other", "--top-k", "--pattern", "--device", "--max-elements"):
+        assert token in proc.stdout
+    assert "Compare same-name tensors" in proc.stdout
