@@ -72,6 +72,7 @@ class TrainerConfig:
     agent_timeout_s: float = 300.0
     train_tool_results: bool = False
     chat_template_enable_thinking: bool | None = None
+    degenerate_policy: str = "skip"
 
     def __post_init__(self) -> None:
         if self.backend is None:
@@ -86,7 +87,7 @@ class TrainerConfig:
             raise ValueError("attn_backend must be one of: flash, native")
         if self.model_hub not in {"hf", "modelscope"}:
             raise ValueError("model_hub must be one of: hf, modelscope")
-        self._validate_multimodal_optimizer_group(
+self._validate_multimodal_optimizer_group(
             "tower",
             self.unfreeze_multimodal_tower,
             self.multimodal_tower_lr,
@@ -102,6 +103,8 @@ class TrainerConfig:
             self.multimodal_projector_lr_decay_steps,
             self.multimodal_projector_lr_decay_style,
         )
+        if self.degenerate_policy not in {"skip", "error"}:
+            raise ValueError("degenerate_policy must be one of: skip, error")
 
     @staticmethod
     def _validate_multimodal_optimizer_group(
@@ -146,6 +149,15 @@ class TrainerConfig:
             "multimodal_projector_lr_decay_steps": self.multimodal_projector_lr_decay_steps,
             "multimodal_projector_lr_decay_style": self.multimodal_projector_lr_decay_style,
         }
+
+def degenerate_filter_config(self):
+        """Build the :class:`DegenerateFilterConfig` for this trainer config."""
+
+        from areno.api.data import DegenerateFilterConfig, DegeneratePolicy
+
+        return DegenerateFilterConfig(
+            policy=DegeneratePolicy.SKIP if self.degenerate_policy == "skip" else DegeneratePolicy.ERROR,
+        )
 
     def backend_type(self):
         """Return the selected execution backend without importing it eagerly."""

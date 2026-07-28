@@ -120,6 +120,7 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "agent_fn",
             "agent_timeout_s",
             "train_tool_results",
+            "degenerate_policy",
             "reward_fn_path",
             "reward_ckpt",
         ),
@@ -587,6 +588,7 @@ def _rollout_summary_rows(config: TrainerConfig) -> list[tuple[str, str]]:
         ("max_prompt_tokens", str(config.max_prompt_tokens)),
         ("max_new_tokens", str(config.max_new_tokens)),
         ("max_context_len", _format_optional(config.max_context_len, default="model limit")),
+        ("degenerate_policy", config.degenerate_policy),
     ]
     if not isinstance(config, RolloutTrainerConfig):
         return [
@@ -842,6 +844,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             chat_template_enable_thinking=chat_template_enable_thinking,
             ref_ckpt=args.ref_ckpt,
             dpo_beta=args.dpo_beta,
+            degenerate_policy=args.degenerate_policy,
         )
     if algorithm.name == "sft":
         return TrainerConfig(
@@ -893,6 +896,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             agent_timeout_s=args.agent_timeout_s,
             train_tool_results=args.train_tool_results,
             chat_template_enable_thinking=chat_template_enable_thinking,
+            degenerate_policy=args.degenerate_policy,
         )
     if algorithm.name != "ppo":
         return PolicyTrainerConfig(
@@ -956,6 +960,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             agent_timeout_s=args.agent_timeout_s,
             train_tool_results=args.train_tool_results,
             chat_template_enable_thinking=chat_template_enable_thinking,
+            degenerate_policy=args.degenerate_policy,
         )
     return PPOTrainerConfig(
         algo=algorithm.name,
@@ -1032,6 +1037,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
         agent_timeout_s=args.agent_timeout_s,
         train_tool_results=args.train_tool_results,
         chat_template_enable_thinking=chat_template_enable_thinking,
+        degenerate_policy=args.degenerate_policy,
     )
 
 
@@ -1147,6 +1153,7 @@ def _training_config_settings(config: TrainerConfig) -> dict:
                 "agent_fn",
                 "agent_timeout_s",
                 "train_tool_results",
+                "degenerate_policy",
                 "reward_fn_path",
                 "reward_ckpt",
             ],
@@ -1636,6 +1643,13 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     "--agent-timeout-s", type=float, default=300.0, show_default=True, help="Agentic rollout proxy request timeout."
 )
 @click.option("--train-tool-results", is_flag=True, help="Include tool-result spans in agentic policy loss.")
+@click.option(
+    "--degenerate-policy",
+    type=click.Choice(["skip", "error"], case_sensitive=False),
+    default="skip",
+    show_default=True,
+    help="Policy for degenerate training samples (empty/whitespace-only/special-tokens-only/no-trainable-tokens/identical-preference-branches). Use 'skip' to silently filter, 'error' to raise.",
+)
 @click.option(
     "--gspo-clip-eps", type=float, default=3.0e-4, show_default=True, help="GSPO sequence-ratio clipping epsilon."
 )

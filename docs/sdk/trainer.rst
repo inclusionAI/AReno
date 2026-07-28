@@ -114,7 +114,7 @@ directly from Python.
 
       :returns: tokenizer object from the selected model path.
 
-   .. py:method:: load_prompt_batches(dataset, *, batch_size, max_prompt_tokens, prompt_key="prompt", solutions_key="solutions")
+   .. py:method:: load_prompt_batches(dataset, *, batch_size, max_prompt_tokens, prompt_key="prompt", solutions_key="solutions", degenerate_config=None)
 
       Yield tokenized prompt batches from a dataset-like object.
 
@@ -128,6 +128,9 @@ directly from Python.
          than this limit.
       :param str prompt_key: Field containing the prompt text.
       :param str solutions_key: Optional field containing reference answers.
+      :param DegenerateFilterConfig | None degenerate_config: Configuration for
+         degenerate sample detection. When ``None``, defaults to enabled with
+         ``SKIP`` policy (backward-compatible).
       :returns: iterable of ``PromptBatch``.
 
       .. code-block:: python

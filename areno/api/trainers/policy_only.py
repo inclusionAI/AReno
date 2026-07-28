@@ -111,6 +111,7 @@ class PolicyOnlyTrainer:
                 self.dataset,
                 batch_size=self.config.batch_size,
                 max_prompt_tokens=self.config.max_prompt_tokens,
+                degenerate_config=self.config.degenerate_filter_config(),
             ):
                 role = self._policy_role_name()
                 self.logger.info("epoch=%d step=%d role=%s stage=rollout_start", epoch, step, role)

@@ -23,6 +23,15 @@ from typing import Any
 
 import areno.api
 from areno.api.dashboard import record_dashboard_state
+from areno.api.data import (
+    DegenerateFilterConfig,
+    apply_degenerate_policy,
+    check_prompt_text,
+    check_response_text,
+    check_trainable_tokens,
+    format_degenerate_reasons,
+    record_degenerate_reason,
+)
 from areno.api.data_utils import prompt_response_to_tokens_and_mask
 from areno.api.multimodal import (
     encode_multimodal_prompt,
@@ -108,8 +117,10 @@ class SFTTrainer:
         # Dataset rows are converted lazily so large HF datasets do not need an
         # up-front tokenized copy. Rows that are empty, all-prompt, or exceed
         # the configured prompt or supervised-response budgets are dropped.
+        degenerate_config = self.config.degenerate_filter_config()
         batch = []
         skipped = 0
+        degenerate_reasons: dict[str, int] = {}
         accepted = 0
         total_rows = len(self.dataset)
         for index in range(total_rows):
@@ -120,6 +131,8 @@ class SFTTrainer:
                 processor,
                 max_prompt_tokens=max_prompt_tokens,
                 max_new_tokens=max_new_tokens,
+                degenerate_config=degenerate_config,
+                degenerate_reasons=degenerate_reasons,
             )
             if seq is None:
                 skipped += 1
@@ -130,12 +143,18 @@ class SFTTrainer:
                 yield batch
                 batch = []
         if skipped:
-            self.logger.info("stage=sft_dataset_filter skipped_long_or_empty=%d", skipped)
+            self.logger.info(
+                "stage=sft_dataset_filter skipped_long_or_empty=%d degenerate_reasons=%s",
+                skipped,
+                format_degenerate_reasons(degenerate_reasons) or "none",
+            )
         if accepted == 0:
+            reason_str = format_degenerate_reasons(degenerate_reasons) or "none"
             raise ValueError(
                 "SFT dataset produced no valid training rows after filtering: "
                 f"scanned {total_rows} row(s), skipped {skipped} as empty, over-budget, or all-prompt examples. "
-                "Check dataset quality, --max-prompt-tokens, and --max-new-tokens."
+                f"Degenerate reasons: {reason_str}. "
+                "Check dataset quality, --max-prompt-tokens, --max-new-tokens, and --degenerate-policy."
             )
         if batch:
             yield batch
@@ -152,13 +171,27 @@ class SFTTrainer:
         record_dashboard_state(self.areno, stage="save_checkpoint_end", epoch=epoch, step=step, role="policy")
 
 
-def _record_to_train_sequence(record: Any, tokenizer, processor=None, *, max_prompt_tokens: int, max_new_tokens: int):
+def _record_to_train_sequence(
+    record: Any,
+    tokenizer,
+    processor=None,
+    *,
+    max_prompt_tokens: int,
+    max_new_tokens: int,
+    degenerate_config: DegenerateFilterConfig | None = None,
+    degenerate_reasons: dict[str, int] | None = None,
+):
     """Normalize one loader-produced SFT row into backend training format.
 
     `prompt_mask=True` means "do not train this source token"; the backend loss
     is next-token aligned, so the loss function later uses positions after the
     prompt prefix. RL-only fields are filled with zeros to satisfy the shared
     `TrainSequence` packing contract.
+
+    When ``degenerate_config`` is provided, pre-tokenization and
+    post-tokenization degeneracy checks are applied. Degenerate samples are
+    skipped or raise depending on the policy, and the reason is recorded in
+    ``degenerate_reasons``.
     """
 
     record = dict(record)
@@ -249,6 +282,20 @@ def _record_to_train_sequence(record: Any, tokenizer, processor=None, *, max_pro
         return None
     prompt = str(record["prompt"])
     response = str(record["response"])
+
+    # --- Pre-tokenization degeneracy checks ---
+    if degenerate_config is not None:
+        report = check_prompt_text(prompt)
+        if apply_degenerate_policy(report, degenerate_config):
+            if degenerate_reasons is not None:
+                record_degenerate_reason(degenerate_reasons, report)
+            return None
+        report = check_response_text(response)
+        if apply_degenerate_policy(report, degenerate_config):
+            if degenerate_reasons is not None:
+                record_degenerate_reason(degenerate_reasons, report)
+            return None
+
     if not response:
         return None
     tokens, prompt_mask = prompt_response_to_tokens_and_mask(prompt, response, tokenizer, eos_token_id)
@@ -259,6 +306,15 @@ def _record_to_train_sequence(record: Any, tokenizer, processor=None, *, max_pro
     response_tokens = prompt_mask[1:].count(False)
     if prompt_tokens > max_prompt_tokens or response_tokens > max_new_tokens or response_tokens == 0:
         return None
+
+    # --- Post-tokenization degeneracy checks ---
+    if degenerate_config is not None:
+        report = check_trainable_tokens(prompt_mask)
+        if apply_degenerate_policy(report, degenerate_config):
+            if degenerate_reasons is not None:
+                record_degenerate_reason(degenerate_reasons, report)
+            return None
+
     zeros = [0.0] * len(tokens)
     # Dummy rollout fields keep the backend packer shared with RL trainers.
     return areno.api.TrainSequence(

@@ -20,6 +20,16 @@ from typing import Any
 
 import areno.api
 from areno.api.dashboard import record_dashboard_state
+from areno.api.data import (
+    DegenerateFilterConfig,
+    apply_degenerate_policy,
+    check_preference_pair,
+    check_prompt_text,
+    check_response_text,
+    check_trainable_tokens,
+    format_degenerate_reasons,
+    record_degenerate_reason,
+)
 from areno.api.data_utils import apply_chat_template, encode_prompt_value, response_to_tokens_and_mask
 from areno.api.roles import ModelRole
 from areno.api.tokenizer import configure_chat_template_enable_thinking
@@ -135,10 +145,18 @@ class DPOTrainer:
     def _iter_train_batches(self, tokenizer, *, max_seq_len: int):
         # `batch_size` counts preference pairs; the emitted train batch has two
         # rows per pair and always preserves chosen/rejected adjacency.
+        degenerate_config = self.config.degenerate_filter_config()
         batch = []
         skipped = 0
+        degenerate_reasons: dict[str, int] = {}
         for index in range(len(self.dataset)):
-            pair = _record_to_train_pair(self.dataset[index], tokenizer, max_seq_len=max_seq_len)
+            pair = _record_to_train_pair(
+                self.dataset[index],
+                tokenizer,
+                max_seq_len=max_seq_len,
+                degenerate_config=degenerate_config,
+                degenerate_reasons=degenerate_reasons,
+            )
             if pair is None:
                 skipped += 1
                 continue
@@ -147,7 +165,17 @@ class DPOTrainer:
                 yield batch
                 batch = []
         if skipped:
-            self.logger.info("stage=dpo_dataset_filter skipped_invalid_or_long=%d", skipped)
+            self.logger.info(
+                "stage=dpo_dataset_filter skipped_invalid_or_long=%d degenerate_reasons=%s",
+                skipped,
+                format_degenerate_reasons(degenerate_reasons) or "none",
+            )
+        if skipped > 0 and not batch:
+            # All pairs were filtered; surface the degenerate reasons.
+            reason_str = format_degenerate_reasons(degenerate_reasons) or "none"
+            self.logger.warning(
+                "DPO dataset produced no valid pairs after filtering; degenerate_reasons=%s", reason_str
+            )
         if batch:
             yield batch
 
@@ -162,7 +190,14 @@ class DPOTrainer:
         record_dashboard_state(self.areno, stage="save_checkpoint_end", epoch=epoch, step=step, role="policy")
 
 
-def _record_to_train_pair(record: Any, tokenizer, *, max_seq_len: int):
+def _record_to_train_pair(
+    record: Any,
+    tokenizer,
+    *,
+    max_seq_len: int,
+    degenerate_config: DegenerateFilterConfig | None = None,
+    degenerate_reasons: dict[str, int] | None = None,
+):
     record = dict(record)
     eos_token_id = tokenizer.eos_token_id if tokenizer.eos_token_id is not None else 0
     if "chosen" not in record or "rejected" not in record:
@@ -185,21 +220,63 @@ def _record_to_train_pair(record: Any, tokenizer, *, max_seq_len: int):
             raise ValueError("DPO prompt/response rows must contain `prompt`")
         prompt = record["prompt"]
         prompt_ids = encode_prompt_value(tokenizer, prompt)
-        chosen_tokens, chosen_mask = response_to_tokens_and_mask(prompt_ids, str(chosen), tokenizer, eos_token_id)
-        rejected_tokens, rejected_mask = response_to_tokens_and_mask(prompt_ids, str(rejected), tokenizer, eos_token_id)
 
-    chosen_seq = _make_sequence(chosen_tokens, chosen_mask, eos_token_id, max_seq_len)
-    rejected_seq = _make_sequence(rejected_tokens, rejected_mask, eos_token_id, max_seq_len)
+        # --- Pre-tokenization degeneracy checks ---
+        if degenerate_config is not None:
+            report = check_prompt_text(str(prompt))
+            if apply_degenerate_policy(report, degenerate_config):
+                if degenerate_reasons is not None:
+                    record_degenerate_reason(degenerate_reasons, report)
+                return None
+            report = check_preference_pair(chosen, rejected)
+            if apply_degenerate_policy(report, degenerate_config):
+                if degenerate_reasons is not None:
+                    record_degenerate_reason(degenerate_reasons, report)
+                return None
+
+        chosen_tokens, chosen_mask = response_to_tokens_and_mask(prompt_ids, str(chosen), tokenizer, eos_token_id)
+        rejected_tokens, rejected_mask = response_to_tokens_and_mask(
+            prompt_ids, str(rejected), tokenizer, eos_token_id
+        )
+
+    chosen_seq = _make_sequence(
+        chosen_tokens, chosen_mask, eos_token_id, max_seq_len,
+        degenerate_config=degenerate_config, degenerate_reasons=degenerate_reasons,
+    )
+    rejected_seq = _make_sequence(
+        rejected_tokens, rejected_mask, eos_token_id, max_seq_len,
+        degenerate_config=degenerate_config, degenerate_reasons=degenerate_reasons,
+    )
     if chosen_seq is None or rejected_seq is None:
         return None
     return [chosen_seq, rejected_seq]
 
 
-def _make_sequence(tokens: list[int], prompt_mask: list[bool], eos_token_id: int, max_seq_len: int):
+def _make_sequence(
+    tokens: list[int],
+    prompt_mask: list[bool],
+    eos_token_id: int,
+    max_seq_len: int,
+    *,
+    degenerate_config: DegenerateFilterConfig | None = None,
+    degenerate_reasons: dict[str, int] | None = None,
+):
     # Drop examples that cannot produce a next-token loss or exceed the shared
     # max sequence budget.
-    if len(tokens) < 2 or len(tokens) > max_seq_len or not any(not item for item in prompt_mask[1:]):
+    if len(tokens) < 2 or len(tokens) > max_seq_len:
         return None
+
+    # --- Post-tokenization degeneracy check: no trainable tokens ---
+    has_trainable = any(not item for item in prompt_mask[1:])
+    if not has_trainable:
+        if degenerate_config is not None:
+            report = check_trainable_tokens(prompt_mask)
+            if apply_degenerate_policy(report, degenerate_config):
+                if degenerate_reasons is not None:
+                    record_degenerate_reason(degenerate_reasons, report)
+                return None
+        return None
+
     zeros = [0.0] * len(tokens)
     # Dummy rollout fields keep the TrainSequence shape contract shared with
     # RL trainers; DPO only consumes tokens, prompt_mask, and ref_logprobs.

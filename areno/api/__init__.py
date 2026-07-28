@@ -27,7 +27,22 @@ from areno.api.algorithms import (
     sft_loss_fn,
 )
 from areno.api.config import CudaConfig, MlxConfig, default_backend_type
-from areno.api.data import PromptBatch, PromptItem
+from areno.api.data import (
+    DegenerateFilterConfig,
+    DegeneratePolicy,
+    DegenerateReason,
+    PromptBatch,
+    PromptItem,
+    SampleQualityReport,
+    apply_degenerate_policy,
+    check_preference_pair,
+    check_prompt_text,
+    check_response_text,
+    check_tokenized_prompt,
+    check_trainable_tokens,
+    format_degenerate_reasons,
+    record_degenerate_reason,
+)
 from areno.api.models import (
     BackendType,
     RolloutResult,
@@ -38,7 +53,7 @@ from areno.api.models import (
 from areno.api.rewards import RewardEvent, RewardRecord
 from areno.api.trainer import Trainer
 
-# Friendly aliases mirroring the BackendType enum members. The default is
+# Friendly aliases mirroring the BackendType enum members; the default is
 # selected from the host platform without importing either backend.
 CUDA = BackendType.CUDA
 MLX = BackendType.MLX
@@ -49,8 +64,12 @@ __all__ = [
     "AlgorithmSpec",
     "CudaConfig",
     "MlxConfig",
+    "DegenerateFilterConfig",
+    "DegeneratePolicy",
+    "DegenerateReason",
     "PromptBatch",
     "PromptItem",
+    "SampleQualityReport",
     "AgentBatch",
     "AgentItem",
     "AgentTrainBatch",
@@ -67,6 +86,14 @@ __all__ = [
     "CUDA",
     "MLX",
     "DefaultBackend",
+    "apply_degenerate_policy",
+    "check_preference_pair",
+    "check_prompt_text",
+    "check_response_text",
+    "check_tokenized_prompt",
+    "check_trainable_tokens",
+    "format_degenerate_reasons",
+    "record_degenerate_reason",
     "get_algorithm",
     "list_algorithms",
     "register_algorithm",

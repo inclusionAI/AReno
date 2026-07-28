@@ -15,7 +15,16 @@ from areno.api.agentic import LossMaskPolicy, RolloutSession
 from areno.api.backend.base import Backend, get_backend_cls
 from areno.api.config import BackendConfig, coerce_backend_config, resolve_backend_type
 from areno.api.context import Context
-from areno.api.data import PromptBatch, PromptItem
+from areno.api.data import (
+    DegenerateFilterConfig,
+    PromptBatch,
+    PromptItem,
+    apply_degenerate_policy,
+    check_prompt_text,
+    check_tokenized_prompt,
+    format_degenerate_reasons,
+    record_degenerate_reason,
+)
 from areno.api.metrics import MetricsRecorder
 from areno.api.models import BackendType, RolloutResult, SamplingParams, TrainSequence
 from areno.api.multimodal import (
@@ -241,6 +250,7 @@ class Trainer:
         max_prompt_tokens: int,
         prompt_key: str = "prompt",
         solutions_key: str = "solutions",
+        degenerate_config: DegenerateFilterConfig | None = None,
     ) -> Iterable[PromptBatch]:
         """Yield tokenized prompt batches from a dataset-like object.
 
@@ -248,19 +258,31 @@ class Trainer:
         original record is preserved on each `PromptItem` so reward functions
         can read task-specific fields. The cursor advances even when records
         are skipped, so the iterator eventually walks the entire dataset.
+
+        When ``degenerate_config`` is provided (or defaults to the standard
+        SKIP policy), empty, whitespace-only, and special-token-only prompts
+        are also skipped with per-reason counters on the yielded
+        :class:`PromptBatch`.
         """
+
+        if degenerate_config is None:
+            degenerate_config = DegenerateFilterConfig()
 
         cursor = 0
         total_skipped_long = 0
+        total_skipped_degenerate = 0
+        cumulative_reasons: dict[str, int] = {}
         shortest_skipped = None
         longest_skipped = None
         while cursor < len(dataset):
             items = []
             scanned = 0
             skipped_long = 0
+            skipped_degenerate = 0
+            batch_reasons: dict[str, int] = {}
             # Keep scanning until we accumulate `batch_size` accepted rows or
-            # exhaust the dataset; over-long prompts increment the skip counter
-            # but do not fill the batch.
+            # exhaust the dataset; over-long or degenerate prompts increment
+            # their respective skip counters but do not fill the batch.
             while len(items) < batch_size and cursor < len(dataset):
                 record = dict(dataset[cursor])
                 cursor += 1
@@ -302,7 +324,23 @@ class Trainer:
                     record["tokens"] = input_tokens
                 elif prompt_key in record:
                     prompt = record[prompt_key]
-                    input_tokens = encode_generation_prompt(self._tokenizer, prompt)
+                    # Pre-tokenization text-level check.
+                    report = check_prompt_text(str(prompt))
+                    if apply_degenerate_policy(report, degenerate_config):
+                        skipped_degenerate += 1
+                        total_skipped_degenerate += 1
+                        record_degenerate_reason(batch_reasons, report)
+                        record_degenerate_reason(cumulative_reasons, report)
+                        continue
+                    input_tokens = encode_generation_prompt(self._tokenizer, str(prompt))
+                    # Post-tokenization check for zero-length or special-token-only.
+                    report = check_tokenized_prompt(input_tokens, self._tokenizer)
+                    if apply_degenerate_policy(report, degenerate_config):
+                        skipped_degenerate += 1
+                        total_skipped_degenerate += 1
+                        record_degenerate_reason(batch_reasons, report)
+                        record_degenerate_reason(cumulative_reasons, report)
+                        continue
                 else:
                     raise ValueError(
                         f"dataset row must contain `{prompt_key}`; use --dataset-loader-fn to normalize raw rows"
@@ -333,12 +371,21 @@ class Trainer:
                         f"(shortest={shortest_skipped}, longest={longest_skipped}); "
                         "increase --max-prompt-tokens or shorten the dataset prompts"
                     )
+                if total_skipped_degenerate > 0 and total_skipped_long == 0:
+                    raise ValueError(
+                        f"dataset produced no valid rows: all {total_skipped_degenerate} "
+                        f"rows were degenerate (reasons: {format_degenerate_reasons(cumulative_reasons)}). "
+                        "Check dataset quality or set --degenerate-policy to skip with diagnostics."
+                    )
                 break
             yield PromptBatch(
                 items=items,
                 scanned=scanned,
                 skipped_long=skipped_long,
                 total_skipped_long=total_skipped_long,
+                skipped_degenerate=skipped_degenerate,
+                total_skipped_degenerate=total_skipped_degenerate,
+                degenerate_reasons=batch_reasons,
             )
 
     def rollout_batch(self, prompts: list[str], n_samples: int, sampling_params: SamplingParams) -> list[RolloutResult]:
