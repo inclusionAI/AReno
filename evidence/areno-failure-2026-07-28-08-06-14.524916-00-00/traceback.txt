@@ -1,0 +1,4 @@
+RuntimeError: Traceback (most recent call last):
+  File "train.py", line 42, in <module>
+ValueError: CUDA out of memory
+
