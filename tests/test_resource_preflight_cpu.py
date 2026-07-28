@@ -74,8 +74,8 @@ def _names(results):
 
 def test_estimate_demand_formula_matches_documented_upper_bound():
     demand = estimate_resource_demand(world_size=8, tp_size=4)
-    # 64 fds/worker * 8 workers + 8*7 cross-rank peers = 512 + 56
-    assert demand["file_descriptors"] == 64 * 8 + 8 * 7
+    # RLIMIT_NOFILE is per process: 64 fds base + 7 cross-rank peers = 71.
+    assert demand["file_descriptors"] == 64 + 7
     # world_size workers + 1 driver
     assert demand["processes"] == 9
     # 1 GiB * tp_size
@@ -118,12 +118,12 @@ def test_boundary_observed_equals_required_is_ok():
 
 def test_low_file_descriptors_is_fail_with_delta_and_remediation():
     demand = estimate_resource_demand(8, 4)
-    limits = _limits(fd_value=100)  # well below 568
+    limits = _limits(fd_value=32)  # well below the per-process demand of 71
     results = preflight_host_resources(8, 4, policy="warn", limits=limits)
     fd = results[0]
     assert fd.status == RESOURCE_FAIL
-    assert f"observed=100 required={demand['file_descriptors']}" in fd.detail
-    assert f"delta={100 - demand['file_descriptors']}" in fd.detail
+    assert f"observed=32 required={demand['file_descriptors']}" in fd.detail
+    assert f"delta={32 - demand['file_descriptors']}" in fd.detail
     assert "ulimit -n" in fd.next_step
 
 
@@ -134,6 +134,9 @@ def test_low_shared_memory_fail_points_at_sysctl():
     assert shm.status == RESOURCE_FAIL
     assert "bytes" in shm.detail
     assert "kernel.shmmax" in shm.next_step
+    # The remediation hint carries the concrete required value, not a placeholder.
+    demand = estimate_resource_demand(8, 4)
+    assert f"kernel.shmmax={demand['shared_memory']}" in shm.next_step
 
 
 def test_unbounded_rlimit_is_ok_not_unavailable():
@@ -178,6 +181,12 @@ def test_should_block_on_resources_only_counts_fail():
 def test_invalid_policy_raises():
     with pytest.raises(ValueError):
         preflight_host_resources(2, 1, policy="enforce")
+
+
+def test_skip_short_circuits_without_probing(monkeypatch):
+    # `skip` must not touch the host at all and returns no results.
+    monkeypatch.setattr(diagnostics, "collect_host_limits", lambda: pytest.fail("host probed under skip"))
+    assert preflight_host_resources(2, 1, policy="skip") == []
 
 
 def test_format_resource_preflight_renders_status_and_next_steps():

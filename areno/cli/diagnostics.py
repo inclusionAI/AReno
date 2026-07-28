@@ -596,8 +596,10 @@ def estimate_resource_demand(world_size: int, tp_size: int) -> dict[str, int]:
     """Return a documented upper-bound estimate of resource demand for one run.
 
     - file descriptors: per-worker base plus one socket per cross-rank peer for
-      the NCCL/tensor-parallel mesh; sum across all `world_size` workers.
-    - processes: `world_size` worker ranks plus the driver process.
+      the NCCL/tensor-parallel mesh. `RLIMIT_NOFILE` is a per-process limit, so
+      this is the demand on a single worker process, not the fleet total.
+    - processes: `world_size` worker ranks plus the driver process. `RLIMIT_NPROC`
+      is a per-user limit, so the fleet total is the right quantity here.
     - shared memory: baseline per tensor-parallel group, scaled by `tp_size`.
 
     The estimate is intentionally conservative -- it triggers a warning rather
@@ -608,9 +610,9 @@ def estimate_resource_demand(world_size: int, tp_size: int) -> dict[str, int]:
         raise ValueError("world_size must be >= 1")
     if tp_size < 1:
         raise ValueError("tp_size must be >= 1")
-    cross_rank_peers = world_size * (world_size - 1)
+    cross_rank_peers_per_worker = world_size - 1
     return {
-        "file_descriptors": _BASE_FDS_PER_WORKER * world_size + cross_rank_peers,
+        "file_descriptors": _BASE_FDS_PER_WORKER + cross_rank_peers_per_worker,
         "processes": world_size + 1,
         "shared_memory": _SHM_BASELINE_BYTES * tp_size,
     }
@@ -637,6 +639,9 @@ def preflight_host_resources(
 
     if policy not in {"skip", "warn", "block"}:
         raise ValueError(f"resource-check policy must be skip/warn/block, got {policy!r}")
+    if policy == "skip":
+        # `skip` disables the preflight entirely; do not probe the host.
+        return []
     if limits is None:
         limits = collect_host_limits()
     demand = estimate_resource_demand(world_size, tp_size)
@@ -673,7 +678,7 @@ def _shmmax_result(observed: dict[str, Any], required: int) -> CheckResult:
         required,
         name="shared memory (kernel.shmmax)",
         unit=" bytes",
-        adjust="raise the system limit, e.g. `sudo sysctl -w kernel.shmmax=<required>`",
+        adjust=f"raise the system limit, e.g. `sudo sysctl -w kernel.shmmax={required}`",
     )
 
 
