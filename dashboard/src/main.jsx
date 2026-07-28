@@ -194,6 +194,78 @@ const defaultServeConfig = {
   extra_args: "",
 };
 
+// ---------------------------------------------------------------------------
+// Launch presets – localStorage persistence for launcher form state
+// ---------------------------------------------------------------------------
+
+const LAUNCH_PRESETS_STORAGE_KEY = "areno-dashboard-launch-presets";
+const MAX_PRESETS = 40;
+
+function loadPresets() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(LAUNCH_PRESETS_STORAGE_KEY) || "[]");
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (p) => p && typeof p.id === "string" && typeof p.name === "string" && p.config && typeof p.config === "object"
+    );
+  } catch {
+    return [];
+  }
+}
+
+function savePreset(name, config, kind, presets) {
+  const id = `preset-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const preset = { id, name, kind, createdAt: Date.now(), config: { ...config } };
+  const rest = presets.filter((p) => p.name !== name);
+  const updated = [preset, ...rest].slice(0, MAX_PRESETS);
+  try {
+    localStorage.setItem(LAUNCH_PRESETS_STORAGE_KEY, JSON.stringify(updated));
+    return updated;
+  } catch {
+    const trimmed = [preset, ...rest].slice(0, Math.max(1, MAX_PRESETS / 2));
+    try {
+      localStorage.setItem(LAUNCH_PRESETS_STORAGE_KEY, JSON.stringify(trimmed));
+      return trimmed;
+    } catch {
+      return presets;
+    }
+  }
+}
+
+function clonePreset(sourcePreset, cloneName, presets) {
+  return savePreset(cloneName, sourcePreset.config, sourcePreset.kind, presets);
+}
+
+function deletePreset(id, presets) {
+  const updated = presets.filter((p) => p.id !== id);
+  try {
+    localStorage.setItem(LAUNCH_PRESETS_STORAGE_KEY, JSON.stringify(updated));
+  } catch {
+    // Silently ignore write errors.
+  }
+  return updated;
+}
+
+function computeDiff(presetConfig, currentConfig) {
+  const diffs = [];
+  const allKeys = new Set([...Object.keys(presetConfig || {}), ...Object.keys(currentConfig || {})]);
+  for (const key of allKeys) {
+    if (key === "extra_args") continue;
+    const presetValue = presetConfig[key];
+    const currentValue = currentConfig[key];
+    const normalize = (v) => {
+      if (v === undefined || v === null || v === "") return undefined;
+      return v;
+    };
+    const p = normalize(presetValue);
+    const c = normalize(currentValue);
+    if (JSON.stringify(p) !== JSON.stringify(c)) {
+      diffs.push({ key, presetValue: p, currentValue: c });
+    }
+  }
+  return diffs;
+}
+
 function App() {
   const [selectedJobId, setSelectedJobId] = useState(null);
   const [trainConfig, setTrainConfig] = useState(defaultTrainConfig);
@@ -216,6 +288,10 @@ function App() {
   const [agentSettingsOpen, setAgentSettingsOpen] = useState(false);
   const [jobPage, setJobPage] = useState(1);
   const [refreshNonce, setRefreshNonce] = useState(0);
+  const [presets, setPresets] = useState(() => loadPresets());
+  const [activePresetId, setActivePresetId] = useState(null);
+  const [diffFields, setDiffFields] = useState([]);
+  const [modalState, setModalState] = useState(null);  // {mode: "save"|"clone"|"delete", presetId?}
   const chatMessagesRef = useRef(null);
   const env = usePolling(() => api("/api/env"), 5000);
   const jobs = usePolling(() => api("/api/jobs"), 2000);
@@ -284,6 +360,19 @@ function App() {
     }
   }, [agentMessages, agentChatTab]);
 
+  useEffect(() => {
+    try {
+      localStorage.setItem(LAUNCH_PRESETS_STORAGE_KEY, JSON.stringify(presets));
+    } catch {
+      // Quota exceeded or write error; silently ignore.
+    }
+  }, [presets]);
+
+  useEffect(() => {
+    setActivePresetId(null);
+    setDiffFields([]);
+  }, [launcherMode]);
+
   const pages = [
     { id: "jobs", label: "Jobs", icon: <Activity size={16} /> },
     { id: "runtime", label: "Runtime", icon: <Server size={16} /> },
@@ -298,6 +387,83 @@ function App() {
     launcher: ["Task Launcher", "Start low-intrusion AReno train or serve subprocesses from explicit configs."],
     agent: ["Agent Console", "Chat with an operations agent using the selected job context."],
   };
+
+  // ---- preset handlers -------------------------------------------------
+
+  function handlePresetSelect(id) {
+    if (!id) {
+      setActivePresetId(null);
+      setDiffFields([]);
+      return;
+    }
+    const preset = presets.find((p) => p.id === id);
+    if (!preset) {
+      setActivePresetId(null);
+      setDiffFields([]);
+      return;
+    }
+    const currentConfig = launcherMode === "train" ? { ...trainConfig } : { ...serveConfig };
+    if (preset.kind === "serve" && launcherMode === "serve") {
+      const newConfig = { ...defaultServeConfig, ...preset.config };
+      setServeConfig(newConfig);
+      setDiffFields(computeDiff(preset.config, currentConfig));
+    } else if (preset.kind === "train" && launcherMode === "train") {
+      const newConfig = { ...defaultTrainConfig, ...preset.config };
+      setTrainConfig(newConfig);
+      setDiffFields(computeDiff(preset.config, currentConfig));
+    } else {
+      if (preset.kind === "serve") {
+        setLauncherMode("serve");
+        setServeConfig({ ...defaultServeConfig, ...preset.config });
+        setDiffFields(computeDiff(preset.config, defaultServeConfig));
+      } else {
+        setLauncherMode("train");
+        setTrainConfig({ ...defaultTrainConfig, ...preset.config });
+        setDiffFields(computeDiff(preset.config, defaultTrainConfig));
+      }
+    }
+    setActivePresetId(id);
+  }
+
+  function handleSavePreset(name) {
+    if (!name.trim()) return false;
+    const config = launcherMode === "train" ? trainConfig : serveConfig;
+    const updated = savePreset(name.trim(), config, launcherMode, presets);
+    setPresets(updated);
+    const saved = updated.find((p) => p.name === name.trim());
+    if (saved) {
+      setActivePresetId(saved.id);
+      setDiffFields([]);
+    }
+    setModalState(null);
+    return true;
+  }
+
+  function handleClonePreset(name) {
+    if (!name.trim()) return false;
+    const source = presets.find((p) => p.id === modalState?.presetId);
+    if (!source) return false;
+    const updated = savePreset(name.trim(), source.config, source.kind, presets);
+    setPresets(updated);
+    const cloned = updated.find((p) => p.name === name.trim());
+    if (cloned) {
+      setActivePresetId(cloned.id);
+      setDiffFields([]);
+    }
+    setModalState(null);
+    return true;
+  }
+
+  function handleDeletePreset() {
+    const id = modalState?.presetId;
+    if (!id) return;
+    setPresets(deletePreset(id, presets));
+    if (activePresetId === id) {
+      setActivePresetId(null);
+      setDiffFields([]);
+    }
+    setModalState(null);
+  }
 
   async function startTrain() {
     setBusy("Starting train job...");
@@ -522,7 +688,7 @@ function App() {
     }
     if (activePage === "launcher") {
       return (
-        <section className="panel launcher">
+          <><section className="panel launcher">
           <div className="panelHeader">
             <div>
               <h2>Task Launcher</h2>
@@ -533,13 +699,62 @@ function App() {
               <button className={classNames(launcherMode === "serve" && "active")} onClick={() => setLauncherMode("serve")}>Serve</button>
             </div>
           </div>
+          <PresetRow
+            kind={launcherMode}
+            presets={presets}
+            activePresetId={activePresetId}
+            onSelect={(id) => handlePresetSelect(id)}
+            onSave={() => setModalState({ mode: "save" })}
+            onClone={(preset) => {
+              if (preset) setModalState({ mode: "clone", presetId: preset.id });
+            }}
+            onDelete={(preset) => {
+              if (preset) setModalState({ mode: "delete", presetId: preset.id });
+            }}
+            diffFields={diffFields}
+          />
           {launcherMode === "train" ? (
             <TrainForm config={trainConfig} setConfig={setTrainConfig} onStart={startTrain} />
           ) : (
             <ServeForm config={serveConfig} setConfig={setServeConfig} onStart={startServe} />
           )}
         </section>
-      );
+
+      {/* ---- preset modals (save / clone / delete) ---- */}
+      {modalState && (() => {
+        const preset = modalState.presetId ? presets.find((p) => p.id === modalState.presetId) : null;
+        if (modalState.mode === "delete") {
+          return (
+            <Modal title="Delete Preset" onClose={() => setModalState(null)}>
+              <div className="deleteConfirmation">
+                <p>Delete &ldquo;{preset?.name || "this preset"}&rdquo;? This action cannot be undone.</p>
+                <div className="deleteActions">
+                  <button className="secondaryButton" onClick={() => setModalState(null)}>Cancel</button>
+                  <button className="dangerButton" onClick={handleDeletePreset}>Delete</button>
+                </div>
+              </div>
+            </Modal>
+          );
+        }
+        return (
+          <PresetNameModal
+            title={modalState.mode === "clone" ? "Clone Preset" : "Save Preset"}
+            initialName={
+              modalState.mode === "clone" && preset
+                ? `${preset.name} (copy)`
+                : ""
+            }
+            onSave={(name) => {
+              if (modalState.mode === "clone") {
+                return handleClonePreset(name);
+              }
+              return handleSavePreset(name);
+            }}
+            onClose={() => setModalState(null)}
+          />
+        );
+      })()}
+      </>);
     }
     if (activePage === "agent") {
       return (
@@ -1697,6 +1912,107 @@ function Field({ label, value, onChange, compact, type = "text", options = [] })
         <input value={value ?? ""} onChange={(event) => onChange(event.target.value)} />
       )}
     </label>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Preset row – select + save/clone/delete + expandable diff list
+// ---------------------------------------------------------------------------
+
+function PresetRow({ kind, presets, activePresetId, onSelect, onSave, onClone, onDelete, diffFields }) {
+  const [diffOpen, setDiffOpen] = useState(false);
+  const filtered = presets.filter((p) => p.kind === kind);
+  const activePreset = presets.find((p) => p.id === activePresetId) || null;
+  const stalePaths = diffFields.filter((d) =>
+    typeof d.presetValue === "string" && (
+      d.presetValue.startsWith("/") || d.presetValue.startsWith("outputs/") || d.presetValue.startsWith("examples/")
+    )
+  );
+  return (
+    <div>
+      <div className="presetRow">
+        <select value={activePresetId || ""} onChange={(e) => onSelect(e.target.value || null)}>
+          <option value="">None</option>
+          {filtered.map((p) => (
+            <option key={p.id} value={p.id}>{p.name}</option>
+          ))}
+        </select>
+        <button className="secondaryButton" onClick={onSave}>Save</button>
+        <button className="secondaryButton" disabled={!activePresetId} onClick={() => onClone(activePreset)}>Clone</button>
+        <button className="secondaryButton" disabled={!activePresetId} onClick={() => onDelete(activePreset)}>Delete</button>
+        {diffFields.length > 0 && (
+          <button className="presetDiff" onClick={() => setDiffOpen((v) => !v)} title="Click to show differences">
+            {diffFields.length} field{diffFields.length !== 1 ? "s" : ""} differ
+          </button>
+        )}
+      </div>
+      {diffOpen && diffFields.length > 0 && (
+        <div className="presetDiffList">
+          <div className="presetDiffHeader">
+            <span>Changes from &ldquo;{activePreset?.name || "preset"}&rdquo;</span>
+            <button className="iconButton" onClick={() => setDiffOpen(false)}>&times;</button>
+          </div>
+          {diffFields.map((d) => (
+            <div key={d.key} className="presetDiffItem">
+              <span className="presetDiffKey">{d.key}</span>
+              <span className="presetDiffVal">{formatConfigValue(d.presetValue)}</span>
+              <span className="presetDiffArrow">&rarr;</span>
+              <span className="presetDiffVal current">{formatConfigValue(d.currentValue)}</span>
+            </div>
+          ))}
+          {stalePaths.length > 0 && (
+            <div className="presetDiffStale">
+              {stalePaths.length} path reference{stalePaths.length !== 1 ? "s" : ""} (e.g. {stalePaths.slice(0, 3).map((d) => d.key).join(", ")}) may not exist on this machine.
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Preset name modal – reused for Save and Clone prompts
+// ---------------------------------------------------------------------------
+
+function PresetNameModal({ title, initialName, onSave, onClose }) {
+  const [name, setName] = useState(initialName);
+  const [error, setError] = useState("");
+
+  const handleSubmit = () => {
+    const trimmed = name.trim();
+    if (!trimmed) {
+      setError("Name is required.");
+      return;
+    }
+    const result = onSave(trimmed);
+    if (result === false) {
+      setError("Could not save preset.");
+    }
+  };
+
+  return (
+    <Modal title={title} onClose={onClose}>
+      <div className="modalForm">
+        <label className="field">
+          <span>Name</span>
+          <input
+            value={name}
+            onChange={(e) => { setName(e.target.value); setError(""); }}
+            onKeyDown={(e) => { if (e.key === "Enter") handleSubmit(); }}
+            autoFocus
+            placeholder={title === "Clone Preset" ? "Copy of..." : "Enter preset name"}
+          />
+        </label>
+        {error && <div className="error">{error}</div>}
+        <div className="deleteActions" style={{ marginTop: 14 }}>
+          <button className="secondaryButton" onClick={onClose}>Cancel</button>
+          <button className="primaryButton" onClick={handleSubmit}>
+            {title === "Clone Preset" ? "Clone" : "Save"}
+          </button>
+        </div>
+      </div>
+    </Modal>
   );
 }
 

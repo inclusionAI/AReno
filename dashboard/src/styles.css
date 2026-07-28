@@ -1194,6 +1194,133 @@ pre {
   text-align: right;
 }
 
+.presetRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 0 14px;
+  margin-bottom: 14px;
+  border-bottom: 1px solid var(--deck-line);
+  flex-wrap: wrap;
+}
+
+.presetRow select {
+  width: 240px;
+}
+
+.presetDiff {
+  margin-left: auto;
+  color: var(--deck-amber);
+  font-size: 12px;
+  font-weight: 600;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+}
+
+.presetDiff:hover {
+  text-decoration: underline;
+}
+
+.presetDiffList {
+  width: 100%;
+  margin-bottom: 14px;
+  border: 1px solid var(--deck-line);
+  border-radius: var(--radius-md);
+  background: var(--deck-panel-2);
+  overflow: hidden;
+}
+
+.presetDiffHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--deck-line);
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--deck-text);
+}
+
+.presetDiffHeader .iconButton {
+  width: 28px;
+  height: 28px;
+  min-height: 28px;
+  font-size: 14px;
+}
+
+.presetDiffItem {
+  display: grid;
+  grid-template-columns: minmax(100px, auto) 1fr 24px 1fr;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--deck-line);
+  font-size: 12px;
+}
+
+.presetDiffItem:last-child {
+  border-bottom: 0;
+}
+
+.presetDiffKey {
+  font-weight: 650;
+  color: var(--deck-ink);
+  font-size: 11px;
+}
+
+.presetDiffVal {
+  color: var(--deck-muted);
+  font-family: monospace;
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.presetDiffVal.current {
+  color: var(--deck-amber);
+}
+
+.presetDiffArrow {
+  text-align: center;
+  color: var(--deck-muted);
+  font-weight: 700;
+}
+
+.presetDiffStale {
+  padding: 8px 12px;
+  border-top: 1px solid var(--deck-line);
+  color: var(--deck-amber);
+  background: rgba(255, 200, 87, 0.06);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.deleteConfirmation p {
+  margin: 0 0 14px;
+}
+
+.deleteActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.modalForm {
+  display: grid;
+  gap: 0;
+}
+
+.modalForm .field {
+  grid-column: span 1;
+}
+
+.modalForm .error {
+  margin-top: 8px;
+}
+
 .formGrid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
