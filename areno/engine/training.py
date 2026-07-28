@@ -22,7 +22,6 @@ from areno.engine.runtime.train_step import (
     _train_meta,
 )
 
-
 class TrainingManager:
     """Own actor forward/backward, gradient sync, and optimizer stepping."""
 
@@ -93,6 +92,7 @@ class TrainingManager:
         if not isinstance(loss, torch.Tensor):
             raise TypeError("train_loss_fn must return a torch.Tensor")
         _non_finite_loss = check_loss_non_finite(loss)
+
         (loss / max(grad_scale, 1)).backward()
         self._accumulate_main_gradients()
         stepped = allow_step
