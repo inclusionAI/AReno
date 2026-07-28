@@ -1,0 +1,2 @@
+{"prompt":"Write a Python expression that adds one to x.","response":"x + 1"}
+{"prompt":"Write a Python expression that returns the length of items.","response":"len(items)"}

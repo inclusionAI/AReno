@@ -67,6 +67,54 @@ trainer schema. Without a loader, Areno passes dataset rows through unchanged,
 except for SFT where a loader is required. See :doc:`dataset_loaders` for the
 per-algorithm loader contracts.
 
+``--dataset-mix-config PATH``
+   JSON manifest for deterministic weighted SFT dataset mixing. This option is
+   mutually exclusive with ``--dataset-path``. The first implementation
+   supports map-style datasets only, and the shared ``--dataset-loader-fn`` is
+   applied independently to each source.
+
+The manifest requires ``version: 1``, an integer ``seed``, an explicit
+``exhaustion`` policy, and at least two uniquely named sources with finite,
+positive weights. Weights are normalized automatically:
+
+.. code-block:: json
+
+   {
+     "version": 1,
+     "seed": 42,
+     "exhaustion": "renormalize",
+     "shuffle_within_sources": true,
+     "sources": [
+       {"name": "math", "path": "math.jsonl", "weight": 0.7},
+       {"name": "code", "path": "code.jsonl", "weight": 0.3}
+     ]
+   }
+
+Existing relative local paths, explicit ``./`` or ``../`` paths, and supported
+local file suffixes are resolved from the manifest directory. Other values are
+handled as remote dataset references using ``--model-hub``. The exhaustion
+policies have deliberately different consumption behavior:
+
+* ``stop`` ends when one selected source is exhausted. Records are not
+  repeated, but other sources may remain partially unused.
+* ``cycle`` restarts exhausted sources and ends after every source has
+  exhausted at least once. Smaller sources may be repeated. Set the optional
+  positive ``max_samples_per_epoch`` field to bound highly imbalanced mixes.
+* ``renormalize`` removes an exhausted source and renormalizes the remaining
+  weights. Every source record is emitted exactly once.
+
+The seed controls source selection and per-source ordering. AReno derives a
+different deterministic ordering for each epoch. Source identity is attached
+under the reserved ``__areno_meta__`` field. The run prints a sample-free
+summary, logs the plan for each epoch, and writes
+``dataset_mix_plan.<pid>.json`` to ``--metrics-log-dir``.
+
+The map-style implementation precomputes an index schedule for the current
+epoch. Very large mixes therefore require memory proportional to the planned
+row count; streaming datasets are not supported in this first version.
+See ``examples/sft/mixed`` for a copyable local example and an invalid-weight
+boundary case.
+
 ``--algo TEXT``
    Training algorithm registered in ``areno.api``. Default: ``gspo``.
 

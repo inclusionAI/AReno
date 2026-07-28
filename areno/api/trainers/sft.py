@@ -56,6 +56,12 @@ class SFTTrainer:
         configure_chat_template_enable_thinking(tokenizer, getattr(self.config, "chat_template_enable_thinking", None))
         step = 0
         for epoch in range(self.config.epochs):
+            set_epoch = getattr(self.dataset, "set_epoch", None)
+            if callable(set_epoch):
+                set_epoch(epoch)
+            mix_summary = getattr(self.dataset, "summary", None)
+            if callable(mix_summary):
+                self.logger.info("epoch=%d stage=dataset_mix_plan dataset_mix=%s", epoch, mix_summary())
             self.logger.info("epoch=%d stage=epoch_start", epoch)
             record_dashboard_state(self.areno, stage="epoch_start", epoch=epoch, step=step, role="policy")
             for train_batch in self._iter_train_batches(

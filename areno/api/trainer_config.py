@@ -11,7 +11,7 @@ critic warmup window.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from areno.api.defaults import DEFAULT_METRICS_LOG_DIR
 
@@ -26,9 +26,10 @@ class TrainerConfig:
 
     algo: str
     ckpt: str
-    dataset_path: str
+    dataset_path: str | None
     model_hub: str = "modelscope"
     dataset_loader_fn: str | None = None
+    dataset_mix_config: str | None = field(default=None, kw_only=True)
     save_path: str | None = None
     save_interval: int = 100
     epochs: int = 10
@@ -62,6 +63,12 @@ class TrainerConfig:
     chat_template_enable_thinking: bool | None = None
 
     def __post_init__(self) -> None:
+        if self.dataset_path is None and self.dataset_mix_config is None:
+            raise ValueError("dataset_path is required unless dataset_mix_config is provided")
+        if self.dataset_path is not None and self.dataset_mix_config is not None:
+            raise ValueError("dataset_path and dataset_mix_config are mutually exclusive")
+        if self.dataset_mix_config is not None and self.algo != "sft":
+            raise ValueError("dataset_mix_config currently supports algo='sft' only")
         if self.attn_backend not in {"flash", "native"}:
             raise ValueError("attn_backend must be one of: flash, native")
         if self.model_hub not in {"hf", "modelscope"}:

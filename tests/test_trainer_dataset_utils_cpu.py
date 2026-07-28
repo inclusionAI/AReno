@@ -4,6 +4,7 @@ import unittest
 from types import SimpleNamespace
 
 from areno.api import data_utils
+from areno.api.data import DatasetMixSource, WeightedMixedDataset
 from areno.api.trainers import dpo as dpo_mod
 from areno.api.trainers import sft as sft_mod
 
@@ -32,6 +33,7 @@ class FakeSFTBackend:
     def __init__(self):
         self.closed = False
         self.train_calls = 0
+        self.train_rows = 0
 
     def init(self):
         return None
@@ -42,10 +44,30 @@ class FakeSFTBackend:
     def get_tokenizer(self):
         return FakeTextTokenizer()
 
-    def train(self, _batch, _loss_fn, *, mini_bs, gradient_accumulation_steps):
+    def train(self, batch, _loss_fn, *, mini_bs, gradient_accumulation_steps):
         del mini_bs, gradient_accumulation_steps
         self.train_calls += 1
+        self.train_rows += len(batch)
         return {}
+
+
+class EpochAwareDataset:
+    def __init__(self):
+        self.epochs = []
+        self.summary_epochs = []
+
+    def set_epoch(self, epoch):
+        self.epochs.append(epoch)
+
+    def summary(self):
+        self.summary_epochs.append(self.epochs[-1])
+        return {"epoch": self.epochs[-1]}
+
+    def __len__(self):
+        return 1
+
+    def __getitem__(self, _index):
+        return {"prompt": "q", "response": "a"}
 
 
 def _sft_config(**overrides):
@@ -55,6 +77,7 @@ def _sft_config(**overrides):
         "batch_size": 2,
         "epochs": 1,
         "gradient_accumulation_steps": 1,
+        "max_steps": None,
         "max_new_tokens": 2,
         "max_prompt_tokens": 2,
         "mini_bs": 1,
@@ -155,6 +178,47 @@ class TrainerDatasetUtilityTest(unittest.TestCase):
             trainer.fit()
 
         self.assertEqual(backend.train_calls, 0)
+        self.assertTrue(backend.closed)
+
+    def test_sft_sets_and_reports_dataset_epoch_before_each_pass(self):
+        backend = FakeSFTBackend()
+        dataset = EpochAwareDataset()
+        trainer = sft_mod.SFTTrainer(
+            _sft_config(epochs=2),
+            instance=backend,
+            dataset=dataset,
+            reward_fn=None,
+            loss_fn=lambda _pack, _logprobs: None,
+        )
+
+        trainer.fit()
+
+        self.assertEqual(dataset.epochs, [0, 1])
+        self.assertEqual(dataset.summary_epochs, [0, 1])
+        self.assertEqual(backend.train_calls, 2)
+
+    def test_sft_trains_two_mixed_sources_end_to_end_with_cpu_backend(self):
+        backend = FakeSFTBackend()
+        dataset = WeightedMixedDataset(
+            [
+                DatasetMixSource("math", [{"prompt": "q", "response": "a"}], 0.7),
+                DatasetMixSource("code", [{"prompt": "r", "response": "b"}], 0.3),
+            ],
+            seed=42,
+            exhaustion="renormalize",
+        )
+        trainer = sft_mod.SFTTrainer(
+            _sft_config(),
+            instance=backend,
+            dataset=dataset,
+            reward_fn=None,
+            loss_fn=lambda _pack, _logprobs: None,
+        )
+
+        trainer.fit()
+
+        self.assertEqual(backend.train_calls, 1)
+        self.assertEqual(backend.train_rows, 2)
         self.assertTrue(backend.closed)
 
     def test_dpo_requires_explicit_prompt_chosen_rejected_schema(self):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -26,6 +27,95 @@ def test_train_config_requires_ckpt():
 def test_train_config_requires_dataset_path():
     with pytest.raises(UsageError, match="--dataset-path is required"):
         _trainer_config_from_options(**_options(dataset_path=None, algo="sft"))
+
+
+def test_train_config_accepts_dataset_mix_manifest_for_sft(tmp_path):
+    loader = tmp_path / "loader.py"
+    loader.write_text("def load_training_dataset(dataset_path, **kwargs):\n    return []\n", encoding="utf-8")
+    manifest = tmp_path / "mix.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "seed": 42,
+                "exhaustion": "renormalize",
+                "sources": [
+                    {"name": "a", "path": "a.jsonl", "weight": 0.7},
+                    {"name": "b", "path": "b.jsonl", "weight": 0.3},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = _trainer_config_from_options(
+        **_options(
+            algo="sft",
+            dataset_path=None,
+            dataset_mix_config=str(manifest),
+            dataset_loader_fn=str(loader),
+        )
+    )
+
+    assert config.dataset_path is None
+    assert config.dataset_mix_config == str(manifest)
+
+
+def test_train_config_rejects_dataset_path_with_mix_manifest(tmp_path):
+    manifest = tmp_path / "mix.json"
+    manifest.write_text("{}", encoding="utf-8")
+
+    with pytest.raises(UsageError, match="mutually exclusive"):
+        _trainer_config_from_options(
+            **_options(algo="sft", dataset_path="dataset", dataset_mix_config=str(manifest))
+        )
+
+
+def test_train_config_rejects_mix_manifest_for_non_sft(tmp_path):
+    manifest = tmp_path / "mix.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "seed": 1,
+                "exhaustion": "stop",
+                "sources": [
+                    {"name": "a", "path": "a", "weight": 1},
+                    {"name": "b", "path": "b", "weight": 1},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(UsageError, match="currently supports --algo sft only"):
+        _trainer_config_from_options(
+            **_options(algo="gspo", dataset_path=None, dataset_mix_config=str(manifest))
+        )
+
+
+def test_sdk_config_enforces_dataset_mix_contract():
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        TrainerConfig(
+            algo="sft",
+            ckpt="actor",
+            dataset_path="dataset",
+            dataset_mix_config="mix.json",
+        )
+    with pytest.raises(ValueError, match="currently supports algo='sft' only"):
+        PolicyTrainerConfig(
+            algo="gspo",
+            ckpt="actor",
+            dataset_path=None,
+            dataset_mix_config="mix.json",
+        )
+
+
+def test_dataset_mix_config_does_not_shift_existing_positional_config_arguments():
+    config = TrainerConfig("sft", "actor", "dataset", "hf", None, "save")
+
+    assert config.save_path == "save"
+    assert config.dataset_mix_config is None
 
 
 def test_train_config_validates_model_hub():

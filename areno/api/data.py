@@ -8,8 +8,16 @@ records were skipped for exceeding the prompt-length budget.
 
 from __future__ import annotations
 
+import hashlib
+import math
+import random
+from collections import Counter
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
+
+DATASET_MIX_METADATA_KEY = "__areno_meta__"
+DatasetExhaustionPolicy = Literal["stop", "cycle", "renormalize"]
 
 
 @dataclass(slots=True)
@@ -48,3 +56,234 @@ class PromptBatch:
         """Return raw prompt strings in batch order for rollout."""
 
         return [item.prompt for item in self.items]
+
+
+@dataclass(frozen=True, slots=True)
+class DatasetMixSource:
+    """One named, weighted map-style dataset used by ``WeightedMixedDataset``."""
+
+    name: str
+    dataset: Sequence
+    weight: float
+
+
+@dataclass(frozen=True, slots=True)
+class _DatasetMixEntry:
+    source_index: int
+    row_index: int
+    cycle: int
+
+
+class WeightedMixedDataset:
+    """Deterministically interleave weighted map-style datasets.
+
+    ``stop`` ends when a selected source is exhausted. ``cycle`` restarts
+    exhausted sources until every source has exhausted at least once.
+    ``renormalize`` removes exhausted sources and continues with the remaining
+    weights, emitting every source row exactly once.
+    """
+
+    def __init__(
+        self,
+        sources: Sequence[DatasetMixSource],
+        *,
+        seed: int,
+        exhaustion: DatasetExhaustionPolicy,
+        shuffle_within_sources: bool = True,
+        max_samples_per_epoch: int | None = None,
+    ) -> None:
+        self.sources = tuple(sources)
+        self.seed = seed
+        self.exhaustion = exhaustion
+        self.shuffle_within_sources = shuffle_within_sources
+        self.max_samples_per_epoch = max_samples_per_epoch
+        self.epoch = 0
+        self._normalized_weights: tuple[float, ...] = ()
+        self._validate()
+        self._entries: list[_DatasetMixEntry] = []
+        self._termination_reason = ""
+        self._summary_cache: dict[str, Any] = {}
+        self.set_epoch(0)
+
+    def _validate(self) -> None:
+        if len(self.sources) < 2:
+            raise ValueError("dataset mix requires at least two sources")
+        if isinstance(self.seed, bool) or not isinstance(self.seed, int) or not 0 <= self.seed < 2**63:
+            raise ValueError("dataset mix seed must be an integer in [0, 2^63)")
+        if self.exhaustion not in {"stop", "cycle", "renormalize"}:
+            raise ValueError("dataset mix exhaustion must be one of: stop, cycle, renormalize")
+        if self.max_samples_per_epoch is not None and (
+            isinstance(self.max_samples_per_epoch, bool)
+            or not isinstance(self.max_samples_per_epoch, int)
+            or self.max_samples_per_epoch <= 0
+        ):
+            raise ValueError("dataset mix max_samples_per_epoch must be a positive integer")
+        if self.max_samples_per_epoch is not None and self.exhaustion != "cycle":
+            raise ValueError("dataset mix max_samples_per_epoch is only supported with exhaustion='cycle'")
+        if not isinstance(self.shuffle_within_sources, bool):
+            raise ValueError("dataset mix shuffle_within_sources must be a boolean")
+
+        names: set[str] = set()
+        numeric_weights: list[float] = []
+        for source in self.sources:
+            if not isinstance(source.name, str) or not source.name.strip():
+                raise ValueError("dataset mix source name must be a non-empty string")
+            if source.name in names:
+                raise ValueError(f"duplicate dataset mix source name: {source.name}")
+            names.add(source.name)
+            try:
+                numeric_weight = float(source.weight)
+            except (OverflowError, TypeError, ValueError):
+                numeric_weight = math.nan
+            if isinstance(source.weight, bool) or not math.isfinite(numeric_weight) or numeric_weight <= 0:
+                raise ValueError(f"dataset mix source '{source.name}' weight must be finite and positive")
+            numeric_weights.append(numeric_weight)
+            if not hasattr(source.dataset, "__len__") or not hasattr(source.dataset, "__getitem__"):
+                raise ValueError(f"dataset mix source '{source.name}' must support len() and indexed access")
+            if len(source.dataset) == 0:
+                raise ValueError(f"dataset mix source '{source.name}' is empty")
+            first = source.dataset[0]
+            if not isinstance(first, Mapping):
+                raise ValueError(f"dataset mix source '{source.name}' rows must be mappings")
+            if DATASET_MIX_METADATA_KEY in first:
+                raise ValueError(
+                    f"dataset mix source '{source.name}' contains reserved field '{DATASET_MIX_METADATA_KEY}'"
+                )
+        max_weight = max(numeric_weights)
+        scaled_weights = [weight / max_weight for weight in numeric_weights]
+        if any(weight == 0.0 for weight in scaled_weights):
+            raise ValueError("dataset mix weights have an unsupported numeric range")
+        scaled_total = sum(scaled_weights)
+        self._normalized_weights = tuple(weight / scaled_total for weight in scaled_weights)
+
+    def set_epoch(self, epoch: int) -> None:
+        """Build the deterministic schedule for one epoch."""
+
+        if epoch < 0:
+            raise ValueError("dataset mix epoch must be non-negative")
+        if epoch == self.epoch and self._entries:
+            return
+        self.epoch = epoch
+        self._entries, self._termination_reason = self._build_schedule()
+        self._summary_cache = self._build_summary()
+
+    def _build_schedule(self) -> tuple[list[_DatasetMixEntry], str]:
+        rng = random.Random(_stable_seed(self.seed, self.epoch, "source-selection"))
+        orders = [self._source_order(index, cycle=0) for index in range(len(self.sources))]
+        positions = [0] * len(self.sources)
+        cycles = [0] * len(self.sources)
+        exhausted_once: set[int] = set()
+        active = list(range(len(self.sources)))
+        entries: list[_DatasetMixEntry] = []
+
+        while active:
+            if self.max_samples_per_epoch is not None and len(entries) >= self.max_samples_per_epoch:
+                return entries, "max_samples_per_epoch"
+            source_index = _weighted_choice(rng, active, [self._normalized_weights[index] for index in active])
+
+            row_index = orders[source_index][positions[source_index]]
+            positions[source_index] += 1
+            entries.append(
+                _DatasetMixEntry(source_index=source_index, row_index=row_index, cycle=cycles[source_index])
+            )
+            if positions[source_index] < len(orders[source_index]):
+                continue
+
+            exhausted_once.add(source_index)
+            if self.exhaustion == "stop":
+                return entries, f"source_exhausted:{self.sources[source_index].name}"
+            if self.exhaustion == "renormalize":
+                active.remove(source_index)
+                continue
+            if len(exhausted_once) == len(self.sources):
+                return entries, "all_sources_exhausted_once"
+            cycles[source_index] += 1
+            orders[source_index] = self._source_order(source_index, cycle=cycles[source_index])
+            positions[source_index] = 0
+
+        return entries, "all_sources_exhausted"
+
+    def _source_order(self, source_index: int, *, cycle: int) -> Sequence[int]:
+        if not self.shuffle_within_sources:
+            return range(len(self.sources[source_index].dataset))
+        order = list(range(len(self.sources[source_index].dataset)))
+        source = self.sources[source_index]
+        random.Random(_stable_seed(self.seed, self.epoch, source.name, cycle)).shuffle(order)
+        return order
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+    def __getitem__(self, index: int) -> dict[str, Any]:
+        entry = self._entries[index]
+        source = self.sources[entry.source_index]
+        record = dict(source.dataset[entry.row_index])
+        if DATASET_MIX_METADATA_KEY in record:
+            raise ValueError(
+                f"dataset mix source '{source.name}' row {entry.row_index} contains reserved field "
+                f"'{DATASET_MIX_METADATA_KEY}'"
+            )
+        record[DATASET_MIX_METADATA_KEY] = {
+            "source": source.name,
+            "source_index": entry.row_index,
+            "cycle": entry.cycle,
+        }
+        return record
+
+    def summary(self) -> dict[str, Any]:
+        """Return sample-free metadata suitable for logs and JSON artifacts."""
+
+        return {
+            **self._summary_cache,
+            "sources": [dict(source) for source in self._summary_cache["sources"]],
+        }
+
+    def _build_summary(self) -> dict[str, Any]:
+        selected = Counter(entry.source_index for entry in self._entries)
+        duplicates = Counter(entry.source_index for entry in self._entries if entry.cycle > 0)
+        total = len(self._entries)
+        source_summaries = []
+        for index, source in enumerate(self.sources):
+            count = selected[index]
+            source_summaries.append(
+                {
+                    "name": source.name,
+                    "weight_requested": self._normalized_weights[index],
+                    "rows_available": len(source.dataset),
+                    "rows_selected": count,
+                    "duplicates": duplicates[index],
+                    "observed_proportion": count / total if total else 0.0,
+                }
+            )
+        schedule_hash = hashlib.sha256()
+        for entry in self._entries:
+            schedule_hash.update(
+                f"{self.sources[entry.source_index].name}:{entry.row_index}:{entry.cycle}\n".encode()
+            )
+        return {
+            "version": 1,
+            "seed": self.seed,
+            "epoch": self.epoch,
+            "policy": self.exhaustion,
+            "shuffle_within_sources": self.shuffle_within_sources,
+            "max_samples_per_epoch": self.max_samples_per_epoch,
+            "planned_rows": total,
+            "termination_reason": self._termination_reason,
+            "schedule_hash": f"sha256:{schedule_hash.hexdigest()}",
+            "sources": source_summaries,
+        }
+
+
+def _weighted_choice(rng: random.Random, candidates: Sequence[int], weights: Sequence[float]) -> int:
+    threshold = rng.random() * sum(weights)
+    cumulative = 0.0
+    for candidate, weight in zip(candidates, weights, strict=True):
+        cumulative += weight
+        if threshold < cumulative:
+            return candidate
+    return candidates[-1]
+
+
+def _stable_seed(*parts: object) -> int:
+    payload = "\0".join(str(part) for part in parts).encode()
+    return int.from_bytes(hashlib.sha256(payload).digest()[:8], "big")

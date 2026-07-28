@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "seed": 42,
+  "exhaustion": "renormalize",
+  "shuffle_within_sources": true,
+  "sources": [
+    {
+      "name": "math",
+      "path": "math.jsonl",
+      "weight": 0.7
+    },
+    {
+      "name": "code",
+      "path": "code.jsonl",
+      "weight": 0.3
+    }
+  ]
+}

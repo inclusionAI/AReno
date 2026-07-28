@@ -15,8 +15,11 @@ import ast
 import importlib.util
 import json
 import logging
+import math
+import os
 import shutil
 import textwrap
+from collections.abc import Mapping
 from dataclasses import fields
 from pathlib import Path
 from types import SimpleNamespace
@@ -24,6 +27,7 @@ from types import SimpleNamespace
 import click
 
 from areno.api.algorithms import get_algorithm
+from areno.api.data import DATASET_MIX_METADATA_KEY, DatasetMixSource, WeightedMixedDataset
 from areno.api.defaults import DEFAULT_METRICS_LOG_DIR
 from areno.api.trainer_config import (
     DPOTrainerConfig,
@@ -57,6 +61,7 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "algo",
             "ckpt",
             "dataset_path",
+            "dataset_mix_config",
             "model_hub",
             "dataset_loader_fn",
             "tune_params",
@@ -176,6 +181,8 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
     args.max_steps = getattr(args, "max_steps", None)
     args.score_micro_bs = getattr(args, "score_micro_bs", 8)
     args.model_hub = getattr(args, "model_hub", "modelscope")
+    dataset_mix_config = getattr(args, "dataset_mix_config", None)
+    args.dataset_mix_config = str(dataset_mix_config) if dataset_mix_config is not None else None
     smoke_infer = bool(getattr(args, "smoke_infer", False))
     smoke_train = bool(getattr(args, "smoke_train", False))
     if smoke_infer or smoke_train:
@@ -184,13 +191,19 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
     # inputs while RL algorithms still require a reward function or model.
     if args.ckpt is None:
         raise click.UsageError("--ckpt is required")
-    if args.dataset_path is None:
-        raise click.UsageError("--dataset-path is required")
+    if args.dataset_path is None and args.dataset_mix_config is None:
+        raise click.UsageError("--dataset-path is required unless --dataset-mix-config is provided")
+    if args.dataset_path is not None and args.dataset_mix_config is not None:
+        raise click.UsageError("--dataset-path and --dataset-mix-config are mutually exclusive")
     if args.model_hub not in {"hf", "modelscope"}:
         raise click.UsageError("--model-hub must be one of: hf, modelscope")
     algorithm = _algorithm_for_cli(args.algo)
     if algorithm.name == "sft" and args.dataset_loader_fn is None:
         raise click.UsageError("--dataset-loader-fn is required for --algo sft")
+    if args.dataset_mix_config is not None:
+        if algorithm.name != "sft":
+            raise click.UsageError("--dataset-mix-config currently supports --algo sft only")
+        _preflight_dataset_mix_config(args.dataset_mix_config)
     tune_params = bool(getattr(args, "tune_params", False))
     mem_frac = float(getattr(args, "mem_frac", 0.9))
     tune_max_samples = int(getattr(args, "tune_max_samples", 256))
@@ -282,6 +295,13 @@ def _require_positive_float(value: float, option_name: str) -> None:
         raise click.UsageError(f"{option_name} must be positive")
 
 
+def _preflight_dataset_mix_config(config_path: str) -> None:
+    try:
+        _read_dataset_mix_manifest(config_path)
+    except (OSError, ValueError) as exc:
+        raise click.UsageError(f"invalid --dataset-mix-config: {exc}") from exc
+
+
 def _format_training_config_summary(
     config: TrainerConfig,
     *,
@@ -306,7 +326,8 @@ def _format_training_config_summary(
             "Inputs",
             [
                 ("ckpt", config.ckpt),
-                ("dataset_path", config.dataset_path),
+                ("dataset_path", _format_optional(config.dataset_path)),
+                ("dataset_mix", _format_optional(config.dataset_mix_config)),
                 ("model_hub", config.model_hub),
                 ("dataset_loader", _format_optional(config.dataset_loader_fn)),
                 (
@@ -598,6 +619,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
     args.max_steps = getattr(args, "max_steps", None)
     args.score_micro_bs = getattr(args, "score_micro_bs", 8)
     args.model_hub = getattr(args, "model_hub", "modelscope")
+    args.dataset_mix_config = getattr(args, "dataset_mix_config", None)
     algorithm = get_algorithm(args.algo)
     chat_template_enable_thinking = False if args.disable_thinking else None
     if algorithm.name == "dpo":
@@ -607,6 +629,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             dataset_path=args.dataset_path,
             model_hub=args.model_hub,
             dataset_loader_fn=args.dataset_loader_fn,
+            dataset_mix_config=args.dataset_mix_config,
             save_path=args.save_path,
             save_interval=args.save_interval,
             epochs=args.epochs,
@@ -648,6 +671,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             dataset_path=args.dataset_path,
             model_hub=args.model_hub,
             dataset_loader_fn=args.dataset_loader_fn,
+            dataset_mix_config=args.dataset_mix_config,
             save_path=args.save_path,
             save_interval=args.save_interval,
             epochs=args.epochs,
@@ -687,6 +711,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             dataset_path=args.dataset_path,
             model_hub=args.model_hub,
             dataset_loader_fn=args.dataset_loader_fn,
+            dataset_mix_config=args.dataset_mix_config,
             reward_fn_path=args.reward_fn_path,
             save_path=args.save_path,
             save_interval=args.save_interval,
@@ -734,6 +759,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
         dataset_path=args.dataset_path,
         model_hub=args.model_hub,
         dataset_loader_fn=args.dataset_loader_fn,
+        dataset_mix_config=args.dataset_mix_config,
         reward_fn_path=args.reward_fn_path,
         save_path=args.save_path,
         save_interval=args.save_interval,
@@ -802,6 +828,17 @@ def run(trainer_config: TrainerConfig):
     from areno.api.rewards import load_reward_fn
     from areno.api.trainer_factory import build_trainer
 
+    mixed_dataset = None
+    if trainer_config.dataset_mix_config is not None:
+        mixed_dataset = _load_mixed_dataset_for_training(
+            trainer_config.dataset_mix_config,
+            model_hub=trainer_config.model_hub,
+            dataset_loader_fn=trainer_config.dataset_loader_fn,
+            load_dataset=load_dataset,
+            load_from_disk=load_from_disk,
+        )
+        click.echo(_format_dataset_mix_summary(mixed_dataset.summary()))
+
     trainer_config = resolve_model_refs_for_config(trainer_config)
     _write_dashboard_run_config(trainer_config)
     loss_fn = _loss_fn_for_config(trainer_config)
@@ -815,13 +852,19 @@ def run(trainer_config: TrainerConfig):
         metrics_log_dir=trainer_config.metrics_log_dir,
         custom_config=trainer_config.areno_config(),
     )
-    dataset = _load_dataset_for_training(
-        trainer_config.dataset_path,
-        dataset_loader_fn=trainer_config.dataset_loader_fn,
-        model_hub=trainer_config.model_hub,
-        load_dataset=load_dataset,
-        load_from_disk=load_from_disk,
-    )
+    if mixed_dataset is None:
+        if trainer_config.dataset_path is None:
+            raise ValueError("dataset_path is required when dataset_mix_config is not set")
+        dataset = _load_dataset_for_training(
+            trainer_config.dataset_path,
+            dataset_loader_fn=trainer_config.dataset_loader_fn,
+            model_hub=trainer_config.model_hub,
+            load_dataset=load_dataset,
+            load_from_disk=load_from_disk,
+        )
+    else:
+        dataset = mixed_dataset
+        _write_dataset_mix_artifact(dataset, trainer_config.metrics_log_dir)
     trainer = build_trainer(trainer_config, instance=api_trainer, dataset=dataset, reward_fn=reward_fn, loss_fn=loss_fn)
     trainer.fit()
 
@@ -831,7 +874,6 @@ def _write_dashboard_run_config(config: TrainerConfig) -> None:
 
     if not config.metrics_log_dir:
         return
-    import os
 
     path = Path(config.metrics_log_dir)
     path.mkdir(parents=True, exist_ok=True)
@@ -868,6 +910,7 @@ def _training_config_settings(config: TrainerConfig) -> dict:
                 "algo",
                 "ckpt",
                 "dataset_path",
+                "dataset_mix_config",
                 "model_hub",
                 "dataset_loader_fn",
                 "epochs",
@@ -991,7 +1034,13 @@ def _reward_fn_path_for_config(config: TrainerConfig) -> str | None:
 
 
 def _load_dataset_for_training(
-    dataset_path: str, *, model_hub: str = "modelscope", dataset_loader_fn: str | None, load_dataset, load_from_disk
+    dataset_path: str,
+    *,
+    model_hub: str = "modelscope",
+    dataset_loader_fn: str | None,
+    load_dataset,
+    load_from_disk,
+    _loader_fn=None,
 ):
     def default_loader(path):
         return _load_dataset_from_path(
@@ -1001,8 +1050,10 @@ def _load_dataset_for_training(
             load_from_disk=load_from_disk,
         )
 
-    if dataset_loader_fn is not None:
+    loader_fn = _loader_fn
+    if loader_fn is None and dataset_loader_fn is not None:
         loader_fn = _load_dataset_loader_fn(dataset_loader_fn)
+    if loader_fn is not None:
         return loader_fn(
             dataset_path,
             default_loader=default_loader,
@@ -1010,6 +1061,178 @@ def _load_dataset_for_training(
             load_from_disk=load_from_disk,
         )
     return default_loader(dataset_path)
+
+
+def _read_dataset_mix_manifest(config_path: str | Path) -> dict:
+    path = Path(config_path)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{path}: invalid JSON at line {exc.lineno}, column {exc.colno}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"{path}: top-level value must be an object")
+    version = payload.get("version")
+    if isinstance(version, bool) or not isinstance(version, int) or version != 1:
+        raise ValueError(f"{path}: version must be 1")
+
+    seed = payload.get("seed")
+    if isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed < 2**63:
+        raise ValueError(f"{path}: seed must be an integer in [0, 2^63)")
+    exhaustion = payload.get("exhaustion")
+    if exhaustion not in {"stop", "cycle", "renormalize"}:
+        raise ValueError(f"{path}: exhaustion must be one of: stop, cycle, renormalize")
+    shuffle = payload.get("shuffle_within_sources", True)
+    if not isinstance(shuffle, bool):
+        raise ValueError(f"{path}: shuffle_within_sources must be a boolean")
+    max_samples = payload.get("max_samples_per_epoch")
+    if max_samples is not None and (
+        isinstance(max_samples, bool) or not isinstance(max_samples, int) or max_samples <= 0
+    ):
+        raise ValueError(f"{path}: max_samples_per_epoch must be a positive integer")
+    if max_samples is not None and exhaustion != "cycle":
+        raise ValueError(f"{path}: max_samples_per_epoch is only supported with exhaustion='cycle'")
+
+    sources = payload.get("sources")
+    if not isinstance(sources, list) or len(sources) < 2:
+        raise ValueError(f"{path}: sources must contain at least two entries")
+    names: set[str] = set()
+    normalized_sources = []
+    for index, source in enumerate(sources):
+        prefix = f"{path}: sources[{index}]"
+        if not isinstance(source, dict):
+            raise ValueError(f"{prefix} must be an object")
+        name = source.get("name")
+        dataset_path = source.get("path")
+        weight = source.get("weight")
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError(f"{prefix}.name must be a non-empty string")
+        if name in names:
+            raise ValueError(f"{path}: duplicate source name: {name}")
+        names.add(name)
+        if not isinstance(dataset_path, str) or not dataset_path.strip():
+            raise ValueError(f"{prefix}.path must be a non-empty string")
+        try:
+            numeric_weight = float(weight)
+        except (OverflowError, TypeError, ValueError):
+            numeric_weight = math.nan
+        if isinstance(weight, bool) or not math.isfinite(numeric_weight) or numeric_weight <= 0:
+            raise ValueError(f"{prefix}.weight must be finite and positive")
+        normalized_sources.append({"name": name, "path": dataset_path, "weight": numeric_weight})
+    max_weight = max(source["weight"] for source in normalized_sources)
+    if any(source["weight"] / max_weight == 0.0 for source in normalized_sources):
+        raise ValueError(f"{path}: source weights have an unsupported numeric range")
+
+    return {
+        "version": 1,
+        "seed": seed,
+        "exhaustion": exhaustion,
+        "shuffle_within_sources": shuffle,
+        "max_samples_per_epoch": max_samples,
+        "sources": normalized_sources,
+    }
+
+
+def _load_mixed_dataset_for_training(
+    config_path: str,
+    *,
+    model_hub: str,
+    dataset_loader_fn: str | None,
+    load_dataset,
+    load_from_disk,
+) -> WeightedMixedDataset:
+    manifest = _read_dataset_mix_manifest(config_path)
+    sources = []
+    try:
+        loader_fn = _load_dataset_loader_fn(dataset_loader_fn) if dataset_loader_fn is not None else None
+    except Exception as exc:
+        raise ValueError(f"stage=dataset_mix_loader input={dataset_loader_fn}: {exc}") from exc
+    for source in manifest["sources"]:
+        source_path = _resolve_mix_source_path(Path(config_path), source["path"])
+        try:
+            dataset = _load_dataset_for_training(
+                source_path,
+                model_hub=model_hub,
+                dataset_loader_fn=dataset_loader_fn,
+                load_dataset=load_dataset,
+                load_from_disk=load_from_disk,
+                _loader_fn=loader_fn,
+            )
+            _validate_sft_mix_source(source["name"], dataset)
+        except Exception as exc:
+            raise ValueError(f"stage=dataset_mix_validation source={source['name']} input={source['path']}: {exc}") from exc
+        sources.append(DatasetMixSource(name=source["name"], dataset=dataset, weight=source["weight"]))
+    return WeightedMixedDataset(
+        sources,
+        seed=manifest["seed"],
+        exhaustion=manifest["exhaustion"],
+        shuffle_within_sources=manifest["shuffle_within_sources"],
+        max_samples_per_epoch=manifest["max_samples_per_epoch"],
+    )
+
+
+def _resolve_mix_source_path(config_path: Path, source_path: str) -> str:
+    path = Path(source_path)
+    if path.is_absolute():
+        return str(path)
+    candidate = config_path.resolve().parent / path
+    if (
+        candidate.exists()
+        or source_path.startswith(("./", "../"))
+        or path.suffix.lower() in _SUPPORTED_DATASET_SUFFIXES
+    ):
+        return str(candidate)
+    return source_path
+
+
+def _validate_sft_mix_source(source_name: str, dataset) -> None:
+    if not hasattr(dataset, "__len__") or not hasattr(dataset, "__getitem__"):
+        raise ValueError("source must be a map-style dataset with len() and indexed access")
+    if len(dataset) == 0:
+        raise ValueError("source is empty")
+    columns = getattr(dataset, "column_names", None)
+    if columns is not None:
+        missing = [field for field in ("prompt", "response") if field not in columns]
+        if missing:
+            raise ValueError(f"missing required SFT field(s): {', '.join(missing)}")
+        if DATASET_MIX_METADATA_KEY in columns:
+            raise ValueError(f"source contains reserved field '{DATASET_MIX_METADATA_KEY}'")
+    rows = [dataset[0]] if columns is not None else (dataset[index] for index in range(len(dataset)))
+    for index, row in enumerate(rows):
+        if not isinstance(row, Mapping):
+            raise ValueError(f"row {index} must be a mapping")
+        missing = [field for field in ("prompt", "response") if field not in row]
+        if missing:
+            raise ValueError(f"row {index} missing required SFT field(s): {', '.join(missing)}")
+        if DATASET_MIX_METADATA_KEY in row:
+            raise ValueError(f"row {index} contains reserved field '{DATASET_MIX_METADATA_KEY}'")
+
+
+def _format_dataset_mix_summary(summary: dict) -> str:
+    lines = [
+        "AReno dataset mix",
+        f"  policy: {summary['policy']}",
+        f"  seed: {summary['seed']}",
+        f"  shuffle_within_sources: {summary['shuffle_within_sources']}",
+        f"  planned_rows: {summary['planned_rows']}",
+        f"  termination_reason: {summary['termination_reason']}",
+        "  sources:",
+    ]
+    for source in summary["sources"]:
+        lines.append(
+            "    - "
+            f"{source['name']}: rows={source['rows_available']} "
+            f"weight={source['weight_requested']:.6f} selected={source['rows_selected']}"
+        )
+    return "\n".join(lines)
+
+
+def _write_dataset_mix_artifact(dataset: WeightedMixedDataset, metrics_log_dir: str | None) -> None:
+    if not metrics_log_dir:
+        return
+    path = Path(metrics_log_dir)
+    path.mkdir(parents=True, exist_ok=True)
+    artifact_path = path / f"dataset_mix_plan.{os.getpid()}.json"
+    artifact_path.write_text(json.dumps(dataset.summary(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
 def _load_dataset_loader_fn(spec_text: str):
@@ -1166,6 +1389,12 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
 @click.option("--ckpt", default=None, help="Actor model/tokenizer checkpoint path or remote model repo ID.")
 @click.option(
     "--dataset-path", default=None, help="Training dataset path, HF save_to_disk directory, or remote dataset ref."
+)
+@click.option(
+    "--dataset-mix-config",
+    type=click.Path(path_type=Path, dir_okay=False),
+    default=None,
+    help="JSON manifest for deterministic weighted SFT dataset mixing; mutually exclusive with --dataset-path.",
 )
 @click.option(
     "--model-hub",
