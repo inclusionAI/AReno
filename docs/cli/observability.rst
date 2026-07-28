@@ -156,7 +156,7 @@ execution:
 .. code-block:: text
 
    agentic rollout batch prompts=2 n_samples=8 expected_requests=16 max_running_prompts=16
-   agentic train batch built samples=16 tokens=223308 messages=242 tool_calls=133 tool_results=97
+   agentic train batch built samples=16 tokens=223308 trainable_tokens=41281 masked_response_tokens=5917 trainable_turns=final_answer mask_tool_call_args=False messages=242 tool_calls=133 tool_results=97
 
 These lines are useful for checking whether the configured concurrency,
 trajectory length, and tool-call volume match expectations.

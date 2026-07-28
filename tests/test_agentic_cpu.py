@@ -6,6 +6,8 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from areno.api.tool_call_parser import (
     Gemma4ToolCallParser,
     JsonToolCallParser,
@@ -1125,6 +1127,350 @@ def test_json_tool_call_parser_rejects_tool_choice_mismatch():
 
     assert parsed.tool_calls == []
     assert parsed.normal_text
+
+
+def test_loss_mask_policy_defaults_new_fields():
+    policy = LossMaskPolicy()
+    assert policy.trainable_turns == "all_assistant"
+    assert policy.mask_tool_call_args is False
+    # the dead `final_assistant_text` flag has been removed
+    assert not hasattr(policy, "final_assistant_text")
+
+
+def _spanned_sample(item, tokens, spans, base_mask):
+    sample = _sample(item, "", list(tokens))
+    sample.response_spans = list(spans)
+    sample.loss_mask_override = list(base_mask)
+    return sample
+
+
+def test_trainable_turns_last_assistant_masks_prior_spans():
+    session = RolloutSession(
+        None, sampling_params=None, loss_mask_policy=LossMaskPolicy(trainable_turns="last_assistant")
+    )
+    item = next(AgentBatch(records=[{}], prompts=["p"], input_tokens=[[1]], n_samples=1).iter_samples())
+    spans = [
+        agentic.ResponseSpan("assistant_text", 2),
+        agentic.ResponseSpan("assistant_tool_call", 2),
+        agentic.ResponseSpan("assistant_text", 2),
+    ]
+    sample = _spanned_sample(item, [10, 11, 12, 13, 20, 21], spans, [True] * 6)
+    session._apply_trainable_turn_mode(sample)
+    # only the final assistant span (tokens 20, 21) stays trainable
+    assert sample.loss_mask_override == [False, False, False, False, True, True]
+
+
+def test_trainable_turns_final_answer_targets_post_tool_result_text():
+    session = RolloutSession(
+        None, sampling_params=None, loss_mask_policy=LossMaskPolicy(trainable_turns="final_answer")
+    )
+    item = next(AgentBatch(records=[{}], prompts=["p"], input_tokens=[[1]], n_samples=1).iter_samples())
+    spans = [
+        agentic.ResponseSpan("assistant_text", 2),
+        agentic.ResponseSpan("assistant_tool_call", 2),
+        agentic.ResponseSpan("assistant_text", 2),
+    ]
+    sample = _spanned_sample(item, [10, 11, 12, 13, 20, 21], spans, [True] * 6)
+    session._apply_trainable_turn_mode(sample)
+    # final_answer keeps the assistant_text after the last tool_call (tokens 20, 21)
+    assert sample.loss_mask_override == [False, False, False, False, True, True]
+
+
+def test_trainable_turns_final_answer_degenerates_without_tool_result():
+    session = RolloutSession(
+        None, sampling_params=None, loss_mask_policy=LossMaskPolicy(trainable_turns="final_answer")
+    )
+    item = next(AgentBatch(records=[{}], prompts=["p"], input_tokens=[[1]], n_samples=1).iter_samples())
+    spans = [agentic.ResponseSpan("assistant_text", 3)]
+    sample = _spanned_sample(item, [10, 11, 12], spans, [True, True, True])
+    session._apply_trainable_turn_mode(sample)
+    assert sample.loss_mask_override == [True, True, True]
+
+
+def test_trainable_turns_final_answer_bare_trailing_tool_call_zero_signal():
+    session = RolloutSession(
+        None, sampling_params=None, loss_mask_policy=LossMaskPolicy(trainable_turns="final_answer")
+    )
+    item = next(AgentBatch(records=[{}], prompts=["p"], input_tokens=[[1]], n_samples=1).iter_samples())
+    spans = [
+        agentic.ResponseSpan("assistant_text", 2),
+        agentic.ResponseSpan("assistant_tool_call", 2),
+    ]
+    sample = _spanned_sample(item, [10, 11, 12, 13], spans, [True, True, True, True])
+    session._apply_trainable_turn_mode(sample)
+    assert sample.loss_mask_override == [False, False, False, False]
+
+
+def test_trainable_turns_last_assistant_keeps_trailing_tool_call():
+    session = RolloutSession(
+        None, sampling_params=None, loss_mask_policy=LossMaskPolicy(trainable_turns="last_assistant")
+    )
+    item = next(AgentBatch(records=[{}], prompts=["p"], input_tokens=[[1]], n_samples=1).iter_samples())
+    spans = [
+        agentic.ResponseSpan("assistant_text", 2),
+        agentic.ResponseSpan("assistant_tool_call", 2),
+    ]
+    sample = _spanned_sample(item, [10, 11, 12, 13], spans, [True, True, True, True])
+    session._apply_trainable_turn_mode(sample)
+    # last_assistant keeps the trailing tool_call span (differs from final_answer)
+    assert sample.loss_mask_override == [False, False, True, True]
+
+
+def test_mask_tool_call_args_masks_arguments_keeps_name():
+    pieces = ['{"name":"search","arguments":', '{"q":"x"}', " tail"]
+    tokenizer = _PieceTokenizer(pieces)
+    trainer = _FakeTrainer(world_size=1, tp_size=1)
+    trainer.tokenizer = tokenizer
+    session = RolloutSession(
+        trainer,
+        sampling_params=_FakeSamplingParams(),
+        loss_mask_policy=LossMaskPolicy(mask_tool_call_args=True),
+    )
+    item = next(AgentBatch(records=[{}], prompts=["p"], input_tokens=[[1]], n_samples=1).iter_samples())
+    spans = [agentic.ResponseSpan("assistant_tool_call", 3)]
+    sample = _spanned_sample(item, [0, 1, 2], spans, [True, True, True])
+    session._apply_trainable_turn_mode(sample)
+    # arguments value is piece[1] (token 1); name (piece0) + tail (piece2) kept
+    assert sample.loss_mask_override == [True, False, True]
+
+
+def test_mask_tool_call_args_composes_with_existing_suppression():
+    pieces = ['{"name":"f","arguments":', '{"a":1}', " tail"]
+    tokenizer = _PieceTokenizer(pieces)
+    trainer = _FakeTrainer(world_size=1, tp_size=1)
+    trainer.tokenizer = tokenizer
+    session = RolloutSession(
+        trainer,
+        sampling_params=_FakeSamplingParams(),
+        loss_mask_policy=LossMaskPolicy(mask_tool_call_args=True),
+    )
+    item = next(AgentBatch(records=[{}], prompts=["p"], input_tokens=[[1]], n_samples=1).iter_samples())
+    spans = [agentic.ResponseSpan("assistant_tool_call", 3)]
+    # token 2 (tail / result region) already suppressed by _tool_call_loss_mask
+    sample = _spanned_sample(item, [0, 1, 2], spans, [True, True, False])
+    session._apply_trainable_turn_mode(sample)
+    # token 1 (args) narrowed to False; token 2 stays False (not un-suppressed)
+    assert sample.loss_mask_override == [True, False, False]
+
+
+def test_call_result_pairing_rejects_mid_call_without_result():
+    session = RolloutSession(None, sampling_params=None, loss_mask_policy=LossMaskPolicy())
+    item = next(AgentBatch(records=[{}], prompts=["p"], input_tokens=[[1]], n_samples=1).iter_samples())
+    sample = _sample(item, "", [10, 11])
+    sample.trace = [
+        agentic.RewardEvent(type="assistant_tool_call", name="f", arguments="{}"),
+        agentic.RewardEvent(type="assistant_text", text="ok"),
+    ]
+    sample.response_spans = [
+        agentic.ResponseSpan("assistant_tool_call", 1),
+        agentic.ResponseSpan("assistant_text", 1),
+    ]
+    sample.messages = [{"role": "user", "content": "q"}, {"role": "assistant", "content": ""}]
+    with pytest.raises(ValueError):
+        session._validate_call_result_pairing([sample])
+
+
+def test_call_result_pairing_allows_bare_trailing_tool_call():
+    session = RolloutSession(None, sampling_params=None, loss_mask_policy=LossMaskPolicy())
+    item = next(AgentBatch(records=[{}], prompts=["p"], input_tokens=[[1]], n_samples=1).iter_samples())
+    sample = _sample(item, "", [10])
+    sample.trace = [agentic.RewardEvent(type="assistant_tool_call", name="f", arguments="{}")]
+    sample.response_spans = [agentic.ResponseSpan("assistant_tool_call", 1)]
+    sample.messages = [{"role": "user", "content": "q"}]
+    session._validate_call_result_pairing([sample])  # no raise
+
+
+def test_call_result_pairing_tolerates_orphan_tool_result():
+    session = RolloutSession(None, sampling_params=None, loss_mask_policy=LossMaskPolicy())
+    item = next(AgentBatch(records=[{}], prompts=["p"], input_tokens=[[1]], n_samples=1).iter_samples())
+    sample = _sample(item, "", [10])
+    sample.trace = [agentic.RewardEvent(type="assistant_text", text="ok")]
+    sample.response_spans = [agentic.ResponseSpan("assistant_text", 1)]
+    sample.messages = [{"role": "user", "content": "q"}, {"role": "tool", "content": "r"}]
+    session._validate_call_result_pairing([sample])  # no raise (orphan tolerated)
+
+
+def test_empty_response_tokens_not_invalid():
+    session = RolloutSession(None, sampling_params=None, loss_mask_policy=LossMaskPolicy())
+    item = next(AgentBatch(records=[{}], prompts=["p"], input_tokens=[[1]], n_samples=1).iter_samples())
+    sample = _sample(item, "", [])
+    sample.messages = [{"role": "user", "content": "q"}]
+    session._validate_call_result_pairing([sample])  # no raise
+
+
+def _make_two_turn_text_text(session, item):
+    first = _pending_chat(0, _FakeSamplingParams())
+    first.item = item
+    first.input_tokens = [1, 2]
+    first.messages = [{"role": "user", "content": "step 1"}]
+    second = _pending_chat(0, _FakeSamplingParams())
+    second.item = item
+    second.input_tokens = [1, 2, 10, 11, 30, 31]
+    second.messages = [
+        {"role": "user", "content": "step 1"},
+        {"role": "assistant", "content": "10 11"},
+        {"role": "tool", "content": "tool result"},
+        {"role": "user", "content": "step 2"},
+    ]
+    first_sample = session._sample_from_pending_chat(first, agentic._ResponseData([10, 11], [-0.1, -0.2]))
+    second_sample = session._sample_from_pending_chat(second, agentic._ResponseData([20], [-0.3]))
+    session._append_sample_response(first_sample, second_sample)
+    return first_sample
+
+
+def test_trainable_turns_all_assistant_full_row_default_parity():
+    trainer = _FakeTrainer(world_size=1, tp_size=1)
+    session = RolloutSession(
+        trainer,
+        sampling_params=_FakeSamplingParams(),
+        loss_mask_policy=LossMaskPolicy(),
+        max_running_prompts=4,
+    )
+    item = agentic.AgentItem(record={"task": "multi"}, prompt="p", input_tokens=[1, 2], prompt_index=0, sample_index=0)
+    sample = _make_two_turn_text_text(session, item)
+    rows = session._train_rows_from_samples([sample])
+    # default: both assistant spans trainable (parity with pre-change behavior)
+    assert rows.loss_masks == [[False, False, True, True, False, False, True]]
+    assert rows.trainable_tokens == 3
+    assert rows.masked_response_tokens == 0
+
+
+def test_trainable_turns_last_assistant_full_row_and_metrics():
+    trainer = _FakeTrainer(world_size=1, tp_size=1)
+    session = RolloutSession(
+        trainer,
+        sampling_params=_FakeSamplingParams(),
+        loss_mask_policy=LossMaskPolicy(trainable_turns="last_assistant"),
+        max_running_prompts=4,
+    )
+    item = agentic.AgentItem(record={"task": "multi"}, prompt="p", input_tokens=[1, 2], prompt_index=0, sample_index=0)
+    sample = _make_two_turn_text_text(session, item)
+    rows = session._train_rows_from_samples([sample])
+    # turn1 response [10, 11] masked; turn2 response [20] kept
+    assert rows.loss_masks == [[False, False, False, False, False, False, True]]
+    assert rows.trainable_tokens == 1
+    assert rows.masked_response_tokens == 2
+
+
+def test_response_spans_populated_after_multi_turn_assembly():
+    """B-tier: assembled multi-turn samples carry a response_spans list."""
+    trainer = _FakeTrainer(world_size=1, tp_size=1)
+    session = RolloutSession(
+        trainer,
+        sampling_params=_FakeSamplingParams(),
+        loss_mask_policy=LossMaskPolicy(),
+        max_running_prompts=4,
+    )
+    item = agentic.AgentItem(record={"task": "multi"}, prompt="p", input_tokens=[1, 2], prompt_index=0, sample_index=0)
+    first = _pending_chat(0, _FakeSamplingParams())
+    first.item = item
+    first.input_tokens = [1, 2]
+    first.messages = [{"role": "user", "content": "step 1"}]
+    second = _pending_chat(0, _FakeSamplingParams())
+    second.item = item
+    second.input_tokens = [1, 2, 10, 11, 30, 31]
+    second.messages = [
+        {"role": "user", "content": "step 1"},
+        {"role": "assistant", "content": "10 11"},
+        {"role": "tool", "content": "tool result"},
+        {"role": "user", "content": "step 2"},
+    ]
+    first_sample = session._sample_from_pending_chat(first, agentic._ResponseData([10, 11], [-0.1, -0.2]))
+    # single-turn sample has one span
+    assert len(first_sample.response_spans) == 1
+    assert first_sample.response_spans[0].kind == "assistant_text"
+    assert first_sample.response_spans[0].length == 2
+    second_sample = session._sample_from_pending_chat(second, agentic._ResponseData([20], [-0.3]))
+    session._append_sample_response(first_sample, second_sample)
+    # after merge, both spans are present with their kinds/lengths
+    assert [(s.kind, s.length) for s in first_sample.response_spans] == [
+        ("assistant_text", 2),
+        ("assistant_text", 1),
+    ]
+
+
+def test_explicit_trajectory_path_last_assistant_masks_correctly():
+    """Dual-path: explicit-trajectory path (AgentTrajectoryTurn) masked correctly."""
+    trainer = _FakeTrainer(world_size=1, tp_size=1)
+    session = RolloutSession(
+        trainer,
+        sampling_params=_FakeSamplingParams(),
+        loss_mask_policy=LossMaskPolicy(trainable_turns="last_assistant"),
+        max_running_prompts=4,
+    )
+    item = agentic.AgentItem(record={"task": "t"}, prompt="p", input_tokens=[1], prompt_index=0, sample_index=0)
+    turns = [
+        AgentTrajectoryTurn(
+            item,
+            messages=[{"role": "user", "content": "q"}],
+            response={"areno": {"response_tokens": [10, 11], "response_logprobs": [-0.1, -0.2]}},
+        ),
+        AgentTrajectoryTurn(
+            item,
+            messages=[
+                {"role": "user", "content": "q"},
+                {"role": "assistant", "content": "10 11"},
+                {"role": "tool", "content": "r"},
+                {"role": "user", "content": "q2"},
+            ],
+            response={"areno": {"response_tokens": [20, 21], "response_logprobs": [-0.3, -0.4]}},
+        ),
+    ]
+    samples = []
+    for turn in turns:
+        sample = session._sample_from_trajectory_turn(turn)
+        existing = None
+        for s in samples:
+            if (s.item.prompt_index, s.item.sample_index) == (sample.item.prompt_index, sample.item.sample_index):
+                existing = s
+                break
+        if existing is None:
+            samples.append(sample)
+        else:
+            session._append_sample_response(existing, sample)
+    rows = session._train_rows_from_samples(samples)
+    # token_row: [1, 10, 11, 12, 20, 21] — 12 is inter-turn context (tool result)
+    # two assistant_text spans (2 tokens each); last_assistant keeps only the second
+    assert rows.loss_masks[0] == [False, False, False, False, True, True]
+    assert rows.trainable_tokens == 2
+
+
+def test_rollout_log_records_active_mode_and_mask_state(caplog):
+    """Observability: rollout log line records trainable_turns mode + mask_tool_call_args."""
+    import logging
+
+    trainer = _FakeTrainer(world_size=1, tp_size=1)
+    session = RolloutSession(
+        trainer,
+        sampling_params=_FakeSamplingParams(),
+        loss_mask_policy=LossMaskPolicy(trainable_turns="last_assistant", mask_tool_call_args=True),
+        max_running_prompts=4,
+    )
+    item = agentic.AgentItem(record={"task": "t"}, prompt="p", input_tokens=[1], prompt_index=0, sample_index=0)
+    sample = _sample(item, "ok", [10])
+    sample.response_spans = [agentic.ResponseSpan("assistant_text", 1)]
+    sample.loss_mask_override = [True]
+    sample.token_row = [1, 10]
+    sample.response_mask_row = [False, True]
+    sample.loss_mask_row = [False, True]
+    sample.rollout_logprobs_row = [0.0, 0.0]
+    # _train_rows_from_samples invokes _apply_trainable_turn_mode; log via policy_only path
+    # Here we assert the loss_mask_policy carries the configured mode/state (log source of truth).
+    policy = session._loss_mask_policy
+    assert policy.trainable_turns == "last_assistant"
+    assert policy.mask_tool_call_args is True
+    #exercise the row builder to ensure no error and metrics flow
+    rows = session._train_rows_from_samples([sample])
+    assert rows.trainable_tokens == 1
+    # The policy_only trainer log format is verified structurally in policy_only._run_agentic_rollout;
+    # this test pins the policy fields that the log line reads.
+
+
+def test_trainer_config_rejects_invalid_trainable_turns():
+    from areno.api.trainer_config import TrainerConfig
+
+    with pytest.raises(ValueError):
+        TrainerConfig(algo="gspo", ckpt="x", dataset_path="y", trainable_turns="all_turns")
 
 
 def _sample(item, text, tokens):

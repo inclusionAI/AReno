@@ -173,6 +173,35 @@ the same session lifecycle.
    results are environment observations rather than policy actions. Assistant
    text and assistant tool-call spans are trainable by default.
 
+``--trainable-turns {all_assistant,last_assistant,final_answer}``
+   Which assistant turns in an agentic trajectory contribute to policy loss.
+   Default: ``all_assistant`` (every assistant span; backward-compatible).
+   ``last_assistant`` trains only the final assistant span; ``final_answer``
+   trains only the ``assistant_text`` span following the last tool result and
+   degenerates to the last assistant span when the trajectory has no tool
+   result. A trajectory ending in a bare tool call under ``final_answer`` yields
+   zero trainable signal (no error).
+
+``--mask-tool-call-args``
+   Mask JSON-argument tokens within tool-call spans while keeping tool-name /
+   action tokens trainable. Defaults to off. This is a research ablation that
+   diverges from industry tool-use training (which trains the full tool-call
+   span); argument-span localization is approximate (decode/encode is not
+   round-trip). Pin behavior with CPU per-token tests.
+
+Train only the final answer of a multi-tool trajectory:
+
+.. code-block:: bash
+
+   areno train --ckpt Qwen/Qwen3-0.6B --dataset-path mytask:main \
+     --agent-fn examples/mytask/run_agent.py --reward-fn-path examples/mytask/reward.py \
+     --algo gspo --tp-size 4 --trainable-turns final_answer
+
+The rollout log reports the active mode and the resulting token counts:
+``trainable_turns=final_answer mask_tool_call_args=False trainable_tokens=...
+masked_response_tokens=...`` (``masked_response_tokens`` = response tokens minus
+trainable tokens).
+
 Agentic trajectories can contain multiple chat-completion turns for the same
 prompt/sample pair. The agent owns the OpenAI-style message list and returns
 trajectory turns with the model response; Areno converts those turns into token

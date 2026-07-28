@@ -59,6 +59,8 @@ class TrainerConfig:
     agent_fn: str | None = None
     agent_timeout_s: float = 300.0
     train_tool_results: bool = False
+    trainable_turns: str = "all_assistant"
+    mask_tool_call_args: bool = False
     chat_template_enable_thinking: bool | None = None
 
     def __post_init__(self) -> None:
@@ -66,6 +68,10 @@ class TrainerConfig:
             raise ValueError("attn_backend must be one of: flash, native")
         if self.model_hub not in {"hf", "modelscope"}:
             raise ValueError("model_hub must be one of: hf, modelscope")
+        if self.trainable_turns not in {"all_assistant", "last_assistant", "final_answer"}:
+            raise ValueError(
+                "trainable_turns must be one of: all_assistant, last_assistant, final_answer"
+            )
 
     def optimizer_config(self) -> dict:
         """Build the optimizer dict consumed by the backend config."""

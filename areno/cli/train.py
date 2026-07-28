@@ -90,6 +90,8 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "agent_fn",
             "agent_timeout_s",
             "train_tool_results",
+            "trainable_turns",
+            "mask_tool_call_args",
             "reward_fn_path",
             "reward_ckpt",
         ),
@@ -435,6 +437,8 @@ def _rollout_summary_rows(config: TrainerConfig) -> list[tuple[str, str]]:
         ("max_prompt_tokens", str(config.max_prompt_tokens)),
         ("max_new_tokens", str(config.max_new_tokens)),
         ("max_context_len", _format_optional(config.max_context_len, default="model limit")),
+        ("trainable_turns", str(getattr(config, "trainable_turns", "all_assistant"))),
+        ("mask_tool_call_args", _format_bool(getattr(config, "mask_tool_call_args", False))),
     ]
     if not isinstance(config, RolloutTrainerConfig):
         return [
@@ -637,6 +641,8 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             agent_fn=args.agent_fn,
             agent_timeout_s=args.agent_timeout_s,
             train_tool_results=args.train_tool_results,
+            trainable_turns=args.trainable_turns,
+            mask_tool_call_args=args.mask_tool_call_args,
             chat_template_enable_thinking=chat_template_enable_thinking,
             ref_ckpt=args.ref_ckpt,
             dpo_beta=args.dpo_beta,
@@ -678,6 +684,8 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             agent_fn=args.agent_fn,
             agent_timeout_s=args.agent_timeout_s,
             train_tool_results=args.train_tool_results,
+            trainable_turns=args.trainable_turns,
+            mask_tool_call_args=args.mask_tool_call_args,
             chat_template_enable_thinking=chat_template_enable_thinking,
         )
     if algorithm.name != "ppo":
@@ -726,6 +734,8 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             agent_fn=args.agent_fn,
             agent_timeout_s=args.agent_timeout_s,
             train_tool_results=args.train_tool_results,
+            trainable_turns=args.trainable_turns,
+            mask_tool_call_args=args.mask_tool_call_args,
             chat_template_enable_thinking=chat_template_enable_thinking,
         )
     return PPOTrainerConfig(
@@ -787,6 +797,8 @@ def _trainer_config_from_args(args) -> TrainerConfig:
         agent_fn=args.agent_fn,
         agent_timeout_s=args.agent_timeout_s,
         train_tool_results=args.train_tool_results,
+            trainable_turns=args.trainable_turns,
+            mask_tool_call_args=args.mask_tool_call_args,
         chat_template_enable_thinking=chat_template_enable_thinking,
     )
 
@@ -902,6 +914,8 @@ def _training_config_settings(config: TrainerConfig) -> dict:
                 "agent_fn",
                 "agent_timeout_s",
                 "train_tool_results",
+                "trainable_turns",
+                "mask_tool_call_args",
                 "reward_fn_path",
                 "reward_ckpt",
             ],
@@ -1300,6 +1314,18 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     "--agent-timeout-s", type=float, default=300.0, show_default=True, help="Agentic rollout proxy request timeout."
 )
 @click.option("--train-tool-results", is_flag=True, help="Include tool-result spans in agentic policy loss.")
+@click.option(
+    "--trainable-turns",
+    type=click.Choice(["all_assistant", "last_assistant", "final_answer"]),
+    default="all_assistant",
+    show_default=True,
+    help="Which assistant turns in an agentic trajectory contribute to policy loss.",
+)
+@click.option(
+    "--mask-tool-call-args",
+    is_flag=True,
+    help="Mask JSON argument tokens within tool-call spans (keep tool-name trainable). Research ablation; see docs for divergence from industry practice.",
+)
 @click.option(
     "--gspo-clip-eps", type=float, default=3.0e-4, show_default=True, help="GSPO sequence-ratio clipping epsilon."
 )

@@ -440,14 +440,27 @@ Data classes
    Tool-result/context spans are included in train rows so logprob scoring sees
    the same context as rollout, but they are masked from policy loss by default.
 
-.. py:class:: areno.api.agentic.LossMaskPolicy(assistant_text=True, assistant_tool_calls=True, tool_results=False, final_assistant_text=True, system_prompt=False, user_prompt=False)
+.. py:class:: areno.api.agentic.LossMaskPolicy(assistant_text=True, assistant_tool_calls=True, tool_results=False, trainable_turns="all_assistant", mask_tool_call_args=False, system_prompt=False, user_prompt=False)
 
    Span-level policy-loss controls for agentic trajectories.
 
    :param bool assistant_text: Train assistant text spans.
    :param bool assistant_tool_calls: Train assistant tool-call spans.
    :param bool tool_results: Train tool-result spans. Defaults to ``False``.
-   :param bool final_assistant_text: Reserved for final-response text spans.
+   :param str trainable_turns: Which assistant turns contribute to policy loss.
+      One of ``all_assistant`` (default; every assistant span, backward-compatible),
+      ``last_assistant`` (only the final assistant span), or ``final_answer``
+      (only the ``assistant_text`` span following the last tool result; degenerates
+      to the last assistant span when the trajectory has no tool result).
+   :param bool mask_tool_call_args: Mask JSON-argument tokens within tool-call
+      spans while keeping tool-name/action tokens trainable. Defaults to
+      ``False``. This is a **research ablation**: industry tool-use training
+      (ToolFormer, Gorilla, ToolACE, xLAM, Hermes, NexusRaven) trains the full
+      tool-call span (name + arguments) and has no public precedent for
+      argument-internal token masking; the established "avoid bad-argument
+      contamination" practice is step/sample-level reward filtering, not arg
+      masking. Argument-span localization is approximate (decode/encode is not
+      round-trip), so pin behavior with CPU per-token tests.
    :param bool system_prompt: Reserved for system prompt spans.
    :param bool user_prompt: Reserved for user prompt spans.
 
