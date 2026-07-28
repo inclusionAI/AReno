@@ -2,8 +2,8 @@
 
 Modes:
   * human  -- arrow keys play one move at a time (offline, no model).
-  * random -- the uniform-random-legal baseline plays one move per request
-              (offline, no model).
+  * random -- a uniform-random direction (all four, not legal-only) plays one
+              move per request (offline, no model).
   * llm    -- a trained policy's ``choose_moves`` tool call is replayed as one
               episode against the same seeded engine used in training; the
               random baseline on the same board+seed is shown alongside for the
@@ -323,15 +323,12 @@ def _random_step(server: Game2048Server) -> dict[str, Any]:
         _append_event(server, "Random: game over. Start a new board.")
         return _payload(server)
     server.agent_mode = "random"
-    # Always play a legal (board-changing) direction, silently discarding no-op
-    # picks so a Random Step always makes visible progress. Mirrors a casual
-    # human nudge; the random_episode baseline still records invalid rates.
-    legal = game.legal_moves(server.board)
-    if not legal:
-        server.terminal = True
-        _append_event(server, "Random: no legal move remains — game over.")
-        return _payload(server)
-    _step(server, server.rng.choice(legal), who="random")
+    # Match game.random_episode: a uniform-random *direction* (all four), not a
+    # legal-only pick. A no-op direction is counted as invalid by _step, so the
+    # browser's Random mode reports the same invalid-rate semantics as the
+    # training/eval baseline.
+    direction = server.rng.choice(game.ACTIONS)
+    _step(server, direction, who="random")
     return _payload(server)
 
 
@@ -494,7 +491,7 @@ input[type=number]{width:110px;border:3px solid #27313a;border-radius:12px;paddi
       <input type="number" id="seedInput" aria-label="Random seed">
       <button id="new">New Game</button>
     </div>
-    <p class="rules" style="margin-top:auto">Human: arrows/WASD. Random Step: one uniformly-random *legal* direction (no-ops silently retried). LLM Episode: a served policy plays a whole episode, animated step-by-step. LLM Auto: loop LLM episodes automatically (current board fed back each turn) until you stop or the game ends.</p>
+    <p class="rules" style="margin-top:auto">Human: arrows/WASD. Random Step: one uniformly-random direction (all four; no-ops counted as invalid). LLM Episode: a served policy plays a whole episode, animated step-by-step. LLM Auto: loop LLM episodes automatically (current board fed back each turn) until you stop or the game ends.</p>
   </section>
   <aside class="panel events-panel">
     <div class="events-head">History</div>

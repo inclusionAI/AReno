@@ -65,8 +65,8 @@ python examples/agentic/2048/web_ui.py \
 Open `http://127.0.0.1:8768`. Modes:
 
 - **Human** — arrow keys or WASD; plays one move at a time. No server needed.
-- **Random** — the uniform-random-legal baseline plays one move per *Agent Step*.
-  No server needed.
+- **Random** — a uniform-random *direction* (all four, not legal-only) plays one
+  move per *Agent Step*; no server needed.
 - **LLM** — the policy plays a whole episode; the random baseline on the same
   board+seed and the trained-vs-baseline improvement are printed in the events
   panel. Requires `--base-url`.
@@ -83,6 +83,14 @@ python examples/agentic/2048/baseline.py \
   --boards /tmp/areno-2048-boards.jsonl --cap 32 \
   --base-url http://127.0.0.1:8000/v1 --api-key token --model policy
 ```
+
+With `--json`, the structured output nests metrics under `random_baseline` (and
+`trained_policy` / `improvement` when `--base-url` is given) and also mirrors
+the headline means at top-level `summary` (`mean_score`, `mean_max_tile`,
+`mean_invalid_rate`) for simple parsers. When `--cap`/`--trials` match the
+values baked into the dataset, `random_baseline.baseline_source` is `stored`
+(reusing the per-board baselines written by the generator); otherwise it is
+`recomputed` (or `mixed`) and `recomputed` counts how many were rerun.
 
 ## Run without Tool Calls
 
@@ -130,3 +138,7 @@ areno train \
   LLM/policy is used.
 - `areno train` and `areno serve` need CUDA + a checkpoint; the engine,
   generator, loader, reward, baseline, and web UI run on CPU without a GPU.
+- The random baseline (in `reward_fn`, `baseline.py`, and the web UI's Random
+  mode) is a uniform-random direction over all four directions, not a
+  legal-only policy — so it has a nonzero invalid-move rate, and any policy
+  that picks legal directions should beat it on invalid-rate.

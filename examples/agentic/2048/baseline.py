@@ -57,18 +57,36 @@ SYSTEM_PROMPT = (
 
 
 def evaluate_random(records: list[dict], *, cap: int, trials: int) -> dict[str, float]:
-    """Run the random-action baseline across the given records."""
+    """Run the random-action baseline, preferring precomputed per-board baselines.
+
+    The dataset generator writes a ``random_baseline`` per record using the same
+    ``(cap, trials)`` defaults. When the requested cap/trials match the stored
+    ones we reuse them so the eval baseline and the reward-time baseline are the
+    *same* numbers; otherwise we recompute and report how many were recomputed.
+    """
 
     scores: list[float] = []
     max_tiles: list[int] = []
     invalid_rates: list[float] = []
+    recomputed = 0
     for record in records:
         board = game.normalize_board(record["board"])
-        summary = game.random_episode(board, seed=int(record["seed"]), cap=cap, trials=trials)
+        stored = record.get("random_baseline")
+        summary = None
+        if isinstance(stored, dict) and stored.get("trials") == trials and stored.get("cap", cap) == cap:
+            summary = stored
+        if summary is None:
+            summary = game.random_episode(board, seed=int(record["seed"]), cap=cap, trials=trials)
+            recomputed += 1
         scores.append(float(summary["score"]))
         max_tiles.append(int(summary["max_tile"]))
         invalid_rates.append(float(summary["invalid_rate"]))
-    return _summarize("random", scores, max_tiles, invalid_rates)
+    out = _summarize("random", scores, max_tiles, invalid_rates)
+    out["baseline_source"] = "recomputed" if recomputed == len(records) and len(records) else (
+        "stored" if recomputed == 0 else "mixed"
+    )
+    out["recomputed"] = recomputed
+    return out
 
 
 def evaluate_policy(records: list[dict], client, *, model: str, cap: int) -> dict[str, float]:
@@ -187,6 +205,14 @@ def main() -> None:
 
     if args.json:
         payload: dict[str, Any] = {"random_baseline": random}
+        # Flat top-level summary so simple parsers match the planned contract
+        # (mean_score/mean_max_tile/mean_invalid_rate) without traversing the
+        # nested structured block, which stays for richer downstream tooling.
+        payload["summary"] = {
+            "mean_score": random["mean_score"],
+            "mean_max_tile": random["mean_max_tile"],
+            "mean_invalid_rate": random["mean_invalid_rate"],
+        }
         if policy is not None:
             payload["trained_policy"] = policy
             payload["improvement"] = _improvement(random, policy)

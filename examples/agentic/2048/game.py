@@ -221,16 +221,19 @@ def legal_moves(board: Board) -> list[str]:
     return [direction for direction in ACTIONS if slide(board, direction)[2]]
 
 
-def play_episode(
+def _replay(
     board: Board,
     moves: Iterable[str],
     *,
     seed: int,
-    cap: int = DEFAULT_EPISODE_CAP,
-) -> EpisodeResult:
-    """Replay a bounded move sequence deterministically.
+    cap: int,
+    collect_frames: bool = False,
+) -> tuple[EpisodeResult, list[dict]]:
+    """Replay a bounded move sequence deterministically (single engine path).
 
-    Tiles spawn from ``random.Random(seed)`` so identical ``(board, moves, seed,
+    Both ``play_episode`` (reward) and ``play_episode_frames`` (web UI) delegate
+    here so the training-visible episode and the browser demo can never diverge.
+    Tiles spawn from ``random.Random(seed)``; identical ``(board, moves, seed,
     cap)`` reproduces the episode exactly. Invalid (no-op) moves are counted and
     penalized but do not advance the RNG.
     """
@@ -245,6 +248,13 @@ def play_episode(
     played: list[str] = []
     truncated = False
     reached_2048 = max_tile(board) >= WIN_TILE
+    frames: list[dict] = []
+
+    def _snapshot() -> Board:
+        # Snapshot the board for a UI frame; never hand out a live reference,
+        # since later iterations rebind ``board`` and a future in-place update
+        # would otherwise silently mutate earlier frames.
+        return [list(row) for row in board]
 
     for raw_move in moves:
         if total >= cap:
@@ -255,77 +265,21 @@ def play_episode(
             total += 1
             invalid += 1
             played.append(move)
+            if collect_frames:
+                frames.append({"move": move, "board": _snapshot(), "score": score, "gained": 0, "changed": False})
             continue
         played.append(move)
         new_board, gained, changed = slide(board, move)
         total += 1
         if not changed:
             invalid += 1
+            if collect_frames:
+                frames.append({"move": move, "board": _snapshot(), "score": score, "gained": 0, "changed": False})
             continue
         board = spawn_tile(new_board, rng)
         score += gained
-        if max_tile(board) >= WIN_TILE:
-            reached_2048 = True
-            break
-        if is_terminal(board):
-            break
-
-    return EpisodeResult(
-        board=board,
-        score=score,
-        max_tile=max_tile(board),
-        total_moves=total,
-        invalid_moves=invalid,
-        reached_2048=reached_2048,
-        truncated=truncated,
-        moves=played,
-    )
-
-
-def play_episode_frames(
-    board: Board,
-    moves: Iterable[str],
-    *,
-    seed: int,
-    cap: int = DEFAULT_EPISODE_CAP,
-) -> tuple[EpisodeResult, list[dict]]:
-    """Replay an episode and also return one frame per move for step-by-step UI.
-
-    Frames capture the board *after* each attempted move (and after the spawn
-    for a changed move), so a UI can animate the policy's plan. Shares the same
-    determinism as ``play_episode``.
-    """
-
-    board = normalize_board(board)
-    if cap < 0:
-        raise ValueError("cap must be non-negative")
-    rng = random.Random(seed)
-    score = 0
-    total = 0
-    invalid = 0
-    truncated = False
-    reached_2048 = max_tile(board) >= WIN_TILE
-    frames: list[dict] = []
-
-    for raw_move in moves:
-        if total >= cap:
-            truncated = True
-            break
-        move = str(raw_move).lower().strip()
-        if move not in ACTIONS:
-            total += 1
-            invalid += 1
-            frames.append({"move": move, "board": board, "score": score, "gained": 0, "changed": False})
-            continue
-        new_board, gained, changed = slide(board, move)
-        total += 1
-        if not changed:
-            invalid += 1
-            frames.append({"move": move, "board": board, "score": score, "gained": 0, "changed": False})
-            continue
-        board = spawn_tile(new_board, rng)
-        score += gained
-        frames.append({"move": move, "board": board, "score": score, "gained": gained, "changed": True})
+        if collect_frames:
+            frames.append({"move": move, "board": _snapshot(), "score": score, "gained": gained, "changed": True})
         if max_tile(board) >= WIN_TILE:
             reached_2048 = True
             break
@@ -340,8 +294,39 @@ def play_episode_frames(
         invalid_moves=invalid,
         reached_2048=reached_2048,
         truncated=truncated,
+        moves=played,
     )
     return result, frames
+
+
+def play_episode(
+    board: Board,
+    moves: Iterable[str],
+    *,
+    seed: int,
+    cap: int = DEFAULT_EPISODE_CAP,
+) -> EpisodeResult:
+    """Replay a bounded move sequence deterministically and return the result."""
+
+    result, _frames = _replay(board, moves, seed=seed, cap=cap, collect_frames=False)
+    return result
+
+
+def play_episode_frames(
+    board: Board,
+    moves: Iterable[str],
+    *,
+    seed: int,
+    cap: int = DEFAULT_EPISODE_CAP,
+) -> tuple[EpisodeResult, list[dict]]:
+    """Replay an episode and also return one frame per move for step-by-step UI.
+
+    Frames snapshot the board *after* each attempted move (and after the spawn
+    for a changed move). Delegates to ``_replay`` so it shares the exact same
+    dynamics as ``play_episode``.
+    """
+
+    return _replay(board, moves, seed=seed, cap=cap, collect_frames=True)
 
 
 def score_episode(result: EpisodeResult) -> float:
@@ -392,12 +377,14 @@ def random_episode(
 ) -> dict:
     """Random-action baseline: mean episode metrics over ``trials`` rollouts.
 
-    Each rollout picks a uniform-random direction from **all four** actions
-    every step (a true random policy, not just legal moves). No-op directions
-    are counted as invalid moves and do not spawn a tile, so the baseline's
-    ``invalid_rate`` reflects how often a random direction wastes a step. Tile
-    spawns use an independent ``random.Random`` derived from ``(seed, trial)`` so
-    the baseline is reproducible, and the same RNG draws the move choices.
+    Each rollout picks a uniform-random direction from **all four** directions
+    every step (a true random policy, not restricted to legal moves). No-op
+    directions are counted as invalid moves and do not spawn a tile, so the
+    baseline's ``invalid_rate`` reflects how often a random direction wastes a
+    step. This is the same random policy used by the web UI's Random mode, so
+    the browser demo and the reward/eval baseline stay consistent. Tile spawns
+    use an independent ``random.Random`` derived from ``(seed, trial)`` so the
+    baseline is reproducible, and the same RNG draws the move choices.
     """
 
     board = normalize_board(board)
@@ -414,6 +401,7 @@ def random_episode(
         "max_tile": sum(max_tiles) / len(max_tiles) if max_tiles else 0,
         "invalid_rate": sum(invalid_rates) / len(invalid_rates) if invalid_rates else 0.0,
         "trials": trials,
+        "cap": cap,
     }
 
 

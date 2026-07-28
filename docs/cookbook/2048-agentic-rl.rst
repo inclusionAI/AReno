@@ -22,6 +22,11 @@ baseline and observable episode metrics. The same engine also powers a CPU-only
 ``baseline.py`` evaluation harness and a local ``web_ui.py`` demo (Human /
 Random / LLM modes), both runnable without a GPU.
 
+The random baseline (in ``reward_fn``, ``baseline.py``, and the web UI's Random
+mode) is a uniform-random direction over all four directions, not a legal-only
+policy — so it carries a nonzero invalid-move rate that any legal-direction
+policy should beat.
+
 Key adaptation points:
 
 * Replace the seeded environment loop in ``game.py`` with your own dynamics.
