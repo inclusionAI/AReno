@@ -16,6 +16,8 @@ import {
   Plus,
   Play,
   RefreshCw,
+  RotateCcw,
+  Search,
   Send,
   Server,
   Settings2,
@@ -194,6 +196,37 @@ const defaultServeConfig = {
   extra_args: "",
 };
 
+const SORT_OPTIONS = [
+  { value: "newest", label: "Start time (newest)" },
+  { value: "oldest", label: "Start time (oldest)" },
+  { value: "duration_desc", label: "Duration (longest)" },
+  { value: "duration_asc", label: "Duration (shortest)" },
+];
+
+const STATE_OPTIONS = ["all", "running", "succeeded", "failed", "stopped", "exited", "unknown"];
+const TYPE_OPTIONS = ["all", "train", "serve"];
+
+function readUrlParam(key, fallback) {
+  const params = new URLSearchParams(window.location.search);
+  return params.get(key) || fallback;
+}
+
+function syncUrlParams(params) {
+  const url = new URL(window.location.href);
+  url.search = "";
+  for (const [key, value] of Object.entries(params)) {
+    if (value) url.searchParams.set(key, value);
+  }
+  window.history.replaceState({}, "", url.toString());
+}
+
+function jobTimestamp(job, field) {
+  const v = job[field];
+  if (typeof v === "number") return v;
+  if (typeof v === "string") return Date.parse(v) || 0;
+  return 0;
+}
+
 function App() {
   const [selectedJobId, setSelectedJobId] = useState(null);
   const [trainConfig, setTrainConfig] = useState(defaultTrainConfig);
@@ -214,7 +247,12 @@ function App() {
   const [theme, setTheme] = useState(() => localStorage.getItem("areno-dashboard-theme") || "dark");
   const [busy, setBusy] = useState("");
   const [agentSettingsOpen, setAgentSettingsOpen] = useState(false);
-  const [jobPage, setJobPage] = useState(1);
+  const [jobPage, setJobPage] = useState(() => Number(readUrlParam("page", "1")) || 1);
+  const [searchQuery, setSearchQuery] = useState(() => readUrlParam("q", ""));
+  const [stateFilter, setStateFilter] = useState(() => readUrlParam("state", "all"));
+  const [typeFilter, setTypeFilter] = useState(() => readUrlParam("type", "all"));
+  const [algoFilter, setAlgoFilter] = useState(() => readUrlParam("algo", "all"));
+  const [sortKey, setSortKey] = useState(() => readUrlParam("sort", "newest"));
   const [refreshNonce, setRefreshNonce] = useState(0);
   const chatMessagesRef = useRef(null);
   const env = usePolling(() => api("/api/env"), 5000);
@@ -223,9 +261,53 @@ function App() {
 
   const jobList = jobs.data?.jobs || [];
   const jobPageSize = 10;
-  const jobPageCount = Math.max(1, Math.ceil(jobList.length / jobPageSize));
+
+  const algoOptions = useMemo(() => {
+    const algos = Array.from(new Set(jobList.map((job) => job.algo).filter(Boolean))).sort();
+    return ["all", ...algos];
+  }, [jobList]);
+
+  const filteredJobs = useMemo(() => {
+    let result = jobList;
+    if (searchQuery.trim()) {
+      const q = searchQuery.toLowerCase();
+      result = result.filter((job) =>
+        [job.id, job.name, job.ckpt, job.dataset_path].some((field) =>
+          String(field || "").toLowerCase().includes(q)
+        )
+      );
+    }
+    if (stateFilter !== "all") result = result.filter((job) => job.status === stateFilter);
+    if (typeFilter !== "all") result = result.filter((job) => job.kind === typeFilter);
+    if (algoFilter !== "all") result = result.filter((job) => job.algo === algoFilter);
+
+    const sorted = [...result];
+    if (sortKey === "newest") {
+      sorted.sort((a, b) => jobTimestamp(b, "created_at") - jobTimestamp(a, "created_at"));
+    } else if (sortKey === "oldest") {
+      sorted.sort((a, b) => jobTimestamp(a, "created_at") - jobTimestamp(b, "created_at"));
+    } else if (sortKey === "duration_desc") {
+      sorted.sort((a, b) => (Number(b.duration_s) || 0) - (Number(a.duration_s) || 0));
+    } else if (sortKey === "duration_asc") {
+      sorted.sort((a, b) => (Number(a.duration_s) || 0) - (Number(b.duration_s) || 0));
+    }
+    return sorted;
+  }, [jobList, searchQuery, stateFilter, typeFilter, algoFilter, sortKey]);
+
+  const hasActiveFilters = searchQuery || stateFilter !== "all" || typeFilter !== "all" || algoFilter !== "all" || sortKey !== "newest";
+
+  function resetFilters() {
+    setSearchQuery("");
+    setStateFilter("all");
+    setTypeFilter("all");
+    setAlgoFilter("all");
+    setSortKey("newest");
+    setJobPage(1);
+  }
+
+  const jobPageCount = Math.max(1, Math.ceil(filteredJobs.length / jobPageSize));
   const currentJobPage = Math.min(jobPage, jobPageCount);
-  const pagedJobs = jobList.slice((currentJobPage - 1) * jobPageSize, currentJobPage * jobPageSize);
+  const pagedJobs = filteredJobs.slice((currentJobPage - 1) * jobPageSize, currentJobPage * jobPageSize);
   const selectedJob = jobDetail.data?.job || (selectedJobId ? jobList.find((job) => job.id === selectedJobId) : null) || null;
   const activeAgentSession = useMemo(() => {
     return agentSessions.find((session) => session.id === activeAgentSessionId) || agentSessions[0] || createAgentSession();
@@ -241,6 +323,17 @@ function App() {
   useEffect(() => {
     if (jobPage > jobPageCount) setJobPage(jobPageCount);
   }, [jobPage, jobPageCount]);
+
+  useEffect(() => {
+    syncUrlParams({
+      q: searchQuery,
+      state: stateFilter !== "all" ? stateFilter : "",
+      type: typeFilter !== "all" ? typeFilter : "",
+      algo: algoFilter !== "all" ? algoFilter : "",
+      sort: sortKey !== "newest" ? sortKey : "",
+      page: jobPage > 1 ? String(jobPage) : "",
+    });
+  }, [searchQuery, stateFilter, typeFilter, algoFilter, sortKey, jobPage]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -612,8 +705,41 @@ function App() {
               <button className="secondaryButton" disabled={currentJobPage >= jobPageCount} onClick={() => setJobPage((page) => Math.min(jobPageCount, page + 1))}>Next</button>
             </div>
           </div>
+          {jobList.length > 0 && (
+            <div className="jobToolbar">
+              <div className="jobSearch">
+                <Search size={14} />
+                <input
+                  type="text"
+                  placeholder="Search by ID, model, or dataset..."
+                  value={searchQuery}
+                  onChange={(event) => { setSearchQuery(event.target.value); setJobPage(1); }}
+                />
+              </div>
+              <div className="jobFilters">
+                <select value={stateFilter} onChange={(event) => { setStateFilter(event.target.value); setJobPage(1); }}>
+                  {STATE_OPTIONS.map((s) => <option key={s} value={s}>{s === "all" ? "All states" : s}</option>)}
+                </select>
+                <select value={typeFilter} onChange={(event) => { setTypeFilter(event.target.value); setJobPage(1); }}>
+                  {TYPE_OPTIONS.map((t) => <option key={t} value={t}>{t === "all" ? "All types" : t}</option>)}
+                </select>
+                <select value={algoFilter} onChange={(event) => { setAlgoFilter(event.target.value); setJobPage(1); }}>
+                  {algoOptions.map((a) => <option key={a} value={a}>{a === "all" ? "All algorithms" : a}</option>)}
+                </select>
+                <select value={sortKey} onChange={(event) => setSortKey(event.target.value)}>
+                  {SORT_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                </select>
+                <button className="secondaryButton" onClick={resetFilters} disabled={!hasActiveFilters}>
+                  <RotateCcw size={14} /> Reset
+                </button>
+              </div>
+            </div>
+          )}
           <div className="jobList">
             {jobList.length === 0 && <EmptyState title="No jobs yet" text="Start a train or serve task from the launcher." />}
+            {filteredJobs.length === 0 && jobList.length > 0 && (
+              <EmptyState title="No matching jobs" text="Try adjusting your search or filters." />
+            )}
             {pagedJobs.map((job) => (
               <button key={job.id} className="jobRow large" onClick={() => setSelectedJobId(job.id)}>
                 <div className="jobIcon">{job.kind === "serve" ? <Server size={16} /> : <Layers size={16} />}</div>
@@ -627,9 +753,10 @@ function App() {
               </button>
             ))}
           </div>
-          {jobList.length > jobPageSize && (
+          {filteredJobs.length > jobPageSize && (
             <div className="listFooter">
-              Showing {(currentJobPage - 1) * jobPageSize + 1}-{Math.min(currentJobPage * jobPageSize, jobList.length)} of {jobList.length} jobs
+              Showing {(currentJobPage - 1) * jobPageSize + 1}-{Math.min(currentJobPage * jobPageSize, filteredJobs.length)} of {filteredJobs.length} jobs
+              {jobList.length > filteredJobs.length && ` (filtered from ${jobList.length})`}
             </div>
           )}
         </section>

@@ -57,6 +57,29 @@ def now() -> str:
     return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
 
 
+def _parse_time(value: Any) -> float | None:
+    """Parse an ISO-8601 timestamp or epoch float to epoch seconds."""
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return dt.datetime.fromisoformat(value).timestamp()
+        except ValueError:
+            return None
+    return None
+
+
+def _duration_seconds(created_at: Any, updated_at: Any) -> float | None:
+    """Return the elapsed seconds between two timestamps, or None if unparseable."""
+    start = _parse_time(created_at)
+    if start is None:
+        return None
+    end = _parse_time(updated_at)
+    if end is None:
+        return None
+    return max(0.0, end - start)
+
+
 class Job:
     def __init__(
         self,
@@ -144,6 +167,7 @@ class Job:
         }
 
     def to_summary_json(self) -> dict[str, Any]:
+        launch = self.launch_config or {}
         return {
             "id": self.id,
             "kind": self.kind,
@@ -155,9 +179,13 @@ class Job:
             "step": self.step,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+            "duration_s": _duration_seconds(self.created_at, self.updated_at),
             "returncode": self.returncode,
             "pid": self.pid,
             "perf": self.perf,
+            "algo": launch.get("algo", ""),
+            "ckpt": launch.get("ckpt") or launch.get("model_path", ""),
+            "dataset_path": launch.get("dataset_path", ""),
         }
 
 

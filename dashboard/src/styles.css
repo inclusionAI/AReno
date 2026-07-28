@@ -509,6 +509,55 @@ p {
   min-width: 0;
 }
 
+.jobToolbar {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.jobSearch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--deck-line);
+  border-radius: var(--radius-sm);
+  padding: 0 10px;
+  background: var(--deck-panel-2);
+  color: var(--deck-muted);
+}
+
+.jobSearch input {
+  flex: 1;
+  border: 0;
+  background: transparent;
+  color: var(--deck-ink);
+  font-size: 13px;
+  padding: 8px 0;
+  outline: none;
+}
+
+.jobSearch input::placeholder {
+  color: var(--deck-muted);
+}
+
+.jobFilters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.jobFilters select {
+  min-height: 34px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+}
+
+.jobFilters .secondaryButton:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
 .jobList {
   display: grid;
   gap: 7px;
