@@ -119,6 +119,7 @@ class ArenoBackend(Backend):
 
         super().__init__()
         self._engine = None
+        self._closed = False
         # Per-step wall-time accumulators used to print the
         # rollout/train/end-to-end breakdown after `train` completes.
         self._step_e2e_start: float | None = None
@@ -132,10 +133,14 @@ class ArenoBackend(Backend):
         return self._engine
 
     def close(self) -> None:
-        """Stop backend worker processes and release engine resources."""
+        """Stop backend worker processes and release engine resources.
+
+        Idempotent: safe to call multiple times.
+        """
 
         engine = self._engine
         self._engine = None
+        self._closed = True
         if engine is not None:
             engine.close()
 
@@ -165,16 +170,27 @@ class ArenoBackend(Backend):
 
         # ArenoEngine construction is synchronous and CUDA-heavy. The SDK is
         # intentionally synchronous because engine IPC is blocking as well.
-        self._engine = ArenoEngine.from_pretrained(
-            cfg.model_path or ctx.model_path,
-            tp_size=tp_size,
-            dp_size=dp_size,
-            devices=devices,
-            dummy_load=cfg.dummy_load,
-            optimizer_config=OptimizerConfig(**cfg.optimizer),
-            runtime_config=RuntimeConfig(**cfg.runtime),
-            loss_fn=_external_loss_dispatcher,
-        )
+        try:
+            self._engine = ArenoEngine.from_pretrained(
+                cfg.model_path or ctx.model_path,
+                tp_size=tp_size,
+                dp_size=dp_size,
+                devices=devices,
+                dummy_load=cfg.dummy_load,
+                optimizer_config=OptimizerConfig(**cfg.optimizer),
+                runtime_config=RuntimeConfig(**cfg.runtime),
+                loss_fn=_external_loss_dispatcher,
+            )
+        except BaseException:
+            # If from_pretrained partially succeeded (e.g. cluster started
+            # but model loading failed), ensure worker processes are cleaned up.
+            if self._engine is not None:
+                try:
+                    self._engine.close()
+                except Exception:
+                    pass
+                self._engine = None
+            raise
 
     def rollout_batch(
         self,

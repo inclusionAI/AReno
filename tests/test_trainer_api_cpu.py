@@ -51,6 +51,76 @@ class TrainerPromptBatchTest(unittest.TestCase):
         self.assertTrue(backend.closed)
         self.assertIsNone(trainer._backend)
         self.assertFalse(trainer._initialized)
+        self.assertTrue(trainer._closed)
+
+    def test_close_is_idempotent(self):
+        """Repeated close() calls are safe and do not raise."""
+        trainer = Trainer(world_size=1, model_path="unused")
+
+        class BackendStub:
+            def __init__(self):
+                self.close_count = 0
+
+            def close(self):
+                self.close_count += 1
+
+        backend = BackendStub()
+        trainer._backend = backend
+        trainer._initialized = True
+
+        trainer.close()
+        trainer.close()
+        trainer.close()
+        self.assertEqual(backend.close_count, 1)
+
+    def test_close_nulls_metrics(self):
+        """After close(), _metrics should be None."""
+        trainer = Trainer(world_size=1, model_path="unused")
+
+        class BackendStub:
+            def close(self):
+                pass
+
+        trainer._backend = BackendStub()
+        trainer._initialized = True
+
+        trainer.close()
+        self.assertIsNone(trainer._metrics)
+
+    def test_init_failure_cleans_up_backend(self):
+        """If backend.initialize raises, backend.close should be called."""
+        trainer = Trainer(world_size=1, model_path="unused")
+
+        class FailingBackend:
+            def __init__(self):
+                self.closed = False
+
+            def initialize(self, _ctx):
+                raise RuntimeError("init failed")
+
+            def close(self):
+                self.closed = True
+
+        backend = FailingBackend()
+
+        # Mock load_tokenizer, eos_token_ids, and get_backend_cls so init()
+        # reaches the backend.initialize() call without real I/O.
+        original_load_tokenizer = trainer_mod.load_tokenizer
+        original_eos_token_ids = trainer_mod.eos_token_ids
+        original_get_backend_cls = trainer_mod.get_backend_cls
+        trainer_mod.load_tokenizer = lambda _path: object()
+        trainer_mod.eos_token_ids = lambda _path, _tok: ()
+        trainer_mod.get_backend_cls = lambda _t: (lambda: backend)
+        try:
+            with self.assertRaises(RuntimeError):
+                trainer.init()
+        finally:
+            trainer_mod.load_tokenizer = original_load_tokenizer
+            trainer_mod.eos_token_ids = original_eos_token_ids
+            trainer_mod.get_backend_cls = original_get_backend_cls
+
+        self.assertTrue(backend.closed)
+        self.assertIsNone(trainer._backend)
 
     def test_load_prompt_batches_skips_long_prompts_and_keeps_records(self):
         """Overlong prompts should be skipped without dropping record metadata."""

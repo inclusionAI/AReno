@@ -195,18 +195,22 @@ def create_app(
         runtime_config=RuntimeConfig(eager_decode=bool(eager_decode), attn_backend=attn_backend),
         loss_fn=_serve_loss_fn,
     )
-    state = ServeState(
-        model_path=model_path,
-        tokenizer=tokenizer,
-        engine=engine,
-        max_running_prompts=max_running_prompts,
-        default_max_tokens=default_max_tokens,
-        max_model_len=int(engine.config.model.max_position_embeddings),
-        tool_call_parser=get_tool_call_parser(infer_tool_call_parser_name(parser_trainer)),
-    )
-    app = FastAPI(title="areno OpenAI-compatible server")
-    app.state.areno_serve = state
-    app.state.decode_progress_interval_s = float(decode_progress_interval_s)
+    try:
+        state = ServeState(
+            model_path=model_path,
+            tokenizer=tokenizer,
+            engine=engine,
+            max_running_prompts=max_running_prompts,
+            default_max_tokens=default_max_tokens,
+            max_model_len=int(engine.config.model.max_position_embeddings),
+            tool_call_parser=get_tool_call_parser(infer_tool_call_parser_name(parser_trainer)),
+        )
+        app = FastAPI(title="areno OpenAI-compatible server")
+        app.state.areno_serve = state
+        app.state.decode_progress_interval_s = float(decode_progress_interval_s)
+    except BaseException:
+        engine.close()
+        raise
 
     @app.on_event("startup")
     async def startup() -> None:

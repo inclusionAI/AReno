@@ -164,12 +164,17 @@ class _PendingClusterCall:
     error: BaseException | None = None
 
 
-def find_free_port() -> int:
-    """Reserve an available localhost TCP port for torch distributed init."""
+def find_free_port() -> tuple[int, socket.socket]:
+    """Reserve an available localhost TCP port for torch distributed init.
 
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
+    Returns ``(port, socket)`` where *socket* is still bound so the port
+    cannot be stolen by another process before workers rendezvous.  The
+    caller is responsible for closing the socket once rendezvous is complete.
+    """
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.bind(("127.0.0.1", 0))
+    return int(sock.getsockname()[1]), sock
 
 
 def _rollout_payload_count(payload: RolloutPayload) -> int:
@@ -223,15 +228,22 @@ class TPCluster:
         self._pending_calls: dict[int, _PendingClusterCall] = {}
         self._pump_stop = threading.Event()
         self._pump_thread: threading.Thread | None = None
+        self._closed = False
+        self._close_lock = threading.Lock()
+        self._port_socket: socket.socket | None = None
 
     def start(self) -> None:
         """Spawn workers and wait until every rank has finished initialization."""
 
         if self.started:
             return
+        if self._closed:
+            raise RuntimeError("TPCluster has been closed and cannot be restarted")
         # Reserve a unique TCP port for torch.distributed rendezvous; ranks
-        # discover each other through this port over loopback.
-        port = find_free_port()
+        # discover each other through this port over loopback.  The socket is
+        # held open until workers have completed rendezvous to prevent another
+        # process from stealing the port (TOCTOU race).
+        port, self._port_socket = find_free_port()
         assert self.config.devices is not None
         devices = self.config.devices
         world_size = self.config.tp_size * int(self.config.dp_size)
@@ -269,10 +281,27 @@ class TPCluster:
             _close_queue(self.result_queue)
             self.cmd_queues = []
             self.processes = []
+            # Recreate result_queue so a subsequent start() attempt is not
+            # blocked by a closed queue.
+            self.result_queue = self.ctx.Queue()
+            if self._port_socket is not None:
+                try:
+                    self._port_socket.close()
+                except OSError:
+                    pass
+                self._port_socket = None
             raise
         else:
             self.started = True
             self._start_result_pump()
+            # Workers have rendezvoused; release the port socket so the OS
+            # can recycle it.
+            if self._port_socket is not None:
+                try:
+                    self._port_socket.close()
+                except OSError:
+                    pass
+                self._port_socket = None
 
     def _start_result_pump(self) -> None:
         """Start the single result-demux thread for all concurrent calls."""
@@ -440,9 +469,32 @@ class TPCluster:
         return dead
 
     def close(self) -> None:
-        """Request shutdown and terminate workers that do not exit promptly."""
+        """Request shutdown and terminate workers that do not exit promptly.
 
+        Idempotent: repeated calls are safe and do not raise.  Concurrent
+        calls are serialized via ``_close_lock``.
+        """
+
+        if self._closed:
+            return
+        with self._close_lock:
+            if self._closed:
+                return
+            self._closed = True
         if not self.started:
+            # Never started but may hold leftover resources from a failed
+            # start (e.g. port socket, partially populated queues/processes).
+            if self._port_socket is not None:
+                try:
+                    self._port_socket.close()
+                except OSError:
+                    pass
+                self._port_socket = None
+            for q in self.cmd_queues:
+                _close_queue(q)
+            _close_queue(self.result_queue)
+            self.cmd_queues = []
+            self.processes = []
             return
         try:
             pump_stop = getattr(self, "_pump_stop", None)
@@ -468,6 +520,14 @@ class TPCluster:
             for q in self.cmd_queues:
                 _close_queue(q)
             _close_queue(self.result_queue)
+            if self._port_socket is not None:
+                try:
+                    self._port_socket.close()
+                except OSError:
+                    pass
+                self._port_socket = None
+            self.cmd_queues = []
+            self.processes = []
             self.started = False
 
     def __enter__(self) -> TPCluster:
@@ -558,12 +618,20 @@ def _worker_entry(
 
 
 def _close_queue(q: mp.Queue) -> None:
-    """Close a multiprocessing queue and reap its feeder thread when present."""
+    """Close a multiprocessing queue and reap its feeder thread when present.
+
+    Exception-safe: a ``ValueError`` or ``OSError`` from an already-closed
+    queue is swallowed so that cleanup of remaining queues is not aborted.
+    """
 
     try:
         q.close()
-    finally:
+    except (ValueError, OSError):
+        pass
+    try:
         q.join_thread()
+    except (ValueError, OSError):
+        pass
 
 
 def _set_async_result(future: asyncio.Future, value: Any) -> None:

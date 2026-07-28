@@ -296,11 +296,16 @@ class RolloutSession:
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
-        """Stop the local proxy."""
+        """Stop the local proxy.
+
+        Idempotent: safe to call multiple times.
+        """
 
         del exc_type, exc, tb
+        if self._closing:
+            return
+        self._closing = True
         try:
-            self._closing = True
             if self._server is not None:
                 self._server.shutdown()
                 self._server.server_close()

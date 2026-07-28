@@ -62,6 +62,7 @@ class Trainer:
         self._step_wall_start: float | None = None
         self._rollout_session_depth = 0
         self._rollout_wall_start: float | None = None
+        self._closed = False
 
     def init(self) -> None:
         """Load tokenizer, create backend context, and initialize workers."""
@@ -75,7 +76,18 @@ class Trainer:
         if backend_cls is None:
             raise ValueError(f"unsupported backend type: {self._backend_type}")
         self._backend = backend_cls()
-        self._backend.initialize(self._ctx)
+        try:
+            self._backend.initialize(self._ctx)
+        except BaseException:
+            # If backend initialization partially succeeded (e.g. engine
+            # workers started but model loading failed), ensure workers
+            # are cleaned up before propagating the error.
+            try:
+                self._backend.close()
+            except Exception:
+                pass
+            self._backend = None
+            raise
         self._initialized = True
 
     def get_tokenizer(self) -> Any:
@@ -432,8 +444,14 @@ class Trainer:
         return self._backend.save_checkpoint(self._ctx, path)
 
     def close(self) -> None:
-        """Release backend workers and local resources such as metric writers."""
+        """Release backend workers and local resources such as metric writers.
 
+        Idempotent: safe to call multiple times.
+        """
+
+        if self._closed:
+            return
+        self._closed = True
         try:
             if self._backend is not None:
                 self._backend.close()
@@ -442,6 +460,7 @@ class Trainer:
             self._initialized = False
             if self._metrics is not None:
                 self._metrics.close()
+                self._metrics = None
 
 
 def _normalize_prompt_token_batch(prompt_tokens: list[list[int]]) -> list[list[int]]:

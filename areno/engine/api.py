@@ -148,6 +148,8 @@ class ArenoEngine:
         self.cluster = TPCluster(config, ArenoWorker)
         self.cluster.start()
         self._async_dp_cursor = count()
+        self._closed = False
+        self._shared_tensors: list[torch.Tensor] = []
 
     def begin_rollout_session(self) -> None:
         """Prepare workers for one or more rollout calls."""
@@ -639,14 +641,42 @@ class ArenoEngine:
 
         # share_memory=True lets the worker side mmap the underlying buffer
         # instead of receiving a pickled copy over the IPC channel.
-        return to_cpu(payload, share_memory=True)
+        transported = to_cpu(payload, share_memory=True)
+        # Track shared-memory tensors so close() can release coordinator-side
+        # references after workers have exited.
+        self._collect_shared_tensors(transported)
+        return transported
+
+    def _collect_shared_tensors(self, obj: Any) -> None:
+        """Recursively collect tensors that are backed by shared memory."""
+
+        if isinstance(obj, torch.Tensor):
+            if obj.is_shared():
+                self._shared_tensors.append(obj)
+        elif isinstance(obj, dict):
+            for value in obj.values():
+                self._collect_shared_tensors(value)
+        elif isinstance(obj, (list, tuple)):
+            for item in obj:
+                self._collect_shared_tensors(item)
 
     def close(self) -> None:
         """Stop worker processes and release cluster resources.
 
+        Idempotent: repeated calls are safe.  Shared-memory tensor references
+        are released before worker processes are terminated so the OS can
+        reclaim the underlying segments once all readers have exited.
+
         Blocking: waits for each rank's worker process to exit before returning.
         """
 
+        if self._closed:
+            return
+        self._closed = True
+        # Release coordinator-side references to shared-memory tensors.  The
+        # actual segments are reclaimed by the OS once worker processes have
+        # exited (after cluster.close()).
+        self._shared_tensors.clear()
         self.cluster.close()
 
     def __enter__(self) -> ArenoEngine:
