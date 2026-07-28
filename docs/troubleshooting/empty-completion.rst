@@ -79,6 +79,12 @@ validated before ``reward_fn``:
 
 The resample budget is configured via:
 
+.. code-block:: bash
+
+   areno train ... --empty-completion-policy resample --empty-completion-resample-budget 5
+
+Or via the SDK:
+
 .. code-block:: python
 
    from areno.api.trainer_config import PolicyTrainerConfig
@@ -90,6 +96,12 @@ The resample budget is configured via:
        empty_completion_policy="resample",
        empty_completion_resample_budget=5,  # default 3
    )
+
+Parameter validation runs before model initialization:
+
+* ``--empty-completion-policy`` must be one of ``off``, ``filter``, ``resample``.
+* ``--empty-completion-resample-budget`` must be positive when policy is
+  ``resample``.
 
 Log output reference
 ~~~~~~~~~~~~~~~~~~~~
