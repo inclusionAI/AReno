@@ -63,6 +63,9 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "dataset_path",
             "dataset_mix_config",
             "dataset_sources",
+            "dataset_mix_seed",
+            "dataset_mix_exhaustion",
+            "dataset_mix_samples_per_epoch",
             "model_hub",
             "dataset_loader_fn",
             "tune_params",
@@ -185,6 +188,9 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
     dataset_mix_config = getattr(args, "dataset_mix_config", None)
     args.dataset_mix_config = str(dataset_mix_config) if dataset_mix_config is not None else None
     args.dataset_sources = tuple(getattr(args, "dataset_sources", ()))
+    args.dataset_mix_seed = getattr(args, "dataset_mix_seed", 42)
+    args.dataset_mix_exhaustion = getattr(args, "dataset_mix_exhaustion", "cycle")
+    args.dataset_mix_samples_per_epoch = getattr(args, "dataset_mix_samples_per_epoch", None)
     smoke_infer = bool(getattr(args, "smoke_infer", False))
     smoke_train = bool(getattr(args, "smoke_train", False))
     if smoke_infer or smoke_train:
@@ -204,6 +210,15 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
         raise click.UsageError("one of --dataset-path, --dataset-mix-config, or repeated --dataset-source is required")
     if dataset_inputs > 1:
         raise click.UsageError("--dataset-path, --dataset-mix-config, and --dataset-source are mutually exclusive")
+    if not args.dataset_sources and (
+        args.dataset_mix_seed != 42
+        or args.dataset_mix_exhaustion != "cycle"
+        or args.dataset_mix_samples_per_epoch is not None
+    ):
+        raise click.UsageError(
+            "--dataset-mix-seed, --dataset-mix-exhaustion, and --dataset-mix-samples-per-epoch "
+            "apply only to repeated --dataset-source"
+        )
     if args.model_hub not in {"hf", "modelscope"}:
         raise click.UsageError("--model-hub must be one of: hf, modelscope")
     algorithm = _algorithm_for_cli(args.algo)
@@ -215,7 +230,12 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
         if args.dataset_mix_config is not None:
             _preflight_dataset_mix_config(args.dataset_mix_config)
         else:
-            _preflight_dataset_sources(args.dataset_sources)
+            _preflight_dataset_sources(
+                args.dataset_sources,
+                seed=args.dataset_mix_seed,
+                exhaustion=args.dataset_mix_exhaustion,
+                samples_per_epoch=args.dataset_mix_samples_per_epoch,
+            )
     tune_params = bool(getattr(args, "tune_params", False))
     mem_frac = float(getattr(args, "mem_frac", 0.9))
     tune_max_samples = int(getattr(args, "tune_max_samples", 256))
@@ -314,14 +334,31 @@ def _preflight_dataset_mix_config(config_path: str) -> None:
         raise click.UsageError(f"invalid --dataset-mix-config: {exc}") from exc
 
 
-def _preflight_dataset_sources(source_specs: tuple[str, ...]) -> None:
+def _preflight_dataset_sources(
+    source_specs: tuple[str, ...],
+    *,
+    seed: int = 42,
+    exhaustion: str = "cycle",
+    samples_per_epoch: int | None = None,
+) -> None:
     try:
-        _dataset_mix_manifest_from_sources(source_specs)
+        _dataset_mix_manifest_from_sources(
+            source_specs,
+            seed=seed,
+            exhaustion=exhaustion,
+            samples_per_epoch=samples_per_epoch,
+        )
     except ValueError as exc:
         raise click.UsageError(f"invalid --dataset-source: {exc}") from exc
 
 
-def _dataset_mix_manifest_from_sources(source_specs: tuple[str, ...]) -> dict:
+def _dataset_mix_manifest_from_sources(
+    source_specs: tuple[str, ...],
+    *,
+    seed: int = 42,
+    exhaustion: str = "cycle",
+    samples_per_epoch: int | None = None,
+) -> dict:
     if len(source_specs) < 2:
         raise ValueError("repeat the option at least twice using NAME=PATH:WEIGHT")
 
@@ -352,12 +389,22 @@ def _dataset_mix_manifest_from_sources(source_specs: tuple[str, ...]) -> dict:
         sources.append({"name": name, "path": dataset_path, "weight": weight})
 
     _validate_dataset_mix_weight_range([source["weight"] for source in sources], "source weights")
+    if isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed < 2**63:
+        raise ValueError("seed must be an integer in [0, 2^63)")
+    if exhaustion not in {"stop", "cycle", "renormalize"}:
+        raise ValueError("exhaustion must be one of: stop, cycle, renormalize")
+    if samples_per_epoch is not None and (
+        isinstance(samples_per_epoch, bool) or not isinstance(samples_per_epoch, int) or samples_per_epoch <= 0
+    ):
+        raise ValueError("samples per epoch must be a positive integer")
+    if samples_per_epoch is not None and exhaustion != "cycle":
+        raise ValueError("samples per epoch requires exhaustion='cycle'")
     return {
         "version": 1,
-        "seed": 42,
-        "exhaustion": "renormalize",
+        "seed": seed,
+        "exhaustion": exhaustion,
         "shuffle_within_sources": True,
-        "max_samples_per_epoch": None,
+        "samples_per_epoch": samples_per_epoch,
         "sources": sources,
     }
 
@@ -716,6 +763,9 @@ def _trainer_config_from_args(args) -> TrainerConfig:
     args.model_hub = getattr(args, "model_hub", "modelscope")
     args.dataset_mix_config = getattr(args, "dataset_mix_config", None)
     args.dataset_sources = tuple(getattr(args, "dataset_sources", ()))
+    args.dataset_mix_seed = getattr(args, "dataset_mix_seed", 42)
+    args.dataset_mix_exhaustion = getattr(args, "dataset_mix_exhaustion", "cycle")
+    args.dataset_mix_samples_per_epoch = getattr(args, "dataset_mix_samples_per_epoch", None)
     algorithm = get_algorithm(args.algo)
     chat_template_enable_thinking = False if args.disable_thinking else None
     if algorithm.name == "dpo":
@@ -727,6 +777,9 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             dataset_loader_fn=args.dataset_loader_fn,
             dataset_mix_config=args.dataset_mix_config,
             dataset_sources=args.dataset_sources,
+            dataset_mix_seed=args.dataset_mix_seed,
+            dataset_mix_exhaustion=args.dataset_mix_exhaustion,
+            dataset_mix_samples_per_epoch=args.dataset_mix_samples_per_epoch,
             save_path=args.save_path,
             save_interval=args.save_interval,
             epochs=args.epochs,
@@ -770,6 +823,9 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             dataset_loader_fn=args.dataset_loader_fn,
             dataset_mix_config=args.dataset_mix_config,
             dataset_sources=args.dataset_sources,
+            dataset_mix_seed=args.dataset_mix_seed,
+            dataset_mix_exhaustion=args.dataset_mix_exhaustion,
+            dataset_mix_samples_per_epoch=args.dataset_mix_samples_per_epoch,
             save_path=args.save_path,
             save_interval=args.save_interval,
             epochs=args.epochs,
@@ -811,6 +867,9 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             dataset_loader_fn=args.dataset_loader_fn,
             dataset_mix_config=args.dataset_mix_config,
             dataset_sources=args.dataset_sources,
+            dataset_mix_seed=args.dataset_mix_seed,
+            dataset_mix_exhaustion=args.dataset_mix_exhaustion,
+            dataset_mix_samples_per_epoch=args.dataset_mix_samples_per_epoch,
             reward_fn_path=args.reward_fn_path,
             save_path=args.save_path,
             save_interval=args.save_interval,
@@ -860,6 +919,9 @@ def _trainer_config_from_args(args) -> TrainerConfig:
         dataset_loader_fn=args.dataset_loader_fn,
         dataset_mix_config=args.dataset_mix_config,
         dataset_sources=args.dataset_sources,
+        dataset_mix_seed=args.dataset_mix_seed,
+        dataset_mix_exhaustion=args.dataset_mix_exhaustion,
+        dataset_mix_samples_per_epoch=args.dataset_mix_samples_per_epoch,
         reward_fn_path=args.reward_fn_path,
         save_path=args.save_path,
         save_interval=args.save_interval,
@@ -940,6 +1002,9 @@ def run(trainer_config: TrainerConfig):
     elif trainer_config.dataset_sources:
         mixed_dataset = _load_dataset_sources_for_training(
             trainer_config.dataset_sources,
+            seed=trainer_config.dataset_mix_seed,
+            exhaustion=trainer_config.dataset_mix_exhaustion,
+            samples_per_epoch=trainer_config.dataset_mix_samples_per_epoch,
             model_hub=trainer_config.model_hub,
             dataset_loader_fn=trainer_config.dataset_loader_fn,
             load_dataset=load_dataset,
@@ -1021,6 +1086,9 @@ def _training_config_settings(config: TrainerConfig) -> dict:
                 "dataset_path",
                 "dataset_mix_config",
                 "dataset_sources",
+                "dataset_mix_seed",
+                "dataset_mix_exhaustion",
+                "dataset_mix_samples_per_epoch",
                 "model_hub",
                 "dataset_loader_fn",
                 "epochs",
@@ -1186,6 +1254,7 @@ def _read_dataset_mix_manifest(config_path: str | Path) -> dict:
         "seed",
         "exhaustion",
         "shuffle_within_sources",
+        "samples_per_epoch",
         "max_samples_per_epoch",
         "sources",
     }
@@ -1205,13 +1274,15 @@ def _read_dataset_mix_manifest(config_path: str | Path) -> dict:
     shuffle = payload.get("shuffle_within_sources", True)
     if not isinstance(shuffle, bool):
         raise ValueError(f"{path}: shuffle_within_sources must be a boolean")
-    max_samples = payload.get("max_samples_per_epoch")
-    if max_samples is not None and (
-        isinstance(max_samples, bool) or not isinstance(max_samples, int) or max_samples <= 0
+    if "samples_per_epoch" in payload and "max_samples_per_epoch" in payload:
+        raise ValueError(f"{path}: samples_per_epoch and legacy max_samples_per_epoch are mutually exclusive")
+    samples_per_epoch = payload.get("samples_per_epoch", payload.get("max_samples_per_epoch"))
+    if samples_per_epoch is not None and (
+        isinstance(samples_per_epoch, bool) or not isinstance(samples_per_epoch, int) or samples_per_epoch <= 0
     ):
-        raise ValueError(f"{path}: max_samples_per_epoch must be a positive integer")
-    if max_samples is not None and exhaustion != "cycle":
-        raise ValueError(f"{path}: max_samples_per_epoch is only supported with exhaustion='cycle'")
+        raise ValueError(f"{path}: samples_per_epoch must be a positive integer")
+    if samples_per_epoch is not None and exhaustion != "cycle":
+        raise ValueError(f"{path}: samples_per_epoch is only supported with exhaustion='cycle'")
 
     sources = payload.get("sources")
     if not isinstance(sources, list) or len(sources) < 2:
@@ -1257,7 +1328,7 @@ def _read_dataset_mix_manifest(config_path: str | Path) -> dict:
         "seed": seed,
         "exhaustion": exhaustion,
         "shuffle_within_sources": shuffle,
-        "max_samples_per_epoch": max_samples,
+        "samples_per_epoch": samples_per_epoch,
         "sources": normalized_sources,
     }
 
@@ -1284,12 +1355,20 @@ def _load_mixed_dataset_for_training(
 def _load_dataset_sources_for_training(
     source_specs: tuple[str, ...],
     *,
+    seed: int = 42,
+    exhaustion: str = "cycle",
+    samples_per_epoch: int | None = None,
     model_hub: str,
     dataset_loader_fn: str | None,
     load_dataset,
     load_from_disk,
 ) -> WeightedMixedDataset:
-    manifest = _dataset_mix_manifest_from_sources(source_specs)
+    manifest = _dataset_mix_manifest_from_sources(
+        source_specs,
+        seed=seed,
+        exhaustion=exhaustion,
+        samples_per_epoch=samples_per_epoch,
+    )
     return _load_mixed_dataset_from_manifest(
         manifest,
         source_path_resolver=lambda source_path: source_path,
@@ -1331,12 +1410,15 @@ def _load_mixed_dataset_from_manifest(
                 f"stage=dataset_mix_validation source={source['name']} input={source['path']}: {exc}"
             ) from exc
         sources.append(DatasetMixSource(name=source["name"], dataset=dataset, weight=source["weight"]))
+    samples_per_epoch = manifest["samples_per_epoch"]
+    if manifest["exhaustion"] == "cycle" and samples_per_epoch is None:
+        samples_per_epoch = sum(len(source.dataset) for source in sources)
     return WeightedMixedDataset(
         sources,
         seed=manifest["seed"],
         exhaustion=manifest["exhaustion"],
         shuffle_within_sources=manifest["shuffle_within_sources"],
-        max_samples_per_epoch=manifest["max_samples_per_epoch"],
+        samples_per_epoch=samples_per_epoch,
     )
 
 
@@ -1381,8 +1463,10 @@ def _format_dataset_mix_summary(summary: dict) -> str:
     lines = [
         "AReno dataset mix",
         f"  policy: {summary['policy']}",
+        f"  weight_unit: {summary['weight_unit']}",
         f"  seed: {summary['seed']}",
         f"  shuffle_within_sources: {summary['shuffle_within_sources']}",
+        f"  samples_per_epoch: {summary['samples_per_epoch'] or 'natural exhaustion'}",
         f"  planned_rows: {summary['planned_rows']}",
         f"  termination_reason: {summary['termination_reason']}",
         "  sources:",
@@ -1393,6 +1477,8 @@ def _format_dataset_mix_summary(summary: dict) -> str:
             f"{source['name']}: rows={source['rows_available']} "
             f"weight={source['weight_requested']:.6f} selected={source['rows_selected']}"
         )
+    for warning in summary["warnings"]:
+        lines.append(f"  warning: {warning}")
     return "\n".join(lines)
 
 
@@ -1571,10 +1657,27 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     "dataset_sources",
     multiple=True,
     metavar="NAME=PATH:WEIGHT",
-    help=(
-        "Weighted SFT dataset source; repeat at least twice. Uses seed 42, "
-        "renormalize exhaustion, and source shuffling by default."
-    ),
+    help=("Weighted SFT dataset source; repeat at least twice. Weights are per sampled row."),
+)
+@click.option(
+    "--dataset-mix-seed",
+    type=click.IntRange(min=0, max=2**63 - 1),
+    default=42,
+    show_default=True,
+    help="Seed for command-line dataset-source sampling and source shuffling.",
+)
+@click.option(
+    "--dataset-mix-exhaustion",
+    type=click.Choice(["cycle", "stop", "renormalize"], case_sensitive=False),
+    default="cycle",
+    show_default=True,
+    help="Behavior when a command-line dataset source is exhausted.",
+)
+@click.option(
+    "--dataset-mix-samples-per-epoch",
+    type=click.IntRange(min=1),
+    default=None,
+    help="Sample budget for a cycle mix; defaults to the sum of source row counts.",
 )
 @click.option(
     "--model-hub",

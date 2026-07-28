@@ -70,6 +70,9 @@ def test_train_config_accepts_repeated_dataset_sources_for_sft():
                 "alpaca_cleaned=yahma/alpaca-cleaned:0.7",
                 "stanford_alpaca=tatsu-lab/alpaca:0.3",
             ),
+            dataset_mix_seed=7,
+            dataset_mix_exhaustion="cycle",
+            dataset_mix_samples_per_epoch=1000,
         )
     )
 
@@ -79,6 +82,9 @@ def test_train_config_accepts_repeated_dataset_sources_for_sft():
         "alpaca_cleaned=yahma/alpaca-cleaned:0.7",
         "stanford_alpaca=tatsu-lab/alpaca:0.3",
     )
+    assert config.dataset_mix_seed == 7
+    assert config.dataset_mix_exhaustion == "cycle"
+    assert config.dataset_mix_samples_per_epoch == 1000
 
 
 def test_train_config_requires_at_least_two_dataset_sources():
@@ -598,6 +604,10 @@ def test_train_command_accepts_repeated_dataset_source_options(monkeypatch):
             "stanford_alpaca=tatsu-lab/alpaca:0.3",
             "--dataset-loader-fn",
             "examples/sft/alpaca/dataset_loader.py",
+            "--dataset-mix-seed",
+            "7",
+            "--dataset-mix-samples-per-epoch",
+            "1000",
             "--world-size",
             "1",
             "--tp-size",
@@ -612,6 +622,8 @@ def test_train_command_accepts_repeated_dataset_source_options(monkeypatch):
         "alpaca_cleaned=yahma/alpaca-cleaned:0.7",
         "stanford_alpaca=tatsu-lab/alpaca:0.3",
     )
+    assert captured[0].dataset_mix_seed == 7
+    assert captured[0].dataset_mix_samples_per_epoch == 1000
 
 
 def test_train_command_tunes_params_before_summary_and_run(monkeypatch):

@@ -99,25 +99,25 @@ def test_cycle_visits_every_record_and_can_repeat_small_sources():
     assert next(item for item in dataset.summary()["sources"] if item["name"] == "small")["duplicates"] > 0
 
 
-def test_max_samples_per_epoch_bounds_cycle():
+def test_samples_per_epoch_bounds_cycle():
     dataset = WeightedMixedDataset(
         [_source("small", 1, 0.99), _source("rare", 2, 0.01)],
         seed=5,
         exhaustion="cycle",
-        max_samples_per_epoch=3,
+        samples_per_epoch=3,
     )
 
     assert len(dataset) == 3
-    assert dataset.summary()["termination_reason"] == "max_samples_per_epoch"
+    assert dataset.summary()["termination_reason"] == "samples_per_epoch"
 
 
-def test_max_samples_per_epoch_is_rejected_for_non_cycle_policies():
+def test_samples_per_epoch_is_rejected_for_non_cycle_policies():
     with pytest.raises(ValueError, match="only supported with exhaustion='cycle'"):
         WeightedMixedDataset(
             [_source("first", 1, 1.0), _source("second", 1, 1.0)],
             seed=5,
             exhaustion="renormalize",
-            max_samples_per_epoch=1,
+            samples_per_epoch=1,
         )
 
 
@@ -127,12 +127,35 @@ def test_observed_proportions_follow_weights_with_documented_tolerance():
         seed=42,
         exhaustion="cycle",
         shuffle_within_sources=False,
-        max_samples_per_epoch=2_000,
+        samples_per_epoch=2_000,
     )
 
     observed = {source["name"]: source["observed_proportion"] for source in dataset.summary()["sources"]}
     assert observed["major"] == pytest.approx(0.7, abs=0.05)
     assert observed["minor"] == pytest.approx(0.3, abs=0.05)
+
+
+def test_many_source_cycle_uses_fixed_budget_and_reports_rare_source_risk():
+    dataset = WeightedMixedDataset(
+        [
+            _source("math", 3, 0.6),
+            _source("code", 2, 0.3),
+            _source("general", 4, 0.099),
+            _source("rare", 1, 0.001),
+        ],
+        seed=42,
+        exhaustion="cycle",
+        samples_per_epoch=100,
+    )
+
+    summary = dataset.summary()
+    assert len(dataset) == 100
+    assert summary["sampler_version"] == 1
+    assert summary["weight_unit"] == "sample"
+    assert summary["termination_reason"] == "samples_per_epoch"
+    assert summary["mix_spec_hash"].startswith("sha256:")
+    assert summary["schedule_hash"].startswith("sha256:")
+    assert any("source 'rare'" in warning for warning in summary["warnings"])
 
 
 @pytest.mark.parametrize("weight", [0, -1, math.nan, math.inf])
@@ -279,8 +302,9 @@ def test_dataset_source_shorthand_preserves_remote_ref_colons():
     )
 
     assert manifest["seed"] == 42
-    assert manifest["exhaustion"] == "renormalize"
+    assert manifest["exhaustion"] == "cycle"
     assert manifest["shuffle_within_sources"] is True
+    assert manifest["samples_per_epoch"] is None
     assert manifest["sources"] == [
         {"name": "math", "path": "gsm8k:main:train", "weight": 0.7},
         {"name": "code", "path": "org/code-dataset:default:train", "weight": 0.3},
@@ -324,6 +348,7 @@ def test_dataset_source_shorthand_loads_remote_sources_through_shared_loader(tmp
 
     dataset = train_cli._load_dataset_sources_for_training(
         ("first=org/first:0.7", "second=org/second:0.3"),
+        samples_per_epoch=100,
         model_hub="hf",
         dataset_loader_fn=str(loader),
         load_dataset=load_dataset,
@@ -331,6 +356,7 @@ def test_dataset_source_shorthand_loads_remote_sources_through_shared_loader(tmp
     )
 
     assert loaded == ["org/first", "org/second"]
+    assert len(dataset) == 100
     assert {row["prompt"] for row in dataset} == {"org/first", "org/second"}
     assert {row[DATASET_MIX_METADATA_KEY]["source"] for row in dataset} == {"first", "second"}
 

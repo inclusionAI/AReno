@@ -222,10 +222,42 @@ class TrainerDatasetUtilityTest(unittest.TestCase):
         self.assertEqual(backend.train_rows, 2)
         self.assertTrue(backend.closed)
         progress_log = next(message for message in logs.output if "stage=dataset_mix_progress" in message)
+        self.assertIn("'rows_scheduled': 2", progress_log)
+        self.assertIn("'rows_filtered': 0", progress_log)
         self.assertIn("'rows_trained': 2", progress_log)
+        self.assertIn("'target_tokens_trained': 2", progress_log)
         self.assertIn("'name': 'math'", progress_log)
         self.assertIn("'name': 'code'", progress_log)
-        self.assertIn("'observed_proportion': 0.5", progress_log)
+        self.assertIn("'observed_sample_proportion': 0.5", progress_log)
+        self.assertIn("'observed_token_proportion': 0.5", progress_log)
+
+    def test_sft_mix_progress_exposes_post_tokenization_filter_drift(self):
+        backend = FakeSFTBackend()
+        dataset = WeightedMixedDataset(
+            [
+                DatasetMixSource("valid", [{"prompt": "q", "response": "a"}], 0.5),
+                DatasetMixSource("empty", [{"prompt": "r", "response": ""}], 0.5),
+            ],
+            seed=42,
+            exhaustion="renormalize",
+        )
+        trainer = sft_mod.SFTTrainer(
+            _sft_config(),
+            instance=backend,
+            dataset=dataset,
+            reward_fn=None,
+            loss_fn=lambda _pack, _logprobs: None,
+        )
+
+        with self.assertLogs("areno.api.trainers.sft.SFTTrainer", level="INFO") as logs:
+            trainer.fit()
+
+        epoch_end = next(message for message in logs.output if "stage=dataset_mix_epoch_end" in message)
+        self.assertIn("'rows_scheduled': 2", epoch_end)
+        self.assertIn("'rows_filtered': 1", epoch_end)
+        self.assertIn("'rows_trained': 1", epoch_end)
+        self.assertIn("'name': 'empty'", epoch_end)
+        self.assertIn("'observed_sample_proportion': 0.0", epoch_end)
 
     def test_dpo_requires_explicit_prompt_chosen_rejected_schema(self):
         """DPO rows should not guess preference or prompt field aliases."""

@@ -1,8 +1,9 @@
 {
   "version": 1,
   "seed": 42,
-  "exhaustion": "renormalize",
+  "exhaustion": "cycle",
   "shuffle_within_sources": true,
+  "samples_per_epoch": 20,
   "sources": [
     {
       "name": "math",

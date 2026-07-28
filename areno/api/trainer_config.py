@@ -31,6 +31,9 @@ class TrainerConfig:
     dataset_loader_fn: str | None = None
     dataset_mix_config: str | None = field(default=None, kw_only=True)
     dataset_sources: tuple[str, ...] = field(default=(), kw_only=True)
+    dataset_mix_seed: int = field(default=42, kw_only=True)
+    dataset_mix_exhaustion: str = field(default="cycle", kw_only=True)
+    dataset_mix_samples_per_epoch: int | None = field(default=None, kw_only=True)
     save_path: str | None = None
     save_interval: int = 100
     epochs: int = 10
@@ -75,10 +78,30 @@ class TrainerConfig:
             raise ValueError("one of dataset_path, dataset_mix_config, or dataset_sources is required")
         if dataset_inputs > 1:
             raise ValueError("dataset_path, dataset_mix_config, and dataset_sources are mutually exclusive")
+        if not self.dataset_sources and (
+            self.dataset_mix_seed != 42
+            or self.dataset_mix_exhaustion != "cycle"
+            or self.dataset_mix_samples_per_epoch is not None
+        ):
+            raise ValueError("inline dataset mix settings apply only when dataset_sources is configured")
         if self.dataset_sources and len(self.dataset_sources) < 2:
             raise ValueError("dataset_sources must contain at least two entries")
         if (self.dataset_mix_config is not None or self.dataset_sources) and self.algo != "sft":
             raise ValueError("dataset mixing currently supports algo='sft' only")
+        if isinstance(self.dataset_mix_seed, bool) or not isinstance(self.dataset_mix_seed, int):
+            raise ValueError("dataset_mix_seed must be an integer")
+        if not 0 <= self.dataset_mix_seed < 2**63:
+            raise ValueError("dataset_mix_seed must be in [0, 2^63)")
+        if self.dataset_mix_exhaustion not in {"stop", "cycle", "renormalize"}:
+            raise ValueError("dataset_mix_exhaustion must be one of: stop, cycle, renormalize")
+        if self.dataset_mix_samples_per_epoch is not None and (
+            isinstance(self.dataset_mix_samples_per_epoch, bool)
+            or not isinstance(self.dataset_mix_samples_per_epoch, int)
+            or self.dataset_mix_samples_per_epoch <= 0
+        ):
+            raise ValueError("dataset_mix_samples_per_epoch must be a positive integer")
+        if self.dataset_mix_samples_per_epoch is not None and self.dataset_mix_exhaustion != "cycle":
+            raise ValueError("dataset_mix_samples_per_epoch requires dataset_mix_exhaustion='cycle'")
         if self.attn_backend not in {"flash", "native"}:
             raise ValueError("attn_backend must be one of: flash, native")
         if self.model_hub not in {"hf", "modelscope"}:

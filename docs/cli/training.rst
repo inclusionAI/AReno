@@ -82,12 +82,32 @@ per-algorithm loader contracts.
         --algo sft \
         --ckpt Qwen/Qwen3-0.6B \
         --model-hub hf \
-        --dataset-source alpaca_cleaned=yahma/alpaca-cleaned:0.7 \
+        --dataset-source alpaca_cleaned=yahma/alpaca-cleaned:0.6 \
         --dataset-source stanford_alpaca=tatsu-lab/alpaca:0.3 \
+        --dataset-source alpaca_gpt4=vicgalle/alpaca-gpt4:0.1 \
+        --dataset-mix-samples-per-epoch 10000 \
         --dataset-loader-fn examples/sft/alpaca/dataset_loader.py
 
-   The shorthand uses seed ``42``, ``renormalize`` exhaustion, and source
-   shuffling. Use ``--dataset-mix-config`` when those settings must be changed.
+   Any number of sources (two or more) can be repeated. Weights are normalized
+   across all sources and mean probabilities of selecting a **row**, not a
+   token or a batch. The shorthand uses seed ``42``, ``cycle`` exhaustion, and
+   source shuffling. Override these with ``--dataset-mix-seed``,
+   ``--dataset-mix-exhaustion``, and
+   ``--dataset-mix-samples-per-epoch``.
+
+``--dataset-mix-samples-per-epoch INTEGER``
+   Fixed row-sampling budget for a command-line ``cycle`` mix. If omitted,
+   AReno uses the sum of the loaded source row counts. A fixed budget keeps
+   many-source training bounded while preserving the requested distribution;
+   small sources repeat as necessary.
+
+``--dataset-mix-exhaustion [cycle|stop|renormalize]``
+   Exhaustion policy for command-line sources. ``cycle`` is the default because
+   it keeps weights meaningful for the whole fixed budget. ``stop`` and
+   ``renormalize`` do not accept a sample budget.
+
+``--dataset-mix-seed INTEGER``
+   Seed for source selection and per-source shuffling. Default: ``42``.
 
 Both mixing forms currently support map-style datasets only, and the shared
 ``--dataset-loader-fn`` is applied independently to each source.
@@ -103,8 +123,9 @@ normalized automatically:
    {
      "version": 1,
      "seed": 42,
-     "exhaustion": "renormalize",
+     "exhaustion": "cycle",
      "shuffle_within_sources": true,
+     "samples_per_epoch": 10000,
      "sources": [
        {"name": "math", "path": "math.jsonl", "weight": 0.7},
        {"name": "code", "path": "code.jsonl", "weight": 0.3}
@@ -118,19 +139,32 @@ policies have deliberately different consumption behavior:
 
 * ``stop`` ends when one selected source is exhausted. Records are not
   repeated, but other sources may remain partially unused.
-* ``cycle`` restarts exhausted sources and ends after every source has
-  exhausted at least once. Smaller sources may be repeated. Set the optional
-  positive ``max_samples_per_epoch`` field to bound highly imbalanced mixes.
+* ``cycle`` restarts exhausted sources and emits exactly
+  ``samples_per_epoch`` rows. When the field/flag is omitted, both manifest and
+  command-line forms resolve the budget to the sum of source row counts.
 * ``renormalize`` removes an exhausted source and renormalizes the remaining
   weights. Every source record is emitted exactly once.
+
+For ``K`` sources and budget ``N``, source ``i`` receives about
+``N * normalized_weight_i`` rows. This is stochastic: a source whose expected
+count is below one can receive zero rows in an epoch, so AReno emits a plan
+warning. Use a larger budget when every low-weight source needs practical
+coverage.
 
 The seed controls source selection and per-source ordering. AReno derives a
 different deterministic ordering for each epoch. Source identity is attached
 under the reserved ``__areno_meta__`` field. The run prints a sample-free
-summary, logs the plan for each epoch, logs cumulative
-``stage=dataset_mix_progress`` counts and observed proportions for rows that
-successfully completed training, and writes
+summary, logs the plan for each epoch, and records both a mix-spec hash and
+schedule hash. These hashes identify the sampler inputs and selected indices;
+they do not prove that a mutable remote dataset still has identical contents.
+The cumulative ``stage=dataset_mix_progress`` event reports scheduled,
+filtered, and successfully trained rows plus trained target-token counts and
+both row/token proportions. The plan is also written as
 ``dataset_mix_plan.<pid>.json`` to ``--metrics-log-dir``.
+
+V1 guarantees deterministic replay from the beginning of an epoch. AReno
+checkpoints currently do not persist an optimizer state plus mid-epoch dataset
+cursor, so exact mid-epoch resume is outside this contract.
 
 The map-style implementation precomputes an index schedule for the current
 epoch. Very large mixes therefore require memory proportional to the planned

@@ -58,20 +58,32 @@ class SFTTrainer:
         tokenizer = self.areno.get_tokenizer()
         configure_chat_template_enable_thinking(tokenizer, getattr(self.config, "chat_template_enable_thinking", None))
         step = 0
-        trained_mix_counts: Counter[str] = Counter()
         for epoch in range(self.config.epochs):
             set_epoch = getattr(self.dataset, "set_epoch", None)
             if callable(set_epoch):
                 set_epoch(epoch)
             mix_summary = getattr(self.dataset, "summary", None)
             if callable(mix_summary):
-                self.logger.info("epoch=%d stage=dataset_mix_plan dataset_mix=%s", epoch, mix_summary())
+                resolved_mix_summary = mix_summary()
+                self.logger.info("epoch=%d stage=dataset_mix_plan dataset_mix=%s", epoch, resolved_mix_summary)
+                mix_source_names = [
+                    source["name"] for source in resolved_mix_summary.get("sources", []) if "name" in source
+                ]
+            else:
+                mix_source_names = []
+            mix_progress = {
+                "scheduled": Counter(),
+                "filtered": Counter(),
+                "trained": Counter(),
+                "target_tokens": Counter(),
+            }
             self.logger.info("epoch=%d stage=epoch_start", epoch)
             record_dashboard_state(self.areno, stage="epoch_start", epoch=epoch, step=step, role="policy")
-            for train_batch, batch_mix_counts in self._iter_train_batches(
+            for train_batch, batch_mix_counts, batch_mix_target_tokens in self._iter_train_batches(
                 tokenizer,
                 max_prompt_tokens=self.config.max_prompt_tokens,
                 max_new_tokens=self.config.max_new_tokens,
+                mix_progress=mix_progress,
             ):
                 if not train_batch:
                     continue
@@ -96,12 +108,13 @@ class SFTTrainer:
                 record_dashboard_state(self.areno, stage="train_end", epoch=epoch, step=step, role="policy")
                 self.logger.info("epoch=%d step=%d train_stats=%s", epoch, step, result)
                 if batch_mix_counts:
-                    trained_mix_counts.update(batch_mix_counts)
+                    mix_progress["trained"].update(batch_mix_counts)
+                    mix_progress["target_tokens"].update(batch_mix_target_tokens)
                     self.logger.info(
                         "epoch=%d step=%d stage=dataset_mix_progress dataset_mix=%s",
                         epoch,
                         step,
-                        _dataset_mix_progress(trained_mix_counts),
+                        _dataset_mix_progress(mix_progress, mix_source_names),
                     )
                 self._maybe_save(epoch, step)
                 step += 1
@@ -109,21 +122,38 @@ class SFTTrainer:
                     self.logger.info("epoch=%d step=%d stage=max_steps_reached", epoch, step)
                     record_dashboard_state(self.areno, stage="max_steps_reached", epoch=epoch, step=step, role="policy")
                     return
+            if mix_source_names:
+                self.logger.info(
+                    "epoch=%d stage=dataset_mix_epoch_end dataset_mix=%s",
+                    epoch,
+                    _dataset_mix_progress(mix_progress, mix_source_names),
+                )
             self.logger.info("epoch=%d stage=epoch_end", epoch)
             record_dashboard_state(self.areno, stage="epoch_end", epoch=epoch, step=step, role="policy")
 
-    def _iter_train_batches(self, tokenizer, *, max_prompt_tokens: int, max_new_tokens: int):
+    def _iter_train_batches(
+        self,
+        tokenizer,
+        *,
+        max_prompt_tokens: int,
+        max_new_tokens: int,
+        mix_progress: dict[str, Counter[str]] | None = None,
+    ):
         # Dataset rows are converted lazily so large HF datasets do not need an
         # up-front tokenized copy. Rows that are empty, all-prompt, or exceed
         # the configured prompt or supervised-response budgets are dropped.
         batch = []
         batch_mix_counts: Counter[str] = Counter()
+        batch_mix_target_tokens: Counter[str] = Counter()
         skipped = 0
         accepted = 0
         total_rows = len(self.dataset)
         for index in range(total_rows):
             # Normalize each supported row schema into one TrainSequence.
             record = self.dataset[index]
+            source_name = _dataset_mix_source_name(record)
+            if source_name is not None and mix_progress is not None:
+                mix_progress["scheduled"][source_name] += 1
             seq = _record_to_train_sequence(
                 record,
                 tokenizer,
@@ -132,16 +162,19 @@ class SFTTrainer:
             )
             if seq is None:
                 skipped += 1
+                if source_name is not None and mix_progress is not None:
+                    mix_progress["filtered"][source_name] += 1
                 continue
             accepted += 1
             batch.append(seq)
-            source_name = _dataset_mix_source_name(record)
             if source_name is not None:
                 batch_mix_counts[source_name] += 1
+                batch_mix_target_tokens[source_name] += seq.prompt_mask[1:].count(False)
             if len(batch) >= self.config.batch_size:
-                yield batch, batch_mix_counts
+                yield batch, batch_mix_counts, batch_mix_target_tokens
                 batch = []
                 batch_mix_counts = Counter()
+                batch_mix_target_tokens = Counter()
         if skipped:
             self.logger.info("stage=sft_dataset_filter skipped_long_or_empty=%d", skipped)
         if accepted == 0:
@@ -151,7 +184,7 @@ class SFTTrainer:
                 "Check dataset quality, --max-prompt-tokens, and --max-new-tokens."
             )
         if batch:
-            yield batch, batch_mix_counts
+            yield batch, batch_mix_counts, batch_mix_target_tokens
 
     def _maybe_save(self, epoch: int, step: int) -> None:
         # Keep the same step-based checkpoint cadence as the RL trainers.
@@ -216,17 +249,29 @@ def _dataset_mix_source_name(record: Any) -> str | None:
     return source_name if isinstance(source_name, str) else None
 
 
-def _dataset_mix_progress(counts: Counter[str]) -> dict[str, Any]:
-    total = sum(counts.values())
+def _dataset_mix_progress(progress: dict[str, Counter[str]], source_names: list[str]) -> dict[str, Any]:
+    rows_scheduled = sum(progress["scheduled"].values())
+    rows_filtered = sum(progress["filtered"].values())
+    rows_trained = sum(progress["trained"].values())
+    target_tokens = sum(progress["target_tokens"].values())
     return {
-        "rows_trained": total,
+        "rows_scheduled": rows_scheduled,
+        "rows_filtered": rows_filtered,
+        "rows_trained": rows_trained,
+        "target_tokens_trained": target_tokens,
         "sources": [
             {
                 "name": name,
-                "rows_trained": counts[name],
-                "observed_proportion": counts[name] / total,
+                "rows_scheduled": progress["scheduled"][name],
+                "rows_filtered": progress["filtered"][name],
+                "rows_trained": progress["trained"][name],
+                "target_tokens_trained": progress["target_tokens"][name],
+                "observed_sample_proportion": progress["trained"][name] / rows_trained if rows_trained else 0.0,
+                "observed_token_proportion": (
+                    progress["target_tokens"][name] / target_tokens if target_tokens else 0.0
+                ),
             }
-            for name in sorted(counts)
+            for name in sorted(source_names)
         ],
     }
 
