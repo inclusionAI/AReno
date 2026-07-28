@@ -866,6 +866,48 @@ def run(trainer_config: TrainerConfig):
     trainer.fit()
 
 
+def _dashboard_value(value):
+    """Coerce a trainer-config value into a JSON-serializable form for the dashboard.
+
+    The health-check config is a nested dataclass; convert it to a plain dict
+    (or keep ``None`` when disabled) so `_write_dashboard_run_config` can
+    `json.dumps` the settings payload without raising.
+    """
+
+    if value is None:
+        return None
+    if isinstance(value, HealthCheckConfig):
+        return {
+            "enabled": value.enabled,
+            "startup_window_updates": value.startup_window_updates,
+            "on_fail": value.on_fail,
+            "effective_tokens": {
+                "min_per_batch": value.effective_tokens.min_per_batch,
+                "fail_if_zero": value.effective_tokens.fail_if_zero,
+            },
+            "reward_variance": {
+                "enabled": value.reward_variance.enabled,
+                "require_variation": value.reward_variance.require_variation,
+                "min_std_warn": value.reward_variance.min_std_warn,
+                "min_std_fail": value.reward_variance.min_std_fail,
+            },
+            "loss_change": {
+                "enabled": value.loss_change.enabled,
+                "min_abs_delta_warn": value.loss_change.min_abs_delta_warn,
+                "min_abs_delta_fail": value.loss_change.min_abs_delta_fail,
+                "mode": value.loss_change.mode,
+            },
+            "skipped_batches": {
+                "enabled": value.skipped_batches.enabled,
+                "max_ratio_warn": value.skipped_batches.max_ratio_warn,
+                "max_ratio_fail": value.skipped_batches.max_ratio_fail,
+                "max_grad_zero_ratio_warn": value.skipped_batches.max_grad_zero_ratio_warn,
+                "max_grad_zero_ratio_fail": value.skipped_batches.max_grad_zero_ratio_fail,
+            },
+        }
+    return value
+
+
 def _write_dashboard_run_config(config: TrainerConfig) -> None:
     """Persist the same train settings summary that the CLI prints."""
 
@@ -898,7 +940,7 @@ def _training_config_settings(config: TrainerConfig) -> dict:
             if not hasattr(config, name):
                 continue
             used.add(name)
-            items.append({"key": name, "value": getattr(config, name)})
+            items.append({"key": name, "value": _dashboard_value(getattr(config, name))})
         return {"title": title, "items": items}
 
     sections = [
@@ -991,12 +1033,12 @@ def _training_config_settings(config: TrainerConfig) -> dict:
             ],
         ),
         section("Checkpoint", ["save_path", "save_interval"]),
-        section("Observability", ["metrics_log_dir"]),
+        section("Observability", ["metrics_log_dir", "health_check"]),
     ]
     extras = []
     for field in fields(config):
         if field.name not in used:
-            extras.append({"key": field.name, "value": getattr(config, field.name)})
+            extras.append({"key": field.name, "value": _dashboard_value(getattr(config, field.name))})
     if extras:
         sections.append({"title": "Other", "items": extras})
     if isinstance(config, RolloutTrainerConfig):
