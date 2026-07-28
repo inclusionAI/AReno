@@ -120,7 +120,8 @@ class TraceReplayTest(unittest.TestCase):
         self.assertIn("Score:", trace)
 
     def test_trace_invalid_move(self):
-        trace = game.format_trace([1, 5], 10, 100, 5, "*")
+        """Non-integer division should show 'invalid' in trace."""
+        trace = game.format_trace([3, 10], 5, 10, 3, "/")
         self.assertIn("invalid", trace)
 
 
