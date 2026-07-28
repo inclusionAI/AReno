@@ -17,4 +17,9 @@ Check:
 If rewards are always zero, inspect answer parsing first. If rewards are
 always one, verify the checker actually reads the completion.
 
+To break a composite reward into per-component trends (zero/outlier fractions,
+weighted contribution, per-step drill-down), write
+``reward_components.<pid>.jsonl`` rows from your reward function and run
+``areno reward-analysis`` — see :doc:`/cli/observability`.
+
 See :doc:`/concepts/reward-functions` and :doc:`/reference/reward-function-api`.

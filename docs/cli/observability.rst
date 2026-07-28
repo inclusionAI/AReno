@@ -175,3 +175,116 @@ When a trajectory is dropped for exceeding the model context window,
 counts, message counts, assistant turn counts, tool-result counts, and a short
 prompt preview. This is the fastest way to debug overlong agentic examples
 without dumping every token in every trajectory.
+
+Multi-component reward analysis
+-------------------------------
+
+``areno reward-analysis`` is a focused, read-only command that inspects a
+metrics directory for per-step reward *components* (for example
+``correctness``, ``format``, ``length_penalty``) and reports how each component
+evolves, how often it is zero or an outlier, and how it weights into the total
+reward. It performs no model or worker initialization — inputs are validated up
+front and the analysis runs purely over local artifacts.
+
+.. code-block:: bash
+
+   areno reward-analysis --metrics-dir /tmp/areno/tfevent
+   areno reward-analysis --metrics-dir /tmp/areno/tfevent --json
+
+A missing path is rejected up front with the affected stage and input:
+
+.. code-block:: text
+
+   Error: stage=artifact resolution: path not found (input=/tmp/does-not-exist)
+
+Input contract
+^^^^^^^^^^^^^^
+
+The analyzer reuses AReno's existing ``{name, value, step}`` JSONL metric row
+convention — the same schema the dashboard already ingests generically — scoped
+to ``reward_components.<pid>.jsonl`` files in the metrics directory (naming
+mirrors ``rollout_samples.<pid>.jsonl``). Each row names one component for one
+step; rows are grouped by step before analysis:
+
+.. code-block:: json
+
+   {"step": 0, "name": "correctness", "value": 0.8}
+   {"step": 0, "name": "format", "value": 0.2}
+   {"step": 1, "name": "correctness", "value": 0.0}
+   {"step": 1, "name": "format", "value": 0.2}
+   {"step": 2, "name": "correctness", "value": 1.0}
+   {"step": 2, "name": "format", "value": null}
+
+``step`` is an integer and ``name`` a non-empty string. A ``value`` may be
+``null`` (present-but-unknown, counted as *missing*) or non-finite
+(``NaN``/``inf``, counted separately) and is never treated as zero. The set of
+component names may grow over steps — a name first seen at step *k* is not
+reported as missing before *k*. The per-step total defaults to the sum of the
+step's finite component values.
+
+Because the rows follow the existing metric convention, a producer only needs to
+append these rows from a reward function (plain Python) or any metrics hook — no
+trainer or SDK change is required. Malformed rows are skipped and reported by
+file, line number, and step/component name only; prompt or completion text from
+samples is never carried into errors.
+
+Defaults and flags
+^^^^^^^^^^^^^^^^^^
+
+``--metrics-dir`` (required)
+   Directory (or single file) to analyze.
+``--json``
+   Emit a machine-readable report instead of the human table.
+``--history`` (default ``200``)
+   Bounded per-component history length (a rolling window).
+``--outlier-z`` (default ``3.0``)
+   Z-score threshold used for the outlier fraction.
+
+Output fields
+^^^^^^^^^^^^^
+
+Each component in the report carries:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 70
+
+   * - Field
+     - Meaning
+   * - ``current``
+     - Most recent finite value (``null`` if none).
+   * - ``mean`` / ``std``
+     - Welford mean and sample std over finite observations only.
+   * - ``zero_fraction``
+     - Fraction of present observations equal to zero.
+   * - ``outlier_fraction``
+     - Fraction of finite observations beyond ``--outlier-z`` standard deviations.
+   * - ``non_finite_fraction``
+     - Fraction of present observations that are ``NaN``/``inf``.
+   * - ``missing_count``
+     - Times the component was expected but absent or ``null``.
+   * - ``weighted_contribution``
+     - Component finite sum divided by the total finite sum (share of total reward).
+   * - ``contribution_fraction``
+     - Component finite sum divided by the sum of all components (relative weight).
+   * - ``history`` / ``distribution``
+     - Bounded recent values and a fixed-bucket histogram for drill-down.
+
+A bounded ``steps`` list gives a per-update drill-down: each entry carries the
+step's ``total``, the components present, and the names that were non-finite or
+missing. Large batches are aggregated server-side: only per-step aggregates are
+retained, never raw per-sample rewards, so memory stays bounded regardless of
+batch size.
+
+Limitations
+^^^^^^^^^^^
+
+This is a post-hoc, read-only view. It consumes whatever component artifact
+exists in the metrics directory; producing that artifact from a reward function
+is a separate concern tracked independently. The command needs no GPU, no
+external database, and no sandbox. When the feature is not used, existing
+training and serving behavior is unchanged.
+
+The dashboard surfaces the same data: select a job and the *Reward Components*
+panel polls ``/api/jobs/<id>/reward-components`` for the table and per-step
+drill-down.

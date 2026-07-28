@@ -207,6 +207,16 @@ areno env --json
 
 The report includes AReno, Python, platform, PyTorch/CUDA, GPU, `nvcc`, dependency import status, and relevant environment variables.
 
+### Observability
+
+AReno logs a compact per-step lifecycle, writes TensorBoard scalars, and ships a low-intrusion React dashboard (start it with `areno dashboard --start`). For a read-only breakdown of per-component reward — current value, history, zero/outlier fractions, missing/non-finite handling, and weighted contribution — point the analyzer at a metrics directory:
+
+```bash
+areno reward-analysis --metrics-dir /tmp/areno/tfevent
+```
+
+See the [observability guide](docs/cli/observability.rst) for the full metric surface, the reward-component input contract, and output fields.
+
 ### Training
 
 #### Tiny training smoke test
