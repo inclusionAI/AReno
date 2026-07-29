@@ -39,8 +39,14 @@ Kaggle 提供以下 GPU，均可运行此 demo：
 !git clone -b feat/maze-agentic-rl https://github.com/sliverdancer/AReno.git /kaggle/working/AReno
 %cd /kaggle/working/AReno
 
-# 安装 AReno（跳过 CUDA 编译，Kaggle 自带 PyTorch）
-!ARENO_BUILD_EXT=0 pip install -e . --no-build-isolation
+# 安装编译工具（Kaggle 镜像可能缺少）
+!apt-get update -qq && apt-get install -y -qq build-essential ninja-build
+
+# 安装 AReno（编译 CUDA 扩展！T4 的 compute capability 是 7.5，P100 是 6.0）
+!TORCH_CUDA_ARCH_LIST="7.5" pip install -e . --no-build-isolation
+
+# 验证 CUDA 扩展是否安装成功（训练必须！）
+!python -c "from areno.accel._extension import extension; print('CUDA extension OK')"
 ```
 
 在第三个 cell 中运行：
@@ -58,6 +64,10 @@ os.environ["PATH"] = sysconfig.get_path("scripts") + ":" + os.environ["PATH"]
 > **如果 `areno --version` 仍然报 `command not found`**，所有后续 `areno` 命令
 > 都改用 `python -m areno.cli.main` 替代。例如：
 > `!python -m areno.cli.main --version`
+>
+> **警告**：不要用 `ARENO_BUILD_EXT=0` 安装 AReno！那只跳过 CUDA 编译，
+> 适合 CPU 测试，但 **GPU 训练必须编译 CUDA 扩展**，否则会报
+> `ModuleNotFoundError: No module named 'areno.accel._areno_accel'`。
 
 ### 3. 生成迷宫数据集
 
