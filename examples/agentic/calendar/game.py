@@ -301,7 +301,12 @@ def compute_reward(
 
 
 def format_prompt(state: CalendarState, meeting_id: str) -> str:
-    """Render a human-readable scheduling scenario for the LLM."""
+    """Render a human-readable scheduling scenario for the LLM.
+
+    Note: participant availability details are intentionally NOT included
+    in the prompt. The model must discover them by calling the
+    query_availability tool, which returns UTC-converted slots.
+    """
     meeting = state.meeting_by_id(meeting_id)
     if meeting is None:
         raise ValueError(f"meeting {meeting_id!r} not found")
@@ -318,13 +323,14 @@ def format_prompt(state: CalendarState, meeting_id: str) -> str:
         "Participants:",
     ]
 
+    # Only list participant names and timezones, NOT their availability.
+    # The model must call query_availability to learn the actual slots.
     for name in meeting.required_participants:
         p = state.participants.get(name)
         if p is None:
             lines.append(f"  {name}: (not found)")
             continue
-        slots_str = ", ".join(f"{s.start_hour:02d}:00-{s.end_hour:02d}:00" for s in p.available_slots)
-        lines.append(f"  {name}: timezone={p.timezone}, available=[{slots_str}]")
+        lines.append(f"  {name}: timezone={p.timezone}")
 
     if state.confirmed:
         lines.append("")
@@ -336,9 +342,9 @@ def format_prompt(state: CalendarState, meeting_id: str) -> str:
 
     lines.append("")
     lines.append("Steps:")
-    lines.append("1. Call query_availability for each required participant.")
-    lines.append("2. Find a UTC time range that overlaps all participants' availability.")
-    lines.append("3. Call propose_slot with the meeting_id and UTC time range.")
+    lines.append("1. Call query_availability for each required participant to learn their UTC availability.")
+    lines.append("2. Find a UTC time range that overlaps all participants' availability and fits the meeting duration.")
+    lines.append("3. Call propose_slot with the meeting_id and the UTC time range.")
     lines.append("4. Call confirm_slot to finalize the booking.")
     lines.append("")
     lines.append("Answer by calling the tools. Do not write free text.")
@@ -418,3 +424,49 @@ def record_to_state(raw: dict) -> CalendarState:
         meetings=meetings,
         confirmed=confirmed,
     )
+
+
+# ---------------------------------------------------------------------------
+# Tool execution functions (called by run_agent.py during multi-turn rollout)
+# ---------------------------------------------------------------------------
+
+
+def execute_query_availability(state: CalendarState, participant_name: str) -> dict:
+    """Execute query_availability: return a participant's availability in UTC.
+
+    This is called by run_agent.py after the model requests availability,
+    so the model sees the real UTC-converted slots before proposing a time.
+    """
+    p = state.participants.get(participant_name)
+    if p is None:
+        return {"error": f"participant {participant_name!r} not found"}
+    utc_slots = []
+    for slot in p.available_slots:
+        utc_start, utc_end = to_utc(slot, p.timezone)
+        utc_slots.append({
+            "local_start": slot.start_hour,
+            "local_end": slot.end_hour,
+            "timezone": p.timezone,
+            "utc_start": utc_start,
+            "utc_end": utc_end,
+        })
+    return {"participant": participant_name, "timezone": p.timezone, "available_slots_utc": utc_slots}
+
+
+def execute_propose_slot(state: CalendarState, meeting_id: str, utc_start: int, utc_end: int) -> dict:
+    """Execute propose_slot: validate the proposed slot and return the result.
+
+    The model sees whether the proposal is valid before confirming.
+    """
+    error = validate_proposal(state, meeting_id, utc_start, utc_end)
+    if error is not None:
+        return {"valid": False, "error": error}
+    return {"valid": True, "meeting_id": meeting_id, "utc_start": utc_start, "utc_end": utc_end}
+
+
+def execute_confirm_slot(state: CalendarState, meeting_id: str, utc_start: int, utc_end: int) -> dict:
+    """Execute confirm_slot: finalize the booking if valid."""
+    error = validate_proposal(state, meeting_id, utc_start, utc_end)
+    if error is not None:
+        return {"confirmed": False, "error": error}
+    return {"confirmed": True, "meeting_id": meeting_id, "utc_start": utc_start, "utc_end": utc_end}
