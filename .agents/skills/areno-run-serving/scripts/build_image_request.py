@@ -3,15 +3,19 @@
 
 from __future__ import annotations
 
-import argparse
 import base64
 import json
 import mimetypes
+import pathlib
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / "scripts"))
+from areno_skill_sdk import build_parser
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
+    parser = build_parser("Write an OpenAI-compatible image chat request as JSON.")
     parser.add_argument("image", type=Path)
     parser.add_argument("--model", required=True)
     parser.add_argument("--prompt", default="Describe this image.")

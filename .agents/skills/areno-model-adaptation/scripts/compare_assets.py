@@ -3,10 +3,13 @@
 
 from __future__ import annotations
 
-import argparse
 import hashlib
-import json
+import pathlib
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / "scripts"))
+from areno_skill_sdk import Result, build_parser, skill_main
 
 WEIGHT_SUFFIXES = {".safetensors", ".bin", ".pt", ".pth"}
 
@@ -20,22 +23,24 @@ def assets(root: Path) -> dict[str, str]:
     return result
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser()
+@skill_main
+def main() -> Result:
+    parser = build_parser("Compare non-weight checkpoint assets needed for HF-compatible reload.")
     parser.add_argument("source", type=Path)
     parser.add_argument("saved", type=Path)
     args = parser.parse_args()
+
     source, saved = assets(args.source), assets(args.saved)
     missing = sorted(set(source) - set(saved))
     changed = sorted(name for name in source.keys() & saved.keys() if source[name] != saved[name])
-    result = {
-        "ok": not missing and not changed,
-        "missing": missing,
-        "changed": changed,
-        "extra": sorted(set(saved) - set(source)),
-    }
-    print(json.dumps(result, indent=2))
-    return 0 if result["ok"] else 1
+    return Result(
+        ok=not missing and not changed,
+        data={
+            "missing": missing,
+            "changed": changed,
+            "extra": sorted(set(saved) - set(source)),
+        },
+    )
 
 
 if __name__ == "__main__":

@@ -3,10 +3,14 @@
 
 from __future__ import annotations
 
-import argparse
 import json
+import pathlib
+import sys
 import time
 from pathlib import Path
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / "scripts"))
+from areno_skill_sdk import build_parser
 
 
 def snapshot(root_pid: int) -> dict:
@@ -37,7 +41,7 @@ def snapshot(root_pid: int) -> dict:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
+    parser = build_parser("Sample wall time, CPU, RSS, threads, and I/O for a process tree.")
     parser.add_argument("--pid", type=int, required=True)
     parser.add_argument("--duration", type=float, default=60.0)
     parser.add_argument("--interval", type=float, default=1.0)

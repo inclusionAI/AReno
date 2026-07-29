@@ -3,11 +3,14 @@
 
 from __future__ import annotations
 
-import argparse
 import importlib
-import json
+import pathlib
 import statistics
+import sys
 import time
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / "scripts"))
+from areno_skill_sdk import Result, build_parser, skill_main
 
 
 def resolve(spec: str):
@@ -17,8 +20,9 @@ def resolve(spec: str):
     return getattr(importlib.import_module(module), name)
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser()
+@skill_main
+def main() -> Result:
+    parser = build_parser("Benchmark a unary tensor operator with synchronized timings.")
     parser.add_argument("--callable", required=True)
     parser.add_argument("--shape", required=True)
     parser.add_argument("--dtype", default="float16")
@@ -26,26 +30,26 @@ def main() -> int:
     parser.add_argument("--warmup", type=int, default=20)
     parser.add_argument("--iterations", type=int, default=100)
     args = parser.parse_args()
-    result: dict = {"ok": False}
-    try:
-        import torch
 
-        function = resolve(args.callable)
-        shape = tuple(int(item) for item in args.shape.split(","))
-        tensor = torch.randn(shape, device=args.device, dtype=getattr(torch, args.dtype))
-        synchronize = torch.cuda.synchronize if tensor.is_cuda else lambda: None
-        for _ in range(args.warmup):
-            function(tensor)
+    import torch
+
+    function = resolve(args.callable)
+    shape = tuple(int(item) for item in args.shape.split(","))
+    tensor = torch.randn(shape, device=args.device, dtype=getattr(torch, args.dtype))
+    synchronize = torch.cuda.synchronize if tensor.is_cuda else lambda: None
+    for _ in range(args.warmup):
+        function(tensor)
+    synchronize()
+    samples = []
+    for _ in range(args.iterations):
+        start = time.perf_counter_ns()
+        function(tensor)
         synchronize()
-        samples = []
-        for _ in range(args.iterations):
-            start = time.perf_counter_ns()
-            function(tensor)
-            synchronize()
-            samples.append((time.perf_counter_ns() - start) / 1e3)
-        ordered = sorted(samples)
-        result = {
-            "ok": True,
+        samples.append((time.perf_counter_ns() - start) / 1e3)
+    ordered = sorted(samples)
+    return Result(
+        ok=True,
+        data={
             "shape": shape,
             "dtype": args.dtype,
             "device": args.device,
@@ -53,11 +57,8 @@ def main() -> int:
             "mean_us": statistics.fmean(samples),
             "median_us": statistics.median(samples),
             "p95_us": ordered[min(len(ordered) - 1, int(len(ordered) * 0.95))],
-        }
-    except Exception as exc:
-        result["error"] = f"{type(exc).__name__}: {exc}"
-    print(json.dumps(result, indent=2))
-    return 0 if result["ok"] else 1
+        },
+    )
 
 
 if __name__ == "__main__":

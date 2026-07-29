@@ -221,6 +221,20 @@ def test_emit_to_custom_stream():
     assert json.loads(buf.getvalue()) == {"ok": True}
 
 
+def test_emit_ensure_ascii_false_preserves_non_ascii(capsys):
+    emit({"ok": True, "text": "中文"}, json_mode=True, ensure_ascii=False)
+    out = capsys.readouterr().out
+    assert "中文" in out  # not escaped as \uXXXX
+    assert json.loads(out) == {"ok": True, "text": "中文"}
+
+
+def test_emit_sort_keys_false_preserves_insertion_order(capsys):
+    emit({"ok": True, "z": 1, "a": 2}, json_mode=True, sort_keys=False)
+    out = capsys.readouterr().out
+    # Insertion order: ok, z, a — z must appear before a.
+    assert out.index('"z"') < out.index('"a"')
+
+
 # ---------------------------------------------------------------------------
 # Progress: deterministic JSONL sink
 # ---------------------------------------------------------------------------
@@ -385,3 +399,89 @@ def test_compare_ckpt_diff_help_preserves_positional_and_flags():
     for token in ("base", "other", "--top-k", "--pattern", "--device", "--max-elements"):
         assert token in proc.stdout
     assert "Compare same-name tensors" in proc.stdout
+
+
+# ---------------------------------------------------------------------------
+# Additional migrated-script regression tests
+# ---------------------------------------------------------------------------
+
+VALIDATE_TRANSCRIPT = ROOT / ".agents/skills/areno-build-agentic-workflow/scripts/validate_transcript.py"
+INSPECT_DATASET = ROOT / ".agents/skills/areno-run-training/scripts/inspect_dataset.py"
+
+
+def test_validate_transcript_migrated_rejects_unmatched_tool_result(tmp_path):
+    transcript = tmp_path / "transcript.json"
+    transcript.write_text(
+        json.dumps(
+            {
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                "id": "call-1",
+                                "type": "function",
+                                "function": {"name": "guess_code", "arguments": {"code": "0123"}},
+                            }
+                        ],
+                    },
+                    # tool result with a DIFFERENT call id -> unmatched
+                    {"role": "tool", "tool_call_id": "call-999", "content": "{}"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    proc = _run(VALIDATE_TRANSCRIPT, str(transcript))
+    assert proc.returncode == 1
+    result = json.loads(proc.stdout)
+    assert result["ok"] is False
+    assert any("unmatched tool result" in e for e in result["errors"])
+
+
+def test_validate_transcript_migrated_success(tmp_path):
+    transcript = tmp_path / "transcript.json"
+    transcript.write_text(
+        json.dumps(
+            {
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                "id": "call-1",
+                                "type": "function",
+                                "function": {"name": "guess_code", "arguments": {"code": "0123"}},
+                            }
+                        ],
+                    },
+                    {"role": "tool", "tool_call_id": "call-1", "content": '{"solved":true}'},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    proc = _run(VALIDATE_TRANSCRIPT, str(transcript))
+    assert proc.returncode == 0
+    result = json.loads(proc.stdout)
+    assert result["ok"] is True
+    assert result["tool_calls"] == 1
+    assert result["errors"] == []
+
+
+def test_inspect_dataset_migrated_preserves_non_ascii_and_unsorted(tmp_path):
+    """inspect_dataset must keep ensure_ascii=False and unsorted keys."""
+    dataset = tmp_path / "data.jsonl"
+    dataset.write_text(
+        json.dumps({"prompt": "解释这段代码", "response": "这是一个函数"}, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    proc = _run(INSPECT_DATASET, "--dataset-path", str(dataset), "--algo", "sft", "--model-hub", "hf")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    # Non-ASCII content must be preserved verbatim, not escaped.
+    assert "解释这段代码" in proc.stdout
+    assert "\\u" not in proc.stdout
+    result = json.loads(proc.stdout)
+    assert result["ok"] is True
+    # Insertion order preserved (ok before count before sample_keys ...).
+    assert list(result.keys())[0] == "ok"

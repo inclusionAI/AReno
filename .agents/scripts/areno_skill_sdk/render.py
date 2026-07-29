@@ -17,6 +17,8 @@ def emit(
     *,
     json_mode: bool = True,
     indent: int = 2,
+    sort_keys: bool = True,
+    ensure_ascii: bool = True,
     stream: TextIO | None = None,
 ) -> None:
     """Emit a result dict.
@@ -26,10 +28,18 @@ def emit(
     ``json_mode=False`` writes human-readable rich text to stderr so stdout
     stays machine-clean. ``stream`` overrides the JSON output destination (used
     by tests and JSON-Lines-style scripts).
+
+    ``sort_keys`` and ``ensure_ascii`` default to the values used by the
+    majority of legacy scripts (sorted, ASCII-escaped). Scripts that previously
+    emitted unsorted JSON with non-ASCII content preserved (e.g.
+    ``inspect_dataset``) pass ``sort_keys=False, ensure_ascii=False`` to keep
+    their exact pre-migration byte output.
     """
     if json_mode:
         target = stream if stream is not None else sys.stdout
-        target.write(json.dumps(result, indent=indent, sort_keys=True) + "\n")
+        target.write(
+            json.dumps(result, indent=indent, sort_keys=sort_keys, ensure_ascii=ensure_ascii) + "\n"
+        )
         target.flush()
     else:
         _emit_human(result)

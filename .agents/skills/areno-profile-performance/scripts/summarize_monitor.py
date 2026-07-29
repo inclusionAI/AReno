@@ -3,11 +3,15 @@
 
 from __future__ import annotations
 
-import argparse
 import json
+import pathlib
 import statistics
+import sys
 from collections import defaultdict
 from pathlib import Path
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / "scripts"))
+from areno_skill_sdk import build_parser, skill_main
 
 
 def stats(values: list[float]) -> dict[str, float] | None:
@@ -60,25 +64,23 @@ def summarize_process(records: list[dict]) -> dict:
     }
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser()
+@skill_main
+def main() -> dict:
+    parser = build_parser("Summarize JSONL emitted by the AReno GPU or process monitors.")
     parser.add_argument("input", type=Path)
     args = parser.parse_args()
-    try:
-        records = [json.loads(line) for line in args.input.read_text(encoding="utf-8").splitlines() if line.strip()]
-        if not records:
-            raise ValueError("monitor file contains no records")
-        if "gpus" in records[0]:
-            result = summarize_gpu(records)
-        elif "processes" in records[0]:
-            result = summarize_process(records)
-        else:
-            raise ValueError("unrecognized monitor record type")
-        result["ok"] = True
-    except Exception as exc:
-        result = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
-    print(json.dumps(result, indent=2, sort_keys=True))
-    return 0 if result["ok"] else 1
+
+    records = [json.loads(line) for line in args.input.read_text(encoding="utf-8").splitlines() if line.strip()]
+    if not records:
+        raise ValueError("monitor file contains no records")
+    if "gpus" in records[0]:
+        result = summarize_gpu(records)
+    elif "processes" in records[0]:
+        result = summarize_process(records)
+    else:
+        raise ValueError("unrecognized monitor record type")
+    result["ok"] = True
+    return result
 
 
 if __name__ == "__main__":

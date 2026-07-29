@@ -3,18 +3,24 @@
 
 from __future__ import annotations
 
-import argparse
 import json
+import pathlib
+import sys
 from pathlib import Path
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / "scripts"))
+from areno_skill_sdk import Result, build_parser, skill_main
 
-def main() -> int:
-    parser = argparse.ArgumentParser()
+
+@skill_main
+def main() -> Result:
+    parser = build_parser("Validate OpenAI-style assistant tool-call and tool-result ordering.")
     parser.add_argument("transcript", type=Path)
     args = parser.parse_args()
+
     value = json.loads(args.transcript.read_text(encoding="utf-8"))
     messages = value.get("messages", value) if isinstance(value, dict) else value
-    errors = []
+    errors: list[str] = []
     pending: list[str] = []
     calls = 0
     for index, message in enumerate(messages):
@@ -53,9 +59,12 @@ def main() -> int:
             errors.append(f"message {index} appears before pending tool results {pending}")
     if pending:
         errors.append(f"missing tool results for {pending}")
-    result = {"ok": not errors, "messages": len(messages), "tool_calls": calls, "errors": errors}
-    print(json.dumps(result, indent=2))
-    return 0 if result["ok"] else 1
+
+    return Result(
+        ok=not errors,
+        errors=errors,
+        data={"messages": len(messages), "tool_calls": calls},
+    )
 
 
 if __name__ == "__main__":

@@ -3,9 +3,13 @@
 
 from __future__ import annotations
 
-import argparse
 import json
+import pathlib
+import sys
 import urllib.request
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / "scripts"))
+from areno_skill_sdk import build_parser
 
 
 def request_json(url: str, payload: dict | None, timeout: float) -> object:
@@ -16,7 +20,7 @@ def request_json(url: str, payload: dict | None, timeout: float) -> object:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
+    parser = build_parser("Run bounded OpenAI-compatible AReno server probes.")
     parser.add_argument("--base-url", default="http://127.0.0.1:8000")
     parser.add_argument("--model")
     parser.add_argument("--prompt", default="Reply with the word ready.")

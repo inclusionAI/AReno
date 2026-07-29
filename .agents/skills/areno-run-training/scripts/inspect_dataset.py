@@ -3,11 +3,15 @@
 
 from __future__ import annotations
 
-import argparse
 import importlib.util
 import json
+import pathlib
+import sys
 from pathlib import Path
 from typing import Any
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / "scripts"))
+from areno_skill_sdk import build_parser, emit, exit_code
 
 
 def default_loader(path: str, *, model_hub: str) -> list[dict[str, Any]]:
@@ -87,7 +91,7 @@ def summarize(value: Any) -> Any:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
+    parser = build_parser("Load a bounded AReno dataset sample and validate its coarse algorithm contract.")
     parser.add_argument("--dataset-path", required=True)
     parser.add_argument("--loader")
     parser.add_argument("--model-hub", choices=("modelscope", "hf"), default="modelscope")
@@ -108,8 +112,10 @@ def main() -> int:
         }
     except Exception as exc:
         result = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
-    print(json.dumps(result, ensure_ascii=False, indent=2))
-    return 0 if result["ok"] else 1
+    # Preserve the legacy serialization: unsorted keys, non-ASCII content
+    # kept verbatim (dataset samples may contain Chinese text).
+    emit(result, sort_keys=False, ensure_ascii=False)
+    return exit_code(result)
 
 
 if __name__ == "__main__":

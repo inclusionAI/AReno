@@ -3,12 +3,16 @@
 
 from __future__ import annotations
 
-import argparse
 import json
+import pathlib
 import statistics
+import sys
 import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / "scripts"))
+from areno_skill_sdk import build_parser, skill_main
 
 
 def request_once(url: str, payload: dict, timeout: float) -> dict:
@@ -42,8 +46,9 @@ def request_once(url: str, payload: dict, timeout: float) -> dict:
     }
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser()
+@skill_main
+def main() -> dict:
+    parser = build_parser("Measure TTFT and total latency from an OpenAI-compatible streaming API.")
     parser.add_argument("--base-url", default="http://127.0.0.1:8000")
     parser.add_argument("--model", required=True)
     parser.add_argument("--prompt", default="Reply with one short sentence.")
@@ -53,42 +58,39 @@ def main() -> int:
     parser.add_argument("--warmup", type=int, default=1)
     parser.add_argument("--timeout", type=float, default=120.0)
     args = parser.parse_args()
+
     payload = {
         "model": args.model,
         "messages": [{"role": "user", "content": args.prompt}],
         "max_tokens": args.max_tokens,
         "stream": True,
     }
-    try:
-        for _ in range(max(args.warmup, 0)):
-            request_once(args.base_url, payload, args.timeout)
-        request_count = max(args.requests, 1)
-        with ThreadPoolExecutor(max_workers=max(args.concurrency, 1)) as executor:
-            measured = list(
-                executor.map(
-                    lambda _: request_once(args.base_url, payload, args.timeout),
-                    range(request_count),
-                )
+    for _ in range(max(args.warmup, 0)):
+        request_once(args.base_url, payload, args.timeout)
+    request_count = max(args.requests, 1)
+    with ThreadPoolExecutor(max_workers=max(args.concurrency, 1)) as executor:
+        measured = list(
+            executor.map(
+                lambda _: request_once(args.base_url, payload, args.timeout),
+                range(request_count),
             )
-        ttft = [row["ttft_seconds"] for row in measured if row["ttft_seconds"] is not None]
-        total = [row["total_seconds"] for row in measured]
-        result = {
-            "ok": bool(ttft),
-            "concurrency": max(args.concurrency, 1),
-            "requests": measured,
-            "summary": {
-                "ttft_mean_seconds": statistics.fmean(ttft) if ttft else None,
-                "ttft_median_seconds": statistics.median(ttft) if ttft else None,
-                "total_mean_seconds": statistics.fmean(total),
-                "total_median_seconds": statistics.median(total),
-            },
-        }
-        if not ttft:
-            result["error"] = "stream contained no content or reasoning delta"
-    except Exception as exc:
-        result = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
-    print(json.dumps(result, indent=2))
-    return 0 if result["ok"] else 1
+        )
+    ttft = [row["ttft_seconds"] for row in measured if row["ttft_seconds"] is not None]
+    total = [row["total_seconds"] for row in measured]
+    result = {
+        "ok": bool(ttft),
+        "concurrency": max(args.concurrency, 1),
+        "requests": measured,
+        "summary": {
+            "ttft_mean_seconds": statistics.fmean(ttft) if ttft else None,
+            "ttft_median_seconds": statistics.median(ttft) if ttft else None,
+            "total_mean_seconds": statistics.fmean(total),
+            "total_median_seconds": statistics.median(total),
+        },
+    }
+    if not ttft:
+        result["error"] = "stream contained no content or reasoning delta"
+    return result
 
 
 if __name__ == "__main__":
