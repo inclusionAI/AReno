@@ -218,7 +218,7 @@ def make_prompt(record: dict[str, Any]) -> str:
     )
 
 
-def generate_records(count: int, *, seed: int = 2026) -> list[dict]:
+def generate_records(count: int, *, seed: int = 42) -> list[dict]:
     """Generate deterministic multi-tool records by sampling from TASKS.
 
     Uses a seeded RNG so the same seed always produces the same task sequence,
@@ -386,7 +386,12 @@ def _score_arguments(record: dict[str, Any], tool_calls: list[dict[str, Any]]) -
                 checks.append(False)
         elif name == "read_note":
             key = str(args.get("note_key", "")).strip()
-            if key in record.get("expected_note_keys", [record.get("expected_note_key", "")]):
+            expected_keys = record.get("expected_note_keys")
+            if expected_keys is None:
+                expected_keys = [record.get("expected_note_key", "")]
+            if expected_keys is None:
+                expected_keys = []
+            if key in expected_keys:
                 checks.append(True)
             else:
                 checks.append(False)
