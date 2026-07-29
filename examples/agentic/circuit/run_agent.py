@@ -210,7 +210,18 @@ async def run_agent(ctx, batch):
                 tool_choice="auto",
                 stream=False,
             )
-            # Record this turn for training.
+            # Extract the assistant message from the response.
+            assistant_message = _assistant_message_from_response(response)
+            raw_tool_calls = assistant_message.get("tool_calls") or []
+
+            # If the model returned multiple tool calls, only keep the first.
+            # This ensures parsed_tool_calls (used by reward) does not contain
+            # unexecuted submit calls.
+            if len(raw_tool_calls) > 1:
+                assistant_message["tool_calls"] = [raw_tool_calls[0]]
+                _trim_response_tool_calls(response, 1)
+
+            # Record this turn for training (response already trimmed).
             turns.append(
                 AgentTrajectoryTurn(
                     item=item,
@@ -221,8 +232,6 @@ async def run_agent(ctx, batch):
                 )
             )
 
-            # Extract the assistant message from the response.
-            assistant_message = _assistant_message_from_response(response)
             messages.append(assistant_message)
 
             # Check if the model made a tool call.
@@ -323,3 +332,19 @@ def _assistant_message_from_response(response: Any) -> dict[str, Any]:
             for tc in message.tool_calls
         ]
     return assistant_message
+
+
+def _trim_response_tool_calls(response: Any, keep: int = 1) -> None:
+    """Trim the response's tool_calls list to only the first ``keep`` entries.
+
+    This ensures ``AgentTrajectoryTurn.__post_init__`` (which calls
+    ``_chat_response_message_tool_calls``) does not record unexecuted
+    tool calls in ``parsed_tool_calls``.
+    """
+
+    try:
+        message = response.choices[0].message
+        if message.tool_calls and len(message.tool_calls) > keep:
+            message.tool_calls = message.tool_calls[:keep]
+    except (AttributeError, IndexError, TypeError):
+        pass

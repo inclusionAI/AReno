@@ -627,10 +627,16 @@ class _FakeChoice:
 
 
 class _FakeResponse:
-    """Mimics openai ChatCompletion response."""
+    """Mimics openai ChatCompletion response with Areno trajectory metadata."""
 
     def __init__(self, message):
         self.choices = [_FakeChoice(message)]
+        # AgentTrajectoryTurn.__post_init__ requires response.areno metadata
+        # with response_tokens and response_logprobs lists.
+        self.areno = {
+            "response_tokens": [1, 2, 3],
+            "response_logprobs": [-0.1, -0.2, -0.3],
+        }
 
 
 class _FakeOpenAIClient:
@@ -800,6 +806,10 @@ class TestRunAgentMultiTurn(unittest.TestCase):
 
         # Turn 1: probe executed, submit ignored. Turn 2: submit.
         self.assertEqual(len(traj.turns), 2)
+        # Turn 1 parsed_tool_calls should only contain probe, NOT submit.
+        turn1_parsed = traj.turns[0].parsed_tool_calls
+        self.assertEqual(len(turn1_parsed), 1)
+        self.assertEqual(turn1_parsed[0]["function"]["name"], "probe")
         # After turn 1, we should see a probe tool message, not a submit.
         tool_msgs = []
         for m in traj.turns[1].messages:  # Turn 2's messages include turn 1 history
