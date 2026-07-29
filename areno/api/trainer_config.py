@@ -60,6 +60,12 @@ class TrainerConfig:
     agent_timeout_s: float = 300.0
     train_tool_results: bool = False
     chat_template_enable_thinking: bool | None = None
+    # Quarantine of failing samples during execution (#248).
+    quarantine_enabled: bool = False
+    quarantine_max_entries: int = 200
+    quarantine_max_file_bytes: int = 10_485_760  # 10 MB
+    quarantine_failure_rate_threshold: float = 0.5
+    quarantine_failure_rate_window: int = 20
 
     def __post_init__(self) -> None:
         if self.attn_backend not in {"flash", "native"}:

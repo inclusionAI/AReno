@@ -23,6 +23,7 @@ import numpy as np
 
 from areno.api.dashboard import record_dashboard_state
 from areno.api.tokenizer import configure_chat_template_enable_thinking
+from areno.engine.quarantine import QuarantineConfig, QuarantineThresholdExceeded, QuarantineWriter
 
 
 class PolicyOnlyTrainer:
@@ -42,12 +43,23 @@ class PolicyOnlyTrainer:
         self.loss_fn = loss_fn
         self.logger = logging.getLogger(f"{self.__class__.__module__}.{self.__class__.__name__}")
         self._agent_run_fn = None
+        self._quarantine = QuarantineWriter(
+            QuarantineConfig(
+                enabled=getattr(config, "quarantine_enabled", False),
+                output_dir=getattr(config, "metrics_log_dir", None),
+                max_entries=getattr(config, "quarantine_max_entries", 200),
+                max_file_bytes=getattr(config, "quarantine_max_file_bytes", 10_485_760),
+                failure_rate_threshold=getattr(config, "quarantine_failure_rate_threshold", 0.5),
+                failure_rate_window=getattr(config, "quarantine_failure_rate_window", 20),
+            )
+        )
 
     def fit(self) -> None:
         self.areno.init()
         try:
             self._fit_initialized()
         finally:
+            self._quarantine.close()
             self.areno.close()
 
     def _fit_initialized(self) -> None:
@@ -527,23 +539,38 @@ class PolicyOnlyTrainer:
         for item_idx, (item, result) in enumerate(zip(prompt_batch.items, rollout_results, strict=True)):
             prefix_len = len(item.input_tokens)
             completions = [tokenizer.decode(seq.resp_tokens) for seq in result.sequences]
-            rewards = [
-                float(
-                    self.reward_fn(
-                        make_reward_record(
-                            prompt=item.prompt,
-                            completion=completion,
-                            source_record=item.record,
-                            answer=item.solutions,
-                            tokens=item.input_tokens + seq.resp_tokens,
-                            logprobs=[0.0] * prefix_len + seq.resp_logprobs,
-                            loss_mask=[False] * prefix_len + [True] * len(seq.resp_tokens),
-                            metadata={"prompt_index": item_idx, "sample_index": sample_idx},
-                        )
-                    )
+            rewards = []
+            for sample_idx, (completion, seq) in enumerate(zip(completions, result.sequences, strict=True)):
+                record = make_reward_record(
+                    prompt=item.prompt,
+                    completion=completion,
+                    source_record=item.record,
+                    answer=item.solutions,
+                    tokens=item.input_tokens + seq.resp_tokens,
+                    logprobs=[0.0] * prefix_len + seq.resp_logprobs,
+                    loss_mask=[False] * prefix_len + [True] * len(seq.resp_tokens),
+                    metadata={"prompt_index": item_idx, "sample_index": sample_idx},
                 )
-                for sample_idx, (completion, seq) in enumerate(zip(completions, result.sequences, strict=True))
-            ]
+                try:
+                    reward = float(self.reward_fn(record))
+                    self._quarantine.record_success()
+                except QuarantineThresholdExceeded:
+                    raise
+                except Exception as exc:
+                    self._quarantine.record(
+                        phase="reward",
+                        reason=f"{type(exc).__name__}: {exc}",
+                        sample_meta={
+                            "prompt_index": item_idx,
+                            "sample_index": sample_idx,
+                            "prompt_len": len(item.prompt) if item.prompt else 0,
+                            "completion_len": len(completion) if completion else 0,
+                            "prompt_text": item.prompt,
+                            "completion_text": completion,
+                        },
+                    )
+                    reward = 0.0
+                rewards.append(reward)
             rewards_all += rewards
             # Group-relative advantage: A_i = (r_i - mean(r))/std(r); shared by
             # every response token of sample i.
