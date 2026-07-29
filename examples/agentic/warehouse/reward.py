@@ -29,6 +29,7 @@ def reward_fn(record) -> float:
         "invalid_actions": stats["invalid_actions"],
         "baseline_distance": baseline,
         "tool_names": names,
+        "cart": stats.get("cart", {}),
     }
     return score_task(source, trajectory_data)
 
@@ -41,6 +42,7 @@ def _extract_stats_from_messages(messages: list[dict[str, Any]]) -> dict[str, An
         "distance": 0,
         "picking_errors": 0,
         "invalid_actions": 0,
+        "cart": {},
     }
     for msg in messages:
         if msg.get("role") != "tool":
@@ -54,6 +56,8 @@ def _extract_stats_from_messages(messages: list[dict[str, Any]]) -> dict[str, An
             stats["completed"] = True
         if "distance" in data:
             stats["distance"] = max(stats["distance"], data["distance"])
+        if content.get("success") and "cart" in data:
+            stats["cart"] = dict(data["cart"])
         if not content.get("success"):
             msg_text = content.get("message", "")
             if "unreachable" in msg_text or "unknown shelf" in msg_text:

@@ -262,10 +262,26 @@ def baseline_distance(state: WarehouseState) -> int:
 
 
 def score_task(record: dict[str, Any], trajectory_data: dict[str, Any]) -> float:
-    """Score a completed warehouse picking trajectory."""
+    """Score a warehouse picking trajectory.
+
+    For completed tasks: base 1.0 + bonuses - penalties.
+    For incomplete tasks: base -0.5 + partial credit for items correctly picked,
+    so that different failure depths yield different rewards (needed for
+    non-zero group-relative advantages in GSPO/GRPO).
+    """
 
     if not trajectory_data.get("completed"):
-        return -0.5
+        score = -0.5
+        cart = trajectory_data.get("cart", {})
+        if cart:
+            order_dict = {item["sku"]: item["qty"] for item in record.get("order", [])}
+            if order_dict:
+                total_needed = sum(order_dict.values())
+                total_fulfilled = sum(min(cart.get(sku, 0), qty) for sku, qty in order_dict.items())
+                score += 0.3 * (total_fulfilled / total_needed)
+        score -= 0.1 * trajectory_data.get("picking_errors", 0)
+        score -= 0.05 * trajectory_data.get("invalid_actions", 0)
+        return max(score, -1.0)
     score = 1.0
     score -= 0.1 * trajectory_data.get("picking_errors", 0)
     score -= 0.05 * trajectory_data.get("invalid_actions", 0)
