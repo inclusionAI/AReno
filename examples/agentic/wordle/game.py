@@ -236,23 +236,39 @@ WordleGame = dict[str, Any]  # Main game state dictionary
 def normalize_word(word: str, word_length: int = WORD_LENGTH) -> str:
     """Return a validated lowercase word of specified length."""
     word = word.lower().strip()
-    if len(word) != word_length:
-        raise ValueError(f"Word must be {word_length} letters, got: {word}")
     if not word.isalpha():
         raise ValueError(f"Word must contain only letters, got: {word}")
+    if len(word) != word_length:
+        raise ValueError(f"Word must be {word_length} letters, got: {word}")
     return word
 
 
-def is_valid_word(word: str, word_list: frozenset = WORD_LIST) -> bool:
-    """Check if *word* is in *word_list* (inferring length from the list)."""
+def is_valid_word(word: str, word_list: frozenset = None) -> bool:
+    """Check if *word* is in *word_list*.
+
+    For backward compatibility, uses the default 5-letter WORD_LIST when
+    no word_list is provided. Returns True only if the normalized word
+    exists in the specified word_list.
+    """
+    # Handle default - use the 5-letter dictionary
+    if word_list is None:
+        word_list = WORD_LIST
+
     try:
-        # Infer expected word length from the first entry in word_list.
-        # All words in a valid word list share the same length.
-        word_length = len(next(iter(word_list)))
-        normalized = normalize_word(word, word_length=word_length)
-        return normalized in word_list
+        # Get word length from the word list (assumes all words same length)
+        if len(word_list) > 0:
+            list_word_length = len(next(iter(word_list)))
+            normalized = normalize_word(word, word_length=list_word_length)
+            return normalized in word_list
+        return False
     except (ValueError, StopIteration):
         return False
+
+
+# For backward compatibility: is_valid_word_5letter
+def is_valid_word_5letter(word: str) -> bool:
+    """Check if word is in the default 5-letter WORD_LIST."""
+    return is_valid_word(word, WORD_LIST)
 
 
 def check_guess(guess: str, target: str) -> GuessResult:
@@ -354,12 +370,24 @@ def apply_guess(game: WordleGame, guess: str) -> WordleGame:
 
     Uses the target word's length for validation so that variable-length
     words work correctly.  Returns a new game state (immutable update).
+
+    For 5-letter words: validates against WORD_LIST (default behavior)
+    For other lengths: uses relaxed validation (any valid word of correct length)
     """
     target = game["target"]
     word_length = len(target)
     guess = normalize_word(guess, word_length=word_length)
-    if not is_valid_word(guess):
-        raise ValueError(f"Invalid word: {guess}. Not in word list.")
+
+    # For the default 5-letter case, validate against the word list
+    # For other word lengths, we use relaxed validation to enable variable-length play
+    if word_length == WORD_LENGTH:
+        # Default 5-letter behavior: strict validation
+        if not is_valid_word(guess, WORD_LIST):
+            raise ValueError(f"Invalid word: {guess}. Not in word list.")
+    else:
+        # Variable-length mode: only basic validation (already done by normalize_word)
+        # Accept any valid word of the correct length
+        pass
 
     feedback = check_guess(guess, target)
     new_guesses = game["guesses"] + [guess]
