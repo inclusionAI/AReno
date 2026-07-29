@@ -124,10 +124,10 @@ class DPOTrainer:
 
                 # Pre-compute reference logprobs for all sequences.
                 tokens = [seq.tokens for seq in eval_batch]
-                ref_logprob_rows = self.areno.score_logprobs(
-                    "ref", tokens, microbatch_size=self.config.score_micro_bs
-                )
+                ref_logprob_rows = self.areno.score_logprobs("ref", tokens, microbatch_size=self.config.score_micro_bs)
                 for seq, ref_lp in zip(eval_batch, ref_logprob_rows):
+                    if len(ref_lp) != len(seq.tokens):
+                        raise ValueError("reference role returned misaligned logprobs")
                     seq.ref_logprobs = [float(v) for v in ref_lp]
                     seq.values = [0.0] * len(seq.tokens)
                     seq.returns = [0.0] * len(seq.tokens)
@@ -154,10 +154,10 @@ class DPOTrainer:
                 eval_batch.extend(p)
 
             tokens = [seq.tokens for seq in eval_batch]
-            ref_logprob_rows = self.areno.score_logprobs(
-                "ref", tokens, microbatch_size=self.config.score_micro_bs
-            )
+            ref_logprob_rows = self.areno.score_logprobs("ref", tokens, microbatch_size=self.config.score_micro_bs)
             for seq, ref_lp in zip(eval_batch, ref_logprob_rows):
+                if len(ref_lp) != len(seq.tokens):
+                    raise ValueError("reference role returned misaligned logprobs")
                 seq.ref_logprobs = [float(v) for v in ref_lp]
                 seq.values = [0.0] * len(seq.tokens)
                 seq.returns = [0.0] * len(seq.tokens)
@@ -274,7 +274,9 @@ class DPOTrainer:
                     record_dashboard_state(self.areno, stage="max_steps_reached", epoch=epoch, step=step, role="policy")
                     # End-of-training evaluation triggered before exiting at max_steps.
                     # Skip when the interval eval already ran at this step.
-                    if self._eval_enabled and not (self.config.eval_interval > 0 and step % self.config.eval_interval == 0):
+                    if self._eval_enabled and not (
+                        self.config.eval_interval > 0 and step % self.config.eval_interval == 0
+                    ):
                         self._run_eval(step)
                     return
             # End-of-epoch evaluation: triggers regardless of interval alignment.

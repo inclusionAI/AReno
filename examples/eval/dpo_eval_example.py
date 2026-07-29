@@ -128,7 +128,11 @@ def main() -> None:
     )
 
     backend = _ExampleBackend(metrics=metrics)
-    loss_fn = partial(lambda _pack, _logprobs, *, beta: None, beta=config.dpo_beta)
+
+    def _dpo_loss(_pack, _logprobs, *, beta):
+        return None
+
+    loss_fn = partial(_dpo_loss, beta=config.dpo_beta)
     trainer = DPOTrainer(config, instance=backend, dataset=train_data, reward_fn=None, loss_fn=loss_fn)
 
     # Inject eval dataset directly to skip file loading.

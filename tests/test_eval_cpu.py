@@ -10,7 +10,6 @@ Task 5: DPO training evaluation integration.
 from __future__ import annotations
 
 import copy
-import importlib.util
 import tempfile
 import unittest
 from pathlib import Path
@@ -279,15 +278,18 @@ class EvalMetricsRecorderTest(unittest.TestCase):
             time_set = {t for t in scalar_tags if t.startswith("time/")}
 
             self.assertEqual(
-                len(eval_set & train_set), 0,
+                len(eval_set & train_set),
+                0,
                 "eval/ and train/ namespaces must not overlap",
             )
             self.assertEqual(
-                len(eval_set & rollout_set), 0,
+                len(eval_set & rollout_set),
+                0,
                 "eval/ and rollout/ namespaces must not overlap",
             )
             self.assertEqual(
-                len(eval_set & time_set), 0,
+                len(eval_set & time_set),
+                0,
                 "eval/ and time/ namespaces must not overlap",
             )
 
@@ -399,7 +401,11 @@ def _make_sft_trainer(config, *, train_data=None, backend=None, _metrics=None):
         backend = _FakeEvalSFTBackend(metrics=_metrics)
     if train_data is None:
         train_data = list(_FIXTURE_TRAIN_DATA)
-    loss_fn = lambda _pack, _logprobs: None
+
+    def _stub_loss_fn(_pack, _logprobs):
+        return None
+
+    loss_fn = _stub_loss_fn
     trainer = SFTTrainer(config, instance=backend, dataset=train_data, reward_fn=None, loss_fn=loss_fn)
     return trainer, backend
 
@@ -561,8 +567,14 @@ class SFTEvalIntegrationTest(unittest.TestCase):
     def test_eval_end_of_max_steps(self):
         """max_steps exit triggers eval before return."""
         train_calls, eval_steps = self._count_eval_calls_from_fit(
-            {"eval_dataset_path": "dummy", "eval_interval": 0, "eval_batches": 0,
-             "batch_size": 1, "epochs": 2, "max_steps": 3},
+            {
+                "eval_dataset_path": "dummy",
+                "eval_interval": 0,
+                "eval_batches": 0,
+                "batch_size": 1,
+                "epochs": 2,
+                "max_steps": 3,
+            },
             train_rows=10,
         )
         self.assertEqual(train_calls, 3)
@@ -742,7 +754,10 @@ def _make_dpo_trainer(config, *, train_data=None, backend=None, _metrics=None):
     if train_data is None:
         train_data = list(_FIXTURE_DPO_TRAIN_DATA)
 
-    loss_fn = partial(lambda _pack, _logprobs, *, beta: None, beta=config.dpo_beta)
+    def _dpo_stub_loss(_pack, _logprobs, *, beta):
+        return None
+
+    loss_fn = partial(_dpo_stub_loss, beta=config.dpo_beta)
     trainer = DPOTrainer(config, instance=backend, dataset=train_data, reward_fn=None, loss_fn=loss_fn)
     return trainer, backend
 
@@ -832,3 +847,76 @@ class DPOEvalIntegrationTest(unittest.TestCase):
             # 6 train rows at batch_size=2 pairs => 3 train batches (each is 4 rows).
             self.assertEqual(backend.train_calls, 3)
             self.assertGreater(backend.eval_calls, 0)
+
+    def test_dpo_eval_batches_limit(self):
+        """DPO eval_batches limits the number of evaluated batches."""
+        from areno.api.metrics import MetricsRecorder
+
+        with tempfile.TemporaryDirectory() as log_dir:
+            metrics = MetricsRecorder(log_dir)
+            config = _dpo_eval_config(
+                eval_dataset_path="dummy",
+                eval_interval=2,
+                eval_batches=1,
+                batch_size=2,
+            )
+            trainer, backend = _make_dpo_trainer(config, _metrics=metrics)
+            trainer._eval_dataset = list(_FIXTURE_DPO_EVAL_DATA)
+            trainer._ensure_roles()
+
+            trainer._run_eval(step=10)
+
+            self.assertEqual(backend.eval_calls, 1)
+            self.assertEqual(backend.ref_score_calls, 1)
+            metrics.close()
+
+            import tensorboard.backend.event_processing.event_accumulator as ea
+
+            acc = ea.EventAccumulator(log_dir)
+            acc.Reload()
+            eval_tags = [t for t in acc.Tags()["scalars"] if t.startswith("eval/")]
+            self.assertIn("eval/dpo_loss", eval_tags)
+
+    def test_dpo_eval_disabled(self):
+        """DPO eval does not trigger when eval_dataset_path is None."""
+        from areno.api.metrics import MetricsRecorder
+
+        with tempfile.TemporaryDirectory() as log_dir:
+            metrics = MetricsRecorder(log_dir)
+            train_data = [_FIXTURE_DPO_TRAIN_DATA[0].copy() for _ in range(6)]
+            config = _dpo_eval_config(
+                eval_dataset_path=None,
+                eval_interval=2,
+                eval_batches=0,
+                batch_size=2,
+                epochs=1,
+                max_steps=2,
+            )
+            trainer, backend = _make_dpo_trainer(config, train_data=train_data, _metrics=metrics)
+            trainer._eval_dataset = list(_FIXTURE_DPO_EVAL_DATA)
+            trainer.fit()
+            metrics.close()
+
+            import tensorboard.backend.event_processing.event_accumulator as ea
+
+            acc = ea.EventAccumulator(log_dir)
+            acc.Reload()
+            eval_tags = [t for t in acc.Tags()["scalars"] if t.startswith("eval/")]
+            self.assertEqual(len(eval_tags), 0, "eval/ tags should not exist when disabled")
+            self.assertEqual(backend.eval_calls, 0)
+
+    def test_dpo_eval_ref_logprob_mismatch(self):
+        """DPO eval raises ValueError when ref logprobs don't match token count."""
+        trainer, backend = _make_dpo_trainer(_dpo_eval_config(eval_dataset_path="dummy", batch_size=2))
+
+        def _score_logprobs_mismatch(role, token_rows, microbatch_size=None):
+            del role, microbatch_size
+            return [[-0.1] * (len(row) - 1) for row in token_rows]
+
+        backend.score_logprobs = _score_logprobs_mismatch
+        trainer._eval_dataset = list(_FIXTURE_DPO_EVAL_DATA)
+        trainer._ensure_roles()
+
+        with self.assertRaises(ValueError) as ctx:
+            trainer._run_eval(step=10)
+        self.assertIn("misaligned logprobs", str(ctx.exception))

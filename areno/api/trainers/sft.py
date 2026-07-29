@@ -205,7 +205,9 @@ class SFTTrainer:
                     record_dashboard_state(self.areno, stage="max_steps_reached", epoch=epoch, step=step, role="policy")
                     # End-of-training evaluation triggered before exiting at max_steps.
                     # Skip when the interval eval already ran at this step.
-                    if self._eval_enabled and not (self.config.eval_interval > 0 and step % self.config.eval_interval == 0):
+                    if self._eval_enabled and not (
+                        self.config.eval_interval > 0 and step % self.config.eval_interval == 0
+                    ):
                         self._run_eval(step)
                     return
             # End-of-epoch evaluation: triggers regardless of interval alignment.

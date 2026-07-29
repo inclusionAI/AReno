@@ -279,9 +279,7 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
     if args.eval_dataset_path is not None:
         path = Path(args.eval_dataset_path).expanduser().resolve()
         if path.suffix.lower() in _SUPPORTED_DATASET_SUFFIXES and not path.exists():
-            raise click.UsageError(
-                f"--eval-dataset-path does not exist: {path}"
-            )
+            raise click.UsageError(f"--eval-dataset-path does not exist: {path}")
         if path.exists():
             args.eval_dataset_path = str(path)
     if args.eval_interval < 0:
@@ -1225,10 +1223,18 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
 )
 @click.option("--eval-dataset-path", default=None, help="Optional evaluation dataset path.")
 @click.option(
-    "--eval-interval", type=int, default=0, show_default=True, help="Evaluate every N training steps. 0 disables periodic eval."
+    "--eval-interval",
+    type=int,
+    default=0,
+    show_default=True,
+    help="Evaluate every N training steps. 0 disables periodic eval.",
 )
 @click.option(
-    "--eval-batches", type=int, default=0, show_default=True, help="Max eval batches per evaluation. 0 means full dataset."
+    "--eval-batches",
+    type=int,
+    default=0,
+    show_default=True,
+    help="Max eval batches per evaluation. 0 means full dataset.",
 )
 @click.option("--epochs", type=int, default=10, show_default=True, help="Number of dataset epochs to train.")
 @click.option("--max-steps", type=int, default=None, help="Stop after this many trainer steps.")

@@ -13,10 +13,8 @@ Requirements: the ``datasets`` library and a tokenizer-aware model checkpoint.
 
 from __future__ import annotations
 
-import json
 import logging
 import tempfile
-from pathlib import Path
 from types import SimpleNamespace
 
 from areno.api.metrics import MetricsRecorder
@@ -110,7 +108,11 @@ def main() -> None:
     )
 
     backend = _ExampleBackend(metrics=metrics)
-    loss_fn = lambda _pack, _logprobs: None
+
+    def _loss_fn(_pack, _logprobs):
+        return None
+
+    loss_fn = _loss_fn
     trainer = SFTTrainer(config, instance=backend, dataset=train_data, reward_fn=None, loss_fn=loss_fn)
 
     # Inject eval dataset directly to skip file loading.

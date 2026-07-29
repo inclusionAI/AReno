@@ -429,7 +429,7 @@ class ArenoBackend(Backend):
         for pack in packs:
             # Extract per-row token lists for score_logprobs.
             tokens = pack["input_ids"]  # (B, max_len) int64
-            lengths = pack["lengths"]   # (B,) int32
+            lengths = pack["lengths"]  # (B,) int32
             token_rows = []
             for b in range(tokens.shape[0]):
                 L = int(lengths[b].item())
@@ -451,7 +451,7 @@ class ArenoBackend(Backend):
             logprobs = torch.zeros(B, max_len - 1, dtype=torch.float32)
             for b, row in enumerate(logprob_rows):
                 nxt = row[1:]  # drop position-0 dummy logprob
-                L = len(nxt)   # == len(row) - 1
+                L = len(nxt)  # == len(row) - 1
                 logprobs[b, :L] = torch.tensor(nxt, dtype=torch.float32)
 
             loss_out = loss_fn(pack, logprobs)

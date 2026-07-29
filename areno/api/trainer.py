@@ -378,9 +378,7 @@ class Trainer:
         if not callable(loss_fn):
             raise TypeError("loss_fn must be callable")
         with torch.no_grad():
-            return self._backend.evaluate(
-                self._ctx, batch_data, loss_fn, mini_bs, gradient_accumulation_steps
-            )
+            return self._backend.evaluate(self._ctx, batch_data, loss_fn, mini_bs, gradient_accumulation_steps)
 
     def record_rollout_sample(self, sample: dict[str, Any]) -> None:
         """Persist a representative rollout sample when metrics recording is enabled."""
