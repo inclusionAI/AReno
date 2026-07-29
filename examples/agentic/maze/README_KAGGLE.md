@@ -71,14 +71,16 @@ os.environ["PATH"] = sysconfig.get_path("scripts") + ":" + os.environ["PATH"]
 
 ### 3. 生成迷宫数据集
 
+推荐使用 5×5 迷宫降低难度，让 agent 有更高概率到达终点：
+
 ```python
-# 生成 2048 个迷宫（7×7 为主，自动混入少量 9×9 增加多样性），vision_radius=1 (3×3 视野)
+# 5×5 完整迷宫（含 key/door），vision_radius=1 (3×3 视野)
 !python examples/agentic/maze/dataset_generator.py \
-  --output /kaggle/working/mazes.jsonl \
-  --count 2048 \
+  --output /kaggle/working/mazes_5x5.jsonl \
+  --count 512 \
   --seed 2026 \
-  --width 7 \
-  --height 7 \
+  --width 5 \
+  --height 5 \
   --vision-radius 1
 ```
 
@@ -91,30 +93,49 @@ os.environ["PATH"] = sysconfig.get_path("scripts") + ":" + os.environ["PATH"]
 
 ### 5. 运行训练
 
-T4 ×2 双卡张量并行，实测可跑：
+**实验 A（禁思考，快速验证）**：
 
 ```python
 !areno train \
   --ckpt Qwen/Qwen3-0.6B \
-  --dataset-path /kaggle/working/mazes.jsonl \
+  --dataset-path /kaggle/working/mazes_5x5.jsonl \
   --dataset-loader-fn examples/agentic/maze/dataset_loader.py \
   --reward-fn-path examples/agentic/maze/reward.py \
   --agent-fn examples/agentic/maze/run_agent.py \
   --algo gspo \
   --batch-size 2 \
-  --n-samples 4 \
-  --max-new-tokens 64 \
+  --n-samples 8 \
+  --max-new-tokens 128 \
+  --disable-thinking \
   --tp-size 2 \
   --world-size 2 \
-  --max-steps 100
+  --max-steps 500
 ```
 
-> * `--tp-size 2 --world-size 2`：使用两张 T4 做张量并行，显存翻倍
-> * `--batch-size 2 --n-samples 4`：每步 8 个 rollout，足够的梯度信号
-> * `--max-new-tokens 64`：覆盖 tool call + 少量推理文本
+**实验 B（思考模式，对比）**：
+
+```python
+!areno train \
+  --ckpt Qwen/Qwen3-0.6B \
+  --dataset-path /kaggle/working/mazes_5x5.jsonl \
+  --dataset-loader-fn examples/agentic/maze/dataset_loader.py \
+  --reward-fn-path examples/agentic/maze/reward.py \
+  --agent-fn examples/agentic/maze/run_agent.py \
+  --algo gspo \
+  --batch-size 1 \
+  --n-samples 8 \
+  --max-new-tokens 256 \
+  --tp-size 2 \
+  --world-size 2 \
+  --max-steps 500
+```
+
+> * `--disable-thinking`：禁用 Qwen3 思考模式，避免 64 token 内 tool call 被截断
+> * `--n-samples 8`：每 prompt 8 个 sample，提升 advantage 估计质量和探索效率
+> * `--max-new-tokens 128/256`：实验 A 用 128（禁思考够用），实验 B 用 256（留思考空间）
+> * reward shaping：默认使用 BFS closest-approach；在数据集 JSONL 中添加 `"reward_mode": "pbrs"` 切换 PBRS
 >
-> 如果单卡 (tp-size=1) OOM，必须用双卡；如果双卡仍 OOM，加：
-> `--adam-8bit --activation-checkpointing --max-prompt-tokens 128 --max-context-len 512`
+> 如果双卡仍 OOM，加：`--adam-8bit --activation-checkpointing`
 >
 > 如果 `areno` 不在 PATH，改用 `!python -m areno.cli.main train ...`
 

@@ -97,8 +97,10 @@ async def run_agent(ctx, batch):
                 if result.terminal:
                     break
             else:
-                # Invalid / missing tool call — count as a wasted step.
-                break
+                # Invalid / missing tool call — waste a step but keep going.
+                state = game.replace(state, steps_taken=state.steps_taken + 1)
+                if state.steps_taken >= state.max_steps:
+                    break
 
         return turns
 

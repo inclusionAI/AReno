@@ -220,9 +220,9 @@ def test_maze_reward_scores_goal_and_failure_paths():
     mock = SimpleNamespace(source_record=record, tool_calls=tool_calls, completion="")
     assert reward.reward_fn(mock) == 1.0
 
-    # No moves → negative reward.
+    # No moves → negative reward (baseline -0.5, shaped by BFS distance from start).
     mock_empty = SimpleNamespace(source_record=record, tool_calls=[], completion="")
-    assert reward.reward_fn(mock_empty) == -0.5
+    assert reward.reward_fn(mock_empty) < 0.0
 
     # Invalid move → more negative.
     mock_invalid = SimpleNamespace(
@@ -231,6 +231,65 @@ def test_maze_reward_scores_goal_and_failure_paths():
         completion="",
     )
     assert reward.reward_fn(mock_invalid) < 0.0
+
+    # BFS shaping: moving closer to goal should give higher reward than staying put.
+    # Take the first step of the optimal path (moves closer to goal).
+    first_dir = directions[0] if directions else "right"
+    mock_one_step = SimpleNamespace(
+        source_record=record,
+        tool_calls=[{"name": "move", "arguments": json.dumps({"direction": first_dir})}],
+        completion="",
+    )
+    reward_one_step = reward.reward_fn(mock_one_step)
+    reward_no_move = reward.reward_fn(mock_empty)
+    assert reward_one_step > reward_no_move, (
+        f"BFS shaping should reward progress: one_step={reward_one_step} > no_move={reward_no_move}"
+    )
+
+
+def test_maze_reward_pbrs_mode():
+    """Verify PBRS reward mode provides gradient signal."""
+    game = _load_module("game")
+    reward = _load_module("reward")
+    generator = _load_module("dataset_generator")
+
+    record = generator.generate_records(1, seed=7)[0]
+    maze = game.normalize_maze(record["maze"])
+    start = tuple(record["start"])
+    goal = tuple(record["goal"])
+
+    # Add PBRS mode to source_record.
+    record_pbrs = dict(record)
+    record_pbrs["reward_mode"] = "pbrs"
+
+    path = game.solve_shortest_path(maze, start, goal, has_key=False)
+    directions = []
+    for i in range(1, len(path)):
+        dr = path[i][0] - path[i - 1][0]
+        dc = path[i][1] - path[i - 1][1]
+        if dr == -1:
+            directions.append("up")
+        elif dr == 1:
+            directions.append("down")
+        elif dc == -1:
+            directions.append("left")
+        elif dc == 1:
+            directions.append("right")
+
+    # Optimal path with PBRS should still give positive reward.
+    tool_calls = [{"name": "move", "arguments": json.dumps({"direction": d})} for d in directions]
+    mock = SimpleNamespace(source_record=record_pbrs, tool_calls=tool_calls, completion="")
+    assert reward.reward_fn(mock) > 0.0
+
+    # One step toward goal should be better than no steps.
+    first_dir = directions[0] if directions else "right"
+    mock_one = SimpleNamespace(
+        source_record=record_pbrs,
+        tool_calls=[{"name": "move", "arguments": json.dumps({"direction": first_dir})}],
+        completion="",
+    )
+    mock_empty = SimpleNamespace(source_record=record_pbrs, tool_calls=[], completion="")
+    assert reward.reward_fn(mock_one) > reward.reward_fn(mock_empty)
 
 
 # ---------------------------------------------------------------------------

@@ -435,14 +435,31 @@ def format_prompt(state: MazeState) -> str:
 # Scoring
 # ---------------------------------------------------------------------------
 
+def _find_goal(maze: Maze) -> Position:
+    """Scan the maze for the goal cell."""
+    for r, row in enumerate(maze):
+        for c, cell in enumerate(row):
+            if cell == GOAL:
+                return (r, c)
+    raise ValueError("maze has no goal cell")
+
+
+def bfs_distance(maze: Maze, start: Position, goal: Position, has_key: bool) -> int:
+    """Return BFS distance from *start* to *goal* (edge count), or a large number if unreachable."""
+    path = solve_shortest_path(maze, start, goal, has_key)
+    if not path:
+        return maze_width(maze) * maze_height(maze)
+    return len(path) - 1
+
+
 def score_episode(
     results: list[MoveResult],
     shortest_path_len: int,
 ) -> float:
-    """Score a completed episode.
+    """Score a completed episode using BFS closest-approach shaping.
 
     - Goal reached: ``1.0 - 0.05 * excess_steps``, clamped to ``[0.3, 1.0]``.
-    - Goal not reached: ``-0.5 + 0.02 * closest_approach``.
+    - Goal not reached: ``-0.5 + 0.3 * (1 - min_dist / maze_size)``.
     - Invalid moves: ``-0.1`` per invalid move.
     - Final result clamped to ``[-1.0, 1.0]``.
     """
@@ -455,10 +472,51 @@ def score_episode(
         reward = 1.0 - 0.05 * excess
         reward = max(0.3, min(1.0, reward))
     else:
-        reward = -0.5
+        maze = results[0].state.maze if results else None
+        if maze is not None and valid_steps:
+            goal_pos = _find_goal(maze)
+            maze_size = maze_width(maze) * maze_height(maze)
+            min_dist = min(
+                bfs_distance(r.state.maze, r.state.agent_pos, goal_pos, r.state.has_key)
+                for r in valid_steps
+            )
+            reward = -0.5 + 0.3 * (1.0 - min_dist / maze_size)
+        else:
+            reward = -0.5
 
     reward -= 0.1 * invalid_count
     return max(-1.0, min(1.0, reward))
+
+
+def score_episode_pbrs(
+    results: list[MoveResult],
+    shortest_path_len: int,
+    source: dict,
+) -> float:
+    """Score with Potential-Based Reward Shaping (PBRS).
+
+    Uses ``Phi(s) = -bfs_distance(agent_pos, goal, has_key)`` as the potential.
+    Shaping reward per transition: ``gamma * Phi(s') - Phi(s)``.
+    Total = base ``score_episode`` + ``alpha * sum(shaping)``.
+    """
+    base = score_episode(results, shortest_path_len)
+
+    maze = normalize_maze(source["maze"])
+    goal_pos: Position = (source["goal"][0], source["goal"][1])
+    start_pos: Position = (source["start"][0], source["start"][1])
+
+    gamma = 0.95
+    alpha = 0.1
+
+    prev_phi = -bfs_distance(maze, start_pos, goal_pos, has_key=False)
+    shaped = 0.0
+    for r in results:
+        if r.success:
+            cur_phi = -bfs_distance(r.state.maze, r.state.agent_pos, goal_pos, r.state.has_key)
+            shaped += gamma * cur_phi - prev_phi
+            prev_phi = cur_phi
+
+    return max(-1.0, min(1.0, base + alpha * shaped))
 
 
 # ---------------------------------------------------------------------------

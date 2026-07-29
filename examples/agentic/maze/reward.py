@@ -1,7 +1,11 @@
 """Reward function for the maze agentic example.
 
 Replays the agent's move sequence against the initial maze state and
-scores the outcome.
+scores the outcome.  Supports two shaping modes selectable via the
+``reward_mode`` field in ``source_record``:
+
+- ``"bfs"`` (default): BFS closest-approach distance shaping.
+- ``"pbrs"``: Potential-Based Reward Shaping with gamma=0.95.
 """
 
 from __future__ import annotations
@@ -22,6 +26,10 @@ def reward_fn(record: Any) -> float:
     directions = _extract_moves(record)
     results = _replay_episode(source, directions)
     shortest = source.get("shortest_path_len", 0)
+    mode = source.get("reward_mode", "bfs")
+
+    if mode == "pbrs":
+        return game.score_episode_pbrs(results, shortest, source)
     return game.score_episode(results, shortest)
 
 

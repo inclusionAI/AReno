@@ -52,8 +52,8 @@ def generate_records(
         sub_seed = rng.randint(0, 2**31 - 1)
         n_keys = rng.randint(1, 2)
         n_doors = rng.randint(1, 2)
-        w = width + rng.choice([0, 0, 0, 2, 2, 4])
-        h = height + rng.choice([0, 0, 0, 2, 2, 4])
+        w = width + rng.choice([0, 0, 2])
+        h = height + rng.choice([0, 0, 2])
         maze, start, goal, keys, doors = game.generate_maze(
             w, h, seed=sub_seed, n_keys=n_keys, n_doors=n_doors,
         )
