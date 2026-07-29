@@ -1,24 +1,24 @@
-# Serve Readiness States
+# 服务就绪状态
 
-AReno provides detailed serve-readiness state tracking to help you monitor and debug the serve startup sequence.
+AReno 提供了详细的服务就绪状态追踪功能，帮助你监控和调试服务启动过程。
 
-## Overview
+## 概述
 
-When starting an AReno serve instance, the system progresses through several stages before it's ready to accept requests:
+当启动 AReno 服务时，系统会按顺序经过多个阶段，然后才能接受请求：
 
-1. **model_loading** - Model weights are being loaded
-2. **worker_ready** - Worker processes are initialized
-3. **router_ready** - Request router is ready
-4. **minimal_probe** - Basic health check passed
-5. **ready** - Fully ready to accept requests
+1. **model_loading** — 正在加载模型权重
+2. **worker_ready** — 工作进程已初始化
+3. **router_ready** — 请求路由器已就绪
+4. **minimal_probe** — 基础健康检查通过
+5. **ready** — 完全就绪，可以接受请求
 
-If any stage fails, the system enters the **failed** state with detailed error information.
+如果任何阶段失败，系统会进入 **failed** 状态，并附带详细的错误信息。
 
-## Enabling Readiness Tracking
+## 启用就绪状态追踪
 
-### CLI Options
+### CLI 选项
 
-Use the `--enable-readiness` flag to enable detailed readiness tracking:
+使用 `--enable-readiness` 参数启用详细的就绪状态追踪：
 
 ```bash
 areno serve \
@@ -28,15 +28,15 @@ areno serve \
   --output text
 ```
 
-Available options:
+可用选项：
 
-- `--enable-readiness` - Enable readiness state tracking (default: disabled)
-- `--readiness-timeout` - Timeout per stage in seconds (default: 30, range: 1-3600)
-- `--output` - Output format: `text` or `json` (default: text)
+- `--enable-readiness` — 启用就绪状态追踪（默认：关闭）
+- `--readiness-timeout` — 每个阶段的超时时间（秒，默认：30，范围：1-3600）
+- `--output` — 输出格式：`text` 或 `json`（默认：text）
 
-### Output Formats
+### 输出格式
 
-**Text format** (default):
+**文本格式**（默认）：
 ```
 [AReno] Validating inputs... OK
 [AReno] model_loading... (1/5)
@@ -47,7 +47,7 @@ Available options:
 [AReno] ready - server listening (5/5)
 ```
 
-**JSON format** (with `--output json`):
+**JSON 格式**（使用 `--output json`）：
 ```json
 {
   "status": "ready",
@@ -62,13 +62,13 @@ Available options:
 }
 ```
 
-## HTTP Endpoints
+## HTTP 端点
 
-When readiness tracking is enabled, additional endpoints are available:
+启用就绪状态追踪后，提供以下额外端点：
 
 ### GET /health
 
-Basic liveness probe. Returns `200 OK` when server is running:
+基础存活探针。服务器运行时返回 `200 OK`：
 
 ```json
 {"status": "ok"}
@@ -76,13 +76,13 @@ Basic liveness probe. Returns `200 OK` when server is running:
 
 ### GET /ready
 
-Readiness probe. Returns current readiness status:
+就绪探针。返回当前的就绪状态：
 
 ```json
 {"status": "ready", "stage": "ready"}
 ```
 
-Returns `503 Service Unavailable` if not ready:
+如果未就绪，返回 `503 Service Unavailable`：
 
 ```json
 {"status": "not_ready", "stage": "model_loading"}
@@ -90,7 +90,7 @@ Returns `503 Service Unavailable` if not ready:
 
 ### GET /readiness/status
 
-Full readiness status including all stages:
+完整的就绪状态，包含所有阶段详情：
 
 ```json
 {
@@ -109,7 +109,7 @@ Full readiness status including all stages:
 
 ### GET /readiness/metrics
 
-Prometheus-format metrics:
+Prometheus 格式的指标：
 
 ```
 # HELP areno_serve_readiness_state Current serve readiness state
@@ -127,9 +127,9 @@ areno_serve_probe_requests_total 42
 areno_serve_uptime_seconds 12.345
 ```
 
-## Error Handling
+## 错误处理
 
-If a stage fails, the system enters the `failed` state with detailed error information:
+如果某个阶段失败，系统会进入 `failed` 状态并附带详细错误信息：
 
 ```
 [AReno] Validating inputs... OK
@@ -137,7 +137,7 @@ If a stage fails, the system enters the `failed` state with detailed error infor
 [AReno] failed:model_loading - CUDA OOM: tried to allocate 12GB on device with 10GB free
 ```
 
-JSON format:
+JSON 格式：
 ```json
 {
   "status": "failed",
@@ -153,43 +153,43 @@ JSON format:
 }
 ```
 
-Common failure scenarios:
+常见的失败场景：
 
-- **Timeout** - Stage took longer than `--readiness-timeout`
-- **CUDA OOM** - GPU out of memory during model loading
-- **Worker initialization failed** - Worker process crashed or failed to start
-- **Router initialization failed** - Router setup failed
+- **超时** — 阶段执行时间超过了 `--readiness-timeout` 设置的值
+- **CUDA 内存不足** — 模型加载时 GPU 内存不足
+- **工作进程初始化失败** — 工作进程崩溃或启动失败
+- **路由器初始化失败** — 路由器设置失败
 
-## Input Validation
+## 输入验证
 
-Invalid inputs are caught before expensive initialization:
+在昂贵的初始化操作之前会进行输入验证：
 
 ```bash
-# Invalid timeout value
+# 无效的超时值
 areno serve --enable-readiness --readiness-timeout -1
 # [AReno] Validation error: --readiness-timeout must be at least 1. Got: -1
 
-# Non-numeric timeout
+# 非数字的超时值
 areno serve --enable-readiness --readiness-timeout "not_a_number"
 # [AReno] Validation error: --readiness-timeout must be a positive integer (invalid format). Got: 'not_a_number'
 ```
 
-## Metrics Isolation
+## 指标隔离
 
-Probe requests to `/health`, `/ready`, `/readiness/status`, and `/readiness/metrics` are **not** counted in business request metrics. This ensures that health checks don't skew your request statistics.
+对 `/health`、`/ready`、`/readiness/status` 和 `/readiness/metrics` 的探针请求**不计入**业务请求指标。这确保了健康检查不会影响你的请求统计数据。
 
-## Backward Compatibility
+## 向后兼容
 
-Readiness tracking is **disabled by default**. When not enabled:
+就绪状态追踪**默认关闭**。未启用时：
 
-- No additional logging output
-- No new HTTP endpoints (except `/health` which returns basic status)
-- No metrics changes
-- Existing behavior is unchanged
+- 不会产生额外的日志输出
+- 不会新增 HTTP 端点（`/health` 仍可用，仅返回基本状态）
+- 指标不受影响
+- 现有行为保持不变
 
-## Configuration File Example
+## 配置文件示例
 
-Create a YAML configuration file for reusable settings:
+创建 YAML 配置文件以复用设置：
 
 ```yaml
 # fixtures/readiness_minimal.yaml
@@ -216,55 +216,60 @@ router:
   mock: true
 ```
 
-Use with:
+使用方法：
 
 ```bash
 areno serve --config fixtures/readiness_minimal.yaml --enable-readiness
 ```
 
-## Troubleshooting
+## 故障排查
 
-### Server stuck in model_loading
+### 服务卡在 model_loading 阶段
 
-Check:
-1. Model path is correct and accessible
-2. Sufficient GPU memory available
-3. Network connectivity if downloading from Hugging Face
+检查：
 
-### Worker initialization fails
+1. 模型路径是否正确且可访问
+2. GPU 内存是否充足
+3. 如果从 Hugging Face 下载，网络连接是否正常
 
-Check:
-1. `--world-size` and `--tp-size` are compatible
-2. Sufficient system memory
-3. No conflicting processes on the same GPU
+### 工作进程初始化失败
 
-### Timeout errors
+检查：
 
-Increase timeout for slow systems:
+1. `--world-size` 和 `--tp-size` 是否兼容
+2. 系统内存是否充足
+3. 同一 GPU 上是否有冲突的进程
+
+### 超时错误
+
+为慢速系统增加超时时间：
+
 ```bash
 areno serve --enable-readiness --readiness-timeout 120
 ```
 
-### Debug with full status
+### 使用完整状态进行调试
 
-Query the full status endpoint:
+查询完整状态端点：
+
 ```bash
 curl http://localhost:8000/readiness/status | jq
 ```
 
-Or check metrics:
+或查看指标：
+
 ```bash
 curl http://localhost:8000/readiness/metrics
 ```
 
-## API Reference
+## API 参考
 
 ### ReadinessStateMachine
 
-The core state machine class (for programmatic use):
+核心状态机类（供程序化使用）：
 
 ```python
-from areno.engine.readiness import ReadinessStateMachine, ReadinessState
+from areno.engine.runtime.readiness import ReadinessStateMachine, ReadinessState
 
 sm = ReadinessStateMachine(
     enabled=True,
@@ -272,19 +277,19 @@ sm = ReadinessStateMachine(
     on_state_change=lambda old, new, duration: print(f"{old} -> {new}: {duration}ms"),
 )
 
-# Progress through stages
+# 按顺序经过各个阶段
 sm.mark_stage_complete(ReadinessState.MODEL_LOADING)
 sm.mark_stage_complete(ReadinessState.WORKER_READY)
 
-# Check status
+# 查看状态
 status = sm.get_status()
 print(status.to_dict())
 ```
 
-### Validation
+### 输入验证
 
 ```python
-from areno.engine.readiness_validation import validate_readiness_options, ValidationError
+from areno.engine.runtime.readiness_validation import validate_readiness_options, ValidationError
 
 try:
     config = validate_readiness_options(
@@ -296,19 +301,19 @@ except ValidationError as e:
     print(e.to_dict())
 ```
 
-### Metrics Collection
+### 指标收集
 
 ```python
-from areno.engine.readiness import ReadinessStateMachine
-from areno.engine.readiness_metrics import ReadinessMetricsCollector
+from areno.engine.runtime.readiness import ReadinessStateMachine
+from areno.engine.runtime.readiness_metrics import ReadinessMetricsCollector
 
 sm = ReadinessStateMachine(enabled=True)
 collector = ReadinessMetricsCollector(sm)
 
-# Record probe request
+# 记录探针请求
 collector.record_probe_request()
 
-# Get Prometheus-format metrics
+# 获取 Prometheus 格式的指标
 metrics = collector.get_metrics()
 print(metrics)
 ```
