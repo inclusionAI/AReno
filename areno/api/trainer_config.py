@@ -61,11 +61,32 @@ class TrainerConfig:
     train_tool_results: bool = False
     chat_template_enable_thinking: bool | None = None
 
+    # ===== Length-grouped batching (optional) =====
+    length_grouped: bool = False
+    bucket_strategy: str = "fixed_interval"
+    bucket_interval: int = 32
+    custom_boundaries: list[int] | None = None
+    num_percentile_buckets: int = 8
+    sort_within_bucket: bool = True
+    drop_last_batch: bool = False
+    enable_batch_shuffle: bool = True
+    shuffle_seed: int = 42
+    enable_length_cache: bool = False
+    length_cache_path: str | None = None
+    length_cache_max_size: int = 100_000
+    min_bucket_samples: int = 10
+    max_sample_length: int = 4096
+    truncate_strategy: str = "keep"
+
     def __post_init__(self) -> None:
         if self.attn_backend not in {"flash", "native"}:
             raise ValueError("attn_backend must be one of: flash, native")
         if self.model_hub not in {"hf", "modelscope"}:
             raise ValueError("model_hub must be one of: hf, modelscope")
+        if self.bucket_strategy not in {"fixed_interval", "percentile", "custom"}:
+            raise ValueError("bucket_strategy must be one of: fixed_interval, percentile, custom")
+        if self.truncate_strategy not in {"keep", "truncate", "drop"}:
+            raise ValueError("truncate_strategy must be one of: keep, truncate, drop")
 
     def optimizer_config(self) -> dict:
         """Build the optimizer dict consumed by the backend config."""

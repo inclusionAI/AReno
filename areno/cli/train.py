@@ -679,6 +679,12 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             agent_timeout_s=args.agent_timeout_s,
             train_tool_results=args.train_tool_results,
             chat_template_enable_thinking=chat_template_enable_thinking,
+            length_grouped=getattr(args, "length_grouped", False),
+            bucket_strategy=getattr(args, "bucket_strategy", "fixed_interval"),
+            bucket_interval=getattr(args, "bucket_interval", 32),
+            enable_batch_shuffle=getattr(args, "enable_batch_shuffle", True),
+            shuffle_seed=getattr(args, "shuffle_seed", 42),
+            drop_last_batch=getattr(args, "drop_last_batch", False),
         )
     if algorithm.name != "ppo":
         return PolicyTrainerConfig(
@@ -1324,6 +1330,24 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
 @click.option("--value-loss-coef", type=float, default=0.5, show_default=True, help="PPO value loss coefficient.")
 @click.option("--gamma", type=float, default=1.0, show_default=True, help="PPO GAE discount.")
 @click.option("--lam", type=float, default=0.95, show_default=True, help="PPO GAE lambda.")
+# ===== Length-grouped batching =====
+@click.option("--length-grouped", is_flag=True, default=False, help="Enable length-grouped batching to reduce padding (SFT).")
+@click.option(
+    "--bucket-strategy",
+    type=click.Choice(["fixed_interval", "percentile", "custom"]),
+    default="fixed_interval",
+    show_default=True,
+    help="Bucket strategy for length grouping.",
+)
+@click.option("--bucket-interval", type=int, default=32, show_default=True, help="Fixed-interval bucket width in tokens.")
+@click.option(
+    "--enable-batch-shuffle/--disable-batch-shuffle",
+    default=True,
+    show_default=True,
+    help="Shuffle batch order after length grouping to avoid sequential length bias.",
+)
+@click.option("--shuffle-seed", type=int, default=42, show_default=True, help="Random seed for batch shuffle.")
+@click.option("--drop-last-batch", is_flag=True, default=False, help="Drop the final under-full batch in each bucket.")
 def train_command(**options) -> None:
     """Click entrypoint for training."""
 

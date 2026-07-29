@@ -24,6 +24,7 @@ from typing import Any
 import areno.api
 from areno.api.dashboard import record_dashboard_state
 from areno.api.data_utils import prompt_response_to_tokens_and_mask
+from areno.api.length_grouped import LengthGroupedBatcher
 from areno.api.tokenizer import configure_chat_template_enable_thinking
 
 
@@ -102,6 +103,7 @@ class SFTTrainer:
         skipped = 0
         accepted = 0
         total_rows = len(self.dataset)
+        all_sequences: list = []
         for index in range(total_rows):
             # Normalize each supported row schema into one TrainSequence.
             seq = _record_to_train_sequence(
@@ -114,6 +116,9 @@ class SFTTrainer:
                 skipped += 1
                 continue
             accepted += 1
+            if getattr(self.config, "length_grouped", False):
+                all_sequences.append(seq)
+                continue
             batch.append(seq)
             if len(batch) >= self.config.batch_size:
                 yield batch
@@ -126,6 +131,11 @@ class SFTTrainer:
                 f"scanned {total_rows} row(s), skipped {skipped} as empty, over-budget, or all-prompt examples. "
                 "Check dataset quality, --max-prompt-tokens, and --max-new-tokens."
             )
+        if getattr(self.config, "length_grouped", False) and all_sequences:
+            batcher = LengthGroupedBatcher(self.config, tokenizer)
+            for lg_batch in batcher.make_batches(all_sequences, get_length=lambda s: len(s.tokens)):
+                yield lg_batch
+            return
         if batch:
             yield batch
 
