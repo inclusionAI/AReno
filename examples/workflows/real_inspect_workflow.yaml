@@ -1,0 +1,31 @@
+# Example workflow using REAL AReno skill scripts (no mock scripts).
+#
+# Chains: dataset inspection -> summary of inspection result.
+# Runs entirely on CPU with a local JSONL file. No GPU, no network.
+#
+# Prerequisites:
+#   The inspect step reads /tmp/test_dataset.jsonl. Create a tiny test file first:
+#     echo '{"question":"1+1=?","answer":"2"}' > /tmp/test_dataset.jsonl
+#   Without this file the inspect step will fail.
+#
+# Run with:
+#   python3 .agents/scripts/run_workflow.py examples/workflows/real_inspect_workflow.yaml
+
+name: real-inspect-workflow
+description: Inspect a local dataset using the real AReno skill script, then summarise.
+
+steps:
+  - id: inspect
+    script: ../../.agents/skills/areno-run-training/scripts/inspect_dataset.py
+    inputs:
+      --dataset-path: /tmp/test_dataset.jsonl
+      --algo: gspo
+    depends_on: []
+
+  - id: summary
+    script: scripts/summarize.py
+    inputs:
+      --algo: gspo
+      --steps-completed: ${steps.inspect.count}
+      --source: run
+    depends_on: [inspect]

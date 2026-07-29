@@ -1,0 +1,40 @@
+# Example workflow: recipe -> tiny run -> summary
+#
+# Fully deterministic, no external database, no network, no GPU required.
+# Run with:
+#   python .agents/scripts/run_workflow.py examples/workflows/recipe_to_summary.yaml
+
+name: recipe-to-summary
+description: Build a tiny recipe, simulate a training run, and summarise the result.
+
+steps:
+  - id: recipe
+    script: scripts/make_recipe.py
+    inputs:
+      --algo: gspo
+      --model: Qwen/Qwen3-0.6B
+      --dataset: gsm8k:main
+    depends_on: []
+
+  - id: run
+    script: scripts/tiny_run.py
+    inputs:
+      --algo: ${steps.recipe.algo}
+      --model: ${steps.recipe.model}
+      --dataset: ${steps.recipe.dataset}
+      --batch-size: ${steps.recipe.batch_size}
+      --n-samples: ${steps.recipe.n_samples}
+      --max-new-tokens: ${steps.recipe.max_new_tokens}
+    depends_on: [recipe]
+
+  - id: summary
+    script: scripts/summarize.py
+    inputs:
+      --algo: ${steps.run.algo}
+      --model: ${steps.run.model}
+      --dataset: ${steps.run.dataset}
+      --steps-completed: ${steps.run.steps_completed}
+      --final-reward: ${steps.run.final_reward}
+      --final-loss: ${steps.run.final_loss}
+      --source: run
+    depends_on: [run]

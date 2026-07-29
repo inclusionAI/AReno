@@ -1,0 +1,32 @@
+# Example workflow: serve -> probe -> summary
+#
+# Fully deterministic, no external database, no network, no GPU required.
+# Run with:
+#   python .agents/scripts/run_workflow.py examples/workflows/serve_to_summary.yaml
+
+name: serve-to-summary
+description: Mock a serving endpoint, probe it, and summarise the probe result.
+
+steps:
+  - id: serve
+    script: scripts/mock_serve.py
+    inputs:
+      --model: Qwen/Qwen3-0.6B
+      --port: 8000
+    depends_on: []
+
+  - id: probe
+    script: scripts/mock_probe.py
+    inputs:
+      --base-url: ${steps.serve.base_url}
+      --model-id: ${steps.serve.model_id}
+    depends_on: [serve]
+
+  - id: summary
+    script: scripts/summarize.py
+    inputs:
+      --model: ${steps.serve.model_id}
+      --source: probe
+      --probe-ok: ${steps.probe.ok}
+      --model-advertised: ${steps.probe.model_id}
+    depends_on: [probe]
