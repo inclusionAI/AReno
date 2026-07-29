@@ -127,7 +127,14 @@ def _ensure_dashboard_build() -> None:
 
 
 def _load_dashboard_state() -> Any:
-    """Import the dashboard state lazily so `areno metrics` does not pull torch."""
+    """Import the dashboard state lazily so `areno metrics` does not pull torch.
+
+    STATE reads its persisted job/metrics data from the directory named by the
+    ARENO_DASHBOARD_ROOT env var (falling back to the current working dir when
+    unset). The dashboard server sets this when `areno dashboard --start` runs;
+    for a standalone `areno metrics` invoke, point ARENO_DASHBOARD_ROOT at the
+    same runtime root the dashboard used so the job and its metrics_dir resolve.
+    """
     from areno.dashboard.server import STATE
 
     return STATE

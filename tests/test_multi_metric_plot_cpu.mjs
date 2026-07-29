@@ -145,6 +145,13 @@ check("empty order yields empty plot list", () => {
   assert.equal(plots.length, 0);
 });
 
+check("buildMultiMetricPlot does not crash on all-empty series", () => {
+  // Regression: Math.min(...[]) returns Infinity and used to corrupt coords.
+  const axes = new Map([["a", 0], ["b", 0]]);
+  const plots = buildMultiMetricPlot({ a: [], b: [] }, ["a", "b"], { normalize: false, axes, smooth: 0.6 });
+  assert.equal(plots.length, 0);
+});
+
 check("palette is colorblind-safe sized and cyclic", () => {
   assert.ok(METRIC_PALETTE.length >= 8);
   assert.equal(metricColor(0), metricColor(METRIC_PALETTE.length), "wraps around");

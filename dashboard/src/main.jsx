@@ -1428,9 +1428,13 @@ function MultiMetricPlot({ order, plots, smooth, normalize, errors, hoverStep, h
             ))}
           </g>
         ))}
-        {hoverStep !== null && plots[0] && (
-          <line className="hoverGuide" x1={plots[0].coords.find((c) => c.step === hoverStep)?.x || 0} x2={plots[0].coords.find((c) => c.step === hoverStep)?.x || 0} y1="0" y2="180" />
-        )}
+        {hoverStep !== null && (() => {
+          // Find the first non-empty plot that actually has the hovered step;
+          // fall back to nothing rather than drawing the guide at x=0.
+          const guidePlot = plots.find((p) => p.coords.some((c) => c.step === hoverStep));
+          const guideX = guidePlot ? guidePlot.coords.find((c) => c.step === hoverStep).x : null;
+          return guideX === null ? null : <line className="hoverGuide" x1={guideX} x2={guideX} y1="0" y2="180" />;
+        })()}
       </svg>
       <div className="metricLegend">
         {plots.map((p, i) => (
@@ -1512,6 +1516,16 @@ function metricColor(index) {
 // Largest-triangle-three-buckets downsample: keeps the visual shape of a
 // time-ordered series while capping point count at `target`. Pure and
 // non-mutating; returns the original array when already small enough.
+//
+// Length guarantee: when n >= target >= 2 the returned array has exactly
+// `target` points (first + middle buckets + last); each middle bucket always
+// contributes one point even when tiny, because `end` is clamped to >= start+1.
+//
+// Non-finite values: callers already filter NaN/Inf out of plotted points, but
+// the loop also guards against them so a stray non-finite point cannot poison
+// the triangle-area math (which would otherwise produce NaN and make the
+// "largest area" comparison unstable). A non-finite candidate is skipped; if a
+// bucket contains only non-finite points it falls back to its first point.
 function downsampleLttb(points, target) {
   const n = points.length;
   // Passthrough when target is invalid or the series already fits. The first
@@ -1519,32 +1533,51 @@ function downsampleLttb(points, target) {
   if (!Number.isFinite(target) || target < 2 || n <= target) return points;
   const sampled = [points[0]];
   const bucketSize = (n - 2) / (target - 2);
+  // `prev` is the previously selected point; it seeds the triangle baseline.
   let prev = points[0];
   for (let i = 0; i < target - 2; i += 1) {
-    // Clamp each bucket's index range to [1, n-2] so empty/tiny buckets and
-    // the boundary near the last point never read out of bounds.
+    // Bucket i covers original indices [start, end): start inclusive, end
+    // exclusive. Clamp to [1, n-2] so empty/tiny buckets and the boundary near
+    // the last point never read out of bounds; end is forced > start so every
+    // bucket selects at least one point (keeps the output length at `target`).
     const start = Math.min(Math.max(Math.floor(i * bucketSize) + 1, 1), n - 2);
     const end = Math.min(Math.max(Math.floor((i + 1) * bucketSize) + 1, start + 1), n - 1);
-    // Average of the NEXT bucket (the actual range it will cover) is the
+    // Average of the NEXT bucket (indices [nextStart, nextEnd)) is the
     // reference point the triangle area is measured against in LTTB.
     const nextStart = Math.min(Math.floor((i + 1) * bucketSize) + 1, n - 1);
     const nextEnd = Math.min(Math.floor((i + 2) * bucketSize) + 1, n - 1);
     let avgStep = 0;
     let avgValue = 0;
+    let finiteCount = 0;
     for (let k = nextStart; k < nextEnd; k += 1) {
-      avgStep += points[k].step;
-      avgValue += points[k].value;
+      const pk = points[k];
+      if (Number.isFinite(pk.step) && Number.isFinite(pk.value)) {
+        avgStep += pk.step;
+        avgValue += pk.value;
+        finiteCount += 1;
+      }
     }
-    const nextCount = Math.max(nextEnd - nextStart, 1);
-    avgStep /= nextCount;
-    avgValue /= nextCount;
+    avgStep = finiteCount ? avgStep / finiteCount : 0;
+    avgValue = finiteCount ? avgValue / finiteCount : 0;
     let maxArea = -1;
     let chosen = points[start];
+    const prevFinite = Number.isFinite(prev.step) && Number.isFinite(prev.value);
     for (let j = start; j < end && j < n - 1; j += 1) {
-      const area = Math.abs((avgStep - prev.step) * (points[j].value - avgValue) - (avgStep - points[j].step) * (prev.value - avgValue)) / 2;
+      const pj = points[j];
+      // Skip non-finite candidates: their triangle area is NaN, and NaN >
+      // maxArea is always false, so leaving them in would silently never pick
+      // them anyway — skipping makes that contract explicit and avoids relying
+      // on NaN comparison semantics across engines.
+      if (!Number.isFinite(pj.step) || !Number.isFinite(pj.value)) continue;
+      if (!prevFinite || !finiteCount) {
+        // Cannot compute a meaningful area; prefer the first finite candidate.
+        chosen = pj;
+        break;
+      }
+      const area = Math.abs((avgStep - prev.step) * (pj.value - avgValue) - (avgStep - pj.step) * (prev.value - avgValue)) / 2;
       if (area > maxArea) {
         maxArea = area;
-        chosen = points[j];
+        chosen = pj;
       }
     }
     sampled.push(chosen);
@@ -1582,7 +1615,16 @@ function assignAxes(seriesByKey, order) {
   for (let i = 1; i < order.length; i += 1) {
     const r = rangeOf(seriesByKey[order[i]]);
     const peak = Number.isFinite(r.max) ? Math.max(Math.abs(r.min), Math.abs(r.max)) : 0;
-    const sameScale = firstPeak === 0 || peak === 0 || Math.log10(Math.max(firstPeak, peak) / Math.max(Math.min(firstPeak, peak), 1e-12)) <= 1;
+    // Two series share the left axis when their peak magnitudes are within one
+    // order of magnitude (ratio <= 10). A zero peak means a degenerate
+    // (constant-zero) series; keep it on the left axis.
+    let sameScale;
+    if (firstPeak === 0 || peak === 0) {
+      sameScale = true;
+    } else {
+      const ratio = Math.max(firstPeak, peak) / Math.min(firstPeak, peak);
+      sameScale = Math.log10(ratio) <= 1;
+    }
     axes.set(order[i], sameScale ? 0 : 1);
   }
   return axes;
@@ -1600,8 +1642,14 @@ function rangeOf(points) {
 // the y-axis it uses, and the true raw min/max labels (unmodified by any
 // view-only normalization).
 function buildMultiMetricPlot(seriesByKey, order, { normalize, axes, smooth }) {
-  const stepMin = Math.min(...order.flatMap((k) => seriesByKey[k].map((p) => p.step)));
-  const stepMax = Math.max(...order.flatMap((k) => seriesByKey[k].map((p) => p.step)));
+  // Guard against empty / all-empty input: Math.min(...[]) would return
+  // Infinity and corrupt every coordinate. With no plottable points, there is
+  // nothing to render, so return an empty plot list (callers already show the
+  // empty-state placeholder).
+  const allPoints = order.flatMap((k) => seriesByKey[k] || []);
+  if (!order.length || !allPoints.length) return [];
+  const stepMin = Math.min(...allPoints.map((p) => p.step));
+  const stepMax = Math.max(...allPoints.map((p) => p.step));
   const stepSpan = Math.max(stepMax - stepMin, 1);
   const leftKeys = order.filter((k) => (axes.get(k) ?? 0) === 0);
   const rightKeys = order.filter((k) => (axes.get(k) ?? 0) === 1);
