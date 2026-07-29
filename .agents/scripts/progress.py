@@ -265,6 +265,7 @@ class ProgressDisplay:
 
     def _render_tty(self, event: ProgressEvent) -> None:
         try:
+            from rich.console import Console
             from rich.progress import (
                 BarColumn,
                 Progress,
@@ -284,9 +285,8 @@ class ProgressDisplay:
                 BarColumn(),
                 TaskProgressColumn(),
                 TimeElapsedColumn(),
-                console=None,
+                console=Console(file=self._file),
                 transient=False,
-                file=self._file,
             )
             self._progress.start()
 
@@ -299,7 +299,8 @@ class ProgressDisplay:
         elif event.status == "running" and task_id is not None:
             self._progress.update(task_id, completed=event.step or 0)
         elif event.status in ("completed", "failed", "cancelled") and task_id is not None:
-            self._progress.update(task_id, completed=self._progress.tasks[task_id].total)
+            if event.total:
+                self._progress.update(task_id, completed=event.total, total=event.total)
             self._progress.remove_task(task_id)
             self._task_ids.pop(event.stage, None)
 
