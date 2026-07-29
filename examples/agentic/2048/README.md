@@ -23,6 +23,9 @@ workflow as the other agentic examples.
   define the XML no-tool variant.
 - `baseline.py` — CPU-only random-baseline / trained-policy evaluation harness.
 - `web_ui.py` — local browser demo (Human / Random / LLM modes), offline-capable.
+- `patch_serve_context.py` — clamps a checkpoint's `config.json` context length
+  before `areno serve`; the supported fix for the Qwen3.5 serve-time OOM (see
+  [Serve the Policy](#serve-the-policy)).
 
 ## Generate Boards
 
@@ -35,34 +38,129 @@ python examples/agentic/2048/dataset_generator.py \
 
 Each line is `{"id", "board", "seed", "random_baseline": {score, max_tile, invalid_rate, trials}}`.
 
-## Run with Tool Calls
+## Train (Tool-Call Variant)
+
+A full training command (2-way tensor-parallel, GSPO). It exports checkpoints to
+`--save-path` every `--save-interval` steps — with interval 10 you get
+`./2048/step_000010/`, `./2048/step_000020/`, …, each containing `config.json`
+plus the model shards:
 
 ```bash
 areno train \
-  --ckpt Qwen/Qwen3-1.7B \
+  --ckpt Qwen/Qwen3.5-0.8B \
+  --world-size 2 \
+  --algo gspo \
+  --tp-size 2 \
+  --save-path ./2048 \
+  --save-interval 10 \
+  --model-hub hf \
   --dataset-path /tmp/areno-2048-boards.jsonl \
   --dataset-loader-fn examples/agentic/2048/dataset_loader.py \
   --reward-fn-path examples/agentic/2048/reward.py \
   --agent-fn examples/agentic/2048/run_agent.py \
-  --algo gspo \
-  --batch-size 2 \
-  --n-samples 4 \
-  --max-new-tokens 256
+  --batch-size 1 \
+  --n-samples 2 \
+  --max-running-prompts 4 \
+  --max-context-len 2048 \
+  --max-prompt-tokens 1024 \
+  --max-new-tokens 1024 \
+  --mini-bs 1 \
+  --drop-rollout-state \
+  --tune-params \
+  --mem-frac 0.85
 ```
+
+Notes on the non-obvious flags:
+
+- `--model-hub hf` pulls the base checkpoint from Hugging Face (the default is
+  ModelScope); use `modelscope` if HF is unreachable in your environment.
+- `--max-context-len 2048` together with `--mem-frac 0.85` keeps the KV and
+  activation footprint small. Lower `--mem-frac` if you still OOM mid-training.
+- `--drop-rollout-state` frees the rollout tensors between steps; `--tune-params`
+  trains the policy weights (rather than a frozen rollout-only run).
+- `--max-running-prompts 4` caps concurrent rollout requests; `--n-samples 2`
+  gives GSPO two rollouts per board for the group baseline.
+
+## Serve the Policy
+
+Serve a saved checkpoint behind an OpenAI-compatible endpoint. Point
+`--model-path` at a step directory written above (e.g. `./2048/step_000010`):
+
+```bash
+areno serve \
+  --model-path ./2048/step_000010 \
+  --tp-size 1 --world-size 1 \
+  --port 8000 \
+  --max-running-prompts 1 \
+  --default-max-tokens 512
+```
+
+### Serve-time OOM on Qwen3.5 — clamp the checkpoint context
+
+`areno serve` sizes its paged-KV pool from `max_position_embeddings` in the
+checkpoint's `config.json`. Qwen3.5 ships
+`text_config.max_position_embeddings = 262144` (256K native context), and the
+checkpoint writer copies that verbatim into every `step_*/config.json`.
+Honoring 262144 pre-allocates a KV pool no single GPU can hold → **OOM at serve
+startup**, long before any 2048 prompt is served. The 2048 prompt is tiny, so
+clamp the advertised context to a small serving budget *before* launching serve:
+
+```bash
+python examples/agentic/2048/patch_serve_context.py \
+  --ckpt ./2048/step_000010 --max-model-len 2048
+```
+
+The script is idempotent and only ever *lowers* the value — it clamps
+`text_config.max_position_embeddings`, any `rope_scaling` / `rope_parameters`
+copy, and the top-level field — so it is safe to run before every serve. There
+is no `--max-model-len` flag on the served side; the patched `config.json` is
+what carries the budget. Run the patch, then `areno serve` as above.
+
+<details>
+<summary>Equivalent manual edit (what the script automates)</summary>
+
+```python
+import json
+p = "./2048/step_000010/config.json"
+cfg = json.load(open(p))
+tc = cfg.get("text_config") or {}
+print("has text_config:", "text_config" in cfg)
+print("top   max_position_embeddings:", cfg.get("max_position_embeddings"))
+print("text  max_position_embeddings:", tc.get("max_position_embeddings", "<missing → 262144>"))
+print("text  num_key_value_heads     :", tc.get("num_key_value_heads", "<missing>"))
+print("text  head_dim                :", tc.get("head_dim", "<missing>"))
+tc["max_position_embeddings"] = 2048
+rs = tc.get("rope_scaling") or tc.get("rope_parameters")
+if isinstance(rs, dict) and "max_position_embeddings" in rs:
+    rs["max_position_embeddings"] = 2048
+cfg["text_config"] = tc
+json.dump(cfg, open(p, "w"), indent=2, ensure_ascii=False)
+print("patched text_config.max_position_embeddings = 2048")
+```
+
+Prefer `patch_serve_context.py` — it additionally covers the top-level
+`max_position_embeddings` field and is guaranteed to only ever lower values, so
+it is safe to re-run.
+</details>
 
 ## Play in the Web UI
 
-Serve the trained checkpoint, then point the UI at its OpenAI-compatible
-endpoint and switch to **LLM** mode:
+Point the UI at the served endpoint and switch to **LLM** mode. `--host 0.0.0.0`
+binds all interfaces so the demo is reachable from other machines:
 
 ```bash
-areno serve --model-path /path/to/2048-policy --tp-size 1 --world-size 1 --port 8000
 python examples/agentic/2048/web_ui.py \
+  --host 0.0.0.0 \
   --base-url http://127.0.0.1:8000/v1 \
-  --api-key token --model policy --agent-mode llm
+  --api-key token \
+  --model policy \
+  --agent-mode llm
 ```
 
-Open `http://127.0.0.1:8768`. Modes:
+`--api-key` is sent in the `Authorization` header; the local `areno serve`
+endpoint does not enforce a key, so the default `token` is fine — replace it
+only if you front the endpoint with an authenticated proxy. Open
+`http://<host>:8768`. Modes:
 
 - **Human** — arrow keys or WASD; plays one move at a time. No server needed.
 - **Random** — a uniform-random *direction* (all four, not legal-only) plays one
@@ -92,23 +190,40 @@ values baked into the dataset, `random_baseline.baseline_source` is `stored`
 (reusing the per-board baselines written by the generator); otherwise it is
 `recomputed` (or `mixed`) and `recomputed` counts how many were rerun.
 
-## Run without Tool Calls
+## Train (No-Tool Variant)
 
 The XML no-tool variant asks the model to answer with a moves tag such as
-`<moves>up,left,down</moves>`.
+`<moves>up,left,down</moves>`. It is the tool-call command above with only the
+three `_no_tool` file flags swapped (same checkpoint, GSPO config, and memory
+budget):
 
 ```bash
 areno train \
-  --ckpt Qwen/Qwen3-1.7B \
+  --ckpt Qwen/Qwen3.5-0.8B \
+  --world-size 2 \
+  --algo gspo \
+  --tp-size 2 \
+  --save-path ./2048 \
+  --save-interval 10 \
+  --model-hub hf \
   --dataset-path /tmp/areno-2048-boards.jsonl \
   --dataset-loader-fn examples/agentic/2048/dataset_loader_no_tool.py \
   --reward-fn-path examples/agentic/2048/reward_no_tool.py \
   --agent-fn examples/agentic/2048/run_agent_no_tool.py \
-  --algo gspo \
-  --batch-size 2 \
-  --n-samples 4 \
-  --max-new-tokens 256
+  --batch-size 1 \
+  --n-samples 2 \
+  --max-running-prompts 4 \
+  --max-context-len 2048 \
+  --max-prompt-tokens 1024 \
+  --max-new-tokens 1024 \
+  --mini-bs 1 \
+  --drop-rollout-state \
+  --tune-params \
+  --mem-frac 0.85
 ```
+
+Serve and play it exactly as the tool-call variant — point `--model-path` at a
+`./2048/step_*` checkpoint (run `patch_serve_context.py` first).
 
 ## Input & Output Contract
 
@@ -138,6 +253,8 @@ areno train \
   LLM/policy is used.
 - `areno train` and `areno serve` need CUDA + a checkpoint; the engine,
   generator, loader, reward, baseline, and web UI run on CPU without a GPU.
+- See [Serve the Policy](#serve-the-policy): Qwen3.5 checkpoints OOM at serve
+  startup unless their `config.json` context is clamped first.
 - The random baseline (in `reward_fn`, `baseline.py`, and the web UI's Random
   mode) is a uniform-random direction over all four directions, not a
   legal-only policy — so it has a nonzero invalid-move rate, and any policy
