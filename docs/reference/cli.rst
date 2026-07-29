@@ -12,3 +12,4 @@ Command pages:
 * :doc:`/cli/dataset_loaders`
 * :doc:`/cli/observability`
 * :doc:`/cli/diagnostics`
+* :doc:`/cli/dataset_cache`

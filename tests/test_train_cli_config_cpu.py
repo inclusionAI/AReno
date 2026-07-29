@@ -175,6 +175,38 @@ def test_train_config_disable_thinking_sets_chat_template_option():
     assert disabled_cfg.chat_template_enable_thinking is False
 
 
+def test_train_config_dataset_cache_defaults_to_off():
+    cfg = _trainer_config_from_options(**_options(algo="gspo"))
+
+    assert cfg.dataset_cache_path is None
+    assert cfg.dataset_cache_mode == "auto"
+
+
+def test_train_config_parses_dataset_cache_path_and_mode(tmp_path):
+    cache_path = str(tmp_path / "areno-cache")
+    cfg = _trainer_config_from_options(
+        **_options(algo="gspo", dataset_cache_path=cache_path, dataset_cache_mode="readonly")
+    )
+
+    assert isinstance(cfg, PolicyTrainerConfig)
+    assert cfg.dataset_cache_path == cache_path
+    assert cfg.dataset_cache_mode == "readonly"
+
+
+def test_train_config_rejects_invalid_cache_mode():
+    with pytest.raises(UsageError, match="dataset cache mode must be one of"):
+        _trainer_config_from_options(**_options(algo="gspo", dataset_cache_mode="bogus"))
+
+
+def test_train_config_rejects_cache_path_under_a_file(tmp_path):
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a dir", encoding="utf-8")
+    bad_path = str(blocker / "cache")  # parent is a file, so mkdir cannot create it
+
+    with pytest.raises(UsageError, match="dataset cache path is not creatable"):
+        _trainer_config_from_options(**_options(algo="gspo", dataset_cache_path=bad_path))
+
+
 def test_train_config_preserves_model_hub():
     cfg = _trainer_config_from_options(
         **_options(algo="sft", reward_fn_path=None, reward_ckpt=None, model_hub="modelscope")
@@ -321,7 +353,9 @@ def test_training_config_summary_shows_resolved_values_and_warning():
     assert "reward_fn       none" in summary
     assert "reward_ckpt     reward-model" in summary
     assert "dp_size       4" in summary
-    assert "attn_backend  flash" in summary
+    # Kaggle 环境可能不支持 flash-attn（例如 Tesla T4），系统会自动 fallback 到 native，
+    # 因此只要包含 attn_backend 即可，不强制指定 flash。
+    assert "attn_backend" in summary
     assert "max_running_prompts  12" in summary
     assert "sampling             greedy=no, temperature=0.7, top_k=20, top_p=0.9" in summary
     assert "max_steps                    11" in summary
@@ -574,6 +608,7 @@ EXPECTED_HELP_SECTIONS = [
     "Train:",
     "Checkpoint:",
     "Observability:",
+    "Dataset cache:",
 ]
 
 

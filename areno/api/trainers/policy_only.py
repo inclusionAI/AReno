@@ -22,6 +22,7 @@ from pathlib import Path
 import numpy as np
 
 from areno.api.dashboard import record_dashboard_state
+from areno.api.dataset_cache import DatasetCache
 from areno.api.tokenizer import configure_chat_template_enable_thinking
 
 
@@ -55,6 +56,13 @@ class PolicyOnlyTrainer:
 
         tokenizer = self.areno.get_tokenizer()
         configure_chat_template_enable_thinking(tokenizer, getattr(self.config, "chat_template_enable_thinking", None))
+        # 仅当用户通过 --dataset-cache-path 显式启用时才开启磁盘分词缓存；
+        # `None` 保持历史行为（每个 epoch 均重新分词）。
+        self._dataset_cache = (
+            DatasetCache(self.config.dataset_cache_path, mode=self.config.dataset_cache_mode)
+            if self.config.dataset_cache_path
+            else None
+        )
         sampling_params = areno.api.SamplingParams(
             greedy=self.config.greedy,
             temperature=self.config.temperature,
@@ -75,6 +83,7 @@ class PolicyOnlyTrainer:
                 self.dataset,
                 batch_size=self.config.batch_size,
                 max_prompt_tokens=self.config.max_prompt_tokens,
+                dataset_cache=self._dataset_cache,
             ):
                 role = self._policy_role_name()
                 self.logger.info("epoch=%d step=%d role=%s stage=rollout_start", epoch, step, role)

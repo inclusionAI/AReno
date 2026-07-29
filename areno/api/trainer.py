@@ -7,6 +7,7 @@ one `Trainer`, calls ``init()`` once, and then loops:
 ref/reward/critic models become available behind the backend boundary.
 """
 
+import logging
 import time
 from collections.abc import Callable, Iterable
 from typing import Any
@@ -16,10 +17,35 @@ from areno.api.backend.base import Backend, get_backend_cls
 from areno.api.config import BackendConfig, coerce_backend_config, resolve_backend_type
 from areno.api.context import Context
 from areno.api.data import PromptBatch, PromptItem
+from areno.api.dataset_cache import CacheKey, DatasetCache, compute_cache_key
 from areno.api.metrics import MetricsRecorder
 from areno.api.models import BackendType, RolloutResult, SamplingParams, TrainSequence
 from areno.api.roles import ModelRole
 from areno.api.tokenizer import encode_generation_prompt, eos_token_ids, load_tokenizer, normalize_token_ids
+
+logger = logging.getLogger("areno.api.trainer")
+
+
+def _prompt_item_to_dict(item: PromptItem) -> dict[str, Any]:
+    """Serialize a `PromptItem` to a plain JSON-compatible dict for caching."""
+
+    return {
+        "prompt": item.prompt,
+        "solutions": item.solutions,
+        "input_tokens": item.input_tokens,
+        "record": item.record,
+    }
+
+
+def _prompt_item_from_dict(data: dict[str, Any]) -> PromptItem:
+    """Reconstruct a `PromptItem` from a cached dict (the inverse of above)."""
+
+    return PromptItem(
+        prompt=data["prompt"],
+        solutions=data.get("solutions"),
+        input_tokens=data["input_tokens"],
+        record=dict(data.get("record") or {}),
+    )
 
 
 class Trainer:
@@ -62,6 +88,10 @@ class Trainer:
         self._step_wall_start: float | None = None
         self._rollout_session_depth = 0
         self._rollout_wall_start: float | None = None
+        # 当前运行的数据集缓存键（带记忆化）。指纹由分词器、数据集、预处理选项共同决定，
+        # 在一次运行中保持不变，因此计算一次后在各个 epoch 间复用，避免每次重复流式哈希。
+        # 元组保存 (dataset, kwargs_id, key) 以便按数据集对象身份进行键控。
+        self._dataset_cache_key: tuple[Any, tuple[Any, ...], CacheKey] | None = None
 
     def init(self) -> None:
         """Load tokenizer, create backend context, and initialize workers."""
@@ -212,6 +242,7 @@ class Trainer:
         max_prompt_tokens: int,
         prompt_key: str = "prompt",
         solutions_key: str = "solutions",
+        dataset_cache: DatasetCache | None = None,
     ) -> Iterable[PromptBatch]:
         """Yield tokenized prompt batches from a dataset-like object.
 
@@ -219,39 +250,48 @@ class Trainer:
         original record is preserved on each `PromptItem` so reward functions
         can read task-specific fields. The cursor advances even when records
         are skipped, so the iterator eventually walks the entire dataset.
+
+        When ``dataset_cache`` is provided, the transformed samples are loaded
+        from the cache on a hit (skipping re-tokenization) and persisted on a
+        miss in a writable cache mode; see ``areno/api/dataset_cache.py`` and
+        ``TrainerConfig.dataset_cache_path``. With ``dataset_cache=None`` the
+        function streams lazily and re-tokenizes every call, exactly as before.
         """
+
+        if dataset_cache is not None:
+            yield from self._load_prompt_batches_cached(
+                dataset_cache,
+                dataset,
+                batch_size=batch_size,
+                max_prompt_tokens=max_prompt_tokens,
+                prompt_key=prompt_key,
+                solutions_key=solutions_key,
+            )
+            return
 
         cursor = 0
         total_skipped_long = 0
         while cursor < len(dataset):
-            items = []
+            items: list[PromptItem] = []
             scanned = 0
             skipped_long = 0
             # Keep scanning until we accumulate `batch_size` accepted rows or
             # exhaust the dataset; over-long prompts increment the skip counter
             # but do not fill the batch.
             while len(items) < batch_size and cursor < len(dataset):
-                record = dataset[cursor]
+                item = self._tokenize_to_prompt_item(
+                    dataset[cursor],
+                    prompt_key=prompt_key,
+                    solutions_key=solutions_key,
+                    max_prompt_tokens=max_prompt_tokens,
+                )
                 cursor += 1
                 scanned += 1
-                if prompt_key not in record:
-                    raise ValueError(
-                        f"dataset row must contain `{prompt_key}`; use --dataset-loader-fn to normalize raw rows"
-                    )
-                prompt = record[prompt_key]
-                input_tokens = encode_generation_prompt(self._tokenizer, prompt)
-                if len(input_tokens) > max_prompt_tokens:
+                if item is None:
                     skipped_long += 1
                     total_skipped_long += 1
                     continue
-                items.append(
-                    PromptItem(
-                        prompt=prompt,
-                        solutions=record[solutions_key] if solutions_key in record else None,
-                        input_tokens=input_tokens,
-                        record=dict(record),
-                    )
-                )
+                items.append(item)
             if not items:
                 break
             yield PromptBatch(
@@ -260,6 +300,201 @@ class Trainer:
                 skipped_long=skipped_long,
                 total_skipped_long=total_skipped_long,
             )
+
+    def _tokenize_to_prompt_item(
+        self, record, *, prompt_key: str, solutions_key: str, max_prompt_tokens: int
+    ) -> PromptItem | None:
+        """Tokenize one dataset row, returning ``None`` for over-long prompts.
+
+        Raises ``ValueError`` when the row lacks the prompt field, so the
+        dataset contract is enforced the same way by the streaming and cached
+        paths.
+        """
+
+        if prompt_key not in record:
+            raise ValueError(
+                f"dataset row must contain `{prompt_key}`; use --dataset-loader-fn to normalize raw rows"
+            )
+        prompt = record[prompt_key]
+        input_tokens = encode_generation_prompt(self._tokenizer, prompt)
+        if len(input_tokens) > max_prompt_tokens:
+            return None
+        return PromptItem(
+            prompt=prompt,
+            solutions=record[solutions_key] if solutions_key in record else None,
+            input_tokens=input_tokens,
+            record=dict(record),
+        )
+
+    def _dataset_cache_key_for(
+        self, dataset, *, max_prompt_tokens: int, prompt_key: str, solutions_key: str
+    ) -> CacheKey:
+        """返回（并记忆化）当前运行的缓存键。
+
+        计算指纹需要流式遍历数据集一次以计算内容哈希，因此将其记忆化到 Trainer 实例上，
+        并在各个 epoch 间复用。按数据集对象身份 + 预处理参数键控，允许同一个 Trainer
+        对两个不同数据集分词而不会错误复用缓存。
+        """
+
+        kwargs_id = (max_prompt_tokens, prompt_key, solutions_key)
+        if (
+            self._dataset_cache_key is not None
+            and self._dataset_cache_key[0] is dataset
+            and self._dataset_cache_key[1] == kwargs_id
+        ):
+            return self._dataset_cache_key[2]
+        key = compute_cache_key(
+            self._model_path,
+            self._tokenizer,
+            dataset,
+            max_prompt_tokens=max_prompt_tokens,
+            prompt_key=prompt_key,
+            solutions_key=solutions_key,
+        )
+        self._dataset_cache_key = (dataset, kwargs_id, key)
+        return key
+
+    def _load_prompt_batches_cached(
+        self,
+        cache: DatasetCache,
+        dataset,
+        *,
+        batch_size: int,
+        max_prompt_tokens: int,
+        prompt_key: str,
+        solutions_key: str,
+    ) -> Iterable[PromptBatch]:
+        """通过缓存服务于 `load_prompt_batches`，仅在未命中时分词。"""
+
+        key = self._dataset_cache_key_for(
+            dataset,
+            max_prompt_tokens=max_prompt_tokens,
+            prompt_key=prompt_key,
+            solutions_key=solutions_key,
+        )
+
+        # Hit path: replay cached samples without re-tokenizing.
+        if cache.mode != "refresh":
+            load_start = time.perf_counter()
+            loaded = cache.try_load(key)
+            load_time = time.perf_counter() - load_start
+            if loaded is not None:
+                items_dicts, meta = loaded
+                items = [_prompt_item_from_dict(item) for item in items_dicts]
+                artifact = cache.artifact_path(key)
+                try:
+                    size_bytes = artifact.stat().st_size if artifact.is_file() else 0
+                except OSError:
+                    size_bytes = 0
+                self._record_cache_event(
+                    cache, key, hit=True, items=len(items), load_time=load_time, size_bytes=size_bytes
+                )
+                yield from self._iter_replay_batches(items, int(meta.get("skipped_long", 0)), batch_size)
+                return
+
+        # 未命中 / 刷新路径：对每条被接受的行分词，然后（在可写模式下）持久化，
+        # 最后将已物化的行按批产出。
+        tokenize_start = time.perf_counter()
+        items: list[PromptItem] = []
+        skipped_long = 0
+        for index in range(len(dataset)):
+            item = self._tokenize_to_prompt_item(
+                dataset[index],
+                prompt_key=prompt_key,
+                solutions_key=solutions_key,
+                max_prompt_tokens=max_prompt_tokens,
+            )
+            if item is None:
+                skipped_long += 1
+                continue
+            items.append(item)
+        tokenization_time = time.perf_counter() - tokenize_start
+        meta = {
+            "max_prompt_tokens": max_prompt_tokens,
+            "prompt_key": prompt_key,
+            "solutions_key": solutions_key,
+            "skipped_long": skipped_long,
+        }
+        size_bytes = 0
+        if cache.mode in ("auto", "refresh"):
+            saved = cache.save(key, [_prompt_item_to_dict(item) for item in items], meta)
+            size_bytes = saved or 0
+        self._record_cache_event(
+            cache,
+            key,
+            hit=False,
+            items=len(items),
+            tokenization_time=tokenization_time,
+            size_bytes=size_bytes,
+            skipped_long=skipped_long,
+        )
+        yield from self._iter_replay_batches(items, skipped_long, batch_size)
+
+    @staticmethod
+    def _iter_replay_batches(
+        items: list[PromptItem], total_skipped_long: int, batch_size: int
+    ) -> Iterable[PromptBatch]:
+        """将已缓存的 `PromptItem` 列表按 `batch_size` 分块还原为 `PromptBatch`。
+
+        缓存命中时，超长行已被过滤，因此每批的 `scanned` 即为该批实际接受的样本数，
+        `skipped_long` 为零；累计 `total_skipped_long` 来自缓存时的统计。
+        """
+
+        cursor = 0
+        while cursor < len(items):
+            batch_items = items[cursor : cursor + batch_size]
+            cursor += len(batch_items)
+            yield PromptBatch(
+                items=batch_items,
+                scanned=len(batch_items),
+                skipped_long=0,
+                total_skipped_long=total_skipped_long,
+            )
+
+    def _record_cache_event(
+        self,
+        cache: DatasetCache,
+        key: CacheKey,
+        *,
+        hit: bool,
+        items: int,
+        load_time: float = 0.0,
+        tokenization_time: float = 0.0,
+        size_bytes: int = 0,
+        skipped_long: int = 0,
+    ) -> None:
+        """输出人类可读日志 + 结构化 dashboard 状态，记录一次缓存事件。"""
+
+        outcome = "hit" if hit else "miss"
+        logger.info(
+            "stage=dataset_cache_%s key=%s items=%d size_bytes=%d skipped_long=%d "
+            "load_time_s=%.3f tokenization_time_s=%.3f mode=%s",
+            outcome,
+            key.fingerprint_hash[:12],
+            items,
+            size_bytes,
+            skipped_long,
+            load_time,
+            tokenization_time,
+            cache.mode,
+        )
+        try:
+            self.record_dashboard_state(
+                stage="dataset_cache_load",
+                status="ok" if hit else "miss",
+                extra={
+                    "hit": hit,
+                    "items": items,
+                    "size_bytes": size_bytes,
+                    "skipped_long": skipped_long,
+                    "load_time_s": load_time,
+                    "tokenization_time_s": tokenization_time,
+                    "mode": cache.mode,
+                    "fingerprint_hash": key.fingerprint_hash,
+                },
+            )
+        except Exception:  # pragma: no cover - observability must not break training
+            logger.debug("dataset cache dashboard event failed", exc_info=True)
 
     def rollout_batch(self, prompts: list[str], n_samples: int, sampling_params: SamplingParams) -> list[RolloutResult]:
         """Generate `n_samples` completions for each prompt in order."""

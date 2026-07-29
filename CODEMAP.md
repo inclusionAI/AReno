@@ -56,6 +56,7 @@ backend-only view.
 | Add or change an algorithm or loss | `areno/api/algorithms.py`, `areno/api/trainers/`, and `areno/api/loss_fns/` | `tests/test_algorithms_cpu.py` and `tests/test_losses_rewards_cpu.py` |
 | Add or change a model family | `areno/models/base.py`, `areno/models/registry.py`, then the closest family under `areno/models/` | `tests/test_registry_cpu.py` and `tests/test_registry_discovery_cpu.py` |
 | Change agentic rollout behavior | `areno/api/agentic.py`, then a matching task under `examples/agentic/` | `tests/test_agentic_cpu.py` and the matching example test |
+| Cache tokenized dataset samples | `areno/api/dataset_cache.py`, then `areno/api/trainer.py::Trainer.load_prompt_batches` | `tests/test_dataset_cache_cpu.py` and `tests/test_trainer_api_cpu.py::TrainerDatasetCacheTest` |
 
 ## Tests, examples, and skills
 

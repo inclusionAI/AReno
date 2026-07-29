@@ -24,6 +24,7 @@ from types import SimpleNamespace
 import click
 
 from areno.api.algorithms import get_algorithm
+from areno.api.dataset_cache import DatasetCacheError, validate_cache_config
 from areno.api.defaults import DEFAULT_METRICS_LOG_DIR
 from areno.api.trainer_config import (
     DPOTrainerConfig,
@@ -130,6 +131,7 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ),
     ("Checkpoint", ("save_path", "save_interval")),
     ("Observability", ("metrics_log_dir",)),
+    ("Dataset cache", ("dataset_cache_path", "dataset_cache_mode")),
 )
 
 
@@ -274,7 +276,23 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
     if args.critic_warmup_steps < 0:
         raise click.UsageError("--critic-warmup-steps must be non-negative")
     _preflight_task_hooks(args, algorithm)
+    _validate_dataset_cache(args)
     return _trainer_config_from_args(args)
+
+
+def _validate_dataset_cache(args) -> None:
+    """在昂贵的模型/worker 初始化之前校验数据集缓存配置。
+
+    缓存路径和模式是轻量的文件系统/配置检查；在此处（配置构建阶段，`run()` 构造并
+    初始化 backend 之前）执行校验可以快速失败，并给出带有 stage/input 标记的清晰报错。
+    """
+
+    cache_path = getattr(args, "dataset_cache_path", None)
+    mode = getattr(args, "dataset_cache_mode", "auto")
+    try:
+        validate_cache_config(cache_path, mode)
+    except DatasetCacheError as exc:
+        raise click.UsageError(str(exc)) from exc
 
 
 def _require_positive_float(value: float, option_name: str) -> None:
@@ -598,6 +616,8 @@ def _trainer_config_from_args(args) -> TrainerConfig:
     args.max_steps = getattr(args, "max_steps", None)
     args.score_micro_bs = getattr(args, "score_micro_bs", 8)
     args.model_hub = getattr(args, "model_hub", "modelscope")
+    args.dataset_cache_path = getattr(args, "dataset_cache_path", None)
+    args.dataset_cache_mode = getattr(args, "dataset_cache_mode", "auto")
     algorithm = get_algorithm(args.algo)
     chat_template_enable_thinking = False if args.disable_thinking else None
     if algorithm.name == "dpo":
@@ -638,6 +658,8 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             agent_timeout_s=args.agent_timeout_s,
             train_tool_results=args.train_tool_results,
             chat_template_enable_thinking=chat_template_enable_thinking,
+            dataset_cache_path=args.dataset_cache_path,
+            dataset_cache_mode=args.dataset_cache_mode,
             ref_ckpt=args.ref_ckpt,
             dpo_beta=args.dpo_beta,
         )
@@ -679,6 +701,8 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             agent_timeout_s=args.agent_timeout_s,
             train_tool_results=args.train_tool_results,
             chat_template_enable_thinking=chat_template_enable_thinking,
+            dataset_cache_path=args.dataset_cache_path,
+            dataset_cache_mode=args.dataset_cache_mode,
         )
     if algorithm.name != "ppo":
         return PolicyTrainerConfig(
@@ -727,6 +751,8 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             agent_timeout_s=args.agent_timeout_s,
             train_tool_results=args.train_tool_results,
             chat_template_enable_thinking=chat_template_enable_thinking,
+            dataset_cache_path=args.dataset_cache_path,
+            dataset_cache_mode=args.dataset_cache_mode,
         )
     return PPOTrainerConfig(
         algo=algorithm.name,
@@ -788,6 +814,8 @@ def _trainer_config_from_args(args) -> TrainerConfig:
         agent_timeout_s=args.agent_timeout_s,
         train_tool_results=args.train_tool_results,
         chat_template_enable_thinking=chat_template_enable_thinking,
+        dataset_cache_path=args.dataset_cache_path,
+        dataset_cache_mode=args.dataset_cache_mode,
     )
 
 
@@ -1187,6 +1215,21 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
 @click.option("--save-interval", type=int, default=100, show_default=True, help="Save checkpoint every N train steps.")
 @click.option(
     "--metrics-log-dir", default=DEFAULT_METRICS_LOG_DIR, show_default=True, help="TensorBoard metrics log directory."
+)
+@click.option(
+    "--dataset-cache-path",
+    default=None,
+    help="Opt-in directory to cache tokenized prompt samples. Unset re-tokenizes every epoch as before; "
+    "set it to cache the transformed samples keyed on dataset content, tokenizer, chat template, and options. "
+    "Cache events (stage=dataset_cache_hit/miss/rejected/skip) are logged at INFO to stderr; "
+    "filter with `grep stage=dataset_cache_`. Level via ARENO_LOG_LEVEL.",
+)
+@click.option(
+    "--dataset-cache-mode",
+    type=click.Choice(["auto", "refresh", "readonly"], case_sensitive=False),
+    default="auto",
+    show_default=True,
+    help="auto reads then writes on a miss; refresh overwrites; readonly reads but never writes.",
 )
 @click.option("--epochs", type=int, default=10, show_default=True, help="Number of dataset epochs to train.")
 @click.option("--max-steps", type=int, default=None, help="Stop after this many trainer steps.")

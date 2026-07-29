@@ -366,6 +366,25 @@ Observability
    ``rollout/*``, ``train/*``, and ``time/*`` metric namespaces and debugging
    log examples.
 
+Dataset cache
+~~~~~~~~~~~~~
+
+``--dataset-cache-path TEXT``
+   Opt-in directory to cache tokenized prompt samples. Unset (the default)
+   re-tokenizes every epoch as before; set it to cache the transformed samples
+   keyed on dataset content, tokenizer assets, chat template, and preprocessing
+   options. See :doc:`dataset_cache`.
+
+``--dataset-cache-mode [auto|refresh|readonly]``
+   ``auto`` reads then writes on a miss (default); ``refresh`` overwrites;
+   ``readonly`` reads but never writes.
+
+When the cache is enabled the first epoch tokenizes and persists; later epochs
+log ``stage=dataset_cache_hit`` and skip re-tokenization. Cache inputs are
+validated before model/worker initialization. Use ``areno dataset-cache
+inspect/clean`` to report cache size and remove artifacts; see
+:doc:`dataset_cache` for details, limitations, and a reproducible example.
+
 Examples
 --------
 

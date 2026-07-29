@@ -60,12 +60,20 @@ class TrainerConfig:
     agent_timeout_s: float = 300.0
     train_tool_results: bool = False
     chat_template_enable_thinking: bool | None = None
+    # 可选的磁盘分词缓存，缓存 `Trainer.load_prompt_batches` 产生的 prompt 样本。
+    # `None`（默认）保持每个 epoch 重新分词的历史行为；设置路径后将启用缓存，
+    # 缓存键由数据集内容、分词器资产、chat template 及预处理选项共同决定。
+    # 详见 `areno/api/dataset_cache.py`。
+    dataset_cache_path: str | None = None
+    dataset_cache_mode: str = "auto"
 
     def __post_init__(self) -> None:
         if self.attn_backend not in {"flash", "native"}:
             raise ValueError("attn_backend must be one of: flash, native")
         if self.model_hub not in {"hf", "modelscope"}:
             raise ValueError("model_hub must be one of: hf, modelscope")
+        if self.dataset_cache_mode not in {"auto", "refresh", "readonly"}:
+            raise ValueError("dataset_cache_mode must be one of: auto, refresh, readonly")
 
     def optimizer_config(self) -> dict:
         """Build the optimizer dict consumed by the backend config."""

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 
 import areno.api.trainer as trainer_mod
 from areno import Trainer
 from areno.api.context import Context
+from areno.api.dataset_cache import DatasetCache
 from areno.api.models import SamplingParams
 from areno.api.trainer import Trainer as ApiTrainer
 from tests.helpers import PatchedContext
@@ -247,6 +250,124 @@ class TrainerPromptBatchTest(unittest.TestCase):
         trainer.train([], lambda _pack, _logprobs: None, mini_bs=1)
 
         self.assertEqual(trainer._ctx.global_step, 0)
+
+
+def _counting_encode(calls: list[str]):
+    """包装确定性桩函数，以便测试断言分词是否被跳过。"""
+
+    def _encode(_tokenizer, prompt: str) -> list[int]:
+        calls.append(prompt)
+        return _encode_from_record_prompt(_tokenizer, prompt)
+
+    return _encode
+
+
+class TrainerDatasetCacheTest(unittest.TestCase):
+    """Issue #206 分词缓存行为，通过 `Trainer.load_prompt_batches` 测试。
+
+    未传入缓存时的流式路径已在 `TrainerPromptBatchTest` 中覆盖；此处覆盖可选缓存
+    的各条路径（未命中/往返、失效、只读，以及不可序列化记录的安全跳过）。
+    """
+
+    def _trainer(self) -> Trainer:
+        trainer = Trainer(world_size=1, model_path="unused")
+        # 空的 object() 没有 chat_template，`model_path` 也没有分词器文件，因此
+        # 指纹在多次调用间稳定，无需加载 HF 分词器。
+        trainer._tokenizer = object()
+        return trainer
+
+    def _dataset(self) -> list[dict]:
+        return [
+            {"prompt": "long", "solutions": ["skip"], "answer": "x"},
+            {"prompt": "short", "solutions": ["ok"], "answer": "2"},
+            {"prompt": "next", "answer": "3"},
+        ]
+
+    def test_miss_writes_artifact_and_hit_skips_retokenization(self):
+        trainer = self._trainer()
+        dataset = self._dataset()
+        calls: list[str] = []
+        with tempfile.TemporaryDirectory() as cache_dir:
+            cache = DatasetCache(cache_dir, mode="auto")
+            with PatchedContext(trainer_mod, encode_generation_prompt=_counting_encode(calls)):
+                first = list(
+                    trainer.load_prompt_batches(dataset, batch_size=2, max_prompt_tokens=3, dataset_cache=cache)
+                )
+            # Every row is encoded once on the miss; the over-long row is
+            # filtered after tokenization, not before.
+            self.assertEqual(len(calls), 3)
+            self.assertEqual(len(list(Path(cache_dir).glob("*.json"))), 1)
+
+            with PatchedContext(trainer_mod, encode_generation_prompt=_counting_encode(calls)):
+                second = list(
+                    trainer.load_prompt_batches(dataset, batch_size=2, max_prompt_tokens=3, dataset_cache=cache)
+                )
+            # Cache hit: no re-tokenization (deterministic proof the second load
+            # is cheaper) and identical batches.
+            self.assertEqual(len(calls), 3)
+            self.assertEqual([b.prompts for b in first], [["short", "next"]])
+            self.assertEqual([b.prompts for b in second], [["short", "next"]])
+            self.assertEqual(
+                [item.input_tokens for b in first for item in b.items],
+                [item.input_tokens for b in second for item in b.items],
+            )
+            self.assertEqual(first[0].total_skipped_long, 1)
+            self.assertEqual(second[0].total_skipped_long, 1)
+
+    def test_invalidation_reretokenizes_when_max_prompt_tokens_changes(self):
+        trainer = self._trainer()
+        dataset = self._dataset()
+        calls: list[str] = []
+        with tempfile.TemporaryDirectory() as cache_dir:
+            cache = DatasetCache(cache_dir, mode="auto")
+            with PatchedContext(trainer_mod, encode_generation_prompt=_counting_encode(calls)):
+                loose = list(
+                    trainer.load_prompt_batches(dataset, batch_size=2, max_prompt_tokens=3, dataset_cache=cache)
+                )
+            # max_prompt_tokens=6 now admits "long" (5 tokens <= 6); the changed
+            # preprocessing option resolves to a new key, so a fresh miss occurs.
+            with PatchedContext(trainer_mod, encode_generation_prompt=_counting_encode(calls)):
+                strict = list(
+                    trainer.load_prompt_batches(dataset, batch_size=2, max_prompt_tokens=6, dataset_cache=cache)
+                )
+            self.assertEqual([b.prompts for b in loose], [["short", "next"]])
+            self.assertEqual([b.prompts for b in strict], [["long", "short"], ["next"]])
+            self.assertEqual(len(calls), 6)
+            self.assertEqual(len(list(Path(cache_dir).glob("*.json"))), 2)
+
+    def test_readonly_mode_never_writes_but_still_serves_batches(self):
+        trainer = self._trainer()
+        dataset = self._dataset()
+        with tempfile.TemporaryDirectory() as cache_dir:
+            cache = DatasetCache(cache_dir, mode="readonly")
+            with PatchedContext(trainer_mod, encode_generation_prompt=_encode_from_record_prompt):
+                batches = list(
+                    trainer.load_prompt_batches(dataset, batch_size=2, max_prompt_tokens=3, dataset_cache=cache)
+                )
+            self.assertEqual([b.prompts for b in batches], [["short", "next"]])
+            # The trainer gate never calls save in readonly mode.
+            self.assertEqual(list(Path(cache_dir).glob("*.json")), [])
+
+    def test_non_serializable_record_degrades_to_uncached_without_partial_file(self):
+        trainer = self._trainer()
+        dataset = [{"prompt": "short", "weird": {1, 2, 3}}]  # a set is not JSON-serializable
+        calls: list[str] = []
+        with tempfile.TemporaryDirectory() as cache_dir:
+            cache = DatasetCache(cache_dir, mode="auto")
+            with PatchedContext(trainer_mod, encode_generation_prompt=_counting_encode(calls)):
+                first = list(
+                    trainer.load_prompt_batches(dataset, batch_size=2, max_prompt_tokens=3, dataset_cache=cache)
+                )
+            with PatchedContext(trainer_mod, encode_generation_prompt=_counting_encode(calls)):
+                second = list(
+                    trainer.load_prompt_batches(dataset, batch_size=2, max_prompt_tokens=3, dataset_cache=cache)
+                )
+            # Both passes re-tokenize (no cache benefit) but behavior is correct
+            # and no partial/corrupt artifact is ever left on disk.
+            self.assertEqual([b.prompts for b in first], [["short"]])
+            self.assertEqual([b.prompts for b in second], [["short"]])
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(list(Path(cache_dir).glob("*.json")), [])
 
 
 if __name__ == "__main__":
