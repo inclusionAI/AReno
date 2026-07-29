@@ -256,6 +256,7 @@ class RolloutSession:
         timeout_s: float = 300.0,
         proxy: bool = True,
         agentic_context_overflow_policy: str = "reject",
+        trim_max_tokens: int | None = None,
     ) -> None:
         self._trainer = trainer
         self._sampling_params = sampling_params
@@ -274,6 +275,7 @@ class RolloutSession:
         self._base_url = ""
         self._proxy_enabled = bool(proxy)
         self._agentic_context_overflow_policy = agentic_context_overflow_policy
+        self._trim_max_tokens = trim_max_tokens
 
     @property
     def max_running_prompts(self) -> int:
@@ -508,31 +510,33 @@ class RolloutSession:
                 fallback_prompt=_first_user_text(pending.messages),
             )
             max_context_len = _max_context_len(pending.params)
-            # When no explicit max is set, fall back to the model's sequence
-            # length for the trim policy so that long-running agentic
-            # trajectories can continue. The reject policy stays strict.
-            trim_target = max_context_len
-            if trim_target is None:
-                trim_target = _model_sequence_len(tokenizer)
-            if trim_target is not None and len(pending.input_tokens) > trim_target and self._agentic_context_overflow_policy == "trim_messages":
-                trimmed = _trim_messages_to_fit(
-                    tokenizer,
-                    pending.messages,
-                    tools=pending.tools,
-                    max_context_len=trim_target,
-                    input_tokens=pending.input_tokens,
-                )
-                if trimmed is None:
-                    response = _unfittable_chat_response(
-                        model=pending.model,
-                        prompt_tokens=len(pending.input_tokens),
-                        max_sequence_len=trim_target,
+            # trim_messages: use the dedicated trim_max_tokens if set,
+            # otherwise fall back to max_context_len or model limit.
+            if self._agentic_context_overflow_policy == "trim_messages":
+                trim_target = self._trim_max_tokens
+                if trim_target is None:
+                    trim_target = max_context_len
+                if trim_target is None:
+                    trim_target = _model_sequence_len(tokenizer)
+                if trim_target is not None and len(pending.input_tokens) > trim_target:
+                    trimmed = _trim_messages_to_fit(
+                        tokenizer,
+                        pending.messages,
+                        tools=pending.tools,
+                        max_context_len=trim_target,
+                        input_tokens=pending.input_tokens,
                     )
-                    self._set_pending_response(pending, response)
-                    return
-                pending.input_tokens = trimmed["tokens"]
-                pending._trimmed_messages = trimmed["messages"]
-                pending._trim_info = trimmed["diagnostics"]
+                    if trimmed is None:
+                        response = _unfittable_chat_response(
+                            model=pending.model,
+                            prompt_tokens=len(pending.input_tokens),
+                            max_sequence_len=trim_target,
+                        )
+                        self._set_pending_response(pending, response)
+                        return
+                    pending.input_tokens = trimmed["tokens"]
+                    pending._trimmed_messages = trimmed["messages"]
+                    pending._trim_info = trimmed["diagnostics"]
             elif max_context_len is not None and len(pending.input_tokens) > max_context_len:
                 response = _filtered_chat_response(
                     model=pending.model,

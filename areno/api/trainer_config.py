@@ -60,6 +60,7 @@ class TrainerConfig:
     agent_timeout_s: float = 300.0
     train_tool_results: bool = False
     agentic_context_overflow_policy: str = "reject"
+    trim_max_tokens: int | None = None
     chat_template_enable_thinking: bool | None = None
 
     def __post_init__(self) -> None:
