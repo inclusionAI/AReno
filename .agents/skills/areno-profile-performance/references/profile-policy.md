@@ -10,3 +10,4 @@
 - TensorBoard event directories are job-specific. List available tags and select the target job's files; never combine unrelated runs into one conclusion.
 - Serve comparisons report warmup policy, request concurrency, prompt/output lengths, TTFT, total latency, and throughput.
 - Profile overhead is not production throughput; validate the change without the profiler.
+- Run comparisons report percentage change per metric, highlight configuration mismatches, and never convert missing values to zero; use `compare_runs.py` for a structured diff of two run directories.

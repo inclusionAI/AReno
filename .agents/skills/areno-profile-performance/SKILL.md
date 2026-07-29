@@ -26,6 +26,8 @@ python .agents/skills/areno-profile-performance/scripts/probe_openai_latency.py 
   --base-url http://127.0.0.1:8000 --model <model> --requests 16 --concurrency 4
 python .agents/skills/areno-profile-performance/scripts/build_nsys_command.py \
   --output /tmp/areno-profile -- <bounded-command> [args...]
+python .agents/skills/areno-profile-performance/scripts/compare_runs.py \
+  <baseline-metrics-dir> <candidate-metrics-dir>
 ```
 
 ## Workflow
@@ -39,5 +41,26 @@ python .agents/skills/areno-profile-performance/scripts/build_nsys_command.py \
 7. Use `py-spy record -p <pid> -o /tmp/areno.svg --duration 30` for Python scheduling, data processing, serialization, blocking I/O, or compilation orchestration.
 8. Use a bounded Nsight Systems capture for GPU compute, communication, synchronization, allocator activity, or launch gaps. Read [references/profile-policy.md](references/profile-policy.md).
 9. Compare baseline and candidate with identical workloads and multiple steady-state observations, then re-run correctness validation after optimization.
+
+Use `compare_runs.py` to produce a structured comparison of throughput, phase
+timing, peak memory, and configuration between two run directories. The script
+reads `areno_run_config`, `dashboard_state`, TensorBoard `time/*` and
+`throughput`/`tokens_per_second` scalars, and monitor JSONL artifacts from each
+directory. Missing values are reported as null, never converted to zero.
+Configuration mismatches are highlighted in both the terminal report (stderr)
+and the JSON report (stdout). Active runs (status="running") produce a warning
+that metrics may be incomplete.
+
+Example:
+
+```bash
+python .agents/skills/areno-profile-performance/scripts/compare_runs.py \
+  /tmp/run-baseline/metrics /tmp/run-candidate/metrics --json-only
+```
+
+Output fields: `ok`, `baseline` (status/stage/step/kind/pid), `candidate`,
+`metrics` (per-key baseline/candidate/pct_change), `peak_memory`,
+`settings_comparison` (matched/mismatched/only_baseline/only_candidate),
+`extremes` (largest_improvement/largest_regression), `warnings`.
 
 Report raw workload metadata, selected window, GPU peak/average memory and utilization, process CPU/RSS, stage breakdown or TTFT/latency, bottleneck evidence, profiler overhead, and before/after metrics. A single warmup step is not a benchmark.
