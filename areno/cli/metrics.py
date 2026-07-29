@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -183,8 +184,12 @@ def _fmt(value: float | None) -> str:
     return f"{value:.6g}"
 
 
-def _iter_accumulators(log_dir: Path):
-    """Yield EventAccumulator instances for each event file in *log_dir*."""
+def _iter_accumulators(log_dir: Path) -> Iterator[Any]:
+    """Yield EventAccumulator instances for each event file in *log_dir*.
+
+    ``Any`` is used because ``EventAccumulator`` is imported lazily inside the
+    function to avoid a hard dependency on tensorboard at module import time.
+    """
 
     try:
         from tensorboard.backend.event_processing.event_accumulator import EventAccumulator

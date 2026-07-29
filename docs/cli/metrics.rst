@@ -82,4 +82,6 @@ Limitations
 * Reads only TensorBoard scalar tags; text, images, and histograms are not
   supported.
 * NaN and Inf values are silently skipped.
+* When the same step appears in multiple event files (e.g. after a training
+  restart), the value from the last file is kept.
 * The command does not modify stored data; it is read-only.
