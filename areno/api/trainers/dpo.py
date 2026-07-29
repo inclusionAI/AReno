@@ -25,7 +25,6 @@ from areno.api.data import (
     apply_degenerate_policy,
     check_preference_pair,
     check_prompt_text,
-    check_response_text,
     check_trainable_tokens,
     format_degenerate_reasons,
     record_degenerate_reason,
@@ -267,14 +266,18 @@ def _make_sequence(
         return None
 
     # --- Post-tokenization degeneracy check: no trainable tokens ---
-    has_trainable = any(not item for item in prompt_mask[1:])
-    if not has_trainable:
-        if degenerate_config is not None:
-            report = check_trainable_tokens(prompt_mask)
-            if apply_degenerate_policy(report, degenerate_config):
-                if degenerate_reasons is not None:
-                    record_degenerate_reason(degenerate_reasons, report)
-                return None
+    # check_trainable_tokens internally tests ``any(not p for p in
+    # prompt_mask[1:])``; when degenerate_config is None we still need the
+    # bare check for backward compatibility.
+    if degenerate_config is not None:
+        report = check_trainable_tokens(prompt_mask)
+        if apply_degenerate_policy(report, degenerate_config):
+            if degenerate_reasons is not None:
+                record_degenerate_reason(degenerate_reasons, report)
+            return None
+        if report.is_degenerate:
+            return None
+    elif not any(not item for item in prompt_mask[1:]):
         return None
 
     zeros = [0.0] * len(tokens)

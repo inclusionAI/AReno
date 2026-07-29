@@ -173,9 +173,7 @@ def apply_degenerate_policy(report: SampleQualityReport, config: DegenerateFilte
     return True
 
 
-def record_degenerate_reason(
-    counts: dict[str, int], report: SampleQualityReport
-) -> None:
+def record_degenerate_reason(counts: dict[str, int], report: SampleQualityReport) -> None:
     """Increment the reason counter in ``counts`` for a degenerate report."""
 
     if report.reason is not None:

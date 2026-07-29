@@ -284,6 +284,9 @@ def _record_to_train_sequence(
     response = str(record["response"])
 
     # --- Pre-tokenization degeneracy checks ---
+    # Empty/whitespace-only prompt and response are detected here.  When
+    # degenerate_config is None the bare ``if not response`` below still
+    # rejects empty responses for backward compatibility.
     if degenerate_config is not None:
         report = check_prompt_text(prompt)
         if apply_degenerate_policy(report, degenerate_config):
