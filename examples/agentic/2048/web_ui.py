@@ -386,27 +386,28 @@ def _llm_episode(server: Game2048Server) -> dict[str, Any]:
             f"[llm] NO tool_call: text fallback → [{moves_preview}] ({len(moves)} moves).",
         )
     # DEV-LOG: remove before launch
-    _dev_log(f"episode start seed={server.seed} cap={server.cap} moves={moves}")
+    # _dev_log(f"episode start seed={server.seed} cap={server.cap} moves={moves}")
     # DEV-LOG: remove before launch
-    _dev_log("episode start board:\n" + _board_ascii(start_board))
+    # _dev_log("episode start board:\n" + _board_ascii(start_board))
     result, frames = game.play_episode_frames(start_board, moves, seed=server.seed, cap=server.cap)
     # DEV-LOG: remove before launch
-    _dev_log(
-        f"episode result: score={result.score} max_tile={result.max_tile} "
-        f"total_moves={result.total_moves} invalid={result.invalid_moves} "
-        f"reached_2048={result.reached_2048} truncated={result.truncated} frames={len(frames)}"
-    )
+    # _dev_log(
+    #     f"episode result: score={result.score} max_tile={result.max_tile} "
+    #     f"total_moves={result.total_moves} invalid={result.invalid_moves} "
+    #     f"reached_2048={result.reached_2048} truncated={result.truncated} frames={len(frames)}"
+    # )
     for index, frame in enumerate(frames):
         # DEV-LOG: remove before launch -- one board snapshot per replayed move.
         # Prefix every frame line with the policy source so a `tail` of the
         # stderr log shows whether this episode came from a real choose_moves
         # tool_call or the text fallback, no matter which frames are in view
         # (the per-frame board dumps otherwise bury the source line above).
-        _dev_log(
-            f"  frame[{index}] src={policy_source} move={frame.get('move')!r} "
-            f"changed={frame.get('changed')} gained={frame.get('gained')} score={frame.get('score')}\n"
-            + _board_ascii(frame.get("board"))
-        )
+        # _dev_log(
+        #     f"  frame[{index}] src={policy_source} move={frame.get('move')!r} "
+        #     f"changed={frame.get('changed')} gained={frame.get('gained')} score={frame.get('score')}\n"
+        #     + _board_ascii(frame.get("board"))
+        # )
+        pass
     server.board = result.board
     # Accumulate (don't overwrite): result.score is the merge score gained
     # *during this episode* from the start board, so adding it keeps Score as a
@@ -469,7 +470,7 @@ def _policy_moves(server: Game2048Server, board: game.Board) -> tuple[list[str],
     # DEV-LOG: remove before launch -- dump the board we send and the raw policy
     # response so we can tell whether the model emits a choose_moves tool_call
     # or plain-text directions that the serve parser does not recognise.
-    _dev_log("policy request board:\n" + _board_ascii(board))
+    # _dev_log("policy request board:\n" + _board_ascii(board))
     response = server.openai_client.chat.completions.create(
         model=server.args.model,
         messages=[
@@ -488,9 +489,9 @@ def _policy_moves(server: Game2048Server, board: game.Board) -> tuple[list[str],
     tool_calls = message.get("tool_calls") or []
     content = message.get("content")
     # DEV-LOG: remove before launch
-    _dev_log(f"policy response finish_reason={finish_reason!r} tool_calls={tool_calls!r}")
+    # _dev_log(f"policy response finish_reason={finish_reason!r} tool_calls={tool_calls!r}")
     # DEV-LOG: remove before launch -- full content, not truncated, for analysis
-    _dev_log(f"policy response content={content!r}")
+    # _dev_log(f"policy response content={content!r}")
     for call in tool_calls:
         if call.get("function", {}).get("name") != "choose_moves":
             continue
@@ -500,11 +501,11 @@ def _policy_moves(server: Game2048Server, board: game.Board) -> tuple[list[str],
                 arguments = json.loads(arguments)
             except json.JSONDecodeError:
                 # DEV-LOG: remove before launch
-                _dev_log("choose_moves arguments not JSON; falling back to content text.")
+                # _dev_log("choose_moves arguments not JSON; falling back to content text.")
                 break
         moves = game.parse_moves(arguments)
         # DEV-LOG: remove before launch
-        _dev_log(f"parsed moves from tool_call: {moves}")
+        # _dev_log(f"parsed moves from tool_call: {moves}")
         return moves, "tool_call"
     # No recognised tool_call: mirror reward.py's text fallback so the demo can
     # replay plain-text directions the policy may emit before it learns tool use.
@@ -513,7 +514,7 @@ def _policy_moves(server: Game2048Server, board: game.Board) -> tuple[list[str],
     # never emits tool_calls cannot silently coast on parsed text.
     moves = game.parse_moves(content) if isinstance(content, str) else []
     # DEV-LOG: remove before launch
-    _dev_log(f"no choose_moves tool_call parsed; text-fallback moves: {moves}")
+    # _dev_log(f"no choose_moves tool_call parsed; text-fallback moves: {moves}")
     return moves, "text_fallback"
 
 
