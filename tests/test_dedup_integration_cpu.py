@@ -283,10 +283,12 @@ class TestCLINoMutation(unittest.TestCase):
 
     def test_source_file_unchanged(self):
         path = _write_temp_file(_JSONL_WITH_DUPES)
-        original_content = open(path).read()
+        with open(path) as f:
+            original_content = f.read()
         try:
             self.runner.invoke(dedup_command, ["--data-path", path])
-            self.assertEqual(open(path).read(), original_content)
+            with open(path) as f:
+                self.assertEqual(f.read(), original_content)
         finally:
             os.unlink(path)
 
