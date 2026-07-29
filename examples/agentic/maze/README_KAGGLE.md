@@ -31,8 +31,8 @@ Kaggle 提供以下 GPU，均可运行此 demo：
 !pip install -q psutil flash-linear-attention openai --no-deps
 !pip install -q math-verify addict
 
-# 克隆仓库（替换为你的 fork）
-!git clone https://github.com/inclusionAI/AReno.git /kaggle/working/AReno
+# 克隆你的 fork 并切换到 maze 分支
+!git clone -b feat/maze-agentic-rl https://github.com/sliverdancer/AReno.git /kaggle/working/AReno
 %cd /kaggle/working/AReno
 
 # 安装 AReno（跳过 CUDA 编译，Kaggle 自带 PyTorch）
