@@ -94,6 +94,9 @@ class Game2048Server(ThreadingHTTPServer):
         self.terminal = False
         self.events: list[str] = []
         self.openai_client = None
+        # Last LLM episode's action source ("tool_call" | "text_fallback" | None),
+        # surfaced in the per-request CLI summary line so it lands in the log file.
+        self.last_policy_source: str | None = None
         _reset(self)
 
 
@@ -239,6 +242,11 @@ def _describe_action(
     if route == "agent":
         who = body.get("mode") if isinstance(body, dict) else mode
         last = server.events[-1] if server.events else ""
+        # For LLM episodes, tag the summary with the policy action source so the
+        # single per-request CLI line (which lands in the log file) states whether
+        # the episode came from a real choose_moves tool_call or the text fallback.
+        if who == "llm" and server.last_policy_source:
+            return f"{who} step [{server.last_policy_source}]: {last}"
         return f"{who} step: {last}"
     if route == "state":
         return "state poll"
@@ -351,7 +359,27 @@ def _llm_episode(server: Game2048Server) -> dict[str, Any]:
 
     server.agent_mode = "llm"
     start_board = [list(row) for row in server.board]
-    moves = _policy_moves(server, start_board)
+    moves, policy_source = _policy_moves(server, start_board)
+    server.last_policy_source = policy_source
+    # Surface whether the policy actually emitted a choose_moves tool_call, or
+    # whether the plan came from the text fallback. The History panel shows it
+    # directly so a no-tool-call degradation is visible without grepping logs.
+    # --strict-tool-call rejects the fallback outright, mirroring reward.py's
+    # no-tool-call penalty: a policy that cannot produce a tool call must fail
+    # loudly instead of silently playing prose-parsed directions.
+    if server.args.strict_tool_call and policy_source != "tool_call":
+        raise ValueError(
+            f"policy did not emit a choose_moves tool call (source={policy_source!r}); "
+            "--strict-tool-call rejects the text fallback. Train longer or rerun without the flag."
+        )
+    moves_preview = ", ".join(moves) if moves else "-"
+    if policy_source == "tool_call":
+        _append_event(server, f"[llm] tool_call OK: choose_moves → [{moves_preview}] ({len(moves)} moves).")
+    else:
+        _append_event(
+            server,
+            f"[llm] NO tool_call: text fallback → [{moves_preview}] ({len(moves)} moves).",
+        )
     # DEV-LOG: remove before launch
     _dev_log(f"episode start seed={server.seed} cap={server.cap} moves={moves}")
     # DEV-LOG: remove before launch
@@ -364,10 +392,14 @@ def _llm_episode(server: Game2048Server) -> dict[str, Any]:
         f"reached_2048={result.reached_2048} truncated={result.truncated} frames={len(frames)}"
     )
     for index, frame in enumerate(frames):
-        # DEV-LOG: remove before launch -- one board snapshot per replayed move
+        # DEV-LOG: remove before launch -- one board snapshot per replayed move.
+        # Prefix every frame line with the policy source so a `tail` of the
+        # stderr log shows whether this episode came from a real choose_moves
+        # tool_call or the text fallback, no matter which frames are in view
+        # (the per-frame board dumps otherwise bury the source line above).
         _dev_log(
-            f"  frame[{index}] move={frame.get('move')!r} changed={frame.get('changed')} "
-            f"gained={frame.get('gained')} score={frame.get('score')}\n"
+            f"  frame[{index}] src={policy_source} move={frame.get('move')!r} "
+            f"changed={frame.get('changed')} gained={frame.get('gained')} score={frame.get('score')}\n"
             + _board_ascii(frame.get("board"))
         )
     server.board = result.board
@@ -394,7 +426,7 @@ def _llm_episode(server: Game2048Server) -> dict[str, Any]:
     return payload
 
 
-def _policy_moves(server: Game2048Server, board: game.Board) -> list[str]:
+def _policy_moves(server: Game2048Server, board: game.Board) -> tuple[list[str], str]:
     # DEV-LOG: remove before launch -- dump the board we send and the raw policy
     # response so we can tell whether the model emits a choose_moves tool_call
     # or plain-text directions that the serve parser does not recognise.
@@ -434,13 +466,16 @@ def _policy_moves(server: Game2048Server, board: game.Board) -> list[str]:
         moves = game.parse_moves(arguments)
         # DEV-LOG: remove before launch
         _dev_log(f"parsed moves from tool_call: {moves}")
-        return moves
+        return moves, "tool_call"
     # No recognised tool_call: mirror reward.py's text fallback so the demo can
     # replay plain-text directions the policy may emit before it learns tool use.
+    # The returned source label lets the UI (and --strict-tool-call) distinguish
+    # a real tool call from this prose fallback, so a half-trained policy that
+    # never emits tool_calls cannot silently coast on parsed text.
     moves = game.parse_moves(content) if isinstance(content, str) else []
     # DEV-LOG: remove before launch
     _dev_log(f"no choose_moves tool_call parsed; text-fallback moves: {moves}")
-    return moves
+    return moves, "text_fallback"
 
 
 def _payload(server: Game2048Server) -> dict[str, Any]:
@@ -677,6 +712,16 @@ def main() -> None:
     parser.add_argument("--base-url", default=None, help="OpenAI-compatible base URL for LLM mode.")
     parser.add_argument("--api-key", default="token")
     parser.add_argument("--model", default="policy")
+    parser.add_argument(
+        "--strict-tool-call",
+        action="store_true",
+        help=(
+            "Reject LLM episodes where the policy did not emit a choose_moves tool call. "
+            "Without this flag, plain-text directions are parsed as a fallback so the demo "
+            "still plays; with it, a no-tool-call turn raises an error event so a "
+            "half-trained policy cannot coast on prose."
+        ),
+    )
     args = parser.parse_args()
 
     server = Game2048Server((args.host, args.port), Game2048Handler, seed=args.seed, cap=args.cap, args=args)
