@@ -1,20 +1,21 @@
 # Agentic 2048 Example
 
-This example trains a policy to play 2048 via multi-turn tool calls. The model
-calls a `move` tool with a direction (UP, DOWN, LEFT, RIGHT) each turn. After
-each move the environment spawns a random tile (2 or 4) using a seeded RNG,
-reports the new board and merge score, and continues until the board is full
-or the move cap is reached.
+This example trains a policy to play 2048 via **single-turn** LLM calls. Each
+step, the model sees only the system prompt and the current board state — no
+conversation history is accumulated. The model outputs brief reasoning followed
+by a direction keyword (UP/DOWN/LEFT/RIGHT), which is parsed from the response
+text.
 
-The game engine is pure Python with no external dependencies. Tile placement
-is deterministic given the seed, so every episode is reproducible.
+This design matches academic RL practice for 2048: the game is Markovian, so
+the current board is the complete state. Single-turn calls avoid context
+length growth (OOM) and eliminate tool-call parsing failures.
 
 ## Files
 
 - `game.py` — 4x4 board engine: slide/merge, spawn, terminal detection, scoring.
 - `dataset_generator.py` — generates reproducible initial board JSONL.
 - `dataset_loader.py` — loads JSONL into AReno prompt records.
-- `run_agent.py` — multi-turn agent loop (move tool call per turn).
+- `run_agent.py` — single-turn agent loop (one LLM call per move, no history).
 - `reward.py` — replays the agent's moves and computes episode reward.
 
 ## Generate Boards
@@ -41,21 +42,35 @@ areno train \
   --max-new-tokens 64
 ```
 
+## How It Works
+
+Each episode plays up to `max_moves` steps. At each step:
+
+1. `run_agent.py` sends the system prompt + current board to the model as a
+   fresh chat (no prior turns appended).
+2. The model outputs brief reasoning, ending with `MOVE: <DIRECTION>`.
+3. `game.parse_action()` extracts the direction from the text.
+4. If no direction is found, a random legal move is used as fallback.
+5. The board is updated and the next step repeats.
+
+All steps from one episode are collected as `AgentTrajectoryTurn` entries and
+merged by the AReno framework into a single training row. The reward function
+parses all directions from the concatenated response text and replays the
+episode on the seeded board.
+
 ## Reward
 
 The reward function replays the agent's move sequence on the seeded board and
-combines three signals into a scalar in [-1, 1]:
+combines:
 
 | Component | Weight | Description |
 |-----------|--------|-------------|
-| Merge score | 50% | `min(total_score / 2000, 1)` |
-| Max tile | 30% | `min(log2(max_tile) / 13, 1)` (8192 = 1.0) |
-| Valid-move base | 20% | Fixed bonus, reduced by invalid-move penalty |
-
-Invalid moves (moves that do not change the board) do not consume an RNG draw
-and incur a penalty of `0.3 * invalid_rate`.
+| Merge score | 1.0 | Total merge score across all valid moves |
+| Monotonicity bonus | 0.01 | Per-step bonus for monotonic board structure |
+| Empty-cell bonus | 0.02 | Per-step bonus × empty cell count |
+| Invalid move penalty | -1.0 | Per invalid move |
 
 ## Episode Cap
 
-Each episode is capped at `DEFAULT_MAX_MOVES = 200` turns. The cap is
+Each episode is capped at `DEFAULT_MAX_MOVES = 50` turns. The cap is
 configurable via the `max_moves` field in the dataset record.

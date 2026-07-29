@@ -21,31 +21,13 @@ DEFAULT_MAX_MOVES = 50
 SYSTEM_PROMPT = (
     "You are a 2048 game AI. The board is a 4x4 grid. Each turn you choose to "
     "swipe UP, DOWN, LEFT, or RIGHT. Identical tiles merge on collision. After "
-    "each move a new 2 (90%) or 4 (10%) appears in a random empty cell. "
-    "You MUST call the move tool every turn with one direction.\n\n"
-    "Example tool call:\n"
-    '{"name": "move", "arguments": {"direction": "LEFT"}}'
+    "each move a new 2 (90%) or 4 (10%) appears in a random empty cell.\n\n"
+    "Strategy: keep your largest tile in a corner and build a monotonic chain "
+    "along one edge. Avoid moving the largest tile away from its corner.\n\n"
+    "Output format: briefly reason about the best move (1-2 sentences), then "
+    "end your response with the direction on its own line, like:\n"
+    "MOVE: LEFT"
 )
-
-MOVE_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "move",
-        "description": "Swipe the 2048 board in one direction.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "direction": {
-                    "type": "string",
-                    "enum": list(DIRECTIONS),
-                    "description": "The swipe direction: UP, DOWN, LEFT, or RIGHT.",
-                }
-            },
-            "required": ["direction"],
-            "additionalProperties": False,
-        },
-    },
-}
 
 _DIRECTION_RE = re.compile(r"\b(UP|DOWN|LEFT|RIGHT)\b", re.IGNORECASE)
 
