@@ -36,6 +36,7 @@ AReno documentation
    cookbook/math-rlvr
    cookbook/tictactoe-agentic-rl
    cookbook/duelgrid-visual-agent
+   cookbook/othello-agentic-rl
 
 .. toctree::
    :hidden:
