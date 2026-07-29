@@ -1,4 +1,9 @@
-"""Reward function for the circuit-diagnosis agentic example (issue #193)."""
+"""Reward function for the circuit-diagnosis agentic example (issue #193).
+
+The agent makes multiple turns of probe/submit calls. The reward function
+scans all tool calls across all turns for the last `submit` call and checks
+whether the submitted gate_id matches the faulty gate.
+"""
 
 from __future__ import annotations
 
@@ -13,14 +18,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 def reward_fn(record: Any) -> float:
     """Score one diagnosis completion by extracting the submit tool call.
 
+    Scans all tool calls (across multi-turn trajectories) for the last
+    `submit` call and checks correctness.
+
     Args:
         record: A record with ``source_record``, ``tool_calls``, and
             ``completion`` fields from the agentic rollout.
 
     Returns:
         1.0 if the agent correctly identified the faulty gate,
-        0.0 otherwise. Partial credit for fewer probes is handled
-        by :func:`circuit.score_diagnosis` when used programmatically.
+        0.0 otherwise.
     """
 
     source = record.source_record
@@ -32,9 +39,10 @@ def reward_fn(record: Any) -> float:
 
 
 def _tool_gate_id(record: Any) -> int | None:
-    """Extract the gate_id from the last submit tool call."""
+    """Extract the gate_id from the last submit tool call across all turns."""
 
-    for call in reversed(record.tool_calls):
+    tool_calls = getattr(record, "tool_calls", None) or []
+    for call in reversed(tool_calls):
         name = call.get("name") if isinstance(call, dict) else None
         if name != "submit":
             continue
@@ -43,11 +51,11 @@ def _tool_gate_id(record: Any) -> int | None:
             try:
                 arguments = json.loads(arguments)
             except json.JSONDecodeError:
-                return None
+                continue
         if isinstance(arguments, dict):
             gate_id = arguments.get("gate_id")
             try:
                 return int(gate_id)
             except (TypeError, ValueError):
-                return None
+                continue
     return None
