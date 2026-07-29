@@ -119,6 +119,7 @@ class PolicyOnlyTrainer:
                     )
 
                 if train_batch:
+                    _consecutive_skipped = 0
                     # PPO uses this hook to skip actor updates during the
                     # critic-only warmup window; GSPO/GRPO always train.
                     if not self._should_train_policy(step):
@@ -153,18 +154,19 @@ class PolicyOnlyTrainer:
                     record_dashboard_state(self.areno, stage="train_end", epoch=epoch, step=step, role=role)
                     self.logger.info("epoch=%d step=%d train_stats=%s", epoch, step, result)
                     self._maybe_save(epoch, step)
-                    _consecutive_skipped = 0
                 else:
+                    self.areno.finish_step()
                     _consecutive_skipped += 1
                     reason = "empty_response"
                     _skip_reasons[reason] = _skip_reasons.get(reason, 0) + 1
                     self.logger.warning(
-                        "epoch=%d step=%d reason=%s consecutive=%d/%d",
+                        "epoch=%d step=%d reason=%s consecutive=%d/%s",
                         epoch, step, reason, _consecutive_skipped,
                         self.config.max_consecutive_skipped_steps,
                     )
                     record_dashboard_state(self.areno, stage="empty_train_batch",
-                                           epoch=epoch, step=step, extra={"reason": reason})
+                                           epoch=epoch, step=step, role=role,
+                                           extra={"reason": reason})
                     if (self.config.max_consecutive_skipped_steps is not None
                             and _consecutive_skipped >= self.config.max_consecutive_skipped_steps):
                         summary = {
@@ -177,6 +179,7 @@ class PolicyOnlyTrainer:
                         self.logger.error("stop_reason=consecutive_empty_batches %s",
                                           json.dumps(summary))
                         record_dashboard_state(self.areno, stage="stopped_consecutive_empty",
+                                               epoch=epoch, step=step, role=role,
                                                extra=summary)
                         return
                 step += 1
