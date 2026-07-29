@@ -41,12 +41,13 @@ ALL_COORDS: tuple[tuple[int, int], ...] = tuple((r, c) for r in range(9) for c i
 # Number of givens retained per difficulty band. 17 is the theoretical minimum
 # for a unique-solution Sudoku; bands are chosen so generation stays fast.
 DIFFICULTY_CLUES: dict[str, int] = {
+    "tutorial": 66,  # ~15 empty cells: shortest episodes, fastest to verify the RL loop
     "easy": 40,
     "medium": 32,
     "hard": 26,
     "extreme": 20,
 }
-DEFAULT_DIFFICULTY = "medium"
+DEFAULT_DIFFICULTY = "tutorial"
 # Default action budget per episode. Plenty for a 41-empty-cell medium board
 # while still bounded so truncation is observable.
 DEFAULT_ACTION_BUDGET = 81

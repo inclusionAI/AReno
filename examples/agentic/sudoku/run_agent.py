@@ -251,11 +251,16 @@ def _execute_tool(env: sudoku.SudokuEnv, call: dict[str, Any]) -> dict[str, Any]
 
 
 def _with_board(env: sudoku.SudokuEnv, result: dict[str, Any]) -> dict[str, Any]:
-    """Attach the visible board to a tool result (never the solution)."""
+    """Attach lightweight state to a tool result (never the solution).
 
-    result["board"] = [row[:] for row in env.puzzle]
-    result["board_text"] = env.board_text()
+    We intentionally do NOT echo the full board back every turn. The board is
+    already in the initial user prompt, and re-sending all 81 cells each turn
+    makes multi-turn context explode (101 turns x ~500 tokens = ~50k+ tokens,
+    far over any sane context budget). Instead each tool result carries only
+    the compact action outcome plus a few integers the policy needs to track
+    progress; the policy mentally updates the board from its own moves.
+    """
+
     result["is_terminal"] = env.is_terminal()
-    result["difficulty"] = env.difficulty
     result["actions_remaining"] = env._actions_remaining()  # noqa: SLF001
     return result

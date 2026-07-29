@@ -80,14 +80,13 @@ def _format_record(raw: dict, index: int) -> dict:
         action_budget=int(raw.get("action_budget", sudoku.DEFAULT_ACTION_BUDGET)),
     )
     # max_turns is the per-episode LLM turn cap. Each turn performs exactly one
-    # tool call, and Sudoku fills ONE cell per place_digit — so a solvable
-    # episode needs at least `empty_cells` place turns, plus headroom for
-    # inspect_candidates / undo calls. Compute it from the board so it is always
-    # sufficient (a fixed small cap like 8 would make every board un-finishable
-    # and drive solve_rate to 0). Headroom = empty_cells (so inspect can be
-    # used roughly once per cell) + 20 buffer for undo/exploration.
+    # tool call and fills at most ONE cell, so a solvable episode needs at least
+    # `empty_cells` place turns. We add a modest headroom for a few
+    # inspect_candidates / undo calls. We keep the cap tight (not empty_cells*2)
+    # because multi-turn context grows with turns — a policy that inspects too
+    # much will truncate, which is itself the signal to learn denser moves.
     if _curriculum_enabled() and "max_turns" not in raw:
-        max_turns = empty_cells * 2 + 20
+        max_turns = empty_cells + 15
     else:
         max_turns = int(raw.get("max_turns", DEFAULT_MAX_TURNS))
     return {

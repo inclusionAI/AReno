@@ -19,11 +19,13 @@ import sudoku  # noqa: E402
 
 DEFAULT_COUNT = 128
 DEFAULT_SEED = 2026
-# Curriculum order: records are emitted in this difficulty order (easy first,
-# extreme last). AReno's trainer consumes the dataset list sequentially, so an
-# ordered dataset becomes an automatic easy->hard curriculum in pass 1.
-DEFAULT_DIFFICULTIES = "easy,medium,hard,extreme"
-DIFFICULTY_ORDER: tuple[str, ...] = ("easy", "medium", "hard", "extreme")
+# Curriculum order: records are emitted in this difficulty order (tutorial
+# first, extreme last). AReno's trainer consumes the dataset list sequentially,
+# so an ordered dataset becomes an automatic easy->hard curriculum in pass 1.
+# `tutorial` (~15 empty cells) gives short episodes so the RL loop can be
+# verified quickly on limited GPUs before scaling to fuller boards.
+DEFAULT_DIFFICULTIES = "tutorial,easy,medium,hard,extreme"
+DIFFICULTY_ORDER: tuple[str, ...] = ("tutorial", "easy", "medium", "hard", "extreme")
 
 
 def generate_records(

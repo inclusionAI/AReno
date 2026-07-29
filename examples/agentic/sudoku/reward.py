@@ -36,6 +36,7 @@ import sudoku  # noqa: E402
 
 # Solved-reward weight per difficulty (curriculum). Higher bands pay more.
 SOLVED_REWARD: dict[str, float] = {
+    "tutorial": 0.8,
     "easy": 1.0,
     "medium": 1.2,
     "hard": 1.5,
