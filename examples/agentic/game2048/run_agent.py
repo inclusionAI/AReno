@@ -100,11 +100,26 @@ async def _run_episode(item, client) -> list[AgentTrajectoryTurn]:
     return turns
 
 
+_debug_logged = 0
+_DEBUG_LOG_LIMIT = 6
+
+
 def _extract_direction(response) -> str | None:
     """Parse direction from the model's tool call response."""
 
+    global _debug_logged
     message = response.choices[0].message
     tool_calls = getattr(message, "tool_calls", None) or []
+    content = getattr(message, "content", None)
+    if _debug_logged < _DEBUG_LOG_LIMIT:
+        _debug_logged += 1
+        logger.warning(
+            "Game2048 DEBUG #%d: content=%r tool_calls=%r finish_reason=%r",
+            _debug_logged,
+            content,
+            tool_calls,
+            getattr(response.choices[0], "finish_reason", None),
+        )
     if not tool_calls:
         return None
     call = tool_calls[0]
