@@ -91,6 +91,8 @@ def _fulfill_order(game, state) -> None:
             if available <= 0:
                 continue
             _move_to(game, state, shelf_id)
+            if shelf_id not in state.checked_shelves:
+                assert game.check_shelf(state).success
             quantity = min(available, remaining)
             assert game.pick(state, item["sku"], quantity).success
             remaining -= quantity
@@ -175,6 +177,7 @@ def test_warehouse_generator_is_balanced_deterministic_and_satisfiable():
         for item in record["order"]:
             available = sum(shelf.stock.get(item["sku"], 0) for shelf in state.shelves.values())
             assert available >= item["qty"]
+            assert any(shelf.stock.get(item["sku"], 0) >= item["qty"] for shelf in state.shelves.values())
 
 
 def test_warehouse_generator_rejects_non_positive_count():
@@ -199,6 +202,7 @@ def test_warehouse_loader_uses_shared_defaults_and_current_tool_names():
 
     assert record["rows"] == 2
     assert record["sku_pool"] == ["S1", "S2", "S3", "S4"]
+    assert "query_inventory" in record["prompt"]
     assert "check_shelf" in record["prompt"]
     assert "pick_item" in record["prompt"]
     assert "pick_from_shelf" not in record["prompt"]
@@ -241,6 +245,7 @@ def test_warehouse_build_state_returns_independent_mutable_states():
 
     assert first is not second
     assert first.shelves is not second.shelves
+    assert game.check_shelf(first).success
     assert game.pick(first, sku, 1).success
     assert first.cart == {sku: 1}
     assert second.cart == {}
@@ -281,6 +286,51 @@ def test_warehouse_move_validates_unknown_and_unreachable_shelves():
     assert state.invalid_actions == 2
 
 
+def test_warehouse_inventory_query_returns_all_current_locations():
+    game = _load_module("game")
+    state = game.build_state(_records(1, seed=151)[0])
+    item = state.order[0]
+
+    result = game.query_inventory(state, item["sku"])
+
+    assert result.success
+    assert result.data["sku"] == item["sku"]
+    assert result.data["locations"] == [
+        {"shelf_id": shelf_id, "qty": shelf.stock[item["sku"]]}
+        for shelf_id, shelf in sorted(state.shelves.items())
+        if shelf.stock.get(item["sku"], 0) > 0
+    ]
+
+
+def test_warehouse_check_penalizes_shelves_without_requested_stock():
+    game = _load_module("game")
+    state = game.build_state(_records(1, seed=152)[0])
+    order_skus = {item["sku"] for item in state.order}
+    empty_target = next(shelf_id for shelf_id in state.shelves if shelf_id != state.agent_pos)
+    for sku in order_skus:
+        state.shelves[empty_target].stock.pop(sku, None)
+    _move_to(game, state, empty_target)
+
+    result = game.check_shelf(state)
+
+    assert result.success
+    assert result.data["useful"] is False
+    assert result.data["requested_stock"] == {}
+    assert state.empty_shelf_checks == 1
+
+
+def test_warehouse_pick_requires_a_current_shelf_inspection():
+    game = _load_module("game")
+    state = game.build_state(_records(1, seed=153)[0])
+    sku = next(iter(state.shelves[state.agent_pos].stock))
+
+    result = game.pick(state, sku, 1)
+
+    assert not result.success
+    assert result.data["stage"] == "inspection_validation"
+    assert state.invalid_actions == 1
+
+
 def test_warehouse_pick_tracks_wrong_item_and_out_of_stock():
     game = _load_module("game")
     state = game.build_state(_records(1, seed=16)[0])
@@ -292,6 +342,7 @@ def test_warehouse_pick_tracks_wrong_item_and_out_of_stock():
         if sku not in order_skus
     )
     _move_to(game, state, wrong[0])
+    assert game.check_shelf(state).success
 
     result = game.pick(state, wrong[1], 1)
     assert result.success
@@ -324,6 +375,7 @@ def test_warehouse_submit_requires_exact_cart_and_emits_metrics():
         "complete_orders",
         "picking_mistakes",
         "invalid_actions",
+        "empty_shelf_checks",
         "distance",
         "baseline_distance",
         "distance_ratio",
@@ -344,6 +396,24 @@ def test_warehouse_baseline_supports_quantities_split_across_shelves():
     assert game.baseline_distance(state) == 2
 
 
+def test_warehouse_baseline_finds_global_shortest_route():
+    game = _load_module("game")
+    state = game.build_state(_records(2, seed=181)[1])
+    for shelf in state.shelves.values():
+        shelf.stock.clear()
+    state.shelves["C1"].stock["S1"] = 1
+    state.shelves["A2"].stock["S2"] = 1
+    state.order = [
+        {"sku": "S1", "qty": 1},
+        {"sku": "S2", "qty": 1},
+    ]
+    state.agent_pos = "A1"
+
+    assert game.baseline_route(state) == ["A2", "C1"]
+    assert game.baseline_distance(state) == 4
+    assert game.baseline_action_count(state) == 11
+
+
 def test_warehouse_execute_action_rejects_malformed_arguments_without_raising():
     game = _load_module("game")
     state = game.build_state(_records(1, seed=19)[0])
@@ -354,20 +424,24 @@ def test_warehouse_execute_action_rejects_malformed_arguments_without_raising():
         "pick_item",
         {"sku": "S1", "qty": "one"},
     )
+    invalid_query_result = game.execute_action(state, "query_inventory", {})
     unknown_result = game.execute_action(state, "fly", {})
 
     assert not array_result.success
     assert array_result.data["input"] == "arguments"
     assert not string_qty_result.success
     assert string_qty_result.data["input"] == "qty"
+    assert not invalid_query_result.success
+    assert invalid_query_result.data["input"] == "sku"
     assert not unknown_result.success
-    assert state.invalid_actions == 3
+    assert state.invalid_actions == 4
 
 
 def test_warehouse_agent_tool_schemas_are_closed():
     run_agent = _load_module("run_agent")
 
     assert {tool["function"]["name"] for tool in run_agent.TOOLS} == {
+        "query_inventory",
         "move_to",
         "check_shelf",
         "pick_item",
@@ -434,10 +508,10 @@ def test_warehouse_state_prompt_tracks_partial_quantities():
     item = state.order[0]
     state.cart[item["sku"]] = item["qty"] - 1
 
-    prompt = run_agent.make_state_prompt(state, turn_number=2)
+    prompt = run_agent.make_state_prompt(state, turn_number=2, turn_limit=9)
 
     assert f"{item['sku']} x1" in prompt
-    assert "Action turn 2 of 6" in prompt
+    assert "Action turn 2 of 9" in prompt
 
 
 def test_warehouse_episode_preserves_history_and_final_tool_result():
@@ -455,6 +529,13 @@ def test_warehouse_episode_preserves_history_and_final_tool_result():
     )
     client = _fake_client(
         [
+            _response(
+                {
+                    "id": "query",
+                    "name": "query_inventory",
+                    "arguments": {"sku": sku},
+                }
+            ),
             _response({"id": "check", "name": "check_shelf"}),
             _response(
                 {
@@ -471,7 +552,7 @@ def test_warehouse_episode_preserves_history_and_final_tool_result():
     turns = asyncio.run(run_agent._run_episode(item, state, client))
 
     assert state.completed
-    assert len(turns) == 4
+    assert len(turns) == 5
     second_messages = client.completions.requests[1]["messages"]
     assert [message["role"] for message in second_messages[-4:]] == [
         "user",
@@ -489,6 +570,9 @@ def test_warehouse_episode_preserves_history_and_final_tool_result():
     submit_result = json.loads(final_messages[-2]["content"])
     assert submit_result["data"]["completed"] is True
     assert submit_result["data"]["metrics"]["complete_orders"] == 1
+    final_request = client.completions.requests[-1]
+    assert final_request["tools"] == run_agent.TOOLS
+    assert final_request["tool_choice"] == "none"
 
 
 def test_warehouse_episode_does_not_fabricate_a_missing_tool_call():
@@ -531,6 +615,7 @@ def test_warehouse_concurrent_episodes_keep_state_isolated():
     def client(call_id):
         return _fake_client(
             [
+                _response({"id": f"{call_id}-check", "name": "check_shelf"}),
                 _response(
                     {
                         "id": call_id,
@@ -603,21 +688,27 @@ def test_warehouse_reward_replays_optimal_partial_and_invalid_paths():
         "pick_item",
         {"sku": sku, "qty": 1},
     )
+    query_call = _assistant_call(
+        "query",
+        "query_inventory",
+        {"sku": sku},
+    )
+    check_call = _assistant_call("check", "check_shelf", {})
     submit_call = _assistant_call("submit", "submit_order", {})
     optimal = SimpleNamespace(
         source_record=record,
-        messages=[pick_call, submit_call],
+        messages=[query_call, check_call, pick_call, submit_call],
         tool_calls=[],
     )
     partial = SimpleNamespace(
         source_record=record,
-        messages=[pick_call],
+        messages=[check_call, pick_call],
         tool_calls=[],
     )
     repeated = SimpleNamespace(
         source_record=record,
         messages=[
-            _assistant_call("check-1", "check_shelf", {}),
+            check_call,
             _assistant_call("check-2", "check_shelf", {}),
         ],
         tool_calls=[],
@@ -637,6 +728,89 @@ def test_warehouse_reward_replays_optimal_partial_and_invalid_paths():
     )
 
     assert reward.reward_fn(optimal) == 1.0
-    assert reward.reward_fn(partial) == 0.0
+    assert abs(reward.reward_fn(partial) - (-0.1)) < 1e-9
     assert reward.reward_fn(repeated) < -0.5
     assert reward.reward_fn(multiple) < -0.5
+
+
+def test_warehouse_reward_prefers_shortest_route_and_penalizes_empty_check():
+    game = _load_module("game")
+    reward = _load_module("reward")
+    record = None
+    state = None
+    wrong_neighbor = None
+    sku = None
+    for candidate in _records(60, seed=260):
+        candidate_state = game.build_state(candidate)
+        for candidate_sku in candidate["sku_pool"]:
+            locations = [
+                shelf_id for shelf_id, shelf in candidate_state.shelves.items() if shelf.stock.get(candidate_sku, 0) > 0
+            ]
+            empty_neighbors = [
+                shelf_id
+                for shelf_id in candidate_state.adjacency[candidate_state.agent_pos]
+                if candidate_state.shelves[shelf_id].stock.get(candidate_sku, 0) == 0
+            ]
+            if candidate_state.agent_pos not in locations and empty_neighbors:
+                record = dict(candidate)
+                record["order"] = [{"sku": candidate_sku, "qty": 1}]
+                state = game.build_state(record)
+                wrong_neighbor = empty_neighbors[0]
+                sku = candidate_sku
+                break
+        if record is not None:
+            break
+
+    assert record is not None
+    assert state is not None
+    assert wrong_neighbor is not None
+    assert sku is not None
+    target = game.baseline_route(state)[-1]
+    shortest_path = _path_to(state, target)
+
+    def calls_for_path(path, prefix):
+        return [
+            _assistant_call(
+                f"{prefix}-{index}",
+                "move_to",
+                {"shelf_id": shelf_id},
+            )
+            for index, shelf_id in enumerate(path)
+        ]
+
+    query = _assistant_call("query", "query_inventory", {"sku": sku})
+    finish = [
+        _assistant_call("check-target", "check_shelf", {}),
+        _assistant_call("pick", "pick_item", {"sku": sku, "qty": 1}),
+        _assistant_call("submit", "submit_order", {}),
+    ]
+    shortest = SimpleNamespace(
+        source_record=record,
+        messages=[query, *calls_for_path(shortest_path, "short"), *finish],
+        tool_calls=[],
+    )
+    detour_moves = [wrong_neighbor, state.agent_pos, *shortest_path]
+    detour = SimpleNamespace(
+        source_record=record,
+        messages=[query, *calls_for_path(detour_moves, "detour"), *finish],
+        tool_calls=[],
+    )
+    empty_check = SimpleNamespace(
+        source_record=record,
+        messages=[
+            query,
+            _assistant_call("wrong-move", "move_to", {"shelf_id": wrong_neighbor}),
+            _assistant_call("wrong-check", "check_shelf", {}),
+            _assistant_call("return", "move_to", {"shelf_id": state.agent_pos}),
+            *calls_for_path(shortest_path, "empty"),
+            *finish,
+        ],
+        tool_calls=[],
+    )
+
+    shortest_score = reward.reward_fn(shortest)
+    detour_score = reward.reward_fn(detour)
+    empty_score = reward.reward_fn(empty_check)
+    assert shortest_score == 1.0
+    assert detour_score < shortest_score
+    assert abs((detour_score - empty_score) - 0.1) < 1e-9

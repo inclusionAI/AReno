@@ -3,14 +3,21 @@
 This example trains a policy on a deterministic, multi-turn warehouse task.
 Each sample contains a connected shelf grid, reproducible stock, and a
 satisfiable order. Every prompt/sample rollout owns an independent mutable
-environment.
+environment. The robot locates requested SKUs through the inventory service
+before navigating to and inspecting their shelves.
 
-On each of at most six action turns, the model must call exactly one tool:
+On each bounded action turn, the model must call exactly one tool:
 
-1. `check_shelf` inspects stock on the current shelf.
+1. `query_inventory` returns every current shelf location for one SKU.
 2. `move_to` moves one step to an adjacent shelf.
-3. `pick_item` picks stock from the current shelf.
-4. `submit_order` validates the cart against the exact order.
+3. `check_shelf` verifies stock on the current shelf. Inspecting a shelf with
+   no still-requested stock is recorded as an empty check.
+4. `pick_item` picks verified stock from the current shelf.
+5. `submit_order` validates the cart against the exact order.
+
+The turn limit is the shortest-route reference action count plus two recovery
+turns. This keeps every generated task achievable while bounding rollout
+length. Picking before inspecting the current shelf is rejected.
 
 After a completed, rejected, or turn-limited episode, one final model turn
 summarizes the real tool results without calling another tool. Missing calls
@@ -29,7 +36,9 @@ python examples/agentic/warehouse/dataset_generator.py \
 The generator prints a JSON summary and writes local JSONL records. Generation
 cycles through small (2x2), medium (3x3), and hard (4x3) layouts, so any count
 of at least three contains every difficulty. Reusing the same seed produces
-the same records. Generated order quantities never exceed total stock.
+the same records. Every generated order quantity fits on at least one shelf;
+the environment and route baseline continue to support split stock in custom
+fixtures.
 
 Inputs are validated before agent requests begin. For example, this boundary
 input fails with `count must be a positive integer`:
@@ -55,14 +64,16 @@ areno train \
   --algo gspo \
   --batch-size 8 \
   --n-samples 4 \
+  --max-context-len 8192 \
   --max-new-tokens 128
 ```
 
 The reward replays exact assistant tool calls against a fresh deterministic
-environment. It rewards exact completion and route efficiency while
-penalizing picking mistakes, invalid actions, and repeated checks. Incomplete
-cart progress remains non-positive, so repeated observation or movement cannot
-earn a positive reward by itself.
+environment. Exact order submission is the primary outcome. Completed paths
+receive an additional efficiency component based on the exact minimum movement
+distance needed to reach sufficient stock. Empty or repeated inspections,
+picking mistakes, and invalid actions are penalized. Incomplete cart progress
+remains negative, so merely reaching a shelf cannot earn a completion reward.
 
 ## Observable Output
 
@@ -71,6 +82,7 @@ Every tool result contains a human-readable message and structured `metrics`:
 - `complete_orders`: `1` after an exact successful submission, otherwise `0`
 - `picking_mistakes`: wrong-item, excess-quantity, and stock errors
 - `invalid_actions`: malformed tools, unreachable moves, and invalid submissions
+- `empty_shelf_checks`: inspections with no still-requested stock
 - `distance` and `baseline_distance`
 - `distance_ratio` and `distance_efficiency`
 - `cart_progress`
@@ -84,5 +96,6 @@ the deterministic seed needed to reconstruct layouts and replay trajectories.
 - The environment is local and uses no external database or sandbox.
 - Only existing AReno dependencies are required.
 - Shelf layouts are connected rectangular grids, not arbitrary warehouse maps.
+- Inventory locations are deterministic and static during each episode.
 - Generated tasks are satisfiable. Out-of-stock and wrong-item behavior is
   exercised through invalid action paths and focused CPU tests.
