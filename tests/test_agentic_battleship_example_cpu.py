@@ -587,3 +587,44 @@ def test_battleship_evaluate_random_player():
     assert result["total_fleets"] == 1
     # Random should eventually hit something if turn cap is high enough
     assert result["results"][0]["shots_used"] <= 64
+
+
+def test_battleship_tool_messages_error_path_serializes_without_state():
+    """Error-path tool results (which carry a GameState) serialize to JSON and
+    never leak hidden ship positions."""
+    import json
+
+    try:
+        run_agent = _load_module("run_agent")
+    except ModuleNotFoundError as e:
+        if "torch" in str(e):
+            # Skip if torch is not available (required by areno imports)
+            return
+        raise
+    game = _load_module("game")
+
+    record = game.place_fleet(42)
+    state = game.init_state(record)
+
+    # Error path: missing fire tool call -> result carries {"state": state}.
+    assistant_message = {
+        "role": "assistant",
+        "tool_calls": [{
+            "id": "missing_fire",
+            "type": "function",
+            "function": {"name": "fire", "arguments": "{}"},
+        }],
+    }
+    result = run_agent._run_tool(assistant_message, state)
+    assert "state" in result  # internal bookkeeping still present for run_one
+
+    msgs = run_agent._tool_messages(assistant_message, result)
+    tool_msg = next(m for m in msgs if m["role"] == "tool")
+    # Must not raise and must not carry the raw state / ship cells.
+    parsed = json.loads(tool_msg["content"])
+    assert "state" not in parsed
+    blob = tool_msg["content"]
+    for ship in state.ships:
+        for cell in ship.cells:
+            coord = game.format_coordinate(cell[0], cell[1])
+            assert coord not in blob  # no hidden ship coordinate leaked

@@ -205,16 +205,18 @@ async def _call_model(item, client, messages: list[dict], state):
 # 构建工具调用和工具结果消息的辅助函数
 def _tool_messages(assistant_message: dict, tool_result: dict) -> list[dict]:
     """Build the messages for assistant tool call and tool result."""
-    # 首先添加助手消息
     messages = [assistant_message]
-    # 遍历每个工具调用，添加工具结果消息
+    # `state` is internal bookkeeping for run_one (line 113) and is not
+    # JSON-serializable (GameState/Ship). Strip it so the tool message only
+    # carries serializable status metadata — never the hidden ship positions.
+    content = {k: v for k, v in tool_result.items() if k != "state"}
     for call in assistant_message.get("tool_calls") or []:
         messages.append(
             {
                 "role": "tool",
                 "tool_call_id": call["id"],
                 "name": call["function"]["name"],
-                "content": json.dumps(tool_result, ensure_ascii=False),
+                "content": json.dumps(content, ensure_ascii=False),
             }
         )
     return messages
