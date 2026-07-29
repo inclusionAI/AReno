@@ -25,7 +25,7 @@ from __future__ import annotations
 import logging
 import math
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 # Status ordering used by the aggregator: higher = more severe.
@@ -190,6 +190,14 @@ class HealthCheckConfig:
             raise HealthCheckConfigError("skipped_batches.max_ratio_warn must be <= max_ratio_fail")
         if sbc.max_grad_zero_ratio_warn > sbc.max_grad_zero_ratio_fail:
             raise HealthCheckConfigError("skipped_batches.max_grad_zero_ratio_warn must be <= max_grad_zero_ratio_fail")
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to a plain dict for JSON-compatible consumers (dashboard).
+
+        Uses ``dataclasses.asdict`` so new fields are picked up automatically
+        without a manual serialization mirror.
+        """
+        return asdict(self)
 
 
 @dataclass(slots=True)
