@@ -1,137 +1,80 @@
-# Issue #187: 部分可观测迷宫 Agentic RL Demo — PR 理解与 Review 记录
+# Issue #187 迷宫 Agentic RL Demo — PR 记录
 
-## 一、对 Issue 的理解
+## Issue 要求什么
 
-Issue #187 要求构建一个**部分可观测迷宫（POMDP）**的 Agentic RL demo。核心特征是：
+建一个部分可观测迷宫的 agentic RL demo。agent 只能看到周围几个格子，要走到一个被墙围住的终点，路上还要先找钥匙开锁门。和 tictactoe（一步结束）或 shopping（固定四步）不一样，迷宫的步数完全不确定，可能 8 步到，也可能 49 步耗尽都没到。
 
-1. **部分可观测**：agent 只能看到自身周围有限范围内的格子，完整地图永远不可见
-2. **多元素交互**：迷宫包含 walls、keys、doors、goal，agent 需要先找到钥匙才能通过门
-3. **多轮决策**：agent 每次只能移动一步，需要多轮 tool call 才能到达终点
-4. **可量化评估**：需要 shortest-path oracle 作为基准，衡量 agent 的路径效率
+## 实现过程中几个值得记的点
 
-与现有的 tictactoe（单步决策）和 shopping（固定 4 轮）不同，迷宫 demo 的轮次数是不确定的——最短路径可能 8 步，但 agent 可能走 49 步（max_steps）都没到终点。这使得它在 AReno 的 agentic demo 矩阵中填补了"变长多轮 POMDP"这个空白。
+### 参照了 shopping 的多轮结构
 
-## 二、对实现方案的思考
+tictactoe 太简单了——给它一个棋盘，它选一个格子就完事。迷宫不行，agent 要在变化的环境里连续决策。shopping 做的是固定四轮 tool call 循环，我把这个循环改成了 while + terminal 判断，框架是一样的：调模型 → 解析 tool call → 执行 → 把新观察塞回 messages → 继续。
 
-### 为什么选择参照 shopping 而非 tictactoe
+### local_view 怎么做的
 
-tictactoe 是单步决策：给棋盘 → 选格子 → 结束。迷宫不可能这样，因为 agent 需要在一个持续变化的环境中做序列决策。
+就一个函数，渲染 agent 周围 (2r+1)² 个格子，外面的全填 `?`。agent 看到的 3×3 视野里只有 9 个格子，整个 7×7 迷宫有 49 个，它能看到的不到五分之一。模型永远拿不到完整的 maze 数组，只能靠对话历史里积累的局部观察去推断。
 
-shopping 是固定 4 轮：search → inspect → check → submit。迷宫的轮次不确定，但"每轮调用一个 tool、环境返回新观察、agent 继续决策"这个循环模式是相同的。所以 `run_agent.py` 的多轮循环结构参照了 shopping，但去掉了固定轮次，改为 while 循环直到 terminal。
+### 一个实际踩的坑：BFS 漏了钥匙状态
 
-### POMDP 的核心设计：local_view
+写 `solve_shortest_path` 的时候，我传了 `has_key=True` 让 BFS 能穿门，以为这样就能算出最短路径。结果 replay 的时候 agent 卡在门口出不去——因为它一开始没有钥匙，BFS 算的路径假设你一开始就能穿门。
 
-部分可观测的实现非常简洁：`local_view(state)` 函数只渲染 agent 周围 `(2r+1)²` 个格子，视野外的格子用 `?` 表示。这个函数是 agent 观察世界的唯一窗口——`run_agent` 把 `local_view` 的输出作为 tool result 返回给模型，模型永远看不到完整的 `maze` 二维数组。
+真正的解法是把搜索状态从"位置"变成"位置 + 有没有钥匙"的组合，搜索过程中走到钥匙格自动拾取，这样才能正确算出"先去拿钥匙再回来穿门"的两段路径。改完之后所有 8 条测试数据都跑通了，之前全是 -1.0。
 
-这个设计意味着 agent 必须"记住"自己走过的路径和看到过的地形，才能规划出通往钥匙和终点的路线。对于一个 7×7 迷宫、3×3 视野的 agent 来说，它最多只能看到 9 个格子，而整个迷宫有 49 个格子——信息覆盖率不到 20%。这就是 POMDP 的难度所在。
+### 奖励太稀疏了
 
-### Key-gated BFS：一个被低估的设计难点
+到达终点给 1.0 减去多走步数的惩罚，没到就给 -0.5。问题在于没到终点时没有区分度——走到离终点 1 格和 10 格都是 -0.5。实际训练 100 步，reward_mean 一直在 -0.5 附近，说明 agent 从来没到过终点，也就没有任何正向梯度。后面如果要让 agent 真的学出来，大概得加距离奖励或者先从 5×5 的小迷宫开始。
 
-最初实现 `solve_shortest_path` 时，我假设 `has_key=True` 意味着 agent 从一开始就有钥匙，BFS 直接找一条能穿过门的最短路径。但实际 replay 时发现 agent 卡在门前——因为它**没有钥匙**。
+### 7×7 迷宫生成 2048 个会爆
 
-真正的最短路径应该是两阶段的：先走到钥匙位置（不能穿门），拾取钥匙后再穿门到终点。修复方法是把 BFS 的搜索状态从 `Position` 扩展为 `(Position, has_key)`，在搜索过程中拾取钥匙并解锁门的通行权限。
+7×7 迷宫的变体没那么多，DFS carve 加上 key/door 放置后去重空间收缩得很快。一开始写了个 `count * 50` 的上限，2048 个直接 RuntimeError。后来加了尺寸变化（7/9/11）和 key/door 数量变化（1-2），还在唯一变体用完后自动放行重复，不会再崩。
 
-这个 bug 的深层教训是：**在 POMDP 中，"状态"不只是位置，还包括 agent 携带的物品**。如果只追踪位置，就会忽略钥匙拾取对可达性的影响。
+## 自己 review 下来觉得还行和不太行的地方
 
-### 奖励设计的权衡
+**还行：**
+- 五个文件的结构跟 tictactoe 和 shopping 完全一样，reviewer 不用学新东西
+- 没碰 `areno/` 下面任何代码，全靠 `--dataset-loader-fn`、`--reward-fn-path`、`--agent-fn` 三个 hook 接进去
+- `game.py` 不依赖 AReno，`MazeState` 是 frozen dataclass，测试不用 mock 也不需要 GPU
+- 11 个测试在本地和 Kaggle 上都跑过了
 
-奖励函数 `score_episode` 的设计面临稀疏奖励问题：
+**不太行：**
+- `run_agent` 里的 `MazeState` 对 AReno 是黑箱，以后如果要做 rollout 重放（issue #211）会麻烦。不过 shopping 也是这么做的，目前框架就这样
+- `reward_fn` 完整 replay 所有 move 来算分，开销比直接解析 tool_results 大。但两套逻辑分开写更容易不一致，所以还是 replay 了
+- 测试文件最初多了一个没用到的 `import asyncio`，最后检查才发现删掉
+- Kaggle 文档来来回回改了好多次：PATH 找不到 areno、没编译 CUDA 扩展、显存不够、数据集生成崩、ngrok 顺序反了。这些在本地 Mac 上根本遇不到，得实际上 Kaggle 跑一遍才知道
 
-- **到达终点**：`1.0 - 0.05 × excess_steps`，最优路径得 1.0，多走 14 步降到 0.3
-- **未到达终点**：恒定 `-0.5`，无论走了多远
-- **无效移动**：`-0.1` per move，惩罚撞墙和撞门
+## 运行记录
 
-这个设计的弱点是：未到达终点时没有距离梯度。agent 如果走到离终点 1 格和离终点 10 格，得到的都是 -0.5，无法区分"差一点"和"差很远"。在 100 步训练中 reward_mean 稳定在 -0.5 也印证了这一点——agent 从未到达终点，奖励信号完全没有梯度方向。
-
-改进方向是加入距离奖励（基于曼哈顿距离或 BFS 距离的负相关），但这会增加奖励工程的复杂度，作为第一版 demo 保持简单是合理的。
-
-### 数据集生成器的健壮性
-
-7×7 迷宫的唯一变体数量是有限的——DFS wall carving 在 25 个内部格子上生成的 spanning tree 数量虽然不少，但加上固定的 key/door 放置规则后，去重空间会快速收缩。最初用 `count × 50` 次尝试生成 2048 个唯一迷宫时直接 RuntimeError。
-
-修复方案分两步：1) 随机变化 key/door 数量（1-2）和迷宫尺寸（7→9→11），扩大搜索空间；2) 当唯一变体耗尽后自动切换为允许重复模式，保证不报错。这是一个从"严格唯一"到"尽量唯一"的实用妥协。
-
-## 三、AI 生成代码的 Self-Review
-
-### 做得好的地方
-
-1. **模式一致性**：所有 5 个核心文件的结构与 tictactoe/shopping 完全对齐——`sys.path.insert` + `import game`、`# noqa: E402`、相同的函数签名（`load_training_dataset`、`reward_fn`、`run_agent`）。一个熟悉 AReno 的 reviewer 不需要学习新的模式。
-
-2. **零侵入性**：没有修改 `areno/` 下任何一行代码，没有改 `pyproject.toml`，没有动 CLI。所有功能都是通过 AReno 现有的 hook 机制（`--dataset-loader-fn`、`--reward-fn-path`、`--agent-fn`）接入的。
-
-3. **纯函数环境**：`game.py` 零 AReno 依赖，`MazeState` 是 frozen dataclass，所有状态转移返回新对象。这使得测试不需要 mock 任何 AReno 组件，也不需要 GPU。
-
-4. **测试覆盖**：11 个 CPU 测试覆盖了生成器可复现性、游戏规则（墙/门/钥匙）、部分可观测不泄露、多尺寸、奖励梯度、tool schema、终局停止、步数耗尽、loader 契约、无效输入。在 Kaggle 上实测全部通过。
-
-### 需要反思的地方
-
-1. **run_agent 的状态管理**：maze 的 `MazeState` 完全在 `run_agent` 内部维护，AReno 基础设施对此一无所知。如果 AReno 未来需要支持 rollout 重放（issue #211），这种"隐藏状态"模式会成为障碍。但参照 shopping demo 的做法，这确实是当前 agentic 框架的标准模式。
-
-2. **reward 的 replay 开销**：`reward_fn` 通过完整 replay 所有 move 来计算分数，而不是直接从 `tool_results` 中解析最终状态。这增加了计算开销，但保证了奖励的一致性——如果 `run_agent` 和 `reward_fn` 各自维护一份状态逻辑，很容易出现不一致。这里选择一致性而非效率是正确的。
-
-3. **测试中 unused import**：最初的测试文件有一个未使用的 `import asyncio`，在最终检查时才发现并移除。AI 生成代码时容易引入"以防万一"的 import，需要人工 review 时仔细检查。
-
-4. **Kaggle 文档的迭代过程**：文档经历了多次修复——PATH 问题、CUDA 编译问题、OOM 问题、数据集生成问题、ngrok 顺序问题。这些问题在本地 macOS 开发时无法预见，只有在 Kaggle 实际运行时才暴露。这说明 agentic demo 的"可运行性"验证必须覆盖目标部署环境，不能只依赖本地 CPU 测试。
-
-## 四、分步骤运行记录
-
-### Step 1: 本地 CPU 测试（macOS, Python 3.12）
+**本地 CPU 测试**（macOS, Python 3.12）：
 
 ```
 pytest tests/test_agentic_maze_example_cpu.py -v
 → 11 passed in 0.09s
 ```
 
-所有 11 个测试在本地 macOS 上首次通过，覆盖：迷宫生成可复现性、游戏规则（墙碰撞/门锁定/钥匙拾取）、部分可观测不泄露完整地图、多尺寸支持、奖励评分（最优路径/失败/无效移动）、tool schema 封闭性、终局停止、步数耗尽、loader 契约、无效方向拒绝。
-
-### Step 2: 全量 agentic 回归测试（macOS, Python 3.12 + CPU PyTorch）
+**全量回归**（含现有 agentic 测试）：
 
 ```
-pytest tests/test_agentic_maze_example_cpu.py tests/test_agentic_tictactoe_example_cpu.py tests/test_agentic_shopping_example_cpu.py tests/test_agentic_cpu.py -v
+pytest tests/test_agentic_maze_example_cpu.py tests/test_agentic_tictactoe_example_cpu.py tests/test_agentic_shopping_example_cpu.py tests/test_agentic_cpu.py
 → 85 passed in 2.27s
 ```
 
-maze 11/11 + tictactoe 3/3 + shopping 7/7 + agentic 框架 64/64 = 85 全部通过，确认没有破坏任何现有功能。
+没破坏任何现有测试。
 
-### Step 3: Kaggle CPU 测试（T4×2, Python 3.12）
-
-![Kaggle CPU Tests](kaggle-cpu-tests.png)
+**Kaggle CPU 测试**（T4×2, Python 3.12）：
 
 ```
 pytest tests/test_agentic_maze_example_cpu.py -v
 → 11 passed in 0.14s
 ```
 
-在 Kaggle 环境验证，11 个测试全部通过，耗时 0.14s。
+**Kaggle GPU 训练**（T4×2, Qwen3-0.6B, GSPO）：
 
-### Step 4: Kaggle GPU 训练（T4×2, Qwen3-0.6B, GSPO）
+配置：`--batch-size 2 --n-samples 4 --tp-size 2 --world-size 2 --max-steps 100`
 
-训练配置：`--batch-size 2 --n-samples 4 --max-new-tokens 64 --tp-size 2 --world-size 2 --max-steps 100`
+![Kaggle CPU Tests](kaggle-cpu-tests.png)
 
-第一次尝试（单卡 tp-size=1）遇到 CUDA OOM，改为双卡张量并行后成功启动训练。
+单卡 tp-size=1 直接 OOM，换成双卡 tp-size=2 后跑通。每步大约 9.9s，rollout 5.6s + train 4.2s，100 步 16 分钟跑完。
 
 ![Training Dashboard](kaggle-training-dashboard.png)
 
-训练在 Kaggle T4×2 上运行，每步约 9.9s（rollout 5.6s + train 4.2s），100 步约 16 分钟完成。
-
-### Step 5: 训练结果分析
-
-`rollout/rewards_mean` 在 100 步内稳定在 -0.5125 到 -0.5 之间，说明 agent 在 100 步训练中未到达过终点。
-
-这在预期之内：
-- 每步仅 8 个 rollout（batch-size 2 × n-samples 4），100 步 = 800 次尝试
-- POMDP 环境复杂度高：7×7 迷宫，3×3 视野，需要钥匙→开门→到终点
-- 奖励稀疏：只有到达终点才有正奖励，未到终点恒定 -0.5，缺乏梯度方向
-
-后续改进方向：增加训练步数到 500+、引入距离奖励、先用 5×5 小迷宫降低难度预训练。
-
-## 五、总结
-
-这个 PR 的核心价值不在于训练效果（100 步不足以学到有效策略），而在于：
-
-1. **填补了 AReno agentic demo 矩阵中"POMDP + 变长多轮"的空白**
-2. **验证了 AReno 现有 agentic 框架可以支撑多轮环境内的状态管理**
-3. **提供了从代码到 Kaggle GPU 训练的完整可复现路径**
-4. **11 个 CPU 测试保证了代码逻辑的正确性，可在无 GPU 环境下验证**
-
-迷宫 demo 作为一个研究测试床，后续可以在此基础上研究：不同视野半径对策略学习的影响、奖励工程（稠密 vs 稀疏）、多轮轨迹的 loss mask 策略等课题。
+**训练结果**：reward_mean 在 -0.5125 到 -0.5 之间，agent 100 步内没到过终点。每步只有 8 个 rollout，总共 800 次尝试，对 7×7 POMDP 来说太少了。后续打算跑 500 步 + 5×5 小迷宫试试。
