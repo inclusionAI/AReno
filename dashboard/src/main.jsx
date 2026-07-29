@@ -1804,8 +1804,17 @@ function CompareRunsPanel({ jobList, refreshJobs, compareJobAId, setCompareJobAI
         }));
       };
 
-      const coordsA = normalizeX ? toCoordsNorm(ptsA, maxStepA) : toCoordsAbs(ptsA);
-      const coordsB = normalizeX ? toCoordsNorm(ptsB, maxStepB) : toCoordsAbs(ptsB);
+      // 不归一化上下子图模式：各自用各自的step范围铺满全宽
+      const toCoordsIndependent = (points, maxStepLocal) => {
+        const localSpan = Math.max(maxStepLocal - 0, 1);
+        return points.map(p => ({
+          x: ((p.step - 0) / localSpan) * 680 + 10,
+          y: 120 - ((p.value - minVal) / valSpan) * 100,
+        }));
+      };
+
+      const coordsA = normalizeX ? toCoordsNorm(ptsA, maxStepA) : toCoordsIndependent(ptsA, maxStepA);
+      const coordsB = normalizeX ? toCoordsNorm(ptsB, maxStepB) : toCoordsIndependent(ptsB, maxStepB);
 
       chartPlot = {
         lineA: coordsA.map(c => `${c.x.toFixed(1)},${c.y.toFixed(1)}`).join(" "),
@@ -2096,7 +2105,7 @@ function CompareRunsPanel({ jobList, refreshJobs, compareJobAId, setCompareJobAI
                       <div className="compareChartWarning">
                         Job A runs to step {stepInfo.maxStepA}, Job B runs to step {stepInfo.maxStepB}.
                         {stepInfo.aLonger ? " Job B data covers fewer steps." : " Job A data covers fewer steps."}
-                         Enable "Normalize X-axis" to align by training progress.
+                         Enable "Normalize X-axis" to overlay both curves.
                       </div>
                     )}
                     {stepInfo && !stepInfo.sameSteps && normalizeX && (
@@ -2104,13 +2113,38 @@ function CompareRunsPanel({ jobList, refreshJobs, compareJobAId, setCompareJobAI
                         X-axis normalized: A (0-{stepInfo.maxStepA}) and B (0-{stepInfo.maxStepB}) both stretched to full width by progress.
                       </div>
                     )}
-                    <svg className="compareChartSvg" viewBox="0 0 700 170" role="img">
-                      <g className="plotGrid">
-                        {[0, 1, 2, 3].map((item) => <line key={item} x1="0" x2="700" y1={20 + item * 37} y2={20 + item * 37} />)}
-                      </g>
-                      <polyline className="compareLineA" points={chartPlot.lineA} />
-                      <polyline className="compareLineB" points={chartPlot.lineB} />
-                    </svg>
+                    {normalizeX ? (
+                      /* 归一化模式：两条线叠加在同一个图里 */
+                      <svg className="compareChartSvg" viewBox="0 0 700 170" role="img">
+                        <g className="plotGrid">
+                          {[0, 1, 2, 3].map((item) => <line key={item} x1="0" x2="700" y1={20 + item * 37} y2={20 + item * 37} />)}
+                        </g>
+                        <polyline className="compareLineA" points={chartPlot.lineA} />
+                        <polyline className="compareLineB" points={chartPlot.lineB} />
+                      </svg>
+                    ) : (
+                      /* 绝对步数模式：上下两个子图，各自独立 */
+                      <div className="compareDualChart">
+                        <div className="compareDualSub">
+                          <div className="compareDualLabel"><i className="legendA" /> Job A (step 0 - {stepInfo?.maxStepA ?? "?"})</div>
+                          <svg className="compareChartSvgSmall" viewBox="0 0 700 140" role="img">
+                            <g className="plotGrid">
+                              {[0, 1, 2].map((item) => <line key={item} x1="0" x2="700" y1={15 + item * 40} y2={15 + item * 40} />)}
+                            </g>
+                            <polyline className="compareLineA" points={chartPlot.lineA} />
+                          </svg>
+                        </div>
+                        <div className="compareDualSub">
+                          <div className="compareDualLabel"><i className="legendB" /> Job B (step 0 - {stepInfo?.maxStepB ?? "?"})</div>
+                          <svg className="compareChartSvgSmall" viewBox="0 0 700 140" role="img">
+                            <g className="plotGrid">
+                              {[0, 1, 2].map((item) => <line key={item} x1="0" x2="700" y1={15 + item * 40} y2={15 + item * 40} />)}
+                            </g>
+                            <polyline className="compareLineB" points={chartPlot.lineB} />
+                          </svg>
+                        </div>
+                      </div>
+                    )}
                     <div className="compareChartLegend">
                       <span><i className="legendA" /> Job A ({jobA?.name || "—"})</span>
                       <span><i className="legendB" /> Job B ({jobB?.name || "—"})</span>
