@@ -537,6 +537,15 @@ class RolloutSession:
                     pending.input_tokens = trimmed["tokens"]
                     pending._trimmed_messages = trimmed["messages"]
                     pending._trim_info = trimmed["diagnostics"]
+                    diag = trimmed["diagnostics"]
+                    logger.info(
+                        "trim_messages removed %d units (%d messages): %d -> %d tokens, system=%s",
+                        diag["units_removed"],
+                        diag["messages_removed"],
+                        diag["original_prompt_tokens"],
+                        diag["effective_prompt_tokens"],
+                        diag["preserved_instructions"],
+                    )
             elif max_context_len is not None and len(pending.input_tokens) > max_context_len:
                 response = _filtered_chat_response(
                     model=pending.model,
