@@ -19,7 +19,11 @@ GPU_QUERY = "index,uuid,name,utilization.gpu,memory.used,memory.total,power.draw
 PROCESS_QUERY = "gpu_uuid,pid,process_name,used_gpu_memory"
 
 
-def number(value: str) -> float | None:
+from typing import Optional
+
+# ... (existing code) ...
+
+def number(value: str) -> Optional[float]:
     try:
         return float(value)
     except ValueError:

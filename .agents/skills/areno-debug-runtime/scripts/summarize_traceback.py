@@ -23,7 +23,7 @@ def main() -> Result:
     args = parser.parse_args()
 
     groups: dict[str, dict] = {}
-    current_rank: int | None = None
+    current_rank = None  # type: int | None
     for line_number, line in enumerate(args.log.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
         rank_match = RANK.search(line)
         if rank_match:

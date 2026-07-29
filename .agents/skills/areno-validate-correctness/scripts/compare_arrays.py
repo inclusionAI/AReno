@@ -17,7 +17,7 @@ def flatten(value):
     if isinstance(value, list):
         for item in value:
             yield from flatten(item)
-    elif isinstance(value, int | float):
+    elif isinstance(value, (int, float)):
         yield float(value)
     else:
         raise TypeError(f"non-numeric value {value!r}")

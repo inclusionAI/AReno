@@ -41,7 +41,7 @@ def default_loader(path: str, *, model_hub: str) -> list[dict[str, Any]]:
     return load_dataset(name, config or None, split="train")
 
 
-def load_rows(path: str, loader_path: str | None, *, model_hub: str) -> Any:
+def load_rows(path: str, loader_path, *, model_hub: str) -> Any:
     def load_default(dataset_path: str):
         return default_loader(dataset_path, model_hub=model_hub)
 
@@ -114,7 +114,7 @@ def main() -> int:
         result = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
     # Preserve the legacy serialization: unsorted keys, non-ASCII content
     # kept verbatim (dataset samples may contain Chinese text).
-    emit(result, sort_keys=False, ensure_ascii=False)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
     return exit_code(result)
 
 

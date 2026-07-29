@@ -7,12 +7,13 @@ import json
 import pathlib
 import sys
 import urllib.request
+from typing import Optional
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / "scripts"))
 from areno_skill_sdk import build_parser
 
 
-def request_json(url: str, payload: dict | None, timeout: float) -> object:
+def request_json(url: str, payload: Optional[dict], timeout: float) -> object:
     data = None if payload is None else json.dumps(payload).encode()
     request = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(request, timeout=timeout) as response:
