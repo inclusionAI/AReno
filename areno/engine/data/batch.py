@@ -17,7 +17,15 @@ import torch
 
 @dataclass(slots=True)
 class TrainStats:
-    """Metrics returned by one worker train step."""
+    """Metrics returned by one worker train step.
+
+    When multiple reward components are registered (repeatable
+    ``--reward-fn-path``), the trainer writes their per-step diagnostics into
+    ``metrics`` using the keys ``reward/<name>_mean`` and
+    ``reward/<name>_invalid_count``. CLI/dashboard consumers then read those
+    components through this existing metrics dict, with no parallel reporting
+    subsystem.
+    """
 
     loss: float
     stepped: bool = True

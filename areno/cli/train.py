@@ -91,6 +91,7 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "agent_timeout_s",
             "train_tool_results",
             "reward_fn_path",
+            "reward_on_error",
             "reward_ckpt",
         ),
     ),
@@ -176,6 +177,18 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
     args.max_steps = getattr(args, "max_steps", None)
     args.score_micro_bs = getattr(args, "score_micro_bs", 8)
     args.model_hub = getattr(args, "model_hub", "modelscope")
+    # `--reward-fn-path` is repeatable (option dest `reward_fn_paths`). Derive a
+    # single legacy path for the config field / summary (first entry, or None)
+    # and a parsed component table for CompositeReward construction in run().
+    reward_fn_paths: tuple[str, ...] = tuple(getattr(args, "reward_fn_paths", ()) or ())
+    args.reward_fn_paths = reward_fn_paths
+    args.reward_on_error = getattr(args, "reward_on_error", "raise")
+    reward_components = _parse_reward_fn_paths(reward_fn_paths)
+    _reject_duplicate_reward_component_names(reward_components)
+    args.reward_components = reward_components
+    # Backward-compatible scalar used by config fields and the help summary; it
+    # is None when no reward file was supplied, matching the pre-repeatable CLI.
+    args.reward_fn_path = reward_components[0][1] if reward_components else None
     smoke_infer = bool(getattr(args, "smoke_infer", False))
     smoke_train = bool(getattr(args, "smoke_train", False))
     if smoke_infer or smoke_train:
@@ -533,14 +546,17 @@ def _preflight_task_hooks(args, algorithm) -> None:
             expected=f"{fn_name}(...)",
             positional_args=1,
         )
-    if algorithm.requires_rollout and args.reward_fn_path is not None:
-        _validate_python_callable(
-            Path(args.reward_fn_path).expanduser().resolve(),
-            "reward_fn",
-            option_name="--reward-fn-path",
-            expected="reward_fn(record)",
-            positional_args=1,
-        )
+    if algorithm.requires_rollout and args.reward_components:
+        # Validate every registered reward component before any model/worker
+        # init, so a typo in one --reward-fn-path fails fast with its path.
+        for _name, path, _weight in args.reward_components:
+            _validate_python_callable(
+                Path(path),
+                "reward_fn",
+                option_name="--reward-fn-path",
+                expected="reward_fn(record)",
+                positional_args=1,
+            )
     if args.agent_fn is not None:
         _validate_python_callable(
             Path(args.agent_fn).expanduser().resolve(),
@@ -791,7 +807,12 @@ def _trainer_config_from_args(args) -> TrainerConfig:
     )
 
 
-def run(trainer_config: TrainerConfig):
+def run(
+    trainer_config: TrainerConfig,
+    *,
+    reward_components: list[tuple[str, str, float]] | None = None,
+    reward_on_error: str = "raise",
+):
     """Build the trainer chosen by `--algo` and run `.fit()` to completion."""
 
     # Heavy dependencies are imported lazily so `python train.py --help`
@@ -799,14 +820,18 @@ def run(trainer_config: TrainerConfig):
     from datasets import load_dataset, load_from_disk
 
     import areno.api
-    from areno.api.rewards import load_reward_fn
+    from areno.api.rewards import CompositeReward, load_reward_fn
     from areno.api.trainer_factory import build_trainer
 
     trainer_config = resolve_model_refs_for_config(trainer_config)
     _write_dashboard_run_config(trainer_config)
     loss_fn = _loss_fn_for_config(trainer_config)
-    reward_fn_path = _reward_fn_path_for_config(trainer_config)
-    reward_fn = load_reward_fn(reward_fn_path) if reward_fn_path else None
+    reward_fn = _build_reward_fn(
+        trainer_config,
+        reward_components=reward_components,
+        reward_on_error=reward_on_error,
+        loader=load_reward_fn,
+    )
 
     api_trainer = areno.api.Trainer(
         trainer_config.world_size,
@@ -903,6 +928,7 @@ def _training_config_settings(config: TrainerConfig) -> dict:
                 "agent_timeout_s",
                 "train_tool_results",
                 "reward_fn_path",
+                "reward_on_error",
                 "reward_ckpt",
             ],
         ),
@@ -988,6 +1014,99 @@ def _reward_fn_path_for_config(config: TrainerConfig) -> str | None:
     if isinstance(config, PolicyTrainerConfig):
         return config.reward_fn_path
     return None
+
+
+def _build_reward_fn(
+    config: TrainerConfig,
+    *,
+    reward_components: list[tuple[str, str, float]] | None,
+    reward_on_error: str,
+    loader,
+):
+    """Build the reward callable injected into the trainer.
+
+    Multiple components (or a single weighted ``path:weight``) become a
+    :class:`CompositeReward`; a single unweighted path keeps the historical
+    ``load_reward_fn`` result so the single-reward path is unchanged. ``None``
+    (no reward file and no reward role) returns ``None`` exactly like before.
+    """
+
+    components = list(reward_components or [])
+    if not components:
+        return None
+    if len(components) == 1 and reward_on_error == "raise":
+        # Legacy path: one file, default weight — load it directly so behavior
+        # matches the pre-repeatable CLI and we avoid the CompositeReward wrapper.
+        _name, path, _weight = components[0]
+        return loader(path)
+    from areno.api.rewards import CompositeReward
+
+    return CompositeReward(
+        [(name, loader(path), weight) for name, path, weight in components],
+        on_error=reward_on_error,  # type: ignore[arg-type]
+    )
+
+
+def _parse_reward_fn_paths(paths: tuple[str, ...]) -> list[tuple[str, str, float]]:
+    """Parse repeatable ``--reward-fn-path`` values into ``(name, path, weight)``.
+
+    Each value is ``path[:weight]`` (weight defaults to 1.0). The component name
+    is the file stem so the metric keys (``reward/<name>_mean``) stay readable.
+    An empty tuple returns ``[]``; a single value without ``:`` returns a
+    one-element list whose caller treats as the legacy single-reward path.
+    Parsing failures raise ``ValueError`` mentioning the offending value so the
+    CLI preflight can convert them into a precise ``click.UsageError``.
+    """
+
+    parsed: list[tuple[str, str, float]] = []
+    for value in paths:
+        spec, _, weight_suffix = value.rpartition(":")
+        if not spec:
+            # No ':' at all, or a leading ':' — treat the whole value as the path.
+            spec = value
+            weight = 1.0
+        else:
+            try:
+                weight = float(weight_suffix)
+            except ValueError as exc:
+                raise ValueError(
+                    f"--reward-fn-path {value!r} has an unparseable weight {weight_suffix!r}; "
+                    "expected path or path:float"
+                ) from exc
+            if weight < 0:
+                raise ValueError(f"--reward-fn-path {value!r} weight must be non-negative, got {weight}")
+        path = Path(spec).expanduser().resolve()
+        parsed.append((path.stem, str(path), float(weight)))
+    return parsed
+
+
+def _reward_components_legacy(paths: tuple[str, ...]) -> bool:
+    """True when the inputs should keep the historical single-reward path.
+
+    That legacy path is exactly one value and it has no ``:weight`` suffix, so
+    the run behaves byte-for-byte like before ``--reward-fn-path`` became
+    repeatable.
+    """
+
+    return len(paths) == 1 and ":" not in paths[0]
+
+
+def _reject_duplicate_reward_component_names(components: list[tuple[str, str, float]]) -> None:
+    """Surface duplicate component names (file-stem collisions) as a UsageError.
+
+    Distinct paths sharing a stem would otherwise collide on the metric key
+    ``reward/<name>_mean``; rejecting here keeps diagnostics unambiguous and
+    mirrors CompositeReward's own duplicate-name guard at construction.
+    """
+
+    seen: set[str] = set()
+    for name, path, _weight in components:
+        if name in seen:
+            raise click.UsageError(
+                f"--reward-fn-path component names must be unique; duplicate name {name!r} "
+                "(two files share the same stem). Rename one file or refactor the rewards."
+            )
+        seen.add(name)
 
 
 def _load_dataset_for_training(
@@ -1177,7 +1296,24 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
 @click.option(
     "--dataset-loader-fn", default=None, help="Optional Python dataset loader function as file.py or file.py:function."
 )
-@click.option("--reward-fn-path", default=None, help="Python file defining reward_fn(record).")
+@click.option(
+    "--reward-fn-path",
+    "reward_fn_paths",
+    multiple=True,
+    help=(
+        "Python file defining reward_fn(record). Repeatable to register multiple weighted "
+        "reward components; append :weight to set a per-component weight (default 1.0), "
+        "e.g. accuracy_reward.py:0.7. A single value without :weight keeps the legacy "
+        "single-reward path unchanged."
+    ),
+)
+@click.option(
+    "--reward-on-error",
+    type=click.Choice(["raise", "mark_invalid"]),
+    default="raise",
+    help="Behavior when a reward component raises or returns non-finite (default raise; "
+         "mark_invalid records the failure and continues with the surviving components).",
+)
 @click.option(
     "--ref-ckpt", default=None, help="Optional PPO/DPO reference model checkpoint path or remote model repo ID."
 )
@@ -1355,6 +1491,16 @@ def train_command(**options) -> None:
         reward_ckpt=options.get("reward_ckpt"),
         model_config=_model_config_for_summary(trainer_config),
     )
+    reward_components = _parse_reward_fn_paths(tuple(options.get("reward_fn_paths") or ()))
+    reward_on_error = options.get("reward_on_error") or "raise"
+    if reward_components:
+        # Human-readable reward-component table; structured per-component output
+        # then flows through train_stats -> TensorBoard as reward/<name>_*.
+        click.echo("reward components:", color=True)
+        for name, path, weight in reward_components:
+            click.echo(f"  - {name}: weight={weight} path={path}", color=True)
+        if reward_on_error != "raise":
+            click.echo(f"reward on_error={reward_on_error}", color=True)
     from areno.cli.dashboard_registry import register_dashboard_job
 
     register_dashboard_job(
@@ -1363,7 +1509,7 @@ def train_command(**options) -> None:
         config=_training_config_settings(trainer_config),
         metrics_dir=trainer_config.metrics_log_dir,
     )
-    run(trainer_config)
+    run(trainer_config, reward_components=reward_components, reward_on_error=reward_on_error)
 
 
 def main() -> None:

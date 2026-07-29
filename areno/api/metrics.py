@@ -212,6 +212,10 @@ def record_training_stats(writer, stats, step, train_res, train_batch, timings: 
             writer.add_scalar(f"rollout/{key}", stats[key], step)
 
     # Backend-supplied training metrics (loss, policy_loss, ratio_mean, ...).
+    # When multiple reward components are registered (--reward-fn-path repeated),
+    # the trainer also folds in `reward/<name>_mean` and
+    # `reward/<name>_invalid_count`, so each component surfaces here as
+    # `train/reward/<name>_*` with no dedicated writer branch.
     for key, value in train_res.items():
         writer.add_scalar(f"train/{key}", value, step)
     metric_timings = timings or stats

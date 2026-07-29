@@ -130,7 +130,11 @@ class PPOTrainer(PolicyOnlyTrainer):
         if self.reward_fn is not None:
             self._record_ppo_state(stage="score_start", role="reward")
             reward_start = time.perf_counter()
-            rewards_all = [float(self.reward_fn(record)) for record in reward_records]
+            # Score through `_score_reward` so a CompositeReward still yields a
+            # plain scalar total for GAE while its component breakdown is
+            # accumulated for per-step diagnostics (reward/<name>_*).
+            self._reset_step_component_stats()
+            rewards_all = [self._score_reward(record)[0] for record in reward_records]
             self._last_ppo_stats["reward_score_time_s"] = time.perf_counter() - reward_start
             self._record_ppo_state(stage="score_end", role="reward")
         else:
@@ -459,9 +463,12 @@ class PPOTrainer(PolicyOnlyTrainer):
 
     def _augment_train_stats(self, result):
         # Merge the per-step PPO diagnostics into the dict the metric recorder
-        # consumes so they show up alongside the actor loss.
+        # consumes so they show up alongside the actor loss. Composite-reward
+        # component diagnostics (reward/<name>_*) are folded in here too so they
+        # reach the recorder through the same train_stats channel.
         if isinstance(result, dict):
             result.update(self._last_ppo_stats)
+            result.update(self._collect_component_stats())
         return result
 
     def _gae_for_response(self, token_rewards: list[float], values: list[float]) -> tuple[list[float], list[float]]:

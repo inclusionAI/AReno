@@ -26,7 +26,7 @@ from areno.api.models import (
     SamplingParams,
     TrainSequence,
 )
-from areno.api.rewards import RewardEvent, RewardRecord
+from areno.api.rewards import CompositeReward, CompositeScore, RewardEvent, RewardRecord
 from areno.api.trainer import Trainer
 
 # Friendly aliases mirroring the BackendType enum members; `DefaultBackend`
@@ -48,6 +48,8 @@ __all__ = [
     "LossMaskPolicy",
     "RewardEvent",
     "RewardRecord",
+    "CompositeReward",
+    "CompositeScore",
     "RolloutSession",
     "SamplingParams",
     "RolloutResult",

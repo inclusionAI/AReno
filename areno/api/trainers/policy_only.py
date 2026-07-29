@@ -42,6 +42,11 @@ class PolicyOnlyTrainer:
         self.loss_fn = loss_fn
         self.logger = logging.getLogger(f"{self.__class__.__module__}.{self.__class__.__name__}")
         self._agent_run_fn = None
+        # Per-step accumulators for composite-reward component diagnostics. Only
+        # populated when `reward_fn` is a `CompositeReward`; empty otherwise so
+        # the plain single-reward path is byte-for-byte unchanged.
+        self._step_component_values: dict[str, list[float]] = {}
+        self._step_component_invalid: dict[str, int] = {}
 
     def fit(self) -> None:
         self.areno.init()
@@ -171,7 +176,52 @@ class PolicyOnlyTrainer:
     def _augment_train_stats(self, result):
         # Hook for PPO to attach role-specific stats (critic loss, KL,
         # reference forward-time, ...) before they reach the metric recorder.
+        # Composite-reward component diagnostics (reward/<name>_mean,
+        # reward/<name>_invalid_count) are folded in here so they flow through
+        # the existing train_stats -> metric-recorder channel with no new surface.
+        component_stats = self._collect_component_stats()
+        if component_stats and isinstance(result, dict):
+            result.update(component_stats)
         return result
+
+    def _reset_step_component_stats(self) -> None:
+        """Clear per-step composite-reward accumulators at the rollout boundary."""
+
+        self._step_component_values = {}
+        self._step_component_invalid = {}
+
+    def _score_reward(self, record):
+        """Score one record, returning ``(total, CompositeScore | None)``.
+
+        When ``reward_fn`` is a :class:`CompositeReward` we use ``score`` so the
+        per-component breakdown is accumulated for metrics, then return its
+        ``total`` so the rest of the loop treats it exactly like a scalar
+        reward. Plain single-reward functions go through the existing path and
+        are unaffected.
+        """
+
+        from areno.api.rewards import CompositeReward
+
+        if isinstance(self.reward_fn, CompositeReward):
+            composite_score = self.reward_fn.score(record)
+            for name, value in composite_score.components.items():
+                self._step_component_values.setdefault(name, []).append(value)
+            for name in composite_score.invalid:
+                self._step_component_invalid[name] = self._step_component_invalid.get(name, 0) + 1
+            return composite_score.total, composite_score
+        return float(self.reward_fn(record)), None
+
+    def _collect_component_stats(self) -> dict[str, float]:
+        """Aggregate the step's composite-reward diagnostics into metric keys."""
+
+        stats: dict[str, float] = {}
+        for name, values in self._step_component_values.items():
+            if values:
+                stats[f"reward/{name}_mean"] = float(np.mean(values))
+        for name, count in self._step_component_invalid.items():
+            if count:
+                stats[f"reward/{name}_invalid_count"] = float(count)
+        return stats
 
     def _agentic_enabled(self) -> bool:
         return bool(getattr(self.config, "agent_fn", None))
@@ -242,7 +292,11 @@ class PolicyOnlyTrainer:
                     f"{self._format_agent_filter_diagnostics(filter_diagnostics)}"
                 )
             reward_records = [ctx.reward_record(sample) for sample in samples]
-            rewards = [float(self.reward_fn(record)) for record in reward_records]
+            # Mirror the prompt-rollout path: clear composite-reward accumulators
+            # at the rollout boundary and score via `_score_reward` so component
+            # diagnostics are collected the same way for agentic and prompt RL.
+            self._reset_step_component_stats()
+            rewards = [self._score_reward(record)[0] for record in reward_records]
             rows = ctx._train_rows_from_samples(samples)
             tool_call_count = sum(len(record.tool_calls) for record in reward_records)
             tool_result_count = sum(len(record.tool_results) for record in reward_records)
@@ -521,6 +575,9 @@ class PolicyOnlyTrainer:
         import areno.api
         from areno.api.rewards import compute_group_advantages, make_reward_record
 
+        # Clear the per-step composite-reward accumulators at the rollout
+        # boundary so each train step reports only its own component diagnostics.
+        self._reset_step_component_stats()
         train_batch = []
         rewards_all = []
         rollout_logprobs = []
@@ -528,20 +585,18 @@ class PolicyOnlyTrainer:
             prefix_len = len(item.input_tokens)
             completions = [tokenizer.decode(seq.resp_tokens) for seq in result.sequences]
             rewards = [
-                float(
-                    self.reward_fn(
-                        make_reward_record(
-                            prompt=item.prompt,
-                            completion=completion,
-                            source_record=item.record,
-                            answer=item.solutions,
-                            tokens=item.input_tokens + seq.resp_tokens,
-                            logprobs=[0.0] * prefix_len + seq.resp_logprobs,
-                            loss_mask=[False] * prefix_len + [True] * len(seq.resp_tokens),
-                            metadata={"prompt_index": item_idx, "sample_index": sample_idx},
-                        )
+                self._score_reward(
+                    make_reward_record(
+                        prompt=item.prompt,
+                        completion=completion,
+                        source_record=item.record,
+                        answer=item.solutions,
+                        tokens=item.input_tokens + seq.resp_tokens,
+                        logprobs=[0.0] * prefix_len + seq.resp_logprobs,
+                        loss_mask=[False] * prefix_len + [True] * len(seq.resp_tokens),
+                        metadata={"prompt_index": item_idx, "sample_index": sample_idx},
                     )
-                )
+                )[0]
                 for sample_idx, (completion, seq) in enumerate(zip(completions, result.sequences, strict=True))
             ]
             rewards_all += rewards
