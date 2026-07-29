@@ -32,6 +32,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import keyword
+import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -131,11 +133,13 @@ def infer_config(
         ValueError: If the config is missing required fields or adapter_name is invalid.
     """
 
-    # Validate adapter_name: only alphanumeric + underscore.
-    if not adapter_name or not adapter_name.replace("-", "_").replace("_", "").isalnum():
+    module_name = adapter_name.replace("-", "_")
+    if not module_name.isidentifier() or keyword.iskeyword(module_name):
         raise ValueError(
-            f"adapter_name must contain only alphanumeric characters, underscores, or hyphens; got {adapter_name!r}"
+            f"adapter_name must form a valid Python module name after replacing hyphens with underscores; got {adapter_name!r}"
         )
+    if not dest_dir.strip():
+        raise ValueError("dest_dir must be non-empty")
 
     path = Path(hf_config_path)
     if not path.exists():
@@ -148,30 +152,43 @@ def infer_config(
         raise ValueError("Config file must contain a JSON object")
 
     model_type = hf_config.get("model_type")
-    if not model_type:
+    if not isinstance(model_type, str) or not model_type.strip():
         raise ValueError("Config file is missing 'model_type' field")
+    if re.fullmatch(r"[A-Za-z0-9_.-]+", model_type) is None:
+        raise ValueError(f"model_type contains unsupported characters: {model_type!r}")
 
     # Detect MoE: check common fields across model families.
     is_moe = _detect_moe(hf_config)
 
     # Extract architecture parameters.
-    hidden_size = int(hf_config.get("hidden_size", 0))
-    num_hidden_layers = int(hf_config.get("num_hidden_layers", 0))
-    num_attention_heads = int(hf_config.get("num_attention_heads", 0))
-    num_key_value_heads = int(hf_config.get("num_key_value_heads", hf_config.get("num_kv_heads", num_attention_heads)))
-    intermediate_size = int(hf_config.get("intermediate_size", 0))
-    vocab_size = int(hf_config.get("vocab_size", 0))
+    hidden_size = _positive_int(hf_config, "hidden_size")
+    num_hidden_layers = _positive_int(hf_config, "num_hidden_layers")
+    num_attention_heads = _positive_int(hf_config, "num_attention_heads")
+    num_key_value_heads = _positive_int(
+        hf_config,
+        "num_key_value_heads",
+        fallback_key="num_kv_heads",
+        default=num_attention_heads,
+    )
+    intermediate_size = _positive_int(hf_config, "intermediate_size")
+    vocab_size = _positive_int(hf_config, "vocab_size")
+    if hidden_size % num_attention_heads != 0:
+        raise ValueError("hidden_size must be divisible by num_attention_heads")
+    if num_attention_heads % num_key_value_heads != 0:
+        raise ValueError("num_attention_heads must be divisible by num_key_value_heads")
 
     num_experts = None
     num_experts_per_tok = None
     if is_moe:
-        num_experts = int(hf_config.get("num_experts", 0))
-        num_experts_per_tok = int(hf_config.get("num_experts_per_tok", 1))
+        num_experts = _positive_int(hf_config, "num_experts")
+        num_experts_per_tok = _positive_int(hf_config, "num_experts_per_tok")
+        if num_experts_per_tok > num_experts:
+            raise ValueError("num_experts_per_tok must not exceed num_experts")
 
     class_name = _to_pascal_case(adapter_name) + "Adapter"
 
     return AdapterConfig(
-        adapter_name=adapter_name,
+        adapter_name=module_name,
         model_type=model_type,
         is_moe=is_moe,
         class_name=class_name,
@@ -186,6 +203,25 @@ def infer_config(
         num_experts=num_experts,
         num_experts_per_tok=num_experts_per_tok,
     )
+
+
+def _positive_int(
+    config: dict[str, Any],
+    key: str,
+    *,
+    fallback_key: str | None = None,
+    default: int | None = None,
+) -> int:
+    """Read a required positive integer without accepting booleans or floats."""
+
+    value = config.get(key)
+    if value is None and fallback_key is not None:
+        value = config.get(fallback_key)
+    if value is None:
+        value = default
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"Config field {key!r} must be a positive integer; got {value!r}")
+    return value
 
 
 def _detect_moe(hf_config: dict[str, Any]) -> bool:
@@ -230,7 +266,15 @@ from __future__ import annotations
 
 from areno.models.{config.adapter_name}.{model_module} import {config.class_name}
 
-__all__ = ["{config.class_name}"]
+
+def register() -> None:
+    """Register this adapter with AReno's model registry."""
+
+    from areno.models.registry import register_adapter
+
+    register_adapter({config.class_name}())
+
+__all__ = ["{config.class_name}", "register"]
 '''
 
 
@@ -703,6 +747,11 @@ def generate_scaffold(
     templates = _file_templates(config)
     result = GenerationResult(dest_dir=str(dest))
 
+    if dest.exists() and not dest.is_dir():
+        raise ValueError(f"Destination exists and is not a directory: {dest}")
+    if dest.is_symlink():
+        raise ValueError(f"Destination must not be a symbolic link: {dest}")
+
     # Create destination directory.
     dest.mkdir(parents=True, exist_ok=True)
 
@@ -710,7 +759,9 @@ def generate_scaffold(
         file_path = dest / rel_path
         tagged_content = _add_sentinel(content)
 
-        if file_path.exists():
+        if file_path.is_symlink():
+            result.conflicted_files.append(rel_path)
+        elif file_path.exists():
             if _is_generated(file_path):
                 # This is a previously generated file.
                 if overwrite:
@@ -758,8 +809,9 @@ def format_result(result: GenerationResult) -> str:
     lines.append("")
     lines.append("Next steps:")
     lines.append("  1. Edit checkpoint.py to fill in HF key mappings.")
-    lines.append("  2. Edit model.py to adjust architecture details.")
-    lines.append("  3. Register the adapter in areno/models/__init__.py.")
+    model_file = "model_moe.py" if "model_moe.py" in result.created_files + result.preserved_files + result.conflicted_files else "model.py"
+    lines.append(f"  2. Edit {model_file} to adjust architecture details.")
+    lines.append("  3. Call the generated register() function from areno/models/__init__.py.")
     return "\n".join(lines)
 
 
@@ -795,38 +847,46 @@ def main(argv: list[str] | None = None) -> int:
     # Infer config.
     try:
         config = infer_config(args.hf_config, args.adapter_name, args.dest_dir)
-    except (FileNotFoundError, ValueError) as exc:
-        print(f"Error: {exc}", file=sys.stderr)
+    except (OSError, ValueError) as exc:
+        if args.json:
+            print(json.dumps({"error": str(exc)}))
+        else:
+            print(f"Error: {exc}", file=sys.stderr)
         return 1
 
-    # Print inferred config for confirmation.
-    print(f"Adapter name:     {config.adapter_name}")
-    print(f"Model type:       {config.model_type}")
-    print(f"Scaffold type:    {'MoE' if config.is_moe else 'Dense'}")
-    print(f"Class name:       {config.class_name}")
-    print(f"Hidden size:      {config.hidden_size}")
-    print(f"Num layers:       {config.num_hidden_layers}")
-    print(f"Attention heads:  {config.num_attention_heads}")
-    print(f"KV heads:         {config.num_key_value_heads}")
-    if config.is_moe:
-        print(f"Num experts:      {config.num_experts}")
-        print(f"Experts per tok:  {config.num_experts_per_tok}")
-    print(f"Destination:      {config.dest_dir}")
-    print()
+    if not args.json:
+        print(f"Adapter name:     {config.adapter_name}")
+        print(f"Model type:       {config.model_type}")
+        print(f"Scaffold type:    {'MoE' if config.is_moe else 'Dense'}")
+        print(f"Class name:       {config.class_name}")
+        print(f"Hidden size:      {config.hidden_size}")
+        print(f"Num layers:       {config.num_hidden_layers}")
+        print(f"Attention heads:  {config.num_attention_heads}")
+        print(f"KV heads:         {config.num_key_value_heads}")
+        if config.is_moe:
+            print(f"Num experts:      {config.num_experts}")
+            print(f"Experts per tok:  {config.num_experts_per_tok}")
+        print(f"Destination:      {config.dest_dir}")
+        print()
 
     # Confirm unless --yes.
-    if not args.yes:
+    if not args.yes and not args.json:
         response = input("Proceed with generation? [y/N] ")
         if response.lower() not in ("y", "yes"):
             print("Aborted.")
             return 0
 
     # Generate.
-    result = generate_scaffold(config, overwrite=args.overwrite)
+    try:
+        result = generate_scaffold(config, overwrite=args.overwrite)
+    except (OSError, ValueError) as exc:
+        if args.json:
+            print(json.dumps({"error": str(exc)}))
+        else:
+            print(f"Error: {exc}", file=sys.stderr)
+        return 1
     if args.json:
-        import json as _json
-
-        print(_json.dumps(result.to_dict(), indent=2))
+        print(json.dumps(result.to_dict(), indent=2))
     else:
         print(format_result(result))
     return 0

@@ -4,7 +4,7 @@ Model Adapter Scaffold Generator
 ================================
 
 The ``generate_adapter_scaffold.py`` script under
-``skills/areno-model-adaptation/scripts/`` reads a local HuggingFace
+``.agents/skills/areno-model-adaptation/scripts/`` reads a local HuggingFace
 ``config.json`` and generates an adapter directory structure with
 registration code, checkpoint-mapping placeholders, and a minimal load
 example.
@@ -22,7 +22,7 @@ Usage
 
 .. code-block:: bash
 
-   python skills/areno-model-adaptation/scripts/generate_adapter_scaffold.py \
+   python .agents/skills/areno-model-adaptation/scripts/generate_adapter_scaffold.py \
        --hf-config /path/to/model/config.json \
        --adapter-name mymodel \
        --dest-dir areno/models/mymodel \
@@ -41,7 +41,8 @@ Options
     Destination directory for generated files.
 
 ``--yes``
-    Accept all inferred choices without prompting.  Implies ``--overwrite``.
+    Accept all inferred choices without prompting.  Existing files are still
+    preserved unless ``--overwrite`` is passed separately.
 
 ``--overwrite``
     Overwrite previously generated files that have been user-edited.
@@ -87,7 +88,7 @@ Limitations
 
 * The generated code is a starting point.  Checkpoint key mappings and
   architecture-specific details must be filled in manually.
-* The generator does not register the adapter in ``areno/models/__init__.py``;
-  this must be done manually after generation.
+* The generated package includes a ``register()`` helper.  Add a call to it in
+  ``areno/models/__init__.py`` after reviewing the generated adapter.
 * MoE scaffolds include a placeholder ``nn.Identity()`` for the MoE MLP that
   must be replaced with an actual implementation.
