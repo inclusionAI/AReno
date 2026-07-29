@@ -19,9 +19,10 @@ SIZE = 4
 DEFAULT_MAX_MOVES = 50
 
 SYSTEM_PROMPT = (
-    "你是一个 2048 游戏 AI。棋盘是 4x4 的网格，每次可以选择上/下/左/右移动。"
-    "相同数字的方块碰撞会合并，每次移动后会在随机空位出现一个新的 2（90%）或 4（10%）。"
-    "请先分析局面，然后调用 move 工具执行动作。"
+    "You are a 2048 game AI. The board is a 4x4 grid. Each turn you choose to "
+    "swipe UP, DOWN, LEFT, or RIGHT. Identical tiles merge on collision. After "
+    "each move a new 2 (90%) or 4 (10%) appears in a random empty cell. "
+    "Call the move tool with one direction to make your move."
 )
 
 MOVE_TOOL = {
@@ -231,7 +232,7 @@ def board_to_text(board: Board) -> str:
 def format_prompt(board: Board) -> str:
     """Build a user-facing prompt with the current board and instructions."""
 
-    return f"当前棋盘：\n{board_to_text(board)}"
+    return f"Current board:\n{board_to_text(board)}"
 
 
 # ------------------------------------------------------------------

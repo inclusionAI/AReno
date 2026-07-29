@@ -61,7 +61,7 @@ async def _run_episode(item, client) -> list[AgentTrajectoryTurn]:
     for move_number in range(1, max_moves + 1):
         turn_messages = [
             *messages,
-            {"role": "user", "content": f"第 {move_number}/{max_moves} 步：请先分析当前局面，然后调用 move 工具执行动作。"},
+            {"role": "user", "content": f"Step {move_number}/{max_moves}: Analyze the board, then call the move tool with one direction."},
         ]
         response = await client.chat.completions.create(
             model="policy",
@@ -85,14 +85,22 @@ async def _run_episode(item, client) -> list[AgentTrajectoryTurn]:
         if tool_result is None:
             logger.warning("Game2048 model returned no executable move call; penalising and falling back to random")
             tool_result = _invalid_move_result(board, rng)
-
-        board = tool_result["board"]
-        messages.extend(_tool_messages(assistant_message, tool_result))
+            board = tool_result["board"]
+            messages.append({
+                "role": "user",
+                "content": (
+                    f"No valid move tool call detected. A random move ({tool_result['direction']}) "
+                    f"was executed. Board:\n{tool_result['board_text']}"
+                ),
+            })
+        else:
+            board = tool_result["board"]
+            messages.extend(_tool_messages(assistant_message, tool_result))
 
         if tool_result["terminal"]:
             finish_messages = [
                 *messages,
-                {"role": "user", "content": "游戏结束。请简要总结结果，不要调用工具。"},
+                {"role": "user", "content": "Game over. Briefly summarize the result. Do not call any tool."},
             ]
             finish_response = await client.chat.completions.create(
                 model="policy",
