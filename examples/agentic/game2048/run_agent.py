@@ -18,6 +18,9 @@ import game  # noqa: E402
 logger = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
+_debug_call_count = 0
+_MAX_DEBUG_CALLS = 5
+
 
 async def run_agent(ctx, batch):
     """Run bounded concurrent 2048 episodes and preserve exact model outputs."""
@@ -121,23 +124,37 @@ async def _run_episode(item, client) -> list[AgentTrajectoryTurn]:
 
 def _assistant_message(response) -> dict:
     message = response.choices[0].message
+    tool_calls = [
+        {
+            "id": call.id,
+            "type": call.type,
+            "function": {"name": call.function.name, "arguments": call.function.arguments},
+        }
+        for call in (message.tool_calls or [])
+    ]
+    if not tool_calls and message.content:
+        global _debug_call_count
+        if _debug_call_count < _MAX_DEBUG_CALLS:
+            _debug_call_count += 1
+            logger.warning("Game2048 no tool_calls parsed, raw content=%.300s", message.content)
     return {
         "role": "assistant",
         "content": message.content,
-        "tool_calls": [
-            {
-                "id": call.id,
-                "type": call.type,
-                "function": {"name": call.function.name, "arguments": call.function.arguments},
-            }
-            for call in (message.tool_calls or [])
-        ],
+        "tool_calls": tool_calls,
     }
 
 
 def _execute_move(assistant_message: dict, board, rng) -> dict | None:
     calls = assistant_message.get("tool_calls") or []
+    content = assistant_message.get("content")
     if len(calls) != 1 or calls[0].get("function", {}).get("name") != "move":
+        global _debug_call_count
+        if _debug_call_count < _MAX_DEBUG_CALLS:
+            _debug_call_count += 1
+            logger.warning(
+                "Game2048 _execute_move reject: num_calls=%d content=%.300s",
+                len(calls), content or "",
+            )
         return None
     try:
         arguments = json.loads(calls[0]["function"].get("arguments") or "")
