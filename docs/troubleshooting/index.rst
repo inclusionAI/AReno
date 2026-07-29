@@ -16,3 +16,4 @@ Troubleshooting pages:
 
 * :doc:`faq`
 * :doc:`report-issue`
+* :doc:`quarantine`

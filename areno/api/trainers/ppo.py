@@ -31,6 +31,7 @@ from areno.api.dashboard import record_dashboard_state
 from areno.api.rewards import make_reward_record
 from areno.api.roles import MissingRoleCapability, ModelRole
 from areno.api.trainers.policy_only import PolicyOnlyTrainer
+from areno.engine.quarantine import QuarantineThresholdExceeded
 
 logger = logging.getLogger(__name__)
 
@@ -130,7 +131,27 @@ class PPOTrainer(PolicyOnlyTrainer):
         if self.reward_fn is not None:
             self._record_ppo_state(stage="score_start", role="reward")
             reward_start = time.perf_counter()
-            rewards_all = [float(self.reward_fn(record)) for record in reward_records]
+            rewards_all = []
+            for record in reward_records:
+                try:
+                    rewards_all.append(float(self.reward_fn(record)))
+                    self._quarantine.record_success()
+                except QuarantineThresholdExceeded:
+                    raise
+                except Exception as exc:
+                    self._quarantine.record(
+                        phase="reward",
+                        reason=f"{type(exc).__name__}: {exc}",
+                        sample_meta={
+                            "prompt_index": record.metadata.get("prompt_index"),
+                            "sample_index": record.metadata.get("sample_index"),
+                            "prompt_len": len(record.prompt) if record.prompt else 0,
+                            "completion_len": len(record.completion) if record.completion else 0,
+                            "prompt_text": record.prompt,
+                            "completion_text": record.completion,
+                        },
+                    )
+                    rewards_all.append(0.0)
             self._last_ppo_stats["reward_score_time_s"] = time.perf_counter() - reward_start
             self._record_ppo_state(stage="score_end", role="reward")
         else:

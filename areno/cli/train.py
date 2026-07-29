@@ -129,7 +129,7 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         ),
     ),
     ("Checkpoint", ("save_path", "save_interval")),
-    ("Observability", ("metrics_log_dir",)),
+    ("Observability", ("metrics_log_dir", "quarantine_enabled", "quarantine_max_entries", "quarantine_max_file_bytes", "quarantine_failure_rate_threshold", "quarantine_failure_rate_window")),
 )
 
 
@@ -598,6 +598,11 @@ def _trainer_config_from_args(args) -> TrainerConfig:
     args.max_steps = getattr(args, "max_steps", None)
     args.score_micro_bs = getattr(args, "score_micro_bs", 8)
     args.model_hub = getattr(args, "model_hub", "modelscope")
+    args.quarantine_enabled = getattr(args, "quarantine_enabled", False)
+    args.quarantine_max_entries = getattr(args, "quarantine_max_entries", 200)
+    args.quarantine_max_file_bytes = getattr(args, "quarantine_max_file_bytes", 10_485_760)
+    args.quarantine_failure_rate_threshold = getattr(args, "quarantine_failure_rate_threshold", 0.5)
+    args.quarantine_failure_rate_window = getattr(args, "quarantine_failure_rate_window", 20)
     algorithm = get_algorithm(args.algo)
     chat_template_enable_thinking = False if args.disable_thinking else None
     if algorithm.name == "dpo":
@@ -638,6 +643,11 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             agent_timeout_s=args.agent_timeout_s,
             train_tool_results=args.train_tool_results,
             chat_template_enable_thinking=chat_template_enable_thinking,
+            quarantine_enabled=args.quarantine_enabled,
+            quarantine_max_entries=args.quarantine_max_entries,
+            quarantine_max_file_bytes=args.quarantine_max_file_bytes,
+            quarantine_failure_rate_threshold=args.quarantine_failure_rate_threshold,
+            quarantine_failure_rate_window=args.quarantine_failure_rate_window,
             ref_ckpt=args.ref_ckpt,
             dpo_beta=args.dpo_beta,
         )
@@ -679,6 +689,11 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             agent_timeout_s=args.agent_timeout_s,
             train_tool_results=args.train_tool_results,
             chat_template_enable_thinking=chat_template_enable_thinking,
+            quarantine_enabled=args.quarantine_enabled,
+            quarantine_max_entries=args.quarantine_max_entries,
+            quarantine_max_file_bytes=args.quarantine_max_file_bytes,
+            quarantine_failure_rate_threshold=args.quarantine_failure_rate_threshold,
+            quarantine_failure_rate_window=args.quarantine_failure_rate_window,
         )
     if algorithm.name != "ppo":
         return PolicyTrainerConfig(
@@ -727,6 +742,11 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             agent_timeout_s=args.agent_timeout_s,
             train_tool_results=args.train_tool_results,
             chat_template_enable_thinking=chat_template_enable_thinking,
+            quarantine_enabled=args.quarantine_enabled,
+            quarantine_max_entries=args.quarantine_max_entries,
+            quarantine_max_file_bytes=args.quarantine_max_file_bytes,
+            quarantine_failure_rate_threshold=args.quarantine_failure_rate_threshold,
+            quarantine_failure_rate_window=args.quarantine_failure_rate_window,
         )
     return PPOTrainerConfig(
         algo=algorithm.name,
@@ -788,6 +808,11 @@ def _trainer_config_from_args(args) -> TrainerConfig:
         agent_timeout_s=args.agent_timeout_s,
         train_tool_results=args.train_tool_results,
         chat_template_enable_thinking=chat_template_enable_thinking,
+        quarantine_enabled=args.quarantine_enabled,
+        quarantine_max_entries=args.quarantine_max_entries,
+        quarantine_max_file_bytes=args.quarantine_max_file_bytes,
+        quarantine_failure_rate_threshold=args.quarantine_failure_rate_threshold,
+        quarantine_failure_rate_window=args.quarantine_failure_rate_window,
     )
 
 
@@ -951,7 +976,7 @@ def _training_config_settings(config: TrainerConfig) -> dict:
             ],
         ),
         section("Checkpoint", ["save_path", "save_interval"]),
-        section("Observability", ["metrics_log_dir"]),
+        section("Observability", ["metrics_log_dir", "quarantine_enabled", "quarantine_max_entries", "quarantine_max_file_bytes", "quarantine_failure_rate_threshold", "quarantine_failure_rate_window"]),
     ]
     extras = []
     for field in fields(config):
@@ -1187,6 +1212,23 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
 @click.option("--save-interval", type=int, default=100, show_default=True, help="Save checkpoint every N train steps.")
 @click.option(
     "--metrics-log-dir", default=DEFAULT_METRICS_LOG_DIR, show_default=True, help="TensorBoard metrics log directory."
+)
+@click.option(
+    "--quarantine-enabled", is_flag=True, default=False, help="Write failing samples to quarantine.jsonl for debugging."
+)
+@click.option(
+    "--quarantine-max-entries", type=int, default=200, show_default=True, help="Maximum quarantine entries before freezing."
+)
+@click.option(
+    "--quarantine-max-file-bytes", type=int, default=10_485_760, show_default=True, help="Maximum quarantine file size in bytes."
+)
+@click.option(
+    "--quarantine-failure-rate-threshold", type=float, default=0.5, show_default=True,
+    help="Stop training when failure rate exceeds this fraction over the last N samples.",
+)
+@click.option(
+    "--quarantine-failure-rate-window", type=int, default=20, show_default=True,
+    help="Sliding window size for failure-rate detection.",
 )
 @click.option("--epochs", type=int, default=10, show_default=True, help="Number of dataset epochs to train.")
 @click.option("--max-steps", type=int, default=None, help="Stop after this many trainer steps.")
