@@ -67,11 +67,25 @@ TOOLS = [
 
 TOOL_BY_NAME = {tool["function"]["name"]: tool for tool in TOOLS}
 
-# 简短的 turn prompts (学习 shopping)
-TURN_PROMPTS = {
-    "pick_from_shelf": "Pick items: call pick_from_shelf to get required items.",
-    "submit_order": "Done: call submit_order to complete the order.",
-}
+# 带上下文的 turn prompts - 让模型知道当前状态
+def make_pick_prompt(state: WarehouseState, order: list[dict]) -> str:
+    """生成 pick 轮提示，包含订单和购物车状态"""
+    order_str = ", ".join(f"{item['sku']}×{item['qty']}" for item in order)
+    if state.cart:
+        cart_str = ", ".join(f"{sku}×{qty}" for sku, qty in state.cart.items())
+        picked = set(state.cart.keys())
+        remaining = [f"{item['sku']}×{item['qty']}" for item in order if item['sku'] not in picked]
+        remaining_str = ", ".join(remaining) if remaining else "all done!"
+        return f"Order: {order_str}. Cart: {cart_str}. Still need: {remaining_str}. Use pick_from_shelf."
+    return f"Order: {order_str}. Cart: empty. Use pick_from_shelf to pick items."
+
+
+def make_submit_prompt(state: WarehouseState) -> str:
+    """生成 submit 轮提示"""
+    if state.cart:
+        cart_str = ", ".join(f"{sku}×{qty}" for sku, qty in state.cart.items())
+        return f"Cart: {cart_str}. Use submit_order to complete."
+    return "Cart empty. Use pick_from_shelf first, then submit_order."
 
 # 状态缓存
 _state_cache: dict[int, WarehouseState] = {}
@@ -122,31 +136,37 @@ async def run_agent(ctx, batch):
 
     async def run_one(item):
         turns = []
+        # 获取初始状态
+        state = _get_or_build_state(item.record)
+
         # 初始消息
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": item.prompt},
         ]
 
-        # Turn 1: pick_from_shelf only
-        pick_msg, pick_turn = await _call_model(item, client, messages, "pick_from_shelf")
+        # Turn 1: pick_from_shelf only (带状态上下文的提示)
+        pick_prompt = make_pick_prompt(state, item.record.get("order", []))
+        pick_msg, pick_turn = await _call_model(item, client, messages, "pick_from_shelf", pick_prompt)
         turns.append(pick_turn)
 
         tool_result = _run_tool(pick_msg, item.record)
         messages = _tool_messages(pick_msg, tool_result)
         # 截断：只保留 system + user + 这一轮的结果
-        messages = messages[:4]  # system, user, assistant, tool
+        messages = messages[:4]
 
         # 检查是否已完成（可能第一次就完成了）
         completed = tool_result.get("data", {}).get("completed", False)
 
         if not completed:
-            # Turn 2: submit_order only
-            submit_msg, submit_turn = await _call_model(item, client, messages, "submit_order")
+            # 获取更新后的状态
+            state = _get_or_build_state(item.record)
+            # Turn 2: submit_order only (带状态上下文的提示)
+            submit_prompt = make_submit_prompt(state)
+            submit_msg, submit_turn = await _call_model(item, client, messages, "submit_order", submit_prompt)
             turns.append(submit_turn)
 
             tool_result = _run_tool(submit_msg, item.record)
-            # 不需要继续了，2 轮是上限
 
         return turns
 
@@ -157,9 +177,10 @@ async def run_agent(ctx, batch):
         await client.close()
 
 
-async def _call_model(item, client, messages: list[dict], tool_name: str):
+async def _call_model(item, client, messages: list[dict], tool_name: str, custom_prompt: str | None = None):
     """Call model with forced tool choice (1 tool per turn, like shopping)."""
-    turn_messages = [*messages, {"role": "user", "content": TURN_PROMPTS[tool_name]}]
+    prompt = custom_prompt or TURN_PROMPTS.get(tool_name, f"Use {tool_name}.")
+    turn_messages = [*messages, {"role": "user", "content": prompt}]
     tools = [TOOL_BY_NAME[tool_name]]
     tool_choice = {"type": "function", "function": {"name": tool_name}}
 
