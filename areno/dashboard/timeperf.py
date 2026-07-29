@@ -360,9 +360,11 @@ def summarize(run_dir: Path, pid: int | None = None) -> dict[str, Any]:
         }
         latest_update = {
             "step": last,
-            "segments": {
-                name: (val if val and val > 0 else None) for name, val in latest_phases.items()
-            },
+            # Keep 0.0 distinct from missing: a phase that was recorded with
+            # zero wall time (e.g. SFT's rollout, which has no generation)
+            # shows as 0.0, while a phase absent from this step shows as null.
+            # This matches whole_run.segments, which never collapses 0 to null.
+            "segments": dict(latest_phases),
             "partial": partial,
             **recon,
         }

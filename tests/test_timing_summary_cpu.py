@@ -110,6 +110,57 @@ class ReconcileLogicTest(unittest.TestCase):
         self.assertAlmostEqual(recon["reconstructed_total"], 5.0)
 
 
+class LatestZeroVsMissingTest(unittest.TestCase):
+    """A recorded phase with 0.0 wall time must stay 0.0, not become missing (null).
+
+    Reproduces the SFT case seen on a real run: ``train/step_rollout_time_s`` is
+    recorded as 0.0 every step (no generation), while reward/value/etc. are
+    never recorded. The summary must keep rollout=0.0 distinct from the genuinely
+    missing phases, in both latest_update and whole_run, and only list the
+    never-recorded phases under ``missing``.
+    """
+
+    def _summary_for_sft_like_step(self) -> dict:
+        # Simulate summarize() for a single step where rollout was recorded at 0.0
+        # and only train has real time — mirroring real SFT metrics.
+        bucket = {"total": 1.0, "rollout": 0.0, "train": 1.0}
+        recon = tp._reconcile(bucket)
+        latest_phases = {name: (bucket[name] if name in bucket else None) for name in tp.TIME_SEGMENT_ORDER}
+        return {
+            "run_status": "completed",
+            "run_dir": "/tmp/sft",
+            "num_steps": 1,
+            "latest_update": {"step": 0, "segments": dict(latest_phases), "partial": False, **recon},
+            "whole_run": {
+                "segments": {n: (bucket.get(n, 0.0) if n in bucket else 0.0) for n in tp.TIME_SEGMENT_ORDER},
+                "reported_total": 1.0,
+                "reconstructed_total": recon["reconstructed_total"],
+                "diff": recon["diff"],
+                "total_source": "reported",
+            },
+            "missing": [n for n in tp.TIME_SEGMENT_ORDER if n not in bucket and n != "other"],
+        }
+
+    def test_zero_phase_stays_zero_not_null_in_latest(self):
+        s = self._summary_for_sft_like_step()
+        # rollout was recorded at 0.0 -> must be 0.0, not None
+        self.assertEqual(s["latest_update"]["segments"]["rollout"], 0.0)
+        # reward was never recorded -> must be None
+        self.assertIsNone(s["latest_update"]["segments"]["reward"])
+
+    def test_zero_phase_not_listed_as_missing(self):
+        s = self._summary_for_sft_like_step()
+        self.assertNotIn("rollout", s["missing"])
+        self.assertIn("reward", s["missing"])
+
+    def test_format_table_distinguishes_zero_from_missing(self):
+        s = self._summary_for_sft_like_step()
+        text = tp.format_table(s)
+        # 0.0 renders as "0.00"; never-recorded renders as "missing"
+        self.assertIn("missing", text)
+        self.assertIn("0.00", text)
+
+
 class FormatTest(unittest.TestCase):
     """No-dependency tests for the two output renderers."""
 
