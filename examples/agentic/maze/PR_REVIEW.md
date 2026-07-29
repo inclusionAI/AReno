@@ -80,12 +80,16 @@ pytest tests/test_agentic_maze_example_cpu.py -v
 
 ### Kaggle GPU 训练（T4×2, Qwen3-0.6B, GSPO）
 
-配置：`--batch-size 2 --n-samples 4 --max-new-tokens 64 --tp-size 2 --world-size 2 --max-steps 100`
+配置：`--batch-size 2 --n-samples 4 --max-new-tokens 64 --tp-size 2 --world-size 2 --max-steps 500`
 
-单卡（tp-size=1）触发 CUDA OOM，切换双卡张量并行（tp-size=2）后成功。每步约 9.9s（rollout 5.6s + train 4.2s），100 步约 16 分钟完成。
+单卡（tp-size=1）触发 CUDA OOM，切换双卡张量并行（tp-size=2）后成功。每步约 9.9s（rollout 5.6s + train 4.2s）。
 
 ![Training Dashboard](kaggle-training-dashboard.png)
 
 ### 训练结果
 
-`rollout/rewards_mean` 在 100 步内维持在 -0.5125 至 -0.5，agent 未到达过终点。原因分析：每步仅 8 个 rollout（batch-size 2 × n-samples 4），100 步共 800 次尝试，对 7×7 POMDP 环境不足；奖励稀疏导致缺乏梯度方向。后续计划：训练步数提升至 500+，引入距离奖励，或先用 5×5 迷宫降低难度。
+首轮 100 步训练：`rollout/rewards_mean` 维持在 -0.5125 至 -0.5，agent 未到达终点。
+
+扩展至 500 步训练（截图中 step 304，287 个数据点）：`rollout/rewards_mean` 范围 -0.5375 至 -0.5，agent 仍未到达终点。每步 8 个 rollout，300+ 步共约 2400 次尝试，对 7×7 POMDP 环境仍不足。
+
+原因分析：奖励稀疏导致缺乏梯度方向——未到达终点时恒定 -0.5，无距离梯度。后续改进方向：引入 BFS 距离奖励、先用 5×5 迷宫降低难度、增大 n-samples 提升探索效率。
