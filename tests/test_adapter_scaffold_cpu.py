@@ -162,6 +162,19 @@ class TestInferConfig(unittest.TestCase):
         with self.assertRaises(ValueError):
             infer_config(str(path), "test", "/tmp/test")
 
+    def test_invalid_adapter_name(self):
+        """adapter_name with spaces or special chars should raise."""
+        path = _write_hf_config(self.tmpdir, _DENSE_CONFIG)
+        with self.assertRaises(ValueError):
+            infer_config(path, "my model", "/tmp/test")
+        with self.assertRaises(ValueError):
+            infer_config(path, "my@model", "/tmp/test")
+
+    def test_empty_adapter_name(self):
+        path = _write_hf_config(self.tmpdir, _DENSE_CONFIG)
+        with self.assertRaises(ValueError):
+            infer_config(path, "", "/tmp/test")
+
 
 # ---------------------------------------------------------------------------
 # Dense scaffold generation
@@ -464,6 +477,69 @@ class TestCLI(unittest.TestCase):
             ]
         )
         self.assertNotEqual(ret, 0)
+
+    def test_cli_yes_does_not_overwrite(self):
+        """--yes should NOT implicitly overwrite user-edited files."""
+        # First generate.
+        ret = main(
+            [
+                "--hf-config",
+                self.config_path,
+                "--adapter-name",
+                "mydense",
+                "--dest-dir",
+                self.dest_dir,
+                "--yes",
+            ]
+        )
+        self.assertEqual(ret, 0)
+        # Edit a file.
+        model_file = Path(self.dest_dir) / "model.py"
+        original = model_file.read_text(encoding="utf-8")
+        model_file.write_text(original + "\n# User edit\n", encoding="utf-8")
+        # Re-generate with --yes (should NOT overwrite).
+        ret = main(
+            [
+                "--hf-config",
+                self.config_path,
+                "--adapter-name",
+                "mydense",
+                "--dest-dir",
+                self.dest_dir,
+                "--yes",
+            ]
+        )
+        self.assertEqual(ret, 0)
+        # File should still have the user edit.
+        content = model_file.read_text(encoding="utf-8")
+        self.assertIn("# User edit", content)
+
+    def test_cli_json_output(self):
+        """--json should emit JSON with created_files."""
+        ret = main(
+            [
+                "--hf-config",
+                self.config_path,
+                "--adapter-name",
+                "mydense",
+                "--dest-dir",
+                self.dest_dir,
+                "--yes",
+                "--json",
+            ]
+        )
+        self.assertEqual(ret, 0)
+
+    def test_generation_result_to_dict(self):
+        """GenerationResult.to_dict should return all fields."""
+        from generate_adapter_scaffold import GenerationResult
+
+        result = GenerationResult(created_files=["a.py"], dest_dir="/tmp")
+        d = result.to_dict()
+        self.assertEqual(d["created_files"], ["a.py"])
+        self.assertEqual(d["dest_dir"], "/tmp")
+        self.assertEqual(d["preserved_files"], [])
+        self.assertEqual(d["conflicted_files"], [])
 
 
 if __name__ == "__main__":

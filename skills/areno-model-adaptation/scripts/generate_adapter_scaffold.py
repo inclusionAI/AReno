@@ -95,6 +95,16 @@ class GenerationResult:
     conflicted_files: list[str] = field(default_factory=list)
     dest_dir: str = ""
 
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-serialisable dict for structured output."""
+
+        return {
+            "created_files": self.created_files,
+            "preserved_files": self.preserved_files,
+            "conflicted_files": self.conflicted_files,
+            "dest_dir": self.dest_dir,
+        }
+
 
 # ---------------------------------------------------------------------------
 # Config inference
@@ -118,8 +128,14 @@ def infer_config(
 
     Raises:
         FileNotFoundError: If the config file does not exist.
-        ValueError: If the config is missing required fields.
+        ValueError: If the config is missing required fields or adapter_name is invalid.
     """
+
+    # Validate adapter_name: only alphanumeric + underscore.
+    if not adapter_name or not adapter_name.replace("-", "_").replace("_", "").isalnum():
+        raise ValueError(
+            f"adapter_name must contain only alphanumeric characters, underscores, or hyphens; got {adapter_name!r}"
+        )
 
     path = Path(hf_config_path)
     if not path.exists():
@@ -285,13 +301,13 @@ class {config.class_name.replace("Adapter", "ForCausalLM")}(nn.Module):
     def __init__(self, config: ModelConfig):
         super().__init__()
         self.config = config
-        self.embed_tokens = VocabParallelEmbedding(config)
+        self.embed_tokens = VocabParallelEmbedding(config.vocab_size, config.hidden_size, dtype=config.dtype)
         self.layers = nn.ModuleList([
             {config.class_name.replace("Adapter", "DecoderLayer")}(config, i)
             for i in range(config.num_hidden_layers)
         ])
         self.norm = RMSNorm(config.hidden_size, config.rms_norm_eps)
-        self.lm_head = VocabParallelLMHead(config)
+        self.lm_head = VocabParallelLMHead(config.hidden_size, config.vocab_size, dtype=config.dtype)
 
     def forward(
         self,
@@ -409,13 +425,13 @@ class {config.class_name.replace("Adapter", "ForCausalLM")}(nn.Module):
     def __init__(self, config: ModelConfig):
         super().__init__()
         self.config = config
-        self.embed_tokens = VocabParallelEmbedding(config)
+        self.embed_tokens = VocabParallelEmbedding(config.vocab_size, config.hidden_size, dtype=config.dtype)
         self.layers = nn.ModuleList([
             {config.class_name.replace("Adapter", "DecoderLayer")}(config, i)
             for i in range(config.num_hidden_layers)
         ])
         self.norm = RMSNorm(config.hidden_size, config.rms_norm_eps)
-        self.lm_head = VocabParallelLMHead(config)
+        self.lm_head = VocabParallelLMHead(config.hidden_size, config.vocab_size, dtype=config.dtype)
 
     def forward(
         self,
@@ -762,12 +778,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--yes",
         action="store_true",
-        help="Accept all inferred choices without prompting. Implies --overwrite.",
+        help="Accept all inferred choices without prompting.",
     )
     parser.add_argument(
         "--overwrite",
         action="store_true",
         help="Overwrite previously generated files.",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable JSON output instead of human-readable text.",
     )
     args = parser.parse_args(argv)
 
@@ -801,8 +822,13 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
     # Generate.
-    result = generate_scaffold(config, overwrite=args.yes or args.overwrite)
-    print(format_result(result))
+    result = generate_scaffold(config, overwrite=args.overwrite)
+    if args.json:
+        import json as _json
+
+        print(_json.dumps(result.to_dict(), indent=2))
+    else:
+        print(format_result(result))
     return 0
 
 
