@@ -550,6 +550,14 @@ def test_score_convert_search_contact_parcel_success():
     score = game.score_task(record, tool_calls)
     assert score["overall"] == 1.0
     assert score["failures"] == []
+
+
+# ---------------------------------------------------------------------------
+# Scoring tests — failure paths: verify incorrect trajectories are penalized
+# ---------------------------------------------------------------------------
+
+
+def test_score_wrong_tool_order():
     """Verify that calling tools in the wrong order lowers the 'order' score."""
 
     game = _load_module("game")
@@ -646,9 +654,76 @@ def test_score_invalid_json_arguments():
     assert score["arguments"] < 1.0
 
 
-# ---------------------------------------------------------------------------
-# Reward function tests — verify reward.py wraps score_task correctly
-# ---------------------------------------------------------------------------
+def test_score_search_meeting_contact_wrong_order():
+    """Verify that wrong tool order in a 3-step search-meeting-contact task lowers the 'order' score."""
+
+    game = _load_module("game")
+    record = {
+        "id": "search-meeting-contact-1",
+        "description": "Search notes for 'Team', read the meeting note, then list contacts in Shanghai.",
+        "required_tools": ["search_notes", "read_note", "list_contacts_by_city"],
+        "expected_search_keyword": "Team",
+        "expected_note_key": "meeting",
+        "expected_city": "Shanghai",
+    }
+    # Wrong order: read_note before search_notes
+    tool_calls = [
+        {"name": "read_note", "arguments": json.dumps({"note_key": "meeting"})},
+        {"name": "search_notes", "arguments": json.dumps({"keyword": "Team"})},
+        {"name": "list_contacts_by_city", "arguments": json.dumps({"city": "Shanghai"})},
+    ]
+    score = game.score_task(record, tool_calls)
+    assert score["order"] < 1.0
+    assert "order" in score["failures"]
+
+
+def test_score_parcel_calc_note_wrong_arguments():
+    """Verify that wrong arguments in a 3-step parcel-calc-note task lowers the 'arguments' score."""
+
+    game = _load_module("game")
+    record = {
+        "id": "parcel-calc-note-1",
+        "description": "Look up parcel P002, calculate 7 - 6, then read the shipping note.",
+        "required_tools": ["lookup_parcel", "calculate", "read_note"],
+        "expected_parcel": "P002",
+        "expected_expression": "7 - 6",
+        "expected_note_key": "shipping",
+    }
+    # Wrong: looking up P001 instead of P002, wrong expression, wrong note key
+    tool_calls = [
+        {"name": "lookup_parcel", "arguments": json.dumps({"tracking_id": "P001"})},
+        {"name": "calculate", "arguments": json.dumps({"expression": "3 + 3"})},
+        {"name": "read_note", "arguments": json.dumps({"note_key": "budget"})},
+    ]
+    score = game.score_task(record, tool_calls)
+    assert score["arguments"] < 1.0
+    assert "arguments" in score["failures"]
+
+
+def test_score_convert_search_contact_parcel_missing_tool():
+    """Verify that omitting a tool in a 4-step task lowers the 'tool_selection' score."""
+
+    game = _load_module("game")
+    record = {
+        "id": "convert-search-contact-parcel-1",
+        "description": "Convert 1000 mm to m, search notes for 'shipping', list contacts in Shanghai, then look up parcel P001.",
+        "required_tools": ["unit_convert", "search_notes", "list_contacts_by_city", "lookup_parcel"],
+        "expected_value": 1000,
+        "expected_from_unit": "mm",
+        "expected_to_unit": "m",
+        "expected_search_keyword": "shipping",
+        "expected_city": "Shanghai",
+        "expected_parcel": "P001",
+    }
+    # Missing list_contacts_by_city
+    tool_calls = [
+        {"name": "unit_convert", "arguments": json.dumps({"value": 1000, "from_unit": "mm", "to_unit": "m"})},
+        {"name": "search_notes", "arguments": json.dumps({"keyword": "shipping"})},
+        {"name": "lookup_parcel", "arguments": json.dumps({"tracking_id": "P001"})},
+    ]
+    score = game.score_task(record, tool_calls)
+    assert score["tool_selection"] < 1.0
+    assert "tool_selection" in score["failures"]
 
 
 def test_reward_fn_returns_positive_on_success():
