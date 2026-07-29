@@ -46,13 +46,18 @@ def query_gpu_status(devices: list[int]) -> list[GpuStatus]:
     so callers can safely skip warnings on CPU-only machines.
     """
 
+    # Step 1: locate nvidia-smi. On CPU-only machines (e.g. macOS dev),
+    # shutil.which returns None — we silently skip instead of raising.
     smi = shutil.which("nvidia-smi")
     if smi is None:
         return []
     if not devices:
         return []
+    # nvidia-smi -i expects a comma-separated GPU index list (e.g. "0,1,2").
     indices = ",".join(str(d) for d in devices)
 
+    # Step 2: query per-GPU memory and utilization.
+    # --format=csv,noheader,nounits strips unit suffixes so we get raw ints.
     gpu_info = _run_smi(
         smi,
         "--query-gpu=memory.total,memory.free,memory.used,utilization.gpu,name",
@@ -61,6 +66,8 @@ def query_gpu_status(devices: list[int]) -> list[GpuStatus]:
     if gpu_info is None:
         return []
 
+    # Step 3: query compute processes (pid, name, memory) on those GPUs.
+    # Used to show the user which processes occupy the flagged GPUs.
     proc_info = _run_smi(
         smi,
         "--query-compute-apps=pid,process_name,used_memory",
@@ -104,9 +111,12 @@ def check_gpu_occupancy(
 
     warnings: list[GpuWarning] = []
     for status in statuses:
+        # Guard against division-by-zero when nvidia-smi returns invalid data.
         if status.total_mem_mb <= 0:
             continue
         free_pct = status.free_mem_mb / status.total_mem_mb * 100
+        # Two independent checks — a GPU can trigger both (e.g. low mem AND
+        # high util). The issue explicitly requires "warn, don't block".
         if free_pct < mem_free_warn_pct:
             procs = _format_processes(status)
             warnings.append(
@@ -169,9 +179,11 @@ def _run_smi(smi: str, query: str, indices: str) -> list[list[str]] | None:
     """Run nvidia-smi with *query* for *indices* and return parsed CSV rows."""
 
     try:
+        # Use list form (not shell=True) to avoid command injection; smi
+        # comes from shutil.which, not user input, but defense-in-depth.
         proc = subprocess.run(
             [smi, f"--query-gpu={query}", "--format=csv,noheader,nounits", "-i", indices],
-            check=False,
+            check=False,  # don't raise on non-zero; we check returncode below
             text=True,
             capture_output=True,
         )

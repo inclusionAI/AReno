@@ -801,10 +801,17 @@ def _warn_gpu_occupancy(config: TrainerConfig, *, mem_free_warn_pct: int, util_w
     """Check GPU occupancy before launch and print warnings to stderr.
 
     Never raises — on CPU-only machines or when nvidia-smi is unavailable the
-    check is silently skipped.
+    check is silently skipped.  This aligns with issue #233's requirement:
+    warn only, never terminate or alter other processes.
     """
 
+    # Derive the list of GPU indices from world_size, matching the pattern
+    # used by _resolved_attn_backend_for_summary (line 474).
     devices = list(range(config.world_size))
+
+    # Lazy import: gpu_check is pure stdlib but we follow the project convention
+    # of importing heavy/relevant modules inside functions so `areno train --help`
+    # stays fast.
     from areno.engine.runtime.gpu_check import (
         check_gpu_occupancy,
         format_gpu_warnings,
@@ -813,6 +820,7 @@ def _warn_gpu_occupancy(config: TrainerConfig, *, mem_free_warn_pct: int, util_w
 
     statuses = query_gpu_status(devices)
     if not statuses:
+        # No nvidia-smi / CPU-only machine — silently skip.
         return
     warnings = check_gpu_occupancy(
         statuses,
@@ -821,6 +829,7 @@ def _warn_gpu_occupancy(config: TrainerConfig, *, mem_free_warn_pct: int, util_w
     )
     if warnings:
         text = format_gpu_warnings(warnings, statuses)
+        # Output to stderr so stdout stays clean for pipeline usage.
         click.echo(text, err=True)
 
 
