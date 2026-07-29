@@ -62,4 +62,4 @@ backend-only view.
 Runnable context lives in `examples/`: math RLVR under `examples/math/`, SFT
 under `examples/sft/`, and multi-turn agents under `examples/agentic/`.
 CPU-safe tests use the `*_cpu.py` suffix in `tests/`. Repeatable
-model-adaptation guidance lives in `skills/areno-model-adaptation/SKILL.md`.
+model-adaptation guidance lives in `.agents/skills/areno-model-adaptation/SKILL.md`.
