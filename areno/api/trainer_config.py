@@ -112,6 +112,8 @@ class RolloutTrainerConfig(TrainerConfig):
     top_k: int = -1
     top_p: float = 1.0
     max_running_prompts: int | None = None
+    replay_path: str | None = None
+    save_replay_path: str | None = None
 
     def resolved_max_running_prompts(self) -> int:
         """Return explicit or full-batch rollout concurrency."""

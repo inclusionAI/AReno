@@ -7,5 +7,16 @@ by the runtime and worker layers.
 """
 
 from areno.engine.data.batch import RolloutOutput, SamplingParams, TrainStats, to_cpu, to_device
+from areno.engine.data.replay import REPLAY_FORMAT_VERSION, RolloutRecord, load_rollout_records, save_rollout_records
 
-__all__ = ["RolloutOutput", "SamplingParams", "TrainStats", "to_cpu", "to_device"]
+__all__ = [
+    "RolloutOutput",
+    "SamplingParams",
+    "TrainStats",
+    "to_cpu",
+    "to_device",
+    "REPLAY_FORMAT_VERSION",
+    "RolloutRecord",
+    "load_rollout_records",
+    "save_rollout_records",
+]

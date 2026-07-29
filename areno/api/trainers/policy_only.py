@@ -89,6 +89,21 @@ class PolicyOnlyTrainer:
                     train_batch, rewards_all, rollout_logprobs = self._materialize_agentic_train_batch(
                         tokenizer, prompt_batch, agent_batch
                     )
+                elif self.config.replay_path is not None:
+                    replay_file = Path(self.config.replay_path) / f"step_{step:06d}.jsonl"
+                    if not replay_file.exists():
+                        self.logger.info("epoch=%d step=%d stage=replay_exhausted", epoch, step)
+                        record_dashboard_state(
+                            self.areno, stage="replay_exhausted", epoch=epoch, step=step, role=role
+                        )
+                        return
+                    train_batch = self.areno.load_rollout_batch(str(replay_file))
+                    rewards_all = [seq.reward for seq in train_batch]
+                    rollout_logprobs = []
+                    self.logger.info("epoch=%d step=%d stage=replay_loaded path=%s", epoch, step, replay_file)
+                    record_dashboard_state(
+                        self.areno, stage="replay_loaded", epoch=epoch, step=step, role=role
+                    )
                 else:
                     # 1) Sample n_samples completions per prompt; ordering
                     #    matches `prompt_batch.items` so we can zip downstream.
@@ -102,6 +117,11 @@ class PolicyOnlyTrainer:
                     train_batch, rewards_all, rollout_logprobs = self._materialize_train_batch(
                         tokenizer, prompt_batch, rollout_results
                     )
+
+                if self.config.save_replay_path is not None and train_batch:
+                    replay_file = Path(self.config.save_replay_path) / f"step_{step:06d}.jsonl"
+                    self.areno.save_rollout_batch(str(replay_file), epoch=epoch, step=step, train_batch=train_batch)
+                    self.logger.info("epoch=%d step=%d stage=replay_saved path=%s", epoch, step, replay_file)
 
                 if rewards_all:
                     self.logger.info(

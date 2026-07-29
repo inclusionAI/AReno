@@ -679,6 +679,8 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             agent_timeout_s=args.agent_timeout_s,
             train_tool_results=args.train_tool_results,
             chat_template_enable_thinking=chat_template_enable_thinking,
+            replay_path=args.replay_path,
+            save_replay_path=args.save_replay_path,
         )
     if algorithm.name != "ppo":
         return PolicyTrainerConfig(
@@ -727,6 +729,8 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             agent_timeout_s=args.agent_timeout_s,
             train_tool_results=args.train_tool_results,
             chat_template_enable_thinking=chat_template_enable_thinking,
+            replay_path=args.replay_path,
+            save_replay_path=args.save_replay_path,
         )
     return PPOTrainerConfig(
         algo=algorithm.name,
@@ -1324,6 +1328,16 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
 @click.option("--value-loss-coef", type=float, default=0.5, show_default=True, help="PPO value loss coefficient.")
 @click.option("--gamma", type=float, default=1.0, show_default=True, help="PPO GAE discount.")
 @click.option("--lam", type=float, default=0.95, show_default=True, help="PPO GAE lambda.")
+@click.option(
+    "--replay-path",
+    default=None,
+    help="Load saved rollout records from this directory instead of running online rollout.",
+)
+@click.option(
+    "--save-replay-path",
+    default=None,
+    help="Save rollout records to this directory for later replay training.",
+)
 def train_command(**options) -> None:
     """Click entrypoint for training."""
 

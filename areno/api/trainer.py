@@ -426,6 +426,52 @@ class Trainer:
             value_loss_coef=value_loss_coef,
         )
 
+    def save_rollout_batch(
+        self, path: str, *, epoch: int, step: int, train_batch: list[TrainSequence]
+    ) -> None:
+        """Persist a training batch as versioned rollout records for later replay."""
+
+        from areno.engine.data.replay import REPLAY_FORMAT_VERSION, RolloutRecord, save_rollout_records
+
+        records = [
+            RolloutRecord(
+                format_version=REPLAY_FORMAT_VERSION,
+                epoch=epoch,
+                step=step,
+                prompt_index=idx,
+                sample_index=0,
+                tokens=list(seq.tokens),
+                prompt_mask=list(seq.prompt_mask),
+                loss_mask=list(seq.loss_mask),
+                logprobs=list(seq.logprobs),
+                advantages=list(seq.advantages),
+                reward=float(seq.reward),
+                eos_token_id=int(seq.eos_token_id),
+                metadata={},
+            )
+            for idx, seq in enumerate(train_batch)
+        ]
+        save_rollout_records(path, records)
+
+    def load_rollout_batch(self, path: str) -> list[TrainSequence]:
+        """Load saved rollout records and rebuild ``TrainSequence`` objects."""
+
+        from areno.engine.data.replay import load_rollout_records
+
+        records = load_rollout_records(path)
+        return [
+            TrainSequence(
+                tokens=r.tokens,
+                prompt_mask=r.prompt_mask,
+                loss_mask=r.loss_mask,
+                logprobs=r.logprobs,
+                advantages=r.advantages,
+                reward=r.reward,
+                eos_token_id=r.eos_token_id,
+            )
+            for r in records
+        ]
+
     def save_checkpoint(self, path: str) -> str:
         """Save a HuggingFace-compatible checkpoint when supported by backend."""
 
