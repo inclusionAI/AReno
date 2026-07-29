@@ -230,11 +230,15 @@ def test_reward_success_returns_float_and_logs_metrics(caplog):
 
 def test_reward_empty_moves_are_penalized():
     reward = _load_module("reward")
+    game = _load_module("game")
 
     value = reward.reward_fn(_record(moves=[]))
 
-    # No episode played: score 0 minus baseline 50, no invalid penalty.
-    assert value == -50.0
+    # E: a zero-move call is "not outputting" -- penalized worse than any
+    # >=1-move episode (the no-call floor), not the old 0 - baseline soft landing.
+    expected = -(50.0 + game.INVALID_PENALTY * game.DEFAULT_EPISODE_CAP + 1.0)
+    assert value == expected
+    assert value < -50.0
 
 
 def test_reward_wrong_tool_is_penalized_not_parsed_from_text():
@@ -243,8 +247,9 @@ def test_reward_wrong_tool_is_penalized_not_parsed_from_text():
 
     # A non-choose_moves tool call must NOT fall back to parsing "left/right"
     # out of the completion text -- that fallback let prose out-score tool calls
-    # and the RL abandoned tool use. Expect the no-tool-call penalty instead,
-    # which is worse than the baseline-only (-50) empty-moves case.
+    # and the RL abandoned tool use. Expect the no-tool-call penalty, which is
+    # now the same floor a zero-move call gets (tool_choice is forced, so "not
+    # outputting" is the only real failure mode).
     value = reward.reward_fn(_record(tool_name="other_tool", completion="left then right"))
     baseline = 50.0
     expected_penalty = -(baseline + game.INVALID_PENALTY * game.DEFAULT_EPISODE_CAP + 1.0)
@@ -254,9 +259,12 @@ def test_reward_wrong_tool_is_penalized_not_parsed_from_text():
 
 def test_reward_malformed_json_arguments_does_not_raise():
     reward = _load_module("reward")
+    game = _load_module("game")
 
     value = reward.reward_fn(_record(arguments="{not valid json"))
-    assert value == -50.0  # falls through to empty -> baseline-only penalty
+    # malformed JSON parses to no moves -> zero-move E floor (was the old
+    # baseline-only -50; empty output is now a real penalty, not a soft landing).
+    assert value == -(50.0 + game.INVALID_PENALTY * game.DEFAULT_EPISODE_CAP + 1.0)
 
 
 def test_reward_out_of_enum_tokens_filtered():
@@ -309,10 +317,69 @@ def test_reward_noop_appended_lowers_reward():
 
     clean = reward.reward_fn(record(["left"]))
     padded = reward.reward_fn(record(["left", "left"]))
-    # Same merge (+4), but the padded plan wastes a step on a no-op: it loses
-    # exactly INVALID_PENALTY.
+    # Same merge (+4), but the padded plan wastes a step on a no-op. Under the
+    # length-matched baseline, appending a move also lengthens the matched random
+    # baseline (matched_2 >= matched_1 trial-wise), so the drop is INVALID_PENALTY
+    # plus that extra baseline growth -- still strictly worse, and the no-op
+    # penalty stays visible (drop >= INVALID_PENALTY).
     assert padded < clean
-    assert clean - padded == pytest.approx(game.INVALID_PENALTY)
+    assert clean - padded >= game.INVALID_PENALTY
+
+
+def test_reward_short_plan_uses_length_matched_baseline():
+    """A: a short move list is measured against a baseline at the SAME move
+    count, not the full-cap baseline -- so a 1-move plan is not drowned by the
+    32-move random baseline's merge opportunities."""
+    reward = _load_module("reward")
+    game = _load_module("game")
+
+    board = [[2, 0, 0, 0], [0, 0, 0, 2], [4, 0, 2, 0], [0, 8, 0, 0]]
+    # Fake an absurd full-cap baseline; a fair 1-move comparison must ignore it.
+    source = {
+        "board": board,
+        "seed": 42,
+        "random_baseline": {"score": 999.0, "trials": 8},
+        "id": "short",
+    }
+    record = SimpleNamespace(
+        source_record=source,
+        completion="",
+        tool_calls=[{"name": "choose_moves", "arguments": {"moves": ["left"]}}],
+    )
+    value = reward.reward_fn(record)
+
+    res = game.play_episode(board, ["left"], seed=42, cap=game.DEFAULT_EPISODE_CAP)
+    matched = game.random_episode(board, seed=42, cap=res.total_moves, trials=8)["score"]
+    expected = res.score - matched - game.INVALID_PENALTY * res.invalid_moves
+    assert value == pytest.approx(expected)
+    assert value > -999.0  # not drowned by the fake 999 full-cap baseline
+
+
+def test_reward_zero_move_call_is_penalized_below_any_legit():
+    """E: a choose_moves call with zero recognized moves is "not outputting" and
+    must score worse than any >=1-move episode -- it cannot coast on the
+    length-matched baseline collapsing to 0 at zero moves."""
+    reward = _load_module("reward")
+    game = _load_module("game")
+
+    board = [[2, 0, 0, 0], [0, 0, 0, 2], [4, 0, 2, 0], [0, 8, 0, 0]]
+    baseline = 50.0
+    source = {"board": board, "seed": 42, "random_baseline": {"score": baseline, "trials": 8}, "id": "zero"}
+    empty = SimpleNamespace(
+        source_record=source,
+        completion="",
+        tool_calls=[{"name": "choose_moves", "arguments": {"moves": []}}],
+    )
+    real = SimpleNamespace(
+        source_record=source,
+        completion="",
+        tool_calls=[{"name": "choose_moves", "arguments": {"moves": ["left", "up", "right", "down"]}}],
+    )
+    empty_r = reward.reward_fn(empty)
+    real_r = reward.reward_fn(real)
+    floor = -(baseline + game.INVALID_PENALTY * game.DEFAULT_EPISODE_CAP + 1.0)
+    assert empty_r == floor
+    assert empty_r < real_r
 
 
 # --- XML no-tool variant ------------------------------------------------------
@@ -320,10 +387,12 @@ def test_reward_noop_appended_lowers_reward():
 
 def test_reward_no_tool_requires_moves_tag():
     reward_no_tool = _load_module("reward_no_tool")
+    game = _load_module("game")
 
-    # No <moves> tag -> empty move list -> baseline-only penalty (no raising).
+    # No <moves> tag -> empty move list -> zero-move E floor (was baseline-only
+    # -50; "not outputting" is now penalized worse than any real plan).
     record = _record(tool_name=None, completion="I think up and left")
-    assert reward_no_tool.reward_fn(record) == -50.0
+    assert reward_no_tool.reward_fn(record) == -(50.0 + game.INVALID_PENALTY * game.DEFAULT_EPISODE_CAP + 1.0)
 
     # A real moves tag is parsed and replayed to a float reward.
     record = _record(tool_name=None, completion="...<moves>left,up,right,down</moves>...")

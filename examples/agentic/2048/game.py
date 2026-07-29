@@ -347,25 +347,56 @@ def score_moves(
     seed: int,
     baseline_score: float,
     cap: int = DEFAULT_EPISODE_CAP,
+    trials: int = 8,
     record_id: object = "?",
 ) -> float:
     """Replay ``moves`` and return one rollout reward scalar.
 
     Used by both the tool-call and XML no-tool reward functions: the caller only
-    differs in how it parses ``moves``. Episode score, max tile, invalid-move
-    rate, and trained-vs-baseline improvement are logged for observability.
+    differs in how it parses ``moves``. The reward is a *length-matched*
+    advantage over the random baseline (a short plan is compared against a random
+    baseline at the same move count, not the full 32-move baseline that would
+    otherwise drown it), minus the no-op penalty. A zero-move output
+    (empty/unparseable ``moves``) is penalized worse than any >=1-move episode:
+    under the length-matched rule zero moves would collapse the baseline to 0 and
+    let "not outputting" coast at reward ~0. Episode score, max tile, invalid-move
+    rate, matched baseline, improvement, and reward are logged for observability.
     """
 
     board = normalize_board(board)
     result = play_episode(board, moves, seed=seed, cap=cap)
-    improvement = float(result.score) - float(baseline_score)
-    reward = float(result.score) - float(baseline_score) - INVALID_PENALTY * result.invalid_moves
+
+    if result.total_moves == 0:
+        # Worse than any legitimate episode (worst legit at full cap is score 0
+        # with every move invalid = -(baseline + INVALID_PENALTY * cap)), so an
+        # empty/unparseable move list can never out-score a real plan.
+        reward = -(float(baseline_score) + INVALID_PENALTY * cap + 1.0)
+        logger.info(
+            "2048 zero-move penalty id=%s baseline=%.1f reward=%.3f moves=0",
+            record_id,
+            baseline_score,
+            reward,
+        )
+        return reward
+
+    # Length-matched baseline: a full-length episode (total_moves >= cap) reuses
+    # the precomputed ``baseline_score`` (== the full-cap baseline in real
+    # training, where the dataset cap equals the reward cap); a short plan
+    # recomputes the random baseline at its actual move budget so it is not
+    # measured against 32 moves of random merge opportunity it never had.
+    if result.total_moves >= cap:
+        matched = float(baseline_score)
+    else:
+        matched = float(random_episode(board, seed=seed, cap=result.total_moves, trials=trials)["score"])
+    improvement = float(result.score) - matched
+    reward = improvement - INVALID_PENALTY * result.invalid_moves
     logger.info(
-        "2048 episode id=%s score=%d max_tile=%d invalid_rate=%.3f improvement=%.3f reward=%.3f moves=%d",
+        "2048 episode id=%s score=%d max_tile=%d invalid_rate=%.3f baseline=%.1f improvement=%.3f reward=%.3f moves=%d",
         record_id,
         result.score,
         result.max_tile,
         result.invalid_rate,
+        matched,
         improvement,
         reward,
         result.total_moves,

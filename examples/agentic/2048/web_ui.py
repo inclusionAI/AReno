@@ -424,8 +424,22 @@ def _llm_episode(server: Game2048Server) -> dict[str, Any]:
     server.terminal = result.reached_2048 or game.is_terminal(server.board)
 
     baseline = game.random_episode(start_board, seed=server.seed, cap=server.cap, trials=8)
-    improvement = result.score - baseline["score"]
-    reward = improvement - game.INVALID_PENALTY * result.invalid_moves
+    # Reward mirrors reward_fn exactly (length-matched baseline + zero-move
+    # floor) by delegating to ``score_moves``; ``improvement`` is then derived by
+    # adding back the no-op penalty. This preserves the UI's
+    # reward == improvement - INVALID_PENALTY * invalid invariant for every
+    # episode -- including a zero-move one, where both fields mirror the floor
+    # -- without duplicating the reward logic. ``baseline`` above stays the
+    # full-cap random reference for the human-readable event line below.
+    reward = game.score_moves(
+        start_board,
+        moves,
+        seed=server.seed,
+        baseline_score=baseline["score"],
+        cap=server.cap,
+        trials=8,
+    )
+    improvement = reward + game.INVALID_PENALTY * result.invalid_moves
     # Last LLM episode metrics surfaced as dedicated UI pills: the episode's
     # own merge score, the trained-vs-random improvement, and the full RL
     # reward (improvement minus the no-op penalty) used by reward_fn. The UI

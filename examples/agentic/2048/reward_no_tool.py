@@ -21,5 +21,6 @@ def reward_fn(record: Any) -> float:
         moves,
         seed=int(source["seed"]),
         baseline_score=float(source["random_baseline"]["score"]),
+        trials=int(source["random_baseline"].get("trials", 8)),
         record_id=source.get("id", "?"),
     )
