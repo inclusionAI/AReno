@@ -15,6 +15,7 @@ import ast
 import importlib.util
 import json
 import logging
+import os
 import shutil
 import textwrap
 from dataclasses import fields
@@ -68,6 +69,7 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "max_steps",
             "world_size",
             "tp_size",
+            "skip_check",
         ),
     ),
     (
@@ -379,6 +381,199 @@ def _print_training_config_summary(
         _format_training_config_summary(config, reward_ckpt=reward_ckpt, model_config=model_config, color=True),
         color=True,
     )
+
+
+# Params that only make sense for specific algorithm families.  The resolved
+# command omits them when they are irrelevant to the chosen --algo so the
+# reproduced command stays clean and correct — a student copying an SFT
+# command should not see --reward-fn-path or --critic-lr in the output.
+#
+# The grouping mirrors the TrainerConfig inheritance hierarchy:
+#   - _ROLLOUT_ONLY_PARAMS: only on RolloutTrainerConfig and its subclasses
+#     (GSPO, GRPO, PPO).  SFT and DPO don't have rollout/reward fields.
+#   - _PPO_ONLY_PARAMS: only on PPOTrainerConfig (critic, KL, value loss, GAE).
+#   - _DPO_ONLY_PARAMS: only on DPOTrainerConfig (ref_ckpt, dpo_beta).
+_ROLLOUT_ONLY_PARAMS = {
+    "reward_fn_path",
+    "agent_fn",
+    "agent_timeout_s",
+    "train_tool_results",
+    "n_samples",
+    "max_running_prompts",
+    "greedy",
+    "temperature",
+    "top_k",
+    "top_p",
+    "eager_decode",
+    "drop_rollout_state",
+    "reward_ckpt",
+    "gspo_clip_eps",
+    "grpo_clip_eps",
+}
+
+_PPO_ONLY_PARAMS = {
+    "ref_ckpt",
+    "critic_ckpt",
+    "critic_lr",
+    "critic_warmup_steps",
+    "use_kl_loss",
+    "kl_loss_coef",
+    "kl_loss_type",
+    "clip_eps",
+    "clip_ratio_c",
+    "value_clip_eps",
+    "value_loss_coef",
+    "gamma",
+    "lam",
+}
+
+_DPO_ONLY_PARAMS = {
+    "ref_ckpt",
+    "dpo_beta",
+}
+
+
+def _params_hidden_for_algo(algo: str) -> set[str]:
+    """Return the set of CLI param names to omit from the resolved command."""
+
+    hidden: set[str] = set()
+    if algo == "sft":
+        hidden |= _ROLLOUT_ONLY_PARAMS | _PPO_ONLY_PARAMS | _DPO_ONLY_PARAMS
+    elif algo == "dpo":
+        hidden |= _ROLLOUT_ONLY_PARAMS | _PPO_ONLY_PARAMS
+    elif algo in {"gspo", "grpo"}:
+        hidden |= _PPO_ONLY_PARAMS | _DPO_ONLY_PARAMS
+    return hidden
+
+
+def _format_resolved_command(config: TrainerConfig, *, reward_ckpt: str | None = None) -> str:
+    """Build a copy-pasteable ``areno train`` command from a resolved config.
+
+    The command includes *all* resolved parameter values (defaults + user-specified)
+    so that a student can copy it into an experiment report and reproduce the
+    run exactly.  Algorithm-irrelevant parameters are filtered out via
+    :func:`_params_hidden_for_algo` to keep the command clean.
+
+    Some CLI flag names differ from the config dataclass field names (e.g.
+    ``--lr`` maps to ``config.optimizer_lr``).  The ``flag_overrides`` dict
+    bridges this gap so we read the right attribute from the config.
+    """
+
+    # Map config dataclass field names to CLI flag names by introspecting
+    # the Click command's declared parameters.  This avoids hardcoding flag
+    # strings and stays in sync if options are renamed.
+    field_to_flag: dict[str, str] = {}
+    ctx = click.Context(train_command)
+    for param in train_command.get_params(ctx):
+        flag = param.opts[0] if param.opts else f"--{param.name.replace('_', '-')}"
+        field_to_flag[param.name] = flag
+
+    hidden = _params_hidden_for_algo(config.algo)
+
+    # Build ordered list of (flag, value) pairs for all config fields.
+    lines: list[str] = ["areno train \\"]
+
+    # Manually ordered for readability, matching the TRAIN_OPTION_GROUPS order.
+    ordered_fields = [
+        "algo", "ckpt", "dataset_path", "model_hub", "dataset_loader_fn",
+        "reward_fn_path", "ref_ckpt", "reward_ckpt", "critic_ckpt",
+        "save_path", "save_interval", "metrics_log_dir",
+        "epochs", "max_steps",
+        "tp_size", "world_size",
+        "batch_size", "n_samples", "mini_bs", "score_micro_bs",
+        "gradient_accumulation_steps",
+        "max_prompt_tokens", "max_new_tokens", "max_context_len",
+        "max_running_prompts",
+        "temperature", "top_k", "top_p", "greedy",
+        "lr", "min_lr", "lr_decay_steps", "lr_decay_style",
+        "adam_beta1", "adam_beta2", "adam_8bit", "weight_decay", "grad_clip_norm",
+        "activation_checkpointing",
+        "drop_rollout_state", "eager_decode", "attn_backend",
+        "disable_thinking",
+        "agent_fn", "agent_timeout_s", "train_tool_results",
+        "gspo_clip_eps", "grpo_clip_eps", "dpo_beta",
+        "critic_lr", "critic_warmup_steps",
+        "use_kl_loss", "kl_loss_coef", "kl_loss_type",
+        "clip_eps", "clip_ratio_c", "value_clip_eps", "value_loss_coef",
+        "gamma", "lam",
+    ]
+
+    # Several CLI flags map to differently-named config fields because the config
+    # dataclass uses more descriptive names (e.g. --lr → optimizer_lr).  We also
+    # handle boolean flags that are inverted on the config (e.g. --drop-rollout-state
+    # stores keep_rollout_state=False) and flags that are only shown when set
+    # (e.g. --disable-thinking only appears when chat_template_enable_thinking is False).
+    flag_overrides: dict[str, str] = {
+        "lr": "optimizer_lr",
+        "min_lr": "optimizer_min_lr",
+        "adam_beta1": "optimizer_beta1",
+        "adam_beta2": "optimizer_beta2",
+        "drop_rollout_state": "keep_rollout_state",
+        "disable_thinking": "chat_template_enable_thinking",
+    }
+
+    parts: list[tuple[str, str]] = []
+    for field_name in ordered_fields:
+        if field_name in hidden:
+            continue
+        flag = field_to_flag.get(field_name, f"--{field_name.replace('_', '-')}")
+
+        # Special handling for transformed fields
+        if field_name == "drop_rollout_state":
+            value = not getattr(config, "keep_rollout_state", True)
+            if not value:
+                continue  # Don't show --no-drop-rollout-state; only show when True
+            parts.append((flag, ""))
+            continue
+        if field_name == "disable_thinking":
+            thinking = getattr(config, "chat_template_enable_thinking", None)
+            if thinking is False:
+                parts.append((flag, ""))
+            continue
+        if field_name == "activation_checkpointing":
+            value = getattr(config, "activation_checkpointing", True)
+            if not value:
+                flag = "--no-activation-checkpointing"
+                parts.append((flag, ""))
+            continue
+
+        config_field = flag_overrides.get(field_name, field_name)
+        if not hasattr(config, config_field):
+            continue
+        value = getattr(config, config_field)
+
+        # Skip None values (optional params not set)
+        if value is None:
+            continue
+        # Skip False boolean flags (only show when True)
+        if isinstance(value, bool):
+            if value:
+                parts.append((flag, ""))
+            continue
+
+        parts.append((flag, str(value)))
+
+    # Build command string
+    for i, (flag, val) in enumerate(parts):
+        is_last = i == len(parts) - 1
+        suffix = "" if is_last else " \\"
+        if val:
+            lines.append(f"  {flag} {val}{suffix}")
+        else:
+            lines.append(f"  {flag}{suffix}")
+
+    return "\n".join(lines)
+
+
+def _print_resolved_command(config: TrainerConfig, *, reward_ckpt: str | None = None) -> None:
+    """Print the resolved command in a highlighted block."""
+
+    bar = "=" * 80
+    click.echo(_style(bar, color=True, fg="bright_black"))
+    click.echo(_style("Resolved command (copy to reproduce):", color=True, fg="bright_white", bold=True))
+    click.echo(_style(bar, color=True, fg="bright_black"))
+    click.echo(_format_resolved_command(config, reward_ckpt=reward_ckpt))
+    click.echo(_style(bar, color=True, fg="bright_black"))
 
 
 def _print_auto_tune_summary(result) -> None:
@@ -1222,6 +1417,11 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     help="Dummy-load the model and run one minimal synthetic train step, then exit.",
 )
 @click.option("--tp-size", type=int, default=4, show_default=True, help="Tensor parallel size for the backend.")
+@click.option(
+    "--skip-check",
+    is_flag=True,
+    help="Skip pre-flight environment checks (CRITICAL failures still block training).",
+)
 @click.option("--world-size", type=int, default=8, show_default=True, help="Total device count for the backend.")
 @click.option("--batch-size", type=int, default=32, show_default=True, help="Prompt/pair batch size.")
 @click.option(
@@ -1350,11 +1550,53 @@ def train_command(**options) -> None:
         )
         trainer_config = result.config
         _print_auto_tune_summary(result)
+
+    # Pre-flight environment checks before starting training.
+    #
+    # Why this runs *after* smoke/tune but *before* config summary: smoke and
+    # tune branches have their own model-loading probes and return early, so
+    # they don't need preflight.  For normal training, we want checks to run
+    # before the config summary is printed so users see "PASS/GPU OK" first,
+    # then the config, then the resolved command — a natural reading order for
+    # "is my environment ready → what am I training → how to reproduce".
+    #
+    # CRITICAL failures always block (even with --skip-check) because training
+    # is physically impossible without a GPU or PyTorch.  ERROR failures block
+    # by default but can be bypassed with --skip-check for experienced users
+    # who know what they're doing.
+    skip_check = bool(options.get("skip_check"))
+    if not skip_check:
+        from areno.cli.diagnostics import print_preflight_result, run_preflight_checks
+
+        preflight = run_preflight_checks(
+            trainer_config,
+            reward_ckpt=options.get("reward_ckpt"),
+        )
+        print_preflight_result(preflight)
+        if preflight.critical_failures:
+            names = ", ".join(c.name for c in preflight.critical_failures)
+            raise click.ClickException(
+                f"Pre-flight check failed (CRITICAL): {names}.\n"
+                "These failures cannot be skipped; fix the environment before training."
+            )
+        if preflight.errors:
+            names = ", ".join(c.name for c in preflight.errors)
+            raise click.ClickException(
+                f"Pre-flight check failed (ERROR): {names}.\n"
+                "Fix the environment or use --skip-check to bypass (not recommended)."
+            )
+    else:
+        # Even with --skip-check, show a brief notice.
+        click.echo(
+            _style("Pre-flight checks skipped (--skip-check).", color=True, fg="yellow")
+        )
+
     _print_training_config_summary(
         trainer_config,
         reward_ckpt=options.get("reward_ckpt"),
         model_config=_model_config_for_summary(trainer_config),
     )
+    _print_resolved_command(trainer_config, reward_ckpt=options.get("reward_ckpt"))
     from areno.cli.dashboard_registry import register_dashboard_job
 
     register_dashboard_job(

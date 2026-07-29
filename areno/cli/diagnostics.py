@@ -482,3 +482,446 @@ def _print_env_report(report: dict[str, Any]) -> None:
     click.echo("  Environment variables:")
     for name, value in report["env"].items():
         click.echo(f"    {name}={value if value is not None else '<unset>'}")
+
+
+# ---------------------------------------------------------------------------
+# Pre-flight checks for ``areno train``
+#
+# These checks run before training starts so that environment problems (missing
+# GPU, insufficient disk, broken paths) are caught *before* a potentially long
+# model download.  The three-level severity model lets users override
+# non-fatal issues with ``--skip-check`` while hard failures always block:
+#
+#   CRITICAL — training is impossible (no GPU, no PyTorch).  Cannot be skipped.
+#   ERROR    — training will almost certainly fail (wrong PyTorch version,
+#              missing areno_accel, path not found).  Skippable with --skip-check.
+#   WARNING  — training works but may be slower or limited (no flash_attn,
+#              non-Linux platform).  Never blocks.
+# ---------------------------------------------------------------------------
+
+# Kept for backward compatibility with any external callers that inspect labels.
+_CHECK_LABEL = "PASS", "WARN", "ERROR", "CRITICAL"
+
+
+@dataclass(frozen=True)
+class PreflightCheck:
+    """A single pre-flight check result with severity level."""
+
+    level: str  # "PASS", "WARN", "ERROR", "CRITICAL"
+    name: str
+    detail: str = ""
+    next_step: str = ""
+
+
+@dataclass(frozen=True)
+class PreflightResult:
+    """Aggregated pre-flight check results.
+
+    ``critical_failures`` block training unconditionally (even with
+    ``--skip-check``).  ``errors`` block training unless the user passes
+    ``--skip-check``.  ``warnings`` never block.
+    """
+
+    checks: list[PreflightCheck]
+    kaggle_detected: bool = False
+
+    @property
+    def passed(self) -> list[PreflightCheck]:
+        return [c for c in self.checks if c.level == "PASS"]
+
+    @property
+    def warnings(self) -> list[PreflightCheck]:
+        return [c for c in self.checks if c.level == "WARN"]
+
+    @property
+    def errors(self) -> list[PreflightCheck]:
+        return [c for c in self.checks if c.level == "ERROR"]
+
+    @property
+    def critical_failures(self) -> list[PreflightCheck]:
+        return [c for c in self.checks if c.level == "CRITICAL"]
+
+
+def _is_kaggle() -> bool:
+    """Detect whether we are running inside a Kaggle Notebook.
+
+    Kaggle sets ``KAGGLE_KERNEL_RUN_TYPE`` and always mounts ``/kaggle/working``.
+    We check both so the detection works even if one indicator is missing.
+    """
+
+    if os.environ.get("KAGGLE_KERNEL_RUN_TYPE"):
+        return True
+    return Path("/kaggle/working").is_dir()
+
+
+def _disk_free_gb(path: str) -> float | None:
+    """Return available disk space in GB for the partition holding *path*."""
+
+    try:
+        usage = shutil.disk_usage(path)
+    except OSError:
+        return None
+    return usage.free / (1024**3)
+
+
+_MIN_DISK_GB = 5.0
+
+
+def run_preflight_checks(
+    config,
+    *,
+    reward_ckpt: str | None = None,
+) -> PreflightResult:
+    """Run pre-flight environment and config checks before training.
+
+    *config* is a ``TrainerConfig`` (or subclass).  The function reuses
+    :func:`collect_env` for system-level inspection, then adds training-specific
+    checks such as GPU/world_size matching and path reachability.
+    """
+
+    report = collect_env()
+    checks: list[PreflightCheck] = []
+
+    # --- CRITICAL: cannot train without these ---------------------------
+    py_version = sys.version_info
+    checks.append(
+        PreflightCheck(
+            "PASS" if py_version >= (3, 10) else "CRITICAL",
+            "Python >= 3.10",
+            f"found {platform.python_version()}",
+            "Use Python 3.10 or newer.",
+        )
+    )
+
+    torch_info = report["torch"]
+    torch_imported = bool(torch_info["imported"])
+    checks.append(
+        PreflightCheck(
+            "PASS" if torch_imported else "CRITICAL",
+            "PyTorch import",
+            torch_info.get("version") or torch_info.get("error", ""),
+            "Install CUDA-enabled PyTorch matching your CUDA version.",
+        )
+    )
+
+    cuda_available = bool(torch_info.get("cuda_available"))
+    checks.append(
+        PreflightCheck(
+            "PASS" if cuda_available else "CRITICAL",
+            "torch.cuda.is_available()",
+            f"visible_gpus={torch_info.get('device_count')}",
+            "Check NVIDIA driver installation and CUDA_VISIBLE_DEVICES.",
+        )
+    )
+
+    gpu_count = len(report.get("gpus", []))
+    checks.append(
+        PreflightCheck(
+            "PASS" if gpu_count >= 1 else "CRITICAL",
+            "NVIDIA GPU visibility",
+            ", ".join(g["name"] for g in report["gpus"]) if report["gpus"] else "no GPUs reported",
+            "Make at least one NVIDIA GPU visible to the process.",
+        )
+    )
+
+    # --- ERROR: training will almost certainly fail ----------------------
+    checks.append(
+        PreflightCheck(
+            "PASS" if (torch_imported and _version_at_least(torch_info.get("version"), (2, 6))) else "ERROR",
+            "PyTorch >= 2.6",
+            torch_info.get("version") or "not importable",
+            "Install PyTorch 2.6 or newer with CUDA support.",
+        )
+    )
+
+    cuda_build = torch_info.get("cuda_build")
+    checks.append(
+        PreflightCheck(
+            "PASS" if cuda_build else "ERROR",
+            "PyTorch CUDA build",
+            f"torch.version.cuda={cuda_build}" if cuda_build else "CPU-only build",
+            "Install a CUDA-enabled PyTorch build; CPU-only torch cannot run AReno.",
+        )
+    )
+
+    checks.append(
+        PreflightCheck(
+            "PASS" if gpu_count >= config.world_size else "ERROR",
+            "GPU count >= world_size",
+            f"gpus={gpu_count}, world_size={config.world_size}",
+            f"Reduce --world-size to <= {gpu_count} or make more GPUs visible.",
+        )
+    )
+
+    accel = report["dependencies"]["areno_accel"]
+    checks.append(
+        PreflightCheck(
+            "PASS" if accel["imported"] else "ERROR",
+            "areno_accel import",
+            accel.get("error", "imported") if not accel["imported"] else "imported",
+            "Reinstall AReno from source: pip install -e . --no-build-isolation",
+        )
+    )
+
+    # --- ERROR: path reachability ----------------------------------------
+    # Distinguish local paths from remote model repo IDs.  The order matters:
+    # we check existence first, then use the leading character to decide
+    # whether a non-existent path is a local file (absolute/home-relative) or
+    # a remote repo ID (e.g. "Qwen/Qwen3-0.6B" contains "/" but is not a
+    # filesystem path).  We cannot rely on Path.suffix alone because names
+    # like "Qwen3.5-0.8B" have a suffix-like trailing segment.
+    ckpt_path = Path(config.ckpt)
+    if ckpt_path.exists() or ckpt_path.is_dir():
+        # Path exists locally — no further checks needed.
+        checks.append(
+            PreflightCheck(
+                "PASS",
+                "Checkpoint path",
+                f"{config.ckpt} (found)",
+            )
+        )
+    elif config.ckpt.startswith(("/", "~")):
+        # Absolute or home-relative path that doesn't exist — this is a user
+        # error, not a remote download target.
+        checks.append(
+            PreflightCheck(
+                "ERROR",
+                "Checkpoint path",
+                f"{config.ckpt} (not found)",
+                f"Verify --ckpt path: {config.ckpt}",
+            )
+        )
+    elif "/" in config.ckpt or "\\" in config.ckpt:
+        # Relative path with a separator but no leading slash — convention for
+        # HuggingFace/ModelScope repo IDs like "Qwen/Qwen3-0.6B".  These will
+        # be fetched from the model hub at training time.
+        checks.append(
+            PreflightCheck(
+                "PASS",
+                "Checkpoint path",
+                f"{config.ckpt} (remote, will download from {config.model_hub})",
+            )
+        )
+    else:
+        # Bare name without a path separator — could be a local file in the
+        # current directory or a hub shorthand.  Check existence to decide.
+        checks.append(
+            PreflightCheck(
+                "PASS" if ckpt_path.exists() else "ERROR",
+                "Checkpoint path",
+                f"{config.ckpt} ({'found' if ckpt_path.exists() else 'not found'})",
+                f"Verify --ckpt path: {config.ckpt}",
+            )
+        )
+
+    # Dataset paths come in three forms: local files/directories (check existence),
+    # remote dataset refs like "AI-MO/NuminaMath-CoT" (will be fetched by the
+    # datasets library), or local files with known suffixes that should exist.
+    dataset_path = Path(config.dataset_path)
+    dataset_supported = dataset_path.suffix.lower() in _SUPPORTED_DATASET_SUFFIXES
+    if dataset_path.exists() or dataset_path.is_dir():
+        checks.append(
+            PreflightCheck(
+                "PASS",
+                "Dataset path",
+                f"{config.dataset_path} (found)",
+            )
+        )
+    elif dataset_supported and not dataset_path.exists():
+        checks.append(
+            PreflightCheck(
+                "ERROR",
+                "Dataset path",
+                f"{config.dataset_path} (not found)",
+                f"Verify --dataset-path: {config.dataset_path}",
+            )
+        )
+    else:
+        checks.append(
+            PreflightCheck(
+                "PASS",
+                "Dataset path",
+                f"{config.dataset_path} (remote, will download)",
+            )
+        )
+
+    # --- ERROR: disk space -----------------------------------------------
+    cwd_free = _disk_free_gb(os.getcwd())
+    if cwd_free is not None:
+        checks.append(
+            PreflightCheck(
+                "PASS" if cwd_free >= _MIN_DISK_GB else "ERROR",
+                "Disk space (workdir)",
+                f"{cwd_free:.1f} GB available in {os.getcwd()}",
+                f"Free at least {_MIN_DISK_GB:.0f} GB in the working directory.",
+            )
+        )
+
+    save_path = getattr(config, "save_path", None)
+    if save_path:
+        save_dir = Path(save_path)
+        target_dir = save_dir if save_dir.is_dir() else save_dir.parent
+        if not target_dir.exists():
+            target_dir = _nearest_existing_parent(save_dir)
+        save_free = _disk_free_gb(str(target_dir))
+        if save_free is not None:
+            checks.append(
+                PreflightCheck(
+                    "PASS" if save_free >= _MIN_DISK_GB else "ERROR",
+                    "Disk space (save-path)",
+                    f"{save_free:.1f} GB available for {save_path}",
+                    f"Free at least {_MIN_DISK_GB:.0f} GB for --save-path.",
+                )
+            )
+
+    # --- ERROR: metrics log dir writable ---------------------------------
+    metrics_dir = getattr(config, "metrics_log_dir", None)
+    if metrics_dir:
+        checks.append(_writable_preflight_check("metrics_log_dir", metrics_dir))
+
+    # --- WARNING: optional dependencies ----------------------------------
+    # These never block training. flash_attn falls back to native attention;
+    # CUDA_HOME/nvcc are only needed for source compilation, not runtime;
+    # non-Linux platforms may work via WSL2.
+    for label in ("flash_attn", "flash_linear_attention"):
+        dep = report["dependencies"][label]
+        checks.append(
+            PreflightCheck(
+                "PASS" if dep["imported"] else "WARN",
+                f"{label} import",
+                dep.get("version") or dep.get("error", "not installed"),
+                f"Install {dep['distribution']} for better performance (optional).",
+            )
+        )
+
+    cuda_home = report["cuda"]["cuda_home"]
+    checks.append(
+        PreflightCheck(
+            "PASS" if cuda_home else "WARN",
+            "CUDA_HOME",
+            cuda_home or "not set",
+            "export CUDA_HOME=/usr/local/cuda (optional; not required if areno_accel imports).",
+        )
+    )
+
+    nvcc = report["cuda"]["nvcc"]
+    checks.append(
+        PreflightCheck(
+            "PASS" if nvcc["path"] else "WARN",
+            "nvcc",
+            nvcc["version"] or nvcc["path"] or "not found",
+            "Add CUDA's bin directory to PATH (optional; not required if areno_accel imports).",
+        )
+    )
+
+    system = report["platform"]["system"]
+    checks.append(
+        PreflightCheck(
+            "PASS" if system == "Linux" else "WARN",
+            "Supported platform",
+            f"{system} {report['platform']['machine']}",
+            "Run AReno on Linux with an NVIDIA CUDA GPU. On Windows, use WSL2.",
+        )
+    )
+
+    return PreflightResult(checks=checks, kaggle_detected=_is_kaggle())
+
+
+def _writable_preflight_check(label: str, path_text: str) -> PreflightCheck:
+    """Return a preflight check for path writability."""
+
+    path = Path(path_text).expanduser()
+    if path.exists() and not path.is_dir():
+        return PreflightCheck(
+            "ERROR",
+            f"{label} writable",
+            f"{path} (exists but is a file, not a directory)",
+            "Remove the file or choose a different directory path.",
+        )
+    parent = path if path.is_dir() else _nearest_existing_parent(path)
+    ok = os.access(parent, os.W_OK)
+    return PreflightCheck(
+        "PASS" if ok else "ERROR",
+        f"{label} writable",
+        str(path),
+        f"Create the directory: mkdir -p {path}",
+    )
+
+
+_SUPPORTED_DATASET_SUFFIXES = {".json", ".jsonl", ".parquet", ".csv", ".tsv", ".arrow"}
+
+
+def _style(text: str, *, color: bool, fg: str | None = None, bold: bool = False) -> str:
+    return click.style(text, fg=fg, bold=bold) if color else text
+
+
+def _preflight_level_str(level: str, *, color: bool) -> str:
+    """Return a padded, optionally colored level label."""
+
+    colors = {
+        "PASS": "bright_green",
+        "WARN": "yellow",
+        "ERROR": "red",
+        "CRITICAL": "red",
+    }
+    text = level.ljust(8)
+    if color:
+        return click.style(text, fg=colors.get(level, "white"), bold=level in {"ERROR", "CRITICAL"})
+    return text
+
+
+def print_preflight_result(result: PreflightResult, *, color: bool = True) -> None:
+    """Print pre-flight check results in a readable format.
+
+    The output is designed to be readable in both interactive terminals and
+    non-interactive environments (Kaggle ``!`` cells, CI logs, piped output).
+    We deliberately do *not* use ``click.confirm`` to prompt the user because
+    stdin may not be a TTY; instead, train.py decides whether to proceed or
+    exit based on the structured ``PreflightResult``.
+    """
+
+    bar = "=" * 80
+    click.echo(_style(bar, color=color, fg="bright_black"))
+    click.echo(_style("Pre-flight environment check", color=color, fg="bright_white", bold=True))
+    click.echo(_style(bar, color=color, fg="bright_black"))
+
+    for check in result.checks:
+        level_str = _preflight_level_str(check.level, color=color)
+        line = f"  {level_str}  {check.name}"
+        if check.detail:
+            line += f": {check.detail}"
+        click.echo(line)
+
+    # Summary line
+    n_pass = len(result.passed)
+    n_warn = len(result.warnings)
+    n_err = len(result.errors)
+    n_crit = len(result.critical_failures)
+
+    click.echo()
+    if n_crit:
+        summary = _style("FAILED", color=color, fg="red", bold=True)
+        summary += f" — {n_crit} critical, {n_err} errors, {n_warn} warnings, {n_pass} passed."
+    elif n_err:
+        summary = _style("FAILED", color=color, fg="red", bold=True)
+        summary += f" — {n_err} errors, {n_warn} warnings, {n_pass} passed."
+    else:
+        summary = _style("OK", color=color, fg="bright_green", bold=True)
+        summary += f" — {n_pass} passed, {n_warn} warning(s)."
+
+    click.echo(f"  Result: {summary}")
+
+    if result.kaggle_detected:
+        click.echo()
+        click.echo(f"  {_style('INFO', color=color, fg='bright_cyan')}  Kaggle environment detected.")
+        click.echo(f"  {_style('INFO', color=color, fg='bright_cyan')}  If training is slow, try reducing --batch-size and --max-new-tokens.")
+
+    # Next steps for failures
+    next_steps = [c.next_step for c in result.checks if c.level in {"CRITICAL", "ERROR"} and c.next_step]
+    if next_steps:
+        click.echo()
+        click.echo("  Next steps:")
+        for step in next_steps:
+            click.echo(f"    - {step}")
+
+    click.echo(_style(bar, color=color, fg="bright_black"))

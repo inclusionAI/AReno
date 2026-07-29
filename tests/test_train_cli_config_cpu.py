@@ -417,6 +417,15 @@ def test_train_command_prints_summary_before_run(monkeypatch):
         events.append(("run", config.algo))
 
     monkeypatch.setattr(train_cli, "run", fake_run)
+    # Mock preflight to avoid environment-dependent failures in CI.
+    # Without this mock, the test would fail on machines without a GPU or
+    # where --ckpt "actor" doesn't exist locally.  The preflight feature
+    # itself is tested in test_preflight_cpu.py.
+    from areno.cli.diagnostics import PreflightResult
+    monkeypatch.setattr(
+        "areno.cli.diagnostics.run_preflight_checks",
+        lambda config, **kw: PreflightResult(checks=[], kaggle_detected=False),
+    )
 
     result = CliRunner().invoke(
         train_cli.train_command,
@@ -440,7 +449,9 @@ def test_train_command_prints_summary_before_run(monkeypatch):
 
     assert result.exit_code == 0, result.output
     output = unstyle(result.output)
-    assert output.startswith("AReno training config\n")
+    # Uses "in" (not startswith) because preflight output now precedes the
+    # config summary in the train_command output stream.
+    assert "AReno training config" in output
     assert "dp_size       2" in output
     assert "save_path        out" in output
     assert "WARNING: no checkpoint output path configured" not in output
@@ -490,6 +501,12 @@ def test_train_command_tunes_params_before_summary_and_run(monkeypatch):
     monkeypatch.setattr("areno.cli.auto_tune.auto_tune_config", fake_auto_tune)
     monkeypatch.setattr(train_cli, "resolve_model_refs_for_config", lambda config: config)
     monkeypatch.setattr(train_cli, "run", fake_run)
+    # Mock preflight (same reason as test_train_command_prints_summary_before_run).
+    from areno.cli.diagnostics import PreflightResult
+    monkeypatch.setattr(
+        "areno.cli.diagnostics.run_preflight_checks",
+        lambda config, **kw: PreflightResult(checks=[], kaggle_detected=False),
+    )
 
     result = CliRunner().invoke(
         train_cli.train_command,
