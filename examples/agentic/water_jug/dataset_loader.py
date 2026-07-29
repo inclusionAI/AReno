@@ -1,4 +1,10 @@
-"""Dataset loader for water-jug puzzles."""
+"""Dataset loader for water-jug puzzles.
+
+Implements ``load_training_dataset()``, the function AReno calls to load
+puzzle data before training. Reads a JSONL file produced by
+``dataset_generator.py`` and converts each line into a training record
+with ``prompt`` (str) and ``image`` (dict with puzzle metadata).
+"""
 
 from __future__ import annotations
 

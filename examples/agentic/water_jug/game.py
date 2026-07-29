@@ -61,6 +61,7 @@ def _parse_index(action: str, name: str, n: int) -> int:
 
 
 def _parse_pair(action: str, n: int) -> tuple[int, int]:
+    # "pour(" is 5 chars; strip prefix and trailing ")"
     inner = action[5:-1].strip()
     parts = [x.strip() for x in inner.split(",")]
     if len(parts) != 2:
@@ -100,6 +101,7 @@ def neighbours(capacities: Iterable[int], state: Iterable[int]):
     seen: set[State] = set()
 
     def _emit(action: str) -> tuple[str, State] | None:
+        """Try an action; return (action, new_state) if it changes the state."""
         ns = apply_action(caps, st, action)
         if ns != st and ns not in seen:
             seen.add(ns)
@@ -181,7 +183,11 @@ def build_user_prompt(capacities: Iterable[int], target: int) -> str:
 
 
 def parse_trajectory(messages: list[dict[str, Any]]) -> tuple[State, list[str]]:
-    """Extract the sequence of actions played so far from chat messages.
+    """Extract the sequence of actions from chat messages (debugging only).
+
+    This function is NOT called by the AReno training pipeline. It exists for
+    manual inspection of trajectories. The reward function uses its own
+    replay logic via ``record.tool_calls``.
 
     Returns (final_state, action_list).
     """

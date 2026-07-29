@@ -1,4 +1,16 @@
-"""Agent entrypoint for water-jug tool-call rollouts."""
+"""Agent entrypoint for water-jug tool-call rollouts.
+
+This module implements ``run_agent(ctx, batch)``, the function AReno calls
+during Agentic GSPO rollout. For each puzzle in the batch, the agent:
+
+1. Sends the puzzle prompt to the model with a ``water_jug_action`` tool.
+2. Parses the model's tool call, applies the action to the game state.
+3. Feeds the new state back to the model as a tool response.
+4. Repeats until the puzzle is solved or ``MAX_TURNS`` is reached.
+
+Each model call produces one ``AgentTrajectoryTurn``. AReno internally
+concatenates multiple turns into a single training trajectory.
+"""
 
 from __future__ import annotations
 

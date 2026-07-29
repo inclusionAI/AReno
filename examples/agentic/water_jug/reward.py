@@ -1,4 +1,18 @@
-"""Reward function for water-jug Agentic RL."""
+"""Reward function for water-jug Agentic RL.
+
+Implements ``reward_fn(record)``, called by AReno after each rollout to
+score the model's trajectory.
+
+Reward design:
+  - Solved optimally:     1.0 + 0.1 efficiency bonus = 1.1
+  - Solved with excess:   1.0 - 0.1 * (extra steps), floor 0.1
+  - Not solved, closer:   0.5 * (1 - dist / initial_dist), range [0, 0.5]
+  - Not solved, no progress / unsolvable: 0.0
+
+The ``record`` argument is AReno's ``RewardRecord`` with:
+  - ``source_record``: the original dataset item (dict with ``image``)
+  - ``tool_calls``: list of ``{"name": ..., "arguments": ...}`` dicts
+"""
 
 from __future__ import annotations
 
