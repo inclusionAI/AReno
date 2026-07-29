@@ -135,20 +135,66 @@ class DPOTrainer:
     def _iter_train_batches(self, tokenizer, *, max_seq_len: int):
         # `batch_size` counts preference pairs; the emitted train batch has two
         # rows per pair and always preserves chosen/rejected adjacency.
+        # When ``token_budget`` is set, the budget is checked per-pair (both
+        # chosen+rejected tokens counted together) so a pair is never split
+        # across batches.
+        token_budget = getattr(self.config, "token_budget", None)
         batch = []
+        current_tokens = 0
         skipped = 0
         for index in range(len(self.dataset)):
             pair = _record_to_train_pair(self.dataset[index], tokenizer, max_seq_len=max_seq_len)
             if pair is None:
                 skipped += 1
                 continue
-            batch.extend(pair)
-            if len(batch) >= self.config.batch_size * 2:
-                yield batch
-                batch = []
+            if token_budget is not None:
+                pair_tokens = sum(len(seq.tokens) for seq in pair)
+                # Warn when a single pair exceeds the token budget; it will
+                # form a batch of its own rather than being dropped.
+                if len(batch) == 0 and pair_tokens > token_budget:
+                    self.logger.warning(
+                        "preference pair with %d tokens exceeds token_budget=%d; forming a single-pair batch",
+                        pair_tokens,
+                        token_budget,
+                    )
+                # If adding this pair would exceed the budget and the batch
+                # is non-empty, yield the current batch first so the pair
+                # stays intact in the next batch.
+                if len(batch) > 0 and current_tokens + pair_tokens > token_budget:
+                    self.logger.debug(
+                        "stage=dpo_batch pairs=%d tokens=%d",
+                        len(batch) // 2,
+                        current_tokens,
+                    )
+                    yield batch
+                    batch = []
+                    current_tokens = 0
+                # batch_size still acts as a hard pair-count cap.
+                if len(batch) >= self.config.batch_size * 2:
+                    self.logger.debug(
+                        "stage=dpo_batch pairs=%d tokens=%d",
+                        len(batch) // 2,
+                        current_tokens,
+                    )
+                    yield batch
+                    batch = []
+                    current_tokens = 0
+                batch.extend(pair)
+                current_tokens += pair_tokens
+            else:
+                batch.extend(pair)
+                if len(batch) >= self.config.batch_size * 2:
+                    yield batch
+                    batch = []
         if skipped:
             self.logger.info("stage=dpo_dataset_filter skipped_invalid_or_long=%d", skipped)
         if batch:
+            if token_budget is not None:
+                self.logger.debug(
+                    "stage=dpo_batch pairs=%d tokens=%d",
+                    len(batch) // 2,
+                    current_tokens,
+                )
             yield batch
 
     def _maybe_save(self, epoch: int, step: int) -> None:

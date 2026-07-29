@@ -75,9 +75,17 @@ class PolicyOnlyTrainer:
                 self.dataset,
                 batch_size=self.config.batch_size,
                 max_prompt_tokens=self.config.max_prompt_tokens,
+                token_budget=getattr(self.config, "token_budget", None),
             ):
                 role = self._policy_role_name()
-                self.logger.info("epoch=%d step=%d role=%s stage=rollout_start", epoch, step, role)
+                self.logger.info(
+                    "epoch=%d step=%d role=%s stage=rollout_start batch_items=%d batch_tokens=%d",
+                    epoch,
+                    step,
+                    role,
+                    len(prompt_batch.items),
+                    prompt_batch.total_tokens,
+                )
                 record_dashboard_state(self.areno, stage="rollout_start", epoch=epoch, step=step, role=role)
                 self._dashboard_epoch = epoch
                 self._dashboard_step = step

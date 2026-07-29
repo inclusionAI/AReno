@@ -7,6 +7,7 @@ one `Trainer`, calls ``init()`` once, and then loops:
 ref/reward/critic models become available behind the backend boundary.
 """
 
+import logging
 import time
 from collections.abc import Callable, Iterable
 from typing import Any
@@ -210,6 +211,7 @@ class Trainer:
         *,
         batch_size: int,
         max_prompt_tokens: int,
+        token_budget: int | None = None,
         prompt_key: str = "prompt",
         solutions_key: str = "solutions",
     ) -> Iterable[PromptBatch]:
@@ -219,6 +221,12 @@ class Trainer:
         original record is preserved on each `PromptItem` so reward functions
         can read task-specific fields. The cursor advances even when records
         are skipped, so the iterator eventually walks the entire dataset.
+
+        When ``token_budget`` is set, batches are formed by accumulating prompt
+        token counts until the budget is reached, instead of using a fixed item
+        count. ``batch_size`` still acts as a hard upper bound on items per
+        batch. A single item that exceeds the budget forms its own batch and
+        emits a warning.
         """
 
         cursor = 0
@@ -227,10 +235,16 @@ class Trainer:
             items = []
             scanned = 0
             skipped_long = 0
-            # Keep scanning until we accumulate `batch_size` accepted rows or
-            # exhaust the dataset; over-long prompts increment the skip counter
-            # but do not fill the batch.
-            while len(items) < batch_size and cursor < len(dataset):
+            current_tokens = 0
+            # Keep scanning until we fill the batch according to the active
+            # sizing mode (fixed item count or token budget) or exhaust the
+            # dataset; over-long prompts increment the skip counter but do not
+            # fill the batch.
+            while cursor < len(dataset):
+                # batch_size always acts as a hard item-count cap.
+                if len(items) >= batch_size:
+                    break
+
                 record = dataset[cursor]
                 cursor += 1
                 scanned += 1
@@ -244,6 +258,25 @@ class Trainer:
                     skipped_long += 1
                     total_skipped_long += 1
                     continue
+
+                # Forward-looking token-budget check: if adding this item
+                # would exceed the budget and the batch is non-empty, yield
+                # the current batch first. This keeps every batch within the
+                # budget (except single-item batches for over-budget items).
+                if token_budget is not None and len(items) > 0 and current_tokens + len(input_tokens) > token_budget:
+                    cursor -= 1
+                    scanned -= 1
+                    break
+
+                # Warn when a single item exceeds the token budget; it will
+                # form a batch of its own rather than being dropped.
+                if token_budget is not None and len(items) == 0 and len(input_tokens) > token_budget:
+                    logging.getLogger(__name__).warning(
+                        "prompt with %d tokens exceeds token_budget=%d; forming a single-item batch",
+                        len(input_tokens),
+                        token_budget,
+                    )
+
                 items.append(
                     PromptItem(
                         prompt=prompt,
@@ -252,6 +285,7 @@ class Trainer:
                         record=dict(record),
                     )
                 )
+                current_tokens += len(input_tokens)
             if not items:
                 break
             yield PromptBatch(
@@ -259,6 +293,7 @@ class Trainer:
                 scanned=scanned,
                 skipped_long=skipped_long,
                 total_skipped_long=total_skipped_long,
+                total_tokens=current_tokens,
             )
 
     def rollout_batch(self, prompts: list[str], n_samples: int, sampling_params: SamplingParams) -> list[RolloutResult]:

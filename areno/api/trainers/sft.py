@@ -98,7 +98,11 @@ class SFTTrainer:
         # Dataset rows are converted lazily so large HF datasets do not need an
         # up-front tokenized copy. Rows that are empty, all-prompt, or exceed
         # the configured prompt or supervised-response budgets are dropped.
+        # When ``token_budget`` is set, batches are formed by accumulating
+        # sequence token counts (prompt + response) until the budget is reached.
+        token_budget = getattr(self.config, "token_budget", None)
         batch = []
+        current_tokens = 0
         skipped = 0
         accepted = 0
         total_rows = len(self.dataset)
@@ -114,10 +118,44 @@ class SFTTrainer:
                 skipped += 1
                 continue
             accepted += 1
-            batch.append(seq)
-            if len(batch) >= self.config.batch_size:
-                yield batch
-                batch = []
+            if token_budget is not None:
+                seq_tokens = len(seq.tokens)
+                # Warn when a single sequence exceeds the token budget; it
+                # will form a batch of its own rather than being dropped.
+                if len(batch) == 0 and seq_tokens > token_budget:
+                    self.logger.warning(
+                        "sequence with %d tokens exceeds token_budget=%d; forming a single-item batch",
+                        seq_tokens,
+                        token_budget,
+                    )
+                # If adding this sequence would exceed the budget and the
+                # batch is non-empty, yield the current batch first.
+                if len(batch) > 0 and current_tokens + seq_tokens > token_budget:
+                    self.logger.debug(
+                        "stage=sft_batch items=%d tokens=%d",
+                        len(batch),
+                        current_tokens,
+                    )
+                    yield batch
+                    batch = []
+                    current_tokens = 0
+                # batch_size still acts as a hard item-count cap.
+                if len(batch) >= self.config.batch_size:
+                    self.logger.debug(
+                        "stage=sft_batch items=%d tokens=%d",
+                        len(batch),
+                        current_tokens,
+                    )
+                    yield batch
+                    batch = []
+                    current_tokens = 0
+                batch.append(seq)
+                current_tokens += seq_tokens
+            else:
+                batch.append(seq)
+                if len(batch) >= self.config.batch_size:
+                    yield batch
+                    batch = []
         if skipped:
             self.logger.info("stage=sft_dataset_filter skipped_long_or_empty=%d", skipped)
         if accepted == 0:
@@ -127,6 +165,12 @@ class SFTTrainer:
                 "Check dataset quality, --max-prompt-tokens, and --max-new-tokens."
             )
         if batch:
+            if token_budget is not None:
+                self.logger.debug(
+                    "stage=sft_batch items=%d tokens=%d",
+                    len(batch),
+                    current_tokens,
+                )
             yield batch
 
     def _maybe_save(self, epoch: int, step: int) -> None:
