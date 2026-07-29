@@ -175,3 +175,93 @@ When a trajectory is dropped for exceeding the model context window,
 counts, message counts, assistant turn counts, tool-result counts, and a short
 prompt preview. This is the fastest way to debug overlong agentic examples
 without dumping every token in every trajectory.
+
+Dataset loader resource limits
+------------------------------
+
+When a custom dataset loader (``--dataset-loader-fn``) or the default loader
+takes too long or returns too many records, it can block training or exhaust
+memory.  Two CLI flags bound the loader's resource usage:
+
+``--loader-timeout-s SECONDS``
+   Abort the loader if it runs longer than *SECONDS* wall-clock time
+   (default: ``0``, disabled).  On Unix this uses ``SIGALRM``; on platforms
+   without ``SIGALRM`` the timeout is silently skipped and a warning is
+   logged.
+
+``--max-loader-records N``
+   Truncate the dataset to the first *N* records when the loader returns more
+   than *N* rows (default: ``0``, disabled).
+
+Both limits are independent and can be combined.  When neither is set (the
+default), the loader runs with no overhead beyond lightweight timing.
+
+Minimal example
+~~~~~~~~~~~~~~~
+
+Cap the loader to 100 records with a 30-second timeout:
+
+.. code-block:: bash
+
+   areno train \
+     --algo sft \
+     --ckpt Qwen/Qwen3-0.6B \
+     --dataset-path yahma/alpaca-cleaned \
+     --dataset-loader-fn examples/sft/alpaca/dataset_loader.py \
+     --model-hub hf \
+     --max-loader-records 100 \
+     --loader-timeout-s 30
+
+When the loader finishes, AReno logs a diagnostic line:
+
+.. code-block:: text
+
+   dataset loader finished: duration=3.250s records=100 mem_delta=124800KB truncated=True
+
+Observable fields
+~~~~~~~~~~~~~~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 70
+
+   * - Field
+     - Meaning
+   * - ``duration``
+     - Wall-clock time the loader took to return (seconds).
+   * - ``records``
+     - Number of records after any truncation.
+   * - ``mem_delta``
+     - Change in peak process RSS during the loader call (KB).
+   * - ``truncated``
+     - ``True`` when the loader returned more than ``--max-loader-records`` and
+       the result was truncated.
+
+Timeout behaviour
+~~~~~~~~~~~~~~~~~
+
+When the loader exceeds ``--loader-timeout-s``, AReno raises
+``DatasetLoaderTimeout`` (a subclass of ``TimeoutError``) and aborts the run
+before model or worker initialisation.  The original traceback is preserved.
+
+.. code-block:: text
+
+   DatasetLoaderTimeout: Dataset loader exceeded the configured timeout
+
+User exceptions from the loader itself (e.g. ``ValueError``,
+``FileNotFoundError``) are re-raised unchanged—only the timeout produces
+``DatasetLoaderTimeout``.
+
+Platform limitations
+~~~~~~~~~~~~~~~~~~~~
+
+The timeout mechanism relies on ``SIGALRM``, which is available on Unix
+(Linux, macOS).  On Windows or other platforms without ``SIGALRM``, the
+timeout is not enforced and a warning is logged.  ``--max-loader-records``
+works on all platforms because it only inspects the returned object.
+
+To disable both limits and use the loader as-is:
+
+.. code-block:: bash
+
+   areno train ...   # no --loader-timeout-s or --max-loader-records flags

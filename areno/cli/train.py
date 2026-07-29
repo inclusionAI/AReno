@@ -129,7 +129,7 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         ),
     ),
     ("Checkpoint", ("save_path", "save_interval")),
-    ("Observability", ("metrics_log_dir",)),
+    ("Observability", ("metrics_log_dir", "loader_timeout_s", "max_loader_records")),
 )
 
 
@@ -638,6 +638,8 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             agent_timeout_s=args.agent_timeout_s,
             train_tool_results=args.train_tool_results,
             chat_template_enable_thinking=chat_template_enable_thinking,
+            loader_timeout_s=args.loader_timeout_s,
+            max_loader_records=args.max_loader_records,
             ref_ckpt=args.ref_ckpt,
             dpo_beta=args.dpo_beta,
         )
@@ -679,6 +681,8 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             agent_timeout_s=args.agent_timeout_s,
             train_tool_results=args.train_tool_results,
             chat_template_enable_thinking=chat_template_enable_thinking,
+            loader_timeout_s=args.loader_timeout_s,
+            max_loader_records=args.max_loader_records,
         )
     if algorithm.name != "ppo":
         return PolicyTrainerConfig(
@@ -727,6 +731,8 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             agent_timeout_s=args.agent_timeout_s,
             train_tool_results=args.train_tool_results,
             chat_template_enable_thinking=chat_template_enable_thinking,
+            loader_timeout_s=args.loader_timeout_s,
+            max_loader_records=args.max_loader_records,
         )
     return PPOTrainerConfig(
         algo=algorithm.name,
@@ -788,6 +794,8 @@ def _trainer_config_from_args(args) -> TrainerConfig:
         agent_timeout_s=args.agent_timeout_s,
         train_tool_results=args.train_tool_results,
         chat_template_enable_thinking=chat_template_enable_thinking,
+        loader_timeout_s=args.loader_timeout_s,
+        max_loader_records=args.max_loader_records,
     )
 
 
@@ -821,6 +829,8 @@ def run(trainer_config: TrainerConfig):
         model_hub=trainer_config.model_hub,
         load_dataset=load_dataset,
         load_from_disk=load_from_disk,
+        loader_timeout_s=trainer_config.loader_timeout_s,
+        max_loader_records=trainer_config.max_loader_records,
     )
     trainer = build_trainer(trainer_config, instance=api_trainer, dataset=dataset, reward_fn=reward_fn, loss_fn=loss_fn)
     trainer.fit()
@@ -991,8 +1001,17 @@ def _reward_fn_path_for_config(config: TrainerConfig) -> str | None:
 
 
 def _load_dataset_for_training(
-    dataset_path: str, *, model_hub: str = "modelscope", dataset_loader_fn: str | None, load_dataset, load_from_disk
+    dataset_path: str,
+    *,
+    model_hub: str = "modelscope",
+    dataset_loader_fn: str | None,
+    load_dataset,
+    load_from_disk,
+    loader_timeout_s: float = 0.0,
+    max_loader_records: int = 0,
 ):
+    from areno.cli.dataset_loader_guard import run_loader_with_limits
+
     def default_loader(path):
         return _load_dataset_from_path(
             path,
@@ -1003,12 +1022,24 @@ def _load_dataset_for_training(
 
     if dataset_loader_fn is not None:
         loader_fn = _load_dataset_loader_fn(dataset_loader_fn)
-        return loader_fn(
+        dataset, diag = run_loader_with_limits(
+            loader_fn,
             dataset_path,
+            timeout_s=loader_timeout_s,
+            max_records=max_loader_records,
             default_loader=default_loader,
             load_dataset=load_dataset,
             load_from_disk=load_from_disk,
         )
+        return dataset
+    if loader_timeout_s > 0 or max_loader_records > 0:
+        dataset, diag = run_loader_with_limits(
+            default_loader,
+            dataset_path,
+            timeout_s=loader_timeout_s,
+            max_records=max_loader_records,
+        )
+        return dataset
     return default_loader(dataset_path)
 
 
@@ -1176,6 +1207,20 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
 )
 @click.option(
     "--dataset-loader-fn", default=None, help="Optional Python dataset loader function as file.py or file.py:function."
+)
+@click.option(
+    "--loader-timeout-s",
+    type=float,
+    default=0.0,
+    show_default=True,
+    help="Wall-clock timeout in seconds for the dataset loader. 0 disables the timeout (Unix only, uses SIGALRM).",
+)
+@click.option(
+    "--max-loader-records",
+    type=int,
+    default=0,
+    show_default=True,
+    help="Maximum number of records to keep from the dataset loader. 0 disables the cap.",
 )
 @click.option("--reward-fn-path", default=None, help="Python file defining reward_fn(record).")
 @click.option(

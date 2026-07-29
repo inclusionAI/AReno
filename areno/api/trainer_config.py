@@ -60,8 +60,14 @@ class TrainerConfig:
     agent_timeout_s: float = 300.0
     train_tool_results: bool = False
     chat_template_enable_thinking: bool | None = None
+    loader_timeout_s: float = 0.0
+    max_loader_records: int = 0
 
     def __post_init__(self) -> None:
+        if self.loader_timeout_s < 0:
+            raise ValueError("loader_timeout_s must be non-negative")
+        if self.max_loader_records < 0:
+            raise ValueError("max_loader_records must be non-negative")
         if self.attn_backend not in {"flash", "native"}:
             raise ValueError("attn_backend must be one of: flash, native")
         if self.model_hub not in {"hf", "modelscope"}:
