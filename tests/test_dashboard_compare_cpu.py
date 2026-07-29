@@ -98,7 +98,6 @@ class TestCompareSuccess:
             ],
             extra_config={"n_samples": 4, "max_new_tokens": 512},
         )
-        state = _state_with_jobs([job_a, job_b])  # noqa: F841
         state = _state_with_jobs([job_a, job_b])
         result = state.compare_jobs("job-a", "job-b")
 
@@ -433,3 +432,148 @@ class TestCompareCLI:
         runner = CliRunner()
         result = runner.invoke(compare_command, ["--job-a", "x", "--job-b", "y"])
         assert result.exit_code != 0
+
+
+# ---------------------------------------------------------------------------
+# Tests for new features: metric_charts, diff_summary, throughput
+# ---------------------------------------------------------------------------
+
+class TestCompareNewFeatures:
+    """Tests for metric_charts, diff_summary, and throughput fields."""
+
+    def test_metric_charts_returns_time_series(self):
+        """metric_charts should return time-series points for each metric."""
+        job_a = _make_job("a", step=3, metrics=[
+            {"name": "loss", "value": 1.5, "step": 1, "time": "t"},
+            {"name": "loss", "value": 1.0, "step": 2, "time": "t"},
+            {"name": "loss", "value": 0.8, "step": 3, "time": "t"},
+        ])
+        job_b = _make_job("b", step=2, metrics=[
+            {"name": "loss", "value": 2.0, "step": 1, "time": "t"},
+            {"name": "loss", "value": 1.5, "step": 2, "time": "t"},
+        ])
+        state = _state_with_jobs([job_a, job_b])
+        result = state.compare_jobs("a", "b")
+
+        assert "metric_charts" in result
+        assert "loss" in result["metric_charts"]
+        assert len(result["metric_charts"]["loss"]["points_a"]) == 3
+        assert len(result["metric_charts"]["loss"]["points_b"]) == 2
+
+    def test_metric_charts_empty_when_no_metrics(self):
+        """metric_charts should be empty dict when jobs have no metrics."""
+        job_a = _make_job("a", step=0)
+        job_b = _make_job("b", step=0)
+        state = _state_with_jobs([job_a, job_b])
+        result = state.compare_jobs("a", "b")
+
+        assert result["metric_charts"] == {}
+
+    def test_metric_charts_handles_metric_only_in_one_job(self):
+        """metric_charts should include metrics present in only one job."""
+        job_a = _make_job("a", step=1, metrics=[
+            {"name": "unique_metric", "value": 0.5, "step": 1, "time": "t"},
+        ])
+        job_b = _make_job("b", step=1, metrics=[
+            {"name": "loss", "value": 1.0, "step": 1, "time": "t"},
+        ])
+        state = _state_with_jobs([job_a, job_b])
+        result = state.compare_jobs("a", "b")
+
+        assert "unique_metric" in result["metric_charts"]
+        assert len(result["metric_charts"]["unique_metric"]["points_a"]) == 1
+        assert len(result["metric_charts"]["unique_metric"]["points_b"]) == 0
+
+    def test_diff_summary_generated_for_different_configs(self):
+        """diff_summary should list changed config items with arrows."""
+        job_a = _make_job("a", algo="gspo", step=1, extra_config={"lr": 1e-6, "batch_size": 4})
+        job_b = _make_job("b", algo="gspo", step=1, extra_config={"lr": 1e-5, "batch_size": 4})
+        state = _state_with_jobs([job_a, job_b])
+        result = state.compare_jobs("a", "b")
+
+        assert "diff_summary" in result
+        assert len(result["diff_summary"]) > 0
+        lr_line = [s for s in result["diff_summary"] if "lr" in s]
+        assert len(lr_line) == 1
+        assert "1e-06" in lr_line[0] or "0.000001" in lr_line[0]
+        assert "1e-05" in lr_line[0] or "0.00001" in lr_line[0]
+
+    def test_diff_summary_shows_ratio_for_large_changes(self):
+        """diff_summary should show (Nx) ratio when value changes by >=2x."""
+        job_a = _make_job("a", step=1, extra_config={"batch_size": 4, "lr": 1e-6})
+        job_b = _make_job("b", step=1, extra_config={"batch_size": 16, "lr": 1e-6})
+        state = _state_with_jobs([job_a, job_b])
+        result = state.compare_jobs("a", "b")
+
+        batch_line = [s for s in result["diff_summary"] if "batch_size" in s]
+        assert len(batch_line) == 1
+        assert "4.0x" in batch_line[0]
+
+    def test_diff_summary_empty_when_configs_identical(self):
+        """diff_summary should be empty when configs are identical."""
+        job_a = _make_job("a", algo="sft", step=1)
+        job_b = _make_job("b", algo="sft", step=1)
+        state = _state_with_jobs([job_a, job_b])
+        result = state.compare_jobs("a", "b")
+
+        assert result["diff_summary"] == []
+
+    def test_throughput_calculated_from_duration_and_steps(self):
+        """throughput should be steps/duration when both are available."""
+        job_a = _make_job("a", step=10, timeperf=[
+            {"step": i, "rollout_s": 5.0, "train_s": 5.0, "other_s": 0.0, "total_s": 10.0, "time": "t"}
+            for i in range(10)
+        ])
+        job_a.created_at = "2026-07-28T10:00:00+00:00"
+        job_a.updated_at = "2026-07-28T10:01:40+00:00"  # 100 seconds
+
+        job_b = _make_job("b", step=5, timeperf=[
+            {"step": i, "rollout_s": 5.0, "train_s": 5.0, "other_s": 0.0, "total_s": 10.0, "time": "t"}
+            for i in range(5)
+        ])
+        job_b.created_at = "2026-07-28T10:00:00+00:00"
+        job_b.updated_at = "2026-07-28T10:02:00+00:00"  # 120 seconds
+
+        state = _state_with_jobs([job_a, job_b])
+        result = state.compare_jobs("a", "b")
+
+        assert result["throughput_a"] == 0.1  # 10 steps / 100s
+        assert result["throughput_b"] is not None
+
+    def test_throughput_none_when_no_duration(self):
+        """throughput should be None when duration cannot be computed."""
+        job_a = _make_job("a", step=5, timeperf=[])
+        job_b = _make_job("b", step=5, timeperf=[])
+        state = _state_with_jobs([job_a, job_b])
+        result = state.compare_jobs("a", "b")
+
+        assert result["throughput_a"] is None
+        assert result["throughput_b"] is None
+
+    def test_non_numeric_metric_diff_is_none(self):
+        """Metric with non-numeric values should have diff=None, not crash."""
+        job_a = _make_job("a", step=1, metrics=[
+            {"name": "text_metric", "value": "hello", "step": 1, "time": "t"},
+        ])
+        job_b = _make_job("b", step=1, metrics=[
+            {"name": "text_metric", "value": "world", "step": 1, "time": "t"},
+        ])
+        state = _state_with_jobs([job_a, job_b])
+        result = state.compare_jobs("a", "b")
+
+        metrics_by_name = {m["name"]: m for m in result["metrics"]}
+        assert "text_metric" in metrics_by_name
+        assert metrics_by_name["text_metric"]["comparable"] is True
+        assert metrics_by_name["text_metric"]["diff"] is None  # non-numeric, can't subtract
+
+    def test_same_job_returns_all_new_fields(self):
+        """Comparing same job should return empty new fields, not KeyError."""
+        job = _make_job("solo", step=1)
+        state = _state_with_jobs([job])
+        result = state.compare_jobs("solo", "solo")
+
+        assert result["comparable"] is False
+        # New fields should exist even for non-comparable results.
+        assert "metric_charts" not in result  # early return, not populated
+        assert "diff_summary" not in result
+        # This is acceptable: early return for same-job skips these fields.
