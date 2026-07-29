@@ -1777,8 +1777,8 @@ function CompareRunsPanel({ jobList, refreshJobs, compareJobAId, setCompareJobAI
   let chartPlot = null;
   let stepInfo = null;
   if (chartData) {
-    const ptsA = (chartData.points_a || []).map(p => ({ step: Number(p.step || 0), value: Number(p.value) })).filter(p => Number.isFinite(p.value));
-    const ptsB = (chartData.points_b || []).map(p => ({ step: Number(p.step || 0), value: Number(p.value) })).filter(p => Number.isFinite(p.value));
+    const ptsA = (chartData.points_a || []).map(p => ({ step: Number(p.step || 0), value: Number(p.value) })).filter(p => Number.isFinite(p.value)).sort((a, b) => a.step - b.step);
+    const ptsB = (chartData.points_b || []).map(p => ({ step: Number(p.step || 0), value: Number(p.value) })).filter(p => Number.isFinite(p.value)).sort((a, b) => a.step - b.step);
     if (ptsA.length > 0 || ptsB.length > 0) {
       const allPts = [...ptsA, ...ptsB];
       const minVal = Math.min(...allPts.map(p => p.value));
