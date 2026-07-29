@@ -1732,6 +1732,7 @@ function CompareRunsPanel({ jobList, refreshJobs, compareJobAId, setCompareJobAI
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [activeChartMetric, setActiveChartMetric] = useState("");
+  const [normalizeX, setNormalizeX] = useState(false);
 
   async function fetchComparison(aId, bId) {
     const effectiveAId = aId || compareJobAId;
@@ -1774,6 +1775,7 @@ function CompareRunsPanel({ jobList, refreshJobs, compareJobAId, setCompareJobAI
   // 构建对比曲线图
   const chartData = metricCharts[activeChartMetric];
   let chartPlot = null;
+  let stepInfo = null;
   if (chartData) {
     const ptsA = (chartData.points_a || []).map(p => ({ step: Number(p.step || 0), value: Number(p.value) })).filter(p => Number.isFinite(p.value));
     const ptsB = (chartData.points_b || []).map(p => ({ step: Number(p.step || 0), value: Number(p.value) })).filter(p => Number.isFinite(p.value));
@@ -1781,21 +1783,40 @@ function CompareRunsPanel({ jobList, refreshJobs, compareJobAId, setCompareJobAI
       const allPts = [...ptsA, ...ptsB];
       const minVal = Math.min(...allPts.map(p => p.value));
       const maxVal = Math.max(...allPts.map(p => p.value));
-      const minStep = Math.min(...allPts.map(p => p.step));
-      const maxStep = Math.max(...allPts.map(p => p.step));
+      const maxStepA = ptsA.length > 0 ? ptsA[ptsA.length - 1].step : 1;
+      const maxStepB = ptsB.length > 0 ? ptsB[ptsB.length - 1].step : 1;
+      const minStep = 0;
+      const maxStep = Math.max(maxStepA, maxStepB);
       const valSpan = Math.max(maxVal - minVal, 1e-9);
       const stepSpan = Math.max(maxStep - minStep, 1);
-      const toCoords = (points) => points.map(p => ({
+
+      const toCoordsAbs = (points) => points.map(p => ({
         x: ((p.step - minStep) / stepSpan) * 680 + 10,
         y: 150 - ((p.value - minVal) / valSpan) * 130,
       }));
-      const coordsA = toCoords(ptsA);
-      const coordsB = toCoords(ptsB);
+
+      // 归一化模式：各自按进度拉伸到 0-100%
+      const toCoordsNorm = (points, maxStepLocal) => {
+        const localSpan = Math.max(maxStepLocal - 0, 1);
+        return points.map(p => ({
+          x: ((p.step - 0) / localSpan) * 680 + 10,
+          y: 150 - ((p.value - minVal) / valSpan) * 130,
+        }));
+      };
+
+      const coordsA = normalizeX ? toCoordsNorm(ptsA, maxStepA) : toCoordsAbs(ptsA);
+      const coordsB = normalizeX ? toCoordsNorm(ptsB, maxStepB) : toCoordsAbs(ptsB);
+
       chartPlot = {
         lineA: coordsA.map(c => `${c.x.toFixed(1)},${c.y.toFixed(1)}`).join(" "),
         lineB: coordsB.map(c => `${c.x.toFixed(1)},${c.y.toFixed(1)}`).join(" "),
         minLabel: compactNumber(minVal),
         maxLabel: compactNumber(maxVal),
+      };
+      stepInfo = {
+        maxStepA, maxStepB,
+        aLonger: maxStepA > maxStepB,
+        sameSteps: maxStepA === maxStepB,
       };
     }
   }
@@ -2047,7 +2068,15 @@ function CompareRunsPanel({ jobList, refreshJobs, compareJobAId, setCompareJobAI
 
           {/* 4. 指标曲线对比图 */}
           <div className="compareSection">
-            <h3>Metric Curve Comparison</h3>
+            <div className="compareChartHeader">
+              <h3>Metric Curve Comparison</h3>
+              {stepInfo && !stepInfo.sameSteps && (
+                <label className="normalizeToggle">
+                  <input type="checkbox" checked={normalizeX} onChange={(e) => setNormalizeX(e.target.checked)} />
+                  Normalize X-axis (align by progress)
+                </label>
+              )}
+            </div>
             {chartMetricNames.length > 0 ? (
               <>
                 <div className="compareChartTabs">
@@ -2063,6 +2092,18 @@ function CompareRunsPanel({ jobList, refreshJobs, compareJobAId, setCompareJobAI
                 </div>
                 {chartPlot ? (
                   <div className="compareChartWrap">
+                    {stepInfo && !stepInfo.sameSteps && !normalizeX && (
+                      <div className="compareChartWarning">
+                        Job A runs to step {stepInfo.maxStepA}, Job B runs to step {stepInfo.maxStepB}.
+                        {stepInfo.aLonger ? " Job B data covers fewer steps." : " Job A data covers fewer steps."}
+                         Enable "Normalize X-axis" to align by training progress.
+                      </div>
+                    )}
+                    {stepInfo && !stepInfo.sameSteps && normalizeX && (
+                      <div className="compareChartInfo">
+                        X-axis normalized: A (0-{stepInfo.maxStepA}) and B (0-{stepInfo.maxStepB}) both stretched to full width by progress.
+                      </div>
+                    )}
                     <svg className="compareChartSvg" viewBox="0 0 700 170" role="img">
                       <g className="plotGrid">
                         {[0, 1, 2, 3].map((item) => <line key={item} x1="0" x2="700" y1={20 + item * 37} y2={20 + item * 37} />)}

@@ -2463,6 +2463,42 @@ textarea:focus {
 }
 
 /* -- Compare: Chart tabs -- */
+.compareChartHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.compareChartHeader h3 {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text);
+  margin: 0;
+}
+
+.normalizeToggle {
+  font-size: 12px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.normalizeToggle input {
+  cursor: pointer;
+}
+
+.compareChartInfo {
+  font-size: 12px;
+  color: #4f8cff;
+  margin-bottom: 8px;
+  padding: 6px 10px;
+  background: rgba(79, 140, 255, 0.08);
+  border-radius: 6px;
+}
+
 .compareChartTabs {
   display: flex;
   flex-wrap: wrap;
