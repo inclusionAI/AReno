@@ -28,19 +28,32 @@ def generate_records(
     vision_radius: int = DEFAULT_VISION_RADIUS,
     max_steps: int | None = None,
 ) -> list[dict]:
-    """Generate *count* unique solvable maze records."""
+    """Generate *count* unique solvable maze records.
+
+    To maximise variety, each maze is generated with a random sub-seed and a
+    random key/door count (1-2).  If the base dimensions are too small to
+    produce enough unique mazes, the generator gradually widens the search
+    by allowing adjacent odd sizes.
+    """
 
     rng = random.Random(seed)
     records: list[dict] = []
     seen: set[tuple[tuple[str, ...], ...]] = set()
     attempts = 0
+    max_attempts = count * 500
     while len(records) < count:
         attempts += 1
-        if attempts > count * 50:
+        if attempts > max_attempts:
             raise RuntimeError("could not generate enough unique mazes")
         sub_seed = rng.randint(0, 2**31 - 1)
+        # Vary key/door counts for diversity.
+        n_keys = rng.randint(1, 2)
+        n_doors = rng.randint(1, 2)
+        # Occasionally allow slightly larger mazes to expand the unique pool.
+        w = width + (rng.choice([0, 0, 0, 2]) if attempts > count else 0)
+        h = height + (rng.choice([0, 0, 0, 2]) if attempts > count else 0)
         maze, start, goal, keys, doors = game.generate_maze(
-            width, height, seed=sub_seed,
+            w, h, seed=sub_seed, n_keys=n_keys, n_doors=n_doors,
         )
         key_tuple = tuple(tuple(row) for row in maze)
         if key_tuple in seen:
