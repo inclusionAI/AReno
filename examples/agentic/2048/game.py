@@ -19,7 +19,12 @@ ACTIONS = ("up", "down", "left", "right")
 SIZE = 4
 DEFAULT_EPISODE_CAP = 32
 SPAWN_4_PROB = 0.1
-INVALID_PENALTY = 0.5
+# Per no-op penalty. 0.5 was too weak to steer the policy: a full-no-op episode
+# lost only 16 (=0.5*32), drowned by the ~150 baseline scale and by merge-score
+# variance under GRPO normalization, so `invalid_rate` never fell during RL.
+# 2.0 puts a full-no-op episode at -64 (baseline-scale), making each wasted move
+# genuinely costly against a merge score of comparable magnitude.
+INVALID_PENALTY = 2.0
 WIN_TILE = 2048
 
 logger = logging.getLogger(__name__)

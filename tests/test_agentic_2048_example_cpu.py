@@ -6,6 +6,8 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 EXAMPLE_DIR = Path(__file__).resolve().parents[1] / "examples" / "agentic" / "2048"
 
 # Sibling module names these example files import as a side effect of loading.
@@ -235,11 +237,19 @@ def test_reward_empty_moves_are_penalized():
     assert value == -50.0
 
 
-def test_reward_wrong_tool_falls_back_to_completion():
+def test_reward_wrong_tool_is_penalized_not_parsed_from_text():
     reward = _load_module("reward")
+    game = _load_module("game")
 
+    # A non-choose_moves tool call must NOT fall back to parsing "left/right"
+    # out of the completion text -- that fallback let prose out-score tool calls
+    # and the RL abandoned tool use. Expect the no-tool-call penalty instead,
+    # which is worse than the baseline-only (-50) empty-moves case.
     value = reward.reward_fn(_record(tool_name="other_tool", completion="left then right"))
-    assert isinstance(value, float)  # parsed and replayed without raising
+    baseline = 50.0
+    expected_penalty = -(baseline + game.INVALID_PENALTY * game.DEFAULT_EPISODE_CAP + 1.0)
+    assert value == expected_penalty
+    assert value < -baseline
 
 
 def test_reward_malformed_json_arguments_does_not_raise():
@@ -272,6 +282,37 @@ def test_reward_all_noop_moves_counted_as_invalid():
     value = reward.reward_fn(record)
     result_moves = 4
     assert value == 0.0 - game.INVALID_PENALTY * result_moves
+
+
+def test_reward_noop_appended_lowers_reward():
+    """Contract: a no-op move is penalized.
+
+    Appending one no-op to an otherwise identical plan must yield a strictly
+    worse reward (by exactly INVALID_PENALTY). This is the requirement's "对不
+    改变游戏板的动作进行惩罚" hook: the penalty has to be visible against the
+    merging score, not buried under the tool-call collapse.
+    """
+    reward = _load_module("reward")
+    game = _load_module("game")
+    # Full board whose top row [2,2,8,16] -> left -> [4,8,16,0] (+4). Col 0 has
+    # a 4/4 pair in rows 2-3, so "up"/"down" stay legal afterward -- the episode
+    # is NOT terminal, so the second "left" is actually attempted. That second
+    # "left" cannot merge or slide (4,8,16 + a 2/4 spawn, all distinct and left
+    # packed), so it is a guaranteed no-op.
+    board = [[2, 2, 8, 16], [16, 32, 64, 128], [4, 8, 16, 32], [4, 128, 256, 512]]
+    source = {"board": board, "seed": 2026, "random_baseline": {"score": 0.0}, "id": "noop"}
+    record = lambda moves: SimpleNamespace(  # noqa: E731
+        source_record=source,
+        completion="",
+        tool_calls=[{"name": "choose_moves", "arguments": {"moves": moves}}],
+    )
+
+    clean = reward.reward_fn(record(["left"]))
+    padded = reward.reward_fn(record(["left", "left"]))
+    # Same merge (+4), but the padded plan wastes a step on a no-op: it loses
+    # exactly INVALID_PENALTY.
+    assert padded < clean
+    assert clean - padded == pytest.approx(game.INVALID_PENALTY)
 
 
 # --- XML no-tool variant ------------------------------------------------------
