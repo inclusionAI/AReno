@@ -49,6 +49,11 @@ from areno.engine.runtime.common import (
     split_list_by_dp,
 )
 from areno.engine.runtime.decode_graph import ceil_div
+from areno.engine.runtime.load_progress import (
+    ModelLoadTracker,
+    STAGE_CONFIG_TOKENIZER,
+    STAGE_REFERENCE_RESOLUTION,
+)
 from areno.engine.runtime.rollout import _build_rollout_from_rows, _merge_dp_rollouts_in_input_order, _merge_rollouts
 from areno.engine.worker import ArenoWorker
 from areno.models.registry import config_from_hf
@@ -197,12 +202,17 @@ class ArenoEngine:
 
         if model is None:
             raise ValueError("from_pretrained() requires a local model path or Hugging Face model id")
+        # driver 进程在这里是单线程的，所以 rank0=True 即可避免重复进度行，
+        # 无需查询 TP context（它要到 worker 启动后才初始化）。
+        tracker = ModelLoadTracker(rank0=True)
         # Resolve HF repo id or local dir to an on-disk checkpoint directory.
-        model_path = resolve_model_path(model)
+        with tracker.stage(STAGE_REFERENCE_RESOLUTION, detail=str(model)):
+            model_path = resolve_model_path(model)
         if model_path is None:
             raise ValueError(f"could not resolve model path: {model!r}")
         # Translate the HF config.json into the engine's internal model schema.
-        model_config = config_from_hf(model_path)
+        with tracker.stage(STAGE_CONFIG_TOKENIZER, detail=model_path):
+            model_config = config_from_hf(model_path)
         cfg = EngineConfig(
             model=model_config,
             model_path=model_path,
