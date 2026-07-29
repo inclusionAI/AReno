@@ -241,15 +241,9 @@ class Trainer:
             # dataset; over-long prompts increment the skip counter but do not
             # fill the batch.
             while cursor < len(dataset):
-                # --- Determine whether the current batch is full ---
-                if token_budget is not None:
-                    if len(items) > 0 and current_tokens >= token_budget:
-                        break
-                    if len(items) >= batch_size:
-                        break
-                else:
-                    if len(items) >= batch_size:
-                        break
+                # batch_size always acts as a hard item-count cap.
+                if len(items) >= batch_size:
+                    break
 
                 record = dataset[cursor]
                 cursor += 1
@@ -264,6 +258,15 @@ class Trainer:
                     skipped_long += 1
                     total_skipped_long += 1
                     continue
+
+                # Forward-looking token-budget check: if adding this item
+                # would exceed the budget and the batch is non-empty, yield
+                # the current batch first. This keeps every batch within the
+                # budget (except single-item batches for over-budget items).
+                if token_budget is not None and len(items) > 0 and current_tokens + len(input_tokens) > token_budget:
+                    cursor -= 1
+                    scanned -= 1
+                    break
 
                 # Warn when a single item exceeds the token budget; it will
                 # form a batch of its own rather than being dropped.

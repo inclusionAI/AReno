@@ -126,7 +126,7 @@ def split_by_token_budget(
 ) -> list[tuple[int, int]]:
     """Return a list of (item_count, token_total) per batch.
 
-    Mirrors the accumulation logic in load_prompt_batches for testing.
+    Mirrors the forward-looking accumulation logic in load_prompt_batches.
     """
     batches = []
     cursor = 0
@@ -135,14 +135,10 @@ def split_by_token_budget(
         current_tokens = 0
         while cursor < len(token_lengths):
             length = token_lengths[cursor]
-            if token_budget is not None:
-                if len(items) > 0 and current_tokens >= token_budget:
-                    break
-                if len(items) >= batch_size:
-                    break
-            else:
-                if len(items) >= batch_size:
-                    break
+            if len(items) >= batch_size:
+                break
+            if token_budget is not None and len(items) > 0 and current_tokens + length > token_budget:
+                break
             items.append(length)
             current_tokens += length
             cursor += 1
@@ -163,27 +159,26 @@ class RLSplitLogicTest(unittest.TestCase):
     def test_basic_token_budget(self):
         """Each batch should not exceed the token budget (except single items)."""
         result = split_by_token_budget([100, 200, 300, 400, 500], batch_size=10, token_budget=500)
-        # batch1: 100+200+300=600 > 500? No, check: after adding 300, current=600>=500, break
-        # Actually: 100+200=300 < 500, add 300 -> 600 >= 500, break
-        # batch1: [100, 200, 300] = 600  (300 pushed it over, but we break AFTER adding)
-        # Wait - the logic breaks BEFORE adding when current >= budget
-        # Let's re-trace:
+        # Forward-looking: if adding would exceed budget, split first.
         # items=[], current=0 -> add 100, current=100
-        # items=[100], current=100 < 500 -> add 200, current=300
-        # items=[100,200], current=300 < 500 -> add 300, current=600
-        # items=[100,200,300], current=600 >= 500 -> break
-        # batch1: (3, 600)
+        # items=[100], current=100 -> 100+200=300 <= 500, add 200, current=300
+        # items=[100,200], current=300 -> 300+300=600 > 500, break
+        # batch1: (2, 300)
+        # items=[], current=0 -> add 300, current=300
+        # items=[300], current=300 -> 300+400=700 > 500, break
+        # batch2: (1, 300)
         # items=[], current=0 -> add 400, current=400
-        # items=[400], current=400 < 500 -> add 500, current=900
-        # items=[400,500], current=900 >= 500 -> break
-        # batch2: (2, 900)
-        self.assertEqual(result, [(3, 600), (2, 900)])
+        # items=[400], current=400 -> 400+500=900 > 500, break
+        # batch3: (1, 400)
+        # items=[], current=0 -> add 500, current=500
+        # batch4: (1, 500)
+        self.assertEqual(result, [(2, 300), (1, 300), (1, 400), (1, 500)])
 
     def test_single_item_over_budget(self):
         """A single item exceeding budget should form its own batch."""
         result = split_by_token_budget([1000, 100, 200], batch_size=10, token_budget=500)
-        # batch1: [1000] (single, exceeds budget) -> break when current=1000>=500
-        # batch2: [100, 200] -> 300 < 500, no more data
+        # batch1: [1000] (single, exceeds budget, len(items)==0 so no pre-split)
+        # batch2: [100, 200] -> 300 <= 500, no more data
         self.assertEqual(result, [(1, 1000), (2, 300)])
 
     def test_batch_size_cap_with_large_budget(self):
@@ -216,9 +211,10 @@ class RLSplitLogicTest(unittest.TestCase):
         self.assertEqual(total_items, len(token_lengths))
 
     def test_budget_equals_single_item(self):
-        """Budget exactly equal to one item should still pack more if possible."""
+        """Budget exactly equal to one item: forward-looking allows adding if total <= budget."""
         result = split_by_token_budget([100, 100, 100], batch_size=10, token_budget=100)
-        # add 100 -> current=100 >= 100 -> break after first item
+        # Forward-looking: 0+100=100 <= 100, add. 100+100=200 > 100, break.
+        # Each batch has exactly 1 item.
         self.assertEqual(result, [(1, 100), (1, 100), (1, 100)])
 
 
@@ -457,8 +453,7 @@ class LoadPromptBatchesIntegrationTest(unittest.TestCase):
                 token_budget=150,
             )
         )
-        # Each batch should have total_tokens <= 150 (except possibly the
-        # last one or a single-item batch).
+        # Each batch should have total_tokens <= 150 (except single-item batches).
         for batch in batches:
             self.assertGreater(len(batch.items), 0)
         # Verify all items are covered
@@ -541,14 +536,8 @@ class _TrainerStub:
             skipped_long = 0
             current_tokens = 0
             while cursor < len(dataset):
-                if token_budget is not None:
-                    if len(items) > 0 and current_tokens >= token_budget:
-                        break
-                    if len(items) >= batch_size:
-                        break
-                else:
-                    if len(items) >= batch_size:
-                        break
+                if len(items) >= batch_size:
+                    break
                 record = dataset[cursor]
                 cursor += 1
                 scanned += 1
@@ -560,6 +549,10 @@ class _TrainerStub:
                     skipped_long += 1
                     total_skipped_long += 1
                     continue
+                if token_budget is not None and len(items) > 0 and current_tokens + len(input_tokens) > token_budget:
+                    cursor -= 1
+                    scanned -= 1
+                    break
                 if token_budget is not None and len(items) == 0 and len(input_tokens) > token_budget:
                     logging.getLogger(__name__).warning(
                         "prompt with %d tokens exceeds token_budget=%d; forming a single-item batch",
@@ -790,7 +783,8 @@ def _cli_options(**overrides):
         dataset_path="dataset",
         model_hub="modelscope",
         dataset_loader_fn=None,
-        reward_fn_path="examples/math/math_verify_reward.py",
+        reward_fn_path=None,
+        reward_ckpt="reward-model",
         save_path="save",
         save_interval=10,
         tune_params=False,
@@ -836,7 +830,6 @@ def _cli_options(**overrides):
         grpo_clip_eps=0.2,
         ref_ckpt=None,
         dpo_beta=0.1,
-        reward_ckpt=None,
         critic_ckpt=None,
         critic_lr=1e-5,
         use_kl_loss=True,
@@ -854,7 +847,7 @@ def _cli_options(**overrides):
     )
     defaults.update(overrides)
     if defaults["algo"] == "sft" and "dataset_loader_fn" not in overrides:
-        defaults["dataset_loader_fn"] = "examples/sft/alpaca/dataset_loader.py"
+        defaults["dataset_loader_fn"] = "examples/math/dataset_loader.py"
     return defaults
 
 
@@ -879,9 +872,7 @@ class CLITokenBudgetTest(unittest.TestCase):
         from areno.api.trainer_config import TrainerConfig
         from areno.cli.train import _trainer_config_from_options
 
-        config = _trainer_config_from_options(
-            **_cli_options(algo="sft", token_budget=4096, reward_fn_path=None, reward_ckpt=None)
-        )
+        config = _trainer_config_from_options(**_cli_options(algo="sft", token_budget=4096, reward_fn_path=None))
         self.assertIsInstance(config, TrainerConfig)
         self.assertEqual(config.token_budget, 4096)
 
