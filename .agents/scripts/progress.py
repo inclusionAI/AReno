@@ -123,6 +123,7 @@ class ProgressTracker:
         """Finish the current stage successfully and pop it from the stack."""
         if not self._stack:
             return ProgressEvent(stage="", status="completed", message=message)
+        elapsed = self._elapsed()
         active = self._stack.pop()
         self._last_completed = active["stage"]
         return ProgressEvent(
@@ -131,7 +132,7 @@ class ProgressTracker:
             message=message,
             step=active.get("total"),
             total=active.get("total"),
-            elapsed_s=self._elapsed(),
+            elapsed_s=elapsed,
             data=data,
         )
 
@@ -144,6 +145,7 @@ class ProgressTracker:
                 message=error,
                 data={"last_completed_stage": self._last_completed},
             )
+        elapsed = self._elapsed()
         active = self._stack.pop()
         # Keep the last *successfully* completed stage, not the failed one.
         return ProgressEvent(
@@ -151,7 +153,7 @@ class ProgressTracker:
             status="failed",
             message=error,
             total=active.get("total"),
-            elapsed_s=self._elapsed(),
+            elapsed_s=elapsed,
             data={"last_completed_stage": self._last_completed},
         )
 
