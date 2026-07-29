@@ -531,6 +531,17 @@ class RolloutSession:
                         input_tokens=pending.input_tokens,
                     )
                     if trimmed is None:
+                        # Two failure modes: (a) no removable units at all
+                        # (system + user alone exceeds the budget) or
+                        # (b) all removable units removed but still too long.
+                        units = group_messages_into_units(pending.messages)
+                        if len(units) <= 2:
+                            raise RuntimeError(
+                                f"trim_messages impossible: system + latest user alone "
+                                f"({len(pending.input_tokens)} tokens) exceeds trim_max_tokens "
+                                f"({trim_target}). Increase --trim-max-tokens or "
+                                f"--agentic-context-overflow-policy."
+                            )
                         response = _unfittable_chat_response(
                             model=pending.model,
                             prompt_tokens=len(pending.input_tokens),
