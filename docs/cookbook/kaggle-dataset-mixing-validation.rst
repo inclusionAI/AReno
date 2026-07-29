@@ -19,7 +19,7 @@ The tested implementation completed all of the following:
 * loaded and normalized three public Alpaca-contract datasets;
 * produced the requested 60/30/10 deterministic sample schedule;
 * reproduced the same schedule hash across three independent runs;
-* completed 500 single-GPU SFT optimizer steps;
+* completed 500 SFT optimizer steps with two-GPU tensor parallelism;
 * trained 1,000 accepted rows and 77,533 target tokens;
 * exposed source-specific scheduled, filtered, trained, and token counts;
 * completed without NaN, Inf, CUDA, or worker errors.
@@ -50,7 +50,7 @@ GPU accelerator enabled.
    * - NVCC
      - 12.8 (V12.8.93)
    * - Accelerator
-     - 2 x Tesla T4 available; the SFT run used one GPU
+     - 2 x Tesla T4; the SFT runs used both GPUs with tensor parallelism
    * - Per-GPU memory
      - 15,360 MiB reported by ``nvidia-smi``
    * - GPU compute capability
@@ -60,12 +60,13 @@ GPU accelerator enabled.
    * - Model
      - Qwen3-0.6B converted to FP16
 
-.. admonition:: Screenshot K1 — Kaggle runtime and GPU environment
+.. figure:: ../_static/kaggle-dataset-mixing/kaggle-02-environment.png
+   :alt: Kaggle PyTorch, CUDA, Tesla T4, and areno_accel environment check
+   :width: 100%
 
-   Capture one output region containing the Python, PyTorch, CUDA, GPU model,
-   GPU count, memory, and NVCC version. Include enough of the Kaggle page to
-   show that the output came from a notebook cell, but crop unrelated browser
-   controls. Suggested filename: ``kaggle-01-environment.png``.
+   Kaggle environment check showing PyTorch 2.10.0+cu128, CUDA 12.8, a
+   visible Tesla T4, and a successful import of the compiled
+   ``areno_accel`` extension.
 
 1. Check out the PR branch
 --------------------------
@@ -78,9 +79,8 @@ Clone the fork branch into the ephemeral Kaggle working directory:
    git clone \
      --branch codex/issue-198-dataset-mixing \
      --single-branch \
-     https://github.com/lkxdsb/AReno.git \
-     AReno-issue198
-   cd /kaggle/working/AReno-issue198
+     https://github.com/lkxdsb/AReno.git
+   cd /kaggle/working/AReno
 
 Record the exact source revision before installing:
 
@@ -94,11 +94,13 @@ The branch should be ``codex/issue-198-dataset-mixing`` and the working tree
 should be clean. The exact commit can be newer than the validated
 implementation commit when it contains documentation-only updates.
 
-.. admonition:: Screenshot K2 — branch and source revision
+.. figure:: ../_static/kaggle-dataset-mixing/kaggle-01-source-revision.png
+   :alt: Kaggle checkout of the Issue 198 branch and exact source revision
+   :width: 100%
 
-   Capture the branch name, full commit SHA, and clean ``git status`` output in
-   one image. This binds every later result to an exact source state.
-   Suggested filename: ``kaggle-02-source-revision.png``.
+   The notebook cloned ``codex/issue-198-dataset-mixing`` and recorded
+   implementation revision
+   ``e33e40de3419e37a44bf5279374ada6d6c37eae3`` before installation.
 
 2. Install AReno and compile the CUDA extension
 -----------------------------------------------
@@ -131,12 +133,11 @@ valid training environment. A missing ``flash_attn`` warning is acceptable for
 this test because the command explicitly selects ``--attn-backend native``;
 the diagnostic must still exit with code zero.
 
-.. admonition:: Screenshot K3 — installation and AReno diagnostic
-
-   Do not capture the full dependency installation log. Capture the final
-   successful editable-build lines followed by the complete ``areno check``
-   result. The extension status and CUDA status must be readable. Suggested
-   filename: ``kaggle-03-areno-check.png``.
+The environment figure above is the retained installation evidence: it proves
+that CUDA is available and the compiled extension imports successfully. For a
+new reproduction, retain the complete ``areno check`` output as well. The
+shell here-document warning visible in the captured cell came from the
+notebook wrapper and did not affect the successful CUDA or extension imports.
 
 3. Prepare the FP16 checkpoint
 ------------------------------
@@ -167,11 +168,23 @@ Warnings about anonymous Hugging Face rate limits or tied-weight metadata do
 not invalidate the conversion. The decisive evidence is a completed
 ``model.safetensors`` write and ``torch.float16`` parameter dtype.
 
-.. admonition:: Screenshot K4 — model preparation
+The captured notebook used the older ``torch_dtype=torch.float16`` spelling.
+The reproduction cell above uses ``dtype=torch.float16`` because current
+Transformers versions deprecate ``torch_dtype``.
 
-   Capture the completed model download/write progress together with the local
-   checkpoint path and ``torch.float16`` output. Do not expose an ``HF_TOKEN``.
-   Suggested filename: ``kaggle-04-fp16-checkpoint.png``.
+.. figure:: ../_static/kaggle-dataset-mixing/kaggle-03-model-preparation.png
+   :alt: Kaggle code cell that downloads and converts Qwen3 0.6B to FP16
+   :width: 100%
+
+   Model-preparation cell used to download Qwen3-0.6B and write a local FP16
+   checkpoint.
+
+.. figure:: ../_static/kaggle-dataset-mixing/kaggle-04-fp16-checkpoint.png
+   :alt: Completed Qwen3 0.6B download and FP16 checkpoint write
+   :width: 100%
+
+   Completed weight download and checkpoint write. The final output confirms
+   ``/kaggle/working/qwen3-0.6b-fp16`` and ``torch.float16``.
 
 4. Define the three-source mix
 ------------------------------
@@ -216,6 +229,10 @@ defaults:
 5. Run the 500-step validation
 ------------------------------
 
+The notebook first ran 50-step checks at 128 and 256 tokens, then ran the final
+500-step validation at 256 tokens. Sections 8 through 10 retain the commands
+and final output from all three passes.
+
 The following is the command corresponding to the recorded 500-step result:
 
 .. code-block:: bash
@@ -228,7 +245,7 @@ The following is the command corresponding to the recorded 500-step result:
      --dataset-source stanford=tatsu-lab/alpaca:0.3 \
      --dataset-source gpt4=vicgalle/alpaca-gpt4:0.1 \
      --dataset-loader-fn examples/sft/alpaca/dataset_loader.py \
-     --world-size 1 --tp-size 1 \
+     --world-size 2 --tp-size 2 \
      --batch-size 2 --mini-bs 1 \
      --max-steps 500 \
      --max-prompt-tokens 256 --max-new-tokens 256 \
@@ -255,13 +272,13 @@ and it does not guarantee 5,000 accepted training rows. In this configuration,
 ``500 steps x batch size 2`` requires 1,000 accepted rows; filtering causes the
 trainer to scan more than 1,000 scheduled rows to fill those batches.
 
-.. admonition:: Screenshot K5 — resolved training config and mix plan
+.. figure:: ../_static/kaggle-dataset-mixing/kaggle-10-500-step-config.png
+   :alt: Kaggle 500-step three-source SFT command and resolved configuration
+   :width: 100%
 
-   Capture the resolved ``Algorithm``, ``Inputs``, ``Runtime``, ``Training``,
-   and ``Outputs`` summaries plus the complete ``AReno dataset mix`` block.
-   The image must show the seed, policy, planned rows, requested weights,
-   selected rows, and termination reason. Suggested filename:
-   ``kaggle-05-config-and-plan.png``.
+   The 500-step command and the beginning of AReno's resolved configuration.
+   It records three inline sources, ``world_size=2``, ``tp_size=2``, batch size
+   two, 256-token limits, and the native attention backend.
 
 6. Inspect the structured plan
 ------------------------------
@@ -326,11 +343,12 @@ after its 51,760 unique rows are exhausted. The 500-step run consumed only the
 first 1,171 scheduled rows, so this full-plan duplicate count does not mean
 that the short validation consumed 41,726 duplicates.
 
-.. admonition:: Screenshot K6 — structured plan
+.. figure:: ../_static/kaggle-dataset-mixing/kaggle-07-structured-plan.png
+   :alt: Structured dataset-mixing plan with schedule hash and source counts
+   :width: 100%
 
-   Capture the compact plan-inspection output above. It must include both
-   hashes and all three requested/selected/observed source rows. Suggested
-   filename: ``kaggle-06-structured-plan.png``.
+   Structured plan inspection showing the schedule hash, 155,764 planned
+   rows, and requested, planned, and selected values for all three sources.
 
 7. Verify deterministic replay
 ------------------------------
@@ -363,17 +381,26 @@ tokens must not change either hash. Compare all saved plans:
            plan = json.load(handle)
        print(os.path.basename(path), plan["schedule_hash"])
 
-.. admonition:: Screenshot K7 — deterministic hashes
-
-   Capture at least two independently generated plan filenames with identical
-   schedule hashes. Three matching runs are preferred. Suggested filename:
-   ``kaggle-07-deterministic-hashes.png``.
+The structured-plan figure and the final 500-step summary below both report
+``sha256:26e61327f09b9c27a0e7219a40e2d17bebc5604571b47a1b8a3dc4119aad420b``.
+Together with the matching plan artifacts observed in the intervening
+256-token run,
+this verifies that token limits and step count did not alter the schedule.
 
 8. Compare token-limit filtering
 --------------------------------
 
 Before the final run, two 50-step runs compared 128-token and 256-token
-prompt/response budgets.
+prompt/response budgets. They used the command from section 5 with
+``--max-steps 50`` and, respectively:
+
+.. code-block:: bash
+
+   --max-prompt-tokens 128 --max-new-tokens 128
+
+.. code-block:: bash
+
+   --max-prompt-tokens 256 --max-new-tokens 256
 
 .. list-table::
    :header-rows: 1
@@ -403,20 +430,37 @@ prompt/response budgets.
 
 The 256-token configuration reduced filtering by 24.86 percentage points and
 nearly doubled the supervised target-token volume without destabilizing the
-single-GPU run. It was therefore selected for the 500-step validation.
+two-GPU tensor-parallel run. It was therefore selected for the 500-step
+validation.
 
-.. admonition:: Screenshot K8 — 128-token final progress
+.. figure:: ../_static/kaggle-dataset-mixing/kaggle-05-token-limit-128-config.png
+   :alt: Kaggle 128-token 50-step SFT command and resolved configuration
+   :width: 100%
 
-   Capture the final ``stage=dataset_mix_progress`` event and the following
-   ``stage=max_steps_reached`` line from the 128-token run. The source-specific
-   scheduled, filtered, trained, and token counts must be readable. Suggested
-   filename: ``kaggle-08-token-limit-128.png``.
+   First validation command: 50 steps with 128 prompt tokens and 128 response
+   tokens. The resolved input summary confirms that three command-line sources
+   were selected.
 
-.. admonition:: Screenshot K9 — 256-token final progress
+.. figure:: ../_static/kaggle-dataset-mixing/kaggle-06-token-limit-128-result.png
+   :alt: Final progress and completion logs from the 128-token run
+   :width: 100%
 
-   Capture the equivalent final progress and completion lines from the
-   256-token run. Suggested filename:
-   ``kaggle-09-token-limit-256.png``.
+   Final 128-token progress. The run reached 50 steps after scheduling 165
+   rows, filtering 65, and training 100.
+
+.. figure:: ../_static/kaggle-dataset-mixing/kaggle-08-token-limit-256-config.png
+   :alt: Kaggle 256-token 50-step SFT command and resolved configuration
+   :width: 100%
+
+   Second validation command: the same 50-step run with both token limits
+   raised to 256. All dataset-source and runtime settings remain unchanged.
+
+.. figure:: ../_static/kaggle-dataset-mixing/kaggle-09-token-limit-256-result.png
+   :alt: Final progress and completion logs from the 256-token run
+   :width: 100%
+
+   Final 256-token progress. The run reached 50 steps after scheduling 117
+   rows, filtering 17, and training 100.
 
 9. Inspect the 500-step result
 ------------------------------
@@ -484,12 +528,14 @@ response lengths are source-dependent. The progress event makes both effects
 observable rather than silently claiming that scheduled weights equal loss
 contribution.
 
-.. admonition:: Screenshot K10 — 500-step completion
+.. figure:: ../_static/kaggle-dataset-mixing/kaggle-11-500-step-result.png
+   :alt: Final training statistics, source progress, and completion of the 500-step run
+   :width: 100%
 
-   Capture the ``step=499`` ``train_stats`` line, the final
-   ``stage=dataset_mix_progress`` object, and ``step=500
-   stage=max_steps_reached``. Suggested filename:
-   ``kaggle-10-500-step-result.png``.
+   The final 500-step log contains step 499 training statistics, source-level
+   mixing progress, and ``step=500 stage=max_steps_reached``. It is the
+   evidence for scheduled, filtered, trained, and token counts after
+   token-length filtering.
 
 10. Evaluate training stability
 -------------------------------
@@ -522,39 +568,195 @@ reported losses, gradients, learning rates, and timings remained finite. This
 supports execution stability, but it must not be presented as a downstream
 quality benchmark because no held-out evaluation set was used.
 
-.. admonition:: Screenshot K11 — loss trend
+The following notebook cell generated the compact final validation. It selects
+the event file with the most recorded loss points, associates it with the
+matching process-specific run state, configuration, and mix plan, and then
+checks the 500-step completion contract:
 
-   Prefer a TensorBoard loss chart covering all 500 steps. If TensorBoard is
-   unavailable, capture notebook output from a small log-summary cell that
-   prints the first-50 and last-50 mean/median losses. Do not use only two
-   individual loss points as evidence. Suggested filename:
-   ``kaggle-11-loss-trend.png``.
+.. code-block:: python
+
+   from pathlib import Path
+   from statistics import mean
+   from tensorboard.backend.event_processing.event_accumulator import (
+       EventAccumulator,
+   )
+   import json
+   import math
+
+   log_dir = Path("/tmp/areno/tfevent")
+   runs = []
+
+   for event_file in log_dir.rglob("events.out.tfevents.*"):
+       try:
+           accumulator = EventAccumulator(
+               str(event_file),
+               size_guidance={"scalars": 0},
+           )
+           accumulator.Reload()
+           tags = accumulator.Tags().get("scalars", [])
+           if "train/loss" in tags:
+               runs.append(
+                   (
+                       len(accumulator.Scalars("train/loss")),
+                       event_file,
+                       accumulator,
+                   )
+               )
+       except Exception:
+           pass
+
+   if not runs:
+       raise RuntimeError(f"No training events found under {log_dir}")
+
+   steps_recorded, event_file, accumulator = max(
+       runs,
+       key=lambda item: item[0],
+   )
+
+   pid = None
+   for state_path in log_dir.glob("dashboard_state.*.json"):
+       candidate_pid = state_path.stem.split(".")[-1]
+       if f".{candidate_pid}." in event_file.name:
+           pid = candidate_pid
+           break
+
+   if pid is None:
+       state_path = max(
+           log_dir.glob("dashboard_state.*.json"),
+           key=lambda path: path.stat().st_mtime,
+       )
+       pid = state_path.stem.split(".")[-1]
+   else:
+       state_path = log_dir / f"dashboard_state.{pid}.json"
+
+   config_path = log_dir / f"areno_run_config.{pid}.json"
+   plan_path = log_dir / f"dataset_mix_plan.{pid}.json"
+
+   with state_path.open(encoding="utf-8") as handle:
+       state = json.load(handle)
+   with config_path.open(encoding="utf-8") as handle:
+       config = json.load(handle)
+   with plan_path.open(encoding="utf-8") as handle:
+       plan = json.load(handle)
+
+   settings = {
+       item["key"]: item["value"]
+       for section in config["settings"]["sections"]
+       for item in section["items"]
+   }
+
+   def scalar_values(tag):
+       return [
+           float(event.value)
+           for event in accumulator.Scalars(tag)
+       ]
+
+   tags = accumulator.Tags()["scalars"]
+   loss = scalar_values("train/loss")
+   grad_norm = scalar_values("train/grad_norm")
+   target_tokens_mean = scalar_values("train/sft_target_tokens")
+   time_tag = (
+       "train/step_train_time_s"
+       if "train/step_train_time_s" in tags
+       else "time/train"
+   )
+   train_time = scalar_values(time_tag)
+
+   batch_size = int(settings["batch_size"])
+   max_steps = int(settings["max_steps"])
+   first_loss = mean(loss[:50])
+   last_loss = mean(loss[-50:])
+   loss_change = (last_loss / first_loss - 1) * 100
+
+   print("=== AReno third-run validation ===")
+   print("event_file:", event_file.name)
+   print("run_stage:", state.get("stage"))
+   print("state_step:", state.get("step"))
+   print("configured_max_steps:", max_steps)
+   print("steps_recorded:", steps_recorded)
+   print("batch_size:", batch_size)
+   print("trained_rows:", steps_recorded * batch_size)
+   print(
+       "target_tokens_trained:",
+       round(sum(target_tokens_mean) * batch_size),
+   )
+
+   print("\n=== Training metrics ===")
+   print("first_50_loss_mean:", round(first_loss, 6))
+   print("last_50_loss_mean:", round(last_loss, 6))
+   print("loss_mean_change:", f"{loss_change:.2f}%")
+   print("final_step_loss:", round(loss[-1], 6))
+   print(
+       "first_50_grad_norm_mean:",
+       round(mean(grad_norm[:50]), 6),
+   )
+   print(
+       "last_50_grad_norm_mean:",
+       round(mean(grad_norm[-50:]), 6),
+   )
+   print(
+       "overall_train_time_mean_s:",
+       round(mean(train_time), 6),
+   )
+   print(
+       "last_50_train_time_mean_s:",
+       round(mean(train_time[-50:]), 6),
+   )
+
+   print("\n=== Dataset mixing plan ===")
+   print("schedule_hash:", plan["schedule_hash"])
+   print("planned_rows:", plan["planned_rows"])
+   for source in plan["sources"]:
+       print(
+           source["name"],
+           "requested =", round(source["weight_requested"], 3),
+           "planned =", round(source["observed_proportion"], 3),
+           "selected =", source["rows_selected"],
+       )
+
+   passed = (
+       state.get("stage") == "max_steps_reached"
+       and state.get("step") == max_steps
+       and steps_recorded == max_steps
+       and len(target_tokens_mean) == max_steps
+       and all(math.isfinite(value) for value in loss)
+   )
+   print("\nVALIDATION:", "PASS" if passed else "FAIL")
+
+.. figure:: ../_static/kaggle-dataset-mixing/kaggle-12-500-step-summary.png
+   :alt: Programmatic validation summary for the 500-step dataset-mixing run
+   :width: 100%
+
+   Programmatic inspection of the TensorBoard event file and matching
+   run-state artifacts. It confirms all 500 recorded steps, 1,000 trained
+   rows, 77,533 target tokens, a 26.71% first-to-last-window mean loss
+   decrease, the expected schedule hash, finite metrics, and
+   ``VALIDATION: PASS``. The 60/30/10 values shown here are pre-filter plan
+   proportions; the effective post-filter shares are reported in the previous
+   figure and table.
 
 Evidence checklist
 ------------------
 
-The recommended submission contains these eleven screenshots:
+The retained submission contains these twelve screenshots:
 
-#. ``kaggle-01-environment.png`` — runtime, CUDA, and GPU identity;
-#. ``kaggle-02-source-revision.png`` — branch, commit, and clean tree;
-#. ``kaggle-03-areno-check.png`` — compiled extension and diagnostic;
-#. ``kaggle-04-fp16-checkpoint.png`` — completed FP16 model preparation;
-#. ``kaggle-05-config-and-plan.png`` — resolved config and human-readable plan;
-#. ``kaggle-06-structured-plan.png`` — structured counts and hashes;
-#. ``kaggle-07-deterministic-hashes.png`` — matching hashes across runs;
-#. ``kaggle-08-token-limit-128.png`` — 128-token filtering result;
-#. ``kaggle-09-token-limit-256.png`` — 256-token filtering result;
-#. ``kaggle-10-500-step-result.png`` — final progress and completion;
-#. ``kaggle-11-loss-trend.png`` — windowed or charted training-loss evidence.
+#. ``kaggle-01-source-revision.png`` — branch checkout and implementation SHA;
+#. ``kaggle-02-environment.png`` — PyTorch, CUDA, GPU, and extension import;
+#. ``kaggle-03-model-preparation.png`` — FP16 conversion cell;
+#. ``kaggle-04-fp16-checkpoint.png`` — completed model write and dtype;
+#. ``kaggle-05-token-limit-128-config.png`` — first-run command and config;
+#. ``kaggle-06-token-limit-128-result.png`` — first-run final progress;
+#. ``kaggle-07-structured-plan.png`` — schedule hash and planned source counts;
+#. ``kaggle-08-token-limit-256-config.png`` — second-run command and config;
+#. ``kaggle-09-token-limit-256-result.png`` — second-run final progress;
+#. ``kaggle-10-500-step-config.png`` — third-run command and config;
+#. ``kaggle-11-500-step-result.png`` — third-run source progress and completion;
+#. ``kaggle-12-500-step-summary.png`` — TensorBoard and artifact validation.
 
-If the PR should remain compact, K1, K2, K3, K5, K7, K10, and K11 form the
-minimum defensible set. K4, K6, K8, and K9 provide useful reproduction and
-parameter-selection detail.
-
-Store approved images under
-``docs/_static/kaggle-dataset-mixing/`` and replace each screenshot admonition
-with a normal ``figure`` directive. Use lossless PNG for text-heavy notebook
-output and crop large blank margins.
+All images are stored under ``docs/_static/kaggle-dataset-mixing/`` as
+lossless PNG files. The pair of final-run images is intentional: the raw log
+proves effective per-source contribution, while the compact summary verifies
+the complete 500-step metric series and pre-filter schedule.
 
 Artifacts and retained evidence
 -------------------------------
@@ -583,5 +785,5 @@ Known limitations
   verification of remote dataset contents.
 * Exact deterministic replay starts at an epoch boundary. Mid-epoch optimizer
   state and dataset-cursor resume are outside the current contract.
-* The Kaggle run validates single-GPU SFT. It does not validate multi-node,
-  multi-GPU data parallelism, or model-quality generalization.
+* The Kaggle run validates two-GPU tensor-parallel SFT. It does not validate
+  multi-node execution, data parallelism, or model-quality generalization.
