@@ -366,6 +366,85 @@ Observability
    ``rollout/*``, ``train/*``, and ``time/*`` metric namespaces and debugging
    log examples.
 
+Periodic evaluation
+~~~~~~~~~~~~~~~~~~~
+
+SFT and DPO trainers support periodic evaluation on a held-out dataset. When
+enabled, the trainer pauses every *N* steps, runs a no-gradient forward pass
+on the eval set, records the loss, and resumes training. Parameters, optimizer
+state, and RNG are untouched.
+
+Evaluation is disabled by default. Enable it by passing at least
+``--eval-dataset-path``.
+
+.. code-block:: bash
+
+   areno train \
+     --ckpt Qwen/Qwen3.5-0.8B \
+     --algo sft \
+     --dataset-path yahma/alpaca-cleaned \
+     --dataset-loader-fn examples/sft/alpaca/dataset_loader.py \
+     --batch-size 2 --mini-bs 2 --max-steps 1000 \
+     --eval-dataset-path ./eval_data.jsonl \
+     --eval-interval 100 \
+     --eval-batches 10
+
+``--eval-dataset-path TEXT``
+   Path to the evaluation dataset. Same format as the training dataset
+   (SFT: ``prompt`` / ``response``; DPO: ``chosen`` / ``rejected``). Accepts
+   local files (JSONL, Parquet, ...), directories, and remote HF/ModelScope
+   dataset references. When omitted, evaluation is disabled.
+
+``--eval-interval INTEGER``
+   Evaluate every *N* training steps. A value of ``0`` (default) skips
+   interval evaluation but still triggers a final evaluation at the end of
+   each epoch and when ``--max-steps`` is reached.
+
+``--eval-batches INTEGER``
+   Maximum number of batches per evaluation pass. ``0`` (default) means
+   iterate the full eval dataset. Use a positive value to bound eval time
+   on large datasets.
+
+Output
+......
+
+Each evaluation produces one structured log line:
+
+.. code-block:: text
+
+   step=100 stage=eval_end eval_loss=1.1692 sample_count=50 duration_s=1.407
+
+TensorBoard records every scalar under the ``eval/`` namespace, separate from
+``train/`` and ``rollout/``:
+
+.. list-table::
+   :header-rows: 1
+
+   * - Metric
+     - Meaning
+   * - ``eval/sft_loss``
+     - Weighted average NLL on eval set (SFT)
+   * - ``eval/dpo_loss``
+     - Preference loss on eval set (DPO)
+   * - ``eval/dpo_accuracy``
+     - Fraction of pairs where chosen > rejected (DPO)
+   * - ``eval/dpo_margin``
+     - Mean chosen-rejected logit margin (DPO)
+   * - ``eval/sample_count``
+     - Number of evaluated examples
+   * - ``eval/duration_s``
+     - Wall-clock seconds of the eval phase
+
+Limitations
+...........
+
+- Supported for SFT and DPO only. GSPO, GRPO, and PPO do not trigger
+  evaluation.
+- Eval and train datasets must have the same schema when using
+  ``--dataset-loader-fn``. The loader is applied to both.
+- Model ``eval()`` mode is restored by the next training step; inserting
+  operations between eval and train may require explicit mode management.
+
 Examples
 --------
 
