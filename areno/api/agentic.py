@@ -508,34 +508,39 @@ class RolloutSession:
                 fallback_prompt=_first_user_text(pending.messages),
             )
             max_context_len = _max_context_len(pending.params)
-            if max_context_len is not None and len(pending.input_tokens) > max_context_len:
-                if self._agentic_context_overflow_policy == "trim_messages":
-                    trimmed = _trim_messages_to_fit(
-                        tokenizer,
-                        pending.messages,
-                        tools=pending.tools,
-                        max_context_len=max_context_len,
-                        input_tokens=pending.input_tokens,
-                    )
-                    if trimmed is None:
-                        response = _unfittable_chat_response(
-                            model=pending.model,
-                            prompt_tokens=len(pending.input_tokens),
-                            max_sequence_len=max_context_len,
-                        )
-                        self._set_pending_response(pending, response)
-                        return
-                    pending.input_tokens = trimmed["tokens"]
-                    pending._trimmed_messages = trimmed["messages"]
-                    pending._trim_info = trimmed["diagnostics"]
-                else:
-                    response = _filtered_chat_response(
+            # When no explicit max is set, fall back to the model's sequence
+            # length for the trim policy so that long-running agentic
+            # trajectories can continue. The reject policy stays strict.
+            trim_target = max_context_len
+            if trim_target is None:
+                trim_target = _model_sequence_len(tokenizer)
+            if trim_target is not None and len(pending.input_tokens) > trim_target and self._agentic_context_overflow_policy == "trim_messages":
+                trimmed = _trim_messages_to_fit(
+                    tokenizer,
+                    pending.messages,
+                    tools=pending.tools,
+                    max_context_len=trim_target,
+                    input_tokens=pending.input_tokens,
+                )
+                if trimmed is None:
+                    response = _unfittable_chat_response(
                         model=pending.model,
                         prompt_tokens=len(pending.input_tokens),
-                        max_sequence_len=max_context_len,
+                        max_sequence_len=trim_target,
                     )
                     self._set_pending_response(pending, response)
                     return
+                pending.input_tokens = trimmed["tokens"]
+                pending._trimmed_messages = trimmed["messages"]
+                pending._trim_info = trimmed["diagnostics"]
+            elif max_context_len is not None and len(pending.input_tokens) > max_context_len:
+                response = _filtered_chat_response(
+                    model=pending.model,
+                    prompt_tokens=len(pending.input_tokens),
+                    max_sequence_len=max_context_len,
+                )
+                self._set_pending_response(pending, response)
+                return
             results = await self._trainer.rollout_token_batch_async([pending.input_tokens], 1, pending.params)
             sequence = results[0].sequences[0] if results and results[0].sequences else None
             if sequence is None:
@@ -848,6 +853,17 @@ def _max_context_len(params: Any) -> int | None:
     if max_prompt_len is None:
         return None
     return int(max_prompt_len)
+
+
+def _model_sequence_len(tokenizer: Any) -> int | None:
+    """Return the model's maximum sequence length from its tokenizer config."""
+    max_seq = getattr(tokenizer, "model_max_length", None)
+    if max_seq is not None:
+        return int(max_seq)
+    max_pos = getattr(tokenizer, "max_position_embeddings", None)
+    if max_pos is not None:
+        return int(max_pos)
+    return None
 
 
 def _filtered_chat_response(*, model: str, prompt_tokens: int, max_sequence_len: int) -> dict[str, Any]:
