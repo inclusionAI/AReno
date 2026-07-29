@@ -64,9 +64,10 @@ class Backend(ABC):
 
         pass
 
-    def close(self) -> None:
-        """Release backend-owned resources."""
+    def close(self, *, shutdown_info: dict | None = None) -> None:
+        """Release backend-owned resources, optionally propagating a shutdown event."""
 
+        del shutdown_info
         return None
 
     @abstractmethod

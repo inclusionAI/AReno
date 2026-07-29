@@ -641,13 +641,13 @@ class ArenoEngine:
         # instead of receiving a pickled copy over the IPC channel.
         return to_cpu(payload, share_memory=True)
 
-    def close(self) -> None:
+    def close(self, *, shutdown_info: dict | None = None) -> None:
         """Stop worker processes and release cluster resources.
 
         Blocking: waits for each rank's worker process to exit before returning.
         """
 
-        self.cluster.close()
+        self.cluster.close(shutdown_info=shutdown_info)
 
     def __enter__(self) -> ArenoEngine:
         """Return self for `with ArenoEngine...` usage."""

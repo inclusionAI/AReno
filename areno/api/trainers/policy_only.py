@@ -23,6 +23,7 @@ import numpy as np
 
 from areno.api.dashboard import record_dashboard_state
 from areno.api.tokenizer import configure_chat_template_enable_thinking
+from areno.api.trainers._shutdown import close_trainer
 from areno.engine.shutdown import ShutdownStage
 
 
@@ -45,11 +46,11 @@ class PolicyOnlyTrainer:
         self._agent_run_fn = None
 
     def fit(self, *, shutdown=None) -> None:
-        self.areno.init()
         try:
+            self.areno.init()
             self._fit_initialized(shutdown=shutdown)
         finally:
-            self.areno.close()
+            close_trainer(self.areno, shutdown)
 
     def _fit_initialized(self, *, shutdown=None) -> None:
         import areno.api
@@ -92,8 +93,13 @@ class PolicyOnlyTrainer:
                     self.logger.info("epoch=%d step=%d role=%s stage=rollout_end", epoch, step, role)
                     record_dashboard_state(self.areno, stage="rollout_end", epoch=epoch, step=step, role=role)
                     self._log_agentic_sample_completions(epoch, step, agent_batch)
+                    if shutdown is not None and shutdown.should_stop:
+                        self.logger.info("epoch=%d step=%d stage=shutdown_after_rollout", epoch, step)
+                        return
+                    if shutdown is not None:
+                        shutdown.set_stage(ShutdownStage.TRAINING)
                     train_batch, rewards_all, rollout_logprobs = self._materialize_agentic_train_batch(
-                        tokenizer, prompt_batch, agent_batch
+                        tokenizer, prompt_batch, agent_batch, shutdown=shutdown
                     )
                 else:
                     # 1) Sample n_samples completions per prompt; ordering
@@ -102,11 +108,16 @@ class PolicyOnlyTrainer:
                     self.logger.info("epoch=%d step=%d role=%s stage=rollout_end", epoch, step, role)
                     record_dashboard_state(self.areno, stage="rollout_end", epoch=epoch, step=step, role=role)
                     self._record_sample_completions(tokenizer, epoch, step, prompt_batch, rollout_results)
+                    if shutdown is not None and shutdown.should_stop:
+                        self.logger.info("epoch=%d step=%d stage=shutdown_after_rollout", epoch, step)
+                        return
+                    if shutdown is not None:
+                        shutdown.set_stage(ShutdownStage.TRAINING)
 
                     # 2+3) Score rewards and broadcast group-normalised
                     #      advantages down to per-token tensors.
                     train_batch, rewards_all, rollout_logprobs = self._materialize_train_batch(
-                        tokenizer, prompt_batch, rollout_results
+                        tokenizer, prompt_batch, rollout_results, shutdown=shutdown
                     )
 
                 if rewards_all:
@@ -120,6 +131,10 @@ class PolicyOnlyTrainer:
                         step,
                         float(np.mean(rollout_logprobs)),
                     )
+
+                if shutdown is not None and shutdown.should_stop:
+                    self.logger.info("epoch=%d step=%d stage=shutdown_before_train", epoch, step)
+                    return
 
                 if train_batch:
                     # PPO uses this hook to skip actor updates during the
@@ -403,7 +418,8 @@ class PolicyOnlyTrainer:
                 return sample
         return None
 
-    def _materialize_agentic_train_batch(self, tokenizer, prompt_batch, agent_batch):
+    def _materialize_agentic_train_batch(self, tokenizer, prompt_batch, agent_batch, *, shutdown=None):
+        del shutdown
         """Assemble TrainSequence rows from an agentic rollout batch."""
 
         import areno.api
@@ -514,7 +530,8 @@ class PolicyOnlyTrainer:
             if logged + 1 >= limit:
                 return
 
-    def _materialize_train_batch(self, tokenizer, prompt_batch, rollout_results):
+    def _materialize_train_batch(self, tokenizer, prompt_batch, rollout_results, *, shutdown=None):
+        del shutdown
         """Assemble TrainSequence rows for one rollout batch.
 
         Steps:

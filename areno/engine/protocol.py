@@ -11,6 +11,7 @@ request-id demux so multiple caller threads/tasks can have in-flight commands.
 from __future__ import annotations
 
 import asyncio
+import logging
 import multiprocessing as mp
 import queue
 import socket
@@ -26,6 +27,8 @@ import torch
 from areno.engine.config import EngineConfig
 from areno.engine.data import SamplingParams
 from areno.engine.parallel.context import destroy_process_group, init_process_group
+
+logger = logging.getLogger(__name__)
 
 
 class Op(Enum):
@@ -439,7 +442,7 @@ class TPCluster:
                 proc.join(timeout=0)
         return dead
 
-    def close(self) -> None:
+    def close(self, *, shutdown_info: dict | None = None) -> None:
         """Request shutdown and terminate workers that do not exit promptly."""
 
         if not self.started:
@@ -455,7 +458,7 @@ class TPCluster:
             # Polite shutdown: SHUTDOWN op lets workers tear down the
             # distributed context cleanly.
             for q in self.cmd_queues:
-                q.put(Command(op=Op.SHUTDOWN))
+                q.put(Command(op=Op.SHUTDOWN, payload=shutdown_info))
             for proc in self.processes:
                 proc.join(timeout=5)
         finally:
@@ -526,8 +529,10 @@ def _worker_entry(
         while True:
             cmd = worker._deferred_commands.pop(0) if worker._deferred_commands else cmd_q.get()
             if cmd.op is Op.SHUTDOWN:
+                if cmd.payload is not None:
+                    logger.info("rank=%d shutdown_event=%s", rank, cmd.payload)
                 # Acknowledge shutdown so the coordinator's join completes.
-                result_q.put((rank, WorkerResult(ok=True, request_id=cmd.request_id)))
+                result_q.put((rank, WorkerResult(ok=True, payload=cmd.payload, request_id=cmd.request_id)))
                 break
             worker._current_request_id = cmd.request_id
             if cmd.op is Op.INFER_ROLLOUT:

@@ -129,7 +129,7 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         ),
     ),
     ("Checkpoint", ("save_path", "save_interval")),
-    ("Observability", ("metrics_log_dir",)),
+    ("Observability", ("metrics_log_dir", "graceful_shutdown", "shutdown_deadline_s")),
 )
 
 
@@ -791,7 +791,12 @@ def _trainer_config_from_args(args) -> TrainerConfig:
     )
 
 
-def run(trainer_config: TrainerConfig):
+def run(
+    trainer_config: TrainerConfig,
+    *,
+    graceful_shutdown: bool = False,
+    shutdown_deadline_s: float = 30.0,
+):
     """Build the trainer chosen by `--algo` and run `.fit()` to completion."""
 
     # Heavy dependencies are imported lazily so `python train.py --help`
@@ -823,21 +828,18 @@ def run(trainer_config: TrainerConfig):
         load_from_disk=load_from_disk,
     )
     trainer = build_trainer(trainer_config, instance=api_trainer, dataset=dataset, reward_fn=reward_fn, loss_fn=loss_fn)
+    if not graceful_shutdown:
+        trainer.fit()
+        return
+
     from areno.engine.shutdown import GracefulShutdown, ShutdownStage
 
-    with GracefulShutdown() as shutdown:
-        try:
-            shutdown.set_stage(ShutdownStage.TRAINING)
-            trainer.fit(shutdown=shutdown)
-        except KeyboardInterrupt:
-            if shutdown.shutdown_requested:
-                shutdown.begin_shutdown()
-                click.echo(
-                    f"\nGraceful shutdown: {shutdown.info.reason if shutdown.info else 'interrupted'}",
-                    err=True,
-                )
-            else:
-                raise
+    with GracefulShutdown(deadline_s=shutdown_deadline_s) as shutdown:
+        shutdown.set_stage(ShutdownStage.TRAINING)
+        trainer.fit(shutdown=shutdown)
+        if shutdown.shutdown_requested:
+            shutdown.begin_shutdown()
+            shutdown.complete_shutdown()
 
 
 def _write_dashboard_run_config(config: TrainerConfig) -> None:
@@ -1338,6 +1340,19 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
 @click.option("--value-loss-coef", type=float, default=0.5, show_default=True, help="PPO value loss coefficient.")
 @click.option("--gamma", type=float, default=1.0, show_default=True, help="PPO GAE discount.")
 @click.option("--lam", type=float, default=0.95, show_default=True, help="PPO GAE lambda.")
+@click.option(
+    "--graceful-shutdown/--no-graceful-shutdown",
+    default=False,
+    show_default=True,
+    help="Enable two-stage SIGINT/SIGTERM shutdown at trainer safe points.",
+)
+@click.option(
+    "--shutdown-deadline-s",
+    type=click.FloatRange(min=0.0, min_open=True),
+    default=30.0,
+    show_default=True,
+    help="Seconds after the first signal before forced exit.",
+)
 def train_command(**options) -> None:
     """Click entrypoint for training."""
 
@@ -1371,13 +1386,27 @@ def train_command(**options) -> None:
     )
     from areno.cli.dashboard_registry import register_dashboard_job
 
+    dashboard_config = _training_config_settings(trainer_config)
+    dashboard_config.update(
+        {
+            "graceful_shutdown": options["graceful_shutdown"],
+            "shutdown_deadline_s": options["shutdown_deadline_s"],
+        }
+    )
     register_dashboard_job(
         kind="train",
         name=f"train {trainer_config.algo} {trainer_config.ckpt}",
-        config=_training_config_settings(trainer_config),
+        config=dashboard_config,
         metrics_dir=trainer_config.metrics_log_dir,
     )
-    run(trainer_config)
+    if options["graceful_shutdown"]:
+        run(
+            trainer_config,
+            graceful_shutdown=True,
+            shutdown_deadline_s=options["shutdown_deadline_s"],
+        )
+    else:
+        run(trainer_config)
 
 
 def main() -> None:

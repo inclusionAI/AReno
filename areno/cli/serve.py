@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import time
 import warnings
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -144,6 +145,7 @@ class ServeState:
     active_tasks: set[asyncio.Task] = field(default_factory=set)
     closing: bool = False
     rollout_session_started: bool = False
+    shutdown_info: dict[str, Any] | None = None
 
 
 class _ToolParserTrainerShim:
@@ -228,7 +230,10 @@ def create_app(
             if state.rollout_session_started:
                 await state.engine.end_rollout_session_async()
         finally:
-            state.engine.close()
+            if state.shutdown_info is None:
+                state.engine.close()
+            else:
+                state.engine.close(shutdown_info=state.shutdown_info)
 
     @app.get("/health")
     def health() -> dict[str, str]:
@@ -253,6 +258,8 @@ def create_app(
     @app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
     async def chat_completions(raw_request: Request, request: ChatCompletionRequest) -> ChatCompletionResponse:
         """Validate the request, encode the prompt, run rollout, and await the response."""
+        if state.closing:
+            raise HTTPException(status_code=503, detail="server is shutting down")
         if request.stream:
             raise HTTPException(status_code=400, detail="stream=true is not supported")
         if not request.messages:
@@ -274,8 +281,6 @@ def create_app(
             key=key,
             future=asyncio.get_running_loop().create_future(),
         )
-        if state.closing:
-            raise HTTPException(status_code=503, detail="server is shutting down")
         task = asyncio.create_task(_run_request_task(app, pending))
         state.active_tasks.add(task)
         task.add_done_callback(state.active_tasks.discard)
@@ -518,6 +523,32 @@ def _normalize_stop(stop: str | list[str] | None) -> list[str]:
     return [value for value in stop if value]
 
 
+def _run_uvicorn_with_graceful_shutdown(app: FastAPI, *, host: str, port: int, deadline_s: float, uvicorn_module) -> None:
+    """Run Uvicorn while retaining ownership of SIGINT and SIGTERM."""
+
+    from areno.engine.shutdown import GracefulShutdown, ShutdownInfo, ShutdownStage
+
+    class GracefulUvicornServer(uvicorn_module.Server):
+        @contextmanager
+        def capture_signals(self):
+            yield
+
+    server = GracefulUvicornServer(uvicorn_module.Config(app, host=host, port=port))
+    state: ServeState = app.state.areno_serve
+
+    def request_server_shutdown(info: ShutdownInfo) -> None:
+        state.closing = True
+        state.shutdown_info = info.to_dict()
+        server.should_exit = True
+
+    with GracefulShutdown(deadline_s=deadline_s, on_shutdown_requested=request_server_shutdown) as shutdown:
+        shutdown.set_stage(ShutdownStage.SERVING)
+        server.run()
+        if shutdown.shutdown_requested:
+            shutdown.begin_shutdown()
+            shutdown.complete_shutdown()
+
+
 @click.command(
     name="serve",
     context_settings={"help_option_names": ["-h", "--help"]},
@@ -563,6 +594,19 @@ def _normalize_stop(stop: str | list[str] | None) -> list[str]:
     is_flag=True,
     help="Pass enable_thinking=False to tokenizer chat templates when supported.",
 )
+@click.option(
+    "--graceful-shutdown/--no-graceful-shutdown",
+    default=False,
+    show_default=True,
+    help="Enable two-stage SIGINT/SIGTERM shutdown while draining in-flight requests.",
+)
+@click.option(
+    "--shutdown-deadline-s",
+    type=click.FloatRange(min=0.0, min_open=True),
+    default=30.0,
+    show_default=True,
+    help="Seconds after the first signal before forced exit.",
+)
 def serve_command(
     model_path: str,
     model_hub: Literal["hf", "modelscope"],
@@ -576,6 +620,8 @@ def serve_command(
     eager_decode: bool,
     attn_backend: Literal["flash", "native"],
     disable_thinking: bool,
+    graceful_shutdown: bool,
+    shutdown_deadline_s: float,
 ) -> None:
     """Click entry point: build the app and hand it to uvicorn."""
     import uvicorn
@@ -597,6 +643,8 @@ def serve_command(
             "default_max_tokens": default_max_tokens,
             "eager_decode": eager_decode,
             "attn_backend": attn_backend,
+            "graceful_shutdown": graceful_shutdown,
+            "shutdown_deadline_s": shutdown_deadline_s,
         },
         metrics_dir=None,
     )
@@ -611,17 +659,17 @@ def serve_command(
         attn_backend=attn_backend,
         chat_template_enable_thinking=False if disable_thinking else None,
     )
-    from areno.engine.shutdown import GracefulShutdown, ShutdownStage
+    if not graceful_shutdown:
+        uvicorn.run(app, host=host, port=port)
+        return
 
-    with GracefulShutdown() as shutdown:
-        shutdown.set_stage(ShutdownStage.SERVING)
-        try:
-            uvicorn.run(app, host=host, port=port)
-        except KeyboardInterrupt:
-            if shutdown.shutdown_requested:
-                pass  # Graceful shutdown in progress
-            else:
-                raise
+    _run_uvicorn_with_graceful_shutdown(
+        app,
+        host=host,
+        port=port,
+        deadline_s=shutdown_deadline_s,
+        uvicorn_module=uvicorn,
+    )
 
 
 def main() -> None:

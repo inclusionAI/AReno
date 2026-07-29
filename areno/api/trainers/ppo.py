@@ -30,6 +30,7 @@ from areno.api.advantages import compute_gae
 from areno.api.dashboard import record_dashboard_state
 from areno.api.rewards import make_reward_record
 from areno.api.roles import MissingRoleCapability, ModelRole
+from areno.api.trainers._shutdown import close_trainer
 from areno.api.trainers.policy_only import PolicyOnlyTrainer
 
 logger = logging.getLogger(__name__)
@@ -91,7 +92,7 @@ class PPOTrainer(PolicyOnlyTrainer):
             role=role,
         )
 
-    def _materialize_train_batch(self, tokenizer, prompt_batch, rollout_results):
+    def _materialize_train_batch(self, tokenizer, prompt_batch, rollout_results, *, shutdown=None):
         self._last_ppo_stats = {}
         train_batch = []
         rewards_all = []
@@ -144,6 +145,9 @@ class PPOTrainer(PolicyOnlyTrainer):
             self.logger.info("role=reward stage=score_end rows=%d", len(token_rows))
             self._record_ppo_state(stage="score_end", role="reward")
 
+        if self._shutdown_after_stage(shutdown, "reward_score"):
+            return [], rewards_all, rollout_logprobs
+
         # Forward ref/actor/critic over every row in a single batched call per
         # role so the backend can amortise activation memory and kernel launch
         # cost across all sequences.
@@ -154,6 +158,8 @@ class PPOTrainer(PolicyOnlyTrainer):
         self._last_ppo_stats["ref_logprob_forward_time_s"] = time.perf_counter() - ref_start
         self.logger.info("role=ref stage=logprob_score_end rows=%d", len(token_rows))
         self._record_ppo_state(stage="logprob_score_end", role="ref")
+        if self._shutdown_after_stage(shutdown, "ref_score"):
+            return [], rewards_all, rollout_logprobs
         self.logger.info("role=actor stage=old_logprob_score_start rows=%d", len(token_rows))
         self._record_ppo_state(stage="old_logprob_score_start", role="actor")
         actor_logprob_start = time.perf_counter()
@@ -164,6 +170,8 @@ class PPOTrainer(PolicyOnlyTrainer):
         self._last_ppo_stats["actor_old_logprob_forward_time_s"] = time.perf_counter() - actor_logprob_start
         self.logger.info("role=actor stage=old_logprob_score_end rows=%d", len(token_rows))
         self._record_ppo_state(stage="old_logprob_score_end", role="actor")
+        if self._shutdown_after_stage(shutdown, "actor_score"):
+            return [], rewards_all, rollout_logprobs
         self.logger.info("role=critic stage=value_score_start rows=%d", len(token_rows))
         self._record_ppo_state(stage="value_score_start", role="critic")
         critic_value_start = time.perf_counter()
@@ -171,6 +179,8 @@ class PPOTrainer(PolicyOnlyTrainer):
         self._last_ppo_stats["critic_value_forward_time_s"] = time.perf_counter() - critic_value_start
         self.logger.info("role=critic stage=value_score_end rows=%d", len(token_rows))
         self._record_ppo_state(stage="value_score_end", role="critic")
+        if self._shutdown_after_stage(shutdown, "critic_score"):
+            return [], rewards_all, rollout_logprobs
 
         self._record_ppo_state(stage="advantage_start", role="critic")
         old_logprobs_all = []
@@ -235,7 +245,7 @@ class PPOTrainer(PolicyOnlyTrainer):
                 )
             )
 
-        if train_batch:
+        if train_batch and not self._shutdown_after_stage(shutdown, "critic_train"):
             # Train the critic first so the value loss reflects the current
             # batch before the actor consumes the advantages.
             self.logger.info("role=critic stage=train_start rows=%d", len(train_batch))
@@ -270,7 +280,7 @@ class PPOTrainer(PolicyOnlyTrainer):
         self._record_ppo_state(stage="advantage_end", role="critic")
         return train_batch, rewards_all, rollout_logprobs
 
-    def _materialize_agentic_train_batch(self, tokenizer, prompt_batch, agent_batch):
+    def _materialize_agentic_train_batch(self, tokenizer, prompt_batch, agent_batch, *, shutdown=None):
         del prompt_batch
         self._last_ppo_stats = {}
         train_batch = []
@@ -295,6 +305,9 @@ class PPOTrainer(PolicyOnlyTrainer):
             self.logger.info("role=reward stage=score_end rows=%d", len(token_rows))
             self._record_ppo_state(stage="score_end", role="reward")
 
+        if self._shutdown_after_stage(shutdown, "reward_score"):
+            return [], rewards_all, rollout_logprobs
+
         self.logger.info("role=ref stage=logprob_score_start rows=%d", len(token_rows))
         self._record_ppo_state(stage="logprob_score_start", role="ref")
         ref_start = time.perf_counter()
@@ -302,6 +315,8 @@ class PPOTrainer(PolicyOnlyTrainer):
         self._last_ppo_stats["ref_logprob_forward_time_s"] = time.perf_counter() - ref_start
         self.logger.info("role=ref stage=logprob_score_end rows=%d", len(token_rows))
         self._record_ppo_state(stage="logprob_score_end", role="ref")
+        if self._shutdown_after_stage(shutdown, "ref_score"):
+            return [], rewards_all, rollout_logprobs
         self.logger.info("role=actor stage=old_logprob_score_start rows=%d", len(token_rows))
         self._record_ppo_state(stage="old_logprob_score_start", role="actor")
         actor_logprob_start = time.perf_counter()
@@ -309,6 +324,8 @@ class PPOTrainer(PolicyOnlyTrainer):
         self._last_ppo_stats["actor_old_logprob_forward_time_s"] = time.perf_counter() - actor_logprob_start
         self.logger.info("role=actor stage=old_logprob_score_end rows=%d", len(token_rows))
         self._record_ppo_state(stage="old_logprob_score_end", role="actor")
+        if self._shutdown_after_stage(shutdown, "actor_score"):
+            return [], rewards_all, rollout_logprobs
         self.logger.info("role=critic stage=value_score_start rows=%d", len(token_rows))
         self._record_ppo_state(stage="value_score_start", role="critic")
         critic_value_start = time.perf_counter()
@@ -316,6 +333,8 @@ class PPOTrainer(PolicyOnlyTrainer):
         self._last_ppo_stats["critic_value_forward_time_s"] = time.perf_counter() - critic_value_start
         self.logger.info("role=critic stage=value_score_end rows=%d", len(token_rows))
         self._record_ppo_state(stage="value_score_end", role="critic")
+        if self._shutdown_after_stage(shutdown, "critic_score"):
+            return [], rewards_all, rollout_logprobs
 
         self._record_ppo_state(stage="advantage_start", role="critic")
         old_logprobs_all = []
@@ -387,7 +406,7 @@ class PPOTrainer(PolicyOnlyTrainer):
                 )
             )
 
-        if train_batch:
+        if train_batch and not self._shutdown_after_stage(shutdown, "critic_train"):
             self.logger.info("role=critic stage=train_start rows=%d", len(train_batch))
             self._record_ppo_state(stage="train_start", role="critic")
             critic_train_start = time.perf_counter()
@@ -428,15 +447,21 @@ class PPOTrainer(PolicyOnlyTrainer):
         for role in self.roles.values():
             self.logger.info("role=%s stage=init_end trainable=%s", role.name, role.trainable)
 
-    def fit(self) -> None:
+    def _shutdown_after_stage(self, shutdown, stage: str) -> bool:
+        if shutdown is None or not shutdown.should_stop:
+            return False
+        self.logger.info("stage=shutdown_after_%s", stage)
+        return True
+
+    def fit(self, *, shutdown=None) -> None:
         # Override the base `fit` so role initialisation happens after the
         # backend is up but before the first rollout/train cycle.
-        self.areno.init()
-        self._ensure_roles()
         try:
-            self._fit_initialized()
+            self.areno.init()
+            self._ensure_roles()
+            self._fit_initialized(shutdown=shutdown)
         finally:
-            self.areno.close()
+            close_trainer(self.areno, shutdown)
 
     def _score_logprobs(self, role: str, token_rows: list[list[int]]) -> list[list[float]]:
         return self.areno.score_logprobs(role, token_rows, microbatch_size=self.config.score_micro_bs)

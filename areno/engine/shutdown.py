@@ -21,12 +21,15 @@ Public API:
 
 from __future__ import annotations
 
+import json
 import logging
+import math
 import os
 import signal
 import sys
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
@@ -57,6 +60,7 @@ class ShutdownState(str, Enum):
     RUNNING = "running"
     SHUTDOWN_REQUESTED = "shutdown_requested"
     SHUTTING_DOWN = "shutting_down"
+    COMPLETED = "completed"
     FORCED = "forced"
 
 
@@ -79,6 +83,7 @@ class ShutdownInfo:
     reason: str
     timestamp: float
     first_signal: bool
+    deadline: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -88,6 +93,7 @@ class ShutdownInfo:
             "reason": self.reason,
             "timestamp": self.timestamp,
             "first_signal": self.first_signal,
+            "deadline": self.deadline,
         }
 
 
@@ -136,7 +142,14 @@ class GracefulShutdown:
             shutdown.uninstall()
     """
 
-    def __init__(self, *, deadline_s: float = _DEFAULT_DEADLINE_S) -> None:
+    def __init__(
+        self,
+        *,
+        deadline_s: float = _DEFAULT_DEADLINE_S,
+        on_shutdown_requested: Callable[[ShutdownInfo], None] | None = None,
+    ) -> None:
+        if not math.isfinite(deadline_s) or deadline_s <= 0:
+            raise ValueError("deadline_s must be a finite number greater than 0")
         self._state = ShutdownState.RUNNING
         self._first_info: ShutdownInfo | None = None
         self._current_stage: ShutdownStage = ShutdownStage.IDLE
@@ -145,6 +158,7 @@ class GracefulShutdown:
         self._deadline_s = deadline_s
         self._deadline_thread: threading.Thread | None = None
         self._deadline_stop = threading.Event()
+        self._on_shutdown_requested = on_shutdown_requested
 
     # ------------------------------------------------------------------
     # Properties
@@ -184,6 +198,18 @@ class GracefulShutdown:
         """The deadline in seconds after the first signal before forced exit."""
 
         return self._deadline_s
+
+    def worker_payload(self) -> dict[str, Any] | None:
+        """Return the initial shutdown event for propagation to worker ranks."""
+
+        if self._first_info is None:
+            return None
+        return self._first_info.to_dict()
+
+    @staticmethod
+    def _log_event(event: str, info: ShutdownInfo) -> None:
+        payload = {"event": event, **info.to_dict()}
+        logger.info("shutdown_event=%s", json.dumps(payload, sort_keys=True))
 
     # ------------------------------------------------------------------
     # Stage management
@@ -239,7 +265,8 @@ class GracefulShutdown:
 
         self._deadline_stop.set()
         if self._deadline_thread is not None:
-            self._deadline_thread.join(timeout=0.5)
+            if self._deadline_thread is not threading.current_thread():
+                self._deadline_thread.join(timeout=0.5)
             self._deadline_thread = None
 
     def _deadline_worker(self) -> None:
@@ -248,14 +275,8 @@ class GracefulShutdown:
         if self._deadline_stop.wait(timeout=self._deadline_s):
             return  # Cancelled
         # Deadline expired — force exit.
-        if self._state != ShutdownState.FORCED:
-            self._state = ShutdownState.FORCED
-            print(
-                f"\nDeadline ({self._deadline_s}s) expired after graceful shutdown request. Forcing exit.\n",
-                file=sys.stderr,
-                flush=True,
-            )
-            os._exit(_EXIT_CODE_SIGINT)
+        if self._state != ShutdownState.FORCED and self._first_info is not None:
+            self._force_exit(self._first_info.signal_number, trigger="deadline")
 
     # ------------------------------------------------------------------
     # Signal handler
@@ -278,6 +299,7 @@ class GracefulShutdown:
                     first_signal=True,
                 )
             )
+            deadline = now + self._deadline_s
             self._first_info = ShutdownInfo(
                 state=ShutdownState.SHUTDOWN_REQUESTED,
                 signal_number=signum,
@@ -285,6 +307,7 @@ class GracefulShutdown:
                 reason=reason,
                 timestamp=now,
                 first_signal=True,
+                deadline=deadline,
             )
             self._state = ShutdownState.SHUTDOWN_REQUESTED
             sig_name = _SIGNAL_NAMES.get(signum, f"signal {signum}")
@@ -295,26 +318,40 @@ class GracefulShutdown:
             )
             print(msg, file=sys.stderr, flush=True)
             logger.info(reason)
+            self._log_event("shutdown_requested", self._first_info)
+            if self._on_shutdown_requested is not None:
+                try:
+                    self._on_shutdown_requested(self._first_info)
+                except Exception:
+                    logger.exception("shutdown request callback failed")
             # Start deadline timer.
             self._start_deadline()
         else:
-            # Second signal: force exit.
-            self._state = ShutdownState.FORCED
-            self._cancel_deadline()
-            forced_reason = format_shutdown_reason(
-                ShutdownInfo(
-                    state=ShutdownState.FORCED,
-                    signal_number=signum,
-                    stage=self._current_stage,
-                    reason=self._first_info.reason,
-                    timestamp=now,
-                    first_signal=False,
-                )
-            )
-            print(f"\nForced exit: {forced_reason}\n", file=sys.stderr, flush=True)
-            self.uninstall()
-            exit_code = _EXIT_CODE_SIGINT if signum == signal.SIGINT else _EXIT_CODE_SIGTERM
-            os._exit(exit_code)
+            self._force_exit(signum, trigger="second_signal", timestamp=now)
+
+    def _force_exit(self, signum: int, *, trigger: str, timestamp: float | None = None) -> None:
+        """Emit the forced event and terminate using the initial signal's exit code."""
+
+        if self._first_info is None:
+            return
+        self._state = ShutdownState.FORCED
+        self._cancel_deadline()
+        forced_info = ShutdownInfo(
+            state=ShutdownState.FORCED,
+            signal_number=signum,
+            stage=self._current_stage,
+            reason=self._first_info.reason,
+            timestamp=time.monotonic() if timestamp is None else timestamp,
+            first_signal=False,
+            deadline=self._first_info.deadline,
+        )
+        forced_reason = format_shutdown_reason(forced_info)
+        print(f"\nForced exit ({trigger}): {forced_reason}\n", file=sys.stderr, flush=True)
+        self._log_event("shutdown_forced", forced_info)
+        self.uninstall()
+        initial_signal = self._first_info.signal_number
+        exit_code = _EXIT_CODE_SIGINT if initial_signal == signal.SIGINT else _EXIT_CODE_SIGTERM
+        os._exit(exit_code)
 
     # ------------------------------------------------------------------
     # State transitions for the main loop
@@ -325,7 +362,6 @@ class GracefulShutdown:
 
         if self._state == ShutdownState.SHUTDOWN_REQUESTED:
             self._state = ShutdownState.SHUTTING_DOWN
-            self._cancel_deadline()
             logger.debug("Entering shutdown phase")
 
     def complete_shutdown(self) -> ShutdownInfo | None:
@@ -334,7 +370,9 @@ class GracefulShutdown:
         self._cancel_deadline()
         self.uninstall()
         if self._first_info is not None:
-            self._state = ShutdownState.SHUTTING_DOWN
+            self._state = ShutdownState.COMPLETED
+            self._first_info.state = ShutdownState.COMPLETED
+            self._log_event("shutdown_completed", self._first_info)
         return self._first_info
 
     # ------------------------------------------------------------------

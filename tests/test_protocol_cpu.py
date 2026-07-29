@@ -86,6 +86,22 @@ class TPClusterResourceTest(unittest.TestCase):
             self.assertTrue(queue.closed)
             self.assertTrue(queue.joined)
 
+    def test_close_propagates_shutdown_reason_and_deadline_to_every_rank(self):
+        cluster = object.__new__(TPCluster)
+        cluster.config = SimpleNamespace(tp_size=1, dp_size=2)
+        cluster.started = True
+        cluster.cmd_queues = [FakeQueue(), FakeQueue()]
+        cluster.result_queue = FakeQueue()
+        cluster.processes = [FakeProcess(alive=False), FakeProcess(alive=False)]
+        payload = {"reason": "SIGTERM during training", "deadline": 123.0}
+
+        cluster.close(shutdown_info=payload)
+
+        for command_queue in cluster.cmd_queues:
+            self.assertEqual(len(command_queue.items), 1)
+            self.assertIs(command_queue.items[0].op, Op.SHUTDOWN)
+            self.assertEqual(command_queue.items[0].payload, payload)
+
     def test_async_call_can_wait_for_user_visible_rollout_ranks_only(self):
         """Async rollout futures should not wait for TP sibling acks before returning."""
 

@@ -407,6 +407,33 @@ class TestDeadline(unittest.TestCase):
         shutdown = GracefulShutdown(deadline_s=60.0)
         self.assertEqual(shutdown.deadline_s, 60.0)
 
+    @patch("areno.engine.shutdown.os._exit")
+    def test_sigterm_deadline_uses_initial_signal_exit_code(self, mock_exit):
+        shutdown = GracefulShutdown(deadline_s=0.01)
+        shutdown._simulate_signal(signal.SIGTERM)
+        import time as _time
+
+        _time.sleep(0.05)
+        mock_exit.assert_called_once_with(143)
+
+    def test_deadline_must_be_positive_and_finite(self):
+        for value in (0.0, -1.0, float("inf"), float("nan")):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "finite number greater than 0"):
+                GracefulShutdown(deadline_s=value)
+
+    def test_first_signal_invokes_callback_with_structured_deadline(self):
+        events = []
+        shutdown = GracefulShutdown(deadline_s=10.0, on_shutdown_requested=events.append)
+        shutdown.set_stage(ShutdownStage.ROLLOUT)
+
+        shutdown._simulate_signal(signal.SIGINT)
+        shutdown.complete_shutdown()
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].stage, ShutdownStage.ROLLOUT)
+        self.assertIsNotNone(events[0].deadline)
+        self.assertEqual(shutdown.state, ShutdownState.COMPLETED)
+
 
 if __name__ == "__main__":
     unittest.main()

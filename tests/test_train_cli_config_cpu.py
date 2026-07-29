@@ -447,6 +447,48 @@ def test_train_command_prints_summary_before_run(monkeypatch):
     assert events == [("run", "sft")]
 
 
+def test_train_command_passes_opt_in_shutdown_settings(monkeypatch):
+    captured = {}
+
+    def fake_run(config, **kwargs):
+        captured["algo"] = config.algo
+        captured.update(kwargs)
+
+    monkeypatch.setattr(train_cli, "run", fake_run)
+    result = CliRunner().invoke(
+        train_cli.train_command,
+        [
+            "--algo",
+            "sft",
+            "--ckpt",
+            "actor",
+            "--dataset-path",
+            "dataset",
+            "--dataset-loader-fn",
+            "examples/sft/alpaca/dataset_loader.py",
+            "--world-size",
+            "1",
+            "--tp-size",
+            "1",
+            "--graceful-shutdown",
+            "--shutdown-deadline-s",
+            "12.5",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured == {"algo": "sft", "graceful_shutdown": True, "shutdown_deadline_s": 12.5}
+
+
+def test_train_command_rejects_non_positive_shutdown_deadline_before_run(monkeypatch):
+    monkeypatch.setattr(train_cli, "run", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("ran")))
+
+    result = CliRunner().invoke(train_cli.train_command, ["--shutdown-deadline-s", "0"])
+
+    assert result.exit_code == 2
+    assert "0.0 is not in the range x>0.0" in result.output
+
+
 def test_train_command_tunes_params_before_summary_and_run(monkeypatch):
     from areno.cli.auto_tune import AutoTuneCandidate, AutoTuneMeasurement, AutoTuneResult
 

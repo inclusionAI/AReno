@@ -52,6 +52,32 @@ class TrainerPromptBatchTest(unittest.TestCase):
         self.assertIsNone(trainer._backend)
         self.assertFalse(trainer._initialized)
 
+    def test_close_records_and_propagates_structured_shutdown_info(self):
+        trainer = Trainer(world_size=1, model_path="unused")
+        events = []
+
+        class BackendStub:
+            def close(self, *, shutdown_info=None):
+                events.append(("backend", shutdown_info))
+
+        class MetricsStub:
+            def record_dashboard_state(self, **payload):
+                events.append(("metrics", payload))
+
+            def close(self):
+                events.append(("metrics_close", None))
+
+        shutdown_info = {"reason": "SIGINT during rollout", "deadline": 123.0}
+        trainer._backend = BackendStub()
+        trainer._metrics = MetricsStub()
+
+        trainer.close(shutdown_info=shutdown_info)
+
+        self.assertEqual(events[0][0], "metrics")
+        self.assertEqual(events[0][1]["extra"]["shutdown"], shutdown_info)
+        self.assertEqual(events[1], ("backend", shutdown_info))
+        self.assertEqual(events[2], ("metrics_close", None))
+
     def test_load_prompt_batches_skips_long_prompts_and_keeps_records(self):
         """Overlong prompts should be skipped without dropping record metadata."""
         trainer = Trainer(world_size=1, model_path="unused")
