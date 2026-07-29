@@ -5,14 +5,38 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import dataset_generator  # noqa: E402
 import game  # noqa: E402
 
 
+class DatasetValidationError(Exception):
+    """Raised when dataset validation fails."""
+    pass
+
+
 def load_training_dataset(dataset_path: str, *, default_loader=None, **_: object) -> list[dict]:
-    """Load JSONL Wordle games and convert them to Areno prompt records."""
+    """
+    Load JSONL Wordle games and convert them to Areno prompt records.
+
+    Args:
+        dataset_path: Path to JSONL file or directory containing games.jsonl
+
+    Returns:
+        List of formatted prompt records
+
+    Raises:
+        DatasetValidationError: If dataset path is invalid before expensive initialization
+    """
+    # Validate input before expensive operations
+    is_valid, error_msg = game.validate_dataset_path(dataset_path)
+    if not is_valid:
+        raise DatasetValidationError(
+            f"Dataset validation failed: {error_msg}. "
+            f"AReno validates inputs before expensive model or worker initialization."
+        )
 
     del default_loader
     records = _load_records(dataset_path)

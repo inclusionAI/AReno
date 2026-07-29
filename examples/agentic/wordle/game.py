@@ -506,3 +506,169 @@ def score_game(game: WordleGame, guess: str | None = None) -> float:
     elif game["state"] == GameState.LOST:
         return 0.0
     return -1.0  # In progress or invalid
+
+
+# =============================================================================
+# Statistics functions for Issue #189 acceptance criteria:
+# "report solve rate and guesses-to-solve by word length"
+# =============================================================================
+
+def compute_stats(results: list[dict]) -> dict:
+    """
+    Compute solve rate and average guesses by word length.
+
+    Args:
+        results: List of game results, each containing:
+            - target: The target word
+            - guesses: Number of guesses made (None if not solved)
+            - solved: True if solved, False otherwise
+            - word_length: Length of the target word (optional, auto-computed)
+
+    Returns:
+        Dictionary with:
+            - overall_solve_rate: float (0.0 to 1.0)
+            - overall_avg_guesses: float (average guesses for solved games)
+            - by_word_length: dict mapping word_length to:
+                - solve_rate: float
+                - avg_guesses: float
+                - total_games: int
+                - solved_games: int
+    """
+    if not results:
+        return {
+            "overall_solve_rate": 0.0,
+            "overall_avg_guesses": 0.0,
+            "by_word_length": {},
+        }
+
+    # Group by word length
+    by_length: dict[int, dict] = {}
+    total_solved = 0
+    total_guesses = 0
+
+    for r in results:
+        target = r.get("target", "")
+        word_len = len(target)
+        solved = r.get("solved", False)
+        num_guesses = r.get("guesses")
+
+        if word_len not in by_length:
+            by_length[word_len] = {
+                "solved": 0,
+                "total": 0,
+                "guesses_sum": 0,
+            }
+
+        by_length[word_len]["total"] += 1
+        if solved and num_guesses is not None:
+            by_length[word_len]["solved"] += 1
+            by_length[word_len]["guesses_sum"] += num_guesses
+            total_solved += 1
+            total_guesses += num_guesses
+
+    # Compute statistics
+    by_word_length = {}
+    for length, data in by_length.items():
+        total = data["total"]
+        solved = data["solved"]
+        guesses_sum = data["guesses_sum"]
+
+        solve_rate = solved / total if total > 0 else 0.0
+        avg_guesses = guesses_sum / solved if solved > 0 else 0.0
+
+        by_word_length[length] = {
+            "solve_rate": round(solve_rate, 4),
+            "avg_guesses": round(avg_guesses, 2),
+            "total_games": total,
+            "solved_games": solved,
+        }
+
+    overall_solve_rate = total_solved / len(results) if results else 0.0
+    overall_avg_guesses = total_guesses / total_solved if total_solved > 0 else 0.0
+
+    return {
+        "overall_solve_rate": round(overall_solve_rate, 4),
+        "overall_avg_guesses": round(overall_avg_guesses, 2),
+        "by_word_length": by_word_length,
+    }
+
+
+def format_stats(stats: dict, human_readable: bool = True) -> str:
+    """
+    Format statistics for display.
+
+    Args:
+        stats: Output from compute_stats()
+        human_readable: If True, use human-readable format with descriptions.
+                       If False, output structured format.
+
+    Returns:
+        Formatted string representation of statistics.
+    """
+    if human_readable:
+        lines = [
+            "Wordle Statistics",
+            "=" * 40,
+            f"Overall Solve Rate: {stats['overall_solve_rate'] * 100:.1f}%",
+            f"Overall Avg Guesses (when solved): {stats['overall_avg_guesses']:.2f}",
+            "",
+            "By Word Length:",
+        ]
+        for length in sorted(stats["by_word_length"].keys()):
+            data = stats["by_word_length"][length]
+            lines.append(
+                f"  {length}-letter words: "
+                f"{data['solve_rate'] * 100:.1f}% solved, "
+                f"avg {data['avg_guesses']:.2f} guesses "
+                f"({data['solved_games']}/{data['total_games']})"
+            )
+        return "\n".join(lines)
+    else:
+        # Structured output (JSON-like)
+        import json
+        return json.dumps(stats, indent=2)
+
+
+def validate_dataset_path(path: str) -> tuple[bool, str | None]:
+    """
+    Validate dataset path before expensive initialization.
+
+    Args:
+        path: Path to dataset file or directory
+
+    Returns:
+        Tuple of (is_valid, error_message)
+        - is_valid: True if path is valid for processing
+        - error_message: None if valid, otherwise descriptive error
+    """
+    from pathlib import Path
+
+    p = Path(path).expanduser()
+
+    # Check if path exists
+    if not p.exists():
+        return False, f"Path does not exist: {path}"
+
+    # If directory, check for games.jsonl
+    if p.is_dir():
+        jsonl_file = p / "games.jsonl"
+        if not jsonl_file.exists():
+            return False, f"No games.jsonl found in directory: {path}"
+        p = jsonl_file
+
+    # Check if it's a file
+    if not p.is_file():
+        return False, f"Path is not a file: {path}"
+
+    # Check file extension
+    if p.suffix not in (".jsonl", ".json"):
+        return False, f"Expected .jsonl or .json file, got: {p.suffix}"
+
+    # Check if file is readable and has content
+    try:
+        if p.stat().st_size == 0:
+            return False, f"File is empty: {path}"
+    except OSError as e:
+        return False, f"Cannot read file: {e}"
+
+    return True, None

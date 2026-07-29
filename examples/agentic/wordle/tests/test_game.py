@@ -279,5 +279,130 @@ class TestDatasetGenerator:
         assert records1 == records2
 
 
+class TestStatistics:
+    """Test solve rate and statistics functions (Issue #189)."""
+
+    def test_compute_stats_empty(self):
+        """Test statistics with empty results."""
+        stats = game.compute_stats([])
+        assert stats["overall_solve_rate"] == 0.0
+        assert stats["overall_avg_guesses"] == 0.0
+        assert stats["by_word_length"] == {}
+
+    def test_compute_stats_all_solved(self):
+        """Test statistics when all games are solved."""
+        results = [
+            {"target": "hello", "solved": True, "guesses": 3},
+            {"target": "world", "solved": True, "guesses": 4},
+            {"target": "about", "solved": True, "guesses": 2},
+        ]
+        stats = game.compute_stats(results)
+        assert stats["overall_solve_rate"] == 1.0
+        assert stats["overall_avg_guesses"] == 3.0  # (3+4+2)/3
+
+    def test_compute_stats_mixed(self):
+        """Test statistics with mixed results."""
+        results = [
+            {"target": "hello", "solved": True, "guesses": 3},
+            {"target": "world", "solved": True, "guesses": 5},
+            {"target": "about", "solved": False, "guesses": 6},
+            {"target": "apple", "solved": False, "guesses": None},
+        ]
+        stats = game.compute_stats(results)
+        assert stats["overall_solve_rate"] == 0.5  # 2/4
+        assert stats["overall_avg_guesses"] == 4.0  # (3+5)/2
+
+    def test_compute_stats_by_word_length(self):
+        """Test statistics grouped by word length."""
+        results = [
+            {"target": "hi", "solved": True, "guesses": 1},  # 2-letter
+            {"target": "cat", "solved": True, "guesses": 2},  # 3-letter
+            {"target": "hello", "solved": True, "guesses": 3},  # 5-letter
+            {"target": "world", "solved": False, "guesses": 6},  # 5-letter
+        ]
+        stats = game.compute_stats(results)
+
+        assert 2 in stats["by_word_length"]
+        assert 3 in stats["by_word_length"]
+        assert 5 in stats["by_word_length"]
+
+        assert stats["by_word_length"][2]["solve_rate"] == 1.0
+        assert stats["by_word_length"][2]["avg_guesses"] == 1.0
+
+        assert stats["by_word_length"][5]["solve_rate"] == 0.5
+        assert stats["by_word_length"][5]["total_games"] == 2
+
+    def test_format_stats_human_readable(self):
+        """Test human-readable stats output."""
+        results = [
+            {"target": "hello", "solved": True, "guesses": 3},
+            {"target": "world", "solved": False, "guesses": 6},
+        ]
+        stats = game.compute_stats(results)
+        output = game.format_stats(stats, human_readable=True)
+
+        assert "Wordle Statistics" in output
+        assert "50.0% solved" in output
+        assert "5-letter words" in output
+
+    def test_format_stats_structured(self):
+        """Test structured (JSON-like) stats output."""
+        results = [
+            {"target": "hello", "solved": True, "guesses": 3},
+        ]
+        stats = game.compute_stats(results)
+        output = game.format_stats(stats, human_readable=False)
+
+        assert "overall_solve_rate" in output
+        assert "by_word_length" in output
+
+
+class TestDatasetValidation:
+    """Test dataset path validation (Issue #189)."""
+
+    def test_validate_valid_path(self):
+        """Test validation with valid path."""
+        # Path that doesn't exist yet should still be handled
+        is_valid, error = game.validate_dataset_path("/tmp/nonexistent.jsonl")
+        # Should fail because file doesn't exist, not because of format
+        assert is_valid is False
+
+    def test_validate_valid_jsonl(self, tmp_path):
+        """Test validation with actual JSONL file."""
+        jsonl_file = tmp_path / "games.jsonl"
+        jsonl_file.write_text('{"target": "hello"}\n{"target": "world"}\n')
+
+        is_valid, error = game.validate_dataset_path(str(jsonl_file))
+        assert is_valid is True
+        assert error is None
+
+    def test_validate_empty_file(self, tmp_path):
+        """Test validation rejects empty file."""
+        jsonl_file = tmp_path / "empty.jsonl"
+        jsonl_file.write_text("")
+
+        is_valid, error = game.validate_dataset_path(str(jsonl_file))
+        assert is_valid is False
+        assert "empty" in error.lower()
+
+    def test_validate_directory_without_jsonl(self, tmp_path):
+        """Test validation rejects directory without games.jsonl."""
+        subdir = tmp_path / "data"
+        subdir.mkdir()
+
+        is_valid, error = game.validate_dataset_path(str(subdir))
+        assert is_valid is False
+        assert "games.jsonl" in error
+
+    def test_validate_wrong_extension(self, tmp_path):
+        """Test validation rejects wrong file extension."""
+        txt_file = tmp_path / "data.txt"
+        txt_file.write_text("hello")
+
+        is_valid, error = game.validate_dataset_path(str(txt_file))
+        assert is_valid is False
+        assert ".jsonl or .json" in error
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
