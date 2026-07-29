@@ -2094,3 +2094,297 @@ textarea:focus {
     text-align: left;
   }
 }
+
+/* Trajectory detail view */
+.trajectoryDetail {
+  display: grid;
+  gap: 12px;
+}
+
+.trajectorySummary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--deck-line);
+  border-radius: var(--radius-md);
+  background: rgba(167, 186, 210, 0.03);
+}
+
+.trajectorySummaryItem {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.trajectorySummaryItem span {
+  color: var(--deck-muted);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.trajectorySummaryItem strong {
+  color: var(--deck-ink);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.trajectoryTokenCounts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--deck-line);
+  border-radius: var(--radius-md);
+  background: rgba(167, 186, 210, 0.03);
+}
+
+.trajectoryTokenItem {
+  display: grid;
+  gap: 3px;
+}
+
+.trajectoryTokenItem label {
+  color: var(--deck-muted);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.trajectoryTokenItem strong {
+  color: var(--deck-ink);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.trajectoryMaskBar {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1px;
+  padding: 6px 0;
+}
+
+.maskCell {
+  display: inline-block;
+  width: 8px;
+  height: 14px;
+  border-radius: 2px;
+}
+
+.maskCell.train {
+  background: var(--deck-green);
+}
+
+.maskCell.skip {
+  background: rgba(167, 186, 210, 0.15);
+}
+
+.maskTruncated {
+  grid-column: 1 / -1;
+  color: var(--deck-muted);
+  font-size: 11px;
+  font-style: italic;
+}
+
+.trajectoryEvents {
+  display: grid;
+  gap: 8px;
+}
+
+.trajectoryEvent {
+  border: 1px solid var(--deck-line);
+  border-radius: var(--radius-md);
+  padding: 10px 12px;
+  background: rgba(167, 186, 210, 0.02);
+}
+
+.trajectoryEvent.message.assistant {
+  border-left: 3px solid var(--deck-cyan);
+}
+
+.trajectoryEvent.message.user {
+  border-left: 3px solid var(--deck-violet);
+}
+
+.trajectoryEvent.message.tool {
+  border-left: 3px solid var(--deck-amber);
+}
+
+.trajectoryEvent.message.system {
+  border-left: 3px solid var(--deck-muted);
+}
+
+.trajectoryEvent.toolResult {
+  border-left: 3px solid var(--deck-green);
+}
+
+.eventHeader {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: default;
+  margin-bottom: 6px;
+}
+
+.trajectoryEvent.toolResult .eventHeader {
+  cursor: pointer;
+}
+
+.eventBadge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 50px;
+  height: 18px;
+  border-radius: 999px;
+  padding: 0 7px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.eventBadge.assistant {
+  color: var(--deck-cyan);
+  background: rgba(56, 215, 255, 0.1);
+}
+
+.eventBadge.user {
+  color: var(--deck-violet);
+  background: rgba(169, 147, 255, 0.1);
+}
+
+.eventBadge.tool {
+  color: var(--deck-amber);
+  background: rgba(255, 200, 87, 0.1);
+}
+
+.eventBadge.system {
+  color: var(--deck-muted);
+  background: rgba(114, 129, 150, 0.1);
+}
+
+.eventBadge.result {
+  color: var(--deck-green);
+  background: rgba(87, 227, 155, 0.1);
+}
+
+.eventHeader b {
+  color: var(--deck-ink);
+  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, Consolas, monospace;
+  font-weight: 650;
+}
+
+.eventHeader em {
+  color: var(--deck-muted);
+  font-size: 11px;
+  font-style: normal;
+}
+
+.eventToolCalls {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.eventToolCall {
+  display: grid;
+  gap: 4px;
+  padding: 6px 8px;
+  border: 1px solid var(--deck-line);
+  border-radius: var(--radius-sm);
+  background: rgba(56, 215, 255, 0.04);
+}
+
+.toolCallBadge {
+  display: inline-flex;
+  align-items: center;
+  min-width: 50px;
+  height: 16px;
+  border-radius: 999px;
+  padding: 0 6px;
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: var(--deck-cyan);
+  background: rgba(56, 215, 255, 0.08);
+}
+
+.eventToolCall b {
+  color: var(--deck-ink);
+  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, Consolas, monospace;
+}
+
+.toolCallArgs {
+  max-height: 100px;
+  overflow: auto;
+  font-size: 11px;
+  color: var(--deck-text);
+  background: transparent;
+  border: 0;
+  padding: 2px 0;
+}
+
+.eventOutput {
+  max-height: 200px;
+  overflow: auto;
+  font-size: 11px;
+  color: var(--deck-text);
+  background: rgba(4, 8, 13, 0.22);
+  border: 1px solid var(--deck-line);
+  border-radius: var(--radius-sm);
+  padding: 8px;
+  margin-top: 6px;
+}
+
+.eventOutput.collapsed {
+  max-height: 0;
+  overflow: hidden;
+  padding: 0;
+  border: 0;
+}
+
+.trajectoryFinalAnswer {
+  border: 1px solid var(--deck-line);
+  border-radius: var(--radius-md);
+  padding: 12px;
+  background: rgba(87, 227, 155, 0.04);
+}
+
+.rawJsonView {
+  max-height: 480px;
+  overflow: auto;
+  font-size: 11px;
+  color: var(--deck-text);
+  background: rgba(4, 8, 13, 0.22);
+  border: 1px solid var(--deck-line);
+  border-radius: var(--radius-md);
+  padding: 12px;
+  margin: 0;
+}
+
+.trajectoryPage {
+  display: grid;
+  gap: 16px;
+}
+
+.trajectoryControls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.trajectoryControls select {
+  min-width: 160px;
+}
+
+.trajectoryContent {
+  min-height: 200px;
+}

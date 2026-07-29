@@ -1480,6 +1480,114 @@ def execute_agent_tool(tool_call: dict[str, Any]) -> dict[str, Any]:
         return {"name": name, "ok": False, "error": str(exc)}
 
 
+def validate_trajectory_sample(sample: dict[str, Any]) -> list[str]:
+    """Validate a rollout sample dict before rendering its trajectory detail.
+
+    Returns a list of human-readable validation error strings; an empty list
+    means the sample is valid for trajectory rendering.
+    """
+    errors: list[str] = []
+    if not isinstance(sample, dict):
+        return ["sample is not a dict"]
+    if sample.get("kind") != "agentic":
+        return [f"sample kind '{sample.get('kind', 'missing')}' is not 'agentic'"]
+    if not sample.get("messages"):
+        errors.append("messages field is empty or missing")
+    if not sample.get("prompt") and not sample.get("messages"):
+        errors.append("prompt field is missing")
+    return errors
+
+
+def build_trajectory_detail(sample: dict[str, Any]) -> dict[str, Any]:
+    """Build a chronologically ordered trajectory detail from an agentic sample.
+
+    Reads existing local rollout-sample artifacts only; never executes tool
+    calls. Output fields:
+      - events: ordered list of {type, role, content, tool_calls, tool_result}
+      - final_answer: str
+      - token_counts: {prompt_tokens, response_tokens, loss_mask_true, loss_mask_total}
+      - training_mask: {loss_mask_true, loss_mask_total, first_loss_idx}
+      - end_reason: str
+      - raw: the original sample dict (privacy-safe: no full training data)
+    """
+    errors = validate_trajectory_sample(sample)
+    if errors:
+        return {"error": "; ".join(errors), "valid": False}
+
+    messages = sample.get("messages") or []
+    tool_calls = sample.get("tool_calls") or []
+    tool_results = sample.get("tool_results") or []
+    events: list[dict[str, Any]] = []
+
+    # Walk messages in order, interleaving tool results where they match.
+    tool_result_queue = list(tool_results)
+    for message in messages:
+        role = str(message.get("role") or "unknown")
+        content = message.get("content") or ""
+        msg_tool_calls = message.get("tool_calls") or []
+        entry: dict[str, Any] = {"type": "message", "role": role, "content": str(content)}
+        if msg_tool_calls:
+            entry["tool_calls"] = msg_tool_calls
+        if role == "tool" and tool_result_queue:
+            entry["tool_result"] = tool_result_queue.pop(0)
+        events.append(entry)
+
+    # Append any remaining tool results that did not match a tool message.
+    for result in tool_result_queue:
+        events.append({"type": "tool_result", "role": "tool", "tool_result": result})
+
+    loss_mask = sample.get("loss_mask") or []
+    tokens = sample.get("tokens") or []
+    loss_mask_true = int(sample.get("loss_mask_true") or sum(1 for m in loss_mask if m))
+    loss_mask_total = int(sample.get("loss_mask_total") or len(loss_mask))
+    first_loss_idx = int(sample.get("first_loss_idx") or -1)
+
+    return {
+        "valid": True,
+        "step": sample.get("step", 0),
+        "prompt_idx": sample.get("prompt_idx", -1),
+        "sample_idx": sample.get("sample_idx", -1),
+        "kind": "agentic",
+        "events": events,
+        "final_answer": sample.get("final_answer") or "",
+        "token_counts": {
+            "prompt_tokens": len(sample.get("prompt_tokens") or []),
+            "response_tokens": len(sample.get("response_tokens") or []),
+            "loss_mask_true": loss_mask_true,
+            "loss_mask_total": loss_mask_total,
+            "token_row_len": len(tokens),
+        },
+        "training_mask": {
+            "loss_mask_true": loss_mask_true,
+            "loss_mask_total": loss_mask_total,
+            "first_loss_idx": first_loss_idx,
+            "truncated": len(loss_mask) < loss_mask_total if loss_mask_total else False,
+        },
+        "end_reason": sample.get("end_reason") or "completed",
+        "tool_call_count": len(tool_calls),
+        "tool_result_count": len(tool_results),
+    }
+
+
+def trajectory_detail(job_id: str | None, step: int, prompt_idx: int, sample_idx: int) -> dict[str, Any]:
+    """Resolve a single trajectory sample from a job's rollout samples."""
+    job = STATE.get_job(job_id)
+    if job is None:
+        return {"error": "job not found", "valid": False}
+    candidates = [
+        s for s in job.samples
+        if int(s.get("step", 0)) == step
+        and int(s.get("prompt_idx", -1)) == prompt_idx
+        and int(s.get("sample_idx", -1)) == sample_idx
+    ]
+    if not candidates:
+        return {"error": "trajectory sample not found", "valid": False}
+    sample = candidates[-1]
+    detail = build_trajectory_detail(sample)
+    detail["raw"] = sample
+    return detail
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args: Any) -> None:
         sys.stderr.write(f"{self.log_date_time_string()} - {fmt % args}\n")
@@ -1500,6 +1608,17 @@ class Handler(BaseHTTPRequestHandler):
                 metric_name = query.get("name", [""])[0]
                 limit = int(query.get("limit", ["500"])[0] or 500)
                 self.json({"metric": metric_name, "points": STATE.metric_series(job_id, metric_name, limit=limit)})
+            elif path.startswith("/api/jobs/") and path.endswith("/trajectory"):
+                job_id = path.split("/")[-2]
+                query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+                try:
+                    step = int(query.get("step", ["0"])[0] or 0)
+                    prompt_idx = int(query.get("prompt_idx", ["-1"])[0] or -1)
+                    sample_idx = int(query.get("sample_idx", ["-1"])[0] or -1)
+                except ValueError:
+                    self.error("step, prompt_idx, and sample_idx must be integers")
+                    return
+                self.json(trajectory_detail(job_id, step, prompt_idx, sample_idx))
             elif path.startswith("/api/jobs/"):
                 job = STATE.get_job(path.split("/")[-1])
                 if not job:
