@@ -41,9 +41,11 @@ def reward_fn(record: Any) -> float:
     advantages (reward - mean) are non-zero, preventing GSPO loss
     from collapsing to 0 and gradients from vanishing.
 
-    Fallback jitter: when model doesn't call tool, all samples get -1.0,
-    advantage becomes 0, loss becomes 0, gradient vanishes. We add a
-    tiny deterministic jitter based on record hash to break ties.
+    Anti-collapse jitter: when all samples in a group get the same base
+    reward (e.g. all fail to call tool), advantage=0, loss=0, grad=0,
+    and the model can never recover. We add a deterministic jitter
+    based on unique sample identity (prompt_index + sample_index) to
+    every reward, ensuring group std is always non-zero.
     """
     import hashlib
 
@@ -51,27 +53,29 @@ def reward_fn(record: Any) -> float:
     target = source.get("target", "")
     current_game = source.get("game", {})
 
+    # Deterministic per-sample jitter to prevent all-zero advantage.
+    # Uses prompt_index + sample_index from metadata for uniqueness.
+    # Range: [-0.1, +0.1] - large enough to produce meaningful gradients
+    # after compute_group_advantages normalization.
+    meta = record.metadata if hasattr(record, "metadata") else {}
+    p_idx = meta.get("prompt_index", 0)
+    s_idx = meta.get("sample_index", 0)
+    jitter_seed = f"{p_idx}:{s_idx}:{source.get('id', '')}"
+    jitter_hash = int(hashlib.md5(jitter_seed.encode()).hexdigest()[:8], 16)
+    jitter = ((jitter_hash % 1000) - 500) / 5000.0  # [-0.1, +0.1]
+
     guess = _tool_guess(record)
     if guess is None:
         # Model didn't call guess_word tool
-        # Add tiny jitter to prevent all-zero advantage when entire batch fails
-        # Jitter is deterministic per record (based on record id) and small [-0.01, 0.01]
-        record_id = source.get("id", str(id(record)))
-        jitter_hash = int(hashlib.md5(str(record_id).encode()).hexdigest()[:8], 16)
-        jitter = ((jitter_hash % 200) - 100) / 10000.0  # [-0.01, 0.01]
         return REWARD_NO_TOOL + jitter
-
-    # Model called the tool - no base bonus (avoid uniform rewards)
-    # Different outcomes get different rewards to maintain batch advantage variance
 
     # Check if guess is valid
     if not game.is_valid_word(guess):
-        # Called tool but invalid word: negative reward
-        return REWARD_INVALID
+        return REWARD_INVALID + jitter
 
     # Check if guess is correct
     if guess == target:
-        return REWARD_CORRECT  # Fixed 1.0, no efficiency bonus to keep bounded
+        return REWARD_CORRECT + jitter
 
     # Check for partial progress
     try:
@@ -80,15 +84,13 @@ def reward_fn(record: Any) -> float:
         present_count = sum(1 for f in feedback if f == game.LetterStatus.PRESENT)
 
         if exact_count > 0:
-            # Exact matches: base 0.5 + 0.1 per exact + 0.02 per present
-            return REWARD_EXACT + (exact_count * 0.1) + (present_count * 0.02)
+            return REWARD_EXACT + (exact_count * 0.1) + (present_count * 0.02) + jitter
         elif present_count > 0:
-            # Present only: base 0.2 + 0.05 per present
-            return REWARD_PRESENT + (present_count * 0.05)
+            return REWARD_PRESENT + (present_count * 0.05) + jitter
         else:
-            return REWARD_NO_MATCH  # Valid word, no matches = neutral 0.0
+            return REWARD_NO_MATCH + jitter
     except Exception:
-        return REWARD_INVALID
+        return REWARD_INVALID + jitter
 
 
 def _tool_guess(record: Any) -> str | None:
