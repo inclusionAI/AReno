@@ -130,7 +130,8 @@ def _sparkline(values: list[float], *, width: int = 40) -> str:
 
     if not values:
         return ""
-    if len(values) > width:
+    width = max(1, width)
+    if len(values) > width and width > 1:
         indices = [round(i * (len(values) - 1) / (width - 1)) for i in range(width)]
         sampled = [values[i] for i in indices]
     else:
