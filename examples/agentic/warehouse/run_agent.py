@@ -1,4 +1,4 @@
-"""Agent entrypoint for two-turn warehouse-picking tool-call rollouts."""
+"""Agent entrypoint for multi-turn warehouse-picking tool-call rollouts."""
 
 from __future__ import annotations
 
@@ -22,9 +22,10 @@ logger = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 SYSTEM_PROMPT = (
-    "You are a warehouse picking robot. Use the pick_from_shelf tool to move to a shelf "
-    "and pick a required item, then use submit_order to complete the order. "
-    "You can only move to adjacent shelves. Do not answer in plain text."
+    "You are a warehouse picking robot. Your goal is to pick all items in the order "
+    "and submit the completed order. Use the pick_from_shelf tool to move to a shelf "
+    "and pick items, then use submit_order to complete the order once finished. "
+    "You can only move to adjacent shelves. Do not answer in plain text - always use a tool."
 )
 
 TOOLS = [
@@ -52,7 +53,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "submit_order",
-            "description": "Submit the completed order for validation.",
+            "description": "Submit the completed order for validation when finished picking.",
             "parameters": {
                 "type": "object",
                 "properties": {},
@@ -65,10 +66,17 @@ TOOLS = [
 
 TOOL_BY_NAME = {tool["function"]["name"]: tool for tool in TOOLS}
 
-TURN_PROMPTS = {
-    "pick_from_shelf": "Turn 1: call pick_from_shelf only. Move to a shelf that has a needed SKU and pick it.",
-    "submit_order": "Turn 2: call submit_order only. Submit the completed order.",
-}
+# 动态提示，根据当前购物车状态调整
+def get_turn_prompt(state: WarehouseState, is_first_turn: bool) -> str:
+    """根据当前状态生成提示"""
+    if state.cart:
+        cart_items = ", ".join(f"{sku}×{qty}" for sku, qty in state.cart.items())
+        return (
+            f"You have picked: {cart_items}. "
+            "Use pick_from_shelf to pick more items, or submit_order when done."
+        )
+    return "Use pick_from_shelf to pick the first item for your order."
+
 
 _state_cache: dict[int, WarehouseState] = {}
 
@@ -87,7 +95,7 @@ def _get_or_build_state(record: dict) -> WarehouseState:
 
 
 async def run_agent(ctx, batch):
-    """Run two tool-call turns for each warehouse picking task."""
+    """Run multi-turn tool-call rollout until order is completed or max turns reached."""
 
     reset_state_cache()
 
@@ -109,16 +117,34 @@ async def run_agent(ctx, batch):
     )
     client = AsyncOpenAI(base_url=ctx.get_base_url(), api_key=ctx.api_key, http_client=http_client, max_retries=0)
 
+    # 限制最大轮次，避免无限循环和 OOM
+    MAX_TURNS = 8
+
     async def run_one(item):
         turns = []
+        state = _get_or_build_state(item.record)
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": item.prompt},
         ]
-        for tool_name in ["pick_from_shelf", "submit_order"]:
-            assistant_msg, turn = await _call_model(item, client, messages, tool_name)
+
+        for turn_num in range(MAX_TURNS):
+            # 获取当前状态的提示
+            turn_prompt = get_turn_prompt(state, turn_num == 0)
+            assistant_msg, turn = await _call_model(
+                item, client, messages, tools=TOOLS, turn_prompt=turn_prompt
+            )
             turns.append(turn)
-            messages.extend(_tool_messages(assistant_msg, _run_tool(assistant_msg, item.record)))
+
+            # 执行工具并获取结果
+            tool_result = _run_tool(assistant_msg, item.record)
+            messages.extend(_tool_messages(assistant_msg, tool_result))
+
+            # 检查是否完成订单
+            if tool_result.get("data", {}).get("completed"):
+                # 订单完成，不再继续
+                break
+
         return turns
 
     try:
@@ -128,19 +154,17 @@ async def run_agent(ctx, batch):
         await client.close()
 
 
-async def _call_model(item, client, messages: list[dict], tool_name: str):
-    turn_messages = [*messages, {"role": "user", "content": TURN_PROMPTS[tool_name]}]
-    tools = [TOOL_BY_NAME[tool_name]]
-    tool_choice = {"type": "function", "function": {"name": tool_name}}
+async def _call_model(item, client, messages: list[dict], tools: list[dict], turn_prompt: str):
+    """Call the model with tools and prompt."""
+    turn_messages = [*messages, {"role": "user", "content": turn_prompt}]
     response = await client.chat.completions.create(
         model="policy",
         messages=turn_messages,
         tools=tools,
-        tool_choice=tool_choice,
+        # 不强制工具，让模型自己决定
         stream=False,
     )
     message = response.choices[0].message
-    tool_calls = [call for call in (message.tool_calls or []) if call.function.name == tool_name][:1]
     assistant_message = {
         "role": "assistant",
         "content": message.content,
@@ -153,31 +177,24 @@ async def _call_model(item, client, messages: list[dict], tool_name: str):
                     "arguments": call.function.arguments,
                 },
             }
-            for call in tool_calls
+            for call in (message.tool_calls or [])
         ],
     }
     if not assistant_message["tool_calls"]:
-        assistant_message["tool_calls"] = [
-            {
-                "id": f"missing_{tool_name}",
-                "type": "function",
-                "function": {
-                    "name": tool_name,
-                    "arguments": "{}",
-                },
-            }
-        ]
+        # 如果没有工具调用，记录下来
+        assistant_message["tool_calls"] = []
     return assistant_message, AgentTrajectoryTurn(
         item=item,
         messages=turn_messages,
         response=response,
         tools=tools,
-        tool_choice=tool_choice,
+        tool_choice=None,  # 不强制工具选择
     )
 
 
 def _tool_messages(assistant_message: dict, tool_result: dict) -> list[dict]:
     messages = [assistant_message]
+    # 为每个工具调用添加结果
     for call in assistant_message.get("tool_calls") or []:
         messages.append(
             {
@@ -187,21 +204,33 @@ def _tool_messages(assistant_message: dict, tool_result: dict) -> list[dict]:
                 "content": json.dumps(tool_result, ensure_ascii=False),
             }
         )
+    # 如果没有工具调用，添加一个空结果
+    if not assistant_message.get("tool_calls"):
+        messages.append(
+            {
+                "role": "tool",
+                "tool_call_id": "no_tool_call",
+                "name": "none",
+                "content": json.dumps({"error": "no tool call made", "data": {}}),
+            }
+        )
     return messages
 
 
 def _run_tool(assistant_message: dict, record: dict) -> dict:
-    """Execute the environment logic for a tool call."""
+    """Execute the environment logic for tool calls."""
 
     calls = assistant_message.get("tool_calls") or []
     if not calls:
-        return {"error": "missing tool call"}
+        return {"success": False, "message": "no tool call made", "data": {}}
+
+    # 执行第一个工具调用
     call = calls[0]
     name = call["function"]["name"]
     try:
         args = json.loads(call["function"]["arguments"] or "{}")
     except json.JSONDecodeError:
-        return {"error": "invalid JSON arguments"}
+        return {"success": False, "message": "invalid JSON arguments", "data": {}}
 
     state = _get_or_build_state(record)
 
@@ -213,4 +242,6 @@ def _run_tool(assistant_message: dict, record: dict) -> dict:
     if name == "submit_order":
         result = submit_order(state)
         return {"success": result.success, "message": result.message, "data": result.data}
-    return {"error": f"unknown tool: {name}"}
+
+    # 其他工具未知
+    return {"success": False, "message": f"unknown tool: {name}", "data": {}}

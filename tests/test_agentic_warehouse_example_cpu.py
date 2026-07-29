@@ -441,7 +441,8 @@ def test_warehouse_agent_missing_tool_call_returns_error():
 
     result = run_agent._run_tool(assistant_message, _make_record())
 
-    assert result == {"error": "missing tool call"}
+    assert result["success"] is False
+    assert "no tool call" in result["message"]
 
 
 def test_warehouse_agent_invalid_json_arguments():
@@ -461,7 +462,8 @@ def test_warehouse_agent_invalid_json_arguments():
 
     result = run_agent._run_tool(assistant_message, _make_record())
 
-    assert result == {"error": "invalid JSON arguments"}
+    assert result["success"] is False
+    assert "invalid JSON" in result["message"]
 
 
 def test_warehouse_agent_unknown_tool_returns_error():
@@ -481,7 +483,8 @@ def test_warehouse_agent_unknown_tool_returns_error():
 
     result = run_agent._run_tool(assistant_message, _make_record())
 
-    assert result == {"error": "unknown tool: fly"}
+    assert result["success"] is False
+    assert "unknown tool" in result["message"]
 
 
 # ── Reward function ──
