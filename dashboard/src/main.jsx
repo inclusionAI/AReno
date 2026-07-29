@@ -222,13 +222,7 @@ function savePreset(name, config, kind, presets) {
     localStorage.setItem(LAUNCH_PRESETS_STORAGE_KEY, JSON.stringify(updated));
     return updated;
   } catch {
-    const trimmed = [preset, ...rest].slice(0, Math.max(1, MAX_PRESETS / 2));
-    try {
-      localStorage.setItem(LAUNCH_PRESETS_STORAGE_KEY, JSON.stringify(trimmed));
-      return trimmed;
-    } catch {
-      return presets;
-    }
+    return presets;
   }
 }
 
