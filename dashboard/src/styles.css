@@ -2409,7 +2409,7 @@ textarea:focus {
   display: flex;
   justify-content: space-between;
   align-items: baseline;
-  margin-bottom: 4px;
+  gap: 16px;
 }
 
 .metricCardRowLabel {
@@ -2426,14 +2426,28 @@ textarea:focus {
   color: #f59e0b;
 }
 
-.metricCardVal {
-  font-size: 16px;
+.metricCardValSideA {
+  font-size: 15px;
   font-weight: 600;
   font-family: var(--mono-font, "SF Mono", "Fira Code", monospace);
   color: var(--text);
+  flex: 1;
+  text-align: right;
+  padding-right: 14px;
+  border-right: 1px solid var(--border);
 }
 
-.metricCardVal.metricBetter {
+.metricCardValSideB {
+  font-size: 15px;
+  font-weight: 600;
+  font-family: var(--mono-font, "SF Mono", "Fira Code", monospace);
+  color: var(--text);
+  flex: 1;
+  text-align: left;
+  padding-left: 14px;
+}
+
+.valBetter {
   color: #2d8f4f;
 }
 
