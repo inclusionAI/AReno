@@ -8,9 +8,9 @@ episode runner. The output uses only AReno's existing public contracts and
 introduces no external database or mandatory sandbox.
 
 Usage:
-    python .agents/skills/areno-build-agentic-workflow/scripts/generate_agentic_project.py \
-        --name my-gridworld \
-        --out examples/agentic/my-gridworld \
+    python .agents/skills/areno-build-agentic-workflow/scripts/generate_agentic_project.py \\
+        --name my-gridworld \\
+        --out examples/agentic/my-gridworld \\
         [--force] [--seed 2026]
 """
 
@@ -21,7 +21,6 @@ import json
 import re
 import sys
 from pathlib import Path
-from typing import Iterable
 
 NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 DEFAULT_SEED = 2026
@@ -45,10 +44,33 @@ def _header(name: str, seed: int, desc: str = "") -> str:
 
 
 # ---------------------------------------------------------------------------
+# A small helper injected into every generated module that needs to import a
+# sibling file (game.py / dataset_generator.py). Loading via importlib with a
+# project-unique module name keeps the generated project off the global
+# ``sys.modules`` keys ("game", "dataset_generator", ...) so it never collides
+# with other AReno examples (e.g. tictactoe) that share those generic names.
+# ---------------------------------------------------------------------------
+
+_SIBLING_LOADER = '''import importlib.util as _ilu
+from pathlib import Path as _P
+
+_THIS_DIR = _P(__file__).resolve().parent
+
+
+def _load_sibling(filename: str, unique_name: str):
+    """Import a sibling module under a project-unique name (no global pollution)."""
+    spec = _ilu.spec_from_file_location(unique_name, _THIS_DIR / filename)
+    assert spec is not None and spec.loader is not None
+    module = _ilu.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+'''
+
+
+# ---------------------------------------------------------------------------
 # Templates for the generated project files.
 # Each is a function of (name, seed) so output is fully deterministic.
 # ---------------------------------------------------------------------------
-
 
 def _game_py(name: str, seed: int) -> str:
     mod = _module_name(name)
@@ -182,12 +204,12 @@ def _dataset_loader_py(name: str, seed: int) -> str:
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 from typing import Any
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import game  # noqa: E402
+{_SIBLING_LOADER}
+
+game = _load_sibling("game.py", "{mod}_game")
 
 
 def load_training_dataset(dataset_path: str, *, default_loader=None, **_: Any) -> list[dict]:
@@ -202,7 +224,7 @@ def _load_records(dataset_path: str) -> list[dict]:
     if path.is_dir():
         path = path / "tasks.jsonl"
     if not path.exists():
-        import dataset_generator  # local fallback
+        dataset_generator = _load_sibling("dataset_generator.py", "{mod}_dataset_generator")
         return dataset_generator.generate_records()
     records = []
     with path.open("r", encoding="utf-8") as handle:
@@ -230,7 +252,6 @@ def _format_record(raw: dict, index: int) -> dict:
 
 
 def _tool_defs_py(name: str, seed: int) -> str:
-    mod = _module_name(name)
     return f'''{_header(name, seed, "Strict, bounded JSON tool schemas for the agent.")}
 
 from __future__ import annotations
@@ -266,7 +287,6 @@ def tool_choice() -> dict:
 
 
 def _run_agent_py(name: str, seed: int) -> str:
-    mod = _module_name(name)
     return f'''{_header(name, seed, f"Agent entrypoint for {name} tool-call rollouts.")}
 
 from __future__ import annotations
@@ -330,18 +350,16 @@ async def run_agent(ctx, batch):
 
 
 def _reward_py(name: str, seed: int) -> str:
-    mod = _module_name(name)
     return f'''{_header(name, seed, f"Reward function for the {name} tool-call example.")}
 
 from __future__ import annotations
 
 import json
-import sys
-from pathlib import Path
 from typing import Any
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import game  # noqa: E402
+{_SIBLING_LOADER}
+
+game = _load_sibling("game.py", "{_module_name(name)}_game")
 
 
 def reward_fn(record: Any) -> float:
@@ -385,11 +403,9 @@ def _run_episode_py(name: str, seed: int) -> str:
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
+{_SIBLING_LOADER}
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import game  # noqa: E402
+game = _load_sibling("game.py", "{mod}_game")
 
 # Fixed, deterministic action sequence: always reach the goal in {mod.upper()}_SIZE-1 steps.
 FIXED_ACTION_SEQ = [1] * (game.Env.SIZE - 1)
@@ -447,7 +463,7 @@ Expected observable output:
 reset obs={{'position': 0, 'size': 5}} render=[A . . . G]
 step i=0 action=1 reward=-0.1 done=False ...
 ...
-episode_total_reward=0.6
+episode_total_reward=0.7
 ```
 
 ## Train with AReno

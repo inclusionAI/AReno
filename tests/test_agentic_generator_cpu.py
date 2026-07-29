@@ -115,23 +115,37 @@ def test_generated_reward_fn_scores(tmp_path: Path) -> None:
     out = tmp_path / "proj"
     _run(["--name", "my-grid", "--out", str(out)], tmp_path)
 
-    spec = importlib.util.spec_from_file_location("generated_reward", out / "reward.py")
-    assert spec is not None and spec.loader is not None
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
+    # --- Isolation: the generated reward.py imports a sibling game.py via
+    # importlib under a project-unique name, but we still snapshot sys.modules
+    # and sys.path so this test cannot leak state into sibling test modules
+    # (e.g. tests/test_agentic_tictactoe_example_cpu.py). ---
+    saved_modules = set(sys.modules.keys())
+    saved_path = list(sys.path)
+    try:
+        spec = importlib.util.spec_from_file_location("generated_reward", out / "reward.py")
+        assert spec is not None and spec.loader is not None
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
 
-    class _Record:
-        def __init__(self, tool_calls, source_record):
-            self.tool_calls = tool_calls
-            self.source_record = source_record
+        class _Record:
+            def __init__(self, tool_calls, source_record):
+                self.tool_calls = tool_calls
+                self.source_record = source_record
 
-    legal = _Record([{"name": "act", "arguments": {"action": 1}}], {"start": 0})
-    illegal = _Record([{"name": "act", "arguments": {"action": 9}}], {"start": 0})
-    missing = _Record([{"name": "nope", "arguments": {}}], {"start": 0})
+        legal = _Record([{"name": "act", "arguments": {"action": 1}}], {"start": 0})
+        illegal = _Record([{"name": "act", "arguments": {"action": 9}}], {"start": 0})
+        missing = _Record([{"name": "nope", "arguments": {}}], {"start": 0})
 
-    assert isinstance(mod.reward_fn(legal), float)
-    assert mod.reward_fn(illegal) == -1.0
-    assert mod.reward_fn(missing) == -1.0
+        assert isinstance(mod.reward_fn(legal), float)
+        assert mod.reward_fn(illegal) == -1.0
+        assert mod.reward_fn(missing) == -1.0
+    finally:
+        # Restore sys.modules: drop any modules added during this test.
+        for key in list(sys.modules.keys()):
+            if key not in saved_modules:
+                del sys.modules[key]
+        # Restore sys.path.
+        sys.path[:] = saved_path
 
 
 def test_generator_is_deterministic(tmp_path: Path) -> None:
@@ -142,7 +156,7 @@ def test_generator_is_deterministic(tmp_path: Path) -> None:
     _run(["--name", "my-grid", "--out", str(out_b)], tmp_path)
 
     for name in EXPECTED_FILES:
-        if name.endswith(".py") or name.endswith(".md"):
+        if name.endswith((".py", ".md")):
             assert (out_a / name).read_text(encoding="utf-8") == (out_b / name).read_text(
                 encoding="utf-8"
             ), f"non-deterministic output for {name}"
