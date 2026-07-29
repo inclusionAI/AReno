@@ -56,11 +56,6 @@ def tensorboard_event_sources(path: Path, pid: int | None) -> list[Path]:
     return [file for file in event_files if pid_marker in file.name or file.parent.name == f"pid-{pid}"]
 
 
-def locate_event_files(metrics_dir: str | Path, pid: int | None = None) -> list[Path]:
-    """Public locator: resolve ``metrics_dir`` and return event file paths."""
-    return tensorboard_event_sources(Path(metrics_dir), pid)
-
-
 def read_scalar_points(metrics_dir: str | Path, pid: int | None = None) -> list[dict[str, Any]]:
     """Read TensorBoard scalars into de-duplicated ``[{name, value, step, time}]``.
 
@@ -163,9 +158,6 @@ def summarize_metric(
         last_step = max(steps)
         min_step = min(steps)
         max_step = last_step
-        for idx, step in enumerate(steps):
-            if step == last_step:
-                last = values[idx]
         window = values[-recent_n:] if recent_n > 0 else []
         window_steps = steps[-recent_n:] if recent_n > 0 else []
         recent = window

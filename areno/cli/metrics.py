@@ -67,6 +67,18 @@ def metrics_command(
     if not directory.exists():
         raise click.ClickException(f"metrics dir not found: {metrics_dir} (pid={pid})")
 
+    # Probe tensorboard up front: read_scalar_points silently returns [] when the
+    # import fails, which would otherwise look identical to "no metrics found".
+    # Raise a clear, located error so a missing dependency is distinguishable from
+    # an empty directory. (The dashboard keeps read_scalar_points' graceful
+    # degrade-to-empty; this probe is CLI-only.)
+    try:
+        import tensorboard  # noqa: F401
+    except ImportError as exc:
+        raise click.ClickException(
+            "tensorboard is not installed; run `pip install tensorboard` to read metrics."
+        ) from exc
+
     points = metric_reader.read_scalar_points(metrics_dir, pid)
     tags = metric_reader.list_available_tags(points)
 
