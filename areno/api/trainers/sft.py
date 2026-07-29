@@ -82,8 +82,17 @@ class SFTTrainer:
                 train_time_s = time.perf_counter() - train_start
                 if isinstance(result, dict):
                     result["policy_train_wall_time_s"] = train_time_s
+
+                # Extract loss and total_steps for dashboard display
+                extra_train = {}
+                if isinstance(result, dict):
+                    if "loss" in result:
+                        extra_train["loss"] = float(result["loss"])
+                    if self.config.max_steps is not None:
+                        extra_train["total_steps"] = self.config.max_steps
+
                 self.logger.info("epoch=%d step=%d role=policy stage=train_end rows=%d", epoch, step, len(train_batch))
-                record_dashboard_state(self.areno, stage="train_end", epoch=epoch, step=step, role="policy")
+                record_dashboard_state(self.areno, stage="train_end", epoch=epoch, step=step, role="policy", extra=extra_train if extra_train else None)
                 self.logger.info("epoch=%d step=%d train_stats=%s", epoch, step, result)
                 self._maybe_save(epoch, step)
                 step += 1
