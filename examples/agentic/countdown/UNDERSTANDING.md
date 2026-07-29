@@ -77,6 +77,11 @@ examples/agentic/countdown/
 ├── run_agent.py           # Agent 环境：多轮工具调用循环
 └── data/
     └── countdown.jsonl    # 10 道样本题
+
+tests/
+└── test_agentic_countdown_example_cpu.py   # 单元测试：loader / reward / 工具执行
 ```
 
 结构与已有的 `examples/agentic/tictactoe/` 保持一致，方便用户类比学习。
+测试文件放在仓库根的 `tests/` 目录，遵循 AReno 的 `_cpu` 后缀约定（CI 用
+`pytest tests/ -k cpu` 筛选），覆盖三个核心文件的纯函数逻辑。

@@ -19,6 +19,17 @@ submitting its final answer via the `finish` tool.
 | `data/countdown.jsonl` | 10 sample problems |
 | `UNDERSTANDING.md` | Design notes and the author's understanding of this PR |
 
+## Tests
+
+Unit tests for the loader, reward function, and in-process tool execution
+live at the repo root in
+`tests/test_agentic_countdown_example_cpu.py`. Run them with the rest of
+the CPU suite:
+
+```bash
+pytest tests/ -k cpu
+```
+
 ## Training
 
 ```bash
