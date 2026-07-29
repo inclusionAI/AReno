@@ -34,6 +34,7 @@ AReno documentation
    :caption: Cookbook
 
    cookbook/math-rlvr
+   Kaggle Dataset-Mixing Validation <cookbook/kaggle-dataset-mixing-validation>
    cookbook/tictactoe-agentic-rl
    cookbook/duelgrid-visual-agent
 
