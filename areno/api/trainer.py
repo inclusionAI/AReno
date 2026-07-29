@@ -515,25 +515,25 @@ class Trainer:
         finally:
             self._backend = None
             self._initialized = False
-        # Step 2: metrics
-        try:
-            if self._metrics is not None:
-                self._metrics.close()
-        except Exception:
-            logger.warning("metrics close failed", exc_info=True)
-        # Step 3: health checker — finalize the window early if the run ends
-        # before the configured startup window completes.
+        # Step 2: health checker — finalize the window early if the run ends
+        # before the configured startup window completes. Must run BEFORE
+        # metrics close so health/* TensorBoard scalars can be written.
         try:
             if self._health_checker is not None:
                 self._health_checker.finalize_early()
         except HealthCheckError:
-            # on_fail='fail': the user explicitly asked to abort.
             self._health_checker = None
             raise
         except Exception:
             logger.warning("health check finalize failed", exc_info=True)
         finally:
             self._health_checker = None
+        # Step 3: metrics — close the TensorBoard writer last.
+        try:
+            if self._metrics is not None:
+                self._metrics.close()
+        except Exception:
+            logger.warning("metrics close failed", exc_info=True)
 
 
 def _normalize_prompt_token_batch(prompt_tokens: list[list[int]]) -> list[list[int]]:
