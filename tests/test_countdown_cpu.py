@@ -66,8 +66,9 @@ class ScoreMoveTest(unittest.TestCase):
         self.assertEqual(game.score_move([1, 5], 10, None, 5, "+"), -1.0)
 
     def test_result_zero_with_nonzero_target(self):
+        """5 - 5 = 0, target 10: legal move, proximity = max(0, 1 - 10/10) = 0."""
         score = game.score_move([5, 5], 10, 5, 5, "-")
-        self.assertEqual(score, -0.5)
+        self.assertEqual(score, 0.0)
 
 
 class NormalizeNumbersTest(unittest.TestCase):
