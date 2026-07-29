@@ -1,115 +1,160 @@
-# 服务就绪状态
-
-AReno 提供了详细的服务就绪状态追踪功能，帮助你监控和调试服务启动过程。
+# 服务就绪状态追踪
 
 ## 概述
 
-当启动 AReno 服务时，系统会按顺序经过多个阶段，然后才能接受请求：
+AReno 的服务就绪（readiness）状态追踪功能，让你可以精确监控服务启动的每个阶段，知道当前卡在哪里、每个阶段花了多长时间、以及出错时的具体原因。
 
-1. **model_loading** — 正在加载模型权重
-2. **worker_ready** — 工作进程已初始化
-3. **router_ready** — 请求路由器已就绪
-4. **minimal_probe** — 基础健康检查通过
-5. **ready** — 完全就绪，可以接受请求
+## 使用方法
 
-如果任何阶段失败，系统会进入 **failed** 状态，并附带详细的错误信息。
+### 基本用法
 
-## 启用就绪状态追踪
+在 `areno serve` 命令中加上 `--enable-readiness` 参数即可启用：
 
-### CLI 选项
+```bash
+areno serve \
+  --model-path Qwen/Qwen3-0.6B \
+  --enable-readiness
+```
 
-使用 `--enable-readiness` 参数启用详细的就绪状态追踪：
+### 完整参数
 
 ```bash
 areno serve \
   --model-path Qwen/Qwen3-0.6B \
   --enable-readiness \
-  --readiness-timeout 30 \
-  --output text
+  --readiness-timeout 60 \
+  --output json
 ```
 
-可用选项：
+| 参数 | 说明 | 默认值 | 限制 |
+|------|------|--------|------|
+| `--enable-readiness` | 启用就绪状态追踪 | 关闭 | 不带参数，加在命令中即可 |
+| `--readiness-timeout` | 每个阶段的超时时间（秒） | `30` | 范围 1-3600，必须是正整数 |
+| `--output` | 输出格式 | `text` | 可选值：`text`、`json` |
 
-- `--enable-readiness` — 启用就绪状态追踪（默认：关闭）
-- `--readiness-timeout` — 每个阶段的超时时间（秒，默认：30，范围：1-3600）
-- `--output` — 输出格式：`text` 或 `json`（默认：text）
+### 关闭功能
 
-### 输出格式
+不加 `--enable-readiness` 就可以了，不产生任何额外输出。
 
-**文本格式**（默认）：
+## 输出内容
+
+### 1. 日志 / CLI 终端输出
+
+服务启动时，会实时打印每个阶段的状态：
+
 ```
 [AReno] Validating inputs... OK
 [AReno] model_loading... (1/5)
-[AReno] model_loading completed (1023ms) (1/5)
+[AReno] model_loading completed (25969ms) (1/5)
 [AReno] worker_ready (2/5)
+[AReno] worker_ready completed (5630ms) (2/5)
 [AReno] router_ready (3/5)
+[AReno] router_ready completed (12378ms) (3/5)
 [AReno] minimal_probe passed (4/5)
 [AReno] ready - server listening (5/5)
 ```
 
-**JSON 格式**（使用 `--output json`）：
-```json
-{
-  "status": "ready",
-  "stages": {
-    "model_loading": {"state": "completed", "duration_ms": 1023},
-    "worker_ready": {"state": "completed", "duration_ms": 45},
-    "router_ready": {"state": "completed", "duration_ms": 12},
-    "minimal_probe": {"state": "completed", "duration_ms": 5}
-  },
-  "last_completed_stage": "minimal_probe",
-  "error": null
-}
+每条日志的格式：`[阶段名称] [状态] ([第N阶段/共5阶段])`
+
+出错时：
+
+```
+[AReno] failed:model_loading - CUDA OOM: tried to allocate 12GB on device with 10GB free
 ```
 
-## HTTP 端点
+如果选择 JSON 格式（`--output json`），日志会输出 JSON 行。
 
-启用就绪状态追踪后，提供以下额外端点：
+### 2. HTTP 端点
 
-### GET /health
+启用就绪追踪后，以下端点可用：
 
-基础存活探针。服务器运行时返回 `200 OK`：
+| 端点 | 用途 | 未启用时的行为 |
+|------|------|---------------|
+| `GET /health` | 基础健康检查，服务在运行就返回 ok | 始终可用 |
+| `GET /ready` | 就绪探针，服务完全就绪才返回 ready | 返回 404 |
+| `GET /readiness/status` | 完整的阶段状态详情 | 返回 404 |
+| `GET /readiness/metrics` | Prometheus 格式指标 | 返回 404 |
 
-```json
-{"status": "ok"}
+#### GET /ready
+
+```bash
+curl http://localhost:8000/ready
 ```
 
-### GET /ready
-
-就绪探针。返回当前的就绪状态：
-
+**就绪时：**
 ```json
 {"status": "ready", "stage": "ready"}
 ```
+HTTP 状态码：200
 
-如果未就绪，返回 `503 Service Unavailable`：
-
+**未就绪时：**
 ```json
 {"status": "not_ready", "stage": "model_loading"}
 ```
+HTTP 状态码：503
 
-### GET /readiness/status
+#### GET /readiness/status
 
-完整的就绪状态，包含所有阶段详情：
+```bash
+curl http://localhost:8000/readiness/status | python -m json.tool
+```
 
 ```json
 {
-  "status": "not_ready",
-  "current_stage": "model_loading",
-  "stages": {
-    "model_loading": {"state": "in_progress", "duration_ms": 5234},
-    "worker_ready": {"state": "pending"},
-    "router_ready": {"state": "pending"},
-    "minimal_probe": {"state": "pending"}
-  },
-  "last_completed_stage": null,
-  "error": null
+    "status": "ready",
+    "current_stage": "ready",
+    "stages": {
+        "model_loading": {
+            "state": "completed",
+            "duration_ms": 5503,
+            "error": null
+        },
+        "worker_ready": {
+            "state": "completed",
+            "duration_ms": 2042,
+            "error": null
+        },
+        "router_ready": {
+            "state": "completed",
+            "duration_ms": 11868,
+            "error": null
+        },
+        "minimal_probe": {
+            "state": "completed",
+            "duration_ms": 293,
+            "error": null
+        },
+        "ready": {
+            "state": "in_progress",
+            "duration_ms": null,
+            "error": null
+        }
+    },
+    "last_completed_stage": "minimal_probe",
+    "error": null
 }
 ```
 
-### GET /readiness/metrics
+各字段说明：
 
-Prometheus 格式的指标：
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `status` | string | `"not_ready"`、`"ready"` 或 `"failed"` |
+| `current_stage` | string | 当前正在执行的阶段名称 |
+| `stages` | object | 包含 5 个阶段的详细状态 |
+| `stages.*.state` | string | `"pending"`、`"in_progress"`、`"completed"`、`"failed"` |
+| `stages.*.duration_ms` | int/null | 该阶段耗时（毫秒），未完成时为 null |
+| `stages.*.error` | string/null | 错误信息，正常时为 null |
+| `last_completed_stage` | string/null | 最后一个完成的阶段名，都未完成时为 null |
+| `error` | string/null | 全局错误信息 |
+
+#### GET /readiness/metrics
+
+```bash
+curl http://localhost:8000/readiness/metrics
+```
+
+输出 Prometheus 格式的指标，可用于被 Prometheus 服务抓取：
 
 ```
 # HELP areno_serve_readiness_state Current serve readiness state
@@ -117,203 +162,165 @@ Prometheus 格式的指标：
 areno_serve_readiness_state 4
 # HELP areno_serve_readiness_stage_duration_ms Duration of each readiness stage in milliseconds
 # TYPE areno_serve_readiness_stage_duration_ms gauge
-areno_serve_readiness_stage_duration_ms{stage="model_loading"} 3421
-areno_serve_readiness_stage_duration_ms{stage="worker_ready"} 512
+areno_serve_readiness_stage_duration_ms{stage="model_loading"} 5503
+areno_serve_readiness_stage_duration_ms{stage="worker_ready"} 2042
+areno_serve_readiness_stage_duration_ms{stage="router_ready"} 11868
+areno_serve_readiness_stage_duration_ms{stage="minimal_probe"} 293
 # HELP areno_serve_probe_requests_total Total number of probe requests
 # TYPE areno_serve_probe_requests_total counter
-areno_serve_probe_requests_total 42
+areno_serve_probe_requests_total 3
 # HELP areno_serve_uptime_seconds Uptime since server start
 # TYPE areno_serve_uptime_seconds gauge
-areno_serve_uptime_seconds 12.345
+areno_serve_uptime_seconds 16.335
 ```
 
-## 错误处理
+4 种指标：
 
-如果某个阶段失败，系统会进入 `failed` 状态并附带详细错误信息：
+| 指标名 | 类型 | label | 说明 |
+|--------|------|-------|------|
+| `areno_serve_readiness_state` | gauge | 无 | 当前状态数值（0=空, 1=pending, 2=model_loading, 3=worker_ready, 4=router_ready, 5=minimal_probe, 6=ready, -1=failed） |
+| `areno_serve_readiness_stage_duration_ms` | gauge | `stage` | 每个阶段的耗时（毫秒） |
+| `areno_serve_probe_requests_total` | counter | 无 | 探针请求总数（不含业务请求） |
+| `areno_serve_uptime_seconds` | gauge | 无 | 服务启动后的运行时长（秒） |
+
+## 实现原理
+
+### 6 个就绪状态
 
 ```
-[AReno] Validating inputs... OK
-[AReno] model_loading... (1/5)
-[AReno] failed:model_loading - CUDA OOM: tried to allocate 12GB on device with 10GB free
+model_loading → worker_ready → router_ready → minimal_probe → ready
+                                                                    ↓
+                                                                  failed（任何阶段出错）
 ```
 
-JSON 格式：
-```json
-{
-  "status": "failed",
-  "current_stage": "failed",
-  "stages": {
-    "model_loading": {"state": "failed", "duration_ms": 5234, "error": "CUDA OOM: tried to allocate 12GB on device with 10GB free"},
-    "worker_ready": {"state": "pending"},
-    "router_ready": {"state": "pending"},
-    "minimal_probe": {"state": "pending"}
-  },
-  "last_completed_stage": null,
-  "error": "CUDA OOM: tried to allocate 12GB on device with 10GB free"
-}
+| 状态 | 触发时机 | 说明 |
+|------|---------|------|
+| `model_loading` | 加载 tokenizer 和模型权重时 | 耗时取决于模型大小和硬件 |
+| `worker_ready` | 工作进程初始化完成后 | 包括设备分配 |
+| `router_ready` | 引擎（ArenoEngine）创建完成后 | 模型加载到 GPU 完成 |
+| `minimal_probe` | 基础推理验证通过后 | 发送一个最小请求验证推理通路 |
+| `ready` | 服务开始监听端口时 | 最终状态 |
+| `failed` | 任何阶段出错时 | 附带错误信息，服务无法启动 |
+
+### 状态流转规则
+
+- 只能按顺序前进，不能跳阶段或回退
+- 每个阶段有独立的超时计时
+- 超时后自动进入 `failed` 状态
+- 出错后停留在 `failed` 状态，不再变化
+
+### 探针隔离
+
+对 `/health`、`/ready`、`/readiness/status`、`/readiness/metrics` 的请求会被识别为探针请求，**不计入业务请求指标**，避免健康检查污染业务统计数据。
+
+## 使用场景
+
+### 场景 1：调试服务启动慢
+
+查看各阶段耗时，定位瓶颈：
+
+```
+model_loading completed (25969ms)  ← 模型加载耗时过长
+worker_ready completed (5630ms)
+router_ready completed (12378ms)
 ```
 
-常见的失败场景：
+### 场景 2：CI/CD 就绪判断
 
-- **超时** — 阶段执行时间超过了 `--readiness-timeout` 设置的值
-- **CUDA 内存不足** — 模型加载时 GPU 内存不足
-- **工作进程初始化失败** — 工作进程崩溃或启动失败
-- **路由器初始化失败** — 路由器设置失败
-
-## 输入验证
-
-在昂贵的初始化操作之前会进行输入验证：
-
-```bash
-# 无效的超时值
-areno serve --enable-readiness --readiness-timeout -1
-# [AReno] Validation error: --readiness-timeout must be at least 1. Got: -1
-
-# 非数字的超时值
-areno serve --enable-readiness --readiness-timeout "not_a_number"
-# [AReno] Validation error: --readiness-timeout must be a positive integer (invalid format). Got: 'not_a_number'
-```
-
-## 指标隔离
-
-对 `/health`、`/ready`、`/readiness/status` 和 `/readiness/metrics` 的探针请求**不计入**业务请求指标。这确保了健康检查不会影响你的请求统计数据。
-
-## 向后兼容
-
-就绪状态追踪**默认关闭**。未启用时：
-
-- 不会产生额外的日志输出
-- 不会新增 HTTP 端点（`/health` 仍可用，仅返回基本状态）
-- 指标不受影响
-- 现有行为保持不变
-
-## 配置文件示例
-
-创建 YAML 配置文件以复用设置：
+Kubernetes 等容器编排平台配置就绪探针：
 
 ```yaml
-# fixtures/readiness_minimal.yaml
-serve:
-  host: "127.0.0.1"
-  port: 18080
-  readiness:
-    enabled: true
-    timeout_per_stage_seconds: 30
-    probe_interval_seconds: 2
-
-model:
-  backend: "mock"
-  mock_config:
-    load_delay_seconds: 1
-    vocab_size: 1000
-    hidden_size: 64
-
-worker:
-  count: 1
-  mock: true
-
-router:
-  mock: true
+readinessProbe:
+  httpGet:
+    path: /ready
+    port: 8000
+  initialDelaySeconds: 5
+  periodSeconds: 10
 ```
 
-使用方法：
+### 场景 3：监控告警
+
+Prometheus 配合 Grafana 监控：
+
+```promql
+# 服务启动失败告警（5分钟内状态为 failed）
+areno_serve_readiness_state == -1
+```
+
+## 限制与注意事项
+
+### 已知限制
+
+| 限制 | 说明 |
+|------|------|
+| 单次启动 | readiness 状态机是服务级别的，一个进程只有一个状态机实例 |
+| 不可逆 | 状态只能前进，不能回退。如果服务需要重启，必须重新启动进程 |
+| 不适用于负载均衡 | readiness 只反映本进程的状态，不反映上游依赖的健康状况 |
+| 超时粒度为阶段级别 | 每个阶段独立的超时计时，不能为某个阶段单独设置不同的超时值 |
+
+### 注意事项
+
+1. **必须显式启用**：`--enable-readiness` 默认不开启，不加这个参数不会有任何就绪追踪功能
+2. **空响应**：在 `model_loading` 阶段，前几个 HTTP 端点可能还不可用
+3. **超时值选择**：大模型（如 70B+）加载可能超过 30 秒，建议设大超时值或等模型完全加载完再启用
+4. **端口冲突**：确保 `--port` 指定的端口未被占用，否则服务会启动失败
+5. **无持久化**：状态信息只在进程内存中，进程重启后丢失
+
+### 与其他系统的关系
+
+| 系统 | 关系 |
+|------|------|
+| Prometheus | 可以通过 `/readiness/metrics` 端点抓取指标 |
+| Kubernetes | `/ready` 端点可直接作为 `readinessProbe` 使用 |
+| Grafana | 可以导入 Prometheus 指标做可视化 |
+| AReno Dashboard | 当前版本暂未集成，可通过 `/readiness/status` API 自行集成 |
+
+## 完整示例
+
+### 启动并验证
 
 ```bash
-areno serve --config fixtures/readiness_minimal.yaml --enable-readiness
+# 终端 1：启动服务
+areno serve --model-path Qwen/Qwen3-0.6B --enable-readiness --port 8000
+
+# 终端 2：轮询等待就绪
+while true; do
+  RESP=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8000/ready)
+  echo "Ready probe: $RESP"
+  if [ "$RESP" = "200" ]; then
+    echo "Server is ready!"
+    break
+  fi
+  sleep 2
+done
+
+# 查看完整状态
+curl -s http://localhost:8000/readiness/status | python -m json.tool
 ```
 
-## 故障排查
-
-### 服务卡在 model_loading 阶段
-
-检查：
-
-1. 模型路径是否正确且可访问
-2. GPU 内存是否充足
-3. 如果从 Hugging Face 下载，网络连接是否正常
-
-### 工作进程初始化失败
-
-检查：
-
-1. `--world-size` 和 `--tp-size` 是否兼容
-2. 系统内存是否充足
-3. 同一 GPU 上是否有冲突的进程
-
-### 超时错误
-
-为慢速系统增加超时时间：
-
-```bash
-areno serve --enable-readiness --readiness-timeout 120
-```
-
-### 使用完整状态进行调试
-
-查询完整状态端点：
-
-```bash
-curl http://localhost:8000/readiness/status | jq
-```
-
-或查看指标：
-
-```bash
-curl http://localhost:8000/readiness/metrics
-```
-
-## API 参考
-
-### ReadinessStateMachine
-
-核心状态机类（供程序化使用）：
+### 程序化使用（Python）
 
 ```python
-from areno.engine.runtime.readiness import ReadinessStateMachine, ReadinessState
+import urllib.request, json, time
 
-sm = ReadinessStateMachine(
-    enabled=True,
-    timeout_per_stage_seconds=30.0,
-    on_state_change=lambda old, new, duration: print(f"{old} -> {new}: {duration}ms"),
-)
+# 等待就绪
+for i in range(30):
+    try:
+        resp = urllib.request.urlopen("http://localhost:8000/ready")
+        print(f"Ready after {i*2}s")
+        break
+    except urllib.error.HTTPError as e:
+        status = json.loads(e.read())
+        print(f"Waiting... stage: {status['stage']}")
+        time.sleep(2)
+    except Exception:
+        print(f"Not available yet... ({i*2}s)")
+        time.sleep(2)
+else:
+    print("Timeout waiting for server")
 
-# 按顺序经过各个阶段
-sm.mark_stage_complete(ReadinessState.MODEL_LOADING)
-sm.mark_stage_complete(ReadinessState.WORKER_READY)
-
-# 查看状态
-status = sm.get_status()
-print(status.to_dict())
-```
-
-### 输入验证
-
-```python
-from areno.engine.runtime.readiness_validation import validate_readiness_options, ValidationError
-
-try:
-    config = validate_readiness_options(
-        enabled=True,
-        timeout=30,
-    )
-    print(config)  # {'enabled': True, 'timeout_per_stage_seconds': 30, 'probe_interval_seconds': 2}
-except ValidationError as e:
-    print(e.to_dict())
-```
-
-### 指标收集
-
-```python
-from areno.engine.runtime.readiness import ReadinessStateMachine
-from areno.engine.runtime.readiness_metrics import ReadinessMetricsCollector
-
-sm = ReadinessStateMachine(enabled=True)
-collector = ReadinessMetricsCollector(sm)
-
-# 记录探针请求
-collector.record_probe_request()
-
-# 获取 Prometheus 格式的指标
-metrics = collector.get_metrics()
-print(metrics)
+# 获取详细状态
+resp = urllib.request.urlopen("http://localhost:8000/readiness/status")
+data = json.loads(resp.read())
+print(json.dumps(data, indent=2, ensure_ascii=False))
 ```
