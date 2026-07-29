@@ -1795,20 +1795,22 @@ function CompareRunsPanel({ jobList, refreshJobs, compareJobAId, setCompareJobAI
         y: 150 - ((p.value - minVal) / valSpan) * 130,
       }));
 
-      // 归一化模式：各自按进度拉伸到 0-100%
+      // 归一化模式：各自按进度拉伸到 0-100%，从各自的第一个step开始
       const toCoordsNorm = (points, maxStepLocal) => {
-        const localSpan = Math.max(maxStepLocal - 0, 1);
+        const minStepLocal = points.length > 0 ? points[0].step : 0;
+        const localSpan = Math.max(maxStepLocal - minStepLocal, 1);
         return points.map(p => ({
-          x: ((p.step - 0) / localSpan) * 680 + 10,
+          x: ((p.step - minStepLocal) / localSpan) * 680 + 10,
           y: 150 - ((p.value - minVal) / valSpan) * 130,
         }));
       };
 
       // 不归一化上下子图模式：各自用各自的step范围铺满全宽
       const toCoordsIndependent = (points, maxStepLocal) => {
-        const localSpan = Math.max(maxStepLocal - 0, 1);
+        const minStepLocal = points.length > 0 ? points[0].step : 0;
+        const localSpan = Math.max(maxStepLocal - minStepLocal, 1);
         return points.map(p => ({
-          x: ((p.step - 0) / localSpan) * 680 + 10,
+          x: ((p.step - minStepLocal) / localSpan) * 680 + 10,
           y: 120 - ((p.value - minVal) / valSpan) * 100,
         }));
       };
