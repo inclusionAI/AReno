@@ -2099,7 +2099,7 @@ textarea:focus {
 
 .compareSelector {
   display: flex;
-  align-items: flex-start;
+  align-items: flex-end;
   gap: 16px;
   padding: 20px;
   margin-bottom: 24px;
@@ -2160,7 +2160,7 @@ textarea:focus {
 }
 
 .primaryButton {
-  padding: 10px 24px;
+  padding: 0 28px;
   border-radius: 8px;
   border: none;
   background: #4f8cff;
@@ -2169,17 +2169,22 @@ textarea:focus {
   cursor: pointer;
   font-size: 14px;
   white-space: nowrap;
-  height: 40px;
-  transition: background 0.15s;
+  height: 39px;
+  transition: background 0.15s, transform 0.1s;
+  letter-spacing: 0.5px;
 }
 
 .primaryButton:disabled {
-  opacity: 0.5;
+  opacity: 0.4;
   cursor: not-allowed;
 }
 
 .primaryButton:not(:disabled):hover {
   background: #3a78f0;
+}
+
+.primaryButton:not(:disabled):active {
+  transform: scale(0.97);
 }
 
 .compareResults {
