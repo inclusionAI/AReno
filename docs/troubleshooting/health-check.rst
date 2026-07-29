@@ -39,10 +39,11 @@ Common signals
   Verify the reward function parses the completion and that the task actually
   admits variation. For legitimately constant-reward tasks, pass
   ``--health-check-allow-constant-reward``.
-* ``loss_change FAIL`` — loss is unchanged across the window. Check the
-  learning rate (``--lr``), gradient norm in ``train_stats`` (a near-zero
-  ``grad_norm`` pairs with a high ``grad_zero_ratio``), and whether the loss
-  mask leaves any response tokens trainable.
+* ``loss_change FAIL`` — loss is unchanged or barely changed across the
+  window (delta at or below ``min_abs_delta_fail``, which defaults to 0).
+  Check the learning rate (``--lr``), gradient norm in ``train_stats`` (a
+  near-zero ``grad_norm`` pairs with a high ``grad_zero_ratio``), and whether
+  the loss mask leaves any response tokens trainable.
 * ``skipped_batches FAIL`` — either the rollout skip ratio or the
   ``grad_zero_ratio`` proxy exceeded the fail threshold. A zero-batch window
   (``total_batches=0``) is itself a data/input anomaly.

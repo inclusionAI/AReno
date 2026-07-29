@@ -227,13 +227,17 @@ The four checks and their signals:
   lengths; zero across the window fails, a low per-batch mean warns.
 * ``reward_variance`` (stage=trainer) — reward std; with variation required,
   ``std==0`` fails and a low std warns. ``require_variation=false`` passes
-  constant reward. NaN reward fails and records the original error.
-* ``loss_change`` (stage=trainer) — first/last loss delta; ``delta==0`` with
-  ≥2 samples fails; a low delta warns. NaN loss fails. A single-step window
-  warns (unreliable delta).
+  constant reward, but an empty reward list still warns (data-pipeline anomaly).
+  NaN reward fails and records the original error.
+* ``loss_change`` (stage=trainer) — first/last loss delta; ``delta <=
+  min_abs_delta_fail`` (default 0, i.e. unchanged) with ≥2 samples fails; a
+  delta below ``min_abs_delta_warn`` warns. NaN loss fails. A single-step
+  window warns (unreliable delta).
 * ``skipped_batches`` (stage=rollout) — combines the rollout ``skipped_long``
-  ratio and the backend ``grad_zero_ratio`` proxy; the more severe sub-signal
-  wins. A zero-batch window fails pointing at the data/input contract.
+  ratio and the backend ``grad_zero_ratio`` proxy; reaching either threshold
+  triggers (comparisons are threshold-inclusive ``>=``). The more severe
+  sub-signal wins. A zero-batch window fails pointing at the data/input
+  contract.
 
 Failure messages reference only ``stage``, the triggering config field
 (``input``), and a ``metric_ref`` into the existing TensorBoard namespace —

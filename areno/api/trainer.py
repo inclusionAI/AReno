@@ -371,6 +371,12 @@ class Trainer:
         if self._health_checker is not None:
             try:
                 self._health_checker.observe(step=self._ctx.global_step, train_result=result, train_batch=batch_data)
+            except HealthCheckError:
+                # on_fail='fail': the user explicitly asked to abort.
+                # finish_step() must still run so the step state machine resets.
+                self.finish_step()
+                self._health_checker = None
+                raise
             except Exception:
                 logger.warning("health checker observe failed", exc_info=True)
         self.finish_step()
@@ -520,6 +526,10 @@ class Trainer:
         try:
             if self._health_checker is not None:
                 self._health_checker.finalize_early()
+        except HealthCheckError:
+            # on_fail='fail': the user explicitly asked to abort.
+            self._health_checker = None
+            raise
         except Exception:
             logger.warning("health check finalize failed", exc_info=True)
         finally:

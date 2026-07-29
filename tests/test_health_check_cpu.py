@@ -110,6 +110,16 @@ class CheckLogicTest(unittest.TestCase):
         r = check_reward_variance(cfg, _signals(rewards=[1.0, 1.0, 1.0]))
         self.assertEqual(r.status, "pass")
 
+    def test_reward_variance_empty_warns_even_when_variation_not_required(self):
+        cfg = HealthCheckConfig(
+            enabled=True,
+            startup_window_updates=3,
+            reward_variance=RewardVarianceCheckConfig(require_variation=False),
+        )
+        r = check_reward_variance(cfg, _signals(rewards=[]))
+        self.assertEqual(r.status, "warn")
+        self.assertEqual(r.input, "reward_variance")
+
     def test_reward_variance_nan_fails_with_original_error(self):
         cfg = HealthCheckConfig(enabled=True, startup_window_updates=3)
         sig = _signals(rewards=[0.1, float("nan"), 0.2])
@@ -128,6 +138,17 @@ class CheckLogicTest(unittest.TestCase):
         cfg = HealthCheckConfig(enabled=True, startup_window_updates=3)
         r = check_loss_change(cfg, _signals(losses=[1.5, 1.5, 1.5]))
         self.assertEqual(r.status, "fail")
+
+    def test_loss_change_below_custom_fail_threshold_fails(self):
+        cfg = HealthCheckConfig(
+            enabled=True,
+            startup_window_updates=3,
+            loss_change=LossChangeCheckConfig(min_abs_delta_fail=0.1, min_abs_delta_warn=0.2),
+        )
+        # delta = |2.0 - 2.05| = 0.05 < 0.1 → fail
+        r = check_loss_change(cfg, _signals(losses=[2.05, 2.0, 2.0]))
+        self.assertEqual(r.status, "fail")
+        self.assertEqual(r.input, "loss_change.min_abs_delta_fail")
 
     def test_loss_change_single_step_warns(self):
         cfg = HealthCheckConfig(enabled=True, startup_window_updates=1)
@@ -343,6 +364,33 @@ class TrainerHookTest(unittest.TestCase):
             batch = [_seq(prompt_len=2, resp_len=4)]
             trainer.train(batch, lambda data, lp: 0.0, mini_bs=1)
             self.assertFalse(pathlib.Path(tmp, "health_check").exists())
+
+    def test_on_fail_raises_health_check_error(self):
+        import tempfile
+        from areno.api.health_check import HealthCheckError
+
+        cfg = HealthCheckConfig(
+            enabled=True,
+            startup_window_updates=2,
+            on_fail="fail",
+            reward_variance=RewardVarianceCheckConfig(require_variation=True),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            trainer = self._make_trainer_with_checker(cfg, tmp)
+
+            class BackendStub:
+                def train(self, ctx, batch, loss_fn, mini_bs, grad_accum):
+                    # Constant loss + zero effective tokens → degenerate.
+                    return {"loss": 1.5, "grad_zero_ratio": 0.0}
+
+            trainer._backend = BackendStub()
+            # Zero-length responses → effective_tokens fail + constant reward.
+            batch = [_seq(prompt_len=4, resp_len=0, reward=0.0)]
+            trainer.train(batch, lambda data, lp: 0.0, mini_bs=1)
+            # Second train() fills the window → _evaluate() raises HealthCheckError.
+            with self.assertRaises(HealthCheckError) as ctx_err:
+                trainer.train(batch, lambda data, lp: 0.0, mini_bs=1)
+            self.assertIn("health-check FAIL", str(ctx_err.exception))
 
 
 class CollectStatsReuseTest(unittest.TestCase):
