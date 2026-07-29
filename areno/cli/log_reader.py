@@ -29,7 +29,6 @@ import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 from areno.cli.log_filter import LogEntry, parse_line
 
@@ -63,7 +62,7 @@ class LogReader:
         self,
         paths: list[str | Path],
         *,
-        source_labels: Optional[list[str]] = None,
+        source_labels: list[str] | None = None,
     ) -> None:
         if not paths:
             raise ValueError("LogReader requires at least one path")
@@ -82,7 +81,7 @@ class LogReader:
     def read(
         self,
         *,
-        tail: Optional[int] = None,
+        tail: int | None = None,
         follow: bool = False,
         poll_interval: float = 1.0,
     ) -> tuple[Iterator[LogEntry], ReadStats]:
@@ -108,7 +107,7 @@ class LogReader:
     # Non-follow mode
     # ------------------------------------------------------------------
 
-    def _read_once(self, tail: Optional[int], stats: ReadStats) -> Iterator[LogEntry]:
+    def _read_once(self, tail: int | None, stats: ReadStats) -> Iterator[LogEntry]:
         """Read each file once, optionally only the last *tail* lines."""
         for idx, path in enumerate(self._paths):
             if not path.exists():
@@ -168,7 +167,7 @@ class LogReader:
 
     def _read_with_follow(
         self,
-        tail: Optional[int],
+        tail: int | None,
         poll_interval: float,
         stats: ReadStats,
     ) -> Iterator[LogEntry]:

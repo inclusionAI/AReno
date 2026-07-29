@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Optional
 
 # Valid values exposed to the CLI.
 VALID_STAGES = frozenset({"train", "eval", "rollout", "serve"})
@@ -48,10 +47,10 @@ class FilterSpec:
     All specified dimensions are combined with AND logic.
     """
 
-    rank: Optional[int] = None
-    stage: Optional[str] = None
-    severity: Optional[str] = None
-    text_pattern: Optional[re.Pattern] = None
+    rank: int | None = None
+    stage: str | None = None
+    severity: str | None = None
+    text_pattern: re.Pattern | None = None
 
 
 def matches(entry: LogEntry, spec: FilterSpec) -> bool:
@@ -186,7 +185,7 @@ def _infer_stage(logger_name: str) -> str:
     return ""
 
 
-def compile_grep(pattern: str) -> re.Pattern:
+def compile_grep(pattern: str) -> re.Pattern[str]:
     """Compile a user-supplied grep pattern.
 
     Raises ``re.error`` on invalid patterns; the CLI layer converts that

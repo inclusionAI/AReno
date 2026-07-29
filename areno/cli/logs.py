@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import re
 import sys
-from typing import Optional
 
 import click
 
@@ -36,15 +35,15 @@ _VALID_OUTPUTS = ("text", "json")
 
 def _validate_inputs(
     run_id: str,
-    tail: Optional[int],
+    tail: int | None,
     follow: bool,
-    rank: Optional[int],
-    stage: Optional[str],
-    severity: Optional[str],
-    grep: Optional[str],
+    rank: int | None,
+    stage: str | None,
+    severity: str | None,
+    grep: str | None,
     output: str,
     poll_interval: float,
-) -> Optional[tuple[str, str, str]]:
+) -> tuple[str, str, str] | None:
     """Validate all CLI inputs before any file access.
 
     Returns ``(stage, input_name, message)`` on failure, or ``None`` if
@@ -119,12 +118,12 @@ def _validate_inputs(
 )
 def logs_command(
     run_id: str,
-    tail: Optional[int],
+    tail: int | None,
     follow: bool,
-    rank: Optional[int],
-    stage: Optional[str],
-    severity: Optional[str],
-    grep: Optional[str],
+    rank: int | None,
+    stage: str | None,
+    severity: str | None,
+    grep: str | None,
     output: str,
     poll_interval: float,
 ) -> None:
