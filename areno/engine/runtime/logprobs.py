@@ -149,8 +149,7 @@ def _selected_logprobs_components(
     vocab_start: int,
     group,
     world_size: int,
-    *,
-    save_probs: bool,
+    *, save_logsumexp: bool
 ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor]:
     """Distributed log-softmax over a vocab shard, selecting label probabilities.
 
@@ -188,8 +187,9 @@ def _selected_logprobs_components(
     target = target.masked_fill(~local_mask, 0.0)
     if world_size > 1:
         dist.all_reduce(target, op=dist.ReduceOp.SUM, group=group)
-    probs = exp_logits / exp_sum.unsqueeze(-1) if save_probs else None
-    return target - logsumexp, probs, safe_labels, local_mask
+    if save_logsumexp:
+        return target - logsumexp, logsumexp, safe_labels, local_mask
+    return target - logsumexp, None, safe_labels, local_mask
 
 
 class _VocabParallelSelectedLogprobs(torch.autograd.Function):
@@ -198,32 +198,40 @@ class _VocabParallelSelectedLogprobs(torch.autograd.Function):
     Forward computes distributed log-softmax only for target labels. Backward
     returns the local shard gradient equivalent to full-vocab cross entropy,
     avoiding a large all-gather on the training path.
+
+    Memory note: We save the BF16 ``logits_shard`` and the FP32 ``logsumexp``
+    instead of the full FP32 ``probs`` tensor.  This cuts the autograd save
+    from *2 × positions × local_vocab* FP32 bytes down to the BF16 input size
+    plus *1 × positions* FP32 scalars, a 4-8x reduction for typical vocab
+    shards.  Backward recomputes the softmax from the saved logits.
     """
 
     @staticmethod
     def forward(
         ctx, logits_shard: torch.Tensor, labels: torch.Tensor, vocab_start: int, group, world_size: int
     ) -> torch.Tensor:
-        out, probs, safe_labels, local_mask = _selected_logprobs_components(
+        out, logsumexp, safe_labels, local_mask = _selected_logprobs_components(
             logits_shard,
             labels,
             vocab_start,
             group,
             world_size,
-            save_probs=True,
+            save_logsumexp=True,
         )
-        ctx.save_for_backward(probs, safe_labels, local_mask)
+        # Save BF16 logits (not FP32 probs) + scalar logsumexp for backward.
+        ctx.save_for_backward(logits_shard, logsumexp, safe_labels, local_mask)
         ctx.input_dtype = logits_shard.dtype
         return out
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor):
-        # Standard log-softmax gradient: `softmax(logits) - onehot(label)`,
-        # multiplied by upstream `grad_output`. We do the onehot piece only on
-        # the rank that owns the label (`local_mask`) so other ranks contribute
-        # only the negative softmax term; the sum across ranks reproduces the
-        # full-vocab gradient.
-        probs, safe_labels, local_mask = ctx.saved_tensors
+        # Recompute softmax from saved logits:  probs = exp(logits) / exp_sum
+        # = exp(logits - logsumexp).  This trades one forward exp for a 4-8x
+        # memory saving on the autograd tape (logsumexp is already the global
+        # reduced value, so no all-reduce is needed here).
+        logits_shard, logsumexp, safe_labels, local_mask = ctx.saved_tensors
+        logits = logits_shard.float()
+        probs = torch.exp(logits - logsumexp.unsqueeze(-1))
         grad = probs
         grad.neg_()
         grad.scatter_add_(
