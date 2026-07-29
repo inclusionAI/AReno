@@ -1,11 +1,12 @@
 """Tests for non-finite value detection and reporting (Issue #238)."""
 
+import os
 import sys
 import math
 import torch
 import torch.nn as nn
 
-sys.path.insert(0, "/kaggle/working/AReno")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from areno.engine.runtime.non_finite import (
     check_loss_non_finite,
@@ -19,7 +20,7 @@ def test_normal_no_report():
     loss = model(x).sum()
     loss.backward()
     report = detect_non_finite(model, opt, loss, grad_norm=1.0, step=10, lr=1e-3)
-    assert report is None, "正常训练不应报异常"
+    assert report is None, "normal training should not produce a report"
     print("✅ test_normal_no_report passed")
 
 def test_loss_nan():
@@ -62,7 +63,7 @@ def test_grad_explosion():
     x = torch.randn(2, 4)
     loss = model(x).sum()
     loss.backward()
-    # 人为制造梯度爆炸
+    # Inject gradient explosion
     for p in model.parameters():
         if p.grad is not None:
             p.grad.fill_(1e8)

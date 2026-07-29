@@ -1,11 +1,13 @@
 """Non-finite value detection and actionable reporting.
-创建检测器模块
+
 Issue #238: Produce an actionable non-finite-value training report.
 """
 
 from __future__ import annotations
 
+import json
 import math
+import os
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -53,8 +55,7 @@ class NonFiniteReport:
         self.suggestions = _infer_suggestions(self)
 
     def to_dict(self) -> dict[str, Any]:
-        # Only numeric values safe for _merge_metrics (no strings/lists)
-        import math
+        """Return numeric-only metrics dict safe for _merge_metrics."""
         total_nan = sum(e.nan_count for e in self.events)
         total_inf = sum(e.inf_count for e in self.events)
         affected_layers = len(set(e.layer for e in self.events if e.layer not in ("loss", "optimizer")))
@@ -71,7 +72,6 @@ class NonFiniteReport:
 
     def to_json_dict(self) -> dict[str, Any]:
         """Full structured dict for JSON file export (not limited to numeric types)."""
-        import math
         return {
             "step": self.step,
             "phase": self.phase,
@@ -103,14 +103,12 @@ class NonFiniteReport:
 
     def to_json_file(self, output_dir: str = "non_finite_reports") -> str:
         """Write full report to a JSON file. Returns the file path."""
-        import os, json
         os.makedirs(output_dir, exist_ok=True)
         fname = f"step_{self.step}_{self.phase}.json"
         fpath = os.path.join(output_dir, fname)
         data = self.to_json_dict()
         # Replace NaN/Inf with null for valid JSON
         def _sanitize(obj):
-            import math
             if isinstance(obj, float):
                 if math.isnan(obj) or math.isinf(obj):
                     return None
@@ -165,7 +163,7 @@ class NonFiniteReport:
             lines.append(f"  Recent losses: [{', '.join(shown)}]")
         if len(self.events) > max_show:
             lines.append(f"  ... and {len(self.events) - max_show} more events (showing first {max_show})")
-            # 汇总统计
+            # Summary statistics
             grad_events = sum(1 for e in self.events if e.is_gradient)
             param_events = sum(1 for e in self.events if not e.is_gradient)
             total_nan = sum(e.nan_count for e in self.events)
@@ -375,7 +373,7 @@ def _safe_optimizer_state(optimizer) -> list[tuple[int, int, str, torch.Tensor]]
     """Yield (group_idx, param_idx, state_name, tensor) from any optimizer."""
     entries = []
     try:
-        # 标准 PyTorch optimizer
+        # Standard PyTorch optimizer
         for group_idx, group in enumerate(optimizer.param_groups):
             for p_idx, p in enumerate(group["params"]):
                 if p not in optimizer.state:
@@ -385,7 +383,7 @@ def _safe_optimizer_state(optimizer) -> list[tuple[int, int, str, torch.Tensor]]
                     if isinstance(sval, torch.Tensor):
                         entries.append((group_idx, p_idx, sname, sval))
     except AttributeError:
-        # 自定义优化器 (如 AdamWFP32Master)
+        # Custom optimizer (e.g. AdamWFP32Master)
         try:
             state = getattr(optimizer, "state", {})
             for pid, sdict in state.items():

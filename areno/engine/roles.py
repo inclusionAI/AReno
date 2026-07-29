@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+
 import torch
 
 from areno.engine.checkpoints.io import SafetensorsIndex
@@ -471,9 +473,23 @@ class RoleManager:
         loss_unclipped = (values - target).pow(2)
         loss_clipped = (clipped - target).pow(2)
         loss = value_loss_coef * 0.5 * torch.maximum(loss_unclipped[valid], loss_clipped[valid]).mean()
+        _non_finite_loss = check_loss_non_finite(loss)
         (loss / max(group_size, 1)).backward()
         accumulate_role_main_gradients(role)
         stats.add(loss, loss_unclipped, loss_clipped, values, target, baseline, valid)
+        # --- Non-finite detection for Critic (#238) ---
+        if _non_finite_loss:
+            _nf_report = detect_non_finite(
+                model=role.model,
+                optimizer=role.optimizer,
+                loss=loss,
+                grad_norm=0.0,
+                step=self.worker._global_step,
+                lr=role.optimizer.lr if role.optimizer else 0.0,
+                phase="critic",
+            )
+            if _nf_report is not None:
+                print(_nf_report.format_terminal(), file=sys.stderr, flush=True)
         if allow_step:
             self._maybe_step_role(role)
 

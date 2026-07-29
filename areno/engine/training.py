@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import sys
 
 import torch
 import torch.distributed as dist
@@ -21,6 +22,7 @@ from areno.engine.runtime.train_step import (
     _pack_train_data,
     _train_meta,
 )
+
 
 class TrainingManager:
     """Own actor forward/backward, gradient sync, and optimizer stepping."""
@@ -116,7 +118,6 @@ class TrainingManager:
                     phase="actor",
                 )
                 if _nf_report is not None:
-                    import sys
                     print(_nf_report.format_terminal(), file=sys.stderr, flush=True)
                     if metrics is None:
                         metrics = {}
