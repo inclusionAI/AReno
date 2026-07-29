@@ -377,7 +377,7 @@ class TestDatasetGeneration(unittest.TestCase):
 
 
 class TestRewardFunction(unittest.TestCase):
-    """reward_fn should return 1.0 for correct diagnosis, 0.0 otherwise."""
+    """reward_fn should return correct reward dict for various tool call patterns."""
 
     def test_correct_diagnosis(self):
         record = type(
@@ -389,7 +389,9 @@ class TestRewardFunction(unittest.TestCase):
                 "completion": "",
             },
         )()
-        self.assertEqual(reward.reward_fn(record), 1.0)
+        result = reward.reward_fn(record)
+        self.assertEqual(result["reward"], 1.0)
+        self.assertEqual(result["submitted"], 1.0)
 
     def test_incorrect_diagnosis(self):
         record = type(
@@ -401,7 +403,9 @@ class TestRewardFunction(unittest.TestCase):
                 "completion": "",
             },
         )()
-        self.assertEqual(reward.reward_fn(record), 0.0)
+        result = reward.reward_fn(record)
+        self.assertEqual(result["reward"], 0.0)
+        self.assertEqual(result["submitted"], 1.0)
 
     def test_no_submit_call(self):
         record = type(
@@ -413,7 +417,9 @@ class TestRewardFunction(unittest.TestCase):
                 "completion": "",
             },
         )()
-        self.assertEqual(reward.reward_fn(record), 0.0)
+        result = reward.reward_fn(record)
+        self.assertEqual(result["reward"], 0.0)
+        self.assertEqual(result["submitted"], 0.0)
 
     def test_string_arguments(self):
         record = type(
@@ -425,7 +431,45 @@ class TestRewardFunction(unittest.TestCase):
                 "completion": "",
             },
         )()
-        self.assertEqual(reward.reward_fn(record), 1.0)
+        result = reward.reward_fn(record)
+        self.assertEqual(result["reward"], 1.0)
+
+    def test_probes_counted(self):
+        """probes_used should count probe calls before submit."""
+        record = type(
+            "R",
+            (),
+            {
+                "source_record": {"faulty_gate_id": 4},
+                "tool_calls": [
+                    {"name": "probe", "arguments": {"wire_id": 5, "inputs": [True, False, True]}},
+                    {"name": "probe", "arguments": {"wire_id": 3, "inputs": [False, True, False]}},
+                    {"name": "probe", "arguments": {"wire_id": 4, "inputs": [True, True, True]}},
+                    {"name": "submit", "arguments": {"gate_id": 4}},
+                ],
+                "completion": "",
+            },
+        )()
+        result = reward.reward_fn(record)
+        self.assertEqual(result["reward"], 1.0)
+        self.assertEqual(result["probes_used"], 3.0)
+        self.assertEqual(result["submitted"], 1.0)
+
+    def test_no_tool_calls(self):
+        """No tool calls at all should return zero everything."""
+        record = type(
+            "R",
+            (),
+            {
+                "source_record": {"faulty_gate_id": 4},
+                "tool_calls": [],
+                "completion": "I don't know",
+            },
+        )()
+        result = reward.reward_fn(record)
+        self.assertEqual(result["reward"], 0.0)
+        self.assertEqual(result["probes_used"], 0.0)
+        self.assertEqual(result["submitted"], 0.0)
 
 
 # ---------------------------------------------------------------------------
