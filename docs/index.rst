@@ -43,6 +43,7 @@ AReno documentation
    :caption: Reference
 
    CLI Reference <reference/cli>
+   Dedup <cli/dedup>
    SDK Reference <sdk/trainer>
    Supported Models <models/supported>
 

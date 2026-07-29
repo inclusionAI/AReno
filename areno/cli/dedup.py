@@ -14,7 +14,6 @@ Output can be human-readable (default) or JSON (``--json``).
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 
 import click
@@ -89,22 +88,32 @@ def _load_records(path: str) -> list[dict]:
 )
 @click.option(
     "--threshold",
-    type=float,
+    type=click.FloatRange(min=0.0, max=1.0, min_open=True),
     default=0.8,
     show_default=True,
     help="Jaccard similarity threshold for near mode (0.0-1.0).",
 )
 @click.option(
     "--ngram-size",
-    type=int,
+    type=click.IntRange(min=1),
     default=5,
     show_default=True,
     help="Character n-gram size for near mode shingling.",
 )
 @click.option(
+    "--max-features",
+    type=click.IntRange(min=1),
+    default=2048,
+    show_default=True,
+    help="Maximum shingles retained per record in near mode.",
+)
+@click.option(
     "--text-keys",
     default=None,
-    help="Comma-separated field names for text extraction (default: prompt,question,text,content,input,query).",
+    help=(
+        "Comma-separated field names for prompt extraction "
+        "(default: prompt,question,instruction,problem,text,content,input,query)."
+    ),
 )
 @click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON output.")
 def dedup_command(
@@ -113,6 +122,7 @@ def dedup_command(
     scope: str,
     threshold: float,
     ngram_size: int,
+    max_features: int,
     text_keys: str | None,
     as_json: bool,
 ) -> None:
@@ -120,21 +130,32 @@ def dedup_command(
 
     from areno.dedup import find_duplicates, format_duplicate_report
 
+    keys = None
+    if text_keys is not None:
+        raw_keys = text_keys.split(",")
+        if any(not key.strip() for key in raw_keys):
+            raise click.BadParameter(
+                "must be a comma-separated list of non-empty field names",
+                param_hint="--text-keys",
+            )
+        keys = [key.strip() for key in raw_keys]
+
     records = _load_records(data_path)
     if not records:
-        click.echo("No records found in dataset.", err=True)
-        sys.exit(1)
+        raise click.ClickException("No records found in dataset.")
 
-    keys = text_keys.split(",") if text_keys else None
-
-    report = find_duplicates(
-        records,
-        mode=mode,
-        scope=scope,
-        text_keys=keys,
-        threshold=threshold,
-        ngram_size=ngram_size,
-    )
+    try:
+        report = find_duplicates(
+            records,
+            mode=mode,
+            scope=scope,
+            text_keys=keys,
+            threshold=threshold,
+            ngram_size=ngram_size,
+            max_features=max_features,
+        )
+    except (TypeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
 
     if as_json:
         click.echo(json.dumps(report.to_dict(), indent=2))

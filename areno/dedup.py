@@ -31,6 +31,8 @@ Public API:
 from __future__ import annotations
 
 import hashlib
+import heapq
+import json
 import re
 import unicodedata
 from collections.abc import Sequence
@@ -60,6 +62,8 @@ def normalize_text(text: str) -> str:
         Normalised text string.
     """
 
+    if not isinstance(text, str):
+        raise TypeError("text must be a string")
     if not text:
         return ""
     normalised = unicodedata.normalize("NFC", text)
@@ -100,17 +104,37 @@ def shingle_signature(
         A :class:`frozenset` of n-gram strings.
     """
 
+    if not isinstance(text, str):
+        raise TypeError("text must be a string")
+    if not isinstance(ngram_size, int) or isinstance(ngram_size, bool) or ngram_size < 1:
+        raise ValueError(f"ngram_size must be a positive integer, got {ngram_size!r}")
+    if not isinstance(max_features, int) or isinstance(max_features, bool) or max_features < 1:
+        raise ValueError(f"max_features must be a positive integer, got {max_features!r}")
     if not text:
         return frozenset()
     normalised = normalize_text(text)
     if len(normalised) < ngram_size:
         return frozenset({normalised}) if normalised else frozenset()
-    shingles: set[str] = set()
+    # Keep the bottom-k shingles by a stable hash.  Retaining the first k
+    # shingles would over-weight the beginning of long examples and could
+    # make records with identical prefixes look artificially identical.
+    selected: set[str] = set()
+    heap: list[tuple[int, str]] = []
     for i in range(len(normalised) - ngram_size + 1):
-        shingles.add(normalised[i : i + ngram_size])
-        if len(shingles) >= max_features:
-            break
-    return frozenset(shingles)
+        shingle = normalised[i : i + ngram_size]
+        if shingle in selected:
+            continue
+        rank = int.from_bytes(hashlib.blake2b(shingle.encode("utf-8"), digest_size=8).digest(), "big")
+        entry = (-rank, shingle)
+        if len(heap) < max_features:
+            heapq.heappush(heap, entry)
+            selected.add(shingle)
+            continue
+        if rank < -heap[0][0]:
+            _, removed = heapq.heapreplace(heap, entry)
+            selected.remove(removed)
+            selected.add(shingle)
+    return frozenset(selected)
 
 
 def jaccard_similarity(sig_a: frozenset[str], sig_b: frozenset[str]) -> float:
@@ -169,6 +193,10 @@ class DuplicateReport:
         match_type: The detection mode used ("exact" or "near").
         threshold: Jaccard similarity threshold (only for "near" mode).
         ngram_size: Character n-gram size used for shingling.
+        scope: Comparison scope used for the scan.
+        text_keys: Prompt fields checked in priority order, or ``None`` for
+            full-sample comparison.
+        max_features: Maximum shingles retained per record in near mode.
     """
 
     groups: list[DuplicateGroup]
@@ -178,6 +206,9 @@ class DuplicateReport:
     match_type: Literal["exact", "near"]
     threshold: float = 1.0
     ngram_size: int = 5
+    scope: Literal["prompt", "full"] = "prompt"
+    text_keys: tuple[str, ...] | None = None
+    max_features: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serialisable dict for structured output."""
@@ -198,6 +229,9 @@ class DuplicateReport:
             "match_type": self.match_type,
             "threshold": self.threshold,
             "ngram_size": self.ngram_size,
+            "scope": self.scope,
+            "text_keys": list(self.text_keys) if self.text_keys is not None else None,
+            "max_features": self.max_features,
         }
 
     @property
@@ -214,45 +248,68 @@ class DuplicateReport:
 # ---------------------------------------------------------------------------
 
 # Field names checked in priority order for prompt/text extraction.
-_DEFAULT_TEXT_KEYS: tuple[str, ...] = ("prompt", "question", "text", "content", "input", "query")
+_DEFAULT_TEXT_KEYS: tuple[str, ...] = (
+    "prompt",
+    "question",
+    "instruction",
+    "problem",
+    "text",
+    "content",
+    "input",
+    "query",
+)
 
 
-def _extract_text(record: dict[str, Any], text_keys: Sequence[str] | None) -> str:
+def _normalise_text_keys(text_keys: Sequence[str] | None) -> tuple[str, ...]:
+    """Validate prompt field names and return a deterministic tuple."""
+
+    if text_keys is None:
+        return _DEFAULT_TEXT_KEYS
+    if isinstance(text_keys, str):
+        raise TypeError("text_keys must be a sequence of field names, not a string")
+    keys = tuple(text_keys)
+    if not keys:
+        raise ValueError("text_keys must contain at least one field name")
+    normalised: list[str] = []
+    for key in keys:
+        if not isinstance(key, str) or not key.strip():
+            raise ValueError("text_keys must contain only non-empty strings")
+        stripped = key.strip()
+        if stripped not in normalised:
+            normalised.append(stripped)
+    return tuple(normalised)
+
+
+def _extract_text(record: dict[str, Any], text_keys: tuple[str, ...], record_index: int) -> str:
     """Extract the primary text from a record for comparison.
 
     Args:
         record: A dataset row dict.
-        text_keys: Ordered field names to check.  Defaults to
-            ``("prompt", "question", "text", "content", "input", "query")``.
+        text_keys: Ordered field names to check.
+        record_index: Index used in validation errors.
 
     Returns:
-        The first string field found, or empty string if none.
+        The first string field found.
 
     Raises:
-        KeyError: If ``text_keys`` is provided but none of the keys exist
-            and the record has no string values at all.
+        ValueError: If none of the selected fields contains a string.
     """
 
-    keys = tuple(text_keys) if text_keys is not None else _DEFAULT_TEXT_KEYS
-    for key in keys:
+    for key in text_keys:
         value = record.get(key)
         if isinstance(value, str):
             return value
-    # Fallback: try any string value in the record.
-    for value in record.values():
-        if isinstance(value, str):
-            return value
-    return ""
+    fields = ", ".join(text_keys)
+    raise ValueError(f"record at index {record_index} has no string prompt field; checked keys: {fields}")
 
 
-def _extract_full_sample(record: dict[str, Any], text_keys: Sequence[str] | None) -> str:
-    """Extract a concatenation of all string fields for full-sample comparison."""
+def _extract_full_sample(record: dict[str, Any], record_index: int) -> str:
+    """Return a canonical JSON representation for full-sample comparison."""
 
-    parts: list[str] = []
-    for value in record.values():
-        if isinstance(value, str):
-            parts.append(value)
-    return " ".join(parts)
+    try:
+        return json.dumps(record, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(f"record at index {record_index} must contain JSON-serializable values") from exc
 
 
 def find_duplicates(
@@ -296,25 +353,52 @@ def find_duplicates(
         raise ValueError(f"scope must be 'prompt' or 'full', got {scope!r}")
     if not 0.0 < threshold <= 1.0:
         raise ValueError(f"threshold must be in (0.0, 1.0], got {threshold}")
-    if ngram_size < 1:
-        raise ValueError(f"ngram_size must be >= 1, got {ngram_size}")
-    if max_features < 1:
-        raise ValueError(f"max_features must be >= 1, got {max_features}")
+    if not isinstance(ngram_size, int) or isinstance(ngram_size, bool) or ngram_size < 1:
+        raise ValueError(f"ngram_size must be a positive integer, got {ngram_size!r}")
+    if not isinstance(max_features, int) or isinstance(max_features, bool) or max_features < 1:
+        raise ValueError(f"max_features must be a positive integer, got {max_features!r}")
+
+    for index, record in enumerate(records):
+        if not isinstance(record, dict):
+            raise TypeError(f"record at index {index} must be a dict")
+        if any(not isinstance(key, str) for key in record):
+            raise TypeError(f"record at index {index} must use string field names")
 
     total = len(records)
 
     # --- Extract text for each record ---
     if scope == "prompt":
-        texts = [_extract_text(rec, text_keys) for rec in records]
+        selected_text_keys = _normalise_text_keys(text_keys)
+        texts = [_extract_text(record, selected_text_keys, index) for index, record in enumerate(records)]
     else:
-        texts = [_extract_full_sample(rec, text_keys) for rec in records]
+        selected_text_keys = None
+        texts = [_extract_full_sample(record, index) for index, record in enumerate(records)]
 
     if mode == "exact":
-        return _find_exact_duplicates(texts, total)
-    return _find_near_duplicates(texts, total, threshold=threshold, ngram_size=ngram_size, max_features=max_features)
+        return _find_exact_duplicates(
+            texts,
+            total,
+            scope=scope,
+            text_keys=selected_text_keys,
+        )
+    return _find_near_duplicates(
+        texts,
+        total,
+        threshold=threshold,
+        ngram_size=ngram_size,
+        max_features=max_features,
+        scope=scope,
+        text_keys=selected_text_keys,
+    )
 
 
-def _find_exact_duplicates(texts: list[str], total: int) -> DuplicateReport:
+def _find_exact_duplicates(
+    texts: list[str],
+    total: int,
+    *,
+    scope: Literal["prompt", "full"],
+    text_keys: tuple[str, ...] | None,
+) -> DuplicateReport:
     """Group records by normalised-text fingerprint."""
 
     # Map fingerprint -> list of record indices.
@@ -355,6 +439,9 @@ def _find_exact_duplicates(texts: list[str], total: int) -> DuplicateReport:
         match_type="exact",
         threshold=1.0,
         ngram_size=0,
+        scope=scope,
+        text_keys=text_keys,
+        max_features=0,
     )
 
 
@@ -365,6 +452,8 @@ def _find_near_duplicates(
     threshold: float,
     ngram_size: int,
     max_features: int,
+    scope: Literal["prompt", "full"],
+    text_keys: tuple[str, ...] | None,
 ) -> DuplicateReport:
     """Group records by approximate n-gram similarity using union-find."""
 
@@ -436,6 +525,9 @@ def _find_near_duplicates(
         match_type="near",
         threshold=threshold,
         ngram_size=ngram_size,
+        scope=scope,
+        text_keys=text_keys,
+        max_features=max_features,
     )
 
 
@@ -460,9 +552,13 @@ def format_duplicate_report(report: DuplicateReport) -> str:
     lines.append(f"  Duplicate records: {report.duplicate_records}")
     lines.append(f"  Unique records: {report.unique_records}")
     lines.append(f"  Duplicate fraction: {report.duplicate_fraction:.2%}")
+    lines.append(f"  Scope: {report.scope}")
+    if report.text_keys is not None:
+        lines.append(f"  Prompt fields: {', '.join(report.text_keys)}")
     if report.match_type == "near":
         lines.append(f"  Threshold: {report.threshold}")
         lines.append(f"  N-gram size: {report.ngram_size}")
+        lines.append(f"  Max features per record: {report.max_features}")
     lines.append(f"  Duplicate groups: {len(report.groups)}")
     if report.groups:
         lines.append("")

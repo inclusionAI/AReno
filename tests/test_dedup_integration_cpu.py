@@ -18,6 +18,7 @@ import unittest
 from click.testing import CliRunner
 
 from areno.cli.dedup import dedup_command
+from areno.cli.main import main
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -93,6 +94,11 @@ class TestCLIExactMode(unittest.TestCase):
         self.assertTrue(len(data["groups"]) >= 1)
         self.assertIn("record_indices", data["groups"][0])
 
+    def test_top_level_cli_dispatches_to_dedup(self):
+        result = self.runner.invoke(main, ["dedup", "--data-path", self.path, "--json"])
+        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(json.loads(result.output)["duplicate_records"], 2)
+
     def test_no_duplicates(self):
         path = _write_temp_file(_JSONL_NO_DUPES)
         try:
@@ -129,12 +135,24 @@ class TestCLINearMode(unittest.TestCase):
     def test_near_mode_json(self):
         result = self.runner.invoke(
             dedup_command,
-            ["--data-path", self.path, "--mode", "near", "--threshold", "0.3", "--json"],
+            [
+                "--data-path",
+                self.path,
+                "--mode",
+                "near",
+                "--threshold",
+                "0.3",
+                "--max-features",
+                "64",
+                "--json",
+            ],
         )
         self.assertEqual(result.exit_code, 0)
         data = json.loads(result.output)
         self.assertEqual(data["match_type"], "near")
         self.assertEqual(data["threshold"], 0.3)
+        self.assertEqual(data["max_features"], 64)
+        self.assertEqual(data["scope"], "prompt")
 
 
 # ---------------------------------------------------------------------------
@@ -236,6 +254,42 @@ class TestCLIErrorHandling(unittest.TestCase):
         finally:
             os.unlink(path)
 
+    def test_invalid_threshold_is_a_cli_error(self):
+        path = _write_temp_file(_JSONL_NO_DUPES)
+        try:
+            result = self.runner.invoke(
+                dedup_command,
+                ["--data-path", path, "--mode", "near", "--threshold", "0"],
+            )
+            self.assertNotEqual(result.exit_code, 0)
+            self.assertIn("--threshold", result.output)
+            self.assertNotIsInstance(result.exception, ValueError)
+        finally:
+            os.unlink(path)
+
+    def test_invalid_ngram_size_is_a_cli_error(self):
+        path = _write_temp_file(_JSONL_NO_DUPES)
+        try:
+            result = self.runner.invoke(
+                dedup_command,
+                ["--data-path", path, "--mode", "near", "--ngram-size", "0"],
+            )
+            self.assertNotEqual(result.exit_code, 0)
+            self.assertIn("--ngram-size", result.output)
+            self.assertNotIsInstance(result.exception, ValueError)
+        finally:
+            os.unlink(path)
+
+    def test_missing_prompt_field_is_reported_without_sample_content(self):
+        path = _write_temp_file('{"answer": "private answer"}\n')
+        try:
+            result = self.runner.invoke(dedup_command, ["--data-path", path])
+            self.assertNotEqual(result.exit_code, 0)
+            self.assertIn("record at index 0", result.output)
+            self.assertNotIn("private answer", result.output)
+        finally:
+            os.unlink(path)
+
 
 # ---------------------------------------------------------------------------
 # CLI: custom text_keys
@@ -259,6 +313,14 @@ class TestCLITextKeys(unittest.TestCase):
         result = self.runner.invoke(
             dedup_command,
             ["--data-path", self.path, "--text-keys", "custom_field"],
+        )
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("Duplicate records: 1", result.output)
+
+    def test_custom_text_keys_are_trimmed(self):
+        result = self.runner.invoke(
+            dedup_command,
+            ["--data-path", self.path, "--text-keys", " custom_field , prompt "],
         )
         self.assertEqual(result.exit_code, 0)
         self.assertIn("Duplicate records: 1", result.output)

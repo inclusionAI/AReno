@@ -1,5 +1,3 @@
-:orphan:
-
 Dedup CLI reference
 ===================
 
@@ -52,9 +50,16 @@ Options
 ``--ngram-size`` (default: ``5``)
     Character n-gram size for shingling in ``near`` mode.
 
-``--text-keys`` (default: ``prompt,question,text,content,input,query``)
+``--max-features`` (default: ``2048``)
+    Maximum number of shingles retained per record in ``near`` mode.  AReno
+    keeps the bottom-k shingles selected by a stable hash, so the cap does not
+    favor the beginning of long records.
+
+``--text-keys`` (default: ``prompt,question,instruction,problem,text,content,input,query``)
     Comma-separated field names for text extraction in ``prompt`` scope.
-    The first matching string field in each record is used.
+    The first matching string field in each record is used.  Missing fields
+    produce an error containing only the record index and checked field names;
+    AReno does not print the sample text.
 
 ``--json``
     Emit machine-readable JSON output instead of human-readable text.
@@ -72,42 +77,61 @@ The human-readable output includes:
 * Group details (group ID, record count, similarity, record indices).
 
 The JSON output (``--json``) includes the same fields plus per-group
-``record_indices``, ``similarity``, and ``match_type``.
+``record_indices``, ``similarity``, and ``match_type``.  It also records
+``scope``, ``text_keys``, ``threshold``, ``ngram_size``, and ``max_features``
+so that a curation scan can be reproduced.
 
 Examples
 ~~~~~~~~
 
-Exact mode with a JSONL dataset:
+Create a tiny JSONL fixture and run exact mode:
 
 .. code-block:: bash
 
-   areno dedup --data-path /path/to/train.jsonl
+   printf '%s\n' \
+     '{"prompt":"What is 2 + 2?","answer":"4"}' \
+     '{"prompt":"what is 2 + 2","answer":"four"}' \
+     '{"prompt":"Explain photosynthesis","answer":"..."}' \
+     > /tmp/areno-dedup.jsonl
+   areno dedup --data-path /tmp/areno-dedup.jsonl --json
 
 Near mode with a lower threshold:
 
 .. code-block:: bash
 
-   areno dedup --data-path /path/to/train.jsonl --mode near --threshold 0.5
+   areno dedup --data-path /tmp/areno-dedup.jsonl \
+     --mode near --threshold 0.5 --max-features 1024
 
 Full-sample comparison with JSON output:
 
 .. code-block:: bash
 
-   areno dedup --data-path /path/to/train.jsonl --scope full --json
+   areno dedup --data-path /tmp/areno-dedup.jsonl --scope full --json
 
 Custom text field:
 
 .. code-block:: bash
 
-   areno dedup --data-path /path/to/train.jsonl --text-keys question,problem
+   areno dedup --data-path /tmp/areno-dedup.jsonl --text-keys question,problem
+
+Invalid resource or similarity controls fail before scanning the dataset.  For
+example, this command exits with a Click validation error because the threshold
+must be greater than zero:
+
+.. code-block:: bash
+
+   areno dedup --data-path /tmp/areno-dedup.jsonl --mode near --threshold 0
 
 Limitations
 ~~~~~~~~~~~
 
 * The ``near`` mode uses O(n^2) pairwise comparison, which may be slow for
-  very large datasets (>10k records).  Memory is bounded by ``max_features``
-  (default 2048 shingles per record).
+  very large datasets (>10k records).  Signature memory is
+  O(number-of-records * ``max_features``); the cap bounds each record rather
+  than the whole input file.
+* ``full`` scope uses a canonical, key-sorted JSON representation of the
+  complete record, so JSON field order does not change the result.
 * The command reports duplicates for review but does not remove, filter, or
   modify any records.
-* Text extraction falls back to any string field if none of the specified
-  ``text_keys`` are found in a record.
+* In ``prompt`` scope, every record must contain a string value under one of
+  the selected ``text_keys``.  Use ``--text-keys`` for custom dataset schemas.

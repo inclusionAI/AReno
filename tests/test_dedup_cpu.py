@@ -91,6 +91,11 @@ class TestShingling(unittest.TestCase):
         sig = shingle_signature(long_text, max_features=10)
         self.assertLessEqual(len(sig), 10)
 
+    def test_capped_signature_is_not_prefix_biased(self):
+        forward = shingle_signature("abcdefgh", ngram_size=1, max_features=3)
+        reverse = shingle_signature("hgfedcba", ngram_size=1, max_features=3)
+        self.assertEqual(forward, reverse)
+
     def test_jaccard_both_empty(self):
         self.assertEqual(jaccard_similarity(frozenset(), frozenset()), 0.0)
 
@@ -256,6 +261,10 @@ class TestInvalidInputs(unittest.TestCase):
         with self.assertRaises(TypeError):
             find_duplicates("not a list")  # type: ignore[arg-type]
 
+    def test_non_dict_record_identifies_index(self):
+        with self.assertRaisesRegex(TypeError, "record at index 1 must be a dict"):
+            find_duplicates([{"prompt": "valid"}, None])  # type: ignore[list-item]
+
     def test_bad_mode(self):
         with self.assertRaises(ValueError):
             find_duplicates([], mode="invalid")  # type: ignore[arg-type]
@@ -309,6 +318,22 @@ class TestScopeModes(unittest.TestCase):
         report = find_duplicates(records, mode="exact", scope="full")
         self.assertEqual(len(report.groups), 0)
 
+    def test_full_scope_is_independent_of_field_order(self):
+        records = [
+            {"prompt": "same question", "answer": "same answer"},
+            {"answer": "same answer", "prompt": "same question"},
+        ]
+        report = find_duplicates(records, mode="exact", scope="full")
+        self.assertEqual(report.groups[0].record_indices, [0, 1])
+
+    def test_full_scope_includes_field_names(self):
+        records = [
+            {"prompt": "same text"},
+            {"answer": "same text"},
+        ]
+        report = find_duplicates(records, mode="exact", scope="full")
+        self.assertEqual(report.groups, [])
+
 
 # ---------------------------------------------------------------------------
 # text_keys customisation
@@ -326,16 +351,22 @@ class TestTextKeys(unittest.TestCase):
         report = find_duplicates(records, mode="exact", text_keys=["my_field"])
         self.assertEqual(len(report.groups), 1)
 
-    def test_custom_text_keys_not_found_falls_back(self):
+    def test_custom_text_keys_not_found_reports_record_index(self):
         records = [
             {"my_field": "unique A", "prompt": "same"},
             {"my_field": "unique B", "prompt": "same"},
         ]
-        # text_keys not found -> falls back to any string value.
-        # Fallback may pick different fields for different records,
-        # so duplicates are not guaranteed.  Just verify it doesn't crash.
-        report = find_duplicates(records, mode="exact", text_keys=["nonexistent"])
-        self.assertEqual(report.total_records, 2)
+        with self.assertRaisesRegex(ValueError, "record at index 0.*nonexistent"):
+            find_duplicates(records, mode="exact", text_keys=["nonexistent"])
+
+    def test_default_text_keys_do_not_treat_answers_as_prompts(self):
+        records = [{"answer": "same"}, {"answer": "same"}]
+        with self.assertRaisesRegex(ValueError, "record at index 0 has no string prompt field"):
+            find_duplicates(records, mode="exact")
+
+    def test_text_keys_must_be_non_empty_strings(self):
+        with self.assertRaisesRegex(ValueError, "text_keys must contain at least one"):
+            find_duplicates([{"prompt": "text"}], text_keys=[])
 
 
 # ---------------------------------------------------------------------------
@@ -382,6 +413,9 @@ class TestToDict(unittest.TestCase):
         self.assertIn("match_type", d)
         self.assertIn("threshold", d)
         self.assertIn("ngram_size", d)
+        self.assertIn("scope", d)
+        self.assertIn("text_keys", d)
+        self.assertIn("max_features", d)
 
     def test_to_dict_group_fields(self):
         report = find_duplicates([{"prompt": "a"}, {"prompt": "a"}], mode="exact")
