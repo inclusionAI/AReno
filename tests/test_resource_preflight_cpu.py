@@ -313,7 +313,7 @@ def test_serve_warn_proceeds_to_engine_init(monkeypatch, patched_preflight):
     monkeypatch.setattr(dashboard_registry, "register_dashboard_job", lambda **k: None)
 
     runner = CliRunner()
-    result = runner.invoke(
+    runner.invoke(
         serve_mod.serve_command,
         ["--model-path", "x", "--world-size", "2", "--tp-size", "1"],
     )

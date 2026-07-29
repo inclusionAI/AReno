@@ -21,8 +21,8 @@ from pydantic import BaseModel, Field
 from areno.api.openai_chat import build_chat_completion_response, messages_to_prompt_tokens
 from areno.api.tokenizer import configure_chat_template_enable_thinking
 from areno.api.tool_call_parser import ToolCallParser, get_tool_call_parser, infer_tool_call_parser_name
-from areno.cli.model_refs import resolve_model_ref
 from areno.cli.diagnostics import RESOURCE_FAIL, format_resource_preflight, preflight_host_resources
+from areno.cli.model_refs import resolve_model_ref
 from areno.engine import ArenoEngine
 from areno.engine.config import (
     RuntimeConfig,
