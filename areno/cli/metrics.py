@@ -18,6 +18,7 @@ from typing import Any
 import click
 
 from areno.api import metric_reader
+from areno.api.defaults import DEFAULT_METRICS_LOG_DIR
 
 
 @click.command(name="metrics", context_settings={"help_option_names": ["-h", "--help"]})
@@ -58,10 +59,6 @@ def metrics_command(
 ) -> None:
     """Query metric history (last/min/max/recent/trend) from local run artifacts."""
     if metrics_dir is None:
-        # Lazy import keeps the CLI module light; the default lives with the
-        # dashboard server as the single source (no duplicated absolute path).
-        from areno.dashboard.server import DEFAULT_METRICS_LOG_DIR
-
         metrics_dir = DEFAULT_METRICS_LOG_DIR
 
     # Surface a missing directory early with a clear, located error -- do not let

@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
-import math
 import os
 import re
 import shlex
@@ -23,6 +22,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from areno.api.defaults import DEFAULT_METRICS_LOG_DIR
 from areno.api.metric_reader import number_like
 from areno.cli.dashboard_registry import GLOBAL_REGISTRY_FILE
 from areno.cli.diagnostics import collect_env, run_checks
@@ -32,7 +32,6 @@ from areno.dashboard.agent_files import AgentFileBrowser
 ROOT = Path(os.environ.get("ARENO_DASHBOARD_ROOT", Path.cwd())).resolve()
 STATIC_DIR = Path(__file__).resolve().parent / "dist"
 STATE_FILE = ROOT / ".areno-dashboard-state.json"
-DEFAULT_METRICS_LOG_DIR = "/tmp/areno/tfevent"
 TIME_SEGMENT_ORDER = [
     "rollout",
     "make_sample",
