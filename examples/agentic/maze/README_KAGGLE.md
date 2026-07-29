@@ -81,6 +81,28 @@ areno train \
 pytest tests/test_agentic_maze_example_cpu.py -v
 ```
 
+### 6. 通过 ngrok 暴露 Dashboard
+
+Kaggle Notebook 没有公网端口，使用 ngrok 隧道在外部浏览器访问 AReno Dashboard。
+
+前置条件：在 Kaggle Notebook 的 **Add-ons → Secrets** 中添加一个名为 `ngrok_key` 的 secret，值为你的 ngrok authtoken（从 https://dashboard.ngrok.com/get-started/your-authtoken 获取）。
+
+```python
+from kaggle_secrets import UserSecretsClient
+user_secrets = UserSecretsClient()
+ngrok_key = user_secrets.get_secret("ngrok_key")
+
+!pip install pyngrok
+from pyngrok import ngrok
+ngrok.set_auth_token(ngrok_key)
+public_url = ngrok.connect(8000)
+print(public_url)
+
+!areno dashboard --start --host 0.0.0.0 --port 8000
+```
+
+运行后终端会输出一个 `https://xxxx.ngrok-free.app` 地址，在任意浏览器打开即可查看训练指标、奖励曲线和轨迹详情。
+
 ---
 
 ## 参数调优建议
