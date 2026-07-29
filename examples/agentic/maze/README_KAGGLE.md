@@ -38,10 +38,19 @@ Kaggle 提供以下 GPU，均可运行此 demo：
 # 安装 AReno（跳过 CUDA 编译，Kaggle 自带 PyTorch）
 !ARENO_BUILD_EXT=0 pip install -e . --no-build-isolation
 
+# 修复 PATH（Kaggle 的 pip install 可能不把 areno 放到默认 PATH）
+import shutil, sysconfig
+bindir = sysconfig.get_path("scripts")
+import os
+os.environ["PATH"] = bindir + ":" + os.environ["PATH"]
+
 # 验证安装
 !python -c "import torch; print('GPU:', torch.cuda.is_available(), 'Devices:', torch.cuda.device_count())"
 !areno --version
 ```
+
+> 如果 `areno --version` 仍然报 `command not found`，改用 `python -m areno.cli.main` 替代
+> 所有 `areno` 命令，例如 `!python -m areno.cli.main --version`。
 
 ### 3. 生成迷宫数据集
 
@@ -98,7 +107,11 @@ ngrok.set_auth_token(ngrok_key)
 public_url = ngrok.connect(8000)
 print(public_url)
 
-!areno dashboard --start --host 0.0.0.0 --port 8000
+# Dashboard 必须用 nohup 后台运行，否则会阻塞 notebook
+!nohup areno dashboard --start --host 0.0.0.0 --port 8000 > /tmp/dashboard.log 2>&1 &
+
+# 如果 areno 不在 PATH，改用：
+# !nohup python -m areno.cli.main dashboard --start --host 0.0.0.0 --port 8000 > /tmp/dashboard.log 2>&1 &
 ```
 
 运行后终端会输出一个 `https://xxxx.ngrok-free.app` 地址，在任意浏览器打开即可查看训练指标、奖励曲线和轨迹详情。
