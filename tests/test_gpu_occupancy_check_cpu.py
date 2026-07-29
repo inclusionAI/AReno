@@ -92,6 +92,35 @@ class QueryGpuStatusTest(unittest.TestCase):
         self.assertEqual(statuses[1].index, 1)
         self.assertEqual(statuses[1].utilization_pct, 95)
 
+    @patch("areno.engine.runtime.gpu_check.shutil.which", return_value="/usr/bin/nvidia-smi")
+    @patch("areno.engine.runtime.gpu_check.subprocess.run")
+    def test_smi_command_construction_no_prefix_duplication(self, mock_run, mock_which):
+        """Verify the nvidia-smi command is constructed without prefix duplication.
+
+        Regression test: previously _run_smi hardcoded --query-gpu= prefix,
+        causing --query-compute-apps calls to become --query-gpu=--query-compute-apps=...
+        """
+        gpu_csv = "81920,80000,1920,5,NVIDIA H100\n"
+        proc_csv = ""
+        mock_run.side_effect = [
+            _make_proc_result(gpu_csv),
+            _make_proc_result(proc_csv),
+        ]
+        query_gpu_status([0])
+
+        # First call: GPU info query — must use --query-gpu, not --query-gpu=--query-gpu
+        first_call_args = mock_run.call_args_list[0]
+        cmd = first_call_args[0][0]  # positional args: the command list
+        self.assertEqual(cmd[0], "/usr/bin/nvidia-smi")
+        self.assertTrue(cmd[1].startswith("--query-gpu=memory.total"))
+        self.assertFalse("--query-gpu=--query-gpu" in cmd[1])
+
+        # Second call: process query — must use --query-compute-apps, not --query-gpu
+        second_call_args = mock_run.call_args_list[1]
+        cmd2 = second_call_args[0][0]
+        self.assertTrue(cmd2[1].startswith("--query-compute-apps=pid"))
+        self.assertFalse("--query-gpu" in cmd2[1])
+
 
 class CheckGpuOccupancyTest(unittest.TestCase):
     """Tests for check_gpu_occupancy."""

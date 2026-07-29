@@ -60,7 +60,8 @@ def query_gpu_status(devices: list[int]) -> list[GpuStatus]:
     # --format=csv,noheader,nounits strips unit suffixes so we get raw ints.
     gpu_info = _run_smi(
         smi,
-        "--query-gpu=memory.total,memory.free,memory.used,utilization.gpu,name",
+        "--query-gpu",
+        "memory.total,memory.free,memory.used,utilization.gpu,name",
         indices,
     )
     if gpu_info is None:
@@ -70,7 +71,8 @@ def query_gpu_status(devices: list[int]) -> list[GpuStatus]:
     # Used to show the user which processes occupy the flagged GPUs.
     proc_info = _run_smi(
         smi,
-        "--query-compute-apps=pid,process_name,used_memory",
+        "--query-compute-apps",
+        "pid,process_name,used_memory",
         indices,
     )
 
@@ -175,14 +177,18 @@ def format_gpu_warnings(warnings: list[GpuWarning], statuses: list[GpuStatus]) -
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _run_smi(smi: str, query: str, indices: str) -> list[list[str]] | None:
-    """Run nvidia-smi with *query* for *indices* and return parsed CSV rows."""
+def _run_smi(smi: str, query_flag: str, query_fields: str, indices: str) -> list[list[str]] | None:
+    """Run nvidia-smi with *query_flag* and *query_fields* for *indices*.
+
+    *query_flag* is the nvidia-smi select (e.g. ``--query-gpu`` or
+    ``--query-compute-apps``); *query_fields* is the comma-separated field list.
+    """
 
     try:
         # Use list form (not shell=True) to avoid command injection; smi
         # comes from shutil.which, not user input, but defense-in-depth.
         proc = subprocess.run(
-            [smi, f"--query-gpu={query}", "--format=csv,noheader,nounits", "-i", indices],
+            [smi, f"{query_flag}={query_fields}", "--format=csv,noheader,nounits", "-i", indices],
             check=False,  # don't raise on non-zero; we check returncode below
             text=True,
             capture_output=True,
