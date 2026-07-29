@@ -153,13 +153,13 @@ class Trainer:
 
         if self._backend is None or self._ctx is None:
             raise RuntimeError("Trainer is not initialized")
-        try:
-            return int(self._backend.dp_size(self._ctx))
-        except AttributeError:
-            config = self._ctx.custom_config
-            if config is None:
-                return int(self._ctx.world_size)
-            return max(int(self._ctx.world_size) // int(config.tp_size), 1)
+        dp_size_fn = getattr(self._backend, "dp_size", None)
+        if callable(dp_size_fn):
+            return int(dp_size_fn(self._ctx))
+        config = self._ctx.custom_config
+        if config is None:
+            return int(self._ctx.world_size)
+        return max(int(self._ctx.world_size) // int(config.tp_size), 1)
 
     def model_context_len(self) -> int | None:
         """Return the loaded model's context length when the backend exposes it."""
@@ -186,6 +186,7 @@ class Trainer:
         if self._backend is None or self._ctx is None:
             raise RuntimeError("Trainer is not initialized")
         if self._rollout_session_depth <= 0:
+            logger.warning("end_rollout_session called without matching begin")
             return
         self._rollout_session_depth -= 1
         if self._rollout_session_depth == 0:
@@ -368,7 +369,10 @@ class Trainer:
                 timings=self._metric_timings,
             )
         if self._health_checker is not None:
-            self._health_checker.observe(step=self._ctx.global_step, train_result=result, train_batch=batch_data)
+            try:
+                self._health_checker.observe(step=self._ctx.global_step, train_result=result, train_batch=batch_data)
+            except Exception:
+                logger.warning("health checker observe failed", exc_info=True)
         self.finish_step()
         return result
 
@@ -482,6 +486,9 @@ class Trainer:
         field call this so the skipped-batches check sees the real count. When
         never called, the window assumes zero rollout skips for that step,
         which is correct for batches that contained no overlong prompts.
+
+        Must be called **before** the corresponding ``train()`` call so the
+        skips are attributed to the current step's window, not the next one.
         """
 
         if self._health_checker is not None:
@@ -490,19 +497,33 @@ class Trainer:
     def close(self) -> None:
         """Release backend workers and local resources such as metric writers."""
 
+        # Each cleanup step is independent so a failure in one does not skip
+        # the others (e.g. a metrics-writer error must not prevent the health
+        # checker from writing its artifact).
+        # Step 1: backend
         try:
             if self._backend is not None:
                 self._backend.close()
+        except Exception:
+            logger.warning("backend close failed", exc_info=True)
         finally:
             self._backend = None
             self._initialized = False
+        # Step 2: metrics
+        try:
             if self._metrics is not None:
                 self._metrics.close()
-            # Finalize the health window early if the run ends before the
-            # configured startup window completes.
+        except Exception:
+            logger.warning("metrics close failed", exc_info=True)
+        # Step 3: health checker — finalize the window early if the run ends
+        # before the configured startup window completes.
+        try:
             if self._health_checker is not None:
                 self._health_checker.finalize_early()
-                self._health_checker = None
+        except Exception:
+            logger.warning("health check finalize failed", exc_info=True)
+        finally:
+            self._health_checker = None
 
 
 def _normalize_prompt_token_batch(prompt_tokens: list[list[int]]) -> list[list[int]]:
@@ -564,7 +585,7 @@ class TrainingHealthChecker:
 
         self._pending_skipped += int(skipped_long)
 
-    def observe(self, *, step: int, train_result: dict, train_batch: list[TrainSequence]) -> None:
+    def observe(self, *, step: int, train_result: Any, train_batch: list[TrainSequence]) -> None:
         """Feed one training step's signals; evaluate when the window fills."""
 
         if self._finalized:
@@ -595,11 +616,23 @@ class TrainingHealthChecker:
             self._evaluate()
 
     def finalize_early(self) -> None:
-        """Evaluate the partial window if the run ends before it fills."""
+        """Evaluate the partial window if the run ends before it fills.
+
+        If the window is incomplete (``steps_seen < startup_window_updates``),
+        a warning is logged so the user knows the result may be less reliable
+        than a full-window evaluation.
+        """
 
         if self._finalized or self._steps_seen == 0:
             self._finalized = True
             return
+        if self._steps_seen < self._config.startup_window_updates:
+            self._logger.warning(
+                "health check window incomplete: steps_seen=%d < startup_window_updates=%d; "
+                "results may be less reliable",
+                self._steps_seen,
+                self._config.startup_window_updates,
+            )
         self._evaluate()
 
     def _evaluate(self) -> None:
@@ -622,7 +655,9 @@ class TrainingHealthChecker:
             stages = sorted({c.stage for c in report.checks if c.status == "fail"})
             inputs = [c.input for c in report.checks if c.status == "fail" and c.input != "-"]
             detail = "; ".join(c.message for c in report.checks if c.status == "fail")
-            raise HealthCheckError(f"health-check FAIL stage={stages} input={inputs} detail={detail}")
+            raise HealthCheckError(
+                f"health-check FAIL stage={','.join(stages)} input={','.join(inputs)} detail={detail}"
+            )
 
     def _write_artifact(self, report: HealthReport) -> None:
         if self._sink is None:
