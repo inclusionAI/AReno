@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from game import (  # noqa: E402
     ActionResult,
     WarehouseState,
+    baseline_action_count,
     baseline_distance,
     build_state,
     execute_action,
@@ -24,16 +25,35 @@ from game import (  # noqa: E402
 logger = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
-MAX_TURNS = 6
+TURN_SLACK = 2
 
 SYSTEM_PROMPT = (
     "You are a warehouse robot. Collect exactly the requested items and complete the order. "
-    "On each action turn, call exactly one available tool. Use check_shelf to inspect current stock, "
-    "move_to for one adjacent step, pick_item for stock on the current shelf, and submit_order only "
-    "when the cart exactly matches the order. Never invent shelf stock or call multiple tools at once."
+    "On each action turn, call exactly one available tool. Use query_inventory to locate requested "
+    "SKUs, move_to for one adjacent step, check_shelf to verify stock after arrival, pick_item only "
+    "after inspecting the current shelf, and submit_order only when the cart exactly matches the "
+    "order. Prefer the shortest route and never invent stock or call multiple tools at once."
 )
 
 TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "query_inventory",
+            "description": "Find every current shelf location and quantity for one SKU.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "sku": {
+                        "type": "string",
+                        "description": "SKU whose warehouse locations should be returned.",
+                    }
+                },
+                "required": ["sku"],
+                "additionalProperties": False,
+            },
+        },
+    },
     {
         "type": "function",
         "function": {
@@ -108,6 +128,7 @@ def make_state_prompt(
     state: WarehouseState,
     *,
     turn_number: int,
+    turn_limit: int,
 ) -> str:
     """Build a compact state reminder without discarding message history."""
 
@@ -121,7 +142,7 @@ def make_state_prompt(
     needed = ", ".join(remaining) if remaining else "nothing; submit the order"
     neighbors = ", ".join(state.adjacency.get(state.agent_pos, [])) or "none"
     return (
-        f"Action turn {turn_number} of {MAX_TURNS}. Order: {order}. Cart: {cart}. "
+        f"Action turn {turn_number} of {turn_limit}. Order: {order}. Cart: {cart}. "
         f"Still needed: {needed}. Current shelf: {state.agent_pos}. Adjacent shelves: {neighbors}. "
         "Call exactly one tool."
     )
@@ -181,10 +202,11 @@ async def _run_episode(
         {"role": "user", "content": item.prompt},
     ]
     baseline = baseline_distance(state)
+    turn_limit = baseline_action_count(state) + TURN_SLACK
     termination_reason = "turn_limit"
     needs_final_turn = False
 
-    for turn_number in range(1, MAX_TURNS + 1):
+    for turn_number in range(1, turn_limit + 1):
         turn_messages = [
             *messages,
             {
@@ -192,6 +214,7 @@ async def _run_episode(
                 "content": make_state_prompt(
                     state,
                     turn_number=turn_number,
+                    turn_limit=turn_limit,
                 ),
             },
         ]
@@ -244,7 +267,8 @@ async def _run_episode(
         metrics = payload["data"]["metrics"]
         logger.info(
             "Warehouse action prompt_index=%s sample_index=%s turn=%d tool=%s "
-            "success=%s completed=%d mistakes=%d invalid=%d distance=%d baseline=%d",
+            "success=%s completed=%d mistakes=%d invalid=%d empty_checks=%d "
+            "distance=%d baseline=%d",
             getattr(item, "prompt_index", None),
             getattr(item, "sample_index", None),
             turn_number,
@@ -253,6 +277,7 @@ async def _run_episode(
             metrics["complete_orders"],
             metrics["picking_mistakes"],
             metrics["invalid_actions"],
+            metrics["empty_shelf_checks"],
             metrics["distance"],
             metrics["baseline_distance"],
         )
@@ -320,12 +345,16 @@ async def _final_turn(
     response = await client.chat.completions.create(
         model="policy",
         messages=final_messages,
+        tools=TOOLS,
+        tool_choice="none",
         stream=False,
     )
     return AgentTrajectoryTurn(
         item=item,
         messages=final_messages,
         response=response,
+        tools=TOOLS,
+        tool_choice="none",
     )
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import heapq
 import random
 from collections import deque
 from dataclasses import dataclass, field
@@ -54,6 +55,8 @@ class WarehouseState:
     total_distance: int = 0
     invalid_actions: int = 0
     picking_errors: int = 0
+    empty_shelf_checks: int = 0
+    checked_shelves: set[str] = field(default_factory=set)
     completed: bool = False
 
 
@@ -175,18 +178,20 @@ def generate_order(
     order_size: int,
     rng: random.Random,
 ) -> list[dict[str, Any]]:
-    """Generate an order whose quantities are satisfiable by total stock."""
+    """Generate an order whose quantities each fit on at least one shelf."""
 
     _positive_int(order_size, "order_size")
     total_stock: dict[str, int] = {}
+    max_shelf_stock: dict[str, int] = {}
     for shelf in shelves.values():
         for sku, quantity in shelf.stock.items():
             total_stock[sku] = total_stock.get(sku, 0) + quantity
+            max_shelf_stock[sku] = max(max_shelf_stock.get(sku, 0), quantity)
     if order_size > len(total_stock):
         raise ValueError(f"order_size {order_size} exceeds the {len(total_stock)} stocked SKUs")
 
     chosen = rng.sample(sorted(total_stock), k=order_size)
-    return [{"sku": sku, "qty": rng.randint(1, min(3, total_stock[sku]))} for sku in chosen]
+    return [{"sku": sku, "qty": rng.randint(1, min(3, max_shelf_stock[sku]))} for sku in chosen]
 
 
 def build_state(record: dict[str, Any]) -> WarehouseState:
@@ -225,24 +230,60 @@ def _inactive_result(state: WarehouseState) -> ActionResult | None:
     )
 
 
-def query_inventory(state: WarehouseState, shelf_id: str) -> ActionResult:
-    """Query stock information for one shelf."""
+def query_inventory(state: WarehouseState, sku: str) -> ActionResult:
+    """Return every current storage location for one SKU."""
 
     inactive = _inactive_result(state)
     if inactive is not None:
         return inactive
-    shelf = state.shelves.get(shelf_id)
-    if shelf is None:
+    if not isinstance(sku, str) or not sku:
         state.invalid_actions += 1
         return ActionResult(
             False,
-            f"unknown shelf: {shelf_id}",
-            {"stage": "action_validation", "input": "shelf_id"},
+            "sku must be a non-empty string",
+            {"stage": "action_validation", "input": "sku"},
         )
+
+    locations = [
+        {"shelf_id": shelf_id, "qty": shelf.stock[sku]}
+        for shelf_id, shelf in sorted(state.shelves.items())
+        if shelf.stock.get(sku, 0) > 0
+    ]
     return ActionResult(
         True,
-        "ok",
-        {"shelf_id": shelf_id, "stock": dict(shelf.stock)},
+        "inventory found" if locations else "sku not in stock",
+        {"sku": sku, "locations": locations},
+    )
+
+
+def check_shelf(state: WarehouseState) -> ActionResult:
+    """Inspect the current shelf and track checks with no requested stock."""
+
+    inactive = _inactive_result(state)
+    if inactive is not None:
+        return inactive
+
+    shelf = state.shelves[state.agent_pos]
+    required = {item["sku"]: item["qty"] for item in state.order}
+    requested_stock = {
+        sku: min(quantity, required[sku] - state.cart.get(sku, 0))
+        for sku, quantity in shelf.stock.items()
+        if sku in required and required[sku] > state.cart.get(sku, 0)
+    }
+    state.checked_shelves.add(state.agent_pos)
+    useful = bool(requested_stock)
+    if not useful:
+        state.empty_shelf_checks += 1
+
+    return ActionResult(
+        True,
+        "requested stock found" if useful else "no requested stock on current shelf",
+        {
+            "shelf_id": state.agent_pos,
+            "stock": dict(shelf.stock),
+            "requested_stock": requested_stock,
+            "useful": useful,
+        },
     )
 
 
@@ -297,6 +338,16 @@ def pick(state: WarehouseState, sku: str, qty: int) -> ActionResult:
             False,
             f"invalid qty: {qty}",
             {"stage": "quantity_validation", "input": "qty"},
+        )
+    if state.agent_pos not in state.checked_shelves:
+        state.invalid_actions += 1
+        return ActionResult(
+            False,
+            f"inspect shelf {state.agent_pos} before picking",
+            {
+                "stage": "inspection_validation",
+                "shelf_id": state.agent_pos,
+            },
         )
 
     shelf = state.shelves[state.agent_pos]
@@ -414,6 +465,15 @@ def execute_action(
             )
         return move(state, arguments["shelf_id"])
 
+    if tool_name == "query_inventory":
+        if set(arguments) != {"sku"} or not isinstance(arguments.get("sku"), str):
+            return _tool_validation_error(
+                state,
+                "query_inventory requires exactly one string sku",
+                input_name="sku",
+            )
+        return query_inventory(state, arguments["sku"])
+
     if tool_name == "check_shelf":
         if arguments:
             return _tool_validation_error(
@@ -421,7 +481,7 @@ def execute_action(
                 "check_shelf does not accept arguments",
                 input_name="arguments",
             )
-        return query_inventory(state, state.agent_pos)
+        return check_shelf(state)
 
     if tool_name == "pick_item":
         if set(arguments) != {"sku", "qty"}:
@@ -476,54 +536,107 @@ def _bfs_distance(state: WarehouseState, start: str, target: str) -> int:
     return -1
 
 
-def _nearest_stocked_shelf(
+def _route_fulfills_order(
     state: WarehouseState,
-    start: str,
-    sku: str,
-    stock: dict[str, dict[str, int]],
-) -> str | None:
-    if stock[start].get(sku, 0) > 0:
-        return start
-    visited = {start}
-    queue: deque[str] = deque([start])
+    shelf_ids: list[str],
+    visited_mask: int,
+) -> bool:
+    required = {item["sku"]: item["qty"] for item in state.order}
+    collected = {sku: 0 for sku in required}
+    for index, shelf_id in enumerate(shelf_ids):
+        if not visited_mask & (1 << index):
+            continue
+        shelf = state.shelves[shelf_id]
+        for sku in required:
+            collected[sku] += shelf.stock.get(sku, 0)
+    return all(collected[sku] >= quantity for sku, quantity in required.items())
+
+
+def baseline_route(state: WarehouseState) -> list[str]:
+    """Return a deterministic minimum-distance route over sufficient stock."""
+
+    required_skus = {item["sku"] for item in state.order}
+    shelf_ids = sorted(
+        shelf_id
+        for shelf_id, shelf in state.shelves.items()
+        if any(shelf.stock.get(sku, 0) > 0 for sku in required_skus)
+    )
+    if not shelf_ids:
+        raise ValueError("no stocked shelf can satisfy the order")
+
+    start_mask = 0
+    start_path: tuple[str, ...] = ()
+    if state.agent_pos in shelf_ids:
+        start_index = shelf_ids.index(state.agent_pos)
+        start_mask = 1 << start_index
+        start_path = (state.agent_pos,)
+
+    start_rank = (0, len(start_path), start_path)
+    best: dict[tuple[str, int], tuple[int, int, tuple[str, ...]]] = {(state.agent_pos, start_mask): start_rank}
+    queue: list[tuple[int, int, tuple[str, ...], str, int]] = [(*start_rank, state.agent_pos, start_mask)]
+
     while queue:
-        node = queue.popleft()
-        for neighbor in state.adjacency.get(node, []):
-            if neighbor in visited:
+        distance, stop_count, path, position, visited_mask = heapq.heappop(queue)
+        if best.get((position, visited_mask)) != (distance, stop_count, path):
+            continue
+        if _route_fulfills_order(state, shelf_ids, visited_mask):
+            return list(path)
+
+        for index, shelf_id in enumerate(shelf_ids):
+            bit = 1 << index
+            if visited_mask & bit:
                 continue
-            visited.add(neighbor)
-            if stock[neighbor].get(sku, 0) > 0:
-                return neighbor
-            queue.append(neighbor)
-    return None
+            step_distance = _bfs_distance(state, position, shelf_id)
+            if step_distance < 0:
+                continue
+            new_path = (*path, shelf_id)
+            rank = (distance + step_distance, len(new_path), new_path)
+            key = (shelf_id, visited_mask | bit)
+            if key in best and best[key] <= rank:
+                continue
+            best[key] = rank
+            heapq.heappush(
+                queue,
+                (*rank, shelf_id, visited_mask | bit),
+            )
+
+    raise ValueError("order stock is unreachable")
 
 
 def baseline_distance(state: WarehouseState) -> int:
-    """Return a greedy shortest-path baseline that supports split stock."""
+    """Return the exact minimum movement distance needed to reach enough stock."""
 
     position = state.agent_pos
     distance = 0
-    stock = {shelf_id: dict(shelf.stock) for shelf_id, shelf in state.shelves.items()}
-    for item in state.order:
-        remaining = item["qty"]
-        while remaining > 0:
-            target = _nearest_stocked_shelf(
-                state,
-                position,
-                item["sku"],
-                stock,
-            )
-            if target is None:
-                raise ValueError(f"no remaining stock for order SKU {item['sku']}")
-            step_distance = _bfs_distance(state, position, target)
-            if step_distance < 0:
-                raise ValueError(f"order SKU {item['sku']} is unreachable")
-            distance += step_distance
-            quantity = min(stock[target].get(item["sku"], 0), remaining)
-            stock[target][item["sku"]] -= quantity
-            remaining -= quantity
-            position = target
+    for target in baseline_route(state):
+        step_distance = _bfs_distance(state, position, target)
+        if step_distance < 0:
+            raise ValueError(f"order stock on shelf {target} is unreachable")
+        distance += step_distance
+        position = target
     return distance
+
+
+def baseline_action_count(state: WarehouseState) -> int:
+    """Return actions in a shortest-route query, inspect, pick, and submit plan."""
+
+    remaining = {item["sku"]: item["qty"] for item in state.order}
+    pick_actions = 0
+    inspected_shelves = 0
+    for shelf_id in baseline_route(state):
+        used_shelf = False
+        for sku in remaining:
+            quantity = min(state.shelves[shelf_id].stock.get(sku, 0), remaining[sku])
+            if quantity <= 0:
+                continue
+            remaining[sku] -= quantity
+            pick_actions += 1
+            used_shelf = True
+        inspected_shelves += int(used_shelf)
+
+    if any(quantity > 0 for quantity in remaining.values()):
+        raise ValueError("baseline route does not satisfy the order")
+    return len(state.order) + baseline_distance(state) + inspected_shelves + pick_actions + 1
 
 
 def cart_progress(state: WarehouseState) -> float:
@@ -554,6 +667,7 @@ def state_metrics(
         "complete_orders": int(state.completed),
         "picking_mistakes": state.picking_errors,
         "invalid_actions": state.invalid_actions,
+        "empty_shelf_checks": state.empty_shelf_checks,
         "distance": state.total_distance,
         "baseline_distance": baseline,
         "distance_ratio": distance_ratio,
@@ -563,13 +677,14 @@ def state_metrics(
 
 
 def make_prompt(record: dict[str, Any]) -> str:
-    """Build the task prompt without exposing shelf stock."""
+    """Build a task prompt that directs the agent to query SKU locations."""
 
     order = ", ".join(f"{item['sku']} x{item['qty']}" for item in record["order"])
     return (
         f"You are in a warehouse with a {record['rows']}x{record['cols']} grid of shelves. "
         "Shelf IDs follow the pattern A1, A2, ..., B1, B2, etc. "
         f"Your order is: {order}. You start at shelf {record['start_shelf']}. "
-        "Use check_shelf to inspect the current shelf, move_to to move one adjacent shelf, "
-        "pick_item to collect stock, and submit_order only when the cart exactly matches the order."
+        "Use query_inventory to find storage locations for each required SKU, move_to to move one "
+        "adjacent shelf, check_shelf to verify stock after arrival, pick_item to collect verified "
+        "stock, and submit_order only when the cart exactly matches the order."
     )

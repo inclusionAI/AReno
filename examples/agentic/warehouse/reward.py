@@ -24,7 +24,6 @@ def reward_fn(record) -> float:
     baseline = baseline_distance(state)
     groups = _tool_call_groups(record)
     repeated_checks = 0
-    checked_shelves: set[str] = set()
 
     for calls in groups:
         if len(calls) != 1:
@@ -41,20 +40,20 @@ def reward_fn(record) -> float:
             continue
 
         if name == "check_shelf":
-            if state.agent_pos in checked_shelves:
+            if state.agent_pos in state.checked_shelves:
                 repeated_checks += 1
-            checked_shelves.add(state.agent_pos)
         execute_action(state, name, arguments)
 
     metrics = state_metrics(state, baseline=baseline)
     if state.completed:
         score = 0.7 + 0.3 * metrics["distance_efficiency"]
     else:
-        score = -0.5 + 0.5 * cart_progress(state)
+        score = -0.5 + 0.4 * cart_progress(state)
 
-    score -= 0.10 * state.picking_errors
+    score -= 0.20 * state.picking_errors
     score -= 0.05 * state.invalid_actions
-    score -= 0.02 * repeated_checks
+    score -= 0.10 * state.empty_shelf_checks
+    score -= 0.05 * repeated_checks
     return max(-1.0, min(1.0, score))
 
 
