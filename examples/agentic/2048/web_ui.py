@@ -406,7 +406,12 @@ def _llm_episode(server: Game2048Server) -> dict[str, Any]:
     server.score = result.score
     server.moves_played = result.total_moves
     server.invalid_moves = result.invalid_moves
-    server.terminal = result.reached_2048 or game.is_terminal(server.board) or result.truncated
+    # ``truncated`` only means the policy's plan hit the 32-step cap before the
+    # board reached 2048 or a true dead end -- the game is NOT over and the user
+    # may continue playing from the resulting board. Counting it as terminal
+    # surfaced a false "Game over" the moment an LLM episode ran the full cap,
+    # so terminal is gated on real end conditions only, mirroring ``_step``.
+    server.terminal = result.reached_2048 or game.is_terminal(server.board)
 
     baseline = game.random_episode(start_board, seed=server.seed, cap=server.cap, trials=8)
     improvement = result.score - baseline["score"]
