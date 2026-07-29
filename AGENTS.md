@@ -95,7 +95,7 @@ areno/                     Core Python package (layered cli -> api -> engine -> 
 +-- experimental/          Incubation area for new algorithms
 
 examples/                  Runnable reward functions and dataset loaders
-skills/                    Claude Code skills
+.agents/skills/            Repository-local agent skills
 tests/                     CPU test suite (*_cpu.py)
 docs/                      Architecture notes, CLI/SDK guides
 ```
@@ -103,6 +103,25 @@ docs/                      Architecture notes, CLI/SDK guides
 For task-to-file and call-path pointers, use the
 [code navigation map](CODEMAP.md). This guide remains
 the source of working rules and repository conventions.
+
+Repository-local workflows live under `.agents/skills/`. Load only the skill
+whose description matches the current task; each skill points to executable
+scripts and detailed references as they become relevant.
+
+For development tasks that require a remote GPU host, make every source change
+in a local worktree on a dedicated branch. Commit the local change, then update
+the remote checkout by fetching and checking out or pulling that branch. Do not
+edit source files on the remote host and do not copy uncommitted files there as
+an implicit deployment mechanism. If `areno/accel` changed, rebuild remotely
+with `pip install -e . --no-deps --no-build-isolation`; otherwise do not
+reinstall AReno.
+
+Use ModelScope for remote model and dataset assets. Pass
+`--model-hub modelscope` to `areno train` and `areno serve` when the source is a
+repository reference. For adaptation and inspection scripts, use ModelScope's
+`snapshot_download` and `MsDataset` APIs. Do not silently fall back to Hugging
+Face when ModelScope resolution fails; report the missing ModelScope asset or
+use a user-provided local path.
 
 ______________________________________________________________________
 
