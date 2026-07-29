@@ -257,6 +257,60 @@ class TestScoring:
         assert score == -1.0
 
 
+class TestRewardBounded:
+    """Test reward function stays in [-1.0, +1.0] (Issue #189 + gradient stability)."""
+
+    def test_reward_no_tool_call(self):
+        """Reward for no tool call is -1.0."""
+        import reward
+        class FakeRecord:
+            source_record = {"target": "hello", "game": {}}
+            tool_calls = []
+        r = reward.reward_fn(FakeRecord())
+        assert r == -1.0
+
+    def test_reward_correct_guess(self):
+        """Reward for correct guess is +1.0 (capped)."""
+        import reward
+        class FakeRecord:
+            source_record = {"target": "hello", "game": {"guesses": []}}
+            tool_calls = [{"name": "guess_word", "arguments": {"word": "hello"}}]
+        r = reward.reward_fn(FakeRecord())
+        assert r == 1.0
+
+    def test_reward_all_bounded(self):
+        """All reward values must be in [-1.0, +1.0]."""
+        import reward
+        test_cases = [
+            ("hello", "hello"),   # correct
+            ("hello", "world"),   # partial match
+            ("hello", "abcde"),   # invalid word (not in list)
+            ("hello", "heart"),   # some letters present
+        ]
+        for target, guess_word in test_cases:
+            class FakeRecord:
+                source_record = {"target": target, "game": {"guesses": []}}
+                tool_calls = [{"name": "guess_word", "arguments": {"word": guess_word}}]
+            r = reward.reward_fn(FakeRecord())
+            assert -1.0 <= r <= 1.0, f"Reward {r} out of bounds for target={target} guess={guess_word}"
+
+    def test_reward_no_tool_is_worst(self):
+        """Not calling tool should be strictly worse than any tool call."""
+        import reward
+        class NoToolRecord:
+            source_record = {"target": "hello", "game": {"guesses": []}}
+            tool_calls = []
+        no_tool_reward = reward.reward_fn(NoToolRecord())
+
+        # Any tool call should be better
+        class ToolRecord:
+            source_record = {"target": "hello", "game": {"guesses": []}}
+            tool_calls = [{"name": "guess_word", "arguments": {"word": "xxxxx"}}]
+        tool_reward = reward.reward_fn(ToolRecord())
+
+        assert no_tool_reward < tool_reward
+
+
 class TestDatasetGenerator:
     """Test dataset generation."""
 

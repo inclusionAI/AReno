@@ -10,12 +10,11 @@ from areno.api.agentic import AgentTrajectory, AgentTrajectoryTurn
 logger = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
-# CRITICAL: Keep prompt SHORT and DIRECT like tictactoe.
-# Qwen3-0.6B is small; long prompts confuse it.
+# CRITICAL: Keep prompt SHORT and DIRECT.
+# The system prompt must explicitly require tool calls.
 SYSTEM_PROMPT = (
-    "You are playing Wordle. Guess the 5-letter word by calling guess_word. "
-    "After each guess you get feedback. "
-    "You have 6 attempts. Call guess_word with a valid 5-letter English word."
+    "You are playing Wordle. You MUST call guess_word to submit your guess. "
+    "Do not write any text. Only call the guess_word tool with a 5-letter word."
 )
 
 GUESS_WORD_TOOL = {
