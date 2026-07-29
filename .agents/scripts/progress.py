@@ -29,7 +29,7 @@ from __future__ import annotations
 import json
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, TextIO
 
 
@@ -61,7 +61,7 @@ class ProgressEvent:
             d["step"] = self.step
         if self.total is not None:
             d["total"] = self.total
-        if self.data:
+        if self.data is not None:
             d["data"] = self.data
         return d
 
@@ -83,7 +83,6 @@ class ProgressTracker:
     def __init__(self) -> None:
         self._stack: list[dict[str, Any]] = []
         self._last_completed: str | None = None
-        self._stage_start: float | None = None
 
     # -- public API ---------------------------------------------------------
 
@@ -91,8 +90,8 @@ class ProgressTracker:
         self, stage: str, *, total: int | None = None, message: str = ""
     ) -> ProgressEvent:
         """Start a new stage, pushing it onto the stack."""
-        self._stage_start = time.monotonic()
-        entry = {"stage": stage, "total": total, "start": self._stage_start}
+        now = time.monotonic()
+        entry = {"stage": stage, "total": total, "start": now}
         self._stack.append(entry)
         return ProgressEvent(
             stage=stage,
@@ -175,9 +174,12 @@ class ProgressTracker:
     # -- internal -----------------------------------------------------------
 
     def _elapsed(self) -> float:
-        if self._stage_start is None:
+        if not self._stack:
             return 0.0
-        return time.monotonic() - self._stage_start
+        start = self._stack[-1].get("start")
+        if start is None:
+            return 0.0
+        return time.monotonic() - start
 
 
 # ---------------------------------------------------------------------------
@@ -207,10 +209,16 @@ class ProgressDisplay:
 
     # -- public API ---------------------------------------------------------
 
-    def render(self, event: ProgressEvent) -> None:
+    def render(self, event: ProgressEvent | None) -> None:
         """Render a single progress event."""
         if event is None:
             return
+        if event.status == "cancelled" and self._mode == "tty":
+            # Clear all orphaned tasks so stale bars don't persist.
+            for tid in list(self._task_ids.values()):
+                if self._progress is not None:
+                    self._progress.remove_task(tid)
+            self._task_ids.clear()
         if self._mode == "jsonl":
             self._render_jsonl(event)
         elif self._mode == "tty":
@@ -247,7 +255,7 @@ class ProgressDisplay:
 
     def _render_line(self, event: ProgressEvent) -> None:
         parts = [f"[{event.stage}]", event.status]
-        if event.step is not None and event.total:
+        if event.step is not None and event.total is not None:
             parts.append(f"{event.step}/{event.total}")
         if event.message:
             parts.append(event.message)
@@ -282,7 +290,7 @@ class ProgressDisplay:
 
         task_id = self._task_ids.get(event.stage)
         if event.status == "started":
-            total = event.total or 1
+            total = event.total if event.total is not None else 1
             desc = event.stage
             task_id = self._progress.add_task(desc, total=total)
             self._task_ids[event.stage] = task_id
