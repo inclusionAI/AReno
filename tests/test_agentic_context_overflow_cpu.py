@@ -424,6 +424,7 @@ def test_trim_messages_policy_trims_and_rolls_out():
 
 
 def test_trim_messages_policy_impossible_returns_error():
+    """When only system+user exist and exceed budget, raise RuntimeError immediately."""
     trainer = _FakeTrainer(world_size=1, tp_size=1)
     trainer.tokenizer = _ChatTemplateTokenizer(tokens_per_message=100, tools_overhead=0, gen_prompt_overhead=50)
     params = _FakeSamplingParams()
@@ -442,9 +443,8 @@ def test_trim_messages_policy_impossible_returns_error():
             {"model": "policy", "messages": [_sys(), _usr("only task")]}
         )
 
-    response = asyncio.run(run())
-    assert response["choices"][0]["finish_reason"] == "length"
-    assert response["areno"].get("error") == "context_overflow"
+    with pytest.raises(RuntimeError, match="trim_messages impossible"):
+        asyncio.run(run())
     assert trainer.rollout_batches == []
 
 
