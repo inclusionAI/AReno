@@ -121,13 +121,16 @@ class TrainingManager:
                 if metrics is None:
                     metrics = {}
                 metrics["auto_tune_worker_peak_mem_frac"] = float(peak) / float(total)
+            # Compute effective trainable token counts from the same masks
+            # used by the loss function (issue #227).
+            token_metrics = _compute_token_metrics(data_pack)
             return {
                 "loss": float(loss.detach().cpu()),
                 "stepped": stepped,
                 "global_step": worker._global_step,
                 "metrics": _merge_metrics(
                     metrics,
-                    None,
+                    token_metrics,
                     {"lr": current_lr},
                     {"grad_norm": grad_norm} if grad_norm is not None else None,
                     grad_zero_metrics,
@@ -200,3 +203,56 @@ class TrainingManager:
 
         ctx = get_tp_context()
         self.worker.model.finalize_router_expert_bias(ctx.group, ctx.dp_group)
+
+
+def _compute_token_metrics(data_pack: dict) -> dict[str, float] | None:
+    """Compute effective trainable token metrics from the data pack (issue #227).
+
+    Reads the same ``prompt_mask`` / ``loss_mask`` / ``packed_response_mask``
+    fields used by the loss function. Returns a metrics dict or None if
+    the required fields are not present.
+    """
+
+    from areno.engine.token_counts import compute_token_counts
+
+    try:
+        if "packed_response_mask" in data_pack:
+            resp_mask = data_pack["packed_response_mask"]
+            if isinstance(resp_mask, torch.Tensor):
+                resp_mask = resp_mask.cpu().tolist()
+            n_seqs = int(data_pack.get("packed_num_sequences", 1))
+            counts = compute_token_counts(
+                lengths=[],
+                packed_response_mask=[bool(m) for m in resp_mask],
+                num_sequences=n_seqs,
+            )
+            return counts.to_dict()
+        # Padded layout.
+        lengths_t = data_pack.get("lengths")
+        prompt_mask_t = data_pack.get("prompt_mask")
+        if lengths_t is None or prompt_mask_t is None:
+            return None
+        lengths = lengths_t.cpu().tolist() if isinstance(lengths_t, torch.Tensor) else list(lengths_t)
+        prompt_mask_rows = []
+        for row in range(len(lengths)):
+            pm = prompt_mask_t[row]
+            if isinstance(pm, torch.Tensor):
+                pm = pm.cpu().tolist()
+            prompt_mask_rows.append([bool(m) for m in pm])
+        loss_mask_rows = None
+        loss_mask_t = data_pack.get("loss_mask")
+        if loss_mask_t is not None and isinstance(loss_mask_t, torch.Tensor):
+            loss_mask_rows = []
+            for row in range(len(lengths)):
+                lm = loss_mask_t[row]
+                if isinstance(lm, torch.Tensor):
+                    lm = lm.cpu().tolist()
+                loss_mask_rows.append([bool(m) for m in lm])
+        counts = compute_token_counts(
+            lengths=lengths,
+            prompt_mask_rows=prompt_mask_rows,
+            loss_mask_rows=loss_mask_rows,
+        )
+        return counts.to_dict()
+    except (KeyError, ValueError, AttributeError, TypeError):
+        return None
