@@ -2391,7 +2391,6 @@ textarea:focus {
   border: 1px solid var(--border);
   border-radius: 10px;
   padding: 14px 16px;
-  position: relative;
 }
 
 .metricCardLabel {
@@ -2408,11 +2407,15 @@ textarea:focus {
   align-items: center;
 }
 
-.metricCardSubLabel {
+.metricCardBetterTag {
   font-size: 10px;
-  font-weight: 500;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: rgba(45, 143, 79, 0.12);
+  color: #2d8f4f;
   text-transform: none;
-  color: var(--text-tertiary, #999);
+  letter-spacing: 0;
 }
 
 .metricCardRow {
@@ -2456,19 +2459,6 @@ textarea:focus {
 }
 
 .valBetter {
-  color: #2d8f4f;
-}
-
-.metricCardFlag {
-  position: absolute;
-  top: 10px;
-  right: 10px;
-  font-size: 9px;
-  font-weight: 700;
-  text-transform: uppercase;
-  padding: 1px 6px;
-  border-radius: 8px;
-  background: rgba(45, 143, 79, 0.12);
   color: #2d8f4f;
 }
 

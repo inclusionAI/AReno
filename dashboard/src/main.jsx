@@ -1971,11 +1971,13 @@ function CompareRunsPanel({ jobList, refreshJobs, compareJobAId, setCompareJobAI
                 const bBetterH = card.better === "higher" && Number.isFinite(valA) && Number.isFinite(valB) && valB > valA;
                 return (
                   <div className="metricCard" key={i}>
-                    {(aBetter || aBetterH) && <div className="metricCardFlag">A better</div>}
-                    {(bBetter || bBetterH) && <div className="metricCardFlag">B better</div>}
                     <div className="metricCardLabel">
                       {card.label}
-                      <span className="metricCardSubLabel">A vs B</span>
+                      {((aBetter || aBetterH) || (bBetter || bBetterH)) && (
+                        <span className="metricCardBetterTag">
+                          {(aBetter || aBetterH) ? "A better" : "B better"}
+                        </span>
+                      )}
                     </div>
                     <div className="metricCardRow">
                       <div className="metricCardSide">
