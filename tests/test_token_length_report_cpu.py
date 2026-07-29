@@ -19,16 +19,28 @@ from click.testing import CliRunner
 
 # ---------------------------------------------------------------------------
 # Load areno.api.data without triggering areno.api.__init__ (which imports torch).
+# Module names use a `_for_tests` suffix and are registered under those names
+# only, so the real `areno.api.data` / `areno.cli.*` slots in sys.modules stay
+# untouched -- this avoids cross-test module-identity pollution when the full
+# CPU suite runs side by side with tests that import those modules normally.
 # ---------------------------------------------------------------------------
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-_DATA_PY = _REPO_ROOT / "areno" / "api" / "data.py"
 
-# Ensure numpy is importable (it's a dependency of data.py).
-_spec = importlib.util.spec_from_file_location("areno.api.data", _DATA_PY)
-_data_mod = importlib.util.module_from_spec(_spec)
-sys.modules["areno.api.data"] = _data_mod
-_spec.loader.exec_module(_data_mod)
+
+def _load_module_for_tests(path: Path, name: str):
+    """Load a source file under a tests-only module name, isolated from sys.modules global slots."""
+
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_DATA_PY = _REPO_ROOT / "areno" / "api" / "data.py"
+_data_mod = _load_module_for_tests(_DATA_PY, "_areno_token_report_data_for_tests")
 
 # Re-export the symbols we need.
 LengthStats = _data_mod.LengthStats
@@ -40,16 +52,10 @@ compute_token_length_report = _data_mod.compute_token_length_report
 # Load areno.cli.diagnostics and areno.cli.main for CLI tests.
 # These also avoid importing heavy modules at load time.
 _DIAG_PY = _REPO_ROOT / "areno" / "cli" / "diagnostics.py"
-_spec_diag = importlib.util.spec_from_file_location("areno.cli.diagnostics", _DIAG_PY)
-diag_mod = importlib.util.module_from_spec(_spec_diag)
-sys.modules["areno.cli.diagnostics"] = diag_mod
-_spec_diag.loader.exec_module(diag_mod)
+diag_mod = _load_module_for_tests(_DIAG_PY, "_areno_token_report_diagnostics_for_tests")
 
 _MAIN_PY = _REPO_ROOT / "areno" / "cli" / "main.py"
-_spec_main = importlib.util.spec_from_file_location("areno.cli.main", _MAIN_PY)
-main_mod = importlib.util.module_from_spec(_spec_main)
-sys.modules["areno.cli.main"] = main_mod
-_spec_main.loader.exec_module(main_mod)
+main_mod = _load_module_for_tests(_MAIN_PY, "_areno_token_report_main_for_tests")
 
 
 class _MockTokenizer:

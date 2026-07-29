@@ -490,7 +490,7 @@ def _print_env_report(report: dict[str, Any]) -> None:
 
 
 @click.command(name="token-report", context_settings={"help_option_names": ["-h", "--help"]})
-@click.option("--dataset-path", required=True, help="Path or HuggingFace ID of the dataset (JSONL file).")
+@click.option("--dataset-path", required=True, help="Path to a local JSONL dataset file (one JSON object per line).")
 @click.option("--tokenizer", "tokenizer_path", required=True, help="Model path for tokenizer loading.")
 @click.option("--max-context", default=4096, type=int, help="Maximum context length for over-context stats.")
 @click.option("--sample-ratio", default=1.0, type=float, help="Fraction to sample (1.0 = full scan).")
