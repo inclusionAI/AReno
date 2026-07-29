@@ -150,3 +150,21 @@ Follow and filter to errors on rank 0::
 Combined filters with JSON output for scripting::
 
     areno logs /tmp/areno/tfevent --tail 100 --stage train --grep "loss" --output json
+
+Persisting training logs for later analysis
+--------------------------------------------
+
+By default, ``areno train`` writes log output to the terminal only.  To
+also persist logs to a file that ``areno logs`` can read afterwards, add
+``--log-to-file`` to the training command::
+
+    areno train --ckpt Qwen/Qwen3-0.6B --algo sft --log-to-file ...
+
+This writes ``areno_train.<pid>.log`` under ``--metrics-log-dir``.  After
+training completes, filter and inspect the persisted logs::
+
+    areno logs /tmp/areno/tfevent --tail 50 --severity error
+    areno logs /tmp/areno/tfevent --grep "loss" --output json
+
+Without ``--log-to-file``, no training log file is created and existing
+behaviour is unchanged.

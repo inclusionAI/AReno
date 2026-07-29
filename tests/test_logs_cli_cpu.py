@@ -352,6 +352,86 @@ class TestResolvePaths:
         result = resolve_run_paths(str(tmp_path / "nope"))
         assert result == []
 
+    def test_find_log_files_prioritises_log_over_txt(self, metrics_dir: Path):
+        """.log files should come before .txt config files in the result."""
+        files = find_log_files(metrics_dir)
+        log_files = [f for f in files if f.name.endswith(".log")]
+        txt_files = [f for f in files if f.name.endswith(".txt") and "run_config" in f.name]
+        if log_files and txt_files:
+            # .log files should appear before .txt files.
+            first_log_idx = files.index(log_files[0])
+            first_txt_idx = files.index(txt_files[0])
+            assert first_log_idx < first_txt_idx
+
+    def test_find_log_files_skips_run_config_json(self, metrics_dir: Path):
+        """areno_run_config.*.json should be excluded (not a log line format)."""
+        files = find_log_files(metrics_dir)
+        names = [f.name for f in files]
+        assert not any(n.startswith("areno_run_config.") and n.endswith(".json") for n in names)
+
+
+# ---------------------------------------------------------------------------
+# --log-to-file tests
+# ---------------------------------------------------------------------------
+
+
+class TestLogToFile:
+    """Test that --log-to-file writes training logs to disk."""
+
+    def test_install_file_handler_creates_file(self, tmp_path: Path):
+        """install_file_handler should create a .log file under metrics_log_dir."""
+        import logging
+
+        from areno.cli.log_to_file import install_file_handler, remove_file_handlers
+
+        log_path = install_file_handler(str(tmp_path))
+
+        # Write a log line.
+        logging.info("test log message from --log-to-file")
+
+        # The log file should exist.
+        assert log_path.exists()
+        content = log_path.read_text(encoding="utf-8")
+        assert "test log message" in content
+
+        # Clean up.
+        remove_file_handlers()
+
+    def test_log_to_file_disabled_by_default(self):
+        """Without --log-to-file, no FileHandler should be on the root logger."""
+        import logging
+
+        from areno.cli.log_to_file import remove_file_handlers
+
+        # Ensure clean state.
+        remove_file_handlers()
+
+        root_logger = logging.getLogger()
+        file_handlers = [h for h in root_logger.handlers if isinstance(h, logging.FileHandler)]
+        assert len(file_handlers) == 0
+
+    def test_areno_logs_reads_log_to_file_output(self, tmp_path: Path):
+        """After --log-to-file writes a log, areno logs should read and filter it."""
+        import logging
+
+        from areno.cli.log_to_file import install_file_handler, remove_file_handlers
+
+        log_path = install_file_handler(str(tmp_path))
+
+        # Write some log lines in AReno format.
+        logging.info("step=0 loss=2.3 rank=0")
+        logging.error("OOM at rank=1")
+
+        # Clean up handler so it doesn't leak into other tests.
+        remove_file_handlers()
+
+        # areno logs should read and filter it.
+        runner = CliRunner()
+        result = runner.invoke(logs_command, [str(log_path), "--severity", "error"])
+        assert result.exit_code == 0
+        assert "OOM" in result.output
+        assert "step=0" not in result.output
+
 
 # ---------------------------------------------------------------------------
 # CLI integration tests

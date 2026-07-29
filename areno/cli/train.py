@@ -129,7 +129,7 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         ),
     ),
     ("Checkpoint", ("save_path", "save_interval")),
-    ("Observability", ("metrics_log_dir",)),
+    ("Observability", ("metrics_log_dir", "log_to_file")),
 )
 
 
@@ -826,6 +826,18 @@ def run(trainer_config: TrainerConfig):
     trainer.fit()
 
 
+def _install_file_handler(config: TrainerConfig) -> None:
+    """Attach a FileHandler so training logs are persisted to disk.
+
+    Delegates to ``areno.cli.log_to_file`` to keep the heavy-import
+    surface minimal for CPU tests.
+    """
+
+    from areno.cli.log_to_file import install_file_handler
+
+    install_file_handler(config.metrics_log_dir)
+
+
 def _write_dashboard_run_config(config: TrainerConfig) -> None:
     """Persist the same train settings summary that the CLI prints."""
 
@@ -1324,11 +1336,19 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
 @click.option("--value-loss-coef", type=float, default=0.5, show_default=True, help="PPO value loss coefficient.")
 @click.option("--gamma", type=float, default=1.0, show_default=True, help="PPO GAE discount.")
 @click.option("--lam", type=float, default=0.95, show_default=True, help="PPO GAE lambda.")
+@click.option(
+    "--log-to-file",
+    is_flag=True,
+    help="Also write training logs to a file under --metrics-log-dir (areno_train.<pid>.log). "
+    "Enables 'areno logs' to read and filter training output after the run.",
+)
 def train_command(**options) -> None:
     """Click entrypoint for training."""
 
     trainer_config = _trainer_config_from_options(**options)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    if options.get("log_to_file"):
+        _install_file_handler(trainer_config)
     if options.get("smoke_infer") or options.get("smoke_train"):
         from areno.cli.auto_tune import smoke_infer_config, smoke_train_config
 

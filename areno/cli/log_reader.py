@@ -293,9 +293,14 @@ def find_log_files(metrics_dir: str | Path) -> list[Path]:
         # Skip dashboard state JSON (not a log).
         if name.startswith("dashboard_state."):
             continue
-        # Include text logs and run config.
+        # Skip run config JSON (not a log line format).
+        if name.startswith("areno_run_config.") and name.endswith(".json"):
+            continue
+        # Include text logs, run config txt, and training logs.
         if name.endswith((".log", ".txt", ".out")) or "run_config" in name:
             candidates.append(p)
+    # Prioritise .log files (actual training logs) over .txt config files.
+    candidates.sort(key=lambda p: not p.name.endswith(".log"))
     return candidates
 
 
