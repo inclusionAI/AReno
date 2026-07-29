@@ -521,3 +521,105 @@ class TestTruncation:
         new_inode = log_file.stat().st_ino
         # On most filesystems the inode changes when a file is recreated.
         assert old_inode != new_inode
+
+
+# ---------------------------------------------------------------------------
+# Backward compatibility: existing CLI commands are unaffected
+# ---------------------------------------------------------------------------
+
+
+class TestBackwardCompat:
+    """Verify that adding the 'logs' command does not change existing behavior."""
+
+    def test_main_group_still_lists_all_original_commands(self):
+        """The main click group must still expose all pre-existing commands."""
+        from areno.cli.main import ArenoCli
+
+        commands = ArenoCli._COMMANDS
+        # All original commands must still be present.
+        for name in ("check", "env", "agent", "dashboard", "train", "serve"):
+            assert name in commands, f"Missing original command: {name}"
+        # The new command must also be present.
+        assert "logs" in commands
+
+    def test_logs_command_not_affecting_train_imports(self):
+        """Importing logs.py must not trigger heavy train.py imports."""
+        # If logs.py accidentally imported train.py at module level,
+        # this would pull in torch/CUDA.  We verify it doesn't by
+        # checking that 'areno.api.algorithms' is not in sys.modules
+        # after importing logs.
+        import importlib
+        import sys
+
+        # Remove any prior imports of heavy modules.
+        for mod in list(sys.modules):
+            if mod.startswith("areno.api.algorithms"):
+                del sys.modules[mod]
+        importlib.import_module("areno.cli.logs")
+        assert "areno.api.algorithms" not in sys.modules, (
+            "logs.py should not import train.py's heavy dependencies"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Emitted artifact fields: verify output contains expected metric/field names
+# ---------------------------------------------------------------------------
+
+
+class TestEmittedFields:
+    """Assert emitted output fields, not only exit status."""
+
+    def test_text_output_contains_all_context_fields(self, sample_log_file: Path):
+        """Text output must include timestamp, stage, rank, severity, source."""
+        runner = CliRunner()
+        result = runner.invoke(logs_command, [str(sample_log_file), "--tail", "1"])
+        assert result.exit_code == 0
+        output = result.output
+        # All five context fields must be present in the output line.
+        assert "2026-07-28" in output          # timestamp
+        assert "[train]" in output or "[rollout]" in output  # stage
+        assert "[rank" in output                # rank
+        assert "[INFO]" in output or "[ERROR]" in output or "[DEBUG]" in output  # severity
+        assert "(" in output and ")" in output  # source (logger name in parens)
+
+    def test_json_output_contains_all_expected_keys(self, sample_log_file: Path):
+        """JSON output must contain all required field keys."""
+        runner = CliRunner()
+        result = runner.invoke(
+            logs_command, [str(sample_log_file), "--tail", "1", "--output", "json"]
+        )
+        assert result.exit_code == 0
+        lines = [l for l in result.output.strip().split("\n") if l]
+        assert len(lines) >= 1
+        obj = json.loads(lines[0])
+        # All required keys must be present.
+        expected_keys = {"timestamp", "severity", "source", "message", "rank", "stage"}
+        assert expected_keys.issubset(set(obj.keys())), (
+            f"Missing keys: {expected_keys - set(obj.keys())}"
+        )
+
+    def test_error_output_contains_stage_and_input(self, sample_log_file: Path):
+        """Error messages must identify the affected stage and input."""
+        runner = CliRunner()
+        result = runner.invoke(
+            logs_command, [str(sample_log_file), "--rank", "-1"]
+        )
+        assert result.exit_code == 1
+        assert "stage=" in result.output
+        assert "rank" in result.output
+        assert "Invalid" in result.output
+
+    def test_error_json_contains_structured_fields(self, sample_log_file: Path):
+        """JSON error must contain structured error.stage, error.input, error.message."""
+        runner = CliRunner()
+        result = runner.invoke(
+            logs_command,
+            [str(sample_log_file), "--severity", "trace", "--output", "json"],
+        )
+        assert result.exit_code == 1
+        lines = [l for l in result.output.strip().split("\n") if l]
+        obj = json.loads(lines[0])
+        assert "error" in obj
+        assert "stage" in obj["error"]
+        assert "input" in obj["error"]
+        assert "message" in obj["error"]
