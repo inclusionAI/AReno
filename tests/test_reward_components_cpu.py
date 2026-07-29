@@ -133,14 +133,18 @@ class RewardComponentAnalyzerTest(unittest.TestCase):
         self.assertAlmostEqual(by_name["b"]["zero_fraction"], 0.5, places=6)
 
     def test_outlier_fraction_uses_z_threshold(self):
-        # 0..0..0..0..100: the 100 is a clear z-score outlier.
+        # Nineteen 0s and one 100. With z = (max - mean) / std and sample std
+        # (ddof=1), the 100's z-score is 19/sqrt(20) ~= 4.25, which exceeds
+        # the 3.0 threshold. A single spike among only four points would NOT
+        # be flagged because the spike itself inflates the std (its z ~= 1.79),
+        # so the sample must be large enough for a clean outlier.
         analyzer = RewardComponentAnalyzer(outlier_z=3.0)
-        for _ in range(4):
-            analyzer.update(0, {"v": 0.0})
-        analyzer.update(1, {"v": 100.0})
+        for step in range(19):
+            analyzer.update(step, {"v": 0.0})
+        analyzer.update(19, {"v": 100.0})
 
         comp = analyzer.snapshot()["components"][0]
-        self.assertAlmostEqual(comp["outlier_fraction"], 1 / 5, places=6)
+        self.assertAlmostEqual(comp["outlier_fraction"], 1 / 20, places=6)
 
     def test_invalidConstructor_args_raise(self):
         with self.assertRaises(ValueError):
