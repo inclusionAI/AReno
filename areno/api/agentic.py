@@ -518,6 +518,10 @@ class RolloutSession:
                     trim_target = max_context_len
                 if trim_target is None:
                     trim_target = _model_sequence_len(tokenizer)
+                logger.info(
+                    "trim check: policy=%s trim_target=%s prompt_tokens=%d",
+                    self._agentic_context_overflow_policy, trim_target, len(pending.input_tokens),
+                )
                 if trim_target is not None and len(pending.input_tokens) > trim_target:
                     trimmed = _trim_messages_to_fit(
                         tokenizer,
