@@ -809,7 +809,11 @@ def format_result(result: GenerationResult) -> str:
     lines.append("")
     lines.append("Next steps:")
     lines.append("  1. Edit checkpoint.py to fill in HF key mappings.")
-    model_file = "model_moe.py" if "model_moe.py" in result.created_files + result.preserved_files + result.conflicted_files else "model.py"
+    model_file = (
+        "model_moe.py"
+        if "model_moe.py" in result.created_files + result.preserved_files + result.conflicted_files
+        else "model.py"
+    )
     lines.append(f"  2. Edit {model_file} to adjust architecture details.")
     lines.append("  3. Call the generated register() function from areno/models/__init__.py.")
     return "\n".join(lines)
