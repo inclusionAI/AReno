@@ -237,11 +237,7 @@ def _llm_direction(server: Game2048Server) -> str:
     raise ValueError("response did not contain a valid move tool call")
 
 
-SYSTEM_PROMPT = (
-    "You are a strategic 2048 player. Call the move tool with a direction "
-    "(UP, DOWN, LEFT, RIGHT) to swipe the board. Merge identical tiles to grow "
-    "the largest tile possible. Avoid moves that do not change the board."
-)
+SYSTEM_PROMPT = game.SYSTEM_PROMPT
 
 
 def _agent_name(server: Game2048Server) -> str:

@@ -16,7 +16,13 @@ Board = list[list[int]]
 DIRECTIONS = ("UP", "DOWN", "LEFT", "RIGHT")
 EMPTY = 0
 SIZE = 4
-DEFAULT_MAX_MOVES = 200
+DEFAULT_MAX_MOVES = 50
+
+SYSTEM_PROMPT = (
+    "你是一个 2048 游戏 AI。棋盘是 4x4 的网格，每次可以选择上/下/左/右移动。"
+    "相同数字的方块碰撞会合并，每次移动后会在随机空位出现一个新的 2（90%）或 4（10%）。"
+    "请先分析局面，然后调用 move 工具执行动作。"
+)
 
 MOVE_TOOL = {
     "type": "function",
@@ -138,14 +144,14 @@ def _slide_row_left(row: list[int]) -> tuple[int, list[int]]:
 
 
 def spawn_tile(board: Board, rng: random.Random) -> Board:
-    """Place a 2 in a random empty cell (deterministic: always 2)."""
+    """Place a 2 (90%) or 4 (10%) in a random empty cell."""
 
     empties = [(r, c) for r in range(SIZE) for c in range(SIZE) if board[r][c] == EMPTY]
     if not empties:
         return [list(row) for row in board]
     r, c = rng.choice(empties)
     result = [list(row) for row in board]
-    result[r][c] = 2
+    result[r][c] = 4 if rng.random() < 0.1 else 2
     return result
 
 
@@ -225,12 +231,7 @@ def board_to_text(board: Board) -> str:
 def format_prompt(board: Board) -> str:
     """Build a user-facing prompt with the current board and instructions."""
 
-    return (
-        "You are playing 2048. Swipe the board to merge identical tiles and "
-        "grow toward 2048. Call the move tool with one direction: UP, DOWN, "
-        "LEFT, or RIGHT.\n\n"
-        f"Current board:\n{board_to_text(board)}"
-    )
+    return f"当前棋盘：\n{board_to_text(board)}"
 
 
 # ------------------------------------------------------------------
@@ -283,6 +284,69 @@ def score_episode(
 # ------------------------------------------------------------------
 # Internal helpers
 # ------------------------------------------------------------------
+
+
+def generate_board(max_tile: int, pattern: str, seed: int) -> Board:
+    """Generate a mid-game board with the given max tile and layout pattern.
+
+    Args:
+        max_tile: The largest tile value on the board (64, 128, 256, or 512).
+        pattern: "corner" (large tiles clustered in a corner) or "scattered".
+        seed: Deterministic seed for tile placement.
+    """
+    rng = random.Random(seed)
+    board = _empty_board()
+    tiles = _tile_set(max_tile, rng)
+    if pattern == "corner":
+        _place_corner(board, tiles, rng)
+    else:
+        _place_scattered(board, tiles, rng)
+    return board
+
+
+def _tile_set(max_tile: int, rng: random.Random) -> list[int]:
+    """Return a sorted list of tile values for a mid-game board."""
+    # Approximate distribution: one max tile, a few mid tiles, several small ones
+    tiles = [max_tile]
+    val = max_tile // 2
+    while val >= 2:
+        count = rng.randint(1, 2)
+        tiles.extend([val] * count)
+        val //= 2
+    # Fill remaining with 2s to reach 8-12 total tiles
+    target = rng.randint(8, 12)
+    while len(tiles) < target:
+        tiles.append(2)
+    # Trim if too many
+    tiles = tiles[:target]
+    tiles.sort(reverse=True)
+    return tiles
+
+
+def _place_corner(board: Board, tiles: list[int], rng: random.Random) -> None:
+    """Place tiles with large values clustered toward bottom-left corner."""
+    # Pick a corner: 0=bottom-left, 1=bottom-right, 2=top-left, 3=top-right
+    corner = rng.randint(0, 3)
+    corners = [(3, 0), (3, 3), (0, 0), (0, 3)]
+    cr, cc = corners[corner]
+    # Assign positions sorted by Manhattan distance from corner (closest first),
+    # with row-major tie-breaking for deterministic placement.
+    positions = sorted(
+        [(r, c) for r in range(SIZE) for c in range(SIZE)],
+        key=lambda rc: (abs(rc[0] - cr) + abs(rc[1] - cc), rc[0], rc[1]),
+    )
+    for i, tile in enumerate(tiles):
+        r, c = positions[i]
+        board[r][c] = tile
+
+
+def _place_scattered(board: Board, tiles: list[int], rng: random.Random) -> None:
+    """Place tiles at random positions on the board."""
+    positions = [(r, c) for r in range(SIZE) for c in range(SIZE)]
+    rng.shuffle(positions)
+    for i, tile in enumerate(tiles):
+        r, c = positions[i]
+        board[r][c] = tile
 
 
 def normalize_board(board: Iterable[Iterable[int]]) -> Board:

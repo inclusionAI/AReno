@@ -12,17 +12,11 @@ from pathlib import Path
 from areno.api.agentic import AgentTrajectory, AgentTrajectoryTurn
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from game import MOVE_TOOL, DEFAULT_MAX_MOVES, DIRECTIONS  # noqa: E402
+from game import MOVE_TOOL, DEFAULT_MAX_MOVES, DIRECTIONS, SYSTEM_PROMPT  # noqa: E402
 import game  # noqa: E402
 
 logger = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARNING)
-
-SYSTEM_PROMPT = (
-    "你是一个 2048 游戏 AI。棋盘是 4x4 的网格，每次可以选择上/下/左/右移动。"
-    "相同数字的方块碰撞会合并，每次移动后会在随机空位出现一个新的 2。"
-    "请先分析局面，然后调用 move 工具执行动作。"
-)
 
 
 async def run_agent(ctx, batch):
@@ -89,8 +83,8 @@ async def _run_episode(item, client) -> list[AgentTrajectoryTurn]:
         assistant_message = _assistant_message(response)
         tool_result = _execute_move(assistant_message, board, rng)
         if tool_result is None:
-            logger.warning("Game2048 model returned no executable move call")
-            break
+            logger.warning("Game2048 model returned no executable move call; penalising and falling back to random")
+            tool_result = _invalid_move_result(board, rng)
 
         board = tool_result["board"]
         messages.extend(_tool_messages(assistant_message, tool_result))
@@ -152,6 +146,20 @@ def _execute_move(assistant_message: dict, board, rng) -> dict | None:
         "board": new_board,
         "score": score,
         "valid": valid,
+        "terminal": terminal,
+        "direction": direction,
+        "board_text": game.board_to_text(new_board),
+    }
+
+
+def _invalid_move_result(board, rng) -> dict:
+    """Fallback: pick a random legal direction and mark the move as invalid."""
+    direction = game.random_action(board, rng)
+    new_board, score, valid, terminal = game.move(board, direction, rng)
+    return {
+        "board": new_board,
+        "score": score,
+        "valid": False,  # force invalid so reward_fn applies penalty
         "terminal": terminal,
         "direction": direction,
         "board_text": game.board_to_text(new_board),
