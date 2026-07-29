@@ -416,7 +416,7 @@ class DiagnosisSession:
 # ---------------------------------------------------------------------------
 
 
-def format_prompt(circuit: Circuit) -> str:
+def format_prompt(circuit: Circuit, *, max_turns: int = 10) -> str:
     """Format the user-facing prompt describing the circuit.
 
     The prompt tells the agent the circuit structure (gate types and
@@ -425,6 +425,8 @@ def format_prompt(circuit: Circuit) -> str:
 
     Args:
         circuit: The reference circuit (its structure is shown to the agent).
+        max_turns: Maximum number of turns the agent has (default 10).
+            This should match the MAX_TURNS in run_agent.py.
 
     Returns:
         A prompt string.
@@ -447,7 +449,7 @@ def format_prompt(circuit: Circuit) -> str:
     lines.append("One non-INPUT gate is faulty (stuck-at-0 or stuck-at-1).")
     lines.append("Use the 'probe' tool to set inputs and inspect wire values.")
     lines.append("Use the 'submit' tool to identify the faulty gate.")
-    lines.append("You have at most 20 probes and 3 submissions.")
+    lines.append(f"You have at most {max_turns} turns. Call exactly one tool per turn.")
     return "\n".join(lines)
 
 

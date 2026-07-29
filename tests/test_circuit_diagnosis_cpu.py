@@ -17,15 +17,25 @@ Tests cover:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 # Add example directory to path.
 _EXAMPLE_DIR = Path(__file__).resolve().parents[1] / "examples" / "agentic" / "circuit"
+
+# Check if torch is available (run_agent imports areno.api which needs torch).
+try:
+    import torch  # noqa: F401
+
+    _HAS_TORCH = True
+except ImportError:
+    _HAS_TORCH = False
 sys.path.insert(0, str(_EXAMPLE_DIR))
 
 import circuit  # noqa: E402
@@ -313,7 +323,7 @@ class TestBruteForceBaseline(unittest.TestCase):
 
 
 class TestPromptFormatting(unittest.TestCase):
-    """format_prompt should describe the circuit structure."""
+    """format_prompt should describe the circuit structure and turn limit."""
 
     def test_prompt_contains_circuit_info(self):
         circ = circuit.generate_circuit(num_inputs=3, num_gates=6, seed=42)
@@ -325,6 +335,19 @@ class TestPromptFormatting(unittest.TestCase):
         self.assertIn("faulty", prompt)
         self.assertIn("probe", prompt)
         self.assertIn("submit", prompt)
+
+    def test_prompt_says_10_turns(self):
+        """Prompt should say '10 turns', not '20 probes / 3 submissions'."""
+        circ = circuit.generate_circuit(num_inputs=3, num_gates=6, seed=42)
+        prompt = circuit.format_prompt(circ)
+        self.assertIn("10 turns", prompt)
+        self.assertNotIn("20 probes", prompt)
+        self.assertNotIn("3 submissions", prompt)
+
+    def test_prompt_custom_turns(self):
+        circ = circuit.generate_circuit(num_inputs=3, num_gates=6, seed=42)
+        prompt = circuit.format_prompt(circ, max_turns=5)
+        self.assertIn("5 turns", prompt)
 
 
 # ---------------------------------------------------------------------------
@@ -377,7 +400,7 @@ class TestDatasetGeneration(unittest.TestCase):
 
 
 class TestRewardFunction(unittest.TestCase):
-    """reward_fn should return correct reward dict for various tool call patterns."""
+    """reward_fn should return float 1.0 for correct, 0.0 otherwise."""
 
     def test_correct_diagnosis(self):
         record = type(
@@ -389,9 +412,7 @@ class TestRewardFunction(unittest.TestCase):
                 "completion": "",
             },
         )()
-        result = reward.reward_fn(record)
-        self.assertEqual(result["reward"], 1.0)
-        self.assertEqual(result["submitted"], 1.0)
+        self.assertEqual(reward.reward_fn(record), 1.0)
 
     def test_incorrect_diagnosis(self):
         record = type(
@@ -403,9 +424,7 @@ class TestRewardFunction(unittest.TestCase):
                 "completion": "",
             },
         )()
-        result = reward.reward_fn(record)
-        self.assertEqual(result["reward"], 0.0)
-        self.assertEqual(result["submitted"], 1.0)
+        self.assertEqual(reward.reward_fn(record), 0.0)
 
     def test_no_submit_call(self):
         record = type(
@@ -417,9 +436,7 @@ class TestRewardFunction(unittest.TestCase):
                 "completion": "",
             },
         )()
-        result = reward.reward_fn(record)
-        self.assertEqual(result["reward"], 0.0)
-        self.assertEqual(result["submitted"], 0.0)
+        self.assertEqual(reward.reward_fn(record), 0.0)
 
     def test_string_arguments(self):
         record = type(
@@ -431,32 +448,9 @@ class TestRewardFunction(unittest.TestCase):
                 "completion": "",
             },
         )()
-        result = reward.reward_fn(record)
-        self.assertEqual(result["reward"], 1.0)
-
-    def test_probes_counted(self):
-        """probes_used should count probe calls before submit."""
-        record = type(
-            "R",
-            (),
-            {
-                "source_record": {"faulty_gate_id": 4},
-                "tool_calls": [
-                    {"name": "probe", "arguments": {"wire_id": 5, "inputs": [True, False, True]}},
-                    {"name": "probe", "arguments": {"wire_id": 3, "inputs": [False, True, False]}},
-                    {"name": "probe", "arguments": {"wire_id": 4, "inputs": [True, True, True]}},
-                    {"name": "submit", "arguments": {"gate_id": 4}},
-                ],
-                "completion": "",
-            },
-        )()
-        result = reward.reward_fn(record)
-        self.assertEqual(result["reward"], 1.0)
-        self.assertEqual(result["probes_used"], 3.0)
-        self.assertEqual(result["submitted"], 1.0)
+        self.assertEqual(reward.reward_fn(record), 1.0)
 
     def test_no_tool_calls(self):
-        """No tool calls at all should return zero everything."""
         record = type(
             "R",
             (),
@@ -466,10 +460,41 @@ class TestRewardFunction(unittest.TestCase):
                 "completion": "I don't know",
             },
         )()
+        self.assertEqual(reward.reward_fn(record), 0.0)
+
+    def test_returns_float_not_dict(self):
+        """reward_fn must return float, not dict (AReno trainer does float(reward_fn(record)))."""
+        record = type(
+            "R",
+            (),
+            {
+                "source_record": {"faulty_gate_id": 4},
+                "tool_calls": [{"name": "submit", "arguments": {"gate_id": 4}}],
+                "completion": "",
+            },
+        )()
         result = reward.reward_fn(record)
-        self.assertEqual(result["reward"], 0.0)
-        self.assertEqual(result["probes_used"], 0.0)
-        self.assertEqual(result["submitted"], 0.0)
+        self.assertIsInstance(result, float)
+
+    def test_analyze_tool_calls_helper(self):
+        """analyze_tool_calls is a standalone helper that returns a dict."""
+        record = type(
+            "R",
+            (),
+            {
+                "source_record": {"faulty_gate_id": 4},
+                "tool_calls": [
+                    {"name": "probe", "arguments": {"wire_id": 5, "inputs": [True, False, True]}},
+                    {"name": "probe", "arguments": {"wire_id": 3, "inputs": [False, True, False]}},
+                    {"name": "submit", "arguments": {"gate_id": 4}},
+                ],
+                "completion": "",
+            },
+        )()
+        info = reward.analyze_tool_calls(record)
+        self.assertEqual(info["probes_used"], 2)
+        self.assertTrue(info["submitted"])
+        self.assertEqual(info["guessed_gate_id"], 4)
 
 
 # ---------------------------------------------------------------------------
@@ -512,5 +537,353 @@ class TestBoundaryValues(unittest.TestCase):
             circuit.inject_fault(circ, seed=0)
 
 
-if __name__ == "__main__":
-    unittest.main()
+# ---------------------------------------------------------------------------
+# Probe parameter validation (run_agent._execute_probe)
+# ---------------------------------------------------------------------------
+
+
+@unittest.skipUnless(_HAS_TORCH, "torch not available; run_agent imports areno.api")
+class TestExecuteProbeValidation(unittest.TestCase):
+    """_execute_probe should strictly validate inputs and wire_id."""
+
+    def setUp(self):
+        self.circ = circuit.generate_circuit(num_inputs=3, num_gates=6, seed=42)
+        self.faulty = circuit.inject_fault(self.circ, seed=0)
+        # Import _execute_probe from run_agent module.
+        sys.path.insert(0, str(_EXAMPLE_DIR))
+        import run_agent  # noqa: E402
+
+        self._execute_probe = run_agent._execute_probe
+
+    def test_valid_probe(self):
+        result = self._execute_probe(self.faulty, {"inputs": [True, False, True], "wire_id": 5})
+        self.assertIn("value", result)
+        self.assertNotIn("error", result)
+
+    def test_string_false_not_accepted(self):
+        """bool('false') is True in Python — must reject non-bool inputs."""
+        result = self._execute_probe(self.faulty, {"inputs": ["false", "true", "false"], "wire_id": 5})
+        self.assertIn("error", result)
+        self.assertNotIn("value", result)
+
+    def test_wrong_input_length(self):
+        result = self._execute_probe(self.faulty, {"inputs": [True, False], "wire_id": 5})
+        self.assertIn("error", result)
+        self.assertIn("length", result["error"])
+
+    def test_inputs_not_list(self):
+        result = self._execute_probe(self.faulty, {"inputs": True, "wire_id": 5})
+        self.assertIn("error", result)
+
+    def test_wire_id_out_of_range(self):
+        result = self._execute_probe(self.faulty, {"inputs": [True, False, True], "wire_id": 99})
+        self.assertIn("error", result)
+        self.assertIn("out of range", result["error"])
+
+    def test_wire_id_negative(self):
+        result = self._execute_probe(self.faulty, {"inputs": [True, False, True], "wire_id": -1})
+        self.assertIn("error", result)
+
+    def test_wire_id_string(self):
+        result = self._execute_probe(self.faulty, {"inputs": [True, False, True], "wire_id": "5"})
+        self.assertIn("value", result)
+        self.assertNotIn("error", result)
+
+    def test_wire_id_invalid_string(self):
+        result = self._execute_probe(self.faulty, {"inputs": [True, False, True], "wire_id": "abc"})
+        self.assertIn("error", result)
+
+
+# ---------------------------------------------------------------------------
+# Run agent multi-turn tests with fake OpenAI client
+# ---------------------------------------------------------------------------
+
+
+class _FakeToolCall:
+    """Mimics openai ToolCall object."""
+
+    def __init__(self, name, arguments, call_id="call_0"):
+        self.id = call_id
+        self.type = "function"
+        self.function = MagicMock()
+        self.function.name = name
+        self.function.arguments = arguments
+
+
+class _FakeMessage:
+    """Mimics openai Message object."""
+
+    def __init__(self, content=None, tool_calls=None):
+        self.content = content
+        self.tool_calls = tool_calls
+
+
+class _FakeChoice:
+    """Mimics openai Choice object."""
+
+    def __init__(self, message):
+        self.message = message
+        self.finish_reason = "tool_calls" if message.tool_calls else "stop"
+
+
+class _FakeResponse:
+    """Mimics openai ChatCompletion response."""
+
+    def __init__(self, message):
+        self.choices = [_FakeChoice(message)]
+
+
+class _FakeOpenAIClient:
+    """Fake OpenAI client that returns pre-scripted responses.
+
+    Usage: pass a list of _FakeResponse objects to cycle through.
+    """
+
+    def __init__(self, responses):
+        self._responses = list(responses)
+        self.calls = 0
+
+    class _Completions:
+        def __init__(self, parent):
+            self.parent = parent
+
+        async def create(self, **kwargs):
+            resp = self.parent._responses.pop(0)
+            self.parent.calls += 1
+            return resp
+
+    class _Chat:
+        def __init__(self, parent):
+            self.completions = _FakeOpenAIClient._Completions(parent)
+
+    @property
+    def chat(self):
+        return self._Chat(self)
+
+    async def close(self):
+        pass
+
+
+# Need to also define _FakeChoice finish_reason correctly
+def _make_response(content=None, tool_calls=None):
+    """Create a fake response with optional tool calls."""
+    msg = _FakeMessage(content=content, tool_calls=tool_calls)
+    resp = _FakeResponse(msg)
+    return resp
+
+
+@unittest.skipUnless(_HAS_TORCH, "torch not available; run_agent imports areno.api")
+class TestRunAgentMultiTurn(unittest.TestCase):
+    """Test run_agent multi-turn interaction with fake OpenAI client."""
+
+    def setUp(self):
+        self.circ = circuit.generate_circuit(num_inputs=3, num_gates=6, seed=42)
+        self.faulty = circuit.inject_fault(self.circ, seed=0)
+        self.source_record = {
+            "num_inputs": 3,
+            "num_gates": 6,
+            "gates": [
+                {"gate_id": g.gate_id, "gate_type": g.gate_type.value, "inputs": list(g.inputs)}
+                for g in self.circ.gates
+            ],
+            "faulty_gate_id": self.faulty.faulty_gate_id,
+            "fault_type": self.faulty.fault_type,
+            "prompt": circuit.format_prompt(self.circ),
+        }
+
+    def _make_item(self):
+        """Create a fake batch item."""
+        item = MagicMock()
+        item.prompt = self.source_record["prompt"]
+        item.source_record = self.source_record
+        return item
+
+    def _make_ctx(self, client):
+        """Create a fake agent context."""
+        ctx = MagicMock()
+        ctx.max_running_prompts = 1
+        ctx.get_base_url.return_value = "http://fake/v1"
+        ctx.api_key = "fake"
+        return ctx
+
+    def _make_batch(self, items):
+        batch = MagicMock()
+        batch.iter_samples.return_value = iter(items)
+        return batch
+
+    def test_probe_then_submit_flow(self):
+        """Turn 1: probe → Turn 2: submit → ends."""
+        import run_agent  # noqa: E402
+
+        item = self._make_item()
+        responses = [
+            _make_response(
+                tool_calls=[
+                    _FakeToolCall("probe", '{"inputs": [true, false, true], "wire_id": 5}', "c1"),
+                ]
+            ),
+            _make_response(
+                tool_calls=[
+                    _FakeToolCall("submit", f'{{"gate_id": {self.faulty.faulty_gate_id}}}', "c2"),
+                ]
+            ),
+        ]
+        client = _FakeOpenAIClient(responses)
+        batch = self._make_batch([item])
+        ctx = self._make_ctx(client)
+
+        with patch("httpx.AsyncClient"), patch("openai.AsyncOpenAI", return_value=client):
+            traj = asyncio.run(run_agent.run_agent(ctx, batch))
+
+        # Should have 2 turns (probe + submit).
+        self.assertEqual(len(traj.turns), 2)
+        # Turn 1 messages should not contain tool result yet.
+        # Turn 2 messages should contain the probe tool result.
+        turn2_messages = traj.turns[1].messages
+        tool_msgs = [m for m in turn2_messages if m.get("role") == "tool"]
+        self.assertTrue(len(tool_msgs) >= 1)
+        self.assertEqual(tool_msgs[0]["name"], "probe")
+
+    def test_no_tool_call_nudge(self):
+        """Model returns no tool call → nudge message appended → next turn works."""
+        import run_agent  # noqa: E402
+
+        item = self._make_item()
+        responses = [
+            _make_response(content="I need to think..."),  # No tool call
+            _make_response(
+                tool_calls=[
+                    _FakeToolCall("submit", f'{{"gate_id": {self.faulty.faulty_gate_id}}}', "c1"),
+                ]
+            ),
+        ]
+        client = _FakeOpenAIClient(responses)
+        batch = self._make_batch([item])
+        ctx = self._make_ctx(client)
+
+        with patch("httpx.AsyncClient"), patch("openai.AsyncOpenAI", return_value=client):
+            traj = asyncio.run(run_agent.run_agent(ctx, batch))
+
+        # 2 turns: no-tool + submit.
+        self.assertEqual(len(traj.turns), 2)
+        # Turn 2 messages should have the nudge user message.
+        turn2_messages = traj.turns[1].messages
+        user_msgs = [m for m in turn2_messages if m.get("role") == "user"]
+        self.assertTrue(any("did not include a tool call" in m.get("content", "") for m in user_msgs))
+
+    def test_multiple_tool_calls_only_first_executed(self):
+        """If model returns 2 tool calls, only first is executed."""
+        import run_agent  # noqa: E402
+
+        item = self._make_item()
+        # Model returns probe + submit in same response.
+        # Only probe should execute; submit should NOT be recorded.
+        responses = [
+            _make_response(
+                tool_calls=[
+                    _FakeToolCall("probe", '{"inputs": [true, false, true], "wire_id": 5}', "c1"),
+                    _FakeToolCall("submit", f'{{"gate_id": {self.faulty.faulty_gate_id}}}', "c2"),
+                ]
+            ),
+            _make_response(
+                tool_calls=[
+                    _FakeToolCall("submit", f'{{"gate_id": {self.faulty.faulty_gate_id}}}', "c3"),
+                ]
+            ),
+        ]
+        client = _FakeOpenAIClient(responses)
+        batch = self._make_batch([item])
+        ctx = self._make_ctx(client)
+
+        with patch("httpx.AsyncClient"), patch("openai.AsyncOpenAI", return_value=client):
+            traj = asyncio.run(run_agent.run_agent(ctx, batch))
+
+        # Turn 1: probe executed, submit ignored. Turn 2: submit.
+        self.assertEqual(len(traj.turns), 2)
+        # After turn 1, we should see a probe tool message, not a submit.
+        tool_msgs = []
+        for m in traj.turns[1].messages:  # Turn 2's messages include turn 1 history
+            if m.get("role") == "tool":
+                tool_msgs.append(m)
+        # First tool message should be probe.
+        self.assertEqual(tool_msgs[0]["name"], "probe")
+
+    def test_invalid_probe_returns_error_not_crash(self):
+        """Invalid probe params should return error tool message, not crash."""
+        import run_agent  # noqa: E402
+
+        item = self._make_item()
+        responses = [
+            _make_response(
+                tool_calls=[
+                    _FakeToolCall("probe", '{"inputs": [true, false], "wire_id": 5}', "c1"),
+                ]
+            ),
+            _make_response(
+                tool_calls=[
+                    _FakeToolCall("submit", f'{{"gate_id": {self.faulty.faulty_gate_id}}}', "c2"),
+                ]
+            ),
+        ]
+        client = _FakeOpenAIClient(responses)
+        batch = self._make_batch([item])
+        ctx = self._make_ctx(client)
+
+        with patch("httpx.AsyncClient"), patch("openai.AsyncOpenAI", return_value=client):
+            traj = asyncio.run(run_agent.run_agent(ctx, batch))
+
+        # Should not crash; turn 2 messages should contain error tool message.
+        tool_msgs = [m for m in traj.turns[1].messages if m.get("role") == "tool"]
+        self.assertTrue(len(tool_msgs) >= 1)
+        # The probe result should contain an error.
+        probe_result = json.loads(tool_msgs[0]["content"])
+        self.assertIn("error", probe_result)
+
+    def test_submit_ends_conversation(self):
+        """submit on turn 1 should end immediately with 1 turn."""
+        import run_agent  # noqa: E402
+
+        item = self._make_item()
+        responses = [
+            _make_response(
+                tool_calls=[
+                    _FakeToolCall("submit", f'{{"gate_id": {self.faulty.faulty_gate_id}}}', "c1"),
+                ]
+            ),
+        ]
+        client = _FakeOpenAIClient(responses)
+        batch = self._make_batch([item])
+        ctx = self._make_ctx(client)
+
+        with patch("httpx.AsyncClient"), patch("openai.AsyncOpenAI", return_value=client):
+            traj = asyncio.run(run_agent.run_agent(ctx, batch))
+
+        # Only 1 turn (submit ends immediately).
+        self.assertEqual(len(traj.turns), 1)
+        # Client should only be called once.
+        self.assertEqual(client.calls, 1)
+
+    def test_max_turns_exhausted(self):
+        """If model never calls submit, should stop after MAX_TURNS."""
+        import run_agent  # noqa: E402
+
+        item = self._make_item()
+        # 10 probe responses, no submit.
+        responses = [
+            _make_response(
+                tool_calls=[
+                    _FakeToolCall("probe", '{"inputs": [true, false, true], "wire_id": 5}', f"c{i}"),
+                ]
+            )
+            for i in range(15)  # More than MAX_TURNS
+        ]
+        client = _FakeOpenAIClient(responses)
+        batch = self._make_batch([item])
+        ctx = self._make_ctx(client)
+
+        with patch("httpx.AsyncClient"), patch("openai.AsyncOpenAI", return_value=client):
+            traj = asyncio.run(run_agent.run_agent(ctx, batch))
+
+        # Should stop at MAX_TURNS=10.
+        self.assertEqual(len(traj.turns), 10)
+        self.assertEqual(client.calls, 10)

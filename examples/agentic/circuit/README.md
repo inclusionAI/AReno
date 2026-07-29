@@ -16,15 +16,16 @@ across multiple turns and submitting the identified faulty gate.
      reason about expected vs observed values.
    - **submit**: Submit the guessed faulty gate ID. This ends the conversation.
 4. The reward is 1.0 for a correct diagnosis, 0.0 otherwise.
-5. Additional metrics (probes_used, submitted) are returned alongside the
-   reward for observability.
+5. Only the first tool call in each model response is executed. Extra tool
+   calls are ignored.
 
 ## Files
 
 - `circuit.py` — Circuit generation, fault injection, simulation, diagnosis
-  session (with action limits for standalone use), scoring, brute-force baseline.
-- `reward.py` — Reward function extracting the last `submit` tool call across
-  all turns. Returns reward, probes_used, and submitted as a dict.
+  session (standalone, with its own action limits), scoring, brute-force
+  baseline.
+- `reward.py` — Reward function returning float (1.0 correct / 0.0 incorrect).
+  Also includes `analyze_tool_calls()` helper for offline debugging.
 - `dataset_generator.py` — Generate JSONL circuit records (seeded, deterministic).
 - `dataset_loader.py` — Load JSONL records for training.
 - `run_agent.py` — Multi-turn agent function: loops up to 10 turns, executes
@@ -56,20 +57,14 @@ areno train \
     --world-size 1
 ```
 
-## Metrics
+## Reward
 
-The reward function returns a dict with the following fields, which AReno
-logs as training metrics:
+`reward_fn` returns a **float**: `1.0` if the agent's last `submit` call
+matches the faulty gate, `0.0` otherwise (including no submit at all).
 
-- **reward**: 1.0 for correct diagnosis, 0.0 otherwise (the main training signal).
-- **probes_used**: Number of probe calls made before submit (lower is more
-  efficient; visible in training metrics as `probes_used`).
-- **submitted**: Whether the agent made a submit call at all (0.0 or 1.0;
-  useful for diagnosing cases where the model never submits).
-
-The `circuit.py` module also includes a `brute_force_baseline()` function
-that systematically probes all gates — use it as a reference baseline
-outside of training to compare against the learned policy.
+A separate `analyze_tool_calls()` function is provided for offline
+debugging — it returns `{"probes_used": int, "submitted": bool,
+"guessed_gate_id": int | None}` but does **not** affect training.
 
 ## Multi-turn flow
 
@@ -87,13 +82,21 @@ If the model does not call any tool in a turn, a nudge message is appended
 asking it to use probe or submit. If the model never calls submit within
 10 turns, the reward is 0.0.
 
+## Standalone vs Training limits
+
+The `DiagnosisSession` class in `circuit.py` provides its own action limits
+(`max_probes=20`, `max_submissions=3`) as a standalone programming interface.
+These limits **do not** apply to the training Agent, which uses `MAX_TURNS=10`
+in `run_agent.py`. The prompt sent to the model during training says "at most
+10 turns", not "20 probes / 3 submissions".
+
 ## Limitations
 
 - Maximum 10 turns per rollout. The model may not always reach a submit
   call within this limit, resulting in 0.0 reward.
-- The `DiagnosisSession` class in `circuit.py` provides standalone action
-  limits (max_probes, max_submissions) for programmatic use, but the
-  training loop uses MAX_TURNS (10) as the turn limit instead.
 - Circuits are small (default 3 inputs, 6 gates) for fast iteration.
 - The brute-force baseline is a standalone function, not integrated into
   the training loop.
+- Probe parameters are strictly validated: `inputs` must be a list of
+  booleans matching `num_inputs`, `wire_id` must be an integer in range.
+  Invalid parameters return a tool error message, not a crash.

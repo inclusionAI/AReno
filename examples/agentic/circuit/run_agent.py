@@ -4,12 +4,15 @@ The agent interacts with a faulty logic circuit through two tools:
 - ``probe``: Set input values and inspect a wire's output.
 - ``submit``: Submit the guessed faulty gate ID.
 
-Unlike Tic-Tac-Toe (one tool call), circuit diagnosis requires multi-turn
-interaction: the agent probes several wires across multiple turns, observes
-the results, then submits its diagnosis. This mirrors the coding agent loop
-in ``areno/agent/agent_loop.py``.
+Multi-turn conversation (max 10 turns):
+1. Model receives circuit description.
+2. Model calls probe → executed on faulty circuit → result returned as tool message.
+3. Model calls submit → conversation ends.
+4. All turns recorded as AgentTrajectoryTurn for training.
 
-The agent sees the circuit structure but not which gate is faulty.
+Only the first tool call in a response is executed.  If the model returns
+multiple tool calls, the extras are ignored and not recorded in tool_calls
+for reward purposes.
 """
 
 from __future__ import annotations
@@ -113,15 +116,42 @@ def _build_faulty_circuit(source_record: dict[str, Any]) -> circuit.FaultyCircui
 
 
 def _execute_probe(faulty: circuit.FaultyCircuit, arguments: dict[str, Any]) -> dict[str, Any]:
-    """Execute a probe tool call against the faulty circuit."""
+    """Execute a probe tool call against the faulty circuit with strict validation.
 
-    inputs_raw = arguments.get("inputs", [])
-    wire_id = arguments.get("wire_id", -1)
-    # Coerce inputs to booleans.
-    inputs = [bool(i) for i in inputs_raw] if isinstance(inputs_raw, list) else []
+    Returns a dict with either ``{"wire_id": int, "value": bool}`` on success
+    or ``{"error": str}`` on invalid input.  Never raises.
+    """
+
+    inputs_raw = arguments.get("inputs")
+    wire_id_raw = arguments.get("wire_id", -1)
+
+    # Validate inputs: must be a list of true booleans.
+    if not isinstance(inputs_raw, list):
+        return {"error": "inputs must be a list of booleans"}
+    for item in inputs_raw:
+        if not isinstance(item, bool):
+            return {"error": f"inputs contains non-boolean value: {item!r}"}
+    if len(inputs_raw) != faulty.reference.num_inputs:
+        return {"error": f"inputs length {len(inputs_raw)} does not match num_inputs {faulty.reference.num_inputs}"}
+
+    # Validate wire_id: must be an integer in range.
+    if isinstance(wire_id_raw, bool) or not isinstance(wire_id_raw, int):
+        if isinstance(wire_id_raw, str):
+            try:
+                wire_id = int(wire_id_raw)
+            except ValueError:
+                return {"error": f"wire_id must be an integer, got {wire_id_raw!r}"}
+        else:
+            return {"error": f"wire_id must be an integer, got {wire_id_raw!r}"}
+    else:
+        wire_id = wire_id_raw
+
+    if wire_id < 0 or wire_id >= faulty.reference.num_gates:
+        return {"error": f"wire_id {wire_id} out of range [0, {faulty.reference.num_gates})"}
+
     try:
-        value = faulty.get_faulty_wire_value(inputs, int(wire_id))
-        return {"wire_id": int(wire_id), "value": bool(value)}
+        value = faulty.get_faulty_wire_value(inputs_raw, wire_id)
+        return {"wire_id": wire_id, "value": bool(value)}
     except (ValueError, IndexError) as exc:
         return {"error": str(exc)}
 
@@ -135,6 +165,9 @@ async def run_agent(ctx, batch):
        on the faulty circuit and return the result as a tool message.
     3. The model calls `submit` with its diagnosis — the conversation ends.
     4. All turns are recorded as AgentTrajectoryTurn for training.
+
+    Only the first tool call in each model response is executed.  Extra
+    tool calls are ignored and not recorded for reward purposes.
     """
 
     try:
@@ -168,7 +201,7 @@ async def run_agent(ctx, batch):
         ]
         turns: list[AgentTrajectoryTurn] = []
 
-        for turn_idx in range(MAX_TURNS):
+        for _turn_idx in range(MAX_TURNS):
             response = await _create_chat_completion_with_retry(
                 client,
                 model="policy",
@@ -207,7 +240,7 @@ async def run_agent(ctx, batch):
                 )
                 continue
 
-            # Execute the first tool call.
+            # Only execute the first tool call.  Extra calls are ignored.
             call = tool_calls[0]
             call_name = call["function"]["name"]
             try:
@@ -216,7 +249,6 @@ async def run_agent(ctx, batch):
                 arguments = {}
 
             if call_name == "submit":
-                # Submit ends the conversation.
                 tool_message = {
                     "role": "tool",
                     "tool_call_id": call["id"],
@@ -226,7 +258,6 @@ async def run_agent(ctx, batch):
                 messages.append(tool_message)
                 break
             elif call_name == "probe":
-                # Execute the probe on the faulty circuit.
                 result = _execute_probe(faulty, arguments)
                 tool_message = {
                     "role": "tool",
@@ -236,7 +267,6 @@ async def run_agent(ctx, batch):
                 }
                 messages.append(tool_message)
             else:
-                # Unknown tool.
                 tool_message = {
                     "role": "tool",
                     "tool_call_id": call["id"],
@@ -249,7 +279,6 @@ async def run_agent(ctx, batch):
 
     try:
         all_turns = await asyncio.gather(*(run_one(item) for item in items))
-        # Flatten: each item produces a list of turns; AgentTrajectory expects a flat list.
         flat_turns: list[AgentTrajectoryTurn] = []
         for turns in all_turns:
             flat_turns.extend(turns)
