@@ -160,6 +160,69 @@ rewards accelerate training, but stability depends on RL algorithm choice.
 SFT-to-RL ratio matters. This work provides the experimental methodology
 template for the pending GPU ablation (T6.2).
 
+### II.6 Token-Level Reward Redistribution
+
+| Work | Mechanism | Granularity | Signal |
+|---|---|---|---|
+| **RED** (Li et al. 2024, [arXiv:2411.08302](https://arxiv.org/abs/2411.08302)) | Temporal differentiation of reward model output: per-token reward = R(y≤t) - R(y≤t-1) | Token (individual) | Reward model (Ant Group,浙大) |
+
+RED 把 trajectory-level reward model 的输出沿时间轴差分，给每个 token 分配
+"边际贡献"作为 reward。总和等于原始 trajectory reward（return-equivalent）。
+不需要额外训练，复用现成 reward model 的 hidden state。
+
+与我们的方向差异：RED 是 **rewerighting**（所有 token 都保留，只是调整 reward
+大小），我们是 **selective masking**（低价值 turn 整个丢弃，不训）。RED 保留
+全部 token 但给不同权重，我们做二值丢弃。
+
+### II.7 Selective Turn Memory (ECHO, 2026)
+
+| Work | Mechanism | Granularity | Signal |
+|---|---|---|---|
+| **ECHO** (Xie et al. 2026, [arXiv:2606.31650](https://arxiv.org/abs/2606.31650)) | Source-indexed turn memory + 只路由正向 advantage 到被选中的 turn | Turn (source-indexed) | Context-driven memory selection + outcome reward |
+
+ECHO 是目前和我们要做方向最接近的工作。核心机制：
+
+1. 每个 turn 完成后压缩成带源头索引的 memory record
+2. 上下文超预算时，policy 学着选择有用的 memory record 重建 context
+3. 训练时只把**正向 advantage** 路由给被选中的 turn 的 token，没被选中的 turn 不收正向 credit
+4. 负向 advantage 仍照常给所有 turn
+
+BrowseComp-Plus 上 43.4% vs GRPO 28.9%，用的 turn 更少。
+
+**与我们的关键差异**——ECHO 没有完全占掉空白：
+
+| 维度 | ECHO | 我们的方向 |
+|---|---|---|
+| 要解决的问题 | 上下文窗口不够 + credit 路由 | 哪些 turn 该训不该训 |
+| 选择性来源 | context rebuild 时 policy 自己选的记忆记录 | trajectory reward 分数 |
+| 丢弃逻辑 | 正向 advantage 只给被选中 turn；负向给全部 | reward 低 → 整 turn mask，正负都不给 |
+| 触发机制 | 上下文预算触发 context rebuild | trajectory 完成后用 reward threshold |
+| 负 reward 处理 | 不做选择 | 也做选择（被丢的 turn 连负 reward 也不给） |
+| 框架依赖 | 需要 context management + memory record | 只需 reward + loss_mask，零额外架构 |
+| 场景 | 超长 horizon BrowseComp（几十轮 web 搜索） | 短中 horizon agentic RL（几轮 tool call） |
+
+ECHO 是 context-management 视角，我们是 supervision-efficiency 视角。两者互补。
+
+### II.8 2026 Survey: Credit Assignment 全景
+
+**Zhang 2026** ([arXiv:2604.09459](https://arxiv.org/abs/2604.09459))：系统梳理
+2024-2026 年 47 篇 LLM RL credit assignment 方法，按粒度（token/segment/step/turn/
+multi-agent）×方法论（MC/TD/model-based/game-theoretic/info-theoretic）分类。
+
+关键发现：
+- agentic CA 正在驱动全新方法：hindsight counterfactual analysis、
+  privileged asymmetric critics、turn-level MDP reformulations——在 reasoning
+  RL 中没有先例
+- 2026 年 3 月一周内出现 3 篇独立的 counterfactual/hindsight credit 论文
+- 社区关注度快速上升，"哪一步该得到多少 credit"是热点
+
+### II.9 Hindsight/Counterfactual Credit（新趋势，2026）
+
+2026 年涌现的一批新方法（Tan et al. 2026, Chen et al. 2026, Li et al. 2026c）
+做**反事实奖励分解**：对 trajectory 中某一步，假设该步不发生，从该点重新
+rollout 看结果差异，差异大的就是关键 turn。这是比"mask 掉不训"更强的 credit
+assignment 方法，计算成本也更高。
+
 ## Part III — AReno #199 in the Landscape
 
 ```
@@ -301,6 +364,69 @@ the **step/sample level**, not the token level.
 
 **Open question**: can only be answered with GPU ablation (T6.2, pending).
 
+### Gap 4: Reward-Driven Turn-Level Selective Masking（科研空白确认）
+
+**2026-07-29 深度调研结论**
+
+经过对 ECHO (arXiv:2606.31650)、RED (arXiv:2411.08302)、Zhang 2026 survey
+(arXiv:2604.09459)、MT-GRPO (arXiv:2505.11821)、STM (arXiv:2501.14315) 等工作
+的系统对比，确认以下交叉仍然空白：
+
+> **基于 trajectory outcome reward 的 turn 级动态"丢弃式"选择性监督**
+> （reward-driven + turn-level + binary mask，三者交集）
+
+现有工作分布：
+- turn 级 + 不丢弃 → MT-GRPO（保留所有 turn，调 advantage 权重）
+- token 级 + 丢弃 + 非 reward → STM（perplexity 阈值 mask，SFT 不是 RL）
+- token 级 + 不丢弃 + reward → RED（reward redistribution，保留全部 token）
+- turn 级 + 选择性 routing + 只对正 reward → ECHO（context-driven selection）
+- trajectory 级 + 丢弃 + reward → RFT（整条 trajectory 丢，不到 turn 级）
+
+**ECHO 是最近的工作**。它的"selective turn"是 context management 的副产品，
+不面向"该不该训这个 turn"的问题；且只对正 reward 做选择，负 reward 仍给全部。
+
+**空白窗口评估：正在收窄。** 2026 年 credit assignment 方向论文密度上升
+（survey + ECHO + 3 篇 counterfactual 同期出现）。但"reward-driven + turn 级 +
+正负都丢"的具体角度尚未有公开工作。如果拖到 2026 下半年，大概率会被覆盖。
+
+### 可做方向（按可行性排序）
+
+#### 方向 1：Reward-Threshold Selective Turn Masking（B 档实验版）
+
+**玩具实验**。AReno 的 `response_spans` 清单 + `loss_mask_override` 接口已经
+搭好（PR #311 B 档预留），只需注入一个 callable：trajectory reward 低于阈值 →
+mask 掉非最终答案 turn 的 token，只保留 final answer turn 训（相当于低 reward
+trajectory 退化为 `final_answer` 模式，高 reward trajectory 保持 `all_assistant`）。
+
+用 AReno 的 tictactoe/shopping agentic example，在同一组 trajectory 上对比：
+- 全部 `all_assistant`（baseline）
+- 全部 `final_answer`（静态极端）
+- reward-threshold 动态（高 reward 全训，低 reward 只训 final answer）
+
+GPU 需求不大（Qwen3-0.6B，Kaggle T4x2 可以跑几步看 reward 曲线趋势）。产出：
+是一个可量化的 ablation 表 + trainable_tokens 趋势图，论证"动态比静态两种极端
+更好"或"动态没有额外收益，静态够了"——两种结论都有论文价值。
+
+#### 方向 2：正负 reward 都做选择的对比
+
+ECHO 只对正 reward 做选择。做一个 ablation：对负 reward 也做选择（低 reward
+trajectory 的负梯度也只给 final answer turn），对比 ECHO 式的"正选负不选"。
+如果"正负都选"更好，就是一个独立的贡献点。
+
+#### 方向 3：与 hindsight counterfactual 对比
+
+2026 年的 counterfactual 方法（计算成本高但 credit 更精确）可能在性能上优于
+简单 threshold mask。做一个对比实验：threshold mask（简单、快）vs counterfactual
+credit（复杂、准）在同一任务上的 reward 曲线和 trainable qualidade 对比。如果
+简单方法在短 horizon 场景已经够用，这个结论本身有实践价值。
+
+#### 方向 4：从静态到动态的渐进式谱系论文
+
+把 PR #331 A 档的三种静态模式 + B 档动态 mask + C 档 turn-level advantage
+组织成一个"selective supervision 谱系"，沿着 supervision density 轴做 ablation。
+这个角度的综述+实验论文可以填一个"系统性对照"的空白——现有工作各自做各自的
+方法，缺乏在统一框架下的 controlled comparison。
+
 ## Part VI — Implications for Agentic RL Research
 
 The taxonomy and statistics produced here support several research claims:
@@ -346,9 +472,14 @@ The taxonomy and statistics produced here support several research claims:
 | ToolFormer | Schick et al. 2023 | [2302.04761](https://arxiv.org/abs/2302.04761) |
 | veRL | (engineering account, LinkedIn post by Jiang) | N/A |
 | Practitioner Guide | Wang & Ammanabrolu 2025, "A Practitioner's Guide to Multi-turn Agentic RL" | [2510.01132](https://arxiv.org/abs/2510.01132) |
+| RED | Li et al. 2024, "RED: Unleashing Token-Level Rewards from Holistic Feedback via Reward Redistribution" | [2411.08302](https://arxiv.org/abs/2411.08302) |
+| ECHO | Xie et al. 2026, "ECHO: Prune to Act, Trace to Learn with Selective Turn Memory in Agentic RL" | [2606.31650](https://arxiv.org/abs/2606.31650) |
+| CA Survey | Zhang 2026, "From Reasoning to Agentic: Credit Assignment in Reinforcement Learning for Large Language Models" | [2604.09459](https://arxiv.org/abs/2604.09459) |
+| Counterfactual | Tan et al. 2026 / Chen et al. 2026 / Li et al. 2026c, hindsight counterfactual credit (cited in CA Survey) | (arXiv IDs in survey, not individually verified) |
 
 ---
 
 *Document generated as part of AReno issue #199 research extension (Phase 6 / G8).
 Statistics artifact: `trainable_turns_stats.py` / `.csv` / `.json`.
-GPU ablation (T6.2) pending — range limitations noted where applicable.*
+GPU ablation (T6.2) pending — range limitations noted where applicable.
+2026-07-29 更新：追加 ECHO/RED/CA Survey/counterfactual 文献与 Gap 4 深度调研结论。*
