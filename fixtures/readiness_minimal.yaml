@@ -1,0 +1,26 @@
+# Minimal deterministic fixture for readiness testing
+# This fixture does not require external database, network services, or sandbox
+# Can run in pure CPU environment without GPU
+
+serve:
+  host: "127.0.0.1"
+  port: 18080
+  readiness:
+    enabled: true
+    timeout_per_stage_seconds: 30
+    probe_interval_seconds: 2
+
+model:
+  # Use deterministic mock model, no real model weights download needed
+  backend: "mock"
+  mock_config:
+    load_delay_seconds: 1      # Simulate loading time
+    vocab_size: 1000
+    hidden_size: 64
+
+worker:
+  count: 1
+  mock: true                    # CPU-runnable mock worker
+
+router:
+  mock: true                    # CPU-runnable mock router

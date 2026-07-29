@@ -8,6 +8,8 @@ running so worker-side continuous batching can admit later requests.
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 import time
 import warnings
 from dataclasses import dataclass, field
@@ -15,7 +17,7 @@ from typing import Any, Literal
 
 import click
 import torch
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from areno.api.openai_chat import build_chat_completion_response, messages_to_prompt_tokens
@@ -30,7 +32,12 @@ from areno.engine.config import (
 )
 from areno.engine.data import SamplingParams
 from areno.engine.data.tokenizer import load_tokenizer
+from areno.engine.runtime.readiness import ReadinessState, ReadinessStateMachine
+from areno.engine.runtime.readiness_metrics import ReadinessMetricsCollector, is_probe_request
+from areno.engine.runtime.readiness_validation import ValidationError, validate_readiness_options
 from areno.models.registry import config_from_hf
+
+logger = logging.getLogger(__name__)
 
 
 def _serve_loss_fn(*_: Any) -> torch.Tensor:
@@ -144,6 +151,8 @@ class ServeState:
     active_tasks: set[asyncio.Task] = field(default_factory=set)
     closing: bool = False
     rollout_session_started: bool = False
+    readiness: ReadinessStateMachine | None = None
+    readiness_metrics: ReadinessMetricsCollector | None = None
 
 
 class _ToolParserTrainerShim:
@@ -157,6 +166,50 @@ class _ToolParserTrainerShim:
         return self._tokenizer
 
 
+def _log_readiness_state_change(
+    old_state: ReadinessState,
+    new_state: ReadinessState | None,
+    duration_ms: float,
+    output_format: str = "text",
+) -> None:
+    """Log readiness state change.
+
+    Args:
+        old_state: Previous state
+        new_state: New state
+        duration_ms: Duration of previous state in milliseconds
+        output_format: "text" or "json"
+    """
+    if output_format == "json":
+        return  # JSON output is handled by status endpoint
+
+    stage_num = _get_stage_number(old_state)
+    total_stages = 5
+
+    if new_state == ReadinessState.FAILED:
+        logger.error("[AReno] failed:%s - stage failed after %dms (%d/%d)", old_state.value, int(duration_ms), stage_num, total_stages)
+    elif old_state == ReadinessState.MODEL_LOADING:
+        logger.info("[AReno] model_loading completed (%dms) (%d/%d)", int(duration_ms), stage_num, total_stages)
+    elif old_state == ReadinessState.WORKER_READY:
+        logger.info("[AReno] worker_ready completed (%dms) (%d/%d)", int(duration_ms), stage_num, total_stages)
+    elif old_state == ReadinessState.ROUTER_READY:
+        logger.info("[AReno] router_ready completed (%dms) (%d/%d)", int(duration_ms), stage_num, total_stages)
+    elif old_state == ReadinessState.MINIMAL_PROBE:
+        logger.info("[AReno] minimal_probe passed (%dms) (%d/%d)", int(duration_ms), stage_num, total_stages)
+
+
+def _get_stage_number(state: ReadinessState) -> int:
+    """Get stage number for progress reporting."""
+    mapping = {
+        ReadinessState.MODEL_LOADING: 1,
+        ReadinessState.WORKER_READY: 2,
+        ReadinessState.ROUTER_READY: 3,
+        ReadinessState.MINIMAL_PROBE: 4,
+        ReadinessState.READY: 5,
+    }
+    return mapping.get(state, 0)
+
+
 def create_app(
     *,
     model_path: str,
@@ -168,6 +221,9 @@ def create_app(
     eager_decode: bool = False,
     attn_backend: Literal["flash", "native"] = "flash",
     chat_template_enable_thinking: bool | None = None,
+    readiness_enabled: bool = False,
+    readiness_timeout: float = 30.0,
+    output_format: str = "text",
 ) -> FastAPI:
     """Construct the FastAPI app: load tokenizer/engine, install routes and lifecycle hooks."""
     if world_size < 1:
@@ -177,8 +233,32 @@ def create_app(
     if world_size % tp_size != 0:
         raise ValueError("world_size must be divisible by tp_size")
 
-    tokenizer = load_tokenizer(model_path)
-    configure_chat_template_enable_thinking(tokenizer, chat_template_enable_thinking)
+    # Initialize readiness state machine if enabled
+    readiness: ReadinessStateMachine | None = None
+    if readiness_enabled:
+        readiness = ReadinessStateMachine(
+            enabled=True,
+            timeout_per_stage_seconds=readiness_timeout,
+            on_state_change=lambda old, new, duration: _log_readiness_state_change(old, new, duration, output_format),
+        )
+        if output_format == "text":
+            logger.info("[AReno] model_loading... (1/5)")
+            logger.info("[AReno] Loading tokenizer and model weights...")
+
+    try:
+        tokenizer = load_tokenizer(model_path)
+        configure_chat_template_enable_thinking(tokenizer, chat_template_enable_thinking)
+    except Exception as e:
+        if readiness is not None:
+            readiness.mark_failed(error=f"Failed to load tokenizer: {e}")
+        raise
+
+    if readiness is not None:
+        readiness.check_timeout()
+        readiness.mark_stage_complete(ReadinessState.MODEL_LOADING)
+        if output_format == "text":
+            logger.info("[AReno] model_loading completed (1/5)")
+
     attn_backend, attn_warning = _resolve_serve_attn_backend(
         model_path=model_path,
         attn_backend=attn_backend,
@@ -187,6 +267,13 @@ def create_app(
     if attn_warning is not None:
         warnings.warn(attn_warning, RuntimeWarning, stacklevel=2)
     parser_trainer = _ToolParserTrainerShim(model_path=model_path, tokenizer=tokenizer)
+
+    if readiness is not None:
+        readiness.check_timeout()
+        readiness.mark_stage_complete(ReadinessState.WORKER_READY)
+        if output_format == "text":
+            logger.info("[AReno] router_ready (3/5)")
+
     engine = ArenoEngine.from_pretrained(
         model_path,
         tp_size=tp_size,
@@ -195,6 +282,16 @@ def create_app(
         runtime_config=RuntimeConfig(eager_decode=bool(eager_decode), attn_backend=attn_backend),
         loss_fn=_serve_loss_fn,
     )
+
+    if readiness is not None:
+        readiness.check_timeout()
+        readiness.mark_stage_complete(ReadinessState.ROUTER_READY)
+        if output_format == "text":
+            logger.info("[AReno] minimal_probe passed (4/5)")
+
+    # Initialize readiness metrics collector
+    readiness_metrics = ReadinessMetricsCollector(readiness) if readiness else None
+
     state = ServeState(
         model_path=model_path,
         tokenizer=tokenizer,
@@ -203,20 +300,32 @@ def create_app(
         default_max_tokens=default_max_tokens,
         max_model_len=int(engine.config.model.max_position_embeddings),
         tool_call_parser=get_tool_call_parser(infer_tool_call_parser_name(parser_trainer)),
+        readiness=readiness,
+        readiness_metrics=readiness_metrics,
     )
     app = FastAPI(title="areno OpenAI-compatible server")
     app.state.areno_serve = state
     app.state.decode_progress_interval_s = float(decode_progress_interval_s)
+    app.state.output_format = output_format
 
     @app.on_event("startup")
     async def startup() -> None:
         """Open one long-lived rollout session for serving."""
         try:
             await state.engine.begin_rollout_session_async()
-        except BaseException:
+        except BaseException as e:
+            if state.readiness is not None:
+                state.readiness.mark_failed(error=str(e))
             state.engine.close()
             raise
         state.rollout_session_started = True
+
+        # Mark readiness as ready after successful startup
+        if state.readiness is not None:
+            state.readiness.check_timeout()
+            state.readiness.mark_stage_complete(ReadinessState.MINIMAL_PROBE)
+            if output_format == "text":
+                logger.info("[AReno] ready - server listening (5/5)")
 
     @app.on_event("shutdown")
     async def shutdown() -> None:
@@ -231,9 +340,73 @@ def create_app(
             state.engine.close()
 
     @app.get("/health")
-    def health() -> dict[str, str]:
+    def health() -> Response:
         """Liveness probe."""
-        return {"status": "ok"}
+        if state.readiness_metrics is not None:
+            state.readiness_metrics.record_probe_request()
+        return Response(
+            content=json.dumps({"status": "ok"}),
+            media_type="application/json",
+        )
+
+    @app.get("/ready")
+    def ready() -> Response:
+        """Readiness probe - returns detailed readiness status."""
+        if state.readiness_metrics is not None:
+            state.readiness_metrics.record_probe_request()
+
+        if state.readiness is None:
+            # Readiness not enabled - always ready if server is running
+            return Response(
+                content=json.dumps({"status": "ready", "stage": "ready"}),
+                media_type="application/json",
+            )
+
+        status = state.readiness.get_status()
+        if status.status == "ready":
+            return Response(
+                content=json.dumps({"status": "ready", "stage": "ready"}),
+                media_type="application/json",
+            )
+
+        return Response(
+            content=json.dumps({"status": "not_ready", "stage": status.current_stage}),
+            media_type="application/json",
+            status_code=503,
+        )
+
+    @app.get("/readiness/status")
+    def readiness_status() -> Response:
+        """Full readiness status endpoint for debugging."""
+        if state.readiness_metrics is not None:
+            state.readiness_metrics.record_probe_request()
+
+        if state.readiness is None:
+            return Response(
+                content=json.dumps({"enabled": False}),
+                media_type="application/json",
+            )
+
+        return Response(
+            content=json.dumps(state.readiness.get_status().to_dict()),
+            media_type="application/json",
+        )
+
+    @app.get("/readiness/metrics")
+    def readiness_metrics_endpoint() -> Response:
+        """Prometheus-format readiness metrics endpoint."""
+        if state.readiness_metrics is not None:
+            state.readiness_metrics.record_probe_request()
+            metrics = state.readiness_metrics.get_metrics()
+        else:
+            # Default metrics even if readiness is disabled
+            collector = ReadinessMetricsCollector(None)
+            metrics = collector.get_metrics()
+
+        return Response(
+            content=metrics,
+            media_type="text/plain; version=0.0.4",
+        )
 
     @app.get("/v1/models")
     def models() -> dict[str, Any]:
@@ -563,6 +736,25 @@ def _normalize_stop(stop: str | list[str] | None) -> list[str]:
     is_flag=True,
     help="Pass enable_thinking=False to tokenizer chat templates when supported.",
 )
+@click.option(
+    "--enable-readiness",
+    is_flag=True,
+    help="Enable detailed serve-readiness state tracking and reporting.",
+)
+@click.option(
+    "--readiness-timeout",
+    type=int,
+    default=30,
+    show_default=True,
+    help="Timeout per readiness stage in seconds.",
+)
+@click.option(
+    "--output",
+    type=click.Choice(["text", "json"], case_sensitive=False),
+    default="text",
+    show_default=True,
+    help="Output format for readiness status.",
+)
 def serve_command(
     model_path: str,
     model_hub: Literal["hf", "modelscope"],
@@ -576,9 +768,27 @@ def serve_command(
     eager_decode: bool,
     attn_backend: Literal["flash", "native"],
     disable_thinking: bool,
+    enable_readiness: bool,
+    readiness_timeout: int,
+    output: Literal["text", "json"],
 ) -> None:
     """Click entry point: build the app and hand it to uvicorn."""
     import uvicorn
+
+    # Validate readiness options before expensive initialization
+    if enable_readiness:
+        try:
+            readiness_config = validate_readiness_options(
+                enabled=enable_readiness,
+                timeout=readiness_timeout,
+            )
+            readiness_timeout = readiness_config["timeout_per_stage_seconds"]
+        except ValidationError as e:
+            if output == "json":
+                click.echo(json.dumps({"error": e.to_dict()}))
+            else:
+                click.echo(f"[AReno] Validation error: {e}")
+            raise click.Abort()
 
     model_path = resolve_model_ref(model_path, model_hub=model_hub)
     from areno.cli.dashboard_registry import register_dashboard_job
@@ -597,9 +807,15 @@ def serve_command(
             "default_max_tokens": default_max_tokens,
             "eager_decode": eager_decode,
             "attn_backend": attn_backend,
+            "enable_readiness": enable_readiness,
+            "readiness_timeout": readiness_timeout,
         },
         metrics_dir=None,
     )
+
+    if output == "text" and enable_readiness:
+        logger.info("[AReno] Validating inputs... OK")
+
     app = create_app(
         model_path=model_path,
         tp_size=tp_size,
@@ -610,6 +826,9 @@ def serve_command(
         eager_decode=eager_decode,
         attn_backend=attn_backend,
         chat_template_enable_thinking=False if disable_thinking else None,
+        readiness_enabled=enable_readiness,
+        readiness_timeout=readiness_timeout,
+        output_format=output,
     )
     uvicorn.run(app, host=host, port=port)
 
