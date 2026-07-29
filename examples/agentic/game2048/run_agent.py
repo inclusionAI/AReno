@@ -103,8 +103,20 @@ async def _run_episode(item, client) -> list[AgentTrajectoryTurn]:
 def _extract_direction(response) -> str | None:
     """Parse direction from the model's tool call response."""
 
-    message = response.choices[0].message
+    choice = response.choices[0]
+    message = choice.message
     tool_calls = getattr(message, "tool_calls", None) or []
+    content = getattr(message, "content", None)
+    finish_reason = getattr(choice, "finish_reason", None)
+    usage = getattr(response, "usage", None)
+    completion_tokens = getattr(usage, "completion_tokens", None) if usage else None
+    logger.warning(
+        "Game2048 DEBUG: finish_reason=%s completion_tokens=%s content=%r tool_calls=%r",
+        finish_reason,
+        completion_tokens,
+        content,
+        tool_calls,
+    )
     if not tool_calls:
         return None
     call = tool_calls[0]
