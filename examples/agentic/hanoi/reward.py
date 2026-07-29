@@ -5,30 +5,36 @@ Mirrors ``examples/agentic/duelgrid/reward.py``: extract the model's
 board, and return a scalar reward. Rewards come from the rule engine, so the
 same fixtures work for warmup, rollout, or RLVR training.
 
-Design rationale (completion-led, with a small partial-credit bridge):
+Design rationale (completion-led, with a small PROGRESS partial credit):
     The issue asks to "score completion with a small efficiency component
     relative to the known optimum". Read strictly, that means 0 unless the
     board is solved. Read leniently — which this file adopts — completion is
-    still the dominant signal, but a small partial credit is given for legal
-    moves on unsolved traces. The lenient reading is chosen for a concrete
-   training reason: a weak base model almost never solves the board in one shot,
-    so a strictly-sparse reward leaves every GSPO group at all-zero reward,
-    zero variance, zero advantage, zero gradient — a cold-start stall (the
-    scenario H-version #203/#239 target, but AReno has no early stop today).
+    still the dominant signal, but a small partial credit is given for PROGRESS
+    toward the target peg on unsolved traces. The lenient reading is chosen for
+    a concrete training reason: a weak base model almost never solves the board
+    in one shot, so a strictly-sparse reward leaves every GSPO group at all-zero
+    reward → zero variance → zero advantage → zero gradient (cold-start stall).
+
+    The partial credit is PROGRESS-based, not legal-step-based. An earlier
+    legal-step bonus ("0.02 per legal move") caused a mode collapse in rollout:
+    the model locked reward at 0.04 by replaying ``[[0,2],[0,1]]`` — two legal
+    moves that don't push any disk onto peg 2 in the correct bottom-up order —
+    and, all 4 group samples converging to that shortcut, the group had zero
+    variance and gradients died. Progress-based credit (only disks correctly
+    stacked on peg 2 from the bottom count) scores that shortcut 0, removing
+    the incentive to freeze, while still giving GSPO non-zero reward variance
+    across samples that reach different depths and a gradient pointing at
+    completion.
 
     Concretely:
-    - solved:      ``COMPLETION_REWARD - EXCESS_STEP_PENALTY * excess``
-                   (1.0 minus 0.02 per move above the oracle ``2**n-1``).
-                   Completion dominates; efficiency is the "small component".
-    - unsolved:    ``min(LEGAL_STEP_BONUS * legal_count + ILLEGAL_STEP_PENALTY * illegal_count,
-                   PARTIAL_CREDIT_CAP)`` (≈ +0.02 per legal move, -0.05 per
-                   illegal, hard-capped at 0.5). The cap is essential: without
-                   it a long legal-but-unsolved trace could accumulate more than
-                   1.0 from legal steps alone and perversely reward not solving.
-                   With the cap, completing (≥ the efficiency-discounted 1.0
-                   path) is always strictly better than any unsolved trace, so
-                   completion stays the primary signal; the partial credit only
-                   gives GSPO non-zero reward variance so training can move.
+    - solved:    ``COMPLETION_REWARD - EXCESS_STEP_PENALTY * excess``
+                 (1.0 minus 0.02 per move above the oracle ``2**n-1``).
+                 Completion dominates; efficiency is the "small component".
+    - unsolved:  ``min(PROGRESS_BONUS * progress_count, PARTIAL_CREDIT_CAP)``
+                 (≈ +0.02 per disk correctly stacked on peg 2 from the bottom,
+                 hard-capped at 0.5). The cap keeps any unsolved trace strictly
+                 below COMPLETION_REWARD, so completing is always the dominant
+                 choice; progress credit only gives variance + a direction.
 
     The completion-rate + excess-moves-over-optimum metrics in ``game.evaluate``
     are unaffected — they still key on completion — so the issue's acceptance
@@ -52,16 +58,17 @@ import game
 # completion text is also accepted as a fallback.
 _MOVE_LIST_RE = re.compile(r"\[.*\]", re.DOTALL)
 
-# Partial-credit magnitudes for UNSOLVED traces (see module docstring). Kept
-# small and local so completion (game.COMPLETION_REWARD = 1.0) stays the
-# dominant signal; these only exist to give GSPO non-zero reward variance.
-LEGAL_STEP_BONUS = 0.02  # each legal move on an unsolved trace earns a little
-ILLEGAL_STEP_PENALTY = -0.05  # each illegal move on an unsolved trace costs a little
-# Hard cap on unsolved partial credit. Without it, a long legal-but-unsolved
-# trace (e.g. the failure fixture oscillating for 2*(2**n-1) steps) could
-# accumulate more than COMPLETION_REWARD from legal steps alone — which would
-# perversely reward *not* solving. The cap guarantees completing the board is
-# always strictly better than any unsolved trace.
+# Partial credit for UNSOLVED traces is PROGRESS-based, not legal-step-based
+# (see module docstring): only disks actually pushed onto peg 2 in the correct
+# bottom-up order earn a little, so a model cannot "steal" reward by emitting a
+# couple of legal-but-stagnant moves (observed mode collapse: the model
+# replayed `[[0,2],[0,1]]` to lock 0.04 and froze). Kept small so completion
+# (game.COMPLETION_REWARD = 1.0) stays the dominant signal.
+PROGRESS_BONUS = 0.02  # per disk correctly stacked on peg 2 from the bottom
+# Hard cap on unsolved partial credit: guarantees completing the board (the
+# efficiency-discounted >=1.0 path) is always strictly better than any unsolved
+# trace, so completion stays the primary signal; progress credit only gives
+# GSPO non-zero reward variance and a gradient toward completion.
 PARTIAL_CREDIT_CAP = 0.5
 
 
@@ -84,13 +91,33 @@ def reward_fn(record: Any) -> float:
         excess = max(0, result.legal_count + result.illegal_count - game.optimal_steps(state.n))
         excess = max(excess, result.excess_moves)
         return game.COMPLETION_REWARD - game.EXCESS_STEP_PENALTY * excess
-    # Unsolved: small partial credit only — enough to vary across samples so
-    # GSPO can form a non-zero advantage, never enough to rival completion.
-    # The cap (0.5) keeps any unsolved trace strictly below COMPLETION_REWARD,
-    # so solving is always the dominant choice even if a trace racks up many
-    # legal moves without finishing.
-    partial = LEGAL_STEP_BONUS * result.legal_count + ILLEGAL_STEP_PENALTY * result.illegal_count
+    # Unsolved: small PROGRESS-based partial credit (see module docstring).
+    # Only disks correctly stacked on peg 2 from the bottom count, so a couple
+    # of legal-but-stagnant moves score 0 and cannot be "stolen" for a stable
+    # reward. This keeps the gradient pointing at completion while still giving
+    # GSPO non-zero reward variance across samples that reach different depths.
+    partial = PROGRESS_BONUS * _progress_count(result)
     return min(partial, PARTIAL_CREDIT_CAP)
+
+
+def _progress_count(result: Any) -> int:
+    """Disks correctly stacked on peg 2 from the bottom (0 if none match).
+
+    The target peg is ``game.TARGET_PEG`` and the correct bottom-up order is
+    ``(n, n-1, ..., 1)``. Only a contiguous correct prefix counts, so a disk in
+    the right slot above a wrong one does not score — pushing the gradient to
+    *build* the target stack in order rather than park any disk on peg 2.
+    """
+
+    peg2 = result.final_state.pegs[game.TARGET_PEG]
+    n = result.final_state.n
+    count = 0
+    for i, disk in enumerate(peg2):
+        if disk == n - i:
+            count += 1
+        else:
+            break
+    return count
 
 
 def _tool_moves(record: Any) -> list[tuple[int, int]]:
