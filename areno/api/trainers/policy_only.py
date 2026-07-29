@@ -573,6 +573,7 @@ class PolicyOnlyTrainer:
         """Assemble TrainSequence rows from an agentic rollout batch."""
 
         import areno.api
+        from areno.api.reward_transforms import transform_rewards
         from areno.api.rewards import compute_group_advantages
 
         del prompt_batch
@@ -594,9 +595,23 @@ class PolicyOnlyTrainer:
         for row_idx, record in enumerate(agent_batch.reward_records):
             prompt_index = int(record.metadata.get("prompt_index", row_idx))
             grouped.setdefault(prompt_index, []).append(row_idx)
+        # Apply configurable reward clipping / standardization per prompt
+        # group before advantage computation.  ``disabled`` is a no-op.
+        transform_mode = getattr(self.config, "reward_transform_mode", "disabled")
         advantages_by_reward: dict[int, float] = {}
         for row_indices in grouped.values():
             group_rewards = [rewards_all[row_idx] for row_idx in row_indices]
+            group_rewards, _stats = transform_rewards(
+                group_rewards,
+                mode=transform_mode,
+                clip_min=getattr(self.config, "reward_clip_min", -10.0),
+                clip_max=getattr(self.config, "reward_clip_max", 10.0),
+                standardize_eps=getattr(self.config, "reward_standardize_eps", 1e-8),
+            )
+            # Write transformed rewards back so the TrainSequence carries the
+            # post-transform value in its ``reward`` field.
+            for row_idx, transformed_reward in zip(row_indices, group_rewards, strict=True):
+                rewards_all[row_idx] = transformed_reward
             for row_idx, advantage in zip(row_indices, compute_group_advantages(group_rewards), strict=True):
                 advantages_by_reward[row_idx] = float(advantage)
         row_features = getattr(agent_batch, "features", [None] * len(agent_batch.token_rows))
@@ -725,9 +740,11 @@ class PolicyOnlyTrainer:
 
         Steps:
             1. Decode each completion and score it with `reward_fn`.
-            2. Standardise rewards within each prompt group to get advantages
+            2. Optionally clip / standardize the raw rewards (configurable via
+               ``reward_transform_mode``) before advantage computation.
+            3. Standardise rewards within each prompt group to get advantages
                (`compute_batch_group_advantages`); this is the GRPO/GSPO baseline.
-            3. Stitch each prompt prefix with its response tokens and copy the
+            4. Stitch each prompt prefix with its response tokens and copy the
                group-level advantage onto every response position; prompt
                positions carry zero advantage and zero logprob.
 
@@ -745,7 +762,10 @@ class PolicyOnlyTrainer:
 
         import areno.api
         from areno.api.advantages import compute_batch_group_advantages
+        from areno.api.reward_transforms import transform_rewards
         from areno.api.rewards import make_reward_record
+
+        transform_mode = getattr(self.config, "reward_transform_mode", "disabled")
 
         # One batched decode for the whole rollout batch instead of one
         # `tokenizer.decode` round trip per completion.
@@ -794,8 +814,41 @@ class PolicyOnlyTrainer:
                 for (seq, tokens, logprobs, loss_mask), reward in zip(sample_rows, rewards, strict=True)
             )
 
+        # Apply configurable reward clipping / standardization per prompt
+        # group before advantage computation.  In ``disabled`` mode this is
+        # a no-op that returns numerically identical values.
+        offset = 0
+        for size in group_sizes:
+            group_rewards = all_rewards[offset:offset + size]
+            group_rewards, reward_stats = transform_rewards(
+                group_rewards,
+                mode=transform_mode,
+                clip_min=getattr(self.config, "reward_clip_min", -10.0),
+                clip_max=getattr(self.config, "reward_clip_max", 10.0),
+                standardize_eps=getattr(self.config, "reward_standardize_eps", 1e-8),
+            )
+            if reward_stats.get("transform_mode", "disabled") != "disabled":
+                self.logger.info(
+                    "metric=reward_transform mode=%s raw_mean=%.6f raw_std=%.6f transformed_mean=%.6f transformed_std=%.6f",
+                    reward_stats["transform_mode"],
+                    reward_stats.get("raw_mean", 0.0),
+                    reward_stats.get("raw_std", 0.0),
+                    reward_stats.get("transformed_mean", 0.0),
+                    reward_stats.get("transformed_std", 0.0),
+                )
+            all_rewards[offset:offset + size] = group_rewards
+            # Update the reward stored in pending so TrainSequence carries the
+            # post-transform value.
+            for i in range(size):
+                item_p, seq_p, tokens_p, logprobs_p, _ = pending[offset + i]
+                pending[offset + i] = (item_p, seq_p, tokens_p, logprobs_p, group_rewards[i])
+            offset += size
+
         # Group-relative advantage: A_i = (r_i - mean(r))/std(r); shared by
         # every response token of sample i. One vectorized pass over the whole
+        # batch using the prompt-group boundaries, instead of one numpy call
+        # per prompt group.
+        advantages = compute_batch_group_advantages(all_rewards, group_sizes)
         # batch using the prompt-group boundaries, instead of one numpy call
         # per prompt group.
         advantages = compute_batch_group_advantages(all_rewards, group_sizes)
