@@ -652,7 +652,7 @@ class DashboardState:
         chart_metrics: list[str] = []
         priority_names = [n for n in all_metric_names if "loss" in n.lower()]
         other_names = [n for n in all_metric_names if "loss" not in n.lower()]
-        chart_metrics = (priority_names + other_names)[:12]
+        chart_metrics = priority_names + other_names
 
         metric_charts = {}
         for name in chart_metrics:
