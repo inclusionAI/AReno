@@ -1,114 +1,190 @@
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import json
 import sys
+from collections import deque
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 EXAMPLE_DIR = Path(__file__).resolve().parents[1] / "examples" / "agentic" / "warehouse"
 
 
 def _load_module(name: str):
     path = EXAMPLE_DIR / f"{name}.py"
-    previous_game = sys.modules.pop("game", None)
+    module_name = f"agentic_warehouse_{name}_for_tests"
+    saved_modules = {key: sys.modules.get(key) for key in ("game", "areno", "areno.api", "areno.api.agentic")}
+    if name == "run_agent":
+        areno_module = ModuleType("areno")
+        api_module = ModuleType("areno.api")
+
+        class AgentTrajectory:
+            def __init__(self, *, turns):
+                self.turns = turns
+
+        agentic_module = ModuleType("areno.api.agentic")
+        agentic_module.AgentTrajectory = AgentTrajectory
+        agentic_module.AgentTrajectoryTurn = lambda **kwargs: SimpleNamespace(**kwargs)
+        sys.modules["areno"] = areno_module
+        sys.modules["areno.api"] = api_module
+        sys.modules["areno.api.agentic"] = agentic_module
+
+    sys.modules.pop("game", None)
     sys.path.insert(0, str(EXAMPLE_DIR))
-    mod_name = f"agentic_warehouse_{name}_for_tests"
     try:
-        spec = importlib.util.spec_from_file_location(mod_name, path)
+        spec = importlib.util.spec_from_file_location(module_name, path)
         module = importlib.util.module_from_spec(spec)
-        sys.modules[mod_name] = module
+        sys.modules[module_name] = module
         assert spec.loader is not None
         spec.loader.exec_module(module)
         return module
     finally:
         sys.path.remove(str(EXAMPLE_DIR))
         sys.modules.pop("game", None)
-        sys.modules.pop(mod_name, None)
-        if previous_game is not None:
-            sys.modules["game"] = previous_game
+        sys.modules.pop(module_name, None)
+        for key, previous in saved_modules.items():
+            sys.modules.pop(key, None)
+            if previous is not None:
+                sys.modules[key] = previous
 
 
-def _load_module_without_sys_path(name: str):
-    path = EXAMPLE_DIR / f"{name}.py"
-    previous_game = sys.modules.pop("game", None)
-    mod_name = f"agentic_warehouse_{name}_without_path_for_tests"
+def _assert_value_error(fn, text: str) -> None:
     try:
-        spec = importlib.util.spec_from_file_location(mod_name, path)
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[mod_name] = module
-        assert spec.loader is not None
-        spec.loader.exec_module(module)
-        return module
-    finally:
-        sys.modules.pop("game", None)
-        sys.modules.pop(mod_name, None)
-        if previous_game is not None:
-            sys.modules["game"] = previous_game
+        fn()
+    except ValueError as exc:
+        assert text in str(exc)
+    else:
+        raise AssertionError("expected ValueError")
 
 
-def _make_record(**overrides):
-    record = {
-        "rows": 2,
-        "cols": 2,
-        "sku_pool": ["S1", "S2", "S3", "S4"],
-        "max_stock": 5,
-        "order_size": 2,
-        "seed": 42,
-        "start_shelf": "A1",
-        "order": [{"sku": "S1", "qty": 1}, {"sku": "S2", "qty": 1}],
+def _records(count: int = 3, *, seed: int = 2026) -> list[dict]:
+    return _load_module("dataset_generator").generate_records(count, seed=seed)
+
+
+def _path_to(state, target: str) -> list[str]:
+    if state.agent_pos == target:
+        return []
+    visited = {state.agent_pos}
+    queue = deque([(state.agent_pos, [])])
+    while queue:
+        node, path = queue.popleft()
+        for neighbor in state.adjacency[node]:
+            if neighbor == target:
+                return [*path, neighbor]
+            if neighbor not in visited:
+                visited.add(neighbor)
+                queue.append((neighbor, [*path, neighbor]))
+    raise AssertionError(f"unreachable test shelf: {target}")
+
+
+def _move_to(game, state, target: str) -> None:
+    for shelf_id in _path_to(state, target):
+        assert game.move(state, shelf_id).success
+
+
+def _fulfill_order(game, state) -> None:
+    for item in state.order:
+        remaining = item["qty"]
+        for shelf_id, shelf in state.shelves.items():
+            available = shelf.stock.get(item["sku"], 0)
+            if available <= 0:
+                continue
+            _move_to(game, state, shelf_id)
+            quantity = min(available, remaining)
+            assert game.pick(state, item["sku"], quantity).success
+            remaining -= quantity
+            if remaining == 0:
+                break
+        assert remaining == 0
+
+
+def _response(*calls, content=None):
+    tool_calls = [
+        SimpleNamespace(
+            id=call["id"],
+            type="function",
+            function=SimpleNamespace(
+                name=call["name"],
+                arguments=json.dumps(call.get("arguments", {})),
+            ),
+        )
+        for call in calls
+    ]
+    return SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    content=content,
+                    tool_calls=tool_calls,
+                )
+            )
+        ]
+    )
+
+
+class _FakeCompletions:
+    def __init__(self, responses):
+        self._responses = iter(responses)
+        self.requests = []
+
+    async def create(self, **kwargs):
+        self.requests.append(kwargs)
+        return next(self._responses)
+
+
+def _fake_client(responses):
+    completions = _FakeCompletions(responses)
+    return SimpleNamespace(
+        chat=SimpleNamespace(completions=completions),
+        completions=completions,
+    )
+
+
+def _assistant_call(call_id: str, name: str, arguments: object) -> dict:
+    return {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [
+            {
+                "id": call_id,
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "arguments": json.dumps(arguments),
+                },
+            }
+        ],
     }
-    record.update(overrides)
-    return record
 
 
-# ── Data generation & loading ──
-
-
-def test_warehouse_generator_produces_promptable_records():
+def test_warehouse_generator_is_balanced_deterministic_and_satisfiable():
     game = _load_module("game")
     generator = _load_module("dataset_generator")
+    records = generator.generate_records(9, seed=7)
 
-    records = generator.generate_records(12, seed=7)
-
-    assert len(records) == 12
+    assert records == generator.generate_records(9, seed=7)
+    assert [record["difficulty"] for record in records[:3]] == [
+        "small",
+        "medium",
+        "hard",
+    ]
     for record in records:
-        assert record["difficulty"] in {"small", "medium", "hard"}
-        assert "order" in record
-        assert isinstance(record["order"], list)
-        assert len(record["order"]) == record["order_size"]
-        assert game.make_prompt(record)
+        state = game.build_state(record)
+        assert game.baseline_distance(state) >= 0
+        for item in record["order"]:
+            available = sum(shelf.stock.get(item["sku"], 0) for shelf in state.shelves.values())
+            assert available >= item["qty"]
 
 
-def test_warehouse_generator_is_deterministic():
-    _load_module("game")
-    gen1 = _load_module("dataset_generator")
-    gen2 = _load_module("dataset_generator")
-
-    r1 = gen1.generate_records(8, seed=2026)
-    r2 = gen2.generate_records(8, seed=2026)
-
-    assert r1 == r2
-
-
-def test_warehouse_loader_imports_from_file_path_without_sys_path():
+def test_warehouse_generator_rejects_non_positive_count():
     generator = _load_module("dataset_generator")
-    loader = _load_module_without_sys_path("dataset_loader")
-    reward = _load_module_without_sys_path("reward")
-
-    source = generator.generate_records(1, seed=9)[0]
-
-    records = loader.load_training_dataset("unused", default_loader=lambda _: [source])
-
-    # Updated prompt style
-    assert "warehouse" in records[0]["prompt"].lower()
-
-    # New reward handles no tool calls as -0.5
-    assert reward.reward_fn(SimpleNamespace(source_record=source, tool_calls=[], messages=[])) == -0.5
+    _assert_value_error(lambda: generator.generate_records(0), "count must be")
+    _assert_value_error(lambda: generator.generate_records(-1), "count must be")
 
 
-def test_warehouse_loader_fills_missing_fields_from_difficulty():
-    loader = _load_module_without_sys_path("dataset_loader")
+def test_warehouse_loader_uses_shared_defaults_and_current_tool_names():
+    loader = _load_module("dataset_loader")
     source = {
         "id": 1,
         "difficulty": "small",
@@ -116,472 +192,451 @@ def test_warehouse_loader_fills_missing_fields_from_difficulty():
         "order": [{"sku": "S1", "qty": 1}],
     }
 
-    records = loader.load_training_dataset("unused", default_loader=lambda _: [source])
-
-    assert records[0]["rows"] == 2
-    assert records[0]["cols"] == 2
-    assert records[0]["sku_pool"] == ["S1", "S2", "S3", "S4"]
-    assert records[0]["start_shelf"] == "A1"
-    assert "prompt" in records[0]
-
-
-# ── Environment core logic ──
-
-
-def test_warehouse_game_build_state_generates_valid_layout():
-    game = _load_module("game")
-    record = _make_record()
-    state = game.build_state(record)
-
-    assert len(state.shelves) == 4
-    assert state.agent_pos == "A1"
-    assert state.order == record["order"]
-    assert state.cart == {}
-    assert state.completed is False
-
-
-def test_warehouse_game_adjacency_is_symmetric():
-    game = _load_module("game")
-    record = _make_record()
-    state = game.build_state(record)
-
-    for shelf_id, neighbors in state.adjacency.items():
-        for neighbor in neighbors:
-            assert shelf_id in state.adjacency[neighbor], f"{shelf_id} -> {neighbor} not symmetric"
-
-
-def test_warehouse_game_query_inventory_valid():
-    game = _load_module("game")
-    state = game.build_state(_make_record())
-
-    result = game.query_inventory(state, "A1")
-
-    assert result.success
-    assert result.data["shelf_id"] == "A1"
-    assert isinstance(result.data["stock"], dict)
-
-
-def test_warehouse_game_query_inventory_unknown_shelf():
-    game = _load_module("game")
-    state = game.build_state(_make_record())
-
-    result = game.query_inventory(state, "Z9")
-
-    assert not result.success
-    assert "unknown shelf" in result.message
-
-
-def test_warehouse_game_move_to_adjacent_shelf():
-    game = _load_module("game")
-    state = game.build_state(_make_record())
-
-    neighbors = state.adjacency["A1"]
-    target = neighbors[0]
-    result = game.move(state, target)
-
-    assert result.success
-    assert state.agent_pos == target
-    assert state.total_distance == 1
-
-
-def test_warehouse_game_move_to_non_adjacent_shelf():
-    game = _load_module("game")
-    state = game.build_state(_make_record())
-
-    # A1 -> A2 is adjacent in 2x2, but A1 -> B2 is diagonal (not adjacent)
-    result = game.move(state, "B2")
-
-    assert not result.success
-    assert "unreachable" in result.message
-    assert state.invalid_actions == 1
-
-
-def test_warehouse_game_move_to_unknown_shelf():
-    game = _load_module("game")
-    state = game.build_state(_make_record())
-
-    result = game.move(state, "Z9")
-
-    assert not result.success
-    assert "unknown shelf" in result.message
-    assert state.invalid_actions == 1
-
-
-def test_warehouse_game_pick_valid():
-    game = _load_module("game")
-    state = game.build_state(_make_record())
-
-    # Find a SKU on the starting shelf and pick it
-    shelf = state.shelves["A1"]
-    sku = next(iter(shelf.stock))
-    qty = min(shelf.stock[sku], 2)
-
-    result = game.pick(state, sku, qty)
-
-    assert result.success
-    assert state.cart[sku] == qty
-
-
-def test_warehouse_game_pick_wrong_shelf():
-    game = _load_module("game")
-    state = game.build_state(_make_record())
-
-    # Find a SKU that is NOT on A1
-    shelf_a1 = state.shelves["A1"]
-    all_skus = set()
-    for s in state.shelves.values():
-        all_skus.update(s.stock.keys())
-    missing = all_skus - set(shelf_a1.stock.keys())
-    if missing:
-        sku = next(iter(missing))
-        result = game.pick(state, sku, 1)
-
-        assert not result.success
-        assert "not on shelf" in result.message
-        assert state.picking_errors == 1
-
-
-def test_warehouse_game_pick_insufficient_stock():
-    game = _load_module("game")
-    state = game.build_state(_make_record())
-
-    shelf = state.shelves["A1"]
-    sku = next(iter(shelf.stock))
-    excess_qty = shelf.stock[sku] + 1
-
-    result = game.pick(state, sku, excess_qty)
-
-    assert not result.success
-    assert "insufficient stock" in result.message
-    assert state.picking_errors == 1
-
-
-def test_warehouse_game_pick_zero_qty():
-    game = _load_module("game")
-    state = game.build_state(_make_record())
-
-    result = game.pick(state, "S1", 0)
-
-    assert not result.success
-    assert "invalid qty" in result.message
-    assert state.picking_errors == 1
-
-
-def test_warehouse_game_submit_complete_order():
-    game = _load_module("game")
-    record = _make_record()
-    state = game.build_state(record)
-
-    # Pick all order items from wherever they are
-    for item in state.order:
-        sku, qty = item["sku"], item["qty"]
-        # Find which shelf has this SKU
-        for shelf_id, shelf in state.shelves.items():
-            if shelf.stock.get(sku, 0) >= qty:
-                if state.agent_pos != shelf_id:
-                    # Move step by step to the shelf (brute force for test)
-                    _force_move(game, state, shelf_id)
-                game.pick(state, sku, qty)
-                break
-
-    result = game.submit_order(state)
-
-    assert result.success
-    assert state.completed is True
-
-
-def test_warehouse_game_submit_incomplete_order():
-    game = _load_module("game")
-    state = game.build_state(_make_record())
-
-    # Don't pick anything, submit directly
-    result = game.submit_order(state)
-
-    assert not result.success
-    assert "order incomplete" in result.message
-    assert state.completed is False
-
-
-def test_warehouse_game_submit_extra_items():
-    game = _load_module("game")
-    record = _make_record(order=[{"sku": "S1", "qty": 1}])
-    state = game.build_state(record)
-
-    # Pick more than needed
-    shelf = state.shelves["A1"]
-    for sku, available in shelf.stock.items():
-        game.pick(state, sku, 1)
-        break
-
-    # Pick an extra item if available
-    for shelf_id, shelf in state.shelves.items():
-        if shelf_id == state.agent_pos:
-            continue
-        for sku in shelf.stock:
-            _force_move(game, state, shelf_id)
-            game.pick(state, sku, 1)
-            break
-        break
-
-    result = game.submit_order(state)
-
-    assert not result.success
-    assert state.completed is False
-
-
-def test_warehouse_game_submit_empty_cart():
-    game = _load_module("game")
-    state = game.build_state(_make_record())
-
-    result = game.submit_order(state)
-
-    assert not result.success
-    assert "order incomplete" in result.message
-
-
-# ── Scoring ──
-
-
-def test_warehouse_baseline_distance_returns_positive():
-    game = _load_module("game")
-    state = game.build_state(_make_record())
-
-    baseline = game.baseline_distance(state)
-
-    assert isinstance(baseline, int)
-    assert baseline >= 0
-
-
-def test_warehouse_score_task_completed_correct_sequence():
-    game = _load_module("game")
-    record = _make_record()
-    state = game.build_state(record)
-    baseline = game.baseline_distance(state)
-
-    trajectory_data = {
-        "completed": True,
-        "distance": baseline,
-        "picking_errors": 0,
-        "invalid_actions": 0,
-        "baseline_distance": baseline,
-        "tool_names": ["pick_from_shelf", "submit_order"],
-    }
-
-    score = game.score_task(record, trajectory_data)
-
-    assert score > 1.0  # 1.0 base + 0.2 bonus
-
-
-def test_warehouse_score_task_not_completed():
-    game = _load_module("game")
-    record = _make_record()
-
-    # No tools called, no cart, no distance → base -0.5 - 0.2 (no pick) = -0.7
-    score = game.score_task(record, {"completed": False, "tool_names": []})
-
-    assert score == -0.7
-
-
-def test_warehouse_score_task_with_errors():
-    game = _load_module("game")
-    record = _make_record()
-    state = game.build_state(record)
-    baseline = game.baseline_distance(state)
-
-    trajectory_data = {
-        "completed": True,
-        "distance": baseline,
-        "picking_errors": 2,
-        "invalid_actions": 1,
-        "baseline_distance": baseline,
-        "tool_names": ["query_inventory", "move", "pick", "submit_order"],
-    }
-
-    score = game.score_task(record, trajectory_data)
-
-    # 1.0 - 0.2 - 0.05 = 0.75, * efficiency, + 0.2
-    assert score < 1.2
-    assert score > 0.5
-
-
-# ── Agent entrypoint ──
-
-
-def test_warehouse_agent_tools_use_record_shape():
-    run_agent = _load_module_without_sys_path("run_agent")
-    run_agent.reset_state_cache()
-    record = _make_record()
-
-    # Build state to find a valid SKU on A1
-    game = _load_module("game")
-    state = game.build_state(record)
-    shelf = state.shelves["A1"]
-    sku = next(iter(shelf.stock))
-    qty = min(shelf.stock[sku], 1)
-
-    # Test pick_item (new tool name)
-    assistant_message = {
-        "tool_calls": [
-            {
-                "function": {
-                    "name": "pick_item",
-                    "arguments": json.dumps({"sku": sku, "qty": qty}),
-                }
-            }
-        ]
-    }
-
-    result = run_agent._run_tool(assistant_message, record)
-
-    assert result["success"] is True
-    assert result["data"]["cart"][sku] == qty
-
-
-def test_warehouse_agent_missing_tool_call_returns_error():
-    run_agent = _load_module_without_sys_path("run_agent")
-    run_agent.reset_state_cache()
-
-    assistant_message = {"role": "assistant", "content": "plain text", "tool_calls": []}
-
-    result = run_agent._run_tool(assistant_message, _make_record())
-
-    assert result["success"] is False
-    assert "no tool call" in result["message"]
-
-
-def test_warehouse_agent_invalid_json_arguments():
-    run_agent = _load_module_without_sys_path("run_agent")
-    run_agent.reset_state_cache()
-
-    assistant_message = {
-        "tool_calls": [
-            {
-                "function": {
-                    "name": "query_inventory",
-                    "arguments": "{invalid json}",
-                }
-            }
-        ]
-    }
-
-    result = run_agent._run_tool(assistant_message, _make_record())
-
-    assert result["success"] is False
-    assert "invalid JSON" in result["message"]
-
-
-def test_warehouse_agent_unknown_tool_returns_error():
-    run_agent = _load_module_without_sys_path("run_agent")
-    run_agent.reset_state_cache()
-
-    assistant_message = {
-        "tool_calls": [
-            {
-                "function": {
-                    "name": "fly",
-                    "arguments": "{}",
-                }
-            }
-        ]
-    }
-
-    result = run_agent._run_tool(assistant_message, _make_record())
-
-    assert result["success"] is False
-    assert "unknown tool" in result["message"]
-
-
-# ── Reward function ──
-
-
-def test_warehouse_reward_no_submit_returns_negative():
-    reward = _load_module_without_sys_path("reward")
-    record = _make_record()
-    reward_record = SimpleNamespace(
-        source_record=record,
-        tool_calls=[
-            {"name": "check_shelf", "arguments": "{}"},
-            {"name": "move_to", "arguments": "{}"},
-            {"name": "pick_item", "arguments": "{}"},
-        ],
-        messages=[],
+    record = loader.load_training_dataset(
+        "unused",
+        default_loader=lambda _: [source],
+    )[0]
+
+    assert record["rows"] == 2
+    assert record["sku_pool"] == ["S1", "S2", "S3", "S4"]
+    assert "check_shelf" in record["prompt"]
+    assert "pick_item" in record["prompt"]
+    assert "pick_from_shelf" not in record["prompt"]
+
+
+def test_warehouse_loader_reports_row_and_invalid_field():
+    loader = _load_module("dataset_loader")
+    source = _records(1, seed=12)[0]
+    source["start_shelf"] = "Z9"
+
+    _assert_value_error(
+        lambda: loader.load_training_dataset(
+            "unused",
+            default_loader=lambda _: [source],
+        ),
+        "warehouse dataset row 0: start_shelf",
     )
 
-    # No tool calls (empty messages) → -0.5
-    assert reward.reward_fn(reward_record) == -0.5
+
+def test_warehouse_loader_rejects_an_unsatisfiable_order():
+    loader = _load_module("dataset_loader")
+    source = _records(1, seed=121)[0]
+    source["order"][0]["qty"] = 10_000
+
+    _assert_value_error(
+        lambda: loader.load_training_dataset(
+            "unused",
+            default_loader=lambda _: [source],
+        ),
+        "warehouse dataset row 0: order SKU",
+    )
 
 
-def test_warehouse_reward_full_correct_sequence():
+def test_warehouse_build_state_returns_independent_mutable_states():
     game = _load_module("game")
-    reward = _load_module_without_sys_path("reward")
-    record = _make_record()
-    state = game.build_state(record)
-    baseline = game.baseline_distance(state)
+    record = _records(1, seed=13)[0]
+    first = game.build_state(record)
+    second = game.build_state(record)
+    sku, quantity = next(iter(first.shelves["A1"].stock.items()))
 
-    # Simulate a successful complete trajectory with new tool names
-    messages = [
-        {"role": "tool", "name": "move_to", "content": json.dumps({"success": True, "message": "moved", "data": {"distance": 1}})},
-        {"role": "tool", "name": "pick_item", "content": json.dumps({"success": True, "message": "picked", "data": {"cart": {"S1": 1, "S2": 1}, "distance": 1}})},
-        {"role": "tool", "name": "submit_order", "content": json.dumps({"success": True, "message": "order completed", "data": {"completed": True, "distance": 1}})},
-    ]
-    reward_record = SimpleNamespace(
-        source_record=record,
-        tool_calls=[
-            {"name": "move_to", "arguments": "{}"},
-            {"name": "pick_item", "arguments": "{}"},
-            {"name": "submit_order", "arguments": "{}"},
-        ],
-        messages=messages,
-    )
-
-    score = reward.reward_fn(reward_record)
-
-    # completed should give high positive score
-    assert score > 0.5
+    assert first is not second
+    assert first.shelves is not second.shelves
+    assert game.pick(first, sku, 1).success
+    assert first.cart == {sku: 1}
+    assert second.cart == {}
+    assert second.shelves["A1"].stock[sku] == quantity
 
 
-def test_warehouse_reward_wrong_sequence():
-    reward = _load_module_without_sys_path("reward")
-    record = _make_record()
-
-    # Simulate incomplete submission (wrong order)
-    messages = [
-        {"role": "tool", "name": "submit_order", "content": json.dumps({"success": False, "message": "order incomplete", "data": {"completed": False}})},
-    ]
-    reward_record = SimpleNamespace(
-        source_record=record,
-        tool_calls=[
-            {"name": "submit_order", "arguments": "{}"},
-        ],
-        messages=messages,
-    )
-
-    score = reward.reward_fn(reward_record)
-
-    # Incomplete submission should be negative
-    assert score < 0
-
-
-# ── Helpers ──
-
-
-def _force_move(game, state, target_shelf_id):
-    """Move agent to target shelf by any path, picking adjacent moves."""
-
-    import collections
-
-    if state.agent_pos == target_shelf_id:
-        return
-    # BFS path
+def test_warehouse_grid_is_connected_and_adjacency_is_symmetric():
+    game = _load_module("game")
+    state = game.build_state(_records(3, seed=14)[2])
     visited = {state.agent_pos}
-    queue = collections.deque([(state.agent_pos, [])])
+    queue = deque([state.agent_pos])
     while queue:
-        node, path = queue.popleft()
-        for neighbor in state.adjacency.get(node, []):
-            if neighbor == target_shelf_id:
-                for step in path + [neighbor]:
-                    game.move(state, step)
-                return
+        shelf_id = queue.popleft()
+        for neighbor in state.adjacency[shelf_id]:
+            assert shelf_id in state.adjacency[neighbor]
             if neighbor not in visited:
                 visited.add(neighbor)
-                queue.append((neighbor, path + [neighbor]))
+                queue.append(neighbor)
+    assert visited == set(state.shelves)
+
+
+def test_warehouse_move_validates_unknown_and_unreachable_shelves():
+    game = _load_module("game")
+    state = game.build_state(_records(1, seed=15)[0])
+    neighbor = state.adjacency[state.agent_pos][0]
+
+    assert game.move(state, neighbor).success
+    assert state.total_distance == 1
+    assert not game.move(state, "Z9").success
+    assert state.invalid_actions == 1
+
+    non_neighbor = next(
+        shelf_id
+        for shelf_id in state.shelves
+        if shelf_id != state.agent_pos and shelf_id not in state.adjacency[state.agent_pos]
+    )
+    assert not game.move(state, non_neighbor).success
+    assert state.invalid_actions == 2
+
+
+def test_warehouse_pick_tracks_wrong_item_and_out_of_stock():
+    game = _load_module("game")
+    state = game.build_state(_records(1, seed=16)[0])
+    order_skus = {item["sku"] for item in state.order}
+    wrong = next(
+        (shelf_id, sku, quantity)
+        for shelf_id, shelf in state.shelves.items()
+        for sku, quantity in shelf.stock.items()
+        if sku not in order_skus
+    )
+    _move_to(game, state, wrong[0])
+
+    result = game.pick(state, wrong[1], 1)
+    assert result.success
+    assert result.data["mistake"] is True
+    assert state.picking_errors == 1
+
+    result = game.pick(state, wrong[1], wrong[2] + 1)
+    assert not result.success
+    assert result.data["stage"] == "stock_validation"
+    assert state.picking_errors == 2
+
+
+def test_warehouse_submit_requires_exact_cart_and_emits_metrics():
+    game = _load_module("game")
+    state = game.build_state(_records(1, seed=17)[0])
+    baseline = game.baseline_distance(state)
+
+    early = game.submit_order(state)
+    assert not early.success
+    assert early.data["stage"] == "completion_validation"
+    assert state.invalid_actions == 1
+
+    _fulfill_order(game, state)
+    completed = game.submit_order(state)
+    metrics = game.state_metrics(state, baseline=baseline)
+    assert completed.success
+    assert metrics["complete_orders"] == 1
+    assert metrics["baseline_distance"] == baseline
+    assert set(metrics) == {
+        "complete_orders",
+        "picking_mistakes",
+        "invalid_actions",
+        "distance",
+        "baseline_distance",
+        "distance_ratio",
+        "distance_efficiency",
+        "cart_progress",
+    }
+
+
+def test_warehouse_baseline_supports_quantities_split_across_shelves():
+    game = _load_module("game")
+    state = game.build_state(_records(1, seed=18)[0])
+    for shelf in state.shelves.values():
+        shelf.stock.pop("SPLIT", None)
+    state.shelves["A1"].stock["SPLIT"] = 1
+    state.shelves["B2"].stock["SPLIT"] = 1
+    state.order = [{"sku": "SPLIT", "qty": 2}]
+
+    assert game.baseline_distance(state) == 2
+
+
+def test_warehouse_execute_action_rejects_malformed_arguments_without_raising():
+    game = _load_module("game")
+    state = game.build_state(_records(1, seed=19)[0])
+
+    array_result = game.execute_action(state, "pick_item", [])
+    string_qty_result = game.execute_action(
+        state,
+        "pick_item",
+        {"sku": "S1", "qty": "one"},
+    )
+    unknown_result = game.execute_action(state, "fly", {})
+
+    assert not array_result.success
+    assert array_result.data["input"] == "arguments"
+    assert not string_qty_result.success
+    assert string_qty_result.data["input"] == "qty"
+    assert not unknown_result.success
+    assert state.invalid_actions == 3
+
+
+def test_warehouse_agent_tool_schemas_are_closed():
+    run_agent = _load_module("run_agent")
+
+    assert {tool["function"]["name"] for tool in run_agent.TOOLS} == {
+        "move_to",
+        "check_shelf",
+        "pick_item",
+        "submit_order",
+    }
+    for tool in run_agent.TOOLS:
+        assert tool["function"]["parameters"]["additionalProperties"] is False
+
+
+def test_warehouse_agent_invalid_json_is_a_structured_failure():
+    game = _load_module("game")
+    run_agent = _load_module("run_agent")
+    state = game.build_state(_records(1, seed=20)[0])
+    call = {
+        "id": "bad-json",
+        "function": {
+            "name": "pick_item",
+            "arguments": "{not-json}",
+        },
+    }
+
+    result = run_agent._execute_tool_call(call, state)
+
+    assert not result.success
+    assert result.data == {
+        "stage": "tool_validation",
+        "input": "arguments",
+    }
+    assert state.invalid_actions == 1
+
+
+def test_warehouse_agent_tool_results_match_every_call_id():
+    run_agent = _load_module("run_agent")
+    assistant = {
+        "tool_calls": [
+            {
+                "id": "call-1",
+                "function": {"name": "check_shelf"},
+            },
+            {
+                "id": "call-2",
+                "function": {"name": "submit_order"},
+            },
+        ]
+    }
+    results = [{"success": False}, {"success": False}]
+
+    messages = run_agent._tool_messages(assistant, results)
+
+    assert [message["tool_call_id"] for message in messages] == [
+        "call-1",
+        "call-2",
+    ]
+    _assert_value_error(
+        lambda: run_agent._tool_messages(assistant, results[:1]),
+        "does not match",
+    )
+
+
+def test_warehouse_state_prompt_tracks_partial_quantities():
+    game = _load_module("game")
+    run_agent = _load_module("run_agent")
+    state = game.build_state(_records(1, seed=21)[0])
+    item = state.order[0]
+    state.cart[item["sku"]] = item["qty"] - 1
+
+    prompt = run_agent.make_state_prompt(state, turn_number=2)
+
+    assert f"{item['sku']} x1" in prompt
+    assert "Action turn 2 of 6" in prompt
+
+
+def test_warehouse_episode_preserves_history_and_final_tool_result():
+    game = _load_module("game")
+    run_agent = _load_module("run_agent")
+    record = _records(1, seed=22)[0]
+    state = game.build_state(record)
+    sku = next(iter(state.shelves["A1"].stock))
+    state.order = [{"sku": sku, "qty": 1}]
+    item = SimpleNamespace(
+        prompt="pick one item",
+        record=record,
+        prompt_index=0,
+        sample_index=0,
+    )
+    client = _fake_client(
+        [
+            _response({"id": "check", "name": "check_shelf"}),
+            _response(
+                {
+                    "id": "pick",
+                    "name": "pick_item",
+                    "arguments": {"sku": sku, "qty": 1},
+                }
+            ),
+            _response({"id": "submit", "name": "submit_order"}),
+            _response(content="The order was completed."),
+        ]
+    )
+
+    turns = asyncio.run(run_agent._run_episode(item, state, client))
+
+    assert state.completed
+    assert len(turns) == 4
+    second_messages = client.completions.requests[1]["messages"]
+    assert [message["role"] for message in second_messages[-4:]] == [
+        "user",
+        "assistant",
+        "tool",
+        "user",
+    ]
+    final_messages = client.completions.requests[-1]["messages"]
+    assert [message["role"] for message in final_messages[-4:]] == [
+        "user",
+        "assistant",
+        "tool",
+        "user",
+    ]
+    submit_result = json.loads(final_messages[-2]["content"])
+    assert submit_result["data"]["completed"] is True
+    assert submit_result["data"]["metrics"]["complete_orders"] == 1
+
+
+def test_warehouse_episode_does_not_fabricate_a_missing_tool_call():
+    game = _load_module("game")
+    run_agent = _load_module("run_agent")
+    record = _records(1, seed=23)[0]
+    state = game.build_state(record)
+    item = SimpleNamespace(
+        prompt="pick an order",
+        record=record,
+        prompt_index=0,
+        sample_index=0,
+    )
+    client = _fake_client([_response(content="I cannot act.")])
+
+    turns = asyncio.run(run_agent._run_episode(item, state, client))
+
+    assert len(turns) == 1
+    assert len(client.completions.requests) == 1
+    assert turns[0].response.choices[0].message.tool_calls == []
+    assert state.cart == {}
+
+
+def test_warehouse_concurrent_episodes_keep_state_isolated():
+    game = _load_module("game")
+    run_agent = _load_module("run_agent")
+    record = _records(1, seed=231)[0]
+    first_state = game.build_state(record)
+    second_state = game.build_state(record)
+    sku, original_stock = next(iter(first_state.shelves["A1"].stock.items()))
+    first_state.order = [{"sku": sku, "qty": 2}]
+    second_state.order = [{"sku": sku, "qty": 2}]
+    item = SimpleNamespace(
+        prompt="pick an order",
+        record=record,
+        prompt_index=0,
+        sample_index=0,
+    )
+
+    def client(call_id):
+        return _fake_client(
+            [
+                _response(
+                    {
+                        "id": call_id,
+                        "name": "pick_item",
+                        "arguments": {"sku": sku, "qty": 1},
+                    }
+                ),
+                _response(content="I cannot continue."),
+            ]
+        )
+
+    async def run_both():
+        return await asyncio.gather(
+            run_agent._run_episode(item, first_state, client("first")),
+            run_agent._run_episode(item, second_state, client("second")),
+        )
+
+    asyncio.run(run_both())
+
+    assert first_state.cart == {sku: 1}
+    assert second_state.cart == {sku: 1}
+    assert first_state.shelves["A1"].stock.get(sku, 0) == original_stock - 1
+    assert second_state.shelves["A1"].stock.get(sku, 0) == original_stock - 1
+
+
+def test_warehouse_episode_rejects_multiple_calls_with_matched_results():
+    game = _load_module("game")
+    run_agent = _load_module("run_agent")
+    record = _records(1, seed=24)[0]
+    state = game.build_state(record)
+    item = SimpleNamespace(
+        prompt="pick an order",
+        record=record,
+        prompt_index=0,
+        sample_index=0,
+    )
+    client = _fake_client(
+        [
+            _response(
+                {"id": "call-1", "name": "check_shelf"},
+                {"id": "call-2", "name": "submit_order"},
+            ),
+            _response(content="The tool protocol was invalid."),
+        ]
+    )
+
+    turns = asyncio.run(run_agent._run_episode(item, state, client))
+
+    assert len(turns) == 2
+    assert state.invalid_actions == 1
+    final_messages = client.completions.requests[-1]["messages"]
+    tool_messages = [message for message in final_messages if message["role"] == "tool"]
+    assert [message["tool_call_id"] for message in tool_messages] == [
+        "call-1",
+        "call-2",
+    ]
+    assert all(json.loads(message["content"])["data"]["stage"] == "tool_protocol" for message in tool_messages)
+
+
+def test_warehouse_reward_replays_optimal_partial_and_invalid_paths():
+    game = _load_module("game")
+    reward = _load_module("reward")
+    record = _records(1, seed=25)[0]
+    state = game.build_state(record)
+    sku = next(iter(state.shelves["A1"].stock))
+    record["order"] = [{"sku": sku, "qty": 1}]
+
+    pick_call = _assistant_call(
+        "pick",
+        "pick_item",
+        {"sku": sku, "qty": 1},
+    )
+    submit_call = _assistant_call("submit", "submit_order", {})
+    optimal = SimpleNamespace(
+        source_record=record,
+        messages=[pick_call, submit_call],
+        tool_calls=[],
+    )
+    partial = SimpleNamespace(
+        source_record=record,
+        messages=[pick_call],
+        tool_calls=[],
+    )
+    repeated = SimpleNamespace(
+        source_record=record,
+        messages=[
+            _assistant_call("check-1", "check_shelf", {}),
+            _assistant_call("check-2", "check_shelf", {}),
+        ],
+        tool_calls=[],
+    )
+    multiple = SimpleNamespace(
+        source_record=record,
+        messages=[
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    pick_call["tool_calls"][0],
+                    submit_call["tool_calls"][0],
+                ],
+            }
+        ],
+        tool_calls=[],
+    )
+
+    assert reward.reward_fn(optimal) == 1.0
+    assert reward.reward_fn(partial) == 0.0
+    assert reward.reward_fn(repeated) < -0.5
+    assert reward.reward_fn(multiple) < -0.5
