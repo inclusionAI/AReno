@@ -1881,7 +1881,7 @@ function CompareRunsPanel({ jobList, refreshJobs }) {
             ))}
           </select>
         </div>
-        <button className="primaryButton" disabled={!canCompare} onClick={fetchComparison}>
+        <button className="primaryButton" disabled={!canCompare} onClick={() => fetchComparison()}>
           {loading ? "Comparing..." : "Compare"}
         </button>
       </div>
