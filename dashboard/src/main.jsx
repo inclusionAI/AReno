@@ -1732,7 +1732,7 @@ function CompareRunsPanel({ jobList, refreshJobs, compareJobAId, setCompareJobAI
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [activeChartMetric, setActiveChartMetric] = useState("");
-  const [normalizeX, setNormalizeX] = useState(false);
+  const [normalizeX, setNormalizeX] = useState(true);
 
   async function fetchComparison(aId, bId) {
     const effectiveAId = aId || compareJobAId;
