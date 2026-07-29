@@ -2403,48 +2403,56 @@ textarea:focus {
   margin-bottom: 10px;
   padding-bottom: 6px;
   border-bottom: 1px solid var(--border);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.metricCardSubLabel {
+  font-size: 10px;
+  font-weight: 500;
+  text-transform: none;
+  color: var(--text-tertiary, #999);
 }
 
 .metricCardRow {
   display: flex;
-  justify-content: space-between;
+  gap: 8px;
+}
+
+.metricCardSide {
+  flex: 1;
+  display: flex;
   align-items: baseline;
-  gap: 16px;
+  gap: 6px;
 }
 
-.metricCardRowLabel {
+.metricCardSideTag {
   font-size: 11px;
-  font-weight: 600;
-  color: var(--text-secondary);
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 4px;
+  flex-shrink: 0;
 }
 
-.metricCardRowLabel.runA {
+.metricCardSideTag.A {
+  background: rgba(79, 140, 255, 0.15);
   color: #4f8cff;
 }
 
-.metricCardRowLabel.runB {
+.metricCardSideTag.B {
+  background: rgba(245, 158, 11, 0.15);
   color: #f59e0b;
 }
 
-.metricCardValSideA {
+.metricCardSideVal {
   font-size: 15px;
   font-weight: 600;
   font-family: var(--mono-font, "SF Mono", "Fira Code", monospace);
   color: var(--text);
-  flex: 1;
-  text-align: right;
-  padding-right: 14px;
-  border-right: 1px solid var(--border);
-}
-
-.metricCardValSideB {
-  font-size: 15px;
-  font-weight: 600;
-  font-family: var(--mono-font, "SF Mono", "Fira Code", monospace);
-  color: var(--text);
-  flex: 1;
-  text-align: left;
-  padding-left: 14px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .valBetter {

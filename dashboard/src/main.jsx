@@ -1973,10 +1973,19 @@ function CompareRunsPanel({ jobList, refreshJobs, compareJobAId, setCompareJobAI
                   <div className="metricCard" key={i}>
                     {(aBetter || aBetterH) && <div className="metricCardFlag">A better</div>}
                     {(bBetter || bBetterH) && <div className="metricCardFlag">B better</div>}
-                    <div className="metricCardLabel">{card.label}</div>
+                    <div className="metricCardLabel">
+                      {card.label}
+                      <span className="metricCardSubLabel">A vs B</span>
+                    </div>
                     <div className="metricCardRow">
-                      <span className={`metricCardValSideA ${aBetter || aBetterH ? "valBetter" : ""}`}>{card.valueA}</span>
-                      <span className={`metricCardValSideB ${bBetter || bBetterH ? "valBetter" : ""}`}>{card.valueB}</span>
+                      <div className="metricCardSide">
+                        <span className="metricCardSideTag A">A</span>
+                        <span className={`metricCardSideVal ${aBetter || aBetterH ? "valBetter" : ""}`}>{card.valueA}</span>
+                      </div>
+                      <div className="metricCardSide">
+                        <span className="metricCardSideTag B">B</span>
+                        <span className={`metricCardSideVal ${bBetter || bBetterH ? "valBetter" : ""}`}>{card.valueB}</span>
+                      </div>
                     </div>
                   </div>
                 );
