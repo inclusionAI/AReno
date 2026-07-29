@@ -238,7 +238,7 @@ class PolicyOnlyTrainer:
             # filter actually counted something.
             overlength_counters = filter_diagnostics.get("overlength_counters") or {}
             if overlength_counters:
-                self.areno._step_overlength_counters = dict(overlength_counters)
+                self.areno.record_overlength_counters(overlength_counters)
             expected = len(agent_batch)
             if len(samples) + filtered_count != expected:
                 raise RuntimeError(
@@ -296,8 +296,14 @@ class PolicyOnlyTrainer:
                 continue
             # Overlength sample.
             filtered_details.append(detail)
-            overlength_counters[f"trajectory_too_long/{policy}"] = (
-                overlength_counters.get(f"trajectory_too_long/{policy}", 0) + 1
+            # `truncate` is not implemented for agentic trajectories (the
+            # flattened token row carries no per-turn offsets, so cutting it
+            # could split a tool_call/result pair). It degrades to reject here;
+            # label the counter accordingly so operators are not misled into
+            # thinking samples were safely truncated when they were dropped.
+            counter_policy = "truncate_degraded_to_reject" if policy == "truncate" else policy
+            overlength_counters[f"trajectory_too_long/{counter_policy}"] = (
+                overlength_counters.get(f"trajectory_too_long/{counter_policy}", 0) + 1
             )
             if policy == "warn":
                 # Keep the overlength sample unchanged but count it.
@@ -310,6 +316,14 @@ class PolicyOnlyTrainer:
         )
         if overlength_counters:
             diagnostics["overlength_counters"] = overlength_counters
+        if policy == "truncate" and filtered_details:
+            # Explicitly warn that truncate degraded to reject so an operator
+            # monitoring the `truncate` policy is not left assuming truncation happened.
+            self.logger.warning(
+                "agentic truncate not implemented (no per-turn offsets); dropped %d overlength "
+                "trajectory(ies) as reject instead of truncating",
+                len(filtered_details),
+            )
         if filtered_details:
             self.logger.warning("agentic trajectory filtered: %s", self._format_agent_filter_diagnostics(diagnostics))
         # `warn` keeps overlength samples, so the filtered_count (dropped) must

@@ -127,6 +127,13 @@ class SFTTrainer:
             accepted += 1
             batch.append(seq)
             if len(batch) >= self.config.batch_size:
+                # Surface the overlength counts accumulated for this batch to the
+                # metrics recorder so they emit `rollout/overlength/*` scalars
+                # for this step, then reset so the next batch only carries its
+                # own counts (mirrors the per-step semantics of the agentic path).
+                if overlength_counters:
+                    self.areno.record_overlength_counters(overlength_counters)
+                    overlength_counters = {}
                 yield batch
                 batch = []
         if skipped_empty or overlength_counters:
@@ -142,6 +149,8 @@ class SFTTrainer:
                 "Check dataset quality, --max-prompt-tokens, and --max-new-tokens."
             )
         if batch:
+            if overlength_counters:
+                self.areno.record_overlength_counters(overlength_counters)
             yield batch
 
     def _maybe_save(self, epoch: int, step: int) -> None:

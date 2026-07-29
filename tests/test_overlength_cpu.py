@@ -164,6 +164,31 @@ class OverlengthMetricsTest(unittest.TestCase):
         stats = collect_train_batch_stats([])
         self.assertEqual(stats["overlength_counters"], {})
 
+    def test_record_overlength_counters_writes_step_accumulator(self):
+        # Issue #216 CR fix: trainers call the public `record_overlength_counters`
+        # method instead of reaching into the private `_step_overlength_counters`
+        # attribute. The method must copy the counters onto the step accumulator
+        # so `record_train_step` flushes them as `rollout/overlength/*` scalars.
+        from types import SimpleNamespace
+
+        trainer = SimpleNamespace(_step_overlength_counters={}, _metrics=None)
+        # Bind the real method under test.
+        from areno.api.trainer import Trainer
+
+        Trainer.record_overlength_counters(trainer, {"response_too_long/warn": 3})
+        self.assertEqual(trainer._step_overlength_counters, {"response_too_long/warn": 3})
+
+    def test_record_overlength_counters_ignores_empty(self):
+        # Empty counters must not overwrite a previous step's accumulator (the
+        # caller guards this too, but the method must be a no-op regardless).
+        from types import SimpleNamespace
+
+        trainer = SimpleNamespace(_step_overlength_counters={"existing/reject": 1}, _metrics=None)
+        from areno.api.trainer import Trainer
+
+        Trainer.record_overlength_counters(trainer, {})
+        self.assertEqual(trainer._step_overlength_counters, {"existing/reject": 1})
+
 
 class _FakeWriter:
     """Minimal TensorBoard writer substitute that records add_scalar calls."""
@@ -201,10 +226,12 @@ class TruncateSftResponseTest(unittest.TestCase):
             prompt_ids=prompt_ids, response_ids=response_ids, max_new_tokens=3, eos_token_ids=(7,)
         )
         self.assertTrue(truncated)
-        # cut = [4,5,6] then EOS re-appended -> [4,5,6,7]
-        self.assertEqual(tokens, [1, 2, 4, 5, 6, 7])
-        self.assertEqual(mask, [True, True, False, False, False, False])
+        # cut = [4,5,6]; the last token is replaced with EOS so the cut stays
+        # within max_new_tokens -> [4,5,7]. Total length never exceeds the budget.
+        self.assertEqual(tokens, [1, 2, 4, 5, 7])
+        self.assertEqual(mask, [True, True, False, False, False])
         self.assertEqual(len(tokens), len(mask))
+        self.assertEqual(len(tokens), len(prompt_ids) + 3)  # respects max_new_tokens
 
     def test_cut_keeps_existing_eos_at_boundary(self):
         prompt_ids = [1]
@@ -435,12 +462,14 @@ class AgentOverlengthFilterTest(unittest.TestCase):
     def test_truncate_degrades_to_reject(self):
         # truncate is not implemented for agentic yet; it must degrade to reject
         # (drop the overlong sample) rather than split a tool call/result pair.
+        # The counter is labeled `truncate_degraded_to_reject` so operators are
+        # not misled into thinking samples were safely truncated.
         trainer = self._make_fake_trainer("truncate")
         samples = [self._make_fake_sample(5), self._make_fake_sample(20)]
         kept, dropped, diag = trainer._filter_overlong_agent_samples(self._FakeCtx(), samples, None)
         self.assertEqual(len(kept), 1)
         self.assertEqual(dropped, 1)
-        self.assertEqual(diag["overlength_counters"]["trajectory_too_long/truncate"], 1)
+        self.assertEqual(diag["overlength_counters"]["trajectory_too_long/truncate_degraded_to_reject"], 1)
 
     def test_all_within_budget_no_counters(self):
         trainer = self._make_fake_trainer("reject")

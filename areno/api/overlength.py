@@ -104,11 +104,15 @@ def truncate_sft_response(
         return tokens, mask, False
 
     cut = list(response_ids[:max_new_tokens])
-    # Re-append an EOS if the cut removed it. We only append when there is at
-    # least one response token to train on after the prompt; otherwise the
-    # sequence cannot produce a next-token loss and the caller should reject it.
+    # Re-append an EOS if the cut removed it. Appending would make the cut one
+    # token longer than `max_new_tokens`, breaking the budget; instead replace
+    # the last cut token with EOS so the total stays within budget. This matches
+    # `truncate_dpo_pair`'s EOS handling so both truncators obey the same length
+    # contract. We only replace when there is at least one response token to
+    # train on after the prompt; otherwise the sequence cannot produce a
+    # next-token loss and the caller should reject it.
     if cut and eos_token_ids and cut[-1] not in eos_token_ids:
-        cut.append(eos_token_ids[0])
+        cut[-1] = eos_token_ids[0]
     tokens = list(prompt_ids) + cut
     mask = [True] * len(prompt_ids) + [False] * len(cut)
     return tokens, mask, True

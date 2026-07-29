@@ -159,6 +159,13 @@ class DPOTrainer:
                 continue
             batch.extend(pair)
             if len(batch) >= self.config.batch_size * 2:
+                # Surface this batch's overlength counts to the metrics recorder
+                # so they emit `rollout/overlength/*` scalars for this step, then
+                # reset so the next batch only carries its own counts (mirrors
+                # the per-step semantics of the agentic path).
+                if overlength_counters:
+                    self.areno.record_overlength_counters(overlength_counters)
+                    overlength_counters = {}
                 yield batch
                 batch = []
         if skipped_invalid or overlength_counters:
@@ -167,6 +174,8 @@ class DPOTrainer:
                 parts.append(f"{key}={count}")
             self.logger.info("stage=dpo_dataset_filter %s", " ".join(parts))
         if batch:
+            if overlength_counters:
+                self.areno.record_overlength_counters(overlength_counters)
             yield batch
 
     def _maybe_save(self, epoch: int, step: int) -> None:

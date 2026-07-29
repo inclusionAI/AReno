@@ -369,6 +369,19 @@ class Trainer:
         if self._metrics is not None:
             self._metrics.record_rollout_sample(sample)
 
+    def record_overlength_counters(self, counters: dict[str, int]) -> None:
+        """Surface per-reason/per-action overlength counts for the current step.
+
+        Issue #216: trainers (SFT/DPO/agentic) call this with the counts they
+        collected during rollout filtering so `record_train_step` can emit
+        ``rollout/overlength/{reason}/{action}`` scalars. The counts replace
+        the step accumulator and are flushed on the next ``train()`` call;
+        ``_begin_step`` resets them so counts never leak across steps.
+        """
+
+        if counters:
+            self._step_overlength_counters = dict(counters)
+
     def record_dashboard_state(
         self,
         *,
