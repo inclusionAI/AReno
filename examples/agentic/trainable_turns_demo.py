@@ -55,8 +55,7 @@ class _FakeSamplingParams:
 
 def _spanned_sample(tokens, spans, base_mask):
     """Build a minimal _AgentSample with explicit response spans and base mask."""
-    from areno.api.agentic import _AgentSample
-    from areno.api.agentic import AgentBatch, RewardEvent
+    from areno.api.agentic import AgentBatch, RewardEvent, _AgentSample
 
     item = next(AgentBatch(records=[{}], prompts=["p"], input_tokens=[[1]], n_samples=1).iter_samples())
     sample = _AgentSample(

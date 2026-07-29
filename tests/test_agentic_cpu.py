@@ -1437,7 +1437,6 @@ def test_explicit_trajectory_path_last_assistant_masks_correctly():
 
 def test_rollout_log_records_active_mode_and_mask_state(caplog):
     """Observability: rollout log line records trainable_turns mode + mask_tool_call_args."""
-    import logging
 
     trainer = _FakeTrainer(world_size=1, tp_size=1)
     session = RolloutSession(
