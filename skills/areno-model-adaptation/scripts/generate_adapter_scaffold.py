@@ -214,7 +214,7 @@ from __future__ import annotations
 
 from areno.models.{config.adapter_name}.{model_module} import {config.class_name}
 
-__all____ = ["{config.class_name}"]
+__all__ = ["{config.class_name}"]
 '''
 
 
