@@ -14,6 +14,8 @@ needed.
 | `calculate` | Evaluate a safe arithmetic expression |
 | `unit_convert` | Convert between length/weight units |
 | `lookup_parcel` | Look up parcel tracking info |
+| `search_notes` | Search notes by keyword (returns matching keys + snippets) |
+| `list_contacts_by_city` | List all contacts in a given city |
 
 ## Task Types
 
@@ -22,6 +24,9 @@ needed.
 - **parcel-city**: Look up parcel P002, then find a contact in the same city
 - **calc-shipping**: Calculate `3 * 15`, then read the shipping note
 - **convert-parcel**: Convert 100 cm to m, then look up parcel P003
+- **search-meeting-contact** (3 steps): Search notes for 'meeting', read the meeting note, then list contacts in Shanghai
+- **parcel-calc-note** (3 steps): Look up parcel P002, calculate `7 - 6`, then read the shipping note
+- **convert-search-contact-parcel** (4 steps): Convert 1000 mm to m, search notes for 'shipping', list contacts in Shanghai, then look up parcel P001
 
 ## Reward Dimensions
 

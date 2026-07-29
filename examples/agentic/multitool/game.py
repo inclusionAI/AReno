@@ -149,6 +149,53 @@ def lookup_parcel(tracking_id: str) -> dict[str, str] | None:
     return None
 
 
+def search_notes(keyword: str) -> list[dict[str, str]]:
+    """Search notes by keyword (case-insensitive substring match).
+
+    Unlike read_note which requires an exact key, search_notes finds all notes
+    whose content contains the keyword. This adds complexity: the agent must
+    first search to discover the right key, then read the full note.
+
+    Args:
+        keyword: A keyword to search for in note content (case-insensitive).
+
+    Returns:
+        A list of {"key": ..., "snippet": ...} dicts for matching notes.
+        Empty list if no matches.
+    """
+
+    kw = keyword.strip().lower()
+    if not kw:
+        return []
+    results: list[dict[str, str]] = []
+    for key, content in NOTES.items():
+        if kw in content.lower():
+            snippet = content if len(content) <= 80 else content[:77] + "..."
+            results.append({"key": key, "snippet": snippet})
+    return results
+
+
+def list_contacts_by_city(city: str) -> list[dict[str, str]]:
+    """List all contacts in a given city.
+
+    Unlike lookup_contact which finds one person by name, this returns all
+    contacts in a city. This adds complexity: the agent must determine the city
+    from a parcel or note, then list contacts to find the right person.
+
+    Args:
+        city: City name to filter by (case-insensitive).
+
+    Returns:
+        A list of contact dicts (name, email, phone, city) in that city.
+        Empty list if no contacts found.
+    """
+
+    c = city.strip().lower()
+    if not c:
+        return []
+    return [dict(contact) for contact in CONTACTS if contact["city"].lower() == c]
+
+
 # ---------------------------------------------------------------------------
 # Task generation and scoring
 # ---------------------------------------------------------------------------
@@ -196,6 +243,33 @@ TASKS: list[dict[str, Any]] = [
         "expected_from_unit": "cm",
         "expected_to_unit": "m",
         "expected_parcel": "P003",
+    },
+    {
+        "id": "search-meeting-contact",
+        "description": "Search notes for 'Team', read the meeting note, then list contacts in Shanghai.",
+        "required_tools": ["search_notes", "read_note", "list_contacts_by_city"],
+        "expected_search_keyword": "Team",
+        "expected_note_key": "meeting",
+        "expected_city": "Shanghai",
+    },
+    {
+        "id": "parcel-calc-note",
+        "description": "Look up parcel P002, calculate the ETA days from today (2026-07-29 to 2026-07-30 = 1 day) as 7 - 6, then read the shipping note.",
+        "required_tools": ["lookup_parcel", "calculate", "read_note"],
+        "expected_parcel": "P002",
+        "expected_expression": "7 - 6",
+        "expected_note_key": "shipping",
+    },
+    {
+        "id": "convert-search-contact-parcel",
+        "description": "Convert 1000 mm to m, search notes for 'shipping', then list contacts in Shanghai and look up parcel P001.",
+        "required_tools": ["unit_convert", "search_notes", "list_contacts_by_city", "lookup_parcel"],
+        "expected_value": 1000,
+        "expected_from_unit": "mm",
+        "expected_to_unit": "m",
+        "expected_search_keyword": "shipping",
+        "expected_city": "Shanghai",
+        "expected_parcel": "P001",
     },
 ]
 
@@ -418,6 +492,14 @@ def _score_arguments(record: dict[str, Any], tool_calls: list[dict[str, Any]]) -
                 checks.append(True)
             else:
                 checks.append(False)
+        elif name == "search_notes":
+            kw = str(args.get("keyword", "")).strip().lower()
+            expected_kw = str(record.get("expected_search_keyword", "")).strip().lower()
+            checks.append(bool(kw and kw == expected_kw))
+        elif name == "list_contacts_by_city":
+            city = str(args.get("city", "")).strip().lower()
+            expected_city = str(record.get("expected_city", record.get("expected_contact_city", ""))).strip().lower()
+            checks.append(bool(city and city == expected_city))
 
     if not checks:
         return 0.0
@@ -507,6 +589,13 @@ def _score_final_answer(record: dict[str, Any], tool_calls: list[dict[str, Any]]
     if task_id == "convert" and name == "lookup_parcel":
         parcel = lookup_parcel(str(args.get("tracking_id", "")))
         return 1.0 if parcel is not None else 0.0
+    if task_id == "search" and name == "list_contacts_by_city":
+        contacts = list_contacts_by_city(str(args.get("city", "")))
+        return 1.0 if contacts else 0.0
+    if task_id == "parcel" and name == "read_note":
+        # parcel-calc-note ends with read_note
+        note = read_note(str(args.get("note_key", "")))
+        return 1.0 if note is not None else 0.0
     return 0.0
 
 

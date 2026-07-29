@@ -17,9 +17,11 @@ from areno.api.agentic import AgentTrajectory, AgentTrajectoryTurn
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from game import (  # noqa: E402
     calculate,
+    list_contacts_by_city,
     lookup_contact,
     lookup_parcel,
     read_note,
+    search_notes,
     unit_convert,
 )
 
@@ -129,7 +131,39 @@ PARCEL_TOOL = {
     },
 }
 
-TOOLS = [CONTACTS_TOOL, NOTES_TOOL, CALCULATOR_TOOL, UNIT_CONVERT_TOOL, PARCEL_TOOL]
+SEARCH_NOTES_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "search_notes",
+        "description": "Search all notes by keyword (case-insensitive). Returns matching note keys and snippets.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "keyword": {"type": "string", "description": "The keyword to search for in note content."},
+            },
+            "required": ["keyword"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+LIST_CONTACTS_BY_CITY_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "list_contacts_by_city",
+        "description": "List all contacts in a given city.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "city": {"type": "string", "description": "The city name, e.g. 'Shanghai'."},
+            },
+            "required": ["city"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+TOOLS = [CONTACTS_TOOL, NOTES_TOOL, CALCULATOR_TOOL, UNIT_CONVERT_TOOL, PARCEL_TOOL, SEARCH_NOTES_TOOL, LIST_CONTACTS_BY_CITY_TOOL]
 TOOL_BY_NAME = {tool["function"]["name"]: tool for tool in TOOLS}
 
 # Per-turn guidance for each tool name.
@@ -139,6 +173,8 @@ TURN_PROMPTS = {
     "calculate": "Call calculate with the expression from the task.",
     "unit_convert": "Call unit_convert with the value and units from the task.",
     "lookup_parcel": "Call lookup_parcel with the tracking id from the task.",
+    "search_notes": "Call search_notes with the keyword from the task.",
+    "list_contacts_by_city": "Call list_contacts_by_city with the city from the task.",
 }
 
 
@@ -269,4 +305,10 @@ def _run_tool(assistant_message: dict) -> dict:
     if name == "lookup_parcel":
         result = lookup_parcel(str(args.get("tracking_id", "")))
         return result if result else {"error": "parcel not found"}
+    if name == "search_notes":
+        results = search_notes(str(args.get("keyword", "")))
+        return {"results": results} if results else {"error": "no notes found"}
+    if name == "list_contacts_by_city":
+        results = list_contacts_by_city(str(args.get("city", "")))
+        return {"contacts": results} if results else {"error": "no contacts in that city"}
     return {"error": f"unknown tool: {name}"}

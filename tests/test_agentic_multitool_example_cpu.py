@@ -219,6 +219,64 @@ def test_lookup_parcel_not_found():
     assert game.lookup_parcel("P999") is None
 
 
+def test_search_notes_finds_matching_keyword():
+    """Verify search_notes returns matching notes for a keyword in content."""
+
+    game = _load_module("game")
+    results = game.search_notes("Team")
+    assert len(results) > 0
+    assert results[0]["key"] == "meeting"
+
+
+def test_search_notes_case_insensitive():
+    """Verify search_notes matches case-insensitively."""
+
+    game = _load_module("game")
+    results = game.search_notes("BUDGET")
+    assert len(results) > 0
+    assert results[0]["key"] == "budget"
+
+
+def test_search_notes_no_match_returns_empty():
+    """Verify search_notes returns empty list for a non-matching keyword."""
+
+    game = _load_module("game")
+    assert game.search_notes("nonexistent") == []
+
+
+def test_search_notes_empty_keyword_returns_empty():
+    """Verify search_notes returns empty list for an empty keyword."""
+
+    game = _load_module("game")
+    assert game.search_notes("") == []
+
+
+def test_list_contacts_by_city_returns_shanghai():
+    """Verify list_contacts_by_city returns contacts in Shanghai."""
+
+    game = _load_module("game")
+    results = game.list_contacts_by_city("Shanghai")
+    assert len(results) >= 2
+    for contact in results:
+        assert contact["city"] == "Shanghai"
+
+
+def test_list_contacts_by_city_case_insensitive():
+    """Verify list_contacts_by_city matches case-insensitively."""
+
+    game = _load_module("game")
+    results = game.list_contacts_by_city("beijing")
+    assert len(results) == 1
+    assert results[0]["name"] == "Bob Smith"
+
+
+def test_list_contacts_by_city_no_match_returns_empty():
+    """Verify list_contacts_by_city returns empty list for a city with no contacts."""
+
+    game = _load_module("game")
+    assert game.list_contacts_by_city("Tokyo") == []
+
+
 # ---------------------------------------------------------------------------
 # Dataset generator and loader tests — verify data pipeline correctness
 # ---------------------------------------------------------------------------
@@ -424,12 +482,74 @@ def test_score_convert_parcel_success():
     assert score["failures"] == []
 
 
-# ---------------------------------------------------------------------------
-# Scoring tests — failure paths: verify incorrect trajectories are penalized
-# ---------------------------------------------------------------------------
+def test_score_search_meeting_contact_success():
+    """Verify a correct 3-step search-meeting-contact trajectory gets a perfect score."""
+
+    game = _load_module("game")
+    record = {
+        "id": "search-meeting-contact-0",
+        "description": "Search notes for 'Team', read the meeting note, then list contacts in Shanghai.",
+        "required_tools": ["search_notes", "read_note", "list_contacts_by_city"],
+        "expected_search_keyword": "Team",
+        "expected_note_key": "meeting",
+        "expected_city": "Shanghai",
+    }
+    tool_calls = [
+        {"name": "search_notes", "arguments": json.dumps({"keyword": "Team"})},
+        {"name": "read_note", "arguments": json.dumps({"note_key": "meeting"})},
+        {"name": "list_contacts_by_city", "arguments": json.dumps({"city": "Shanghai"})},
+    ]
+    score = game.score_task(record, tool_calls)
+    assert score["overall"] == 1.0
+    assert score["failures"] == []
 
 
-def test_score_wrong_tool_order():
+def test_score_parcel_calc_note_success():
+    """Verify a correct 3-step parcel-calc-note trajectory gets a perfect score."""
+
+    game = _load_module("game")
+    record = {
+        "id": "parcel-calc-note-0",
+        "description": "Look up parcel P002, calculate 7 - 6, then read the shipping note.",
+        "required_tools": ["lookup_parcel", "calculate", "read_note"],
+        "expected_parcel": "P002",
+        "expected_expression": "7 - 6",
+        "expected_note_key": "shipping",
+    }
+    tool_calls = [
+        {"name": "lookup_parcel", "arguments": json.dumps({"tracking_id": "P002"})},
+        {"name": "calculate", "arguments": json.dumps({"expression": "7 - 6"})},
+        {"name": "read_note", "arguments": json.dumps({"note_key": "shipping"})},
+    ]
+    score = game.score_task(record, tool_calls)
+    assert score["overall"] == 1.0
+    assert score["failures"] == []
+
+
+def test_score_convert_search_contact_parcel_success():
+    """Verify a correct 4-step convert-search-contact-parcel trajectory gets a perfect score."""
+
+    game = _load_module("game")
+    record = {
+        "id": "convert-search-contact-parcel-0",
+        "description": "Convert 1000 mm to m, search notes for 'shipping', list contacts in Shanghai, then look up parcel P001.",
+        "required_tools": ["unit_convert", "search_notes", "list_contacts_by_city", "lookup_parcel"],
+        "expected_value": 1000,
+        "expected_from_unit": "mm",
+        "expected_to_unit": "m",
+        "expected_search_keyword": "shipping",
+        "expected_city": "Shanghai",
+        "expected_parcel": "P001",
+    }
+    tool_calls = [
+        {"name": "unit_convert", "arguments": json.dumps({"value": 1000, "from_unit": "mm", "to_unit": "m"})},
+        {"name": "search_notes", "arguments": json.dumps({"keyword": "shipping"})},
+        {"name": "list_contacts_by_city", "arguments": json.dumps({"city": "Shanghai"})},
+        {"name": "lookup_parcel", "arguments": json.dumps({"tracking_id": "P001"})},
+    ]
+    score = game.score_task(record, tool_calls)
+    assert score["overall"] == 1.0
+    assert score["failures"] == []
     """Verify that calling tools in the wrong order lowers the 'order' score."""
 
     game = _load_module("game")

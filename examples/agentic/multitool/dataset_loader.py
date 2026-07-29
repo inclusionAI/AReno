@@ -14,16 +14,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from game import make_prompt  # noqa: E402
 
 # Known tool names that can appear in required_tools / tool_calls.
-KNOWN_TOOLS = {"lookup_contact", "read_note", "calculate", "unit_convert", "lookup_parcel"}
+KNOWN_TOOLS = {"lookup_contact", "read_note", "calculate", "unit_convert", "lookup_parcel", "search_notes", "list_contacts_by_city"}
 
 # Required expected_* fields per task id prefix. Each task type must have
 # its expected fields present so the scoring logic can evaluate arguments.
+# Note: "parcel" covers both parcel-city (lookup_contact) and parcel-calc-note (calculate + read_note);
+# "convert" covers both convert-parcel (unit_convert + lookup_parcel) and convert-search-contact-parcel (4 tools).
 REQUIRED_EXPECTED_FIELDS: dict[str, set[str]] = {
     "contact": {"expected_contact", "expected_note_key"},
     "budget": {"expected_note_keys"},
-    "parcel": {"expected_parcel", "expected_contact_city"},
+    "parcel": {"expected_parcel"},  # parcel-city also has expected_contact_city; parcel-calc-note has expected_expression + expected_note_key
     "calc": {"expected_expression", "expected_note_key"},
     "convert": {"expected_value", "expected_from_unit", "expected_to_unit", "expected_parcel"},
+    "search": {"expected_search_keyword", "expected_note_key", "expected_city"},
 }
 
 
