@@ -75,6 +75,7 @@ class PolicyOnlyTrainer:
                 self.dataset,
                 batch_size=self.config.batch_size,
                 max_prompt_tokens=self.config.max_prompt_tokens,
+                split_messages=getattr(self.config, "split_conversations", False),
             ):
                 role = self._policy_role_name()
                 self.logger.info("epoch=%d step=%d role=%s stage=rollout_start", epoch, step, role)
