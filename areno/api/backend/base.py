@@ -94,6 +94,22 @@ class Backend(ABC):
 
         pass
 
+    def evaluate(
+        self,
+        ctx: Context,
+        batch_data: list[TrainSequence],
+        loss_fn: Callable,
+        mini_bs: int,
+        gradient_accumulation_steps: int | None = None,
+    ) -> dict[str, float]:
+        """Run a forward-only evaluation pass; no gradient, no optimizer step.
+
+        Default implementation raises `NotImplementedError` so backends that
+        are not evaluation-capable fail explicitly.
+        """
+
+        raise NotImplementedError(f"{type(self).__name__} does not support evaluation")
+
     def save_checkpoint(self, ctx: Context, path: str) -> str:
         """Persist model weights, or raise when the backend cannot save."""
 
