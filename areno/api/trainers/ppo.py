@@ -31,6 +31,7 @@ from areno.api.dashboard import record_dashboard_state
 from areno.api.rewards import make_reward_record
 from areno.api.roles import MissingRoleCapability, ModelRole
 from areno.api.trainers.policy_only import PolicyOnlyTrainer
+from areno.engine.oom_diagnostics import OOMStage, oom_stage
 
 logger = logging.getLogger(__name__)
 
@@ -431,8 +432,9 @@ class PPOTrainer(PolicyOnlyTrainer):
     def fit(self) -> None:
         # Override the base `fit` so role initialisation happens after the
         # backend is up but before the first rollout/train cycle.
-        self.areno.init()
-        self._ensure_roles()
+        with oom_stage(OOMStage.MODEL_LOADING):
+            self.areno.init()
+            self._ensure_roles()
         try:
             self._fit_initialized()
         finally:

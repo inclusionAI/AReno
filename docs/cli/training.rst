@@ -555,6 +555,7 @@ Troubleshooting OOM
 
 When a CUDA out-of-memory error occurs, AReno automatically detects which
 stage the error happened in (model loading, rollout generation, or training)
-and prints stage-specific suggestions to stderr after the original traceback.
+and prints stage-specific suggestions to stderr without replacing the original
+exception or changing the configured run.
 See :doc:`/troubleshooting/oom-timeout` for the full list of suggestions and
 the programmatic API.

@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import logging
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -50,13 +51,14 @@ class OOMSuggestion:
     """A single actionable suggestion for resolving an OOM error.
 
     Attributes:
-        option: The AReno CLI option name to adjust (e.g. ``--tp-size``).
+        option: The AReno CLI option name to adjust, or ``None`` for a
+            diagnostic action that does not change configuration.
         current_value: The resolved value currently in effect.
         recommended_action: Human-readable description of what to do.
         priority: Lower numbers appear first in the output.
     """
 
-    option: str
+    option: str | None
     current_value: Any
     recommended_action: str
     priority: int = 0
@@ -110,11 +112,39 @@ class OOMGuidance:
 def is_oom_error(error: BaseException) -> bool:
     """Return ``True`` if *error* is a CUDA out-of-memory error."""
 
-    for et in type(error).__mro__:
-        if "OutOfMemory" in et.__name__:
+    pending = [error]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if any("OutOfMemory" in et.__name__ for et in type(current).__mro__):
             return True
-    msg = str(error).lower()
-    return "out of memory" in msg
+        message = str(current).lower()
+        if "out of memory" in message and any(marker in message for marker in ("cuda", "gpu", "cublas")):
+            return True
+        cause = getattr(current, "__cause__", None)
+        context = getattr(current, "__context__", None)
+        nested = getattr(current, "exceptions", ())
+        if cause is not None:
+            pending.append(cause)
+        if context is not None:
+            pending.append(context)
+        pending.extend(item for item in nested if isinstance(item, BaseException))
+    return False
+
+
+@contextmanager
+def oom_stage(stage: OOMStage):
+    """Annotate a CUDA OOM at an explicit runtime boundary and re-raise it."""
+
+    try:
+        yield
+    except Exception as exc:
+        if is_oom_error(exc) and not hasattr(exc, "_oom_stage"):
+            exc._oom_stage = stage.value
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -191,30 +221,27 @@ def _build_model_loading_suggestions(cfg: dict[str, Any]) -> list[OOMSuggestion]
     because optimizer state is not allocated during model loading.
     """
 
-    suggestions: list[OOMSuggestion] = []
+    suggestions: list[OOMSuggestion] = [
+        OOMSuggestion(
+            option=None,
+            current_value=None,
+            recommended_action=(
+                "Inspect competing GPU processes with nvidia-smi and stop only stale jobs you own before retrying."
+            ),
+            priority=0,
+        )
+    ]
     tp_size = cfg.get("tp_size")
-    if isinstance(tp_size, int) and tp_size > 0:
+    world_size = cfg.get("world_size")
+    next_tp_size = _next_tp_size(tp_size, world_size)
+    if next_tp_size is not None:
         suggestions.append(
             OOMSuggestion(
                 option="--tp-size",
                 current_value=tp_size,
                 recommended_action=(
-                    f"Increase --tp-size (currently {tp_size}) to shard the model "
+                    f"Increase --tp-size from {tp_size} to {next_tp_size} to shard the model "
                     "across more GPUs, reducing per-GPU memory for weights."
-                ),
-                priority=0,
-            )
-        )
-
-    dp_size = cfg.get("dp_size")
-    world_size = cfg.get("world_size")
-    if isinstance(dp_size, int) and isinstance(world_size, int) and dp_size > 1:
-        suggestions.append(
-            OOMSuggestion(
-                option="--world-size",
-                current_value=world_size,
-                recommended_action=(
-                    "Increase --tp-size within the same --world-size so each rank holds a smaller model shard."
                 ),
                 priority=1,
             )
@@ -287,27 +314,16 @@ def _build_rollout_suggestions(cfg: dict[str, Any]) -> list[OOMSuggestion]:
             )
         )
 
-    drop_rollout = cfg.get("drop_rollout_state")
-    if drop_rollout is False:
-        suggestions.append(
-            OOMSuggestion(
-                option="--drop-rollout-state",
-                current_value=drop_rollout,
-                recommended_action=(
-                    "Add --drop-rollout-state to release rollout KV-cache and decode "
-                    "state after rollout, freeing memory before training."
-                ),
-                priority=3,
-            )
-        )
-
     tp_size = cfg.get("tp_size")
-    if isinstance(tp_size, int) and tp_size > 0:
+    next_tp_size = _next_tp_size(tp_size, cfg.get("world_size"))
+    if next_tp_size is not None:
         suggestions.append(
             OOMSuggestion(
                 option="--tp-size",
                 current_value=tp_size,
-                recommended_action=(f"Increase --tp-size (currently {tp_size}) to shard KV-cache across more GPUs."),
+                recommended_action=(
+                    f"Increase --tp-size from {tp_size} to {next_tp_size} to shard KV-cache across more GPUs."
+                ),
                 priority=4,
             )
         )
@@ -389,13 +405,14 @@ def _build_training_suggestions(cfg: dict[str, Any]) -> list[OOMSuggestion]:
         )
 
     tp_size = cfg.get("tp_size")
-    if isinstance(tp_size, int) and tp_size > 0:
+    next_tp_size = _next_tp_size(tp_size, cfg.get("world_size"))
+    if next_tp_size is not None:
         suggestions.append(
             OOMSuggestion(
                 option="--tp-size",
                 current_value=tp_size,
                 recommended_action=(
-                    f"Increase --tp-size (currently {tp_size}) to shard model weights, "
+                    f"Increase --tp-size from {tp_size} to {next_tp_size} to shard model weights, "
                     "gradients, and optimizer states across more GPUs."
                 ),
                 priority=5,
@@ -403,6 +420,14 @@ def _build_training_suggestions(cfg: dict[str, Any]) -> list[OOMSuggestion]:
         )
 
     return suggestions
+
+
+def _next_tp_size(tp_size: Any, world_size: Any) -> int | None:
+    """Return the next valid tensor-parallel divisor, if one exists."""
+
+    if not isinstance(tp_size, int) or not isinstance(world_size, int) or tp_size < 1 or world_size < 1:
+        return None
+    return next((candidate for candidate in range(tp_size + 1, world_size + 1) if world_size % candidate == 0), None)
 
 
 _STAGE_BUILDERS: dict[OOMStage, Any] = {
@@ -422,6 +447,7 @@ _STAGE_RELEVANT_KEYS: dict[OOMStage, list[str]] = {
         "eager_decode",
         "drop_rollout_state",
         "tp_size",
+        "world_size",
     ],
     OOMStage.TRAINING: [
         "mini_bs",
@@ -430,6 +456,7 @@ _STAGE_RELEVANT_KEYS: dict[OOMStage, list[str]] = {
         "adam_8bit",
         "gradient_accumulation_steps",
         "tp_size",
+        "world_size",
     ],
     OOMStage.UNKNOWN: [],
 }
@@ -487,7 +514,8 @@ def format_oom_guidance(stage: OOMStage, config_snapshot: dict[str, Any]) -> str
     lines.append("")
     for i, s in enumerate(guidance.suggestions, 1):
         lines.append(f"  {i}. {s.recommended_action}")
-        lines.append(f"     Option: {s.option}  (current value: {s.current_value})")
+        if s.option is not None:
+            lines.append(f"     Option: {s.option}  (current value: {s.current_value})")
     lines.append("")
     lines.append(f"See {guidance.troubleshooting_url} for detailed OOM troubleshooting.")
     return "\n".join(lines)
@@ -500,6 +528,6 @@ def validate_suggestions_use_real_cli_options(guidance: OOMGuidance) -> bool:
     """
 
     for s in guidance.suggestions:
-        if s.option not in _VALID_CLI_OPTIONS:
+        if s.option is not None and s.option not in _VALID_CLI_OPTIONS:
             return False
     return True

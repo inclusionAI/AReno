@@ -24,9 +24,8 @@ Stage-specific OOM guidance
 ---------------------------
 
 When a CUDA out-of-memory error occurs, AReno automatically detects which
-stage the error happened in and prints actionable suggestions to stderr
-**after** the original error traceback.  The original error is never replaced
-or hidden.
+stage the error happened in and prints actionable suggestions to stderr.  The
+original error is re-raised unchanged and is never replaced or hidden.
 
 Three stages are recognised:
 
@@ -57,13 +56,12 @@ Suggestion summary by stage:
 **Model loading**
 
 * Increase ``--tp-size`` to shard the model across more GPUs.
-* Reduce data-parallel size or increase ``--tp-size`` within the same
-  ``--world-size``.
+* Inspect competing GPU processes with ``nvidia-smi`` and stop stale jobs you
+  own.
+* Increase ``--tp-size`` to the next divisor of ``--world-size`` when one is
+  available.
 * Try ``--attn-backend native`` if flash-attn workspace allocations
   contribute (slower but lower peak workspace memory).
-* Disable ``torch.compile`` via runtime config to avoid compile-time memory
-  overhead.
-* Enable ``--adam-8bit`` to use 8-bit Adam moment states.
 
 **Rollout generation**
 
@@ -71,9 +69,7 @@ Suggestion summary by stage:
   KV-cache footprint.
 * Reduce ``--batch-size`` or ``--n-samples`` to lower total concurrent
   rollout sequences.
-* Reduce ``--max-new-tokens`` to shorten maximum generation length.
 * Add ``--eager-decode`` to disable decode CUDA graph capture.
-* Add ``--drop-rollout-state`` to release rollout state after rollout.
 * Increase ``--tp-size`` to shard KV-cache across more GPUs.
 
 **Training**
@@ -82,7 +78,6 @@ Suggestion summary by stage:
 * Enable ``--activation-checkpointing`` to trade compute for memory.
 * Add ``--drop-rollout-state`` to free GPU memory before backward pass.
 * Enable ``--adam-8bit`` to reduce optimizer memory.
-* Reduce ``--max-new-tokens`` to shorten training sequences.
 * Increase ``--gradient-accumulation-steps`` and further reduce
   ``--mini-bs``.
 * Increase ``--tp-size`` to shard gradients and optimizer states.
@@ -94,5 +89,5 @@ passes through unchanged, preserving backward compatibility.
 
 For programmatic access, the :mod:`areno.engine.oom_diagnostics` module
 exposes ``build_oom_guidance()``, ``format_oom_guidance()``,
-``detect_stage()``, ``is_oom_error()``, and ``diagnose_oom_from_exception()``
-with both human-readable and structured (``OOMGuidance.to_dict()``) output.
+``is_oom_error()``, and ``oom_stage()`` with both human-readable and structured
+(``OOMGuidance.to_dict()``) output.

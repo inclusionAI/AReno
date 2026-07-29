@@ -25,6 +25,7 @@ from areno.engine.oom_diagnostics import (
     build_oom_guidance,
     format_oom_guidance,
     is_oom_error,
+    oom_stage,
     validate_suggestions_use_real_cli_options,
 )
 
@@ -355,7 +356,60 @@ class TestBoundaryInputs(unittest.TestCase):
 
     def test_empty_config_model_loading(self):
         guidance = build_oom_guidance(OOMStage.MODEL_LOADING, {})
-        self.assertEqual(guidance.suggestions, [])
+        self.assertEqual(len(guidance.suggestions), 1)
+        self.assertIsNone(guidance.suggestions[0].option)
+        self.assertIn("nvidia-smi", guidance.suggestions[0].recommended_action)
+
+    def test_cpu_out_of_memory_is_not_cuda_oom(self):
+        self.assertFalse(is_oom_error(RuntimeError("CPU allocator out of memory")))
+
+    def test_wrapped_cuda_oom_is_detected(self):
+        inner = RuntimeError("CUDA out of memory")
+        outer = RuntimeError("worker failed")
+        outer.__cause__ = inner
+        self.assertTrue(is_oom_error(outer))
+
+    def test_stage_context_preserves_original_exception(self):
+        error = RuntimeError("CUDA out of memory")
+        with self.assertRaises(RuntimeError) as raised:
+            with oom_stage(OOMStage.TRAINING):
+                raise error
+        self.assertIs(raised.exception, error)
+        self.assertEqual(error._oom_stage, "training")
+
+    def test_tp_suggestion_is_valid_for_world_size(self):
+        guidance = build_oom_guidance(OOMStage.TRAINING, {**_BASE_CONFIG, "tp_size": 3, "world_size": 12})
+        tp = next(item for item in guidance.suggestions if item.option == "--tp-size")
+        self.assertIn("to 4", tp.recommended_action)
+
+    def test_tp_suggestion_omitted_at_full_tensor_parallelism(self):
+        guidance = build_oom_guidance(OOMStage.ROLLOUT, {**_BASE_CONFIG, "tp_size": 8, "world_size": 8})
+        self.assertNotIn("--tp-size", [item.option for item in guidance.suggestions])
+
+
+class TestTrainerCoverage(unittest.TestCase):
+    def test_all_trainer_fit_paths_mark_loading_oom(self):
+        from areno.api.trainers.dpo import DPOTrainer
+        from areno.api.trainers.policy_only import PolicyOnlyTrainer
+        from areno.api.trainers.ppo import PPOTrainer
+        from areno.api.trainers.sft import SFTTrainer
+
+        class Backend:
+            def __init__(self, error):
+                self.error = error
+
+            def init(self):
+                raise self.error
+
+        for trainer_type in (PolicyOnlyTrainer, PPOTrainer, SFTTrainer, DPOTrainer):
+            with self.subTest(trainer=trainer_type.__name__):
+                error = RuntimeError("CUDA out of memory")
+                trainer = trainer_type.__new__(trainer_type)
+                trainer.areno = Backend(error)
+                with self.assertRaises(RuntimeError) as raised:
+                    trainer.fit()
+                self.assertIs(raised.exception, error)
+                self.assertEqual(error._oom_stage, "model_loading")
 
     def test_empty_config_training(self):
         guidance = build_oom_guidance(OOMStage.TRAINING, {})

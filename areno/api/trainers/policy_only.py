@@ -23,6 +23,7 @@ import numpy as np
 
 from areno.api.dashboard import record_dashboard_state
 from areno.api.tokenizer import configure_chat_template_enable_thinking
+from areno.engine.oom_diagnostics import OOMStage, oom_stage
 
 
 class PolicyOnlyTrainer:
@@ -44,15 +45,8 @@ class PolicyOnlyTrainer:
         self._agent_run_fn = None
 
     def fit(self) -> None:
-        try:
+        with oom_stage(OOMStage.MODEL_LOADING):
             self.areno.init()
-        except BaseException as exc:
-            # Model loading / worker initialization boundary.
-            from areno.engine.oom_diagnostics import is_oom_error
-
-            if is_oom_error(exc):
-                exc._oom_stage = "model_loading"
-            raise
         try:
             self._fit_initialized()
         finally:
@@ -90,38 +84,28 @@ class PolicyOnlyTrainer:
                 self._dashboard_epoch = epoch
                 self._dashboard_step = step
                 if self._agentic_enabled():
-                    try:
+                    with oom_stage(OOMStage.ROLLOUT):
                         agent_batch = asyncio.run(self._run_agentic_rollout(sampling_params, prompt_batch))
-                    except BaseException as exc:
-                        from areno.engine.oom_diagnostics import is_oom_error as _is_oom
-
-                        if _is_oom(exc):
-                            exc._oom_stage = "rollout"
-                        raise
                     self.logger.info("epoch=%d step=%d role=%s stage=rollout_end", epoch, step, role)
                     record_dashboard_state(self.areno, stage="rollout_end", epoch=epoch, step=step, role=role)
                     self._log_agentic_sample_completions(epoch, step, agent_batch)
-                    train_batch, rewards_all, rollout_logprobs = self._materialize_agentic_train_batch(
-                        tokenizer, prompt_batch, agent_batch
-                    )
+                    with oom_stage(OOMStage.TRAINING):
+                        train_batch, rewards_all, rollout_logprobs = self._materialize_agentic_train_batch(
+                            tokenizer, prompt_batch, agent_batch
+                        )
                 else:
-                    try:
+                    with oom_stage(OOMStage.ROLLOUT):
                         rollout_results = asyncio.run(self._run_prompt_rollout(sampling_params, prompt_batch))
-                    except BaseException as exc:
-                        from areno.engine.oom_diagnostics import is_oom_error as _is_oom
-
-                        if _is_oom(exc):
-                            exc._oom_stage = "rollout"
-                        raise
                     self.logger.info("epoch=%d step=%d role=%s stage=rollout_end", epoch, step, role)
                     record_dashboard_state(self.areno, stage="rollout_end", epoch=epoch, step=step, role=role)
                     self._record_sample_completions(tokenizer, epoch, step, prompt_batch, rollout_results)
 
                     # 2+3) Score rewards and broadcast group-normalised
                     #      advantages down to per-token tensors.
-                    train_batch, rewards_all, rollout_logprobs = self._materialize_train_batch(
-                        tokenizer, prompt_batch, rollout_results
-                    )
+                    with oom_stage(OOMStage.TRAINING):
+                        train_batch, rewards_all, rollout_logprobs = self._materialize_train_batch(
+                            tokenizer, prompt_batch, rollout_results
+                        )
 
                 if rewards_all:
                     self.logger.info(
@@ -156,19 +140,13 @@ class PolicyOnlyTrainer:
                     record_dashboard_state(self.areno, stage="train_start", epoch=epoch, step=step, role=role)
                     train_start = time.perf_counter()
                     # 4) The actual gradient step happens inside the backend.
-                    try:
+                    with oom_stage(OOMStage.TRAINING):
                         result = self.areno.train(
                             train_batch,
                             self.loss_fn,
                             mini_bs=self.config.mini_bs,
                             gradient_accumulation_steps=self.config.gradient_accumulation_steps,
                         )
-                    except BaseException as exc:
-                        from areno.engine.oom_diagnostics import is_oom_error as _is_oom
-
-                        if _is_oom(exc):
-                            exc._oom_stage = "training"
-                        raise
                     train_time_s = time.perf_counter() - train_start
                     if isinstance(result, dict):
                         result[f"{role}_train_wall_time_s"] = train_time_s

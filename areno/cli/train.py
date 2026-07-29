@@ -800,11 +800,7 @@ def _build_oom_config_snapshot(trainer_config: TrainerConfig) -> dict:
 
 
 def _print_oom_guidance(stage_text: str, trainer_config: TrainerConfig) -> None:
-    """Print stage-specific OOM guidance to stderr.
-
-    Called AFTER the original exception has been raised and its traceback
-    printed. The guidance is additional information, not a replacement.
-    """
+    """Print additional stage-specific OOM guidance to stderr."""
 
     from areno.engine.oom_diagnostics import OOMStage, format_oom_guidance
 
@@ -853,7 +849,7 @@ def run(trainer_config: TrainerConfig):
     trainer = build_trainer(trainer_config, instance=api_trainer, dataset=dataset, reward_fn=reward_fn, loss_fn=loss_fn)
     try:
         trainer.fit()
-    except BaseException as exc:
+    except Exception as exc:
         # Check if the exception has an attached OOM stage (set by the
         # trainer at explicit call-site boundaries). If not, we don't
         # guess — UNKNOWN stage means no guidance (backward compatible).
