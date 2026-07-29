@@ -11,10 +11,13 @@ from pathlib import Path
 from areno.api.agentic import AgentTrajectory, AgentTrajectoryTurn
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from game import GUESS_TOOL, score_guess  # noqa: E402
+from game import GUESS_TOOL, WORDLE_WORDS, score_guess  # noqa: E402
 
 logger = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARNING)
+
+# Pre-build a regex to find any valid 5-letter word in model output text.
+_WORDLE_WORD_RE = None
 
 SYSTEM_PROMPT = (
     "You are a Wordle solver. On every guessing turn call guess_word exactly once. "
@@ -97,6 +100,17 @@ async def _run_episode(item, client) -> list[AgentTrajectoryTurn]:
         tool_result = _execute_guess(assistant_message, item.record)
 
         if tool_result is None:
+            # Fallback: small models may not emit structured tool calls.
+            # Try to extract a guess from the response text instead.
+            content = response.choices[0].message.content or ""
+            fallback_word = _extract_fallback_guess(content)
+            if fallback_word is not None:
+                assistant_message = _synth_tool_call_message(content, fallback_word)
+                tool_result = _execute_guess(assistant_message, item.record)
+                if tool_result is not None:
+                    logger.info("Wordle fallback extracted guess: %s", fallback_word)
+
+        if tool_result is None:
             logger.warning("Wordle model returned no executable guess_word call")
             break
 
@@ -127,6 +141,55 @@ async def _run_episode(item, client) -> list[AgentTrajectoryTurn]:
             break
 
     return turns
+
+
+def _synth_tool_call_message(content: str, word: str) -> dict:
+    """Synthesize a tool-call message for a fallback-extracted guess."""
+
+    import uuid
+
+    return {
+        "role": "assistant",
+        "content": content,
+        "tool_calls": [
+            {
+                "id": f"call_{uuid.uuid4().hex[:24]}",
+                "type": "function",
+                "function": {
+                    "name": "guess_word",
+                    "arguments": json.dumps({"word": word}),
+                },
+            }
+        ],
+    }
+
+
+def _build_wordle_word_re():
+    """Build a regex that matches any word from the Wordle word list."""
+
+    import re
+
+    global _WORDLE_WORD_RE
+    if _WORDLE_WORD_RE is None:
+        # Match any valid 5-letter word as a whole word (case-insensitive).
+        alternation = "|".join(re.escape(w) for w in WORDLE_WORDS)
+        _WORDLE_WORD_RE = re.compile(rf"\b({alternation})\b", re.IGNORECASE)
+    return _WORDLE_WORD_RE
+
+
+def _extract_fallback_guess(content: str | None) -> str | None:
+    """Extract a Wordle guess from natural-language model output.
+
+    Small models without tool-calling fine-tuning often emit a sentence like
+    "I'll guess apple" instead of a structured tool call.  This fallback scans
+    the text for any known 5-letter word and returns the last match (the final
+    guess is most likely the model's intended answer).
+    """
+
+    if not content:
+        return None
+    matches = _build_wordle_word_re().findall(content)
+    return matches[-1].lower() if matches else None
 
 
 def _assistant_message(response) -> dict:
