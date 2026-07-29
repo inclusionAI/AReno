@@ -114,7 +114,7 @@ def main() -> int:
         result = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
     # Preserve the legacy serialization: unsorted keys, non-ASCII content
     # kept verbatim (dataset samples may contain Chinese text).
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+    emit(result, sort_keys=False, ensure_ascii=False)
     return exit_code(result)
 
 
