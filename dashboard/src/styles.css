@@ -2099,9 +2099,9 @@ textarea:focus {
 
 .compareSelector {
   display: flex;
-  align-items: flex-end;
+  align-items: flex-start;
   gap: 16px;
-  padding: 16px 20px;
+  padding: 20px;
   margin-bottom: 24px;
   flex-wrap: wrap;
   background: var(--surface);
@@ -2111,14 +2111,14 @@ textarea:focus {
 
 .compareSelectGroup {
   flex: 1;
-  min-width: 200px;
+  min-width: 220px;
 }
 
 .compareSelectGroup label {
   display: block;
   font-size: 12px;
   font-weight: 700;
-  margin-bottom: 6px;
+  margin-bottom: 10px;
   color: var(--text-secondary);
   text-transform: uppercase;
   letter-spacing: 0.5px;

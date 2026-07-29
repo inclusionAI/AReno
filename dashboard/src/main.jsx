@@ -210,6 +210,9 @@ function App() {
     }
   });
   const [activePage, setActivePage] = useState("jobs");
+  const [compareJobAId, setCompareJobAId] = useState("");
+  const [compareJobBId, setCompareJobBId] = useState("");
+  const [compareResult, setCompareResult] = useState(null);
   const [launcherMode, setLauncherMode] = useState("train");
   const [theme, setTheme] = useState(() => localStorage.getItem("areno-dashboard-theme") || "dark");
   const [busy, setBusy] = useState("");
@@ -515,7 +518,7 @@ function App() {
 
   function renderPage() {
     if (activePage === "compare") {
-      return <CompareRunsPanel jobList={jobList} refreshJobs={() => jobs.refresh()} />;
+      return <CompareRunsPanel jobList={jobList} refreshJobs={() => jobs.refresh()} compareJobAId={compareJobAId} setCompareJobAId={setCompareJobAId} compareJobBId={compareJobBId} setCompareJobBId={setCompareJobBId} compareResult={compareResult} setCompareResult={setCompareResult} />;
     }
     if (activePage === "runtime") {
       return (
@@ -1724,61 +1727,15 @@ if (rootElement) {
 // Compare Two Runs Panel
 // ---------------------------------------------------------------------------
 
-function CompareRunsPanel({ jobList, refreshJobs }) {
-  // 从 URL 参数初始化状态，解决页面切换后状态丢失的问题
-  const getInitialJobAId = () => {
-    const params = new URLSearchParams(window.location.search);
-    return params.get("job_a") || "";
-  };
-  const getInitialJobBId = () => {
-    const params = new URLSearchParams(window.location.search);
-    return params.get("job_b") || "";
-  };
-
-  const [jobAId, setJobAId] = useState(getInitialJobAId);
-  const [jobBId, setJobBId] = useState(getInitialJobBId);
-  const [compareResult, setCompareResult] = useState(null);
+function CompareRunsPanel({ jobList, refreshJobs, compareJobAId, setCompareJobAId, compareJobBId, setCompareJobBId, compareResult, setCompareResult }) {
   const [showIdentical, setShowIdentical] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [activeChartMetric, setActiveChartMetric] = useState("");
 
-  // 更新 URL 参数
-  const updateUrlParams = (aId, bId) => {
-    const params = new URLSearchParams(window.location.search);
-    if (aId) params.set("job_a", aId); else params.delete("job_a");
-    if (bId) params.set("job_b", bId); else params.delete("job_b");
-    const newUrl = params.toString() ? `${window.location.pathname}?${params.toString()}` : window.location.pathname;
-    window.history.pushState({}, "", newUrl);
-  };
-
-  const handleJobAChange = (e) => {
-    const newId = e.target.value;
-    setJobAId(newId);
-    updateUrlParams(newId, jobBId);
-  };
-
-  const handleJobBChange = (e) => {
-    const newId = e.target.value;
-    setJobBId(newId);
-    updateUrlParams(jobAId, newId);
-  };
-
-  useEffect(() => {
-    const urlJobA = getInitialJobAId();
-    const urlJobB = getInitialJobBId();
-    if (urlJobA && urlJobB && jobList.length > 0) {
-      const jobAExists = jobList.some(j => j.id === urlJobA);
-      const jobBExists = jobList.some(j => j.id === urlJobB);
-      if (jobAExists && jobBExists) {
-        fetchComparison(urlJobA, urlJobB);
-      }
-    }
-  }, []);
-
   async function fetchComparison(aId, bId) {
-    const effectiveAId = aId || jobAId;
-    const effectiveBId = bId || jobBId;
+    const effectiveAId = aId || compareJobAId;
+    const effectiveBId = bId || compareJobBId;
     if (!effectiveAId || !effectiveBId) return;
     setLoading(true);
     setError("");
@@ -1799,7 +1756,7 @@ function CompareRunsPanel({ jobList, refreshJobs }) {
     }
   }
 
-  const canCompare = jobAId && jobBId && !loading;
+  const canCompare = compareJobAId && compareJobBId && !loading;
   const config = compareResult?.config;
   const metrics = compareResult?.metrics || [];
   const timing = compareResult?.timing || {};
@@ -1861,7 +1818,7 @@ function CompareRunsPanel({ jobList, refreshJobs }) {
       <div className="compareSelector">
         <div className="compareSelectGroup">
           <label>Job A</label>
-          <select value={jobAId} onChange={handleJobAChange}>
+          <select value={compareJobAId} onChange={(e) => setCompareJobAId(e.target.value)}>
             <option value="">— Select a job —</option>
             {jobList.map((job) => (
               <option key={job.id} value={job.id}>
@@ -1872,7 +1829,7 @@ function CompareRunsPanel({ jobList, refreshJobs }) {
         </div>
         <div className="compareSelectGroup">
           <label>Job B</label>
-          <select value={jobBId} onChange={handleJobBChange}>
+          <select value={compareJobBId} onChange={(e) => setCompareJobBId(e.target.value)}>
             <option value="">— Select a job —</option>
             {jobList.map((job) => (
               <option key={job.id} value={job.id}>
@@ -1937,50 +1894,75 @@ function CompareRunsPanel({ jobList, refreshJobs }) {
                 { label: "Throughput", key: null },
               ];
               // 动态查找 loss 相关指标
-              const lossMetric = metrics.find(m => m.name.includes("loss") && !m.name.includes("grad"));
+              const lossMetric = metrics.find(m => m.name.includes("loss") && !m.name.includes("grad") && !m.name.includes("zero"));
               const rewardMetric = metrics.find(m => m.name.includes("reward") && m.name.includes("mean"));
               const accuracyMetric = metrics.find(m => m.name.includes("accuracy"));
+              const lrMetric = metrics.find(m => m.name === "train/lr");
+
+              const fmt = (v) => {
+                if (v === null || v === undefined) return "—";
+                const n = parseFloat(v);
+                if (!Number.isFinite(n)) return "—";
+                if (n === 0) return "0";
+                if (Math.abs(n) >= 1000) return n.toFixed(0);
+                if (Math.abs(n) >= 1) return n.toFixed(4);
+                if (Math.abs(n) < 0.001) return n.toExponential(2);
+                return n.toFixed(4);
+              };
 
               const cards = [
                 {
                   label: "Loss",
-                  valueA: lossMetric?.value_a ?? "—",
-                  valueB: lossMetric?.value_b ?? "—",
+                  valueA: fmt(lossMetric?.value_a),
+                  valueB: fmt(lossMetric?.value_b),
                   better: "lower",
+                  show: !!lossMetric,
                 },
                 {
                   label: "Reward Mean",
-                  valueA: rewardMetric?.value_a ?? "—",
-                  valueB: rewardMetric?.value_b ?? "—",
+                  valueA: fmt(rewardMetric?.value_a),
+                  valueB: fmt(rewardMetric?.value_b),
                   better: "higher",
+                  show: !!rewardMetric,
                 },
                 {
                   label: "Accuracy",
-                  valueA: accuracyMetric?.value_a ?? "—",
-                  valueB: accuracyMetric?.value_b ?? "—",
+                  valueA: fmt(accuracyMetric?.value_a),
+                  valueB: fmt(accuracyMetric?.value_b),
                   better: "higher",
+                  show: !!accuracyMetric,
+                },
+                {
+                  label: "Learning Rate",
+                  valueA: fmt(lrMetric?.value_a),
+                  valueB: fmt(lrMetric?.value_b),
+                  better: null,
+                  show: !!lrMetric,
                 },
                 {
                   label: "Steps",
                   valueA: timing.job_a?.total_steps ?? jobA?.step ?? "—",
                   valueB: timing.job_b?.total_steps ?? jobB?.step ?? "—",
                   better: null,
+                  show: true,
                 },
                 {
                   label: "Duration",
-                  valueA: timing.job_a?.duration_s != null ? `${timing.job_a.duration_s}s` : "—",
-                  valueB: timing.job_b?.duration_s != null ? `${timing.job_b.duration_s}s` : "—",
+                  valueA: timing.job_a?.duration_s != null ? `${Math.round(timing.job_a.duration_s)}s` : "—",
+                  valueB: timing.job_b?.duration_s != null ? `${Math.round(timing.job_b.duration_s)}s` : "—",
                   better: "lower",
+                  show: true,
                 },
                 {
                   label: "Throughput",
                   valueA: compareResult?.throughput_a != null ? `${compareResult.throughput_a} step/s` : "—",
                   valueB: compareResult?.throughput_b != null ? `${compareResult.throughput_b} step/s` : "—",
                   better: "higher",
+                  show: compareResult?.throughput_a != null || compareResult?.throughput_b != null,
                 },
               ];
 
-              return cards.map((card, i) => {
+              return cards.filter(c => c.show).map((card, i) => {
                 const valA = parseFloat(card.valueA);
                 const valB = parseFloat(card.valueB);
                 const aBetter = card.better === "lower" && Number.isFinite(valA) && Number.isFinite(valB) && valA < valB;
