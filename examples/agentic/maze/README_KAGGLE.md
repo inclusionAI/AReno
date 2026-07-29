@@ -6,11 +6,11 @@ Kaggle 提供以下 GPU，均可运行此 demo：
 
 | GPU | 显存 | 推荐模型 | TP size |
 |-----|------|---------|---------|
-| T4 ×2 | 16GB ×2 | Qwen3-0.6B | 1 (单卡) |
+| T4 ×2 | 16GB ×2 | Qwen3-0.6B | 2 (双卡张量并行) |
 | P100 | 16GB | Qwen3-0.6B | 1 |
 | TPU v5e-8 | — | 暂不支持（AReno 仅支持 CUDA） |
 
-**推荐**：使用 T4 ×2 + Qwen3-0.6B，单卡训练 (tp-size=1)。
+**推荐**：使用 T4 ×2 + Qwen3-0.6B，双卡张量并行 (tp-size=2)。
 
 ---
 
@@ -91,7 +91,7 @@ os.environ["PATH"] = sysconfig.get_path("scripts") + ":" + os.environ["PATH"]
 
 ### 5. 运行训练
 
-T4 显存只有 15GB，迷宫是多轮交互，必须省显存配置：
+T4 ×2 双卡张量并行，实测可跑：
 
 ```python
 !areno train \
@@ -101,25 +101,20 @@ T4 显存只有 15GB，迷宫是多轮交互，必须省显存配置：
   --reward-fn-path examples/agentic/maze/reward.py \
   --agent-fn examples/agentic/maze/run_agent.py \
   --algo gspo \
-  --batch-size 1 \
+  --batch-size 2 \
   --n-samples 4 \
-  --max-new-tokens 32 \
-  --max-prompt-tokens 128 \
-  --max-context-len 512 \
-  --tp-size 1 \
-  --world-size 1 \
-  --max-steps 50 \
-  --mini-bs 1 \
-  --adam-8bit \
-  --activation-checkpointing
+  --max-new-tokens 64 \
+  --tp-size 2 \
+  --world-size 2 \
+  --max-steps 100
 ```
 
-> * `--max-new-tokens 32`：tool call 只需几个 token，不需要 64
-> * `--max-context-len 512`：限制多轮轨迹的总上下文长度（关键省显存）
-> * `--batch-size 1`：减少同时并发的 rollout 数量
-> * `--adam-8bit` + `--activation-checkpointing`：优化器和激活值省显存
+> * `--tp-size 2 --world-size 2`：使用两张 T4 做张量并行，显存翻倍
+> * `--batch-size 2 --n-samples 4`：每步 8 个 rollout，足够的梯度信号
+> * `--max-new-tokens 64`：覆盖 tool call + 少量推理文本
 >
-> 如果仍然 OOM，进一步减小：`--n-samples 2 --max-context-len 384`
+> 如果单卡 (tp-size=1) OOM，必须用双卡；如果双卡仍 OOM，加：
+> `--adam-8bit --activation-checkpointing --max-prompt-tokens 128 --max-context-len 512`
 >
 > 如果 `areno` 不在 PATH，改用 `!python -m areno.cli.main train ...`
 
@@ -160,15 +155,34 @@ print("Dashboard URL:", public_url)
 
 ## 参数调优建议
 
-### T4 (15GB) 配置
+### T4 ×2 (双卡，已验证可跑)
 
-见上方第 5 步的省显存配置。T4 显存有限，迷宫多轮交互比单步 demo 消耗更大。
+见上方第 5 步，使用 `--tp-size 2 --world-size 2` 双卡张量并行。
 
-如果 OOM 持续，逐步减小：`--n-samples 2` → `--max-context-len 384` → `--max-new-tokens 16`。
+### T4 单卡 / P100 (16GB) 配置
 
-### P100 (16GB) 配置
+单卡显存不够跑默认配置，需要省显存：
 
-与 T4 相同的配置。P100 不支持 FlashAttention，AReno 会自动回退到 native attention。
+```python
+!areno train \
+  --ckpt Qwen/Qwen3-0.6B \
+  --dataset-path /kaggle/working/mazes.jsonl \
+  --dataset-loader-fn examples/agentic/maze/dataset_loader.py \
+  --reward-fn-path examples/agentic/maze/reward.py \
+  --agent-fn examples/agentic/maze/run_agent.py \
+  --algo gspo \
+  --batch-size 1 \
+  --n-samples 4 \
+  --max-new-tokens 32 \
+  --max-prompt-tokens 128 \
+  --max-context-len 512 \
+  --tp-size 1 \
+  --world-size 1 \
+  --max-steps 50 \
+  --mini-bs 1 \
+  --adam-8bit \
+  --activation-checkpointing
+```
 
 ### 更大模型 (Qwen3-1.7B)
 
