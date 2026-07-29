@@ -11,4 +11,5 @@ Command pages:
 * :doc:`/cli/agent`
 * :doc:`/cli/dataset_loaders`
 * :doc:`/cli/observability`
+* :doc:`/cli/metrics`
 * :doc:`/cli/diagnostics`
