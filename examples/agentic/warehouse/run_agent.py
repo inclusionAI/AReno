@@ -119,6 +119,8 @@ async def run_agent(ctx, batch):
 
     # 限制最大轮次，避免无限循环和 OOM
     MAX_TURNS = 8
+    # 保留最近 N 轮对话以控制序列长度
+    MAX_KEEP_TURNS = 3
 
     async def run_one(item):
         turns = []
@@ -127,6 +129,17 @@ async def run_agent(ctx, batch):
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": item.prompt},
         ]
+        # 消息截断：保留 system + user 初始消息 + 最近 N 轮
+        def truncate_messages(msgs, keep_turns: int = MAX_KEEP_TURNS):
+            """保留 system + user + 最近 keep_turns 轮对话"""
+            if len(msgs) <= 2 + keep_turns * 2:
+                return msgs
+            # 保留前两条 (system + user)
+            base = msgs[:2]
+            # 保留最近 keep_turns 轮 (每轮 = assistant + tool)
+            recent = msgs[-(keep_turns * 2):]
+            # 还要保留当前购物车状态在最后tool result中
+            return base + recent
 
         for turn_num in range(MAX_TURNS):
             # 获取当前状态的提示
@@ -139,6 +152,9 @@ async def run_agent(ctx, batch):
             # 执行工具并获取结果
             tool_result = _run_tool(assistant_msg, item.record)
             messages.extend(_tool_messages(assistant_msg, tool_result))
+
+            # 控制消息长度，只保留最近 N 轮
+            messages = truncate_messages(messages)
 
             # 检查是否完成订单
             if tool_result.get("data", {}).get("completed"):
