@@ -206,8 +206,9 @@ async def run_agent(ctx, batch):
             {"role": "user", "content": item.prompt},
         ]
         required_tools = list(item.record.get("required_tools", []))
-        for tool_name in required_tools:
-            assistant_message, turn = await _call_model(item, client, messages, tool_name)
+        max_turns = len(required_tools)
+        for _ in range(max_turns):
+            assistant_message, turn = await _call_model(item, client, messages)
             turns.append(turn)
             messages.extend(_tool_messages(assistant_message, _run_tool(assistant_message)))
         return turns
@@ -219,19 +220,24 @@ async def run_agent(ctx, batch):
         await client.close()
 
 
-async def _call_model(item, client, messages: list[dict], tool_name: str):
-    turn_messages = [*messages, {"role": "user", "content": TURN_PROMPTS[tool_name]}]
-    tools = [TOOL_BY_NAME[tool_name]]
-    tool_choice = {"type": "function", "function": {"name": tool_name}}
+async def _call_model(item, client, messages: list[dict]):
+    """Ask the model to choose and call a tool freely (no forced tool_choice).
+
+    The model sees ALL available tools and decides which to call. This creates
+    sampling diversity: different samples may pick different tools, different
+    arguments, or different orders — producing reward variance for RL.
+    """
+    tools = TOOLS
+    tool_choice = "auto"
     response = await client.chat.completions.create(
         model="policy",
-        messages=turn_messages,
+        messages=messages,
         tools=tools,
         tool_choice=tool_choice,
         stream=False,
     )
     message = response.choices[0].message
-    tool_calls = [call for call in (message.tool_calls or []) if call.function.name == tool_name][:1]
+    tool_calls = list(message.tool_calls or [])[:1]
     assistant_message = {
         "role": "assistant",
         "content": message.content,
@@ -250,14 +256,14 @@ async def _call_model(item, client, messages: list[dict], tool_name: str):
     if not assistant_message["tool_calls"]:
         assistant_message["tool_calls"] = [
             {
-                "id": f"missing_{tool_name}",
+                "id": "missing",
                 "type": "function",
-                "function": {"name": tool_name, "arguments": "{}"},
+                "function": {"name": "unknown", "arguments": "{}"},
             }
         ]
     return assistant_message, AgentTrajectoryTurn(
         item=item,
-        messages=turn_messages,
+        messages=messages,
         response=response,
         tools=tools,
         tool_choice=tool_choice,
