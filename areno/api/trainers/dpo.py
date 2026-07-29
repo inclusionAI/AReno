@@ -20,6 +20,7 @@ from typing import Any
 
 import areno.api
 from areno.api.dashboard import record_dashboard_state
+from areno.api.data_profile import StageProfiler
 from areno.api.data_utils import apply_chat_template, encode_prompt_value, response_to_tokens_and_mask
 from areno.api.roles import ModelRole
 from areno.api.tokenizer import configure_chat_template_enable_thinking
@@ -135,20 +136,44 @@ class DPOTrainer:
     def _iter_train_batches(self, tokenizer, *, max_seq_len: int):
         # `batch_size` counts preference pairs; the emitted train batch has two
         # rows per pair and always preserves chosen/rejected adjacency.
+        profiling = getattr(self.config, "profile_dataset_stages", False)
+        threshold = getattr(self.config, "profile_slow_threshold_s", 1.0)
+        profiler = StageProfiler(enabled=profiling, slow_threshold_s=threshold)
+        wall_start = time.perf_counter()
         batch = []
         skipped = 0
         for index in range(len(self.dataset)):
-            pair = _record_to_train_pair(self.dataset[index], tokenizer, max_seq_len=max_seq_len)
-            if pair is None:
-                skipped += 1
-                continue
+            with profiler.stage("record_access", index=index):
+                record = self.dataset[index]
+            with profiler.stage("contract_conversion", index=index):
+                pair = _record_to_train_pair(record, tokenizer, max_seq_len=max_seq_len)
+            with profiler.stage("filter", index=index):
+                if pair is None:
+                    skipped += 1
+                    continue
             batch.extend(pair)
             if len(batch) >= self.config.batch_size * 2:
+                with profiler.stage("batch"):
+                    pass
+                if profiling:
+                    report = profiler.build_report(
+                        records_scanned=index + 1, records_skipped_long=skipped,
+                        wall_seconds=time.perf_counter() - wall_start,
+                    )
+                    self.logger.info("stage=data_profile\n%s", report.render_human())
                 yield batch
                 batch = []
         if skipped:
             self.logger.info("stage=dpo_dataset_filter skipped_invalid_or_long=%d", skipped)
         if batch:
+            with profiler.stage("batch"):
+                pass
+            if profiling:
+                report = profiler.build_report(
+                    records_scanned=len(self.dataset), records_skipped_long=skipped,
+                    wall_seconds=time.perf_counter() - wall_start,
+                )
+                self.logger.info("stage=data_profile\n%s", report.render_human())
             yield batch
 
     def _maybe_save(self, epoch: int, step: int) -> None:

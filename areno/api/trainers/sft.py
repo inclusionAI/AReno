@@ -23,6 +23,7 @@ from typing import Any
 
 import areno.api
 from areno.api.dashboard import record_dashboard_state
+from areno.api.data_profile import StageProfiler
 from areno.api.data_utils import prompt_response_to_tokens_and_mask
 from areno.api.tokenizer import configure_chat_template_enable_thinking
 
@@ -98,24 +99,39 @@ class SFTTrainer:
         # Dataset rows are converted lazily so large HF datasets do not need an
         # up-front tokenized copy. Rows that are empty, all-prompt, or exceed
         # the configured prompt or supervised-response budgets are dropped.
+        profiling = getattr(self.config, "profile_dataset_stages", False)
+        threshold = getattr(self.config, "profile_slow_threshold_s", 1.0)
+        profiler = StageProfiler(enabled=profiling, slow_threshold_s=threshold)
+        wall_start = time.perf_counter()
         batch = []
         skipped = 0
         accepted = 0
         total_rows = len(self.dataset)
         for index in range(total_rows):
-            # Normalize each supported row schema into one TrainSequence.
-            seq = _record_to_train_sequence(
-                self.dataset[index],
-                tokenizer,
-                max_prompt_tokens=max_prompt_tokens,
-                max_new_tokens=max_new_tokens,
-            )
-            if seq is None:
-                skipped += 1
-                continue
+            with profiler.stage("record_access", index=index):
+                record = self.dataset[index]
+            with profiler.stage("contract_conversion", index=index):
+                seq = _record_to_train_sequence(
+                    record,
+                    tokenizer,
+                    max_prompt_tokens=max_prompt_tokens,
+                    max_new_tokens=max_new_tokens,
+                )
+            with profiler.stage("filter", index=index):
+                if seq is None:
+                    skipped += 1
+                    continue
             accepted += 1
             batch.append(seq)
             if len(batch) >= self.config.batch_size:
+                with profiler.stage("batch"):
+                    pass
+                if profiling:
+                    report = profiler.build_report(
+                        records_scanned=index + 1, records_skipped_long=skipped,
+                        wall_seconds=time.perf_counter() - wall_start,
+                    )
+                    self.logger.info("stage=data_profile\n%s", report.render_human())
                 yield batch
                 batch = []
         if skipped:
@@ -127,6 +143,14 @@ class SFTTrainer:
                 "Check dataset quality, --max-prompt-tokens, and --max-new-tokens."
             )
         if batch:
+            with profiler.stage("batch"):
+                pass
+            if profiling:
+                report = profiler.build_report(
+                    records_scanned=total_rows, records_skipped_long=skipped,
+                    wall_seconds=time.perf_counter() - wall_start,
+                )
+                self.logger.info("stage=data_profile\n%s", report.render_human())
             yield batch
 
     def _maybe_save(self, epoch: int, step: int) -> None:
