@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from areno.api.metric_reader import number_like
 from areno.cli.dashboard_registry import GLOBAL_REGISTRY_FILE
 from areno.cli.diagnostics import collect_env, run_checks
 from areno.dashboard.agent_context import agent_system_prompt
@@ -317,36 +318,27 @@ class DashboardState:
             from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
         except Exception:
             return
+        # Lazy import: read_scalar_points imports TensorBoard's EventAccumulator
+        # internally, so keep it out of module import time.
+        from areno.api.metric_reader import read_scalar_points
+
         job.timeperf = [row for row in job.timeperf if row.get("source") != "metrics"]
         job._timeperf_keys = {int(row.get("step", -1)) for row in job.timeperf}
         by_step: dict[int, dict[str, float]] = {}
-        for accumulator_path in tensorboard_event_sources(path, job_pid(job)):
-            try:
-                accumulator = EventAccumulator(str(accumulator_path), size_guidance={"scalars": 10000})
-                accumulator.Reload()
-                tags = accumulator.Tags().get("scalars", [])
-            except Exception:
-                continue
-            for tag in tags:
-                try:
-                    events = accumulator.Scalars(tag)[-500:]
-                except Exception:
-                    continue
-                for event in events:
-                    step = int(event.step)
-                    value = float(event.value)
-                    if math.isnan(value):
-                        continue
-                    self._add_metric(job, tag, value, step)
-                    time_name = tensorboard_time_segment_name(tag)
-                    if time_name:
-                        by_step.setdefault(step, {})[time_name] = value
-                    if tag in {"train/step_e2e_time_s", "time/total", "time/e2e"}:
-                        by_step.setdefault(step, {})["total"] = value
-                    elif tag == "train/step_rollout_time_s":
-                        by_step.setdefault(step, {})["rollout"] = value
-                    elif tag in {"train/step_train_time_s", "train/policy_train_wall_time_s"}:
-                        by_step.setdefault(step, {})["train"] = value
+        for point in read_scalar_points(path, job_pid(job)):
+            name = str(point.get("name") or "")
+            step = int(point.get("step") or 0)
+            value = float(point.get("value"))
+            self._add_metric(job, name, value, step)
+            time_name = tensorboard_time_segment_name(name)
+            if time_name:
+                by_step.setdefault(step, {})[time_name] = value
+            if name in {"train/step_e2e_time_s", "time/total", "time/e2e"}:
+                by_step.setdefault(step, {})["total"] = value
+            elif name == "train/step_rollout_time_s":
+                by_step.setdefault(step, {})["rollout"] = value
+            elif name in {"train/step_train_time_s", "train/policy_train_wall_time_s"}:
+                by_step.setdefault(step, {})["train"] = value
         for step, values in sorted(by_step.items()):
             total = values.pop("total", None)
             if total is None:
@@ -794,24 +786,6 @@ def registered_job_items() -> list[dict[str, Any]]:
 
 def job_pid(job: Job) -> int | None:
     return job.pid
-
-
-def number_like(value: Any) -> bool:
-    try:
-        return not math.isnan(float(value))
-    except (TypeError, ValueError):
-        return False
-
-
-def tensorboard_event_sources(path: Path, pid: int | None) -> list[Path]:
-    event_files = sorted(path.rglob("events.out.tfevents.*"), key=lambda item: item.stat().st_mtime)
-    if not event_files:
-        return [path]
-    if pid is None:
-        return event_files
-    pid_marker = f".{pid}."
-    matched = [file for file in event_files if pid_marker in file.name or file.parent.name == f"pid-{pid}"]
-    return matched
 
 
 def rollout_sample_sources(path: Path, pid: int | None) -> list[Path]:
