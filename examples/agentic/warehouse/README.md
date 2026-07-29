@@ -5,10 +5,8 @@ generates a warehouse with a grid of shelves, stock, and an order. The agent
 must navigate shelves, query inventory, pick the required items, and submit the
 completed order. The agent runs four model turns:
 
-1. `query_inventory`
-2. `move`
-3. `pick`
-4. `submit_order`
+1. `pick_from_shelf`
+2. `submit_order`
 
 Every step is validated by the environment: shelf existence, reachability
 (adjacency), stock quantity, and cart completeness. The reward function scores

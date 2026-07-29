@@ -1,4 +1,4 @@
-"""Agent entrypoint for multi-turn warehouse-picking tool-call rollouts."""
+"""Agent entrypoint for two-turn warehouse-picking tool-call rollouts."""
 
 from __future__ import annotations
 
@@ -14,9 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from game import (  # noqa: E402
     WarehouseState,
     build_state,
-    move,
-    pick,
-    query_inventory,
+    pick_from_shelf,
     submit_order,
 )
 
@@ -24,61 +22,28 @@ logger = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 SYSTEM_PROMPT = (
-    "You are a warehouse picking robot. Use tools to query inventory, "
-    "navigate to shelves, pick required items, and submit the completed order. "
-    "You can only move to adjacent shelves. You can only pick from your current shelf. "
-    "Do not answer in plain text."
+    "You are a warehouse picking robot. Use the pick_from_shelf tool to move to a shelf "
+    "and pick a required item, then use submit_order to complete the order. "
+    "You can only move to adjacent shelves. Do not answer in plain text."
 )
 
 TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "query_inventory",
-            "description": "Query stock information for a specific shelf.",
+            "name": "pick_from_shelf",
+            "description": "Move to an adjacent shelf and pick a quantity of a SKU from it.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "shelf_id": {
                         "type": "string",
-                        "description": "The shelf to query, e.g. A1, B2",
-                    }
-                },
-                "required": ["shelf_id"],
-                "additionalProperties": False,
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "move",
-            "description": "Move to an adjacent shelf. Only directly connected shelves are reachable.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "target_shelf_id": {
-                        "type": "string",
-                        "description": "The adjacent shelf to move to",
-                    }
-                },
-                "required": ["target_shelf_id"],
-                "additionalProperties": False,
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "pick",
-            "description": "Pick a quantity of a SKU from the current shelf.",
-            "parameters": {
-                "type": "object",
-                "properties": {
+                        "description": "The adjacent shelf to move to and pick from, e.g. A1, B2",
+                    },
                     "sku": {"type": "string", "description": "The SKU to pick"},
                     "qty": {"type": "integer", "minimum": 1, "description": "Quantity to pick"},
                 },
-                "required": ["sku", "qty"],
+                "required": ["shelf_id", "sku", "qty"],
                 "additionalProperties": False,
             },
         },
@@ -101,10 +66,8 @@ TOOLS = [
 TOOL_BY_NAME = {tool["function"]["name"]: tool for tool in TOOLS}
 
 TURN_PROMPTS = {
-    "query_inventory": "Turn 1: call query_inventory only. Query the starting shelf.",
-    "move": "Turn 2: call move only. Move to a shelf that has a needed SKU.",
-    "pick": "Turn 3: call pick only. Pick the required quantity of a needed SKU.",
-    "submit_order": "Turn 4: call submit_order only. Submit the completed order.",
+    "pick_from_shelf": "Turn 1: call pick_from_shelf only. Move to a shelf that has a needed SKU and pick it.",
+    "submit_order": "Turn 2: call submit_order only. Submit the completed order.",
 }
 
 _state_cache: dict[int, WarehouseState] = {}
@@ -124,7 +87,7 @@ def _get_or_build_state(record: dict) -> WarehouseState:
 
 
 async def run_agent(ctx, batch):
-    """Run four tool-call turns for each warehouse picking task."""
+    """Run two tool-call turns for each warehouse picking task."""
 
     reset_state_cache()
 
@@ -152,7 +115,7 @@ async def run_agent(ctx, batch):
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": item.prompt},
         ]
-        for tool_name in ["query_inventory", "move", "pick", "submit_order"]:
+        for tool_name in ["pick_from_shelf", "submit_order"]:
             assistant_msg, turn = await _call_model(item, client, messages, tool_name)
             turns.append(turn)
             messages.extend(_tool_messages(assistant_msg, _run_tool(assistant_msg, item.record)))
@@ -242,14 +205,10 @@ def _run_tool(assistant_message: dict, record: dict) -> dict:
 
     state = _get_or_build_state(record)
 
-    if name == "query_inventory":
-        result = query_inventory(state, args.get("shelf_id", ""))
-        return {"success": result.success, "message": result.message, "data": result.data}
-    if name == "move":
-        result = move(state, args.get("target_shelf_id", ""))
-        return {"success": result.success, "message": result.message, "data": result.data}
-    if name == "pick":
-        result = pick(state, args.get("sku", ""), int(args.get("qty", 0)))
+    if name == "pick_from_shelf":
+        result = pick_from_shelf(
+            state, args.get("shelf_id", ""), args.get("sku", ""), int(args.get("qty", 0))
+        )
         return {"success": result.success, "message": result.message, "data": result.data}
     if name == "submit_order":
         result = submit_order(state)

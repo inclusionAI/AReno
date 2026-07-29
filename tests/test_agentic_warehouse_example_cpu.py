@@ -361,7 +361,7 @@ def test_warehouse_score_task_completed_correct_sequence():
         "picking_errors": 0,
         "invalid_actions": 0,
         "baseline_distance": baseline,
-        "tool_names": ["query_inventory", "move", "pick", "submit_order"],
+        "tool_names": ["pick_from_shelf", "submit_order"],
     }
 
     score = game.score_task(record, trajectory_data)
@@ -419,8 +419,8 @@ def test_warehouse_agent_tools_use_record_shape():
         "tool_calls": [
             {
                 "function": {
-                    "name": "pick",
-                    "arguments": json.dumps({"sku": sku, "qty": qty}),
+                    "name": "pick_from_shelf",
+                    "arguments": json.dumps({"shelf_id": "A1", "sku": sku, "qty": qty}),
                 }
             }
         ]
@@ -509,19 +509,15 @@ def test_warehouse_reward_full_correct_sequence():
     state = game.build_state(record)
     baseline = game.baseline_distance(state)
 
-    # Simulate a successful complete trajectory
+    # Simulate a successful complete trajectory (2-turn: pick_from_shelf + submit_order)
     messages = [
-        {"role": "tool", "content": json.dumps({"success": True, "message": "ok", "data": {"shelf_id": "A1", "stock": {}}})},
-        {"role": "tool", "content": json.dumps({"success": True, "message": "moved", "data": {"distance": baseline}})},
-        {"role": "tool", "content": json.dumps({"success": True, "message": "picked", "data": {"cart": {}}})},
+        {"role": "tool", "content": json.dumps({"success": True, "message": "picked", "data": {"cart": {}, "distance": baseline}})},
         {"role": "tool", "content": json.dumps({"success": True, "message": "order completed", "data": {"completed": True, "distance": baseline}})},
     ]
     reward_record = SimpleNamespace(
         source_record=record,
         tool_calls=[
-            {"name": "query_inventory", "arguments": "{}"},
-            {"name": "move", "arguments": "{}"},
-            {"name": "pick", "arguments": "{}"},
+            {"name": "pick_from_shelf", "arguments": "{}"},
             {"name": "submit_order", "arguments": "{}"},
         ],
         messages=messages,
@@ -540,18 +536,14 @@ def test_warehouse_reward_wrong_sequence():
     baseline = game.baseline_distance(state)
 
     messages = [
-        {"role": "tool", "content": json.dumps({"success": True, "message": "moved", "data": {"distance": baseline}})},
-        {"role": "tool", "content": json.dumps({"success": True, "message": "ok", "data": {}})},
-        {"role": "tool", "content": json.dumps({"success": True, "message": "picked", "data": {}})},
+        {"role": "tool", "content": json.dumps({"success": True, "message": "picked", "data": {"distance": baseline}})},
         {"role": "tool", "content": json.dumps({"success": True, "message": "order completed", "data": {"completed": True, "distance": baseline}})},
     ]
     reward_record = SimpleNamespace(
         source_record=record,
         tool_calls=[
-            {"name": "move", "arguments": "{}"},
-            {"name": "query_inventory", "arguments": "{}"},
-            {"name": "pick", "arguments": "{}"},
             {"name": "submit_order", "arguments": "{}"},
+            {"name": "pick_from_shelf", "arguments": "{}"},
         ],
         messages=messages,
     )
@@ -559,7 +551,7 @@ def test_warehouse_reward_wrong_sequence():
     score = reward.reward_fn(reward_record)
 
     # No sequence bonus (0.2 less than correct sequence)
-    correct_names = ["query_inventory", "move", "pick", "submit_order"]
+    correct_names = ["pick_from_shelf", "submit_order"]
     correct_reward_record = SimpleNamespace(
         source_record=record,
         tool_calls=[{"name": n, "arguments": "{}"} for n in correct_names],

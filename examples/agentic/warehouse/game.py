@@ -163,6 +163,49 @@ def submit_order(state: WarehouseState) -> ActionResult:
     return ActionResult(True, "order completed", {"completed": True, "distance": state.total_distance})
 
 
+def pick_from_shelf(state: WarehouseState, shelf_id: str, sku: str, qty: int) -> ActionResult:
+    """Move to a shelf (must be adjacent) and pick an item in one action."""
+
+    if shelf_id not in state.shelves:
+        state.invalid_actions += 1
+        return ActionResult(False, f"unknown shelf: {shelf_id}", {})
+    if state.agent_pos != shelf_id:
+        neighbors = state.adjacency.get(state.agent_pos, [])
+        if shelf_id not in neighbors:
+            state.invalid_actions += 1
+            return ActionResult(
+                False,
+                f"unreachable: {state.agent_pos} -> {shelf_id}",
+                {"from": state.agent_pos, "to": shelf_id},
+            )
+        prev = state.agent_pos
+        state.agent_pos = shelf_id
+        state.total_distance += 1
+        move_info = {"from": prev, "to": shelf_id, "distance": state.total_distance}
+    else:
+        move_info = {"from": shelf_id, "to": shelf_id, "distance": state.total_distance}
+    if qty <= 0:
+        state.picking_errors += 1
+        return ActionResult(False, f"invalid qty: {qty}", move_info)
+    shelf = state.shelves[state.agent_pos]
+    available = shelf.stock.get(sku, 0)
+    if available <= 0:
+        state.picking_errors += 1
+        return ActionResult(False, f"sku {sku} not on shelf {state.agent_pos}", move_info)
+    if qty > available:
+        state.picking_errors += 1
+        return ActionResult(False, f"insufficient stock: {sku} need {qty} have {available}", move_info)
+    shelf.stock[sku] -= qty
+    if shelf.stock[sku] == 0:
+        del shelf.stock[sku]
+    state.cart[sku] = state.cart.get(sku, 0) + qty
+    return ActionResult(
+        True,
+        "picked",
+        {"sku": sku, "qty": qty, "cart": dict(state.cart), **move_info},
+    )
+
+
 def _bfs_distance(state: WarehouseState, start: str, target: str) -> int:
     """BFS shortest distance between two shelves on the unweighted graph."""
 
@@ -232,7 +275,7 @@ def score_task(record: dict[str, Any], trajectory_data: dict[str, Any]) -> float
         efficiency = min(baseline / max(actual, 1), 1.0)
         score *= 0.7 + 0.3 * efficiency
     names = trajectory_data.get("tool_names", [])
-    if names[:4] == ["query_inventory", "move", "pick", "submit_order"]:
+    if names[:2] == ["pick_from_shelf", "submit_order"]:
         score += 0.2
     return max(score, -1.0)
 
@@ -246,7 +289,6 @@ def make_prompt(record: dict[str, Any]) -> str:
         f"Shelf IDs follow the pattern A1, A2, ..., B1, B2, etc. "
         f"Your order: {order_str}. "
         f"You start at shelf {record['start_shelf']}. "
-        "Use query_inventory to check which shelves have the items, "
-        "move to adjacent shelves, pick required items, then submit_order. "
-        "Move only to adjacent shelves. Pick only from your current shelf."
+        "Use pick_from_shelf to move to a shelf and pick an item, then submit_order. "
+        "You can only move to adjacent shelves."
     )
