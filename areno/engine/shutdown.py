@@ -24,6 +24,7 @@ import logging
 import os
 import signal
 import sys
+import time
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
@@ -231,8 +232,6 @@ class GracefulShutdown:
 
     def _handler(self, signum: int, _frame: Any) -> None:
         """Internal signal handler implementing the two-stage logic."""
-
-        import time
 
         now = time.monotonic()
 
