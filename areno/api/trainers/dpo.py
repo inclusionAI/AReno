@@ -20,7 +20,9 @@ from typing import Any
 
 import areno.api
 from areno.api.dashboard import record_dashboard_state
+from areno.api.data import OverlengthPolicy
 from areno.api.data_utils import apply_chat_template, encode_prompt_value, response_to_tokens_and_mask
+from areno.api.overlength import truncate_dpo_pair
 from areno.api.roles import ModelRole
 from areno.api.tokenizer import configure_chat_template_enable_thinking
 
@@ -135,19 +137,35 @@ class DPOTrainer:
     def _iter_train_batches(self, tokenizer, *, max_seq_len: int):
         # `batch_size` counts preference pairs; the emitted train batch has two
         # rows per pair and always preserves chosen/rejected adjacency.
+        policy = getattr(self.config, "overlength_policy", "reject")
         batch = []
-        skipped = 0
+        skipped_invalid = 0
+        overlength_counters: dict[str, int] = {}
         for index in range(len(self.dataset)):
-            pair = _record_to_train_pair(self.dataset[index], tokenizer, max_seq_len=max_seq_len)
+            # `overlength_counters` is mutated as a side effect when a pair is
+            # dropped/truncated for being over budget; an invalid pair leaves it
+            # untouched so the two drop reasons can be distinguished.
+            before = sum(overlength_counters.values())
+            pair = _record_to_train_pair(
+                self.dataset[index],
+                tokenizer,
+                max_seq_len=max_seq_len,
+                policy=policy,
+                counters=overlength_counters,
+            )
             if pair is None:
-                skipped += 1
+                if sum(overlength_counters.values()) == before:
+                    skipped_invalid += 1
                 continue
             batch.extend(pair)
             if len(batch) >= self.config.batch_size * 2:
                 yield batch
                 batch = []
-        if skipped:
-            self.logger.info("stage=dpo_dataset_filter skipped_invalid_or_long=%d", skipped)
+        if skipped_invalid or overlength_counters:
+            parts = [f"skipped_invalid={skipped_invalid}"]
+            for key, count in sorted(overlength_counters.items()):
+                parts.append(f"{key}={count}")
+            self.logger.info("stage=dpo_dataset_filter %s", " ".join(parts))
         if batch:
             yield batch
 
@@ -162,12 +180,24 @@ class DPOTrainer:
         record_dashboard_state(self.areno, stage="save_checkpoint_end", epoch=epoch, step=step, role="policy")
 
 
-def _record_to_train_pair(record: Any, tokenizer, *, max_seq_len: int):
+def _record_to_train_pair(
+    record: Any,
+    tokenizer,
+    *,
+    max_seq_len: int,
+    policy: str = "reject",
+    counters: dict[str, int] | None = None,
+):
     record = dict(record)
     eos_token_id = tokenizer.eos_token_id if tokenizer.eos_token_id is not None else 0
     if "chosen" not in record or "rejected" not in record:
         raise ValueError("DPO dataset row must contain `chosen` and `rejected`")
     chosen, rejected = record["chosen"], record["rejected"]
+
+    def _count(reason_value: str) -> None:
+        if counters is not None:
+            key = f"{reason_value}/{policy}"
+            counters[key] = counters.get(key, 0) + 1
 
     if isinstance(chosen, list) and isinstance(rejected, list):
         # Preference datasets sometimes store full chosen/rejected chats. The
@@ -187,18 +217,71 @@ def _record_to_train_pair(record: Any, tokenizer, *, max_seq_len: int):
         prompt_ids = encode_prompt_value(tokenizer, prompt)
         chosen_tokens, chosen_mask = response_to_tokens_and_mask(prompt_ids, str(chosen), tokenizer, eos_token_id)
         rejected_tokens, rejected_mask = response_to_tokens_and_mask(prompt_ids, str(rejected), tokenizer, eos_token_id)
+        prefix_len = len(prompt_ids)
 
-    chosen_seq = _make_sequence(chosen_tokens, chosen_mask, eos_token_id, max_seq_len)
-    rejected_seq = _make_sequence(rejected_tokens, rejected_mask, eos_token_id, max_seq_len)
-    if chosen_seq is None or rejected_seq is None:
+    # Pair-level overlength check: if either side exceeds the budget, the whole
+    # pair is handled together so chosen/rejected stay comparable.
+    chosen_over = len(chosen_tokens) > max_seq_len
+    rejected_over = len(rejected_tokens) > max_seq_len
+    if not chosen_over and not rejected_over:
+        # Both sides fit; still validate each is trainable, else reject as invalid.
+        chosen_seq = _make_sequence(chosen_tokens, chosen_mask, eos_token_id)
+        rejected_seq = _make_sequence(rejected_tokens, rejected_mask, eos_token_id)
+        if chosen_seq is None or rejected_seq is None:
+            return None
+        return [chosen_seq, rejected_seq]
+
+    overlength_policy = OverlengthPolicy(policy)
+    # DPO overlength is response/pair-level: at least one divergent suffix
+    # pushed the pair past the shared sequence budget.
+    reason = "response_too_long"
+
+    if overlength_policy is OverlengthPolicy.REJECT:
+        _count(reason)
         return None
+    if overlength_policy is OverlengthPolicy.WARN:
+        # Keep the original pair unchanged but count it.
+        chosen_seq = _make_sequence(chosen_tokens, chosen_mask, eos_token_id)
+        rejected_seq = _make_sequence(rejected_tokens, rejected_mask, eos_token_id)
+        if chosen_seq is None or rejected_seq is None:
+            # Untrainable even when kept; reject instead of emitting broken rows.
+            _count(reason)
+            return None
+        _count(reason)
+        return [chosen_seq, rejected_seq]
+
+    # TRUNCATE: cut both sides to a common budget over the shared prefix.
+    cut = truncate_dpo_pair(
+        chosen_tokens=chosen_tokens,
+        chosen_mask=chosen_mask,
+        rejected_tokens=rejected_tokens,
+        rejected_mask=rejected_mask,
+        prefix_len=prefix_len,
+        max_seq_len=max_seq_len,
+        eos_token_ids=(eos_token_id,) if eos_token_id is not None else None,
+    )
+    if cut is None:
+        # Either side cannot fit even at minimum; reject the whole pair rather
+        # than keep an incomparable single side.
+        _count("single_message_oversized")
+        return None
+    cut_chosen_tokens, cut_chosen_mask, cut_rejected_tokens, cut_rejected_mask, _truncated = cut
+    chosen_seq = _make_sequence(cut_chosen_tokens, cut_chosen_mask, eos_token_id)
+    rejected_seq = _make_sequence(cut_rejected_tokens, cut_rejected_mask, eos_token_id)
+    if chosen_seq is None or rejected_seq is None:
+        _count("single_message_oversized")
+        return None
+    _count(reason)
     return [chosen_seq, rejected_seq]
 
 
-def _make_sequence(tokens: list[int], prompt_mask: list[bool], eos_token_id: int, max_seq_len: int):
+def _make_sequence(tokens: list[int], prompt_mask: list[bool], eos_token_id: int, max_seq_len: int | None = None):
     # Drop examples that cannot produce a next-token loss or exceed the shared
-    # max sequence budget.
-    if len(tokens) < 2 or len(tokens) > max_seq_len or not any(not item for item in prompt_mask[1:]):
+    # max sequence budget. When `max_seq_len` is None the caller has already
+    # validated/truncated the length (e.g. the truncate policy path).
+    if len(tokens) < 2 or not any(not item for item in prompt_mask[1:]):
+        return None
+    if max_seq_len is not None and len(tokens) > max_seq_len:
         return None
     zeros = [0.0] * len(tokens)
     # Dummy rollout fields keep the TrainSequence shape contract shared with

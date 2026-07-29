@@ -269,9 +269,15 @@ class PolicyOnlyTrainer:
         max_context_len = self._agent_model_context_len()
         if max_context_len is None:
             return samples, 0, {}
+        # Resolve the overlength policy from config (default reject keeps the
+        # pre-#216 behavior). Agentic turn-level truncation is not implemented
+        # yet because the flattened token row does not carry per-turn offsets,
+        # so `truncate` degrades to `reject` here with an explicit log line.
+        policy = getattr(self.config, "overlength_policy", "reject")
         kept = []
         filtered_details = []
         all_details = []
+        overlength_counters: dict[str, int] = {}
         for sample in samples:
             rows = ctx._train_rows_from_samples([sample])
             token_len = len(rows.token_rows[0]) if rows.token_rows else 0
@@ -280,16 +286,30 @@ class PolicyOnlyTrainer:
             if token_len <= max_context_len:
                 kept.append(sample)
                 continue
+            # Overlength sample.
             filtered_details.append(detail)
+            overlength_counters[f"trajectory_too_long/{policy}"] = (
+                overlength_counters.get(f"trajectory_too_long/{policy}", 0) + 1
+            )
+            if policy == "warn":
+                # Keep the overlength sample unchanged but count it.
+                kept.append(sample)
         diagnostics = self._agent_filter_diagnostics(
             all_details,
             filtered_details,
             max_context_len=max_context_len,
             kept_count=len(kept),
         )
+        if overlength_counters:
+            diagnostics["overlength_counters"] = overlength_counters
         if filtered_details:
             self.logger.warning("agentic trajectory filtered: %s", self._format_agent_filter_diagnostics(diagnostics))
-        return kept, len(filtered_details), diagnostics
+        # `warn` keeps overlength samples, so the filtered_count (dropped) must
+        # exclude them to preserve the caller's `len(samples)+filtered==expected`
+        # invariant. Under reject/truncate-degraded-to-reject, every overlength
+        # sample is dropped.
+        dropped = len(filtered_details) if policy != "warn" else 0
+        return kept, dropped, diagnostics
 
     def _agent_sample_filter_detail(self, sample, token_len):
         tool_result_count = sum(1 for message in sample.messages if message.get("role") == "tool")

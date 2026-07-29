@@ -152,8 +152,17 @@ def collect_train_batch_stats(train_batch) -> dict:
     return stats
 
 
-def init_rollout_stats(skipped_long: int = 0, total_skipped_long: int = 0) -> dict:
-    """Create the mutable stats accumulator used by metric helpers."""
+def init_rollout_stats(
+    skipped_long: int = 0,
+    total_skipped_long: int = 0,
+    overlength_counters: dict[str, int] | None = None,
+) -> dict:
+    """Create the mutable stats accumulator used by metric helpers.
+
+    `overlength_counters` carries the issue #216 per-reason, per-action counts
+    (``{f"{reason}/{action}": count}``). It defaults to an empty dict so callers
+    that do not feed it in keep the pre-#216 behavior.
+    """
 
     return {
         "rewards": [],
@@ -164,6 +173,7 @@ def init_rollout_stats(skipped_long: int = 0, total_skipped_long: int = 0) -> di
         "response_len": [],
         "skipped_long": skipped_long,
         "total_skipped_long": total_skipped_long,
+        "overlength_counters": dict(overlength_counters) if overlength_counters else {},
     }
 
 
@@ -210,6 +220,11 @@ def record_training_stats(writer, stats, step, train_res, train_batch, timings: 
     for key in ("skipped_long", "total_skipped_long"):
         if key in stats:
             writer.add_scalar(f"rollout/{key}", stats[key], step)
+    # Issue #216: emit one scalar per (reason, action) so operators can see why
+    # and how samples were dropped/kept/truncated across training modes.
+    overlength_counters = stats.get("overlength_counters") or {}
+    for counter_key, count in overlength_counters.items():
+        writer.add_scalar(f"rollout/overlength/{counter_key}", count, step)
 
     # Backend-supplied training metrics (loss, policy_loss, ratio_mean, ...).
     for key, value in train_res.items():

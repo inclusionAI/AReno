@@ -23,7 +23,9 @@ from typing import Any
 
 import areno.api
 from areno.api.dashboard import record_dashboard_state
+from areno.api.data import OverlengthPolicy, OverlengthReason
 from areno.api.data_utils import prompt_response_to_tokens_and_mask
+from areno.api.overlength import decide_overlength, truncate_sft_response
 from areno.api.tokenizer import configure_chat_template_enable_thinking
 
 
@@ -97,33 +99,46 @@ class SFTTrainer:
     def _iter_train_batches(self, tokenizer, *, max_prompt_tokens: int, max_new_tokens: int):
         # Dataset rows are converted lazily so large HF datasets do not need an
         # up-front tokenized copy. Rows that are empty, all-prompt, or exceed
-        # the configured prompt or supervised-response budgets are dropped.
+        # the configured prompt or supervised-response budgets are dropped or
+        # truncated according to the configured overlength policy.
+        policy = getattr(self.config, "overlength_policy", "reject")
         batch = []
-        skipped = 0
+        skipped_empty = 0
+        overlength_counters: dict[str, int] = {}
         accepted = 0
         total_rows = len(self.dataset)
         for index in range(total_rows):
-            # Normalize each supported row schema into one TrainSequence.
+            # `overlength_counters` is mutated as a side effect when a row is
+            # dropped/truncated for being over budget; an empty/invalid row
+            # leaves it untouched so we can tell the two drop reasons apart.
+            before = sum(overlength_counters.values())
             seq = _record_to_train_sequence(
                 self.dataset[index],
                 tokenizer,
                 max_prompt_tokens=max_prompt_tokens,
                 max_new_tokens=max_new_tokens,
+                policy=policy,
+                counters=overlength_counters,
             )
             if seq is None:
-                skipped += 1
+                if sum(overlength_counters.values()) == before:
+                    skipped_empty += 1
                 continue
             accepted += 1
             batch.append(seq)
             if len(batch) >= self.config.batch_size:
                 yield batch
                 batch = []
-        if skipped:
-            self.logger.info("stage=sft_dataset_filter skipped_long_or_empty=%d", skipped)
+        if skipped_empty or overlength_counters:
+            parts = [f"skipped_empty={skipped_empty}"]
+            for key, count in sorted(overlength_counters.items()):
+                parts.append(f"{key}={count}")
+            self.logger.info("stage=sft_dataset_filter %s", " ".join(parts))
         if accepted == 0:
             raise ValueError(
                 "SFT dataset produced no valid training rows after filtering: "
-                f"scanned {total_rows} row(s), skipped {skipped} as empty, over-budget, or all-prompt examples. "
+                f"scanned {total_rows} row(s), skipped {skipped_empty} as empty, "
+                f"overlength {sum(overlength_counters.values())}, or all-prompt examples. "
                 "Check dataset quality, --max-prompt-tokens, and --max-new-tokens."
             )
         if batch:
@@ -141,14 +156,35 @@ class SFTTrainer:
         record_dashboard_state(self.areno, stage="save_checkpoint_end", epoch=epoch, step=step, role="policy")
 
 
-def _record_to_train_sequence(record: Any, tokenizer, *, max_prompt_tokens: int, max_new_tokens: int):
+def _record_to_train_sequence(
+    record: Any,
+    tokenizer,
+    *,
+    max_prompt_tokens: int,
+    max_new_tokens: int,
+    policy: str = "reject",
+    counters: dict[str, int] | None = None,
+):
     """Normalize one loader-produced SFT row into backend training format.
 
     `prompt_mask=True` means "do not train this source token"; the backend loss
     is next-token aligned, so the loss function later uses positions after the
     prompt prefix. RL-only fields are filled with zeros to satisfy the shared
     `TrainSequence` packing contract.
+
+    Returns a ``TrainSequence`` or ``None``. When a row is dropped because it
+    exceeds a budget, the per-reason, per-action count is recorded into
+    ``counters`` (as ``{f"{reason}/{policy}": count}``) so callers can surface
+    per-reason diagnostics; empty/invalid rows return ``None`` without touching
+    ``counters``. Under ``warn`` the original sequence is kept and counted;
+    under ``truncate`` the response is cut to ``max_new_tokens`` with a trailing
+    EOS preserved.
     """
+
+    def _count(reason_value: str) -> None:
+        if counters is not None:
+            key = f"{reason_value}/{policy}"
+            counters[key] = counters.get(key, 0) + 1
 
     record = dict(record)
     eos_token_id = tokenizer.eos_token_id if tokenizer.eos_token_id is not None else 0
@@ -169,8 +205,61 @@ def _record_to_train_sequence(record: Any, tokenizer, *, max_prompt_tokens: int,
         return None
     prompt_tokens = prompt_mask.count(True)
     response_tokens = prompt_mask[1:].count(False)
-    if prompt_tokens > max_prompt_tokens or response_tokens > max_new_tokens or response_tokens == 0:
+    if response_tokens == 0:
         return None
+
+    overlength_policy = OverlengthPolicy(policy)
+    decision = decide_overlength(
+        prompt_len=prompt_tokens,
+        max_prompt_tokens=max_prompt_tokens,
+        response_len=response_tokens,
+        max_new_tokens=max_new_tokens,
+        policy=overlength_policy,
+    )
+
+    # Within budget: keep as-is (no overlength reason to count).
+    if not decision.truncated and decision.reason.value in ("within_budget", "exact_limit"):
+        return _build_train_sequence(tokens, prompt_mask, eos_token_id)
+
+    reason_value = decision.reason.value
+
+    # Prompt overlength: SFT prompts are plain strings with no chat-turn
+    # boundary to cut on, so truncate degrades to reject for this path.
+    if decision.reason is OverlengthReason.SINGLE_MESSAGE_OVERSIZED:
+        if overlength_policy is OverlengthPolicy.WARN:
+            _count(reason_value)
+            return _build_train_sequence(tokens, prompt_mask, eos_token_id)
+        _count(reason_value)
+        return None
+
+    # Response overlength.
+    if overlength_policy is OverlengthPolicy.REJECT:
+        _count(reason_value)
+        return None
+    if overlength_policy is OverlengthPolicy.WARN:
+        _count(reason_value)
+        return _build_train_sequence(tokens, prompt_mask, eos_token_id)
+
+    # TRUNCATE: cut the response at max_new_tokens, preserve trailing EOS.
+    prompt_ids = tokens[:prompt_tokens]
+    response_ids = tokens[prompt_tokens:]
+    cut_tokens, cut_mask, _truncated = truncate_sft_response(
+        prompt_ids=prompt_ids,
+        response_ids=response_ids,
+        max_new_tokens=max_new_tokens,
+        eos_token_ids=(eos_token_id,) if eos_token_id is not None else None,
+    )
+    if len(cut_tokens) < 2 or cut_mask[1:].count(False) == 0:
+        # Trimming produced an un-trainable sequence; reject instead.
+        _count(reason_value)
+        return None
+    _count(reason_value)
+    return _build_train_sequence(cut_tokens, cut_mask, eos_token_id)
+
+
+def _build_train_sequence(tokens: list[int], prompt_mask: list[bool], eos_token_id: int):
+    """Wrap token/mask rows into a TrainSequence with zeroed RL-only fields."""
+
     zeros = [0.0] * len(tokens)
     # Dummy rollout fields keep the backend packer shared with RL trainers.
     return areno.api.TrainSequence(
