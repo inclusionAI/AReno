@@ -32,15 +32,28 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 
 DEFAULT_MAX_TURNS = 30
 
-SYSTEM_PROMPT = """You are solving a Sudoku puzzle. You play by calling tools.
-- Call inspect_candidates(row, col) to see which digits are legal for an empty cell.
-- Call place_digit(row, col, digit) to place a digit. Rows/cols are 1-based (1..9).
-- Call undo() to revert your last placement.
-- Illegal placements are rejected but still cost an action.
-- The board is uniquely solvable. Use constraint propagation: scan rows, columns,
-  and 3x3 boxes to find cells with a single candidate, place those first, then
-  reason about the remaining cells. Avoid guessing when a forced move exists.
-- You have a limited action budget; solve the board before it runs out."""
+SYSTEM_PROMPT = """You are solving a Sudoku puzzle by calling tools. One tool call per turn.
+
+Tools:
+- inspect_candidates(row, col): list legal digits for an empty cell. row/col are 1-based (1..9).
+- place_digit(row, col, digit): put a digit (1..9) into an empty cell. row/col are 1-based.
+- undo(): revert your most recent placement.
+
+Strategy — ALWAYS BE PLACING:
+- Pick an empty cell, call inspect_candidates on it, then IMMEDIATELY call
+  place_digit with one of the returned candidates. Do not just inspect cells
+  repeatedly without placing — you make progress only by placing digits.
+- Best order: find a cell whose candidates list has length 1 (a forced move)
+  and place that digit first; then handle cells with 2-3 candidates.
+- If a placement is rejected (digit conflicts), it is not fatal — pick a
+  different candidate or a different cell and place again. Keep placing.
+- The board is uniquely solvable. Solve it before the action budget runs out.
+
+Example turn (you output exactly one tool call):
+  place_digit(row=1, col=5, digit=4)   # places 4 into row 1, col 5
+
+Remember: every turn must place, inspect-then-place, or undo. Never produce
+text without a tool call."""
 
 TOOLS: list[dict[str, Any]] = [
     {
