@@ -105,7 +105,13 @@ TOOLS = [QUERY_AVAILABILITY_TOOL, PROPOSE_SLOT_TOOL, CONFIRM_SLOT_TOOL]
 
 
 async def run_agent(ctx, batch):
-    """Run one tool-call model request for each calendar scenario."""
+    """Run one tool-call model request for each calendar scenario.
+
+    Sends the scheduling prompt and three tool definitions to AReno's
+    local OpenAI-compatible endpoint. The model responds with tool calls
+    (query_availability / propose_slot / confirm_slot) that are later
+    scored by reward.py.
+    """
 
     try:
         import httpx
@@ -122,6 +128,7 @@ async def run_agent(ctx, batch):
         len(items),
         ctx.max_running_prompts,
     )
+    # Share one httpx connection pool sized to the max rollout concurrency.
     max_connections = max(len(items), ctx.max_running_prompts)
     http_client = httpx.AsyncClient(
         limits=httpx.Limits(
@@ -134,10 +141,12 @@ async def run_agent(ctx, batch):
     )
 
     async def run_one(item):
+        # Build the message sequence: system prompt → user scheduling scenario.
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": item.prompt},
         ]
+        # Let the model choose which tool to call (query/propose/confirm).
         tool_choice = "auto"
         response = await client.chat.completions.create(
             model="policy",
