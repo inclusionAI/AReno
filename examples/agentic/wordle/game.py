@@ -404,10 +404,13 @@ def num_guesses(game: WordleGame) -> int:
 def format_prompt(game: WordleGame) -> str:
     """
     Build the prompt for the Wordle agent.
-    Keep it concise so small models (Qwen3-0.6B) can follow.
+
+    Infers word length from the target so variable-length words work
+    correctly.  Keep it concise so small models (Qwen3-0.6B) can follow.
     """
+    target_len = len(game["target"])
     lines = [
-        f"Wordle: Guess the {WORD_LENGTH}-letter word.",
+        f"Wordle: Guess the {target_len}-letter word.",
         f"You have {MAX_GUESSES} attempts.",
         "",
         "Feedback: [G]=correct position, [Y]=wrong position, [?]=not in word.",
@@ -425,7 +428,7 @@ def format_prompt(game: WordleGame) -> str:
     lines.append(f"Attempts left: {remaining}")
 
     if game["state"] == GameState.IN_PROGRESS:
-        lines.append("Call guess_word with a valid 5-letter word.")
+        lines.append(f"Call guess_word with a valid {target_len}-letter word.")
 
     return "\n".join(lines)
 
@@ -434,8 +437,9 @@ def format_xml_prompt(game: WordleGame) -> str:
     """
     Build the prompt for the Wordle agent without tools.
     """
+    target_len = len(game["target"])
     lines = [
-        f"Wordle: Guess the {WORD_LENGTH}-letter word.",
+        f"Wordle: Guess the {target_len}-letter word.",
         f"You have {MAX_GUESSES} attempts.",
         "",
         "Feedback: [G]=correct position, [Y]=wrong position, [?]=not in word.",
@@ -450,7 +454,7 @@ def format_xml_prompt(game: WordleGame) -> str:
     remaining = MAX_GUESSES - num_guesses(game)
     lines.append("")
     lines.append(f"Attempts left: {remaining}")
-    lines.append('Answer with <guess>WORD</guess>.')
+    lines.append(f'Answer with <guess>WORD</guess> (a {target_len}-letter word).')
 
     return "\n".join(lines)
 
@@ -498,17 +502,14 @@ def normalize_game(game_data: dict) -> WordleGame:
 
 def score_game(game: WordleGame, guess: str | None = None) -> float:
     """
-    Score a game outcome for RL reward.
+    Score a game outcome for RL reward (bounded [-1.0, +1.0]).
 
     - +1.0: Won the game
-    - 0.0: Lost the game (exhausted all guesses)
+    -  0.0: Lost the game (exhausted all guesses)
     - -1.0: Invalid guess or timeout
     """
     if game["state"] == GameState.WON:
-        # Bonus for fewer guesses (more efficient)
-        num = num_guesses(game)
-        efficiency_bonus = (MAX_GUESSES - num) / MAX_GUESSES * 0.5
-        return 1.0 + efficiency_bonus
+        return 1.0
     elif game["state"] == GameState.LOST:
         return 0.0
     return -1.0  # In progress or invalid

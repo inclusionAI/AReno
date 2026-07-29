@@ -106,12 +106,20 @@ The word list is MIT licensed for redistribution.
 
 ## Reward Function
 
-The reward function provides:
-- **+1.0 to +1.5**: Correctly guessed the word (higher reward for fewer guesses)
-- **+0.5 to +0.7**: Made progress (at least one letter in correct position)
-- **+0.2 to +0.3**: Valid word but no correct letters
-- **0.0**: Lost the game (exhausted all 6 guesses)
-- **-1.0**: Invalid word (not in word list)
+The reward function scores each agent response (bounded [-1.0, +1.0]):
+
+| Outcome | Reward |
+|---------|--------|
+| Correct guess | +1.0 |
+| Partial exact match | +0.5 + 0.1 per exact + 0.02 per present |
+| Letters present | +0.2 + 0.05 per present |
+| Valid word, no match | 0.0 |
+| Invalid word | -0.5 |
+| No tool call | -1.0 |
+
+A small per-sample jitter ([-0.1, +0.1]) is added to every reward to prevent
+GSPO advantage collapsing to zero when all samples in a group produce the same
+outcome.
 
 ## AReno Integration
 
