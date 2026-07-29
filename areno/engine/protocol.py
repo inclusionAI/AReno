@@ -11,12 +11,14 @@ request-id demux so multiple caller threads/tasks can have in-flight commands.
 from __future__ import annotations
 
 import asyncio
+import logging
 import multiprocessing as mp
 import queue
 import socket
 import threading
+import time
 import traceback
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum, auto
 from itertools import count
 from typing import Any
@@ -152,6 +154,59 @@ class SaveCheckpointPayload:
 
 
 @dataclass(slots=True)
+class _WorkerError:
+    """Record of a single worker failure for error aggregation."""
+
+    rank: int
+    op: Op
+    error: str
+    timestamp: float
+
+
+class FirstWorkerError(RuntimeError):
+    """Raised when ``preserve_first_error`` is enabled and at least one worker fails.
+
+    The first causal failure is preserved prominently with its full traceback,
+    rank, stage, and coordinator-side timestamp.  Subsequent failures (typically
+    NCCL/collective timeouts triggered by the first worker exiting) are grouped
+    as a short secondary summary so they do not drown out the root cause.
+    """
+
+    def __init__(self, first_error: _WorkerError, secondary_errors: list[_WorkerError]):
+        self.first_error = first_error
+        self.secondary_errors = secondary_errors
+        super().__init__(str(self))
+
+    def __str__(self) -> str:
+        fe = self.first_error
+        lines = [
+            "=== First Worker Failure (root cause) ===",
+            f"rank={fe.rank}  stage={fe.op.name}  timestamp={fe.timestamp:.6f}",
+            fe.error,
+        ]
+        if self.secondary_errors:
+            shown = self.secondary_errors[:5]
+            lines.append("")
+            lines.append(f"=== Secondary Errors ({len(self.secondary_errors)} ranks, shown as summary) ===")
+            for err in shown:
+                summary = _extract_error_summary(err.error)
+                lines.append(f"[rank={err.rank}  stage={err.op.name}] {summary}")
+            if len(self.secondary_errors) > 5:
+                lines.append(f"... and {len(self.secondary_errors) - 5} more secondary error(s) omitted")
+        return "\n".join(lines)
+
+
+def _extract_error_summary(traceback_str: str) -> str:
+    """Extract the last non-empty line of a traceback as a one-line summary."""
+
+    for line in reversed(traceback_str.strip().splitlines()):
+        stripped = line.strip()
+        if stripped:
+            return stripped
+    return "<empty traceback>"
+
+
+@dataclass(slots=True)
 class _PendingClusterCall:
     """Coordinator-side accumulator for one in-flight cluster request."""
 
@@ -162,6 +217,8 @@ class _PendingClusterCall:
     future: asyncio.Future | None = None
     loop: asyncio.AbstractEventLoop | None = None
     error: BaseException | None = None
+    first_error: _WorkerError | None = None
+    secondary_errors: list[_WorkerError] = field(default_factory=list)
 
 
 def find_free_port() -> int:
@@ -223,6 +280,7 @@ class TPCluster:
         self._pending_calls: dict[int, _PendingClusterCall] = {}
         self._pump_stop = threading.Event()
         self._pump_thread: threading.Thread | None = None
+        self._preserve_first_error = getattr(getattr(config, "runtime", None), "preserve_first_error", False)
 
     def start(self) -> None:
         """Spawn workers and wait until every rank has finished initialization."""
@@ -388,9 +446,21 @@ class TPCluster:
         """Apply one worker result to a pending call and complete it if done."""
 
         if not result.ok:
-            self._finish_pending_call(
-                request_id, pending, RuntimeError(f"rank {rank} failed during {pending.op}:\n{result.error}")
-            )
+            if self._preserve_first_error:
+                worker_error = _WorkerError(rank=rank, op=pending.op, error=result.error, timestamp=time.monotonic())
+                if pending.first_error is None:
+                    pending.first_error = worker_error
+                else:
+                    pending.secondary_errors.append(worker_error)
+                pending.pending.discard(rank)
+                if not pending.pending:
+                    self._finish_pending_call(request_id, pending, None)
+            else:
+                self._finish_pending_call(
+                    request_id,
+                    pending,
+                    RuntimeError(f"rank {rank} failed during {pending.op}:\n{result.error}"),
+                )
             return
         pending.results[rank] = result.payload
         pending.pending.discard(rank)
@@ -400,6 +470,19 @@ class TPCluster:
     def _finish_pending_call(self, request_id: int, pending: _PendingClusterCall, error: BaseException | None) -> None:
         """Mark a pending call complete and wake sync/async waiters."""
 
+        if pending.first_error is not None:
+            if error is not None:
+                pending.secondary_errors.append(
+                    _WorkerError(rank=-1, op=pending.op, error=str(error), timestamp=time.monotonic())
+                )
+            error = FirstWorkerError(pending.first_error, pending.secondary_errors)
+            logger = logging.getLogger("areno")
+            logger.warning(
+                "first worker failure: rank=%d stage=%s | %d secondary error(s) recorded",
+                pending.first_error.rank,
+                pending.first_error.op.name,
+                len(pending.secondary_errors),
+            )
         with self._pending_lock:
             self._pending_calls.pop(request_id, None)
         pending.error = error
@@ -419,12 +502,28 @@ class TPCluster:
             dead = self._dead_pending_workers(pending.pending)
             if not dead:
                 continue
-            details = ", ".join(f"rank {rank} pid {pid} exitcode {exitcode}" for rank, pid, exitcode in dead)
-            self._finish_pending_call(
-                request_id,
-                pending,
-                RuntimeError(f"worker exited without reporting result during {pending.op}: {details}"),
-            )
+            if self._preserve_first_error:
+                for rank, pid, exitcode in dead:
+                    worker_error = _WorkerError(
+                        rank=rank,
+                        op=pending.op,
+                        error=f"worker exited without reporting result: rank {rank} pid {pid} exitcode {exitcode}",
+                        timestamp=time.monotonic(),
+                    )
+                    if pending.first_error is None:
+                        pending.first_error = worker_error
+                    else:
+                        pending.secondary_errors.append(worker_error)
+                pending.pending -= {rank for rank, _, _ in dead}
+                if not pending.pending:
+                    self._finish_pending_call(request_id, pending, None)
+            else:
+                details = ", ".join(f"rank {rank} pid {pid} exitcode {exitcode}" for rank, pid, exitcode in dead)
+                self._finish_pending_call(
+                    request_id,
+                    pending,
+                    RuntimeError(f"worker exited without reporting result during {pending.op}: {details}"),
+                )
 
     def _dead_pending_workers(self, pending: set[int]) -> list[tuple[int, int | None, int | None]]:
         """Return pending ranks whose process exited before reporting."""

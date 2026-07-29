@@ -49,6 +49,7 @@ class RuntimeConfig:
     activation_checkpointing: bool = True
     keep_rollout_state: bool = True
     eager_decode: bool = False
+    preserve_first_error: bool = False
     decode_graph_buckets: list[int] = field(
         default_factory=lambda: [1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 56, 64, 96, 128, 192, 256]
     )

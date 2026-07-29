@@ -129,7 +129,7 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         ),
     ),
     ("Checkpoint", ("save_path", "save_interval")),
-    ("Observability", ("metrics_log_dir",)),
+    ("Observability", ("metrics_log_dir", "preserve_first_error")),
 )
 
 
@@ -633,6 +633,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             keep_rollout_state=not args.drop_rollout_state,
             eager_decode=args.eager_decode,
             attn_backend=args.attn_backend,
+            preserve_first_error=args.preserve_first_error,
             metrics_log_dir=args.metrics_log_dir,
             agent_fn=args.agent_fn,
             agent_timeout_s=args.agent_timeout_s,
@@ -674,6 +675,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             keep_rollout_state=not args.drop_rollout_state,
             eager_decode=args.eager_decode,
             attn_backend=args.attn_backend,
+            preserve_first_error=args.preserve_first_error,
             metrics_log_dir=args.metrics_log_dir,
             agent_fn=args.agent_fn,
             agent_timeout_s=args.agent_timeout_s,
@@ -722,6 +724,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             attn_backend=args.attn_backend,
             gspo_clip_eps=args.gspo_clip_eps,
             grpo_clip_eps=args.grpo_clip_eps,
+            preserve_first_error=args.preserve_first_error,
             metrics_log_dir=args.metrics_log_dir,
             agent_fn=args.agent_fn,
             agent_timeout_s=args.agent_timeout_s,
@@ -769,6 +772,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
         attn_backend=args.attn_backend,
         gspo_clip_eps=args.gspo_clip_eps,
         grpo_clip_eps=args.grpo_clip_eps,
+        preserve_first_error=args.preserve_first_error,
         metrics_log_dir=args.metrics_log_dir,
         ref_ckpt=args.ref_ckpt,
         reward_ckpt=args.reward_ckpt,
@@ -951,7 +955,7 @@ def _training_config_settings(config: TrainerConfig) -> dict:
             ],
         ),
         section("Checkpoint", ["save_path", "save_interval"]),
-        section("Observability", ["metrics_log_dir"]),
+        section("Observability", ["metrics_log_dir", "preserve_first_error"]),
     ]
     extras = []
     for field in fields(config):
@@ -1187,6 +1191,13 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
 @click.option("--save-interval", type=int, default=100, show_default=True, help="Save checkpoint every N train steps.")
 @click.option(
     "--metrics-log-dir", default=DEFAULT_METRICS_LOG_DIR, show_default=True, help="TensorBoard metrics log directory."
+)
+@click.option(
+    "--preserve-first-error",
+    "preserve_first_error",
+    is_flag=True,
+    default=False,
+    help="Preserve the first worker failure for easier root-cause diagnosis in distributed runs.",
 )
 @click.option("--epochs", type=int, default=10, show_default=True, help="Number of dataset epochs to train.")
 @click.option("--max-steps", type=int, default=None, help="Stop after this many trainer steps.")

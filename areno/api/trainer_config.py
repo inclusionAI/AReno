@@ -55,6 +55,7 @@ class TrainerConfig:
     keep_rollout_state: bool = True
     eager_decode: bool = False
     attn_backend: str = "flash"
+    preserve_first_error: bool = False
     metrics_log_dir: str | None = DEFAULT_METRICS_LOG_DIR
     agent_fn: str | None = None
     agent_timeout_s: float = 300.0
@@ -98,6 +99,7 @@ class TrainerConfig:
                 "keep_rollout_state": self.keep_rollout_state,
                 "eager_decode": self.eager_decode,
                 "attn_backend": self.attn_backend,
+                "preserve_first_error": self.preserve_first_error,
             },
         )
 
@@ -134,6 +136,7 @@ class RolloutTrainerConfig(TrainerConfig):
                 "keep_rollout_state": self.keep_rollout_state,
                 "eager_decode": self.eager_decode,
                 "attn_backend": self.attn_backend,
+                "preserve_first_error": self.preserve_first_error,
             },
         )
 
