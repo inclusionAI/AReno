@@ -101,7 +101,7 @@ def test_warehouse_loader_imports_from_file_path_without_sys_path():
     records = loader.load_training_dataset("unused", default_loader=lambda _: [source])
 
     assert records[0]["prompt"].startswith("You are in a warehouse")
-    assert reward.reward_fn(SimpleNamespace(source_record=source, tool_calls=[], messages=[])) == -0.5
+    assert reward.reward_fn(SimpleNamespace(source_record=source, tool_calls=[], messages=[])) == -0.7
 
 
 def test_warehouse_loader_fills_missing_fields_from_difficulty():
@@ -373,9 +373,10 @@ def test_warehouse_score_task_not_completed():
     game = _load_module("game")
     record = _make_record()
 
-    score = game.score_task(record, {"completed": False})
+    # No tools called, no cart, no distance → base -0.5 - 0.2 (no pick) = -0.7
+    score = game.score_task(record, {"completed": False, "tool_names": []})
 
-    assert score == -0.5
+    assert score == -0.7
 
 
 def test_warehouse_score_task_with_errors():
@@ -499,7 +500,8 @@ def test_warehouse_reward_no_submit_returns_negative():
         messages=[],
     )
 
-    assert reward.reward_fn(reward_record) == -0.5
+    # No pick_from_shelf or submit_order in tool_calls → -0.5 - 0.2 (no pick) = -0.7
+    assert reward.reward_fn(reward_record) == -0.7
 
 
 def test_warehouse_reward_full_correct_sequence():

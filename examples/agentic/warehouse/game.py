@@ -264,23 +264,39 @@ def baseline_distance(state: WarehouseState) -> int:
 def score_task(record: dict[str, Any], trajectory_data: dict[str, Any]) -> float:
     """Score a warehouse picking trajectory.
 
-    For completed tasks: base 1.0 + bonuses - penalties.
-    For incomplete tasks: base -0.5 + partial credit for items correctly picked,
-    so that different failure depths yield different rewards (needed for
-    non-zero group-relative advantages in GSPO/GRPO).
+    Multi-dimensional scoring ensures different failure modes get different
+    rewards, producing non-zero group-relative advantages in GSPO/GRPO.
+
+    Dimensions for incomplete tasks:
+    - Tool usage: did the agent call pick_from_shelf at all? (+0.15)
+    - Cart progress: fraction of order items correctly picked (×0.4)
+    - Valid moves: did the agent move to a real adjacent shelf? (+0.1)
+    - Error penalties: picking errors (-0.15 each), invalid actions (-0.1 each)
+    - No tool calls at all: extra penalty (-0.2)
     """
+
+    names = trajectory_data.get("tool_names", [])
+    cart = trajectory_data.get("cart", {})
+    order_dict = {item["sku"]: item["qty"] for item in record.get("order", [])}
+    total_needed = sum(order_dict.values()) if order_dict else 1
+    total_fulfilled = sum(min(cart.get(sku, 0), qty) for sku, qty in order_dict.items())
+    has_pick = "pick_from_shelf" in names
+    has_submit = "submit_order" in names
 
     if not trajectory_data.get("completed"):
         score = -0.5
-        cart = trajectory_data.get("cart", {})
-        if cart:
-            order_dict = {item["sku"]: item["qty"] for item in record.get("order", [])}
-            if order_dict:
-                total_needed = sum(order_dict.values())
-                total_fulfilled = sum(min(cart.get(sku, 0), qty) for sku, qty in order_dict.items())
-                score += 0.3 * (total_fulfilled / total_needed)
-        score -= 0.1 * trajectory_data.get("picking_errors", 0)
-        score -= 0.05 * trajectory_data.get("invalid_actions", 0)
+        if has_pick:
+            score += 0.15
+        else:
+            score -= 0.2
+        if has_submit:
+            score += 0.05
+        if total_needed > 0:
+            score += 0.4 * (total_fulfilled / total_needed)
+        if trajectory_data.get("distance", 0) > 0:
+            score += 0.1
+        score -= 0.15 * trajectory_data.get("picking_errors", 0)
+        score -= 0.1 * trajectory_data.get("invalid_actions", 0)
         return max(score, -1.0)
     score = 1.0
     score -= 0.1 * trajectory_data.get("picking_errors", 0)
@@ -290,7 +306,6 @@ def score_task(record: dict[str, Any], trajectory_data: dict[str, Any]) -> float
     if actual > 0 and baseline > 0:
         efficiency = min(baseline / max(actual, 1), 1.0)
         score *= 0.7 + 0.3 * efficiency
-    names = trajectory_data.get("tool_names", [])
     if names[:2] == ["pick_from_shelf", "submit_order"]:
         score += 0.2
     return max(score, -1.0)
