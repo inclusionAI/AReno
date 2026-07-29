@@ -1,70 +1,61 @@
-"""Agent entrypoint for Hanoi tool-call rollouts.
+"""Agent entrypoint for Hanoi multi-turn tool-call rollouts.
 
-Mirrors ``examples/agentic/duelgrid/run_agent.py``. For each start board the
-model calls ``move_disk`` with a full move sequence; the rollout session
-converts each call into the trainer's token/logprob rows. No trainer logic
-lives here — token rows, loss masks, and tool-result masking are handled by
-``RolloutSession`` / ``LossMaskPolicy``.
-
-Design choice — single-turn full solution:
-    Each board is solved in ONE ``move_disk`` call carrying the whole move
-    list, rather than a multi-turn "move → observe → move" loop. This matches
-    DuelGrid's single-call shape, keeps the trajectory short (one policy span
-    to score), and lets ``reward.py`` score the complete sequence at once via
-    the rules engine. A multi-turn variant is a follow-up, not needed for the
-    issue's acceptance criteria.
+Mirrors ``examples/agentic/shopping/run_agent.py``. For each start board the
+model makes one ``move_disk`` call per turn, the agent applies the move and
+feeds the updated board back as a tool result, looping until solved or the move
+budget is exhausted.  No trainer logic lives here — token rows, loss masks,
+and tool-result masking are handled by ``RolloutSession`` / ``LossMaskPolicy``.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import sys
+from pathlib import Path
 
 from areno.api.agentic import AgentTrajectory, AgentTrajectoryTurn
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import dataset_generator
+import game
 
 logger = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 SYSTEM_PROMPT = (
     "You are an expert at the Towers of Hanoi puzzle. "
-    "Solve the given board by calling the move_disk tool ONCE with an ordered list "
-    'of moves under the "moves" key. The argument shape is '
-    '{"moves": [[0,2],[0,1],...]}: a list of [source, target] pairs, each with '
-    "source, target in {0,1,2}. Do NOT pass a bare {source, target} object — wrap "
-    "every move in the moves list. "
-    "The tool name is always move_disk; never use MOVE or another name as the tool. "
+    "Call move_disk ONCE per turn with a single {source, target} move. "
+    "source and target are integers in {0,1,2}. "
     "Only move a top disk onto an empty peg or a larger disk. "
+    "Win when all disks are stacked on peg 2 (largest at the bottom). "
     "Aim for the shortest solution (the optimum is 2**n - 1 moves)."
 )
 
-# Tool schema: each move is a fixed [source, target] integer pair. We use
-# JSON Schema tuple form (prefixItems + items:false, draft 2020-12) to enforce
-# "exactly two ints". Some OpenAI-compatible servers ignore the tuple form and
-# only validate the outer array — that is fine: the rules engine re-checks
-# every move's legality in reward.py, so schema validation is convenience, not
-# a correctness boundary.
+# Tool schema: a single (source, target) move.
 MOVE_DISK_TOOL = {
     "type": "function",
     "function": {
         "name": "move_disk",
-        "description": "Submit an ordered move sequence to solve the Towers of Hanoi board.",
+        "description": "Move one disk from source peg to target peg.",
         "parameters": {
             "type": "object",
             "properties": {
-                "moves": {
-                    "type": "array",
-                    "minItems": 1,
-                    "description": "Ordered (source, target) moves to execute, e.g. [[0,2],[0,1]].",
-                    "items": {
-                        "type": "array",
-                        "prefixItems": [{"type": "integer"}, {"type": "integer"}],
-                        "minItems": 2,
-                        "maxItems": 2,
-                        "items": False,
-                    },
+                "source": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 2,
+                    "description": "Source peg (0, 1, or 2).",
+                },
+                "target": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 2,
+                    "description": "Target peg (0, 1, or 2).",
                 },
             },
-            "required": ["moves"],
+            "required": ["source", "target"],
             "additionalProperties": False,
         },
     },
@@ -72,7 +63,7 @@ MOVE_DISK_TOOL = {
 
 
 async def run_agent(ctx, batch):
-    """Run one tool-call model request for each Hanoi start board."""
+    """Run multi-turn agentic rollouts for each Hanoi start board."""
 
     try:
         import httpx
@@ -101,31 +92,87 @@ async def run_agent(ctx, batch):
     )
 
     async def run_one(item):
+        state = dataset_generator.record_to_state(item.record["state"])
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": item.prompt},
         ]
-        # Force the move_disk tool so the model cannot ramble in natural language
-        # (a weak base model tends to; reward_fn would then fall back to parsing
-        # completion text and usually score 0). tool_choice is honored by the
-        # OpenAI-compatible proxy backing the in-training policy.
+        turns: list[AgentTrajectoryTurn] = []
         tool_choice = {"type": "function", "function": {"name": "move_disk"}}
-        response = await client.chat.completions.create(
-            model="policy",  # routes to the in-training policy via ctx.get_base_url()
-            messages=messages,
-            tools=[MOVE_DISK_TOOL],
-            tool_choice=tool_choice,
-            stream=False,
-        )
-        return AgentTrajectoryTurn(
-            item=item,
-            messages=messages,
-            response=response,
-            tools=[MOVE_DISK_TOOL],
-            tool_choice=tool_choice,
-        )
+
+        for _turn_idx in range(state.max_moves):
+            response = await client.chat.completions.create(
+                model="policy",
+                messages=messages,
+                tools=[MOVE_DISK_TOOL],
+                tool_choice=tool_choice,
+                stream=False,
+            )
+            turn = AgentTrajectoryTurn(
+                item=item,
+                messages=list(messages),
+                response=response,
+                tools=[MOVE_DISK_TOOL],
+                tool_choice=tool_choice,
+            )
+            turns.append(turn)
+
+            message = response.choices[0].message
+            raw_calls = message.tool_calls or []
+            if not raw_calls:
+                break
+            call = raw_calls[0]
+            try:
+                args = json.loads(call.function.arguments)
+            except json.JSONDecodeError:
+                break
+            source = args.get("source")
+            target = args.get("target")
+            if source is None or target is None or not isinstance(source, int) or not isinstance(target, int):
+                break
+
+            # Append the assistant message with tool call.
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": message.content or "",
+                    "tool_calls": [
+                        {
+                            "id": call.id,
+                            "type": "function",
+                            "function": {"name": "move_disk", "arguments": call.function.arguments},
+                        }
+                    ],
+                }
+            )
+
+            # Apply the move and check terminal.
+            state, _reward, done, _info = game.step(state, (source, target))
+
+            if done:
+                break
+
+            # Feed back the current board state as tool result.
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": call.id,
+                    "name": "move_disk",
+                    "content": json.dumps(
+                        {
+                            "pegs": [list(stack) for stack in state.pegs],
+                            "legal_moves": [list(mv) for mv in game.legal_moves(state)],
+                        },
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                }
+            )
+
+        return turns
 
     try:
-        return AgentTrajectory(turns=list(await asyncio.gather(*(run_one(item) for item in items))))
+        grouped = await asyncio.gather(*(run_one(item) for item in items))
+        return AgentTrajectory(turns=[turn for turns in grouped for turn in turns])
     finally:
         await client.close()

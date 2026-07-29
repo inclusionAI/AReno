@@ -439,9 +439,8 @@ def format_prompt(state: HanoiState) -> str:
     return (
         "You move disks in a Towers of Hanoi puzzle.\n\n"
         "Rules:\n"
-        '- Call the move_disk tool ONCE with {"moves": [[source, target], ...]}: '
-        "a list of [source, target] pairs, each in {0,1,2}. Do not pass a bare "
-        "{source, target} object — wrap every move in the moves list.\n"
+        "- Call the move_disk tool ONCE per turn with a single {source, target}.\n"
+        "- source and target are integers in {0,1,2}.\n"
         "- Only move the top disk of a peg; never place a larger disk on a smaller one.\n"
         "- Win when all disks are stacked on peg 2 (largest at the bottom).\n\n"
         f"Disks: {state.n}. Moves so far: {state.moves}/{state.max_moves}.\n\n"

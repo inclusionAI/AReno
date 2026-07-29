@@ -118,18 +118,16 @@ def _progress_count(result: Any) -> int:
 
 
 def _tool_moves(record: Any) -> list[tuple[int, int]]:
-    """Extract a move list from the ``move_disk`` tool call (or completion text).
+    """Extract a consolidated move list from all ``move_disk`` tool calls.
 
-    Tolerant of the argument shape a weak base model actually emits. The tool
-    schema mandates ``{"moves": [[s, t], ...]}``, but historical prose told the
-    model ``{source, target}``, so a model may return a bare
-    ``{"source": s, "target": t}`` single move or wrap one dict under ``moves``.
-    All three are coerced to a move list; only a genuinely empty/absent call
-    falls through to completion text. Without this, such calls silently extract
-    ``[]`` and reward 0 even though ``tool_calls`` was parsed — the cold-start
-    stall observed when ``tool_calls=8/8`` yet ``reward_mean=0.0``.
+    In multi-turn mode each call carries a single ``{source, target}`` move;
+    all calls across all turns are accumulated into one sequential move list
+    that ``replay`` consumes.  For backward compatibility the old single-turn
+    ``{"moves": [[s, t], ...]}`` form is still accepted.  Only a complete
+    absence of tool calls triggers a fallback to completion-text parsing.
     """
 
+    all_moves: list[tuple[int, int]] = []
     for call in getattr(record, "tool_calls", []) or []:
         name = call.get("name") if isinstance(call, dict) else None
         if name != "move_disk":
@@ -139,19 +137,28 @@ def _tool_moves(record: Any) -> list[tuple[int, int]]:
             try:
                 arguments = json.loads(arguments)
             except json.JSONDecodeError:
-                return []
+                continue  # skip malformed, don't abort the whole trajectory
         if isinstance(arguments, dict):
+            # Multi-turn: {"source": s, "target": t}
+            src = arguments.get("source")
+            tgt = arguments.get("target")
+            if src is not None and tgt is not None:
+                pair = game._normalize_action((src, tgt))
+                if pair is not None:
+                    all_moves.append(pair)
+                    continue
+            # Legacy single-turn: {"moves": [[s, t], ...]} or {"moves": {s, t}}
             moves_field = arguments.get("moves")
-            # Tolerate {"source": s, "target": t} (bare single move) and
-            # {"moves": {"source": s, "target": t}} (single move wrapped under
-            # moves) so a model following the prose over the schema still scores.
-            if moves_field is None and ("source" in arguments or "target" in arguments):
-                return _coerce_moves([arguments])
             if isinstance(moves_field, dict):
-                return _coerce_moves([moves_field])
-            return _coerce_moves(moves_field)
+                all_moves.extend(_coerce_moves([moves_field]))
+                continue
+            if moves_field is not None:
+                all_moves.extend(_coerce_moves(moves_field))
+                continue
         if isinstance(arguments, list):
-            return _coerce_moves(arguments)
+            all_moves.extend(_coerce_moves(arguments))
+    if all_moves:
+        return all_moves
     return _coerce_moves(_fallback_completion(getattr(record, "completion", None)))
 
 
