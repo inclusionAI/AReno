@@ -94,7 +94,17 @@ def reward_fn(record: Any) -> float:
 
 
 def _tool_moves(record: Any) -> list[tuple[int, int]]:
-    """Extract a move list from the ``move_disk`` tool call (or completion text)."""
+    """Extract a move list from the ``move_disk`` tool call (or completion text).
+
+    Tolerant of the argument shape a weak base model actually emits. The tool
+    schema mandates ``{"moves": [[s, t], ...]}``, but historical prose told the
+    model ``{source, target}``, so a model may return a bare
+    ``{"source": s, "target": t}`` single move or wrap one dict under ``moves``.
+    All three are coerced to a move list; only a genuinely empty/absent call
+    falls through to completion text. Without this, such calls silently extract
+    ``[]`` and reward 0 even though ``tool_calls`` was parsed — the cold-start
+    stall observed when ``tool_calls=8/8`` yet ``reward_mean=0.0``.
+    """
 
     for call in getattr(record, "tool_calls", []) or []:
         name = call.get("name") if isinstance(call, dict) else None
@@ -107,13 +117,31 @@ def _tool_moves(record: Any) -> list[tuple[int, int]]:
             except json.JSONDecodeError:
                 return []
         if isinstance(arguments, dict):
-            return _coerce_moves(arguments.get("moves"))
+            moves_field = arguments.get("moves")
+            # Tolerate {"source": s, "target": t} (bare single move) and
+            # {"moves": {"source": s, "target": t}} (single move wrapped under
+            # moves) so a model following the prose over the schema still scores.
+            if moves_field is None and ("source" in arguments or "target" in arguments):
+                return _coerce_moves([arguments])
+            if isinstance(moves_field, dict):
+                return _coerce_moves([moves_field])
+            return _coerce_moves(moves_field)
         if isinstance(arguments, list):
             return _coerce_moves(arguments)
     return _coerce_moves(_fallback_completion(getattr(record, "completion", None)))
 
 
 def _coerce_moves(raw: Any) -> list[tuple[int, int]]:
+    if isinstance(raw, str):
+        # The Qwen tool-call path often serializes the moves list as a JSON
+        # *string* ("[[0,1],[0,2]]") rather than a list. Deserialize first;
+        # without this, str-shaped moves are dropped to [] and reward is 0 even
+        # when every sample emitted a valid move_disk call (observed in rollout:
+        # tool_calls=8/8 yet reward_mean=0.0).
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            return game.parse_trace(raw) if raw.strip() else []
     if not isinstance(raw, list):
         return []
     moves: list[tuple[int, int]] = []

@@ -23,7 +23,7 @@ heavyweight dependency. Its acceptance criteria map to code as follows.
 | Completion rate + excess moves over optimum | `game.evaluate` returns `completion_rate`, `avg_excess_moves`, `oracle_steps` |
 | Uses existing contracts; no DB/sandbox | `run_agent` uses `areno.api.agentic.AgentTrajectory` / `AgentTrajectoryTurn` + `ctx.get_base_url()` proxy; only optional runtime dep is `openai` (same as DuelGrid) |
 | Default behaviour backward compatible | Pure opt-in: no AReno CLI flag / config / public API is added or changed; `illegal_action_policy` defaults to `penalize` |
-| Focused CPU tests (success / invalid / boundary-failure) | `tests/test_agentic_hanoi_example_cpu.py` — 65 cases, `importlib`-loaded, no `areno` import, no CUDA build |
+| Focused CPU tests (success / invalid / boundary-failure) | `tests/test_agentic_hanoi_example_cpu.py` — 68 cases, `importlib`-loaded, no `areno` import, no CUDA build |
 | User docs with runnable example + observable output | `README.md` (rules, `2**n-1`, metrics, input contract, defaults, output fields, limitations, copyable example incl. a boundary input) |
 
 The implementation stays narrow on purpose: it adds one example directory and
@@ -142,14 +142,13 @@ line from the issue.
 ### 3.1 CPU tests
 Command (per CONTRIBUTING step 6):
 ```
-pytest tests/ -k cpu -q tests/test_agentic_hanoi_example_cpu.py
+pytest tests/test_agentic_hanoi_example_cpu.py -q
 ```
 Result (Python 3.9.6, CPU only):
 ```
-collected 65 items
-tests/test_agentic_hanoi_example_cpu.py ................................ [ 49%]
-.................................                                        [100%]
-============================== 65 passed in 0.47s ==============================
+collected 68 items
+tests/test_agentic_hanoi_example_cpu.py .................................................................. [100%]
+============================== 68 passed in 0.47s ==============================
 ```
 
 ### 3.2 Lint / format (pre-commit parity)
@@ -192,10 +191,21 @@ step  reward_mean  advantage_mean  grad_norm  grad_zero_ratio
 > 0. The committed (lenient) reward is expected to break this stall by giving
 > unsolved traces a small partial credit — i.e. `reward_mean` / `advantage_mean`
 > / `grad_norm` should become non-zero from step 0.
+>
+> **Update (2026-07-29, self-review):** on the first real run the lenient reward
+> did *not* break the stall — `tool_calls=8/8` yet `reward_mean=0.0` persisted.
+> Root cause: `reward._tool_moves` only accepted `{"moves":[...]}`, while
+> `SYSTEM_PROMPT` / `format_prompt` told the model `{source,target}`, so a weak
+> base model emitted `{"source":0,"target":2}` and the moves were silently dropped
+> to `[]` → reward 0 → the partial credit above never engaged. Fixed in a
+> follow-up commit: `_tool_moves` now tolerates `{source,target}` and
+> `{moves:{source,target}}`; `SYSTEM_PROMPT` / `format_prompt` are aligned to the
+> schema. Verified: a bare `{"source":0,"target":2}` now scores 0.02 (was 0.0);
+> CPU suite 68 passed. **Training side confirmed (2026-07-29):** step 0 `reward_mean=0.025` (was `0.000000`). The final missing piece: the Qwen tool-call path serializes the moves list as a JSON *string* (`{"moves":"[[0,1],[0,2]]"}`), which `_coerce_moves` previously dropped as non-list to `[]`; it now `json.loads` str-shaped moves first. A `[HANOI-DBG]` print of the real `tool_calls` arguments pinned this to ground (no more guessing).
 
 ## 4. Known limitations (stated honestly)
 
-1. **Cold-start reward stall — mitigated, not eliminated.** Under a strictly
+1. **Cold-start reward stall — root cause found and fixed (2026-07-29).** Under a strictly
    sparse reward a weak base model (Qwen3.5-0.8B) cannot solve Hanoi in one
    shot, so every GSPO group scores all-zero → zero advantage → zero gradient
    → no update (observed: steps 0–7 `grad_zero_ratio=1.0`). This PR mitigates
@@ -204,7 +214,7 @@ step  reward_mean  advantage_mean  grad_norm  grad_zero_ratio
    model to actually learn is a training-experiment question, not a demo-
    correctness one. AReno also has no early-stop today, so a stalled run must
    be bounded with `--max-steps`. The stall itself is the scenario H-version
-   #203/#239 target. Demo correctness is fixed by the 65 CPU tests and the
+   #203/#239 target. Demo correctness is fixed by the 68 CPU tests and the
    oracle/replay fixtures, independent of training outcome.
 2. **`run_agent.py` has no CPU unit test.** It imports `areno` and `openai`, so
    it is only exercised at training time — consistent with DuelGrid's

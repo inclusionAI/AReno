@@ -547,6 +547,47 @@ def test_string_arguments_are_parsed():
     assert reward.reward_fn(rec) == pytest.approx(game.COMPLETION_REWARD)
 
 
+def test_source_target_args_also_scored():
+    # Regression for the cold-start stall: a weak base model tends to emit the
+    # prose form {"source": s, "target": t} instead of the schema's
+    # {"moves": [[s, t]...]}. If _tool_moves rejected that, every sample would
+    # reward exactly 0.0 (observed: tool_calls=8/8 yet reward_mean=0.0,
+    # grad_zero_ratio=1.0) and GSPO could never form an advantage. A bare single
+    # move must still score positive partial credit.
+    rec = _record(3, "optimal", tool_moves=None)
+    rec.tool_calls = [{"name": "move_disk", "arguments": {"source": 0, "target": 2}}]
+    assert reward.reward_fn(rec) > 0.0
+
+
+def test_single_move_dict_wrapped_under_moves_scored():
+    # Also tolerate {"moves": {"source": 0, "target": 2}}.
+    import json as _json
+
+    rec = SimpleNamespace(
+        source_record={"state": next(r for r in gen.generate_records() if r["n"] == 3 and r["scenario"] == "optimal")},
+        completion=None,
+        tool_calls=[{"name": "move_disk", "arguments": _json.dumps({"moves": {"source": 0, "target": 2}})}],
+    )
+    assert reward.reward_fn(rec) > 0.0
+
+
+def test_moves_field_as_json_string_parsed():
+    # Regression (2026-07-29 rollout): the Qwen tool-call path serializes the
+    # moves list as a JSON *string* — arguments {"moves": "[[0,2],..."}. The
+    # extractor must deserialize the string, not reject it as non-list, which
+    # made tool_calls=8/8 yet reward_mean=0.0 until _coerce_moves learned to
+    # json.loads a str-shaped moves field.
+    import json as _json
+
+    optimal = [list(m) for m in game.optimal_solution(3)]
+    rec = SimpleNamespace(
+        source_record={"state": next(r for r in gen.generate_records() if r["n"] == 3 and r["scenario"] == "optimal")},
+        completion=None,
+        tool_calls=[{"name": "move_disk", "arguments": _json.dumps({"moves": _json.dumps(optimal)})}],
+    )
+    assert reward.reward_fn(rec) == pytest.approx(game.COMPLETION_REWARD)
+
+
 def test_malformed_arguments_score_zero_not_crash():
     rec = _record(3, "optimal", tool_moves=None, completion="not json at all")
     assert reward.reward_fn(rec) == 0.0

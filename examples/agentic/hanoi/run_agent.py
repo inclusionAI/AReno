@@ -27,8 +27,11 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 
 SYSTEM_PROMPT = (
     "You are an expert at the Towers of Hanoi puzzle. "
-    "Solve the given board by calling the move_disk tool with an ordered list "
-    "of moves. Each move is {source, target} with source, target in {0,1,2}. "
+    "Solve the given board by calling the move_disk tool ONCE with an ordered list "
+    'of moves under the "moves" key. The argument shape is '
+    '{"moves": [[0,2],[0,1],...]}: a list of [source, target] pairs, each with '
+    "source, target in {0,1,2}. Do NOT pass a bare {source, target} object — wrap "
+    "every move in the moves list. "
     "The tool name is always move_disk; never use MOVE or another name as the tool. "
     "Only move a top disk onto an empty peg or a larger disk. "
     "Aim for the shortest solution (the optimum is 2**n - 1 moves)."
