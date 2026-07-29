@@ -8,11 +8,20 @@ from types import SimpleNamespace
 
 import pytest
 
+# Path to the multitool example directory, used to load game.py, reward.py, etc.
 EXAMPLE_DIR = Path(__file__).resolve().parents[1] / "examples" / "agentic" / "multitool"
 
 
 def _areno_importable() -> bool:
-    """Check whether the areno package can be imported (requires torch)."""
+    """Check whether the areno package can be imported (requires torch).
+
+    Some tests (e.g. run_agent dispatch) depend on the areno package being
+    installed. This function probes importability so those tests can be
+    conditionally skipped when torch is not available (e.g. in CI without GPU).
+
+    Returns:
+        True if `areno.api.agentic` can be imported, False otherwise.
+    """
 
     try:
         import areno.api.agentic  # noqa: F401
@@ -21,11 +30,27 @@ def _areno_importable() -> bool:
     return True
 
 
+# Cached flag: whether the areno package is importable in this environment.
 _HAS_ARENO = _areno_importable()
+# Pytest marker: skip a test if areno (and thus torch) is not installed.
 _requires_areno = pytest.mark.skipif(not _HAS_ARENO, reason="areno package not importable (torch missing)")
 
 
 def _load_module(name: str):
+    """Dynamically load a Python module from the multitool example directory.
+
+    Temporarily adds the example directory to sys.path so that the module
+    can import its sibling modules (e.g. game.py imports from game). The
+    path and any 'game' module entry are cleaned up in the finally block
+    to avoid polluting other tests.
+
+    Args:
+        name: The module file name without .py extension (e.g. "game", "reward").
+
+    Returns:
+        The loaded module object.
+    """
+
     path = EXAMPLE_DIR / f"{name}.py"
     previous_game = sys.modules.pop("game", None)
     sys.path.insert(0, str(EXAMPLE_DIR))
@@ -43,6 +68,20 @@ def _load_module(name: str):
 
 
 def _load_module_without_sys_path(name: str):
+    """Load a module from the example directory WITHOUT adding it to sys.path.
+
+    Used for modules (e.g. dataset_loader.py, run_agent.py) that import
+    'game' via a sys.path manipulation at their own file level, so we
+    must NOT pre-add the directory — otherwise duplicate path entries
+    or import conflicts may occur.
+
+    Args:
+        name: The module file name without .py extension.
+
+    Returns:
+        The loaded module object.
+    """
+
     path = EXAMPLE_DIR / f"{name}.py"
     previous_game = sys.modules.pop("game", None)
     try:
@@ -58,11 +97,13 @@ def _load_module_without_sys_path(name: str):
 
 
 # ---------------------------------------------------------------------------
-# Tool logic tests
+# Tool logic tests — verify each fake tool returns correct results
 # ---------------------------------------------------------------------------
 
 
 def test_lookup_contact_finds_alice():
+    """Verify lookup_contact finds Alice by partial name match."""
+
     game = _load_module("game")
     result = game.lookup_contact("Alice")
     assert result is not None
@@ -71,6 +112,8 @@ def test_lookup_contact_finds_alice():
 
 
 def test_lookup_contact_partial_match_case_insensitive():
+    """Verify lookup_contact matches case-insensitively with a partial name."""
+
     game = _load_module("game")
     result = game.lookup_contact("carol")
     assert result is not None
@@ -78,11 +121,15 @@ def test_lookup_contact_partial_match_case_insensitive():
 
 
 def test_lookup_contact_not_found_returns_none():
+    """Verify lookup_contact returns None for a name that doesn't exist."""
+
     game = _load_module("game")
     assert game.lookup_contact("Zzz") is None
 
 
 def test_read_note_returns_content():
+    """Verify read_note returns the note content for a valid key."""
+
     game = _load_module("game")
     result = game.read_note("meeting")
     assert result is not None
@@ -90,11 +137,15 @@ def test_read_note_returns_content():
 
 
 def test_read_note_unknown_key_returns_none():
+    """Verify read_note returns None for a non-existent note key."""
+
     game = _load_module("game")
     assert game.read_note("nonexistent") is None
 
 
 def test_calculator_basic_arithmetic():
+    """Verify calculate handles +, -, *, / and parentheses correctly."""
+
     game = _load_module("game")
     assert game.calculate("3 * 15")["result"] == 45.0
     assert game.calculate("10 + 5")["result"] == 15.0
@@ -103,6 +154,8 @@ def test_calculator_basic_arithmetic():
 
 
 def test_calculator_division_by_zero_returns_error():
+    """Verify calculate returns an error dict (not an exception) for division by zero."""
+
     game = _load_module("game")
     result = game.calculate("10 / 0")
     assert "error" in result
@@ -110,36 +163,48 @@ def test_calculator_division_by_zero_returns_error():
 
 
 def test_calculator_empty_expression_returns_error():
+    """Verify calculate returns an error for an empty string input."""
+
     game = _load_module("game")
     result = game.calculate("")
     assert "error" in result
 
 
 def test_calculator_invalid_characters_returns_error():
+    """Verify calculate rejects non-arithmetic input (e.g. code injection attempts)."""
+
     game = _load_module("game")
     result = game.calculate("import os")
     assert "error" in result
 
 
 def test_unit_convert_cm_to_m():
+    """Verify unit_convert correctly converts 100 cm to 1 m."""
+
     game = _load_module("game")
     result = game.unit_convert(100, "cm", "m")
     assert result["result"] == 1.0
 
 
 def test_unit_convert_kg_to_g():
+    """Verify unit_convert correctly converts 2.5 kg to 2500 g."""
+
     game = _load_module("game")
     result = game.unit_convert(2.5, "kg", "g")
     assert result["result"] == 2500.0
 
 
 def test_unit_convert_unsupported_returns_error():
+    """Verify unit_convert returns an error when converting across categories (length to weight)."""
+
     game = _load_module("game")
     result = game.unit_convert(1, "cm", "kg")
     assert "error" in result
 
 
 def test_lookup_parcel_existing():
+    """Verify lookup_parcel returns tracking info for a valid tracking id."""
+
     game = _load_module("game")
     result = game.lookup_parcel("P002")
     assert result is not None
@@ -148,16 +213,24 @@ def test_lookup_parcel_existing():
 
 
 def test_lookup_parcel_not_found():
+    """Verify lookup_parcel returns None for a non-existent tracking id."""
+
     game = _load_module("game")
     assert game.lookup_parcel("P999") is None
 
 
 # ---------------------------------------------------------------------------
-# Dataset generator and loader tests
+# Dataset generator and loader tests — verify data pipeline correctness
 # ---------------------------------------------------------------------------
 
 
 def test_generator_produces_deterministic_records():
+    """Verify generate_records produces the correct count and is deterministic by seed.
+
+    Checks: record count matches request, same seed yields identical output,
+    each record has the required fields, and no pre-built prompt leaks in.
+    """
+
     game = _load_module("game")
     records = game.generate_records(10, seed=42)
     assert len(records) == 10
@@ -172,6 +245,12 @@ def test_generator_produces_deterministic_records():
 
 
 def test_loader_adds_prompt():
+    """Verify the dataset loader injects a 'prompt' field into each record.
+
+    The loader calls make_prompt() on the record's description and stores
+    the result as record["prompt"], which is what the agent sees during rollout.
+    """
+
     loader = _load_module_without_sys_path("dataset_loader")
     source = {"id": "test-0", "description": "Do something", "required_tools": ["calculate", "read_note"]}
     records = loader.load_training_dataset("unused", default_loader=lambda _: [source])
@@ -179,11 +258,13 @@ def test_loader_adds_prompt():
 
 
 # ---------------------------------------------------------------------------
-# Scoring tests — success path
+# Scoring tests — success path: verify perfect trajectories score 1.0
 # ---------------------------------------------------------------------------
 
 
 def test_score_contact_meeting_success():
+    """Verify a correct contact-meeting trajectory (lookup_contact then read_note) gets a perfect score."""
+
     game = _load_module("game")
     record = {
         "id": "contact-meeting-0",
@@ -206,6 +287,8 @@ def test_score_contact_meeting_success():
 
 
 def test_score_budget_shipping_success():
+    """Verify a correct budget-shipping trajectory (two read_note calls) gets a perfect score."""
+
     game = _load_module("game")
     record = {
         "id": "budget-shipping-0",
@@ -223,6 +306,8 @@ def test_score_budget_shipping_success():
 
 
 def test_score_parcel_city_success():
+    """Verify a correct parcel-city trajectory (lookup_parcel then lookup_contact by city) gets a perfect score."""
+
     game = _load_module("game")
     record = {
         "id": "parcel-city-0",
@@ -241,6 +326,8 @@ def test_score_parcel_city_success():
 
 
 def test_score_calc_shipping_success():
+    """Verify a correct calc-shipping trajectory (calculate then read_note) gets a perfect score."""
+
     game = _load_module("game")
     record = {
         "id": "calc-shipping-0",
@@ -259,6 +346,8 @@ def test_score_calc_shipping_success():
 
 
 def test_score_convert_parcel_success():
+    """Verify a correct convert-parcel trajectory (unit_convert then lookup_parcel) gets a perfect score."""
+
     game = _load_module("game")
     record = {
         "id": "convert-parcel-0",
@@ -279,11 +368,13 @@ def test_score_convert_parcel_success():
 
 
 # ---------------------------------------------------------------------------
-# Scoring tests — failure paths
+# Scoring tests — failure paths: verify incorrect trajectories are penalized
 # ---------------------------------------------------------------------------
 
 
 def test_score_wrong_tool_order():
+    """Verify that calling tools in the wrong order lowers the 'order' score."""
+
     game = _load_module("game")
     record = {
         "id": "contact-meeting-1",
@@ -292,6 +383,7 @@ def test_score_wrong_tool_order():
         "expected_contact": "Alice Chen",
         "expected_note_key": "meeting",
     }
+    # Intentionally reversed order: read_note before lookup_contact
     tool_calls = [
         {"name": "read_note", "arguments": json.dumps({"note_key": "meeting"})},
         {"name": "lookup_contact", "arguments": json.dumps({"name": "Alice"})},
@@ -302,6 +394,8 @@ def test_score_wrong_tool_order():
 
 
 def test_score_wrong_arguments():
+    """Verify that passing incorrect tool arguments lowers the 'arguments' score."""
+
     game = _load_module("game")
     record = {
         "id": "contact-meeting-2",
@@ -310,6 +404,7 @@ def test_score_wrong_arguments():
         "expected_contact": "Alice Chen",
         "expected_note_key": "meeting",
     }
+    # Wrong: looking up Bob instead of Alice, reading budget instead of meeting
     tool_calls = [
         {"name": "lookup_contact", "arguments": json.dumps({"name": "Bob"})},
         {"name": "read_note", "arguments": json.dumps({"note_key": "budget"})},
@@ -320,6 +415,8 @@ def test_score_wrong_arguments():
 
 
 def test_score_missing_tool():
+    """Verify that omitting a required tool lowers the 'tool_selection' score."""
+
     game = _load_module("game")
     record = {
         "id": "contact-meeting-3",
@@ -328,6 +425,7 @@ def test_score_missing_tool():
         "expected_contact": "Alice Chen",
         "expected_note_key": "meeting",
     }
+    # Only one of two required tools is called
     tool_calls = [
         {"name": "lookup_contact", "arguments": json.dumps({"name": "Alice"})},
     ]
@@ -337,6 +435,8 @@ def test_score_missing_tool():
 
 
 def test_score_empty_trajectory():
+    """Verify that an empty tool-call trajectory gets the worst overall score (-1.0)."""
+
     game = _load_module("game")
     record = {
         "id": "contact-meeting-4",
@@ -351,6 +451,8 @@ def test_score_empty_trajectory():
 
 
 def test_score_invalid_json_arguments():
+    """Verify that malformed JSON arguments are treated as a failed argument check."""
+
     game = _load_module("game")
     record = {
         "id": "contact-meeting-5",
@@ -368,11 +470,13 @@ def test_score_invalid_json_arguments():
 
 
 # ---------------------------------------------------------------------------
-# Reward function tests
+# Reward function tests — verify reward.py wraps score_task correctly
 # ---------------------------------------------------------------------------
 
 
 def test_reward_fn_returns_positive_on_success():
+    """Verify reward_fn returns 1.0 when the agent's tool calls are fully correct."""
+
     reward = _load_module("reward")
     record = {
         "id": "contact-meeting-0",
@@ -390,6 +494,8 @@ def test_reward_fn_returns_positive_on_success():
 
 
 def test_reward_fn_returns_negative_on_empty_trajectory():
+    """Verify reward_fn returns -1.0 when the agent made no tool calls at all."""
+
     reward = _load_module("reward")
     record = {
         "id": "contact-meeting-0",
@@ -403,6 +509,8 @@ def test_reward_fn_returns_negative_on_empty_trajectory():
 
 
 def test_reward_fn_partial_credit_on_wrong_order():
+    """Verify reward_fn returns a partial score (between -1 and 1) for wrong tool order."""
+
     reward = _load_module("reward")
     record = {
         "id": "contact-meeting-0",
@@ -421,12 +529,13 @@ def test_reward_fn_partial_credit_on_wrong_order():
 
 
 # ---------------------------------------------------------------------------
-# run_agent tool dispatch tests
+# run_agent tool dispatch tests — verify _run_tool routes to the correct game tool
 # ---------------------------------------------------------------------------
 
 
 @_requires_areno
 def test_run_agent_dispatches_lookup_contact():
+    """Verify _run_tool dispatches a lookup_contact call and returns the contact dict."""
     run_agent = _load_module_without_sys_path("run_agent")
     assistant_message = {
         "tool_calls": [
@@ -443,6 +552,7 @@ def test_run_agent_dispatches_lookup_contact():
 
 @_requires_areno
 def test_run_agent_dispatches_calculate():
+    """Verify _run_tool dispatches a calculate call and returns the numeric result."""
     run_agent = _load_module_without_sys_path("run_agent")
     assistant_message = {
         "tool_calls": [
@@ -459,6 +569,7 @@ def test_run_agent_dispatches_calculate():
 
 @_requires_areno
 def test_run_agent_dispatches_unit_convert():
+    """Verify _run_tool dispatches a unit_convert call and returns the converted value."""
     run_agent = _load_module_without_sys_path("run_agent")
     assistant_message = {
         "tool_calls": [
@@ -478,6 +589,7 @@ def test_run_agent_dispatches_unit_convert():
 
 @_requires_areno
 def test_run_agent_missing_tool_call_returns_error():
+    """Verify _run_tool returns an error dict when the assistant message has no tool calls."""
     run_agent = _load_module_without_sys_path("run_agent")
     assistant_message = {"tool_calls": []}
     result = run_agent._run_tool(assistant_message)
@@ -486,6 +598,7 @@ def test_run_agent_missing_tool_call_returns_error():
 
 @_requires_areno
 def test_run_agent_unknown_tool_returns_error():
+    """Verify _run_tool returns an error dict when an unrecognized tool name is called."""
     run_agent = _load_module_without_sys_path("run_agent")
     assistant_message = {
         "tool_calls": [
@@ -502,6 +615,7 @@ def test_run_agent_unknown_tool_returns_error():
 
 @_requires_areno
 def test_run_agent_tool_messages_format():
+    """Verify _tool_messages produces the correct OpenAI-style message pair (assistant + tool result)."""
     run_agent = _load_module_without_sys_path("run_agent")
     assistant_message = {
         "role": "assistant",
@@ -524,11 +638,13 @@ def test_run_agent_tool_messages_format():
 
 
 # ---------------------------------------------------------------------------
-# Boundary tests
+# Boundary tests — edge cases and reproducibility checks
 # ---------------------------------------------------------------------------
 
 
 def test_score_task_with_no_required_tools():
+    """Verify score_task gives perfect tool_selection and order when no tools are required."""
+
     game = _load_module("game")
     record = {"id": "empty-0", "description": "No tools needed.", "required_tools": []}
     score = game.score_task(record, [])
@@ -537,6 +653,8 @@ def test_score_task_with_no_required_tools():
 
 
 def test_generator_seed_reproducibility():
+    """Verify that the same seed always produces the same records, and different seeds differ."""
+
     game = _load_module("game")
     r1 = game.generate_records(5, seed=100)
     r2 = game.generate_records(5, seed=100)
