@@ -523,7 +523,9 @@ def _normalize_stop(stop: str | list[str] | None) -> list[str]:
     return [value for value in stop if value]
 
 
-def _run_uvicorn_with_graceful_shutdown(app: FastAPI, *, host: str, port: int, deadline_s: float, uvicorn_module) -> None:
+def _run_uvicorn_with_graceful_shutdown(
+    app: FastAPI, *, host: str, port: int, deadline_s: float, uvicorn_module
+) -> None:
     """Run Uvicorn while retaining ownership of SIGINT and SIGTERM."""
 
     from areno.engine.shutdown import GracefulShutdown, ShutdownInfo, ShutdownStage
