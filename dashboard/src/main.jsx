@@ -11,11 +11,13 @@ import {
   FileText,
   History,
   Layers,
+  Map,
   MessageSquare,
   Moon,
   Plus,
   Play,
   RefreshCw,
+  Route,
   Send,
   Server,
   Settings2,
@@ -286,6 +288,7 @@ function App() {
 
   const pages = [
     { id: "jobs", label: "Jobs", icon: <Activity size={16} /> },
+    { id: "trajectory", label: "Trajectory", icon: <Route size={16} /> },
     { id: "runtime", label: "Runtime", icon: <Server size={16} /> },
     { id: "launcher", label: "Launcher", icon: <Play size={16} /> },
     { id: "agent", label: "Agent", icon: <Bot size={16} /> },
@@ -294,6 +297,7 @@ function App() {
     jobs: selectedJob
       ? [selectedJob.name, `${selectedJob.kind} · ${selectedJob.status} · step ${selectedJob.step ?? 0}`]
       : ["Jobs", "Open an AReno train or serve task to inspect metrics, samples, config, and logs."],
+    trajectory: ["Trajectory Detail", "Inspect agentic rollout trajectories: messages, tool calls, loss masks, and token counts."],
     runtime: ["Runtime Environment", "Review areno check, areno env, dependencies, GPU state, and repository context."],
     launcher: ["Task Launcher", "Start low-intrusion AReno train or serve subprocesses from explicit configs."],
     agent: ["Agent Console", "Chat with an operations agent using the selected job context."],
@@ -512,6 +516,9 @@ function App() {
   }
 
   function renderPage() {
+    if (activePage === "trajectory") {
+      return <TrajectoryPage jobs={jobs} jobDetail={jobDetail} selectedJobId={selectedJobId} setSelectedJobId={setSelectedJobId} />;
+    }
     if (activePage === "runtime") {
       return (
         <div className="tabGrid">
@@ -1350,6 +1357,98 @@ function normalizeDisplayName(name) {
     .trim();
 }
 
+const AGENTIC_ALGOS = ["gspo", "grpo", "ppo"];
+
+function TrajectoryPage({ jobs, jobDetail, selectedJobId, setSelectedJobId }) {
+  const jobList = jobs.data?.jobs || [];
+  const agenticJobs = jobList.filter((job) => job.kind === "train" && AGENTIC_ALGOS.some((algo) => job.command?.some?.((part) => part === `--algo` && job.command?.[job.command.indexOf(part) + 1] === algo) || job.name?.includes(algo)));
+  const detailJob = jobDetail.data?.job;
+  const samples = detailJob?.samples || [];
+  const agenticSamples = samples.filter((sample) => sample.kind === "agentic");
+
+  const stepOptions = useMemo(
+    () => Array.from(new Set(agenticSamples.map((sample) => Number(sample.step || 0)))).sort((a, b) => b - a),
+    [agenticSamples]
+  );
+  const [selectedStep, setSelectedStep] = useState("");
+  const [selectedSampleKey, setSelectedSampleKey] = useState("");
+  const [viewMode, setViewMode] = useState("trajectory");
+
+  useEffect(() => {
+    if (!stepOptions.length) {
+      setSelectedStep("");
+      setSelectedSampleKey("");
+      return;
+    }
+    if (selectedStep === "" || !stepOptions.includes(Number(selectedStep))) {
+      setSelectedStep(String(stepOptions[0]));
+      setSelectedSampleKey("");
+    }
+  }, [selectedStep, stepOptions]);
+
+  const stepSamples = selectedStep === "" ? [] : agenticSamples.filter((sample) => Number(sample.step || 0) === Number(selectedStep));
+  const sampleOptions = stepSamples.map((sample, index) => ({
+    key: sampleKey(sample, index),
+    label: `prompt ${sample.prompt_idx ?? "?"} · sample ${sample.sample_idx ?? "?"}`,
+    sample,
+  }));
+  const activeOption = sampleOptions.find((option) => option.key === selectedSampleKey) || sampleOptions[sampleOptions.length - 1] || null;
+  const sample = activeOption?.sample || null;
+
+  return (
+    <section className="panel trajectoryPage">
+      <div className="panelHeader">
+        <div>
+          <h2>Trajectory Detail</h2>
+          <p>Select a job and rollout sample to inspect the full agentic trajectory.</p>
+        </div>
+      </div>
+      <div className="trajectoryControls">
+        <select
+          value={selectedJobId || ""}
+          onChange={(event) => setSelectedJobId(event.target.value || null)}
+        >
+          <option value="">Select a job…</option>
+          {jobList.map((job) => (
+            <option key={job.id} value={job.id}>
+              {job.name} · {job.kind} · {job.status}
+            </option>
+          ))}
+        </select>
+        {agenticSamples.length > 0 && (
+          <>
+            <select value={selectedStep} onChange={(event) => { setSelectedStep(event.target.value); setSelectedSampleKey(""); }}>
+              {stepOptions.map((step) => <option key={step} value={step}>step {step}</option>)}
+            </select>
+            <select value={activeOption?.key || ""} onChange={(event) => setSelectedSampleKey(event.target.value)}>
+              {sampleOptions.map((option) => <option key={option.key} value={option.key}>{option.label}</option>)}
+            </select>
+            <div className="tabs">
+              <button className={classNames(viewMode === "trajectory" && "active")} onClick={() => setViewMode("trajectory")}>Trajectory</button>
+              <button className={classNames(viewMode === "raw" && "active")} onClick={() => setViewMode("raw")}>Raw JSON</button>
+            </div>
+          </>
+        )}
+      </div>
+      <div className="trajectoryContent">
+        {!selectedJobId ? (
+          <EmptyState title="No job selected" text="Pick a train job with agentic rollouts to view its trajectory." />
+        ) : !agenticSamples.length ? (
+          <EmptyState title="No agentic samples" text="This job has no agentic rollout samples yet, or samples are still being loaded." />
+        ) : sample ? (
+          viewMode === "raw" ? (
+            <pre className="rawJsonView">{JSON.stringify(sample, null, 2)}</pre>
+          ) : (
+            <TrajectoryDetailView sample={sample} />
+          )
+        ) : (
+          <EmptyState title="No sample selected" text="Select a step and sample to view the trajectory detail." />
+        )}
+      </div>
+    </section>
+  );
+}
+
 function SampleView({ samples }) {
   const orderedSamples = useMemo(
     () =>
@@ -1367,6 +1466,7 @@ function SampleView({ samples }) {
   );
   const [selectedStep, setSelectedStep] = useState("");
   const [selectedSampleKey, setSelectedSampleKey] = useState("");
+  const [viewMode, setViewMode] = useState("default");
   useEffect(() => {
     if (!stepOptions.length) {
       setSelectedStep("");
@@ -1387,6 +1487,8 @@ function SampleView({ samples }) {
   const activeOption =
     sampleOptions.find((option) => option.key === selectedSampleKey) || sampleOptions[sampleOptions.length - 1] || null;
   const sample = activeOption?.sample || null;
+  const isAgentic = sample?.kind === "agentic";
+  const effectiveViewMode = isAgentic ? viewMode : "default";
   return (
     <div className="sampleCard">
       <div className="codeTitle sampleTitle">
@@ -1399,20 +1501,32 @@ function SampleView({ samples }) {
             <select value={activeOption?.key || ""} onChange={(event) => setSelectedSampleKey(event.target.value)}>
               {sampleOptions.map((option) => <option key={option.key} value={option.key}>{option.label}</option>)}
             </select>
+            {isAgentic && (
+              <div className="tabs">
+                <button className={classNames(viewMode === "trajectory" && "active")} onClick={() => setViewMode("trajectory")}>Trajectory</button>
+                <button className={classNames(viewMode === "raw" && "active")} onClick={() => setViewMode("raw")}>Raw JSON</button>
+              </div>
+            )}
           </div>
         )}
       </div>
       {sample ? (
-        <div className="sampleGrid">
-          <div>
-            <span>Prompt</span>
-            <p>{sample.prompt || "n/a"}</p>
+        effectiveViewMode === "raw" ? (
+          <pre className="rawJsonView">{JSON.stringify(sample, null, 2)}</pre>
+        ) : isAgentic ? (
+          <TrajectoryDetailView sample={sample} jobId={sample._jobId} />
+        ) : (
+          <div className="sampleGrid">
+            <div>
+              <span>Prompt</span>
+              <p>{sample.prompt || "n/a"}</p>
+            </div>
+            <div>
+              <span>Completion</span>
+              <p>{sample.completion || "n/a"}</p>
+            </div>
           </div>
-          <div>
-            <span>Completion</span>
-            <p>{sample.completion || "n/a"}</p>
-          </div>
-        </div>
+        )
       ) : (
         <div className="sampleEmpty">No rollout sample captured yet.</div>
       )}
@@ -1422,6 +1536,152 @@ function SampleView({ samples }) {
 
 function sampleKey(sample, index) {
   return `${sample.step ?? "x"}-${sample.prompt_idx ?? "x"}-${sample.sample_idx ?? "x"}-${index}`;
+}
+
+function TrajectoryDetailView({ sample }) {
+  const [expandedTools, setExpandedTools] = useState({});
+  const messages = sample.messages || [];
+  const toolCalls = sample.tool_calls || [];
+  const toolResults = sample.tool_results || [];
+  const lossMask = sample.loss_mask || [];
+  const lossMaskTrue = sample.loss_mask_true || 0;
+  const lossMaskTotal = sample.loss_mask_total || 0;
+  const firstLossIdx = sample.first_loss_idx ?? -1;
+  const finalAnswer = sample.final_answer || "";
+  const tokenRowLen = (sample.tokens || []).length;
+
+  const toolResultQueue = [...toolResults];
+  const events = messages.map((message) => {
+    const role = message.role || "unknown";
+    const entry = { type: "message", role, content: String(message.content || "") };
+    if (message.tool_calls) entry.tool_calls = message.tool_calls;
+    if (role === "tool" && toolResultQueue.length) entry.tool_result = toolResultQueue.shift();
+    return entry;
+  });
+  while (toolResultQueue.length) {
+    events.push({ type: "tool_result", role: "tool", tool_result: toolResultQueue.shift() });
+  }
+
+  const tokenCounts = {
+    promptTokens: (sample.prompt_tokens || []).length,
+    responseTokens: (sample.response_tokens || []).length,
+    lossMaskTrue,
+    lossMaskTotal,
+    tokenRowLen,
+  };
+
+  function toggleTool(index) {
+    setExpandedTools((prev) => ({ ...prev, [index]: !prev[index] }));
+  }
+
+  function summarizeToolOutput(result) {
+    const text = JSON.stringify(result, null, 2);
+    return text.length > 200 ? text.slice(0, 200) + "..." : text;
+  }
+
+  return (
+    <div className="trajectoryDetail">
+      <div className="trajectorySummary">
+        <div className="trajectorySummaryItem">
+          <span>Step</span><strong>{sample.step ?? "?"}</strong>
+        </div>
+        <div className="trajectorySummaryItem">
+          <span>Prompt</span><strong>{sample.prompt_idx ?? "?"}</strong>
+        </div>
+        <div className="trajectorySummaryItem">
+          <span>Sample</span><strong>{sample.sample_idx ?? "?"}</strong>
+        </div>
+        <div className="trajectorySummaryItem">
+          <span>Tool calls</span><strong>{toolCalls.length}</strong>
+        </div>
+        <div className="trajectorySummaryItem">
+          <span>Tool results</span><strong>{toolResults.length}</strong>
+        </div>
+        <div className="trajectorySummaryItem">
+          <span>Token row</span><strong>{tokenRowLen}</strong>
+        </div>
+        <div className="trajectorySummaryItem">
+          <span>End reason</span><strong>{sample.end_reason || "completed"}</strong>
+        </div>
+      </div>
+
+      <div className="trajectoryTokenCounts">
+        <div className="trajectoryTokenItem">
+          <label>Prompt tokens</label><strong>{tokenCounts.promptTokens}</strong>
+        </div>
+        <div className="trajectoryTokenItem">
+          <label>Response tokens</label><strong>{tokenCounts.responseTokens}</strong>
+        </div>
+        <div className="trajectoryTokenItem">
+          <label>Loss mask</label><strong>{lossMaskTrue}/{lossMaskTotal}{firstLossIdx >= 0 ? ` (idx ${firstLossIdx})` : ""}</strong>
+        </div>
+        {lossMask.length > 0 && (
+          <div className="trajectoryMaskBar" title={`First ${lossMask.length} mask positions`}>
+            {lossMask.map((enabled, idx) => (
+              <span key={idx} className={classNames("maskCell", enabled ? "train" : "skip")} />
+            ))}
+          </div>
+        )}
+        {lossMaskTotal > lossMask.length && (
+          <span className="maskTruncated">...truncated ({lossMask.length}/{lossMaskTotal} shown)</span>
+        )}
+      </div>
+
+      <div className="trajectoryEvents">
+        {events.map((event, index) => {
+          if (event.type === "tool_result") {
+            const expanded = expandedTools[index];
+            return (
+              <div key={index} className="trajectoryEvent toolResult">
+                <div className="eventHeader" onClick={() => toggleTool(index)}>
+                  <span className="eventBadge result">result</span>
+                  <b>{event.tool_result?.name || "tool"}</b>
+                  <em>{expanded ? "collapse" : "expand"}</em>
+                </div>
+                <pre className={classNames("eventOutput", !expanded && "collapsed")}>
+                  {JSON.stringify(event.tool_result, null, 2)}
+                </pre>
+              </div>
+            );
+          }
+          return (
+            <div key={index} className={`trajectoryEvent message ${event.role}`}>
+              <div className="eventHeader">
+                <span className={`eventBadge ${event.role}`}>{event.role}</span>
+              </div>
+              {event.content && <MarkdownBlock text={event.content} />}
+              {event.tool_calls?.length > 0 && (
+                <div className="eventToolCalls">
+                  {event.tool_calls.map((call, ci) => {
+                    const fn = call.function || {};
+                    return (
+                      <div key={ci} className="eventToolCall">
+                        <span className="toolCallBadge">tool call</span>
+                        <b>{fn.name || call.name || "tool"}</b>
+                        <pre className="toolCallArgs">{fn.arguments || call.arguments || "{}"}</pre>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+              {event.tool_result && (
+                <pre className="eventOutput">
+                  {summarizeToolOutput(event.tool_result)}
+                </pre>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {finalAnswer && (
+        <div className="trajectoryFinalAnswer">
+          <div className="codeTitle"><FileText size={14} /> Final answer</div>
+          <MarkdownBlock text={finalAnswer} />
+        </div>
+      )}
+    </div>
+  );
 }
 
 function ConfigView({ config, launch }) {
