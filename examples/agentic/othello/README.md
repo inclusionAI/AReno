@@ -39,6 +39,45 @@ areno train \
   --max-new-tokens 64
 ```
 
+## Train on Kaggle (Dual T4 GPU)
+
+Kaggle provides free dual T4 GPUs for verified accounts. The following
+commands are tuned for the 2x16 GB VRAM budget on that platform.
+
+```bash
+# 1. Generate boards into Kaggle persistent storage
+python examples/agentic/othello/dataset_generator.py \
+  --output /kaggle/working/othello-boards.jsonl \
+  --count 2048 --seed 2026
+
+# 2. Train with GSPO on dual T4
+areno train \
+  --ckpt Qwen/Qwen3-1.7B \
+  --model-hub modelscope \
+  --dataset-path /kaggle/working/othello-boards.jsonl \
+  --dataset-loader-fn examples/agentic/othello/dataset_loader.py \
+  --reward-fn-path examples/agentic/othello/reward.py \
+  --agent-fn examples/agentic/othello/run_agent.py \
+  --algo gspo --tp-size 2 --world-size 2 \
+  --batch-size 2 --n-samples 4 --max-new-tokens 64 \
+  --mini-bs 2 --max-running-prompts 8 \
+  --save-path /kaggle/working/othello-ckpt --save-interval 50
+```
+
+Key parameter choices for Kaggle T4 x2:
+
+| Parameter | Value | Rationale |
+|-----------|-------|-----------|
+| `--tp-size 2` | 2 | Tensor-parallel across both T4 GPUs |
+| `--world-size 2` | 2 | Must equal GPU count; divisible by `--tp-size` |
+| `--batch-size 2` | 2 | Conservative for 16 GB VRAM per card |
+| `--n-samples 4` | 4 | GSPO group size; needs >= 2 for advantage estimation |
+| `--max-running-prompts 8` | 8 | = batch_size * n_samples; controls rollout concurrency |
+| `--max-new-tokens 64` | 64 | `choose_move` tool-call response is very short |
+| `--model-hub modelscope` | modelscope | Faster in CN; use `hf` internationally |
+
+If you hit OOM, reduce `--batch-size` to 1 or `--n-samples` to 2, or add
+`--drop-rollout-state` to trade speed for lower VRAM usage.
 ## Observable Output
 
 - **Reward**: -1.0 for illegal moves, 0.0 for legal non-terminal moves, 1.0
