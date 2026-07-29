@@ -167,13 +167,24 @@ def _invalid_move_result(board, rng) -> dict:
 
 
 def _tool_messages(assistant_message: dict, tool_result: dict) -> list[dict]:
-    call = assistant_message["tool_calls"][0]
+    calls = assistant_message.get("tool_calls") or []
     content = json.dumps({
         "valid": tool_result["valid"],
         "score": tool_result["score"],
         "terminal": tool_result["terminal"],
         "board": tool_result["board_text"],
     })
+    if not calls:
+        return [
+            assistant_message,
+            {
+                "role": "tool",
+                "tool_call_id": "fallback",
+                "name": "move",
+                "content": content,
+            },
+        ]
+    call = calls[0]
     return [
         assistant_message,
         {
