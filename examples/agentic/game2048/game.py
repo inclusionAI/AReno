@@ -21,15 +21,18 @@ DEFAULT_MAX_MOVES = 50
 SYSTEM_PROMPT = (
     "You are a 2048 game AI. The board is a 4x4 grid. Each turn you choose to "
     "swipe UP, DOWN, LEFT, or RIGHT. Identical tiles merge on collision. After "
-    "each move a new 2 (90%) or 4 (10%) appears in a random empty cell.\n\n"
-    "Strategy: keep your largest tile in a corner and build a monotonic chain "
-    "along one edge. Avoid moving the largest tile away from its corner.\n\n"
-    "Output format: briefly reason about the best move (1-2 sentences), then "
-    "end your response with the direction on its own line, like:\n"
-    "MOVE: LEFT"
+    "each move a new 2 (90%) or 4 (10%) appears in a random empty cell.\n"
+    "Keep your largest tile in a corner.\n\n"
+    "Output exactly one word: UP, DOWN, LEFT, or RIGHT."
 )
 
 _DIRECTION_RE = re.compile(r"\b(UP|DOWN|LEFT|RIGHT)\b", re.IGNORECASE)
+_DIRECTION_ALIASES = {
+    "SOUTH": "DOWN", "BOTTOM": "DOWN", "BELOW": "DOWN",
+    "NORTH": "UP", "TOP": "UP", "ABOVE": "UP",
+    "WEST": "LEFT", "L": "LEFT",
+    "EAST": "RIGHT", "R": "RIGHT",
+}
 
 
 # ------------------------------------------------------------------
@@ -225,12 +228,22 @@ def format_prompt(board: Board) -> str:
 
 
 def parse_action(text: str) -> str | None:
-    """Extract a direction keyword from model text output."""
+    """Extract a direction from model text output.
+
+    Tries exact direction keywords first, then common aliases like
+    SOUTH→DOWN, NORTH→UP, WEST→LEFT, EAST→RIGHT.
+    """
 
     if not text:
         return None
     match = _DIRECTION_RE.search(text)
-    return match.group(1).upper() if match else None
+    if match:
+        return match.group(1).upper()
+    upper = text.upper()
+    for alias, direction in _DIRECTION_ALIASES.items():
+        if re.search(rf"\b{alias}\b", upper):
+            return direction
+    return None
 
 
 # ------------------------------------------------------------------

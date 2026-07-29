@@ -156,7 +156,7 @@ def test_episode_length_cap():
             return next(self.responses)
 
     def response(direction):
-        message = SimpleNamespace(content=f"Looking at the board, I should merge tiles.\nMOVE: {direction}", tool_calls=[])
+        message = SimpleNamespace(content=direction, tool_calls=[])
         return SimpleNamespace(choices=[SimpleNamespace(message=message)])
 
     item = SimpleNamespace(
@@ -257,6 +257,10 @@ def test_malformed_direction_rejected():
     assert game.parse_action("move DOWN please") == "DOWN"
     assert game.parse_action("no direction here") is None
     assert game.parse_action("") is None
+    assert game.parse_action("SOUTH") == "DOWN"
+    assert game.parse_action("move WEST") == "LEFT"
+    assert game.parse_action("EAST is best") == "RIGHT"
+    assert game.parse_action("NORTH") == "UP"
 
 
 # ------------------------------------------------------------------
@@ -371,9 +375,9 @@ def test_tool_schema_is_closed_and_bounded():
     assert "DOWN" in game.SYSTEM_PROMPT
     assert "LEFT" in game.SYSTEM_PROMPT
     assert "RIGHT" in game.SYSTEM_PROMPT
-    assert "MOVE:" in game.SYSTEM_PROMPT
+    assert "one word" in game.SYSTEM_PROMPT
 
-    assert game.parse_action("MOVE: LEFT") == "LEFT"
+    assert game.parse_action("LEFT") == "LEFT"
     assert game.parse_action("I think UP is best") == "UP"
     assert game.parse_action("no direction here") is None
     assert not hasattr(game, "MOVE_TOOL")
