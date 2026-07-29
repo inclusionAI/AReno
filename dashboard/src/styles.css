@@ -2379,7 +2379,7 @@ textarea:focus {
 /* -- Compare: Key metric cards -- */
 .compareMetricCards {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
   gap: 12px;
 }
 
@@ -2387,7 +2387,7 @@ textarea:focus {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 10px;
-  padding: 12px 14px;
+  padding: 14px 16px;
   position: relative;
 }
 
@@ -2397,17 +2397,34 @@ textarea:focus {
   text-transform: uppercase;
   letter-spacing: 0.5px;
   color: var(--text-tertiary, #888);
-  margin-bottom: 6px;
+  margin-bottom: 10px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
 }
 
-.metricCardValues {
+.metricCardRow {
   display: flex;
+  justify-content: space-between;
   align-items: baseline;
-  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.metricCardRowLabel {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.metricCardRowLabel.runA {
+  color: #4f8cff;
+}
+
+.metricCardRowLabel.runB {
+  color: #f59e0b;
 }
 
 .metricCardVal {
-  font-size: 15px;
+  font-size: 16px;
   font-weight: 600;
   font-family: var(--mono-font, "SF Mono", "Fira Code", monospace);
   color: var(--text);
@@ -2417,15 +2434,10 @@ textarea:focus {
   color: #2d8f4f;
 }
 
-.metricCardSep {
-  color: var(--text-tertiary, #999);
-  font-size: 14px;
-}
-
 .metricCardFlag {
   position: absolute;
-  top: 8px;
-  right: 8px;
+  top: 10px;
+  right: 10px;
   font-size: 9px;
   font-weight: 700;
   text-transform: uppercase;

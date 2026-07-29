@@ -1971,14 +1971,17 @@ function CompareRunsPanel({ jobList, refreshJobs, compareJobAId, setCompareJobAI
                 const bBetterH = card.better === "higher" && Number.isFinite(valA) && Number.isFinite(valB) && valB > valA;
                 return (
                   <div className="metricCard" key={i}>
-                    <div className="metricCardLabel">{card.label}</div>
-                    <div className="metricCardValues">
-                      <span className={`metricCardVal ${aBetter || aBetterH ? "metricBetter" : ""}`}>{card.valueA}</span>
-                      <span className="metricCardSep">|</span>
-                      <span className={`metricCardVal ${bBetter || bBetterH ? "metricBetter" : ""}`}>{card.valueB}</span>
-                    </div>
                     {(aBetter || aBetterH) && <div className="metricCardFlag">A better</div>}
                     {(bBetter || bBetterH) && <div className="metricCardFlag">B better</div>}
+                    <div className="metricCardLabel">{card.label}</div>
+                    <div className="metricCardRow">
+                      <span className="metricCardRowLabel runA">A</span>
+                      <span className={`metricCardVal ${aBetter || aBetterH ? "metricBetter" : ""}`}>{card.valueA}</span>
+                    </div>
+                    <div className="metricCardRow">
+                      <span className="metricCardRowLabel runB">B</span>
+                      <span className={`metricCardVal ${bBetter || bBetterH ? "metricBetter" : ""}`}>{card.valueB}</span>
+                    </div>
                   </div>
                 );
               });
