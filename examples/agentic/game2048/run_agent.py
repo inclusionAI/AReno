@@ -1,14 +1,14 @@
-"""Single-turn agent loop for 2048.
+"""Single-turn tool-call agent loop for 2048.
 
 Each step is an independent LLM call: the model sees only the system prompt
 and the current board. No conversation history is accumulated. The model
-outputs brief reasoning followed by a direction keyword (UP/DOWN/LEFT/RIGHT),
-which is parsed from the response text.
+calls the move tool with a direction, which is parsed from the tool call.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import random
 import sys
@@ -17,7 +17,7 @@ from pathlib import Path
 from areno.api.agentic import AgentTrajectory, AgentTrajectoryTurn
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from game import DEFAULT_MAX_MOVES, DIRECTIONS, SYSTEM_PROMPT  # noqa: E402
+from game import MOVE_TOOL, DEFAULT_MAX_MOVES, DIRECTIONS, SYSTEM_PROMPT  # noqa: E402
 import game  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -57,12 +57,13 @@ async def _run_episode(item, client) -> list[AgentTrajectoryTurn]:
     rng = random.Random(seed)
 
     turns: list[AgentTrajectoryTurn] = []
+    tool_choice = {"type": "function", "function": {"name": "move"}}
 
     for move_number in range(1, max_moves + 1):
         user_content = (
             f"Step {move_number}/{max_moves}.\n"
             f"Current board:\n{game.board_to_text(board)}\n"
-            f"Choose the best direction. End with MOVE: <direction>."
+            f"Call the move tool with the best direction."
         )
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
@@ -71,6 +72,8 @@ async def _run_episode(item, client) -> list[AgentTrajectoryTurn]:
         response = await client.chat.completions.create(
             model="policy",
             messages=messages,
+            tools=[MOVE_TOOL],
+            tool_choice=tool_choice,
             stream=False,
         )
         turns.append(
@@ -78,13 +81,14 @@ async def _run_episode(item, client) -> list[AgentTrajectoryTurn]:
                 item=item,
                 messages=messages,
                 response=response,
+                tools=[MOVE_TOOL],
+                tool_choice=tool_choice,
             )
         )
 
-        text = _response_text(response)
-        direction = game.parse_action(text)
+        direction = _extract_direction(response)
         if direction is None:
-            logger.warning("Game2048 no direction parsed from response: %.300s", text or "")
+            logger.warning("Game2048 no valid move tool call, falling back to random")
             direction = game.random_action(board, rng)
 
         new_board, score, valid, terminal = game.move(board, direction, rng)
@@ -96,6 +100,24 @@ async def _run_episode(item, client) -> list[AgentTrajectoryTurn]:
     return turns
 
 
-def _response_text(response) -> str:
-    choice = response.choices[0]
-    return getattr(choice.message, "content", "") or ""
+def _extract_direction(response) -> str | None:
+    """Parse direction from the model's tool call response."""
+
+    message = response.choices[0].message
+    tool_calls = getattr(message, "tool_calls", None) or []
+    if not tool_calls:
+        return None
+    call = tool_calls[0]
+    function = getattr(call, "function", None)
+    if function is None or getattr(function, "name", None) != "move":
+        return None
+    try:
+        arguments = json.loads(function.arguments or "")
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(arguments, dict) or "direction" not in arguments:
+        return None
+    direction = str(arguments["direction"]).upper()
+    if direction not in DIRECTIONS:
+        return None
+    return direction

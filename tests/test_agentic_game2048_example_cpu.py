@@ -156,7 +156,12 @@ def test_episode_length_cap():
             return next(self.responses)
 
     def response(direction):
-        message = SimpleNamespace(content=direction, tool_calls=[])
+        call = SimpleNamespace(
+            id=f"call-{direction}",
+            type="function",
+            function=SimpleNamespace(name="move", arguments=json.dumps({"direction": direction})),
+        )
+        message = SimpleNamespace(content=None, tool_calls=[call])
         return SimpleNamespace(choices=[SimpleNamespace(message=message)])
 
     item = SimpleNamespace(
@@ -228,14 +233,22 @@ def test_reward_scores_valid_vs_invalid():
     # All valid distinct directions
     valid_record = SimpleNamespace(
         source_record={"board": board, "seed": 10, "max_moves": 50},
-        completion="MOVE: LEFT\nMOVE: DOWN\nMOVE: RIGHT",
+        tool_calls=[
+            {"name": "move", "arguments": json.dumps({"direction": "LEFT"})},
+            {"name": "move", "arguments": json.dumps({"direction": "DOWN"})},
+            {"name": "move", "arguments": json.dumps({"direction": "RIGHT"})},
+        ],
     )
     valid_reward = reward.reward_fn(valid_record)
 
     # All same direction (likely invalid after first)
     invalid_record = SimpleNamespace(
         source_record={"board": board, "seed": 10, "max_moves": 50},
-        completion="MOVE: LEFT\nMOVE: LEFT\nMOVE: LEFT",
+        tool_calls=[
+            {"name": "move", "arguments": json.dumps({"direction": "LEFT"})},
+            {"name": "move", "arguments": json.dumps({"direction": "LEFT"})},
+            {"name": "move", "arguments": json.dumps({"direction": "LEFT"})},
+        ],
     )
     invalid_reward = reward.reward_fn(invalid_record)
 
@@ -257,10 +270,6 @@ def test_malformed_direction_rejected():
     assert game.parse_action("move DOWN please") == "DOWN"
     assert game.parse_action("no direction here") is None
     assert game.parse_action("") is None
-    assert game.parse_action("SOUTH") == "DOWN"
-    assert game.parse_action("move WEST") == "LEFT"
-    assert game.parse_action("EAST is best") == "RIGHT"
-    assert game.parse_action("NORTH") == "UP"
 
 
 # ------------------------------------------------------------------
@@ -330,7 +339,12 @@ def test_agent_episode_with_fake_client():
             return next(self.responses)
 
     def response(direction):
-        message = SimpleNamespace(content=f"I should merge tiles.\nMOVE: {direction}", tool_calls=[])
+        call = SimpleNamespace(
+            id=f"call-{direction}",
+            type="function",
+            function=SimpleNamespace(name="move", arguments=json.dumps({"direction": direction})),
+        )
+        message = SimpleNamespace(content=None, tool_calls=[call])
         return SimpleNamespace(choices=[SimpleNamespace(message=message)])
 
     item = SimpleNamespace(
@@ -352,32 +366,33 @@ def test_agent_episode_with_fake_client():
         assert step_messages[0]["role"] == "system"
         assert step_messages[1]["role"] == "user"
 
-    # No direction parsed → episode still runs for max_moves
-    no_dir_completions = FakeCompletions([
+    # No tool call → episode still runs for max_moves with random fallback
+    no_tool_completions = FakeCompletions([
         SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="I give up", tool_calls=[]))]),
         SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="I give up", tool_calls=[]))]),
     ])
-    no_dir_turns = asyncio.run(
-        run_agent._run_episode(item, SimpleNamespace(chat=SimpleNamespace(completions=no_dir_completions)))
+    no_tool_turns = asyncio.run(
+        run_agent._run_episode(item, SimpleNamespace(chat=SimpleNamespace(completions=no_tool_completions)))
     )
-    assert len(no_dir_turns) == 2  # max_moves=2, fallback to random for each
+    assert len(no_tool_turns) == 2  # max_moves=2, fallback to random for each
 
 
 # ------------------------------------------------------------------
-# 13. System prompt and parse_action are well-formed
+# 13. Tool schema is well-formed
 # ------------------------------------------------------------------
 
 
 def test_tool_schema_is_closed_and_bounded():
     game = _load_module("game")
+    tool = game.MOVE_TOOL
+    assert tool["type"] == "function"
+    func = tool["function"]
+    assert func["name"] == "move"
+    params = func["parameters"]
+    assert params["additionalProperties"] is False
+    assert params["properties"]["direction"]["enum"] == ["UP", "DOWN", "LEFT", "RIGHT"]
+    assert params["required"] == ["direction"]
 
     assert "UP" in game.SYSTEM_PROMPT
     assert "DOWN" in game.SYSTEM_PROMPT
-    assert "LEFT" in game.SYSTEM_PROMPT
-    assert "RIGHT" in game.SYSTEM_PROMPT
-    assert "one word" in game.SYSTEM_PROMPT
-
-    assert game.parse_action("LEFT") == "LEFT"
-    assert game.parse_action("I think UP is best") == "UP"
-    assert game.parse_action("no direction here") is None
-    assert not hasattr(game, "MOVE_TOOL")
+    assert "move tool" in game.SYSTEM_PROMPT

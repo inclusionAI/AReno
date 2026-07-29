@@ -2,12 +2,12 @@
 
 Replays the agent's move sequence on the seeded board and returns the
 final merge score plus per-step monotonicity and empty-cell bonuses.
-Invalid moves are penalised. Directions are parsed from model response
-text (no tool calls).
+Invalid moves are penalised. Directions are parsed from tool calls.
 """
 
 from __future__ import annotations
 
+import json
 import random
 import sys
 from pathlib import Path
@@ -91,17 +91,21 @@ def _monotonicity_bonus(board) -> float:
 
 
 def _extract_directions(record) -> list[str]:
-    """Parse move directions from the model's response text.
+    """Pull move directions from the agent's tool calls, in order."""
 
-    In single-turn mode, each step produces an independent response.
-    Multiple steps from one episode are concatenated in record.completion
-    (separated by newlines). We parse each direction keyword in order.
-    """
-
-    text = record.completion or ""
-    directions: list[str] = []
-    for line in text.split("\n"):
-        direction = game.parse_action(line)
-        if direction:
-            directions.append(direction)
+    directions = []
+    for call in record.tool_calls:
+        name = call.get("name") if isinstance(call, dict) else None
+        if name != "move":
+            continue
+        arguments = call.get("arguments")
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except json.JSONDecodeError:
+                continue
+        if isinstance(arguments, dict):
+            direction = arguments.get("direction")
+            if isinstance(direction, str) and direction.upper() in game.DIRECTIONS:
+                directions.append(direction.upper())
     return directions

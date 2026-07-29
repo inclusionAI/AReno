@@ -22,17 +22,31 @@ SYSTEM_PROMPT = (
     "You are a 2048 game AI. The board is a 4x4 grid. Each turn you choose to "
     "swipe UP, DOWN, LEFT, or RIGHT. Identical tiles merge on collision. After "
     "each move a new 2 (90%) or 4 (10%) appears in a random empty cell.\n"
-    "Keep your largest tile in a corner.\n\n"
-    "Output exactly one word: UP, DOWN, LEFT, or RIGHT."
+    "Keep your largest tile in a corner. "
+    "You MUST call the move tool every turn with one direction."
 )
 
-_DIRECTION_RE = re.compile(r"\b(UP|DOWN|LEFT|RIGHT)\b", re.IGNORECASE)
-_DIRECTION_ALIASES = {
-    "SOUTH": "DOWN", "BOTTOM": "DOWN", "BELOW": "DOWN",
-    "NORTH": "UP", "TOP": "UP", "ABOVE": "UP",
-    "WEST": "LEFT", "L": "LEFT",
-    "EAST": "RIGHT", "R": "RIGHT",
+MOVE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "move",
+        "description": "Swipe the 2048 board in one direction.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "direction": {
+                    "type": "string",
+                    "enum": list(DIRECTIONS),
+                    "description": "The swipe direction: UP, DOWN, LEFT, or RIGHT.",
+                }
+            },
+            "required": ["direction"],
+            "additionalProperties": False,
+        },
+    },
 }
+
+_DIRECTION_RE = re.compile(r"\b(UP|DOWN|LEFT|RIGHT)\b", re.IGNORECASE)
 
 
 # ------------------------------------------------------------------
@@ -228,22 +242,12 @@ def format_prompt(board: Board) -> str:
 
 
 def parse_action(text: str) -> str | None:
-    """Extract a direction from model text output.
-
-    Tries exact direction keywords first, then common aliases like
-    SOUTH→DOWN, NORTH→UP, WEST→LEFT, EAST→RIGHT.
-    """
+    """Extract a direction keyword from model text output."""
 
     if not text:
         return None
     match = _DIRECTION_RE.search(text)
-    if match:
-        return match.group(1).upper()
-    upper = text.upper()
-    for alias, direction in _DIRECTION_ALIASES.items():
-        if re.search(rf"\b{alias}\b", upper):
-            return direction
-    return None
+    return match.group(1).upper() if match else None
 
 
 # ------------------------------------------------------------------
