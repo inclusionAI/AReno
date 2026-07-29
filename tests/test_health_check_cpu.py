@@ -115,7 +115,9 @@ class CheckLogicTest(unittest.TestCase):
         sig = _signals(rewards=[0.1, float("nan"), 0.2])
         r = check_reward_variance(cfg, sig)
         self.assertEqual(r.status, "fail")
-        self.assertIn("non-finite", sig.original_errors[0])
+        self.assertTrue(any("non-finite" in e for e in r.errors))
+        # Pure-function contract: signals must not be mutated.
+        self.assertEqual(len(sig.original_errors), 0)
 
     def test_loss_change_passes(self):
         cfg = HealthCheckConfig(enabled=True, startup_window_updates=3)
@@ -138,7 +140,9 @@ class CheckLogicTest(unittest.TestCase):
         sig = _signals(losses=[2.0, float("nan")])
         r = check_loss_change(cfg, sig)
         self.assertEqual(r.status, "fail")
-        self.assertTrue(any("non-finite" in e for e in sig.original_errors))
+        self.assertTrue(any("non-finite" in e for e in r.errors))
+        # Pure-function contract: signals must not be mutated.
+        self.assertEqual(len(sig.original_errors), 0)
 
     def test_skipped_passes(self):
         cfg = HealthCheckConfig(enabled=True, startup_window_updates=3)

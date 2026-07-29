@@ -22,6 +22,7 @@ Design rules (from the issue):
 
 from __future__ import annotations
 
+import logging
 import math
 import uuid
 from dataclasses import dataclass, field
@@ -65,6 +66,10 @@ class HealthCheckError(RuntimeError):
     The message carries the affected stage(s) + triggering input(s) only; it
     never contains sample text. The originating check messages are attached so
     the original signal context is preserved (not swallowed).
+
+    This exception is raised by
+    ``areno.api.trainer.TrainingHealthChecker._evaluate()``, not by the pure
+    check functions in this module.
     """
 
 
@@ -212,7 +217,13 @@ class WindowSignals:
 
 @dataclass(frozen=True, slots=True)
 class CheckResult:
-    """Outcome of one check: status + localized, sample-free diagnostics."""
+    """Outcome of one check: status + localized, sample-free diagnostics.
+
+    ``errors`` carries non-fatal diagnostic strings (e.g. NaN detection context)
+    that the aggregator collects into ``HealthReport.original_errors``.  Keeping
+    errors on the *result* (rather than mutating the input ``WindowSignals``)
+    preserves the pure-function contract of the check functions.
+    """
 
     name: str
     stage: str
@@ -220,6 +231,7 @@ class CheckResult:
     message: str
     metric_ref: str
     input: str
+    errors: tuple[str, ...] = ()
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -269,10 +281,16 @@ def _mean(values: list[float]) -> float:
 
 
 def _std(values: list[float]) -> float:
+    """Sample standard deviation (Bessel-corrected, /n-1).
+
+    For startup windows with few samples the correction matters: at n=2 the
+    population std underestimates by ~29 %.  ``len < 2`` returns 0.0 so the
+    division by ``n-1`` is always safe.
+    """
     if len(values) < 2:
         return 0.0
     mu = _mean(values)
-    var = sum((v - mu) ** 2 for v in values) / len(values)
+    var = sum((v - mu) ** 2 for v in values) / (len(values) - 1)
     return math.sqrt(var)
 
 
@@ -331,8 +349,9 @@ def check_effective_tokens(cfg: HealthCheckConfig, signals: WindowSignals) -> Ch
 def check_reward_variance(cfg: HealthCheckConfig, signals: WindowSignals) -> CheckResult:
     """Classify the reward-variance signal.
 
-    require_variation=False → pass (legitimately constant reward). NaN reward →
-    fail (original error recorded). std==0 with variation required → fail.
+    require_variation=False → pass (legitimately constant reward), but an empty
+    reward list still warns (data-pipeline anomaly). NaN reward → fail (error
+    carried on the result). std==0 with variation required → fail.
     std < min_std_warn → warn.
     """
 
@@ -349,12 +368,21 @@ def check_reward_variance(cfg: HealthCheckConfig, signals: WindowSignals) -> Che
         )
     rewards = signals.rewards
     if _any_non_finite(rewards):
-        signals.original_errors.append("reward_variance: non-finite reward value")
         return CheckResult(
             name=name,
             stage=_STAGE[name],
             status="fail",
             message="non-finite (NaN/Inf) reward detected in window",
+            metric_ref=_METRIC_REF[name],
+            input="reward_variance",
+            errors=("reward_variance: non-finite reward value",),
+        )
+    if not rewards:
+        return CheckResult(
+            name=name,
+            stage=_STAGE[name],
+            status="warn",
+            message="no rewards observed in window (data-pipeline anomaly)",
             metric_ref=_METRIC_REF[name],
             input="reward_variance",
         )
@@ -367,17 +395,8 @@ def check_reward_variance(cfg: HealthCheckConfig, signals: WindowSignals) -> Che
             metric_ref=_METRIC_REF[name],
             input="reward_variance.require_variation=false",
         )
-    if not rewards:
-        return CheckResult(
-            name=name,
-            stage=_STAGE[name],
-            status="fail",
-            message="no rewards observed in window",
-            metric_ref=_METRIC_REF[name],
-            input="reward_variance",
-        )
     std = _std(rewards)
-    if std == rvc.min_std_fail and rvc.min_std_fail == 0.0 and std == 0.0:
+    if std == 0.0 and rvc.min_std_fail == 0.0:
         return CheckResult(
             name=name,
             stage=_STAGE[name],
@@ -408,8 +427,9 @@ def check_reward_variance(cfg: HealthCheckConfig, signals: WindowSignals) -> Che
 def check_loss_change(cfg: HealthCheckConfig, signals: WindowSignals) -> CheckResult:
     """Classify the loss-change signal.
 
-    NaN loss → fail. Single-step window → warn (unreliable delta). delta==0
-    with >=2 samples → fail. delta below warn threshold → warn.
+    NaN loss → fail (error carried on the result). Single-step window → warn
+    (unreliable delta). delta <= min_abs_delta_fail (default 0) → fail.
+    delta below min_abs_delta_warn → warn.
     """
 
     lcc = cfg.loss_change
@@ -425,7 +445,6 @@ def check_loss_change(cfg: HealthCheckConfig, signals: WindowSignals) -> CheckRe
         )
     losses = signals.losses
     if _any_non_finite(losses):
-        signals.original_errors.append("loss_change: non-finite loss value")
         return CheckResult(
             name=name,
             stage=_STAGE[name],
@@ -433,6 +452,7 @@ def check_loss_change(cfg: HealthCheckConfig, signals: WindowSignals) -> CheckRe
             message="non-finite (NaN/Inf) loss detected in window",
             metric_ref=_METRIC_REF[name],
             input="loss_change",
+            errors=("loss_change: non-finite loss value",),
         )
     if len(losses) < 2:
         return CheckResult(
@@ -445,16 +465,17 @@ def check_loss_change(cfg: HealthCheckConfig, signals: WindowSignals) -> CheckRe
         )
     first, last = losses[0], losses[-1]
     if lcc.mode == "relative":
-        denom = max(abs(first), 1.0e-12)
+        denom = max(abs(first), abs(last), 1.0e-8)
         delta = abs(last - first) / denom
     else:
         delta = abs(last - first)
-    if delta == 0.0:
+    if delta <= lcc.min_abs_delta_fail:
         return CheckResult(
             name=name,
             stage=_STAGE[name],
             status="fail",
-            message=(f"loss unchanged across window (first={first}, last={last}, n={len(losses)})"),
+            message=(f"loss unchanged or below fail threshold (first={first}, last={last}, "
+                     f"delta={delta:.3e}, min_abs_delta_fail={lcc.min_abs_delta_fail:.3e}, n={len(losses)})"),
             metric_ref=_METRIC_REF[name],
             input="loss_change.min_abs_delta_fail",
         )
@@ -481,8 +502,9 @@ def check_skipped_batches(cfg: HealthCheckConfig, signals: WindowSignals) -> Che
     """Classify the skipped-batch signal.
 
     Ratio = skipped_long / total_batches. Zero denominator → fail (data/input
-    anomaly). Ratio above fail/warn thresholds → fail/warn. The grad-zero proxy
-    is evaluated independently and the more severe status wins.
+    anomaly). Ratio >= fail/warn thresholds → fail/warn (threshold-inclusive).
+    The grad-zero proxy is evaluated independently and the more severe status
+    wins.
     """
 
     sbc = cfg.skipped_batches
@@ -512,11 +534,13 @@ def check_skipped_batches(cfg: HealthCheckConfig, signals: WindowSignals) -> Che
     grad_max = max(grad_ratios) if grad_ratios else 0.0
     # Determine the status from each sub-signal independently; the more severe
     # one wins so a healthy skip ratio cannot mask a total grad-zero collapse.
+    # Comparisons are threshold-inclusive (>=): reaching 50 % skip is the same
+    # as exceeding it.
     status = "pass"
     detail = f"skip_ratio={ratio:.3f} ({skipped}/{total})"
-    if ratio > sbc.max_ratio_fail:
+    if ratio >= sbc.max_ratio_fail:
         status = "fail"
-    elif ratio > sbc.max_ratio_warn:
+    elif ratio >= sbc.max_ratio_warn:
         status = _worse(status, "warn")
     if grad_ratios:
         detail += f", grad_zero_max={grad_max:.3f}"
@@ -525,8 +549,8 @@ def check_skipped_batches(cfg: HealthCheckConfig, signals: WindowSignals) -> Che
         elif grad_max >= sbc.max_grad_zero_ratio_warn:
             status = _worse(status, "warn")
     if status == "fail":
-        if ratio > sbc.max_ratio_fail:
-            message = f"skipped ratio too high: {ratio:.3f} > max_ratio_fail={sbc.max_ratio_fail:.3f}"
+        if ratio >= sbc.max_ratio_fail:
+            message = f"skipped ratio too high: {ratio:.3f} >= max_ratio_fail={sbc.max_ratio_fail:.3f}"
             input_ref = "skipped_batches.max_ratio_fail"
         else:
             message = (
@@ -535,7 +559,14 @@ def check_skipped_batches(cfg: HealthCheckConfig, signals: WindowSignals) -> Che
             )
             input_ref = "skipped_batches.max_grad_zero_ratio_fail"
     elif status == "warn":
-        message = detail
+        # Distinguish which sub-signal triggered the warn so the user can
+        # locate the cause without re-deriving thresholds.
+        warn_parts = []
+        if ratio >= sbc.max_ratio_warn:
+            warn_parts.append(f"skip_ratio={ratio:.3f} >= max_ratio_warn={sbc.max_ratio_warn:.3f}")
+        if grad_ratios and grad_max >= sbc.max_grad_zero_ratio_warn:
+            warn_parts.append(f"grad_zero_max={grad_max:.3f} >= max_grad_zero_ratio_warn={sbc.max_grad_zero_ratio_warn:.3f}")
+        message = "; ".join(warn_parts) if warn_parts else detail
         input_ref = "skipped_batches"
     else:
         message = f"skipped batches ok ({detail})"
@@ -557,7 +588,12 @@ def _worse(a: str, b: str) -> str:
 
 
 def run_checks(cfg: HealthCheckConfig, signals: WindowSignals) -> list[CheckResult]:
-    """Run all four checks against a window snapshot (pure, no side effects)."""
+    """Run all four checks against a window snapshot.
+
+    The checks are pure: they read from *signals* but never mutate it.
+    Diagnostic errors (e.g. NaN detections) are returned on each
+    ``CheckResult.errors`` field for the aggregator to collect.
+    """
 
     return [
         check_effective_tokens(cfg, signals),
@@ -581,18 +617,26 @@ def aggregate(
     The overall status is the most severe individual status. ``on_fail`` does
     not change the recorded summary — it only governs whether the coordinator
     raises on a ``fail`` summary (handled by the `Trainer` wiring).
+
+    ``original_errors`` is collected from each ``CheckResult.errors`` field so
+    the report is self-contained and no external mutation is needed.
     """
 
     summary = "pass"
     for r in results:
         summary = _worse(summary, r.status)
+    # Collect errors from each check result; fall back to the explicit
+    # ``original_errors`` argument for backward compatibility.
+    collected: list[str] = list(original_errors or [])
+    for r in results:
+        collected.extend(r.errors)
     return HealthReport(
         run_id=run_id or _new_run_id(),
         summary=summary,
         checks=tuple(results),
         window_updates=window_updates,
         completed_at_step=completed_at_step,
-        original_errors=tuple(original_errors or []),
+        original_errors=tuple(collected),
     )
 
 
@@ -618,7 +662,6 @@ def run_health_check(
         window_updates=cfg.startup_window_updates,
         completed_at_step=completed_at_step,
         run_id=run_id,
-        original_errors=signals.original_errors,
     )
 
 
@@ -638,9 +681,18 @@ def configure_health_check_if_supported(instance: Any, config: HealthCheckConfig
     Trainer implementations call this from ``fit()``. The SDK ``Trainer`` exposes
     ``configure_health_check``; stubs/backends used in tests that do not carry
     this method are silently skipped so the health check is opt-in and never
-    breaks a trainer that runs without it.
+    breaks a trainer that runs without it.  A debug-level log records whether
+    the checker was attached so the caller can confirm without inspecting the
+    instance.
     """
 
     configure = getattr(instance, "configure_health_check", None)
     if callable(configure):
         configure(config)
+        logging.getLogger("areno.health_check").debug(
+            "health checker attached to %s", type(instance).__name__
+        )
+    else:
+        logging.getLogger("areno.health_check").debug(
+            "health checker skipped: %s has no configure_health_check", type(instance).__name__
+        )
