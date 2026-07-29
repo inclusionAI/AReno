@@ -14,6 +14,7 @@ role-management hooks; this is why the helpers are designed to be small.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import time
@@ -66,6 +67,8 @@ class PolicyOnlyTrainer:
         )
 
         step = 0
+        _consecutive_skipped = 0
+        _skip_reasons: dict[str, int] = {}
         for epoch in range(self.config.epochs):
             self.logger.info("epoch=%d stage=epoch_start", epoch)
             record_dashboard_state(
@@ -150,6 +153,32 @@ class PolicyOnlyTrainer:
                     record_dashboard_state(self.areno, stage="train_end", epoch=epoch, step=step, role=role)
                     self.logger.info("epoch=%d step=%d train_stats=%s", epoch, step, result)
                     self._maybe_save(epoch, step)
+                    _consecutive_skipped = 0
+                else:
+                    _consecutive_skipped += 1
+                    reason = "empty_response"
+                    _skip_reasons[reason] = _skip_reasons.get(reason, 0) + 1
+                    self.logger.warning(
+                        "epoch=%d step=%d reason=%s consecutive=%d/%d",
+                        epoch, step, reason, _consecutive_skipped,
+                        self.config.max_consecutive_skipped_steps,
+                    )
+                    record_dashboard_state(self.areno, stage="empty_train_batch",
+                                           epoch=epoch, step=step, extra={"reason": reason})
+                    if (self.config.max_consecutive_skipped_steps is not None
+                            and _consecutive_skipped >= self.config.max_consecutive_skipped_steps):
+                        summary = {
+                            "total_steps": step + 1,
+                            "skipped_steps": sum(_skip_reasons.values()),
+                            "by_reason": dict(_skip_reasons),
+                            "max_consecutive": _consecutive_skipped,
+                            "stopped_by_threshold": True,
+                        }
+                        self.logger.error("stop_reason=consecutive_empty_batches %s",
+                                          json.dumps(summary))
+                        record_dashboard_state(self.areno, stage="stopped_consecutive_empty",
+                                               extra=summary)
+                        return
                 step += 1
                 if self.config.max_steps is not None and step >= self.config.max_steps:
                     self.logger.info("epoch=%d step=%d stage=max_steps_reached", epoch, step)
