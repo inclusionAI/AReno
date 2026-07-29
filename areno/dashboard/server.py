@@ -646,6 +646,59 @@ class DashboardState:
 
         result["metrics"] = metrics_comparison
 
+        # -- metric series for charts (top metrics only, limit data) -----
+        # Return time-series for the most common metrics so the frontend can
+        # draw overlaid charts without making separate API calls.
+        chart_metrics: list[str] = []
+        priority_names = [n for n in all_metric_names if "loss" in n.lower()]
+        other_names = [n for n in all_metric_names if "loss" not in n.lower()]
+        chart_metrics = (priority_names + other_names)[:12]
+
+        metric_charts = {}
+        for name in chart_metrics:
+            series_a = self.metric_series(job_a_id, name, limit=200)
+            series_b = self.metric_series(job_b_id, name, limit=200)
+            metric_charts[name] = {
+                "points_a": series_a,
+                "points_b": series_b,
+            }
+        result["metric_charts"] = metric_charts
+
+        # -- config diff summary -----------------------------------------
+        diff_summary: list[str] = []
+        for item in different:
+            val_a = item.get("value_a")
+            val_b = item.get("value_b")
+            label = item.get("key", "")
+            try:
+                if val_a is not None and val_b is not None:
+                    ratio = float(val_b) / float(val_a) if float(val_a) != 0 else None
+                    if ratio is not None and abs(ratio) >= 2:
+                        diff_summary.append(f"{label}: {val_a} -> {val_b} ({ratio:.1f}x)")
+                    else:
+                        diff_summary.append(f"{label}: {val_a} -> {val_b}")
+                elif val_a is not None:
+                    diff_summary.append(f"{label}: {val_a} -> (not set)")
+                elif val_b is not None:
+                    diff_summary.append(f"{label}: (not set) -> {val_b}")
+            except (TypeError, ValueError, ZeroDivisionError):
+                diff_summary.append(f"{label}: {val_a} -> {val_b}")
+        result["diff_summary"] = diff_summary
+
+        # -- throughput stats --------------------------------------------
+        def _throughput(job: Job, timing: dict) -> float | None:
+            try:
+                dur = timing.get("duration_s")
+                steps = timing.get("total_steps") or job.step or 0
+                if dur and dur > 0 and steps > 0:
+                    return round(steps / dur, 2)
+            except Exception:
+                pass
+            return None
+
+        result["throughput_a"] = _throughput(job_a, timing_a)
+        result["throughput_b"] = _throughput(job_b, timing_b)
+
         # -- timing comparison -------------------------------------------
         def _timing_stats(job: Job) -> dict[str, Any]:
             # Duration is computed independently of timeperf entries.

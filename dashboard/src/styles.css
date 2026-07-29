@@ -2280,3 +2280,294 @@ textarea:focus {
   color: #d44;
   border: 1px solid #f0c0c0;
 }
+
+/* -- Compare: Run header cards -- */
+.compareVsLabel {
+  text-align: center;
+  font-size: 15px;
+  font-weight: 600;
+  margin-bottom: 20px;
+  color: var(--text-secondary);
+}
+.compareVsLabel .vsTag {
+  display: inline-block;
+  padding: 2px 10px;
+  margin: 0 6px;
+  border-radius: 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: var(--text-tertiary, #888);
+}
+
+.compareRunHeaders {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+.runHeaderCard {
+  border-radius: 12px;
+  padding: 16px 20px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.runHeaderA {
+  border-left: 4px solid #4f8cff;
+}
+
+.runHeaderB {
+  border-left: 4px solid #f59e0b;
+}
+
+.runHeaderLabel {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-tertiary, #888);
+  margin-bottom: 6px;
+}
+
+.runHeaderName {
+  font-size: 16px;
+  font-weight: 700;
+  margin-bottom: 8px;
+  color: var(--text);
+  word-break: break-word;
+}
+
+.runHeaderMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  align-items: center;
+}
+
+.runStatusBadge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.runStatusBadge.exited,
+.runStatusBadge.completed {
+  background: rgba(45, 143, 79, 0.15);
+  color: #2d8f4f;
+}
+
+.runStatusBadge.running,
+.runStatusBadge.active {
+  background: rgba(79, 140, 255, 0.15);
+  color: #4f8cff;
+}
+
+.runStatusBadge.failed,
+.runStatusBadge.error {
+  background: rgba(221, 68, 68, 0.15);
+  color: #d44;
+}
+
+/* -- Compare: Key metric cards -- */
+.compareMetricCards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px;
+}
+
+.metricCard {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px;
+  position: relative;
+}
+
+.metricCardLabel {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-tertiary, #888);
+  margin-bottom: 6px;
+}
+
+.metricCardValues {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.metricCardVal {
+  font-size: 15px;
+  font-weight: 600;
+  font-family: var(--mono-font, "SF Mono", "Fira Code", monospace);
+  color: var(--text);
+}
+
+.metricCardVal.metricBetter {
+  color: #2d8f4f;
+}
+
+.metricCardSep {
+  color: var(--text-tertiary, #999);
+  font-size: 14px;
+}
+
+.metricCardFlag {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: rgba(45, 143, 79, 0.12);
+  color: #2d8f4f;
+}
+
+/* -- Compare: Chart tabs -- */
+.compareChartTabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.chartTab {
+  padding: 4px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s;
+  font-family: var(--mono-font, "SF Mono", "Fira Code", monospace);
+}
+
+.chartTab:hover {
+  border-color: #4f8cff;
+  color: var(--text);
+}
+
+.chartTabActive {
+  background: #4f8cff;
+  color: #fff;
+  border-color: #4f8cff;
+}
+
+/* -- Compare: Chart SVG -- */
+.compareChartWrap {
+  position: relative;
+}
+
+.compareChartSvg {
+  width: 100%;
+  height: 200px;
+}
+
+.compareLineA {
+  fill: none;
+  stroke: #4f8cff;
+  stroke-width: 1.8;
+  opacity: 0.9;
+}
+
+.compareLineB {
+  fill: none;
+  stroke: #f59e0b;
+  stroke-width: 1.8;
+  opacity: 0.9;
+  stroke-dasharray: 4 2;
+}
+
+.compareChartLegend {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+
+.compareChartLegend i {
+  display: inline-block;
+  width: 16px;
+  height: 3px;
+  border-radius: 2px;
+  margin-right: 4px;
+  vertical-align: middle;
+}
+
+.compareChartLegend i.legendA {
+  background: #4f8cff;
+}
+
+.compareChartLegend i.legendB {
+  background: #f59e0b;
+}
+
+.compareChartRange {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-tertiary, #999);
+  font-family: var(--mono-font, "SF Mono", "Fira Code", monospace);
+}
+
+.compareChartWarning {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--text-tertiary, #999);
+  font-style: italic;
+}
+
+.compareChartWarning span {
+  display: inline-block;
+  margin-right: 12px;
+}
+
+/* -- Compare: Diff summary -- */
+.diffSummaryList {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.diffSummaryList li {
+  padding: 8px 12px;
+  border-left: 3px solid #4f8cff;
+  background: var(--bg);
+  margin-bottom: 6px;
+  border-radius: 0 6px 6px 0;
+  font-size: 13px;
+  font-family: var(--mono-font, "SF Mono", "Fira Code", monospace);
+}
+
+/* -- Compare: Diff indicator in hyperparameter table -- */
+.diffRow .diffIndicator {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #f59e0b;
+  margin-right: 6px;
+}
+
+/* -- Compare: Empty state -- */
+.compareEmptyState {
+  color: var(--text-tertiary, #999);
+  font-size: 13px;
+  font-style: italic;
+  padding: 8px 0;
+}

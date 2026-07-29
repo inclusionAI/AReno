@@ -1741,6 +1741,7 @@ function CompareRunsPanel({ jobList, refreshJobs }) {
   const [showIdentical, setShowIdentical] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [activeChartMetric, setActiveChartMetric] = useState("");
 
   // 更新 URL 参数
   const updateUrlParams = (aId, bId) => {
@@ -1751,33 +1752,29 @@ function CompareRunsPanel({ jobList, refreshJobs }) {
     window.history.pushState({}, "", newUrl);
   };
 
-  // 处理 Job A 选择变化
   const handleJobAChange = (e) => {
     const newId = e.target.value;
     setJobAId(newId);
     updateUrlParams(newId, jobBId);
   };
 
-  // 处理 Job B 选择变化
   const handleJobBChange = (e) => {
     const newId = e.target.value;
     setJobBId(newId);
     updateUrlParams(jobAId, newId);
   };
 
-  // 组件挂载时：如果 URL 中有参数，自动获取比较结果
   useEffect(() => {
     const urlJobA = getInitialJobAId();
     const urlJobB = getInitialJobBId();
     if (urlJobA && urlJobB && jobList.length > 0) {
-      // 确保 job 在列表中（可能已被清理）
       const jobAExists = jobList.some(j => j.id === urlJobA);
       const jobBExists = jobList.some(j => j.id === urlJobB);
       if (jobAExists && jobBExists) {
         fetchComparison(urlJobA, urlJobB);
       }
     }
-  }, []); // 空依赖数组，只在挂载时执行一次
+  }, []);
 
   async function fetchComparison(aId, bId) {
     const effectiveAId = aId || jobAId;
@@ -1788,6 +1785,12 @@ function CompareRunsPanel({ jobList, refreshJobs }) {
     try {
       const data = await api(`/api/compare?job_a=${effectiveAId}&job_b=${effectiveBId}`);
       setCompareResult(data);
+      // 自动选择第一个有数据的指标作为默认图表
+      const charts = data.metric_charts || {};
+      const firstWithPoints = Object.keys(charts).find(name =>
+        (charts[name]?.points_a?.length > 0) || (charts[name]?.points_b?.length > 0)
+      );
+      setActiveChartMetric(firstWithPoints || "");
     } catch (err) {
       setError(err.message || "Failed to fetch comparison");
       setCompareResult(null);
@@ -1800,6 +1803,48 @@ function CompareRunsPanel({ jobList, refreshJobs }) {
   const config = compareResult?.config;
   const metrics = compareResult?.metrics || [];
   const timing = compareResult?.timing || {};
+  const diffSummary = compareResult?.diff_summary || [];
+  const metricCharts = compareResult?.metric_charts || {};
+  const chartMetricNames = Object.keys(metricCharts).sort((a, b) => {
+    // loss 相关的排在前面
+    const aLoss = a.toLowerCase().includes("loss");
+    const bLoss = b.toLowerCase().includes("loss");
+    if (aLoss && !bLoss) return -1;
+    if (!aLoss && bLoss) return 1;
+    return a.localeCompare(b);
+  });
+
+  // 构建对比曲线图
+  const chartData = metricCharts[activeChartMetric];
+  let chartPlot = null;
+  if (chartData) {
+    const ptsA = (chartData.points_a || []).map(p => ({ step: Number(p.step || 0), value: Number(p.value) })).filter(p => Number.isFinite(p.value));
+    const ptsB = (chartData.points_b || []).map(p => ({ step: Number(p.step || 0), value: Number(p.value) })).filter(p => Number.isFinite(p.value));
+    if (ptsA.length > 0 || ptsB.length > 0) {
+      const allPts = [...ptsA, ...ptsB];
+      const minVal = Math.min(...allPts.map(p => p.value));
+      const maxVal = Math.max(...allPts.map(p => p.value));
+      const minStep = Math.min(...allPts.map(p => p.step));
+      const maxStep = Math.max(...allPts.map(p => p.step));
+      const valSpan = Math.max(maxVal - minVal, 1e-9);
+      const stepSpan = Math.max(maxStep - minStep, 1);
+      const toCoords = (points) => points.map(p => ({
+        x: ((p.step - minStep) / stepSpan) * 680 + 10,
+        y: 150 - ((p.value - minVal) / valSpan) * 130,
+      }));
+      const coordsA = toCoords(ptsA);
+      const coordsB = toCoords(ptsB);
+      chartPlot = {
+        lineA: coordsA.map(c => `${c.x.toFixed(1)},${c.y.toFixed(1)}`).join(" "),
+        lineB: coordsB.map(c => `${c.x.toFixed(1)},${c.y.toFixed(1)}`).join(" "),
+        minLabel: compactNumber(minVal),
+        maxLabel: compactNumber(maxVal),
+      };
+    }
+  }
+
+  const jobA = compareResult?.job_a;
+  const jobB = compareResult?.job_b;
 
   return (
     <section className="panel">
@@ -1841,6 +1886,12 @@ function CompareRunsPanel({ jobList, refreshJobs }) {
         </button>
       </div>
 
+      <div className="compareVsLabel">
+        {jobA && jobB && (
+          <span>{jobA.name} <span className="vsTag">vs</span> {jobB.name}</span>
+        )}
+      </div>
+
       {error && <div className="notice errorNotice">{error}</div>}
 
       {compareResult && !compareResult.comparable && (
@@ -1849,14 +1900,117 @@ function CompareRunsPanel({ jobList, refreshJobs }) {
 
       {compareResult && compareResult.comparable && (
         <div className="compareResults">
-          {/* Config Differences */}
+
+          {/* 1. Run 头部信息卡片 */}
+          <div className="compareRunHeaders">
+            <div className="runHeaderCard runHeaderA">
+              <div className="runHeaderLabel">Run A</div>
+              <div className="runHeaderName">{jobA?.name || "—"}</div>
+              <div className="runHeaderMeta">
+                <span className={`runStatusBadge ${jobA?.status || ""}`}>{jobA?.status || "—"}</span>
+                <span>{jobA?.kind || "—"}</span>
+                <span>step {jobA?.step ?? 0}</span>
+              </div>
+            </div>
+            <div className="runHeaderCard runHeaderB">
+              <div className="runHeaderLabel">Run B</div>
+              <div className="runHeaderName">{jobB?.name || "—"}</div>
+              <div className="runHeaderMeta">
+                <span className={`runStatusBadge ${jobB?.status || ""}`}>{jobB?.status || "—"}</span>
+                <span>{jobB?.kind || "—"}</span>
+                <span>step {jobB?.step ?? 0}</span>
+              </div>
+            </div>
+          </div>
+
+          {/* 2. 关键指标卡片 */}
+          <div className="compareMetricCards">
+            {(function() {
+              // 提取关键指标
+              const findMetric = (name) => metrics.find(m => m.name === name);
+              const keyMetrics = [
+                { label: "Loss", key: "train/loss" },
+                { label: "Reward Mean", key: "rollout/rewards_mean" },
+                { label: "Accuracy", key: "rollout/accuracy" },
+                { label: "Steps", key: null },
+                { label: "Duration", key: null },
+                { label: "Throughput", key: null },
+              ];
+              // 动态查找 loss 相关指标
+              const lossMetric = metrics.find(m => m.name.includes("loss") && !m.name.includes("grad"));
+              const rewardMetric = metrics.find(m => m.name.includes("reward") && m.name.includes("mean"));
+              const accuracyMetric = metrics.find(m => m.name.includes("accuracy"));
+
+              const cards = [
+                {
+                  label: "Loss",
+                  valueA: lossMetric?.value_a ?? "—",
+                  valueB: lossMetric?.value_b ?? "—",
+                  better: "lower",
+                },
+                {
+                  label: "Reward Mean",
+                  valueA: rewardMetric?.value_a ?? "—",
+                  valueB: rewardMetric?.value_b ?? "—",
+                  better: "higher",
+                },
+                {
+                  label: "Accuracy",
+                  valueA: accuracyMetric?.value_a ?? "—",
+                  valueB: accuracyMetric?.value_b ?? "—",
+                  better: "higher",
+                },
+                {
+                  label: "Steps",
+                  valueA: timing.job_a?.total_steps ?? jobA?.step ?? "—",
+                  valueB: timing.job_b?.total_steps ?? jobB?.step ?? "—",
+                  better: null,
+                },
+                {
+                  label: "Duration",
+                  valueA: timing.job_a?.duration_s != null ? `${timing.job_a.duration_s}s` : "—",
+                  valueB: timing.job_b?.duration_s != null ? `${timing.job_b.duration_s}s` : "—",
+                  better: "lower",
+                },
+                {
+                  label: "Throughput",
+                  valueA: compareResult?.throughput_a != null ? `${compareResult.throughput_a} step/s` : "—",
+                  valueB: compareResult?.throughput_b != null ? `${compareResult.throughput_b} step/s` : "—",
+                  better: "higher",
+                },
+              ];
+
+              return cards.map((card, i) => {
+                const valA = parseFloat(card.valueA);
+                const valB = parseFloat(card.valueB);
+                const aBetter = card.better === "lower" && Number.isFinite(valA) && Number.isFinite(valB) && valA < valB;
+                const bBetter = card.better === "lower" && Number.isFinite(valA) && Number.isFinite(valB) && valB < valA;
+                const aBetterH = card.better === "higher" && Number.isFinite(valA) && Number.isFinite(valB) && valA > valB;
+                const bBetterH = card.better === "higher" && Number.isFinite(valA) && Number.isFinite(valB) && valB > valA;
+                return (
+                  <div className="metricCard" key={i}>
+                    <div className="metricCardLabel">{card.label}</div>
+                    <div className="metricCardValues">
+                      <span className={`metricCardVal ${aBetter || aBetterH ? "metricBetter" : ""}`}>{card.valueA}</span>
+                      <span className="metricCardSep">|</span>
+                      <span className={`metricCardVal ${bBetter || bBetterH ? "metricBetter" : ""}`}>{card.valueB}</span>
+                    </div>
+                    {(aBetter || aBetterH) && <div className="metricCardFlag">A better</div>}
+                    {(bBetter || bBetterH) && <div className="metricCardFlag">B better</div>}
+                  </div>
+                );
+              });
+            })()}
+          </div>
+
+          {/* 3. 超参数对比表 */}
           <div className="compareSection">
-            <h3>Config Differences ({config?.different?.length || 0} changed)</h3>
+            <h3>Hyperparameters ({config?.different?.length || 0} changed, {config?.identical?.length || 0} identical)</h3>
             {config?.different?.length > 0 && (
               <table className="compareTable">
                 <thead>
                   <tr>
-                    <th>Setting</th>
+                    <th>Parameter</th>
                     <th>Job A</th>
                     <th>Job B</th>
                     <th>Note</th>
@@ -1864,8 +2018,8 @@ function CompareRunsPanel({ jobList, refreshJobs }) {
                 </thead>
                 <tbody>
                   {config.different.map((item) => (
-                    <tr key={item.key}>
-                      <td className="mono">{item.key}</td>
+                    <tr key={item.key} className="diffRow">
+                      <td className="mono"><span className="diffIndicator" /> {item.key}</td>
                       <td>{item.value_a === null ? "—" : String(item.value_a)}</td>
                       <td>{item.value_b === null ? "—" : String(item.value_b)}</td>
                       <td className="compareNote">{item.note || ""}</td>
@@ -1874,7 +2028,7 @@ function CompareRunsPanel({ jobList, refreshJobs }) {
                 </tbody>
               </table>
             )}
-            {config?.different?.length === 0 && <p>No differing settings found.</p>}
+            {config?.different?.length === 0 && <p className="compareEmptyState">No differing settings found.</p>}
 
             <button className="secondaryButton compareToggle" onClick={() => setShowIdentical(!showIdentical)}>
               {showIdentical ? "Hide" : "Show"} identical settings ({config?.identical?.length || 0})
@@ -1899,9 +2053,67 @@ function CompareRunsPanel({ jobList, refreshJobs }) {
             )}
           </div>
 
-          {/* Metrics Comparison */}
+          {/* 4. 指标曲线对比图 */}
           <div className="compareSection">
-            <h3>Metrics Comparison ({metrics.length} metrics)</h3>
+            <h3>Metric Curve Comparison</h3>
+            {chartMetricNames.length > 0 ? (
+              <>
+                <div className="compareChartTabs">
+                  {chartMetricNames.map((name) => (
+                    <button
+                      key={name}
+                      className={`chartTab ${activeChartMetric === name ? "chartTabActive" : ""}`}
+                      onClick={() => setActiveChartMetric(name)}
+                    >
+                      {name}
+                    </button>
+                  ))}
+                </div>
+                {chartPlot ? (
+                  <div className="compareChartWrap">
+                    <svg className="compareChartSvg" viewBox="0 0 700 170" role="img">
+                      <g className="plotGrid">
+                        {[0, 1, 2, 3].map((item) => <line key={item} x1="0" x2="700" y1={20 + item * 37} y2={20 + item * 37} />)}
+                      </g>
+                      <polyline className="compareLineA" points={chartPlot.lineA} />
+                      <polyline className="compareLineB" points={chartPlot.lineB} />
+                    </svg>
+                    <div className="compareChartLegend">
+                      <span><i className="legendA" /> Job A ({jobA?.name || "—"})</span>
+                      <span><i className="legendB" /> Job B ({jobB?.name || "—"})</span>
+                      <span className="compareChartRange">Y: {chartPlot.minLabel} - {chartPlot.maxLabel}</span>
+                    </div>
+                    {(chartData.points_a?.length === 0 || chartData.points_b?.length === 0) && (
+                      <div className="compareChartWarning">
+                        {chartData.points_a?.length === 0 && <span>Job A has no data for this metric</span>}
+                        {chartData.points_b?.length === 0 && <span>Job B has no data for this metric</span>}
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="compareEmptyState">No plottable data for "{activeChartMetric}"</div>
+                )}
+              </>
+            ) : (
+              <p className="compareEmptyState">No metrics with time-series data available.</p>
+            )}
+          </div>
+
+          {/* 5. 差异摘要 */}
+          {diffSummary.length > 0 && (
+            <div className="compareSection">
+              <h3>Key Differences</h3>
+              <ul className="diffSummaryList">
+                {diffSummary.map((item, i) => (
+                  <li key={i}>{item}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {/* 6. 完整指标对比表 */}
+          <div className="compareSection">
+            <h3>All Metrics Comparison ({metrics.length} metrics)</h3>
             {metrics.length > 0 ? (
               <table className="compareTable">
                 <thead>
@@ -1934,11 +2146,11 @@ function CompareRunsPanel({ jobList, refreshJobs }) {
                 </tbody>
               </table>
             ) : (
-              <p>No metrics available for either job.</p>
+              <p className="compareEmptyState">No metrics available for either job.</p>
             )}
           </div>
 
-          {/* Timing Comparison */}
+          {/* 7. Timing 对比表 */}
           <div className="compareSection">
             <h3>Timing Comparison</h3>
             <table className="compareTable">
@@ -1971,11 +2183,6 @@ function CompareRunsPanel({ jobList, refreshJobs }) {
                   <td>{timing.job_b?.avg_train_s != null ? `${timing.job_b.avg_train_s}s` : "—"}</td>
                 </tr>
                 <tr>
-                  <td>Avg other / step</td>
-                  <td>{timing.job_a?.avg_other_s != null ? `${timing.job_a.avg_other_s}s` : "—"}</td>
-                  <td>{timing.job_b?.avg_other_s != null ? `${timing.job_b.avg_other_s}s` : "—"}</td>
-                </tr>
-                <tr>
                   <td>Total duration</td>
                   <td>{timing.job_a?.duration_s != null ? `${timing.job_a.duration_s}s` : "—"}</td>
                   <td>{timing.job_b?.duration_s != null ? `${timing.job_b.duration_s}s` : "—"}</td>
@@ -1992,6 +2199,7 @@ function CompareRunsPanel({ jobList, refreshJobs }) {
               </div>
             )}
           </div>
+
         </div>
       )}
     </section>
