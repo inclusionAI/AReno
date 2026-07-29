@@ -51,6 +51,19 @@ PROGRESS_FRACTION = 0.3  # full-but-unsolved earns 0.3 * SOLVED_REWARD
 PROGRESS_CAP: dict[str, float] = {
     band: weight * PROGRESS_FRACTION for band, weight in SOLVED_REWARD.items()
 }
+# Anti-deadlock shaping. With a purely sparse reward, when every sample in a
+# rollout group fails to make any legal placement, all rewards collapse to
+# NOISE_PENALTY, group advantages become 0, gradients vanish, and RL stalls
+# (policy frozen -> still all-fail next step). To keep a learning signal alive
+# even on weak models, we grade *effort* below the legal-progress band:
+# - tried to place but all placements were illegal : ATTEMPT_PENALTY (-0.05)
+# - only inspected / produced no place_digit at all     : NOISE_PENALTY (-0.1)
+# This guarantees within-group reward spread as long as samples differ in how
+# hard they tried, so advantages (and gradients) stay nonzero. It never rewards
+# illegal placement above legal progress, so the policy still moves toward
+# correct moves; it just stops the all-equal deadlock.
+ATTEMPT_PENALTY = -0.05
+INSPECT_ONLY_PENALTY = -0.08
 NOISE_PENALTY = -0.1
 
 
@@ -66,17 +79,19 @@ def reward_fn(record: Any) -> float:
     empty_cells = int(source.get("empty_cells", 0)) or 1
 
     place_results = _place_results(record)
-    if not place_results:
-        return NOISE_PENALTY
+    inspect_count = _inspect_count(record)
 
     solved = any(bool(result.get("solved")) for result in place_results)
     legal_placements = sum(1 for result in place_results if result.get("placed"))
+    tried_place = bool(place_results)  # any place_digit was attempted (legal or illegal)
 
     if not _curriculum_enabled():
         if solved:
             return 1.0
         if legal_placements:
             return 0.0
+        if tried_place:
+            return ATTEMPT_PENALTY
         return NOISE_PENALTY
 
     # Curriculum path.
@@ -86,6 +101,12 @@ def reward_fn(record: Any) -> float:
         weight = SOLVED_REWARD.get(difficulty, 1.0)
         progress = weight * PROGRESS_FRACTION * (legal_placements / empty_cells)
         return min(PROGRESS_CAP.get(difficulty, weight * PROGRESS_FRACTION), progress)
+    # No legal placement this episode — grade effort to avoid an all-equal
+    # (zero-advantage, zero-gradient) deadlock across the rollout group.
+    if tried_place:
+        return ATTEMPT_PENALTY
+    if inspect_count:
+        return INSPECT_ONLY_PENALTY  # at least inspected; above pure noise
     return NOISE_PENALTY
 
 
@@ -99,6 +120,17 @@ def _place_results(record: Any) -> list[dict[str, Any]]:
             continue
         results.append(_decode(content.get("content") if isinstance(content, dict) else content))
     return results
+
+
+def _inspect_count(record: Any) -> int:
+    """How many inspect_candidates calls the episode made (effort signal)."""
+
+    count = 0
+    for call in record.tool_calls:
+        name = call.get("name") if isinstance(call, dict) else None
+        if name == "inspect_candidates":
+            count += 1
+    return count
 
 
 def _decode(content: Any) -> dict[str, Any]:
