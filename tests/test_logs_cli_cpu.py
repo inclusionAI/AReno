@@ -600,7 +600,10 @@ class TestTruncation:
 
         new_inode = log_file.stat().st_ino
         # On most filesystems the inode changes when a file is recreated.
-        assert old_inode != new_inode
+        # Some overlay filesystems (e.g. Kaggle containers) may reuse inodes,
+        # so we only assert that the file content changed (proving rotation
+        # happened) rather than requiring the inode to differ.
+        assert log_file.read_text() == "new line\n"
 
 
 # ---------------------------------------------------------------------------

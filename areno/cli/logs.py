@@ -171,9 +171,15 @@ def logs_command(
     )
 
     # 4. Build the reader.
+    # When filters are active alongside --tail, we read the full file,
+    # apply filters, then take the last N matching lines.  When no
+    # filters are active, --tail limits the raw read for efficiency.
+    has_filters = spec.rank is not None or spec.stage is not None or spec.severity is not None or spec.text_pattern is not None
+    effective_tail = None if has_filters else tail
+
     reader = LogReader(paths)
     iterator, stats = reader.read(
-        tail=tail,
+        tail=effective_tail,
         follow=follow,
         poll_interval=poll_interval,
     )
@@ -182,10 +188,19 @@ def logs_command(
     formatter = LogFormatter(output=output)
 
     # 6. Stream filtered entries to stdout.
+    # When filters + tail are both active, collect matches and emit only the last N.
     try:
-        for entry in iterator:
-            if matches(entry, spec):
+        if has_filters and tail is not None and not follow:
+            matched: list = []
+            for entry in iterator:
+                if matches(entry, spec):
+                    matched.append(entry)
+            for entry in matched[-tail:] if tail > 0 else []:
                 click.echo(formatter.format(entry))
+        else:
+            for entry in iterator:
+                if matches(entry, spec):
+                    click.echo(formatter.format(entry))
     except KeyboardInterrupt:
         # Ctrl-C during follow mode — print a summary to stderr.
         pass
