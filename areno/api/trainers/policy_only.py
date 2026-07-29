@@ -83,8 +83,11 @@ class PolicyOnlyTrainer:
                 self._dashboard_step = step
                 if self._agentic_enabled():
                     agent_batch = asyncio.run(self._run_agentic_rollout(sampling_params, prompt_batch))
+                    # Calculate reward mean for dashboard display
+                    reward_mean_value = float(np.mean(rewards_all)) if rewards_all else None
+                    extra_rollout = {"reward_mean": reward_mean_value} if reward_mean_value is not None else {}
                     self.logger.info("epoch=%d step=%d role=%s stage=rollout_end", epoch, step, role)
-                    record_dashboard_state(self.areno, stage="rollout_end", epoch=epoch, step=step, role=role)
+                    record_dashboard_state(self.areno, stage="rollout_end", epoch=epoch, step=step, role=role, extra=extra_rollout)
                     self._log_agentic_sample_completions(epoch, step, agent_batch)
                     train_batch, rewards_all, rollout_logprobs = self._materialize_agentic_train_batch(
                         tokenizer, prompt_batch, agent_batch
@@ -93,8 +96,11 @@ class PolicyOnlyTrainer:
                     # 1) Sample n_samples completions per prompt; ordering
                     #    matches `prompt_batch.items` so we can zip downstream.
                     rollout_results = asyncio.run(self._run_prompt_rollout(sampling_params, prompt_batch))
+                    # Calculate reward mean for dashboard display
+                    reward_mean_value = float(np.mean(rewards_all)) if rewards_all else None
+                    extra_rollout = {"reward_mean": reward_mean_value} if reward_mean_value is not None else {}
                     self.logger.info("epoch=%d step=%d role=%s stage=rollout_end", epoch, step, role)
-                    record_dashboard_state(self.areno, stage="rollout_end", epoch=epoch, step=step, role=role)
+                    record_dashboard_state(self.areno, stage="rollout_end", epoch=epoch, step=step, role=role, extra=extra_rollout)
                     self._record_sample_completions(tokenizer, epoch, step, prompt_batch, rollout_results)
 
                     # 2+3) Score rewards and broadcast group-normalised
@@ -146,8 +152,17 @@ class PolicyOnlyTrainer:
                     if isinstance(result, dict):
                         result[f"{role}_train_wall_time_s"] = train_time_s
                     result = self._augment_train_stats(result)
+
+                    # Extract loss and total_steps for dashboard display
+                    extra_train = {}
+                    if isinstance(result, dict):
+                        if "loss" in result:
+                            extra_train["loss"] = float(result["loss"])
+                        if self.config.max_steps is not None:
+                            extra_train["total_steps"] = self.config.max_steps
+
                     self.logger.info("epoch=%d step=%d role=%s stage=train_end", epoch, step, role)
-                    record_dashboard_state(self.areno, stage="train_end", epoch=epoch, step=step, role=role)
+                    record_dashboard_state(self.areno, stage="train_end", epoch=epoch, step=step, role=role, extra=extra_train if extra_train else None)
                     self.logger.info("epoch=%d step=%d train_stats=%s", epoch, step, result)
                     self._maybe_save(epoch, step)
                 step += 1
