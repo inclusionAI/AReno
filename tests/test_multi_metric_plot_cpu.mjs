@@ -150,4 +150,60 @@ check("palette is colorblind-safe sized and cyclic", () => {
   assert.equal(metricColor(0), metricColor(METRIC_PALETTE.length), "wraps around");
 });
 
+// --- LTTB extreme / boundary cases (review feedback) ---
+check("lttb output length equals target for thousands of points", () => {
+  const pts = mk(Array.from({ length: 5000 }, (_, i) => Math.sin(i / 40) + i / 5000));
+  assert.equal(downsampleLttb(pts, 480).length, 480);
+});
+
+check("lttb handles duplicate steps without throwing", () => {
+  const pts = Array.from({ length: 100 }, () => ({ step: 5, value: 1 }));
+  const out = downsampleLttb(pts, 20);
+  assert.equal(out.length, 20);
+  assert.equal(out[0].step, 5);
+});
+
+check("lttb handles NaN/Inf values without throwing", () => {
+  const pts = mk([0, NaN, 3, -Infinity, 5, 6, 7, 8, 9, 10]);
+  const out = downsampleLttb(pts, 5);
+  assert.equal(out.length, 5);
+  assert.equal(out[0], pts[0]);
+  assert.equal(out[out.length - 1], pts[pts.length - 1]);
+});
+
+check("lttb handles n very close to target", () => {
+  const pts = mk(Array.from({ length: 12 }, (_, i) => i));
+  const out = downsampleLttb(pts, 10);
+  assert.equal(out.length, 10);
+});
+
+check("lttb handles uneven step gaps", () => {
+  const pts = [{ step: 0, value: 0 }, { step: 1, value: 1 }, { step: 50, value: 2 },
+               { step: 51, value: 3 }, { step: 100, value: 4 }, ...mk([5, 6, 7, 8])];
+  const out = downsampleLttb(pts, 5);
+  assert.equal(out.length, 5);
+});
+
+check("assignAxes handles negative ranges crossing zero", () => {
+  const series = { a: mk([-2, 0, 3]), b: mk([-800, 0, 1200]) };
+  const axes = assignAxes(series, ["a", "b"]);
+  assert.equal(axes.get("a"), 0, "first series always left");
+  assert.equal(axes.get("b"), 1, "massively larger range -> right");
+});
+
+check("assignAxes keeps [0, constant] range on shared axis when scale matches", () => {
+  // Regression for the truthy-check bug: min==0 must not cause a split.
+  const series = { a: mk([0, 2, 3]), b: mk([0, 1, 2]) };
+  const axes = assignAxes(series, ["a", "b"]);
+  assert.equal(axes.get("b"), 0, "same scale (incl. zero min) shares left axis");
+});
+
 console.log(`\n${passed} multi-metric plot checks passed`);
+
+// Clean up the extracted helper module so the test run leaves no artifacts.
+import { unlinkSync } from "node:fs";
+try {
+  unlinkSync(tmp);
+} catch {
+  // Already gone or never created; not a test failure.
+}

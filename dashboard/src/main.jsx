@@ -1248,10 +1248,14 @@ function MetricChart({ jobId, metricsDir, refreshNonce }) {
     const svg = svgRef.current;
     if (!svg || !allSteps.length) return;
     const rect = svg.getBoundingClientRect();
-    const x = ((event.clientX - rect.left) / rect.width) * 720;
+    // The SVG viewBox is 720 wide; pointer x in viewBox units is the CSS x
+    // scaled by (720 / rect.width). SVG_WIDTH must match the viewBox in the
+    // <svg> element below — keep them in sync if the viewBox changes.
+    const SVG_WIDTH = 720;
+    const x = ((event.clientX - rect.left) / rect.width) * SVG_WIDTH;
     const stepMin = allSteps[0];
     const stepMax = allSteps[allSteps.length - 1];
-    const step = Math.round((x / 720) * (stepMax - stepMin) + stepMin);
+    const step = Math.round((x / SVG_WIDTH) * (stepMax - stepMin) + stepMin);
     setHoverStep(allSteps.reduce((best, s) => (Math.abs(s - step) < Math.abs(best - step) ? s : best), allSteps[0]));
   };
   const hoverRows = hoverStep === null ? [] : order
@@ -1320,13 +1324,21 @@ function MetricSelector({ names, selected, onToggle }) {
   if (!names.length) return null;
   return (
     <div className="metricDropdown" ref={wrapRef}>
-      <button type="button" className="metricDropdownBtn" onClick={() => setOpen((v) => !v)}>
+      <button
+        type="button"
+        className="metricDropdownBtn"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        aria-haspopup="listbox"
+        aria-controls="metricDropdownPanel"
+        aria-label="select metrics to plot"
+      >
         <Activity size={13} />
         {selected.length ? `${selected.length} selected` : "select metrics"}
-        <span className="metricDropdownCaret">{open ? "▴" : "▾"}</span>
+        <span className="metricDropdownCaret" aria-hidden="true">{open ? "▴" : "▾"}</span>
       </button>
       {open && (
-        <div className="metricDropdownPanel">
+        <div className="metricDropdownPanel" id="metricDropdownPanel" role="listbox" aria-label="available metrics">
           {names.map((name) => {
             const checked = selected.includes(name);
             const idx = selected.indexOf(name);
@@ -1337,6 +1349,7 @@ function MetricSelector({ names, selected, onToggle }) {
                 role="checkbox"
                 tabIndex={0}
                 aria-checked={checked}
+                aria-label={`${checked ? "deselect" : "select"} metric ${name}`}
                 onClick={() => onToggle(name)}
                 onKeyDown={(event) => {
                   if (event.key === "Enter" || event.key === " ") {
@@ -1345,7 +1358,7 @@ function MetricSelector({ names, selected, onToggle }) {
                   }
                 }}
               >
-                <i className="metricSwatch" style={{ background: checked ? metricColor(idx) : "transparent", borderColor: checked ? metricColor(idx) : undefined }} />
+                <i className="metricSwatch" style={{ background: checked ? metricColor(idx) : "transparent", borderColor: checked ? metricColor(idx) : undefined }} aria-hidden="true" />
                 <span title={name}>{name}</span>
               </div>
             );
@@ -1501,16 +1514,30 @@ function metricColor(index) {
 // non-mutating; returns the original array when already small enough.
 function downsampleLttb(points, target) {
   const n = points.length;
+  // Passthrough when target is invalid or the series already fits. The first
+  // and last points are always kept, so downsampling needs n >= target >= 2.
   if (!Number.isFinite(target) || target < 2 || n <= target) return points;
   const sampled = [points[0]];
   const bucketSize = (n - 2) / (target - 2);
   let prev = points[0];
   for (let i = 0; i < target - 2; i += 1) {
-    const start = Math.floor(i * bucketSize) + 1;
-    const end = Math.floor((i + 1) * bucketSize) + 1;
-    const nextStart = Math.floor((i + 1) * bucketSize) + 1;
-    const avgStep = (points[Math.min(nextStart, n - 1)].step + points[Math.min(nextStart + 1, n - 1)].step) / 2;
-    const avgValue = (points[Math.min(nextStart, n - 1)].value + points[Math.min(nextStart + 1, n - 1)].value) / 2;
+    // Clamp each bucket's index range to [1, n-2] so empty/tiny buckets and
+    // the boundary near the last point never read out of bounds.
+    const start = Math.min(Math.max(Math.floor(i * bucketSize) + 1, 1), n - 2);
+    const end = Math.min(Math.max(Math.floor((i + 1) * bucketSize) + 1, start + 1), n - 1);
+    // Average of the NEXT bucket (the actual range it will cover) is the
+    // reference point the triangle area is measured against in LTTB.
+    const nextStart = Math.min(Math.floor((i + 1) * bucketSize) + 1, n - 1);
+    const nextEnd = Math.min(Math.floor((i + 2) * bucketSize) + 1, n - 1);
+    let avgStep = 0;
+    let avgValue = 0;
+    for (let k = nextStart; k < nextEnd; k += 1) {
+      avgStep += points[k].step;
+      avgValue += points[k].value;
+    }
+    const nextCount = Math.max(nextEnd - nextStart, 1);
+    avgStep /= nextCount;
+    avgValue /= nextCount;
     let maxArea = -1;
     let chosen = points[start];
     for (let j = start; j < end && j < n - 1; j += 1) {
@@ -1545,10 +1572,17 @@ function assignAxes(seriesByKey, order) {
   if (order.length <= 1) return new Map(order.map((k) => [k, 0]));
   const firstRange = rangeOf(seriesByKey[order[0]]);
   const axes = new Map([[order[0], 0]]);
+  // A later series shares the left axis when its value scale is within one
+  // order of magnitude of the first series. We compare absolute peak magnitudes
+  // (max(|min|, |max|)) rather than a combined max/min ratio so ranges that
+  // legitimately contain zero (e.g. [0, 3]) are not inflated by a 1e-12 floor
+  // into looking massively different. A constant-zero series is degenerate and
+  // shares the left axis. Threshold: log10(peak ratio) <= 1 means <= 10x.
+  const firstPeak = Number.isFinite(firstRange.max) ? Math.max(Math.abs(firstRange.min), Math.abs(firstRange.max)) : 0;
   for (let i = 1; i < order.length; i += 1) {
     const r = rangeOf(seriesByKey[order[i]]);
-    const sameScale = firstRange.min && firstRange.max && r.min && r.max
-      && Math.log10(Math.max(firstRange.max, r.max) / Math.max(Math.min(firstRange.min, r.min), 1e-12)) <= 1;
+    const peak = Number.isFinite(r.max) ? Math.max(Math.abs(r.min), Math.abs(r.max)) : 0;
+    const sameScale = firstPeak === 0 || peak === 0 || Math.log10(Math.max(firstPeak, peak) / Math.max(Math.min(firstPeak, peak), 1e-12)) <= 1;
     axes.set(order[i], sameScale ? 0 : 1);
   }
   return axes;

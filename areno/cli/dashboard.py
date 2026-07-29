@@ -166,15 +166,22 @@ def metrics_command(job_id: str, names_csv: str, limit: int, as_json: bool) -> N
         raise click.ClickException(f"job not found: {job_id}")
 
     # Reject names that do not exist for this job so a typo is diagnosed, not
-    # silently skipped.
-    available = {item["name"] for item in state.metric_summaries(job_id)}
+    # silently skipped. A malformed dashboard state (missing 'metrics' fields)
+    # surfaces a meaningful error rather than a raw traceback.
+    try:
+        available = {item["name"] for item in state.metric_summaries(job_id)}
+    except (KeyError, TypeError, AttributeError) as exc:
+        raise click.ClickException(f"could not read metrics for job {job_id}: {exc}") from exc
     missing = [name for name in requested if name not in available]
     if missing:
         raise click.ClickException(f"unknown metric names for job {job_id}: {', '.join(missing)}")
 
     collected = []
     for name in requested:
-        points = state.metric_series(job_id, name, limit=limit)
+        try:
+            points = state.metric_series(job_id, name, limit=limit)
+        except (KeyError, TypeError, AttributeError) as exc:
+            raise click.ClickException(f"could not read series for metric {name!r}: {exc}") from exc
         collected.append({"name": name, "point_count": len(points), "points": points})
 
     if as_json:
