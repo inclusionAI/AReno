@@ -647,8 +647,30 @@ class DashboardState:
         result["metrics"] = metrics_comparison
 
         # -- metric series for charts ------------------------------------
-        # Return time-series for all metrics so the frontend can draw overlaid
-        # charts without making separate API calls.
+        # Group all metric points by name in a single pass to avoid calling
+        # metric_series() N times (each of which re-scans job.metrics).
+        from collections import defaultdict
+
+        def _group_by_name(job: Job) -> dict[str, list[dict[str, Any]]]:
+            grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+            for point in job.metrics:
+                name = str(point.get("name") or "")
+                if not name or not number_like(point.get("value")):
+                    continue
+                grouped[name].append({
+                    "name": name,
+                    "value": point.get("value"),
+                    "step": int(point.get("step") or 0),
+                    "time": point.get("time"),
+                })
+            # Sort each group by step and limit to last 200 points.
+            for name in grouped:
+                grouped[name].sort(key=lambda p: p["step"])
+                grouped[name] = grouped[name][-200:]
+            return grouped
+
+        grouped_a = _group_by_name(job_a)
+        grouped_b = _group_by_name(job_b)
         priority_names = [n for n in all_metric_names if "loss" in n.lower()]
         other_names = [n for n in all_metric_names if "loss" not in n.lower()]
         chart_metrics = priority_names + other_names
@@ -656,8 +678,8 @@ class DashboardState:
         metric_charts: dict[str, dict[str, Any]] = {}
         for name in chart_metrics:
             metric_charts[name] = {
-                "points_a": self.metric_series(job_a_id, name, limit=200),
-                "points_b": self.metric_series(job_b_id, name, limit=200),
+                "points_a": grouped_a.get(name, []),
+                "points_b": grouped_b.get(name, []),
             }
         result["metric_charts"] = metric_charts
 
