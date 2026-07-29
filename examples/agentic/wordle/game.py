@@ -202,6 +202,8 @@ TARGET_WORD_LIST = frozenset([
     "yearn", "yeast", "yield", "young", "youth", "zebra", "zesty", "zones",
 ])
 
+# Default game settings
+# These can be overridden to support different word lengths
 MAX_GUESSES = 6
 WORD_LENGTH = 5
 
@@ -228,22 +230,23 @@ HistoryEntry = tuple[str, GuessResult]  # (guess, result)
 WordleGame = dict[str, Any]  # Main game state dictionary
 
 
-def normalize_word(word: str) -> str:
-    """Return a validated lowercase 5-letter word."""
+def normalize_word(word: str, word_length: int = WORD_LENGTH) -> str:
+    """Return a validated lowercase word of specified length."""
     word = word.lower().strip()
-    if len(word) != WORD_LENGTH:
-        raise ValueError(f"Word must be {WORD_LENGTH} letters, got: {word}")
+    if len(word) != word_length:
+        raise ValueError(f"Word must be {word_length} letters, got: {word}")
     if not word.isalpha():
         raise ValueError(f"Word must contain only letters, got: {word}")
     return word
 
 
-def is_valid_word(word: str) -> bool:
+def is_valid_word(word: str, word_list: frozenset = WORD_LIST) -> bool:
     """Check if a word is in the valid word list."""
     try:
-        normalized = normalize_word(word)
-        return normalized in WORD_LIST
-    except ValueError:
+        word_length = len(next(iter(word_list))) if word_list else WORD_LENGTH
+        normalized = normalize_word(word, word_length=word_length)
+        return normalized in word_list
+    except (ValueError, StopIteration):
         return False
 
 
@@ -256,12 +259,15 @@ def check_guess(guess: str, target: str) -> GuessResult:
       - First 'E' matches: mark as EXACT or PRESENT
       - Second 'E' is marked ABSENT if no more targets available
 
+    Supports variable-length words by inferring length from the target.
+
     Returns a list of LetterStatus for each position.
     """
-    guess = normalize_word(guess)
-    target = normalize_word(target)
+    word_length = len(target)
+    guess = normalize_word(guess, word_length=word_length)
+    target = normalize_word(target, word_length=word_length)
 
-    result: list[LetterStatus] = [LetterStatus.ABSENT] * WORD_LENGTH
+    result: list[LetterStatus] = [LetterStatus.ABSENT] * word_length
 
     # Track which target letters have been matched
     target_letters: dict[str, int] = {}
@@ -269,13 +275,13 @@ def check_guess(guess: str, target: str) -> GuessResult:
         target_letters[letter] = target_letters.get(letter, 0) + 1
 
     # First pass: mark exact matches
-    for i in range(WORD_LENGTH):
+    for i in range(word_length):
         if guess[i] == target[i]:
             result[i] = LetterStatus.EXACT
             target_letters[guess[i]] -= 1
 
     # Second pass: mark present (but not already matched)
-    for i in range(WORD_LENGTH):
+    for i in range(word_length):
         if result[i] == LetterStatus.EXACT:
             continue
         if guess[i] in target_letters and target_letters[guess[i]] > 0:

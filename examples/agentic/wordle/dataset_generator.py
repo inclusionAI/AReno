@@ -12,7 +12,7 @@ from typing import TextIO
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import game  # noqa: E402
 
-DEFAULT_COUNT = 128
+DEFAULT_COUNT = 1024
 DEFAULT_SEED = 2026
 
 

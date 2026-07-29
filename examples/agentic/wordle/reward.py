@@ -107,6 +107,7 @@ def _tool_guess(record: Any) -> str | None:
                 return None
         if isinstance(arguments, dict):
             word = arguments.get("word")
-            if isinstance(word, str) and len(word) == 5 and word.isalpha():
+            # Accept any alphabetic word (not just 5-letter) to support variable lengths
+            if isinstance(word, str) and len(word) >= 1 and word.isalpha():
                 return word.lower()
     return None

@@ -44,16 +44,56 @@ python -m pytest tests/ -v
 
 ### Running the Demo
 
-1. First, generate some game data:
+1. First, generate game data:
 
 ```bash
-python -m dataset_generator --count 128 --output games.jsonl
+python -m dataset_generator --count 1024 --output /tmp/areno-wordle.jsonl
 ```
 
-2. Then run the agent (requires an OpenAI-compatible API endpoint):
+2. Train with AReno (requires GPU + AReno installed):
 
 ```bash
-python -m run_agent --help
+areno train \
+--save-path /tmp/areno-wordle-ckpt \
+--save-interval 10 \
+--ckpt Qwen/Qwen3-1.7B \
+--adam-8bit \
+--model-hub hf \
+--world-size 2 \
+--tp-size 2 \
+--algo gspo \
+--batch-size 2 \
+--n-samples 8 \
+--drop-rollout-state \
+--max-running-prompts 16 \
+--max-new-tokens 256 \
+--mini-bs 1 \
+--max-steps 200 \
+--dataset-path /tmp/areno-wordle.jsonl \
+--reward-fn-path examples/agentic/wordle/reward.py \
+--dataset-loader-fn examples/agentic/wordle/dataset_loader.py \
+--agent-fn examples/agentic/wordle/run_agent.py \
+--lr 1e-7 \
+--grad-clip-norm 0.5
+```
+
+### Evaluation
+
+Run a deterministic evaluation to report solve rate and average guesses:
+
+```bash
+python -m evaluate --dataset /tmp/areno-wordle.jsonl
+```
+
+Output example:
+```
+Wordle Statistics
+========================================
+Overall Solve Rate: 85.2%
+Overall Avg Guesses (when solved): 4.12
+
+By Word Length:
+  5-letter words: 85.2% solved, avg 4.12 guesses (872/1024)
 ```
 
 ## Word List

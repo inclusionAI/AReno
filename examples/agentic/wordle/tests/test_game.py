@@ -458,5 +458,97 @@ class TestDatasetValidation:
         assert ".jsonl or .json" in error
 
 
+class TestDifferentWordLengths:
+    """Test game supports different word lengths (Issue #189)."""
+
+    def test_three_letter_word(self):
+        """Test game works with 3-letter word."""
+        g = game.create_new_game("cat")
+        g = game.apply_guess(g, "dog")
+        assert g["state"] == game.GameState.IN_PROGRESS
+        assert len(g["guesses"]) == 1
+
+        # Win
+        g = game.apply_guess(g, "cat")
+        assert g["state"] == game.GameState.WON
+
+    def test_four_letter_word(self):
+        """Test game works with 4-letter word."""
+        g = game.create_new_game("fish")
+        g = game.apply_guess(g, "bird")
+        assert g["state"] == game.GameState.IN_PROGRESS
+
+        # Win
+        g = game.apply_guess(g, "fish")
+        assert g["state"] == game.GameState.WON
+
+    def test_six_letter_word(self):
+        """Test game works with 6-letter word."""
+        g = game.create_new_game("planet")
+        g = game.apply_guess(g, "planet")
+        assert g["state"] == game.GameState.WON
+
+    def test_variable_length_check_guess(self):
+        """Test check_guess works with different word lengths."""
+        # 3-letter
+        result = game.check_guess("cat", "dog")
+        assert len(result) == 3
+        assert all(f == game.LetterStatus.ABSENT for f in result)
+
+        # 4-letter
+        result = game.check_guess("fish", "fish")
+        assert len(result) == 4
+        assert all(f == game.LetterStatus.EXACT for f in result)
+
+        # 6-letter
+        result = game.check_guess("planet", "planto")
+        assert len(result) == 6
+        assert result[0] == game.LetterStatus.EXACT  # p
+        assert result[1] == game.LetterStatus.EXACT  # l
+        assert result[2] == game.LetterStatus.EXACT  # a
+        assert result[3] == game.LetterStatus.EXACT  # n
+        assert result[4] == game.LetterStatus.EXACT  # e
+        assert result[5] == game.LetterStatus.ABSENT  # t vs o
+
+    def test_normalize_word_variable_length(self):
+        """Test normalize_word accepts custom word_length."""
+        assert game.normalize_word("cat", word_length=3) == "cat"
+        assert game.normalize_word("FISH", word_length=4) == "fish"
+
+        with pytest.raises(ValueError, match="must be 4 letters"):
+            game.normalize_word("cat", word_length=4)
+
+    def test_format_prompt_variable_length(self):
+        """Test prompt reflects actual word length."""
+        g = game.create_new_game("cat")
+        prompt = game.format_prompt(g)
+        assert "3-letter" in prompt or "6 attempts" in prompt
+
+
+class TestEvaluate:
+    """Test evaluation script (Issue #189)."""
+
+    def test_evaluate_dataset_random(self):
+        """Test evaluation runs without errors."""
+        from evaluate import evaluate_dataset
+
+        records = [{"target": "hello", "max_guesses": 6}]
+        results = evaluate_dataset(records, strategy="random", seed=42)
+        assert len(results) == 1
+        assert "solved" in results[0]
+        assert "guesses" in results[0]
+        assert results[0]["target"] == "hello"
+
+    def test_evaluate_dataset_perfect(self):
+        """Test perfect strategy always wins."""
+        from evaluate import evaluate_dataset
+
+        records = [{"target": "hello", "max_guesses": 6}]
+        results = evaluate_dataset(records, strategy="perfect", seed=42)
+        assert len(results) == 1
+        assert results[0]["solved"] is True
+        assert results[0]["guesses"] == 1
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
