@@ -1725,19 +1725,68 @@ if (rootElement) {
 // ---------------------------------------------------------------------------
 
 function CompareRunsPanel({ jobList, refreshJobs }) {
-  const [jobAId, setJobAId] = useState("");
-  const [jobBId, setJobBId] = useState("");
+  // 从 URL 参数初始化状态，解决页面切换后状态丢失的问题
+  const getInitialJobAId = () => {
+    const params = new URLSearchParams(window.location.search);
+    return params.get("job_a") || "";
+  };
+  const getInitialJobBId = () => {
+    const params = new URLSearchParams(window.location.search);
+    return params.get("job_b") || "";
+  };
+
+  const [jobAId, setJobAId] = useState(getInitialJobAId);
+  const [jobBId, setJobBId] = useState(getInitialJobBId);
   const [compareResult, setCompareResult] = useState(null);
   const [showIdentical, setShowIdentical] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
-  async function fetchComparison() {
-    if (!jobAId || !jobBId) return;
+  // 更新 URL 参数
+  const updateUrlParams = (aId, bId) => {
+    const params = new URLSearchParams(window.location.search);
+    if (aId) params.set("job_a", aId); else params.delete("job_a");
+    if (bId) params.set("job_b", bId); else params.delete("job_b");
+    const newUrl = params.toString() ? `${window.location.pathname}?${params.toString()}` : window.location.pathname;
+    window.history.pushState({}, "", newUrl);
+  };
+
+  // 处理 Job A 选择变化
+  const handleJobAChange = (e) => {
+    const newId = e.target.value;
+    setJobAId(newId);
+    updateUrlParams(newId, jobBId);
+  };
+
+  // 处理 Job B 选择变化
+  const handleJobBChange = (e) => {
+    const newId = e.target.value;
+    setJobBId(newId);
+    updateUrlParams(jobAId, newId);
+  };
+
+  // 组件挂载时：如果 URL 中有参数，自动获取比较结果
+  useEffect(() => {
+    const urlJobA = getInitialJobAId();
+    const urlJobB = getInitialJobBId();
+    if (urlJobA && urlJobB && jobList.length > 0) {
+      // 确保 job 在列表中（可能已被清理）
+      const jobAExists = jobList.some(j => j.id === urlJobA);
+      const jobBExists = jobList.some(j => j.id === urlJobB);
+      if (jobAExists && jobBExists) {
+        fetchComparison(urlJobA, urlJobB);
+      }
+    }
+  }, []); // 空依赖数组，只在挂载时执行一次
+
+  async function fetchComparison(aId, bId) {
+    const effectiveAId = aId || jobAId;
+    const effectiveBId = bId || jobBId;
+    if (!effectiveAId || !effectiveBId) return;
     setLoading(true);
     setError("");
     try {
-      const data = await api(`/api/compare?job_a=${jobAId}&job_b=${jobBId}`);
+      const data = await api(`/api/compare?job_a=${effectiveAId}&job_b=${effectiveBId}`);
       setCompareResult(data);
     } catch (err) {
       setError(err.message || "Failed to fetch comparison");
@@ -1767,7 +1816,7 @@ function CompareRunsPanel({ jobList, refreshJobs }) {
       <div className="compareSelector">
         <div className="compareSelectGroup">
           <label>Job A</label>
-          <select value={jobAId} onChange={(e) => setJobAId(e.target.value)}>
+          <select value={jobAId} onChange={handleJobAChange}>
             <option value="">— Select a job —</option>
             {jobList.map((job) => (
               <option key={job.id} value={job.id}>
@@ -1778,7 +1827,7 @@ function CompareRunsPanel({ jobList, refreshJobs }) {
         </div>
         <div className="compareSelectGroup">
           <label>Job B</label>
-          <select value={jobBId} onChange={(e) => setJobBId(e.target.value)}>
+          <select value={jobBId} onChange={handleJobBChange}>
             <option value="">— Select a job —</option>
             {jobList.map((job) => (
               <option key={job.id} value={job.id}>
