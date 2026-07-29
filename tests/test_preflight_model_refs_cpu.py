@@ -144,11 +144,11 @@ class PreflightLocalTest(unittest.TestCase):
             self.assertEqual(result.status, "ok")
 
     def test_local_nonexistent_path(self):
-        # Use a path that does not look like a remote repo ID (has leading /).
-        result = preflight_model_ref("/nonexistent/path/to/model")
-        # On systems without modelscope installed, this falls through to
-        # the remote path; check that it's either not_found or network.
-        self.assertIn(result.status, ("not_found", "network"))
+        """A nonexistent path that doesn't look like a repo ID should be not_found."""
+        # Use a path with no slash so it can't be mistaken for a remote repo ID.
+        result = preflight_model_ref("nonexistent_local_path_no_slash")
+        self.assertEqual(result.status, "format")
+        self.assertEqual(result.stage, "remote")
 
     def test_local_path_is_file_not_dir(self):
         with tempfile.NamedTemporaryFile() as f:
@@ -449,8 +449,8 @@ class ServePreflightIntegrationTest(unittest.TestCase):
 
     def test_serve_preflight_logic_detects_nonexistent_path(self):
         """The preflight logic used by --preflight catches nonexistent paths."""
-        result = preflight_model_ref("/nonexistent/path/to/model")
-        # Should not be ok.
+        # Use a path with no slash so it fails remote format check.
+        result = preflight_model_ref("nonexistent_serve_path_no_slash")
         self.assertNotEqual(result.status, "ok")
 
 
