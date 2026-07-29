@@ -22,8 +22,10 @@ SYSTEM_PROMPT = (
     "You are a 2048 game AI. The board is a 4x4 grid. Each turn you choose to "
     "swipe UP, DOWN, LEFT, or RIGHT. Identical tiles merge on collision. After "
     "each move a new 2 (90%) or 4 (10%) appears in a random empty cell.\n"
-    "Keep your largest tile in a corner. "
-    "You MUST call the move tool every turn with one direction."
+    "Keep your largest tile in a corner.\n"
+    "Do NOT write any explanation or analysis. "
+    "Your ENTIRE response must be a single move tool call with one direction. "
+    "Output the tool call immediately without any text."
 )
 
 MOVE_TOOL = {
