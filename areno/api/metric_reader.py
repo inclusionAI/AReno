@@ -123,8 +123,9 @@ def summarize_metric(
     - ``min``/``max``: streaming single-pass over all points (O(1) memory,
       independent of the ``[-500:]`` truncation).
     - ``recent``: the last ``recent_n`` values in step order.
-    - ``trend``: the full bounded series normalized to ``[0, 1]``; ``render_table``
-      maps it to a UTF-8 sparkline, ``render_json`` returns it verbatim.
+    - ``trend``: the last ``recent_n`` values normalized to ``[0, 1]`` -- the same
+      window as ``recent`` -- so ``--limit`` bounds the sparkline length;
+      ``render_table`` maps it to a UTF-8 sparkline, ``render_json`` returns it verbatim.
     """
     series = sorted(
         (point for point in points if point.get("name") == name and number_like(point.get("value"))),
@@ -148,8 +149,9 @@ def summarize_metric(
         for point in series:
             if int(point.get("step") or 0) == last_step:
                 last = float(point.get("value"))
-        recent = values[-recent_n:] if recent_n > 0 else []
-        trend = _normalize(values)
+        window = values[-recent_n:] if recent_n > 0 else []
+        recent = window
+        trend = _normalize(window)
 
     return {
         "name": name,
