@@ -787,6 +787,9 @@ function JobMetricsView({ job, refreshNonce }) {
       <div className="panel insetPanel">
         <TimePerfView rows={job?.timeperf || []} />
       </div>
+      <div className="panel insetPanel">
+        <PhaseWaterfall jobId={job?.id} refreshNonce={refreshNonce} />
+      </div>
     </div>
   );
 }
@@ -1293,7 +1296,7 @@ function TimePerfView({ rows }) {
               ? row.segments
               : [];
             return (
-              <div key={`${row.step}-${row.time}`} className="timeRow">
+              <div key={`${row.step}-${row.time}`} className="timeRow" id={`timeperf-step-${row.step}`}>
                 <label>step {row.step}</label>
                 <div className="timeTrack">
                   <div className="timeStack" style={{ width: `${width}%` }}>
@@ -1348,6 +1351,143 @@ function normalizeDisplayName(name) {
     .replace(/^step_/, "")
     .replace(/_/g, " ")
     .trim();
+}
+
+const PHASE_COLORS = {
+  rollout: "var(--phase-rollout, #20c997)",
+  reward: "var(--phase-reward, #d33672)",
+  training: "var(--phase-training, #bf2bd9)",
+  synchronization: "var(--phase-sync, #83b81a)",
+  waiting: "var(--phase-waiting, #2851f5)",
+};
+
+function PhaseWaterfall({ jobId, refreshNonce }) {
+  const [slowThreshold, setSlowThreshold] = useState(0);
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (!jobId) return;
+    let cancelled = false;
+    setLoading(true);
+    api(`/api/jobs/${jobId}/waterfall?slow_threshold=${slowThreshold}`)
+      .then((result) => {
+        if (!cancelled) {
+          setData(result);
+          setLoading(false);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [jobId, slowThreshold, refreshNonce]);
+
+  const updates = data?.updates || [];
+  const errors = data?.errors || [];
+  const summary = data?.summary || {};
+  const maxTotal = Math.max(1, ...updates.map((u) => Number(u.total_s || 0)));
+
+  return (
+    <div className="phaseWaterfall">
+      <div className="phaseHeader">
+        <div>
+          <div className="codeTitle inline"><Layers size={14} /> Phase waterfall</div>
+        </div>
+        <div className="phaseControls">
+          <label>
+            slow &gt; {slowThreshold}s
+            <input
+              type="range"
+              min="0"
+              max={Math.ceil(maxTotal)}
+              step="1"
+              value={slowThreshold}
+              onChange={(e) => setSlowThreshold(Number(e.target.value))}
+            />
+          </label>
+        </div>
+      </div>
+      <div className="phaseLegend">
+        {Object.entries(PHASE_COLORS).map(([name, color]) => (
+          <span key={name}><i style={{ background: color }} /> {name}</span>
+        ))}
+        {summary.slow_count > 0 && <b>{summary.slow_count} slow</b>}
+        {summary.count > 0 && <b>avg {summary.avg_total_s}s</b>}
+      </div>
+      {updates.length === 0 && errors.filter((e) => e.reason?.startsWith("in-progress")).length === 0 ? (
+        <div className="sampleEmpty">{loading ? "Loading waterfall..." : "No phase timing data yet."}</div>
+      ) : (
+        <div className="phaseRows">
+          {updates.map((u) => {
+            const total = Number(u.total_s || 0);
+            return (
+              <div
+                key={u.step}
+                className={classNames("phaseRow", u.is_slow && "slow")}
+                onClick={() => {
+                  const el = document.getElementById(`timeperf-step-${u.step}`);
+                  if (el) {
+                    el.scrollIntoView({ behavior: "smooth", block: "center" });
+                    el.classList.add("highlightFlash");
+                    setTimeout(() => el.classList.remove("highlightFlash"), 1200);
+                  }
+                }}
+              >
+                <label>step {u.step}</label>
+                <div className="phaseBar">
+                  {u.phases.map((p) => {
+                    const left = (p.start_s / Math.max(total, 1)) * 100;
+                    const width = (p.duration_s / Math.max(total, 1)) * 100;
+                    const minWidth = p.duration_s > 0 ? width : 1.5;
+                    return (
+                      <span
+                        key={p.name}
+                        className={classNames("phaseBlock", p.duration_s === 0 && "empty")}
+                        data-phase={p.name}
+                        style={{
+                          left: `${left}%`,
+                          width: `${Math.max(minWidth, 0.3)}%`,
+                          background: PHASE_COLORS[p.name] || "#888",
+                        }}
+                        title={`${p.name}: ${p.start_s.toFixed(1)}s–${p.end_s.toFixed(1)}s (${p.duration_s.toFixed(1)}s)`}
+                      >
+                        {width > 5 ? p.duration_s.toFixed(0) : ""}
+                      </span>
+                    );
+                  })}
+                </div>
+                <strong>{total.toFixed(1)}s</strong>
+              </div>
+            );
+          })}
+          {errors
+            .filter((e) => e.reason?.startsWith("in-progress"))
+            .map((e) => (
+              <div key={`err-${e.step}`} className="phaseRow inProgress">
+                <label>step {e.step ?? "?"}</label>
+                <div className="phaseBar">
+                  <span className="phaseBlock inProgressTag" title={e.reason}>in-progress</span>
+                </div>
+                <strong>—</strong>
+              </div>
+            ))}
+        </div>
+      )}
+      {errors.filter((e) => !e.reason?.startsWith("in-progress")).length > 0 && (
+        <div className="phaseErrors">
+          {errors.filter((e) => !e.reason?.startsWith("in-progress")).slice(0, 5).map((e, i) => (
+            <div key={i}>step {e.step ?? "?"}: {e.reason}</div>
+          ))}
+          {errors.filter((e) => !e.reason?.startsWith("in-progress")).length > 5 && (
+            <div>... {errors.filter((e) => !e.reason?.startsWith("in-progress")).length - 5} more</div>
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function SampleView({ samples }) {

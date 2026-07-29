@@ -515,6 +515,32 @@ class DashboardState:
         points.sort(key=lambda point: int(point.get("step") or 0))
         return points[-max(1, min(limit, 5000)) :]
 
+    def waterfall(self, job_id: str | None, slow_threshold: float = 0.0) -> dict[str, Any]:
+        """Return phase-waterfall data for a job's ``timeperf`` rows.
+
+        Delegates to :func:`areno.api.dashboard.phase_waterfall` and
+        enriches the result with a summary block.
+        """
+        from areno.api.dashboard import phase_waterfall
+
+        job = self.get_job(job_id)
+        if job is None:
+            return {"job_id": None, "slow_threshold": slow_threshold, "updates": [], "errors": [], "summary": {}}
+        updates, wf_errors = phase_waterfall(job.timeperf, slow_threshold=slow_threshold)
+        slow_count = sum(1 for u in updates if u["is_slow"])
+        avg_total = sum(u["total_s"] for u in updates) / len(updates) if updates else 0.0
+        return {
+            "job_id": job.id,
+            "slow_threshold": slow_threshold,
+            "updates": updates,
+            "errors": wf_errors,
+            "summary": {
+                "count": len(updates),
+                "slow_count": slow_count,
+                "avg_total_s": round(avg_total, 2),
+            },
+        }
+
     def scan_registered_jobs(self) -> None:
         registry_jobs = registered_job_items()
         if not registry_jobs:
@@ -1500,6 +1526,19 @@ class Handler(BaseHTTPRequestHandler):
                 metric_name = query.get("name", [""])[0]
                 limit = int(query.get("limit", ["500"])[0] or 500)
                 self.json({"metric": metric_name, "points": STATE.metric_series(job_id, metric_name, limit=limit)})
+            elif path.startswith("/api/jobs/") and path.endswith("/waterfall"):
+                job_id = path.split("/")[-2]
+                query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+                raw_threshold = query.get("slow_threshold", ["0"])[0]
+                try:
+                    slow_threshold = float(raw_threshold)
+                except (TypeError, ValueError):
+                    self.error(f"slow_threshold must be a number, got {raw_threshold!r}")
+                    return
+                if slow_threshold < 0:
+                    self.error(f"slow_threshold must be non-negative, got {slow_threshold}")
+                    return
+                self.json(STATE.waterfall(job_id, slow_threshold=slow_threshold))
             elif path.startswith("/api/jobs/"):
                 job = STATE.get_job(path.split("/")[-1])
                 if not job:

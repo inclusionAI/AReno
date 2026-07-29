@@ -145,6 +145,76 @@ The writer lives in ``areno.api.metrics``. It records three namespaces:
    Stage timings when available: ``time/rollout``, ``time/reward``,
    ``time/advantage``, and ``time/train``.
 
+Dashboard phase waterfall
+-------------------------
+
+The AReno dashboard provides a **phase waterfall** view that visualises
+start, end, duration, overlap, and gaps for the major RL phases — rollout,
+reward, training, synchronization, and waiting — on a per-update basis.
+
+**Endpoint**::
+
+   GET /api/jobs/<job-id>/waterfall?slow_threshold=<seconds>
+
+**Parameters**:
+
+``slow_threshold`` (optional, default ``0``)
+   Updates whose ``total_s`` strictly exceeds this value are flagged
+   ``is_slow = true``. A value of ``0`` disables the flag (default,
+   backward-compatible).
+
+**Output fields**:
+
+``updates``
+   One entry per healthy update, each containing ``step``, ``total_s``,
+   ``is_slow``, and a ``phases`` array of five elements (rollout, reward,
+   training, synchronization, waiting).  Each phase has ``start_s``,
+   ``end_s``, ``duration_s``, and the underlying ``segments``.
+
+``errors``
+   One entry per skipped or invalid row, each containing ``step`` and
+   ``reason`` — identifies the affected stage and input without hiding
+   the original error.
+
+``summary``
+   Aggregate: ``count`` (total updates), ``slow_count`` (flagged), and
+   ``avg_total_s`` (average wall time).
+
+**How it works**: the waterfall reuses existing ``timeperf`` data — the
+fine-grained segment durations already parsed from TensorBoard ``time/*``
+scalars via ``TIME_SEGMENT_ORDER``.  It groups them into five coarse RL
+phases and derives sequential ``start_s`` / ``end_s`` by accumulation.
+No new recording points or trainer/engine changes are needed.
+
+**Limitation**: phases are assumed to be strictly sequential (no overlap).
+The existing ``timeperf`` schema stores durations only, not absolute
+start/end timestamps, so overlap is always reported as zero. If true
+overlap visualization is needed (e.g. rollout/training pipeline overlap),
+a separate follow-up issue should add start/end recording points to the
+trainer.
+
+**Minimal example** (no GPU, no database):
+
+.. code-block:: python
+
+   from areno.api.dashboard import phase_waterfall
+
+   rows = [
+       {
+           "step": 0,
+           "total_s": 100.0,
+           "segments": [
+               {"name": "rollout", "seconds": 50.0},
+               {"name": "reward", "seconds": 5.0},
+               {"name": "train", "seconds": 30.0},
+               {"name": "sync weight", "seconds": 3.0},
+           ],
+       },
+   ]
+   updates, errors = phase_waterfall(rows, slow_threshold=0.0)
+   # updates[0]["phases"] → 5 phases, Σ duration_s == total_s
+   # errors → [] (all rows healthy)
+
 Agentic diagnostics
 -------------------
 

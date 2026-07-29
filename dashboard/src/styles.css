@@ -986,6 +986,175 @@ p {
   background: #b96a19;
 }
 
+.phaseWaterfall {
+  margin-bottom: 12px;
+  border: 1px solid var(--deck-line);
+  border-radius: var(--radius-lg);
+  background: #0b1118;
+  padding: 12px;
+}
+
+.phaseHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 10px;
+}
+
+.phaseControls label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--deck-muted);
+  font-size: 11px;
+}
+
+.phaseControls input[type="range"] {
+  width: 100px;
+}
+
+.phaseLegend {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 9px 12px;
+  color: var(--deck-muted);
+  font-size: 11px;
+  margin-bottom: 10px;
+}
+
+.phaseLegend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.phaseLegend i {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.phaseLegend b {
+  color: var(--deck-text);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.phaseRows {
+  display: grid;
+  gap: 6px;
+}
+
+.phaseRow {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr) 70px;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+}
+
+.phaseRow:hover {
+  opacity: 0.85;
+}
+
+.phaseRow label,
+.phaseRow strong {
+  color: var(--deck-text);
+  font-size: 12px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+
+.phaseRow strong {
+  text-align: right;
+}
+
+.phaseRow.slow {
+  opacity: 0.55;
+}
+
+.phaseRow.inProgress {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.phaseRow.inProgress .phaseBar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.phaseBlock.inProgressTag {
+  position: static;
+  width: auto !important;
+  padding: 2px 8px;
+  border-radius: 3px;
+  background: #444 !important;
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 9px;
+  font-weight: 600;
+}
+
+.highlightFlash {
+  animation: highlightFlash 1.2s ease-out;
+}
+
+@keyframes highlightFlash {
+  0% { background: rgba(99, 102, 241, 0.4); }
+  100% { background: transparent; }
+}
+
+.phaseBar {
+  position: relative;
+  height: 26px;
+  border-radius: 6px;
+  background: #141b25;
+  border: 1px solid rgba(167, 186, 210, 0.1);
+  overflow: hidden;
+}
+
+.phaseBlock {
+  position: absolute;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 10px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  white-space: nowrap;
+  border-right: 1px solid rgba(0, 0, 0, 0.25);
+}
+
+.phaseBlock.empty {
+  opacity: 0.25;
+  background: #3a3a3a !important;
+}
+
+.phaseBlock[data-phase="waiting"] {
+  background-image: repeating-linear-gradient(
+    45deg,
+    #2851f5,
+    #2851f5 4px,
+    #1a3aaa 4px,
+    #1a3aaa 8px
+  ) !important;
+}
+
+.phaseErrors {
+  margin-top: 8px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  background: rgba(255, 100, 100, 0.08);
+  color: rgba(255, 150, 150, 0.9);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
 .split {
   display: grid;
   grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
@@ -1957,6 +2126,8 @@ textarea:focus {
 :root[data-theme="light"] .agentOutput,
 :root[data-theme="light"] .chatComposer,
 :root[data-theme="light"] .timeTrack,
+:root[data-theme="light"] .phaseWaterfall,
+:root[data-theme="light"] .phaseBar,
 :root[data-theme="light"] .tabs {
   background: var(--deck-panel);
 }
