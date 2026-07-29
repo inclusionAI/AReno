@@ -61,7 +61,7 @@ async def _run_episode(item, client) -> list[AgentTrajectoryTurn]:
     for move_number in range(1, max_moves + 1):
         turn_messages = [
             *messages,
-            {"role": "user", "content": f"Step {move_number}/{max_moves}: Analyze the board, then call the move tool with one direction."},
+            {"role": "user", "content": f"Step {move_number}/{max_moves}. Call the move tool."},
         ]
         response = await client.chat.completions.create(
             model="policy",

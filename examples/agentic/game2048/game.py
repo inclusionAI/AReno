@@ -22,7 +22,9 @@ SYSTEM_PROMPT = (
     "You are a 2048 game AI. The board is a 4x4 grid. Each turn you choose to "
     "swipe UP, DOWN, LEFT, or RIGHT. Identical tiles merge on collision. After "
     "each move a new 2 (90%) or 4 (10%) appears in a random empty cell. "
-    "Call the move tool with one direction to make your move."
+    "You MUST call the move tool every turn with one direction.\n\n"
+    "Example tool call:\n"
+    '{"name": "move", "arguments": {"direction": "LEFT"}}'
 )
 
 MOVE_TOOL = {
