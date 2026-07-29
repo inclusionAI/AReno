@@ -193,3 +193,33 @@ def _trim_stop_strings(text: str, stop: list[str]) -> tuple[str, bool]:
     if first is None:
         return text, False
     return text[:first], True
+
+
+def group_messages_into_units(messages: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    """Split messages into atomic conversation units for safe trimming.
+
+    Grouping rules:
+    - system / developer messages: each is its own unit.
+    - user messages: each is its own unit.
+    - assistant (no tool_calls): its own unit.
+    - assistant (with tool_calls) + all immediately following tool messages:
+      treated as one atomic unit that must not be split.
+    """
+
+    units: list[list[dict[str, Any]]] = []
+    idx = 0
+    while idx < len(messages):
+        msg = messages[idx]
+        role = msg.get("role", "")
+        if role == "assistant" and isinstance(msg.get("tool_calls"), list) and msg["tool_calls"]:
+            # Start an atomic unit: assistant with tool_calls + following tool messages.
+            unit = [msg]
+            idx += 1
+            while idx < len(messages) and messages[idx].get("role") == "tool":
+                unit.append(messages[idx])
+                idx += 1
+            units.append(unit)
+        else:
+            units.append([msg])
+            idx += 1
+    return units

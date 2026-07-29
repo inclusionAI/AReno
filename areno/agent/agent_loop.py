@@ -283,9 +283,15 @@ async def _run_training_tasks_by_turn(
         tool_states = []
         tool_calls = []
         for state, response in zip(active, responses, strict=True):
+            areno_meta = response.get("areno", {}) if isinstance(response, dict) else {}
+            effective_messages = areno_meta.get("effective_messages")
             turns.append(
                 AgentTrajectoryTurn(
-                    item=state["item"], messages=list(state["messages"]), response=response, tools=TOOLS
+                    item=state["item"],
+                    messages=list(state["messages"]),
+                    response=response,
+                    tools=TOOLS,
+                    effective_messages=effective_messages,
                 )
             )
             assistant_message = _assistant_message_from_response(response)
@@ -380,7 +386,17 @@ async def run_conversation_turns(
         if record_trajectory:
             # AReno trains from explicit per-turn trajectories; no proxy-side
             # prompt matching is needed to reconstruct the multi-turn sample.
-            turns.append(AgentTrajectoryTurn(item=item, messages=list(messages), response=response, tools=TOOLS))
+            areno_meta2 = response.get("areno", {}) if isinstance(response, dict) else {}
+            effective_messages2 = areno_meta2.get("effective_messages")
+            turns.append(
+                AgentTrajectoryTurn(
+                    item=item,
+                    messages=list(messages),
+                    response=response,
+                    tools=TOOLS,
+                    effective_messages=effective_messages2,
+                )
+            )
         assistant_message = _assistant_message_from_response(response)
         messages.append(assistant_message)
         # The standalone CLI uses this hook to stream model/tool activity as it happens.

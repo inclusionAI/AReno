@@ -59,6 +59,7 @@ class TrainerConfig:
     agent_fn: str | None = None
     agent_timeout_s: float = 300.0
     train_tool_results: bool = False
+    agentic_context_overflow_policy: str = "reject"
     chat_template_enable_thinking: bool | None = None
 
     def __post_init__(self) -> None:
@@ -66,6 +67,11 @@ class TrainerConfig:
             raise ValueError("attn_backend must be one of: flash, native")
         if self.model_hub not in {"hf", "modelscope"}:
             raise ValueError("model_hub must be one of: hf, modelscope")
+        if self.agentic_context_overflow_policy not in ("reject", "trim_messages"):
+            raise ValueError(
+                f"agentic_context_overflow_policy must be 'reject' or 'trim_messages', "
+                f"got {self.agentic_context_overflow_policy!r}"
+            )
 
     def optimizer_config(self) -> dict:
         """Build the optimizer dict consumed by the backend config."""
