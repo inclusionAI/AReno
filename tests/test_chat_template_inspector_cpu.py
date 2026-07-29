@@ -33,7 +33,11 @@ from areno.cli.inspect import inspect_chat_template_command
 
 
 class CompatibleTokenizer:
-    """A mock tokenizer whose template correctly renders all message types."""
+    """A mock tokenizer whose template correctly renders all message types.
+
+    Used as the success-path fixture: every diagnostic check should pass
+    when run against this tokenizer.
+    """
 
     chat_template = "<template>"
     all_special_ids = [0, 1, 2]
@@ -60,6 +64,7 @@ class CompatibleTokenizer:
 
 
 class NoTemplateTokenizer:
+    """A tokenizer with no ``chat_template`` — used to test fast-fail on missing template."""
     """A tokenizer with no chat_template defined."""
 
     chat_template = None
@@ -73,6 +78,7 @@ class NoTemplateTokenizer:
 
 
 class SystemRoleUnsupportedTokenizer:
+    """A tokenizer whose template raises on the ``system`` role — tests role-support failure."""
     """A tokenizer whose template fails on the ``system`` role."""
 
     chat_template = "<template>"
@@ -91,7 +97,11 @@ class SystemRoleUnsupportedTokenizer:
 
 
 class BoundaryBrokenTokenizer:
-    """A tokenizer where add_generation_prompt output is not a prefix."""
+    """A tokenizer where ``add_generation_prompt`` output is not a prefix of the full render.
+
+    Used to verify that the generation-boundary check correctly detects
+    loss-mask boundary inconsistencies.
+    """
 
     chat_template = "<template>"
     all_special_ids = [0, 1]
@@ -111,7 +121,11 @@ class BoundaryBrokenTokenizer:
 
 
 class ToolDroppingTokenizer:
-    """A tokenizer that silently ignores tool_calls and tool messages."""
+    """A tokenizer that silently ignores ``tool_calls`` and ``tool`` role messages.
+
+    Used to verify that the tool-schema check detects when a template
+    drops agentic tool content.
+    """
 
     chat_template = "<template>"
     all_special_ids = [0, 1]
@@ -134,7 +148,11 @@ class ToolDroppingTokenizer:
 
 
 class DuplicateSpecialTokenizer:
-    """A tokenizer that produces consecutive duplicate special token IDs."""
+    """A tokenizer that produces consecutive duplicate special token IDs.
+
+    Used to verify that the duplicate-special-tokens check emits a
+    warning (not a failure) when repeated special tokens are detected.
+    """
 
     chat_template = "<template>"
     all_special_ids = [99]
@@ -162,6 +180,7 @@ class DuplicateSpecialTokenizer:
 
 # ---------------------------------------------------------------------------
 # Tests: individual checks
+# Each test class targets one diagnostic check with pass/fail/boundary cases.
 # ---------------------------------------------------------------------------
 
 
@@ -268,6 +287,7 @@ class CheckDuplicateSpecialTokensTest(unittest.TestCase):
 
 # ---------------------------------------------------------------------------
 # Tests: full inspection
+# Verifies the ChatTemplateInspector orchestrator across all scenarios.
 # ---------------------------------------------------------------------------
 
 
@@ -330,6 +350,8 @@ class ChatTemplateInspectorTest(unittest.TestCase):
 
 # ---------------------------------------------------------------------------
 # Tests: CLI
+# Integration-style tests crossing areno.cli.inspect → areno.api.chat_template_inspector.
+# Uses CliRunner with mocked tokenizer loading (no model downloads).
 # ---------------------------------------------------------------------------
 
 
@@ -395,6 +417,7 @@ class InspectChatTemplateCLITest(unittest.TestCase):
 
 # ---------------------------------------------------------------------------
 # Tests: default behavior unchanged
+# Verifies the inspector is opt-in and does not affect existing code paths.
 # ---------------------------------------------------------------------------
 
 

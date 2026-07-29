@@ -92,6 +92,8 @@ class InspectionReport:
 # ---------------------------------------------------------------------------
 
 CANONICAL_SCENARIOS: list[dict[str, Any]] = [
+    # Basic single-turn with a system prompt — verifies that the template
+    # can handle the ``system`` role and render a complete user/assistant turn.
     {
         "name": "single_turn_basic",
         "messages": [
@@ -101,6 +103,8 @@ CANONICAL_SCENARIOS: list[dict[str, Any]] = [
         ],
         "expected_roles": {"system", "user", "assistant"},
     },
+    # Multi-turn conversation — verifies that the template renders
+    # consecutive turns without corrupting earlier ones.
     {
         "name": "multi_turn",
         "messages": [
@@ -111,6 +115,8 @@ CANONICAL_SCENARIOS: list[dict[str, Any]] = [
         ],
         "expected_roles": {"user", "assistant"},
     },
+    # Full tool-call cycle — verifies that ``tool_calls`` on the assistant
+    # message and the subsequent ``tool`` role response are both rendered.
     {
         "name": "tool_call_request",
         "messages": [
@@ -138,6 +144,8 @@ CANONICAL_SCENARIOS: list[dict[str, Any]] = [
         ],
         "expected_roles": {"user", "assistant", "tool"},
     },
+    # Boundary: no system message — some templates do not support the
+    # ``system`` role and should at least render user/assistant correctly.
     {
         "name": "no_system_role",
         "messages": [
@@ -146,6 +154,8 @@ CANONICAL_SCENARIOS: list[dict[str, Any]] = [
         ],
         "expected_roles": {"user", "assistant"},
     },
+    # Boundary: empty assistant content — a degenerate case where the
+    # generation-boundary check is not applicable (skipped).
     {
         "name": "empty_assistant",
         "messages": [
@@ -163,7 +173,12 @@ CANONICAL_SCENARIOS: list[dict[str, Any]] = [
 
 
 def check_template_exists(tokenizer: Any) -> DiagnosticResult:
-    """Verify that the tokenizer has a ``chat_template`` attribute."""
+    """Verify that the tokenizer has a ``chat_template`` attribute.
+
+    This is a global check run once before all other checks.  If the
+    template is missing there is no point rendering scenarios, so the
+    inspector short-circuits.
+    """
 
     template = getattr(tokenizer, "chat_template", None)
     if not template:
@@ -187,7 +202,15 @@ def check_template_exists(tokenizer: Any) -> DiagnosticResult:
 def check_role_support(
     tokenizer: Any, scenario: dict[str, Any]
 ) -> DiagnosticResult:
-    """Render the scenario and verify no role is dropped or causes an error."""
+    """Render the scenario and verify no role is dropped or causes an error.
+
+    Calls ``apply_chat_template`` with ``tokenize=False`` to obtain the
+    rendered text string.  If the template raises an exception we attempt
+    to identify the offending role from the error message.  When the
+    template returns successfully we also verify that user content is
+    present in the output — a template that silently drops user messages
+    would produce garbage training data.
+    """
 
     name = scenario["name"]
     messages = scenario["messages"]
@@ -260,7 +283,13 @@ def check_role_support(
 def check_generation_boundary(
     tokenizer: Any, scenario: dict[str, Any]
 ) -> DiagnosticResult:
-    """Verify that ``add_generation_prompt`` output is a prefix of the full render."""
+    """Verify that ``add_generation_prompt`` output is a prefix of the full render.
+
+    During training the loss mask starts at the position where
+    ``add_generation_prompt=True`` ends.  If the prompt-rendered text is
+    not a prefix of the full conversation render, the loss mask boundary
+    will be incorrect and gradients will be computed on the wrong tokens.
+    """
 
     name = scenario["name"]
     messages = scenario["messages"]
@@ -346,7 +375,14 @@ def check_generation_boundary(
 def check_tool_schema(
     tokenizer: Any, scenario: dict[str, Any]
 ) -> DiagnosticResult:
-    """For tool-call scenarios, verify tool content appears in the render."""
+    """For tool-call scenarios, verify tool content appears in the render.
+
+    Only runs on scenarios that contain ``tool_calls`` or ``tool`` role
+    messages.  Checks that function names from ``tool_calls`` and response
+    content from ``tool`` messages both appear in the rendered text.  A
+    template that silently ignores tool messages would break agentic
+    training turns.
+    """
 
     name = scenario["name"]
     messages = scenario["messages"]
@@ -432,7 +468,14 @@ def check_tool_schema(
 def check_duplicate_special_tokens(
     tokenizer: Any, scenario: dict[str, Any]
 ) -> DiagnosticResult:
-    """Tokenize the rendered text and check for consecutive duplicate special tokens."""
+    """Tokenize the rendered text and check for consecutive duplicate special tokens.
+
+    Consecutive duplicate special tokens (e.g. ``<|im_start|><|im_start|>``)
+    usually indicate a template bug that inflates sequence length or
+    corrupts token boundaries.  This check emits a **warning** rather
+    than a failure because some templates may intentionally produce
+    repeated special tokens.
+    """
 
     name = scenario["name"]
     messages = scenario["messages"]
@@ -528,6 +571,8 @@ _ALL_CHECKS = [
     check_tool_schema,
     check_duplicate_special_tokens,
 ]
+# Note: ``check_template_exists`` is run separately before this list
+# because it is a global check (not per-scenario).
 
 
 class ChatTemplateInspector:
