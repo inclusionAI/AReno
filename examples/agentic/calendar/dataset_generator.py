@@ -19,7 +19,7 @@ HELD_OUT_FRACTION = 0.2
 # A small set of time zones with fixed offsets (no DST).
 TIMEZONES = ["UTC", "UTC+1", "UTC+2", "UTC+3", "UTC+8", "UTC-5", "UTC-8", "UTC+5:30"]
 
-PARTicipant_NAMES = ["Alice", "Bob", "Carol", "David", "Eve", "Frank"]
+PARTICIPANT_NAMES = ["Alice", "Bob", "Carol", "David", "Eve", "Frank"]
 
 
 def generate_records(count: int = DEFAULT_COUNT, *, seed: int = DEFAULT_SEED) -> list[dict]:
@@ -30,7 +30,7 @@ def generate_records(count: int = DEFAULT_COUNT, *, seed: int = DEFAULT_SEED) ->
 
     while len(records) < count:
         num_participants = rng.randint(2, 3)
-        chosen_names = rng.sample(PARTicipant_NAMES, num_participants)
+        chosen_names = rng.sample(PARTICIPANT_NAMES, num_participants)
 
         participants = {}
         for name in chosen_names:
