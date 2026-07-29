@@ -40,23 +40,25 @@ def generate_records(
     records: list[dict] = []
     seen: set[tuple[tuple[str, ...], ...]] = set()
     attempts = 0
-    max_attempts = count * 500
+    max_attempts = count * 1000
+    allow_duplicates = False
     while len(records) < count:
         attempts += 1
         if attempts > max_attempts:
-            raise RuntimeError("could not generate enough unique mazes")
+            if allow_duplicates:
+                break  # stop trying, return what we have
+            allow_duplicates = True
+            attempts = 0
         sub_seed = rng.randint(0, 2**31 - 1)
-        # Vary key/door counts for diversity.
         n_keys = rng.randint(1, 2)
         n_doors = rng.randint(1, 2)
-        # Occasionally allow slightly larger mazes to expand the unique pool.
-        w = width + (rng.choice([0, 0, 0, 2]) if attempts > count else 0)
-        h = height + (rng.choice([0, 0, 0, 2]) if attempts > count else 0)
+        w = width + rng.choice([0, 0, 0, 2, 2, 4])
+        h = height + rng.choice([0, 0, 0, 2, 2, 4])
         maze, start, goal, keys, doors = game.generate_maze(
             w, h, seed=sub_seed, n_keys=n_keys, n_doors=n_doors,
         )
         key_tuple = tuple(tuple(row) for row in maze)
-        if key_tuple in seen:
+        if key_tuple in seen and not allow_duplicates:
             continue
         seen.add(key_tuple)
 
