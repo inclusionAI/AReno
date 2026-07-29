@@ -31,13 +31,24 @@ class MetricsRecorder:
         self._sample_file = self._log_dir / f"rollout_samples.{os.getpid()}.jsonl"
         self._closed = False
 
-    def record_train_step(self, *, step: int, train_result, train_batch, timings: dict[str, float] | None = None):
+    def record_train_step(
+        self,
+        *,
+        step: int,
+        train_result,
+        train_batch,
+        timings: dict[str, float] | None = None,
+        overlength_counters: dict[str, int] | None = None,
+    ):
         """Record rollout, training, and timing metrics for one step."""
 
         # `collect_train_batch_stats` extracts only the response-side numbers
         # (prompt tokens are masked out) so reported means match what the loss
-        # actually trained on.
-        stats = collect_train_batch_stats(train_batch)
+        # actually trained on. `overlength_counters` carries issue #216
+        # per-reason/per-action counts populated by the trainer (e.g. agentic
+        # trajectory filtering); it is injected into the stats accumulator so
+        # `record_training_stats` can emit `rollout/overlength/*` scalars.
+        stats = collect_train_batch_stats(train_batch, overlength_counters=overlength_counters)
         record_training_stats(self._writer, stats, step, train_result, train_batch, timings=timings)
 
     def record_rollout_sample(self, sample: dict) -> None:
@@ -123,16 +134,20 @@ def create_tensorboard_writer(log_dir: str):
     return SummaryWriter(log_dir=log_dir)
 
 
-def collect_train_batch_stats(train_batch) -> dict:
+def collect_train_batch_stats(train_batch, overlength_counters: dict[str, int] | None = None) -> dict:
     """Summarize rewards, advantages, lengths, and rollout logprobs.
 
     Walks every `TrainSequence` and isolates response-only slices using
     `prompt_mask`. Prompt positions carry zeroed advantage/logprob entries by
     construction (see trainer code), so dropping them gives an honest mean
     over the tokens that actually participated in the loss.
+
+    `overlength_counters` (issue #216) is forwarded into the accumulator so
+    `record_training_stats` can emit `rollout/overlength/{reason}/{action}`
+    scalars for counts the trainer populated during rollout filtering.
     """
 
-    stats = init_rollout_stats()
+    stats = init_rollout_stats(overlength_counters=overlength_counters)
     for seq in train_batch:
         prompt_mask = list(seq.prompt_mask)
         # `prompt_mask[i] == True` marks a prompt token; rollout signals only

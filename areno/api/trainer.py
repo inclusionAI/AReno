@@ -60,6 +60,11 @@ class Trainer:
         self._metric_timings: dict[str, float] = {}
         self._step_active = False
         self._step_wall_start: float | None = None
+        # Issue #216: per-step overlength counters populated by the trainer
+        # (e.g. agentic trajectory filtering) and flushed by `record_train_step`
+        # alongside the rollout/train scalars. Reset every step like
+        # `_metric_timings` so counts never leak across steps.
+        self._step_overlength_counters: dict[str, int] = {}
         self._rollout_session_depth = 0
         self._rollout_wall_start: float | None = None
 
@@ -92,6 +97,7 @@ class Trainer:
             return
         self._ctx.step()
         self._metric_timings = {}
+        self._step_overlength_counters = {}
         self._step_active = True
         self._step_wall_start = time.perf_counter()
 
@@ -352,6 +358,7 @@ class Trainer:
                 train_result=result,
                 train_batch=batch_data,
                 timings=self._metric_timings,
+                overlength_counters=self._step_overlength_counters,
             )
         self.finish_step()
         return result

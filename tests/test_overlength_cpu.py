@@ -144,6 +144,26 @@ class OverlengthMetricsTest(unittest.TestCase):
         overlength_tags = [call[0] for call in writer.scalars if call[0].startswith("rollout/overlength/")]
         self.assertEqual(overlength_tags, [])
 
+    def test_collect_train_batch_stats_forwards_overlength_counters(self):
+        # The agentic path populates counters on the trainer and hands them to
+        # `collect_train_batch_stats`, which must inject them into the stats
+        # accumulator so `record_training_stats` emits the scalars.
+        from areno.api.metrics import collect_train_batch_stats
+
+        counters = {"trajectory_too_long/warn": 2}
+        stats = collect_train_batch_stats([], overlength_counters=counters)
+        self.assertEqual(stats["overlength_counters"], counters)
+        writer = _FakeWriter()
+        record_training_stats(writer, stats, step=0, train_res={}, train_batch=[])
+        tags = {call[0] for call in writer.scalars}
+        self.assertIn("rollout/overlength/trajectory_too_long/warn", tags)
+
+    def test_collect_train_batch_stats_without_counters_is_empty(self):
+        from areno.api.metrics import collect_train_batch_stats
+
+        stats = collect_train_batch_stats([])
+        self.assertEqual(stats["overlength_counters"], {})
+
 
 class _FakeWriter:
     """Minimal TensorBoard writer substitute that records add_scalar calls."""

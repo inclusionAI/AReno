@@ -231,6 +231,14 @@ class PolicyOnlyTrainer:
             samples, filtered_count, filter_diagnostics = self._filter_overlong_agent_samples(
                 ctx, samples, sampling_params
             )
+            # Issue #216: surface the per-reason/per-action overlength counts to
+            # the metrics recorder so they are emitted as `rollout/overlength/*`
+            # scalars alongside the rollout/train stats. The counters are reset
+            # every step by `Trainer._begin_step`, so we only set them when the
+            # filter actually counted something.
+            overlength_counters = filter_diagnostics.get("overlength_counters") or {}
+            if overlength_counters:
+                self.areno._step_overlength_counters = dict(overlength_counters)
             expected = len(agent_batch)
             if len(samples) + filtered_count != expected:
                 raise RuntimeError(
