@@ -12,6 +12,7 @@ def register_models() -> None:
     from areno.models.gemma4 import Gemma4Adapter
     from areno.models.llama import LlamaAdapter
     from areno.models.minicpmv46 import MiniCPMV46Adapter
+    from areno.models.olmo2 import Olmo2Adapter
     from areno.models.qwen3 import Qwen3Adapter, Qwen3MoeAdapter
     from areno.models.qwen3_5 import Qwen35Adapter, Qwen35MoeAdapter
     from areno.models.registry import register_adapter
@@ -26,6 +27,7 @@ def register_models() -> None:
     register_adapter(BailingMoeLinearV2Adapter())
     register_adapter(Gemma4Adapter())
     register_adapter(MiniCPMV46Adapter())
+    register_adapter(Olmo2Adapter())
 
 
 __all__ = ["CausalLMOutput", "ModelAdapter", "register_models"]
