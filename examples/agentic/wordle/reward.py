@@ -14,12 +14,12 @@ import game  # noqa: E402
 # Reward constants - designed for stable GSPO training
 # Key principles:
 # 1. ALL rewards in [-1.0, +1.0] to prevent gradient explosion
-# 2. Spread rewards across a wide range so batch advantage is non-zero
-# 3. Tool-call vs no-tool-call gap must be large
+# 2. Spread rewards so batch advantage is non-zero even when all samples fail
+# 3. IMPORTANT: when all samples get same reward, advantage=0, loss=0, grad=0
+#    So we add a small random jitter to break ties (using guess hash)
 REWARD_NO_TOOL = -1.0      # Worst: didn't call tool
-REWARD_TRY = 0.0           # No bonus just for calling (avoid uniform rewards)
-REWARD_INVALID = -0.5      # Called tool but invalid word: negative (worse than valid)
-REWARD_NO_MATCH = 0.0      # Valid word, no letters match: neutral
+REWARD_INVALID = -0.5      # Called tool but invalid word
+REWARD_NO_MATCH = 0.0      # Valid word, no letters match
 REWARD_PRESENT = 0.2       # Some letters present (wrong position)
 REWARD_EXACT = 0.5         # Some letters in exact position
 REWARD_CORRECT = 1.0       # Correct guess
@@ -40,16 +40,26 @@ def reward_fn(record: Any) -> float:
     Key design: rewards spread across [-1, 1] so that within a batch,
     advantages (reward - mean) are non-zero, preventing GSPO loss
     from collapsing to 0 and gradients from vanishing.
+
+    Fallback jitter: when model doesn't call tool, all samples get -1.0,
+    advantage becomes 0, loss becomes 0, gradient vanishes. We add a
+    tiny deterministic jitter based on record hash to break ties.
     """
+    import hashlib
+
     source = record.source_record
     target = source.get("target", "")
     current_game = source.get("game", {})
 
     guess = _tool_guess(record)
     if guess is None:
-        # Model didn't call guess_word tool - HEAVIEST penalty
-        # This must be the worst option to prevent "reward hacking"
-        return REWARD_NO_TOOL
+        # Model didn't call guess_word tool
+        # Add tiny jitter to prevent all-zero advantage when entire batch fails
+        # Jitter is deterministic per record (based on record id) and small [-0.01, 0.01]
+        record_id = source.get("id", str(id(record)))
+        jitter_hash = int(hashlib.md5(str(record_id).encode()).hexdigest()[:8], 16)
+        jitter = ((jitter_hash % 200) - 100) / 10000.0  # [-0.01, 0.01]
+        return REWARD_NO_TOOL + jitter
 
     # Model called the tool - no base bonus (avoid uniform rewards)
     # Different outcomes get different rewards to maintain batch advantage variance
