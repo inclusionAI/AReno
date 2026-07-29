@@ -696,9 +696,6 @@ class DashboardState:
                 pass
             return None
 
-        result["throughput_a"] = _throughput(job_a, timing_a)
-        result["throughput_b"] = _throughput(job_b, timing_b)
-
         # -- timing comparison -------------------------------------------
         def _timing_stats(job: Job) -> dict[str, Any]:
             # Duration is computed independently of timeperf entries.
@@ -743,6 +740,9 @@ class DashboardState:
 
         timing_a = _timing_stats(job_a)
         timing_b = _timing_stats(job_b)
+
+        result["throughput_a"] = _throughput(job_a, timing_a)
+        result["throughput_b"] = _throughput(job_b, timing_b)
 
         # Add notes for non-comparable timing.
         if timing_a["avg_rollout_s"] is None and algo_a in {"sft", "dpo"}:
