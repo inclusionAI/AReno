@@ -828,7 +828,7 @@ def run(trainer_config: TrainerConfig):
     with GracefulShutdown() as shutdown:
         try:
             shutdown.set_stage(ShutdownStage.TRAINING)
-            trainer.fit()
+            trainer.fit(shutdown=shutdown)
         except KeyboardInterrupt:
             if shutdown.shutdown_requested:
                 shutdown.begin_shutdown()

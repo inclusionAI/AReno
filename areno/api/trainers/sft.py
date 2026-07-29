@@ -44,7 +44,7 @@ class SFTTrainer:
         self.loss_fn = loss_fn
         self.logger = logging.getLogger(f"{self.__class__.__module__}.{self.__class__.__name__}")
 
-    def fit(self) -> None:
+    def fit(self, *, shutdown=None) -> None:
         self.areno.init()
         try:
             self._fit_initialized()

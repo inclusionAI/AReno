@@ -611,7 +611,17 @@ def serve_command(
         attn_backend=attn_backend,
         chat_template_enable_thinking=False if disable_thinking else None,
     )
-    uvicorn.run(app, host=host, port=port)
+    from areno.engine.shutdown import GracefulShutdown, ShutdownStage
+
+    with GracefulShutdown() as shutdown:
+        shutdown.set_stage(ShutdownStage.SERVING)
+        try:
+            uvicorn.run(app, host=host, port=port)
+        except KeyboardInterrupt:
+            if shutdown.shutdown_requested:
+                pass  # Graceful shutdown in progress
+            else:
+                raise
 
 
 def main() -> None:

@@ -342,5 +342,71 @@ class TestBackwardCompatibility(unittest.TestCase):
         self.assertEqual(shutdown.stage, ShutdownStage.SERVING)
 
 
+# ---------------------------------------------------------------------------
+# GracefulShutdown: should_stop property
+# ---------------------------------------------------------------------------
+
+
+class TestShouldStop(unittest.TestCase):
+    """should_stop should mirror shutdown_requested for loop checking."""
+
+    def test_should_stop_false_initially(self):
+        shutdown = GracefulShutdown()
+        self.assertFalse(shutdown.should_stop)
+
+    def test_should_stop_true_after_signal(self):
+        shutdown = GracefulShutdown()
+        shutdown.set_stage(ShutdownStage.TRAINING)
+        shutdown._simulate_signal(signal.SIGINT)
+        self.assertTrue(shutdown.should_stop)
+
+
+# ---------------------------------------------------------------------------
+# GracefulShutdown: deadline timer
+# ---------------------------------------------------------------------------
+
+
+class TestDeadline(unittest.TestCase):
+    """Deadline should force exit after timeout if loop doesn't stop."""
+
+    @patch("areno.engine.shutdown.os._exit")
+    def test_deadline_forces_exit(self, mock_exit):
+        """With a very short deadline, exit should be forced quickly."""
+        shutdown = GracefulShutdown(deadline_s=0.05)
+        shutdown.set_stage(ShutdownStage.TRAINING)
+        shutdown._simulate_signal(signal.SIGINT)
+        # Wait for deadline to fire.
+        import time as _time
+
+        _time.sleep(0.2)
+        mock_exit.assert_called_once()
+
+    @patch("areno.engine.shutdown.os._exit")
+    def test_deadline_cancelled_on_complete_shutdown(self, mock_exit):
+        """If complete_shutdown is called before deadline, no forced exit."""
+        shutdown = GracefulShutdown(deadline_s=0.05)
+        shutdown.set_stage(ShutdownStage.TRAINING)
+        shutdown._simulate_signal(signal.SIGINT)
+        shutdown.complete_shutdown()
+        import time as _time
+
+        _time.sleep(0.2)
+        mock_exit.assert_not_called()
+
+    @patch("areno.engine.shutdown.os._exit")
+    def test_deadline_cancelled_on_second_signal(self, mock_exit):
+        """Second signal should cancel deadline and force exit immediately."""
+        shutdown = GracefulShutdown(deadline_s=10.0)
+        shutdown.set_stage(ShutdownStage.TRAINING)
+        shutdown._simulate_signal(signal.SIGINT)
+        # Second signal cancels deadline and forces exit.
+        shutdown._simulate_signal(signal.SIGINT)
+        mock_exit.assert_called_once()
+
+    def test_deadline_s_property(self):
+        shutdown = GracefulShutdown(deadline_s=60.0)
+        self.assertEqual(shutdown.deadline_s, 60.0)
+
+
 if __name__ == "__main__":
     unittest.main()

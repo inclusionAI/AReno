@@ -47,7 +47,7 @@ class DPOTrainer:
             "ref": ModelRole("ref", config.ref_ckpt or config.ckpt, trainable=False),
         }
 
-    def fit(self) -> None:
+    def fit(self, *, shutdown=None) -> None:
         self.areno.init()
         self._ensure_roles()
         try:

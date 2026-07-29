@@ -23,6 +23,7 @@ import numpy as np
 
 from areno.api.dashboard import record_dashboard_state
 from areno.api.tokenizer import configure_chat_template_enable_thinking
+from areno.engine.shutdown import ShutdownStage
 
 
 class PolicyOnlyTrainer:
@@ -43,14 +44,14 @@ class PolicyOnlyTrainer:
         self.logger = logging.getLogger(f"{self.__class__.__module__}.{self.__class__.__name__}")
         self._agent_run_fn = None
 
-    def fit(self) -> None:
+    def fit(self, *, shutdown=None) -> None:
         self.areno.init()
         try:
-            self._fit_initialized()
+            self._fit_initialized(shutdown=shutdown)
         finally:
             self.areno.close()
 
-    def _fit_initialized(self) -> None:
+    def _fit_initialized(self, *, shutdown=None) -> None:
         import areno.api
 
         tokenizer = self.areno.get_tokenizer()
@@ -76,9 +77,14 @@ class PolicyOnlyTrainer:
                 batch_size=self.config.batch_size,
                 max_prompt_tokens=self.config.max_prompt_tokens,
             ):
+                if shutdown is not None and shutdown.should_stop:
+                    self.logger.info("epoch=%d step=%d stage=shutdown_break", epoch, step)
+                    return
                 role = self._policy_role_name()
                 self.logger.info("epoch=%d step=%d role=%s stage=rollout_start", epoch, step, role)
                 record_dashboard_state(self.areno, stage="rollout_start", epoch=epoch, step=step, role=role)
+                if shutdown is not None:
+                    shutdown.set_stage(ShutdownStage.ROLLOUT)
                 self._dashboard_epoch = epoch
                 self._dashboard_step = step
                 if self._agentic_enabled():
@@ -134,6 +140,8 @@ class PolicyOnlyTrainer:
                         continue
                     self.logger.info("epoch=%d step=%d role=%s stage=train_start", epoch, step, role)
                     record_dashboard_state(self.areno, stage="train_start", epoch=epoch, step=step, role=role)
+                    if shutdown is not None:
+                        shutdown.set_stage(ShutdownStage.TRAINING)
                     train_start = time.perf_counter()
                     # 4) The actual gradient step happens inside the backend.
                     result = self.areno.train(
