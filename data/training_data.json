@@ -1,0 +1,22 @@
+[
+  {"instruction": "将以下中文翻译成英文", "input": "你好，世界", "output": "Hello, world"},
+  {"instruction": "解释机器学习概念", "input": "什么是过拟合？", "output": "过拟合是指模型在训练数据上表现很好，但在新数据上表现差的现象。"},
+  {"instruction": "写一首五言绝句", "input": "主题是春天", "output": "春风吹绿柳，细雨润红花。燕舞莺歌处，人间处处家。"},
+  {"instruction": "编写Python函数", "input": "写一个计算阶乘的函数", "output": "def factorial(n):\n    if n <= 1:\n        return 1\n    return n * factorial(n-1)"},
+  {"instruction": "解答数学题", "input": "计算 15 × 24", "output": "15 × 24 = 360"},
+  {"instruction": "总结文章要点", "input": "人工智能正在改变各个行业...", "output": "1. AI技术快速发展 2. 应用于多个领域 3. 带来效率提升"},
+  {"instruction": "生成SQL查询", "input": "查询所有年龄大于18的用户", "output": "SELECT * FROM users WHERE age > 18;"},
+  {"instruction": "翻译英文到中文", "input": "The quick brown fox", "output": "敏捷的棕色狐狸"},
+  {"instruction": "解释编程概念", "input": "什么是递归？", "output": "递归是函数调用自身的编程技巧，必须有终止条件。"},
+  {"instruction": "写一封邮件", "input": "请假一天", "output": "尊敬的领导：\n因身体不适，申请明天请假一天，请批准。"},
+  {"instruction": "提供健康建议", "input": "如何保持健康？", "output": "1. 均衡饮食 2. 规律运动 3. 充足睡眠 4. 定期体检"},
+  {"instruction": "描述图片内容", "input": "一只猫在沙发上睡觉", "output": "画面中一只橘色的猫咪蜷缩在米色沙发上，闭着眼睛安静地睡觉。"},
+  {"instruction": "编写正则表达式", "input": "匹配邮箱地址", "output": "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$"},
+  {"instruction": "解答物理问题", "input": "牛顿第二定律是什么？", "output": "F = ma，物体的加速度与作用力成正比，与质量成反比。"},
+  {"instruction": "推荐书籍", "input": "学习Python", "output": "1. 《Python编程：从入门到实践》 2. 《流畅的Python》"},
+  {"instruction": "写代码注释", "input": "解释这段代码的作用", "output": "# 遍历用户列表，筛选出活跃用户并发送通知邮件"},
+  {"instruction": "转换数据格式", "input": "JSON转CSV", "output": "使用pandas: df = pd.read_json('data.json'); df.to_csv('data.csv', index=False)"},
+  {"instruction": "回答历史问题", "input": "第二次世界大战何时结束？", "output": "1945年9月2日，日本签署投降书，二战正式结束。"},
+  {"instruction": "优化代码", "input": "提高这段代码效率", "output": "使用列表推导式替代for循环，使用set进行O(1)查找"},
+  {"instruction": "创作故事开头", "input": "科幻题材", "output": "2157年，人类首次接收到来自比邻星系的信号，内容只有三个字：'我们来。'"}
+]
