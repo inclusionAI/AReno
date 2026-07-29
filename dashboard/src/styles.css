@@ -2101,8 +2101,12 @@ textarea:focus {
   display: flex;
   align-items: flex-end;
   gap: 16px;
-  margin-bottom: 20px;
+  padding: 16px 20px;
+  margin-bottom: 24px;
   flex-wrap: wrap;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
 }
 
 .compareSelectGroup {
@@ -2112,24 +2116,48 @@ textarea:focus {
 
 .compareSelectGroup label {
   display: block;
-  font-size: 13px;
-  font-weight: 600;
+  font-size: 12px;
+  font-weight: 700;
   margin-bottom: 6px;
   color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
 }
 
 .compareSelectGroup select {
   width: 100%;
-  padding: 8px 12px;
+  padding: 10px 36px 10px 12px;
   border-radius: 8px;
   border: 1px solid var(--border);
-  background: var(--surface);
+  background: var(--bg);
   color: var(--text);
   font-size: 14px;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='none' stroke='%23888' stroke-width='2' viewBox='0 0 24 24'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.compareSelectGroup select:hover {
+  border-color: #4f8cff;
+}
+
+.compareSelectGroup select:focus {
+  outline: none;
+  border-color: #4f8cff;
+  box-shadow: 0 0 0 3px rgba(79, 140, 255, 0.15);
+}
+
+.compareSelectGroup select option {
+  padding: 8px 12px;
+  font-size: 13px;
 }
 
 .primaryButton {
-  padding: 9px 20px;
+  padding: 10px 24px;
   border-radius: 8px;
   border: none;
   background: #4f8cff;
@@ -2138,6 +2166,8 @@ textarea:focus {
   cursor: pointer;
   font-size: 14px;
   white-space: nowrap;
+  height: 40px;
+  transition: background 0.15s;
 }
 
 .primaryButton:disabled {
@@ -2153,6 +2183,13 @@ textarea:focus {
   display: flex;
   flex-direction: column;
   gap: 24px;
+}
+
+.compareSection {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px 20px;
 }
 
 .compareSection h3 {
