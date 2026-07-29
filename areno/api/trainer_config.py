@@ -60,12 +60,20 @@ class TrainerConfig:
     agent_timeout_s: float = 300.0
     train_tool_results: bool = False
     chat_template_enable_thinking: bool | None = None
+    # Issue #216: how to handle samples that exceed the token budget. Default
+    # "reject" preserves the pre-#216 behavior exactly; "warn" keeps overlength
+    # samples and counts them; "truncate" cuts at a semantically safe boundary
+    # (for agentic trajectories, truncate degrades to reject because per-turn
+    # token offsets are not available yet).
+    overlength_policy: str = "reject"
 
     def __post_init__(self) -> None:
         if self.attn_backend not in {"flash", "native"}:
             raise ValueError("attn_backend must be one of: flash, native")
         if self.model_hub not in {"hf", "modelscope"}:
             raise ValueError("model_hub must be one of: hf, modelscope")
+        if self.overlength_policy not in {"reject", "warn", "truncate"}:
+            raise ValueError("overlength_policy must be one of: reject, warn, truncate")
 
     def optimizer_config(self) -> dict:
         """Build the optimizer dict consumed by the backend config."""

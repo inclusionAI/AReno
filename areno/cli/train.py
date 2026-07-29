@@ -90,6 +90,7 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "agent_fn",
             "agent_timeout_s",
             "train_tool_results",
+            "overlength_policy",
             "reward_fn_path",
             "reward_ckpt",
         ),
@@ -637,6 +638,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             agent_fn=args.agent_fn,
             agent_timeout_s=args.agent_timeout_s,
             train_tool_results=args.train_tool_results,
+            overlength_policy=getattr(args, "overlength_policy", "reject"),
             chat_template_enable_thinking=chat_template_enable_thinking,
             ref_ckpt=args.ref_ckpt,
             dpo_beta=args.dpo_beta,
@@ -678,6 +680,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             agent_fn=args.agent_fn,
             agent_timeout_s=args.agent_timeout_s,
             train_tool_results=args.train_tool_results,
+            overlength_policy=getattr(args, "overlength_policy", "reject"),
             chat_template_enable_thinking=chat_template_enable_thinking,
         )
     if algorithm.name != "ppo":
@@ -726,6 +729,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             agent_fn=args.agent_fn,
             agent_timeout_s=args.agent_timeout_s,
             train_tool_results=args.train_tool_results,
+            overlength_policy=getattr(args, "overlength_policy", "reject"),
             chat_template_enable_thinking=chat_template_enable_thinking,
         )
     return PPOTrainerConfig(
@@ -902,6 +906,7 @@ def _training_config_settings(config: TrainerConfig) -> dict:
                 "agent_fn",
                 "agent_timeout_s",
                 "train_tool_results",
+                "overlength_policy",
                 "reward_fn_path",
                 "reward_ckpt",
             ],
@@ -1300,6 +1305,15 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     "--agent-timeout-s", type=float, default=300.0, show_default=True, help="Agentic rollout proxy request timeout."
 )
 @click.option("--train-tool-results", is_flag=True, help="Include tool-result spans in agentic policy loss.")
+@click.option(
+    "--overlength-policy",
+    type=click.Choice(["reject", "warn", "truncate"], case_sensitive=False),
+    default="reject",
+    show_default=True,
+    help="How to handle samples exceeding the token budget: reject (drop), warn (keep and count), "
+    "or truncate (cut at a semantically safe boundary). Default preserves current behavior. "
+    "For agentic trajectories, truncate degrades to reject until per-turn truncation lands.",
+)
 @click.option(
     "--gspo-clip-eps", type=float, default=3.0e-4, show_default=True, help="GSPO sequence-ratio clipping epsilon."
 )

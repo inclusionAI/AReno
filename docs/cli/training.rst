@@ -183,6 +183,24 @@ but are masked from policy loss unless ``--train-tool-results`` is set.
 When ``--max-context-len`` is set, filtering uses the full concatenated token
 row for the whole agentic trajectory, not only the latest chat-completion turn.
 
+``--overlength-policy {reject,warn,truncate}``
+   How to handle samples that exceed the configured token budget
+   (``--max-prompt-tokens`` / ``--max-new-tokens`` / ``--max-context-len``):
+
+   - ``reject`` (default) drops the sample and counts it. This preserves the
+     pre-existing behavior exactly.
+   - ``warn`` keeps the overlength sample unchanged but logs and counts it.
+   - ``truncate`` cuts the sample at a semantically safe boundary: SFT
+     responses are cut to ``--max-new-tokens`` with a trailing EOS preserved;
+     DPO chosen/rejected pairs are cut to a common budget over the shared
+     prompt prefix so the two branches stay comparable.
+
+   Per-reason, per-action counters are emitted as ``rollout/overlength/{reason}/{action}``
+   TensorBoard scalars. For agentic trajectories, ``truncate`` currently
+   degrades to ``reject`` because per-turn token offsets are not yet available;
+   overlength trajectories are dropped rather than risk splitting a tool-call /
+   tool-result pair.
+
 ``--reward-fn-path TEXT``
    Python file defining ``reward_fn(record)``.
 
