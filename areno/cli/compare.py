@@ -110,11 +110,17 @@ def _format_comparison_human(result: dict[str, Any]) -> str:
     ta = timing.get("job_a", {})
     tb = timing.get("job_b", {})
     comp = timing.get("comparison", {})
+    # Format helper for timing values (None → '-', not 'Nones').
+    def _fmt_t(v):
+        if v is None:
+            return "-"
+        return f"{v}s"
+
     lines.append("Timing:")
     lines.append(f"    Steps: A={ta.get('total_steps', 0)}  B={tb.get('total_steps', 0)}")
-    lines.append(f"    Avg total/step: A={ta.get('avg_total_s', '?')}s  B={tb.get('avg_total_s', '?')}s")
-    lines.append(f"    Avg rollout/step: A={ta.get('avg_rollout_s', '?')}s  B={tb.get('avg_rollout_s', '?')}s")
-    lines.append(f"    Avg train/step: A={ta.get('avg_train_s', '?')}s  B={tb.get('avg_train_s', '?')}s")
+    lines.append(f"    Avg total/step: A={_fmt_t(ta.get('avg_total_s'))}  B={_fmt_t(tb.get('avg_total_s'))}")
+    lines.append(f"    Avg rollout/step: A={_fmt_t(ta.get('avg_rollout_s'))}  B={_fmt_t(tb.get('avg_rollout_s'))}")
+    lines.append(f"    Avg train/step: A={_fmt_t(ta.get('avg_train_s'))}  B={_fmt_t(tb.get('avg_train_s'))}")
     if comp.get("avg_total_diff_s") is not None:
         lines.append(f"    Step time diff: {comp['avg_total_diff_s']:+}s")
     if comp.get("note"):
