@@ -143,10 +143,8 @@ class SFTTrainer:
         final_metrics: dict[str, float] = {}
         if total_target_tokens > 0:
             final_metrics["sft_loss"] = total_weighted_loss / total_target_tokens
-            final_metrics["sft_logprob_mean"] = -final_metrics["sft_loss"]
         else:
             final_metrics["sft_loss"] = 0.0
-            final_metrics["sft_logprob_mean"] = 0.0
         final_metrics["sft_target_tokens"] = float(total_target_tokens)
         final_metrics["sample_count"] = float(total_samples)
         final_metrics["duration_s"] = time.perf_counter() - eval_start

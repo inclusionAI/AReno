@@ -451,7 +451,6 @@ class SFTEvalIntegrationTest(unittest.TestCase):
             acc.Reload()
             eval_tags = [t for t in acc.Tags()["scalars"] if t.startswith("eval/")]
             self.assertIn("eval/sft_loss", eval_tags)
-            self.assertIn("eval/sft_logprob_mean", eval_tags)
             self.assertIn("eval/sft_target_tokens", eval_tags)
             self.assertIn("eval/sample_count", eval_tags)
             self.assertIn("eval/duration_s", eval_tags)
@@ -629,7 +628,6 @@ class SFTEvalIntegrationTest(unittest.TestCase):
             eval_tags = [t for t in scalar_tags if t.startswith("eval/")]
             self.assertGreater(len(eval_tags), 0, "eval/ tags should exist")
             self.assertIn("eval/sft_loss", eval_tags)
-            self.assertIn("eval/sft_logprob_mean", eval_tags)
             self.assertIn("eval/sample_count", eval_tags)
             self.assertIn("eval/duration_s", eval_tags)
 
