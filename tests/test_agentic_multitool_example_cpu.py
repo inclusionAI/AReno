@@ -257,6 +257,63 @@ def test_loader_adds_prompt():
     assert records[0]["prompt"].startswith("Task: Do something")
 
 
+def test_loader_validates_known_tools():
+    """Verify the loader rejects records with unknown tool names before model init."""
+
+    loader = _load_module_without_sys_path("dataset_loader")
+    source = {"id": "test-0", "description": "Bad tools", "required_tools": ["nonexistent_tool", "read_note"]}
+    with pytest.raises(ValueError, match="unknown tool"):
+        loader.load_training_dataset("unused", default_loader=lambda _: [source])
+
+
+def test_loader_validates_required_fields_present():
+    """Verify the loader rejects records missing 'id' or 'description'."""
+
+    loader = _load_module_without_sys_path("dataset_loader")
+    # Missing id
+    with pytest.raises(ValueError, match="missing required field 'id'"):
+        loader.load_training_dataset("unused", default_loader=lambda _: [{"description": "x", "required_tools": ["read_note", "read_note"]}])
+    # Missing description
+    with pytest.raises(ValueError, match="missing 'description'"):
+        loader.load_training_dataset("unused", default_loader=lambda _: [{"id": "test-0", "required_tools": ["read_note", "read_note"]}])
+
+
+def test_loader_validates_min_two_required_tools():
+    """Verify the loader rejects records with fewer than 2 required tools."""
+
+    loader = _load_module_without_sys_path("dataset_loader")
+    source = {"id": "test-0", "description": "One tool", "required_tools": ["read_note"]}
+    with pytest.raises(ValueError, match="at least 2"):
+        loader.load_training_dataset("unused", default_loader=lambda _: [source])
+
+
+def test_loader_validates_expected_fields_per_task_type():
+    """Verify the loader rejects records missing expected_* fields for their task type."""
+
+    loader = _load_module_without_sys_path("dataset_loader")
+    # contact task missing expected_contact
+    source = {"id": "contact-meeting-0", "description": "Find Alice", "required_tools": ["lookup_contact", "read_note"]}
+    with pytest.raises(ValueError, match="missing expected fields"):
+        loader.load_training_dataset("unused", default_loader=lambda _: [source])
+    # calc task missing expected_expression
+    source2 = {"id": "calc-shipping-0", "description": "Calculate", "required_tools": ["calculate", "read_note"],
+               "expected_note_key": "shipping"}
+    with pytest.raises(ValueError, match="missing expected fields"):
+        loader.load_training_dataset("unused", default_loader=lambda _: [source2])
+
+
+def test_loader_passes_valid_contact_task():
+    """Verify the loader accepts a well-formed contact task with all expected fields."""
+
+    loader = _load_module_without_sys_path("dataset_loader")
+    source = {"id": "contact-meeting-0", "description": "Find Alice's phone, then check meeting note.",
+              "required_tools": ["lookup_contact", "read_note"],
+              "expected_contact": "Alice Chen", "expected_note_key": "meeting"}
+    records = loader.load_training_dataset("unused", default_loader=lambda _: [source])
+    assert len(records) == 1
+    assert "prompt" in records[0]
+
+
 # ---------------------------------------------------------------------------
 # Scoring tests — success path: verify perfect trajectories score 1.0
 # ---------------------------------------------------------------------------
@@ -661,3 +718,127 @@ def test_generator_seed_reproducibility():
     assert r1 == r2
     r3 = game.generate_records(5, seed=999)
     assert r1 != r3
+
+
+# ---------------------------------------------------------------------------
+# Robustness tests — verify score_task does not crash on malformed agent output
+# ---------------------------------------------------------------------------
+
+
+def test_score_unit_convert_string_value_does_not_crash():
+    """Verify _score_arguments does not crash when value is a string expression (e.g. '100*10')."""
+
+    game = _load_module("game")
+    record = {
+        "id": "convert-parcel-0",
+        "description": "Convert 100 cm to m, then look up parcel P003.",
+        "required_tools": ["unit_convert", "lookup_parcel"],
+        "expected_value": 100,
+        "expected_from_unit": "cm",
+        "expected_to_unit": "m",
+        "expected_parcel": "P003",
+    }
+    tool_calls = [
+        {"name": "unit_convert", "arguments": json.dumps({"value": "100*10", "from_unit": "cm", "to_unit": "m"})},
+        {"name": "lookup_parcel", "arguments": json.dumps({"tracking_id": "P003"})},
+    ]
+    score = game.score_task(record, tool_calls)
+    assert score["arguments"] < 1.0
+
+
+def test_score_unit_convert_none_value_does_not_crash():
+    """Verify _score_arguments does not crash when value is None."""
+
+    game = _load_module("game")
+    record = {
+        "id": "convert-parcel-0",
+        "description": "Convert 100 cm to m, then look up parcel P003.",
+        "required_tools": ["unit_convert", "lookup_parcel"],
+        "expected_value": 100,
+        "expected_from_unit": "cm",
+        "expected_to_unit": "m",
+        "expected_parcel": "P003",
+    }
+    tool_calls = [
+        {"name": "unit_convert", "arguments": json.dumps({"value": None, "from_unit": "cm", "to_unit": "m"})},
+        {"name": "lookup_parcel", "arguments": json.dumps({"tracking_id": "P003"})},
+    ]
+    score = game.score_task(record, tool_calls)
+    assert score["arguments"] < 1.0
+
+
+def test_score_unit_convert_text_value_does_not_crash():
+    """Verify _score_arguments does not crash when value is a non-numeric string (e.g. 'abc')."""
+
+    game = _load_module("game")
+    record = {
+        "id": "convert-parcel-0",
+        "description": "Convert 100 cm to m, then look up parcel P003.",
+        "required_tools": ["unit_convert", "lookup_parcel"],
+        "expected_value": 100,
+        "expected_from_unit": "cm",
+        "expected_to_unit": "m",
+        "expected_parcel": "P003",
+    }
+    tool_calls = [
+        {"name": "unit_convert", "arguments": json.dumps({"value": "abc", "from_unit": "cm", "to_unit": "m"})},
+        {"name": "lookup_parcel", "arguments": json.dumps({"tracking_id": "P003"})},
+    ]
+    score = game.score_task(record, tool_calls)
+    assert score["arguments"] < 1.0
+
+
+def test_score_read_note_none_expected_keys_does_not_crash():
+    """Verify _score_arguments does not crash when expected_note_keys is None and read_note is called."""
+
+    game = _load_module("game")
+    record = {
+        "id": "contact-meeting-0",
+        "description": "Find Alice's phone, then check the meeting note.",
+        "required_tools": ["lookup_contact", "read_note"],
+        "expected_contact": "Alice Chen",
+        "expected_note_keys": None,
+    }
+    tool_calls = [
+        {"name": "lookup_contact", "arguments": json.dumps({"name": "Alice"})},
+        {"name": "read_note", "arguments": json.dumps({"note_key": "meeting"})},
+    ]
+    score = game.score_task(record, tool_calls)
+    # Should not crash; arguments may be < 1.0 because expected_note_key is missing
+    assert "arguments" in score
+
+
+def test_score_missing_arguments_key_does_not_crash():
+    """Verify _score_arguments does not crash when a tool call has no 'arguments' key at all."""
+
+    game = _load_module("game")
+    record = {
+        "id": "contact-meeting-0",
+        "description": "Find Alice's phone, then check the meeting note.",
+        "required_tools": ["lookup_contact", "read_note"],
+        "expected_contact": "Alice Chen",
+        "expected_note_key": "meeting",
+    }
+    tool_calls = [
+        {"name": "lookup_contact"},  # no "arguments" key
+    ]
+    score = game.score_task(record, tool_calls)
+    assert score["arguments"] < 1.0
+
+
+def test_score_non_dict_arguments_does_not_crash():
+    """Verify _score_arguments does not crash when arguments is a list instead of dict/JSON."""
+
+    game = _load_module("game")
+    record = {
+        "id": "contact-meeting-0",
+        "description": "Find Alice's phone, then check the meeting note.",
+        "required_tools": ["lookup_contact", "read_note"],
+        "expected_contact": "Alice Chen",
+        "expected_note_key": "meeting",
+    }
+    tool_calls = [
+        {"name": "lookup_contact", "arguments": [1, 2, 3]},  # list, not dict or JSON string
+    ]
+    score = game.score_task(record, tool_calls)
+    assert score["arguments"] < 1.0

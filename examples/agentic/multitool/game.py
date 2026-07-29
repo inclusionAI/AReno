@@ -401,9 +401,12 @@ def _score_arguments(record: dict[str, Any], tool_calls: list[dict[str, Any]]) -
             else:
                 checks.append(False)
         elif name == "unit_convert":
+            try:
+                value_ok = record.get("expected_value") is not None and float(args.get("value", -1)) == float(record["expected_value"])
+            except (ValueError, TypeError):
+                value_ok = False
             if (
-                record.get("expected_value") is not None
-                and float(args.get("value", -1)) == float(record["expected_value"])
+                value_ok
                 and str(args.get("from_unit", "")).lower() == record.get("expected_from_unit", "")
                 and str(args.get("to_unit", "")).lower() == record.get("expected_to_unit", "")
             ):
