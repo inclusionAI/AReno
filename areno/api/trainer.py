@@ -212,6 +212,10 @@ class Trainer:
         max_prompt_tokens: int,
         prompt_key: str = "prompt",
         solutions_key: str = "solutions",
+        split_messages: bool = False,
+        split_messages_key: str = "messages",
+        split_system_key: str | None = None,
+        split_tools_key: str | None = None,
     ) -> Iterable[PromptBatch]:
         """Yield tokenized prompt batches from a dataset-like object.
 
@@ -219,7 +223,26 @@ class Trainer:
         original record is preserved on each `PromptItem` so reward functions
         can read task-specific fields. The cursor advances even when records
         are skipped, so the iterator eventually walks the entire dataset.
+
+        When *split_messages* is ``True`` and a record contains a
+        ``"messages"`` field, overlong conversations are split at complete
+        message boundaries (see :func:`areno.api.splitter.split_conversation`).
+        Each chunk becomes an independent ``PromptItem`` carrying the system
+        prefix (if *split_system_key* is set) and tools (if *split_tools_key*
+        is set).
         """
+
+        if split_messages:
+            return self._load_split_prompt_batches(
+                dataset,
+                batch_size=batch_size,
+                max_prompt_tokens=max_prompt_tokens,
+                prompt_key=prompt_key,
+                solutions_key=solutions_key,
+                messages_key=split_messages_key,
+                system_key=split_system_key,
+                tools_key=split_tools_key,
+            )
 
         cursor = 0
         total_skipped_long = 0
@@ -254,6 +277,102 @@ class Trainer:
                 )
             if not items:
                 break
+            yield PromptBatch(
+                items=items,
+                scanned=scanned,
+                skipped_long=skipped_long,
+                total_skipped_long=total_skipped_long,
+            )
+
+    def _load_split_prompt_batches(
+        self,
+        dataset,
+        *,
+        batch_size: int,
+        max_prompt_tokens: int,
+        prompt_key: str,
+        solutions_key: str,
+        messages_key: str,
+        system_key: str | None,
+        tools_key: str | None,
+    ) -> Iterable[PromptBatch]:
+        from areno.api.splitter import split_conversation
+
+        cursor = 0
+        total_skipped_long = 0
+        recorder = _SplitterRecorder()
+        while cursor < len(dataset):
+            items: list[PromptItem] = []
+            scanned = 0
+            skipped_long = 0
+            while len(items) < batch_size and cursor < len(dataset):
+                record = dataset[cursor]
+                cursor += 1
+                scanned += 1
+                if messages_key not in record:
+                    raise ValueError(
+                        f"dataset row must contain `{messages_key}`; "
+                        f"use --dataset-loader-fn to produce messages-format rows"
+                    )
+                all_messages: list[dict] = list(record[messages_key])
+                system_ctx: list[dict] | None = None
+                if system_key is not None and system_key in record:
+                    value = record[system_key]
+                    if isinstance(value, list):
+                        system_ctx = [dict(msg) for msg in value]
+                    elif isinstance(value, dict):
+                        system_ctx = [dict(value)]
+                tools: list[dict] | None = None
+                if tools_key is not None and tools_key in record:
+                    value = record[tools_key]
+                    if isinstance(value, list):
+                        tools = [dict(tool) for tool in value]
+
+                try:
+                    chunks = split_conversation(
+                        all_messages,
+                        max_tokens=max_prompt_tokens,
+                        tokenizer=self._tokenizer,
+                        system_context=system_ctx,
+                        tools=tools,
+                    )
+                except ValueError:
+                    # Unsplittable unit — record the skip but don't halt.
+                    skipped_long += 1
+                    total_skipped_long += 1
+                    recorder.record_unsplittable()
+                    continue
+
+                if len(chunks) > 1:
+                    recorder.record_split(len(chunks))
+
+                prompt_text = record.get(prompt_key) or _messages_to_chat_text(all_messages)
+                solutions = record.get(solutions_key)
+
+                for chunk_index, chunk_messages in enumerate(chunks):
+                    metadata = {
+                        "chunk_index": chunk_index,
+                        "total_chunks": len(chunks),
+                        "original_record": dict(record),
+                    }
+                    chunk_record = dict(record)
+                    chunk_record[messages_key] = chunk_messages
+                    chunk_record["_areno_splitter"] = metadata
+
+                    input_tokens = encode_generation_prompt(self._tokenizer, prompt_text)
+                    items.append(
+                        PromptItem(
+                            prompt=prompt_text,
+                            solutions=solutions,
+                            input_tokens=input_tokens,
+                            record=chunk_record,
+                        )
+                    )
+            if not items:
+                break
+            if recorder.has_output():
+                logger.info("%s", recorder.summary())
+                recorder.reset()
             yield PromptBatch(
                 items=items,
                 scanned=scanned,
@@ -446,3 +565,44 @@ class Trainer:
 
 def _normalize_prompt_token_batch(prompt_tokens: list[list[int]]) -> list[list[int]]:
     return [normalize_token_ids(row) for row in prompt_tokens]
+
+
+def _messages_to_chat_text(messages: list[dict]) -> str:
+    """Compact representation of a message list for the prompt field."""
+    parts = []
+    for msg in messages:
+        role = msg.get("role", "")
+        content = msg.get("content")
+        if isinstance(content, str):
+            parts.append(f"[{role}] {content[:120]}")
+    return "\n".join(parts) if parts else "[conversation]"
+
+
+class _SplitterRecorder:
+    """Lightweight counter for splitter observability."""
+
+    def __init__(self) -> None:
+        self.records_split = 0
+        self.chunks_produced = 0
+        self.records_unsplittable = 0
+
+    def record_split(self, chunk_count: int) -> None:
+        self.records_split += 1
+        self.chunks_produced += chunk_count
+
+    def record_unsplittable(self) -> None:
+        self.records_unsplittable += 1
+
+    def has_output(self) -> bool:
+        return self.records_split > 0 or self.records_unsplittable > 0
+
+    def summary(self) -> str:
+        return (
+            f"splitter: {self.records_split} records split ({self.chunks_produced} chunks), "
+            f"{self.records_unsplittable} unsplittable skipped"
+        )
+
+    def reset(self) -> None:
+        self.records_split = 0
+        self.chunks_produced = 0
+        self.records_unsplittable = 0

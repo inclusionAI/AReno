@@ -90,6 +90,7 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "agent_fn",
             "agent_timeout_s",
             "train_tool_results",
+            "split_conversations",
             "reward_fn_path",
             "reward_ckpt",
         ),
@@ -638,6 +639,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             agent_timeout_s=args.agent_timeout_s,
             train_tool_results=args.train_tool_results,
             chat_template_enable_thinking=chat_template_enable_thinking,
+            split_conversations=getattr(args, "split_conversations", False),
             ref_ckpt=args.ref_ckpt,
             dpo_beta=args.dpo_beta,
         )
@@ -679,6 +681,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             agent_timeout_s=args.agent_timeout_s,
             train_tool_results=args.train_tool_results,
             chat_template_enable_thinking=chat_template_enable_thinking,
+            split_conversations=getattr(args, "split_conversations", False),
         )
     if algorithm.name != "ppo":
         return PolicyTrainerConfig(
@@ -727,6 +730,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             agent_timeout_s=args.agent_timeout_s,
             train_tool_results=args.train_tool_results,
             chat_template_enable_thinking=chat_template_enable_thinking,
+            split_conversations=getattr(args, "split_conversations", False),
         )
     return PPOTrainerConfig(
         algo=algorithm.name,
@@ -788,6 +792,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
         agent_timeout_s=args.agent_timeout_s,
         train_tool_results=args.train_tool_results,
         chat_template_enable_thinking=chat_template_enable_thinking,
+        split_conversations=getattr(args, "split_conversations", False),
     )
 
 
@@ -902,6 +907,7 @@ def _training_config_settings(config: TrainerConfig) -> dict:
                 "agent_fn",
                 "agent_timeout_s",
                 "train_tool_results",
+                "split_conversations",
                 "reward_fn_path",
                 "reward_ckpt",
             ],
@@ -1250,6 +1256,16 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     help=(
         "Maximum total context tokens for agentic rollout trajectories. "
         "Counts prompt plus all generated turns concatenated; defaults to the model limit."
+    ),
+)
+@click.option(
+    "--split-conversations",
+    is_flag=True,
+    help=(
+        "Split overlong conversations at message boundaries so every chunk "
+        "fits within --max-prompt-tokens. Each chunk becomes an independent "
+        "training sample. A single message that exceeds the limit produces "
+        "a skip (the record is dropped)."
     ),
 )
 @click.option("--temperature", type=float, default=1.0, show_default=True, help="Rollout sampling temperature.")
