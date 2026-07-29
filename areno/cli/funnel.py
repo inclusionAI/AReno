@@ -59,7 +59,12 @@ _STAGE_LABELS = {
     is_flag=True,
     help="Show only the per-update funnel (default: per-update and cumulative).",
 )
-@click.option("--max-updates", type=int, default=None, help="Show only the last N updates in the per-update view.")
+@click.option(
+    "--max-updates",
+    type=click.IntRange(min=0),
+    default=None,
+    help="Show only the last N updates in the per-update view (N >= 0).",
+)
 def funnel_command(
     metrics_log_dir: str,
     pid: int | None,

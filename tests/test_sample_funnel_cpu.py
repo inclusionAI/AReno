@@ -130,12 +130,24 @@ class FunnelBarTest(unittest.TestCase):
     def test_baseline_is_global_max(self):
         from areno.cli.funnel import _baselines
 
-        stages = {"loaded": 16, "contract_valid": 15, "generated": 45,
-                  "length_valid": 45, "trainable_token_valid": 45, "trained": 45}
+        stages = {
+            "loaded": 16,
+            "contract_valid": 15,
+            "generated": 45,
+            "length_valid": 45,
+            "trainable_token_valid": 45,
+            "trained": 45,
+        }
         # online-RL fans out, so generated (45) is the global max baseline.
         self.assertEqual(_baselines(stages), 45)
-        stages_sft = {"loaded": 64, "contract_valid": 60, "generated": None,
-                      "length_valid": None, "trainable_token_valid": 58, "trained": 58}
+        stages_sft = {
+            "loaded": 64,
+            "contract_valid": 60,
+            "generated": None,
+            "length_valid": None,
+            "trainable_token_valid": 58,
+            "trained": 58,
+        }
         self.assertEqual(_baselines(stages_sft), 64)
 
 
@@ -231,6 +243,35 @@ class FunnelCliTest(unittest.TestCase):
         self.assertEqual(report["per_update"][0]["drop_reasons"]["loaded"], ["prompt_too_long"])
         # Cumulative trained = 45 + 48
         self.assertEqual(report["cumulative"]["stages"]["trained"], 93)
+
+    def test_max_updates_zero_omits_per_update(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = __import__("pathlib").Path(tmp)
+            _write_funnel_file(
+                tmp_path,
+                [_sft_record(0, 8, 8, 8), _sft_record(1, 8, 8, 8)],
+            )
+            result = CliRunner().invoke(
+                funnel_command, ["--metrics-log-dir", str(tmp_path), "--max-updates", "0", "--json"]
+            )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        report = json.loads(result.output)
+        # max-updates=0 -> per_update omitted; cumulative still present.
+        self.assertEqual(report["per_update"], [])
+        self.assertIsNotNone(report["cumulative"])
+
+    def test_max_updates_negative_is_rejected(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = __import__("pathlib").Path(tmp)
+            _write_funnel_file(tmp_path, [_sft_record(0, 8, 8, 8)])
+            result = CliRunner().invoke(funnel_command, ["--metrics-log-dir", str(tmp_path), "--max-updates", "-1"])
+        # IntRange(min=0) rejects negatives before the body runs.
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("is not in the range", result.output)
 
     def test_reconcile_warns_on_backwards_counts(self):
         import tempfile

@@ -181,7 +181,7 @@ class PolicyOnlyTrainer:
         # reference forward-time, ...) before they reach the metric recorder.
         return result
 
-    def _build_rollout_funnel(self, *, step, prompt_batch, train_batch, rollout_results):
+    def _build_rollout_funnel(self, *, step: int, prompt_batch, train_batch, rollout_results) -> FunnelCounters:
         # Reconcile one RL update's sample funnel from counts already in hand at
         # the train call site. Agentic rollouts pre-filter over-context-length
         # trajectories, so `length_valid` reflects the post-filter batch; the
