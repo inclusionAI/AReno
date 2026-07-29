@@ -187,7 +187,7 @@ class WorkerRole:
     ) -> WorkerRole:
         """Construct a role from a HF-style checkpoint at `path`."""
 
-        # Rank 0 reports role-loading progress; other ranks stay silent (#230).
+        # rank 0 上报角色加载进度，其他 rank 保持静默（#230）。
         tracker = ModelLoadTracker(rank0=get_tp_context().rank == 0)
         with tracker.stage(STAGE_CONFIG_TOKENIZER, detail=path):
             model_config = config_from_hf(path)

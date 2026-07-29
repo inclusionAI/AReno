@@ -202,9 +202,8 @@ class ArenoEngine:
 
         if model is None:
             raise ValueError("from_pretrained() requires a local model path or Hugging Face model id")
-        # The driver process is single-threaded here, so rank0=True avoids
-        # duplicate progress lines without consulting the TP context (which is
-        # not initialized until workers start).
+        # driver 进程在这里是单线程的，所以 rank0=True 即可避免重复进度行，
+        # 无需查询 TP context（它要到 worker 启动后才初始化）。
         tracker = ModelLoadTracker(rank0=True)
         # Resolve HF repo id or local dir to an on-disk checkpoint directory.
         with tracker.stage(STAGE_REFERENCE_RESOLUTION, detail=str(model)):

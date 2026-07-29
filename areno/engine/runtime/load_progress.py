@@ -1,15 +1,12 @@
-"""Bounded progress and timing for model-loading stages.
+"""模型加载各阶段的进度与耗时追踪。
 
-Issue #230: emit per-stage progress and elapsed time for the five model-loading
-stages (reference resolution, config/tokenizer load, weight shard reading,
-device placement, worker distribution). Output is human-readable and structured
-so non-interactive consumers can parse it; only rank 0 logs to avoid spam in
-multi-rank runs. The last completed stage is retained on failure so the caller
-can report which stage and input caused the problem.
+Issue #230：为模型加载的五个阶段（引用解析、配置/分词器加载、权重分片读取、
+设备放置、worker 分发）输出每个阶段的进度和耗时。输出既人类可读又结构化，
+方便非交互式消费者解析；仅在 rank 0 打印日志，避免多 rank 运行时刷屏。
+失败时保留最后完成的阶段，调用方可以据此定位是哪个阶段、哪个输入出了问题。
 
-The tracker is intentionally dependency-free: it uses ``time.perf_counter`` and
-the existing ``areno`` logger. It does not change any default behavior beyond
-adding INFO-level log lines, so backward compatibility is preserved.
+追踪器刻意不引入任何依赖：只用 ``time.perf_counter`` 和现有的 ``areno`` logger。
+除新增几行 INFO 级日志外，不改变任何默认行为，保持向后兼容。
 """
 
 from __future__ import annotations
@@ -21,8 +18,8 @@ from typing import Iterator
 
 logger = logging.getLogger("areno.engine.load_progress")
 
-# Fixed stage order lets callers and tests refer to stages by name without
-# importing arbitrary enums; the tracker records the last completed one.
+# 固定的阶段顺序，调用方和测试通过名字引用阶段，无需引入额外枚举；
+# 追踪器会记录最后一个完成的阶段。
 STAGE_REFERENCE_RESOLUTION = "reference_resolution"
 STAGE_CONFIG_TOKENIZER = "config_tokenizer_load"
 STAGE_WEIGHT_SHARD_READING = "weight_shard_reading"
@@ -31,12 +28,11 @@ STAGE_WORKER_DISTRIBUTION = "worker_distribution"
 
 
 class ModelLoadTracker:
-    """Record per-stage timing and emit bounded progress lines on rank 0.
+    """记录每个阶段的耗时，并在 rank 0 输出有界的进度日志。
 
-    ``rank0`` gates logging so only one process prints in distributed runs;
-    callers pass ``get_tp_context().rank == 0``. The tracker keeps
-    ``last_completed_stage`` so a failing run can surface which stage and input
-    caused the problem without re-running.
+    ``rank0`` 门控日志输出，分布式运行时只有一个进程打印；
+    调用方传入 ``get_tp_context().rank == 0``。追踪器维护
+    ``last_completed_stage``，失败时无需重跑即可定位是哪个阶段、哪个输入出问题。
     """
 
     def __init__(self, *, rank0: bool = True):
@@ -46,12 +42,11 @@ class ModelLoadTracker:
 
     @contextmanager
     def stage(self, name: str, *, detail: str | None = None) -> Iterator[None]:
-        """Time one loading stage and log start/done lines on rank 0.
+        """为一个加载阶段计时，并在 rank 0 输出 start/done 日志。
 
-        On exit (success or exception) the elapsed time is logged and
-        ``last_completed_stage`` is updated. Exceptions are re-raised unchanged
-        after a structured ``status=failed`` line is emitted, so the original
-        error is never hidden.
+        退出时（成功或异常）记录耗时并更新 ``last_completed_stage``。
+        异常在输出结构化的 ``status=failed`` 行后被原样 re-raise，
+        不会隐藏原始错误。
         """
 
         if self._rank0:
@@ -82,11 +77,10 @@ class ModelLoadTracker:
             )
 
     def summary(self) -> dict[str, object]:
-        """Return a structured snapshot for non-interactive consumers.
+        """返回结构化快照，供非交互式消费者使用。
 
-        Includes the last completed stage and total elapsed time since the
-        tracker was constructed, so the dashboard or CLI can surface a single
-        record without parsing log lines.
+        包含最后完成的阶段和追踪器构造以来的总耗时，
+        这样 dashboard 或 CLI 无需解析日志行即可展示一条记录。
         """
 
         return {
@@ -97,10 +91,10 @@ class ModelLoadTracker:
 
 @contextmanager
 def tracked_stage(tracker: ModelLoadTracker | None, name: str, *, detail: str | None = None) -> Iterator[None]:
-    """Time ``name`` on ``tracker`` when present, otherwise run untracked.
+    """当 ``tracker`` 存在时为 ``name`` 计时，否则不追踪直接运行。
 
-    Lets call sites keep a single line when tracking is optional (for example
-    inside registry helpers that may be called outside a tracked load flow).
+    让调用点在追踪可选时保持单行写法（例如在可能在追踪加载流程之外
+    被调用的 registry 辅助函数里）。
     """
 
     if tracker is None:

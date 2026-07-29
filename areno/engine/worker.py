@@ -61,8 +61,8 @@ class ArenoWorker:
         self.config = config
         ctx = get_tp_context()
         self.device = ctx.device
-        # Rank 0 emits per-stage load progress; other ranks stay silent to
-        # avoid duplicate lines across the TP group (issue #230).
+        # rank 0 输出各阶段加载进度，其他 rank 保持静默，
+        # 避免 TP 组内重复打印（issue #230）。
         load_tracker = ModelLoadTracker(rank0=ctx.rank == 0)
         # Build the actor model directly on the shard's device, then wrap in
         # torch.compile so subsequent forward calls use the compiled graph.
