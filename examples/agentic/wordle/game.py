@@ -1,11 +1,14 @@
-"""Small Wordle helpers for agentic examples."""
+"""Small Wordle helpers for agentic examples.
+
+All word-length parameters default to WORD_LENGTH (5) for backward
+compatibility.  Variable-length callers must pass ``word_length`` explicitly
+to each function that supports it.
+"""
 
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable
 from enum import Enum
-from functools import cache
 from typing import Any
 
 # Word list - MIT licensed wordlist subset
@@ -241,9 +244,11 @@ def normalize_word(word: str, word_length: int = WORD_LENGTH) -> str:
 
 
 def is_valid_word(word: str, word_list: frozenset = WORD_LIST) -> bool:
-    """Check if a word is in the valid word list."""
+    """Check if *word* is in *word_list* (inferring length from the list)."""
     try:
-        word_length = len(next(iter(word_list))) if word_list else WORD_LENGTH
+        # Infer expected word length from the first entry in word_list.
+        # All words in a valid word list share the same length.
+        word_length = len(next(iter(word_list)))
         normalized = normalize_word(word, word_length=word_length)
         return normalized in word_list
     except (ValueError, StopIteration):
@@ -319,17 +324,14 @@ def result_to_text(feedback: GuessResult) -> str:
 
 
 def legal_guesses() -> list[str]:
-    """Return list of all valid 5-letter words for guesses."""
+    """Return sorted list of all valid guess words."""
     return sorted(WORD_LIST)
 
 
 def create_new_game(target: str | None = None, *, seed: int | None = None) -> WordleGame:
     """Create a new Wordle game with an optional target word."""
     import random
-    if seed is not None:
-        rng = random.Random(seed)
-    else:
-        rng = random.Random()
+    rng = random.Random(seed) if seed is not None else random.Random()
 
     if target is None:
         target = rng.choice(list(TARGET_WORD_LIST))
@@ -350,38 +352,31 @@ def apply_guess(game: WordleGame, guess: str) -> WordleGame:
     """
     Apply a guess to the game and return updated state.
 
-    Returns a new game state (immutable update).
+    Uses the target word's length for validation so that variable-length
+    words work correctly.  Returns a new game state (immutable update).
     """
-    guess = normalize_word(guess)
+    target = game["target"]
+    word_length = len(target)
+    guess = normalize_word(guess, word_length=word_length)
     if not is_valid_word(guess):
         raise ValueError(f"Invalid word: {guess}. Not in word list.")
 
-    target = game["target"]
+    feedback = check_guess(guess, target)
+    new_guesses = game["guesses"] + [guess]
+    new_feedbacks = game["feedbacks"] + [feedback]
 
-    # Check for win
     if guess == target:
-        return {
-            **game,
-            "guesses": game["guesses"] + [guess],
-            "feedbacks": game["feedbacks"] + [check_guess(guess, target)],
-            "state": GameState.WON,
-        }
+        state = GameState.WON
+    elif len(game["guesses"]) >= MAX_GUESSES - 1:
+        state = GameState.LOST
+    else:
+        state = GameState.IN_PROGRESS
 
-    # Check for loss (max guesses)
-    if len(game["guesses"]) >= MAX_GUESSES - 1:
-        return {
-            **game,
-            "guesses": game["guesses"] + [guess],
-            "feedbacks": game["feedbacks"] + [check_guess(guess, target)],
-            "state": GameState.LOST,
-        }
-
-    # In progress
     return {
         **game,
-        "guesses": game["guesses"] + [guess],
-        "feedbacks": game["feedbacks"] + [check_guess(guess, target)],
-        "state": GameState.IN_PROGRESS,
+        "guesses": new_guesses,
+        "feedbacks": new_feedbacks,
+        "state": state,
     }
 
 
@@ -460,18 +455,23 @@ def format_xml_prompt(game: WordleGame) -> str:
     return "\n".join(lines)
 
 
-def parse_xml_guess(text: str) -> str | None:
-    """Extract the guess word from XML-formatted model response."""
-    # Remove think tags
+def parse_xml_guess(text: str, word_length: int = WORD_LENGTH) -> str | None:
+    """Extract the guess word from XML-formatted model response.
+
+    Args:
+        text: Raw model output.
+        word_length: Expected guess length (default WORD_LENGTH).
+
+    Returns:
+        Lowercase guess or ``None`` if no valid guess is found.
+    """
     text = _strip_think_tags(text)
     text = _strip_chat_special_tokens(text).strip()
 
-    # Look for <guess> tag
-    match = re.search(r"<guess>\s*([a-zA-Z]{5})\s*</guess>", text, re.IGNORECASE | re.DOTALL)
-    if match:
-        return match.group(1).lower()
-
-    return None
+    # Build pattern dynamically to support variable-length words
+    pattern = rf"<guess>\s*([a-zA-Z]{{{word_length}}})\s*</guess>"
+    match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+    return match.group(1).lower() if match else None
 
 
 def _strip_think_tags(text: str) -> str:
@@ -526,9 +526,8 @@ def compute_stats(results: list[dict]) -> dict:
     Args:
         results: List of game results, each containing:
             - target: The target word
-            - guesses: Number of guesses made (None if not solved)
-            - solved: True if solved, False otherwise
-            - word_length: Length of the target word (optional, auto-computed)
+            - guesses: Number of guesses made (``None`` if not solved)
+            - solved: ``True`` if solved, ``False`` otherwise
 
     Returns:
         Dictionary with:
@@ -550,13 +549,13 @@ def compute_stats(results: list[dict]) -> dict:
     # Group by word length
     by_length: dict[int, dict] = {}
     total_solved = 0
-    total_guesses = 0
+    total_guess_count = 0
 
     for r in results:
         target = r.get("target", "")
         word_len = len(target)
         solved = r.get("solved", False)
-        num_guesses = r.get("guesses")
+        guess_count = r.get("guesses")  # int or None
 
         if word_len not in by_length:
             by_length[word_len] = {
@@ -566,31 +565,28 @@ def compute_stats(results: list[dict]) -> dict:
             }
 
         by_length[word_len]["total"] += 1
-        if solved and num_guesses is not None:
+        if solved and guess_count is not None:
             by_length[word_len]["solved"] += 1
-            by_length[word_len]["guesses_sum"] += num_guesses
+            by_length[word_len]["guesses_sum"] += guess_count
             total_solved += 1
-            total_guesses += num_guesses
+            total_guess_count += guess_count
 
-    # Compute statistics
+    # Compute per-length statistics
     by_word_length = {}
     for length, data in by_length.items():
         total = data["total"]
         solved = data["solved"]
         guesses_sum = data["guesses_sum"]
 
-        solve_rate = solved / total if total > 0 else 0.0
-        avg_guesses = guesses_sum / solved if solved > 0 else 0.0
-
         by_word_length[length] = {
-            "solve_rate": round(solve_rate, 4),
-            "avg_guesses": round(avg_guesses, 2),
+            "solve_rate": round(solved / total, 4) if total > 0 else 0.0,
+            "avg_guesses": round(guesses_sum / solved, 2) if solved > 0 else 0.0,
             "total_games": total,
             "solved_games": solved,
         }
 
     overall_solve_rate = total_solved / len(results) if results else 0.0
-    overall_avg_guesses = total_guesses / total_solved if total_solved > 0 else 0.0
+    overall_avg_guesses = total_guess_count / total_solved if total_solved > 0 else 0.0
 
     return {
         "overall_solve_rate": round(overall_solve_rate, 4),
