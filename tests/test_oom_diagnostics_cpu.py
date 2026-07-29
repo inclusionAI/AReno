@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 import unittest
 
-from areno.engine.oom_diagnostics import (
+from areno.engine.runtime.oom_diagnostics import (
     OOMStage,
     build_oom_config_snapshot,
     build_oom_guidance,

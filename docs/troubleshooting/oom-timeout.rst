@@ -87,7 +87,7 @@ configuration or retry the run.  When the OOM stage cannot be determined
 (e.g., ambiguous traceback), no guidance is emitted and the original error
 passes through unchanged, preserving backward compatibility.
 
-For programmatic access, the :mod:`areno.engine.oom_diagnostics` module
+For programmatic access, the :mod:`areno.engine.runtime.oom_diagnostics` module
 exposes ``build_oom_guidance()``, ``format_oom_guidance()``,
 ``is_oom_error()``, and ``oom_stage()`` with both human-readable and structured
 (``OOMGuidance.to_dict()``) output.

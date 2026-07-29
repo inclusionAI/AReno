@@ -23,7 +23,7 @@ import numpy as np
 
 from areno.api.dashboard import record_dashboard_state
 from areno.api.tokenizer import configure_chat_template_enable_thinking
-from areno.engine.oom_diagnostics import OOMStage, oom_stage
+from areno.engine.runtime.oom_diagnostics import OOMStage, oom_stage
 
 
 class PolicyOnlyTrainer:

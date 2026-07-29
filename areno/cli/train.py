@@ -794,7 +794,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
 def _build_oom_config_snapshot(trainer_config: TrainerConfig) -> dict:
     """Extract resolved option values for OOM diagnostics from TrainerConfig."""
 
-    from areno.engine.oom_diagnostics import build_oom_config_snapshot
+    from areno.engine.runtime.oom_diagnostics import build_oom_config_snapshot
 
     return build_oom_config_snapshot(trainer_config)
 
@@ -802,7 +802,7 @@ def _build_oom_config_snapshot(trainer_config: TrainerConfig) -> dict:
 def _print_oom_guidance(stage_text: str, trainer_config: TrainerConfig) -> None:
     """Print additional stage-specific OOM guidance to stderr."""
 
-    from areno.engine.oom_diagnostics import OOMStage, format_oom_guidance
+    from areno.engine.runtime.oom_diagnostics import OOMStage, format_oom_guidance
 
     try:
         stage = OOMStage(stage_text)
@@ -854,7 +854,7 @@ def run(trainer_config: TrainerConfig):
         # trainer at explicit call-site boundaries). If not, we don't
         # guess — UNKNOWN stage means no guidance (backward compatible).
         stage = getattr(exc, "_oom_stage", "unknown")
-        from areno.engine.oom_diagnostics import is_oom_error
+        from areno.engine.runtime.oom_diagnostics import is_oom_error
 
         if is_oom_error(exc):
             _print_oom_guidance(stage, trainer_config)

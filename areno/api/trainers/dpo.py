@@ -23,7 +23,7 @@ from areno.api.dashboard import record_dashboard_state
 from areno.api.data_utils import apply_chat_template, encode_prompt_value, response_to_tokens_and_mask
 from areno.api.roles import ModelRole
 from areno.api.tokenizer import configure_chat_template_enable_thinking
-from areno.engine.oom_diagnostics import OOMStage, oom_stage
+from areno.engine.runtime.oom_diagnostics import OOMStage, oom_stage
 
 
 class DPOTrainer:

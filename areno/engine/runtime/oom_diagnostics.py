@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
-logger = logging.getLogger("areno.engine.oom_diagnostics")
+logger = logging.getLogger("areno.engine.runtime.oom_diagnostics")
 
 _TROUBLESHOOTING_URL = "https://github.com/inclusionAI/AReno/blob/main/docs/troubleshooting/oom-timeout.rst"
 
