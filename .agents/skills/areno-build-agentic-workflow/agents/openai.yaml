@@ -1,0 +1,4 @@
+interface:
+  display_name: "Build an AReno Agentic Workflow"
+  short_description: "Create validated multi-turn tool workflows"
+  default_prompt: "Build this AReno agentic workflow and verify its transcript, reward, and training masks."

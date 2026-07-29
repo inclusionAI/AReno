@@ -1,0 +1,4 @@
+interface:
+  display_name: "Run AReno Serving"
+  short_description: "Start and probe AReno serving endpoints"
+  default_prompt: "Start the requested AReno endpoint and verify its API behavior."
