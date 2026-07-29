@@ -46,6 +46,16 @@ class RewardRecord(BaseModel):
     loss_mask: list[bool] = Field(default_factory=list)
     source_record: dict[str, Any] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
+    # Populated by reward transforms (see ``reward_transforms.py``) so that
+    # raw and transformed reward distributions can be logged separately.
+    # Both default to ``None`` which preserves backward-compatible serialization.
+    raw_reward_stats: dict[str, Any] | None = None
+    transformed_reward_stats: dict[str, Any] | None = None
+    # Populated by reward transforms (see ``reward_transforms.py``) so that
+    # raw and transformed reward distributions can be logged separately.
+    # Both default to ``None`` which preserves backward-compatible serialization.
+    raw_reward_stats: dict[str, Any] | None = None
+    transformed_reward_stats: dict[str, Any] | None = None
 
 
 def compute_group_advantages(rewards: list[float], eps: float = 1e-8) -> list[float]:
