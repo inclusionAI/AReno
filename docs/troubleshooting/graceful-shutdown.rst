@@ -63,6 +63,17 @@ include ``event``, ``state``, ``signal_number``, ``stage``, ``reason``,
 directory also stores the initial event under ``shutdown`` in the dashboard
 state artifact before the metrics writer is closed.
 
+Dashboard display
+-----------------
+
+When a train or serve job is visible in ``areno dashboard``, its detail page
+shows a shutdown card after the first signal. The card reports the graceful or
+forced state, signal, interrupted stage, initial reason, and remaining
+deadline. A dashboard-started job stays in ``stopping`` while it drains, and
+the **Stop** action changes to **Force stop** so a second signal remains
+available. Completed and forced exits retain the initial shutdown reason in
+the card and in the regular log view.
+
 Limitations
 -----------
 
