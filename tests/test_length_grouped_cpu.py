@@ -72,13 +72,25 @@ TokenLengthCache = _length_grouped.TokenLengthCache
 calculate_metrics = _length_grouped.calculate_metrics
 compute_token_length = _length_grouped.compute_token_length
 
-# TrainerConfig requires the full areno.api dependency chain (torch, pydantic,
-# etc.) and Python 3.10+; skip those tests when unavailable.
-try:
-    from areno.api.trainer_config import TrainerConfig  # type: ignore[import]
-    _HAS_DEPS = True
-except Exception:
-    _HAS_DEPS = False
+# TrainerConfig also loads via importlib to bypass areno.api.__init__.
+# It only needs areno.api.defaults.DEFAULT_METRICS_LOG_DIR.
+_defaults_stub = types.ModuleType("areno.api.defaults")
+_defaults_stub.DEFAULT_METRICS_LOG_DIR = "/tmp/areno/tfevent"
+sys.modules["areno.api.defaults"] = _defaults_stub
+
+_spec_tc = importlib.util.spec_from_file_location(
+    "areno.api.trainer_config",
+    os.path.join(os.path.dirname(__file__), "..", "areno", "api", "trainer_config.py"),
+)
+_tc_module = importlib.util.module_from_spec(_spec_tc)
+sys.modules["areno.api.trainer_config"] = _tc_module
+
+_dc.dataclass = _compat_dataclass
+_spec_tc.loader.exec_module(_tc_module)
+_dc.dataclass = _orig_dataclass  # restore
+
+TrainerConfig = _tc_module.TrainerConfig
+_HAS_DEPS = True
 
 
 # --------------------------------------------------------------------------- #
