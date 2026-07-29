@@ -501,17 +501,17 @@ def test_longer_legal_solution_scores_lower():
     assert score == pytest.approx(game.COMPLETION_REWARD - game.EXCESS_STEP_PENALTY * 1)
 
 
-def test_failure_sequence_scores_zero_progress():
-    # Unsolved traces earn partial credit only for PROGRESS toward peg 2, not
-    # for legal steps. The failure fixture oscillates the smallest disk without
-    # ever building the target stack, so peg 2 ends empty and it scores 0 —
-    # and so does a model that tries to "steal" reward with legal-but-stagnant
-    # moves (see test_collapse_sequence_no_partial_credit).
+def test_failure_sequence_scores_legal_floor():
+    # Unsolved traces earn PROGRESS credit (main) plus a tiny legal-move
+    # floor for gradient survival. The failure fixture oscillates disk 1
+    # without ever building the target stack, so peg 2 ends empty and
+    # progress=0; the floor gives 0.02 (8 legal moves × 0.005 capped at 0.02).
     n = 3
     moves = [(0, 2), (2, 0)] * 4  # never solves, peg 2 ends empty
     rec = _record(n, "failure", tool_moves=moves)
     assert not game.replay(moves, n).completed
-    assert reward.reward_fn(rec) == pytest.approx(0.0)
+    expected = min(reward.LEGAL_FLOOR_BONUS * 8, reward.LEGAL_FLOOR_CAP)
+    assert reward.reward_fn(rec) == pytest.approx(expected)
     assert reward.reward_fn(rec) < game.COMPLETION_REWARD
 
 
@@ -544,23 +544,21 @@ def test_string_arguments_are_parsed():
     assert reward.reward_fn(rec) == pytest.approx(game.COMPLETION_REWARD)
 
 
-def test_source_target_args_extracted_without_crash():
+def test_source_target_args_extracted_scored():
     # Regression for the cold-start extraction stall: a weak base model emits
     # the prose form {"source": s, "target": t} instead of the schema's
     # {"moves": [[s,t]...]}. _tool_moves must still extract it (not crash / not
     # silently drop) — before the fix, tool_calls=8/8 yet reward_mean=0.0. The
-    # extracted single move (0,2) puts disk 1 on peg 2, but disk 1 is not the
-    # correct bottom disk (3 for n=3), so under progress-based partial credit
-    # it scores 0; this asserts the extraction path, not the score.
+    # extracted single move (0,2) puts disk 1 on peg 2 (not the correct bottom
+    # disk for n=3), so progress=0 but the legal floor is 0.005.
     rec = _record(3, "optimal", tool_moves=None)
     rec.tool_calls = [{"name": "move_disk", "arguments": {"source": 0, "target": 2}}]
-    assert reward.reward_fn(rec) == 0.0
+    assert reward.reward_fn(rec) == pytest.approx(reward.LEGAL_FLOOR_BONUS * 1)
 
 
-def test_single_move_dict_wrapped_extracted_without_crash():
-    # Also tolerate {"moves": {"source": 0, "target": 2}} — the wrapped-dict
-    # extraction path must not crash; the single move scores 0 under
-    # progress-based credit (disk 1 is not the correct bottom disk for n=3).
+def test_single_move_dict_wrapped_extracted_scored():
+    # Also tolerate {"moves": {"source": 0, "target": 2}} — 1 legal move,
+    # progress=0, legal floor = 0.005.
     import json as _json
 
     rec = SimpleNamespace(
@@ -568,7 +566,7 @@ def test_single_move_dict_wrapped_extracted_without_crash():
         completion=None,
         tool_calls=[{"name": "move_disk", "arguments": _json.dumps({"moves": {"source": 0, "target": 2}})}],
     )
-    assert reward.reward_fn(rec) == 0.0
+    assert reward.reward_fn(rec) == pytest.approx(reward.LEGAL_FLOOR_BONUS * 1)
 
 
 def test_moves_field_as_json_string_parsed():
@@ -589,9 +587,9 @@ def test_moves_field_as_json_string_parsed():
 
 
 def test_progress_toward_peg2_rewarded():
-    # Partial credit is PROGRESS-based: disks correctly stacked on peg 2 from
-    # the bottom earn a little. For n=3, the first 4 optimal moves park disk 3
-    # on peg 2 (progress=1) without completing, so reward = 0.02 (not 0, not 1.0).
+    # Hybrid partial credit: progress(0.02/disk) dominates legal floor.
+    # For n=3, the first 4 optimal moves park disk 3 on peg 2 (progress=1)
+    # without completing, so reward = max(0.02, floor) = 0.02.
     n = 3
     moves = [tuple(m) for m in game.optimal_solution(n)[:4]]  # disk 3 -> peg 2, not yet solved
     rec = _record(n, "optimal", tool_moves=moves)
@@ -600,13 +598,15 @@ def test_progress_toward_peg2_rewarded():
     assert reward.reward_fn(rec) == pytest.approx(reward.PROGRESS_BONUS * 1)
 
 
-def test_collapse_sequence_no_partial_credit():
-    # Regression (2026-07-29 rollout mode collapse): the model locked reward at
-    # 0.04 by replaying [[0,2],[0,1]] — two legal moves that don't push any disk
-    # onto peg 2 in the correct bottom-up order. Progress-based partial credit
-    # scores this 0, removing the incentive to freeze on this shortcut.
+def test_collapse_sequence_scores_tiny_floor():
+    # Regression (2026-07-29 rollout mode collapse): the model previously locked
+    # reward at 0.04 by replaying [[0,2],[0,1]] — two legal moves that don't
+    # make progress (peg2=[1] → [], not [3,2,1]). With the hybrid formula,
+    # progress=0 but the legal floor gives 0.005 × 2 = 0.01 — tiny enough to
+    # be unattractive for freezing while keeping gradients alive (compare to
+    # any progress path which pays 0.02 per disk).
     rec = _record(3, "optimal", tool_moves=[(0, 2), (0, 1)])
-    assert reward.reward_fn(rec) == 0.0
+    assert reward.reward_fn(rec) == pytest.approx(reward.LEGAL_FLOOR_BONUS * 2)
 
 
 def test_malformed_arguments_score_zero_not_crash():
@@ -626,8 +626,10 @@ def test_reward_matches_replay_outcome_for_every_fixture():
             assert score > 0.0
             assert score <= game.COMPLETION_REWARD
         else:
-            # unsolved: partial credit is PROGRESS-based — disks correctly
-            # stacked on peg 2 from the bottom — and stays below completion.
-            expected = min(reward.PROGRESS_BONUS * reward._progress_count(result), reward.PARTIAL_CREDIT_CAP)
+            # unsolved: hybrid partial credit = max(progress, legal floor),
+            # capped at PARTIAL_CREDIT_CAP; stays below completion.
+            progress = reward.PROGRESS_BONUS * reward._progress_count(result)
+            floor = min(reward.LEGAL_FLOOR_BONUS * result.legal_count, reward.LEGAL_FLOOR_CAP)
+            expected = min(max(progress, floor), reward.PARTIAL_CREDIT_CAP)
             assert score == pytest.approx(expected)
             assert score < game.COMPLETION_REWARD

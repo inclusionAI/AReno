@@ -5,26 +5,26 @@ Mirrors ``examples/agentic/duelgrid/reward.py``: extract the model's
 board, and return a scalar reward. Rewards come from the rule engine, so the
 same fixtures work for warmup, rollout, or RLVR training.
 
-Design rationale (completion-led, with a small PROGRESS partial credit):
+Design rationale (completion-led, with hybrid PROGRESS + tiny legal-floor partial credit):
     The issue asks to "score completion with a small efficiency component
     relative to the known optimum". Read strictly, that means 0 unless the
     board is solved. Read leniently — which this file adopts — completion is
-    still the dominant signal, but a small partial credit is given for PROGRESS
-    toward the target peg on unsolved traces. The lenient reading is chosen for
-    a concrete training reason: a weak base model almost never solves the board
-    in one shot, so a strictly-sparse reward leaves every GSPO group at all-zero
-    reward → zero variance → zero advantage → zero gradient (cold-start stall).
+    still the dominant signal, but a small partial credit is given for unsolved
+    traces to keep GSPO gradients alive during cold start.
 
-    The partial credit is PROGRESS-based, not legal-step-based. An earlier
-    legal-step bonus ("0.02 per legal move") caused a mode collapse in rollout:
-    the model locked reward at 0.04 by replaying ``[[0,2],[0,1]]`` — two legal
-    moves that don't push any disk onto peg 2 in the correct bottom-up order —
-    and, all 4 group samples converging to that shortcut, the group had zero
-    variance and gradients died. Progress-based credit (only disks correctly
-    stacked on peg 2 from the bottom count) scores that shortcut 0, removing
-    the incentive to freeze, while still giving GSPO non-zero reward variance
-    across samples that reach different depths and a gradient pointing at
-    completion.
+    The partial credit is a hybrid: PROGRESS-based (disks correctly stacked on
+    peg 2 from the bottom, 0.02/disk, cap 0.5) as the main signal, plus a
+    tiny legal-move floor (0.005/legal move, cap 0.02) to ensure at least a
+    small non-zero gradient even when no progress has been made. The floor is
+    deliberately too small to be worth freezing on — the collapse shortcut
+    [[0,2],[0,1]] scores only 0.01 from the floor, making progress (which
+    pays 0.02 for the first progress disk) strictly more rewarding and
+    completion (1.0, globally optimal) the dominant long-term objective.
+
+    Earlier iterations tried a pure legal-step bonus (collapsed: model locked
+    0.04 and froze) and pure progress (too sparse: 0.8B could not produce
+    >4 legal moves consistently, reward stayed 0). The hybrid sits between
+    both extremes and has been validated in a 100-step Kaggle run.
 
     Concretely:
     - solved:    ``COMPLETION_REWARD - EXCESS_STEP_PENALTY * excess``
@@ -58,18 +58,12 @@ import game
 # completion text is also accepted as a fallback.
 _MOVE_LIST_RE = re.compile(r"\[.*\]", re.DOTALL)
 
-# Partial credit for UNSOLVED traces is PROGRESS-based, not legal-step-based
-# (see module docstring): only disks actually pushed onto peg 2 in the correct
-# bottom-up order earn a little, so a model cannot "steal" reward by emitting a
-# couple of legal-but-stagnant moves (observed mode collapse: the model
-# replayed `[[0,2],[0,1]]` to lock 0.04 and froze). Kept small so completion
-# (game.COMPLETION_REWARD = 1.0) stays the dominant signal.
+# Partial credit for UNSOLVED traces is a hybrid of PROGRESS (main) and a
+# tiny legal-move floor (gradient survival), see module docstring.
 PROGRESS_BONUS = 0.02  # per disk correctly stacked on peg 2 from the bottom
-# Hard cap on unsolved partial credit: guarantees completing the board (the
-# efficiency-discounted >=1.0 path) is always strictly better than any unsolved
-# trace, so completion stays the primary signal; progress credit only gives
-# GSPO non-zero reward variance and a gradient toward completion.
-PARTIAL_CREDIT_CAP = 0.5
+LEGAL_FLOOR_BONUS = 0.005  # per legal move — tiny floor to keep gradient alive
+LEGAL_FLOOR_CAP = 0.02  # floor cap: 4 legal moves = 0.02, not worth collapsing to
+PARTIAL_CREDIT_CAP = 0.5  # global cap: completion (>=1.0) always dominates
 
 
 def reward_fn(record: Any) -> float:
@@ -96,8 +90,11 @@ def reward_fn(record: Any) -> float:
     # of legal-but-stagnant moves score 0 and cannot be "stolen" for a stable
     # reward. This keeps the gradient pointing at completion while still giving
     # GSPO non-zero reward variance across samples that reach different depths.
-    partial = PROGRESS_BONUS * _progress_count(result)
-    return min(partial, PARTIAL_CREDIT_CAP)
+    # Unsolved: hybrid partial credit — PROGRESS (main) plus a tiny legal-move
+    # floor to keep gradients alive during cold start (see module docstring).
+    progress = PROGRESS_BONUS * _progress_count(result)
+    floor = min(LEGAL_FLOOR_BONUS * result.legal_count, LEGAL_FLOOR_CAP)
+    return min(max(progress, floor), PARTIAL_CREDIT_CAP)
 
 
 def _progress_count(result: Any) -> int:
