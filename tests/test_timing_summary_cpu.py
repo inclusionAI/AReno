@@ -43,6 +43,7 @@ def _have_tensorboard() -> bool:
     # needs torch OR tensorboardX.
     try:
         import tensorboard  # noqa: F401
+
         _summary_writer_cls()
     except Exception:
         return False

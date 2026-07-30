@@ -164,10 +164,7 @@ def _accumulate_event(
     if tag in _ROLLUP_TAGS:
         rollup_name = _ROLLUP_TAGS[tag]
         rollup_seen.setdefault(step, {})
-        if (
-            rollup_name in rollup_seen[step]
-            and abs(rollup_seen[step][rollup_name] - value) > 1e-9
-        ):
+        if rollup_name in rollup_seen[step] and abs(rollup_seen[step][rollup_name] - value) > 1e-9:
             return f"step {step} {rollup_name} rollup diverges"
         rollup_seen[step][rollup_name] = value
         bucket[rollup_name] = value
@@ -183,10 +180,7 @@ def _accumulate_event(
         rollup_value = rollup_seen.get(step, {}).get(time_name)
         if rollup_value is not None and abs(rollup_value - value) > 1e-9:
             return f"step {step} {time_name} phase echo diverges (rollup={rollup_value} echo={value})"
-        if (
-            time_name in phase_seen[step]
-            and abs(phase_seen[step][time_name] - value) > 1e-9
-        ):
+        if time_name in phase_seen[step] and abs(phase_seen[step][time_name] - value) > 1e-9:
             return f"step {step} {time_name} phase echo diverges"
         phase_seen[step][time_name] = value
         if time_name not in bucket:
@@ -198,9 +192,7 @@ def _accumulate_event(
     return None
 
 
-def load_step_segments(
-    run_dir: Path, pid: int | None = None
-) -> tuple[dict[int, dict[str, float]], list[str]]:
+def load_step_segments(run_dir: Path, pid: int | None = None) -> tuple[dict[int, dict[str, float]], list[str]]:
     """Read TensorBoard scalars and assemble per-step segment dicts.
 
     Returns ``(by_step, divergences)``.
@@ -367,9 +359,7 @@ def summarize(run_dir: Path, pid: int | None = None) -> dict[str, Any]:
         last_values = by_step[last]
         partial = _is_partial(last_values)
         recon = _reconcile(last_values)
-        latest_phases = {
-            name: (last_values[name] if name in last_values else None) for name in TIME_SEGMENT_ORDER
-        }
+        latest_phases = {name: (last_values[name] if name in last_values else None) for name in TIME_SEGMENT_ORDER}
         latest_update = {
             "step": last,
             # Keep 0.0 distinct from missing: a phase that was recorded with
