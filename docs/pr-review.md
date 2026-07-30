@@ -1,4 +1,4 @@
-# PR Review 文档
+# PR Review 文档 
 
 ## 一、对 PR 任务的理解
 
@@ -103,6 +103,14 @@
 
 命令：`pytest tests/test_dashboard_compare_cpu.py -v`
 输出：27 passed in 0.14s
+
+这 27 个测试覆盖了：
+- 成功路径（3个）：正常对比两个 job、GSPO vs SFT 对比、相同配置对比
+- 无效输入（3个）：缺 job_a、缺 job_b、不存在的 job
+- 边界情况（5个）：same job、无指标、不等步数、无 timeperf、空 config
+- 活跃/兼容（3个）：运行中 job、duration 计算、原有方法不变
+- CLI 命令（3个）：human 格式、JSON 格式、无效 job
+- 新功能（10个）：metric_charts 时间序列、diff_summary 倍率标注、throughput 计算、非数值 metric 边界等
 
 <!-- 贴 pytest 27 passed 的终端截图 -->
 
