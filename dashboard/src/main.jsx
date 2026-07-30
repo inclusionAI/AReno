@@ -1441,7 +1441,7 @@ function PhaseWaterfall({ jobId, refreshNonce }) {
                   {u.phases.map((p) => {
                     const left = (p.start_s / Math.max(total, 1)) * 100;
                     const width = (p.duration_s / Math.max(total, 1)) * 100;
-                    const minWidth = p.duration_s > 0 ? width : 0.5;
+                    const minWidth = p.duration_s > 0 ? width : 1.5;
                     return (
                       <span
                         key={p.name}
