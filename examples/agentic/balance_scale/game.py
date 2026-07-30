@@ -9,6 +9,7 @@ eventually call ``answer`` to identify the odd ball and its weight direction.
 from __future__ import annotations
 
 import random
+import re
 from collections.abc import Sequence
 
 ODD_DIRECTIONS = ("heavier", "lighter")
@@ -152,7 +153,7 @@ def generate_game(
 
 
 def format_prompt(num_balls: int, max_weighings: int) -> str:
-    """Build the user-facing prompt for one puzzle instance."""
+    """Build the user-facing prompt for the tool-call variant."""
 
     return (
         f"You have {num_balls} visually identical balls numbered 0 to {num_balls - 1}. "
@@ -162,3 +163,77 @@ def format_prompt(num_balls: int, max_weighings: int) -> str:
         f"When you know the answer, call the answer tool with the odd ball index "
         f"and whether it is heavier or lighter."
     )
+
+
+def format_xml_prompt(num_balls: int, max_weighings: int) -> str:
+    """Build the user-facing prompt for the XML no-tool variant."""
+
+    return (
+        f"You have {num_balls} visually identical balls numbered 0 to {num_balls - 1}. "
+        f"Exactly one ball is odd — it is either heavier or lighter than the rest. "
+        f"You have a balance scale and may use it at most {max_weighings} time(s).\n\n"
+        f"To weigh, output a tag like: <weigh left=\"0,1\" right=\"2,3\"/>\n"
+        f"You will receive the result (left_heavy, right_heavy, or balanced) as the next message.\n\n"
+        f"To submit your answer, output a tag like: "
+        f"<answer ball=\"3\" direction=\"heavier\"/>\n"
+        f"Direction must be \"heavier\" or \"lighter\".\n\n"
+        f"You may reason step by step before each tag. "
+        f"Use at most {max_weighings} weigh tags, then use one answer tag."
+    )
+
+
+# ---------------------------------------------------------------------------
+# XML parsing helpers for the no-tool variant
+# ---------------------------------------------------------------------------
+
+_WEIGH_RE = re.compile(
+    r'<weigh\s+left\s*=\s*"([^"]*)"\s+right\s*=\s*"([^"]*)"\s*/?>',
+    re.IGNORECASE | re.DOTALL,
+)
+_ANSWER_RE = re.compile(
+    r'<answer\s+ball\s*=\s*"(\d+)"\s+direction\s*=\s*"(heavier|lighter)"\s*/?>',
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def parse_xml_weigh(text: str) -> tuple[list[int], list[int]] | None:
+    """Extract the last <weigh> tag from *text*.
+
+    Returns ``(left_group, right_group)`` or ``None`` when no tag is found.
+    """
+
+    matches = list(_WEIGH_RE.finditer(text))
+    if not matches:
+        return None
+    left_str, right_str = matches[-1].group(1), matches[-1].group(2)
+    left = _parse_int_list(left_str)
+    right = _parse_int_list(right_str)
+    if left is None or right is None:
+        return None
+    return (left, right)
+
+
+def parse_xml_answer(text: str) -> tuple[int, str] | None:
+    """Extract the last <answer> tag from *text*.
+
+    Returns ``(ball_index, direction)`` or ``None`` when no tag is found.
+    """
+
+    matches = list(_ANSWER_RE.finditer(text))
+    if not matches:
+        return None
+    ball_index = int(matches[-1].group(1))
+    direction = matches[-1].group(2).lower()
+    return (ball_index, direction)
+
+
+def _parse_int_list(text: str) -> list[int] | None:
+    """Parse a comma-separated integer list like '0,1,2'."""
+
+    parts = [p.strip() for p in text.split(",") if p.strip()]
+    if not parts:
+        return None
+    try:
+        return [int(p) for p in parts]
+    except ValueError:
+        return None

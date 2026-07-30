@@ -342,5 +342,197 @@ class ImportBoundaryTest(unittest.TestCase):
         self.assertEqual(reward.WRONG_REWARD, 0.0)
 
 
+# ---------------------------------------------------------------------------
+# XML no-tool variant tests
+# ---------------------------------------------------------------------------
+
+reward_no_tool = importlib.import_module("reward_no_tool")
+dataset_loader_no_tool = importlib.import_module("dataset_loader_no_tool")
+
+
+def _make_no_tool_record(
+    *,
+    odd_ball_index: int = 3,
+    odd_ball_direction: str = "heavier",
+    completion: str = "",
+    num_balls: int = 9,
+    max_weighings: int = 3,
+) -> SimpleNamespace:
+    """Build a minimal record for the no-tool reward_fn tests."""
+
+    return SimpleNamespace(
+        source_record={
+            "id": "test-001",
+            "prompt": "test prompt",
+            "num_balls": num_balls,
+            "odd_ball_index": odd_ball_index,
+            "odd_ball_direction": odd_ball_direction,
+            "max_weighings": max_weighings,
+        },
+        completion=completion,
+    )
+
+
+class XmlParseTest(unittest.TestCase):
+    """Tests for parse_xml_weigh and parse_xml_answer in game.py."""
+
+    def test_parse_weigh_basic(self):
+        result = game.parse_xml_weigh('<weigh left="0,1" right="2,3"/>')
+        self.assertEqual(result, ([0, 1], [2, 3]))
+
+    def test_parse_weigh_single_ball(self):
+        result = game.parse_xml_weigh('<weigh left="0" right="1"/>')
+        self.assertEqual(result, ([0], [1]))
+
+    def test_parse_weigh_with_spaces(self):
+        result = game.parse_xml_weigh('<weigh left=" 0 , 1 " right=" 2 , 3 "/>')
+        self.assertEqual(result, ([0, 1], [2, 3]))
+
+    def test_parse_weigh_case_insensitive(self):
+        result = game.parse_xml_weigh('<WEIGH LEFT="0,1" RIGHT="2,3"/>')
+        self.assertEqual(result, ([0, 1], [2, 3]))
+
+    def test_parse_weigh_non_self_closing(self):
+        result = game.parse_xml_weigh('<weigh left="0,1" right="2,3"></weigh>')
+        self.assertEqual(result, ([0, 1], [2, 3]))
+
+    def test_parse_weigh_takes_last_match(self):
+        text = '<weigh left="0" right="1"/>\n<weigh left="2" right="3"/>'
+        result = game.parse_xml_weigh(text)
+        self.assertEqual(result, ([2], [3]))
+
+    def test_parse_weigh_no_match(self):
+        self.assertIsNone(game.parse_xml_weigh("no weigh tag here"))
+
+    def test_parse_weigh_invalid_ints(self):
+        self.assertIsNone(game.parse_xml_weigh('<weigh left="a,b" right="2,3"/>'))
+
+    def test_parse_answer_basic(self):
+        result = game.parse_xml_answer('<answer ball="3" direction="heavier"/>')
+        self.assertEqual(result, (3, "heavier"))
+
+    def test_parse_answer_case_insensitive_direction(self):
+        result = game.parse_xml_answer('<answer ball="3" direction="HEAVIER"/>')
+        self.assertEqual(result, (3, "heavier"))
+
+    def test_parse_answer_non_self_closing(self):
+        result = game.parse_xml_answer('<answer ball="5" direction="lighter"></answer>')
+        self.assertEqual(result, (5, "lighter"))
+
+    def test_parse_answer_takes_last_match(self):
+        text = '<answer ball="1" direction="heavier"/>\n<answer ball="3" direction="lighter"/>'
+        result = game.parse_xml_answer(text)
+        self.assertEqual(result, (3, "lighter"))
+
+    def test_parse_answer_with_reasoning_text(self):
+        text = "Let me think...\nThe odd ball is 3, it feels heavier.\n<answer ball=\"3\" direction=\"heavier\"/>"
+        result = game.parse_xml_answer(text)
+        self.assertEqual(result, (3, "heavier"))
+
+    def test_parse_answer_no_match(self):
+        self.assertIsNone(game.parse_xml_answer("no answer tag"))
+
+    def test_parse_answer_invalid_direction(self):
+        self.assertIsNone(game.parse_xml_answer('<answer ball="3" direction="same"/>'))
+
+
+class FormatXmlPromptTest(unittest.TestCase):
+    """Tests for format_xml_prompt."""
+
+    def test_contains_ball_count(self):
+        text = game.format_xml_prompt(12, 4)
+        self.assertIn("12", text)
+        self.assertIn("0 to 11", text)
+        self.assertIn("4", text)
+
+    def test_contains_weigh_example(self):
+        text = game.format_xml_prompt(9, 3)
+        self.assertIn("<weigh", text)
+        self.assertIn("left=", text)
+        self.assertIn("right=", text)
+
+    def test_contains_answer_example(self):
+        text = game.format_xml_prompt(9, 3)
+        self.assertIn("<answer", text)
+        self.assertIn("ball=", text)
+        self.assertIn("direction=", text)
+
+
+class NoToolRewardTest(unittest.TestCase):
+    """Tests for reward_no_tool.reward_fn."""
+
+    def test_full_correct(self):
+        record = _make_no_tool_record(
+            odd_ball_index=3,
+            odd_ball_direction="heavier",
+            completion='<answer ball="3" direction="heavier"/>',
+        )
+        self.assertEqual(reward_no_tool.reward_fn(record), 1.0)
+
+    def test_identity_only(self):
+        record = _make_no_tool_record(
+            odd_ball_index=3,
+            odd_ball_direction="heavier",
+            completion='<answer ball="3" direction="lighter"/>',
+        )
+        self.assertEqual(reward_no_tool.reward_fn(record), 0.5)
+
+    def test_wrong_ball(self):
+        record = _make_no_tool_record(
+            odd_ball_index=3,
+            odd_ball_direction="heavier",
+            completion='<answer ball="5" direction="heavier"/>',
+        )
+        self.assertEqual(reward_no_tool.reward_fn(record), 0.0)
+
+    def test_no_answer_tag(self):
+        record = _make_no_tool_record(
+            odd_ball_index=3,
+            odd_ball_direction="heavier",
+            completion="I think the odd ball is 3 but I forgot to use the tag.",
+        )
+        self.assertEqual(reward_no_tool.reward_fn(record), 0.0)
+
+    def test_answer_with_reasoning(self):
+        record = _make_no_tool_record(
+            odd_ball_index=3,
+            odd_ball_direction="heavier",
+            completion=(
+                "After weighing, ball 3 is heavier.\n"
+                '<answer ball="3" direction="heavier"/>'
+            ),
+        )
+        self.assertEqual(reward_no_tool.reward_fn(record), 1.0)
+
+    def test_takes_last_answer(self):
+        record = _make_no_tool_record(
+            odd_ball_index=3,
+            odd_ball_direction="heavier",
+            completion=(
+                '<answer ball="5" direction="heavier"/>\n'
+                '<answer ball="3" direction="heavier"/>'
+            ),
+        )
+        self.assertEqual(reward_no_tool.reward_fn(record), 1.0)
+
+
+class NoToolDatasetLoaderTest(unittest.TestCase):
+    """Tests for dataset_loader_no_tool."""
+
+    def test_loads_jsonl_with_xml_prompt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "puzzles.jsonl"
+            records = dataset_generator.generate_records(5, seed=2026, num_balls=9, max_weighings=3)
+            with path.open("w", encoding="utf-8") as f:
+                for r in records:
+                    f.write(json.dumps(r) + "\n")
+            loaded = dataset_loader_no_tool.load_training_dataset(str(path))
+            self.assertEqual(len(loaded), 5)
+            for record in loaded:
+                self.assertIn("prompt", record)
+                self.assertIn("<weigh", record["prompt"])
+                self.assertIn("<answer", record["prompt"])
+
+
 if __name__ == "__main__":
     unittest.main()
