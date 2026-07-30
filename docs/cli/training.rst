@@ -155,12 +155,13 @@ The seed controls source selection and per-source ordering. AReno derives a
 different deterministic ordering for each epoch. Source identity is attached
 under the reserved ``__areno_meta__`` field. The run prints a sample-free
 summary, logs the plan for each epoch, and records both a mix-spec hash and
-schedule hash. These hashes identify the sampler inputs and selected indices;
-they do not prove that a mutable remote dataset still has identical contents.
+schedule hash. These hashes identify sampler configuration and index ordering
+only; they do not prove that a mutable remote dataset still has identical
+contents.
 The cumulative ``stage=dataset_mix_progress`` event reports scheduled,
 filtered, and successfully trained rows plus trained target-token counts and
-both row/token proportions. The plan is also written as
-``dataset_mix_plan.<pid>.json`` to ``--metrics-log-dir``.
+both row/token proportions. Each epoch plan is also written as
+``dataset_mix_plan.<pid>.epoch-<n>.json`` to ``--metrics-log-dir``.
 
 V1 guarantees deterministic replay from the beginning of an epoch. AReno
 checkpoints currently do not persist an optimizer state plus mid-epoch dataset

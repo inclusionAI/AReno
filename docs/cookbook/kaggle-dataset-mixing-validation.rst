@@ -630,7 +630,7 @@ checks the 500-step completion contract:
        state_path = log_dir / f"dashboard_state.{pid}.json"
 
    config_path = log_dir / f"areno_run_config.{pid}.json"
-   plan_path = log_dir / f"dataset_mix_plan.{pid}.json"
+   plan_path = log_dir / f"dataset_mix_plan.{pid}.epoch-0.json"
 
    with state_path.open(encoding="utf-8") as handle:
        state = json.load(handle)
@@ -763,7 +763,8 @@ Artifacts and retained evidence
 
 The feature produces or references:
 
-* ``dataset_mix_plan.<pid>.json`` — sample-free source plan and hashes;
+* ``dataset_mix_plan.<pid>.epoch-<n>.json`` — sample-free per-epoch source plan
+  and hashes;
 * ``areno_run_config.<pid>.json`` — resolved run configuration;
 * ``areno_run_config.<pid>.txt`` — human-readable run configuration;
 * TensorBoard event files under the metrics directory;
@@ -781,7 +782,7 @@ Known limitations
 * Weights are sample-based and apply before tokenization/length filtering.
 * Source-specific filtering can change effective trained-row proportions.
 * Source-specific response lengths can change target-token/loss contribution.
-* The schedule hash covers source names and selected indices, not immutable
+* The schedule hash covers sampler/index ordering only, not immutable
   verification of remote dataset contents.
 * Exact deterministic replay starts at an epoch boundary. Mid-epoch optimizer
   state and dataset-cursor resume are outside the current contract.

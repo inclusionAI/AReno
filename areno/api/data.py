@@ -244,6 +244,7 @@ class WeightedMixedDataset:
 
         return {
             **self._summary_cache,
+            "warnings": list(self._summary_cache["warnings"]),
             "sources": [dict(source) for source in self._summary_cache["sources"]],
         }
 

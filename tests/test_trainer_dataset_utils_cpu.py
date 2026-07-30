@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 
 from areno.api import data_utils
@@ -83,6 +86,7 @@ def _sft_config(**overrides):
         "mini_bs": 1,
         "save_interval": 1,
         "save_path": None,
+        "metrics_log_dir": None,
     }
     defaults.update(overrides)
     return SimpleNamespace(**defaults)
@@ -196,6 +200,37 @@ class TrainerDatasetUtilityTest(unittest.TestCase):
         self.assertEqual(dataset.epochs, [0, 1])
         self.assertEqual(dataset.summary_epochs, [0, 1])
         self.assertEqual(backend.train_calls, 2)
+
+    def test_sft_writes_one_dataset_mix_plan_for_each_epoch(self):
+        backend = FakeSFTBackend()
+        dataset = WeightedMixedDataset(
+            [
+                DatasetMixSource("math", [{"prompt": "q", "response": "a"}], 0.7),
+                DatasetMixSource("code", [{"prompt": "r", "response": "b"}], 0.3),
+            ],
+            seed=42,
+            exhaustion="renormalize",
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            trainer = sft_mod.SFTTrainer(
+                _sft_config(epochs=2, metrics_log_dir=temp_dir),
+                instance=backend,
+                dataset=dataset,
+                reward_fn=None,
+                loss_fn=lambda _pack, _logprobs: None,
+            )
+
+            trainer.fit()
+
+            artifacts = sorted(Path(temp_dir).glob("dataset_mix_plan.*.epoch-*.json"))
+            self.assertEqual([path.name.rsplit(".epoch-", 1)[1] for path in artifacts], ["0.json", "1.json"])
+            summaries = [json.loads(path.read_text(encoding="utf-8")) for path in artifacts]
+
+        self.assertEqual([summary["epoch"] for summary in summaries], [0, 1])
+        for summary in summaries:
+            dataset.set_epoch(summary["epoch"])
+            self.assertEqual(summary["schedule_hash"], dataset.summary()["schedule_hash"])
 
     def test_sft_trains_two_mixed_sources_end_to_end_with_cpu_backend(self):
         backend = FakeSFTBackend()

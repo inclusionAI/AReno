@@ -158,6 +158,23 @@ def test_many_source_cycle_uses_fixed_budget_and_reports_rare_source_risk():
     assert any("source 'rare'" in warning for warning in summary["warnings"])
 
 
+def test_weighted_mix_summary_returns_defensive_nested_copies():
+    dataset = WeightedMixedDataset(
+        [_source("common", 2, 0.999), _source("rare", 1, 0.001)],
+        seed=42,
+        exhaustion="cycle",
+        samples_per_epoch=100,
+    )
+
+    summary = dataset.summary()
+    summary["warnings"].append("caller mutation")
+    summary["sources"][0]["name"] = "caller mutation"
+
+    fresh_summary = dataset.summary()
+    assert "caller mutation" not in fresh_summary["warnings"]
+    assert fresh_summary["sources"][0]["name"] == "common"
+
+
 @pytest.mark.parametrize("weight", [0, -1, math.nan, math.inf])
 def test_weighted_mix_rejects_invalid_weights(weight):
     with pytest.raises(ValueError, match="weight must be finite and positive"):
@@ -309,6 +326,18 @@ def test_dataset_source_shorthand_preserves_remote_ref_colons():
         {"name": "math", "path": "gsm8k:main:train", "weight": 0.7},
         {"name": "code", "path": "org/code-dataset:default:train", "weight": 0.3},
     ]
+
+
+def test_mix_source_path_resolution_distinguishes_local_and_remote_refs(tmp_path):
+    config_path = tmp_path / "mix.json"
+    existing = tmp_path / "data" / "train.jsonl"
+    existing.parent.mkdir()
+    existing.write_text("", encoding="utf-8")
+
+    assert train_cli._resolve_mix_source_path(config_path, "data/train.jsonl") == str(existing)
+    assert train_cli._resolve_mix_source_path(config_path, "./missing.jsonl") == str(tmp_path / "missing.jsonl")
+    assert train_cli._resolve_mix_source_path(config_path, "org/remote-dataset") == "org/remote-dataset"
+    assert train_cli._resolve_mix_source_path(config_path, "org/remote:config:train") == "org/remote:config:train"
 
 
 @pytest.mark.parametrize(
@@ -562,9 +591,10 @@ def test_mix_artifact_is_structured_and_sample_free(tmp_path):
         exhaustion="renormalize",
     )
 
-    train_cli._write_dataset_mix_artifact(dataset, str(tmp_path))
+    artifact_path = train_cli._write_dataset_mix_artifact(dataset, str(tmp_path))
 
-    artifact_path = next(tmp_path.glob("dataset_mix_plan.*.json"))
+    assert artifact_path is not None
+    assert artifact_path.name.endswith(".epoch-0.json")
     artifact_text = artifact_path.read_text(encoding="utf-8")
     artifact = json.loads(artifact_text)
     assert artifact["policy"] == "renormalize"

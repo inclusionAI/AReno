@@ -27,6 +27,7 @@ import areno.api
 from areno.api.dashboard import record_dashboard_state
 from areno.api.data import DATASET_MIX_METADATA_KEY
 from areno.api.data_utils import prompt_response_to_tokens_and_mask
+from areno.api.dataset_mix_artifacts import write_dataset_mix_plan
 from areno.api.tokenizer import configure_chat_template_enable_thinking
 
 
@@ -65,6 +66,11 @@ class SFTTrainer:
             mix_summary = getattr(self.dataset, "summary", None)
             if callable(mix_summary):
                 resolved_mix_summary = mix_summary()
+                if "schedule_hash" in resolved_mix_summary:
+                    write_dataset_mix_plan(
+                        resolved_mix_summary,
+                        getattr(self.config, "metrics_log_dir", None),
+                    )
                 self.logger.info("epoch=%d stage=dataset_mix_plan dataset_mix=%s", epoch, resolved_mix_summary)
                 mix_source_names = [
                     source["name"] for source in resolved_mix_summary.get("sources", []) if "name" in source

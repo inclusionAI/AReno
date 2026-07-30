@@ -28,6 +28,7 @@ import click
 
 from areno.api.algorithms import get_algorithm
 from areno.api.data import DATASET_MIX_METADATA_KEY, DatasetMixSource, WeightedMixedDataset
+from areno.api.dataset_mix_artifacts import write_dataset_mix_plan
 from areno.api.defaults import DEFAULT_METRICS_LOG_DIR
 from areno.api.trainer_config import (
     DPOTrainerConfig,
@@ -1482,13 +1483,8 @@ def _format_dataset_mix_summary(summary: dict) -> str:
     return "\n".join(lines)
 
 
-def _write_dataset_mix_artifact(dataset: WeightedMixedDataset, metrics_log_dir: str | None) -> None:
-    if not metrics_log_dir:
-        return
-    path = Path(metrics_log_dir)
-    path.mkdir(parents=True, exist_ok=True)
-    artifact_path = path / f"dataset_mix_plan.{os.getpid()}.json"
-    artifact_path.write_text(json.dumps(dataset.summary(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+def _write_dataset_mix_artifact(dataset: WeightedMixedDataset, metrics_log_dir: str | None) -> Path | None:
+    return write_dataset_mix_plan(dataset.summary(), metrics_log_dir)
 
 
 def _load_dataset_loader_fn(spec_text: str):
