@@ -210,8 +210,8 @@ class NonFiniteReport:
 # ---------------------------------------------------------------------------
 
 def check_loss_non_finite(loss: torch.Tensor) -> bool:
-    """Return True if loss is NaN or Inf. Call this every step."""
-    return bool(torch.isnan(loss) or torch.isinf(loss))
+    """Return True if loss contains NaN or Inf. Call this every step."""
+    return bool(torch.isnan(loss).any() or torch.isinf(loss).any())
 
 
 # ---------------------------------------------------------------------------

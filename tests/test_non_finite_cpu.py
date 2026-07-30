@@ -372,7 +372,7 @@ class CLINonFiniteFlagTest(unittest.TestCase):
         """TrainerConfig should have the two new fields with False defaults."""
         from areno.api.trainer_config import TrainerConfig
 
-        cfg = TrainerConfig(ckpt="x", dataset_path="x")
+        cfg = TrainerConfig(algo="gspo", ckpt="x", dataset_path="x")
         self.assertFalse(cfg.non_finite_skip_update)
         self.assertFalse(cfg.non_finite_terminate)
 
