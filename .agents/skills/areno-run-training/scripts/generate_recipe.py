@@ -149,52 +149,6 @@ _COMMAND_REQUIRED_BASE: tuple[str, ...] = (
     "max_new_tokens",
 )
 
-# Fields always excluded from the command (handled specially or not CLI-exposed).
-_COMMAND_SKIP_FIELDS: set[str] = {
-    "algo",
-    "ckpt",
-    "dataset_path",
-    "dataset_loader_fn",
-    "reward_fn_path",
-    "ref_ckpt",
-    "reward_ckpt",
-    "critic_ckpt",
-    "save_path",
-    "metrics_log_dir",
-    "model_hub",
-    "agent_fn",
-    "agent_timeout_s",
-    "chat_template_enable_thinking",
-    "role_device",
-    "score_micro_bs",
-    "gradient_accumulation_steps",
-    "optimizer_min_lr",
-    "lr_decay_steps",
-    "lr_decay_style",
-    "optimizer_beta1",
-    "optimizer_beta2",
-    "weight_decay",
-    "grad_clip_norm",
-    "adam_8bit",
-    "activation_checkpointing",
-    "keep_rollout_state",
-    "eager_decode",
-    "attn_backend",
-    "epochs",
-    "max_steps",
-    "save_interval",
-    "max_context_len",
-    "temperature",
-    "top_k",
-    "top_p",
-    "greedy",
-    "max_running_prompts",
-    "agent_fn",
-    "agent_timeout_s",
-    "train_tool_results",
-    "chat_template_enable_thinking",
-}
-
 # Context-length split ratios per algorithm: (prompt_fraction, response_fraction).
 # SFT: all context for prompt, no generation needed.
 # DPO: equal split between prompt and response.
