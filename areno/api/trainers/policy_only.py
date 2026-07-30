@@ -399,13 +399,40 @@ class PolicyOnlyTrainer:
         """Assemble TrainSequence rows from an agentic rollout batch."""
 
         import areno.api
-        from areno.api.rewards import compute_group_advantages
+        from areno.api.rewards import (
+            compute_group_advantages,
+            reward_distribution_summary,
+            transform_rewards,
+        )
 
         del prompt_batch
         if agent_batch.rewards is None:
             raise ValueError("agentic policy training requires a reward_fn")
         train_batch = []
         rewards_all = [float(reward) for reward in agent_batch.rewards]
+
+        # Optional reward transform (cross-group, before advantage computation).
+        mode = getattr(self.config, "reward_transform_mode", "disabled")
+        if mode != "disabled":
+            raw_summary = reward_distribution_summary(rewards_all)
+            rewards_all = transform_rewards(
+                rewards_all,
+                mode=mode,
+                clip_min=getattr(self.config, "reward_clip_min", None),
+                clip_max=getattr(self.config, "reward_clip_max", None),
+                standardize_eps=getattr(self.config, "reward_standardize_eps", 1e-8),
+            )
+            transformed_summary = reward_distribution_summary(rewards_all)
+            self.logger.info(
+                "metric=reward_transform mode=%s raw_mean=%.6f raw_std=%.6f "
+                "transformed_mean=%.6f transformed_std=%.6f",
+                mode,
+                raw_summary["mean"] or 0.0,
+                raw_summary["std"] or 0.0,
+                transformed_summary["mean"] or 0.0,
+                transformed_summary["std"] or 0.0,
+            )
+
         rollout_logprobs = []
         grouped: dict[int, list[int]] = {}
         for row_idx, record in enumerate(agent_batch.reward_records):
@@ -511,19 +538,29 @@ class PolicyOnlyTrainer:
 
         Steps:
             1. Decode each completion and score it with `reward_fn`.
-            2. Standardise rewards within each prompt group to get advantages
+            2. Apply optional reward transform (clip / standardize) across the
+               full batch before advantage computation.
+            3. Standardise rewards within each prompt group to get advantages
                (`compute_group_advantages`); this is the GRPO/GSPO baseline.
-            3. Stitch each prompt prefix with its response tokens and copy the
+            4. Stitch each prompt prefix with its response tokens and copy the
                group-level advantage onto every response position; prompt
                positions carry zero advantage and zero logprob.
         """
 
         import areno.api
-        from areno.api.rewards import compute_group_advantages, make_reward_record
+        from areno.api.rewards import (
+            compute_group_advantages,
+            make_reward_record,
+            reward_distribution_summary,
+            transform_rewards,
+        )
 
         train_batch = []
-        rewards_all = []
         rollout_logprobs = []
+
+        # Step 1: collect rewards per group and metadata needed for step 3.
+        all_rewards_by_group: list[list[float]] = []
+        group_meta: list[tuple] = []  # (item_idx, item, result, prefix_len, completions)
         for item_idx, (item, result) in enumerate(zip(prompt_batch.items, rollout_results, strict=True)):
             prefix_len = len(item.input_tokens)
             completions = [tokenizer.decode(seq.resp_tokens) for seq in result.sequences]
@@ -544,20 +581,47 @@ class PolicyOnlyTrainer:
                 )
                 for sample_idx, (completion, seq) in enumerate(zip(completions, result.sequences, strict=True))
             ]
-            rewards_all += rewards
-            # Group-relative advantage: A_i = (r_i - mean(r))/std(r); shared by
-            # every response token of sample i.
-            advantages = compute_group_advantages(rewards)
-            for seq, advantage, reward in zip(result.sequences, advantages, rewards, strict=True):
+            all_rewards_by_group.append(rewards)
+            group_meta.append((item_idx, item, result, prefix_len, completions))
+
+        rewards_all = [r for group in all_rewards_by_group for r in group]
+
+        # Step 2: optional reward transform (cross-group, before advantage).
+        mode = getattr(self.config, "reward_transform_mode", "disabled")
+        if mode != "disabled":
+            raw_summary = reward_distribution_summary(rewards_all)
+            rewards_all = transform_rewards(
+                rewards_all,
+                mode=mode,
+                clip_min=getattr(self.config, "reward_clip_min", None),
+                clip_max=getattr(self.config, "reward_clip_max", None),
+                standardize_eps=getattr(self.config, "reward_standardize_eps", 1e-8),
+            )
+            transformed_summary = reward_distribution_summary(rewards_all)
+            self.logger.info(
+                "metric=reward_transform mode=%s raw_mean=%.6f raw_std=%.6f "
+                "transformed_mean=%.6f transformed_std=%.6f",
+                mode,
+                raw_summary["mean"] or 0.0,
+                raw_summary["std"] or 0.0,
+                transformed_summary["mean"] or 0.0,
+                transformed_summary["std"] or 0.0,
+            )
+
+        # Step 3: slice transformed rewards back per group, compute advantages.
+        idx = 0
+        for group_idx, (item_idx, item, result, prefix_len, completions) in enumerate(group_meta):
+            group_size = len(all_rewards_by_group[group_idx])
+            group_rewards = rewards_all[idx : idx + group_size]
+            idx += group_size
+            advantages = compute_group_advantages(group_rewards)
+            for seq, advantage, reward in zip(result.sequences, advantages, group_rewards, strict=True):
                 resp_len = len(seq.resp_tokens)
                 rollout_logprobs += seq.resp_logprobs
                 train_batch.append(
                     areno.api.TrainSequence(
-                        # Prompt positions are masked (1=prompt, 0=response).
                         prompt_mask=[1] * prefix_len + [0] * resp_len,
                         tokens=item.input_tokens + seq.resp_tokens,
-                        # Rollout logprobs play the role of "old logprobs"; the
-                        # zero prefix keeps tensor lengths aligned with tokens.
                         logprobs=[0.0] * prefix_len + seq.resp_logprobs,
                         advantages=[0.0] * prefix_len + [advantage] * resp_len,
                         reward=reward,

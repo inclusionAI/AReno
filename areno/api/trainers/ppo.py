@@ -144,6 +144,32 @@ class PPOTrainer(PolicyOnlyTrainer):
             self.logger.info("role=reward stage=score_end rows=%d", len(token_rows))
             self._record_ppo_state(stage="score_end", role="reward")
 
+        # Optional reward transform (cross-batch, before GAE / advantage).
+        reward_transform_mode = getattr(self.config, "reward_transform_mode", "disabled")
+        if reward_transform_mode != "disabled":
+            from areno.api.rewards import reward_distribution_summary, transform_rewards
+
+            raw_summary = reward_distribution_summary(rewards_all)
+            self._last_ppo_stats.update(_summary_stats("reward_raw", rewards_all))
+            rewards_all = transform_rewards(
+                rewards_all,
+                mode=reward_transform_mode,
+                clip_min=getattr(self.config, "reward_clip_min", None),
+                clip_max=getattr(self.config, "reward_clip_max", None),
+                standardize_eps=getattr(self.config, "reward_standardize_eps", 1e-8),
+            )
+            self._last_ppo_stats.update(_summary_stats("reward_transformed", rewards_all))
+            transformed_summary = reward_distribution_summary(rewards_all)
+            self.logger.info(
+                "metric=reward_transform mode=%s raw_mean=%.6f raw_std=%.6f "
+                "transformed_mean=%.6f transformed_std=%.6f",
+                reward_transform_mode,
+                raw_summary["mean"] or 0.0,
+                raw_summary["std"] or 0.0,
+                transformed_summary["mean"] or 0.0,
+                transformed_summary["std"] or 0.0,
+            )
+
         # Forward ref/actor/critic over every row in a single batched call per
         # role so the backend can amortise activation memory and kernel launch
         # cost across all sequences.
@@ -294,6 +320,32 @@ class PPOTrainer(PolicyOnlyTrainer):
             self._last_ppo_stats["reward_score_time_s"] = time.perf_counter() - reward_start
             self.logger.info("role=reward stage=score_end rows=%d", len(token_rows))
             self._record_ppo_state(stage="score_end", role="reward")
+
+        # Optional reward transform (cross-batch, before GAE / advantage).
+        reward_transform_mode = getattr(self.config, "reward_transform_mode", "disabled")
+        if reward_transform_mode != "disabled":
+            from areno.api.rewards import reward_distribution_summary, transform_rewards
+
+            raw_summary = reward_distribution_summary(rewards_all)
+            self._last_ppo_stats.update(_summary_stats("reward_raw", rewards_all))
+            rewards_all = transform_rewards(
+                rewards_all,
+                mode=reward_transform_mode,
+                clip_min=getattr(self.config, "reward_clip_min", None),
+                clip_max=getattr(self.config, "reward_clip_max", None),
+                standardize_eps=getattr(self.config, "reward_standardize_eps", 1e-8),
+            )
+            self._last_ppo_stats.update(_summary_stats("reward_transformed", rewards_all))
+            transformed_summary = reward_distribution_summary(rewards_all)
+            self.logger.info(
+                "metric=reward_transform mode=%s raw_mean=%.6f raw_std=%.6f "
+                "transformed_mean=%.6f transformed_std=%.6f",
+                reward_transform_mode,
+                raw_summary["mean"] or 0.0,
+                raw_summary["std"] or 0.0,
+                transformed_summary["mean"] or 0.0,
+                transformed_summary["std"] or 0.0,
+            )
 
         self.logger.info("role=ref stage=logprob_score_start rows=%d", len(token_rows))
         self._record_ppo_state(stage="logprob_score_start", role="ref")

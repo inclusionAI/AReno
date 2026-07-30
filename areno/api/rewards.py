@@ -48,6 +48,86 @@ class RewardRecord(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class RewardTransformError(ValueError):
+    """Reward transform error carrying a stage identifier and input summary.
+
+    The ``stage`` field identifies where in the pipeline the error occurred.
+    ``input_summary`` is a compact descriptor (e.g. ``"count=0,has_nan=True"``)
+    so callers can surface diagnostics without exposing full training samples.
+    """
+
+    def __init__(self, stage: str, detail: str, input_summary: str = ""):
+        self.stage = stage
+        self.detail = detail
+        self.input_summary = input_summary
+        super().__init__(f"[stage={stage}] {detail}")
+
+
+def transform_rewards(
+    rewards: list[float],
+    mode: str = "disabled",
+    clip_min: float | None = None,
+    clip_max: float | None = None,
+    standardize_eps: float = 1e-8,
+) -> list[float]:
+    """Transform raw rewards before advantage computation.
+
+    Args:
+        rewards: Raw reward values (one per sample in the batch).
+        mode: Transform mode — ``disabled`` | ``clip`` | ``standardize``.
+        clip_min, clip_max: Bounds for clip mode (both required when mode=clip).
+        standardize_eps: Denominator guard for standardize mode.
+
+    Returns:
+        Transformed reward list, same length as input.
+
+    For ``disabled``, returns the input list unchanged (no copy, no
+    computation) to guarantee numerical identity with the un-transformed path.
+
+    For ``standardize``, mean and std are computed across the entire input
+    list (cross-group, not per-group) so the transformation is not cancelled
+    by the subsequent per-group ``compute_group_advantages`` call.
+    """
+
+    if mode == "disabled":
+        return rewards
+    if mode == "clip":
+        # NaN passes through because Python's max/min return the non-NaN
+        # operand only when the comparison is True; NaN comparisons are
+        # always False, so max(min(nan, clip_max), clip_min) yields nan.
+        return [max(clip_min, min(clip_max, r)) for r in rewards]
+    if mode == "standardize":
+        stage = "reward_transform.standardize"
+        if not rewards:
+            raise RewardTransformError(stage, "cannot standardize empty reward list", "count=0")
+        arr = np.asarray(rewards, dtype=np.float32)
+        if np.isnan(arr).any():
+            raise RewardTransformError(stage, "reward contains NaN", f"count={len(rewards)},has_nan=True")
+        mean = float(arr.mean())
+        std = float(arr.std())
+        return ((arr - mean) / (std + standardize_eps)).tolist()
+    raise RewardTransformError("reward_transform.dispatch", f"unknown mode: {mode!r}")
+
+
+def reward_distribution_summary(rewards: list[float]) -> dict:
+    """Compute distributional summary of a reward list.
+
+    Returns a dict with count/mean/std/min/max. For an empty list all
+    statistics are ``None`` (no error raised — callers decide how to handle).
+    """
+
+    if not rewards:
+        return {"count": 0, "mean": None, "std": None, "min": None, "max": None}
+    arr = np.asarray(rewards, dtype=np.float32)
+    return {
+        "count": int(arr.size),
+        "mean": float(arr.mean()),
+        "std": float(arr.std()),
+        "min": float(arr.min()),
+        "max": float(arr.max()),
+    }
+
+
 def compute_group_advantages(rewards: list[float], eps: float = 1e-8) -> list[float]:
     """Normalize rewards within one prompt group for GRPO/GSPO training.
 

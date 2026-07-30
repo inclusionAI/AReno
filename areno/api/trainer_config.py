@@ -145,6 +145,33 @@ class PolicyTrainerConfig(RolloutTrainerConfig):
     reward_fn_path: str | None = None
     gspo_clip_eps: float = 3.0e-4
     grpo_clip_eps: float = 0.2
+    reward_transform_mode: str = "disabled"
+    reward_clip_min: float | None = None
+    reward_clip_max: float | None = None
+    reward_standardize_eps: float = 1e-8
+
+    def __post_init__(self) -> None:
+        TrainerConfig.__post_init__(self)
+        if self.reward_transform_mode not in ("disabled", "clip", "standardize"):
+            raise ValueError(
+                f"reward_transform_mode must be one of: disabled, clip, standardize, "
+                f"got {self.reward_transform_mode!r}"
+            )
+        if self.reward_transform_mode == "clip":
+            if self.reward_clip_min is None or self.reward_clip_max is None:
+                raise ValueError(
+                    "reward_transform_mode=clip requires both reward_clip_min and reward_clip_max"
+                )
+            if self.reward_clip_min > self.reward_clip_max:
+                raise ValueError(
+                    f"reward_clip_min ({self.reward_clip_min}) must be <= "
+                    f"reward_clip_max ({self.reward_clip_max})"
+                )
+        if self.reward_transform_mode == "standardize":
+            if self.reward_standardize_eps <= 0:
+                raise ValueError(
+                    f"reward_standardize_eps must be > 0, got {self.reward_standardize_eps}"
+                )
 
 
 @dataclass(slots=True)

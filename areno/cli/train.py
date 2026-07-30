@@ -116,6 +116,10 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "critic_warmup_steps",
             "gspo_clip_eps",
             "grpo_clip_eps",
+            "reward_transform_mode",
+            "reward_clip_min",
+            "reward_clip_max",
+            "reward_standardize_eps",
             "dpo_beta",
             "use_kl_loss",
             "kl_loss_coef",
@@ -722,6 +726,10 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             attn_backend=args.attn_backend,
             gspo_clip_eps=args.gspo_clip_eps,
             grpo_clip_eps=args.grpo_clip_eps,
+            reward_transform_mode=args.reward_transform_mode,
+            reward_clip_min=args.reward_clip_min,
+            reward_clip_max=args.reward_clip_max,
+            reward_standardize_eps=args.reward_standardize_eps,
             metrics_log_dir=args.metrics_log_dir,
             agent_fn=args.agent_fn,
             agent_timeout_s=args.agent_timeout_s,
@@ -769,6 +777,10 @@ def _trainer_config_from_args(args) -> TrainerConfig:
         attn_backend=args.attn_backend,
         gspo_clip_eps=args.gspo_clip_eps,
         grpo_clip_eps=args.grpo_clip_eps,
+        reward_transform_mode=args.reward_transform_mode,
+        reward_clip_min=args.reward_clip_min,
+        reward_clip_max=args.reward_clip_max,
+        reward_standardize_eps=args.reward_standardize_eps,
         metrics_log_dir=args.metrics_log_dir,
         ref_ckpt=args.ref_ckpt,
         reward_ckpt=args.reward_ckpt,
@@ -937,6 +949,10 @@ def _training_config_settings(config: TrainerConfig) -> dict:
                 "critic_warmup_steps",
                 "gspo_clip_eps",
                 "grpo_clip_eps",
+                "reward_transform_mode",
+                "reward_clip_min",
+                "reward_clip_max",
+                "reward_standardize_eps",
                 "dpo_beta",
                 "kl_coef",
                 "use_kl_loss",
@@ -1304,6 +1320,22 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     "--gspo-clip-eps", type=float, default=3.0e-4, show_default=True, help="GSPO sequence-ratio clipping epsilon."
 )
 @click.option("--grpo-clip-eps", type=float, default=0.2, show_default=True, help="GRPO token-ratio clipping epsilon.")
+@click.option(
+    "--reward-transform-mode",
+    type=click.Choice(["disabled", "clip", "standardize"]),
+    default="disabled",
+    show_default=True,
+    help="Reward transformation applied after reward_fn and before advantage computation.",
+)
+@click.option("--reward-clip-min", type=float, default=None, help="Lower bound for reward clip mode.")
+@click.option("--reward-clip-max", type=float, default=None, help="Upper bound for reward clip mode.")
+@click.option(
+    "--reward-standardize-eps",
+    type=float,
+    default=1e-8,
+    show_default=True,
+    help="Denominator guard for reward standardize mode.",
+)
 @click.option("--dpo-beta", type=float, default=0.1, show_default=True, help="DPO preference margin temperature.")
 @click.option(
     "--critic-warmup-steps",
