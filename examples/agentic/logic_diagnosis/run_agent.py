@@ -109,7 +109,20 @@ async def _run_episode(item, client) -> list[AgentTrajectoryTurn]:
         tool_result = _execute_tool(assistant_msg, nodes, fault, state)
 
         if tool_result is None:
-            logger.warning("Logic diagnosis model returned no executable tool call on turn %d", turn_index)
+            raw = response.model_dump() if hasattr(response, "model_dump") else str(response)
+            content = ""
+            try:
+                if isinstance(raw, dict):
+                    content = raw.get("choices", [{}])[0].get("message", {}).get("content", "")
+                else:
+                    content = getattr(getattr(getattr(raw, "choices", [None])[0], "message", None), "content", "")
+            except Exception:
+                content = str(raw)[:500]
+            logger.warning(
+                "Logic diagnosis model returned no executable tool call on turn %d. "
+                "tool_calls_in_msg=%s content[:200]=%s",
+                turn_index, assistant_msg.get("tool_calls"), content[:200],
+            )
             break
 
         messages.extend(_tool_messages(assistant_msg, tool_result))
