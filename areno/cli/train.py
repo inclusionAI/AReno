@@ -15,8 +15,10 @@ import ast
 import importlib.util
 import json
 import logging
+import os
 import shutil
 import textwrap
+import warnings
 from dataclasses import fields
 from pathlib import Path
 from types import SimpleNamespace
@@ -541,6 +543,9 @@ def _preflight_task_hooks(args, algorithm) -> None:
             expected="reward_fn(record)",
             positional_args=1,
         )
+        _check_reward_fn_return_annotation(
+            Path(args.reward_fn_path).expanduser().resolve(),
+        )
     if args.agent_fn is not None:
         _validate_python_callable(
             Path(args.agent_fn).expanduser().resolve(),
@@ -590,6 +595,29 @@ def _function_accepts_positional_args(function: ast.FunctionDef | ast.AsyncFunct
     if args.vararg is not None:
         return required_count <= count
     return required_count <= count <= positional_count
+
+
+def _check_reward_fn_return_annotation(path: Path) -> None:
+    """Warn if the reward_fn return annotation is not float/int/Any."""
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    except (OSError, SyntaxError, UnicodeDecodeError):
+        return
+    function = _find_top_level_function(tree, "reward_fn")
+    if function is None or function.returns is None:
+        return
+    ann = function.returns
+    name = (
+        ann.id if isinstance(ann, ast.Name) else
+        getattr(ann, "attr", None) or ast.dump(ann)
+    )
+    if name not in {"float", "int", "Any"}:
+        warnings.warn(
+            f"--reward-fn-path {path} return type is annotated as '{name}', "
+            f"expected 'float' or 'int'; the return value will be validated at runtime",
+            UserWarning,
+            stacklevel=2,
+        )
 
 
 def _trainer_config_from_args(args) -> TrainerConfig:
@@ -1179,6 +1207,12 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
 )
 @click.option("--reward-fn-path", default=None, help="Python file defining reward_fn(record).")
 @click.option(
+    "--validate-reward",
+    is_flag=True,
+    default=False,
+    help="Validate reward hook inputs and outputs at runtime (signature check, dry-run, output type/finite validation).",
+)
+@click.option(
     "--ref-ckpt", default=None, help="Optional PPO/DPO reference model checkpoint path or remote model repo ID."
 )
 @click.option("--reward-ckpt", default=None, help="Optional PPO reward model checkpoint path or remote model repo ID.")
@@ -1363,6 +1397,9 @@ def train_command(**options) -> None:
         config=_training_config_settings(trainer_config),
         metrics_dir=trainer_config.metrics_log_dir,
     )
+    if options.get("validate_reward"):
+        os.environ["ARENO_REWARD_VALIDATION"] = "1"
+
     run(trainer_config)
 
 

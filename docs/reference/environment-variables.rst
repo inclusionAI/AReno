@@ -17,4 +17,15 @@ control.
 ``MAX_JOBS``
    Set this to control parallel compilation jobs during editable installs.
 
+``ARENO_REWARD_VALIDATION``
+   Set to ``1`` to enable runtime validation of reward hook inputs and
+   outputs (signature check, dry-run, per-call output type and finiteness
+   validation).  Equivalent to the ``--validate-reward`` CLI flag.  Off by
+   default.
+
+``ARENO_REWARD_VALIDATION_DRY_RUN``
+   Set to ``0`` to skip the reward hook dry-run step while keeping per-call
+   output validation active.  Only effective when
+   ``ARENO_REWARD_VALIDATION=1``.
+
 For environment inspection, use :doc:`/cli/diagnostics`.

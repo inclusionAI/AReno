@@ -83,7 +83,8 @@ def load_reward_fn(path: str) -> Callable[[RewardRecord], float]:
         raise ValueError(f"{module_path} must define callable reward_fn(record)") from exc
     if not callable(reward_fn):
         raise ValueError(f"{module_path} must define callable reward_fn(record)")
-    return reward_fn
+    from areno.api.reward_validation import validate_and_wrap_reward_fn
+    return validate_and_wrap_reward_fn(reward_fn, module_path)
 
 
 def make_reward_record(
