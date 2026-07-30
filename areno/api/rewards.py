@@ -84,9 +84,13 @@ def transform_rewards(
     For ``disabled``, returns the input list unchanged (no copy, no
     computation) to guarantee numerical identity with the un-transformed path.
 
+    For ``clip``, an empty list returns an empty list (no-op). NaN inputs
+    raise ``RewardTransformError`` because clip mode requires finite inputs.
+
     For ``standardize``, mean and std are computed across the entire input
     list (cross-group, not per-group) so the transformation is not cancelled
-    by the subsequent per-group ``compute_group_advantages`` call.
+    by the subsequent per-group ``compute_group_advantages`` call. An empty
+    list raises ``RewardTransformError`` because mean/std are undefined.
     """
 
     if mode == "disabled":

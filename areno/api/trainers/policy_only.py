@@ -42,6 +42,50 @@ class PolicyOnlyTrainer:
         self.loss_fn = loss_fn
         self.logger = logging.getLogger(f"{self.__class__.__module__}.{self.__class__.__name__}")
         self._agent_run_fn = None
+        self._reward_raw_stats: dict | None = None
+
+    def _apply_reward_transform(self, rewards_all: list[float]) -> list[float]:
+        """Apply optional reward transform and populate ``_reward_raw_stats``.
+
+        Returns the transformed reward list. When transform is disabled, returns
+        the input unchanged and sets ``_reward_raw_stats`` to ``None``.
+        """
+
+        from areno.api.rewards import reward_distribution_summary, transform_rewards
+
+        mode = getattr(self.config, "reward_transform_mode", "disabled")
+        self._reward_raw_stats = None
+        if mode == "disabled":
+            return rewards_all
+        raw_summary = reward_distribution_summary(rewards_all)
+        rewards_all = transform_rewards(
+            rewards_all,
+            mode=mode,
+            clip_min=getattr(self.config, "reward_clip_min", None),
+            clip_max=getattr(self.config, "reward_clip_max", None),
+            standardize_eps=getattr(self.config, "reward_standardize_eps", 1e-8),
+        )
+        transformed_summary = reward_distribution_summary(rewards_all)
+        if raw_summary["mean"] is not None:
+            self._reward_raw_stats = {
+                "reward_raw_mean": raw_summary["mean"],
+                "reward_raw_std": raw_summary["std"],
+                "reward_raw_min": raw_summary["min"],
+                "reward_raw_max": raw_summary["max"],
+                "reward_transformed_mean": transformed_summary["mean"] or 0.0,
+                "reward_transformed_std": transformed_summary["std"] or 0.0,
+                "reward_transformed_min": transformed_summary["min"] or 0.0,
+                "reward_transformed_max": transformed_summary["max"] or 0.0,
+            }
+        self.logger.info(
+            "metric=reward_transform mode=%s raw_mean=%.6f raw_std=%.6f transformed_mean=%.6f transformed_std=%.6f",
+            mode,
+            raw_summary["mean"] or 0.0,
+            raw_summary["std"] or 0.0,
+            transformed_summary["mean"] or 0.0,
+            transformed_summary["std"] or 0.0,
+        )
+        return rewards_all
 
     def fit(self) -> None:
         self.areno.init()
@@ -173,9 +217,8 @@ class PolicyOnlyTrainer:
         # reference forward-time, ...) before they reach the metric recorder.
         # GSPO/GRPO uses it to surface raw reward distribution stats when
         # reward transform is enabled.
-        raw_stats = getattr(self, "_reward_raw_stats", None)
-        if raw_stats:
-            result.update(raw_stats)
+        if self._reward_raw_stats:
+            result.update(self._reward_raw_stats)
         return result
 
     def _agentic_enabled(self) -> bool:
@@ -404,11 +447,7 @@ class PolicyOnlyTrainer:
         """Assemble TrainSequence rows from an agentic rollout batch."""
 
         import areno.api
-        from areno.api.rewards import (
-            compute_group_advantages,
-            reward_distribution_summary,
-            transform_rewards,
-        )
+        from areno.api.rewards import compute_group_advantages
 
         del prompt_batch
         if agent_batch.rewards is None:
@@ -417,36 +456,7 @@ class PolicyOnlyTrainer:
         rewards_all = [float(reward) for reward in agent_batch.rewards]
 
         # Optional reward transform (cross-group, before advantage computation).
-        mode = getattr(self.config, "reward_transform_mode", "disabled")
-        self._reward_raw_stats = None
-        if mode != "disabled":
-            raw_summary = reward_distribution_summary(rewards_all)
-            rewards_all = transform_rewards(
-                rewards_all,
-                mode=mode,
-                clip_min=getattr(self.config, "reward_clip_min", None),
-                clip_max=getattr(self.config, "reward_clip_max", None),
-                standardize_eps=getattr(self.config, "reward_standardize_eps", 1e-8),
-            )
-            transformed_summary = reward_distribution_summary(rewards_all)
-            self._reward_raw_stats = {
-                "reward_raw_mean": raw_summary["mean"] or 0.0,
-                "reward_raw_std": raw_summary["std"] or 0.0,
-                "reward_raw_min": raw_summary["min"] or 0.0,
-                "reward_raw_max": raw_summary["max"] or 0.0,
-                "reward_transformed_mean": transformed_summary["mean"] or 0.0,
-                "reward_transformed_std": transformed_summary["std"] or 0.0,
-                "reward_transformed_min": transformed_summary["min"] or 0.0,
-                "reward_transformed_max": transformed_summary["max"] or 0.0,
-            }
-            self.logger.info(
-                "metric=reward_transform mode=%s raw_mean=%.6f raw_std=%.6f transformed_mean=%.6f transformed_std=%.6f",
-                mode,
-                raw_summary["mean"] or 0.0,
-                raw_summary["std"] or 0.0,
-                transformed_summary["mean"] or 0.0,
-                transformed_summary["std"] or 0.0,
-            )
+        rewards_all = self._apply_reward_transform(rewards_all)
 
         rollout_logprobs = []
         grouped: dict[int, list[int]] = {}
@@ -566,8 +576,6 @@ class PolicyOnlyTrainer:
         from areno.api.rewards import (
             compute_group_advantages,
             make_reward_record,
-            reward_distribution_summary,
-            transform_rewards,
         )
 
         train_batch = []
@@ -575,7 +583,7 @@ class PolicyOnlyTrainer:
 
         # Step 1: collect rewards per group and metadata needed for step 3.
         all_rewards_by_group: list[list[float]] = []
-        group_meta: list[tuple] = []  # (item_idx, item, result, prefix_len, completions)
+        group_meta: list[tuple] = []  # (item_idx, item, result, prefix_len)
         for item_idx, (item, result) in enumerate(zip(prompt_batch.items, rollout_results, strict=True)):
             prefix_len = len(item.input_tokens)
             completions = [tokenizer.decode(seq.resp_tokens) for seq in result.sequences]
@@ -597,45 +605,16 @@ class PolicyOnlyTrainer:
                 for sample_idx, (completion, seq) in enumerate(zip(completions, result.sequences, strict=True))
             ]
             all_rewards_by_group.append(rewards)
-            group_meta.append((item_idx, item, result, prefix_len, completions))
+            group_meta.append((item_idx, item, result, prefix_len))
 
         rewards_all = [r for group in all_rewards_by_group for r in group]
 
         # Step 2: optional reward transform (cross-group, before advantage).
-        mode = getattr(self.config, "reward_transform_mode", "disabled")
-        self._reward_raw_stats = None
-        if mode != "disabled":
-            raw_summary = reward_distribution_summary(rewards_all)
-            rewards_all = transform_rewards(
-                rewards_all,
-                mode=mode,
-                clip_min=getattr(self.config, "reward_clip_min", None),
-                clip_max=getattr(self.config, "reward_clip_max", None),
-                standardize_eps=getattr(self.config, "reward_standardize_eps", 1e-8),
-            )
-            transformed_summary = reward_distribution_summary(rewards_all)
-            self._reward_raw_stats = {
-                "reward_raw_mean": raw_summary["mean"] or 0.0,
-                "reward_raw_std": raw_summary["std"] or 0.0,
-                "reward_raw_min": raw_summary["min"] or 0.0,
-                "reward_raw_max": raw_summary["max"] or 0.0,
-                "reward_transformed_mean": transformed_summary["mean"] or 0.0,
-                "reward_transformed_std": transformed_summary["std"] or 0.0,
-                "reward_transformed_min": transformed_summary["min"] or 0.0,
-                "reward_transformed_max": transformed_summary["max"] or 0.0,
-            }
-            self.logger.info(
-                "metric=reward_transform mode=%s raw_mean=%.6f raw_std=%.6f transformed_mean=%.6f transformed_std=%.6f",
-                mode,
-                raw_summary["mean"] or 0.0,
-                raw_summary["std"] or 0.0,
-                transformed_summary["mean"] or 0.0,
-                transformed_summary["std"] or 0.0,
-            )
+        rewards_all = self._apply_reward_transform(rewards_all)
 
         # Step 3: slice transformed rewards back per group, compute advantages.
         idx = 0
-        for group_idx, (item_idx, item, result, prefix_len, completions) in enumerate(group_meta):
+        for group_idx, (item_idx, item, result, prefix_len) in enumerate(group_meta):
             group_size = len(all_rewards_by_group[group_idx])
             group_rewards = rewards_all[idx : idx + group_size]
             idx += group_size

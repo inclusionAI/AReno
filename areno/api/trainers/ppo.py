@@ -145,30 +145,9 @@ class PPOTrainer(PolicyOnlyTrainer):
             self._record_ppo_state(stage="score_end", role="reward")
 
         # Optional reward transform (cross-batch, before GAE / advantage).
-        reward_transform_mode = getattr(self.config, "reward_transform_mode", "disabled")
-        if reward_transform_mode != "disabled":
-            from areno.api.rewards import reward_distribution_summary, transform_rewards
-
-            raw_summary = reward_distribution_summary(rewards_all)
-            self._last_ppo_stats.update(_summary_stats("reward_raw", rewards_all))
-            rewards_all = transform_rewards(
-                rewards_all,
-                mode=reward_transform_mode,
-                clip_min=getattr(self.config, "reward_clip_min", None),
-                clip_max=getattr(self.config, "reward_clip_max", None),
-                standardize_eps=getattr(self.config, "reward_standardize_eps", 1e-8),
-            )
-            self._last_ppo_stats.update(_summary_stats("reward_transformed", rewards_all))
-            transformed_summary = reward_distribution_summary(rewards_all)
-            self.logger.info(
-                "metric=reward_transform mode=%s raw_mean=%.6f raw_std=%.6f "
-                "transformed_mean=%.6f transformed_std=%.6f",
-                reward_transform_mode,
-                raw_summary["mean"] or 0.0,
-                raw_summary["std"] or 0.0,
-                transformed_summary["mean"] or 0.0,
-                transformed_summary["std"] or 0.0,
-            )
+        rewards_all = self._apply_reward_transform(rewards_all)
+        if self._reward_raw_stats:
+            self._last_ppo_stats.update(self._reward_raw_stats)
 
         # Forward ref/actor/critic over every row in a single batched call per
         # role so the backend can amortise activation memory and kernel launch
@@ -322,30 +301,9 @@ class PPOTrainer(PolicyOnlyTrainer):
             self._record_ppo_state(stage="score_end", role="reward")
 
         # Optional reward transform (cross-batch, before GAE / advantage).
-        reward_transform_mode = getattr(self.config, "reward_transform_mode", "disabled")
-        if reward_transform_mode != "disabled":
-            from areno.api.rewards import reward_distribution_summary, transform_rewards
-
-            raw_summary = reward_distribution_summary(rewards_all)
-            self._last_ppo_stats.update(_summary_stats("reward_raw", rewards_all))
-            rewards_all = transform_rewards(
-                rewards_all,
-                mode=reward_transform_mode,
-                clip_min=getattr(self.config, "reward_clip_min", None),
-                clip_max=getattr(self.config, "reward_clip_max", None),
-                standardize_eps=getattr(self.config, "reward_standardize_eps", 1e-8),
-            )
-            self._last_ppo_stats.update(_summary_stats("reward_transformed", rewards_all))
-            transformed_summary = reward_distribution_summary(rewards_all)
-            self.logger.info(
-                "metric=reward_transform mode=%s raw_mean=%.6f raw_std=%.6f "
-                "transformed_mean=%.6f transformed_std=%.6f",
-                reward_transform_mode,
-                raw_summary["mean"] or 0.0,
-                raw_summary["std"] or 0.0,
-                transformed_summary["mean"] or 0.0,
-                transformed_summary["std"] or 0.0,
-            )
+        rewards_all = self._apply_reward_transform(rewards_all)
+        if self._reward_raw_stats:
+            self._last_ppo_stats.update(self._reward_raw_stats)
 
         self.logger.info("role=ref stage=logprob_score_start rows=%d", len(token_rows))
         self._record_ppo_state(stage="logprob_score_start", role="ref")
@@ -512,6 +470,7 @@ class PPOTrainer(PolicyOnlyTrainer):
     def _augment_train_stats(self, result):
         # Merge the per-step PPO diagnostics into the dict the metric recorder
         # consumes so they show up alongside the actor loss.
+        super()._augment_train_stats(result)
         if isinstance(result, dict):
             result.update(self._last_ppo_stats)
         return result
