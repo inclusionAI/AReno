@@ -22,12 +22,12 @@ logger = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 SYSTEM_PROMPT = (
-    "You are a rigorous digital circuit diagnostician. A combinational logic circuit has "
-    "exactly ONE stuck-at fault on a single internal gate (AND/OR/NOT). Use set_input_vector "
-    "to observe the faulty circuit's output (free), inspect_node to probe internal gate values "
-    "(each costs 1 probe), and submit_diagnosis to give your final answer. "
-    "Reason step by step: apply input vectors, compare against expected behavior of the healthy "
-    "circuit, probe suspicious nodes only when needed, then submit your diagnosis."
+    "You are a digital circuit diagnostician. A logic circuit has exactly ONE "
+    "stuck-at fault on a single internal gate (AND/OR/NOT). The fault is either "
+    "stuck_at_0 (gate always outputs False) or stuck_at_1 (gate always outputs True).\n\n"
+    "On EVERY turn you MUST call exactly one tool. Do NOT answer in plain text. "
+    "Use set_input_vector to observe outputs (free), inspect_node to probe a gate "
+    "(costs 1 probe), then submit_diagnosis when confident."
 )
 
 
@@ -74,7 +74,10 @@ async def _run_episode(item, client) -> list[AgentTrajectoryTurn]:
     for turn_index in range(1, max_turns + 1):
         turn_prompt = {
             "role": "user",
-            "content": f"Turn {turn_index}: Choose one tool: set_input_vector, inspect_node, or submit_diagnosis.",
+            "content": (
+                f"Turn {turn_index}. You MUST call one tool now: "
+                "set_input_vector, inspect_node, or submit_diagnosis."
+            ),
         }
         turn_messages = [*messages, turn_prompt]
 
@@ -133,19 +136,57 @@ async def _run_episode(item, client) -> list[AgentTrajectoryTurn]:
 
 
 def _assistant_message(response) -> dict:
-    message = response.choices[0].message
-    return {
-        "role": "assistant",
-        "content": message.content,
-        "tool_calls": [
-            {
-                "id": call.id,
-                "type": call.type,
-                "function": {"name": call.function.name, "arguments": call.function.arguments},
-            }
-            for call in (message.tool_calls or [])
-        ],
-    }
+    # The areno proxy may return dicts, Pydantic models, or SimpleNamespace.
+    raw = response.model_dump() if hasattr(response, "model_dump") else response
+
+    # Extract choices
+    if isinstance(raw, dict):
+        choices = raw.get("choices", [])
+    else:
+        choices = getattr(raw, "choices", [])
+
+    if not choices:
+        return {"role": "assistant", "content": "", "tool_calls": []}
+
+    choice = choices[0]
+    if isinstance(choice, dict):
+        msg = choice.get("message", {})
+    else:
+        msg = getattr(choice, "message", None)
+    if msg is None:
+        return {"role": "assistant", "content": "", "tool_calls": []}
+
+    if isinstance(msg, dict):
+        content = msg.get("content", "") or ""
+        raw_calls = msg.get("tool_calls") or []
+    else:
+        content = getattr(msg, "content", "") or ""
+        raw_calls = getattr(msg, "tool_calls", None) or []
+
+    tool_calls = []
+    for tc in raw_calls:
+        if isinstance(tc, dict):
+            fn = tc.get("function", {})
+            tool_calls.append({
+                "id": tc.get("id", ""),
+                "type": tc.get("type", "function"),
+                "function": {
+                    "name": fn.get("name", "") if isinstance(fn, dict) else "",
+                    "arguments": fn.get("arguments", "{}") if isinstance(fn, dict) else "{}",
+                },
+            })
+        else:
+            fn = getattr(tc, "function", None)
+            tool_calls.append({
+                "id": getattr(tc, "id", ""),
+                "type": getattr(tc, "type", "function"),
+                "function": {
+                    "name": getattr(fn, "name", "") if fn else "",
+                    "arguments": getattr(fn, "arguments", "{}") if fn else "{}",
+                },
+            })
+
+    return {"role": "assistant", "content": content, "tool_calls": tool_calls}
 
 
 def _execute_tool(
