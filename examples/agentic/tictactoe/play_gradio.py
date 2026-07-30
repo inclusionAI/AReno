@@ -1,0 +1,176 @@
+"""Gradio-based visual Tic-Tac-Toe board for playing against the model.
+
+Usage (Kaggle / local):
+    pip install gradio
+    python play_gradio.py --model-path /path/to/Qwen3-0.6B
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+import gradio as gr
+
+# Ensure the tictactoe game module is importable
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import game  # noqa: E402
+from transformers import AutoModelForCausalLM, AutoTokenizer  # noqa: E402
+import torch  # noqa: E402
+
+# ── Globals ──────────────────────────────────────────────────────────────
+EMPTY = game.EMPTY
+HUMAN = "O"
+MODEL = "X"
+
+# Grid buttons stored as a 3x3 list of gr.Button
+buttons: list[list[gr.Button]] = []
+status_box: gr.Markdown | None = None
+
+# Mutable state passed through Gradio
+State = dict  # board, finished, message
+
+
+def board_to_grid(board: game.Board) -> list[list[str]]:
+    """Convert internal board to display strings (empty -> "")."""
+    return [
+        ["" if cell == EMPTY else ("❌" if cell == "X" else "⭕") for cell in row]
+        for row in board
+    ]
+
+
+def model_move(board: game.Board) -> int | None:
+    """Ask the model for a move."""
+    prompt = game.format_xml_prompt(board)
+    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+    outputs = model.generate(**inputs, max_new_tokens=32, do_sample=False)
+    text = tokenizer.decode(outputs[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
+    move = game.parse_xml_move(text)
+    print(f"[model] raw output: {text.strip()!r}  parsed move: {move}")
+    return move
+
+
+def check_result(board: game.Board) -> str | None:
+    """Return status message if game ended, else None."""
+    if game.is_terminal(board):
+        w = game.winner(board)
+        if w == MODEL:
+            return "😔 模型赢了！"
+        elif w == HUMAN:
+            return "🎉 你赢了！"
+        else:
+            return "🤝 平局！"
+    return None
+
+
+def on_cell_click(row: int, col: int, state: State) -> tuple:
+    """Handle a click on a grid cell."""
+    board: game.Board = state["board"]
+    finished: bool = state["finished"]
+
+    if finished:
+        return state, state["message"], *board_to_grid(board)
+
+    square = row * 3 + col + 1
+
+    # ── Human move ──
+    if square not in game.legal_moves(board):
+        return state, "⚠️ 该位置已被占用！", *board_to_grid(board)
+
+    board = game.apply_move(board, square, HUMAN)
+    result = check_result(board)
+    if result:
+        state.update(board=board, finished=True, message=result)
+        return state, result, *board_to_grid(board)
+
+    # ── Model move ──
+    move = model_move(board)
+    if move and move in game.legal_moves(board):
+        board = game.apply_move(board, move, MODEL)
+    else:
+        board_msg = "模型走了非法位置，跳过"
+        # Fall through to check if skipping ends the game
+    result = check_result(board)
+    if result:
+        state.update(board=board, finished=True, message=result)
+        return state, result, *board_to_grid(board)
+
+    state.update(board=board, finished=False, message="你的回合，请落子 ⭕")
+    return state, "你的回合，请落子 ⭕", *board_to_grid(board)
+
+
+def reset_game() -> tuple:
+    """Reset to a fresh board."""
+    board = [[EMPTY] * 3 for _ in range(3)]
+    state = {"board": board, "finished": False, "message": "新对局开始！你执 ⭕，模型执 ❌"}
+    return state, state["message"], *board_to_grid(board)
+
+
+def build_ui() -> gr.Blocks:
+    """Build the Gradio interface."""
+    with gr.Blocks(title="Tic-Tac-Toe vs Model", theme=gr.themes.Soft()) as ui:
+        gr.Markdown("# 🎮 井字棋对弈 — 你 vs 模型")
+        gr.Markdown("你执 ⭕，模型执 ❌。点击空格落子，模型会自动应手。")
+
+        state = gr.State(
+            {"board": [[EMPTY] * 3 for _ in range(3)], "finished": False, "message": "点击下方棋盘开始！"}
+        )
+
+        global status_box
+        status_box = gr.Markdown("点击下方棋盘开始！")
+
+        # 3x3 grid of buttons
+        grid = []
+        for row_idx in range(3):
+            row_buttons = []
+            with gr.Row():
+                for col_idx in range(3):
+                    btn = gr.Button("", scale=1, elem_id=f"cell-{row_idx}-{col_idx}")
+                    row_buttons.append(btn)
+            grid.append(row_buttons)
+
+        with gr.Row():
+            reset_btn = gr.Button("🔄 重新开始")
+
+        # Wire click events
+        for r in range(3):
+            for c in range(3):
+                grid[r][c].click(
+                    on_cell_click,
+                    inputs=[gr.Number(value=r, visible=False),
+                            gr.Number(value=c, visible=False),
+                            state],
+                    outputs=[state, status_box, *[grid[i][j] for i in range(3) for j in range(3)]],
+                )
+
+        reset_btn.click(
+            reset_game,
+            outputs=[state, status_box, *[grid[i][j] for i in range(3) for j in range(3)]],
+        )
+
+    return ui
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Gradio Tic-Tac-Toe vs Model")
+    parser.add_argument("--model-path", required=True, help="Path or HF id of the model")
+    parser.add_argument("--share", action="store_true", help="Create a public Gradio link")
+    parser.add_argument("--port", type=int, default=7860)
+    args = parser.parse_args()
+
+    global tokenizer, model
+    print(f"Loading model from {args.model_path} ...")
+    tokenizer = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=True)
+    model = AutoModelForCausalLM.from_pretrained(
+        args.model_path, torch_dtype=torch.float16, device_map="auto"
+    )
+    print("Model loaded. Starting Gradio UI ...")
+
+    ui = build_ui()
+    ui.launch(server_port=args.port, share=args.share)
+
+
+if __name__ == "__main__":
+    main()
