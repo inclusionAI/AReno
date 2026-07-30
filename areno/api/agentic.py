@@ -138,7 +138,9 @@ class AgentTrajectoryTurn:
         metadata = _chat_response_agentic_metadata(self.response)
         self.response_tokens = list(metadata["response_tokens"])
         self.response_logprobs = [float(value) for value in metadata["response_logprobs"]]
-        self.parsed_tool_calls = _chat_response_message_tool_calls(self.response)
+        # Only auto-parse when the caller did not supply explicit tool calls.
+        if not self.parsed_tool_calls:
+            self.parsed_tool_calls = _chat_response_message_tool_calls(self.response)
 
 
 @dataclass(slots=True)

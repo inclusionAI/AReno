@@ -145,19 +145,10 @@ async def _run_episode(item, client) -> list[AgentTrajectoryTurn]:
             tool_choice=tool_choice,
             stream=False,
         )
-        turns.append(
-            AgentTrajectoryTurn(
-                item=item,
-                messages=turn_messages,
-                response=response,
-                tools=[GUESS_TOOL],
-                tool_choice=tool_choice,
-            )
-        )
-
         assistant_message = _assistant_message(response)
         executed = _execute_guess(assistant_message, item.record)
 
+        fallback_applied = False
         if executed is None:
             # Fallback: small models may emit a tool_call with missing/invalid
             # arguments, or no tool_call at all.  Try to extract a guess from
@@ -172,7 +163,26 @@ async def _run_episode(item, client) -> list[AgentTrajectoryTurn]:
                 assistant_message = _synth_tool_call_message(content, fallback_word)
                 executed = _execute_guess(assistant_message, item.record)
                 if executed is not None:
+                    fallback_applied = True
                     logger.info("Wordle fallback extracted guess: %s", fallback_word)
+
+        # Build parsed_tool_calls so the reward function can see the guess,
+        # even when it came from the fallback path.
+        chosen_call = executed[1] if executed is not None else None
+        parsed_tool_calls = []
+        if chosen_call is not None:
+            parsed_tool_calls = [_call_to_parsed_dict(chosen_call)]
+
+        turns.append(
+            AgentTrajectoryTurn(
+                item=item,
+                messages=turn_messages,
+                response=response,
+                tools=[GUESS_TOOL],
+                tool_choice=tool_choice,
+                parsed_tool_calls=parsed_tool_calls,
+            )
+        )
 
         if executed is None:
             # DEBUG: dump raw model response to diagnose why tool_call parsing fails
@@ -222,6 +232,20 @@ async def _run_episode(item, client) -> list[AgentTrajectoryTurn]:
             break
 
     return turns
+
+
+def _call_to_parsed_dict(call: dict) -> dict:
+    """Convert an internal tool-call dict to the parsed_tool_calls format."""
+
+    function = call.get("function", {})
+    arguments = function.get("arguments", "{}")
+    if not isinstance(arguments, str):
+        arguments = json.dumps(arguments)
+    return {
+        "id": call.get("id", ""),
+        "type": call.get("type", "function"),
+        "function": {"name": function.get("name", ""), "arguments": arguments},
+    }
 
 
 def _synth_tool_call_message(content: str, word: str) -> dict:
