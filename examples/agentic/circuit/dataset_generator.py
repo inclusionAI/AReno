@@ -39,11 +39,22 @@ def generate_records(
         A list of record dicts.
     """
 
+    if count <= 0:
+        raise ValueError("count must be positive")
+    if num_inputs < 2:
+        raise ValueError("num_inputs must be >= 2")
+    if num_gates <= num_inputs:
+        raise ValueError("num_gates must be > num_inputs")
+
     records: list[dict] = []
     seen: set[tuple[tuple, int, str]] = set()
-    for i in range(count):
-        circ = circuit.generate_circuit(num_inputs, num_gates, seed=seed + i)
-        faulty = circuit.inject_fault(circ, seed=seed + i)
+    attempt = 0
+    max_attempts = max(100, count * 100)
+    while len(records) < count and attempt < max_attempts:
+        item_seed = seed + attempt
+        attempt += 1
+        circ = circuit.generate_circuit(num_inputs, num_gates, seed=item_seed)
+        faulty = circuit.inject_fault(circ, seed=item_seed)
         # Create a hashable key to detect duplicates.
         key = (
             tuple((g.gate_type.value, g.inputs) for g in circ.gates),
@@ -53,7 +64,15 @@ def generate_records(
         if key in seen:
             continue
         seen.add(key)
-        records.append(_circuit_to_record(circ, faulty, f"generated-{len(records):05d}"))
+        record = _circuit_to_record(circ, faulty, f"generated-{len(records):05d}")
+        record["seed"] = item_seed
+        records.append(record)
+
+    if len(records) != count:
+        raise RuntimeError(
+            f"could not generate {count} unique observable circuits after {max_attempts} attempts; "
+            f"generated {len(records)}"
+        )
     return records
 
 

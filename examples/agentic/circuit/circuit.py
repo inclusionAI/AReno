@@ -8,8 +8,8 @@ Circuits are represented as a list of gates, each with a type (AND, OR, NOT,
 INPUT) and input wire indices. Wires are indexed 0..N-1; gate i produces
 wire i. INPUT gates have no inputs and are set by the agent.
 
-Fault injection replaces one gate's output with its complement (stuck-at
-fault), and the agent must identify which gate is faulty by probing outputs.
+Fault injection forces one gate's output to a constant stuck-at value, and the
+agent must identify which gate is faulty by probing outputs.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from __future__ import annotations
 import random
 from dataclasses import dataclass, field
 from enum import Enum
+from itertools import product
 from typing import Any
 
 # ---------------------------------------------------------------------------
@@ -105,6 +106,36 @@ class Circuit:
     num_inputs: int
     num_outputs: int = 1
 
+    def __post_init__(self) -> None:
+        """Validate the serialized DAG contract at construction time."""
+
+        if self.num_inputs < 1:
+            raise ValueError("num_inputs must be >= 1")
+        if len(self.gates) <= self.num_inputs:
+            raise ValueError("circuit must contain at least one non-INPUT gate")
+        if self.num_outputs < 1 or self.num_outputs > len(self.gates) - self.num_inputs:
+            raise ValueError("num_outputs must select at least one non-INPUT gate")
+
+        for expected_id, gate in enumerate(self.gates):
+            if gate.gate_id != expected_id:
+                raise ValueError(f"gate IDs must be contiguous and ordered: expected {expected_id}, got {gate.gate_id}")
+            if expected_id < self.num_inputs:
+                if gate.gate_type is not GateType.INPUT or gate.inputs:
+                    raise ValueError(f"gate {expected_id} must be an INPUT with no incoming wires")
+                continue
+            if gate.gate_type is GateType.INPUT:
+                raise ValueError(f"gate {expected_id} cannot be INPUT after the input prefix")
+            expected_arity = 1 if gate.gate_type is GateType.NOT else 2
+            if len(gate.inputs) != expected_arity:
+                raise ValueError(
+                    f"gate {expected_id} ({gate.gate_type.value}) expects {expected_arity} inputs, "
+                    f"got {len(gate.inputs)}"
+                )
+            if any(isinstance(wire_id, bool) or not isinstance(wire_id, int) for wire_id in gate.inputs):
+                raise ValueError(f"gate {expected_id} input IDs must be integers")
+            if any(wire_id < 0 or wire_id >= expected_id for wire_id in gate.inputs):
+                raise ValueError(f"gate {expected_id} inputs must reference earlier gates")
+
     @property
     def num_gates(self) -> int:
         return len(self.gates)
@@ -120,6 +151,20 @@ class Circuit:
         """Wire indices of output wires (last num_outputs gates)."""
 
         return list(range(len(self.gates) - self.num_outputs, len(self.gates)))
+
+    @property
+    def active_gate_ids(self) -> set[int]:
+        """Gate IDs that transitively contribute to at least one output."""
+
+        active = set(self.output_gate_ids)
+        pending = list(self.output_gate_ids)
+        while pending:
+            gate_id = pending.pop()
+            for input_id in self.gates[gate_id].inputs:
+                if input_id not in active:
+                    active.add(input_id)
+                    pending.append(input_id)
+        return active
 
     def simulate(self, input_values: list[bool]) -> list[bool]:
         """Simulate the circuit with given input values.
@@ -189,6 +234,17 @@ class FaultyCircuit:
     reference: Circuit
     faulty_gate_id: int
     fault_type: str = "stuck_at_0"
+
+    def __post_init__(self) -> None:
+        if self.fault_type not in {"stuck_at_0", "stuck_at_1"}:
+            raise ValueError(f"unsupported fault_type: {self.fault_type!r}")
+        if isinstance(self.faulty_gate_id, bool) or not isinstance(self.faulty_gate_id, int):
+            raise ValueError("faulty_gate_id must be an integer")
+        if self.faulty_gate_id < self.reference.num_inputs or self.faulty_gate_id >= self.reference.num_gates:
+            raise ValueError(
+                f"faulty_gate_id {self.faulty_gate_id} must identify a non-INPUT gate in "
+                f"[{self.reference.num_inputs}, {self.reference.num_gates})"
+            )
 
     def simulate_faulty(self, input_values: list[bool]) -> list[bool]:
         """Simulate the faulty circuit.
@@ -274,19 +330,23 @@ def generate_circuit(
         gates.append(Gate(gate_id=i, gate_type=GateType.INPUT, inputs=()))
     # Remaining gates are AND/OR/NOT, each taking inputs from earlier gates.
     for i in range(num_inputs, num_gates):
-        gate_type = rng.choice([GateType.AND, GateType.OR, GateType.NOT])
+        gate_type = rng.choices(
+            [GateType.AND, GateType.OR, GateType.NOT],
+            weights=[0.4, 0.4, 0.2],
+            k=1,
+        )[0]
         if gate_type is GateType.NOT:
-            inp = rng.randint(0, i - 1)
+            inp = i - 1
             gates.append(Gate(gate_id=i, gate_type=gate_type, inputs=(inp,)))
         else:
-            inp_a = rng.randint(0, i - 1)
-            inp_b = rng.randint(0, i - 1)
+            inp_a = i - 1
+            inp_b = rng.randrange(i - 1)
             gates.append(Gate(gate_id=i, gate_type=gate_type, inputs=(inp_a, inp_b)))
     return Circuit(gates=gates, num_inputs=num_inputs, num_outputs=1)
 
 
 def inject_fault(circuit: Circuit, *, seed: int = 0) -> FaultyCircuit:
-    """Inject a random stuck-at fault into a non-INPUT gate.
+    """Inject a deterministic, output-observable stuck-at fault.
 
     Args:
         circuit: The reference circuit.
@@ -299,14 +359,42 @@ def inject_fault(circuit: Circuit, *, seed: int = 0) -> FaultyCircuit:
         ValueError: If the circuit has no non-INPUT gates.
     """
 
-    rng = random.Random(seed)
-    # Only non-INPUT gates can be faulty.
-    candidate_ids = [g.gate_id for g in circuit.gates if g.gate_type is not GateType.INPUT]
-    if not candidate_ids:
-        raise ValueError("circuit has no non-INPUT gates to fault")
-    faulty_gate_id = rng.choice(candidate_ids)
-    fault_type = rng.choice(["stuck_at_0", "stuck_at_1"])
-    return FaultyCircuit(reference=circuit, faulty_gate_id=faulty_gate_id, fault_type=fault_type)
+    candidates = observable_fault_hypotheses(circuit)
+    if not candidates:
+        raise ValueError("circuit has no output-observable stuck-at fault")
+    return random.Random(seed).choice(candidates)
+
+
+def input_vectors(num_inputs: int) -> list[list[bool]]:
+    """Return the complete Boolean input space in deterministic order."""
+
+    if num_inputs < 1:
+        raise ValueError("num_inputs must be >= 1")
+    return [list(values) for values in product([False, True], repeat=num_inputs)]
+
+
+def fault_is_output_observable(faulty: FaultyCircuit) -> bool:
+    """Return whether the fault changes an output for at least one input."""
+
+    output_ids = faulty.reference.output_gate_ids
+    for vector in input_vectors(faulty.reference.num_inputs):
+        reference_values = faulty.reference.simulate(vector)
+        faulty_values = faulty.simulate_faulty(vector)
+        if any(reference_values[wire_id] != faulty_values[wire_id] for wire_id in output_ids):
+            return True
+    return False
+
+
+def observable_fault_hypotheses(circuit: Circuit) -> list[FaultyCircuit]:
+    """Enumerate all valid fault hypotheses that affect a circuit output."""
+
+    hypotheses: list[FaultyCircuit] = []
+    for gate in circuit.gates[circuit.num_inputs :]:
+        for fault_type in ("stuck_at_0", "stuck_at_1"):
+            faulty = FaultyCircuit(circuit, gate.gate_id, fault_type)
+            if fault_is_output_observable(faulty):
+                hypotheses.append(faulty)
+    return hypotheses
 
 
 # ---------------------------------------------------------------------------
@@ -348,6 +436,12 @@ class DiagnosisSession:
     probes: list[ProbeResult] = field(default_factory=list)
     submissions: list[int] = field(default_factory=list)
     solved: bool = False
+
+    def __post_init__(self) -> None:
+        if self.max_probes < 1:
+            raise ValueError("max_probes must be >= 1")
+        if self.max_submissions < 1:
+            raise ValueError("max_submissions must be >= 1")
 
     @property
     def num_probes(self) -> int:
@@ -404,6 +498,13 @@ class DiagnosisSession:
 
         if self.submissions_remaining <= 0:
             raise ValueError(f"no submissions remaining (max={self.max_submissions})")
+        if isinstance(gate_id, bool) or not isinstance(gate_id, int):
+            raise ValueError("gate_id must be an integer")
+        if gate_id < self.faulty_circuit.reference.num_inputs or gate_id >= self.faulty_circuit.reference.num_gates:
+            raise ValueError(
+                f"gate_id {gate_id} must identify a non-INPUT gate in "
+                f"[{self.faulty_circuit.reference.num_inputs}, {self.faulty_circuit.reference.num_gates})"
+            )
         self.submissions.append(gate_id)
         correct = self.faulty_circuit.verify_diagnosis(gate_id)
         if correct:
@@ -478,10 +579,12 @@ def score_diagnosis(session: DiagnosisSession) -> float:
 
 
 def brute_force_baseline(faulty: FaultyCircuit, *, max_probes: int = 20) -> tuple[int, int]:
-    """Brute-force diagnosis: try all input vectors on each non-INPUT gate.
+    """Diagnose by eliminating exhaustive fault hypotheses with probes.
 
-    Compares faulty circuit output against reference for each gate. The
-    first gate that shows a discrepancy is the likely fault.
+    The baseline has the same public information as the agent: the circuit
+    topology and values returned by probes. It never reads ``faulty_gate_id``
+    while selecting a diagnosis. Each probe is chosen to split the remaining
+    hypotheses as evenly as possible.
 
     Args:
         faulty: The faulty circuit to diagnose.
@@ -491,25 +594,41 @@ def brute_force_baseline(faulty: FaultyCircuit, *, max_probes: int = 20) -> tupl
         A tuple of (guessed_gate_id, probes_used).
     """
 
-    circuit = faulty.reference
-    num_inputs = circuit.num_inputs
-    # Generate all possible input vectors.
-    from itertools import product as iter_product
+    if max_probes < 1:
+        raise ValueError("max_probes must be >= 1")
+    if not fault_is_output_observable(faulty):
+        raise ValueError("cannot diagnose a fault that is not observable at a circuit output")
 
-    all_vectors = list(iter_product([False, True], repeat=num_inputs))
-    candidate_ids = [g.gate_id for g in circuit.gates if g.gate_type is not GateType.INPUT]
+    circuit = faulty.reference
+    candidates = observable_fault_hypotheses(circuit)
+    queries = [
+        (vector, wire_id)
+        for vector in input_vectors(circuit.num_inputs)
+        for wire_id in range(circuit.num_inputs, circuit.num_gates)
+    ]
     probes_used = 0
-    for gate_id in candidate_ids:
-        is_faulty_candidate = False
-        for vec in all_vectors:
-            if probes_used >= max_probes:
-                break
-            ref_val = circuit.get_wire_value(list(vec), gate_id)
-            faulty_val = faulty.get_faulty_wire_value(list(vec), gate_id)
-            probes_used += 1
-            if ref_val != faulty_val:
-                is_faulty_candidate = True
-                break
-        if is_faulty_candidate:
-            return gate_id, probes_used
-    return candidate_ids[0], probes_used
+
+    while len({candidate.faulty_gate_id for candidate in candidates}) > 1 and probes_used < max_probes:
+        best_query: tuple[list[bool], int] | None = None
+        best_split = 0
+        for vector, wire_id in queries:
+            true_count = sum(candidate.get_faulty_wire_value(vector, wire_id) for candidate in candidates)
+            split = min(true_count, len(candidates) - true_count)
+            if split > best_split:
+                best_split = split
+                best_query = (vector, wire_id)
+        if best_query is None:
+            break
+
+        queries.remove(best_query)
+        vector, wire_id = best_query
+        observed = faulty.get_faulty_wire_value(vector, wire_id)
+        candidates = [
+            candidate for candidate in candidates if candidate.get_faulty_wire_value(vector, wire_id) == observed
+        ]
+        probes_used += 1
+
+    gate_ids = {candidate.faulty_gate_id for candidate in candidates}
+    if len(gate_ids) != 1:
+        return -1, probes_used
+    return next(iter(gate_ids)), probes_used
