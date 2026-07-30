@@ -111,6 +111,14 @@ async def _run_episode(item, client) -> list[AgentTrajectoryTurn]:
                     logger.info("Wordle fallback extracted guess: %s", fallback_word)
 
         if tool_result is None:
+            # DEBUG: dump raw model response to diagnose why tool_call parsing fails
+            raw_msg = response.choices[0].message
+            logger.warning(
+                "Wordle raw response: content=%r, tool_calls=%r, finish_reason=%r",
+                raw_msg.content,
+                [(c.function.name, c.function.arguments) for c in (raw_msg.tool_calls or [])],
+                getattr(response.choices[0], "finish_reason", None),
+            )
             logger.warning("Wordle model returned no executable guess_word call")
             break
 

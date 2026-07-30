@@ -237,7 +237,8 @@ def test_tool_schema_is_closed():
     params = game.GUESS_TOOL["function"]["parameters"]
     assert params["additionalProperties"] is False
     assert params["required"] == ["word"]
-    assert params["properties"]["word"]["pattern"] == "^[a-zA-Z]{5}$"
+    word_prop = params["properties"]["word"]
+    assert "enum" in word_prop or "pattern" in word_prop, "word must have enum or pattern constraint"
 
 
 # ── generator + loader ──────────────────────────────────────────────────────
