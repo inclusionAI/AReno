@@ -255,13 +255,54 @@ User exceptions from the loader itself (e.g. ``ValueError``,
 Platform limitations
 ~~~~~~~~~~~~~~~~~~~~
 
-The timeout mechanism relies on ``SIGALRM``, which is available on Unix
-(Linux, macOS).  On Windows or other platforms without ``SIGALRM``, the
+The timeout mechanism relies on ``SIGALRM`` and ``setitimer``, which are
+available on Unix (Linux, macOS).  Sub-second precision is supported via
+``setitimer``.  On Windows or other platforms without ``SIGALRM``, the
 timeout is not enforced and a warning is logged.  ``--max-loader-records``
 works on all platforms because it only inspects the returned object.
+The ``resource`` module is imported lazily; if it is unavailable (e.g.
+Windows), memory diagnostics report 0.
 
 To disable both limits and use the loader as-is:
 
 .. code-block:: bash
 
    areno train ...   # no --loader-timeout-s or --max-loader-records flags
+
+Invalid parameters
+~~~~~~~~~~~~~~~~~~
+
+Negative values are rejected at config validation time:
+
+.. code-block:: text
+
+   ValueError: loader_timeout_s must be non-negative
+   ValueError: max_loader_records must be non-negative
+
+Deterministic local example
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Create a tiny JSONL file and a minimal loader script to test without any
+external dataset:
+
+.. code-block:: bash
+
+   # 1. Create a 3-row dataset
+   echo '{"prompt":"hello","response":"world"}' > /tmp/tiny.jsonl
+   echo '{"prompt":"foo","response":"bar"}' >> /tmp/tiny.jsonl
+   echo '{"prompt":"test","response":"case"}' >> /tmp/tiny.jsonl
+
+   # 2. Create a minimal loader
+   cat > /tmp/loader.py << 'EOF'
+   import json
+
+   def load_training_dataset(path, **kw):
+       with open(path) as f:
+           return [json.loads(line) for line in f]
+   EOF
+
+   # 3. Run with record cap and timeout
+   areno train --algo sft --ckpt Qwen/Qwen3-0.6B \
+     --dataset-path /tmp/tiny.jsonl \
+     --dataset-loader-fn /tmp/loader.py \
+     --max-loader-records 2 --loader-timeout-s 10 --summary

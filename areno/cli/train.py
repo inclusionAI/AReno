@@ -1024,32 +1024,23 @@ def _load_dataset_for_training(
 
     if dataset_loader_fn is not None:
         loader_fn = _load_dataset_loader_fn(dataset_loader_fn)
-        if loader_timeout_s > 0 or max_loader_records > 0:
-            dataset, diag = run_loader_with_limits(
-                loader_fn,
-                dataset_path,
-                timeout_s=loader_timeout_s,
-                max_records=max_loader_records,
-                default_loader=default_loader,
-                load_dataset=load_dataset,
-                load_from_disk=load_from_disk,
-            )
-            return dataset
-        return loader_fn(
+        dataset, diag = run_loader_with_limits(
+            loader_fn,
             dataset_path,
+            timeout_s=loader_timeout_s,
+            max_records=max_loader_records,
             default_loader=default_loader,
             load_dataset=load_dataset,
             load_from_disk=load_from_disk,
         )
-    if loader_timeout_s > 0 or max_loader_records > 0:
-        dataset, diag = run_loader_with_limits(
-            default_loader,
-            dataset_path,
-            timeout_s=loader_timeout_s,
-            max_records=max_loader_records,
-        )
         return dataset
-    return default_loader(dataset_path)
+    dataset, diag = run_loader_with_limits(
+        default_loader,
+        dataset_path,
+        timeout_s=loader_timeout_s,
+        max_records=max_loader_records,
+    )
+    return dataset
 
 
 def _load_dataset_loader_fn(spec_text: str):
