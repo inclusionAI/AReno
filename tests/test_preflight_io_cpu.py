@@ -56,13 +56,22 @@ class ProbeFailureTest(unittest.TestCase):
                 pass
 
     def test_probe_fails_on_readonly_dir(self):
+        # On some systems (e.g. Colab running as root), chmod 0o444 does not
+        # prevent writes. Use mock to simulate a real permission denial so the
+        # test is reliable across all environments.
         d = tempfile.mkdtemp()
         readonly = Path(d) / "readonly"
         readonly.mkdir()
-        os.chmod(readonly, 0o444)
-        self._dirs_to_restore.append(readonly)
 
-        result = probe_directory_writability(readonly, stage="checkpoint")
+        real_open = open
+
+        def fail_open(file, mode="r", *args, **kwargs):
+            if "xb" in mode and str(readonly) in str(file):
+                raise PermissionError(13, "Permission denied", str(file))
+            return real_open(file, mode, *args, **kwargs)
+
+        with mock.patch("builtins.open", side_effect=fail_open):
+            result = probe_directory_writability(readonly, stage="checkpoint")
         self.assertFalse(result.ok)
         self.assertIn(result.operation, ("create", "write"))
 
@@ -81,10 +90,10 @@ class ProbeFailureTest(unittest.TestCase):
 
     def test_probe_fails_on_disk_full(self):
         with tempfile.TemporaryDirectory() as tmp:
-            original_open = open
+            real_open = open
 
             def fail_write_open(file, mode="r", *args, **kwargs):
-                fh = original_open(file, mode, *args, **kwargs)
+                fh = real_open(file, mode, *args, **kwargs)
                 if "xb" in mode and ".areno_preflight_" in str(file):
                     original_write = fh.write
 
@@ -100,10 +109,10 @@ class ProbeFailureTest(unittest.TestCase):
 
     def test_probe_fails_on_quota_exceeded(self):
         with tempfile.TemporaryDirectory() as tmp:
-            original_open = open
+            real_open = open
 
             def fail_write_open(file, mode="r", *args, **kwargs):
-                fh = original_open(file, mode, *args, **kwargs)
+                fh = real_open(file, mode, *args, **kwargs)
                 if "xb" in mode and ".areno_preflight_" in str(file):
                     def fail_write(data):
                         raise OSError(122, "Disk quota exceeded")
@@ -187,11 +196,10 @@ class ProbeSafetyTest(unittest.TestCase):
             result = probe_directory_writability(tmp, stage="checkpoint")
             # Should succeed (different UUID).
             self.assertTrue(result.ok)
-            # Pre-existing file should still be there (not overwritten by cleanup
-            # because it doesn't match the exact UUID-based name pattern of the
-            # current probe — but cleanup uses glob prefix, so it WILL be cleaned).
-            # This is acceptable: the prefix is documented and user files should
-            # not use the `.areno_preflight_` prefix.
+            # Note: the cleanup glob uses the prefix pattern, so the pre-existing
+            # file with the .areno_preflight_ prefix WILL be removed by cleanup.
+            # This is documented behavior: users should not create files with the
+            # .areno_preflight_ prefix.
 
 
 class ProbeConfigTest(unittest.TestCase):

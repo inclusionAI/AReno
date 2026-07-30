@@ -116,15 +116,15 @@ class MetricsAtomicWriteTest(unittest.TestCase):
             state_file = Path(tmp) / f"dashboard_state.{os.getpid()}.json"
             tmp_file = Path(str(state_file) + ".tmp")
 
-            from areno.cli.atomic_io import atomic_write_text
-            original = atomic_write_text
+            from areno.cli import atomic_io as atomic_io_mod
+            original = atomic_io_mod.atomic_write_text
 
             def fail_atomic_write(path, content, **kwargs):
                 if str(path) == str(state_file):
                     raise OSError("simulated failure")
                 return original(path, content, **kwargs)
 
-            with mock.patch("areno.api.metrics.atomic_write_text", fail_atomic_write):
+            with mock.patch.object(atomic_io_mod, "atomic_write_text", fail_atomic_write):
                 try:
                     recorder.record_dashboard_state(stage="train", step=1)
                 except OSError:

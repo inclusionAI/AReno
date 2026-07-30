@@ -78,7 +78,7 @@ def probe_directory_writability(
         )
 
     probe_name = f"{cfg.probe_prefix}{stage}_{os.getpid()}_{uuid.uuid4().hex[:8]}.tmp"
-    renamed_name = probe_name.replace(".tmp", ".renamed")
+    renamed_name = f"{cfg.probe_prefix}{stage}_{os.getpid()}_{uuid.uuid4().hex[:8]}.renamed"
     probe_file = resolved / probe_name
     renamed_file = resolved / renamed_name
     fh = None  # tracked so finally can close it on interruption
@@ -102,7 +102,7 @@ def probe_directory_writability(
         except FileExistsError:
             # UUID collision is extremely unlikely; try once more with a new UUID.
             probe_name = f"{cfg.probe_prefix}{stage}_{os.getpid()}_{uuid.uuid4().hex[:8]}.tmp"
-            renamed_name = probe_name.replace(".tmp", ".renamed")
+            renamed_name = f"{cfg.probe_prefix}{stage}_{os.getpid()}_{uuid.uuid4().hex[:8]}.renamed"
             probe_file = resolved / probe_name
             renamed_file = resolved / renamed_name
             try:
