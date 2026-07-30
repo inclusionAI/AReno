@@ -29,6 +29,10 @@ from game import (  # noqa: E402
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8768
 
+# ---------------------------------------------------------------------------
+# Backend: layout helpers
+# ---------------------------------------------------------------------------
+
 
 def _node_depth_by_id(nid: int, id_map: dict[int, dict[str, Any]]) -> int:
     node = id_map.get(nid)
@@ -38,6 +42,64 @@ def _node_depth_by_id(nid: int, id_map: dict[int, dict[str, Any]]) -> int:
     if not inputs:
         return 1
     return 1 + max(_node_depth_by_id(inp, id_map) for inp in inputs)
+
+
+def _node_depth(nid: int, id_map: dict[int, dict[str, Any]]) -> int:
+    return _node_depth_by_id(nid, id_map)
+
+
+def _compute_layout(
+    nodes: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Assign (x, y) pixel positions for a layered DAG layout."""
+    id_map = {n["id"]: n for n in nodes}
+
+    # Group by depth
+    layers: dict[int, list[int]] = {}
+    for node in nodes:
+        d = _node_depth(node["id"], id_map)
+        layers.setdefault(d, []).append(node["id"])
+
+    max_depth = max(layers.keys()) if layers else 0
+    node_w, node_h = 78, 52
+    layer_gap_y = 100
+    padding_x = 40
+
+    positions: dict[int, tuple[float, float]] = {}
+    for depth, nids in sorted(layers.items()):
+        y = padding_x + (max_depth - depth) * layer_gap_y
+        count = len(nids)
+        total_w = count * node_w + (count - 1) * 24
+        start_x = max(padding_x, (620 - total_w) / 2)
+        for idx, nid in enumerate(nids):
+            x = start_x + idx * (node_w + 24)
+            positions[nid] = (x, y)
+
+    total_h = padding_x + max_depth * layer_gap_y + node_h + 20
+    svg_w, svg_h = 620, max(total_h, 200)
+
+    result = []
+    for node in nodes:
+        x, y = positions[node["id"]]
+        result.append(
+            {
+                "id": node["id"],
+                "type": node["type"],
+                "x": x,
+                "y": y,
+                "w": node_w,
+                "h": node_h,
+                "inputs": node.get("inputs", []),
+                "input_positions": [positions[inp] for inp in node.get("inputs", []) if inp in positions],
+                "depth": _node_depth(node["id"], id_map),
+            }
+        )
+    return result, svg_w, svg_h
+
+
+# ---------------------------------------------------------------------------
+# Server
+# ---------------------------------------------------------------------------
 
 
 class DiagnosisServer(ThreadingHTTPServer):
@@ -54,11 +116,12 @@ class DiagnosisServer(ThreadingHTTPServer):
         self.correct: bool | None = None
         self.max_probes: int = MAX_PROBES
         self.n_inputs: int = 0
+        self.n_gates: int = 0
         self.events: list[str] = []
         self._new_game()
 
     def _new_game(self) -> None:
-        for attempt in range(200):
+        for _attempt in range(200):
             n_in = self.rng.randint(3, 5)
             n_g = self.rng.randint(4, 10)
             c_seed = self.rng.randint(0, 2**31 - 1)
@@ -78,7 +141,7 @@ class DiagnosisServer(ThreadingHTTPServer):
         self.max_probes = min(MAX_PROBES, max(1, self.n_gates))
         self.events = [
             f"New circuit: {self.n_inputs} inputs, {self.n_gates} gates. Find the faulty gate!",
-            f"You have {self.max_probes} probes. Click a gate node to probe it.",
+            f"You have {self.max_probes} probes. Click a gate to probe, then diagnose.",
         ]
 
 
@@ -155,10 +218,7 @@ class DiagnosisHandler(BaseHTTPRequestHandler):
         values = evaluate(server.nodes, bits, server.fault)
         output_id = next(n["id"] for n in server.nodes if n["type"] == "output")
         output_val = values[output_id]
-        server.events.insert(
-            0,
-            f"Set inputs to {_bits_str(bits)} → output = {int(output_val)}",
-        )
+        server.events.insert(0, f"Input {_bits_str(bits)} → output = {int(output_val)}")
         server.events = server.events[:12]
         self._send_json(_make_payload(server))
 
@@ -184,11 +244,10 @@ class DiagnosisHandler(BaseHTTPRequestHandler):
         server.probes_used += 1
         values = evaluate(server.nodes, server.input_vector, server.fault)
         probed_val = values[node_id]
-        remaining = server.max_probes - server.probes_used
         server.events.insert(
             0,
-            f"Probed {node['type'].upper()}{node_id} → value = {int(probed_val)} "
-            f"({server.probes_used}/{server.max_probes} probes used)",
+            f"Probed {_node_label_text(server.nodes, node_id)} → value = {int(probed_val)} "
+            f"({server.probes_used}/{server.max_probes} probes)",
         )
         server.events = server.events[:12]
         self._send_json(_make_payload(server, probed_value=probed_val, probed_node=node_id))
@@ -205,17 +264,14 @@ class DiagnosisHandler(BaseHTTPRequestHandler):
         server.correct = verify_diagnosis(server.nodes, server.fault, node_id, fault_type)
         if server.correct:
             server.events.insert(
-                0,
-                f"✓ Correct! Fault was at {_node_label(server.nodes, node_id)} ({fault_type}). "
-                f"Used {server.probes_used} probe(s).",
+                0, f"✓ Correct! Fault was {_node_label_text(server.nodes, node_id)} ({fault_type})."
             )
         else:
             actual = server.fault
             actual_type = "stuck_at_0" if actual["stuck_value"] == 0 else "stuck_at_1"
             server.events.insert(
                 0,
-                f"✗ Wrong. Fault was at {_node_label(server.nodes, actual['node'])} ({actual_type}), "
-                f"not {_node_label(server.nodes, node_id)} ({fault_type}).",
+                f"✗ Wrong. Actual fault: {_node_label_text(server.nodes, actual['node'])} ({actual_type}).",
             )
         server.events = server.events[:12]
         self._send_json(_make_payload(server))
@@ -235,7 +291,7 @@ def _bits_str(bits: list[bool]) -> str:
     return "".join("1" if b else "0" for b in bits)
 
 
-def _node_label(nodes: list[dict[str, Any]], nid: int) -> str:
+def _node_label_text(nodes: list[dict[str, Any]], nid: int) -> str:
     for n in nodes:
         if n["id"] == nid:
             t = n["type"]
@@ -247,39 +303,44 @@ def _node_label(nodes: list[dict[str, Any]], nid: int) -> str:
     return f"?{nid}"
 
 
-def _node_depth(nid: int, id_map: dict[int, dict[str, Any]]) -> int:
-    return _node_depth_by_id(nid, id_map)
-
-
 def _make_payload(
-    server: DiagnosisServer, *, probed_value: bool | None = None, probed_node: int | None = None
+    server: DiagnosisServer,
+    *,
+    probed_value: bool | None = None,
+    probed_node: int | None = None,
 ) -> dict[str, Any]:
-    id_map = {n["id"]: n for n in server.nodes}
+    layout, svg_w, svg_h = _compute_layout(server.nodes)
 
-    # Build layered node list for frontend rendering
+    # Build nodes with layout positions and probe state
+    probed_values: dict[int, bool] = {}
+    if server.input_vector is not None and server.probes_used > 0:
+        values = evaluate(server.nodes, server.input_vector, server.fault)
+        for n in server.nodes:
+            if n["type"] in ("and", "or", "not"):
+                probed_values[n["id"]] = values[n["id"]]
+
     nodes_payload = []
-    for node in server.nodes:
+    for node, pos in zip(server.nodes, layout):
         nid = node["id"]
-        depth = _node_depth(nid, id_map)
-        nodes_payload.append(
-            {
-                "id": nid,
-                "type": node["type"],
-                "label": _node_label(server.nodes, nid),
-                "inputs": node.get("inputs", []),
-                "depth": depth,
-            }
-        )
+        entry = {
+            "id": nid,
+            "type": node["type"],
+            "label": _node_label_text(server.nodes, nid),
+            "inputs": node.get("inputs", []),
+            "depth": pos["depth"],
+            "x": pos["x"],
+            "y": pos["y"],
+            "w": pos["w"],
+            "h": pos["h"],
+            "input_positions": pos["input_positions"],
+        }
+        nodes_payload.append(entry)
 
     # Fault info (only revealed after submission)
     fault_revealed = None
     if server.diagnosis_submitted:
-        fault_revealed = {
-            "node": server.fault["node"],
-            "stuck_value": server.fault["stuck_value"],
-        }
+        fault_revealed = {"node": server.fault["node"], "stuck_value": server.fault["stuck_value"]}
 
-    # Compute current output value if inputs are set
     output_value = None
     if server.input_vector is not None:
         values = evaluate(server.nodes, server.input_vector, server.fault)
@@ -288,6 +349,8 @@ def _make_payload(
 
     return {
         "nodes": nodes_payload,
+        "svg_w": svg_w,
+        "svg_h": svg_h,
         "n_inputs": server.n_inputs,
         "n_gates": server.n_gates,
         "input_vector": server.input_vector,
@@ -303,6 +366,10 @@ def _make_payload(
     }
 
 
+# ---------------------------------------------------------------------------
+# Frontend
+# ---------------------------------------------------------------------------
+
 INDEX_HTML = r"""<!doctype html>
 <html lang="en">
 <head>
@@ -310,69 +377,82 @@ INDEX_HTML = r"""<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Logic Circuit Diagnosis</title>
 <style>
-:root{font-family:Inter,ui-rounded,system-ui,sans-serif;color:#1a1a2e;background:#e8e8f0}
-body{margin:0;min-height:100vh;background:linear-gradient(135deg,#d4d4e4,#a8b8d8 40%,#88a8c8);display:grid;place-items:center}
-.app{width:min(980px,96vw);display:grid;grid-template-columns:minmax(400px,550px) 1fr;gap:22px;align-items:start}
-.panel{background:#f8f8fc;border:4px solid #1a1a2e;border-radius:22px;box-shadow:7px 7px 0 #1a1a2e;padding:16px}
-h1{font-size:34px;line-height:1;margin:0 0 6px;color:#c44;text-shadow:2px 2px 0 #ffd977}
-.subtitle{font-weight:900;color:#444;margin-bottom:12px}
-.circuit{position:relative;background:#eef;border:3px solid #1a1a2e;border-radius:16px;padding:14px;min-height:240px;display:flex;flex-direction:column;align-items:center;gap:8px}
-.layer{display:flex;gap:10px;flex-wrap:wrap;justify-content:center}
-.node{position:relative;border:3px solid #1a1a2e;border-radius:14px;padding:8px 14px;font-weight:1000;font-size:13px;text-align:center;cursor:default;box-shadow:3px 3px 0 #1a1a2e;transition:.12s transform;min-width:64px}
-.node.input{background:#b8e6b8}.node.and{background:#ffd166}.node.or{background:#ffb347}.node.not{background:#e8a0d0}.node.output{background:#87ceeb}
-.node.gate:not(.output):not(.input){cursor:pointer}.node.gate:not(.output):not(.input):hover{transform:translateY(-2px)}
-.node.probed{animation:flash .5s ease}@keyframes flash{0%{background:#fff}100%{}}
-.node.faulty{border-color:#c44;border-width:4px;box-shadow:3px 3px 0 #c44}
-.input-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:10px 0}
-.input-switch{display:flex;flex-direction:column;align-items:center;gap:3px}
-.input-switch button{width:44px;height:44px;border:3px solid #1a1a2e;border-radius:12px;font-size:20px;font-weight:900;cursor:pointer;box-shadow:3px 3px 0 #1a1a2e;transition:.1s}
-.input-switch button.on{background:#9be564;color:#1a1a2e}.input-switch button.off{background:#e8e8e8;color:#999}
-.input-switch span{font-size:11px;font-weight:800;color:#555}
-.actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:10px}
-button{border:3px solid #1a1a2e;border-radius:14px;background:#ffd166;box-shadow:4px 4px 0 #1a1a2e;color:#1a1a2e;font-weight:1000;padding:10px 14px;cursor:pointer;font-size:14px}
-button:hover{transform:translateY(-1px)}button:disabled{filter:grayscale(.7);opacity:.5;cursor:not-allowed}
-button.danger{background:#f08888}
-.pill{display:inline-block;background:#fff;border:3px solid #1a1a2e;border-radius:999px;padding:6px 12px;font-weight:1000;font-size:13px}
-.status{margin-top:10px;display:flex;gap:8px;flex-wrap:wrap}
-.fault-choices{display:flex;gap:8px;margin-top:8px}.fault-choices button{font-size:12px;padding:8px 12px}
-.rules{font-weight:800;line-height:1.5}.rules li{margin:4px 0}
-.events{display:grid;gap:6px;margin-top:10px;max-height:340px;overflow-y:auto}.event{background:#fff;border:3px solid #1a1a2e;border-radius:12px;padding:8px 10px;font-weight:800;font-size:13px}
-.selected-diagnosis{background:#ffe0e0;border:3px dashed #c44;border-radius:12px;padding:10px;margin-top:8px;display:none;font-weight:800;font-size:14px;align-items:center;gap:8px}
-.selected-diagnosis.on{display:flex}
-@media(max-width:800px){.app{grid-template-columns:1fr}}
+:root{font-family:Inter,ui-rounded,system-ui,sans-serif;color:#1a1a2e;background:#e3d5c8}
+body{margin:0;min-height:100vh;background:linear-gradient(135deg,#e3d5c8,#d4c4b0 40%,#c9d5c0);display:grid;place-items:center}
+.app{width:min(1020px,98vw);display:grid;grid-template-columns:minmax(420px,580px) 1fr;gap:20px;align-items:start}
+.panel{background:#fffaf3;border:4px solid #2d2d2d;border-radius:22px;box-shadow:7px 7px 0 #2d2d2d;padding:16px}
+h1{font-size:32px;line-height:1;margin:0 0 4px;color:#c1542c;text-shadow:2px 2px 0 #f0d060}
+.subtitle{font-weight:800;color:#555;margin-bottom:10px;font-size:14px}
+/* Circuit SVG area */
+.circuit-wrap{position:relative;background:#ece6dc;border:3px solid #2d2d2d;border-radius:16px;overflow:hidden;margin-bottom:10px}
+.circuit-wrap svg{display:block}
+.node-rect{stroke:#2d2d2d;stroke-width:3;rx:12}
+.node-rect.input{fill:#9bd5a0}.node-rect.output{fill:#7db8d8}
+.node-rect.and{fill:#ffd166}.node-rect.or{fill:#ffb347}.node-rect.not{fill:#e8a0d0}
+.node-rect.gate{cursor:pointer;transition:transform .1s}.node-rect.gate:hover{filter:brightness(1.08)}
+.node-rect.faulty{stroke:#c44;stroke-width:4}
+.node-rect.probed{filter:drop-shadow(0 0 6px rgba(0,120,255,.5))}
+.node-text{font-family:Inter,ui-rounded,system-ui,sans-serif;font-size:12px;font-weight:900;fill:#1a1a2e;text-anchor:middle;dominant-baseline:central;pointer-events:none}
+.node-val{font-family:Inter,ui-rounded,system-ui,sans-serif;font-size:11px;font-weight:800;text-anchor:middle;dominant-baseline:central;pointer-events:none}
+.conn-line{stroke:#7a7a8a;stroke-width:2.5;fill:none;stroke-linecap:round}
+.conn-line.input-line{stroke:#9bd5a0;stroke-width:3}
+/* Controls */
+.input-row{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:8px}
+.input-row .label{font-weight:800;font-size:13px;color:#555;margin-right:4px}
+.input-switch{display:flex;flex-direction:column;align-items:center;gap:2px}
+.input-switch button{width:40px;height:38px;border:3px solid #2d2d2d;border-radius:10px;font-size:18px;font-weight:900;cursor:pointer;box-shadow:3px 3px 0 #2d2d2d;transition:.1s;line-height:1}
+.input-switch button.on{background:#9be564;color:#1a1a2e}
+.input-switch button.off{background:#eee;color:#aaa}
+.input-switch span{font-size:10px;font-weight:800;color:#777}
+.btn-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+button{border:3px solid #2d2d2d;border-radius:14px;background:#ffd166;box-shadow:4px 4px 0 #2d2d2d;color:#1a1a2e;font-weight:900;padding:9px 14px;cursor:pointer;font-size:13px;transition:.1s}
+button:hover:not(:disabled){transform:translateY(-1px)}
+button:disabled{filter:grayscale(.6);opacity:.5;cursor:not-allowed}
+button.primary{background:#7bc87b;color:#fff}
+button.danger{background:#e07070;color:#fff}
+.pill{display:inline-block;background:#fff;border:3px solid #2d2d2d;border-radius:999px;padding:5px 11px;font-weight:900;font-size:12px}
+.diag-bar{display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap}
+.diag-bar.hidden{display:none}
+.diag-bar .pick{font-weight:800;font-size:13px}
+/* Right panel */
+.rules{font-weight:700;line-height:1.5;font-size:13px}.rules li{margin:4px 0}
+.events{display:grid;gap:5px;margin-top:8px;max-height:360px;overflow-y:auto}
+.event{background:#fff;border:2.5px solid #2d2d2d;border-radius:11px;padding:7px 9px;font-weight:700;font-size:12px}
+@media(max-width:820px){.app{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
 <main class="app">
   <section class="panel">
     <h1>Logic Diagnosis</h1>
-    <div class="subtitle" id="subtitle">Find the faulty gate in this circuit.</div>
-    <div id="circuit" class="circuit"></div>
-    <div class="input-row" id="inputRow"></div>
-    <button id="setInputBtn">Set Input Vector</button>
-    <div class="status">
-      <span class="pill" id="probeCounter"></span>
+    <div class="subtitle" id="subtitle"></div>
+    <div class="circuit-wrap" id="circuitWrap"></div>
+    <div class="input-row">
+      <span class="label">Inputs:</span>
+      <span id="inputSwitches"></span>
+    </div>
+    <div class="btn-row">
+      <button class="primary" id="setInputBtn">Set Input Vector</button>
       <span class="pill" id="outputPill" style="display:none"></span>
+      <span class="pill" id="probePill">Probes: 0/0</span>
     </div>
-    <div id="selectedDiagnosis" class="selected-diagnosis">
-      <span id="diagTarget"></span>
-      <div class="fault-choices" id="faultChoices"></div>
-      <button class="danger" id="cancelDiag">✕</button>
+    <div class="diag-bar hidden" id="diagBar">
+      <span class="pick" id="diagTarget"></span>
+      <button class="danger" onclick="doSubmit('stuck_at_0')">Stuck-at-0</button>
+      <button class="danger" onclick="doSubmit('stuck_at_1')">Stuck-at-1</button>
+      <button onclick="cancelDiag()">✕ Cancel</button>
     </div>
-    <div class="actions">
-      <button id="submitBtn" disabled>Submit Diagnosis</button>
+    <div class="btn-row" style="margin-top:6px">
       <button id="newBtn">New Circuit</button>
     </div>
   </section>
   <aside class="panel">
-    <h1 style="font-size:24px;color:#227">How to Play</h1>
+    <h1 style="font-size:22px;color:#5a8a6a">How to Play</h1>
     <ul class="rules">
-      <li>Toggle inputs above and click <b>Set Input Vector</b> to see the circuit output.</li>
-      <li>Click any <b style="background:#ffd166;padding:1px 6px;border-radius:4px">AND</b>,
-        <b style="background:#ffb347;padding:1px 6px;border-radius:4px">OR</b>, or
-        <b style="background:#e8a0d0;padding:1px 6px;border-radius:4px">NOT</b> gate to probe its value (costs 1 probe).</li>
-      <li>When confident, click a gate to select it, choose the fault type, and <b>Submit Diagnosis</b>.</li>
-      <li>Fewer probes = better diagnosis! Try to deduce the fault by reasoning about expected vs actual outputs.</li>
+      <li>Toggle each input to <b>0</b> or <b>1</b>, then click <b>Set Input Vector</b>.</li>
+      <li>Click a <b style="background:#ffd166;padding:1px 5px;border-radius:3px">gate</b> in the diagram to probe its value (costs 1 probe).</li>
+      <li>Probed values appear on the gate. When confident, click a gate to select it, then choose <b>Stuck-at-0</b> or <b>Stuck-at-1</b>.</li>
+      <li>Goal: find the faulty gate using as few probes as possible!</li>
     </ul>
     <div id="events" class="events"></div>
   </aside>
@@ -382,141 +462,153 @@ let state = null, selectedGate = null;
 
 async function api(path, body){
   const opts = body ? {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)} : {};
-  const res = await fetch(new URL(path, window.location.href).toString(), opts);
+  const res = await fetch(new URL(path,window.location.href).toString(),opts);
   return await res.json();
 }
-async function refresh(){
-  state = await api("api/state");
-  render();
-}
+
+async function refresh(){ state = await api("api/state"); render(); }
+
 function render(){
   if(!state) return;
 
-  // Circuit
-  const circuit = document.getElementById("circuit");
-  const maxDepth = Math.max(...state.nodes.map(n => n.depth), 0);
-  let html = "";
-  for(let d = maxDepth; d >= 0; d--){
-    const layer = state.nodes.filter(n => n.depth === d);
-    html += '<div class="layer">';
-    for(const n of layer){
-      let cls = `node ${n.type}`;
-      if(n.type !== "input" && n.type !== "output") cls += " gate";
-      if(state.probed_node === n.id) cls += " probed";
-      if(state.fault_revealed && state.fault_revealed.node === n.id) cls += " faulty";
-      const onclick = (n.type === "and" || n.type === "or" || n.type === "not")
-        ? `onclick="onGateClick(${n.id})"` : "";
-      const faultBadge = (state.fault_revealed && state.fault_revealed.node === n.id)
-        ? ` ✦FAULT` : "";
-      html += `<div class="${cls}" ${onclick}>${n.label}${faultBadge}</div>`;
+  // Build SVG
+  const wrap = document.getElementById("circuitWrap");
+  let svg = `<svg width="${state.svg_w}" height="${state.svg_h}" viewBox="0 0 ${state.svg_w} ${state.svg_h}">`;
+  // Connection lines
+  for(const n of state.nodes){
+    for(const inp of n.input_positions){
+      const x1 = inp[0] + 39, y1 = inp[1] + 52;
+      const x2 = n.x + 39, y2 = n.y;
+      svg += `<line class="conn-line" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}"/>`;
     }
-    html += '</div>';
   }
-  circuit.innerHTML = html;
+  // Nodes
+  for(const n of state.nodes){
+    let cls = `node-rect ${n.type}`;
+    if(n.type !== "input" && n.type !== "output") cls += " gate";
+    if(state.fault_revealed && state.fault_revealed.node === n.id) cls += " faulty";
+    if(state.probed_node === n.id || (state.input_vector && state.probes_used > 0)) cls += " probed";
+    const onClick = (n.type==="and"||n.type==="or"||n.type==="not")
+      ? `onclick="onGateClick(${n.id})"` : "";
+    svg += `<rect class="${cls}" x="${n.x}" y="${n.y}" width="${n.w}" height="${n.h}" ${onClick}/>`;
+    svg += `<text class="node-text" x="${n.x+39}" y="${n.y+20}">${n.label}</text>`;
+    // Show probed/input value
+    let valText = "";
+    if(n.type === "input" && state.input_vector){
+      valText = state.input_vector[n.id] ? "1" : "0";
+    }
+    if(state.probes_used > 0 && state.input_vector && n.type !== "input" && n.type !== "output"){
+      // Show probe result if this node was probed
+      if(state.probed_node === n.id && state.probed_value !== undefined && state.probed_value !== null){
+        valText = state.probed_value ? "1" : "0";
+      }
+    }
+    if(valText){
+      const color = valText === "1" ? "#2a7a2a" : "#a03030";
+      svg += `<text class="node-val" fill="${color}" x="${n.x+39}" y="${n.y+40}">${valText}</text>`;
+    }
+  }
+  svg += '</svg>';
+  wrap.innerHTML = svg;
 
   // Input toggles
-  const inputRow = document.getElementById("inputRow");
-  inputRow.innerHTML = "";
-  for(let i = 0; i < state.n_inputs; i++){
+  let sw = "";
+  for(let i=0;i<state.n_inputs;i++){
     const val = state.input_vector ? state.input_vector[i] : false;
-    const cls = val ? "on" : "off";
-    inputRow.innerHTML += `<div class="input-switch">
-      <button class="${cls}" onclick="toggleInput(${i})">${val ? "1" : "0"}</button>
-      <span>IN${i}</span></div>`;
+    sw += `<div class="input-switch"><button class="${val?'on':'off'}" onclick="toggleInput(${i})">${val?'1':'0'}</button><span>IN${i}</span></div>`;
   }
+  document.getElementById("inputSwitches").innerHTML = sw;
 
-  // Probes
-  document.getElementById("probeCounter").textContent = `Probes: ${state.probes_used}/${state.max_probes}`;
-
-  // Output
+  // Status pills
+  document.getElementById("probePill").textContent = `Probes: ${state.probes_used}/${state.max_probes}`;
   const op = document.getElementById("outputPill");
-  if(state.output_value !== undefined && state.output_value !== null && !state.diagnosis_submitted){
+  if(state.output_value !== undefined && state.output_value !== null){
     op.style.display = "inline-block";
-    op.textContent = `Output: ${state.output_value ? 1 : 0}`;
+    op.textContent = `Output: ${state.output_value?1:0}`;
     op.style.background = state.output_value ? "#9be564" : "#f08888";
   } else {
     op.style.display = "none";
   }
 
-  // Submit button
-  document.getElementById("submitBtn").disabled = !selectedGate || state.diagnosis_submitted;
+  // Diagnosis bar
+  if(selectedGate !== null && !state.diagnosis_submitted){
+    document.getElementById("diagBar").classList.remove("hidden");
+    const label = state.nodes.find(n=>n.id===selectedGate)?.label || `?${selectedGate}`;
+    document.getElementById("diagTarget").textContent = `Fault at ${label}?`;
+  } else {
+    document.getElementById("diagBar").classList.add("hidden");
+  }
+
+  // Disable set-input if game over
   document.getElementById("setInputBtn").disabled = state.diagnosis_submitted;
 
-  // Diagnosis UI
-  renderDiagnosis();
-
   // Events
-  const eventsEl = document.getElementById("events");
-  eventsEl.innerHTML = (state.events || []).map(e => `<div class="event">${esc(e)}</div>`).join("");
+  document.getElementById("events").innerHTML = (state.events||[]).map(e=>`<div class="event">${esc(e)}</div>`).join("");
 
   // Subtitle
+  const sub = document.getElementById("subtitle");
   if(state.diagnosis_submitted){
-    document.getElementById("subtitle").innerHTML = state.correct
-      ? '<span style="color:#2a2">✓ Correct Diagnosis!</span>'
-      : '<span style="color:#c44">✗ Wrong Diagnosis</span>';
+    sub.innerHTML = state.correct
+      ? '<span style="color:#3a3">✓ Correct!</span>'
+      : '<span style="color:#c44">✗ Wrong</span>';
+  } else if(state.output_value !== null && state.output_value !== undefined){
+    sub.textContent = `Find the faulty gate (${state.n_inputs} inputs, ${state.n_gates} gates, ${state.max_probes} probes max)`;
   } else {
-    document.getElementById("subtitle").textContent = `Find the faulty gate: ${state.n_inputs} inputs, ${state.n_gates} gates`;
+    sub.textContent = `Find the faulty gate — toggle inputs and click Set Input Vector to begin.`;
   }
 }
-function renderDiagnosis(){
-  const diagEl = document.getElementById("selectedDiagnosis");
-  const targetEl = document.getElementById("diagTarget");
-  const choicesEl = document.getElementById("faultChoices");
-  if(selectedGate && !state.diagnosis_submitted){
-    diagEl.classList.add("on");
-    const label = state.nodes.find(n => n.id === selectedGate)?.label || `?${selectedGate}`;
-    targetEl.textContent = `Fault at ${label}:`;
-    choicesEl.innerHTML = `
-      <button onclick="submitDiagnosis(${selectedGate},'stuck_at_0')">Stuck-at-0</button>
-      <button onclick="submitDiagnosis(${selectedGate},'stuck_at_1')">Stuck-at-1</button>`;
-  } else {
-    diagEl.classList.remove("on");
-    targetEl.textContent = "";
-    choicesEl.innerHTML = "";
-  }
-}
-async function onGateClick(nodeId){
+
+let probeResults = {};
+function onGateClick(nodeId){
   if(state.diagnosis_submitted) return;
-  // Probe the gate (costs 1 probe if still available)
-  if(state.input_vector === null){
-    // Auto-set all-0 input if none set
-    state = await api("api/set-input", {inputs: new Array(state.n_inputs).fill(false)});
+  if(!state.input_vector){
+    alert("Set input vector first — toggle the input switches, then click 'Set Input Vector'.");
+    return;
+  }
+  // If already selected, deselect; otherwise select for diagnosis
+  if(selectedGate === nodeId){
+    selectedGate = null;
     render();
+    return;
   }
+  // Probe if we haven't probed this one yet and have probes left
   if(state.probes_used < state.max_probes){
-    state = await api("api/probe", {node_id: nodeId});
+    api("api/probe",{node_id:nodeId}).then(r=>{state=r;render();});
   }
-  // Select this gate for diagnosis
   selectedGate = nodeId;
   render();
 }
+
 function toggleInput(idx){
   if(state.diagnosis_submitted) return;
   if(!state.input_vector) state.input_vector = new Array(state.n_inputs).fill(false);
   state.input_vector[idx] = !state.input_vector[idx];
   render();
 }
-function setAllInputs(val){
-  state.input_vector = new Array(state.n_inputs).fill(val);
-}
-document.getElementById("setInputBtn").onclick = async () => {
+
+document.getElementById("setInputBtn").onclick = async ()=>{
   const bits = state.input_vector || new Array(state.n_inputs).fill(false);
-  state = await api("api/set-input", {inputs: bits});
+  state = await api("api/set-input",{inputs:bits});
   selectedGate = null;
   render();
 };
-document.getElementById("submitBtn").onclick = () => {}; // submit via fault choices
-document.getElementById("cancelDiag").onclick = () => {selectedGate = null; render();};
-document.getElementById("newBtn").onclick = async () => {
+
+function cancelDiag(){ selectedGate = null; render(); }
+
+async function doSubmit(faultType){
+  if(!selectedGate) return;
+  state = await api("api/submit",{node_id:selectedGate,fault_type:faultType});
+  selectedGate = null;
+  render();
+}
+
+document.getElementById("newBtn").onclick = async ()=>{
   state = await api("api/new");
   selectedGate = null;
+  probeResults = {};
   render();
 };
-async function submitDiagnosis(nodeId, faultType){
-  state = await api("api/submit", {node_id: nodeId, fault_type: faultType});
-  selectedGate = null;
-  render();
-}
+
 function esc(s){return s.replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#039;"}[c]));}
 
 refresh();
