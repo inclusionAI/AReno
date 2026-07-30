@@ -310,17 +310,28 @@ def _require_positive_float(value: float, option_name: str) -> None:
 
 
 def _parse_cuda_devices(value: str | None, option_name: str) -> list[int] | None:
-    """Parse a comma-separated list of visible CUDA device indices."""
+    """Parse CUDA indices and inclusive ranges such as ``0..3,8``."""
 
     if value is None:
         return None
     parts = [part.strip() for part in value.split(",")]
     if not parts or any(not part for part in parts):
-        raise click.UsageError(f"{option_name} must be a comma-separated list of CUDA device indices")
+        raise click.UsageError(f"{option_name} must be a comma-separated list of CUDA indices or ranges")
+    devices = []
     try:
-        devices = [int(part) for part in parts]
+        for part in parts:
+            if ".." not in part:
+                devices.append(int(part))
+                continue
+            endpoints = part.split("..")
+            if len(endpoints) != 2 or not all(endpoints):
+                raise ValueError
+            start, end = (int(endpoint) for endpoint in endpoints)
+            if start > end:
+                raise click.UsageError(f"{option_name} range start must not exceed range end: {part}")
+            devices.extend(range(start, end + 1))
     except ValueError as exc:
-        raise click.UsageError(f"{option_name} must contain only integer CUDA device indices") from exc
+        raise click.UsageError(f"{option_name} must contain only integer CUDA indices or ranges") from exc
     if any(device < 0 for device in devices):
         raise click.UsageError(f"{option_name} must not contain negative CUDA device indices")
     if len(devices) != len(set(devices)):
@@ -1314,7 +1325,7 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     "--train-devices",
     type=str,
     default=None,
-    help="Comma-separated CUDA device indices for training; count must equal --world-size.",
+    help="CUDA devices for training, with inclusive ranges such as 0..7,10; count must equal --world-size.",
 )
 @click.option(
     "--rollout-tp-size",
@@ -1326,7 +1337,7 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     "--rollout-devices",
     type=str,
     default=None,
-    help="Comma-separated CUDA device indices for the independent rollout engine.",
+    help="CUDA devices for the independent rollout engine, with inclusive ranges such as 0..7,10.",
 )
 @click.option(
     "--policy-sync-bucket-mb",

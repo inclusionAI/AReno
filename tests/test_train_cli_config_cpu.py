@@ -431,6 +431,9 @@ def test_independent_rollout_topology_parses_distinct_cuda_devices() -> None:
     [
         ({"train_devices": "0,,1", "world_size": 2}, "--train-devices must be a comma-separated"),
         ({"train_devices": "0,a", "world_size": 2}, "--train-devices must contain only integer"),
+        ({"train_devices": "0..", "world_size": 2}, "--train-devices must contain only integer"),
+        ({"train_devices": "3..1", "world_size": 2}, "--train-devices range start must not exceed"),
+        ({"train_devices": "0..2,2", "world_size": 4}, "--train-devices must not contain duplicate"),
         ({"train_devices": "0,-1", "world_size": 2}, "--train-devices must not contain negative"),
         ({"train_devices": "0,0", "world_size": 2}, "--train-devices must not contain duplicate"),
         ({"train_devices": "0", "world_size": 2}, "--train-devices count must equal --world-size"),
@@ -461,6 +464,14 @@ def test_train_and_rollout_devices_may_overlap() -> None:
 
     assert cfg.train_devices == [0, 1]
     assert cfg.rollout_devices == [0, 1]
+
+
+def test_cuda_device_ranges_are_inclusive_and_composable() -> None:
+    assert train_cli._parse_cuda_devices("0..8,11..13,20", "--train-devices") == [
+        *range(0, 9),
+        *range(11, 14),
+        20,
+    ]
 
 
 def test_offline_algorithm_rejects_independent_rollout_devices() -> None:

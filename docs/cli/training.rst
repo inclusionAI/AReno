@@ -88,8 +88,9 @@ Built-in algorithms: ``sft``, ``dpo``, ``gspo``, ``grpo``, ``ppo``.
 ``world-size`` must be divisible by ``tp-size``.
 
 ``--train-devices TEXT``
-   Comma-separated logical CUDA device indices used by training. The count
-   must equal ``world-size``. When omitted, AReno uses ``0`` through
+   Comma-separated logical CUDA device indices or inclusive ranges used by
+   training. For example, ``0..8,11..29`` includes both endpoints. The expanded
+   count must equal ``world-size``. When omitted, AReno uses ``0`` through
    ``world-size - 1``.
 
 Rollout
@@ -100,10 +101,10 @@ limits, sampling, decode runtime, the agentic-rollout hooks, and the reward
 signal.
 
 ``--rollout-devices TEXT``
-   Comma-separated logical CUDA device indices for an independent rollout
-   engine. They may overlap ``--train-devices`` when the GPU has enough memory
-   for both worker processes. This option is valid only for online algorithms
-   that generate rollouts.
+   Comma-separated logical CUDA device indices or inclusive ranges for an
+   independent rollout engine. They may overlap ``--train-devices`` when the
+   GPU has enough memory for both worker processes. This option is valid only
+   for online algorithms that generate rollouts.
 
 ``--rollout-tp-size INTEGER``
    Tensor parallel size of the independent rollout engine. It defaults to the
