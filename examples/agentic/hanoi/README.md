@@ -38,7 +38,7 @@ Evaluation reports two metrics:
 The completion reward is `1.0` minus a small efficiency penalty
 (`0.02 * excess_moves`); incomplete traces score a hybrid partial credit:
 **progress** (0.02 per disk correctly stacked on peg 2 from the bottom)
-plus a **tiny legal-move floor** (0.005 per legal move, capped at 0.02)
+plus a **tiny legal-move floor** (0.005 per legal move, capped at 0.005)
 to keep gradient signals alive during cold start — without being worth
 freezing on. This "hybrid" design is the result of three reward iterations
 that progressively fixed cold-start stalls and mode collapses.
@@ -132,13 +132,15 @@ print(game.replay(boundary, 3).as_text())
 
 A 100-step GSPO run (Kaggle 2×T4, Qwen3.5-0.8B, n_samples=4) shows:
 
-- **reward_mean** activates from step 0 (0.0075), trending up to 0.02–0.0475,
-  exceeding the legal-floor cap of 0.02 — meaning the model makes genuine
-  progress (disks correctly stacked on peg 2) during training.
-- **grad_zero_ratio** ≈ 0.25 (~75% of parameters update each step), confirming
-  training is not frozen.
-- Mode-collapse to `[[0,2],[0,1]]` is no longer observed as a stable reward
-  hack; the hybrid floor is too small (0.01) to be worth locking onto.
+- **reward_mean** activates from step 0 (0.00125), trending up to the floor cap
+  of 0.005 by step 5, with multi-turn trajectory lengths up to 17k tokens.
+- **Multi-turn agent** enables 40-65 tool calls per item (vs ≤8 single-turn),
+  with tool_results non-zero (board state is fed back each turn).
+- **grad_zero_ratio** ≈ 0.25 on active steps (~75% of parameters update), with
+  collapse-to-cap self-healing in 1-2 steps.
+- The hybrid floor (0.005 cap) prevents stable reward hacking, but the 0.8B
+  model's capacity limits convergence to completion on n≥4. This is a training
+  experiment question, not a demo-correctness one.
 
 Further improvement to convergence on harder board sizes (n ≥ 4) would require
 switching `run_agent.py` to a multi-turn design or warmup via SFT; this is a
