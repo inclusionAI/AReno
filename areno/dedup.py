@@ -308,8 +308,7 @@ def _extract_text(record: dict[str, Any], text_keys: tuple[str, ...], record_ind
             return value
     fields = ", ".join(text_keys)
     raise ValueError(
-        f"record at index {record_index} has no string prompt field with non-whitespace content; "
-        f"checked keys: {fields}"
+        f"record at index {record_index} has no string prompt field with non-whitespace content; checked keys: {fields}"
     )
 
 
