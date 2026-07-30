@@ -72,20 +72,27 @@ async def _run_episode(item, client) -> list[AgentTrajectoryTurn]:
     }
 
     for turn_index in range(1, max_turns + 1):
-        turn_prompt = {
-            "role": "user",
-            "content": (
-                f"Turn {turn_index}. You must call exactly one tool: "
-                "set_input_vector (free), inspect_node (1 probe), or submit_diagnosis."
-            ),
-        }
+        # codebreaker pattern: one tool per turn, forced tool_choice.
+        # The model's decisions are in the arguments, not which tool to call.
+        if turn_index == 1:
+            tool_name = "set_input_vector"
+            turn_prompt = {"role": "user", "content": "Call set_input_vector with your chosen input bits."}
+        elif turn_index == max_turns:
+            tool_name = "submit_diagnosis"
+            turn_prompt = {"role": "user", "content": "Final turn. Call submit_diagnosis with your best guess."}
+        else:
+            tool_name = "inspect_node"
+            turn_prompt = {"role": "user", "content": f"Turn {turn_index}. Call inspect_node on a gate you want to probe."}
+
         turn_messages = [*messages, turn_prompt]
+        tool_choice = {"type": "function", "function": {"name": tool_name}}
+        tools = [[t for t in ALL_TOOLS if t["function"]["name"] == tool_name][0]]
 
         response = await client.chat.completions.create(
             model="policy",
             messages=turn_messages,
-            tools=ALL_TOOLS,
-            tool_choice="required",
+            tools=tools,
+            tool_choice=tool_choice,
             stream=False,
         )
         turns.append(
@@ -93,8 +100,8 @@ async def _run_episode(item, client) -> list[AgentTrajectoryTurn]:
                 item=item,
                 messages=turn_messages,
                 response=response,
-                tools=ALL_TOOLS,
-                tool_choice="required",
+                tools=tools,
+                tool_choice=tool_choice,
             )
         )
 
