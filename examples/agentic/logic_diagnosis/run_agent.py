@@ -60,7 +60,7 @@ async def _run_episode(item, client) -> list[AgentTrajectoryTurn]:
     nodes = item.record.get("nodes", [])
     fault = item.record.get("fault", {})
     max_probes = int(item.record.get("max_probes", MAX_PROBES))
-    max_turns = 8  # keep total trajectory short enough for context window
+    max_turns = 4  # turn 1=set_input, turn 2-3=probe, turn 4=submit
 
     messages = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": item.prompt}]
     turns: list[AgentTrajectoryTurn] = []
@@ -72,19 +72,27 @@ async def _run_episode(item, client) -> list[AgentTrajectoryTurn]:
     }
 
     for turn_index in range(1, max_turns + 1):
-        turn_prompt = {
-            "role": "user",
-            "content": (
-                f"Turn {turn_index}. You MUST call one tool now: "
-                "set_input_vector, inspect_node, or submit_diagnosis."
-            ),
-        }
+        # Force a specific tool each turn (codebreaker pattern) to prevent
+        # the model from outputting text instead of a tool call.
+        if turn_index == 1:
+            forced_tool = "set_input_vector"
+            turn_prompt = {"role": "user", "content": "Call set_input_vector with your chosen input bits."}
+        elif turn_index == max_turns:
+            forced_tool = "submit_diagnosis"
+            turn_prompt = {"role": "user", "content": "Final turn. Call submit_diagnosis with your best guess."}
+        else:
+            forced_tool = None
+            turn_prompt = {"role": "user", "content": "Call inspect_node to probe a gate, or submit_diagnosis if confident."}
+
         turn_messages = [*messages, turn_prompt]
+        tools = ALL_TOOLS if forced_tool is None else [[t for t in ALL_TOOLS if t["function"]["name"] == forced_tool][0]]
+        tool_choice = {"type": "function", "function": {"name": forced_tool}} if forced_tool else None
 
         response = await client.chat.completions.create(
             model="policy",
             messages=turn_messages,
-            tools=ALL_TOOLS,
+            tools=tools,
+            tool_choice=tool_choice,
             stream=False,
         )
         turns.append(
@@ -92,7 +100,8 @@ async def _run_episode(item, client) -> list[AgentTrajectoryTurn]:
                 item=item,
                 messages=turn_messages,
                 response=response,
-                tools=ALL_TOOLS,
+                tools=tools,
+                tool_choice=tool_choice,
             )
         )
 
