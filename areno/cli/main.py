@@ -21,6 +21,11 @@ class ArenoCli(click.Group):
         "dashboard": ("areno.cli.dashboard", "dashboard_command", "Start or stop the AReno React dashboard."),
         "train": ("areno.cli.train", "train_command", "Run SFT, DPO, GSPO, GRPO, or PPO training."),
         "serve": ("areno.cli.serve", "serve_command", "Serve an OpenAI-compatible chat API."),
+        "inspect-tokenizer": (
+            "areno.cli.inspect_tokenizer",
+            "inspect_tokenizer_command",
+            "Inspect tokenizer alignment: token ids, pieces, special tokens, EOS, roles, loss masks, and vocab size vs model config.",
+        ),
     }
 
     def list_commands(self, ctx: click.Context) -> list[str]:
