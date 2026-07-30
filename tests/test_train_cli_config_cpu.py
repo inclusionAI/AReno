@@ -489,6 +489,20 @@ def test_train_command_rejects_non_positive_shutdown_deadline_before_run(monkeyp
     assert "0.0 is not in the range x>0.0" in result.output
 
 
+def test_train_command_rejects_nan_shutdown_deadline_before_run(monkeypatch):
+    monkeypatch.setattr(train_cli, "run", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("ran")))
+
+    result = CliRunner().invoke(train_cli.train_command, ["--shutdown-deadline-s", "nan"])
+
+    assert result.exit_code == 2
+    assert "deadline_s must be a finite number greater than 0" in result.output
+
+
+def test_run_validates_shutdown_deadline_before_loading_dependencies():
+    with pytest.raises(ValueError, match="finite number greater than 0"):
+        train_cli.run(object(), graceful_shutdown=True, shutdown_deadline_s=float("nan"))
+
+
 def test_train_command_tunes_params_before_summary_and_run(monkeypatch):
     from areno.cli.auto_tune import AutoTuneCandidate, AutoTuneMeasurement, AutoTuneResult
 

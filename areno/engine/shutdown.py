@@ -44,6 +44,14 @@ _EXIT_CODE_SIGTERM = 143
 _DEFAULT_DEADLINE_S = 30.0
 
 
+def validate_shutdown_deadline(deadline_s: float) -> float:
+    """Validate and return a graceful-shutdown deadline in seconds."""
+
+    if not math.isfinite(deadline_s) or deadline_s <= 0:
+        raise ValueError("deadline_s must be a finite number greater than 0")
+    return deadline_s
+
+
 class ShutdownStage(str, Enum):
     """Which stage was interrupted when the shutdown was requested."""
 
@@ -148,8 +156,7 @@ class GracefulShutdown:
         deadline_s: float = _DEFAULT_DEADLINE_S,
         on_shutdown_requested: Callable[[ShutdownInfo], None] | None = None,
     ) -> None:
-        if not math.isfinite(deadline_s) or deadline_s <= 0:
-            raise ValueError("deadline_s must be a finite number greater than 0")
+        deadline_s = validate_shutdown_deadline(deadline_s)
         self._state = ShutdownState.RUNNING
         self._first_info: ShutdownInfo | None = None
         self._current_stage: ShutdownStage = ShutdownStage.IDLE

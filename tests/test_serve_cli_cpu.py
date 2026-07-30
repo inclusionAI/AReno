@@ -139,6 +139,16 @@ def test_serve_rejects_non_positive_shutdown_deadline_before_model_load():
     assert "0.0 is not in the range x>0.0" in result.output
 
 
+def test_serve_rejects_nan_shutdown_deadline_before_model_load():
+    result = CliRunner().invoke(
+        serve_mod.serve_command,
+        ["--model-path", "model", "--shutdown-deadline-s", "nan"],
+    )
+
+    assert result.exit_code == 2
+    assert "deadline_s must be a finite number greater than 0" in result.output
+
+
 def test_chat_completion_request_defaults_match_sampling_params():
     request = serve_mod.ChatCompletionRequest(messages=[serve_mod.ChatMessage(role="user", content="hi")])
 

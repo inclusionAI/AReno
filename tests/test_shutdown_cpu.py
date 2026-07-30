@@ -25,6 +25,7 @@ from areno.engine.shutdown import (
     ShutdownStage,
     ShutdownState,
     format_shutdown_reason,
+    validate_shutdown_deadline,
 )
 
 # ---------------------------------------------------------------------------
@@ -128,6 +129,10 @@ class TestGracefulShutdownState(unittest.TestCase):
         self.assertEqual(shutdown.stage, ShutdownStage.ROLLOUT)
         shutdown.set_stage(ShutdownStage.TRAINING)
         self.assertEqual(shutdown.stage, ShutdownStage.TRAINING)
+
+    def test_validate_deadline_rejects_nan_before_coordinator_construction(self):
+        with self.assertRaisesRegex(ValueError, "finite number greater than 0"):
+            validate_shutdown_deadline(float("nan"))
 
 
 # ---------------------------------------------------------------------------

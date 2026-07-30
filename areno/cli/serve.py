@@ -31,12 +31,26 @@ from areno.engine.config import (
 )
 from areno.engine.data import SamplingParams
 from areno.engine.data.tokenizer import load_tokenizer
+from areno.engine.shutdown import validate_shutdown_deadline
 from areno.models.registry import config_from_hf
 
 
 def _serve_loss_fn(*_: Any) -> torch.Tensor:
     """Placeholder loss function; serving never trains, so any invocation is an error."""
     raise RuntimeError("areno serve engine does not support training")
+
+
+def _validate_shutdown_deadline(
+    _ctx: click.Context,
+    param: click.Parameter,
+    value: float,
+) -> float:
+    """Reject non-finite deadlines before model and worker initialization."""
+
+    try:
+        return validate_shutdown_deadline(value)
+    except ValueError as exc:
+        raise click.BadParameter(str(exc), param=param) from exc
 
 
 class ChatMessage(BaseModel):
@@ -605,6 +619,7 @@ def _run_uvicorn_with_graceful_shutdown(
 @click.option(
     "--shutdown-deadline-s",
     type=click.FloatRange(min=0.0, min_open=True),
+    callback=_validate_shutdown_deadline,
     default=30.0,
     show_default=True,
     help="Seconds after the first signal before forced exit.",

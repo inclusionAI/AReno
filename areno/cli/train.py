@@ -38,6 +38,7 @@ from areno.engine.config import (
     flash_attention_unsupported_gpu_reason,
     flash_attention_unsupported_model_reason,
 )
+from areno.engine.shutdown import validate_shutdown_deadline
 
 # Group `areno train --help` flags by user intent rather than as one flat wall.
 # Each entry is (section title, option param names in display order). Every
@@ -167,6 +168,19 @@ class GroupedOptionsCommand(click.Command):
         if leftover:
             with formatter.section("Other options"):
                 formatter.write_dl(leftover)
+
+
+def _validate_shutdown_deadline(
+    _ctx: click.Context,
+    param: click.Parameter,
+    value: float,
+) -> float:
+    """Reject non-finite deadlines that Click's range comparison permits."""
+
+    try:
+        return validate_shutdown_deadline(value)
+    except ValueError as exc:
+        raise click.BadParameter(str(exc), param=param) from exc
 
 
 def _trainer_config_from_options(**options) -> TrainerConfig:
@@ -799,6 +813,13 @@ def run(
 ):
     """Build the trainer chosen by `--algo` and run `.fit()` to completion."""
 
+    shutdown = None
+    if graceful_shutdown:
+        from areno.engine.shutdown import GracefulShutdown
+
+        # Validate before importing dataset loaders or resolving model refs.
+        shutdown = GracefulShutdown(deadline_s=shutdown_deadline_s)
+
     # Heavy dependencies are imported lazily so `python train.py --help`
     # does not pay the cost of importing torch/areno.
     from datasets import load_dataset, load_from_disk
@@ -832,9 +853,10 @@ def run(
         trainer.fit()
         return
 
-    from areno.engine.shutdown import GracefulShutdown, ShutdownStage
+    from areno.engine.shutdown import ShutdownStage
 
-    with GracefulShutdown(deadline_s=shutdown_deadline_s) as shutdown:
+    assert shutdown is not None
+    with shutdown:
         shutdown.set_stage(ShutdownStage.TRAINING)
         trainer.fit(shutdown=shutdown)
         if shutdown.shutdown_requested:
@@ -1349,6 +1371,7 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
 @click.option(
     "--shutdown-deadline-s",
     type=click.FloatRange(min=0.0, min_open=True),
+    callback=_validate_shutdown_deadline,
     default=30.0,
     show_default=True,
     help="Seconds after the first signal before forced exit.",
