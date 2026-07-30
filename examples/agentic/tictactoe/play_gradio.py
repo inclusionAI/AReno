@@ -11,6 +11,7 @@ Usage (Kaggle / local):
 from __future__ import annotations
 
 import argparse
+import random
 import sys
 import threading
 from pathlib import Path
@@ -97,15 +98,26 @@ def make_click_handler(square: int):
                 _message = result
                 return _message, *get_all_displays()
 
-            # ── Model move ──
-            move = model_move(_board)
-            if move and move in game.legal_moves(_board):
-                _board = game.apply_move(_board, move, MODEL)
-                print(f"[model] placed X at {move}, board={_board}")
-            else:
-                print(f"[model] illegal move={move}, legal={game.legal_moves(_board)}")
-                _message = "模型走了非法位置，跳过。你的回合 ⭕"
-                return _message, *get_all_displays()
+            # ── Model move (retry up to 3 times, then fallback to random) ──
+            model_placed = False
+            for attempt in range(3):
+                move = model_move(_board)
+                if move and move in game.legal_moves(_board):
+                    _board = game.apply_move(_board, move, MODEL)
+                    print(f"[model] placed X at {move} (attempt {attempt+1}), board={_board}")
+                    model_placed = True
+                    break
+                else:
+                    print(f"[model] illegal move={move} (attempt {attempt+1}), legal={game.legal_moves(_board)}")
+
+            if not model_placed:
+                # Fallback: pick a random legal move
+                legal = game.legal_moves(_board)
+                if legal:
+                    fallback = random.choice(legal)
+                    _board = game.apply_move(_board, fallback, MODEL)
+                    print(f"[model] fallback random X at {fallback}, board={_board}")
+                    model_placed = True
 
             result = check_result(_board)
             if result:
