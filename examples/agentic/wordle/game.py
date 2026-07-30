@@ -209,7 +209,7 @@ def score_episode(
     """Reward solving efficiently, partial progress, and penalize invalid guesses."""
 
     if not guesses:
-        return -1.0
+        return -0.3
     valid_results = [score_guess(secret, guess) for guess in guesses[:max_guesses]]
     if any(not result["valid"] for result in valid_results):
         return -1.0
