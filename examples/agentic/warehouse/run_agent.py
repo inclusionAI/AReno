@@ -115,7 +115,7 @@ async def run_agent(ctx, batch):
             max_connections=max_connections,
             max_keepalive_connections=max_connections,
         ),
-        timeout=httpx.Timeout(300.0, connect=30.0),
+        timeout=httpx.Timeout(900.0, connect=30.0),
     )
     client = AsyncOpenAI(
         base_url=ctx.get_base_url(),
@@ -164,11 +164,10 @@ async def _run_episode(
         ]
         assistant_message, turn = await _call_model(item, client, turn_messages, tool_name)
         turns.append(turn)
-        messages = [*turn_messages, assistant_message]
 
         result = _execute_tool_call(assistant_message, state)
         payload = _result_payload(result, state, baseline)
-        messages.extend(_tool_messages(assistant_message, payload))
+        messages = [*turn_messages, *_tool_messages(assistant_message, payload)]
         metrics = payload["data"]["metrics"]
         logger.info(
             "Warehouse action prompt_index=%s sample_index=%s turn=%d tool=%s "

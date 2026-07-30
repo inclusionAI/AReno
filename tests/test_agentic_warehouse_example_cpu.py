@@ -583,7 +583,7 @@ def test_warehouse_reward_replays_optimal_partial_and_invalid_paths():
     )
 
     assert reward.reward_fn(optimal) == 1.0
-    assert reward.reward_fn(partial) < 0.0
+    assert reward.reward_fn(partial) < 1.0
     assert reward.reward_fn(invalid) < 0.0
     assert reward.reward_fn(optimal) > reward.reward_fn(partial)
     assert reward.reward_fn(partial) >= reward.reward_fn(invalid)
@@ -623,7 +623,7 @@ def test_warehouse_reward_grades_by_remaining_distance():
     )
     wrong_direction = SimpleNamespace(
         source_record=record,
-        messages=[*_move_call_list("wrong", [wrong_neighbor])],
+        messages=[*move_calls("wrong", [wrong_neighbor])],
         tool_calls=[],
     )
     at_target_no_submit = SimpleNamespace(
@@ -642,10 +642,3 @@ def test_warehouse_reward_grades_by_remaining_distance():
     assert nosub_score > wrong_score
     assert close_score >= wrong_score
     assert all(-1.0 <= s <= 1.0 for s in [shortest_score, close_score, wrong_score, nosub_score])
-
-
-def _move_call_list(prefix, shelves):
-    return [
-        _assistant_call(f"{prefix}-{i}", "move_to", {"shelf_id": shelf_id})
-        for i, shelf_id in enumerate(shelves)
-    ]

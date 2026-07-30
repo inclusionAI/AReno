@@ -50,7 +50,7 @@ def reward_fn(record) -> float:
             progress = max(0.0, 1.0 - remaining / baseline)
         else:
             progress = 1.0 if remaining == 0 else 0.0
-        score = -0.5 + 0.3 * progress
+        score = -0.3 + 0.5 * progress
 
     score -= 0.05 * state.invalid_actions
     return max(-1.0, min(1.0, score))
