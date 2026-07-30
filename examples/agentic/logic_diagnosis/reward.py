@@ -21,8 +21,8 @@ def reward_fn(record) -> float:
     source = dict(record.source_record) if record.source_record is not None else {}
     fault = source.get("fault", {})
 
+    interactions = 0  # any valid tool call counts
     probes_used = 0
-    probed_faulty = False
     submitted = False
     correct_diagnosis = False
 
@@ -31,14 +31,18 @@ def reward_fn(record) -> float:
             continue
         name = call.get("name")
 
-        if name == "inspect_node":
+        if name == "set_input_vector":
+            interactions += 1
+        elif name == "inspect_node":
+            interactions += 1
             probes_used += 1
             args = _parse_args(call.get("arguments"))
             node_id = args.get("node_id")
             if isinstance(node_id, int) and node_id == fault.get("node"):
-                probed_faulty = True
+                interactions += 1  # bonus for finding the right gate
 
         elif name == "submit_diagnosis":
+            interactions += 1
             submitted = True
             args = _parse_args(call.get("arguments"))
             node_id = args.get("node_id")
@@ -53,9 +57,9 @@ def reward_fn(record) -> float:
                 )
 
     if not submitted:
-        if probes_used > 0:
-            return -0.3  # interacted but didn't submit — better than nothing
-        return -1.0  # did nothing at all
+        if interactions > 0:
+            return -0.2  # interacted but didn't submit
+        return -1.0  # did nothing — likely format collapse
 
     return score_episode(
         correct_diagnosis=correct_diagnosis,
