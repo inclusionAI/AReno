@@ -181,6 +181,34 @@ async def _run_episodes(*, client: Any, items: list[Any], model: str) -> list[Ag
             )
             if state["env"].is_terminal():
                 state["done"] = True
+                env = state["env"]
+                logger.info(
+                    "episode done solved=%s difficulty=%s actions_used=%d invalid_actions=%d "
+                    "prompt_idx=%d sample_idx=%d",
+                    env.is_solved(),
+                    env.difficulty,
+                    env.actions_used,
+                    env.invalid_actions,
+                    state["item"].prompt_index,
+                    state["item"].sample_index,
+                )
+
+    # Episodes that ran out of turns without reaching a terminal state
+    # (truncated, not solved) — log them too so solve-rate is countable.
+    for state in states:
+        if state["done"]:
+            continue
+        env = state["env"]
+        logger.info(
+            "episode truncated solved=%s difficulty=%s actions_used=%d invalid_actions=%d "
+            "prompt_idx=%d sample_idx=%d",
+            env.is_solved(),
+            env.difficulty,
+            env.actions_used,
+            env.invalid_actions,
+            state["item"].prompt_index,
+            state["item"].sample_index,
+        )
     return turns
 
 

@@ -1,38 +1,60 @@
 """Reward function for the Sudoku agentic example.
 
 Grading is purely structural: a solve is detected from the visible board state
-revealed through tool results — never from a stored solution. The function
-walks the ``place_digit`` tool results and scores one episode.
+revealed through tool results — never from a stored solution.
 
-Curriculum-aware reward (gated on ``SUDOKU_CURRICULUM`` env var, default "on"):
-- Solved reward scales with difficulty so harder boards pay more, pulling the
-  policy toward harder bands as its ability grows:
-    easy +1.0, medium +1.2, hard +1.5, extreme +2.0
-- Un-solved but with legal progress: a small shaped reward proportional to
-  legal placements made (0.1 * (legal_placements / empty_cells)), capped per
-  band. This keeps hard/extreme from being pure zero-signal dead zones without
-  ever reading the solution — progress is measured solely from visible legal
-  placements, so the no-leak invariant is preserved.
-- No legal placement at all: -0.1 (pure noise penalty).
+Reward design (curriculum path, gated on ``SUDOKU_CURRICULUM`` env var,
+default "on"):
+
+    solved                     -> SOLVED_REWARD[difficulty]      (e.g. tutorial 0.8)
+    legal progress, unsolved   -> SOLVED_REWARD * 0.15 * sqrt(filled/empty), capped
+    tried place, all illegal   -> ATTEMPT_PENALTY      (-0.05)
+    only inspected, no place   -> INSPECT_ONLY_PENALTY (-0.08)
+    did nothing at all         -> NOISE_PENALTY        (-0.1)
+
+Three deliberate trade-offs:
+
+1. **Anti-deadlock (effort tiers).** With a purely sparse reward, when every
+   sample in a rollout group fails to make any legal placement, all rewards
+   collapse to the same value, group advantages become 0, gradients vanish,
+   and RL stalls. Grading *effort* below the legal-progress tier guarantees
+   within-group spread as long as samples differ in how hard they tried, so
+   advantages (and gradients) stay nonzero. It never rewards illegal placement
+   above legal progress.
+
+2. **Slow progress curve (sqrt + low cap).** Progress reward grows as the
+   square root of fill ratio and is capped at 0.15 * SOLVED_REWARD, far below
+   the solved reward. This deliberately makes "greedily stuffing legal digits
+   to farm progress" unattractive: the most progress can ever pay is ~0.12
+   (tutorial), while a solve pays 0.8. The policy's main incentive stays
+   "actually finish", not "fill cells".
+
+3. **Invalid-action penalty.** A greedy stuffer produces many rejected
+   placements (digit conflicts). We subtract ``INVALID_PENALTY_RATIO *
+   (invalid_actions / total_actions)`` from any non-solved reward, so
+   "thoughtless placing" is taxed while careful, low-invalid play is not.
 
 Flat (legacy) behavior with ``SUDOKU_CURRICULUM=off``: solved=1.0, legal
 progress=0.0, noise=-0.1.
 
 Per-difficulty ``solve_rate`` and ``invalid_action_rate`` are derivable from
-the same tool results grouped by ``record.source_record["difficulty"]``; wire
-those into AReno's metric fields in the trainer config.
+the same ``place_digit`` tool results grouped by ``record.source_record["difficulty"]``.
 """
 
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import sudoku  # noqa: E402
+
+# --- reward weights ---------------------------------------------------------
 
 # Solved-reward weight per difficulty (curriculum). Higher bands pay more.
 SOLVED_REWARD: dict[str, float] = {
@@ -42,72 +64,141 @@ SOLVED_REWARD: dict[str, float] = {
     "hard": 1.5,
     "extreme": 2.0,
 }
-# Progress shaping: each turn that made >=1 legal placement but did not solve
-# earns a fraction of the solved weight proportional to how full the board is.
-# This gives per-turn gradient signal during the long multi-step solve instead
-# of an all-or-nothing sparse win. The cap is kept below the solved weight so
-# finishing always dominates merely-progressing.
-PROGRESS_FRACTION = 0.3  # full-but-unsolved earns 0.3 * SOLVED_REWARD
+
+# Progress shaping: a legal-but-unsolved episode earns a small fraction of the
+# solved weight, growing with the square root of the fill ratio. The sqrt curve
+# is deliberately *sub-linear* so early fills pay relatively more (keeps a weak
+# policy moving) but late fills pay relatively less (no incentive to stuff cells
+# just to raise the fill ratio). The cap keeps progress far below solved.
+PROGRESS_FRACTION = 0.15
 PROGRESS_CAP: dict[str, float] = {
     band: weight * PROGRESS_FRACTION for band, weight in SOLVED_REWARD.items()
 }
-# Anti-deadlock shaping. With a purely sparse reward, when every sample in a
-# rollout group fails to make any legal placement, all rewards collapse to
-# NOISE_PENALTY, group advantages become 0, gradients vanish, and RL stalls
-# (policy frozen -> still all-fail next step). To keep a learning signal alive
-# even on weak models, we grade *effort* below the legal-progress band:
-# - tried to place but all placements were illegal : ATTEMPT_PENALTY (-0.05)
-# - only inspected / produced no place_digit at all     : NOISE_PENALTY (-0.1)
-# This guarantees within-group reward spread as long as samples differ in how
-# hard they tried, so advantages (and gradients) stay nonzero. It never rewards
-# illegal placement above legal progress, so the policy still moves toward
-# correct moves; it just stops the all-equal deadlock.
-ATTEMPT_PENALTY = -0.05
-INSPECT_ONLY_PENALTY = -0.08
-NOISE_PENALTY = -0.1
+
+# Anti-deadlock effort tiers (see module docstring, trade-off 1).
+ATTEMPT_PENALTY = -0.05       # tried place_digit but every attempt was illegal
+INSPECT_ONLY_PENALTY = -0.08  # only inspected, never attempted a placement
+NOISE_PENALTY = -0.1          # produced no tool call worth grading
+
+# Tax on thoughtless placing (see module docstring, trade-off 3). Subtracted
+# from any non-solved reward, proportional to the episode's invalid-action rate.
+INVALID_PENALTY_RATIO = 0.1
+
+
+# --- episode feature extraction --------------------------------------------
+
+
+@dataclass
+class EpisodeFeatures:
+    """Derived signals from one rollout episode, used to pick its reward tier."""
+
+    solved: bool
+    legal_placements: int            # place_digit calls that succeeded
+    total_place_attempts: int        # place_digit calls (legal + illegal)
+    invalid_actions: int             # place_digit calls rejected by the env
+    tried_place: bool                # any place_digit was attempted at all
+    inspect_count: int               # inspect_candidates calls made
+    empty_cells: int                 # board empties at episode start
+    difficulty: str
+
+
+def _extract_features(record: Any) -> EpisodeFeatures:
+    """Read tool calls/results from the rollout record into structured features."""
+
+    source = record.source_record
+    place_results = _place_results(record)
+    legal = sum(1 for r in place_results if r.get("placed"))
+    invalid = sum(1 for r in place_results if r.get("invalid_action"))
+
+    return EpisodeFeatures(
+        solved=any(bool(r.get("solved")) for r in place_results),
+        legal_placements=legal,
+        total_place_attempts=len(place_results),
+        invalid_actions=invalid,
+        tried_place=bool(place_results),
+        inspect_count=_inspect_count(record),
+        empty_cells=int(source.get("empty_cells", 0)) or 1,
+        difficulty=str(source.get("difficulty", sudoku.DEFAULT_DIFFICULTY)).lower(),
+    )
+
+
+# --- reward tiers -----------------------------------------------------------
+
+
+def _solved_reward(features: EpisodeFeatures) -> float:
+    return SOLVED_REWARD.get(features.difficulty, 1.0)
+
+
+def _progress_reward(features: EpisodeFeatures) -> float:
+    """Legal-but-unsolved: sqrt(fill) * weight, capped; minus invalid tax.
+
+    ``fill_ratio`` is how much of the board the policy legally filled. The cap
+    and the invalid tax together make "stuff cells to farm progress" pay poorly
+    while still giving a weak policy a learnable gradient for partial progress.
+    """
+
+    weight = SOLVED_REWARD.get(features.difficulty, 1.0)
+    fill_ratio = features.legal_placements / features.empty_cells
+    base = weight * PROGRESS_FRACTION * math.sqrt(fill_ratio)
+    capped = min(PROGRESS_CAP.get(features.difficulty, weight * PROGRESS_FRACTION), base)
+    return capped - _invalid_penalty(features)
+
+
+def _invalid_penalty(features: EpisodeFeatures) -> float:
+    """Fraction of place attempts that were illegal, scaled. 0 if none tried."""
+
+    if features.total_place_attempts == 0:
+        return 0.0
+    return INVALID_PENALTY_RATIO * (features.invalid_actions / features.total_place_attempts)
+
+
+def _effort_reward(features: EpisodeFeatures) -> float:
+    """No legal placement: grade effort to avoid a zero-advantage deadlock.
+
+    Tried-to-place (all illegal) ranks above only-inspected, which ranks above
+    pure noise. This keeps within-group reward spread (and thus gradients) alive
+    even when every sample fails to place legally.
+    """
+
+    if features.tried_place:
+        base = ATTEMPT_PENALTY
+    elif features.inspect_count:
+        base = INSPECT_ONLY_PENALTY
+    else:
+        base = NOISE_PENALTY
+    return base - _invalid_penalty(features)
+
+
+# --- public entry point -----------------------------------------------------
+
+
+def reward_fn(record: Any) -> float:
+    """Score one episode. Tier order: solved > legal-progress > effort > noise."""
+
+    features = _extract_features(record)
+
+    if not _curriculum_enabled():
+        # Flat legacy behavior.
+        if features.solved:
+            return 1.0
+        if features.legal_placements:
+            return 0.0
+        if features.tried_place:
+            return ATTEMPT_PENALTY
+        return NOISE_PENALTY
+
+    if features.solved:
+        return _solved_reward(features)
+    if features.legal_placements:
+        return _progress_reward(features)
+    return _effort_reward(features)
 
 
 def _curriculum_enabled() -> bool:
     return os.environ.get("SUDOKU_CURRICULUM", "on").lower() not in ("off", "0", "false", "no")
 
 
-def reward_fn(record: Any) -> float:
-    """Score one episode by replaying its place_digit tool results."""
-
-    source = record.source_record
-    difficulty = str(source.get("difficulty", sudoku.DEFAULT_DIFFICULTY)).lower()
-    empty_cells = int(source.get("empty_cells", 0)) or 1
-
-    place_results = _place_results(record)
-    inspect_count = _inspect_count(record)
-
-    solved = any(bool(result.get("solved")) for result in place_results)
-    legal_placements = sum(1 for result in place_results if result.get("placed"))
-    tried_place = bool(place_results)  # any place_digit was attempted (legal or illegal)
-
-    if not _curriculum_enabled():
-        if solved:
-            return 1.0
-        if legal_placements:
-            return 0.0
-        if tried_place:
-            return ATTEMPT_PENALTY
-        return NOISE_PENALTY
-
-    # Curriculum path.
-    if solved:
-        return SOLVED_REWARD.get(difficulty, 1.0)
-    if legal_placements:
-        weight = SOLVED_REWARD.get(difficulty, 1.0)
-        progress = weight * PROGRESS_FRACTION * (legal_placements / empty_cells)
-        return min(PROGRESS_CAP.get(difficulty, weight * PROGRESS_FRACTION), progress)
-    # No legal placement this episode — grade effort to avoid an all-equal
-    # (zero-advantage, zero-gradient) deadlock across the rollout group.
-    if tried_place:
-        return ATTEMPT_PENALTY
-    if inspect_count:
-        return INSPECT_ONLY_PENALTY  # at least inspected; above pure noise
-    return NOISE_PENALTY
+# --- tool-result decoding helpers ------------------------------------------
 
 
 def _place_results(record: Any) -> list[dict[str, Any]]:
