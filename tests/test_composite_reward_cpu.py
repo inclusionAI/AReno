@@ -186,12 +186,80 @@ class ExampleRewardLoadTest(unittest.TestCase):
         self.assertEqual(format_reward(plain), 0.0)
 
 
+class TrainerComponentStatsTest(unittest.TestCase):
+    """The trainer turns a CompositeReward's per-component scores into metric keys.
+
+    Drives ``_score_reward`` -> ``_collect_component_stats`` -> ``_augment_train_stats``
+    directly on a minimally constructed :class:`PolicyOnlyTrainer` (no backend, no
+    tokenizer): these methods only touch the reward function and the per-step
+    component accumulators, so stubbing ``instance``/``dataset``/``loss_fn`` is safe
+    and Exercises the exact channel that emits ``reward/<name>_mean`` in real runs.
+    """
+
+    def _trainer(self, reward_fn):
+        from areno.api.trainers.policy_only import PolicyOnlyTrainer
+
+        # config/instance/dataset/loss_fn are unused by the component-stat methods.
+        return PolicyOnlyTrainer(None, instance=None, dataset=None, reward_fn=reward_fn, loss_fn=None)
+
+    def test_component_means_collected_and_augmented(self):
+        """Scoring N records populates reward/<name>_mean and folds into train_stats."""
+        cr = CompositeReward([("accuracy", lambda r: 1.0, 0.7), ("format", lambda r: 0.0, 0.3)])
+        trainer = self._trainer(cr)
+
+        for _ in range(3):
+            trainer._score_reward(_record())
+
+        stats = trainer._collect_component_stats()
+        self.assertAlmostEqual(stats["reward/accuracy_reward_mean"], 1.0, places=6)
+        self.assertAlmostEqual(stats["reward/format_reward_mean"], 0.0, places=6)
+        self.assertNotIn("reward/accuracy_reward_invalid_count", stats)  # no failures recorded
+
+        augmented = trainer._augment_train_stats({"loss": 0.5})
+        self.assertAlmostEqual(augmented["reward/accuracy_reward_mean"], 1.0, places=6)
+        self.assertAlmostEqual(augmented["reward/format_reward_mean"], 0.0, places=6)
+        self.assertEqual(augmented["loss"], 0.5)
+
+    def test_mark_invalid_records_component_count(self):
+        """A failed component in mark_invalid mode surfaces as reward/<name>_invalid_count."""
+
+        def _raise(_record):
+            raise RuntimeError("boom")
+
+        cr = CompositeReward(
+            [("ok", lambda r: 1.0, 0.7), ("bad", _raise, 0.3)], on_error="mark_invalid"
+        )
+        trainer = self._trainer(cr)
+
+        totals = [trainer._score_reward(_record())[0] for _ in range(2)]
+        self.assertTrue(all(t == 1.0 for t in totals))  # surviving component total
+
+        stats = trainer._collect_component_stats()
+        self.assertEqual(stats["reward/bad_invalid_count"], 2.0)
+        self.assertIn("reward/ok_mean", stats)
+
+    def test_plain_reward_fn_emits_no_component_keys(self):
+        """A plain single-reward function must not leak any reward/<name>_* keys."""
+        trainer = self._trainer(lambda r: 1.0)
+
+        for _ in range(4):
+            total, score = trainer._score_reward(_record())
+            self.assertEqual(total, 1.0)
+            self.assertIsNone(score)
+
+        self.assertEqual(trainer._collect_component_stats(), {})
+        # Empty component stats must not alter an existing train_stats dict.
+        self.assertEqual(trainer._augment_train_stats({"loss": 0.5}), {"loss": 0.5})
+
+
 class CliRewardParsingTest(unittest.TestCase):
     """CLI --reward-fn-path parsing: reject bad/weights and duplicate names."""
 
     def test_invalid_weight_raises(self):
-        """A non-numeric weight suffix must raise Invalid reward weight: <value>."""
-        with self.assertRaisesRegex(ValueError, "Invalid reward weight: abc"):
+        """A non-numeric weight suffix must raise an Invalid reward weight message naming the
+        offending value and the full --reward-fn-path, so a colon-containing path can be told
+        apart from a genuine weight typo."""
+        with self.assertRaisesRegex(ValueError, r"Invalid reward weight 'abc' in --reward-fn-path"):
             _parse_reward_fn_paths(("examples/math/reward.py:abc",))
 
     def test_negative_weight_raises(self):

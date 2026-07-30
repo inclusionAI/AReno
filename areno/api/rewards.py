@@ -94,6 +94,12 @@ class CompositeReward:
     * ``"mark_invalid"`` records the failure in :class:`CompositeScore.invalid`,
       substitutes ``invalid_value`` for that component, and recomputes the total
       from the surviving components so the rest of the rollout still trains.
+      Keep ``invalid_value`` at its default ``0.0`` for the re-normalisation to
+      match the description above: a non-zero ``invalid_value`` still enters the
+      numerator while its weight is dropped from the denominator, so the failed
+      component ends up scaled by ``1 / surviving_weight`` rather than excluded.
+      (The CLI never sets ``invalid_value``, so this only matters for direct
+      SDK construction.)
 
     Weights are normalised (``sum(w_i * v_i) / sum(w_i)``) rather than summed
     absolutely: users pass ratios such as ``0.7 / 0.3`` to express relative

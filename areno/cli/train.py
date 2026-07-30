@@ -1074,23 +1074,20 @@ def _parse_reward_fn_paths(paths: tuple[str, ...]) -> list[tuple[str, str, float
             try:
                 weight = float(weight_suffix)
             except ValueError as exc:
-                raise ValueError(f"Invalid reward weight: {weight_suffix}") from exc
+                # The suffix after the last ':' was not a number. This is usually a
+                # genuine typo (`file.py:abc`), but can also happen when the path
+                # itself contains a ':' (`a:b.py`) and gets mis-split; name the full
+                # value so the user can tell which case they hit.
+                raise ValueError(
+                    f"Invalid reward weight {weight_suffix!r} in --reward-fn-path {value!r}; "
+                    f"expected the form path[:weight] with a numeric weight (if the path "
+                    f"contains a ':', pass it without a weight suffix)."
+                ) from exc
             if weight < 0:
                 raise ValueError(f"Invalid reward weight: {weight}")
         path = Path(spec).expanduser().resolve()
         parsed.append((path.stem, str(path), float(weight)))
     return parsed
-
-
-def _reward_components_legacy(paths: tuple[str, ...]) -> bool:
-    """True when the inputs should keep the historical single-reward path.
-
-    That legacy path is exactly one value and it has no ``:weight`` suffix, so
-    the run behaves byte-for-byte like before ``--reward-fn-path`` became
-    repeatable.
-    """
-
-    return len(paths) == 1 and ":" not in paths[0]
 
 
 def _reject_duplicate_reward_component_names(components: list[tuple[str, str, float]]) -> None:

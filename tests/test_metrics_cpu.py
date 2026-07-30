@@ -8,6 +8,7 @@ from areno.api.metrics import (
     collect_train_batch_stats,
     init_rollout_stats,
     record_rollout_sequence_stats,
+    record_training_stats,
 )
 from areno.api.models import TrainSequence
 
@@ -65,6 +66,47 @@ class MetricsUtilityTest(unittest.TestCase):
             metrics_mod.create_tensorboard_writer = old_factory
 
         self.assertEqual(writer.close_count, 1)
+
+
+class RewardComponentMetricsTest(unittest.TestCase):
+    """Per-component reward keys flow through record_training_stats to TensorBoard."""
+
+    def test_reward_component_keys_written_under_train_namespace(self):
+        """`reward/<name>_mean` and `reward/<name>_invalid_count` in train_res land as
+        `train/reward/<name>_*` scalars — the channel the trainer relies on without a
+        dedicated writer branch."""
+
+        class FakeWriter:
+            def __init__(self):
+                self.scalars: dict[str, tuple] = {}
+
+            def add_scalar(self, tag, value, step):
+                self.scalars[tag] = (value, step)
+
+            def flush(self):
+                pass
+
+            def close(self):
+                pass
+
+        writer = FakeWriter()
+        stats = init_rollout_stats()
+        stats["rewards"] = [1.0, 0.0, 1.0]
+        train_res = {
+            "loss": 0.5,
+            "reward/accuracy_reward_mean": 1.0,
+            "reward/format_reward_mean": 0.0,
+            "reward/format_reward_invalid_count": 2.0,
+        }
+        record_training_stats(writer, stats, step=3, train_res=train_res, train_batch=[], timings=None)
+
+        # Component means and invalid counts mirror the train_res keys under `train/`.
+        self.assertEqual(writer.scalars["train/reward/accuracy_reward_mean"], (1.0, 3))
+        self.assertEqual(writer.scalars["train/reward/format_reward_mean"], (0.0, 3))
+        self.assertEqual(writer.scalars["train/reward/format_reward_invalid_count"], (2.0, 3))
+        # The ordinary backend metric and the batch-derived rollout mean still flow.
+        self.assertEqual(writer.scalars["train/loss"], (0.5, 3))
+        self.assertIn("rollout/rewards_mean", writer.scalars)
 
 
 if __name__ == "__main__":
