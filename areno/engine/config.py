@@ -52,6 +52,14 @@ class RuntimeConfig:
     decode_graph_buckets: list[int] = field(
         default_factory=lambda: [1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 56, 64, 96, 128, 192, 256]
     )
+    # Non-finite value detection (#238): when False (default), detection runs
+    # but no update is skipped and training continues — preserving existing
+    # behavior. When True, a non-finite step skips optimizer.step() and does
+    # not advance _global_step.
+    non_finite_skip_update: bool = False
+    # When True, a non-finite step raises NonFiniteTrainingError after
+    # reporting, causing controlled training termination.
+    non_finite_terminate: bool = False
 
     def __post_init__(self) -> None:
         if self.attn_backend not in {"flash", "native"}:

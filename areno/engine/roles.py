@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import sys
-
 import torch
 
 from areno.engine.checkpoints.io import SafetensorsIndex
@@ -14,7 +12,7 @@ from areno.engine.optim import AdamW8bit, AdamWFP32Master
 from areno.engine.parallel.context import get_tp_context
 from areno.engine.protocol import EnsureRolesPayload, ScorePayload, TrainValuesPayload
 from areno.engine.runtime.logprobs import next_token_logprobs
-from areno.engine.runtime.non_finite import check_loss_non_finite, detect_non_finite
+from areno.engine.runtime.non_finite import all_reduce_non_finite_flag, check_loss_non_finite, detect_non_finite, emit_non_finite_report
 from areno.engine.runtime.train_step import _dense_train_meta
 from areno.models.registry import config_from_hf, load_model_weights
 
@@ -488,8 +486,26 @@ class RoleManager:
                 lr=role.optimizer.lr if role.optimizer else 0.0,
                 phase="critic",
             )
-            if _nf_report is not None:
-                print(_nf_report.format_terminal(), file=sys.stderr, flush=True)
+        else:
+            _nf_report = None
+        ctx = get_tp_context()
+        _any_non_finite = all_reduce_non_finite_flag(
+            _nf_report is not None, tp_group=ctx.group, dp_group=ctx.dp_group if ctx.dp_size > 1 else None,
+        )
+        if _nf_report is not None or _any_non_finite:
+            skip_update = self.worker.config.runtime.non_finite_skip_update
+            terminate = self.worker.config.runtime.non_finite_terminate
+            if terminate:
+                if role.optimizer is not None:
+                    role.optimizer.zero_grad(set_to_none=True)
+                emit_non_finite_report(_nf_report, skip_update=skip_update, terminate=True)
+            if skip_update:
+                # Discard polluted gradients; skip optimizer step for this microbatch.
+                if role.optimizer is not None:
+                    role.optimizer.zero_grad(set_to_none=True)
+                emit_non_finite_report(_nf_report, skip_update=skip_update, terminate=False)
+                return
+            emit_non_finite_report(_nf_report, skip_update=skip_update, terminate=False)
         if allow_step:
             self._maybe_step_role(role)
 

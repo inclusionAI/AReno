@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-import sys
 
 import torch
 import torch.distributed as dist
@@ -13,7 +12,7 @@ from areno.engine.modeling import param_grad
 from areno.engine.parallel.context import get_tp_context
 from areno.engine.protocol import TrainPayload
 from areno.engine.runtime.logprobs import next_token_logprobs, packed_next_token_logprobs
-from areno.engine.runtime.non_finite import check_loss_non_finite, detect_non_finite
+from areno.engine.runtime.non_finite import all_reduce_non_finite_flag, check_loss_non_finite, detect_non_finite, emit_non_finite_report
 from areno.engine.runtime.train_step import (
     _clip_grad_norm,
     _grad_norm,
@@ -106,7 +105,9 @@ class TrainingManager:
             self._finalize_router_expert_bias()
             grad_norm = _grad_norm(worker.model.parameters())
             grad_zero_metrics = _grad_zero_metrics(worker.model.parameters())
-            # --- Non-finite deep detection (#238) ---
+            # --- Non-finite detection (#238) ---
+            skip_update = worker.config.runtime.non_finite_skip_update
+            terminate = worker.config.runtime.non_finite_terminate
             if _non_finite_loss or worker._global_step % 100 == 0:
                 _nf_report = detect_non_finite(
                     model=worker.model,
@@ -117,20 +118,45 @@ class TrainingManager:
                     lr=worker.optimizer.lr,
                     phase="actor",
                 )
+            else:
+                _nf_report = None
+            # Cross-rank agreement: any rank non-finite → all ranks treat as non-finite
+            _any_non_finite = all_reduce_non_finite_flag(
+                _nf_report is not None, tp_group=ctx.group, dp_group=ctx.dp_group if ctx.dp_size > 1 else None,
+            )
+            if _nf_report is not None or _any_non_finite:
                 if _nf_report is not None:
-                    print(_nf_report.format_terminal(), file=sys.stderr, flush=True)
                     if metrics is None:
                         metrics = {}
                     metrics.update(_nf_report.to_dict())
-            if worker.grad_clip_norm is not None:
-                _clip_grad_norm(worker.model.parameters(), grad_norm, worker.grad_clip_norm)
-            current_lr = self._lr_for_step(worker._global_step + 1)
-            worker.optimizer.lr = current_lr
-            worker.optimizer.step()
-            worker.optimizer.zero_grad(set_to_none=True)
-            worker._global_step += 1
-            if worker.device.type == "cuda" and worker._global_step % 10 == 0:
-                torch.cuda.empty_cache()
+                # Controlled termination takes priority over skip.
+                if terminate:
+                    worker.optimizer.zero_grad(set_to_none=True)
+                    emit_non_finite_report(_nf_report, skip_update=skip_update, terminate=True)
+                if skip_update:
+                    # Skip the unsafe optimizer step; discard polluted gradients.
+                    worker.optimizer.zero_grad(set_to_none=True)
+                    stepped = False
+                    if metrics is None:
+                        metrics = {}
+                    metrics["non_finite_skipped_update"] = 1.0
+                    emit_non_finite_report(_nf_report, skip_update=skip_update, terminate=False)
+                else:
+                    emit_non_finite_report(_nf_report, skip_update=skip_update, terminate=False)
+            if stepped:
+                if worker.grad_clip_norm is not None:
+                    _clip_grad_norm(worker.model.parameters(), grad_norm, worker.grad_clip_norm)
+                current_lr = self._lr_for_step(worker._global_step + 1)
+                worker.optimizer.lr = current_lr
+                worker.optimizer.step()
+                worker.optimizer.zero_grad(set_to_none=True)
+                worker._global_step += 1
+                if worker.device.type == "cuda" and worker._global_step % 10 == 0:
+                    torch.cuda.empty_cache()
+            else:
+                current_lr = worker.optimizer.lr
+                if worker.device.type == "cuda":
+                    torch.cuda.empty_cache()
         else:
             current_lr = worker.optimizer.lr
         if ctx.is_rank0:

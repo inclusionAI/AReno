@@ -1,19 +1,32 @@
 """Non-finite value detection and actionable reporting.
 
-Issue #238: Produce an actionable non-finite-value training report.
+Issue #238: Produce an actionable non-finite-value training report with
+optional skip-update and controlled termination.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
 import torch
+import torch.distributed as dist
 
 from areno.engine.runtime.train_step import _param_grad
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Exception
+# ---------------------------------------------------------------------------
+
+class NonFiniteTrainingError(RuntimeError):
+    """Raised when non-finite values are detected and termination is enabled."""
 
 
 # ---------------------------------------------------------------------------
@@ -416,3 +429,44 @@ def _safe_min(t: torch.Tensor) -> float:
         return float(t[~torch.isinf(t) & ~torch.isnan(t)].min().item())
     except (RuntimeError, ValueError):
         return float("nan")
+
+
+# ---------------------------------------------------------------------------
+# Cross-rank coordination and report output
+# ---------------------------------------------------------------------------
+
+def all_reduce_non_finite_flag(local_non_finite: bool, *, tp_group=None, dp_group=None) -> bool:
+    """Return True if *any* rank detected non-finite values.
+
+    Uses MAX all-reduce so that a single ``True`` (1) on any rank propagates
+    to all ranks. When no distributed group is active, returns the local flag.
+    """
+    if not dist.is_available() or not dist.is_initialized():
+        return local_non_finite
+    flag = torch.tensor(1.0 if local_non_finite else 0.0, dtype=torch.float32)
+    if tp_group is not None:
+        dist.all_reduce(flag, op=dist.ReduceOp.MAX, group=tp_group)
+    if dp_group is not None:
+        dist.all_reduce(flag, op=dist.ReduceOp.MAX, group=dp_group)
+    return bool(flag.item())
+
+
+def emit_non_finite_report(
+    report: NonFiniteReport | None,
+    *,
+    skip_update: bool = False,
+    terminate: bool = False,
+) -> None:
+    """Log the report and optionally raise NonFiniteTrainingError.
+
+    Shared by actor and critic training paths so both use logger.warning
+    instead of bare ``print``.
+    """
+    if report is None:
+        return
+    logger.warning("Non-finite values detected (step %d, phase %s):\n%s", report.step, report.phase, report.format_terminal())
+    if terminate:
+        raise NonFiniteTrainingError(
+            f"Training terminated at step {report.step} (phase={report.phase}) "
+            f"due to non-finite values. See JSON report for details."
+        )

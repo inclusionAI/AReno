@@ -60,6 +60,12 @@ class TrainerConfig:
     agent_timeout_s: float = 300.0
     train_tool_results: bool = False
     chat_template_enable_thinking: bool | None = None
+    # Non-finite value detection (#238): skip optimizer step when NaN/Inf is
+    # detected. Default False preserves existing behavior.
+    non_finite_skip_update: bool = False
+    # Non-finite value detection (#238): terminate training with an error
+    # after reporting. Default False preserves existing behavior.
+    non_finite_terminate: bool = False
 
     def __post_init__(self) -> None:
         if self.attn_backend not in {"flash", "native"}:
@@ -98,6 +104,8 @@ class TrainerConfig:
                 "keep_rollout_state": self.keep_rollout_state,
                 "eager_decode": self.eager_decode,
                 "attn_backend": self.attn_backend,
+                "non_finite_skip_update": self.non_finite_skip_update,
+                "non_finite_terminate": self.non_finite_terminate,
             },
         )
 
@@ -134,6 +142,8 @@ class RolloutTrainerConfig(TrainerConfig):
                 "keep_rollout_state": self.keep_rollout_state,
                 "eager_decode": self.eager_decode,
                 "attn_backend": self.attn_backend,
+                "non_finite_skip_update": self.non_finite_skip_update,
+                "non_finite_terminate": self.non_finite_terminate,
             },
         )
 

@@ -126,6 +126,8 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "value_loss_coef",
             "gamma",
             "lam",
+            "non_finite_skip_update",
+            "non_finite_terminate",
         ),
     ),
     ("Checkpoint", ("save_path", "save_interval")),
@@ -600,6 +602,8 @@ def _trainer_config_from_args(args) -> TrainerConfig:
     args.model_hub = getattr(args, "model_hub", "modelscope")
     algorithm = get_algorithm(args.algo)
     chat_template_enable_thinking = False if args.disable_thinking else None
+    non_finite_skip_update = bool(getattr(args, "non_finite_skip_update", False))
+    non_finite_terminate = bool(getattr(args, "non_finite_terminate", False))
     if algorithm.name == "dpo":
         return DPOTrainerConfig(
             algo=algorithm.name,
@@ -640,6 +644,8 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             chat_template_enable_thinking=chat_template_enable_thinking,
             ref_ckpt=args.ref_ckpt,
             dpo_beta=args.dpo_beta,
+            non_finite_skip_update=non_finite_skip_update,
+            non_finite_terminate=non_finite_terminate,
         )
     if algorithm.name == "sft":
         return TrainerConfig(
@@ -679,6 +685,8 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             agent_timeout_s=args.agent_timeout_s,
             train_tool_results=args.train_tool_results,
             chat_template_enable_thinking=chat_template_enable_thinking,
+            non_finite_skip_update=non_finite_skip_update,
+            non_finite_terminate=non_finite_terminate,
         )
     if algorithm.name != "ppo":
         return PolicyTrainerConfig(
@@ -727,6 +735,8 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             agent_timeout_s=args.agent_timeout_s,
             train_tool_results=args.train_tool_results,
             chat_template_enable_thinking=chat_template_enable_thinking,
+            non_finite_skip_update=non_finite_skip_update,
+            non_finite_terminate=non_finite_terminate,
         )
     return PPOTrainerConfig(
         algo=algorithm.name,
@@ -788,6 +798,8 @@ def _trainer_config_from_args(args) -> TrainerConfig:
         agent_timeout_s=args.agent_timeout_s,
         train_tool_results=args.train_tool_results,
         chat_template_enable_thinking=chat_template_enable_thinking,
+        non_finite_skip_update=non_finite_skip_update,
+        non_finite_terminate=non_finite_terminate,
     )
 
 
@@ -1324,6 +1336,16 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
 @click.option("--value-loss-coef", type=float, default=0.5, show_default=True, help="PPO value loss coefficient.")
 @click.option("--gamma", type=float, default=1.0, show_default=True, help="PPO GAE discount.")
 @click.option("--lam", type=float, default=0.95, show_default=True, help="PPO GAE lambda.")
+@click.option(
+    "--non-finite-skip-update",
+    is_flag=True,
+    help="Skip optimizer.step() when NaN/Inf is detected in loss, gradients, rewards, or advantages.",
+)
+@click.option(
+    "--non-finite-terminate",
+    is_flag=True,
+    help="Terminate training with an error after reporting a non-finite value.",
+)
 def train_command(**options) -> None:
     """Click entrypoint for training."""
 

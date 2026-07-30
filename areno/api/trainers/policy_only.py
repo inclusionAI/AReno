@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import time
 from pathlib import Path
@@ -443,6 +444,11 @@ class PolicyOnlyTrainer:
                     eos_token_id=tokenizer.eos_token_id,
                 )
             )
+        # Non-finite detection for rewards and advantages (#238)
+        step = getattr(self, "_dashboard_step", 0)
+        self._check_non_finite_values(rewards_all, stage="agentic_rewards", step=step)
+        all_advantages = [seq_adv for ts in train_batch for seq_adv in ts.advantages]
+        self._check_non_finite_values(all_advantages, stage="agentic_advantages", step=step)
         return train_batch, rewards_all, rollout_logprobs
 
     def _record_sample_completions(self, tokenizer, epoch: int, step: int, prompt_batch, rollout_results) -> None:
@@ -506,6 +512,31 @@ class PolicyOnlyTrainer:
             if logged + 1 >= limit:
                 return
 
+    def _check_non_finite_values(self, values: list[float], *, stage: str, step: int) -> None:
+        """Log and optionally raise when rewards or advantages contain NaN/Inf.
+
+        Uses the trainer-level config flags ``non_finite_skip_update`` and
+        ``non_finite_terminate`` to decide whether to terminate (raise) or
+        merely warn (the batch is still sent to the backend which will do its
+        own engine-level detection and skip if configured).
+        """
+        bad = [i for i, v in enumerate(values) if not math.isfinite(v)]
+        if not bad:
+            return
+        self.logger.warning(
+            "Non-finite values detected at step %d stage=%s: %d/%d entries are NaN/Inf "
+            "(indices: %s). Values: %s",
+            step, stage, len(bad), len(values), bad[:10],
+            [v if math.isfinite(v) else ("NaN" if math.isnan(v) else "Inf") for v in values[:10]],
+        )
+        if getattr(self.config, "non_finite_terminate", False):
+            from areno.engine.runtime.non_finite import NonFiniteTrainingError
+
+            raise NonFiniteTrainingError(
+                f"Training terminated at step {step} (stage={stage}) due to "
+                f"{len(bad)} non-finite values in {len(values)} entries."
+            )
+
     def _materialize_train_batch(self, tokenizer, prompt_batch, rollout_results):
         """Assemble TrainSequence rows for one rollout batch.
 
@@ -564,6 +595,11 @@ class PolicyOnlyTrainer:
                         eos_token_id=tokenizer.eos_token_id,
                     )
                 )
+        # Non-finite detection for rewards and advantages (#238)
+        step = getattr(self, "_dashboard_step", 0)
+        self._check_non_finite_values(rewards_all, stage="rewards", step=step)
+        all_advantages = [seq_adv for ts in train_batch for seq_adv in ts.advantages]
+        self._check_non_finite_values(all_advantages, stage="advantages", step=step)
         return train_batch, rewards_all, rollout_logprobs
 
     def _maybe_save(self, epoch: int, step: int) -> None:
