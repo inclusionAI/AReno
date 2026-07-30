@@ -148,6 +148,8 @@ class DiagnosisServer(ThreadingHTTPServer):
             f"New circuit: {self.n_inputs} inputs, {self.n_gates} gates. Find the faulty gate!",
             f"You have {self.max_probes} probes. Click a gate to probe, then diagnose.",
         ]
+        if hasattr(self, "_messages"):
+            del self._messages
 
 
 class DiagnosisHandler(BaseHTTPRequestHandler):
@@ -251,6 +253,7 @@ class DiagnosisHandler(BaseHTTPRequestHandler):
         server.probes_used += 1
         values = evaluate(server.nodes, server.input_vector, server.fault)
         probed_val = values[node_id]
+        server._last_probed_value = probed_val
         server.events.insert(
             0,
             f"Probed {_node_label_text(server.nodes, node_id)} → value = {int(probed_val)} "
@@ -284,17 +287,24 @@ class DiagnosisHandler(BaseHTTPRequestHandler):
         self._send_json(_make_payload(server))
 
     def _handle_agent(self) -> None:
-        """Let the LLM agent make one move."""
+        """Let the LLM agent make one move, with full conversation history."""
         server = self.server
         if server.diagnosis_submitted:
             self._send_json(_make_payload(server))
             return
         if server.openai_client is None:
             server.openai_client = _make_openai_client(server.args)
-        messages = [{"role": "system", "content": SYSTEM_PROMPT_AGENT}]
-        from game import make_prompt as game_make_prompt
-        record = {"nodes": server.nodes, "n_inputs": server.n_inputs, "n_gates": server.n_gates, "max_probes": server.max_probes}
-        messages.append({"role": "user", "content": game_make_prompt(record)})
+
+        # Build conversation from scratch on first call, then reuse
+        if not hasattr(server, "_messages"):
+            from game import make_prompt as game_make_prompt
+            record = {"nodes": server.nodes, "n_inputs": server.n_inputs, "n_gates": server.n_gates, "max_probes": server.max_probes}
+            server._messages = [
+                {"role": "system", "content": SYSTEM_PROMPT_AGENT},
+                {"role": "user", "content": game_make_prompt(record)},
+            ]
+
+        # Add turn prompt
         if server.input_vector is None:
             tools = [SET_INPUT_VECTOR_TOOL]
             tc = {"type": "function", "function": {"name": "set_input_vector"}}
@@ -307,9 +317,10 @@ class DiagnosisHandler(BaseHTTPRequestHandler):
             tools = [INSPECT_NODE_TOOL, SUBMIT_DIAGNOSIS_TOOL]
             tc = None
             turn_msg = {"role": "user", "content": "Call inspect_node to probe a gate, or submit_diagnosis if confident."}
-        messages.append(turn_msg)
+
+        server._messages.append(turn_msg)
         try:
-            kwargs = {"model": server.args.model, "messages": messages, "tools": tools, "stream": False}
+            kwargs = {"model": server.args.model, "messages": server._messages, "tools": tools, "stream": False}
             if tc:
                 kwargs["tool_choice"] = tc
             response = server.openai_client.chat.completions.create(**kwargs)
@@ -318,6 +329,7 @@ class DiagnosisHandler(BaseHTTPRequestHandler):
             server.events = server.events[:12]
             self._send_json(_make_payload(server))
             return
+
         msg = response.choices[0].message
         calls = list(msg.tool_calls or [])
         if not calls:
@@ -325,20 +337,50 @@ class DiagnosisHandler(BaseHTTPRequestHandler):
             server.events = server.events[:12]
             self._send_json(_make_payload(server))
             return
+
         call = calls[0]
         name = call.function.name
         try:
             args = json.loads(call.function.arguments or "{}")
         except json.JSONDecodeError:
             args = {}
+
+        # Record assistant message and tool result in history
+        assistant_msg = {
+            "role": "assistant",
+            "content": msg.content,
+            "tool_calls": [{
+                "id": call.id, "type": call.type,
+                "function": {"name": call.function.name, "arguments": call.function.arguments},
+            }],
+        }
+        server._messages.append(assistant_msg)
+
         if name == "set_input_vector":
             bits_raw = args.get("inputs", [])
             if isinstance(bits_raw, list):
                 self._handle_set_input(bits_raw)
+                # Record tool result
+                out = next((n for n in server.nodes if n["type"] == "output"), None)
+                from game import evaluate
+                vals = evaluate(server.nodes, server.input_vector, server.fault)
+                out_val = vals[out["id"]] if out else None
+                server._messages.append({
+                    "role": "tool", "tool_call_id": call.id, "name": name,
+                    "content": json.dumps({"input_vector": bits_raw, "output_value": out_val}),
+                })
         elif name == "inspect_node":
             self._handle_probe(args.get("node_id"))
+            server._messages.append({
+                "role": "tool", "tool_call_id": call.id, "name": name,
+                "content": json.dumps({"node_id": args.get("node_id"), "probed_value": server._last_probed_value}),
+            })
         elif name == "submit_diagnosis":
             self._handle_submit(args.get("node_id"), args.get("fault_type"))
+            server._messages.append({
+                "role": "tool", "tool_call_id": call.id, "name": name,
+                "content": json.dumps({"received": True}),
+            })
         else:
             server.events.insert(0, f"LLM called unknown tool: {name}")
             server.events = server.events[:12]
