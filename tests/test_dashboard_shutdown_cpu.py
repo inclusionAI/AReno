@@ -8,7 +8,9 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+from areno.dashboard import server as dashboard_server
 from areno.dashboard.server import DashboardState, Job, parse_shutdown_event
 
 
@@ -33,6 +35,7 @@ def _state() -> DashboardState:
 
 class FakeProcess:
     def __init__(self, *, returncode: int | None = None):
+        self.pid = 123
         self.returncode = returncode
         self.terminate_calls = 0
 
@@ -121,14 +124,17 @@ class DashboardShutdownTest(unittest.TestCase):
         job.process = FakeProcess()
         state.jobs[job.id] = job
 
-        self.assertTrue(state.stop(job.id))
+        with (
+            patch.object(dashboard_server.os, "getpgid", return_value=42, create=True),
+            patch.object(dashboard_server.os, "killpg", create=True) as killpg,
+        ):
+            self.assertTrue(state.stop(job.id))
 
-        self.assertEqual(job.status, "stopping")
-        self.assertEqual(job.process.terminate_calls, 1)
+            self.assertEqual(job.status, "stopping")
 
-        self.assertTrue(state.stop(job.id))
+            self.assertTrue(state.stop(job.id))
+            self.assertEqual(killpg.call_count, 2)
         self.assertEqual(job.status, "stopping")
-        self.assertEqual(job.process.terminate_calls, 2)
 
     def test_graceful_process_exit_finishes_as_stopped(self):
         state = _state()
