@@ -92,7 +92,10 @@ async def _run_episode(item, client) -> list[AgentTrajectoryTurn]:
 def _extract_direction(response) -> str | None:
     """Parse direction from the model's text response."""
 
-    content = response.choices[0].message.content
+    choice = response.choices[0]
+    content = getattr(choice.message, "content", None)
+    finish_reason = getattr(choice, "finish_reason", None)
+    logger.warning("Game2048 DEBUG: finish_reason=%s content=%r", finish_reason, content)
     if content:
         direction = game.parse_action(content)
         if direction is not None:
