@@ -41,7 +41,10 @@ ALL_COORDS: tuple[tuple[int, int], ...] = tuple((r, c) for r in range(9) for c i
 # Number of givens retained per difficulty band. 17 is the theoretical minimum
 # for a unique-solution Sudoku; bands are chosen so generation stays fast.
 DIFFICULTY_CLUES: dict[str, int] = {
-    "tutorial": 66,  # ~15 empty cells: shortest episodes, fastest to verify the RL loop
+    "tutorial": 73,  # ~8 empty cells: shortest episodes a weak model can finish
+                     # within a small context budget (avoids multi-turn token blowup
+                     # before the policy learns to solve). Bump back toward 66 once
+                     # the model reliably solves tutorial.
     "easy": 40,
     "medium": 32,
     "hard": 26,
