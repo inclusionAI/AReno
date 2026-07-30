@@ -69,11 +69,20 @@ def _parse_time(value: Any) -> float | None:
     return None
 
 
-def _duration_seconds(created_at: Any, updated_at: Any) -> float | None:
-    """Return the elapsed seconds between two timestamps, or None if unparseable."""
+def _duration_seconds(created_at: Any, updated_at: Any, status: str = "") -> float | None:
+    """Return the elapsed seconds for a job.
+
+    For running jobs, duration is measured to now() (not updated_at) so it
+    keeps growing while the job is alive. For terminal jobs, duration is
+    measured to updated_at (which is set when the job transitions to a
+    terminal state). This avoids the problem where registry scans update
+    updated_at every poll cycle even after a job has exited.
+    """
     start = _parse_time(created_at)
     if start is None:
         return None
+    if status == "running":
+        return max(0.0, _parse_time(now()) - start)
     end = _parse_time(updated_at)
     if end is None:
         return None
@@ -194,7 +203,7 @@ class Job:
             "step": self.step,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
-            "duration_s": _duration_seconds(self.created_at, self.updated_at),
+            "duration_s": _duration_seconds(self.created_at, self.updated_at, self.status),
             "returncode": self.returncode,
             "pid": self.pid,
             "perf": self.perf,
@@ -589,6 +598,8 @@ class DashboardState:
                         or DEFAULT_METRICS_LOG_DIR,
                         pid=pid,
                     )
+                    if item.get("created_at"):
+                        job.created_at = item["created_at"]
                     job.launch_config = dict(job.config)
                     job.config = {}
                     job.status = "running" if is_running else "exited"
@@ -603,9 +614,15 @@ class DashboardState:
                         job.config = dict(item.get("config") or {})
                     if item.get("config") and not job.launch_config:
                         job.launch_config = dict(item.get("config") or {})
+                    old_status = job.status
                     if job.status != "stopped":
                         job.status = "running" if is_running else "exited"
-                    job.updated_at = now()
+                    # Only update updated_at when transitioning to a terminal
+                    # state or while still running. Do not touch it for jobs
+                    # that were already in a terminal state — otherwise the
+                    # duration keeps growing on every scan.
+                    if is_running or (old_status == "running" and not is_running):
+                        job.updated_at = now()
             self._save_state()
 
     def _load_state(self) -> None:

@@ -50,6 +50,21 @@ class DurationSecondsTest(unittest.TestCase):
         """If updated_at predates created_at the duration is 0, not negative."""
         self.assertEqual(_duration_seconds(200.0, 100.0), 0.0)
 
+    def test_running_uses_now(self):
+        """Running jobs compute duration to now(), not updated_at."""
+        start = "2020-01-01T00:00:00+00:00"
+        stale_updated = "2020-01-01T00:01:00+00:00"
+        result = _duration_seconds(start, stale_updated, status="running")
+        self.assertIsNotNone(result)
+        self.assertGreater(result, 60.0)
+
+    def test_terminal_uses_updated_at(self):
+        """Terminal jobs use updated_at, not now()."""
+        start = "2026-01-01T00:00:00+00:00"
+        end = "2026-01-01T00:05:00+00:00"
+        result = _duration_seconds(start, end, status="exited")
+        self.assertAlmostEqual(result, 300.0, places=1)
+
 
 def _make_job(**overrides):
     """Create a minimal Job with sensible defaults for summary tests."""
@@ -99,6 +114,16 @@ class SummaryJsonTest(unittest.TestCase):
         job.updated_at = "2026-01-01T00:00:00+00:00"
         summary = job.to_summary_json()
         self.assertIsNone(summary["duration_s"])
+
+    def test_duration_running_uses_now(self):
+        """Running jobs compute duration against now(), not stale updated_at."""
+        job = _make_job()
+        job.status = "running"
+        job.created_at = "2020-01-01T00:00:00+00:00"
+        job.updated_at = "2020-01-01T00:01:00+00:00"
+        summary = job.to_summary_json()
+        self.assertIsNotNone(summary["duration_s"])
+        self.assertGreater(summary["duration_s"], 60.0)
 
     def test_serve_job_uses_model_path(self):
         """Serve jobs store the model under model_path, not ckpt."""
