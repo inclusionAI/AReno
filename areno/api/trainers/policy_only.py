@@ -258,6 +258,8 @@ class PolicyOnlyTrainer:
                 )
             reward_records = [ctx.reward_record(sample) for sample in samples]
             rewards, _profile = self._reward_profiler.score_batch(reward_records)
+            if _profile is not None:
+                self.areno.record_reward_profile(_profile)
             rows = ctx._train_rows_from_samples(samples)
             tool_call_count = sum(len(record.tool_calls) for record in reward_records)
             tool_result_count = sum(len(record.tool_results) for record in reward_records)
@@ -558,6 +560,8 @@ class PolicyOnlyTrainer:
                 for sample_idx, (completion, seq) in enumerate(zip(completions, result.sequences, strict=True))
             ]
             rewards, _profile = self._reward_profiler.score_batch(item_records)
+            if _profile is not None:
+                self.areno.record_reward_profile(_profile)
             rewards_all += rewards
             # Group-relative advantage: A_i = (r_i - mean(r))/std(r); shared by
             # every response token of sample i.

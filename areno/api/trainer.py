@@ -362,6 +362,12 @@ class Trainer:
         if self._metrics is not None:
             self._metrics.record_rollout_sample(sample)
 
+    def record_reward_profile(self, profile) -> None:
+        """Persist per-sample reward timing to a jsonl artifact when metrics recording is enabled."""
+
+        if self._metrics is not None:
+            self._metrics.record_reward_profile(profile)
+
     def record_dashboard_state(
         self,
         *,

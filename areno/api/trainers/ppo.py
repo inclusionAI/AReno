@@ -135,6 +135,7 @@ class PPOTrainer(PolicyOnlyTrainer):
             if reward_profile is not None:
                 self._last_ppo_stats["reward_profile_slow_count"] = float(len(reward_profile.slow_samples))
                 self._last_ppo_stats["reward_profile_max_s"] = reward_profile.to_scalars()["reward_max_s"]
+                self.areno.record_reward_profile(reward_profile)
             self._record_ppo_state(stage="score_end", role="reward")
         else:
             self.logger.info("role=reward stage=score_start rows=%d", len(token_rows))
