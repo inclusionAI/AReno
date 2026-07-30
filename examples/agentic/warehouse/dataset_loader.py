@@ -24,9 +24,10 @@ def load_training_dataset(dataset_path: str, *, default_loader, **_: object) -> 
         record["sku_pool"] = [str(s) for s in record.get("sku_pool", [])]
         record["start_shelf"] = str(record.get("start_shelf", "A1"))
         try:
-            build_state(record)
+            state = build_state(record)
         except ValueError as exc:
             raise ValueError(f"warehouse dataset row {index}: {exc}") from exc
+        record["target_shelf"] = state.target_shelf
         record["prompt"] = make_prompt(record)
         records.append(record)
     return records

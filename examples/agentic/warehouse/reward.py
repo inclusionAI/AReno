@@ -1,4 +1,4 @@
-"""Deterministic outcome and process reward for warehouse trajectories."""
+"""Graded distance reward for warehouse navigation trajectories."""
 
 from __future__ import annotations
 
@@ -11,19 +11,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from game import (  # noqa: E402
     baseline_distance,
     build_state,
-    cart_progress,
     execute_action,
+    remaining_distance,
     state_metrics,
 )
 
 
 def reward_fn(record) -> float:
-    """Replay exact tool calls and score completion, mistakes, and distance."""
+    """Replay tool calls and score completion plus navigation progress."""
 
     state = build_state(dict(record.source_record))
     baseline = baseline_distance(state)
     groups = _tool_call_groups(record)
-    repeated_checks = 0
 
     for calls in groups:
         if len(calls) != 1:
@@ -39,21 +38,21 @@ def reward_fn(record) -> float:
             state.invalid_actions += 1
             continue
 
-        if name == "check_shelf":
-            if state.agent_pos in state.checked_shelves:
-                repeated_checks += 1
         execute_action(state, name, arguments)
 
     metrics = state_metrics(state, baseline=baseline)
-    if state.completed:
-        score = 0.7 + 0.3 * metrics["distance_efficiency"]
-    else:
-        score = -0.5 + 0.4 * cart_progress(state)
 
-    score -= 0.20 * state.picking_errors
+    if state.completed:
+        score = 1.0
+    else:
+        remaining = remaining_distance(state)
+        if baseline > 0:
+            progress = max(0.0, 1.0 - remaining / baseline)
+        else:
+            progress = 1.0 if remaining == 0 else 0.0
+        score = -0.5 + 0.3 * progress
+
     score -= 0.05 * state.invalid_actions
-    score -= 0.10 * state.empty_shelf_checks
-    score -= 0.05 * repeated_checks
     return max(-1.0, min(1.0, score))
 
 

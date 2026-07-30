@@ -1,4 +1,4 @@
-"""Bounded multi-turn agent loop for warehouse picking."""
+"""Bounded multi-turn agent loop for warehouse navigation."""
 
 from __future__ import annotations
 
@@ -25,35 +25,13 @@ from game import (  # noqa: E402
 logger = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
-TURN_SLACK = 2
-
 SYSTEM_PROMPT = (
-    "You are a warehouse robot. Collect exactly the requested items and complete the order. "
-    "On each action turn, call exactly one available tool. Use query_inventory to locate requested "
-    "SKUs, move_to for one adjacent step, check_shelf to verify stock after arrival, pick_item only "
-    "after inspecting the current shelf, and submit_order only when the cart exactly matches the "
-    "order. Prefer the shortest route and never invent stock or call multiple tools at once."
+    "You are a warehouse robot. Navigate to the target shelf and submit the order. "
+    "On each turn, call exactly one tool. Use move_to to move one adjacent shelf at a time. "
+    "Use submit_order when you are at the target shelf to complete the order."
 )
 
 TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "query_inventory",
-            "description": "Find every current shelf location and quantity for one SKU.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "sku": {
-                        "type": "string",
-                        "description": "SKU whose warehouse locations should be returned.",
-                    }
-                },
-                "required": ["sku"],
-                "additionalProperties": False,
-            },
-        },
-    },
     {
         "type": "function",
         "function": {
@@ -75,44 +53,8 @@ TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "check_shelf",
-            "description": "Inspect the stock on the current shelf.",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "required": [],
-                "additionalProperties": False,
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "pick_item",
-            "description": "Pick a positive quantity of one SKU from the current shelf.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "sku": {
-                        "type": "string",
-                        "description": "SKU to pick.",
-                    },
-                    "qty": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "description": "Quantity to pick.",
-                    },
-                },
-                "required": ["sku", "qty"],
-                "additionalProperties": False,
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "submit_order",
-            "description": "Validate and submit the current cart.",
+            "description": "Submit the order. Only works when you are at the target shelf.",
             "parameters": {
                 "type": "object",
                 "properties": {},
@@ -123,28 +65,28 @@ TOOLS = [
     },
 ]
 
+TOOL_BY_NAME = {tool["function"]["name"]: tool for tool in TOOLS}
+
 
 def make_state_prompt(
     state: WarehouseState,
     *,
     turn_number: int,
     turn_limit: int,
+    is_submit_turn: bool,
 ) -> str:
-    """Build a compact state reminder without discarding message history."""
+    """Build a compact state reminder for the current turn."""
 
-    order = ", ".join(f"{item['sku']} x{item['qty']}" for item in state.order)
-    cart = ", ".join(f"{sku} x{quantity}" for sku, quantity in sorted(state.cart.items())) if state.cart else "empty"
-    remaining = []
-    for item in state.order:
-        quantity = item["qty"] - state.cart.get(item["sku"], 0)
-        if quantity > 0:
-            remaining.append(f"{item['sku']} x{quantity}")
-    needed = ", ".join(remaining) if remaining else "nothing; submit the order"
     neighbors = ", ".join(state.adjacency.get(state.agent_pos, [])) or "none"
+    if is_submit_turn:
+        return (
+            f"Turn {turn_number} of {turn_limit}. You are at shelf {state.agent_pos}. "
+            f"Target shelf: {state.target_shelf}. Call submit_order."
+        )
     return (
-        f"Action turn {turn_number} of {turn_limit}. Order: {order}. Cart: {cart}. "
-        f"Still needed: {needed}. Current shelf: {state.agent_pos}. Adjacent shelves: {neighbors}. "
-        "Call exactly one tool."
+        f"Turn {turn_number} of {turn_limit}. You are at shelf {state.agent_pos}. "
+        f"Target shelf: {state.target_shelf}. Adjacent shelves: {neighbors}. "
+        f"Call move_to to navigate toward the target."
     )
 
 
@@ -194,7 +136,7 @@ async def _run_episode(
     state: WarehouseState,
     client,
 ) -> list[AgentTrajectoryTurn]:
-    """Run one episode while preserving exact assistant/tool ordering."""
+    """Run one episode with per-turn forced single tool (shopping pattern)."""
 
     turns: list[AgentTrajectoryTurn] = []
     messages: list[dict[str, Any]] = [
@@ -202,11 +144,12 @@ async def _run_episode(
         {"role": "user", "content": item.prompt},
     ]
     baseline = baseline_distance(state)
-    turn_limit = baseline_action_count(state) + TURN_SLACK
-    termination_reason = "turn_limit"
-    needs_final_turn = False
+    turn_limit = baseline_action_count(state)
 
     for turn_number in range(1, turn_limit + 1):
+        is_submit_turn = (turn_number == turn_limit)
+        tool_name = "submit_order" if is_submit_turn else "move_to"
+
         turn_messages = [
             *messages,
             {
@@ -215,89 +158,35 @@ async def _run_episode(
                     state,
                     turn_number=turn_number,
                     turn_limit=turn_limit,
+                    is_submit_turn=is_submit_turn,
                 ),
             },
         ]
-        assistant_message, turn = await _call_model(
-            item,
-            client,
-            turn_messages,
-        )
+        assistant_message, turn = await _call_model(item, client, turn_messages, tool_name)
         turns.append(turn)
         messages = [*turn_messages, assistant_message]
 
-        calls = list(assistant_message.get("tool_calls") or [])
-        if not calls:
-            logger.warning(
-                "Warehouse model returned no tool call prompt_index=%s sample_index=%s turn=%d",
-                getattr(item, "prompt_index", None),
-                getattr(item, "sample_index", None),
-                turn_number,
-            )
-            termination_reason = "missing_tool_call"
-            needs_final_turn = False
-            break
-
-        if len(calls) != 1:
-            state.invalid_actions += 1
-            message = f"expected exactly one tool call, received {len(calls)}"
-            results = [
-                _result_payload(
-                    ActionResult(
-                        False,
-                        message,
-                        {
-                            "stage": "tool_protocol",
-                            "call_count": len(calls),
-                        },
-                    ),
-                    state,
-                    baseline,
-                )
-                for _ in calls
-            ]
-            messages.extend(_tool_messages(assistant_message, results))
-            termination_reason = "invalid_tool_count"
-            needs_final_turn = True
-            break
-
-        result = _execute_tool_call(calls[0], state)
+        result = _execute_tool_call(assistant_message, state)
         payload = _result_payload(result, state, baseline)
-        messages.extend(_tool_messages(assistant_message, [payload]))
+        messages.extend(_tool_messages(assistant_message, payload))
         metrics = payload["data"]["metrics"]
         logger.info(
             "Warehouse action prompt_index=%s sample_index=%s turn=%d tool=%s "
-            "success=%s completed=%d mistakes=%d invalid=%d empty_checks=%d "
-            "distance=%d baseline=%d",
+            "success=%s completed=%d invalid=%d distance=%d baseline=%d",
             getattr(item, "prompt_index", None),
             getattr(item, "sample_index", None),
             turn_number,
-            calls[0]["function"]["name"],
+            tool_name,
             result.success,
             metrics["complete_orders"],
-            metrics["picking_mistakes"],
             metrics["invalid_actions"],
-            metrics["empty_shelf_checks"],
             metrics["distance"],
             metrics["baseline_distance"],
         )
-        needs_final_turn = True
 
         if state.completed:
-            termination_reason = "completed"
             break
 
-    if needs_final_turn:
-        turns.append(
-            await _final_turn(
-                item,
-                client,
-                messages,
-                state,
-                baseline,
-                termination_reason,
-            )
-        )
     return turns
 
 
@@ -305,62 +194,22 @@ async def _call_model(
     item,
     client,
     messages: list[dict[str, Any]],
+    tool_name: str,
 ) -> tuple[dict[str, Any], AgentTrajectoryTurn]:
+    """Call model with only one tool exposed and forced tool_choice (shopping pattern)."""
+
+    tools = [TOOL_BY_NAME[tool_name]]
+    tool_choice = {"type": "function", "function": {"name": tool_name}}
     response = await client.chat.completions.create(
         model="policy",
         messages=messages,
-        tools=TOOLS,
-        tool_choice="required",
+        tools=tools,
+        tool_choice=tool_choice,
         stream=False,
     )
-    return _assistant_message(response), AgentTrajectoryTurn(
-        item=item,
-        messages=messages,
-        response=response,
-        tools=TOOLS,
-        tool_choice="required",
-    )
-
-
-async def _final_turn(
-    item,
-    client,
-    messages: list[dict[str, Any]],
-    state: WarehouseState,
-    baseline: int,
-    termination_reason: str,
-) -> AgentTrajectoryTurn:
-    metrics = state_metrics(state, baseline=baseline)
-    final_messages = [
-        *messages,
-        {
-            "role": "user",
-            "content": (
-                f"The episode ended with reason {termination_reason}. "
-                f"Metrics: {json.dumps(metrics, sort_keys=True)}. "
-                "Briefly summarize the outcome without calling a tool."
-            ),
-        },
-    ]
-    response = await client.chat.completions.create(
-        model="policy",
-        messages=final_messages,
-        tools=TOOLS,
-        tool_choice="none",
-        stream=False,
-    )
-    return AgentTrajectoryTurn(
-        item=item,
-        messages=final_messages,
-        response=response,
-        tools=TOOLS,
-        tool_choice="none",
-    )
-
-
-def _assistant_message(response) -> dict[str, Any]:
     message = response.choices[0].message
-    return {
+    tool_calls = [call for call in (message.tool_calls or []) if call.function.name == tool_name][:1]
+    assistant_message = {
         "role": "assistant",
         "content": message.content,
         "tool_calls": [
@@ -372,15 +221,42 @@ def _assistant_message(response) -> dict[str, Any]:
                     "arguments": call.function.arguments,
                 },
             }
-            for call in (message.tool_calls or [])
+            for call in tool_calls
         ],
     }
+    if not assistant_message["tool_calls"]:
+        assistant_message["tool_calls"] = [
+            {
+                "id": f"missing_{tool_name}",
+                "type": "function",
+                "function": {
+                    "name": tool_name,
+                    "arguments": "{}",
+                },
+            }
+        ]
+    return assistant_message, AgentTrajectoryTurn(
+        item=item,
+        messages=messages,
+        response=response,
+        tools=tools,
+        tool_choice=tool_choice,
+    )
 
 
 def _execute_tool_call(
-    call: dict[str, Any],
+    assistant_message: dict[str, Any],
     state: WarehouseState,
 ) -> ActionResult:
+    calls = assistant_message.get("tool_calls") or []
+    if not calls:
+        state.invalid_actions += 1
+        return ActionResult(
+            False,
+            "missing tool call",
+            {"stage": "tool_protocol"},
+        )
+    call = calls[0]
     function = call.get("function")
     if not isinstance(function, dict):
         state.invalid_actions += 1
@@ -427,20 +303,16 @@ def _result_payload(
 
 def _tool_messages(
     assistant_message: dict[str, Any],
-    tool_results: list[dict[str, Any]],
+    tool_result: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    calls = list(assistant_message.get("tool_calls") or [])
-    if len(calls) != len(tool_results):
-        raise ValueError(f"tool result count {len(tool_results)} does not match call count {len(calls)}")
-
-    messages: list[dict[str, Any]] = []
-    for call, result in zip(calls, tool_results, strict=True):
+    messages: list[dict[str, Any]] = [assistant_message]
+    for call in assistant_message.get("tool_calls") or []:
         messages.append(
             {
                 "role": "tool",
                 "tool_call_id": call["id"],
                 "name": call["function"]["name"],
-                "content": json.dumps(result, ensure_ascii=False),
+                "content": json.dumps(tool_result, ensure_ascii=False),
             }
         )
     return messages

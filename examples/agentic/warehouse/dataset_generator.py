@@ -41,7 +41,7 @@ def generate_records(count: int, *, seed: int = 2026) -> list[dict]:
             max_stock_per_sku=task["max_stock"],
             rng=record_rng,
         )
-        task["order"] = generate_order(layout["shelves"], task["order_size"], record_rng)
+        task["order"] = generate_order(layout["shelves"], task["order_size"], record_rng, exclude_shelf=task["start_shelf"])
         records.append(task)
     return records
 
