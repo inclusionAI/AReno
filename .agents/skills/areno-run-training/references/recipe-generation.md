@@ -20,7 +20,7 @@ explaining why it was chosen.
 | --- | --- |
 | Topology | `world_size = gpu_count`; `tp_size = 1` when `gpu_count <= 2`, else `min(4, gpu_count)` |
 | Batch sizing | `batch_size = target_batch`; `mini_bs = min(target_batch, 4)` for small GPU, else `min(target_batch, 16)` |
-| Context split | `max_prompt_tokens = min(context_length // 2, 1024)`; `max_new_tokens = min(remaining, 3071)` |
+| Context split | Algorithm-aware: SFT=100%/0%, DPO=50%/50%, RL=25%/75% (prompt capped at 1024, response at 3071) |
 | Rollout fields | Included only for `gspo`/`grpo`/`ppo` (`n_samples`, `temperature`, `top_k`, `top_p`, etc.) |
 | Algorithm fields | DPO: `dpo_beta`, `ref_ckpt`; GSPO: `gspo_clip_eps`; GRPO: `grpo_clip_eps`; PPO: full `PPOTrainerConfig` set |
 | Safe defaults | `activation_checkpointing=True`, `attn_backend="flash"`, `optimizer_lr=1e-6`, `epochs=10` |
@@ -90,12 +90,35 @@ On Kaggle dual-T4 environments (`gpu_count=2`):
 - T4 GPUs do not support FlashAttention 2 — consider `--override attn_backend=native` if you encounter attention backend errors
 - Provenance strings explicitly mention the small-GPU downgrade reasoning
 
+## Concise command output
+
+The generated `command` only includes:
+1. **Required fields** per algorithm (algo, ckpt, dataset-path, tp_size, world_size, batch_size, mini_bs, max_prompt_tokens, max_new_tokens)
+2. **Algorithm-specific fields** (n_samples for RL, gspo_clip_eps for GSPO, clip_eps/critic_lr/gamma/lam for PPO, etc.)
+3. **User overrides** (fields explicitly set via `--override` or named flags like `--tp-size`)
+
+Non-required defaults (epochs, optimizer_lr, weight_decay, etc.) are omitted to keep the command short. They remain in the full `recipe` JSON for reference.
+
+## Memory estimation
+
+When `--ckpt` is provided (e.g. `Qwen/Qwen3-0.6B`), the script estimates per-GPU memory usage:
+
+| Component | Formula |
+| --- | --- |
+| Weights | `param_count * dtype_bytes // tp_size` |
+| Optimizer | `param_count * (dtype_bytes + 6 or 12) // tp_size` (8-bit or standard Adam) |
+| KV-cache | `num_layers * 2 * max_running_seqs * cache_tokens * local_kv_heads * head_dim * dtype_bytes` |
+| Activations | `34 * hidden * seq * mini_bs * dtype_bytes` (reduced 70% with activation checkpointing) |
+
+When `--gpu-type` is also provided (e.g. `T4`, `A100`), the script compares the estimate against typical VRAM and emits an OOM warning if the estimate exceeds available memory.
+
 ## Copyable example
 
 ```bash
-# Generate a GSPO recipe for a 2-GPU (Kaggle T4) setup with 4096-token context
+# Generate a GSPO recipe with memory estimation for T4 GPUs
 python .agents/skills/areno-run-training/scripts/generate_recipe.py \
-  --mode gspo --gpu-count 2 --context-length 4096 --target-batch 8
+  --mode gspo --gpu-count 2 --context-length 4096 --target-batch 8 \
+  --ckpt Qwen/Qwen3-0.6B --gpu-type T4
 ```
 
 Sample output (abbreviated):

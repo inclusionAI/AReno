@@ -6,12 +6,18 @@ target batch size, this script derives a full training configuration from
 AReno's ``TrainerConfig`` dataclass hierarchy defaults, validates all inputs,
 and emits both structured JSON and a human-readable summary.  Each config
 value is annotated with provenance explaining its derivation.
+
+When ``--ckpt`` points to a model whose architecture can be inferred (e.g.
+``Qwen/Qwen3-0.6B``), the script also estimates per-GPU memory usage for
+weights, optimizer, KV-cache, and activations, and warns if the estimate
+exceeds typical GPU VRAM.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import shlex
 from pathlib import Path
 from typing import Any
@@ -26,8 +32,6 @@ MODES = ("sft", "dpo", "gspo", "grpo", "ppo")
 ROLLOUT_MODES = {"gspo", "grpo", "ppo"}
 
 # Fields whose CLI flag name differs from the ``_`` → ``-`` convention.
-# These map dataclass field names to the actual ``--flag`` used by
-# ``areno/cli/train.py``.
 _SPECIAL_CLI_FLAGS: dict[str, str] = {
     "optimizer_lr": "--lr",
     "optimizer_min_lr": "--min-lr",
@@ -63,7 +67,6 @@ def _cli_flag(field_name: str) -> str:
 # Per-mode field sets (ordered for stable output)
 # ---------------------------------------------------------------------------
 
-# Common fields for all modes, in display order.
 _BASE_FIELDS: tuple[str, ...] = (
     "algo",
     "ckpt",
@@ -99,7 +102,6 @@ _BASE_FIELDS: tuple[str, ...] = (
     "metrics_log_dir",
 )
 
-# Rollout-specific fields (gspo/grpo/ppo).
 _ROLLOUT_FIELDS: tuple[str, ...] = (
     "n_samples",
     "temperature",
@@ -109,7 +111,6 @@ _ROLLOUT_FIELDS: tuple[str, ...] = (
     "max_running_prompts",
 )
 
-# Policy-gradient fields (gspo/grpo/ppo).
 _POLICY_FIELDS: tuple[str, ...] = (
     "reward_fn_path",
     "agent_fn",
@@ -138,7 +139,17 @@ _PPO_FIELDS: tuple[str, ...] = (
     "lam",
 )
 
-# Fields excluded from the generated command (handled specially or not CLI-exposed).
+# Fields always emitted in the command (required for every mode).
+_COMMAND_REQUIRED_BASE: tuple[str, ...] = (
+    "tp_size",
+    "world_size",
+    "batch_size",
+    "mini_bs",
+    "max_prompt_tokens",
+    "max_new_tokens",
+)
+
+# Fields always excluded from the command (handled specially or not CLI-exposed).
 _COMMAND_SKIP_FIELDS: set[str] = {
     "algo",
     "ckpt",
@@ -155,6 +166,45 @@ _COMMAND_SKIP_FIELDS: set[str] = {
     "agent_timeout_s",
     "chat_template_enable_thinking",
     "role_device",
+    "score_micro_bs",
+    "gradient_accumulation_steps",
+    "optimizer_min_lr",
+    "lr_decay_steps",
+    "lr_decay_style",
+    "optimizer_beta1",
+    "optimizer_beta2",
+    "weight_decay",
+    "grad_clip_norm",
+    "adam_8bit",
+    "activation_checkpointing",
+    "keep_rollout_state",
+    "eager_decode",
+    "attn_backend",
+    "epochs",
+    "max_steps",
+    "save_interval",
+    "max_context_len",
+    "temperature",
+    "top_k",
+    "top_p",
+    "greedy",
+    "max_running_prompts",
+    "agent_fn",
+    "agent_timeout_s",
+    "train_tool_results",
+    "chat_template_enable_thinking",
+}
+
+# Context-length split ratios per algorithm: (prompt_fraction, response_fraction).
+# SFT: all context for prompt, no generation needed.
+# DPO: equal split between prompt and response.
+# RL: 25% for prompt (capped at 1024), 75% for generation.
+_CONTEXT_SPLIT: dict[str, tuple[float, float]] = {
+    "sft": (1.0, 0.0),
+    "dpo": (0.5, 0.5),
+    "gspo": (0.25, 0.75),
+    "grpo": (0.25, 0.75),
+    "ppo": (0.25, 0.75),
 }
 
 
@@ -281,6 +331,145 @@ def _defaults_for_mode(mode: str) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Model architecture inference (for memory estimation)
+# ---------------------------------------------------------------------------
+
+# Known model families with approximate parameter counts (in billions).
+# Used to infer model size from checkpoint name when areno is not importable.
+_MODEL_SIZE_PATTERNS: list[tuple[re.Pattern[str], float]] = [
+    (re.compile(r"0\.6[bB]", re.IGNORECASE), 0.6),
+    (re.compile(r"1\.5[bB]", re.IGNORECASE), 1.5),
+    (re.compile(r"1\.7[bB]", re.IGNORECASE), 1.7),
+    (re.compile(r"4[bB]", re.IGNORECASE), 4.0),
+    (re.compile(r"7[bB]", re.IGNORECASE), 7.0),
+    (re.compile(r"8[bB]", re.IGNORECASE), 8.0),
+    (re.compile(r"14[bB]", re.IGNORECASE), 14.0),
+    (re.compile(r"32[bB]", re.IGNORECASE), 32.0),
+    (re.compile(r"72[bB]", re.IGNORECASE), 72.0),
+]
+
+# Rough architecture heuristics: param_count → (num_layers, hidden_size, num_heads, num_kv_heads).
+# Based on typical Qwen/Llama-style architectures.  These are coarse estimates
+# sufficient for memory budgeting, not exact specs.
+_ARCH_HEURISTICS: list[tuple[float, tuple[int, int, int, int]]] = [
+    # (min_params_b, (num_layers, hidden, num_heads, num_kv_heads))
+    (0.0, (28, 1024, 16, 8)),  # ~0.6B
+    (1.0, (28, 2048, 16, 8)),  # ~1.5B
+    (3.0, (36, 2560, 20, 8)),  # ~4B
+    (6.0, (32, 3584, 28, 4)),  # ~7B
+    (12.0, (40, 5120, 40, 8)),  # ~14B
+    (24.0, (64, 5120, 40, 8)),  # ~32B
+    (60.0, (80, 8192, 64, 8)),  # ~72B
+]
+
+# Typical VRAM per GPU type (in bytes).
+_GPU_VRAM: dict[str, int] = {
+    "T4": 16 * 1024**3,
+    "V100": 16 * 1024**3,
+    "A10": 24 * 1024**3,
+    "A100": 80 * 1024**3,
+    "H100": 80 * 1024**3,
+    "H200": 141 * 1024**3,
+}
+
+
+def _infer_param_count(ckpt: str) -> float | None:
+    """Infer approximate parameter count (in billions) from a checkpoint name."""
+
+    for pattern, size in _MODEL_SIZE_PATTERNS:
+        if pattern.search(ckpt):
+            return size
+    return None
+
+
+def _infer_architecture(param_count_b: float) -> tuple[int, int, int, int]:
+    """Return (num_layers, hidden_size, num_heads, num_kv_heads) for a param count."""
+
+    for min_params, arch in _ARCH_HEURISTICS:
+        if param_count_b <= min_params + 0.5:
+            return arch
+    return _ARCH_HEURISTICS[-1][1]
+
+
+def estimate_memory(
+    param_count_b: float,
+    tp_size: int,
+    num_layers: int,
+    hidden_size: int,
+    num_heads: int,
+    num_kv_heads: int,
+    batch_size: int,
+    n_samples: int,
+    mini_bs: int,
+    max_new_tokens: int,
+    context_length: int,
+    activation_checkpointing: bool,
+    adam_8bit: bool,
+    mode: str,
+    gpu_type: str | None = None,
+) -> dict[str, Any]:
+    """Estimate per-GPU memory usage for the four major components.
+
+    Returns a dict with bytes for weights, optimizer, KV-cache, activations,
+    total, and (if gpu_type is known) headroom and an OOM warning flag.
+    """
+
+    dtype_bytes = 2  # bf16/fp16
+    param_count = int(param_count_b * 1e9)
+
+    # --- Weights: TP-sharded ---
+    weights_bytes = param_count * dtype_bytes // tp_size
+
+    # --- Optimizer: fp32 Adam states (2 moments + grad) ---
+    # 8-bit Adam uses 6 bytes/param, standard Adam uses 12 bytes/param.
+    opt_bytes_per_param = 6 if adam_8bit else 12
+    optimizer_bytes = param_count * (dtype_bytes + opt_bytes_per_param) // tp_size
+
+    # --- KV-cache: per-GPU ---
+    local_kv_heads = max(num_kv_heads // tp_size, 1)
+    head_dim = hidden_size // num_heads
+    # For RL: running sequences = batch_size * n_samples; for offline: batch_size.
+    max_running_seqs = batch_size * n_samples if mode in ROLLOUT_MODES else batch_size
+    # Each sequence may use up to max_new_tokens tokens of KV cache (coarse).
+    cache_tokens = max(max_new_tokens, context_length)
+    kv_cache_bytes = num_layers * 2 * max_running_seqs * cache_tokens * local_kv_heads * head_dim * dtype_bytes
+
+    # --- Activations: per-GPU, coarse estimate ---
+    # ~34 * hidden * seq * mini_bs * dtype_bytes, reduced 70% with checkpointing.
+    act_bytes = 34 * hidden_size * context_length * mini_bs * dtype_bytes
+    if activation_checkpointing:
+        act_bytes = int(act_bytes * 0.3)
+
+    total = weights_bytes + optimizer_bytes + kv_cache_bytes + act_bytes
+
+    result: dict[str, Any] = {
+        "weights_bytes": weights_bytes,
+        "optimizer_bytes": optimizer_bytes,
+        "kv_cache_bytes": kv_cache_bytes,
+        "activations_bytes": act_bytes,
+        "total_estimated_bytes": total,
+        "param_count": param_count,
+        "tp_size": tp_size,
+    }
+
+    # Add headroom if GPU type is known.
+    if gpu_type and gpu_type in _GPU_VRAM:
+        vram = _GPU_VRAM[gpu_type]
+        result["gpu_type"] = gpu_type
+        result["per_gpu_vram_bytes"] = vram
+        result["headroom_bytes"] = vram - total
+        result["headroom_ok"] = vram > total
+        if vram <= total:
+            result["oom_warning"] = (
+                f"Estimated memory ({total / 1024**3:.1f} GB) exceeds {gpu_type} VRAM "
+                f"({vram / 1024**3:.0f} GB). Consider reducing batch_size, mini_bs, "
+                f"or context_length, or using --adam-8bit."
+            )
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Validation
 # ---------------------------------------------------------------------------
 
@@ -325,47 +514,61 @@ def validate_inputs(
 # Recipe derivation
 # ---------------------------------------------------------------------------
 
-# Fields that require special handling in ``derive_recipe`` beyond a simple
-# default lookup.  Each handler returns (value, provenance, optional warning).
-# Handlers that set ``warning`` will have it appended to the warnings list.
 
-
-def _derive_topo(gpu_count: int, overrides: dict[str, Any]) -> tuple[int, str, str | None]:
-    """Derive tp_size from GPU count.  Returns (tp_size, provenance, warning)."""
+def _derive_topo(gpu_count: int, overrides: dict[str, Any]) -> tuple[int, str]:
+    """Derive tp_size from GPU count.  Returns (tp_size, provenance)."""
 
     if "tp_size" in overrides:
-        return int(overrides["tp_size"]), "user override", None
+        return int(overrides["tp_size"]), "user override"
     if gpu_count <= 2:
-        return 1, f"set to 1 because gpu_count ({gpu_count}) <= 2 (small-GPU friendly)", None
+        return 1, f"set to 1 because gpu_count ({gpu_count}) <= 2 (small-GPU friendly)"
     tp = min(4, gpu_count)
-    return tp, f"set to min(4, gpu_count) = {tp} (TrainerConfig default capped to GPU count)", None
+    return tp, f"set to min(4, gpu_count) = {tp} (TrainerConfig default capped to GPU count)"
 
 
-def _derive_mini_bs(target_batch: int, gpu_count: int, overrides: dict[str, Any]) -> tuple[int, str, str | None]:
+def _derive_mini_bs(target_batch: int, gpu_count: int, overrides: dict[str, Any]) -> tuple[int, str]:
     """Derive mini_bs from target batch and GPU count."""
 
     if "mini_bs" in overrides:
-        return int(overrides["mini_bs"]), "user override", None
+        return int(overrides["mini_bs"]), "user override"
     if gpu_count <= 2:
         cap = min(target_batch, 4)
-        return cap, f"capped to min(target_batch, 4) = {cap} for small GPU count (<=2) to avoid OOM", None
+        return cap, f"capped to min(target_batch, 4) = {cap} for small GPU count (<=2) to avoid OOM"
     cap = min(target_batch, 16)
-    return cap, f"set to min(target_batch, 16) = {cap} (TrainerConfig default capped to batch)", None
+    return cap, f"set to min(target_batch, 16) = {cap} (TrainerConfig default capped to batch)"
 
 
-def _derive_score_micro_bs(gpu_count: int, overrides: dict[str, Any]) -> tuple[int, str, str | None]:
+def _derive_score_micro_bs(gpu_count: int, overrides: dict[str, Any]) -> tuple[int, str]:
     """Derive score_micro_bs from GPU count."""
 
     if "score_micro_bs" in overrides:
-        return int(overrides["score_micro_bs"]), "user override", None
+        return int(overrides["score_micro_bs"]), "user override"
     if gpu_count <= 2:
-        return 4, "reduced to 4 for small GPU count (<=2)", None
-    return 8, "TrainerConfig default (8)", None
+        return 4, "reduced to 4 for small GPU count (<=2)"
+    return 8, "TrainerConfig default (8)"
+
+
+def _derive_context_split(mode: str, context_length: int) -> tuple[int, int]:
+    """Split context_length into (max_prompt_tokens, max_new_tokens) per algorithm.
+
+    SFT: all context for prompt, no generation.
+    DPO: equal split.
+    RL (gspo/grpo/ppo): 25% for prompt (capped at 1024), 75% for generation.
+    """
+
+    prompt_frac, response_frac = _CONTEXT_SPLIT.get(mode, (0.5, 0.5))
+    if mode == "sft":
+        # SFT: full context for prompt, no generation tokens.
+        return context_length, 0
+    max_prompt = min(int(context_length * prompt_frac), 1024)
+    max_new = min(int(context_length * response_frac), 3071)
+    if max_new <= 0:
+        max_new = context_length - max_prompt
+    return max_prompt, max_new
 
 
 # Fields that emit a warning when unset (placeholder required).
 _REQUIRED_PLACEHOLDERS: dict[str, tuple[str, str]] = {
-    # field_name: (provenance_text, warning_text)
     "reward_fn_path": (
         "not set; required for rollout RL — provide --reward-fn-path before training",
         "reward_fn_path is not set; provide --reward-fn-path before training",
@@ -404,14 +607,13 @@ def derive_recipe(
     warnings: list[str] = []
 
     # Pre-derive capacity-sensitive values.
-    tp_size, _, _ = _derive_topo(gpu_count, overrides)
-    mini_bs, _, _ = _derive_mini_bs(target_batch, gpu_count, overrides)
-    score_micro_bs, _, _ = _derive_score_micro_bs(gpu_count, overrides)
+    tp_size, tp_prov = _derive_topo(gpu_count, overrides)
+    mini_bs, mini_prov = _derive_mini_bs(target_batch, gpu_count, overrides)
+    score_micro_bs, smb_prov = _derive_score_micro_bs(gpu_count, overrides)
     world_size = gpu_count
 
-    # Pre-derive context-length split.
-    max_prompt = min(context_length // 2, 1024)
-    max_new = min(context_length - max_prompt, 3071)
+    # Pre-derive context-length split (algorithm-aware).
+    max_prompt, max_new = _derive_context_split(mode, context_length)
 
     for field_name in fields:
         # --- Fixed values (mode, placeholders) ---
@@ -435,7 +637,7 @@ def derive_recipe(
         # --- Capacity-derived values (pre-computed above) ---
         if field_name == "tp_size":
             recipe[field_name] = tp_size
-            provenance[field_name] = _derive_topo(gpu_count, overrides)[1]
+            provenance[field_name] = tp_prov
             continue
 
         if field_name == "world_size":
@@ -450,15 +652,15 @@ def derive_recipe(
 
         if field_name == "mini_bs":
             recipe[field_name] = mini_bs
-            provenance[field_name] = _derive_mini_bs(target_batch, gpu_count, overrides)[1]
+            provenance[field_name] = mini_prov
             continue
 
         if field_name == "score_micro_bs":
             recipe[field_name] = score_micro_bs
-            provenance[field_name] = _derive_score_micro_bs(gpu_count, overrides)[1]
+            provenance[field_name] = smb_prov
             continue
 
-        # --- Context-length fields ---
+        # --- Context-length fields (algorithm-aware split) ---
         if field_name == "max_prompt_tokens":
             if "max_prompt_tokens" in overrides:
                 max_prompt = int(overrides["max_prompt_tokens"])
@@ -466,9 +668,10 @@ def derive_recipe(
                 provenance[field_name] = "user override"
             else:
                 recipe[field_name] = max_prompt
+                prompt_frac = _CONTEXT_SPLIT[mode][0]
                 provenance[field_name] = (
-                    f"set to min(context_length//2, 1024) = {max_prompt} "
-                    "(half context for prompt, capped at TrainerConfig default)"
+                    f"set to min(context_length*{prompt_frac:.0%}, 1024) = {max_prompt} "
+                    f"(algorithm-aware split for {mode})"
                 )
             continue
 
@@ -479,10 +682,14 @@ def derive_recipe(
                 provenance[field_name] = "user override"
             else:
                 recipe[field_name] = max_new
-                provenance[field_name] = (
-                    f"set to min(context_length - max_prompt_tokens, 3071) = {max_new} "
-                    "(remaining context for generation, capped at TrainerConfig default)"
-                )
+                response_frac = _CONTEXT_SPLIT[mode][1]
+                if mode == "sft":
+                    provenance[field_name] = "set to 0 (SFT does not generate tokens)"
+                else:
+                    provenance[field_name] = (
+                        f"set to min(context_length*{response_frac:.0%}, 3071) = {max_new} "
+                        f"(algorithm-aware split for {mode})"
+                    )
             continue
 
         if field_name == "max_context_len":
@@ -555,7 +762,7 @@ def derive_recipe(
 
 
 # ---------------------------------------------------------------------------
-# Command builder
+# Command builder (concise: only required fields + explicit overrides)
 # ---------------------------------------------------------------------------
 
 
@@ -563,19 +770,32 @@ def _format_value(value: Any) -> str:
     """Format a recipe value for CLI output."""
 
     if isinstance(value, float):
-        # Preserve scientific notation for small numbers (e.g. 1e-06).
         if abs(value) < 1e-3 and value != 0:
             return repr(value)
         return str(value)
     return str(value)
 
 
-def build_command(mode: str, recipe: dict[str, Any]) -> str:
-    """Build a directly runnable ``areno train`` command from the recipe."""
+def build_command(
+    mode: str,
+    recipe: dict[str, Any],
+    provenance: dict[str, str],
+    overrides: dict[str, Any],
+) -> str:
+    """Build a concise ``areno train`` command.
+
+    Only emits:
+    1. Mandatory fields (algo, ckpt, dataset-path, tp_size, world_size, etc.)
+    2. Algorithm-specific required fields (reward_fn_path for RL, ref_ckpt for DPO/PPO, etc.)
+    3. Fields explicitly overridden by the user (provenance == 'user override')
+
+    Non-required defaults (epochs, lr, weight_decay, etc.) are omitted to keep
+    the command short.  They remain in the full recipe JSON for reference.
+    """
 
     parts: list[str] = ["areno", "train"]
 
-    # --- Mandatory positional-equivalent flags ---
+    # --- Always-required flags ---
     parts.extend(["--algo", str(recipe["algo"])])
     parts.extend(["--ckpt", str(recipe["ckpt"])])
     parts.extend(["--dataset-path", str(recipe["dataset_path"])])
@@ -601,26 +821,64 @@ def build_command(mode: str, recipe: dict[str, Any]) -> str:
         if recipe.get("critic_ckpt") is not None:
             parts.extend(["--critic-ckpt", str(recipe["critic_ckpt"])])
 
-    # --- Derived/configured values (skip already-emitted and None) ---
+    # --- Required recipe fields (topology, batch, context) ---
+    for field_name in _COMMAND_REQUIRED_BASE:
+        value = recipe.get(field_name)
+        if value is None:
+            continue
+        parts.extend([_cli_flag(field_name), _format_value(value)])
+
+    # RL-specific required fields.
+    if mode in ROLLOUT_MODES:
+        n_samples = recipe.get("n_samples")
+        if n_samples is not None:
+            parts.extend(["--n-samples", str(n_samples)])
+
+    # Algorithm-specific clip/loss fields (always emitted, they define the algorithm behavior).
+    if mode == "gspo" and "gspo_clip_eps" in recipe and recipe["gspo_clip_eps"] is not None:
+        parts.extend(["--gspo-clip-eps", _format_value(recipe["gspo_clip_eps"])])
+    if mode == "grpo" and "grpo_clip_eps" in recipe and recipe["grpo_clip_eps"] is not None:
+        parts.extend(["--grpo-clip-eps", _format_value(recipe["grpo_clip_eps"])])
+    if mode == "dpo" and "dpo_beta" in recipe and recipe["dpo_beta"] is not None:
+        parts.extend(["--dpo-beta", _format_value(recipe["dpo_beta"])])
+    if mode == "ppo":
+        for field in ("clip_eps", "critic_lr", "critic_warmup_steps", "kl_loss_coef", "gamma", "lam"):
+            if field in recipe and recipe[field] is not None:
+                parts.extend([_cli_flag(field), _format_value(recipe[field])])
+
+    # --- User overrides (fields explicitly set by --override or named flags) ---
+    already_emitted = set(_COMMAND_REQUIRED_BASE)
+    if mode in ROLLOUT_MODES:
+        already_emitted.add("n_samples")
+    if mode == "gspo":
+        already_emitted.add("gspo_clip_eps")
+    if mode == "grpo":
+        already_emitted.add("grpo_clip_eps")
+    if mode == "dpo":
+        already_emitted.add("dpo_beta")
+    if mode == "ppo":
+        already_emitted.update({"clip_eps", "critic_lr", "critic_warmup_steps", "kl_loss_coef", "gamma", "lam"})
+
     for field_name, value in recipe.items():
-        if field_name in _COMMAND_SKIP_FIELDS:
+        if field_name in already_emitted:
+            continue  # Already emitted above.
+
+        # Only emit if this was a user override.
+        prov = provenance.get(field_name, "")
+        if prov != "user override":
             continue
         if value is None:
             continue
 
-        # Negated booleans: emit flag when value is False.
+        # Handle boolean flags.
         if field_name in _NEGATED_FLAG_BOOLS:
             if value is False:
                 parts.append(_NEGATED_FLAG_BOOLS[field_name])
             continue
-
-        # is_flag booleans: emit flag when value is True.
         if field_name in _IS_FLAG_BOOLS:
             if value is True:
                 parts.append(_IS_FLAG_BOOLS[field_name])
             continue
-
-        # Skip remaining False booleans (no flag to emit).
         if isinstance(value, bool) and not value:
             continue
 
@@ -643,6 +901,7 @@ def build_human_readable(
     provenance: dict[str, str],
     warnings: list[str],
     command: str,
+    memory: dict[str, Any] | None,
 ) -> str:
     """Build a human-readable summary of the recipe."""
 
@@ -658,6 +917,25 @@ def build_human_readable(
     tp = recipe.get("tp_size", 1)
     lines.append(f"Topology:       world_size={ws}, tp_size={tp}, dp={ws // max(tp, 1)}")
     lines.append("")
+
+    # Memory estimate section.
+    if memory:
+        lines.append("-" * 40)
+        lines.append("Memory Estimate (per GPU)")
+        lines.append("-" * 40)
+        lines.append(f"  weights:      {memory['weights_bytes'] / 1024**3:.2f} GB")
+        lines.append(f"  optimizer:    {memory['optimizer_bytes'] / 1024**3:.2f} GB")
+        lines.append(f"  kv_cache:     {memory['kv_cache_bytes'] / 1024**3:.2f} GB")
+        lines.append(f"  activations:  {memory['activations_bytes'] / 1024**3:.2f} GB")
+        lines.append(f"  total:        {memory['total_estimated_bytes'] / 1024**3:.2f} GB")
+        if "per_gpu_vram_bytes" in memory:
+            vram = memory["per_gpu_vram_bytes"]
+            headroom = memory.get("headroom_bytes", 0)
+            lines.append(f"  GPU VRAM:     {vram / 1024**3:.0f} GB ({memory.get('gpu_type', '?')})")
+            lines.append(
+                f"  headroom:     {headroom / 1024**3:.2f} GB ({'OK' if headroom > 0 else 'WARNING: OOM risk'})"
+            )
+        lines.append("")
 
     lines.append("-" * 40)
     lines.append("Configuration")
@@ -741,6 +1019,8 @@ def main() -> int:
         default=[],
         help="Field-level override in key=value format (can be repeated).",
     )
+    parser.add_argument("--ckpt", type=str, default=None, help="Model checkpoint path (enables memory estimation).")
+    parser.add_argument("--gpu-type", type=str, default=None, help="GPU type for VRAM check (T4, A100, H100, etc.).")
     parser.add_argument("--output", type=str, default=None, help="Write JSON output to this file instead of stdout.")
     args = parser.parse_args()
 
@@ -778,7 +1058,50 @@ def main() -> int:
         args.target_batch,
         overrides,
     )
-    command = build_command(args.mode, recipe)
+
+    # If --ckpt is provided, override the placeholder and estimate memory.
+    ckpt = args.ckpt or recipe.get("ckpt", "<ckpt>")
+    if args.ckpt:
+        recipe["ckpt"] = args.ckpt
+        provenance["ckpt"] = "user-specified checkpoint"
+        # Remove the placeholder warning if present.
+        warnings = [w for w in warnings if not w.startswith("ckpt is a placeholder")]
+
+    command = build_command(args.mode, recipe, provenance, overrides)
+
+    # Estimate memory if model size can be inferred from ckpt.
+    memory: dict[str, Any] | None = None
+    param_count = _infer_param_count(ckpt) if ckpt != "<ckpt>" else None
+    if param_count is not None:
+        num_layers, hidden_size, num_heads, num_kv_heads = _infer_architecture(param_count)
+        tp_size = recipe.get("tp_size", 1)
+        batch_size = recipe.get("batch_size", 1)
+        n_samples = recipe.get("n_samples", 8) if args.mode in ROLLOUT_MODES else 1
+        mini_bs = recipe.get("mini_bs", 4)
+        max_new = recipe.get("max_new_tokens", 3071)
+        act_ckpt = recipe.get("activation_checkpointing", True)
+        adam_8bit = recipe.get("adam_8bit", False)
+        memory = estimate_memory(
+            param_count,
+            tp_size,
+            num_layers,
+            hidden_size,
+            num_heads,
+            num_kv_heads,
+            batch_size,
+            n_samples,
+            mini_bs,
+            max_new,
+            args.context_length,
+            act_ckpt,
+            adam_8bit,
+            args.mode,
+            args.gpu_type,
+        )
+        # Add OOM warning to warnings list.
+        if memory.get("oom_warning"):
+            warnings.append(memory["oom_warning"])
+
     human = build_human_readable(
         args.mode,
         args.gpu_count,
@@ -788,6 +1111,7 @@ def main() -> int:
         provenance,
         warnings,
         command,
+        memory,
     )
 
     output: dict[str, Any] = {
@@ -799,6 +1123,9 @@ def main() -> int:
         "warnings": warnings,
         "human_readable": human,
     }
+
+    if memory:
+        output["memory"] = memory
 
     json_str = json.dumps(output, indent=2, sort_keys=False)
 

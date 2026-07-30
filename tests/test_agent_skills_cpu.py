@@ -290,3 +290,153 @@ def test_generate_recipe_override_works():
     data = json.loads(proc.stdout)
     assert data["recipe"]["optimizer_lr"] == 2e-5
     assert data["provenance"]["optimizer_lr"] == "user override"
+
+
+def test_generate_recipe_command_is_concise():
+    """The generated command should only contain required fields, not all defaults."""
+
+    root = Path(__file__).resolve().parents[1]
+    proc = _run_recipe(
+        root,
+        "--mode",
+        "gspo",
+        "--gpu-count",
+        "2",
+        "--context-length",
+        "4096",
+        "--target-batch",
+        "8",
+    )
+    assert proc.returncode == 0
+    data = json.loads(proc.stdout)
+    cmd = data["command"]
+    # Required fields should be present.
+    assert "--algo" in cmd
+    assert "--tp-size" in cmd
+    assert "--world-size" in cmd
+    assert "--batch-size" in cmd
+    assert "--mini-bs" in cmd
+    assert "--n-samples" in cmd
+    # Non-required defaults should NOT be in the command.
+    assert "--epochs" not in cmd
+    assert "--weight-decay" not in cmd
+    assert "--grad-clip-norm" not in cmd
+    assert "--lr-decay-steps" not in cmd
+
+
+def test_generate_recipe_command_includes_user_overrides():
+    """User-overridden non-required fields should appear in the command."""
+
+    root = Path(__file__).resolve().parents[1]
+    proc = _run_recipe(
+        root,
+        "--mode",
+        "gspo",
+        "--gpu-count",
+        "2",
+        "--context-length",
+        "4096",
+        "--target-batch",
+        "8",
+        "--override",
+        "epochs=5",
+    )
+    assert proc.returncode == 0
+    data = json.loads(proc.stdout)
+    assert data["recipe"]["epochs"] == 5
+    assert "--epochs 5" in data["command"]
+
+
+def test_generate_recipe_sft_context_split():
+    """SFT should allocate all context to prompt, zero to generation."""
+
+    root = Path(__file__).resolve().parents[1]
+    proc = _run_recipe(
+        root,
+        "--mode",
+        "sft",
+        "--gpu-count",
+        "2",
+        "--context-length",
+        "2048",
+        "--target-batch",
+        "4",
+    )
+    assert proc.returncode == 0
+    data = json.loads(proc.stdout)
+    assert data["recipe"]["max_prompt_tokens"] == 2048
+    assert data["recipe"]["max_new_tokens"] == 0
+
+
+def test_generate_recipe_rl_context_split():
+    """RL modes should split context 25% prompt / 75% generation."""
+
+    root = Path(__file__).resolve().parents[1]
+    proc = _run_recipe(
+        root,
+        "--mode",
+        "gspo",
+        "--gpu-count",
+        "2",
+        "--context-length",
+        "4096",
+        "--target-batch",
+        "8",
+    )
+    assert proc.returncode == 0
+    data = json.loads(proc.stdout)
+    # 25% of 4096 = 1024, capped at 1024.
+    assert data["recipe"]["max_prompt_tokens"] == 1024
+    # 75% of 4096 = 3072, capped at 3071.
+    assert data["recipe"]["max_new_tokens"] == 3071
+
+
+def test_generate_recipe_memory_estimation():
+    """Memory estimation should work when --ckpt is provided."""
+
+    root = Path(__file__).resolve().parents[1]
+    proc = _run_recipe(
+        root,
+        "--mode",
+        "gspo",
+        "--gpu-count",
+        "2",
+        "--context-length",
+        "4096",
+        "--target-batch",
+        "8",
+        "--ckpt",
+        "Qwen/Qwen3-0.6B",
+        "--gpu-type",
+        "T4",
+    )
+    assert proc.returncode == 0
+    data = json.loads(proc.stdout)
+    assert "memory" in data
+    mem = data["memory"]
+    assert mem["weights_bytes"] > 0
+    assert mem["optimizer_bytes"] > 0
+    assert mem["kv_cache_bytes"] > 0
+    assert mem["total_estimated_bytes"] > 0
+    assert mem["headroom_ok"] is False  # 0.6B on T4 with batch=8 should OOM
+    assert any("OOM" in w or "exceeds" in w for w in data["warnings"])
+
+
+def test_generate_recipe_memory_no_ckpt():
+    """Memory estimation should be absent when --ckpt is not provided."""
+
+    root = Path(__file__).resolve().parents[1]
+    proc = _run_recipe(
+        root,
+        "--mode",
+        "gspo",
+        "--gpu-count",
+        "2",
+        "--context-length",
+        "4096",
+        "--target-batch",
+        "8",
+    )
+    assert proc.returncode == 0
+    data = json.loads(proc.stdout)
+    assert "memory" not in data
