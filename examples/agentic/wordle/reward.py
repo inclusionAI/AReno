@@ -28,12 +28,21 @@ def reward_fn(record) -> float:
             return -1.0
         guesses.append(arguments["word"])
 
-    if len(guesses) != len(set(map(str, guesses))):
-        return -0.5
+    if not guesses:
+        return -1.0
 
-    return score_episode(
+    has_duplicates = len(guesses) != len(set(map(str, guesses)))
+
+    # Compute base reward from score_episode, then penalize duplicates.
+    # This preserves reward diversity even when some guesses repeat.
+    base = score_episode(
         source["secret"],
         guesses,
         max_guesses=int(source["max_guesses"]),
     )
+    if has_duplicates:
+        # Deduct for repetition but keep the score informative: multiply
+        # the base by a penalty factor and subtract a small fixed cost.
+        return -0.3 + 0.6 * base
+    return base
 
