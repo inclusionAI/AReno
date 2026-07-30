@@ -186,10 +186,10 @@ epoch, sample counts, the last recorded metrics, and a bounded list of error
 messages (at most five).  The original traceback (if any) is preserved and
 printed *before* the summary so it is never lost.
 
-The feature is enabled by default.  Two CLI flags control it:
+The feature is disabled by default.  Two CLI flags control it:
 
 ``--summary`` / ``--no-summary``
-   Enable or disable the run-end summary (default: enabled).
+   Enable or disable the run-end summary (default: disabled).
 
 ``--summary-json``
    Emit the summary as a single JSON object instead of human-readable text
@@ -201,7 +201,7 @@ Minimal example
 
 .. code-block:: bash
 
-   areno train --algo sft --model /path/to/model --dataset /path/to/data
+   areno train --algo sft --ckpt /path/to/model --dataset-path /path/to/data --summary
 
 When the run ends you will see (on stderr):
 
@@ -231,7 +231,7 @@ To get machine-readable JSON instead:
 
 .. code-block:: bash
 
-   areno train --algo sft --model /path/to/model --dataset /path/to/data --summary-json
+   areno train --algo sft --ckpt /path/to/model --dataset-path /path/to/data --summary --summary-json
 
 Output (on stderr):
 
@@ -289,4 +289,4 @@ To disable the summary entirely:
 
 .. code-block:: bash
 
-   areno train --algo sft --model /path/to/model --dataset /path/to/data --no-summary
+   areno train --algo sft --ckpt /path/to/model --dataset-path /path/to/data --no-summary

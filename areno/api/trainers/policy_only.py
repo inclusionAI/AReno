@@ -52,10 +52,10 @@ class PolicyOnlyTrainer:
         self._run_start_time: float | None = None
 
     def fit(self) -> None:
-        self.areno.init()
         outcome = "success"
         error_msgs: list[str] = []
         try:
+            self.areno.init()
             self._fit_initialized()
         except KeyboardInterrupt:
             outcome = "interrupted"
@@ -66,8 +66,14 @@ class PolicyOnlyTrainer:
             error_msgs.append(f"{type(exc).__name__}: {exc}")
             raise
         finally:
-            self._print_run_summary(outcome, error_msgs)
-            self.areno.close()
+            try:
+                self._print_run_summary(outcome, error_msgs)
+            except Exception:
+                pass
+            try:
+                self.areno.close()
+            except Exception:
+                pass
 
     def _print_run_summary(self, outcome: str, errors: list[str]) -> None:
         """Print a structured terminal summary when a run ends."""
@@ -81,7 +87,7 @@ class PolicyOnlyTrainer:
             else 0.0
         )
         data.errors = errors
-        enabled = getattr(self.config, "summary_enabled", True)
+        enabled = getattr(self.config, "summary_enabled", False)
         json_output = getattr(self.config, "summary_json", False)
         print_run_summary(data, enabled=enabled, json_output=json_output)
 
@@ -193,7 +199,7 @@ class PolicyOnlyTrainer:
                 sd.samples_processed += prompt_batch.scanned
                 sd.samples_skipped += prompt_batch.skipped_long
                 sd.samples_trained += len(train_batch) if train_batch else 0
-                if isinstance(result, dict):
+                if train_batch and isinstance(result, dict):
                     sd.metrics = {k: v for k, v in result.items() if isinstance(v, (int, float))}
                 step += 1
                 if self.config.max_steps is not None and step >= self.config.max_steps:

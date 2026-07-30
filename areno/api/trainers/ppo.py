@@ -431,11 +431,11 @@ class PPOTrainer(PolicyOnlyTrainer):
     def fit(self) -> None:
         # Override the base `fit` so role initialisation happens after the
         # backend is up but before the first rollout/train cycle.
-        self.areno.init()
-        self._ensure_roles()
         outcome = "success"
         error_msgs: list[str] = []
         try:
+            self.areno.init()
+            self._ensure_roles()
             self._fit_initialized()
         except KeyboardInterrupt:
             outcome = "interrupted"
@@ -446,8 +446,14 @@ class PPOTrainer(PolicyOnlyTrainer):
             error_msgs.append(f"{type(exc).__name__}: {exc}")
             raise
         finally:
-            self._print_run_summary(outcome, error_msgs)
-            self.areno.close()
+            try:
+                self._print_run_summary(outcome, error_msgs)
+            except Exception:
+                pass
+            try:
+                self.areno.close()
+            except Exception:
+                pass
 
     def _score_logprobs(self, role: str, token_rows: list[list[int]]) -> list[list[float]]:
         return self.areno.score_logprobs(role, token_rows, microbatch_size=self.config.score_micro_bs)

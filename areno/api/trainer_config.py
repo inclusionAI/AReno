@@ -60,7 +60,7 @@ class TrainerConfig:
     agent_timeout_s: float = 300.0
     train_tool_results: bool = False
     chat_template_enable_thinking: bool | None = None
-    summary_enabled: bool = True
+    summary_enabled: bool = False
     summary_json: bool = False
 
     def __post_init__(self) -> None:

@@ -176,6 +176,8 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
     args.max_steps = getattr(args, "max_steps", None)
     args.score_micro_bs = getattr(args, "score_micro_bs", 8)
     args.model_hub = getattr(args, "model_hub", "modelscope")
+    args.summary = getattr(args, "summary", False)
+    args.summary_json = getattr(args, "summary_json", False)
     smoke_infer = bool(getattr(args, "smoke_infer", False))
     smoke_train = bool(getattr(args, "smoke_train", False))
     if smoke_infer or smoke_train:
@@ -1334,7 +1336,7 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
 @click.option("--lam", type=float, default=0.95, show_default=True, help="PPO GAE lambda.")
 @click.option(
     "--summary/--no-summary",
-    default=True,
+    default=False,
     show_default=True,
     help="Print a structured terminal summary when a run ends.",
 )

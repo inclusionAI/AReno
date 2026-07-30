@@ -51,10 +51,10 @@ class SFTTrainer:
         self._run_start_time: float | None = None
 
     def fit(self) -> None:
-        self.areno.init()
         outcome = "success"
         error_msgs: list[str] = []
         try:
+            self.areno.init()
             self._fit_initialized()
         except KeyboardInterrupt:
             outcome = "interrupted"
@@ -65,8 +65,14 @@ class SFTTrainer:
             error_msgs.append(f"{type(exc).__name__}: {exc}")
             raise
         finally:
-            self._print_run_summary(outcome, error_msgs)
-            self.areno.close()
+            try:
+                self._print_run_summary(outcome, error_msgs)
+            except Exception:
+                pass
+            try:
+                self.areno.close()
+            except Exception:
+                pass
 
     def _print_run_summary(self, outcome: str, errors: list[str]) -> None:
         """Print a structured terminal summary when a run ends."""
@@ -80,7 +86,7 @@ class SFTTrainer:
             else 0.0
         )
         data.errors = errors
-        enabled = getattr(self.config, "summary_enabled", True)
+        enabled = getattr(self.config, "summary_enabled", False)
         json_output = getattr(self.config, "summary_json", False)
         print_run_summary(data, enabled=enabled, json_output=json_output)
 
@@ -88,6 +94,8 @@ class SFTTrainer:
         self._run_start_time = time.perf_counter()
         tokenizer = self.areno.get_tokenizer()
         configure_chat_template_enable_thinking(tokenizer, getattr(self.config, "chat_template_enable_thinking", None))
+        # Record total dataset size for summary statistics.
+        self._summary_data.samples_processed = len(self.dataset)
         step = 0
         for epoch in range(self.config.epochs):
             self.logger.info("epoch=%d stage=epoch_start", epoch)

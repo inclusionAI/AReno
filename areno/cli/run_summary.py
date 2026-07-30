@@ -119,25 +119,42 @@ def format_run_summary(
         When *True*, return a JSON string suitable for machine parsing.
     """
     if json_output:
-        return json.dumps(
-            {
-                "outcome": data.outcome,
-                "duration_s": round(data.duration_s, 3),
-                "algo": data.algo,
-                "model": data.model,
-                "final_step": data.final_step,
-                "final_epoch": data.final_epoch,
-                "metrics": data.metrics,
-                "samples": {
-                    "processed": data.samples_processed,
-                    "trained": data.samples_trained,
-                    "skipped": data.samples_skipped,
+        # Bound errors to the same 5-entry limit as text mode.
+        bounded_errors = data.errors[:5] if data.errors else []
+        # Filter non-finite metric values to avoid NaN/Inf in JSON output.
+        safe_metrics = {
+            k: v for k, v in data.metrics.items()
+            if isinstance(v, (int, float)) and not (isinstance(v, float) and (v != v or v == float("inf") or v == float("-inf")))
+        }
+        try:
+            return json.dumps(
+                {
+                    "outcome": data.outcome,
+                    "duration_s": round(data.duration_s, 3),
+                    "algo": data.algo,
+                    "model": data.model,
+                    "final_step": data.final_step,
+                    "final_epoch": data.final_epoch,
+                    "metrics": safe_metrics,
+                    "samples": {
+                        "processed": data.samples_processed,
+                        "trained": data.samples_trained,
+                        "skipped": data.samples_skipped,
+                    },
+                    "errors": bounded_errors,
                 },
-                "errors": data.errors,
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
+                ensure_ascii=False,
+                indent=2,
+                allow_nan=False,
+            )
+        except (ValueError, TypeError):
+            # Fallback: if any value is not JSON-serializable, return a
+            # minimal JSON with just the outcome.
+            return json.dumps(
+                {"outcome": data.outcome, "errors": bounded_errors},
+                ensure_ascii=False,
+                allow_nan=False,
+            )
 
     # --- human-readable text ---
     lines: list[str] = []
