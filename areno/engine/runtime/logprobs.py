@@ -27,7 +27,7 @@ _BACKWARD_VOCAB_CHUNK_SIZE = 8192
 def next_token_logprobs(
     logits_shard: torch.Tensor,
     tokens: torch.Tensor,
-    chunk_size: int = 4096,
+    chunk_size: int = 1024,
 ) -> torch.Tensor:
     """Compute selected next-token logprobs for padded train rows."""
 
@@ -48,7 +48,7 @@ def packed_next_token_logprobs(
     logits_shard: torch.Tensor,
     tokens: torch.Tensor,
     cu_seqlens: torch.Tensor,
-    chunk_size: int = 4096,
+    chunk_size: int = 1024,
 ) -> torch.Tensor:
     """Compute selected next-token logprobs for packed varlen train rows."""
 
@@ -237,13 +237,11 @@ class _VocabParallelSelectedLogprobs(torch.autograd.Function):
         # probs tensor, mirroring the forward-path optimisation.
         logits_shard, logsumexp, safe_labels, local_mask = ctx.saved_tensors
         local_vocab = logits_shard.shape[-1]
+        grad = torch.empty_like(logits_shard, dtype=torch.float32)
         grad_output_expanded = grad_output.float().unsqueeze(-1)
         # Pre-compute which positions have valid labels in this shard so we
         # only scatter_add for rows whose target actually falls here.
         valid_mask = local_mask.to(dtype=torch.float32).unsqueeze(-1)
-        # Compute backward in vocab chunks and collect results, then cat.
-        # Avoids allocating a full [N, local_vocab] FP32 gradient all at once.
-        grad_chunks = []
         for start in range(0, local_vocab, _BACKWARD_VOCAB_CHUNK_SIZE):
             end = min(start + _BACKWARD_VOCAB_CHUNK_SIZE, local_vocab)
             chunk = logits_shard[..., start:end].float()
@@ -260,9 +258,6 @@ class _VocabParallelSelectedLogprobs(torch.autograd.Function):
                     valid_mask[in_chunk],
                 )
             chunk_grad.mul_(grad_output_expanded)
-            grad_chunks.append(chunk_grad)
-            # Explicitly free intermediates so the allocator can reuse memory
-            # for the next chunk iteration.
+            grad[..., start:end] = chunk_grad
             del chunk, probs, chunk_grad
-        grad = torch.cat(grad_chunks, dim=-1)
         return grad.to(dtype=ctx.input_dtype), None, None, None, None
