@@ -616,6 +616,11 @@ p {
   box-shadow: 0 0 0 4px rgba(87, 227, 155, 0.1);
 }
 
+.statusDot.stopping {
+  background: var(--deck-amber);
+  box-shadow: 0 0 0 4px rgba(255, 200, 87, 0.12);
+}
+
 .statusDot.failed {
   background: var(--deck-red);
 }
@@ -665,6 +670,133 @@ p {
 .timelineItem.current {
   border-color: rgba(56, 215, 255, 0.45);
   color: var(--deck-cyan);
+}
+
+.shutdownCard {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 12px;
+  padding: 14px;
+  border: 1px solid rgba(255, 200, 87, 0.34);
+  border-radius: var(--radius-lg);
+  background: linear-gradient(135deg, rgba(255, 200, 87, 0.09), rgba(18, 25, 35, 0.95));
+}
+
+.shutdownCard.completed {
+  border-color: rgba(87, 227, 155, 0.3);
+  background: linear-gradient(135deg, rgba(87, 227, 155, 0.08), rgba(18, 25, 35, 0.95));
+}
+
+.shutdownCard.forced {
+  border-color: rgba(255, 107, 122, 0.38);
+  background: linear-gradient(135deg, rgba(255, 107, 122, 0.1), rgba(18, 25, 35, 0.95));
+}
+
+.shutdownHeader,
+.shutdownTitle,
+.shutdownFacts strong {
+  display: flex;
+  align-items: center;
+}
+
+.shutdownHeader {
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.shutdownTitle {
+  gap: 10px;
+}
+
+.shutdownIcon {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border: 1px solid rgba(255, 200, 87, 0.28);
+  border-radius: 9px;
+  color: var(--deck-amber);
+  background: rgba(255, 200, 87, 0.08);
+}
+
+.shutdownCard.completed .shutdownIcon {
+  color: var(--deck-green);
+  border-color: rgba(87, 227, 155, 0.25);
+  background: rgba(87, 227, 155, 0.08);
+}
+
+.shutdownCard.forced .shutdownIcon {
+  color: var(--deck-red);
+  border-color: rgba(255, 107, 122, 0.28);
+  background: rgba(255, 107, 122, 0.08);
+}
+
+.shutdownTitle h3 {
+  margin: 2px 0 0;
+  font-size: 14px;
+}
+
+.shutdownBadge {
+  padding: 5px 8px;
+  border: 1px solid var(--deck-line);
+  border-radius: 999px;
+  color: var(--deck-text);
+  background: rgba(11, 17, 25, 0.65);
+  font-size: 10px;
+  font-weight: 750;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.shutdownDetail,
+.shutdownReason {
+  margin: 0;
+  color: var(--deck-text);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.shutdownFacts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1px;
+  overflow: hidden;
+  border: 1px solid var(--deck-line);
+  border-radius: var(--radius-md);
+  background: var(--deck-line);
+}
+
+.shutdownFacts > div {
+  min-width: 0;
+  padding: 10px;
+  background: rgba(11, 17, 25, 0.82);
+}
+
+.shutdownFacts span {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--deck-muted);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.shutdownFacts strong {
+  gap: 5px;
+  color: var(--deck-ink);
+  font-size: 12px;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.shutdownReason {
+  padding-left: 10px;
+  border-left: 2px solid rgba(255, 200, 87, 0.45);
+}
+
+.shutdownCard.forced .shutdownReason {
+  border-left-color: rgba(255, 107, 122, 0.5);
 }
 
 .chart {
@@ -2056,7 +2188,8 @@ textarea:focus {
   .metricsGrid,
   .split,
   .sampleGrid,
-  .formGrid {
+  .formGrid,
+  .shutdownFacts {
     grid-template-columns: 1fr;
   }
 

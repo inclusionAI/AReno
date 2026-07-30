@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+from click.testing import CliRunner
 
 from areno.api.tokenizer import configure_chat_template_enable_thinking
 from areno.api.tool_call_parser import QwenToolCallParser
@@ -118,6 +119,34 @@ def test_serve_default_model_hub_is_modelscope():
     option = next(param for param in serve_mod.serve_command.params if param.name == "model_hub")
 
     assert option.default == "modelscope"
+
+
+def test_serve_graceful_shutdown_is_opt_in_with_30_second_deadline():
+    graceful = next(param for param in serve_mod.serve_command.params if param.name == "graceful_shutdown")
+    deadline = next(param for param in serve_mod.serve_command.params if param.name == "shutdown_deadline_s")
+
+    assert graceful.default is False
+    assert deadline.default == 30.0
+
+
+def test_serve_rejects_non_positive_shutdown_deadline_before_model_load():
+    result = CliRunner().invoke(
+        serve_mod.serve_command,
+        ["--model-path", "model", "--shutdown-deadline-s", "0"],
+    )
+
+    assert result.exit_code == 2
+    assert "0.0 is not in the range x>0.0" in result.output
+
+
+def test_serve_rejects_nan_shutdown_deadline_before_model_load():
+    result = CliRunner().invoke(
+        serve_mod.serve_command,
+        ["--model-path", "model", "--shutdown-deadline-s", "nan"],
+    )
+
+    assert result.exit_code == 2
+    assert "deadline_s must be a finite number greater than 0" in result.output
 
 
 def test_chat_completion_request_defaults_match_sampling_params():

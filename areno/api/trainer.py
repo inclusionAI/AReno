@@ -431,12 +431,21 @@ class Trainer:
 
         return self._backend.save_checkpoint(self._ctx, path)
 
-    def close(self) -> None:
+    def close(self, *, shutdown_info: dict | None = None) -> None:
         """Release backend workers and local resources such as metric writers."""
 
         try:
+            if shutdown_info is not None and self._metrics is not None:
+                self._metrics.record_dashboard_state(
+                    stage="shutdown",
+                    status="stopping",
+                    extra={"shutdown": shutdown_info},
+                )
             if self._backend is not None:
-                self._backend.close()
+                if shutdown_info is None:
+                    self._backend.close()
+                else:
+                    self._backend.close(shutdown_info=shutdown_info)
         finally:
             self._backend = None
             self._initialized = False

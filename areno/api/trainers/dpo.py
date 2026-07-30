@@ -23,6 +23,8 @@ from areno.api.dashboard import record_dashboard_state
 from areno.api.data_utils import apply_chat_template, encode_prompt_value, response_to_tokens_and_mask
 from areno.api.roles import ModelRole
 from areno.api.tokenizer import configure_chat_template_enable_thinking
+from areno.api.trainers._shutdown import close_trainer
+from areno.engine.shutdown import ShutdownStage
 
 
 class DPOTrainer:
@@ -47,13 +49,13 @@ class DPOTrainer:
             "ref": ModelRole("ref", config.ref_ckpt or config.ckpt, trainable=False),
         }
 
-    def fit(self) -> None:
-        self.areno.init()
-        self._ensure_roles()
+    def fit(self, *, shutdown=None) -> None:
         try:
-            self._fit_initialized()
+            self.areno.init()
+            self._ensure_roles()
+            self._fit_initialized(shutdown=shutdown)
         finally:
-            self.areno.close()
+            close_trainer(self.areno, shutdown)
 
     def _ensure_roles(self) -> None:
         for role in self.roles.values():
@@ -62,7 +64,7 @@ class DPOTrainer:
         for role in self.roles.values():
             self.logger.info("role=%s stage=init_end trainable=%s", role.name, role.trainable)
 
-    def _fit_initialized(self) -> None:
+    def _fit_initialized(self, *, shutdown=None) -> None:
         tokenizer = self.areno.get_tokenizer()
         configure_chat_template_enable_thinking(tokenizer, getattr(self.config, "chat_template_enable_thinking", None))
         step = 0
@@ -71,8 +73,13 @@ class DPOTrainer:
             self.logger.info("epoch=%d stage=epoch_start", epoch)
             record_dashboard_state(self.areno, stage="epoch_start", epoch=epoch, step=step, role="policy")
             for train_batch in self._iter_train_batches(tokenizer, max_seq_len=max_seq_len):
+                if shutdown is not None and shutdown.should_stop:
+                    self.logger.info("epoch=%d step=%d stage=shutdown_break", epoch, step)
+                    return
                 if not train_batch:
                     continue
+                if shutdown is not None:
+                    shutdown.set_stage(ShutdownStage.TRAINING)
                 self.logger.info(
                     "epoch=%d step=%d role=ref stage=logprob_score_start rows=%d", epoch, step, len(train_batch)
                 )
@@ -88,6 +95,9 @@ class DPOTrainer:
                     "epoch=%d step=%d role=ref stage=logprob_score_end rows=%d", epoch, step, len(train_batch)
                 )
                 record_dashboard_state(self.areno, stage="logprob_score_end", epoch=epoch, step=step, role="ref")
+                if shutdown is not None and shutdown.should_stop:
+                    self.logger.info("epoch=%d step=%d stage=shutdown_after_scoring", epoch, step)
+                    return
                 for seq, ref_logprobs in zip(train_batch, ref_logprob_rows, strict=True):
                     if len(ref_logprobs) != len(seq.tokens):
                         raise ValueError("reference role returned misaligned logprobs")

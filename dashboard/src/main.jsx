@@ -644,12 +644,15 @@ function App() {
             </div>
             <div className="detailActions">
               <button className="secondaryButton" onClick={() => setSelectedJobId(null)}>Back</button>
-              {selectedJob.status === "running" && (
-                <button className="dangerButton" onClick={() => stopJob(selectedJob.id)}><CircleStop size={16} /> Stop</button>
+              {["running", "stopping"].includes(selectedJob.status) && (
+                <button className="dangerButton" onClick={() => stopJob(selectedJob.id)}>
+                  <CircleStop size={16} /> {selectedJob.status === "stopping" ? "Force stop" : "Stop"}
+                </button>
               )}
             </div>
           </div>
           <Timeline job={selectedJob} />
+          <ShutdownCard shutdown={selectedJob?.shutdown} />
           <JobMetricsView job={selectedJob} refreshNonce={refreshNonce} />
           <SampleView samples={selectedJob?.samples || []} />
           <div className="split">
@@ -788,6 +791,63 @@ function JobMetricsView({ job, refreshNonce }) {
         <TimePerfView rows={job?.timeperf || []} />
       </div>
     </div>
+  );
+}
+
+function ShutdownCard({ shutdown }) {
+  if (!shutdown) return null;
+  const state = String(shutdown.state || "unknown");
+  const content = {
+    shutdown_requested: {
+      title: "Graceful stop requested",
+      detail: "AReno is finishing the current safe point before closing workers.",
+      tone: "active",
+    },
+    shutting_down: {
+      title: "Closing workers",
+      detail: "New work is blocked while outputs are flushed and workers close.",
+      tone: "active",
+    },
+    completed: {
+      title: "Graceful shutdown completed",
+      detail: "Outputs were flushed and the runtime closed cleanly.",
+      tone: "completed",
+    },
+    forced: {
+      title: "Forced exit",
+      detail: "A second signal or the shutdown deadline ended the process.",
+      tone: "forced",
+    },
+  }[state] || { title: "Shutdown event", detail: "The runtime reported a shutdown transition.", tone: "active" };
+  const signalName = { 2: "SIGINT", 15: "SIGTERM" }[Number(shutdown.signal_number)] || `signal ${shutdown.signal_number ?? "unknown"}`;
+  const remaining = Number(shutdown.deadline_remaining_s);
+  let deadlineText = "not available";
+  if (Number.isFinite(remaining)) {
+    deadlineText = remaining > 0 ? `${Math.ceil(remaining)}s remaining` : "deadline reached";
+  } else if (state === "completed") {
+    deadlineText = "completed";
+  }
+
+  return (
+    <section className={classNames("shutdownCard", content.tone)} aria-live="polite">
+      <div className="shutdownHeader">
+        <div className="shutdownTitle">
+          <span className="shutdownIcon"><CircleStop size={17} /></span>
+          <div>
+            <div className="tinyLabel">Shutdown</div>
+            <h3>{content.title}</h3>
+          </div>
+        </div>
+        <span className="shutdownBadge">{state.replace(/_/g, " ")}</span>
+      </div>
+      <p className="shutdownDetail">{content.detail}</p>
+      <div className="shutdownFacts">
+        <div><span>Signal</span><strong>{signalName}</strong></div>
+        <div><span>Interrupted stage</span><strong>{shutdown.stage || "unknown"}</strong></div>
+        <div><span>Deadline</span><strong><Timer size={13} /> {deadlineText}</strong></div>
+      </div>
+      {shutdown.reason && <p className="shutdownReason">{shutdown.reason}</p>}
+    </section>
   );
 }
 

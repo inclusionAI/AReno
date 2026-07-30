@@ -25,6 +25,8 @@ import areno.api
 from areno.api.dashboard import record_dashboard_state
 from areno.api.data_utils import prompt_response_to_tokens_and_mask
 from areno.api.tokenizer import configure_chat_template_enable_thinking
+from areno.api.trainers._shutdown import close_trainer
+from areno.engine.shutdown import ShutdownStage
 
 
 class SFTTrainer:
@@ -44,14 +46,14 @@ class SFTTrainer:
         self.loss_fn = loss_fn
         self.logger = logging.getLogger(f"{self.__class__.__module__}.{self.__class__.__name__}")
 
-    def fit(self) -> None:
-        self.areno.init()
+    def fit(self, *, shutdown=None) -> None:
         try:
-            self._fit_initialized()
+            self.areno.init()
+            self._fit_initialized(shutdown=shutdown)
         finally:
-            self.areno.close()
+            close_trainer(self.areno, shutdown)
 
-    def _fit_initialized(self) -> None:
+    def _fit_initialized(self, *, shutdown=None) -> None:
         tokenizer = self.areno.get_tokenizer()
         configure_chat_template_enable_thinking(tokenizer, getattr(self.config, "chat_template_enable_thinking", None))
         step = 0
@@ -63,8 +65,13 @@ class SFTTrainer:
                 max_prompt_tokens=self.config.max_prompt_tokens,
                 max_new_tokens=self.config.max_new_tokens,
             ):
+                if shutdown is not None and shutdown.should_stop:
+                    self.logger.info("epoch=%d step=%d stage=shutdown_break", epoch, step)
+                    return
                 if not train_batch:
                     continue
+                if shutdown is not None:
+                    shutdown.set_stage(ShutdownStage.TRAINING)
                 self.logger.info(
                     "epoch=%d step=%d role=policy stage=train_start rows=%d", epoch, step, len(train_batch)
                 )

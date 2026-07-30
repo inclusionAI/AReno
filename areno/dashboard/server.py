@@ -14,6 +14,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -52,9 +53,102 @@ ENV_CHECK_COUNTS_CACHE: dict[str, int] | None = None
 ENV_CACHE_LOCK = threading.Lock()
 FILE_BROWSER = AgentFileBrowser(ROOT)
 
+_SHUTDOWN_STATES = {"shutdown_requested", "shutting_down", "completed", "forced"}
+_ACTIVE_SHUTDOWN_STATES = {"shutdown_requested", "shutting_down"}
+_TERMINAL_JOB_STATUSES = {"stopped", "failed", "succeeded", "exited"}
+_SHUTDOWN_FIELDS = {
+    "event",
+    "state",
+    "signal_number",
+    "stage",
+    "reason",
+    "timestamp",
+    "first_signal",
+    "deadline",
+}
+
 
 def now() -> str:
     return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
+
+
+def normalize_shutdown_payload(payload: Any) -> dict[str, Any] | None:
+    """Validate and copy the structured shutdown fields used by the dashboard."""
+
+    if not isinstance(payload, dict):
+        return None
+    state = payload.get("state")
+    if not isinstance(state, str) or state not in _SHUTDOWN_STATES:
+        return None
+    shutdown = {key: payload[key] for key in _SHUTDOWN_FIELDS if key in payload}
+    for key in ("event", "stage", "reason"):
+        if key in shutdown and not isinstance(shutdown[key], str):
+            return None
+    signal_number = shutdown.get("signal_number")
+    if signal_number is not None and (isinstance(signal_number, bool) or not isinstance(signal_number, int)):
+        return None
+    for key in ("timestamp", "deadline"):
+        value = shutdown.get(key)
+        if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))):
+            return None
+    first_signal = shutdown.get("first_signal")
+    if first_signal is not None and not isinstance(first_signal, bool):
+        return None
+    shutdown.setdefault(
+        "event",
+        {
+            "shutdown_requested": "shutdown_requested",
+            "shutting_down": "shutdown_started",
+            "completed": "shutdown_completed",
+            "forced": "shutdown_forced",
+        }[shutdown["state"]],
+    )
+    return shutdown
+
+
+def parse_shutdown_event(line: str) -> dict[str, Any] | None:
+    """Extract a documented ``shutdown_event=`` JSON record from one log line."""
+
+    marker = "shutdown_event="
+    if marker not in line:
+        return None
+    try:
+        payload = json.loads(line.split(marker, 1)[1].strip())
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return normalize_shutdown_payload(payload)
+
+
+def shutdown_for_client(shutdown: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Return shutdown data with a server-clock deadline countdown."""
+
+    normalized = normalize_shutdown_payload(shutdown)
+    if normalized is None:
+        return None
+    deadline = normalized.get("deadline")
+    if deadline is not None and normalized["state"] in _ACTIVE_SHUTDOWN_STATES:
+        normalized["deadline_remaining_s"] = max(float(deadline) - time.monotonic(), 0.0)
+    return normalized
+
+
+def apply_shutdown_event(job: Job, shutdown: dict[str, Any]) -> None:
+    """Attach shutdown state and keep the job lifecycle aligned with it."""
+
+    job.shutdown = shutdown
+    state = shutdown["state"]
+    if state in _ACTIVE_SHUTDOWN_STATES and job.status not in _TERMINAL_JOB_STATUSES:
+        job.status = "stopping"
+    elif state in {"completed", "forced"}:
+        job.status = "stopped"
+    job.updated_at = now()
+
+
+def job_uses_graceful_shutdown(job: Job) -> bool:
+    """Return whether the launched command opted into two-stage shutdown."""
+
+    if "--no-graceful-shutdown" in job.command:
+        return False
+    return bool_like(job.launch_config.get("graceful_shutdown")) or "--graceful-shutdown" in job.command
 
 
 class Job:
@@ -90,6 +184,7 @@ class Job:
         self.process: subprocess.Popen[str] | None = None
         self.pid = pid
         self.returncode: int | None = None
+        self.shutdown: dict[str, Any] | None = None
         self._metric_keys: set[tuple[str, int, float]] = set()
         self._timeperf_keys: set[int] = set()
         self._sample_keys: set[tuple[int, int, int]] = set()
@@ -116,6 +211,7 @@ class Job:
         job.config = dict(item.get("config") or {})
         job.config_text = item.get("config_text") or ""
         job.launch_config = dict(item.get("launch") or {})
+        job.shutdown = normalize_shutdown_payload(item.get("shutdown"))
         return job
 
     def to_json(self) -> dict[str, Any]:
@@ -136,6 +232,7 @@ class Job:
             "updated_at": self.updated_at,
             "returncode": self.returncode,
             "pid": self.pid,
+            "shutdown": shutdown_for_client(self.shutdown),
             "logs": self.logs[-300:],
             "metrics_count": len(self.metrics),
             "samples": self.samples[-50:],
@@ -158,6 +255,7 @@ class Job:
             "returncode": self.returncode,
             "pid": self.pid,
             "perf": self.perf,
+            "shutdown": shutdown_for_client(self.shutdown),
         }
 
 
@@ -202,11 +300,15 @@ class DashboardState:
         return job
 
     def _append_log(self, job: Job, line: str) -> None:
+        shutdown = parse_shutdown_event(line)
         with self.lock:
             job.logs.append(line.rstrip("\n"))
             if len(job.logs) > 300:
                 job.logs = job.logs[-300:]
             job.updated_at = now()
+            if shutdown is not None:
+                apply_shutdown_event(job, shutdown)
+                self._save_state()
 
     def _capture_output(self, job: Job) -> None:
         process = job.process
@@ -223,8 +325,8 @@ class DashboardState:
         code = job.process.wait()
         with self.lock:
             job.returncode = code
-            if job.status == "running":
-                job.status = "succeeded" if code == 0 else "failed"
+            if job.status in {"running", "stopping"}:
+                job.status = "stopped" if job.shutdown is not None else ("succeeded" if code == 0 else "failed")
             job.updated_at = now()
             self._load_metric_files(job)
             self._save_state()
@@ -308,8 +410,11 @@ class DashboardState:
         except (TypeError, ValueError):
             pass
         status = payload.get("status")
-        if isinstance(status, str) and job.status not in {"stopped", "failed", "succeeded", "exited"}:
+        if isinstance(status, str) and job.status not in _TERMINAL_JOB_STATUSES:
             job.status = status
+        shutdown = normalize_shutdown_payload(payload.get("shutdown"))
+        if shutdown is not None:
+            apply_shutdown_event(job, shutdown)
         job.updated_at = now()
 
     def _load_tensorboard_scalars(self, job: Job, path: Path) -> None:
@@ -415,7 +520,10 @@ class DashboardState:
                 return False
             pid = job.pid
             process = job.process
-            job.status = "stopped"
+            process_running = (process is not None and process.poll() is None) or (
+                process is None and pid is not None and pid_is_running(pid)
+            )
+            job.status = "stopping" if process_running and job_uses_graceful_shutdown(job) else "stopped"
             job.updated_at = now()
             self._save_state()
         if process is not None and process.poll() is None:
@@ -426,6 +534,11 @@ class DashboardState:
                     process.terminate()
             except ProcessLookupError:
                 pass
+            except AttributeError:
+                # The process object has no addressable ``pid`` (e.g. a lightweight
+                # test stand-in). Fall back to a direct ``terminate`` so the
+                # shutdown request still propagates instead of crashing.
+                process.terminate()
         elif pid is not None:
             try:
                 if hasattr(os, "killpg"):
@@ -458,10 +571,15 @@ class DashboardState:
                     job.returncode = code
                 return
             if code is None:
-                job.status = "running"
-            elif job.status == "running":
+                if job.status != "stopping":
+                    job.status = "running"
+            elif job.status in {"running", "stopping"}:
                 job.returncode = code
-                job.status = "succeeded" if code == 0 else "failed"
+                job.status = (
+                    "stopped"
+                    if job.shutdown is not None or job.status == "stopping"
+                    else ("succeeded" if code == 0 else "failed")
+                )
                 job.updated_at = now()
             return
         # Registry jobs are refreshed in scan_registered_jobs.

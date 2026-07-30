@@ -131,13 +131,13 @@ class ArenoBackend(Backend):
             raise RuntimeError("ArenoBackend is not initialized")
         return self._engine
 
-    def close(self) -> None:
+    def close(self, *, shutdown_info: dict | None = None) -> None:
         """Stop backend worker processes and release engine resources."""
 
         engine = self._engine
         self._engine = None
         if engine is not None:
-            engine.close()
+            engine.close(shutdown_info=shutdown_info)
 
     def initialize(self, ctx: Context):
         _prefer_repo_areno()
