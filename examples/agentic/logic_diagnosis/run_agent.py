@@ -60,7 +60,7 @@ async def _run_episode(item, client) -> list[AgentTrajectoryTurn]:
     nodes = item.record.get("nodes", [])
     fault = item.record.get("fault", {})
     max_probes = int(item.record.get("max_probes", MAX_PROBES))
-    max_turns = max_probes + 5  # allow some free set_input_vector calls + submit
+    max_turns = 8  # keep total trajectory short enough for context window
 
     messages = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": item.prompt}]
     turns: list[AgentTrajectoryTurn] = []
@@ -124,9 +124,9 @@ async def _run_episode(item, client) -> list[AgentTrajectoryTurn]:
             )
             break
 
-        if state["probes_used"] >= max_probes:
+        if state["probes_used"] >= max_probes or turn_index >= max_turns - 1:
             messages.append(
-                {"role": "user", "content": f"Maximum {max_probes} probes used. You must call submit_diagnosis now."}
+                {"role": "user", "content": "Last turn! You must call submit_diagnosis now."}
             )
 
     if not state.get("diagnosis_submitted"):
