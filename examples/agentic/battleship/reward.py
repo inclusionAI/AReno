@@ -19,7 +19,7 @@ WIN_BONUS = 1.0      # 获胜时的奖励
 HIT_REWARD = 0.05    # 每次命中船只的奖励
 SUNK_REWARD = 0.15   # 击沉每艘船的奖励
 INVALID_SHOT_PENALTY = 0.02  # 每次无效射击的惩罚
-EFFICIENCY_PENALTY = 0.002   # 每发一弹的轻微惩罚，激励高效射击
+EFFICIENCY_PENALTY = 0.05    # 每发一弹的效率惩罚：让"慢赢/穷举"接近 0 分，"高效赢"拿高分，拉开 RL 梯度
 
 
 # RL 奖励函数：评估一次完整回合的得分

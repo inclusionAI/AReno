@@ -222,6 +222,19 @@ def _tool_messages(assistant_message: dict, tool_result: dict) -> list[dict]:
     return messages
 
 
+# 模型这回合未产出合法 fire 动作时，把这回合作废：不碰棋盘，只推进 shots_used，
+# 否则 run_one 的 while 循环在未训练模型上永不终止（shots_used 恒为 0）。
+def _wasted_turn(state, reason: str) -> dict:
+    """Mark a turn as wasted (no valid shot) and advance the turn counter."""
+    state.shots_used += 1
+    return {
+        "status": "invalid",
+        "reason": reason,
+        "shots_used": state.shots_used,
+        "state": state,
+    }
+
+
 # 执行 fire 工具的辅助函数
 def _run_tool(assistant_message: dict, state) -> dict:
     """Execute the fire tool and return the result with updated state."""
@@ -229,25 +242,25 @@ def _run_tool(assistant_message: dict, state) -> dict:
     calls = assistant_message.get("tool_calls") or []
     # 如果没有工具调用，返回错误
     if not calls:
-        return {"status": "error", "message": "no tool call", "state": state}
+        return _wasted_turn(state, "no tool call")
 
     # 只处理第一个工具调用
     call = calls[0]
     name = call["function"]["name"]
     # 验证是 fire 工具
     if name != "fire":
-        return {"status": "error", "message": f"unexpected tool: {name}", "state": state}
+        return _wasted_turn(state, f"unexpected tool: {name}")
 
     # 解析工具参数
     try:
         args = json.loads(call["function"]["arguments"] or "{}")
     except json.JSONDecodeError:
-        return {"status": "error", "message": "invalid JSON arguments", "state": state}
+        return _wasted_turn(state, "invalid JSON arguments")
 
     # 获取坐标参数
     coord = args.get("coordinate")
     if not coord:
-        return {"status": "error", "message": "missing coordinate", "state": state }
+        return _wasted_turn(state, "missing coordinate")
 
     # 执行射击动作
     # Execute the fire action

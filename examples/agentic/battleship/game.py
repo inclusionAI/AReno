@@ -10,7 +10,7 @@ from typing import Any, List, Set, Tuple, Optional, Union
 # Compact 8x8 board with fleet [4,3,2,2] = 11 cells
 GRID = 8  # 棋盘边长（8x8）
 SHIPS = (4, 3, 2, 2)  # 舰队各舰长度（4/3/2/2，共11格）
-MAX_TURNS = 64  # 最大回合数
+MAX_TURNS = 40  # 最大回合数（< 棋盘 64 格：让"穷举全盘"不可行，RL 才有提升空间）
 TOTAL_SHIP_CELLS = sum(SHIPS)  # 船只总格子数（11）
 
 # 坐标系统定义：A1..H8（字母 = 行 A-H，数字 = 列 1-8）
@@ -76,22 +76,42 @@ def format_coordinate(row: int, col: int) -> str:
     return f"{_COL_LETTERS[row]}{col + 1}"
 
 
+def _get_neighbor_cells(cells: list[tuple[int, int]]) -> set[tuple[int, int]]:
+    """Get all cells adjacent to the given cells (including diagonals)."""
+    neighbors = set()
+    for r, c in cells:
+        for dr in (-1, 0, 1):
+            for dc in (-1, 0, 1):
+                if dr == 0 and dc == 0:
+                    continue  # Skip the cell itself
+                nr, nc = r + dr, c + dc
+                if 0 <= nr < GRID and 0 <= nc < GRID:
+                    neighbors.add((nr, nc))
+    return neighbors
+
+
 # 使用给定种子生成合法的舰队布局
 def place_fleet(seed: int) -> dict:
-    """Generate a seeded legal fleet placement. Returns dict with seed, ships, fleet_cells."""
+    """Generate a seeded legal fleet placement. Returns dict with seed, ships, fleet_cells.
+
+    Ships cannot overlap and cannot be adjacent (including diagonally),
+    following standard Battleship game rules.
+    """
     # 使用种子创建随机数生成器，确保可复现性
     rng = random.Random(seed)
     # 存储生成的船只
     ships: list[Ship] = []
-    # 记录已占用的格子
+    # 记录已占用的格子及其相邻格子（间隔缓冲区）
     occupied: set[tuple[int, int]] = set()
+    # 记录禁止区域（occupied + 相邻格子）
+    forbidden: set[tuple[int, int]] = set()
 
     # 依次放置每艘船
     for length in SHIPS:
         placed = False
         attempts = 0
-        # 尝试放置船只，最多尝试1000次
-        while not placed and attempts < 1000:
+        # 尝试放置船只，最多尝试5000次（增加限制避免无限循环）
+        while not placed and attempts < 5000:
             attempts += 1
             # 随机选择水平或垂直放置
             horizontal = rng.choice([True, False])
@@ -109,18 +129,22 @@ def place_fleet(seed: int) -> dict:
                 col = rng.randint(0, GRID - 1)
                 cells = [(row + i, col) for i in range(length)]
 
-            # 检查是否与已有船只冲突
-            if not occupied.intersection(cells):
+            # 检查是否与已有船只冲突或相邻
+            # 标准规则：船只不能重叠，也不能相邻（包括对角线）
+            cells_set = set(cells)
+            if not cells_set.intersection(forbidden):
                 # 创建船只对象并添加到列表
                 ship = Ship(length=length, cells=cells)
                 ships.append(ship)
-                # 更新已占用格子
+                # 更新已占用格子和禁止区域
                 occupied.update(cells)
+                forbidden.update(cells)
+                forbidden.update(_get_neighbor_cells(cells))
                 placed = True
 
         # 如果无法放置船只，抛出异常
         if not placed:
-            raise RuntimeError(f"Failed to place ship of length {length} with seed {seed}")
+            raise RuntimeError(f"Failed to place ship of length {length} with seed {seed} after 5000 attempts")
 
     # 构建格子列表用于快速检查
     # Build fleet_cells list for easy checking

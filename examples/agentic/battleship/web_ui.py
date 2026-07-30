@@ -88,9 +88,12 @@ class BattleshipServer(ThreadingHTTPServer):
         record = game.place_fleet(seed)
         self.state = game.init_state(record)
         self.state.seed = seed
+        mode_display = self.agent_mode
+        if mode_display == "random":
+            mode_display += " (baseline)"
         self.events = [
             f"New game. Fleet placed from seed {seed}. Ships remaining: {len(game.SHIPS)}.",
-            f"Agent mode: {self.agent_mode}. Click a cell to fire, or use an agent action.",
+            f"Agent mode: {mode_display}. Click a cell to fire, or use an agent action.",
         ]
 
 
@@ -256,10 +259,13 @@ def _autoplay(server: BattleshipServer, steps: int) -> dict[str, Any]:
 def _agent_shot(server: BattleshipServer) -> str:
     if server.agent_mode == "llm":
         return _llm_shot(server)
+    if server.agent_mode == "random":
+        return _random_shot(server)
     return _heuristic_shot(server)
 
 
 def _llm_shot(server: BattleshipServer) -> str:
+    """LLM agent mode: ask an OpenAI-compatible endpoint for one fire coordinate."""
     if not server.args.base_url:
         raise ValueError("LLM agent mode requires --base-url")
     if server.openai_client is None:
@@ -290,6 +296,15 @@ def _llm_shot(server: BattleshipServer) -> str:
         if coord and game.parse_coordinate(str(coord)) is not None:
             return str(coord).upper()
     raise ValueError("LLM did not return a valid fire tool call")
+
+
+def _random_shot(server: BattleshipServer) -> str:
+    """Random baseline: picks uniformly among legal shots."""
+    state = server.state
+    legal = game.legal_shots(state)
+    if not legal:
+        raise ValueError("no legal shots remain")
+    return game.format_coordinate(*server.rng.choice(list(legal)))
 
 
 def _heuristic_shot(server: BattleshipServer) -> str:
@@ -331,6 +346,14 @@ def _turn_prompt(state: game.GameState) -> str:
     )
 
 
+def _make_openai_client(args):
+    try:
+        from openai import OpenAI
+    except ImportError as exc:
+        raise RuntimeError("LLM mode requires `openai`. Install it with `pip install openai`.") from exc
+    return OpenAI(base_url=args.base_url, api_key=args.api_key, max_retries=0)
+
+
 def _payload(server: BattleshipServer) -> dict[str, Any]:
     state = server.state
     hits: list[list[int]] = [[0] * game.GRID for _ in range(game.GRID)]
@@ -367,14 +390,6 @@ def _payload(server: BattleshipServer) -> dict[str, Any]:
         "terminal": game.is_terminal(state) if state else False,
         "events": server.events[:MAX_EVENTS],
     }
-
-
-def _make_openai_client(args):
-    try:
-        from openai import OpenAI
-    except ImportError as exc:
-        raise RuntimeError("LLM mode requires `openai`. Install it with `pip install openai`.") from exc
-    return OpenAI(base_url=args.base_url, api_key=args.api_key, max_retries=0)
 
 
 INDEX_HTML = r"""<!doctype html>
@@ -425,7 +440,7 @@ input[type=number]{width:90px;border:3px solid #0b1f3a;border-radius:12px;paddin
 <main class="app">
   <section class="panel">
     <h1>Battleship</h1>
-    <div class="subtitle">Sink the hidden fleet with an agentic LLM.</div>
+    <div class="subtitle">Sink the hidden fleet with an agentic LLM or play manually.</div>
     <div id="board" class="board" aria-label="Battleship board"></div>
     <div id="thinking" class="thinking">Agent is thinking<span class="dots"></span></div>
     <div class="stats">
@@ -435,8 +450,9 @@ input[type=number]{width:90px;border:3px solid #0b1f3a;border-radius:12px;paddin
     </div>
     <div class="mode-control" aria-label="Agent mode selector">
       <span class="label">Agent</span>
-      <button class="choice active" id="llmMode">LLM</button>
-      <button class="choice" id="heurMode">Heuristic</button>
+      <button class="choice" id="llmMode">LLM</button>
+      <button class="choice active" id="heurMode">Heuristic</button>
+      <button class="choice" id="randMode">Random</button>
     </div>
     <div class="actions">
       <button id="agentBtn">Agent Fires Once</button>
@@ -451,11 +467,13 @@ input[type=number]{width:90px;border:3px solid #0b1f3a;border-radius:12px;paddin
   <aside class="panel">
     <h1 style="font-size:26px;color:#1f6f8b">How to play</h1>
     <ul class="rules">
-      <li>8x8 grid, fleet of [4,3,2,2] = 11 hidden cells. Max 64 shots.</li>
+      <li>8x8 grid, fleet of [4,3,2,2] = 11 hidden cells. Max 40 shots.</li>
       <li><b>Human:</b> click any unknown cell to fire. X = hit, o = miss.</li>
-      <li><b>Agent (LLM):</b> start an OpenAI-compatible server (e.g. <code>areno serve</code>) and pass <code>--base-url</code>. Then "Agent Fires Once" or "Auto-play".</li>
-      <li><b>Agent (Heuristic):</b> no server needed; uses a hunt/target strategy.</li>
-      <li>Change the seed and click New Game to replay a fixed fleet.</li>
+      <li><b>Agent (LLM):</b> start an OpenAI-compatible server (e.g. <code>areno serve</code>) and launch with <code>--base-url</code>. Then "Agent Fires Once" or "Auto-play".</li>
+      <li><b>Agent (Heuristic):</b> no server needed; smart hunt/target strategy.</li>
+      <li><b>Agent (Random):</b> random baseline. ~0% win rate, proving the need for strategy.</li>
+      <li><b>To use a specific seed:</b> (1) Enter seed number, (2) Select agent mode, (3) Click <b>New Game</b>.</li>
+      <li><b>To compare strategies:</b> Use the same seed, run each mode, compare results.</li>
     </ul>
     <h1 style="font-size:20px;color:#1f6f8b;margin-bottom:8px">Event log</h1>
     <div id="events" class="events"></div>
@@ -463,7 +481,7 @@ input[type=number]{width:90px;border:3px solid #0b1f3a;border-radius:12px;paddin
 </main>
 <script>
 const api = (path) => new URL(path, window.location.href).toString();
-let state = null, recent = null, agentBusy = false, autoPlay = false, agentMode = "llm", lastShots = 0;
+let state = null, recent = null, agentBusy = false, autoPlay = false, agentMode = "heuristic", lastShots = 0;
 async function request(path, body){
   const opts = body ? {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)} : {};
   const res = await fetch(api(path), opts);
@@ -494,9 +512,10 @@ function render(){
       board.appendChild(d);
     }
   }
-  agentMode = state.agent_mode || "llm";
+  agentMode = state.agent_mode || "heuristic";
   document.getElementById("llmMode").classList.toggle("active", agentMode === "llm");
   document.getElementById("heurMode").classList.toggle("active", agentMode === "heuristic");
+  document.getElementById("randMode").classList.toggle("active", agentMode === "random");
   const status = state.terminal ? (state.win ? "Victory!" : "Out of turns") : `${state.shots_used}/${state.max_turns} shots`;
   document.getElementById("turnPill").textContent = status;
   document.getElementById("hitsPill").textContent = `Hits ${state.hits}/${state.total_ship_cells} · Sunk ${state.sunk_ships}/${state.ships_total}`;
@@ -505,7 +524,11 @@ function render(){
   document.getElementById("agentBtn").disabled = agentBusy || state.terminal;
   document.getElementById("autoBtn").disabled = agentBusy || state.terminal;
   document.getElementById("autoBtn").textContent = autoPlay ? "Stop auto-play" : "Auto-play";
-  document.getElementById("seedInput").value = state.seed;
+  // Only update seed input if it's not currently focused (user is not typing)
+  const seedInput = document.getElementById("seedInput");
+  if (document.activeElement !== seedInput) {
+    seedInput.value = state.seed;
+  }
   document.getElementById("events").innerHTML = state.events.map(e => `<div class="event">${escapeHtml(e)}</div>`).join("");
 }
 function div(cls, text){ const d = document.createElement("div"); d.className = cls; d.textContent = text; return d; }
@@ -522,10 +545,11 @@ async function autoplayToggle(){
 }
 function setMode(m){
   agentMode = m;
-  request("api/new", {seed: state.seed, agent_mode: m});
+  request("api/new", {seed: document.getElementById("seedInput").value, agent_mode: m});
 }
 document.getElementById("llmMode").onclick = () => setMode("llm");
 document.getElementById("heurMode").onclick = () => setMode("heuristic");
+document.getElementById("randMode").onclick = () => setMode("random");
 document.getElementById("agentBtn").onclick = agentOnce;
 document.getElementById("autoBtn").onclick = autoplayToggle;
 document.getElementById("newBtn").onclick = () => { autoPlay = false; request("api/new", {seed: document.getElementById("seedInput").value, agent_mode: agentMode}); };
@@ -541,7 +565,7 @@ def main() -> None:
     parser.add_argument("--host", default=DEFAULT_HOST)
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--seed", type=int, default=2026)
-    parser.add_argument("--agent-mode", choices=("llm", "heuristic"), default="heuristic")
+    parser.add_argument("--agent-mode", choices=("llm", "heuristic", "random"), default="heuristic")
     parser.add_argument("--base-url", default=None, help="OpenAI-compatible base URL for LLM agent mode (e.g. areno serve).")
     parser.add_argument("--api-key", default="token")
     parser.add_argument("--model", default="policy")
@@ -550,7 +574,7 @@ def main() -> None:
     server = BattleshipServer((args.host, args.port), BattleshipHandler, seed=args.seed, args=args)
     url = f"http://{args.host}:{args.port}"
     print(f"Battleship web UI running at {url}")
-    print(f"Agent mode: {args.agent_mode}" + (f" | base_url={args.base_url}" if args.base_url else " | no --base-url (use heuristic or click to play)"))
+    print(f"Agent mode: {args.agent_mode}" + (f" | base_url={args.base_url}" if args.base_url else " | no --base-url (use heuristic/random or click to play)"))
     print("Press Ctrl+C to stop.")
     try:
         server.serve_forever()

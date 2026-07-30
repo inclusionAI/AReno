@@ -73,6 +73,49 @@ class FakePlayer:
         return game.format_coordinate(row, col)
 
 
+class HeuristicPlayer:
+    """Heuristic player using hunt/target strategy (same as web_ui.py)."""
+
+    def __init__(self, seed: int = 42):
+        self.rng = random.Random(seed)
+
+    def choose_shot(self, state: game.GameState) -> str:
+        legal = game.legal_shots(state)
+        if not legal:
+            return "A1"
+
+        # Target phase: collect cells adjacent to unresolved hits.
+        hit_cells = set()
+        sunk_cells = set()
+        for ship in state.ships:
+            if ship.is_sunk:
+                for cell in ship.cells:
+                    sunk_cells.add(cell)
+            else:
+                for cell in ship.cells:
+                    if cell in ship.hits:
+                        hit_cells.add(cell)
+
+        open_hits = hit_cells - sunk_cells
+        candidates = []
+        for hit in open_hits:
+            r, c = hit
+            for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                n = (r + dr, c + dc)
+                if n in legal:
+                    candidates.append(n)
+
+        if candidates:
+            row, col = self.rng.choice(candidates)
+            return game.format_coordinate(row, col)
+
+        # Hunt phase: prefer checkerboard spread.
+        spread = [cell for cell in legal if (cell[0] + cell[1]) % 2 == 0]
+        pool = spread if spread else list(legal)
+        row, col = self.rng.choice(pool)
+        return game.format_coordinate(row, col)
+
+
 # 评估玩家策略在给定舰队列表上的表现
 def evaluate_player(player: Player, fleets: list[dict], max_turns: int = None) -> dict:
     """Evaluate a player policy against a list of fleet records."""
@@ -177,7 +220,7 @@ def main():
     parser.add_argument(
         "--player",
         "-p",
-        choices=["random", "fake"],
+        choices=["random", "fake", "heuristic"],
         default="random",
         help="Player policy to evaluate.",
     )
@@ -203,6 +246,8 @@ def main():
         player = RandomPlayer()
     elif args.player == "fake":
         player = FakePlayer()
+    elif args.player == "heuristic":
+        player = HeuristicPlayer(seed=42)
     else:
         raise ValueError(f"Unknown player: {args.player}")
 

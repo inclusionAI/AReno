@@ -7,7 +7,7 @@ A multi-turn agentic RL example where a model learns to play Battleship using to
 - **Board**: 8×8 grid (rows A-H, columns 1-8)
 - **Fleet**: 4 ships of lengths [4, 3, 2, 2] = 11 total cells
 - **Goal**: Sink all ships in as few shots as possible
-- **Max turns**: 64 shots per game (~2× board cells)
+- **Max turns**: 40 shots per game (< 64 board cells, so exhaustive search cannot win — the agent must play strategically)
 - **Feedback**:
   - `miss`: No ship at that coordinate
   - `hit`: Ship hit but not sunk
@@ -25,6 +25,7 @@ The agent sees only its own view: hits (X), misses (o), and unknown cells (.). T
 | `reward.py` | Reward function for RL |
 | `run_agent.py` | Multi-turn agent loop |
 | `evaluate.py` | Baseline comparison harness |
+| `play_llm.py` | Batch-evaluate any OpenAI-compatible LLM (or served trained model) |
 | `web_ui.py` | Cartoon browser game backed by an OpenAI-compatible tool-call model |
 
 ## Quick Start
@@ -90,6 +91,27 @@ To run without an LLM server:
 python examples/agentic/battleship/web_ui.py --agent-mode heuristic
 ```
 
+### 5. Batch-evaluate an LLM
+
+`play_llm.py` plays `--games` seeded fleets against any OpenAI-compatible
+endpoint — a trained checkpoint served by `areno serve`, or an external LLM —
+and reports win rate, completion, shots to win, and invalid-shot rate.
+
+```bash
+# Trained checkpoint served locally
+areno serve --model-path ./runs/battleship/.../step_100 --port 8000 --world-size 1
+python examples/agentic/battleship/play_llm.py \
+  --base-url http://127.0.0.1:8000/v1 \
+  --games 50 --output /tmp/battleship_llm.json
+
+# External LLM (OpenAI-compatible)
+python examples/agentic/battleship/play_llm.py \
+  --base-url https://api.openai.com/v1 \
+  --api-key "$OPENAI_API_KEY" \
+  --model gpt-4o-mini \
+  --games 50
+```
+
 ## Observable Output
 
 Training produces artifacts in `--metrics-log-dir`:
@@ -110,9 +132,9 @@ The reward function provides dense shaping:
 - **+0.05**: Per hit cell
 - **+0.15**: Per sunk ship
 - **−0.02**: Per invalid/repeated shot
-- **−0.002 × shots_used**: Efficiency penalty
+- **−0.05 × shots_used**: Efficiency penalty (strong enough that exhaustive/slow wins score near 0 while efficient wins score high)
 
-This creates a learnable gradient before the agent achieves consistent wins.
+This creates a learnable gradient: a random/exhaustive player scores ~0 reward (it cannot sink the fleet within 40 shots), while an efficient policy that wins quickly scores up to ~1.6. Eval confirms the random baseline's win rate drops from 100% (at 64 turns) to 0% (at 40 turns).
 
 ## Limitations
 
