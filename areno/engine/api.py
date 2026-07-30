@@ -131,7 +131,13 @@ class ArenoEngine:
       rollout paths.
     """
 
-    def __init__(self, config: EngineConfig):
+    def __init__(
+        self,
+        config: EngineConfig,
+        *,
+        start: bool = True,
+        cluster_kwargs: dict[str, Any] | None = None,
+    ):
         """Start rank workers for a validated engine config.
 
         Constructs the :class:`TPCluster` and starts the underlying worker
@@ -140,13 +146,14 @@ class ArenoEngine:
 
         # Loss function is required because the engine always carries a trainer
         # path; pure-inference engines should still set a no-op loss.
-        if config.train_loss_fn is None:
+        if config.role == "train" and config.train_loss_fn is None:
             raise ValueError("ArenoEngine requires train_loss_fn")
         self.config = config
         # TPCluster owns the per-rank worker processes and the IPC channels;
         # ``ArenoWorker`` is the rank-side command loop.
-        self.cluster = TPCluster(config, ArenoWorker)
-        self.cluster.start()
+        self.cluster = TPCluster(config, ArenoWorker, **(cluster_kwargs or {}))
+        if start:
+            self.cluster.start()
         self._async_dp_cursor = count()
 
     def begin_rollout_session(self) -> None:
@@ -186,6 +193,10 @@ class ArenoEngine:
         optimizer_config: OptimizerConfig | None = None,
         runtime_config: RuntimeConfig | None = None,
         loss_fn: Callable[[Any, torch.Tensor], torch.Tensor | tuple[torch.Tensor, dict[str, Any]]] | None = None,
+        role: str = "train",
+        start: bool = True,
+        cluster_kwargs: dict[str, Any] | None = None,
+        policy_sync_bucket_mb: int = 64,
     ) -> ArenoEngine:
         """Build an engine by reading model config from a checkpoint path.
 
@@ -213,8 +224,10 @@ class ArenoEngine:
             dummy_load=dummy_load,
             optimizer=optimizer_config or OptimizerConfig(),
             runtime=runtime_config or RuntimeConfig(),
+            role=role,
+            policy_sync_bucket_mb=policy_sync_bucket_mb,
         )
-        return cls(cfg)
+        return cls(cfg, start=start, cluster_kwargs=cluster_kwargs)
 
     def generate_rollout(
         self,

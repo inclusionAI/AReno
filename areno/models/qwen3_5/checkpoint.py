@@ -25,11 +25,16 @@ from areno.engine.checkpoints.common import (
     write_hf_safetensors_checkpoint,
 )
 from areno.engine.checkpoints.io import (
+    PolicyFlatPiece,
+    PolicyTensorLayout,
+    PolicyTensorStore,
     SafetensorsIndex,
     _all_gather_tensor_parallel,
     _copy_row,
     _owns_checkpoint_tensor,
     _tensor_to_cpu,
+    gather_tensor_parallel_ranged_tensor,
+    policy_plan_scope,
 )
 from areno.engine.layers.linear import _shard_range
 from areno.engine.parallel.context import get_tp_context
@@ -98,6 +103,18 @@ def save_qwen35_weights(
     return saved_path
 
 
+def build_qwen35_policy_plan(model: Qwen35ForCausalLM) -> PolicyTensorStore:
+    """Build a live canonical layout for direct train-to-rollout sync."""
+
+    tensors = PolicyTensorStore()
+    prefix = model.config.checkpoint_prefix
+    with policy_plan_scope():
+        _save_embedding_norm_head(tensors, model, prefix)
+        for layer_idx, layer in enumerate(model.layers):
+            _save_layer(tensors, layer, f"{prefix}.layers.{layer_idx}")
+    return tensors
+
+
 def _top_level_spec(prefix: str, lm_head_key: str = "lm_head.weight") -> TopLevelSpec:
     return TopLevelSpec(
         embedding_key=f"{prefix}.embed_tokens.weight",
@@ -138,7 +155,9 @@ def _save_embedding_norm_head(tensors: dict[str, torch.Tensor | None], model: Qw
     spec = _top_level_spec(prefix, model.config.checkpoint_lm_head_key)
     _require_lm_head_shape(model, spec.lm_head_key)
     save_embedding_norm_head(tensors, model, spec)
-    tensors[spec.norm_key] = rank0_tensor(model.norm.weight - 1.0)
+    tensors[spec.norm_key] = rank0_tensor(
+        model.norm.weight if isinstance(tensors, PolicyTensorStore) else model.norm.weight - 1.0
+    )
 
 
 def _require_lm_head_shape(model: Qwen35ForCausalLM, lm_head_key: str) -> None:
@@ -180,7 +199,10 @@ def _load_layer(index: SafetensorsIndex, layer: Qwen35DecoderLayer, prefix: str,
 
 def _save_layer(tensors: dict[str, torch.Tensor | None], layer: Qwen35DecoderLayer, prefix: str) -> None:
     for spec in LAYER_NORM_SPECS:
-        tensors[spec.key.format(prefix=prefix)] = rank0_tensor(_attr_path(layer, spec.attr) - 1.0)
+        value = _attr_path(layer, spec.attr)
+        tensors[spec.key.format(prefix=prefix)] = rank0_tensor(
+            value if isinstance(tensors, PolicyTensorStore) else value - 1.0
+        )
     _save_mlp(tensors, layer, prefix)
 
     if isinstance(layer.attention, Qwen35FullAttention):
@@ -219,7 +241,11 @@ def _save_moe_mlp(tensors: dict[str, torch.Tensor | None], mlp: nn.Module, prefi
 def _save_packed_routed_experts(tensors: dict[str, torch.Tensor | None], mlp: nn.Module, prefix: str) -> None:
     gate_up_key = f"{prefix}.experts.gate_up_proj"
     down_key = f"{prefix}.experts.down_proj"
-    full_weights = gather_moe_expert_weights(getattr(mlp, "experts"))
+    experts = getattr(mlp, "experts")
+    if isinstance(tensors, PolicyTensorStore):
+        _stage_packed_policy_experts(tensors, experts, gate_up_key, down_key)
+        return
+    full_weights = gather_moe_expert_weights(experts)
     if full_weights is None:
         tensors[gate_up_key] = None
         tensors[down_key] = None
@@ -228,6 +254,59 @@ def _save_packed_routed_experts(tensors: dict[str, torch.Tensor | None], mlp: nn
     gate_up = torch.cat((gate_weights, up_weights), dim=1).contiguous()
     tensors[gate_up_key] = _tensor_to_cpu(gate_up) if _owns_checkpoint_tensor(gate_up_key) else None
     tensors[down_key] = _tensor_to_cpu(down_weights.contiguous()) if _owns_checkpoint_tensor(down_key) else None
+
+
+def _stage_packed_policy_experts(
+    tensors: PolicyTensorStore,
+    experts: nn.Module,
+    gate_up_key: str,
+    down_key: str,
+) -> None:
+    gate_weights, up_weights, down_weights = experts.expert_weights()
+    local_start = int(experts.local_expert_start)
+    num_experts = int(experts.local_num_experts) * get_tp_context().world_size
+    gate_shape = tuple(gate_weights[0].shape)
+    up_shape = tuple(up_weights[0].shape)
+    down_shape = tuple(down_weights[0].shape)
+    trailing = _shape_numel(gate_shape[1:])
+    combined_rows = gate_shape[0] + up_shape[0]
+    gate_up_pieces = []
+    down_pieces = []
+    for local_index, (gate, up, down) in enumerate(zip(gate_weights, up_weights, down_weights, strict=True)):
+        expert_id = local_start + local_index
+        base = expert_id * combined_rows * trailing
+        gate_up_pieces.extend(
+            (
+                PolicyFlatPiece(gate.detach(), base),
+                PolicyFlatPiece(up.detach(), base + gate.numel()),
+            )
+        )
+        down_pieces.append(PolicyFlatPiece(down.detach(), expert_id * down.numel()))
+    tensors.add_layout(
+        gate_up_key,
+        PolicyTensorLayout(
+            shape=(num_experts, combined_rows, *gate_shape[1:]),
+            dtype=gate_weights[0].dtype,
+            pieces=(),
+            flat_pieces=tuple(gate_up_pieces),
+        ),
+    )
+    tensors.add_layout(
+        down_key,
+        PolicyTensorLayout(
+            shape=(num_experts, *down_shape),
+            dtype=down_weights[0].dtype,
+            pieces=(),
+            flat_pieces=tuple(down_pieces),
+        ),
+    )
+
+
+def _shape_numel(shape: tuple[int, ...]) -> int:
+    result = 1
+    for size in shape:
+        result *= size
+    return result
 
 
 def _save_shared_expert_gate(tensors: dict[str, torch.Tensor | None], mlp: nn.Module, prefix: str) -> None:
@@ -598,8 +677,13 @@ def _save_full_attention(tensors: dict[str, torch.Tensor | None], attn: Qwen35Fu
     tensors[f"{prefix}.self_attn.k_proj.weight"] = k_weight
     tensors[f"{prefix}.self_attn.v_proj.weight"] = v_weight
     tensors[f"{prefix}.self_attn.o_proj.weight"] = gather_tensor_parallel_tensor(attn.o_proj.weight, dim=1)
-    tensors[f"{prefix}.self_attn.q_norm.weight"] = rank0_tensor(attn.q_norm.weight - 1.0)
-    tensors[f"{prefix}.self_attn.k_norm.weight"] = rank0_tensor(attn.k_norm.weight - 1.0)
+    policy = isinstance(tensors, PolicyTensorStore)
+    tensors[f"{prefix}.self_attn.q_norm.weight"] = rank0_tensor(
+        attn.q_norm.weight if policy else attn.q_norm.weight - 1.0
+    )
+    tensors[f"{prefix}.self_attn.k_norm.weight"] = rank0_tensor(
+        attn.k_norm.weight if policy else attn.k_norm.weight - 1.0
+    )
 
 
 def _save_full_attention_replicated_kv(
@@ -613,13 +697,28 @@ def _save_full_attention_replicated_kv(
     tensors[f"{prefix}.self_attn.q_proj.weight"] = q_weight
     k_key = f"{prefix}.self_attn.k_proj.weight"
     v_key = f"{prefix}.self_attn.v_proj.weight"
-    k_full = _gather_replicated_kv_heads(k, attn.num_kv_heads)
-    v_full = _gather_replicated_kv_heads(v, attn.num_kv_heads)
-    tensors[k_key] = _tensor_to_cpu(k_full) if _owns_checkpoint_tensor(k_key) else None
-    tensors[v_key] = _tensor_to_cpu(v_full) if _owns_checkpoint_tensor(v_key) else None
+    if isinstance(tensors, PolicyTensorStore):
+        _, k_range, v_range = attn.qkv_proj.shard_ranges
+        global_kv_rows = attn.num_kv_heads * attn.head_dim
+        tensors[k_key] = gather_tensor_parallel_ranged_tensor(
+            k, start=k_range[0], end=k_range[1], global_size=global_kv_rows
+        )
+        tensors[v_key] = gather_tensor_parallel_ranged_tensor(
+            v, start=v_range[0], end=v_range[1], global_size=global_kv_rows
+        )
+    else:
+        k_full = _gather_replicated_kv_heads(k, attn.num_kv_heads)
+        v_full = _gather_replicated_kv_heads(v, attn.num_kv_heads)
+        tensors[k_key] = _tensor_to_cpu(k_full) if _owns_checkpoint_tensor(k_key) else None
+        tensors[v_key] = _tensor_to_cpu(v_full) if _owns_checkpoint_tensor(v_key) else None
     tensors[f"{prefix}.self_attn.o_proj.weight"] = gather_tensor_parallel_tensor(attn.o_proj.weight, dim=1)
-    tensors[f"{prefix}.self_attn.q_norm.weight"] = rank0_tensor(attn.q_norm.weight - 1.0)
-    tensors[f"{prefix}.self_attn.k_norm.weight"] = rank0_tensor(attn.k_norm.weight - 1.0)
+    policy = isinstance(tensors, PolicyTensorStore)
+    tensors[f"{prefix}.self_attn.q_norm.weight"] = rank0_tensor(
+        attn.q_norm.weight if policy else attn.q_norm.weight - 1.0
+    )
+    tensors[f"{prefix}.self_attn.k_norm.weight"] = rank0_tensor(
+        attn.k_norm.weight if policy else attn.k_norm.weight - 1.0
+    )
 
 
 def _gather_replicated_kv_heads(local: torch.Tensor, num_kv_heads: int) -> torch.Tensor:

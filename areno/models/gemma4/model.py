@@ -39,7 +39,11 @@ from areno.accel import (
     areno_topk_softmax,
 )
 from areno.accel.ops import FusedMoeConfig, areno_fused_experts, areno_gelu_tanh_and_mul, log_once
-from areno.engine.checkpoints.common import load_checkpoint_weights, save_checkpoint_weights
+from areno.engine.checkpoints.common import (
+    build_checkpoint_policy_plan,
+    load_checkpoint_weights,
+    save_checkpoint_weights,
+)
 from areno.engine.config import ModelConfig, _parse_dtype
 from areno.engine.layers.attention_backend.infer import FlashAttnInferBackend, build_infer_attention_backend
 from areno.engine.layers.attention_backend.train import build_train_attention_backend
@@ -920,6 +924,9 @@ class Gemma4Adapter(ModelAdapter):
         if not isinstance(model, Gemma4ForCausalLM):
             raise TypeError(f"Gemma4Adapter cannot save weights from {type(model)!r}")
         return save_checkpoint_weights(model, output_path, source_path, checkpoint_spec(model.config.checkpoint_prefix))
+
+    def build_policy_plan(self, model: nn.Module):
+        return build_checkpoint_policy_plan(model, checkpoint_spec(model.config.checkpoint_prefix))
 
 
 def _layer_type(config: ModelConfig, layer_idx: int) -> str:

@@ -87,12 +87,47 @@ Built-in algorithms: ``sft``, ``dpo``, ``gspo``, ``grpo``, ``ppo``.
 
 ``world-size`` must be divisible by ``tp-size``.
 
+``--train-devices TEXT``
+   Comma-separated logical CUDA device indices used by training. The count
+   must equal ``world-size``. When omitted, AReno uses ``0`` through
+   ``world-size - 1``.
+
 Rollout
 ~~~~~~~
 
 Everything that generates and scores completions: batch volume, sequence
 limits, sampling, decode runtime, the agentic-rollout hooks, and the reward
 signal.
+
+``--rollout-devices TEXT``
+   Comma-separated logical CUDA device indices for an independent rollout
+   engine. They must not overlap ``--train-devices``. This option is valid only
+   for online algorithms that generate rollouts.
+
+``--rollout-tp-size INTEGER``
+   Tensor parallel size of the independent rollout engine. It defaults to the
+   training ``tp-size``. The rollout device count must be divisible by this
+   value.
+
+``--policy-sync-bucket-mb INTEGER``
+   Maximum reusable GPU buffer used while streaming policy weights from the
+   training engine to the rollout engine. Default: ``64`` MiB.
+
+For example, the following uses four visible GPUs for training and two
+different visible GPUs for rollout:
+
+.. code-block:: bash
+
+   areno train \
+     --algo gspo \
+     --ckpt Qwen/Qwen3-8B \
+     --dataset-path ... \
+     --reward-fn-path ... \
+     --world-size 4 \
+     --tp-size 4 \
+     --train-devices 0,1,2,3 \
+     --rollout-devices 4,5 \
+     --rollout-tp-size 2
 
 ``--batch-size INTEGER``
    Prompt or pair batch size. Default: ``32``.

@@ -62,7 +62,11 @@ from areno.accel.ops import (
     log_once,
     seg_la_fwd,
 )
-from areno.engine.checkpoints.common import load_checkpoint_weights, save_checkpoint_weights
+from areno.engine.checkpoints.common import (
+    build_checkpoint_policy_plan,
+    load_checkpoint_weights,
+    save_checkpoint_weights,
+)
 from areno.engine.config import ModelConfig, _parse_dtype
 from areno.engine.layers.attention_backend.infer import FlashAttnInferBackend, build_infer_attention_backend
 from areno.engine.layers.attention_backend.train import build_train_attention_backend
@@ -1356,6 +1360,9 @@ class BailingMoeLinearV2Adapter(ModelAdapter):
         if not isinstance(model, BailingMoeLinearV2ForCausalLM):
             raise TypeError(f"BailingMoeLinearV2Adapter cannot save weights from {type(model)!r}")
         return save_checkpoint_weights(model, output_path, source_path, CHECKPOINT_SPEC)
+
+    def build_policy_plan(self, model: nn.Module):
+        return build_checkpoint_policy_plan(model, CHECKPOINT_SPEC)
 
 
 def _is_softmax_layer(config: ModelConfig, layer_idx: int) -> bool:

@@ -15,6 +15,7 @@ This file is the thin glue that:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import sys
 import time
@@ -118,25 +119,40 @@ class ArenoBackend(Backend):
         """Create an adapter; workers are started by `initialize`."""
 
         super().__init__()
-        self._engine = None
+        self._train_engine = None
+        self._rollout_engine = None
+        self._separate_rollout = False
+        self._train_policy_version = 0
+        self._rollout_policy_version = 0
+        self._policy_sync_lock = Lock()
+        self._rollout_session_active = False
+        self._policy_sync_bucket_bytes = 64 * 1024 * 1024
         # Per-step wall-time accumulators used to print the
         # rollout/train/end-to-end breakdown after `train` completes.
         self._step_e2e_start: float | None = None
         self._step_rollout_time_s = 0.0
 
-    def _require_engine(self):
-        """Return the initialized engine or raise a consistent error."""
+    def _require_train_engine(self):
+        """Return the initialized training engine."""
 
-        if self._engine is None:
+        if self._train_engine is None:
             raise RuntimeError("ArenoBackend is not initialized")
-        return self._engine
+        return self._train_engine
+
+    def _require_rollout_engine(self):
+        """Return the independent rollout engine or the colocated engine."""
+
+        return self._rollout_engine or self._require_train_engine()
 
     def close(self) -> None:
         """Stop backend worker processes and release engine resources."""
 
-        engine = self._engine
-        self._engine = None
-        if engine is not None:
+        engines = tuple(engine for engine in (self._rollout_engine, self._train_engine) if engine is not None)
+        self._train_engine = None
+        self._rollout_engine = None
+        self._separate_rollout = False
+        self._rollout_session_active = False
+        for engine in engines:
             engine.close()
 
     def initialize(self, ctx: Context):
@@ -162,19 +178,151 @@ class ArenoBackend(Backend):
         devices = cfg.devices
         if devices is None and ctx.world_size:
             devices = list(range(world_size))
+        if devices is None or len(devices) != world_size:
+            raise ValueError(f"training device count must equal world_size={world_size}")
+        if cfg.rollout_tp_size is not None and cfg.rollout_devices is None:
+            raise ValueError("rollout_tp_size requires rollout_devices")
 
-        # ArenoEngine construction is synchronous and CUDA-heavy. The SDK is
-        # intentionally synchronous because engine IPC is blocking as well.
-        self._engine = ArenoEngine.from_pretrained(
+        if not cfg.uses_separate_rollout_engine():
+            self._train_engine = ArenoEngine.from_pretrained(
+                cfg.model_path or ctx.model_path,
+                tp_size=tp_size,
+                dp_size=dp_size,
+                devices=devices,
+                dummy_load=cfg.dummy_load,
+                optimizer_config=OptimizerConfig(**cfg.optimizer),
+                runtime_config=RuntimeConfig(**cfg.runtime),
+                loss_fn=_external_loss_dispatcher,
+                policy_sync_bucket_mb=cfg.policy_sync_bucket_mb,
+            )
+            return
+        self._policy_sync_bucket_bytes = cfg.policy_sync_bucket_mb * 1024 * 1024
+
+        from areno.engine.protocol import (
+            ClusterPartition,
+            DistributedWorldSpec,
+            find_free_port,
+            start_partitioned_clusters,
+        )
+
+        rollout_devices = list(cfg.rollout_devices or ())
+        rollout_tp_size = cfg.resolved_rollout_tp_size()
+        if not rollout_devices:
+            raise ValueError("rollout_devices must be non-empty")
+        if len(rollout_devices) % rollout_tp_size != 0:
+            raise ValueError("len(rollout_devices) must be divisible by rollout_tp_size")
+        overlap = sorted(set(devices or ()) & set(rollout_devices))
+        if overlap:
+            raise ValueError(f"train and rollout devices must not overlap: {overlap}")
+        train_partition = ClusterPartition(
+            role="train",
+            global_rank_offset=0,
+            local_world_size=world_size,
+            tp_size=tp_size,
+            devices=tuple(devices or ()),
+        )
+        rollout_partition = ClusterPartition(
+            role="rollout",
+            global_rank_offset=world_size,
+            local_world_size=len(rollout_devices),
+            tp_size=rollout_tp_size,
+            devices=tuple(rollout_devices),
+        )
+        world_spec = DistributedWorldSpec(
+            master_addr="127.0.0.1",
+            master_port=find_free_port(),
+            global_world_size=world_size + len(rollout_devices),
+            train=train_partition,
+            rollout=rollout_partition,
+        )
+        common = {
+            "dummy_load": cfg.dummy_load,
+            "runtime_config": RuntimeConfig(**cfg.runtime),
+            "start": False,
+            "policy_sync_bucket_mb": cfg.policy_sync_bucket_mb,
+        }
+        self._train_engine = ArenoEngine.from_pretrained(
             cfg.model_path or ctx.model_path,
             tp_size=tp_size,
             dp_size=dp_size,
             devices=devices,
-            dummy_load=cfg.dummy_load,
             optimizer_config=OptimizerConfig(**cfg.optimizer),
-            runtime_config=RuntimeConfig(**cfg.runtime),
             loss_fn=_external_loss_dispatcher,
+            role="train",
+            cluster_kwargs={"world_spec": world_spec, "partition": train_partition},
+            **common,
         )
+        rollout_runtime = RuntimeConfig(**cfg.runtime)
+        self._rollout_engine = ArenoEngine.from_pretrained(
+            cfg.model_path or ctx.model_path,
+            tp_size=rollout_tp_size,
+            dp_size=len(rollout_devices) // rollout_tp_size,
+            devices=rollout_devices,
+            dummy_load=cfg.dummy_load,
+            runtime_config=rollout_runtime,
+            loss_fn=None,
+            role="rollout",
+            policy_sync_bucket_mb=cfg.policy_sync_bucket_mb,
+            start=False,
+            cluster_kwargs={"world_spec": world_spec, "partition": rollout_partition},
+        )
+        try:
+            start_partitioned_clusters(
+                self._train_engine.cluster,
+                self._rollout_engine.cluster,
+                world_spec,
+            )
+        except BaseException:
+            self.close()
+            raise
+        self._separate_rollout = True
+
+    def _validate_policy_plans(self) -> None:
+        """Refresh live tensor views and reject any cross-rank layout mismatch."""
+
+        # Model onload/offload replaces Parameter storage. Rebuild the plan for
+        # every version so tasks always reference the currently-live tensors;
+        # the metadata comparison is cheap and also guards adapter drift.
+        from areno.engine.protocol import Op
+
+        train_results = self._require_train_engine().cluster.call(Op.POLICY_SYNC_PLAN)
+        rollout_results = self._require_rollout_engine().cluster.call(Op.POLICY_SYNC_PLAN)
+        train_plan = train_results[0]
+        rollout_plan = rollout_results[0]
+        if any(result != train_plan for result in train_results):
+            raise RuntimeError("training ranks produced inconsistent policy synchronization plans")
+        if any(result != rollout_plan for result in rollout_results):
+            raise RuntimeError("rollout ranks produced inconsistent policy synchronization plans")
+        if train_plan != rollout_plan:
+            raise RuntimeError("train and rollout policy synchronization layouts do not match")
+
+    def _sync_policy_if_needed(self) -> None:
+        """Synchronize one new optimizer version before rollout starts."""
+
+        if not self._separate_rollout or self._train_policy_version == self._rollout_policy_version:
+            return
+        with self._policy_sync_lock:
+            if self._train_policy_version == self._rollout_policy_version:
+                return
+            self._validate_policy_plans()
+            from areno.engine.protocol import Op, PolicySyncPayload
+
+            version = self._train_policy_version
+            payload = PolicySyncPayload(version=version, bucket_bytes=self._policy_sync_bucket_bytes)
+            train_call = self._require_train_engine().cluster.submit(Op.POLICY_SYNC_PUBLISH, payload)
+            rollout_call = self._require_rollout_engine().cluster.submit(Op.POLICY_SYNC_RECEIVE, payload)
+            train_call.result()
+            rollout_results = rollout_call.result()
+            self._rollout_policy_version = version
+            summary = next((result for result in rollout_results if isinstance(result, dict)), None)
+            if summary is not None:
+                logger.info(
+                    "policy sync complete version=%d bytes=%d tensors=%d elapsed_s=%.6f",
+                    version,
+                    int(summary["bytes"]),
+                    int(summary["tensors"]),
+                    float(summary["elapsed_s"]),
+                )
 
     def rollout_batch(
         self,
@@ -183,9 +331,11 @@ class ArenoBackend(Backend):
         n_samples: int,
         sampling_params: SamplingParams,
     ) -> list[RolloutResult]:
-        engine = self._require_engine()
+        engine = self._require_rollout_engine()
         if not prompt_tokens:
             return []
+        if not self._rollout_session_active:
+            self._sync_policy_if_needed()
         # Replicate each already-tokenized prompt `n_samples` times so the
         # engine treats each completion as independent while preserving the
         # `[prompt0_sample0, prompt0_sample1, ..., promptN_sampleK]` layout.
@@ -229,31 +379,35 @@ class ArenoBackend(Backend):
         """Prepare colocated actor state before rollout requests are issued."""
 
         del ctx
-        self._require_engine().begin_rollout_session()
+        self._sync_policy_if_needed()
+        self._require_rollout_engine().begin_rollout_session()
+        self._rollout_session_active = True
 
     async def begin_rollout_session_async(self, ctx: Context) -> None:
         """Async rollout-session begin hook for agentic callers."""
 
         del ctx
-        await self._require_engine().begin_rollout_session_async()
+        await asyncio.to_thread(self._sync_policy_if_needed)
+        await self._require_rollout_engine().begin_rollout_session_async()
+        self._rollout_session_active = True
 
     async def sync_rollout_session_async(self, ctx: Context) -> None:
         """Synchronize worker TP groups before agentic request rollout."""
 
         del ctx
-        await self._require_engine().sync_rollout_session_async()
+        await self._require_rollout_engine().sync_rollout_session_async()
 
     def dp_size(self, ctx: Context) -> int:
         """Return the engine's effective DP size after backend initialization."""
 
         del ctx
-        return int(self._require_engine().config.dp_size)
+        return int(self._require_rollout_engine().config.dp_size)
 
     def model_context_len(self, ctx: Context) -> int | None:
         """Return the checkpoint's max position embeddings from the loaded engine config."""
 
         del ctx
-        return int(self._require_engine().config.model.max_position_embeddings)
+        return int(self._require_rollout_engine().config.model.max_position_embeddings)
 
     def probe_rollout_cache(
         self,
@@ -266,7 +420,7 @@ class ArenoBackend(Backend):
         """Allocate rollout cache and capture decode graphs without generating."""
 
         del ctx
-        return self._require_engine().probe_rollout_cache(
+        return self._require_rollout_engine().probe_rollout_cache(
             max_new_tokens=max_new_tokens,
             max_running_prompts=max_running_prompts,
             max_prompt_len=max_prompt_len,
@@ -276,13 +430,15 @@ class ArenoBackend(Backend):
         """Finalize rollout-only state before scoring or training."""
 
         del ctx
-        self._require_engine().end_rollout_session()
+        self._require_rollout_engine().end_rollout_session()
+        self._rollout_session_active = False
 
     async def end_rollout_session_async(self, ctx: Context) -> None:
         """Async rollout-session end hook for agentic callers."""
 
         del ctx
-        await self._require_engine().end_rollout_session_async()
+        await self._require_rollout_engine().end_rollout_session_async()
+        self._rollout_session_active = False
 
     async def rollout_batch_async(
         self,
@@ -293,9 +449,11 @@ class ArenoBackend(Backend):
     ) -> list[RolloutResult]:
         """Async rollout entry for serving/agentic callers."""
 
-        engine = self._require_engine()
+        engine = self._require_rollout_engine()
         if not prompt_tokens:
             return []
+        if not self._rollout_session_active:
+            await asyncio.to_thread(self._sync_policy_if_needed)
         prompts = [tokens for tokens in prompt_tokens for _ in range(n_samples)]
         options = _rollout_options(ctx, sampling_params)
         if self._step_e2e_start is None:
@@ -335,9 +493,11 @@ class ArenoBackend(Backend):
         mini_bs: int,
         gradient_accumulation_steps: int | None = None,
     ) -> dict[str, float]:
-        engine = self._require_engine()
+        engine = self._require_train_engine()
         if not callable(loss_fn):
             raise ValueError("ArenoBackend requires a callable loss_fn")
+        if self._separate_rollout and self._rollout_session_active:
+            raise RuntimeError("cannot update policy weights during an active rollout session")
 
         train_start = time.perf_counter()
         if self._step_e2e_start is None:
@@ -365,6 +525,8 @@ class ArenoBackend(Backend):
                 gradient_accumulation_steps=gradient_accumulation_steps,
             )
         stats_list = engine.step(packs, gradient_accumulation_steps=gradient_accumulation_steps)
+        if self._separate_rollout and any(bool(stats.stepped) for stats in stats_list):
+            self._train_policy_version += 1
         train_time_s = time.perf_counter() - train_start
         # `first_policy_metrics` keeps the per-step rollout/policy diagnostics
         # untouched (we want the value seen on the first microbatch, not the
@@ -401,17 +563,17 @@ class ArenoBackend(Backend):
         return result
 
     def save_checkpoint(self, ctx: Context, path: str) -> str:
-        engine = self._require_engine()
+        engine = self._require_train_engine()
         return engine.save_checkpoint(path)
 
     def ensure_roles(self, ctx: Context, roles: dict[str, ModelRole]) -> None:
-        engine = self._require_engine()
+        engine = self._require_train_engine()
         engine.ensure_roles(roles)
 
     def score_logprobs(
         self, ctx: Context, role: str, token_rows: list[list[int]], *, microbatch_size: int = 8
     ) -> list[list[float]]:
-        engine = self._require_engine()
+        engine = self._require_train_engine()
         return engine.score_logprobs(
             role,
             token_rows,
@@ -420,11 +582,11 @@ class ArenoBackend(Backend):
         )
 
     def score_values(self, ctx: Context, role: str, token_rows: list[list[int]]) -> list[list[float]]:
-        engine = self._require_engine()
+        engine = self._require_train_engine()
         return engine.score_values(role, token_rows, pad_token_id=_pad_token_id(ctx))
 
     def score_rewards(self, ctx: Context, role: str, token_rows: list[list[int]]) -> list[float]:
-        engine = self._require_engine()
+        engine = self._require_train_engine()
         return engine.score_rewards(role, token_rows, pad_token_id=_pad_token_id(ctx))
 
     def train_values(
@@ -438,7 +600,7 @@ class ArenoBackend(Backend):
         cliprange_value: float = 0.5,
         value_loss_coef: float = 0.5,
     ) -> dict[str, float]:
-        engine = self._require_engine()
+        engine = self._require_train_engine()
         # The critic shares the pack layout with the actor; we reuse the same
         # packer but drop the loss-function pointer (the engine has a dedicated
         # value loss path that takes (cliprange_value, value_loss_coef)).

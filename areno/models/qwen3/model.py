@@ -30,7 +30,11 @@ from areno.accel import (
     areno_topk_softmax,
 )
 from areno.accel.ops import FusedMoeConfig, areno_fused_experts, areno_silu_and_mul, log_once
-from areno.engine.checkpoints.common import load_checkpoint_weights, save_checkpoint_weights
+from areno.engine.checkpoints.common import (
+    build_checkpoint_policy_plan,
+    load_checkpoint_weights,
+    save_checkpoint_weights,
+)
 from areno.engine.config import ModelConfig, _parse_dtype
 from areno.engine.layers.attention import CausalSelfAttention
 from areno.engine.layers.linear import mark_tensor_parallel_parameter
@@ -439,6 +443,9 @@ class Qwen3Adapter(ModelAdapter):
             raise TypeError(f"Qwen3Adapter cannot save weights from {type(model)!r}")
         return save_checkpoint_weights(model, output_path, source_path, CHECKPOINT_SPEC)
 
+    def build_policy_plan(self, model: nn.Module):
+        return build_checkpoint_policy_plan(model, CHECKPOINT_SPEC)
+
 
 class Qwen3MoeAdapter(ModelAdapter):
     """Adapter for Qwen3 MoE checkpoints (for example Qwen3-30B-A3B)."""
@@ -489,6 +496,9 @@ class Qwen3MoeAdapter(ModelAdapter):
         if not isinstance(model, Qwen3MoeForCausalLM):
             raise TypeError(f"Qwen3MoeAdapter cannot save weights from {type(model)!r}")
         return save_checkpoint_weights(model, output_path, source_path, QWEN3_MOE_CHECKPOINT_SPEC)
+
+    def build_policy_plan(self, model: nn.Module):
+        return build_checkpoint_policy_plan(model, QWEN3_MOE_CHECKPOINT_SPEC)
 
 
 @torch._dynamo.disable
