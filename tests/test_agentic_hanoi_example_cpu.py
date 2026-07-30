@@ -505,7 +505,7 @@ def test_failure_sequence_scores_legal_floor():
     # Unsolved traces earn PROGRESS credit (main) plus a tiny legal-move
     # floor for gradient survival. The failure fixture oscillates disk 1
     # without ever building the target stack, so peg 2 ends empty and
-    # progress=0; the floor gives 0.02 (8 legal moves × 0.005 capped at 0.02).
+    # progress=0; the floor caps at 0.005.
     n = 3
     moves = [(0, 2), (2, 0)] * 4  # never solves, peg 2 ends empty
     rec = _record(n, "failure", tool_moves=moves)
@@ -600,13 +600,11 @@ def test_progress_toward_peg2_rewarded():
 
 def test_collapse_sequence_scores_tiny_floor():
     # Regression (2026-07-29 rollout mode collapse): the model previously locked
-    # reward at 0.04 by replaying [[0,2],[0,1]] — two legal moves that don't
-    # make progress (peg2=[1] → [], not [3,2,1]). With the hybrid formula,
-    # progress=0 but the legal floor gives 0.005 × 2 = 0.01 — tiny enough to
-    # be unattractive for freezing while keeping gradients alive (compare to
-    # any progress path which pays 0.02 per disk).
+    # reward at 0.04 by replaying [[0,2],[0,1]]. With LEGAL_FLOOR_CAP=0.005,
+    # the floor caps at 0.005 no matter how many legal steps — too small to
+    # freeze on, while keeping gradients alive during cold start.
     rec = _record(3, "optimal", tool_moves=[(0, 2), (0, 1)])
-    assert reward.reward_fn(rec) == pytest.approx(reward.LEGAL_FLOOR_BONUS * 2)
+    assert reward.reward_fn(rec) == pytest.approx(reward.LEGAL_FLOOR_CAP)
 
 
 def test_malformed_arguments_score_zero_not_crash():

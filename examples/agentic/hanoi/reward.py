@@ -62,7 +62,7 @@ _MOVE_LIST_RE = re.compile(r"\[.*\]", re.DOTALL)
 # tiny legal-move floor (gradient survival), see module docstring.
 PROGRESS_BONUS = 0.02  # per disk correctly stacked on peg 2 from the bottom
 LEGAL_FLOOR_BONUS = 0.005  # per legal move — tiny floor to keep gradient alive
-LEGAL_FLOOR_CAP = 0.02  # floor cap: 4 legal moves = 0.02, not worth collapsing to
+LEGAL_FLOOR_CAP = 0.005  # floor cap: 1 legal move caps it; too small to steal, just keeps gradient alive
 PARTIAL_CREDIT_CAP = 0.5  # global cap: completion (>=1.0) always dominates
 
 
