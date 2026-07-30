@@ -42,6 +42,39 @@ class PolicyOnlyTrainer:
         self.loss_fn = loss_fn
         self.logger = logging.getLogger(f"{self.__class__.__module__}.{self.__class__.__name__}")
         self._agent_run_fn = None
+        self._timed_reward_fn = self._build_timed_reward_fn(reward_fn)
+
+    def _build_timed_reward_fn(self, reward_fn):
+        """Wrap the user reward function with optional timing instrumentation.
+
+        When ``reward_timing_enabled`` is ``False`` (the default), the wrapper
+        is a transparent passthrough that adds no overhead.
+        """
+
+        from areno.api.reward_timing import RewardTimingConfig, TimedRewardFn
+
+        timing_config = RewardTimingConfig(
+            enabled=bool(getattr(self.config, "reward_timing_enabled", False)),
+            slow_threshold_s=getattr(self.config, "reward_slow_threshold_s", None),
+            timeout_s=getattr(self.config, "reward_timeout_s", None),
+            hook_name="reward_fn",
+        )
+        timed = TimedRewardFn(reward_fn, timing_config)
+        # Replace the public reward_fn so all call sites (including agentic
+        # rollout) go through the timed wrapper transparently.
+        self.reward_fn = timed
+        return timed
+
+    def _finalize_reward_timing(self, step: int) -> None:
+        """Produce a reward timing report for the current step if enabled."""
+
+        report = self._timed_reward_fn.finalize_batch(step)
+        if report is not None:
+            self.areno.record_dashboard_state(
+                stage="reward_timing",
+                step=step,
+                extra={"reward_timing": report.to_dict()},
+            )
 
     def fit(self) -> None:
         self.areno.init()
@@ -107,6 +140,7 @@ class PolicyOnlyTrainer:
                     self.logger.info(
                         "epoch=%d step=%d metric=reward_mean value=%.6f", epoch, step, float(np.mean(rewards_all))
                     )
+                    self._finalize_reward_timing(step)
                 if rollout_logprobs:
                     self.logger.info(
                         "epoch=%d step=%d metric=rollout_logprob_mean value=%.6f",

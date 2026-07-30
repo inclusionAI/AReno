@@ -92,6 +92,9 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "train_tool_results",
             "reward_fn_path",
             "reward_ckpt",
+            "reward_timing_enabled",
+            "reward_slow_threshold_s",
+            "reward_timeout_s",
         ),
     ),
     (
@@ -273,6 +276,17 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
         _require_positive_float(args.lam, "--lam")
     if args.critic_warmup_steps < 0:
         raise click.UsageError("--critic-warmup-steps must be non-negative")
+    if getattr(args, "reward_timing_enabled", False):
+        if getattr(args, "reward_slow_threshold_s", None) is not None and args.reward_slow_threshold_s <= 0:
+            raise click.UsageError("--reward-slow-threshold-s must be positive or None")
+        if getattr(args, "reward_timeout_s", None) is not None and args.reward_timeout_s <= 0:
+            raise click.UsageError("--reward-timeout-s must be positive or None")
+        if (
+            getattr(args, "reward_timeout_s", None) is not None
+            and getattr(args, "reward_slow_threshold_s", None) is not None
+            and args.reward_timeout_s < args.reward_slow_threshold_s
+        ):
+            raise click.UsageError("--reward-timeout-s must be >= --reward-slow-threshold-s when both are set")
     _preflight_task_hooks(args, algorithm)
     return _trainer_config_from_args(args)
 
@@ -727,6 +741,9 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             agent_timeout_s=args.agent_timeout_s,
             train_tool_results=args.train_tool_results,
             chat_template_enable_thinking=chat_template_enable_thinking,
+            reward_timing_enabled=getattr(args, "reward_timing_enabled", False),
+            reward_slow_threshold_s=getattr(args, "reward_slow_threshold_s", None),
+            reward_timeout_s=getattr(args, "reward_timeout_s", None),
         )
     return PPOTrainerConfig(
         algo=algorithm.name,
@@ -788,6 +805,9 @@ def _trainer_config_from_args(args) -> TrainerConfig:
         agent_timeout_s=args.agent_timeout_s,
         train_tool_results=args.train_tool_results,
         chat_template_enable_thinking=chat_template_enable_thinking,
+        reward_timing_enabled=getattr(args, "reward_timing_enabled", False),
+        reward_slow_threshold_s=getattr(args, "reward_slow_threshold_s", None),
+        reward_timeout_s=getattr(args, "reward_timeout_s", None),
     )
 
 
@@ -1182,6 +1202,23 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     "--ref-ckpt", default=None, help="Optional PPO/DPO reference model checkpoint path or remote model repo ID."
 )
 @click.option("--reward-ckpt", default=None, help="Optional PPO reward model checkpoint path or remote model repo ID.")
+@click.option(
+    "--reward-timing-enabled",
+    is_flag=True,
+    help="Enable per-sample reward hook timing, outlier flagging, and optional timeout.",
+)
+@click.option(
+    "--reward-slow-threshold-s",
+    type=float,
+    default=None,
+    help="Flag reward samples slower than this many seconds as outliers (requires --reward-timing-enabled).",
+)
+@click.option(
+    "--reward-timeout-s",
+    type=float,
+    default=None,
+    help="Per-sample reward timeout in seconds; timed-out samples receive NaN (requires --reward-timing-enabled, POSIX only).",
+)
 @click.option("--critic-ckpt", default=None, help="Optional PPO critic model checkpoint path or remote model repo ID.")
 @click.option("--save-path", default=None, help="Optional checkpoint output directory.")
 @click.option("--save-interval", type=int, default=100, show_default=True, help="Save checkpoint every N train steps.")

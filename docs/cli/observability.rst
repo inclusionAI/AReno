@@ -175,3 +175,105 @@ When a trajectory is dropped for exceeding the model context window,
 counts, message counts, assistant turn counts, tool-result counts, and a short
 prompt preview. This is the fastest way to debug overlong agentic examples
 without dumping every token in every trajectory.
+
+Reward hook timing
+------------------
+
+AReno can measure each reward function invocation, flag slow samples as
+outliers, and enforce an optional per-sample timeout. This feature is
+**disabled by default** and adds near-zero overhead when not enabled.
+
+Enable it with three CLI flags:
+
+.. code-block:: bash
+
+   areno train --algo gspo --ckpt Qwen/Qwen3-0.6B --dataset-path gsm8k:main \
+     --reward-fn-path examples/math/math_verify_reward.py \
+     --reward-timing-enabled \
+     --reward-slow-threshold-s 0.5 \
+     --reward-timeout-s 10.0
+
+Input contract
+~~~~~~~~~~~~~~
+
+``--reward-timing-enabled``
+    Master switch. When omitted, reward timing is disabled and the reward
+    function is called directly with no overhead.
+
+``--reward-slow-threshold-s SECONDS``
+    Samples whose reward computation takes longer than this are flagged as
+    outliers in the log and the timing report. Must be positive. Set to
+    ``None`` (the default) to disable outlier flagging.
+
+``--reward-timeout-s SECONDS``
+    Per-sample wall-clock timeout. Samples exceeding this receive ``NaN``
+    as their reward and are listed in the report's ``timeouts`` field. Must
+    be positive and >= ``--reward-slow-threshold-s`` when both are set.
+    Timeout enforcement uses ``signal.SIGALRM`` and is only effective on
+    POSIX platforms; on Windows the timeout is silently ignored.
+
+Defaults and validation
+~~~~~~~~~~~~~~~~~~~~~~~
+
+All three options default to values that preserve current behavior
+(timing disabled). Invalid combinations -- such as a negative threshold or
+``timeout_s < slow_threshold_s`` -- produce a clear ``click.UsageError``
+before any model or worker initialization.
+
+Observable output
+~~~~~~~~~~~~~~~~~
+
+When enabled, the trainer produces two output channels per training step:
+
+1. **Console logs** -- two log levels are emitted:
+
+   .. code-block:: text
+
+      WARNING reward_slow hook=reward_fn sample=p2_s5 elapsed=0.6231s threshold=0.5s
+      INFO reward_timing hook=reward_fn step=3 n=32 total=4.213s mean=0.132s max=0.623s p95=0.401s slow_samples=[p2_s5,p7_s1]
+
+   The ``sample`` identifier is a short opaque tag (``p{prompt_index}_s{sample_index}``)
+   that distinguishes samples **without exposing prompt or completion text**.
+
+2. **Dashboard state** -- the timing report is persisted as structured JSON
+   via ``record_dashboard_state(stage="reward_timing", ...)`` with fields:
+   ``hook_name``, ``step``, ``num_samples``, ``total_elapsed_s``,
+   ``mean_elapsed_s``, ``max_elapsed_s``, ``p95_elapsed_s``, ``outliers``
+   (list of ``{sample_id, elapsed_s, timed_out}``), and ``timeouts``
+   (list of ``{sample_id, elapsed_s}``).
+
+Limitations
+~~~~~~~~~~~
+
+- Timeout enforcement is POSIX-only (``SIGALRM``).
+- ``NaN`` rewards from timeouts propagate through ``compute_group_advantages``
+  and will produce ``NaN`` advantages; filter or replace them downstream if
+  needed.
+- Timing overhead is one ``time.perf_counter()`` call per sample when
+  enabled; it is not collected at all when disabled.
+
+Copyable example
+~~~~~~~~~~~~~~~~
+
+.. code-block:: python
+
+   from areno.api.reward_timing import RewardTimingConfig, TimedRewardFn
+   from areno.api.rewards import RewardRecord
+
+   def my_reward_fn(record: RewardRecord) -> float:
+       return 1.0 if "correct" in record.completion else 0.0
+
+   config = RewardTimingConfig(
+       enabled=True,
+       slow_threshold_s=0.1,
+       timeout_s=5.0,
+       hook_name="my_reward",
+   )
+   timed = TimedRewardFn(my_reward_fn, config)
+
+   record = RewardRecord(prompt="2+2=?", completion="4", metadata={"prompt_index": 0, "sample_index": 0})
+   score = timed(record)
+   report = timed.finalize_batch(step=0)
+   if report is not None:
+       print(report.format_human())
+       # reward_timing hook=my_reward step=0 n=1 total=0.000012s mean=0.000012s max=0.000012s p95=0.000012s
