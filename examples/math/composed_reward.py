@@ -72,10 +72,20 @@ def brevity_reward(record: RewardRecord) -> float:
 
 
 # Compose: correctness 0.7, format 0.2, brevity 0.1
-reward_fn = compose_reward_fn(
+_composed = compose_reward_fn(
     [
         ("correctness", correctness_reward, 0.7),
         ("format", format_reward, 0.2),
         ("brevity", brevity_reward, 0.1),
     ]
 )
+
+
+def reward_fn(record: RewardRecord) -> float:
+    """Weighted reward composed of correctness, format, and brevity."""
+
+    return _composed(record)
+
+
+# Expose component metadata for downstream metrics wiring.
+reward_fn._reward_components = _composed._reward_components  # type: ignore[attr-defined]
