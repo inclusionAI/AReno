@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 import time
 from functools import partial
+from pathlib import Path
 
 import numpy as np
 
@@ -127,6 +128,50 @@ class PPOTrainer(PolicyOnlyTrainer):
 
         # Reward scoring: either Python reward_fn or a backend-owned reward
         # role. Both produce one float per (prompt, sample) in row order.
+        #
+        # Validate completions before they reach reward_fn; drops empty,
+        # whitespace, special-token-only, and immediate-EOS responses when
+        # the policy is active.  When policy is "off" (default) this is a
+        # no-op that returns the inputs unchanged.
+        ppo_policy = getattr(self.config, "empty_completion_policy", "off")
+        if ppo_policy != "off":
+            from areno.engine.runtime.completion_validator import validate_completions
+
+            ppo_eos_ids = self._completion_eos_ids(tokenizer)
+            ppo_special_ids = self._completion_special_token_ids(tokenizer)
+            ppo_completions = [record.completion for record in reward_records]
+            ppo_resp_tokens = [record.tokens for record in reward_records]
+            ppo_quarantine = None
+            if self.config.save_path:
+                ppo_quarantine = str(Path(self.config.save_path) / "empty_completions.jsonl")
+            ppo_budget = getattr(self.config, "empty_completion_resample_budget", 3)
+            _, _, ppo_vr = validate_completions(
+                ppo_completions,
+                ppo_resp_tokens,
+                policy=ppo_policy,
+                eos_token_ids=ppo_eos_ids,
+                special_token_ids=ppo_special_ids,
+                resample_budget=ppo_budget,
+                quarantine_path=ppo_quarantine,
+            )
+            # Filter token_rows, row_meta, and reward_records to only kept rows.
+            kept_idx_set = set(ppo_vr.kept_indices)
+            token_rows = [r for i, r in enumerate(token_rows) if i in kept_idx_set]
+            row_meta = [r for i, r in enumerate(row_meta) if i in kept_idx_set]
+            reward_records = [r for i, r in enumerate(reward_records) if i in kept_idx_set]
+            if not token_rows:
+                raise RuntimeError(
+                    "all completions were empty or invalid; "
+                    f"dropped={len(ppo_vr.dropped_indices)} policy={ppo_policy}"
+                )
+            if ppo_vr.metrics:
+                self.logger.info(
+                    "epoch=%d step=%d ppo completion_validation metrics=%s",
+                    getattr(self, "_dashboard_epoch", "?"),
+                    getattr(self, "_dashboard_step", "?"),
+                    ppo_vr.metrics,
+                )
+
         if self.reward_fn is not None:
             self._record_ppo_state(stage="score_start", role="reward")
             reward_start = time.perf_counter()

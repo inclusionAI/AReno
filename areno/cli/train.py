@@ -243,6 +243,10 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
         raise click.UsageError("--max-running-prompts must be positive")
     if args.agent_timeout_s <= 0:
         raise click.UsageError("--agent-timeout-s must be positive")
+    if args.empty_completion_policy not in ("off", "filter", "resample"):
+        raise click.UsageError("--empty-completion-policy must be one of: off, filter, resample")
+    if args.empty_completion_policy == "resample" and args.empty_completion_resample_budget <= 0:
+        raise click.UsageError("--empty-completion-resample-budget must be positive when using resample")
     _require_positive_float(args.lr, "--lr")
     if args.min_lr < 0:
         raise click.UsageError("--min-lr must be non-negative")
@@ -727,6 +731,8 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             agent_timeout_s=args.agent_timeout_s,
             train_tool_results=args.train_tool_results,
             chat_template_enable_thinking=chat_template_enable_thinking,
+            empty_completion_policy=args.empty_completion_policy,
+            empty_completion_resample_budget=args.empty_completion_resample_budget,
         )
     return PPOTrainerConfig(
         algo=algorithm.name,
@@ -788,6 +794,8 @@ def _trainer_config_from_args(args) -> TrainerConfig:
         agent_timeout_s=args.agent_timeout_s,
         train_tool_results=args.train_tool_results,
         chat_template_enable_thinking=chat_template_enable_thinking,
+        empty_completion_policy=args.empty_completion_policy,
+        empty_completion_resample_budget=args.empty_completion_resample_budget,
     )
 
 
@@ -904,6 +912,7 @@ def _training_config_settings(config: TrainerConfig) -> dict:
                 "train_tool_results",
                 "reward_fn_path",
                 "reward_ckpt",
+                "empty_completion_policy",
             ],
         ),
         section(
@@ -1300,6 +1309,20 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     "--agent-timeout-s", type=float, default=300.0, show_default=True, help="Agentic rollout proxy request timeout."
 )
 @click.option("--train-tool-results", is_flag=True, help="Include tool-result spans in agentic policy loss.")
+@click.option(
+    "--empty-completion-policy",
+    type=click.Choice(["off", "filter", "resample"], case_sensitive=False),
+    default="off",
+    show_default=True,
+    help="How to handle empty or invalid model completions: 'off' (preserve current behavior), 'filter' (drop them), or 'resample' (re-generate up to budget times).",
+)
+@click.option(
+    "--empty-completion-resample-budget",
+    type=int,
+    default=3,
+    show_default=True,
+    help="Maximum re-generation attempts when --empty-completion-policy is resample.",
+)
 @click.option(
     "--gspo-clip-eps", type=float, default=3.0e-4, show_default=True, help="GSPO sequence-ratio clipping epsilon."
 )

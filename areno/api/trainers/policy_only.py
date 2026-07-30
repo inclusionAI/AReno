@@ -97,6 +97,11 @@ class PolicyOnlyTrainer:
                     record_dashboard_state(self.areno, stage="rollout_end", epoch=epoch, step=step, role=role)
                     self._record_sample_completions(tokenizer, epoch, step, prompt_batch, rollout_results)
 
+                    if getattr(self.config, "empty_completion_policy", "off") != "off":
+                        rollout_results = self._filter_empty_completions(
+                            rollout_results, tokenizer, prompt_batch, sampling_params
+                        )
+
                     # 2+3) Score rewards and broadcast group-normalised
                     #      advantages down to per-token tensors.
                     train_batch, rewards_all, rollout_logprobs = self._materialize_train_batch(
@@ -242,6 +247,12 @@ class PolicyOnlyTrainer:
                     f"{self._format_agent_filter_diagnostics(filter_diagnostics)}"
                 )
             reward_records = [ctx.reward_record(sample) for sample in samples]
+
+            if getattr(self.config, "empty_completion_policy", "off") != "off":
+                samples, reward_records = self._filter_agentic_completions(
+                    samples, reward_records, ctx._trainer.get_tokenizer()
+                )
+
             rewards = [float(self.reward_fn(record)) for record in reward_records]
             rows = ctx._train_rows_from_samples(samples)
             tool_call_count = sum(len(record.tool_calls) for record in reward_records)
@@ -505,6 +516,181 @@ class PolicyOnlyTrainer:
             )
             if logged + 1 >= limit:
                 return
+
+    def _completion_eos_ids(self, tokenizer) -> tuple[int, ...]:
+        """Collect all EOS token ids from tokenizer and model config."""
+
+        from areno.api.tokenizer import eos_token_ids
+
+        model_path = self.areno._ctx.model_path if self.areno._ctx is not None else ""
+        return eos_token_ids(model_path, tokenizer)
+
+    def _completion_special_token_ids(self, tokenizer) -> tuple[int, ...]:
+        """Extract special token ids from tokenizer for completion validation."""
+
+        from areno.engine.runtime.completion_validator import get_special_token_ids
+
+        return get_special_token_ids(tokenizer)
+
+    async def _run_prompt_rollout_for_tokens(self, sampling_params, prompt_tokens):
+        """Run rollout for a list of token lists, returning RolloutResult list."""
+
+        async with self.areno.rollout_session(
+            sampling_params=sampling_params,
+            max_running_prompts=self.config.resolved_max_running_prompts(),
+            proxy=False,
+        ):
+            return await self.areno.rollout_token_batch_async(prompt_tokens, self.config.n_samples, sampling_params)
+
+    def _filter_empty_completions(self, rollout_results, tokenizer, prompt_batch, sampling_params=None):
+        """Filter or resample invalid completions before they reach reward_fn.
+
+        Only active when ``empty_completion_policy`` is not ``"off"``.  When
+        policy is ``"filter"``, invalid sequences are removed from each
+        ``RolloutResult``.  When policy is ``"resample"``, the entire prompt
+        group is re-generated up to ``empty_completion_resample_budget`` times;
+        if resampling is exhausted the prompt is dropped.
+
+        Returns a filtered list of ``RolloutResult`` objects.
+        """
+
+        import areno.api
+        from areno.engine.runtime.completion_validator import validate_completions
+
+        policy = getattr(self.config, "empty_completion_policy", "off")
+        eos_ids = self._completion_eos_ids(tokenizer)
+        special_ids = self._completion_special_token_ids(tokenizer)
+        budget = getattr(self.config, "empty_completion_resample_budget", 3)
+        quarantine_path = None
+        if self.config.save_path:
+            quarantine_path = str(Path(self.config.save_path) / "empty_completions.jsonl")
+
+        filtered: list = []
+        for item_idx, (item, result) in enumerate(zip(prompt_batch.items, rollout_results, strict=True)):
+            completions = [tokenizer.decode(seq.resp_tokens) for seq in result.sequences]
+
+            # --- resample loop -------------------------------------------------
+            if policy == "resample" and sampling_params is not None:
+                for attempt in range(budget):
+                    _, _, check_vr = validate_completions(
+                        completions,
+                        [seq.resp_tokens for seq in result.sequences],
+                        policy="filter",
+                        eos_token_ids=eos_ids,
+                        special_token_ids=special_ids,
+                    )
+                    if not check_vr.dropped_indices:
+                        if attempt > 0:
+                            self.logger.info(
+                                "resample succeeded after %d attempt(s)",
+                                attempt,
+                            )
+                        break
+                    self.logger.info(
+                        "resample attempt %d/%d: re-generating prompt with %d invalid completions",
+                        attempt + 1, budget, len(check_vr.dropped_indices),
+                    )
+                    new_result = asyncio.run(
+                        self._run_prompt_rollout_for_tokens(sampling_params, [item.input_tokens])
+                    )
+                    result = new_result[0]
+                    completions = [tokenizer.decode(seq.resp_tokens) for seq in result.sequences]
+                else:
+                    self.logger.warning(
+                        "resample exhausted after %d attempt(s): %d completions still invalid, "
+                        "falling back to filter",
+                        budget, len(check_vr.dropped_indices),
+                    )
+
+            # --- filter ---------------------------------------------------------
+            completions, kept_tokens, vr = validate_completions(
+                completions,
+                [seq.resp_tokens for seq in result.sequences],
+                policy=policy,
+                eos_token_ids=eos_ids,
+                special_token_ids=special_ids,
+                resample_budget=budget,
+                quarantine_path=quarantine_path,
+                prompt=item.prompt,
+            )
+            if vr.metrics:
+                self.logger.info(
+                    "epoch=%d step=%d completion_validation metrics=%s",
+                    getattr(self, "_dashboard_epoch", "?"),
+                    getattr(self, "_dashboard_step", "?"),
+                    vr.metrics,
+                )
+            if not vr.kept_indices:
+                self.logger.warning(
+                    "all completions for prompt were empty or invalid; "
+                    "skipping this prompt (dropped=%d policy=%s "
+                    "prompt_preview=%r). Consider disabling "
+                    "--empty-completion-policy if this happens frequently.",
+                    len(vr.dropped_indices),
+                    policy,
+                    item.prompt[:200],
+                )
+                # Keep an empty result so list length matches prompt_batch.
+                filtered.append(areno.api.RolloutResult(sequences=[]))
+                continue
+
+            # Rebuild sequences to only kept rows.
+            result = areno.api.RolloutResult(
+                sequences=[result.sequences[idx] for idx in vr.kept_indices]
+            )
+            filtered.append(result)
+
+        return filtered
+
+    def _filter_agentic_completions(self, samples, reward_records, tokenizer):
+        """Filter empty / invalid completions from agentic rollout results.
+
+        Only active when ``empty_completion_policy`` is not ``"off"``.
+        Returns ``(filtered_samples, filtered_reward_records)``.
+
+        .. note::
+           The agentic path does **not** support ``resample`` because
+           re-running a full agent trajectory is significantly more complex
+           than re-rolling a single completion.  When ``policy == "resample"``
+           this method behaves identically to ``filter``.
+        """
+
+        policy = getattr(self.config, "empty_completion_policy", "off")
+        from areno.engine.runtime.completion_validator import validate_completions
+
+        eos_ids = self._completion_eos_ids(tokenizer)
+        special_ids = self._completion_special_token_ids(tokenizer)
+        completions = [record.completion for record in reward_records]
+        resp_tokens = [record.tokens for record in reward_records]
+        quarantine_path = None
+        if self.config.save_path:
+            quarantine_path = str(Path(self.config.save_path) / "empty_completions.jsonl")
+        agent_budget = getattr(self.config, "empty_completion_resample_budget", 3)
+        _, _, vr = validate_completions(
+            completions,
+            resp_tokens,
+            policy=policy,
+            eos_token_ids=eos_ids,
+            special_token_ids=special_ids,
+            resample_budget=agent_budget,
+            quarantine_path=quarantine_path,
+        )
+        kept_idx_set = set(vr.kept_indices)
+        samples = [s for i, s in enumerate(samples) if i in kept_idx_set]
+        reward_records = [r for i, r in enumerate(reward_records) if i in kept_idx_set]
+        if not samples:
+            raise RuntimeError(
+                "all agent trajectories had empty or invalid completions; "
+                f"dropped={len(vr.dropped_indices)} policy={policy}"
+            )
+        if vr.metrics:
+            self.logger.info(
+                "epoch=%d step=%d agentic completion_validation metrics=%s",
+                getattr(self, "_dashboard_epoch", "?"),
+                getattr(self, "_dashboard_step", "?"),
+                vr.metrics,
+            )
+        return samples, reward_records
 
     def _materialize_train_batch(self, tokenizer, prompt_batch, rollout_results):
         """Assemble TrainSequence rows for one rollout batch.
