@@ -1454,7 +1454,7 @@ function PhaseWaterfall({ jobId, refreshNonce }) {
                         }}
                         title={`${p.name}: ${p.start_s.toFixed(1)}s–${p.end_s.toFixed(1)}s (${p.duration_s.toFixed(1)}s)`}
                       >
-                        {width > 5 ? p.duration_s.toFixed(0) : ""}
+                        {width > 5 ? p.duration_s.toFixed(1) : ""}
                       </span>
                     );
                   })}
