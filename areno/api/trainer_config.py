@@ -78,15 +78,18 @@ class TrainerConfig:
             raise ValueError("attn_backend must be one of: flash, native")
         if self.model_hub not in {"hf", "modelscope"}:
             raise ValueError("model_hub must be one of: hf, modelscope")
-        if self.stall_warn_interval_s < 0:
-            raise ValueError("stall_warn_interval_s must be non-negative; use 0 to disable")
-        if self.stall_warn_min_interval_s < 0:
-            raise ValueError("stall_warn_min_interval_s must be non-negative")
-        if 0 < self.stall_warn_interval_s < self.stall_warn_min_interval_s:
-            raise ValueError(
-                f"stall_warn_min_interval_s ({self.stall_warn_min_interval_s}) must not exceed "
-                f"stall_warn_interval_s ({self.stall_warn_interval_s}) when the watcher is enabled"
-            )
+        # Delegate stall-watch validation to `StallWatchConfig.validate` so the
+        # rules live in exactly one place (avoids drift between this dataclass,
+        # ``StallWatchConfig.validate``, and the CLI validator). The constructed
+        # config is thrown away after validation; ``stall_watch_config()`` is
+        # the canonical accessor that returns ``None`` when disabled.
+        from areno.engine.runtime.stall_watch import StallWatchConfig
+
+        StallWatchConfig(
+            interval_s=self.stall_warn_interval_s,
+            min_interval_s=self.stall_warn_min_interval_s,
+            stages=tuple(self.stall_warn_stages),
+        ).validate()
 
     def optimizer_config(self) -> dict:
         """Build the optimizer dict consumed by the backend config."""
