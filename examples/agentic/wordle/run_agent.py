@@ -100,10 +100,15 @@ async def _run_episode(item, client) -> list[AgentTrajectoryTurn]:
         tool_result = _execute_guess(assistant_message, item.record)
 
         if tool_result is None:
-            # Fallback: small models may not emit structured tool calls.
-            # Try to extract a guess from the response text instead.
+            # Fallback: small models may emit a tool_call with missing/invalid
+            # arguments, or no tool_call at all.  Try to extract a guess from
+            # the response text or tool_call arguments instead.
             content = response.choices[0].message.content or ""
-            fallback_word = _extract_fallback_guess(content)
+            tool_call_args = ""
+            calls = assistant_message.get("tool_calls") or []
+            if calls and calls[0].get("function", {}).get("arguments"):
+                tool_call_args = calls[0]["function"]["arguments"]
+            fallback_word = _extract_fallback_guess(content) or _extract_fallback_guess(tool_call_args)
             if fallback_word is not None:
                 assistant_message = _synth_tool_call_message(content, fallback_word)
                 tool_result = _execute_guess(assistant_message, item.record)
