@@ -388,13 +388,32 @@ def _node_label(node: dict[str, Any]) -> str:
 
 
 def node_list_text(nodes: list[dict[str, Any]]) -> str:
-    """Render the circuit topology as a human-readable node list."""
-    lines = []
+    """Render the circuit topology as a compact layered listing.
+
+    Format: one layer per line, each node as ``LABEL=TYPE(input1,input2)``.
+    Input nodes are listed bare on the first line; output node on the last.
+    """
+    # Group nodes by depth
+    layers: dict[int, list[dict[str, Any]]] = {}
     for node in nodes:
-        label = _node_label(node)
-        inputs = node.get("inputs", [])
-        input_labels = [_node_label(n) for n in nodes if n["id"] in inputs]
-        lines.append(f"  Node {node['id']} ({label}): type={node['type']}, inputs={input_labels}")
+        d = _node_depth(node, nodes)
+        layers.setdefault(d, []).append(node)
+
+    lines = []
+    for depth in sorted(layers.keys()):
+        parts = []
+        for node in layers[depth]:
+            label = _node_label(node)
+            ntype = node["type"]
+            if ntype == "input":
+                parts.append(label)
+            elif ntype == "output":
+                ins = ",".join(_node_label(n) for n in nodes if n["id"] in node.get("inputs", []))
+                parts.append(f"OUT({ins})")
+            else:
+                ins = ",".join(_node_label(n) for n in nodes if n["id"] in node.get("inputs", []))
+                parts.append(f"{label}={ntype.upper()}({ins})")
+        lines.append("  " + " ".join(parts))
     return "\n".join(lines)
 
 
@@ -408,19 +427,13 @@ def make_prompt(record: dict[str, Any]) -> str:
     topology = node_list_text(nodes)
 
     return (
-        "You are a digital circuit diagnostician. A combinational logic circuit "
-        "has exactly ONE stuck-at fault on a single internal gate (AND/OR/NOT). "
-        "The fault is either stuck_at_0 (gate always outputs False) or stuck_at_1 "
-        "(gate always outputs True). Primary input nodes and the output node are "
-        "never faulty.\n\n"
-        "Circuit topology:\n"
+        "Diagnose the faulty gate in this logic circuit. "
+        f"Exactly one internal gate is stuck-at-0 or stuck-at-1. "
+        "Inputs (IN*) and output (OUT) are never faulty.\n\n"
+        "Circuit (nodes grouped by depth, left-to-right within each line):\n"
         f"{topology}\n\n"
-        f"The circuit has {n_in} primary inputs and {n_g} internal gates. "
-        f"You may call set_input_vector freely to observe outputs. "
-        f"You may call inspect_node up to {max_probes} times (each costs 1 probe) "
-        "to check an internal node's actual value. When confident, call "
-        "submit_diagnosis with the faulty node id and fault type.\n\n"
-        "Diagnose efficiently — fewer probes is better."
+        f"Tools: set_input_vector (free), inspect_node (1 probe, max {max_probes}), "
+        "submit_diagnosis(node_id, fault_type). Fewer probes is better."
     )
 
 
