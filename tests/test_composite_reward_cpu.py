@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from areno.api.rewards import CompositeReward, CompositeScore, RewardRecord
+from areno.cli.train import _parse_reward_fn_paths, _reject_duplicate_reward_component_names
 
 
 def _record(prompt: str = "p", completion: str = "c") -> RewardRecord:
@@ -183,6 +184,41 @@ class ExampleRewardLoadTest(unittest.TestCase):
         self.assertEqual(format_reward(boxed_correct), 1.0)
         self.assertEqual(format_reward(boxed_wrong), 1.0)
         self.assertEqual(format_reward(plain), 0.0)
+
+
+class CliRewardParsingTest(unittest.TestCase):
+    """CLI --reward-fn-path parsing: reject bad/weights and duplicate names."""
+
+    def test_invalid_weight_raises(self):
+        """A non-numeric weight suffix must raise Invalid reward weight: <value>."""
+        with self.assertRaisesRegex(ValueError, "Invalid reward weight: abc"):
+            _parse_reward_fn_paths(("examples/math/reward.py:abc",))
+
+    def test_negative_weight_raises(self):
+        """Negative weights are reported with the same Invalid reward weight prefix."""
+        with self.assertRaisesRegex(ValueError, "Invalid reward weight: -0.5"):
+            _parse_reward_fn_paths(("examples/math/reward.py:-0.5",))
+
+    def test_duplicate_same_file_raises(self):
+        """Registering the same reward file twice collides on the stem name."""
+        components = _parse_reward_fn_paths(
+            ("examples/math/reward.py:0.5", "examples/math/reward.py:0.5")
+        )
+        with self.assertRaisesRegex(ValueError, "Duplicate reward component name: reward"):
+            _reject_duplicate_reward_component_names(components)
+
+    def test_valid_weighted_components_parse(self):
+        """Two distinct files with weights parse to (stem, resolved_path, weight)."""
+        components = _parse_reward_fn_paths(
+            ("examples/math/accuracy_reward.py:0.7", "examples/math/format_reward.py:0.3")
+        )
+        self.assertEqual([c[0] for c in components], ["accuracy_reward", "format_reward"])
+        self.assertEqual([c[2] for c in components], [0.7, 0.3])
+
+    def test_single_unweighted_is_legacy_path(self):
+        """A lone path without :weight parses with default weight 1.0."""
+        components = _parse_reward_fn_paths(("examples/math/reward.py",))
+        self.assertEqual(components[0][2], 1.0)
 
 
 if __name__ == "__main__":

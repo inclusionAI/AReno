@@ -184,7 +184,12 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
     args.reward_fn_paths = reward_fn_paths
     args.reward_on_error = getattr(args, "reward_on_error", "raise")
     reward_components = _parse_reward_fn_paths(reward_fn_paths)
-    _reject_duplicate_reward_component_names(reward_components)
+    try:
+        _reject_duplicate_reward_component_names(reward_components)
+    except ValueError as exc:
+        # Raise as a Click usage error so bad component names print cleanly and
+        # exit non-zero instead of showing a traceback to CLI users.
+        raise click.UsageError(str(exc)) from exc
     args.reward_components = reward_components
     # Backward-compatible scalar used by config fields and the help summary; it
     # is None when no reward file was supplied, matching the pre-repeatable CLI.
@@ -1069,12 +1074,9 @@ def _parse_reward_fn_paths(paths: tuple[str, ...]) -> list[tuple[str, str, float
             try:
                 weight = float(weight_suffix)
             except ValueError as exc:
-                raise ValueError(
-                    f"--reward-fn-path {value!r} has an unparseable weight {weight_suffix!r}; "
-                    "expected path or path:float"
-                ) from exc
+                raise ValueError(f"Invalid reward weight: {weight_suffix}") from exc
             if weight < 0:
-                raise ValueError(f"--reward-fn-path {value!r} weight must be non-negative, got {weight}")
+                raise ValueError(f"Invalid reward weight: {weight}")
         path = Path(spec).expanduser().resolve()
         parsed.append((path.stem, str(path), float(weight)))
     return parsed
@@ -1092,20 +1094,18 @@ def _reward_components_legacy(paths: tuple[str, ...]) -> bool:
 
 
 def _reject_duplicate_reward_component_names(components: list[tuple[str, str, float]]) -> None:
-    """Surface duplicate component names (file-stem collisions) as a UsageError.
+    """Raise ``Duplicate reward component name: <name>`` on file-stem collisions.
 
     Distinct paths sharing a stem would otherwise collide on the metric key
     ``reward/<name>_mean``; rejecting here keeps diagnostics unambiguous and
-    mirrors CompositeReward's own duplicate-name guard at construction.
+    mirrors CompositeReward's own duplicate-name guard at construction. The
+    ``ValueError`` is surfaced as ``click.UsageError`` at the CLI call site.
     """
 
     seen: set[str] = set()
-    for name, path, _weight in components:
+    for name, _path, _weight in components:
         if name in seen:
-            raise click.UsageError(
-                f"--reward-fn-path component names must be unique; duplicate name {name!r} "
-                "(two files share the same stem). Rename one file or refactor the rewards."
-            )
+            raise ValueError(f"Duplicate reward component name: {name}")
         seen.add(name)
 
 
@@ -1491,7 +1491,10 @@ def train_command(**options) -> None:
         reward_ckpt=options.get("reward_ckpt"),
         model_config=_model_config_for_summary(trainer_config),
     )
-    reward_components = _parse_reward_fn_paths(tuple(options.get("reward_fn_paths") or ()))
+    try:
+        reward_components = _parse_reward_fn_paths(tuple(options.get("reward_fn_paths") or ()))
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from exc
     reward_on_error = options.get("reward_on_error") or "raise"
     if reward_components:
         # Human-readable reward-component table; structured per-component output
