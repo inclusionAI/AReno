@@ -99,147 +99,24 @@
 
 ## 五、分步骤运行结果证明
 
-### 步骤 1：环境准备 — Fork 和创建分支
+### 步骤 1：测试通过
 
-目的：从原仓库 fork 并创建功能分支。
-命令：
-```
-git clone https://github.com/anna495/AReno.git
-cd AReno
-git checkout -b feat/dashboard-compare-runs
-```
-输出：无错误，分支创建成功。
-解释：基于 main 分支创建功能分支，后续所有改动都在此分支上。
-
-### 步骤 2：后端实现并验证语法
-
-目的：实现 `compare_jobs()` 方法和 `/api/compare` 端点。
-命令：
-```
-python3 -c "import py_compile; py_compile.compile('areno/dashboard/server.py', doraise=True)"
-```
-输出：无错误。
-解释：Python 语法正确，可以导入运行。
-
-### 步骤 3：前端构建
-
-目的：编译 React 前端到 dist 目录。
-命令：
-```
-npm install --prefix dashboard
-npm run build --prefix dashboard
-```
-输出：
-```
-../areno/dashboard/dist/index.html                   0.40 kB
-../areno/dashboard/dist/assets/index-9lyAEhxf.css   36.04 kB
-../areno/dashboard/dist/assets/index-Wzu9Xf6x.js   415.53 kB
-built in 4.15s
-```
-解释：构建成功，生成了新的 dist 文件，文件名带 hash 说明内容已更新。
-
-<!-- 贴 npm run build 的终端截图 -->
-
-### 步骤 4：运行测试
-
-目的：验证所有 CPU 测试通过。
-命令：
-```
-pytest tests/test_dashboard_compare_cpu.py -v
-```
-输出：
-```
-27 passed in 0.14s
-```
-解释：27 个测试全部通过，覆盖成功路径、无效输入、边界、CLI 和新功能。
+命令：`pytest tests/test_dashboard_compare_cpu.py -v`
+输出：27 passed in 0.14s
 
 <!-- 贴 pytest 27 passed 的终端截图 -->
 
-### 步骤 5：Kaggle 训练验证
+### 步骤 2：CLI 输出
 
-目的：在真实环境跑两次 SFT 训练产生对比数据。
-命令：
-```
-areno train --ckpt Qwen/Qwen3.5-0.8B --algo sft \
-  --dataset-loader-fn /kaggle/working/AReno/examples/sft/alpaca/dataset_loader.py \
-  --batch-size 2 --mini-bs 2 --max-context-len 2048 \
-  --metrics-log-dir /tmp/areno/tfevent_sft
-```
-输出：两次训练分别跑到 step 268 和 step 85。
-解释：产生了两个不同步数的 SFT job，用于后续对比验证。
-
-### 步骤 6：CLI 验证
-
-目的：验证 `areno compare` CLI 命令输出正确。
-命令：
-```
-python3 -m areno.cli.main compare --job-a 5a3660acfbe3 --job-b 770ad2cffcab
-```
-输出：
-```
-Job A: train sft Qwen/Qwen3.5-0.8B (id=5a3660acfbe3, status=exited, step=268)
-Job B: train sft Qwen/Qwen3.5-0.8B (id=770ad2cffcab, status=exited, step=85)
-
-Config: 0 changed, 0 identical
-
-Metrics (29):
-    rollout/accuracy: A=0.0  B=0.0  diff=+0.0
-    rollout/advantages_mean: A=0.0  B=0.0  diff=+0.0
-    rollout/advantages_std: A=0.0  B=0.0  diff=+0.0
-    rollout/logprobs_mean: A=0.0  B=0.0  diff=+0.0
-    rollout/num_sequences: A=2.0  B=2.0  diff=+0.0
-    rollout/prompt_len_mean: A=31.0  B=45.0  diff=-14.0
-    rollout/response_len_mean: A=74.5  B=160.5  diff=-86.0
-    rollout/rewards_max: A=0.0  B=0.0  diff=+0.0
-    rollout/rewards_mean: A=0.0  B=0.0  diff=+0.0
-    rollout/rewards_min: A=0.0  B=0.0  diff=+0.0
-    rollout/rewards_std: A=0.0  B=0.0  diff=+0.0
-    rollout/seq_len_mean: A=105.5  B=205.5  diff=-100.0
-    rollout/skipped_long: A=0.0  B=0.0  diff=+0.0
-    rollout/total_skipped_long: A=0.0  B=0.0  diff=+0.0
-    time/train: A=0.8329417705535889  B=1.1695845127105713  diff=-0.336643
-    train/grad_nonzero_count: A=752492224.0  B=752582272.0  diff=-90048.0
-    train/grad_nonzero_ratio: A=0.7475043535232544  B=0.7475937604904175  diff=-8.9e-05
-    train/grad_norm: A=35.44312286376953  B=30.288209915161133  diff=+5.154913
-    train/grad_total_count: A=1006672704.0  B=1006672704.0  diff=+0.0
-    train/grad_zero_count: A=254180496.0  B=254090448.0  diff=+90048.0
-    train/grad_zero_ratio: A=0.252495676279068  B=0.25240620970726013  diff=+8.9e-05
-    train/loss: A=1.2566077709197998  B=1.3997747898101807  diff=-0.143167
-    train/lr: A=8.4970531588624e-07  B=9.840508710112772e-07  diff=-0.0
-    train/sft_logprob_mean: A=-1.2566077709197998  B=-1.3997747898101807  diff=+0.143167
-    train/sft_loss: A=1.2566077709197998  B=1.3997747898101807  diff=-0.143167
-    train/sft_target_tokens: A=149.0  B=321.0  diff=-172.0
-    train/step_e2e_time_s: A=0.8329443335533142  B=1.1695916652679443  diff=-0.336647
-    train/step_rollout_time_s: A=0.0  B=0.0  diff=+0.0
-    train/step_train_time_s: A=0.8329417705535889  B=1.1695845127105713  diff=-0.336643
-
-Timing:
-    Steps: A=268  B=85
-    Avg total/step: A=1.07s  B=3.1s
-    Avg rollout/step: A=-  B=-
-    Avg train/step: A=1.07s  B=3.1s
-    Step time diff: -2.03s
-    Note: job A ran 268 steps, job B ran 85 steps; timing comparison may be less reliable
-```
-解释：CLI 正确输出了两个 job 的摘要、29 个指标对比和计时差异。
+命令：`python3 -m areno.cli.main compare --job-a 5a3660acfbe3 --job-b 770ad2cffcab`
 
 <!-- 贴 CLI 输出的终端截图 -->
 
-### 步骤 7：Dashboard 验证
+### 步骤 3：Dashboard Compare 页面
 
-目的：在浏览器中验证 Compare 页面所有区域正常渲染。
-过程：通过 ngrok 暴露 Dashboard 端口，在浏览器中选两个 job 点 Compare。
-结果：头部卡片显示名称、状态、算法、步数；关键指标卡片显示 Loss/LR/Steps/Duration/Throughput，Reward/Accuracy 自动隐藏；超参数对比 0 changed；指标曲线 29 个 tab 可切换，归一化模式两条线从同一起点叠加；完整指标表显示 29 个指标对比；Timing 表显示步数、平均耗时、总时长。
-解释：7 个区域全部正常渲染，数据从后端 API 正确返回。
+通过 ngrok 在浏览器打开，选两个 SFT job 点 Compare。
 
-<!-- 贴 Dashboard Compare 页面截图 -->
-
-### 步骤 8：页面切换验证
-
-目的：验证切页面再回来数据不丢失。
-过程：从 Compare 切到 Jobs 再切回来。
-结果：选中的 Job A/B 和对比结果都保持不变。
-解释：状态提升到 App 组件后，子组件卸载不影响 compare state。
+<!-- 贴 Dashboard Compare 页面截图（5张） -->
 
 ## 六、总结与反思
 
