@@ -861,7 +861,10 @@ def _tool_call_loss_mask(tokenizer, response_tokens: list[int]) -> list[bool]:
     """Mask tool-result sentinels after a generated tool call."""
 
     mask = [True] * len(response_tokens)
-    markers = ("<|tool_response>", "<tool_response>")
+    # Only mask tool-response sentinels, not the normal chat end-of-turn
+    # marker (<|im_end|>), which is a legitimate part of the assistant
+    # response and should remain trainable.
+    markers = ("<|tool_response>",)
     try:
         text = tokenizer.decode(response_tokens)
     except Exception:
