@@ -1,7 +1,7 @@
 """Gradio-based visual Tic-Tac-Toe board for playing against the model.
 
-Uses a single HTML component for the board (rendered with inline CSS/JS)
-and a hidden textbox as the click→Python bridge.
+Uses 9 gr.Button cells + a global variable for state (no gr.State).
+Each button reads its position from a hidden textbox with a fixed value.
 
 Usage (Kaggle / local):
     pip install gradio
@@ -26,73 +26,24 @@ EMPTY = game.EMPTY
 HUMAN = "O"
 MODEL = "X"
 
-# Global board state (server-side, no Gradio State needed)
+# ── Server-side state (no gr.State needed) ───────────────────────────────
 _board: game.Board = [[EMPTY] * 3 for _ in range(3)]
-_finished = False
-_message = "点击下方棋盘开始！"
+_finished: bool = False
+_message: str = "点击下方棋盘开始！"
 
 
-def board_to_html(board: game.Board, msg: str = "") -> str:
-    """Render the board as a self-contained HTML grid."""
-    cells = ""
-    for i in range(9):
-        r, c = divmod(i, 3)
-        cell = board[r][c]
-        if cell == "X":
-            display = "❌"
-            clickable = ""
-        elif cell == "O":
-            display = "⭕"
-            clickable = ""
-        else:
-            display = ""
-            clickable = f"onclick=\"clickCell({i+1})\""
-        cells += f'<div class="cell" {clickable}>{display}</div>'
+def cell_display(cell: str) -> str:
+    """Convert internal cell to display emoji."""
+    if cell == "X":
+        return "❌"
+    if cell == "O":
+        return "⭕"
+    return ""
 
-    status = f'<div class="status">{msg}</div>' if msg else ""
 
-    return f"""
-    <div class="ttt-wrap">
-      <div class="ttt-board">
-        {cells}
-      </div>
-      {status}
-    </div>
-    <script>
-    function clickCell(square) {{
-        // Send the square number to Python via the hidden textbox
-        const bridge = document.getElementById('click_bridge');
-        if (bridge) {{
-            bridge.value = square;
-            bridge.dispatchEvent(new Event('input', {{bubbles: true}}));
-        }}
-    }}
-    </script>
-    <style>
-    .ttt-wrap {{ display: flex; flex-direction: column; align-items: center; gap: 12px; }}
-    .ttt-board {{
-        display: grid;
-        grid-template-columns: repeat(3, 120px);
-        grid-template-rows: repeat(3, 120px);
-        gap: 6px;
-        justify-content: center;
-    }}
-    .cell {{
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        font-size: 3em;
-        font-weight: bold;
-        background: #f0f0f0;
-        border-radius: 10px;
-        cursor: pointer;
-        transition: background 0.15s;
-        user-select: none;
-    }}
-    .cell:hover {{ background: #d0e8ff; }}
-    .status {{ font-size: 1.3em; font-weight: bold; padding: 8px; }}
-    </style>
-    """
+def get_all_displays() -> list[str]:
+    """Return 9 display strings for the current board."""
+    return [cell_display(_board[r][c]) for r in range(3) for c in range(3)]
 
 
 def model_move(board: game.Board) -> int | None:
@@ -118,79 +69,105 @@ def check_result(board: game.Board) -> str | None:
     return None
 
 
-def on_click(square_str: str) -> tuple[str, str]:
-    """Handle a cell click: human moves, then model responds."""
-    global _board, _finished, _message
+def make_click_handler(square: int):
+    """Return a handler for clicking cell `square` (1-9)."""
 
-    if _finished:
-        return board_to_html(_board, _message), ""
+    def handler(status_text: str) -> tuple:
+        """handler receives the current status textbox value (unused, just needs an input to chain)."""
+        global _board, _finished, _message
 
-    if not square_str or square_str.strip() == "":
-        return board_to_html(_board, _message), ""
+        if _finished:
+            return _message, *get_all_displays()
 
-    square = int(square_str.strip())
+        # ── Human move ──
+        if square not in game.legal_moves(_board):
+            _message = "⚠️ 该位置已被占用！"
+            return _message, *get_all_displays()
 
-    # ── Human move ──
-    if square not in game.legal_moves(_board):
-        return board_to_html(_board, "⚠️ 该位置已被占用！"), ""
+        _board = game.apply_move(_board, square, HUMAN)
+        result = check_result(_board)
+        if result:
+            _finished = True
+            _message = result
+            return _message, *get_all_displays()
 
-    _board = game.apply_move(_board, square, HUMAN)
-    result = check_result(_board)
-    if result:
-        _finished = True
-        _message = result
-        return board_to_html(_board, _message), ""
+        # ── Model move ──
+        move = model_move(_board)
+        if move and move in game.legal_moves(_board):
+            _board = game.apply_move(_board, move, MODEL)
+        result = check_result(_board)
+        if result:
+            _finished = True
+            _message = result
+            return _message, *get_all_displays()
 
-    # ── Model move ──
-    move = model_move(_board)
-    if move and move in game.legal_moves(_board):
-        _board = game.apply_move(_board, move, MODEL)
-    result = check_result(_board)
-    if result:
-        _finished = True
-        _message = result
-        return board_to_html(_board, _message), ""
+        _message = "你的回合，请落子 ⭕"
+        return _message, *get_all_displays()
 
-    _message = "你的回合，请落子 ⭕"
-    return board_to_html(_board, _message), ""
+    return handler
 
 
-def reset() -> tuple[str, str]:
-    """Reset the game."""
+def reset_game() -> tuple:
+    """Reset to a fresh board."""
     global _board, _finished, _message
     _board = [[EMPTY] * 3 for _ in range(3)]
     _finished = False
     _message = "新对局开始！你执 ⭕，模型执 ❌"
-    return board_to_html(_board, _message), ""
+    return _message, *get_all_displays()
 
 
 def build_ui() -> gr.Blocks:
-    with gr.Blocks(title="Tic-Tac-Toe vs Model", theme=gr.themes.Soft()) as ui:
+    css = """
+    .ttt-cell {
+        min-height: 100px !important;
+        min-width: 100px !important;
+        font-size: 2.5em !important;
+        font-weight: bold !important;
+        aspect-ratio: 1 / 1 !important;
+    }
+    """
+
+    with gr.Blocks(title="Tic-Tac-Toe vs Model", theme=gr.themes.Soft(), css=css) as ui:
         gr.Markdown("# 🎮 井字棋对弈 — 你 vs 模型")
         gr.Markdown("你执 ⭕，模型执 ❌。点击空格落子，模型会自动应手。")
 
-        board_html = gr.HTML(value=board_to_html(_board, _message))
+        status = gr.Markdown(_message)
 
-        # Hidden textbox as JS→Python bridge
-        click_bridge = gr.Textbox(
-            value="",
-            elem_id="click_bridge",
-            visible=False,
-        )
+        # 3x3 grid of buttons
+        grid: list[list[gr.Button]] = []
+        for row_idx in range(3):
+            row_buttons = []
+            with gr.Row():
+                for col_idx in range(3):
+                    btn = gr.Button(
+                        "",
+                        scale=1,
+                        elem_classes="ttt-cell",
+                        size="lg",
+                    )
+                    row_buttons.append(btn)
+            grid.append(row_buttons)
 
         with gr.Row():
             reset_btn = gr.Button("🔄 重新开始")
 
-        # When the hidden textbox changes (via JS), trigger the game logic
-        click_bridge.change(
-            on_click,
-            inputs=[click_bridge],
-            outputs=[board_html, click_bridge],
-        )
+        all_buttons = [grid[i][j] for i in range(3) for j in range(3)]
+        all_outputs = [status, *all_buttons]
+
+        # Each button click: no inputs (handler reads global state), outputs = status + 9 buttons
+        for r in range(3):
+            for c in range(3):
+                square = r * 3 + c + 1
+                grid[r][c].click(
+                    make_click_handler(square),
+                    inputs=None,
+                    outputs=all_outputs,
+                )
 
         reset_btn.click(
-            reset,
-            outputs=[board_html, click_bridge],
+            reset_game,
+            inputs=None,
+            outputs=all_outputs,
         )
 
     return ui
