@@ -91,11 +91,15 @@ python3 -m areno.cli.main --version
 
 ### 1.6 生成数据 + CPU 测试
 
+> **坑14**：默认 max_steps = width×height = 25，多轮对话累积到 34K token/轨迹，
+> 超过 context 限制全部被过滤。必须用 `--max-steps 10` 限制每局轮数。
+
 ```bash
-# 5×5 迷宫
+# 5×5 迷宫，限制每局最多 10 步（最短路径约 6-8 步）
 python3 examples/agentic/maze/dataset_generator.py \
   --output /root/mazes_5x5.jsonl \
-  --count 512 --seed 2026 --width 5 --height 5 --vision-radius 1
+  --count 512 --seed 2026 --width 5 --height 5 --vision-radius 1 \
+  --max-steps 10
 
 # CPU 测试（期望 12 passed）
 python3 -m pytest tests/test_agentic_maze_example_cpu.py -v
@@ -120,7 +124,10 @@ nohup python3 -m areno.cli.main dashboard --start --host 0.0.0.0 --port 8000 \
 
 > **坑10**：`--batch-size 2 --n-samples 8`（16个轨迹）会 OOM。
 > **坑11**：不加 `--attn-backend native` 时 FLA/Triton 崩溃。
-> **解决**：降 batch、加省显存参数、用 native attention。
+> **坑12**：`--max-prompt-tokens 64` 太小，系统提示+局部视野就超 64 token，全部轨迹被过滤。
+> **坑13**：`--max-context-len 512` 仍然太小，10 轮多轮对话约 8K token，全部被过滤。
+> **坑14**：默认 max_steps=25 导致每条轨迹 34K token，必须用 `--max-steps 10` 限制。
+> **解决**：降 batch、native attention、max-steps=10、max-context-len=8192。
 
 ```bash
 cd /root/AReno
@@ -133,10 +140,11 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 -m areno.cli.main train
   --agent-fn examples/agentic/maze/run_agent.py \
   --algo gspo \
   --batch-size 1 \
-  --n-samples 4 \
-  --max-new-tokens 128 \
+  --n-samples 2 \
+  --max-new-tokens 64 \
   --disable-thinking \
   --attn-backend native \
+  --max-context-len 8192 \
   --tp-size 2 \
   --world-size 2 \
   --max-steps 500 \
@@ -151,6 +159,8 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 -m areno.cli.main train
 - `rollout/rewards_mean`：从 -0.5 开始，有 BFS shaping 应出现波动上升
 - `rollout/rewards_max`：出现接近 0 或正值 = 有 sample 到达终点
 - smooth 调到 0.8 看趋势
+
+**如果还 OOM**，降到 `--n-samples 1 --max-context-len 4096`。
 
 ---
 
@@ -211,7 +221,8 @@ ls -lh /root/ckpt_expA/
 cd /root/AReno
 python3 examples/agentic/maze/dataset_generator.py \
   --output /root/mazes_5x5.jsonl \
-  --count 512 --seed 2026 --width 5 --height 5 --vision-radius 1
+  --count 512 --seed 2026 --width 5 --height 5 --vision-radius 1 \
+  --max-steps 10
 ```
 
 ### 5.4 从 checkpoint 继续训练
@@ -232,10 +243,11 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 -m areno.cli.main train
   --agent-fn examples/agentic/maze/run_agent.py \
   --algo gspo \
   --batch-size 1 \
-  --n-samples 4 \
-  --max-new-tokens 128 \
+  --n-samples 2 \
+  --max-new-tokens 64 \
   --disable-thinking \
   --attn-backend native \
+  --max-context-len 8192 \
   --tp-size 2 \
   --world-size 2 \
   --max-steps 500 \
@@ -265,9 +277,10 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 -m areno.cli.main train
   --agent-fn examples/agentic/maze/run_agent.py \
   --algo gspo \
   --batch-size 1 \
-  --n-samples 4 \
+  --n-samples 2 \
   --max-new-tokens 256 \
   --attn-backend native \
+  --max-context-len 8192 \
   --tp-size 2 \
   --world-size 2 \
   --max-steps 500 \
@@ -286,7 +299,7 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 -m areno.cli.main train
 
 在 Dashboard 对比两轮训练：
 
-| 指标 | 实验A（禁思考 128） | 实验B（思考 256） |
+| 指标 | 实验A（禁思考 64） | 实验B（思考 256） |
 |------|-----------|-----------|
 | `rewards_mean` 起始 | ~-0.5 | ~-0.5 |
 | `rewards_mean` 结束 | 期望>-0.3 | 期望>-0.3 |
@@ -303,20 +316,21 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 -m areno.cli.main train
 
 ## 踩坑速查表
 
-| 现象 | 原因 | 解决 |
-|------|------|------|
-| `externally-managed-environment` | Ubuntu PEP 668 | 加 `--break-system-packages` |
-| `python: command not found` | 无 python 软链接 | 用 `python3` |
-| `areno: command not found` | pip scripts 不在 PATH | 用 `python3 -m areno.cli.main` |
-| `No module named 'torch'` | Docker 镜像无 PyTorch | `pip3 install torch==2.6.0` |
-| CUDA version mismatch (12.8 vs 13.0) | 装了新 torch | 指定 `torch==2.6.0`（CUDA 12.4） |
-| `No module named 'fla.ops'` | flash-linear-attention 用了 --no-deps | 去掉 `--no-deps` 重装 |
-| `No module named 'datasets'` | rich 冲突导致依赖没装全 | 用 `--ignore-installed` 装全部依赖 |
-| `No module named 'modelscope'` | 同上 | 同上 |
-| `worker exited during ROLLOUT_SESSION_END` | Triton 3.2 和 FLA 不兼容 | 加 `--attn-backend native` |
-| Triton 版本冲突 | PyTorch 2.6.0 锁定 triton==3.2.0 | 不要升级 triton，用 native attention |
-| CUDA OOM (训练阶段) | batch×samples 太大 | `--batch-size 1 --n-samples 4 --mini-bs 1 --adam-8bit --activation-checkpointing` |
-| 显存碎片 | PyTorch 内存分配 | `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` |
-| Docker 容器不存在 | 新 session 或容器被删 | 重新 `docker run` |
-| `rich` 包冲突 | Debian 管理的包 | `pip3 install --ignore-installed rich` |
-| `/workspace: No such file` | Docker 镜像无此目录 | 用 `/root` 替代所有路径 |
+| # | 现象 | 原因 | 解决 |
+|---|------|------|------|
+| 1 | `externally-managed-environment` | Ubuntu PEP 668 | 加 `--break-system-packages` |
+| 2 | `python: command not found` | 无 python 软链接 | 用 `python3` |
+| 3 | `areno: command not found` | pip scripts 不在 PATH | 用 `python3 -m areno.cli.main` |
+| 4 | `No module named 'torch'` | Docker 镜像无 PyTorch | `pip3 install torch==2.6.0` |
+| 5 | CUDA version mismatch (12.8 vs 13.0) | 装了新 torch | 指定 `torch==2.6.0`（CUDA 12.4） |
+| 6 | `No module named 'fla.ops'` | flash-linear-attention 用了 --no-deps | 去掉 `--no-deps` 重装 |
+| 7 | `No module named 'datasets'` | rich 冲突导致依赖没装全 | 用 `--ignore-installed` 装全部依赖 |
+| 8 | `worker exited during ROLLOUT_SESSION_END` | Triton 3.2 和 FLA 不兼容 | 加 `--attn-backend native` |
+| 9 | Triton 版本冲突 | PyTorch 2.6.0 锁定 triton==3.2.0 | 不要升级 triton，用 native attention |
+| 10 | CUDA OOM (训练阶段) | batch×samples 太大 | `--batch-size 1 --n-samples 2 --mini-bs 1 --adam-8bit --activation-checkpointing` |
+| 11 | 显存碎片 | PyTorch 内存分配 | `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` |
+| 12 | Docker 容器不存在 | 新 session 或容器被删 | 重新 `docker run` |
+| 13 | `rich` 包冲突 | Debian 管理的包 | `pip3 install --ignore-installed rich` |
+| 14 | `/workspace: No such file` | Docker 镜像无此目录 | 用 `/root` 替代所有路径 |
+| 15 | epoch 瞬间结束，0 步训练 | `--max-prompt-tokens` 太小过滤了全部 | 不要设 `--max-prompt-tokens` |
+| 16 | `all trajectories exceeded context length` | 默认 max_steps=25 → 34K token/轨迹 | 数据生成加 `--max-steps 10`，训练加 `--max-context-len 8192` |
