@@ -53,6 +53,7 @@ def _load_module_without_sys_path(name: str):
 # Generator tests
 # ---------------------------------------------------------------------------
 
+
 def test_maze_generator_produces_valid_solvable_records():
     game = _load_module("game")
     generator = _load_module("dataset_generator")
@@ -73,7 +74,6 @@ def test_maze_generator_produces_valid_solvable_records():
 
 def test_maze_generator_is_reproducible():
     generator = _load_module("dataset_generator")
-    game = _load_module("game")
 
     r1 = generator.generate_records(4, seed=42)
     r2 = generator.generate_records(4, seed=42)
@@ -93,20 +93,27 @@ def test_maze_generator_is_reproducible():
 # Game rules tests
 # ---------------------------------------------------------------------------
 
+
 def test_maze_game_rules_wall_collision_and_door_lock():
     game = _load_module("game")
 
-    maze = game.normalize_maze([
-        ["wall", "wall", "wall", "wall", "wall"],
-        ["wall", "empty", "wall", "empty", "wall"],
-        ["wall", "empty", "door", "empty", "wall"],
-        ["wall", "empty", "empty", "key", "wall"],
-        ["wall", "wall", "wall", "wall", "wall"],
-    ])
+    maze = game.normalize_maze(
+        [
+            ["wall", "wall", "wall", "wall", "wall"],
+            ["wall", "empty", "wall", "empty", "wall"],
+            ["wall", "empty", "door", "empty", "wall"],
+            ["wall", "empty", "empty", "key", "wall"],
+            ["wall", "wall", "wall", "wall", "wall"],
+        ]
+    )
     start = (1, 1)
     state = game.MazeState(
-        maze=maze, agent_pos=start, has_key=False,
-        steps_taken=0, max_steps=50, vision_radius=1,
+        maze=maze,
+        agent_pos=start,
+        has_key=False,
+        steps_taken=0,
+        max_steps=50,
+        vision_radius=1,
     )
 
     # Move into a wall.
@@ -116,8 +123,12 @@ def test_maze_game_rules_wall_collision_and_door_lock():
 
     # Move into a door without key.
     state2 = game.MazeState(
-        maze=maze, agent_pos=(2, 1), has_key=False,
-        steps_taken=0, max_steps=50, vision_radius=1,
+        maze=maze,
+        agent_pos=(2, 1),
+        has_key=False,
+        steps_taken=0,
+        max_steps=50,
+        vision_radius=1,
     )
     result = game.apply_move(state2, "right")
     assert not result.success
@@ -125,8 +136,12 @@ def test_maze_game_rules_wall_collision_and_door_lock():
 
     # Move onto key — auto-pickup.
     state3 = game.MazeState(
-        maze=maze, agent_pos=(3, 2), has_key=False,
-        steps_taken=0, max_steps=50, vision_radius=1,
+        maze=maze,
+        agent_pos=(3, 2),
+        has_key=False,
+        steps_taken=0,
+        max_steps=50,
+        vision_radius=1,
     )
     result = game.apply_move(state3, "right")
     assert result.success
@@ -134,16 +149,24 @@ def test_maze_game_rules_wall_collision_and_door_lock():
 
     # Now door is passable with key.
     state4 = game.MazeState(
-        maze=maze, agent_pos=(2, 1), has_key=True,
-        steps_taken=0, max_steps=50, vision_radius=1,
+        maze=maze,
+        agent_pos=(2, 1),
+        has_key=True,
+        steps_taken=0,
+        max_steps=50,
+        vision_radius=1,
     )
     result = game.apply_move(state4, "right")
     assert result.success
 
     # Max steps exhausted → terminal.
     state5 = game.MazeState(
-        maze=maze, agent_pos=start, has_key=False,
-        steps_taken=50, max_steps=50, vision_radius=1,
+        maze=maze,
+        agent_pos=start,
+        has_key=False,
+        steps_taken=50,
+        max_steps=50,
+        vision_radius=1,
     )
     result = game.apply_move(state5, "down")
     assert result.terminal
@@ -152,16 +175,22 @@ def test_maze_game_rules_wall_collision_and_door_lock():
 def test_maze_local_view_does_not_leak_full_map():
     game = _load_module("game")
 
-    maze = game.normalize_maze([
-        ["wall", "wall", "wall", "wall", "wall", "wall", "wall"],
-        ["wall", "empty", "wall", "empty", "wall", "empty", "wall"],
-        ["wall", "empty", "wall", "empty", "wall", "empty", "wall"],
-        ["wall", "empty", "empty", "empty", "empty", "empty", "wall"],
-        ["wall", "wall", "wall", "wall", "wall", "wall", "wall"],
-    ])
+    maze = game.normalize_maze(
+        [
+            ["wall", "wall", "wall", "wall", "wall", "wall", "wall"],
+            ["wall", "empty", "wall", "empty", "wall", "empty", "wall"],
+            ["wall", "empty", "wall", "empty", "wall", "empty", "wall"],
+            ["wall", "empty", "empty", "empty", "empty", "empty", "wall"],
+            ["wall", "wall", "wall", "wall", "wall", "wall", "wall"],
+        ]
+    )
     state = game.MazeState(
-        maze=maze, agent_pos=(1, 1), has_key=False,
-        steps_taken=0, max_steps=49, vision_radius=1,
+        maze=maze,
+        agent_pos=(1, 1),
+        has_key=False,
+        steps_taken=0,
+        max_steps=49,
+        vision_radius=1,
     )
     view = game.local_view(state)
     lines = view.strip().split("\n")
@@ -190,6 +219,7 @@ def test_maze_supports_multiple_sizes():
 # ---------------------------------------------------------------------------
 # Reward tests
 # ---------------------------------------------------------------------------
+
 
 def test_maze_reward_scores_goal_and_failure_paths():
     game = _load_module("game")
@@ -296,11 +326,13 @@ def test_maze_reward_pbrs_mode():
 # Tool schema test
 # ---------------------------------------------------------------------------
 
+
 def test_maze_tool_schema_is_closed_and_bounded():
     # Mock areno.api.agentic to avoid pulling in torch.
     prev = sys.modules.get("areno.api.agentic")
     sys.modules["areno.api.agentic"] = SimpleNamespace(
-        AgentTrajectory=None, AgentTrajectoryTurn=None,
+        AgentTrajectory=None,
+        AgentTrajectoryTurn=None,
     )
     try:
         run_agent = _load_module("run_agent")
@@ -320,6 +352,7 @@ def test_maze_tool_schema_is_closed_and_bounded():
 # ---------------------------------------------------------------------------
 # Agent episode tests
 # ---------------------------------------------------------------------------
+
 
 def test_maze_agent_stops_on_terminal():
     game = _load_module("game")
@@ -347,8 +380,12 @@ def test_maze_agent_stops_on_terminal():
 
     # Replay through apply_move and check terminality.
     state = game.MazeState(
-        maze=maze, agent_pos=start, has_key=False,
-        steps_taken=0, max_steps=record["max_steps"], vision_radius=1,
+        maze=maze,
+        agent_pos=start,
+        has_key=False,
+        steps_taken=0,
+        max_steps=record["max_steps"],
+        vision_radius=1,
     )
     terminal_hit = False
     for d in directions:
@@ -364,16 +401,22 @@ def test_maze_agent_stops_on_terminal():
 def test_maze_action_exhaustion():
     game = _load_module("game")
 
-    maze = game.normalize_maze([
-        ["wall", "wall", "wall", "wall", "wall"],
-        ["wall", "empty", "empty", "empty", "wall"],
-        ["wall", "empty", "wall", "empty", "wall"],
-        ["wall", "empty", "empty", "goal", "wall"],
-        ["wall", "wall", "wall", "wall", "wall"],
-    ])
+    maze = game.normalize_maze(
+        [
+            ["wall", "wall", "wall", "wall", "wall"],
+            ["wall", "empty", "empty", "empty", "wall"],
+            ["wall", "empty", "wall", "empty", "wall"],
+            ["wall", "empty", "empty", "goal", "wall"],
+            ["wall", "wall", "wall", "wall", "wall"],
+        ]
+    )
     state = game.MazeState(
-        maze=maze, agent_pos=(1, 1), has_key=False,
-        steps_taken=0, max_steps=3, vision_radius=1,
+        maze=maze,
+        agent_pos=(1, 1),
+        has_key=False,
+        steps_taken=0,
+        max_steps=3,
+        vision_radius=1,
     )
     # Take 3 valid-but-non-goal steps.
     for d in ("right", "right", "down"):
@@ -391,12 +434,14 @@ def test_maze_action_exhaustion():
 # Loader test
 # ---------------------------------------------------------------------------
 
+
 def test_maze_loader_produces_prompt_records():
     loader = _load_module_without_sys_path("dataset_loader")
     generator = _load_module("dataset_generator")
 
     # Use a real temp file so the loader reads it instead of falling back.
     import tempfile
+
     raw = generator.generate_records(2, seed=11)
     with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
         for rec in raw:
@@ -418,16 +463,23 @@ def test_maze_loader_produces_prompt_records():
 # Invalid input test
 # ---------------------------------------------------------------------------
 
+
 def test_maze_invalid_directions_rejected():
     game = _load_module("game")
-    maze = game.normalize_maze([
-        ["wall", "wall", "wall", "wall", "wall"],
-        ["wall", "empty", "empty", "empty", "wall"],
-        ["wall", "wall", "wall", "wall", "wall"],
-    ])
+    maze = game.normalize_maze(
+        [
+            ["wall", "wall", "wall", "wall", "wall"],
+            ["wall", "empty", "empty", "empty", "wall"],
+            ["wall", "wall", "wall", "wall", "wall"],
+        ]
+    )
     state = game.MazeState(
-        maze=maze, agent_pos=(1, 1), has_key=False,
-        steps_taken=0, max_steps=10, vision_radius=1,
+        maze=maze,
+        agent_pos=(1, 1),
+        has_key=False,
+        steps_taken=0,
+        max_steps=10,
+        vision_radius=1,
     )
     result = game.apply_move(state, "diagonal")
     assert not result.success

@@ -62,8 +62,7 @@ async def run_agent(ctx, batch):
         from openai import AsyncOpenAI
     except ImportError as exc:
         raise RuntimeError(
-            "The maze agentic example requires `openai` and `httpx`. "
-            "Install them with `pip install openai`."
+            "The maze agentic example requires `openai` and `httpx`. Install them with `pip install openai`."
         ) from exc
 
     items = list(batch.iter_samples())

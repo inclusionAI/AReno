@@ -69,12 +69,12 @@ class MoveResult:
 # Validation
 # ---------------------------------------------------------------------------
 
+
 def normalize_maze(raw: list[list[str]]) -> Maze:
     """Validate and normalise a raw maze grid."""
 
     if not raw or not raw[0]:
         raise ValueError("maze must be a non-empty 2-D grid")
-    h = len(raw)
     w = len(raw[0])
     for row in raw:
         if len(row) != w:
@@ -101,6 +101,7 @@ def maze_height(maze: Maze) -> int:
 # ---------------------------------------------------------------------------
 # Maze generation
 # ---------------------------------------------------------------------------
+
 
 def generate_maze(
     width: int,
@@ -151,10 +152,7 @@ def generate_maze(
 
     # Collect all passage cells (excluding start and goal).
     passages: list[Position] = [
-        (r, c)
-        for r in range(height)
-        for c in range(width)
-        if maze[r][c] == EMPTY and (r, c) != start
+        (r, c) for r in range(height) for c in range(width) if maze[r][c] == EMPTY and (r, c) != start
     ]
     rng.shuffle(passages)
 
@@ -165,9 +163,9 @@ def generate_maze(
     door_positions: list[Position] = []
     if shortest and n_doors > 0:
         candidates = [
-            pos for pos in shortest
-            if maze[pos[0]][pos[1]] == EMPTY
-            and abs(pos[0] - start[0]) + abs(pos[1] - start[1]) > 1
+            pos
+            for pos in shortest
+            if maze[pos[0]][pos[1]] == EMPTY and abs(pos[0] - start[0]) + abs(pos[1] - start[1]) > 1
         ]
         rng.shuffle(candidates)
         for pos in candidates[:n_doors]:
@@ -302,6 +300,7 @@ def is_solvable(maze: Maze, start: Position | None = None, goal: Position | None
 # State transitions
 # ---------------------------------------------------------------------------
 
+
 def apply_move(state: MazeState, direction: str) -> MoveResult:
     """Execute one move and return the resulting state + observation."""
 
@@ -384,6 +383,7 @@ def apply_move(state: MazeState, direction: str) -> MoveResult:
 # Observation (partial observability)
 # ---------------------------------------------------------------------------
 
+
 def local_view(state: MazeState) -> str:
     """Render only the cells within *vision_radius* of the agent.
 
@@ -418,10 +418,7 @@ def format_prompt(state: MazeState) -> str:
     """Build the user-facing prompt for the current observation."""
 
     view = local_view(state)
-    legend = (
-        "Legend: @ = you, # = wall, . = empty, k = key, "
-        "D = locked door, G = goal, ? = unseen"
-    )
+    legend = "Legend: @ = you, # = wall, . = empty, k = key, D = locked door, G = goal, ? = unseen"
     return (
         f"You are at step {state.steps_taken}/{state.max_steps} in a maze.\n"
         f"{'You have the key.' if state.has_key else 'You do not have the key.'}\n"
@@ -434,6 +431,7 @@ def format_prompt(state: MazeState) -> str:
 # ---------------------------------------------------------------------------
 # Scoring
 # ---------------------------------------------------------------------------
+
 
 def _find_goal(maze: Maze) -> Position:
     """Scan the maze for the goal cell."""
@@ -477,8 +475,7 @@ def score_episode(
             goal_pos = _find_goal(maze)
             maze_size = maze_width(maze) * maze_height(maze)
             min_dist = min(
-                bfs_distance(r.state.maze, r.state.agent_pos, goal_pos, r.state.has_key)
-                for r in valid_steps
+                bfs_distance(r.state.maze, r.state.agent_pos, goal_pos, r.state.has_key) for r in valid_steps
             )
             reward = -0.5 + 0.3 * (1.0 - min_dist / maze_size)
         else:
@@ -522,6 +519,7 @@ def score_episode_pbrs(
 # ---------------------------------------------------------------------------
 # Serialisation helpers
 # ---------------------------------------------------------------------------
+
 
 def serialize_maze(
     maze: Maze,

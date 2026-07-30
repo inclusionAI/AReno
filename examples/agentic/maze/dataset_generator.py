@@ -55,7 +55,11 @@ def generate_records(
         w = width + rng.choice([0, 0, 2])
         h = height + rng.choice([0, 0, 2])
         maze, start, goal, keys, doors = game.generate_maze(
-            w, h, seed=sub_seed, n_keys=n_keys, n_doors=n_doors,
+            w,
+            h,
+            seed=sub_seed,
+            n_keys=n_keys,
+            n_doors=n_doors,
         )
         key_tuple = tuple(tuple(row) for row in maze)
         if key_tuple in seen and not allow_duplicates:
@@ -68,7 +72,11 @@ def generate_records(
             effective_max_steps = max_steps
 
         record = game.serialize_maze(
-            maze, start, goal, keys, doors,
+            maze,
+            start,
+            goal,
+            keys,
+            doors,
             vision_radius=vision_radius,
             max_steps=effective_max_steps,
         )
