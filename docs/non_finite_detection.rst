@@ -26,11 +26,23 @@ Implementation
 File                         Content
 ============================ ==================================================
 ``non_finite.py``            Detector core module (detection + report
-                             formatting + JSON output)
-``training.py``              Actor training injection point
-``roles.py``                 Critic training injection point
-``__init__.py``              Exports ``NonFiniteReport``
-``test_non_finite_report.py`` Unit tests
+                             formatting + JSON output + NonFiniteTrainingError
+                             + cross-rank all_reduce_non_finite_flag +
+                             emit_non_finite_report)
+``training.py``              Actor training injection point (skip update +
+                             terminate + cross-rank all_reduce)
+``roles.py``                 Critic training injection point (skip update +
+                             terminate + cross-rank all_reduce)
+``policy_only.py``           Trainer-layer rewards/advantages detection
+                             (``_check_non_finite_values``)
+``config.py``                ``RuntimeConfig``: ``non_finite_skip_update`` /
+                             ``non_finite_terminate`` fields (default False)
+``trainer_config.py``        ``TrainerConfig``: same fields propagated to
+                             ``ArenoConfig`` via ``areno_config()``
+``train.py``                 CLI flags ``--non-finite-skip-update`` and
+                             ``--non-finite-terminate``
+``tests/test_non_finite_cpu.py`` Unit tests (CPU-only, follows project
+                             naming convention)
 ============================ ==================================================
 
 Environment
@@ -277,3 +289,65 @@ Lessons learned
    will crash.
 7. **Reports need explicit markers**: Adding ``alert`` / ``severity`` fields to
    JSON makes it immediately clear this is an anomaly alert, not a regular log.
+
+Configuration
+-------------
+
+Issue #238 adds two opt-in flags. Both default to ``False`` so existing
+behavior is preserved when they are not set.
+
+======================================== ========================================
+Flag                                     Effect
+======================================== ========================================
+``--non-finite-skip-update``             When NaN/Inf is detected, skip
+                                         ``optimizer.step()`` and discard
+                                         polluted gradients. The global step
+                                         counter does not advance.
+``--non-finite-terminate``               After reporting, raise
+                                         ``NonFiniteTrainingError`` to
+                                         terminate training in a controlled
+                                         manner.
+======================================== ========================================
+
+These flags can also be set programmatically:
+
+.. code-block:: python
+
+   from areno.api.trainer_config import TrainerConfig
+
+   config = TrainerConfig(
+       ckpt="Qwen/Qwen3-0.6B",
+       dataset_path="gsm8k:main",
+       non_finite_skip_update=True,
+       non_finite_terminate=False,
+   )
+
+Detection coverage
+------------------
+
+The detector checks four metric categories as required by Issue #238:
+
+==================== ====================================================
+Metric               Detection location
+==================== ====================================================
+Loss                 Engine layer: every step via
+                     ``check_loss_non_finite``
+Gradients            Engine layer: every 100 steps (or on NaN loss)
+                     via ``detect_non_finite``
+Parameters           Engine layer: same schedule as gradients
+Optimizer state      Engine layer: same schedule as gradients
+Rewards              Trainer layer: ``_check_non_finite_values``
+                     in ``policy_only.py``
+Advantages           Trainer layer: ``_check_non_finite_values``
+                     in ``policy_only.py``
+==================== ====================================================
+
+Cross-rank coordination
+-----------------------
+
+When running with tensor-parallel or data-parallel, each rank performs
+local detection independently. ``all_reduce_non_finite_flag`` uses a
+``MAX`` all-reduce so that if *any* rank detects NaN/Inf, *all* ranks
+treat the step as non-finite. This ensures consistent skip/terminate
+behavior across the cluster — no rank advances ``optimizer.step()``
+while another discards gradients.
