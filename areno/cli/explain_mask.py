@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
 
 import click
 
@@ -56,9 +55,12 @@ def explain_mask_command(
     from areno.cli.train import _load_dataset_for_training
 
     try:
-        from datasets import load_dataset as hf_load_dataset, load_from_disk as hf_load_from_disk
+        from datasets import load_dataset as hf_load_dataset
+        from datasets import load_from_disk as hf_load_from_disk
     except ImportError:
-        raise click.UsageError("The `datasets` package is required to load datasets. Install it with `pip install datasets`.")
+        raise click.UsageError(
+            "The `datasets` package is required to load datasets. Install it with `pip install datasets`."
+        )
 
     dataset = _load_dataset_for_training(
         dataset_path,
@@ -85,7 +87,9 @@ def explain_mask_command(
             continue
         spans = spans_from_prompt_mask(prompt_mask)
         loss_mask = [not m for m in prompt_mask]
-        explanation = explain_loss_mask(tokens, loss_mask, spans, tokenizer=tokenizer if show_text else None, show_text=show_text)
+        explanation = explain_loss_mask(
+            tokens, loss_mask, spans, tokenizer=tokenizer if show_text else None, show_text=show_text
+        )
         explanations.append((row_idx, explanation))
         row_idx += 1
 
@@ -103,24 +107,26 @@ def explain_mask_command(
 def _emit_json(explanations: list[tuple[int, LossMaskExplanation]]) -> None:
     rows = []
     for row_idx, exp in explanations:
-        rows.append({
-            "row": row_idx,
-            "total_tokens": exp.total_tokens,
-            "loss_tokens": exp.loss_tokens,
-            "spans": [
-                {
-                    "role": s.role,
-                    "start": s.start,
-                    "end": s.end,
-                    "loss": s.loss,
-                    "turn": s.turn,
-                    "token_count": s.end - s.start,
-                }
-                for s in exp.spans
-            ],
-            "summary": exp.summary,
-            "text_preview": exp.text_preview,
-        })
+        rows.append(
+            {
+                "row": row_idx,
+                "total_tokens": exp.total_tokens,
+                "loss_tokens": exp.loss_tokens,
+                "spans": [
+                    {
+                        "role": s.role,
+                        "start": s.start,
+                        "end": s.end,
+                        "loss": s.loss,
+                        "turn": s.turn,
+                        "token_count": s.end - s.start,
+                    }
+                    for s in exp.spans
+                ],
+                "summary": exp.summary,
+                "text_preview": exp.text_preview,
+            }
+        )
     click.echo(json.dumps({"rows": rows}, indent=2))
 
 

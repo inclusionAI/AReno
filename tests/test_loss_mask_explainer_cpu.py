@@ -19,10 +19,10 @@ from unittest.mock import patch
 
 from click.testing import CliRunner
 
-from areno.api.data import LossMaskExplanation, LossSpan
+from areno.api.agentic import AgentTrainBatch
+from areno.api.data import LossSpan
 from areno.api.data_utils import spans_from_prompt_mask
 from areno.api.loss_mask_explainer import explain_loss_mask
-from areno.api.agentic import AgentTrainBatch, LossMaskPolicy
 
 
 class TestSpansFromPromptMask(unittest.TestCase):
@@ -145,11 +145,11 @@ class TestExplainAgenticEquivalence(unittest.TestCase):
         # turn 1: assistant_tool_call(12-16), tool_result(16-22)
         # turn 2: assistant_text(22-30)
         loss_mask = (
-            [False] * 5          # prompt
-            + [True] * 7         # assistant_text turn 0
-            + [True] * 4         # assistant_tool_call turn 1
-            + [False] * 6        # tool_result turn 1
-            + [True] * 8         # assistant_text turn 2
+            [False] * 5  # prompt
+            + [True] * 7  # assistant_text turn 0
+            + [True] * 4  # assistant_tool_call turn 1
+            + [False] * 6  # tool_result turn 1
+            + [True] * 8  # assistant_text turn 2
         )
         spans = [
             LossSpan(role="prompt", start=0, end=5, loss=False, turn=0),
@@ -177,7 +177,6 @@ class TestExplainAgenticEquivalence(unittest.TestCase):
 
 
 class TestBoundaryCases(unittest.TestCase):
-
     def test_all_masked_sample(self):
         """All loss=False: correct report of 0 loss tokens."""
         tokens = list(range(10))
@@ -212,7 +211,6 @@ class TestBoundaryCases(unittest.TestCase):
 
 
 class TestInvalidInputs(unittest.TestCase):
-
     def test_length_mismatch(self):
         """tokens and loss_mask with different lengths raise ValueError."""
         with self.assertRaises(ValueError) as ctx:
@@ -246,7 +244,6 @@ class TestInvalidInputs(unittest.TestCase):
 
 
 class TestShowText(unittest.TestCase):
-
     def test_show_text_false_omits_content(self):
         """Default behaviour: text_preview is None."""
         tokens = list(range(5))
@@ -257,6 +254,7 @@ class TestShowText(unittest.TestCase):
 
     def test_show_text_true_with_tokenizer(self):
         """show_text=True with a tokenizer decodes span text."""
+
         class FakeTokenizer:
             def decode(self, token_ids):
                 return f"<decoded {len(token_ids)} tokens>"
@@ -314,16 +312,14 @@ class TestCliExplainMask(unittest.TestCase):
                 f.write(json_mod.dumps(row) + "\n")
 
         loader_file = tmp_path / "loader.py"
-        loader_file.write_text(
-            "def load_training_dataset(dataset):\n"
-            "    return dataset\n"
-        )
+        loader_file.write_text("def load_training_dataset(dataset):\n    return dataset\n")
         return str(dataset_file), str(loader_file)
 
     @patch("areno.cli.explain_mask.load_tokenizer", create=True)
     def test_cli_help(self, *args):
         """--help produces output without error."""
         from areno.cli.explain_mask import explain_mask_command
+
         result = self.runner.invoke(explain_mask_command, ["--help"])
         self.assertEqual(result.exit_code, 0)
         self.assertIn("explain-mask", result.output)
@@ -332,6 +328,7 @@ class TestCliExplainMask(unittest.TestCase):
     def test_cli_missing_args(self, *args):
         """Missing required args produces error."""
         from areno.cli.explain_mask import explain_mask_command
+
         result = self.runner.invoke(explain_mask_command, [])
         self.assertNotEqual(result.exit_code, 0)
 
@@ -357,17 +354,27 @@ class TestCliExplainMask(unittest.TestCase):
                 {"prompt": "Hello", "response": "World"},
             ]
 
-            with patch("areno.api.tokenizer.load_tokenizer", return_value=FakeTokenizer()), \
-                 patch("areno.cli.train._load_dataset_for_training", return_value=fake_dataset):
-                result = self.runner.invoke(explain_mask_command, [
-                    "--ckpt", "/fake/path",
-                    "--dataset-path", dataset_path,
-                    "--dataset-loader-fn", loader_path,
-                    "--json",
-                    "--max-rows", "1",
-                ])
+            with (
+                patch("areno.api.tokenizer.load_tokenizer", return_value=FakeTokenizer()),
+                patch("areno.cli.train._load_dataset_for_training", return_value=fake_dataset),
+            ):
+                result = self.runner.invoke(
+                    explain_mask_command,
+                    [
+                        "--ckpt",
+                        "/fake/path",
+                        "--dataset-path",
+                        dataset_path,
+                        "--dataset-loader-fn",
+                        loader_path,
+                        "--json",
+                        "--max-rows",
+                        "1",
+                    ],
+                )
             if result.exception:
                 import traceback
+
                 traceback.print_exception(type(result.exception), result.exception, result.exception.__traceback__)
             self.assertEqual(result.exit_code, 0, f"CLI failed: {result.output}")
             data = json.loads(result.output)

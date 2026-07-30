@@ -665,13 +665,15 @@ class RolloutSession:
                 if span.end <= prefix_len:
                     continue
                 clipped_start = max(span.start, prefix_len)
-                existing.spans.append(LossSpan(
-                    role=span.role,
-                    start=old_row_len + clipped_start - prefix_len,
-                    end=old_row_len + span.end - prefix_len,
-                    loss=span.loss,
-                    turn=next_turn,
-                ))
+                existing.spans.append(
+                    LossSpan(
+                        role=span.role,
+                        start=old_row_len + clipped_start - prefix_len,
+                        end=old_row_len + span.end - prefix_len,
+                        loss=span.loss,
+                        turn=next_turn,
+                    )
+                )
         elif not existing.token_row:
             existing.token_row = list(existing.item.input_tokens) + list(existing.response_tokens)
             prompt_len = len(existing.item.input_tokens)
@@ -713,7 +715,9 @@ class RolloutSession:
                 start = i
                 current = loss_mask[i]
         role = sample.response_kind if current else ("tool_result" if has_override else sample.response_kind)
-        spans.append(LossSpan(role=role, start=prompt_len + start, end=prompt_len + len(loss_mask), loss=current, turn=turn))
+        spans.append(
+            LossSpan(role=role, start=prompt_len + start, end=prompt_len + len(loss_mask), loss=current, turn=turn)
+        )
         return spans
 
     def _set_sample_training_row(self, sample: _AgentSample, prompt_tokens: list[int]) -> None:

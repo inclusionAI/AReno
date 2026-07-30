@@ -60,9 +60,7 @@ def explain_loss_mask(
 
     n = len(tokens)
     if n != len(loss_mask):
-        raise ValueError(
-            f"tokens and loss_mask length mismatch: tokens={n}, loss_mask={len(loss_mask)}"
-        )
+        raise ValueError(f"tokens and loss_mask length mismatch: tokens={n}, loss_mask={len(loss_mask)}")
 
     # Clip spans to the actual token range (handles right-truncated sequences).
     clipped: list[LossSpan] = []
@@ -79,19 +77,15 @@ def explain_loss_mask(
     for span in clipped:
         if span.start > pos:
             raise ValueError(
-                f"span gap: expected coverage at position {pos}, but next span "
-                f"'{span.role}' starts at {span.start}"
+                f"span gap: expected coverage at position {pos}, but next span '{span.role}' starts at {span.start}"
             )
         if span.start < pos:
             raise ValueError(
-                f"span overlap: span '{span.role}' starts at {span.start} "
-                f"but previous span ended at {pos}"
+                f"span overlap: span '{span.role}' starts at {span.start} but previous span ended at {pos}"
             )
         pos = span.end
     if pos < n:
-        raise ValueError(
-            f"span coverage incomplete: spans end at {pos} but tokens has {n} positions"
-        )
+        raise ValueError(f"span coverage incomplete: spans end at {pos} but tokens has {n} positions")
 
     # Compute statistics.
     loss_tokens = sum(1 for m in loss_mask if m)
