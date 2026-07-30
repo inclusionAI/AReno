@@ -534,6 +534,11 @@ class DashboardState:
                     process.terminate()
             except ProcessLookupError:
                 pass
+            except AttributeError:
+                # The process object has no addressable ``pid`` (e.g. a lightweight
+                # test stand-in). Fall back to a direct ``terminate`` so the
+                # shutdown request still propagates instead of crashing.
+                process.terminate()
         elif pid is not None:
             try:
                 if hasattr(os, "killpg"):
