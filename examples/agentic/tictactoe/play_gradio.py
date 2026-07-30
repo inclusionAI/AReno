@@ -25,8 +25,7 @@ EMPTY = game.EMPTY
 HUMAN = "O"
 MODEL = "X"
 
-# Grid buttons stored as a 3x3 list of gr.Button
-buttons: list[list[gr.Button]] = []
+# Status display component
 status_box: gr.Markdown | None = None
 
 # Mutable state passed through Gradio
@@ -66,40 +65,41 @@ def check_result(board: game.Board) -> str | None:
     return None
 
 
-def on_cell_click(row: int, col: int, state: State) -> tuple:
-    """Handle a click on a grid cell."""
-    board: game.Board = state["board"]
-    finished: bool = state["finished"]
+def make_click_handler(row: int, col: int):
+    """Return a click handler with row/col captured at build time."""
 
-    if finished:
-        return state, state["message"], *board_to_flat(board)
+    def handler(state: State) -> tuple:
+        board: game.Board = state["board"]
+        finished: bool = state["finished"]
 
-    square = row * 3 + col + 1
+        if finished:
+            return state, state["message"], *board_to_flat(board)
 
-    # ── Human move ──
-    if square not in game.legal_moves(board):
-        return state, "⚠️ 该位置已被占用！", *board_to_flat(board)
+        square = row * 3 + col + 1
 
-    board = game.apply_move(board, square, HUMAN)
-    result = check_result(board)
-    if result:
-        state.update(board=board, finished=True, message=result)
-        return state, result, *board_to_flat(board)
+        # ── Human move ──
+        if square not in game.legal_moves(board):
+            return state, "⚠️ 该位置已被占用！", *board_to_flat(board)
 
-    # ── Model move ──
-    move = model_move(board)
-    if move and move in game.legal_moves(board):
-        board = game.apply_move(board, move, MODEL)
-    else:
-        board_msg = "模型走了非法位置，跳过"
-        # Fall through to check if skipping ends the game
-    result = check_result(board)
-    if result:
-        state.update(board=board, finished=True, message=result)
-        return state, result, *board_to_flat(board)
+        board = game.apply_move(board, square, HUMAN)
+        result = check_result(board)
+        if result:
+            state.update(board=board, finished=True, message=result)
+            return state, result, *board_to_flat(board)
 
-    state.update(board=board, finished=False, message="你的回合，请落子 ⭕")
-    return state, "你的回合，请落子 ⭕", *board_to_flat(board)
+        # ── Model move ──
+        move = model_move(board)
+        if move and move in game.legal_moves(board):
+            board = game.apply_move(board, move, MODEL)
+        result = check_result(board)
+        if result:
+            state.update(board=board, finished=True, message=result)
+            return state, result, *board_to_flat(board)
+
+        state.update(board=board, finished=False, message="你的回合，请落子 ⭕")
+        return state, "你的回合，请落子 ⭕", *board_to_flat(board)
+
+    return handler
 
 
 def reset_game() -> tuple:
@@ -122,33 +122,50 @@ def build_ui() -> gr.Blocks:
         global status_box
         status_box = gr.Markdown("点击下方棋盘开始！")
 
+        # CSS: make grid buttons square and large
+        gr.HTML(
+            "<style>"
+            ".ttt-cell button {"
+            "  aspect-ratio: 1 / 1;"
+            "  min-width: 80px;"
+            "  font-size: 2em;"
+            "  font-weight: bold;"
+            "}"
+            "</style>"
+        )
+
         # 3x3 grid of buttons
         grid = []
         for row_idx in range(3):
             row_buttons = []
             with gr.Row():
                 for col_idx in range(3):
-                    btn = gr.Button("", scale=1, elem_id=f"cell-{row_idx}-{col_idx}")
+                    btn = gr.Button(
+                        "",
+                        scale=1,
+                        elem_classes="ttt-cell",
+                        elem_id=f"cell-{row_idx}-{col_idx}",
+                    )
                     row_buttons.append(btn)
             grid.append(row_buttons)
 
         with gr.Row():
             reset_btn = gr.Button("🔄 重新开始")
 
-        # Wire click events
+        all_buttons = [grid[i][j] for i in range(3) for j in range(3)]
+
+        # Wire click events — use closures to capture row/col
         for r in range(3):
             for c in range(3):
                 grid[r][c].click(
-                    on_cell_click,
-                    inputs=[gr.Number(value=r, visible=False),
-                            gr.Number(value=c, visible=False),
-                            state],
-                    outputs=[state, status_box, *[grid[i][j] for i in range(3) for j in range(3)]],
+                    make_click_handler(r, c),
+                    inputs=[state],
+                    outputs=[state, status_box, *all_buttons],
                 )
 
         reset_btn.click(
             reset_game,
-            outputs=[state, status_box, *[grid[i][j] for i in range(3) for j in range(3)]],
+            outputs=[state, status_box, *all_buttons],
         )
 
     return ui
