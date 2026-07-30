@@ -25,6 +25,64 @@ SYSTEM_PROMPT = (
     "Never repeat a guess. After the game ends, summarize the outcome without a tool call."
 )
 
+# Few-shot example: one complete turn showing the correct tool_call format.
+# Prepending this to every conversation helps small base models emit structured
+# tool calls instead of unstructured text.
+FEWSHOT_MESSAGES = [
+    {
+        "role": "user",
+        "content": "Guess the hidden 5-letter English word. You have at most 6 guesses. "
+                   "After each guess, you receive feedback for each position: 'exact' = "
+                   "correct letter in correct position, 'present' = letter exists in the "
+                       "word but in a different position, 'absent' = letter not in the word. "
+                       "Call guess_word once per turn and use the feedback to narrow down "
+                       "the word.\nGuess 1 of 6: call guess_word now.",
+    },
+    {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [
+            {
+                "id": "call_demo001",
+                "type": "function",
+                "function": {
+                    "name": "guess_word",
+                    "arguments": json.dumps({"word": "crane"}),
+                },
+            }
+        ],
+    },
+    {
+        "role": "tool",
+        "tool_call_id": "call_demo001",
+        "name": "guess_word",
+        "content": json.dumps({
+            "valid": True,
+            "guess": "crane",
+            "feedback": ["absent", "present", "absent", "absent", "exact"],
+            "solved": False,
+        }),
+    },
+    {
+        "role": "user",
+        "content": "Guess 2 of 6: call guess_word now.",
+    },
+    {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [
+            {
+                "id": "call_demo002",
+                "type": "function",
+                "function": {
+                    "name": "guess_word",
+                    "arguments": json.dumps({"word": "slate"}),
+                },
+            }
+        ],
+    },
+]
+
 
 async def run_agent(ctx, batch):
     """Run bounded concurrent Wordle episodes and preserve exact model outputs."""
@@ -68,6 +126,7 @@ async def _run_episode(item, client) -> list[AgentTrajectoryTurn]:
 
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
+        *FEWSHOT_MESSAGES,
         {"role": "user", "content": item.prompt},
     ]
     turns = []
