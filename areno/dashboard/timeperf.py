@@ -235,8 +235,16 @@ def load_step_segments(
     rollup_seen: dict[int, dict[str, float]] = {}
     phase_seen: dict[int, dict[str, float]] = {}
     divergences: list[str] = []
+    # Track which (step, tag) pairs we've already accepted, so a re-run that
+    # rewrites step 0 into a second event file does not double-count it.
+    # ``tensorboard_event_sources`` returns files in ascending mtime order, so
+    # we iterate newest-first: the first time we see a (step, tag) we keep that
+    # value (from the most recent run) and skip older duplicates. See review
+    # finding: real GSPO run restarted 3x and step 0 was summed 3x.
+    processed: set[tuple[int, str]] = set()
 
-    for accumulator_path in tensorboard_event_sources(run_dir, pid):
+    sources = tensorboard_event_sources(run_dir, pid)
+    for accumulator_path in reversed(sources):
         try:
             accumulator = EventAccumulator(str(accumulator_path), size_guidance={"scalars": 10000})
             accumulator.Reload()
@@ -253,6 +261,10 @@ def load_step_segments(
                 if math.isnan(value):
                     continue
                 step = int(event.step)
+                key = (step, tag)
+                if key in processed:
+                    continue
+                processed.add(key)
                 bucket = by_step.setdefault(step, {})
                 msg = _accumulate_event(bucket, step, tag, value, rollup_seen, phase_seen)
                 if msg:

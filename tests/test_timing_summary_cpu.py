@@ -413,6 +413,47 @@ class EndToEndTest(unittest.TestCase):
         self.assertIn("Run status:", res.output)
         self.assertIn("rollout", res.output)
 
+    def test_restarted_run_keeps_only_latest_per_step(self):
+        """A run that restarted into a second event file must not double-count step 0.
+
+        Reproduces the real GSPO run on Kaggle, where the metrics dir held 3
+        event files each rewriting step 0, and the summary summed step 0 three
+        times. Only the values from the most recent (highest-mtime) file are
+        kept; earlier duplicates do not count as divergences.
+        """
+        import time
+
+        SummaryWriter = _summary_writer_cls()
+        # First (older) file: step 0 with rollout 48, train 277, e2e 325.
+        w1 = SummaryWriter(log_dir=str(self.run_dir))
+        w1.add_scalar("train/step_rollout_time_s", 48.0, 0)
+        w1.add_scalar("train/step_train_time_s", 277.0, 0)
+        w1.add_scalar("train/step_e2e_time_s", 325.0, 0)
+        w1.close()
+        # Force a newer mtime on the second file so newest-first picks it.
+        time.sleep(1.1)
+        # Second (newer) file: same step 0 rewritten with rollout 101, train 16, e2e 117.
+        w2 = SummaryWriter(log_dir=str(self.run_dir))
+        w2.add_scalar("train/step_rollout_time_s", 101.0, 0)
+        w2.add_scalar("train/step_train_time_s", 16.0, 0)
+        w2.add_scalar("train/step_e2e_time_s", 117.0, 0)
+        w2.close()
+        (self.run_dir / f"dashboard_state.{_DEAD_PID}.json").write_text(
+            json.dumps({"pid": _DEAD_PID, "stage": "train_end", "status": "succeeded", "step": 0}),
+            encoding="utf-8",
+        )
+
+        by_step, divergences = tp.load_step_segments(self.run_dir)
+        # Latest file wins -> step 0 carries 101/16, not the sum 48+101.
+        self.assertAlmostEqual(by_step[0]["rollout"], 101.0)
+        self.assertAlmostEqual(by_step[0]["train"], 16.0)
+        self.assertAlmostEqual(by_step[0]["total"], 117.0)
+        # Cross-file duplicates are re-runs, not divergences.
+        self.assertEqual(divergences, [])
+        # And the reconstructed total reconciles with the reported e2e.
+        recon = tp._reconcile(by_step[0])
+        self.assertAlmostEqual(recon["diff"], 0.0)
+
 
 class ValidationTest(unittest.TestCase):
     """Input validation runs before any TensorBoard reading (no deps needed)."""
