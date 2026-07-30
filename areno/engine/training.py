@@ -122,7 +122,9 @@ class TrainingManager:
                 _nf_report = None
             # Cross-rank agreement: any rank non-finite → all ranks treat as non-finite
             _any_non_finite = all_reduce_non_finite_flag(
-                _nf_report is not None, tp_group=ctx.group, dp_group=ctx.dp_group if ctx.dp_size > 1 else None,
+                _nf_report is not None,
+                tp_group=ctx.group if ctx.world_size > 1 else None,
+                dp_group=ctx.dp_group if ctx.dp_size > 1 else None,
             )
             if _nf_report is not None or _any_non_finite:
                 if _nf_report is not None:

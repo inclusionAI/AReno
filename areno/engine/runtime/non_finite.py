@@ -443,7 +443,9 @@ def all_reduce_non_finite_flag(local_non_finite: bool, *, tp_group=None, dp_grou
     """
     if not dist.is_available() or not dist.is_initialized():
         return local_non_finite
-    flag = torch.tensor(1.0 if local_non_finite else 0.0, dtype=torch.float32)
+    # Place flag on CUDA when available — NCCL only supports GPU tensors.
+    device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+    flag = torch.tensor(1.0 if local_non_finite else 0.0, dtype=torch.float32, device=device)
     if tp_group is not None:
         dist.all_reduce(flag, op=dist.ReduceOp.MAX, group=tp_group)
     if dp_group is not None:
