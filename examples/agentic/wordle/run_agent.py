@@ -97,9 +97,9 @@ async def _run_episode(item, client) -> list[AgentTrajectoryTurn]:
         )
 
         assistant_message = _assistant_message(response)
-        tool_result = _execute_guess(assistant_message, item.record)
+        executed = _execute_guess(assistant_message, item.record)
 
-        if tool_result is None:
+        if executed is None:
             # Fallback: small models may emit a tool_call with missing/invalid
             # arguments, or no tool_call at all.  Try to extract a guess from
             # the response text or tool_call arguments instead.
@@ -111,11 +111,11 @@ async def _run_episode(item, client) -> list[AgentTrajectoryTurn]:
             fallback_word = _extract_fallback_guess(content) or _extract_fallback_guess(tool_call_args)
             if fallback_word is not None:
                 assistant_message = _synth_tool_call_message(content, fallback_word)
-                tool_result = _execute_guess(assistant_message, item.record)
-                if tool_result is not None:
+                executed = _execute_guess(assistant_message, item.record)
+                if executed is not None:
                     logger.info("Wordle fallback extracted guess: %s", fallback_word)
 
-        if tool_result is None:
+        if executed is None:
             # DEBUG: dump raw model response to diagnose why tool_call parsing fails
             raw_msg = response.choices[0].message
             areno_meta = getattr(response, "areno", None) or {}
@@ -135,7 +135,8 @@ async def _run_episode(item, client) -> list[AgentTrajectoryTurn]:
             logger.warning("Wordle model returned no executable guess_word call")
             break
 
-        messages.extend(_tool_messages(assistant_message, tool_result))
+        tool_result, chosen_call = executed
+        messages.extend(_tool_messages(assistant_message, tool_result, chosen_call))
 
         game_over = (
             tool_result.get("solved")
@@ -234,30 +235,37 @@ def _assistant_message(response) -> dict:
     }
 
 
-def _execute_guess(assistant_message: dict, record: dict) -> dict | None:
-    """Execute the guess_word tool call and return the result dict."""
+def _execute_guess(assistant_message: dict, record: dict) -> tuple[dict, dict] | None:
+    """Execute the guess_word tool call and return (tool_result, call) or None.
+
+    Small models may emit multiple tool calls in one response.  Try each
+    ``guess_word`` call in order and return the first one that yields a valid
+    ``word`` argument.
+    """
 
     calls = assistant_message.get("tool_calls") or []
-    if len(calls) != 1 or calls[0].get("function", {}).get("name") != "guess_word":
-        return None
-    try:
-        arguments = json.loads(calls[0]["function"].get("arguments") or "")
-    except (json.JSONDecodeError, TypeError):
-        return None
-    if not isinstance(arguments, dict) or "word" not in arguments:
-        return None
-    return score_guess(record["secret"], arguments["word"])
+    for call in calls:
+        if call.get("function", {}).get("name") != "guess_word":
+            continue
+        try:
+            arguments = json.loads(call["function"].get("arguments") or "")
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(arguments, dict) or "word" not in arguments:
+            continue
+        result = score_guess(record["secret"], arguments["word"])
+        return result, call
+    return None
 
 
-def _tool_messages(assistant_message: dict, tool_result: dict) -> list[dict]:
+def _tool_messages(assistant_message: dict, tool_result: dict, chosen_call: dict) -> list[dict]:
     """Build the assistant + tool messages to append to the conversation."""
 
-    call = assistant_message["tool_calls"][0]
     return [
         assistant_message,
         {
             "role": "tool",
-            "tool_call_id": call["id"],
+            "tool_call_id": chosen_call["id"],
             "name": "guess_word",
             "content": json.dumps(tool_result),
         },

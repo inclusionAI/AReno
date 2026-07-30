@@ -275,11 +275,15 @@ def test_agent_executes_guess_and_rejects_bad_calls():
     }
 
     result = run_agent._execute_guess(valid, record)
-    assert result["solved"] is True
+    assert result is not None
+    assert result[0]["solved"] is True
     assert run_agent._execute_guess({"tool_calls": []}, record) is None
-    assert run_agent._execute_guess(
+    # Multiple guess_word calls: now picks the first valid one instead of None
+    multi = run_agent._execute_guess(
         {"tool_calls": [valid["tool_calls"][0], valid["tool_calls"][0]]}, record
-    ) is None
+    )
+    assert multi is not None
+    assert multi[0]["solved"] is True
     assert (
         run_agent._execute_guess(
             {"tool_calls": [{"function": {"name": "guess_word", "arguments": "not-json"}}]}, record
