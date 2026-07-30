@@ -353,31 +353,31 @@ class TestCliExplainMask(unittest.TestCase):
                 def encode(self, text, add_special_tokens=False):
                     return [ord(c) for c in text[:5]]
 
-            class FakeDataset:
-                def __iter__(self):
-                    return iter([
-                        {"prompt": "Hello", "response": "World"},
-                    ])
+            fake_dataset = [
+                {"prompt": "Hello", "response": "World"},
+            ]
 
-            with patch("areno.cli.explain_mask.load_tokenizer", return_value=FakeTokenizer()), \
-                 patch("areno.cli.train._load_dataset_from_path", return_value=FakeDataset()):
-                from areno.cli.train import _load_dataset_loader_fn
-                with patch.object(_load_dataset_loader_fn, "__call__", return_value=lambda ds: ds):
-                    result = self.runner.invoke(explain_mask_command, [
-                        "--ckpt", "/fake/path",
-                        "--dataset-path", dataset_path,
-                        "--dataset-loader-fn", loader_path,
-                        "--json",
-                        "--max-rows", "1",
-                    ])
+            with patch("areno.api.tokenizer.load_tokenizer", return_value=FakeTokenizer()), \
+                 patch("areno.cli.train._load_dataset_for_training", return_value=fake_dataset):
+                result = self.runner.invoke(explain_mask_command, [
+                    "--ckpt", "/fake/path",
+                    "--dataset-path", dataset_path,
+                    "--dataset-loader-fn", loader_path,
+                    "--json",
+                    "--max-rows", "1",
+                ])
             if result.exception:
                 import traceback
                 traceback.print_exception(type(result.exception), result.exception, result.exception.__traceback__)
-            # The CLI may fail on the fake tokenizer, but we check for JSON structure.
-            # If it succeeds, validate JSON.
-            if result.exit_code == 0:
-                data = json.loads(result.output)
-                self.assertIn("rows", data)
+            self.assertEqual(result.exit_code, 0, f"CLI failed: {result.output}")
+            data = json.loads(result.output)
+            self.assertIn("rows", data)
+            self.assertEqual(len(data["rows"]), 1)
+            row = data["rows"][0]
+            self.assertIn("total_tokens", row)
+            self.assertIn("loss_tokens", row)
+            self.assertIn("spans", row)
+            self.assertIn("summary", row)
 
 
 if __name__ == "__main__":
