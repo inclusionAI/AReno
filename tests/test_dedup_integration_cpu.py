@@ -307,6 +307,18 @@ class TestCLIErrorHandling(unittest.TestCase):
         finally:
             os.unlink(path)
 
+    def test_empty_prompt_is_a_cli_error_without_sample_content(self):
+        path = _write_temp_file('{"prompt": "   ", "answer": "private answer"}\n')
+        try:
+            result = self.runner.invoke(dedup_command, ["--data-path", path])
+            self.assertNotEqual(result.exit_code, 0)
+            self.assertIn("record at index 0", result.output)
+            self.assertIn("non-whitespace", result.output)
+            self.assertNotIn("private answer", result.output)
+            self.assertNotIsInstance(result.exception, ValueError)
+        finally:
+            os.unlink(path)
+
 
 # ---------------------------------------------------------------------------
 # CLI: custom text_keys

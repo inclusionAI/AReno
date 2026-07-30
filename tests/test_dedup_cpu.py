@@ -394,6 +394,24 @@ class TestTextKeys(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "record at index 0.*nonexistent"):
             find_duplicates(records, mode="exact", text_keys=["nonexistent"])
 
+    def test_empty_prompt_is_rejected(self):
+        records = [{"prompt": ""}, {"prompt": ""}]
+        with self.assertRaisesRegex(ValueError, "record at index 0.*non-whitespace"):
+            find_duplicates(records, mode="exact")
+
+    def test_whitespace_prompt_is_rejected(self):
+        records = [{"prompt": " \t\n"}]
+        with self.assertRaisesRegex(ValueError, "record at index 0.*non-whitespace"):
+            find_duplicates(records, mode="exact")
+
+    def test_empty_prompt_falls_through_to_later_text_key(self):
+        records = [
+            {"prompt": "", "question": "same question"},
+            {"prompt": "   ", "question": "same question"},
+        ]
+        report = find_duplicates(records, mode="exact")
+        self.assertEqual(report.groups[0].record_indices, [0, 1])
+
     def test_default_text_keys_do_not_treat_answers_as_prompts(self):
         records = [{"answer": "same"}, {"answer": "same"}]
         with self.assertRaisesRegex(ValueError, "record at index 0 has no string prompt field"):

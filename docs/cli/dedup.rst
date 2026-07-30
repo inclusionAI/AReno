@@ -64,9 +64,9 @@ Options
 
 ``--text-keys`` (default: ``prompt,question,instruction,problem,text,content,input,query``)
     Comma-separated field names for text extraction in ``prompt`` scope.
-    The first matching string field in each record is used.  Missing fields
-    produce an error containing only the record index and checked field names;
-    AReno does not print the sample text.
+    The first matching, non-whitespace string field in each record is used.
+    Missing or empty fields produce an error containing only the record index
+    and checked field names; AReno does not print the sample text.
 
 ``--json``
     Emit machine-readable JSON output instead of human-readable text.
@@ -143,5 +143,6 @@ Limitations
   complete record, so JSON field order does not change the result.
 * The command reports duplicates for review but does not remove, filter, or
   modify any records.
-* In ``prompt`` scope, every record must contain a string value under one of
-  the selected ``text_keys``.  Use ``--text-keys`` for custom dataset schemas.
+* In ``prompt`` scope, every record must contain a non-whitespace string value
+  under one of the selected ``text_keys``.  Use ``--text-keys`` for custom
+  dataset schemas.
