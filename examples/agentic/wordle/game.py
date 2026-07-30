@@ -128,7 +128,7 @@ GUESS_TOOL = {
             "properties": {
                 "word": {
                     "type": "string",
-                    "enum": list(WORDLE_WORDS),
+                    "pattern": "^[a-zA-Z]{5}$",
                     "description": "Exactly five English letters (case-insensitive).",
                 }
             },

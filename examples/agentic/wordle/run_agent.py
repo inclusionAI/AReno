@@ -113,11 +113,19 @@ async def _run_episode(item, client) -> list[AgentTrajectoryTurn]:
         if tool_result is None:
             # DEBUG: dump raw model response to diagnose why tool_call parsing fails
             raw_msg = response.choices[0].message
+            areno_meta = getattr(response, "areno", None) or {}
+            usage = getattr(response, "usage", None)
+            max_seq_len = getattr(usage, "max_sequence_len", None) if usage else None
+            resp_tokens = areno_meta.get("response_tokens", []) if isinstance(areno_meta, dict) else []
             logger.warning(
-                "Wordle raw response: content=%r, tool_calls=%r, finish_reason=%r",
+                "Wordle raw response: content=%r, tool_calls=%r, finish_reason=%r, "
+                "response_token_count=%d, max_sequence_len=%r, prompt_tokens=%r",
                 raw_msg.content,
                 [(c.function.name, c.function.arguments) for c in (raw_msg.tool_calls or [])],
                 getattr(response.choices[0], "finish_reason", None),
+                len(resp_tokens),
+                max_seq_len,
+                getattr(usage, "prompt_tokens", None) if usage else None,
             )
             logger.warning("Wordle model returned no executable guess_word call")
             break
