@@ -167,10 +167,11 @@ class DPOTrainer:
                 self.logger.info("epoch=%d step=%d train_stats=%s", epoch, step, result)
                 self._maybe_save(epoch, step)
                 # Update run-end summary data.
+                # samples_processed was set to len(dataset) at the start of
+                # _fit_initialized; only update trained count here.
                 sd = self._summary_data
                 sd.final_step = step + 1
                 sd.final_epoch = epoch
-                sd.samples_processed += len(train_batch)
                 sd.samples_trained += len(train_batch)
                 if isinstance(result, dict):
                     sd.metrics = {k: v for k, v in result.items() if isinstance(v, (int, float))}

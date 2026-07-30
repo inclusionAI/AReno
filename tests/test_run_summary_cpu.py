@@ -210,3 +210,119 @@ class TestRunSummaryData:
         assert data.samples_processed == 0
         assert data.samples_trained == 0
         assert data.samples_skipped == 0
+
+
+# ---------------------------------------------------------------------------
+# _format_float direct tests
+# ---------------------------------------------------------------------------
+
+class TestFormatFloat:
+    def test_zero(self):
+        from areno.cli.run_summary import _format_float
+        assert _format_float(0) == "0"
+
+    def test_integer(self):
+        from areno.cli.run_summary import _format_float
+        assert _format_float(42) == "42"
+
+    def test_small_decimal(self):
+        from areno.cli.run_summary import _format_float
+        assert _format_float(0.0312) == "0.0312"
+
+    def test_scientific(self):
+        from areno.cli.run_summary import _format_float
+        assert "e" in _format_float(1e-07).lower()
+
+    def test_large_number(self):
+        from areno.cli.run_summary import _format_float
+        assert _format_float(751632384.0) == "7.51632e+08"
+
+
+# ---------------------------------------------------------------------------
+# Integration-style: end-to-end summary flow
+# ---------------------------------------------------------------------------
+
+class TestSummaryIntegration:
+    """Verify the full flow: populate RunSummaryData → format → assert fields."""
+
+    def test_success_flow(self):
+        """Simulate a successful training run and verify summary output."""
+        data = RunSummaryData(algo="sft", model="/path/to/model")
+        data.outcome = "success"
+        data.duration_s = 120.5
+        data.final_step = 10
+        data.final_epoch = 1
+        data.samples_processed = 1000
+        data.samples_trained = 950
+        data.samples_skipped = 50
+        data.metrics = {"loss": 0.123, "lr": 1e-5}
+        data.errors = []
+
+        text = format_run_summary(data)
+        assert "success" in text
+        assert "2m 00s" in text
+        assert "sft" in text
+        assert "10" in text
+        assert "950 trained" in text
+        assert "50 skipped" in text
+        assert "1000 processed" in text
+        assert "0.123" in text
+        assert "Errors" not in text
+
+    def test_error_flow(self):
+        """Simulate a failed training run and verify summary output."""
+        data = RunSummaryData(algo="ppo", model="/path/to/model")
+        data.outcome = "error"
+        data.duration_s = 5.2
+        data.final_step = 1
+        data.final_epoch = 0
+        data.samples_processed = 8
+        data.samples_trained = 8
+        data.metrics = {"loss": 2.5}
+        data.errors = ["RuntimeError: CUDA out of memory"]
+
+        text = format_run_summary(data)
+        assert "error" in text
+        assert "5s" in text
+        assert "RuntimeError" in text
+        assert "CUDA" in text
+
+    def test_json_flow(self):
+        """Verify JSON output contains all expected fields."""
+        import json as json_mod
+        data = RunSummaryData(algo="dpo", model="/path/to/model")
+        data.outcome = "success"
+        data.duration_s = 60.0
+        data.final_step = 5
+        data.final_epoch = 0
+        data.samples_processed = 100
+        data.samples_trained = 100
+        data.metrics = {"loss": 0.5}
+        data.errors = []
+
+        out = format_run_summary(data, json_output=True)
+        parsed = json_mod.loads(out)
+        assert parsed["outcome"] == "success"
+        assert parsed["algo"] == "dpo"
+        assert parsed["final_step"] == 5
+        assert parsed["samples"]["trained"] == 100
+        assert parsed["metrics"]["loss"] == 0.5
+        assert parsed["errors"] == []
+
+    def test_disabled_summary(self):
+        """When enabled=False, nothing should be printed."""
+        import io
+        data = RunSummaryData(algo="sft", model="test")
+        stream = io.StringIO()
+        print_run_summary(data, enabled=False, stream=stream)
+        assert stream.getvalue() == ""
+
+    def test_nan_metric_filtered_in_json(self):
+        """NaN metrics should be filtered out in JSON mode."""
+        import json as json_mod
+        data = RunSummaryData(algo="sft", model="test")
+        data.metrics = {"loss": float("nan"), "lr": 1e-5}
+        out = format_run_summary(data, json_output=True)
+        parsed = json_mod.loads(out)
+        assert "loss" not in parsed["metrics"]
+        assert "lr" in parsed["metrics"]
