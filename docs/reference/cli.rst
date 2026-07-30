@@ -10,5 +10,6 @@ Command pages:
 * :doc:`/cli/inference`
 * :doc:`/cli/agent`
 * :doc:`/cli/dataset_loaders`
+* :doc:`/cli/data_inspect`
 * :doc:`/cli/observability`
 * :doc:`/cli/diagnostics`

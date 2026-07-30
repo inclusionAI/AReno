@@ -68,6 +68,7 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "max_steps",
             "world_size",
             "tp_size",
+            "validate_data_contract",
         ),
     ),
     (
@@ -638,6 +639,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             agent_timeout_s=args.agent_timeout_s,
             train_tool_results=args.train_tool_results,
             chat_template_enable_thinking=chat_template_enable_thinking,
+            validate_data_contract=args.validate_data_contract,
             ref_ckpt=args.ref_ckpt,
             dpo_beta=args.dpo_beta,
         )
@@ -679,6 +681,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             agent_timeout_s=args.agent_timeout_s,
             train_tool_results=args.train_tool_results,
             chat_template_enable_thinking=chat_template_enable_thinking,
+            validate_data_contract=args.validate_data_contract,
         )
     if algorithm.name != "ppo":
         return PolicyTrainerConfig(
@@ -727,6 +730,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             agent_timeout_s=args.agent_timeout_s,
             train_tool_results=args.train_tool_results,
             chat_template_enable_thinking=chat_template_enable_thinking,
+            validate_data_contract=args.validate_data_contract,
         )
     return PPOTrainerConfig(
         algo=algorithm.name,
@@ -788,6 +792,50 @@ def _trainer_config_from_args(args) -> TrainerConfig:
         agent_timeout_s=args.agent_timeout_s,
         train_tool_results=args.train_tool_results,
         chat_template_enable_thinking=chat_template_enable_thinking,
+        validate_data_contract=args.validate_data_contract,
+    )
+
+
+def _contract_mode_for_config(config: TrainerConfig) -> str:
+    """Map a trainer configuration to its data-contract mode name."""
+
+    if config.agent_fn is not None:
+        return "agentic"
+    if config.algo == "sft":
+        return "sft"
+    if config.algo == "dpo":
+        return "dpo"
+    return "online_rl"
+
+
+def _validate_data_contract_or_raise(dataset, config: TrainerConfig) -> None:
+    """Validate *dataset* against the mode contract; raise on failure."""
+
+    from areno.api.data_contract import validate_contract
+
+    mode = _contract_mode_for_config(config)
+    report = validate_contract(dataset, mode=mode)
+    if report.ok:
+        click.echo(
+            f"Data contract validation passed: mode={mode}  scanned={report.total_scanned}  warnings={len(report.warnings)}",
+            err=True,
+        )
+        return
+    click.echo(
+        f"Data contract validation failed: mode={mode}  scanned={report.total_scanned}"
+        f"  errors={len(report.errors)}  warnings={len(report.warnings)}",
+        err=True,
+    )
+    for err in report.errors:
+        idx = err.sample_index if err.sample_index >= 0 else "-"
+        click.echo(
+            f"  ERROR sample={idx}  field='{err.field_path}'  expected={err.expected}  got={err.actual}",
+            err=True,
+        )
+        click.echo(f"       hint: {err.hint}", err=True)
+    raise click.ClickException(
+        f"data contract validation failed with {len(report.errors)} error(s); "
+        "fix the dataset loader or pass --no-validate-data-contract to skip"
     )
 
 
@@ -822,6 +870,8 @@ def run(trainer_config: TrainerConfig):
         load_dataset=load_dataset,
         load_from_disk=load_from_disk,
     )
+    if getattr(trainer_config, "validate_data_contract", False):
+        _validate_data_contract_or_raise(dataset, trainer_config)
     trainer = build_trainer(trainer_config, instance=api_trainer, dataset=dataset, reward_fn=reward_fn, loss_fn=loss_fn)
     trainer.fit()
 
@@ -1300,6 +1350,12 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     "--agent-timeout-s", type=float, default=300.0, show_default=True, help="Agentic rollout proxy request timeout."
 )
 @click.option("--train-tool-results", is_flag=True, help="Include tool-result spans in agentic policy loss.")
+@click.option(
+    "--validate-data-contract/--no-validate-data-contract",
+    default=False,
+    show_default=True,
+    help="Validate dataset records against the mode-specific data contract before model init.",
+)
 @click.option(
     "--gspo-clip-eps", type=float, default=3.0e-4, show_default=True, help="GSPO sequence-ratio clipping epsilon."
 )

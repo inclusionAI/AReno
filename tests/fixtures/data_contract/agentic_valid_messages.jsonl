@@ -1,0 +1,2 @@
+{"messages": [{"role": "user", "content": "Hello"}, {"role": "assistant", "content": "Hi there!", "tool_calls": [{"id": "1", "function": {"name": "greet", "arguments": "{}"}}]}]}
+{"messages": [{"role": "system", "content": "You are helpful."}, {"role": "user", "content": "What time is it?"}]}

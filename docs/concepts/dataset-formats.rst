@@ -38,5 +38,7 @@ and reward files.
 Where to go next
 ----------------
 
+* :doc:`/cli/data_inspect` documents the ``areno data inspect`` command for
+  validating datasets against per-mode contracts before training.
 * :doc:`/cli/dataset_loaders` documents loader shapes and examples.
 * :doc:`reward-functions` explains how preserved metadata is used for scoring.

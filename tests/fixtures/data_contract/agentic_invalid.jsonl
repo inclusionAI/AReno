@@ -1,0 +1,4 @@
+{"messages": [{"role": "narrator", "content": "Invalid role"}]}
+{"messages": [{"role": "user"}, {"role": "assistant", "content": "Hi"}]}
+{"messages": [{"role": "assistant", "content": "Hello", "tool_calls": "not_a_list"}]}
+{"prompt": "Valid prompt"}

@@ -65,3 +65,10 @@ Agentic loaders also return ``prompt`` plus task metadata consumed by
 ``run_agent.py`` and ``reward.py``. Examples include
 ``examples/agentic/coding/dataset_loader.py`` and
 ``examples/agentic/shopping/dataset_loader.py``.
+
+Validating before training
+--------------------------
+
+Use :doc:`data_inspect` or ``--validate-data-contract`` (see :doc:`training`)
+to check that loader output matches the per-mode contract before model
+initialization.

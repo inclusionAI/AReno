@@ -1,0 +1,2 @@
+{"prompt": "Play tic-tac-toe. Board: X..|...|...", "board": "X..|...|...", "best_moves": ["(0,1)"]}
+{"prompt": "Solve the coding task.", "files": {"main.py": "print('hello')"}, "test_commands": ["python main.py"]}

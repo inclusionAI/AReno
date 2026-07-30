@@ -1,0 +1,2 @@
+{"chosen": [{"role": "user", "content": "Hello"}, {"role": "assistant", "content": "Hi there!"}], "rejected": [{"role": "user", "content": "Hello"}, {"role": "assistant", "content": "Go away."}]}
+{"prompt": "Greeting", "chosen": [{"role": "user", "content": "Hello"}, {"role": "assistant", "content": "Welcome!"}], "rejected": [{"role": "user", "content": "Hello"}, {"role": "assistant", "content": "Bye."}]}

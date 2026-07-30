@@ -87,6 +87,16 @@ Built-in algorithms: ``sft``, ``dpo``, ``gspo``, ``grpo``, ``ppo``.
 
 ``world-size`` must be divisible by ``tp-size``.
 
+``--validate-data-contract / --no-validate-data-contract``
+   Validate dataset records against the mode-specific data contract before
+   model or worker initialization. Default: ``--no-validate-data-contract``
+   (backward compatible). When enabled, AReno checks the first 100 records
+   for missing fields, wrong types, invalid list lengths, and malformed
+   nested messages. Errors are aggregated (up to 20) rather than stopping at
+   the first — each error includes the sample index, field path (e.g.
+   ``messages[2].role``), expected type, actual type, and a fix hint. Use
+   :doc:`/cli/data_inspect` to validate a dataset independently of training.
+
 Rollout
 ~~~~~~~
 
