@@ -8,9 +8,12 @@ probe internal nodes, and identify the fault using as few probes as possible.
 
 ## Overview
 
-- **Circuit**: Directed acyclic graph with 2–6 primary inputs, 3–15 internal
-  gates (AND/OR/NOT), and one output node.
-- **Fault**: One randomly selected gate is stuck-at-0 or stuck-at-1.
+- **Circuit**: Directed acyclic graph with 2–6 primary inputs, 3–8 *live*
+  internal gates (AND/OR/NOT), and one output node. The training generator
+  discards dead gates rather than treating its pre-pruning gate count as task
+  difficulty.
+- **Fault**: One injected gate is stuck-at-0 or stuck-at-1; generated records
+  balance gate type and stuck value.
 - **Tools**:
   - `set_input_vector(inputs)` — Free. Apply a boolean vector to the inputs
     and observe the output.
@@ -29,8 +32,12 @@ python examples/agentic/logic_diagnosis/dataset_generator.py \
 ```
 
 Each JSONL record contains the full circuit topology, the injected fault
-(ground truth), and a pre-rendered prompt. Small circuits (≤8 gates) are
-brute-force verified to guarantee a unique distinguishing I/O signature.
+(ground truth), and a pre-rendered prompt. Every generated record is within
+the eight-gate brute-force boundary and is checked for a unique distinguishing
+I/O signature. The deterministic generator balances input counts, live gate
+counts, and gate-type/stuck-value fault classes; it rejects exact duplicates
+and faults that never alter the primary output. `n_gates` always reports the
+post-pruning live-gate count.
 
 ## Train
 

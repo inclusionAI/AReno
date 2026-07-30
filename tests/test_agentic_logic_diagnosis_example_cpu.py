@@ -193,9 +193,14 @@ def test_generator_is_reproducible():
 
 
 def test_generator_produces_valid_records():
+    game = _load_module("game")
     generator = _load_module("dataset_generator")
-    records = generator.generate_records(16, seed=7)
-    assert len(records) == 16
+    records = generator.generate_records(24, seed=7)
+    assert len(records) == 24
+    record_keys = set()
+    input_counts = {}
+    gate_counts = {}
+    fault_counts = {}
     for r in records:
         assert "nodes" in r
         assert "fault" in r
@@ -203,6 +208,34 @@ def test_generator_produces_valid_records():
         assert "n_gates" in r
         assert "prompt" in r
         assert r["fault"]["node"] >= 0
+        gate_nodes = [node for node in r["nodes"] if node["type"] in ("and", "or", "not")]
+        assert r["n_gates"] == len(gate_nodes)
+        assert generator.DATASET_MIN_GATES <= r["n_gates"] <= generator.DATASET_MAX_GATES
+        assert game.brute_force_verify(r["nodes"], r["fault"])
+        assert generator._fault_changes_output(r["nodes"], r["fault"])
+
+        record_key = json.dumps({"nodes": r["nodes"], "fault": r["fault"]}, sort_keys=True)
+        assert record_key not in record_keys
+        record_keys.add(record_key)
+        input_counts[r["n_inputs"]] = input_counts.get(r["n_inputs"], 0) + 1
+        gate_counts[r["n_gates"]] = gate_counts.get(r["n_gates"], 0) + 1
+        fault_type = next(node["type"] for node in gate_nodes if node["id"] == r["fault"]["node"])
+        fault_class = (fault_type, r["fault"]["stuck_value"])
+        fault_counts[fault_class] = fault_counts.get(fault_class, 0) + 1
+
+    assert max(input_counts.values()) - min(input_counts.values()) <= 1
+    assert max(gate_counts.values()) - min(gate_counts.values()) <= 1
+    assert max(fault_counts.values()) - min(fault_counts.values()) <= 1
+
+
+def test_generator_rejects_negative_record_count():
+    generator = _load_module("dataset_generator")
+    try:
+        generator.generate_records(-1)
+    except ValueError as exc:
+        assert str(exc) == "count must be non-negative"
+    else:
+        raise AssertionError("negative record counts must be rejected")
 
 
 def test_loader_hides_fault_from_prompt():

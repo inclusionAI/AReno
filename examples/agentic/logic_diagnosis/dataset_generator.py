@@ -5,19 +5,35 @@ from __future__ import annotations
 import argparse
 import json
 import random
+from collections.abc import Sequence
 from pathlib import Path
+from typing import TypeVar
 
 from game import (
+    BRUTE_FORCE_GATE_LIMIT,
     MAX_GATES,
     MAX_INPUTS,
     MAX_PROBES,
     MIN_GATES,
     MIN_INPUTS,
     brute_force_verify,
+    evaluate,
     generate_circuit,
-    inject_fault,
     make_prompt,
 )
+
+DATASET_MIN_GATES = MIN_GATES
+DATASET_MAX_GATES = min(MAX_GATES, BRUTE_FORCE_GATE_LIMIT)
+MAX_ATTEMPTS_PER_RECORD = 1_000
+FAULT_CLASSES = (
+    ("and", 0),
+    ("and", 1),
+    ("or", 0),
+    ("or", 1),
+    ("not", 0),
+    ("not", 1),
+)
+T = TypeVar("T")
 
 
 def generate_records(
@@ -25,55 +41,91 @@ def generate_records(
     *,
     seed: int = 2026,
 ) -> list[dict]:
-    """Return deterministic circuit diagnosis records with unique faults.
+    """Return balanced, deterministic, fully verified diagnosis records.
 
-    Each record contains the full circuit topology, fault information, and a
-    pre-rendered prompt. Small circuits (≤8 gates) are brute-force verified to
-    guarantee a unique distinguishing I/O signature.
+    Every record has 3--8 *live* gates, so the existing brute-force verifier
+    can check every record. Records are balanced across input count, live gate
+    count, and fault type/value; exact duplicate, ambiguous, and output-inert
+    faults are rejected.
     """
+    if count < 0:
+        raise ValueError("count must be non-negative")
+
     rng = random.Random(seed)
     records: list[dict] = []
-    max_attempts = count * 200
+    seen_records: set[str] = set()
+    target_inputs = _balanced_targets(range(MIN_INPUTS, MAX_INPUTS + 1), count, rng)
+    target_gates = _balanced_targets(range(DATASET_MIN_GATES, DATASET_MAX_GATES + 1), count, rng)
+    target_faults = _balanced_targets(FAULT_CLASSES, count, rng)
+    max_attempts = max(count * MAX_ATTEMPTS_PER_RECORD, MAX_ATTEMPTS_PER_RECORD)
 
     attempts = 0
-    while len(records) < count and attempts < max_attempts:
-        attempts += 1
+    for record_index, (n_inputs, n_gates, fault_class) in enumerate(
+        zip(target_inputs, target_gates, target_faults, strict=True), start=1
+    ):
+        fault_type, stuck_value = fault_class
+        while attempts < max_attempts:
+            attempts += 1
+            requested_gates = rng.randint(n_gates, MAX_GATES)
+            nodes = generate_circuit(
+                n_inputs,
+                requested_gates,
+                seed=rng.randint(0, 2**31 - 1),
+            )
+            gate_nodes = [node for node in nodes if node["type"] in ("and", "or", "not")]
+            if len(gate_nodes) != n_gates:
+                continue
 
-        n_inputs = rng.randint(MIN_INPUTS, MAX_INPUTS)
-        n_gates = rng.randint(MIN_GATES, MAX_GATES)
-        circuit_seed = rng.randint(0, 2**31 - 1)
-        nodes = generate_circuit(n_inputs, n_gates, seed=circuit_seed)
+            matching_gates = [node for node in gate_nodes if node["type"] == fault_type]
+            if not matching_gates:
+                continue
+            fault = {"node": rng.choice(matching_gates)["id"], "stuck_value": stuck_value}
 
-        # Ensure there is at least one gate to fault
-        gate_nodes = [n for n in nodes if n["type"] in ("and", "or", "not")]
-        if not gate_nodes:
-            continue
+            if not brute_force_verify(nodes, fault) or not _fault_changes_output(nodes, fault):
+                continue
 
-        fault_seed = rng.randint(0, 2**31 - 1)
-        fault = inject_fault(nodes, seed=fault_seed)
+            record_key = json.dumps({"nodes": nodes, "fault": fault}, sort_keys=True, separators=(",", ":"))
+            if record_key in seen_records:
+                continue
+            seen_records.add(record_key)
 
-        if not brute_force_verify(nodes, fault):
-            continue  # ambiguous — regenerate
-
-        record_id = f"logic-diag-{len(records) + 1:05d}"
-        record = {
-            "id": record_id,
-            "nodes": nodes,
-            "fault": fault,
-            "n_inputs": n_inputs,
-            "n_gates": n_gates,
-            "max_probes": MAX_PROBES,
-        }
-        record["prompt"] = make_prompt(record)
-        records.append(record)
-
-    if len(records) < count:
-        raise RuntimeError(
-            f"only generated {len(records)}/{count} records after {max_attempts} attempts; "
-            "try a different seed or adjust circuit size ranges"
-        )
+            record = {
+                "id": f"logic-diag-{record_index:05d}",
+                "nodes": nodes,
+                "fault": fault,
+                "n_inputs": n_inputs,
+                "n_gates": n_gates,
+                "max_probes": MAX_PROBES,
+            }
+            record["prompt"] = make_prompt(record)
+            records.append(record)
+            break
+        else:
+            raise RuntimeError(
+                f"only generated {len(records)}/{count} records after {attempts} attempts; "
+                "try a different seed or reduce the requested count"
+            )
 
     return records
+
+
+def _balanced_targets(values: Sequence[T], count: int, rng: random.Random) -> list[T]:
+    """Return a shuffled schedule in which bucket counts differ by at most one."""
+    values = list(values)
+    targets = [values[index % len(values)] for index in range(count)]
+    rng.shuffle(targets)
+    return targets
+
+
+def _fault_changes_output(nodes: list[dict], fault: dict[str, int]) -> bool:
+    """Return whether some primary-input vector exposes ``fault`` at the output."""
+    n_inputs = sum(node["type"] == "input" for node in nodes)
+    output_id = next(node["id"] for node in nodes if node["type"] == "output")
+    for value in range(1 << n_inputs):
+        inputs = [bool(value >> index & 1) for index in range(n_inputs)]
+        if evaluate(nodes, inputs)[output_id] != evaluate(nodes, inputs, fault)[output_id]:
+            return True
+    return False
 
 
 def main() -> None:
