@@ -38,6 +38,25 @@ class _NoToolClient:
         self.chat = type("Chat", (), {"completions": _NoToolCompletions()})()
 
 
+class _LengthFinishCompletions:
+    def __init__(self):
+        self.calls = 0
+
+    async def create(self, **kwargs):
+        del kwargs
+        self.calls += 1
+        message = type("Message", (), {"content": "partial tool call", "tool_calls": None})()
+        choice = type("Choice", (), {"message": message, "finish_reason": "length"})()
+        # AgentTrajectoryTurn.__post_init__ reads Areno trajectory metadata off
+        # the response, so the fake must carry a minimal ``areno`` block.
+        return type("Response", (), {"choices": [choice], "areno": {"response_tokens": [], "response_logprobs": []}})()
+
+
+class _LengthFinishClient:
+    def __init__(self):
+        self.chat = type("Chat", (), {"completions": _LengthFinishCompletions()})()
+
+
 def test_chat_completion_retry_recovers_after_transient_failures(monkeypatch):
     sleeps = []
 
@@ -93,6 +112,34 @@ def test_no_tool_assistant_can_delegate_to_interaction_hook(tmp_path):
 
     assert phases == ["before_turn", "assistant_no_tool"]
     assert messages[-1] == {"role": "user", "content": "User runtime hint:\n128"}
+
+
+def test_agent_loop_honors_length_finish_reason_as_terminal(tmp_path):
+    """A ``finish_reason="length"`` response must end the loop without nudging."""
+
+    task = {"instance_id": "local", "repo": str(tmp_path)}
+    item = type("Item", (), {"record": task, "prompt": "run"})()
+    workspace = type("Workspace", (), {"task": task})()
+    client = _LengthFinishClient()
+    messages = [{"role": "user", "content": "run"}]
+
+    turns = asyncio.run(
+        agent_loop.run_conversation_turns(
+            client=client,
+            item=item,
+            workspace=workspace,
+            model="policy",
+            messages=messages,
+            max_turns=3,
+            record_trajectory=True,
+        )
+    )
+
+    # One model call, one recorded turn, and the loop stopped without nudging.
+    assert client.chat.completions.calls == 1
+    assert len(turns) == 1
+    assert messages[-1]["role"] == "assistant"
+    assert messages[-1]["content"] == "partial tool call"
 
 
 def test_run_command_streams_output_before_process_exits(tmp_path):

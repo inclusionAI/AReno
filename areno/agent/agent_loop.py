@@ -290,6 +290,13 @@ async def _run_training_tasks_by_turn(
             )
             assistant_message = _assistant_message_from_response(response)
             state["messages"].append(assistant_message)
+            if _response_finish_reason(response) == "length":
+                # The proxy marked this turn terminal (generation/context/oversized
+                # cap reached). Record the turn as the final state and stop the
+                # item without nudging or executing a (potentially half-finished)
+                # tool call, so the loop does not spin to the turn limit.
+                state["done"] = True
+                continue
             call = _first_tool_call(assistant_message)
             if call is None:
                 state["messages"].append(
@@ -385,6 +392,10 @@ async def run_conversation_turns(
         messages.append(assistant_message)
         # The standalone CLI uses this hook to stream model/tool activity as it happens.
         _emit(on_event, "assistant", assistant_message)
+        if _response_finish_reason(response) == "length":
+            # Proxy signaled a terminal overlength stop; keep the turn and end
+            # the loop instead of nudging the model to retry an overlong turn.
+            break
         call = _first_tool_call(assistant_message)
         if call is None:
             if interaction_hook is not None and await interaction_hook(messages, "assistant_no_tool"):
@@ -476,6 +487,26 @@ def _task_prompt(task: dict[str, Any]) -> str:
         "If this is an information request rather than a code-change request, read enough files to answer with evidence "
         "and then call submit with a concise summary."
     )
+
+
+def _response_finish_reason(response: Any) -> str:
+    """Return the OpenAI ``finish_reason`` of the first choice, or ``""`` if absent.
+
+    Accepts both SDK objects (``response.choices[0].finish_reason``) and plain
+    dict responses so the agent loop can treat a terminal overlength stop
+    uniformly regardless of the client shape.
+    """
+
+    choices = getattr(response, "choices", None)
+    if choices is None and isinstance(response, dict):
+        choices = response.get("choices")
+    if not choices:
+        return ""
+    first = choices[0]
+    value = getattr(first, "finish_reason", None)
+    if value is None and isinstance(first, dict):
+        value = first.get("finish_reason")
+    return str(value) if value is not None else ""
 
 
 def _assistant_message_from_response(response: Any) -> dict[str, Any]:

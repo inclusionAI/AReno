@@ -15,12 +15,41 @@ from areno.cli.train import (
     _format_summary_section,
     _format_training_config_summary,
     _trainer_config_from_options,
+    _training_config_settings,
 )
 
 
 def test_train_config_requires_ckpt():
     with pytest.raises(UsageError, match="--ckpt is required"):
         _trainer_config_from_options(**_options(ckpt=None, algo="sft"))
+
+
+def test_agent_overlength_policy_defaults_to_off():
+    cfg = TrainerConfig(algo="gspo", ckpt="x", dataset_path="x")
+    assert cfg.agent_overlength_policy == "off"
+
+
+def test_agent_overlength_policy_rejects_invalid_value():
+    with pytest.raises(ValueError, match="agent_overlength_policy must be one of"):
+        TrainerConfig(algo="gspo", ckpt="x", dataset_path="x", agent_overlength_policy="bogus")
+
+
+def test_agent_overlength_policy_rejects_invalid_cli_value():
+    result = CliRunner().invoke(train_cli.train_command, ["--agent-overlength-policy", "bogus"])
+    assert result.exit_code != 0
+    assert "agent-overlength-policy" in result.output
+
+
+def test_agent_overlength_policy_safe_stop_flows_into_config_summary_and_settings():
+    cfg = _trainer_config_from_options(**_options(algo="gspo", agent_overlength_policy="safe-stop"))
+    assert cfg.agent_overlength_policy == "safe-stop"
+
+    settings = _training_config_settings(cfg)
+    rollout_items = next(section["items"] for section in settings["sections"] if section["title"] == "Rollout")
+    assert next(item for item in rollout_items if item["key"] == "agent_overlength_policy")["value"] == "safe-stop"
+
+    summary = unstyle(_format_training_config_summary(cfg, reward_ckpt="reward-model"))
+    assert "safe-stop" in summary
 
 
 def test_train_config_requires_dataset_path():

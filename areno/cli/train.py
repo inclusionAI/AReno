@@ -90,6 +90,7 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "agent_fn",
             "agent_timeout_s",
             "train_tool_results",
+            "agent_overlength_policy",
             "reward_fn_path",
             "reward_ckpt",
         ),
@@ -243,6 +244,10 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
         raise click.UsageError("--max-running-prompts must be positive")
     if args.agent_timeout_s <= 0:
         raise click.UsageError("--agent-timeout-s must be positive")
+    agent_overlength_policy = getattr(args, "agent_overlength_policy", "off")
+    if agent_overlength_policy not in {"off", "safe-stop"}:
+        raise click.UsageError("--agent-overlength-policy must be one of: off, safe-stop")
+    args.agent_overlength_policy = agent_overlength_policy
     _require_positive_float(args.lr, "--lr")
     if args.min_lr < 0:
         raise click.UsageError("--min-lr must be non-negative")
@@ -435,6 +440,7 @@ def _rollout_summary_rows(config: TrainerConfig) -> list[tuple[str, str]]:
         ("max_prompt_tokens", str(config.max_prompt_tokens)),
         ("max_new_tokens", str(config.max_new_tokens)),
         ("max_context_len", _format_optional(config.max_context_len, default="model limit")),
+        ("overlength_policy", str(config.agent_overlength_policy)),
     ]
     if not isinstance(config, RolloutTrainerConfig):
         return [
@@ -598,6 +604,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
     args.max_steps = getattr(args, "max_steps", None)
     args.score_micro_bs = getattr(args, "score_micro_bs", 8)
     args.model_hub = getattr(args, "model_hub", "modelscope")
+    args.agent_overlength_policy = getattr(args, "agent_overlength_policy", "off")
     algorithm = get_algorithm(args.algo)
     chat_template_enable_thinking = False if args.disable_thinking else None
     if algorithm.name == "dpo":
@@ -638,6 +645,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             agent_timeout_s=args.agent_timeout_s,
             train_tool_results=args.train_tool_results,
             chat_template_enable_thinking=chat_template_enable_thinking,
+            agent_overlength_policy=args.agent_overlength_policy,
             ref_ckpt=args.ref_ckpt,
             dpo_beta=args.dpo_beta,
         )
@@ -679,6 +687,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             agent_timeout_s=args.agent_timeout_s,
             train_tool_results=args.train_tool_results,
             chat_template_enable_thinking=chat_template_enable_thinking,
+            agent_overlength_policy=args.agent_overlength_policy,
         )
     if algorithm.name != "ppo":
         return PolicyTrainerConfig(
@@ -727,6 +736,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             agent_timeout_s=args.agent_timeout_s,
             train_tool_results=args.train_tool_results,
             chat_template_enable_thinking=chat_template_enable_thinking,
+            agent_overlength_policy=args.agent_overlength_policy,
         )
     return PPOTrainerConfig(
         algo=algorithm.name,
@@ -788,6 +798,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
         agent_timeout_s=args.agent_timeout_s,
         train_tool_results=args.train_tool_results,
         chat_template_enable_thinking=chat_template_enable_thinking,
+        agent_overlength_policy=args.agent_overlength_policy,
     )
 
 
@@ -902,6 +913,7 @@ def _training_config_settings(config: TrainerConfig) -> dict:
                 "agent_fn",
                 "agent_timeout_s",
                 "train_tool_results",
+                "agent_overlength_policy",
                 "reward_fn_path",
                 "reward_ckpt",
             ],
@@ -1300,6 +1312,16 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     "--agent-timeout-s", type=float, default=300.0, show_default=True, help="Agentic rollout proxy request timeout."
 )
 @click.option("--train-tool-results", is_flag=True, help="Include tool-result spans in agentic policy loss.")
+@click.option(
+    "--agent-overlength-policy",
+    type=click.Choice(["off", "safe-stop"], case_sensitive=False),
+    default="off",
+    show_default=True,
+    help=(
+        "Agentic overlength handling: off keeps current behavior; safe-stop drops half-finished "
+        "tool calls / oversized tool results and stops the item while retaining the trajectory."
+    ),
+)
 @click.option(
     "--gspo-clip-eps", type=float, default=3.0e-4, show_default=True, help="GSPO sequence-ratio clipping epsilon."
 )

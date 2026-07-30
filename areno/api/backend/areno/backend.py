@@ -208,6 +208,11 @@ class ArenoBackend(Backend):
         )
         # Repack the flat result into per-prompt groups of `n_samples`
         # completions so downstream code can iterate `for item, result`.
+        # `rollout.finish_reason` is flat-aligned with `rollout.response_ids`,
+        # so the same flat index `i` (= prompt_idx * n_samples + offset) selects
+        # the per-sequence termination signal; fall back to "" when the engine
+        # did not emit one (short / stubbed lists).
+        finish_reasons = getattr(rollout, "finish_reason", None) or []
         results = []
         for prompt_idx in range(len(prompt_tokens)):
             start = prompt_idx * n_samples
@@ -218,6 +223,7 @@ class ArenoBackend(Backend):
                         RolloutSequence(
                             resp_tokens=tokens,
                             resp_logprobs=rollout.logprobs[i, : len(tokens)].tolist(),
+                            finish_reason=finish_reasons[i] if i < len(finish_reasons) else "",
                         )
                         for i, tokens in enumerate(rollout.response_ids[start:end], start=start)
                     ]
@@ -311,6 +317,7 @@ class ArenoBackend(Backend):
             sampling_params=options["sampling_params"],
         )
         results = []
+        finish_reasons = getattr(rollout, "finish_reason", None) or []
         for prompt_idx in range(len(prompt_tokens)):
             start = prompt_idx * n_samples
             end = start + n_samples
@@ -320,6 +327,7 @@ class ArenoBackend(Backend):
                         RolloutSequence(
                             resp_tokens=tokens,
                             resp_logprobs=rollout.logprobs[i, : len(tokens)].tolist(),
+                            finish_reason=finish_reasons[i] if i < len(finish_reasons) else "",
                         )
                         for i, tokens in enumerate(rollout.response_ids[start:end], start=start)
                     ]

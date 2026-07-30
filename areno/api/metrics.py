@@ -31,13 +31,22 @@ class MetricsRecorder:
         self._sample_file = self._log_dir / f"rollout_samples.{os.getpid()}.jsonl"
         self._closed = False
 
-    def record_train_step(self, *, step: int, train_result, train_batch, timings: dict[str, float] | None = None):
+    def record_train_step(
+        self,
+        *,
+        step: int,
+        train_result,
+        train_batch,
+        timings: dict[str, float] | None = None,
+        overlength_counts: dict[str, int] | None = None,
+    ):
         """Record rollout, training, and timing metrics for one step."""
 
         # `collect_train_batch_stats` extracts only the response-side numbers
         # (prompt tokens are masked out) so reported means match what the loss
         # actually trained on.
         stats = collect_train_batch_stats(train_batch)
+        merge_overlength_counts(stats, overlength_counts)
         record_training_stats(self._writer, stats, step, train_result, train_batch, timings=timings)
 
     def record_rollout_sample(self, sample: dict) -> None:
@@ -164,7 +173,30 @@ def init_rollout_stats(skipped_long: int = 0, total_skipped_long: int = 0) -> di
         "response_len": [],
         "skipped_long": skipped_long,
         "total_skipped_long": total_skipped_long,
+        "overlength_generation_limit": 0,
+        "overlength_context_limit": 0,
+        "overlength_oversized_tool_result": 0,
+        "overlength_total": 0,
     }
+
+
+_OVERLENGTH_REASONS = ("generation_limit", "context_limit", "oversized_tool_result")
+
+
+def merge_overlength_counts(stats: dict, counts: dict[str, int] | None) -> dict:
+    """Fold per-reason overlength counts from an agentic batch into stats.
+
+    ``counts`` maps a termination reason (``generation_limit`` /
+    ``context_limit`` / ``oversized_tool_result``) to the number of affected
+    samples. Unknown keys are ignored so future reasons do not corrupt totals.
+    """
+
+    if not counts:
+        return stats
+    for reason in _OVERLENGTH_REASONS:
+        stats[f"overlength_{reason}"] = int(stats.get(f"overlength_{reason}", 0)) + int(counts.get(reason, 0))
+    stats["overlength_total"] = sum(int(stats.get(f"overlength_{reason}", 0)) for reason in _OVERLENGTH_REASONS)
+    return stats
 
 
 def record_rollout_sequence_stats(stats, *, prefix_len: int, response_logprobs, response_len: int):
@@ -210,6 +242,12 @@ def record_training_stats(writer, stats, step, train_res, train_batch, timings: 
     for key in ("skipped_long", "total_skipped_long"):
         if key in stats:
             writer.add_scalar(f"rollout/{key}", stats[key], step)
+    for reason in _OVERLENGTH_REASONS:
+        key = f"overlength_{reason}"
+        if key in stats:
+            writer.add_scalar(f"rollout/{key}", int(stats[key]), step)
+    if "overlength_total" in stats:
+        writer.add_scalar("rollout/overlength_total", int(stats["overlength_total"]), step)
 
     # Backend-supplied training metrics (loss, policy_loss, ratio_mean, ...).
     for key, value in train_res.items():

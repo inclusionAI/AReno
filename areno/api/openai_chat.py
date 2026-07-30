@@ -105,6 +105,41 @@ def messages_to_text(messages: list[dict[str, Any]]) -> str:
     return "\n".join(parts)
 
 
+def single_message_token_count(tokenizer, message: dict[str, Any]) -> int:
+    """Template-aware token count of one message rendered alone.
+
+    Renders the single message through the model's chat template with
+    ``add_generation_prompt=False`` so the count is on the same scale the full
+    prompt is measured (template/special-token aware), which is what the agentic
+    overlength classifier needs to decide whether a single tool result already
+    exceeds the context cap. Falls back to raw ``tokenizer.encode(text)`` when
+    the tokenizer has no chat template or the template cannot render the
+    message alone; returns ``0`` if even the fallback errors so the caller
+    treats the message as not-decidably-oversized.
+    """
+
+    content = message.get("content")
+    text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
+    if getattr(tokenizer, "chat_template", None):
+        try:
+            return len(
+                normalize_token_ids(
+                    apply_chat_template_with_options(
+                        tokenizer,
+                        normalize_messages([message]),
+                        tokenize=True,
+                        add_generation_prompt=False,
+                    )
+                )
+            )
+        except Exception:
+            pass
+    try:
+        return len(tokenizer.encode(text))
+    except Exception:
+        return 0
+
+
 def first_user_text(messages: list[dict[str, Any]]) -> str:
     """Return the first user text, falling back to all text messages."""
 
@@ -129,8 +164,19 @@ def build_chat_completion_response(
     include_areno_metadata: bool = False,
     input_tokens: list[int] | None = None,
     stop_strings: list[str] | None = None,
+    termination_reason: str | None = None,
+    force_finish_reason: str | None = None,
 ) -> dict[str, Any]:
-    """Build an OpenAI chat-completion response and parse tool calls if asked."""
+    """Build an OpenAI chat-completion response and parse tool calls if asked.
+
+    ``termination_reason`` is an additive Areno-only signal (carried in the
+    ``areno`` metadata block, never in the OpenAI ``finish_reason`` surface) so
+    the agentic proxy can distinguish overlength causes without changing the
+    wire shape seen by agent code. ``force_finish_reason`` overrides the derived
+    ``finish_reason`` *only* when the choice has no tool calls (e.g. the
+    safe-stop policy drops a half-finished tool call and wants to surface
+    ``"length"``); it never converts a ``tool_calls`` finish reason.
+    """
 
     tools = list(tools or [])
     stop_strings = list(stop_strings or [])
@@ -145,13 +191,19 @@ def build_chat_completion_response(
         tool_calls = (
             parsed_tool_calls[index] if parsed_tool_calls is not None and index < len(parsed_tool_calls) else []
         )
-        if not tool_calls and tools and tool_call_parser is not None:
+        # Only fall back to parsing from the decoded text when the caller did not
+        # pre-parse. The agentic proxy always passes ``parsed_tool_calls`` (even
+        # an empty list, e.g. after the safe-stop policy drops a half tool call),
+        # so re-parsing here would silently re-introduce the dropped call.
+        if not tool_calls and tools and tool_call_parser is not None and parsed_tool_calls is None:
             tool_calls = tool_call_parser.parse(raw_text, tools, tool_choice).tool_calls
         finish_reason = "stop" if stop_hit or finish_reasons[index] == "stop" else "length"
         message: dict[str, Any] = {"role": "assistant", "content": display_text}
         if tool_calls:
             message = {"role": "assistant", "content": None, "tool_calls": tool_calls}
             finish_reason = "tool_calls"
+        elif force_finish_reason is not None:
+            finish_reason = force_finish_reason
         choices.append({"index": index, "message": message, "finish_reason": finish_reason})
 
     response: dict[str, Any] = {
@@ -167,11 +219,14 @@ def build_chat_completion_response(
         },
     }
     if include_areno_metadata:
-        response["areno"] = {
+        areno_meta: dict[str, Any] = {
             "input_tokens": list(input_tokens or []),
             "response_tokens": list(response_ids[0] if response_ids else []),
             "response_logprobs": list(response_logprobs[0] if response_logprobs else []),
         }
+        if termination_reason is not None:
+            areno_meta["termination_reason"] = termination_reason
+        response["areno"] = areno_meta
     return response
 
 

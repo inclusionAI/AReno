@@ -51,10 +51,16 @@ class RolloutSequence(BaseModel):
     `resp_logprobs[i]` is the log-probability of `resp_tokens[i]` under the
     rollout policy and becomes the "old logprobs" reference signal in
     importance-weighted losses (PPO/GSPO/GRPO).
+
+    `finish_reason` mirrors the engine-level termination signal (``"stop"`` or
+    ``"length"``) for this sequence. It defaults to ``""`` (unset) so legacy
+    consumers that never read it are unaffected; the agentic proxy uses it to
+    distinguish generation-limit overlength from clean stops.
     """
 
     resp_tokens: list[int] = Field(default_factory=list)
     resp_logprobs: list[float] = Field(default_factory=list)
+    finish_reason: str = Field(default="")
 
 
 class RolloutResult(BaseModel):

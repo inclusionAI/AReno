@@ -392,7 +392,7 @@ def test_explicit_trajectory_helper_builds_train_rows_without_prompt_claiming():
     assert rows.token_rows == [[len("same prompt"), 100]]
     assert rows.response_masks == [[False, True]]
     assert rows.rollout_logprobs == [[0.0, -0.25]]
-    assert record.metadata == {"prompt_index": 0, "sample_index": 0}
+    assert record.metadata == {"prompt_index": 0, "sample_index": 0, "termination_reason": None}
 
 
 def test_openai_chat_completion_preserves_proxy_trajectory_metadata():

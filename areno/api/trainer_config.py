@@ -60,12 +60,20 @@ class TrainerConfig:
     agent_timeout_s: float = 300.0
     train_tool_results: bool = False
     chat_template_enable_thinking: bool | None = None
+    # Agentic overlength policy: ``off`` preserves today's behavior (parse and
+    # keep tool calls even when generation hit the token limit; whole-trajectory
+    # filter still drops oversized samples). ``safe-stop`` drops half-finished
+    # tool calls / oversized tool results and marks the item terminal while
+    # retaining the trajectory up to that turn. See docs overlength handling.
+    agent_overlength_policy: str = "off"
 
     def __post_init__(self) -> None:
         if self.attn_backend not in {"flash", "native"}:
             raise ValueError("attn_backend must be one of: flash, native")
         if self.model_hub not in {"hf", "modelscope"}:
             raise ValueError("model_hub must be one of: hf, modelscope")
+        if self.agent_overlength_policy not in {"off", "safe-stop"}:
+            raise ValueError("agent_overlength_policy must be one of: off, safe-stop")
 
     def optimizer_config(self) -> dict:
         """Build the optimizer dict consumed by the backend config."""

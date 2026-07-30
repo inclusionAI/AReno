@@ -24,6 +24,7 @@ python .agents/skills/areno-run-training/scripts/inspect_dataset.py \
 4. Build trajectories using AReno public agentic types. Preserve assistant tool-call and tool-result ordering.
 5. Reward the intended outcome and process separately; test invalid, partial, and optimal paths.
 6. Verify concurrency, timeout, cancellation, context truncation, multimodal content, and loss masks.
-7. Run a bounded agentic rollout, inspect one full transcript, then one real training step.
+7. Treat a proxy `finish_reason == "length"` response as terminal for that item: append the turn, stop the item, and do not nudge the model to retry or execute a (half) tool call. Under `--agent-overlength-policy safe-stop` the proxy already drops half-finished tool calls / oversized tool results and emits `termination_reason` (`generation_limit` / `context_limit` / `oversized_tool_result`) plus `rollout/overlength_*` metrics; `run_agent` must honor the length signal or the loop spins to the turn limit. Default `off` preserves prior behavior.
+8. Run a bounded agentic rollout, inspect one full transcript, then one real training step.
 
 Do not fabricate missing tool calls or alter raw model text to make a trajectory appear valid. Surface parser/capability failures.
