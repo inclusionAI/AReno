@@ -75,18 +75,20 @@ async def _run_episode(item, client) -> list[AgentTrajectoryTurn]:
         # codebreaker pattern: one tool per turn, forced tool_choice.
         # The model's decisions are in the arguments, not which tool to call.
         if turn_index == 1:
-            tool_name = "set_input_vector"
+            tools = [[t for t in ALL_TOOLS if t["function"]["name"] == "set_input_vector"][0]]
+            tool_choice = {"type": "function", "function": {"name": "set_input_vector"}}
             turn_prompt = {"role": "user", "content": "Call set_input_vector with your chosen input bits."}
         elif turn_index == max_turns:
-            tool_name = "submit_diagnosis"
+            tools = [[t for t in ALL_TOOLS if t["function"]["name"] == "submit_diagnosis"][0]]
+            tool_choice = {"type": "function", "function": {"name": "submit_diagnosis"}}
             turn_prompt = {"role": "user", "content": "Final turn. Call submit_diagnosis with your best guess."}
         else:
-            tool_name = "inspect_node"
-            turn_prompt = {"role": "user", "content": f"Turn {turn_index}. Call inspect_node on a gate you want to probe."}
+            # Middle turns: model can probe OR submit early. Max 2 tools.
+            tools = [t for t in ALL_TOOLS if t["function"]["name"] in ("inspect_node", "submit_diagnosis")]
+            tool_choice = None
+            turn_prompt = {"role": "user", "content": f"Turn {turn_index}. Call inspect_node to probe, or submit_diagnosis if confident."}
 
         turn_messages = [*messages, turn_prompt]
-        tool_choice = {"type": "function", "function": {"name": tool_name}}
-        tools = [[t for t in ALL_TOOLS if t["function"]["name"] == tool_name][0]]
 
         response = await client.chat.completions.create(
             model="policy",
