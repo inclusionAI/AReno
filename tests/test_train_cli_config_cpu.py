@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import os
+import tempfile
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -703,10 +706,6 @@ def _options(**overrides):
 # ---------------------------------------------------------------------------
 # Preflight output-directory writability probe tests
 # ---------------------------------------------------------------------------
-
-import os
-import tempfile
-from pathlib import Path
 
 
 def test_preflight_accepts_writable_dirs():
