@@ -123,8 +123,20 @@ async def run_agent(ctx, batch):
             # Check for a weigh tag.
             weigh = game_module.parse_xml_weigh(text)
             if weigh is None:
-                # No actionable tag — stop to avoid infinite loops.
-                break
+                # No actionable tag — nudge the model and try again.
+                messages.append({"role": "assistant", "content": text})
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "Your response did not contain a <weigh> or <answer> tag. "
+                            "Please output one now. "
+                            "To weigh: <weigh left=\"0,1\" right=\"2,3\"/>. "
+                            "To answer: <answer ball=\"3\" direction=\"heavier\"/>."
+                        ),
+                    }
+                )
+                continue
 
             left_group, right_group = weigh
             try:
