@@ -760,7 +760,11 @@ document.getElementById("autoBtn").onclick = async ()=>{
 document.getElementById("newBtn").onclick = async ()=>{
   state = await api("api/new");
   selectedGate = null;
-  probeResults = {};
+  autoRunning = false;
+  document.getElementById("agentBtn").disabled = false;
+  document.getElementById("agentBtn").textContent = "Agent Move";
+  document.getElementById("autoBtn").disabled = false;
+  document.getElementById("autoBtn").textContent = "Auto Play";
   render();
 };
 
