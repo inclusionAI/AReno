@@ -32,8 +32,8 @@ engine handles both sides of the loop:
 ``ArenoEngine`` is implemented in ``areno/engine/api.py``. It coordinates the
 worker cluster used by both rollout and training.
 
-Online RL runs may instead assign non-overlapping CUDA devices to an
-independent rollout engine. Training and rollout workers then join one
+Online RL runs may instead assign CUDA devices to an independent rollout
+engine. Training and rollout workers then join one
 distributed world but use separate TP and DP process groups. This permits, for
 example, training with TP 8 while generating rollouts with TP 2.
 
@@ -44,4 +44,6 @@ through a bounded bucket, and written into the rollout TP shards without a CPU
 or filesystem staging copy.
 
 Both device lists use logical indices within the parent process'
-``CUDA_VISIBLE_DEVICES``. The two lists must not overlap.
+``CUDA_VISIBLE_DEVICES``. They may overlap; overlapping devices hold both a
+training worker and a rollout worker, so the combined model, optimizer, cache,
+and CUDA-context memory must fit on those GPUs.

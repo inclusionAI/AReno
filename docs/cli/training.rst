@@ -101,8 +101,9 @@ signal.
 
 ``--rollout-devices TEXT``
    Comma-separated logical CUDA device indices for an independent rollout
-   engine. They must not overlap ``--train-devices``. This option is valid only
-   for online algorithms that generate rollouts.
+   engine. They may overlap ``--train-devices`` when the GPU has enough memory
+   for both worker processes. This option is valid only for online algorithms
+   that generate rollouts.
 
 ``--rollout-tp-size INTEGER``
    Tensor parallel size of the independent rollout engine. It defaults to the

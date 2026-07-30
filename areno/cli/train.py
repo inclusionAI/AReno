@@ -248,11 +248,6 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
         rollout_tp_size = args.tp_size if args.rollout_tp_size is None else args.rollout_tp_size
         if len(args.rollout_devices) % rollout_tp_size != 0:
             raise click.UsageError("--rollout-devices count must be divisible by --rollout-tp-size")
-        train_devices = args.train_devices if args.train_devices is not None else list(range(args.world_size))
-        overlap = sorted(set(train_devices) & set(args.rollout_devices))
-        if overlap:
-            rendered = ",".join(str(device) for device in overlap)
-            raise click.UsageError(f"train and rollout devices must not overlap: {rendered}")
     if args.policy_sync_bucket_mb <= 0:
         raise click.UsageError("--policy-sync-bucket-mb must be positive")
     if args.batch_size <= 0:

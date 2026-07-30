@@ -211,9 +211,6 @@ class ArenoBackend(Backend):
             raise ValueError("rollout_devices must be non-empty")
         if len(rollout_devices) % rollout_tp_size != 0:
             raise ValueError("len(rollout_devices) must be divisible by rollout_tp_size")
-        overlap = sorted(set(devices or ()) & set(rollout_devices))
-        if overlap:
-            raise ValueError(f"train and rollout devices must not overlap: {overlap}")
         train_partition = ClusterPartition(
             role="train",
             global_rank_offset=0,

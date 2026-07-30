@@ -435,10 +435,6 @@ def test_independent_rollout_topology_parses_distinct_cuda_devices() -> None:
         ({"train_devices": "0,0", "world_size": 2}, "--train-devices must not contain duplicate"),
         ({"train_devices": "0", "world_size": 2}, "--train-devices count must equal --world-size"),
         (
-            {"train_devices": "0,1", "world_size": 2, "rollout_devices": "1,2"},
-            "train and rollout devices must not overlap",
-        ),
-        (
             {"world_size": 2, "rollout_devices": "2,3,4", "rollout_tp_size": 2},
             "--rollout-devices count must be divisible",
         ),
@@ -449,6 +445,22 @@ def test_independent_rollout_topology_parses_distinct_cuda_devices() -> None:
 def test_independent_rollout_topology_rejects_invalid_values(overrides, message) -> None:
     with pytest.raises(UsageError, match=message):
         _trainer_config_from_options(**_options(reward_ckpt="reward", **overrides))
+
+
+def test_train_and_rollout_devices_may_overlap() -> None:
+    cfg = _trainer_config_from_options(
+        **_options(
+            reward_ckpt="reward",
+            train_devices="0,1",
+            world_size=2,
+            tp_size=2,
+            rollout_devices="0,1",
+            rollout_tp_size=1,
+        )
+    )
+
+    assert cfg.train_devices == [0, 1]
+    assert cfg.rollout_devices == [0, 1]
 
 
 def test_offline_algorithm_rejects_independent_rollout_devices() -> None:
