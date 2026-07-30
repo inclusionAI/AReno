@@ -84,7 +84,47 @@ def _load_job_details(job_item: dict[str, Any]) -> dict[str, Any]:
     # Try the dashboard API first.
     result = _try_dashboard_api("http://127.0.0.1:8765", str(job_item.get("id", "")))
     if result is not None:
-        return result
+        # Dashboard API returns to_json() format — normalize it.
+        # config may contain a 'sections' key (structured display data) that
+        # we should unpack, and metrics need to be fetched separately.
+        config = result.get("config") or result.get("launch") or {}
+        launch_config = result.get("launch") or config
+
+        # If config has 'sections', extract flat key-value pairs from it.
+        if "sections" in config and isinstance(config["sections"], list):
+            flat_config = {}
+            for section in config["sections"]:
+                if isinstance(section, dict) and "items" in section:
+                    for item in section["items"]:
+                        if isinstance(item, dict) and "key" in item:
+                            flat_config[item["key"]] = item.get("value")
+            # Merge any non-section keys from config.
+            for k, v in config.items():
+                if k != "sections":
+                    flat_config[k] = v
+            config = flat_config
+
+        # Fetch metric summaries from the metrics endpoint.
+        metric_summaries = _fetch_metric_summaries("http://127.0.0.1:8765", str(job_item.get("id", "")))
+
+        return {
+            "id": result.get("id", job_item.get("id", "?")),
+            "name": result.get("name", "?"),
+            "kind": result.get("kind", "train"),
+            "status": result.get("status", "unknown"),
+            "stage": result.get("stage", ""),
+            "step": result.get("step", 0),
+            "created_at": result.get("created_at", ""),
+            "updated_at": result.get("updated_at", ""),
+            "returncode": result.get("returncode"),
+            "config": config,
+            "launch_config": launch_config if isinstance(launch_config, dict) and "sections" not in launch_config else config,
+            "config_text": result.get("config_text", ""),
+            "metrics_dir": result.get("metrics_dir", ""),
+            "metrics": metric_summaries,
+            "timeperf": result.get("timeperf", []),
+            "logs": result.get("logs", []),
+        }
 
     # Fallback: read from local state file via DashboardState.
     from areno.dashboard.server import DashboardState
@@ -115,6 +155,22 @@ def _load_job_details(job_item: dict[str, Any]) -> dict[str, Any]:
         "timeperf": job.timeperf or [],
         "logs": job.logs[-20:] if job.logs else [],
     }
+
+
+def _fetch_metric_summaries(base_url: str, job_id: str) -> list[dict[str, Any]]:
+    """Fetch metric summaries from the dashboard API."""
+    import urllib.request
+
+    url = f"{base_url.rstrip('/')}/api/jobs/{job_id}/metrics"
+    try:
+        request = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(request, timeout=5) as response:
+            if response.status == 200:
+                data = _json.loads(response.read().decode("utf-8"))
+                return data.get("metrics", [])
+    except Exception:
+        return []
+    return []
 
 
 def _job_item_to_details(item: dict[str, Any]) -> dict[str, Any]:
@@ -292,7 +348,46 @@ def show_command(run_id: str, output_format: str, dashboard_url: str) -> None:
     # Try the dashboard API first for full details.
     result = _try_dashboard_api(dashboard_url, run_id)
     if result is not None:
-        details = result if "id" in result else result.get("job", result)
+        # Dashboard returned job data — need to normalize config and fetch metrics.
+        config = result.get("config") or result.get("launch") or {}
+        launch_config = result.get("launch") or config
+
+        # If config has 'sections', extract flat key-value pairs.
+        if isinstance(config, dict) and "sections" in config and isinstance(config["sections"], list):
+            flat_config = {}
+            for section in config["sections"]:
+                if isinstance(section, dict) and "items" in section:
+                    for item in section["items"]:
+                        if isinstance(item, dict) and "key" in item:
+                            flat_config[item["key"]] = item.get("value")
+            for k, v in config.items():
+                if k != "sections":
+                    flat_config[k] = v
+            config = flat_config
+            if isinstance(launch_config, dict) and "sections" in launch_config:
+                launch_config = flat_config
+
+        # Fetch metric summaries from the metrics endpoint.
+        metric_summaries = _fetch_metric_summaries(dashboard_url, run_id)
+
+        details = {
+            "id": result.get("id", run_id),
+            "name": result.get("name", "?"),
+            "kind": result.get("kind", "train"),
+            "status": result.get("status", "unknown"),
+            "stage": result.get("stage", ""),
+            "step": result.get("step", 0),
+            "created_at": result.get("created_at", ""),
+            "updated_at": result.get("updated_at", ""),
+            "returncode": result.get("returncode"),
+            "config": config,
+            "launch_config": launch_config,
+            "config_text": result.get("config_text", ""),
+            "metrics_dir": result.get("metrics_dir", ""),
+            "metrics": metric_summaries,
+            "timeperf": result.get("timeperf", []),
+            "logs": result.get("logs", []),
+        }
     else:
         # Fallback: resolve from local artifacts.
         job_item = _resolve_job(run_id)
