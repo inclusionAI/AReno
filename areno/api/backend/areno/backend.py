@@ -127,6 +127,7 @@ class ArenoBackend(Backend):
         self._policy_sync_lock = Lock()
         self._rollout_session_active = False
         self._policy_sync_bucket_bytes = 64 * 1024 * 1024
+        self._pending_policy_sync_metrics: dict[str, float] = {}
         # Per-step wall-time accumulators used to print the
         # rollout/train/end-to-end breakdown after `train` completes.
         self._step_e2e_start: float | None = None
@@ -152,6 +153,7 @@ class ArenoBackend(Backend):
         self._rollout_engine = None
         self._separate_rollout = False
         self._rollout_session_active = False
+        self._pending_policy_sync_metrics = {}
         for engine in engines:
             engine.close()
 
@@ -301,6 +303,7 @@ class ArenoBackend(Backend):
         with self._policy_sync_lock:
             if self._train_policy_version == self._rollout_policy_version:
                 return
+            sync_started = time.perf_counter()
             self._validate_policy_plans()
             from areno.engine.protocol import Op, PolicySyncPayload
 
@@ -313,12 +316,26 @@ class ArenoBackend(Backend):
             self._rollout_policy_version = version
             summary = next((result for result in rollout_results if isinstance(result, dict)), None)
             if summary is not None:
+                total_s = time.perf_counter() - sync_started
+                transfer_s = max(float(result["elapsed_s"]) for result in rollout_results if isinstance(result, dict))
+                transferred_bytes = int(summary["bytes"])
+                tensors = int(summary["tensors"])
+                throughput_gbps = transferred_bytes * 8 / max(transfer_s, 1e-12) / 1e9
+                self._pending_policy_sync_metrics = {
+                    "policy_sync_time_s": total_s,
+                    "policy_sync_transfer_time_s": transfer_s,
+                    "policy_sync_bytes": float(transferred_bytes),
+                    "policy_sync_tensors": float(tensors),
+                    "policy_sync_throughput_gbps": throughput_gbps,
+                }
                 logger.info(
-                    "policy sync complete version=%d bytes=%d tensors=%d elapsed_s=%.6f",
+                    "policy_sync version=%d total_s=%.6f transfer_s=%.6f bytes=%d tensors=%d throughput_gbps=%.3f",
                     version,
-                    int(summary["bytes"]),
-                    int(summary["tensors"]),
-                    float(summary["elapsed_s"]),
+                    total_s,
+                    transfer_s,
+                    transferred_bytes,
+                    tensors,
+                    throughput_gbps,
                 )
 
     def rollout_batch(
@@ -545,6 +562,8 @@ class ArenoBackend(Backend):
         metrics.update(first_policy_metrics)
         result = {"loss": sum(losses) / max(len(losses), 1)}
         result.update(metrics)
+        result.update(self._pending_policy_sync_metrics)
+        self._pending_policy_sync_metrics = {}
         if self._step_e2e_start is not None:
             step_e2e_time_s = time.perf_counter() - self._step_e2e_start
             self._step_e2e_start = None

@@ -93,9 +93,9 @@ def transfer_policy_weights(worker, payload: PolicySyncPayload) -> dict[str, obj
         element_size = torch.empty((), dtype=layout.dtype).element_size()
         capacity = max(bucket_bytes // element_size, 1)
         publisher_group = ctx.policy_publisher_groups[owner]
-        if publisher_group is None:
-            raise RuntimeError(f"rank {ctx.global_rank} is missing policy publisher group {owner}")
-        source_rank = owner * ctx.train_tp_size
+        source_rank = ctx.policy_source_ranks[owner]
+        bridge_rank = ctx.policy_bridge_ranks[owner]
+        bridge_dp_rank = ctx.policy_bridge_dp_ranks[owner]
         for offset in range(0, layout.numel, capacity):
             count = min(capacity, layout.numel - offset)
             if buffer is None or buffer.dtype != layout.dtype or buffer.device != ctx.device or buffer.numel() < count:
@@ -103,11 +103,23 @@ def transfer_policy_weights(worker, payload: PolicySyncPayload) -> dict[str, obj
                 worker._policy_sync_buffer = buffer
             chunk = buffer[:count]
             if ctx.role == "train":
-                layout.read_chunk(offset, chunk, include_replicated=ctx.rank == 0)
+                layout.read_chunk(offset, chunk, include_replicated=ctx.global_rank == source_rank)
                 if ctx.world_size > 1:
                     dist.reduce(chunk, dst=source_rank, group=ctx.group)
-            dist.broadcast(chunk, src=source_rank, group=publisher_group)
+            if ctx.global_rank in (source_rank, bridge_rank):
+                if publisher_group is None:
+                    raise RuntimeError(f"rank {ctx.global_rank} is missing policy relay group {owner}")
+                dist.broadcast(chunk, src=source_rank, group=publisher_group)
             if ctx.role == "rollout":
+                # The bridge first fans the canonical chunk across its rollout
+                # TP row. Each TP column then broadcasts down its rollout DP
+                # group, so every rollout rank receives the chunk without ever
+                # putting duplicate physical GPUs in one NCCL communicator.
+                if ctx.dp_rank == bridge_dp_rank and ctx.world_size > 1:
+                    dist.broadcast(chunk, src=bridge_rank, group=ctx.group)
+                if ctx.dp_size > 1:
+                    dp_source = ctx.partition_global_rank(bridge_dp_rank * ctx.world_size + ctx.rank)
+                    dist.broadcast(chunk, src=dp_source, group=ctx.dp_group)
                 layout.write_chunk(offset, chunk)
         published_by_dp[owner] += meta.nbytes
 

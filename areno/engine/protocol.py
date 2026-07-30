@@ -614,6 +614,8 @@ def _worker_entry(
             train_tp_size=world_spec.train.tp_size,
             rollout_world_size=world_spec.rollout.local_world_size if world_spec.rollout is not None else None,
             rollout_tp_size=world_spec.rollout.tp_size if world_spec.rollout is not None else None,
+            train_devices=world_spec.train.devices,
+            rollout_devices=world_spec.rollout.devices if world_spec.rollout is not None else None,
             role=partition.role,
         )
         torch.set_float32_matmul_precision("high")

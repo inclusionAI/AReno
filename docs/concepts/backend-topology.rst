@@ -46,4 +46,13 @@ or filesystem staging copy.
 Both device lists use logical indices within the parent process'
 ``CUDA_VISIBLE_DEVICES``. They may overlap; overlapping devices hold both a
 training worker and a rollout worker, so the combined model, optimizer, cache,
-and CUDA-context memory must fit on those GPUs.
+and CUDA-context memory must fit on those GPUs. For an overlapping topology,
+AReno selects train and rollout relay ranks on different physical GPUs, then
+fans each received bucket through rollout-only TP/DP groups. This keeps
+duplicate physical GPUs out of an NCCL communicator.
+
+Every completed synchronization logs its total time, collective transfer time,
+bytes, tensor count, and effective throughput. The same values are emitted
+with the next training metrics as ``policy_sync_time_s``,
+``policy_sync_transfer_time_s``, ``policy_sync_bytes``,
+``policy_sync_tensors``, and ``policy_sync_throughput_gbps``.

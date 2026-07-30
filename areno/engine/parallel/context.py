@@ -34,6 +34,9 @@ class TPContext:
     role: Literal["train", "rollout"] = "train"
     policy_publisher_groups: tuple[dist.ProcessGroup | None, ...] = ()
     policy_publisher_ranks: tuple[tuple[int, ...], ...] = ()
+    policy_source_ranks: tuple[int, ...] = ()
+    policy_bridge_ranks: tuple[int, ...] = ()
+    policy_bridge_dp_ranks: tuple[int, ...] = ()
     train_tp_size: int = 1
     rollout_tp_size: int = 1
 
@@ -49,6 +52,12 @@ class TPContext:
         if rank < 0 or rank >= self.world_size:
             raise ValueError(f"rank={rank} is outside TP group size {self.world_size}")
         return self.global_rank - self.rank + rank
+
+    def partition_global_rank(self, rank: int) -> int:
+        """Translate a role-partition-local rank into a default-world rank."""
+
+        partition_rank = self.dp_rank * self.world_size + self.rank
+        return self.global_rank - partition_rank + rank
 
 
 _TP_CONTEXT = TPContext(
@@ -89,6 +98,8 @@ def init_process_group(
     train_tp_size: int | None = None,
     rollout_world_size: int | None = None,
     rollout_tp_size: int | None = None,
+    train_devices: tuple[int, ...] | None = None,
+    rollout_devices: tuple[int, ...] | None = None,
     role: Literal["train", "rollout"] = "train",
 ) -> TPContext:
     """Initialize process groups and derive local TP/DP rank coordinates."""
@@ -141,16 +152,29 @@ def init_process_group(
 
     publisher_groups = []
     publisher_ranks = []
-    rollout_ranks = list(range(resolved_train_world, resolved_train_world + resolved_rollout_world))
+    source_ranks = []
+    bridge_ranks = []
+    bridge_dp_ranks = []
     if resolved_rollout_world:
+        resolved_train_devices = train_devices or tuple(range(resolved_train_world))
+        resolved_rollout_devices = rollout_devices or tuple(range(resolved_rollout_world))
         for train_dp_rank in range(resolved_train_world // resolved_train_tp):
-            ranks = [
-                *range(train_dp_rank * resolved_train_tp, (train_dp_rank + 1) * resolved_train_tp),
-                *rollout_ranks,
-            ]
+            pair = _select_policy_relay_pair(
+                train_dp_rank=train_dp_rank,
+                train_tp_size=resolved_train_tp,
+                train_devices=resolved_train_devices,
+                rollout_devices=resolved_rollout_devices,
+                rollout_rank_offset=resolved_train_world,
+                rollout_tp_size=resolved_rollout_tp,
+            )
+            source_rank, bridge_rank, bridge_dp_rank = pair
+            ranks = [source_rank, bridge_rank]
             group = dist.new_group(ranks=ranks)
             publisher_ranks.append(tuple(ranks))
             publisher_groups.append(group if resolved_global_rank in ranks else None)
+            source_ranks.append(source_rank)
+            bridge_ranks.append(bridge_rank)
+            bridge_dp_ranks.append(bridge_dp_rank)
 
     ctx = TPContext(
         rank=tp_rank,
@@ -165,6 +189,9 @@ def init_process_group(
         role=role,
         policy_publisher_groups=tuple(publisher_groups),
         policy_publisher_ranks=tuple(publisher_ranks),
+        policy_source_ranks=tuple(source_ranks),
+        policy_bridge_ranks=tuple(bridge_ranks),
+        policy_bridge_dp_ranks=tuple(bridge_dp_ranks),
         train_tp_size=resolved_train_tp,
         rollout_tp_size=resolved_rollout_tp,
     )
@@ -197,6 +224,32 @@ def _create_partition_groups(
         group = dist.new_group(ranks=ranks)
         dp_groups.append(group if global_rank in ranks else None)
     return tp_groups, dp_groups
+
+
+def _select_policy_relay_pair(
+    *,
+    train_dp_rank: int,
+    train_tp_size: int,
+    train_devices: tuple[int, ...],
+    rollout_devices: tuple[int, ...],
+    rollout_rank_offset: int,
+    rollout_tp_size: int,
+) -> tuple[int, int, int]:
+    """Choose train/rollout ranks on different GPUs for one NCCL relay."""
+
+    train_start = train_dp_rank * train_tp_size
+    for train_local_rank in range(train_start, train_start + train_tp_size):
+        for rollout_local_rank, rollout_device in enumerate(rollout_devices):
+            if train_devices[train_local_rank] == rollout_device:
+                continue
+            return (
+                train_local_rank,
+                rollout_rank_offset + rollout_local_rank,
+                rollout_local_rank // rollout_tp_size,
+            )
+    raise ValueError(
+        "overlapping train and rollout engines need at least two distinct CUDA devices for NCCL policy sync"
+    )
 
 
 def destroy_process_group() -> None:

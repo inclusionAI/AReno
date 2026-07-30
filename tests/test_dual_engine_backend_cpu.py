@@ -107,6 +107,11 @@ def test_policy_sync_runs_once_for_each_new_train_version() -> None:
     assert backend._rollout_policy_version == 2
     assert [op for op, _ in train.cluster.calls] == [Op.POLICY_SYNC_PLAN, Op.POLICY_SYNC_PUBLISH]
     assert [op for op, _ in rollout.cluster.calls] == [Op.POLICY_SYNC_PLAN, Op.POLICY_SYNC_RECEIVE]
+    assert backend._pending_policy_sync_metrics["policy_sync_transfer_time_s"] == pytest.approx(0.01)
+    assert backend._pending_policy_sync_metrics["policy_sync_bytes"] == 16.0
+    assert backend._pending_policy_sync_metrics["policy_sync_tensors"] == 1.0
+    assert backend._pending_policy_sync_metrics["policy_sync_throughput_gbps"] == pytest.approx(0.0000128)
+    assert backend._pending_policy_sync_metrics["policy_sync_time_s"] > 0.0
 
 
 def test_policy_sync_failure_does_not_advance_rollout_version() -> None:

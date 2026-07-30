@@ -86,20 +86,23 @@ def test_partitioned_group_construction_order_is_identical(monkeypatch) -> None:
             (4,),
             (5,),
             (4, 5),
-            (0, 1, 4, 5),
-            (2, 3, 4, 5),
+            (0, 5),
+            (2, 4),
         ]
     )
     assert train_ctx.rank == 1
     assert train_ctx.dp_rank == 0
     assert train_ctx.group == (0, 1)
     assert train_ctx.dp_group == (1, 3)
-    assert train_ctx.policy_publisher_groups == ((0, 1, 4, 5), None)
+    assert train_ctx.policy_publisher_groups == (None, None)
     assert rollout_ctx.rank == 0
     assert rollout_ctx.dp_rank == 1
     assert rollout_ctx.group == (5,)
     assert rollout_ctx.dp_group == (4, 5)
-    assert rollout_ctx.policy_publisher_groups == ((0, 1, 4, 5), (2, 3, 4, 5))
+    assert rollout_ctx.policy_publisher_groups == ((0, 5), None)
+    assert rollout_ctx.policy_source_ranks == (0, 2)
+    assert rollout_ctx.policy_bridge_ranks == (5, 4)
+    assert rollout_ctx.policy_bridge_dp_ranks == (1, 0)
     assert train_ctx.tp_global_rank(0) == 0
     assert train_ctx.tp_global_rank(1) == 1
     assert rollout_ctx.tp_global_rank(0) == 5
