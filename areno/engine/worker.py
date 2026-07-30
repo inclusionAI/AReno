@@ -363,8 +363,7 @@ class ArenoWorker:
             request_id = -1 if cmd.request_id is None else int(cmd.request_id)
         header = torch.tensor([has_command, op_value, request_id], device=ctx.device, dtype=torch.long)
         if ctx.world_size > 1:
-            src = ctx.dp_rank * ctx.world_size
-            dist.broadcast(header, src=src, group=ctx.group)
+            dist.broadcast(header, src=ctx.tp_global_rank(0), group=ctx.group)
         if int(header[0].item()) == 0:
             return None
         return Op(int(header[1].item())), None if int(header[2].item()) < 0 else int(header[2].item())

@@ -525,7 +525,14 @@ def test_worker_refill_queue_is_drained_by_tp_rank0_decision():
 
     worker = object.__new__(worker_mod.ArenoWorker)
     worker._cmd_queue = _QueueDouble([])
-    ctx = SimpleNamespace(is_rank0=True, world_size=2, dp_rank=0, device=torch.device("cpu"), group=object())
+    ctx = SimpleNamespace(
+        is_rank0=True,
+        world_size=2,
+        dp_rank=0,
+        device=torch.device("cpu"),
+        group=object(),
+        tp_global_rank=lambda rank: rank,
+    )
 
     with PatchedContext(
         worker_mod,
@@ -551,7 +558,14 @@ def test_worker_non_rank0_consumes_refill_only_after_tp_broadcast():
     command = _rollout_command(2, [[2]], target=2)
     worker = object.__new__(worker_mod.ArenoWorker)
     worker._cmd_queue = _QueueDouble([command])
-    ctx = SimpleNamespace(is_rank0=False, world_size=2, dp_rank=0, device=torch.device("cpu"), group=object())
+    ctx = SimpleNamespace(
+        is_rank0=False,
+        world_size=2,
+        dp_rank=0,
+        device=torch.device("cpu"),
+        group=object(),
+        tp_global_rank=lambda rank: rank,
+    )
 
     with PatchedContext(
         worker_mod,
@@ -573,7 +587,14 @@ def test_worker_non_rank0_defers_unmatched_refill_commands():
     worker = object.__new__(worker_mod.ArenoWorker)
     worker._cmd_queue = _QueueDouble([stale, selected])
     worker._deferred_commands = []
-    ctx = SimpleNamespace(is_rank0=False, world_size=2, dp_rank=0, device=torch.device("cpu"), group=object())
+    ctx = SimpleNamespace(
+        is_rank0=False,
+        world_size=2,
+        dp_rank=0,
+        device=torch.device("cpu"),
+        group=object(),
+        tp_global_rank=lambda rank: rank,
+    )
 
     with PatchedContext(
         worker_mod,

@@ -597,11 +597,12 @@ def _gather_expert_parallel_tensor(tensor: torch.Tensor) -> torch.Tensor | None:
     local = tensor.detach().contiguous()
     if ctx.world_size == 1:
         return local.cpu()
+    dst = ctx.tp_global_rank(0)
     if ctx.rank == 0:
         chunks = [torch.empty_like(local) for _ in range(ctx.world_size)]
-        dist.gather(local, gather_list=chunks, dst=ctx.dp_rank * ctx.world_size, group=ctx.group)
+        dist.gather(local, gather_list=chunks, dst=dst, group=ctx.group)
         return torch.cat(chunks, dim=0).cpu()
-    dist.gather(local, dst=ctx.dp_rank * ctx.world_size, group=ctx.group)
+    dist.gather(local, dst=dst, group=ctx.group)
     return None
 
 

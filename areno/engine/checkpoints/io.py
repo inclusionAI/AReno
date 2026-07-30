@@ -687,8 +687,9 @@ class SafetensorsIndex:
         """Broadcast one tensor from rank 0 to the rest of the TP group."""
 
         ctx = get_tp_context()
-        # In multi-DP setups, each DP replica needs its own broadcast root.
-        src = ctx.dp_rank * ctx.world_size
+        # PyTorch's ``src`` is a default-world rank even when ``group`` is
+        # supplied. Partitioned train/rollout TP groups may start above rank 0.
+        src = ctx.tp_global_rank(0)
         tensor = None
         meta = [None]
         if ctx.rank == 0:

@@ -43,6 +43,13 @@ class TPContext:
 
         return self.rank == 0
 
+    def tp_global_rank(self, rank: int) -> int:
+        """Translate a rank local to this TP group into a default-world rank."""
+
+        if rank < 0 or rank >= self.world_size:
+            raise ValueError(f"rank={rank} is outside TP group size {self.world_size}")
+        return self.global_rank - self.rank + rank
+
 
 _TP_CONTEXT = TPContext(
     rank=0,
