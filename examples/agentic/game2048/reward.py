@@ -91,7 +91,7 @@ def _monotonicity_bonus(board) -> float:
 
 
 def _extract_directions(record) -> list[str]:
-    """Pull move directions from the agent's tool calls, in order."""
+    """Pull move directions from tool calls or assistant text, in order."""
 
     directions = []
     for call in record.tool_calls:
@@ -108,4 +108,15 @@ def _extract_directions(record) -> list[str]:
             direction = arguments.get("direction")
             if isinstance(direction, str) and direction.upper() in game.DIRECTIONS:
                 directions.append(direction.upper())
+    if directions:
+        return directions
+    for message in record.messages:
+        if message.get("role") != "assistant":
+            continue
+        content = message.get("content")
+        if not content:
+            continue
+        direction = game.parse_action(content)
+        if direction is not None:
+            directions.append(direction)
     return directions
