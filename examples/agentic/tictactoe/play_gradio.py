@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import threading
 from pathlib import Path
 
 import gradio as gr
@@ -30,6 +31,7 @@ MODEL = "X"
 _board: game.Board = [[EMPTY] * 3 for _ in range(3)]
 _finished: bool = False
 _message: str = "点击下方棋盘开始！"
+_lock = threading.Lock()
 
 
 def cell_display(cell: str) -> str:
@@ -72,37 +74,47 @@ def check_result(board: game.Board) -> str | None:
 def make_click_handler(square: int):
     """Return a handler for clicking cell `square` (1-9)."""
 
-    def handler(status_text: str) -> tuple:
-        """handler receives the current status textbox value (unused, just needs an input to chain)."""
+    def handler() -> tuple:
+        """No inputs needed — reads global state directly."""
         global _board, _finished, _message
 
-        if _finished:
-            return _message, *get_all_displays()
+        with _lock:
+            print(f"[click] square={square} board={_board} finished={_finished}")
 
-        # ── Human move ──
-        if square not in game.legal_moves(_board):
-            _message = "⚠️ 该位置已被占用！"
-            return _message, *get_all_displays()
+            if _finished:
+                return _message, *get_all_displays()
 
-        _board = game.apply_move(_board, square, HUMAN)
-        result = check_result(_board)
-        if result:
-            _finished = True
-            _message = result
-            return _message, *get_all_displays()
+            # ── Human move ──
+            if square not in game.legal_moves(_board):
+                _message = "⚠️ 该位置已被占用！"
+                return _message, *get_all_displays()
 
-        # ── Model move ──
-        move = model_move(_board)
-        if move and move in game.legal_moves(_board):
-            _board = game.apply_move(_board, move, MODEL)
-        result = check_result(_board)
-        if result:
-            _finished = True
-            _message = result
-            return _message, *get_all_displays()
+            _board = game.apply_move(_board, square, HUMAN)
+            print(f"[human] placed O at {square}, board={_board}")
+            result = check_result(_board)
+            if result:
+                _finished = True
+                _message = result
+                return _message, *get_all_displays()
 
-        _message = "你的回合，请落子 ⭕"
-        return _message, *get_all_displays()
+            # ── Model move ──
+            move = model_move(_board)
+            if move and move in game.legal_moves(_board):
+                _board = game.apply_move(_board, move, MODEL)
+                print(f"[model] placed X at {move}, board={_board}")
+            else:
+                print(f"[model] illegal move={move}, legal={game.legal_moves(_board)}")
+                _message = "模型走了非法位置，跳过。你的回合 ⭕"
+                return _message, *get_all_displays()
+
+            result = check_result(_board)
+            if result:
+                _finished = True
+                _message = result
+                return _message, *get_all_displays()
+
+            _message = "你的回合，请落子 ⭕"
+            return _message, *get_all_displays()
 
     return handler
 
