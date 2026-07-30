@@ -25,12 +25,6 @@ EMPTY = game.EMPTY
 HUMAN = "O"
 MODEL = "X"
 
-# Status display component
-status_box: gr.Markdown | None = None
-
-# Mutable state passed through Gradio
-State = dict  # board, finished, message
-
 
 def board_to_flat(board: game.Board) -> list[str]:
     """Convert internal board to 9 flat display strings (empty -> "")."""
@@ -39,6 +33,13 @@ def board_to_flat(board: game.Board) -> list[str]:
         for row in board
         for cell in row
     ]
+
+
+def new_state(board=None, finished=False, message="") -> dict:
+    """Always create a fresh dict so Gradio state updates correctly."""
+    if board is None:
+        board = [[EMPTY] * 3 for _ in range(3)]
+    return {"board": board, "finished": finished, "message": message}
 
 
 def model_move(board: game.Board) -> int | None:
@@ -68,24 +69,23 @@ def check_result(board: game.Board) -> str | None:
 def make_click_handler(row: int, col: int):
     """Return a click handler with row/col captured at build time."""
 
-    def handler(state: State) -> tuple:
-        board: game.Board = state["board"]
-        finished: bool = state["finished"]
+    def handler(state: dict) -> tuple:
+        board = state["board"]
+        finished = state["finished"]
 
         if finished:
-            return state, state["message"], *board_to_flat(board)
+            return new_state(board, True, state["message"]), state["message"], *board_to_flat(board)
 
         square = row * 3 + col + 1
 
         # ── Human move ──
         if square not in game.legal_moves(board):
-            return state, "⚠️ 该位置已被占用！", *board_to_flat(board)
+            return new_state(board, False, "⚠️ 该位置已被占用！"), "⚠️ 该位置已被占用！", *board_to_flat(board)
 
         board = game.apply_move(board, square, HUMAN)
         result = check_result(board)
         if result:
-            state.update(board=board, finished=True, message=result)
-            return state, result, *board_to_flat(board)
+            return new_state(board, True, result), result, *board_to_flat(board)
 
         # ── Model move ──
         move = model_move(board)
@@ -93,49 +93,44 @@ def make_click_handler(row: int, col: int):
             board = game.apply_move(board, move, MODEL)
         result = check_result(board)
         if result:
-            state.update(board=board, finished=True, message=result)
-            return state, result, *board_to_flat(board)
+            return new_state(board, True, result), result, *board_to_flat(board)
 
-        state.update(board=board, finished=False, message="你的回合，请落子 ⭕")
-        return state, "你的回合，请落子 ⭕", *board_to_flat(board)
+        msg = "你的回合，请落子 ⭕"
+        return new_state(board, False, msg), msg, *board_to_flat(board)
 
     return handler
 
 
 def reset_game() -> tuple:
     """Reset to a fresh board."""
-    board = [[EMPTY] * 3 for _ in range(3)]
-    state = {"board": board, "finished": False, "message": "新对局开始！你执 ⭕，模型执 ❌"}
-    return state, state["message"], *board_to_flat(board)
+    state = new_state(message="新对局开始！你执 ⭕，模型执 ❌")
+    return state, state["message"], *board_to_flat(state["board"])
 
 
 def build_ui() -> gr.Blocks:
     """Build the Gradio interface."""
-    with gr.Blocks(title="Tic-Tac-Toe vs Model", theme=gr.themes.Soft()) as ui:
+    css = """
+    #cell-0-0 button, #cell-0-1 button, #cell-0-2 button,
+    #cell-1-0 button, #cell-1-1 button, #cell-1-2 button,
+    #cell-2-0 button, #cell-2-1 button, #cell-2-2 button {
+        aspect-ratio: 1 / 1;
+        min-width: 100px;
+        min-height: 100px;
+        font-size: 2.5em;
+        font-weight: bold;
+    }
+    """
+
+    with gr.Blocks(title="Tic-Tac-Toe vs Model", theme=gr.themes.Soft(), css=css) as ui:
         gr.Markdown("# 🎮 井字棋对弈 — 你 vs 模型")
         gr.Markdown("你执 ⭕，模型执 ❌。点击空格落子，模型会自动应手。")
 
-        state = gr.State(
-            {"board": [[EMPTY] * 3 for _ in range(3)], "finished": False, "message": "点击下方棋盘开始！"}
-        )
+        state = gr.State(new_state(message="点击下方棋盘开始！"))
 
-        global status_box
-        status_box = gr.Markdown("点击下方棋盘开始！")
-
-        # CSS: make grid buttons square and large
-        gr.HTML(
-            "<style>"
-            ".ttt-cell button {"
-            "  aspect-ratio: 1 / 1;"
-            "  min-width: 80px;"
-            "  font-size: 2em;"
-            "  font-weight: bold;"
-            "}"
-            "</style>"
-        )
+        status = gr.Markdown("点击下方棋盘开始！")
 
         # 3x3 grid of buttons
-        grid = []
+        grid: list[list[gr.Button]] = []
         for row_idx in range(3):
             row_buttons = []
             with gr.Row():
@@ -143,7 +138,6 @@ def build_ui() -> gr.Blocks:
                     btn = gr.Button(
                         "",
                         scale=1,
-                        elem_classes="ttt-cell",
                         elem_id=f"cell-{row_idx}-{col_idx}",
                     )
                     row_buttons.append(btn)
@@ -154,18 +148,18 @@ def build_ui() -> gr.Blocks:
 
         all_buttons = [grid[i][j] for i in range(3) for j in range(3)]
 
-        # Wire click events — use closures to capture row/col
+        # Wire click events — closures capture row/col at build time
         for r in range(3):
             for c in range(3):
                 grid[r][c].click(
                     make_click_handler(r, c),
                     inputs=[state],
-                    outputs=[state, status_box, *all_buttons],
+                    outputs=[state, status, *all_buttons],
                 )
 
         reset_btn.click(
             reset_game,
-            outputs=[state, status_box, *all_buttons],
+            outputs=[state, status, *all_buttons],
         )
 
     return ui
