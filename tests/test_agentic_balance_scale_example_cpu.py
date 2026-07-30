@@ -394,9 +394,10 @@ def test_loader_fallback_to_generator_when_file_missing():
 # Reward function (information-gain-aware continuous reward)
 # ---------------------------------------------------------------------------
 
-ALPHA = 0.15
+ALPHA = 0.05
 REPEAT_PENALTY = 0.3
 INVALID_PENALTY = 0.2
+WRONG_ANSWER_PENALTY = -0.5
 
 
 def _reward_record(source: dict, tool_calls: list, metadata: dict | None = None):
@@ -469,7 +470,7 @@ def test_reward_identity_only():
 
 
 def test_reward_completely_wrong():
-    """Wrong ball and direction → reward = 0 - alpha (only weighing cost)."""
+    """Wrong ball and direction → reward = WRONG_ANSWER_PENALTY - alpha."""
     reward = _load_module("reward")
 
     source = {"num_balls": 12, "odd_ball_index": 5, "direction": "heavier", "max_weighings": 6}
@@ -481,7 +482,7 @@ def test_reward_completely_wrong():
         ],
     )
 
-    expected = 0.0 - ALPHA
+    expected = WRONG_ANSWER_PENALTY - ALPHA
     assert reward.reward_fn(record) == expected
     assert record.metadata["full_answer_accuracy"] == 0.0
     assert record.metadata["identity_only_accuracy"] == 0.0
@@ -918,6 +919,83 @@ def test_orchestration_multi_weigh_sequence():
 #       --agent-fn examples/agentic/balance_scale/run_agent.py \
 #       --algo gspo --batch-size 2 --n-samples 4 --max-new-tokens 256
 #   - Verify reward > 0 on at least some samples after 1 step.
+
+
+# ---------------------------------------------------------------------------
+# SFT data generator and loader
+# ---------------------------------------------------------------------------
+
+
+def test_sft_solver_solves_correctly():
+    """The ternary search solver should produce correct answers."""
+    sft_gen = _load_module("sft_data_generator")
+    game = _load_module("game")
+
+    import random
+    rng = random.Random(42)
+    correct = 0
+    total = 50
+    for _ in range(total):
+        n = rng.randint(3, 12)
+        idx = rng.randint(0, n - 1)
+        d = rng.choice(["heavier", "lighter"])
+        bs = game.BallSet(num_balls=n, odd_ball_index=idx, direction=d, max_weighings=10)
+        turns = sft_gen.solve_puzzle(bs)
+        last = turns[-1]
+        assert last["action"] == "submit_answer"
+        if last["ball_index"] == idx and last["direction"] == d:
+            correct += 1
+
+    assert correct == total, f"Solver only got {correct}/{total} correct"
+
+
+def test_sft_solver_uses_multiple_weighings():
+    """Solver should use 2+ weighings for non-trivial puzzles."""
+    sft_gen = _load_module("sft_data_generator")
+    game = _load_module("game")
+
+    bs = game.BallSet(num_balls=12, odd_ball_index=5, direction="heavier", max_weighings=8)
+    turns = sft_gen.solve_puzzle(bs)
+
+    weighings = [t for t in turns if t["action"] == "weigh"]
+    assert len(weighings) >= 2, f"Expected 2+ weighings, got {len(weighings)}"
+
+
+def test_sft_loader_flattens_records():
+    """SFT loader should flatten multi-turn conversations into prompt/response rows."""
+    sft_gen = _load_module("sft_data_generator")
+    sft_loader = _load_module("sft_loader")
+    game = _load_module("game")
+
+    # Generate a few SFT records
+    records = sft_gen.generate_sft_records(4, seed=42, num_balls=6)
+
+    import json
+    import tempfile
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+        for r in records:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+        f.flush()
+
+    rows = sft_loader.load_training_dataset(f.name)
+
+    assert len(rows) > 4  # Each puzzle produces multiple rows (one per assistant turn)
+    for row in rows:
+        assert "prompt" in row
+        assert "response" in row
+        assert len(row["response"]) > 0
+        # Response should be JSON (weigh or submit_answer arguments)
+        parsed = json.loads(row["response"])
+        assert isinstance(parsed, dict)
+
+
+def test_sft_generator_skips_fewer_than_3_balls():
+    """SFT generator should skip puzzles with fewer than 3 balls."""
+    sft_gen = _load_module("sft_data_generator")
+
+    records = sft_gen.generate_sft_records(10, seed=42, num_balls=2)
+    # num_balls=2 means all puzzles have 2 balls, which should all be skipped
+    assert len(records) == 0
 
 
 # ---------------------------------------------------------------------------

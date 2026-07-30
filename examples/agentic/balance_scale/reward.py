@@ -5,13 +5,13 @@ Scoring formula:  R_end = K - T·a - P_repeat - P_invalid
   K (answer reward):
     - Full answer correct (ball + direction) → base_reward
     - Identity only correct (ball, wrong direction) → base_reward / 2
-    - Submitted but completely wrong → 0
+    - Submitted but completely wrong → -0.5 (wrong answer penalty)
     - No submit_answer call → -1 (base penalty)
 
   base_reward = ceil(log3(num_balls * 2))  — information-theoretic lower bound,
     auto-scales to any number of balls.
 
-  T (weighing cost):  each valid weighing costs `alpha` (default 0.15).
+  T (weighing cost):  each valid weighing costs `alpha` (default 0.05).
 
   P_repeat:  penalty for repeated identical weighings (same left+right sets).
 
@@ -35,9 +35,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import game  # noqa: E402
 
 # --- Configurable constants ---
-ALPHA = 0.15          # per-weighing cost
+ALPHA = 0.05          # per-weighing cost (low to encourage thorough weighing)
 REPEAT_PENALTY = 0.3   # penalty per repeated weighing
 INVALID_PENALTY = 0.2  # penalty per invalid weighing attempt
+WRONG_ANSWER_PENALTY = -0.5  # extra penalty for submitting a wrong answer
 NO_SUBMIT_PENALTY = -1.0
 
 
@@ -107,7 +108,7 @@ def reward_fn(record: Any) -> float:
         elif result["ball_correct"]:
             k = float(base_reward) / 2.0
         else:
-            k = 0.0
+            k = WRONG_ANSWER_PENALTY
 
         # Weighing cost: only valid + repeated count toward T
         # (invalid weighings are penalised separately)
