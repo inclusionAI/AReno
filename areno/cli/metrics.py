@@ -2,7 +2,7 @@
 
 Issue #254 adds a read-only CLI that summarizes one metric (last/min/max/
 recent/trend) from the ``events.out.tfevents.*`` artifacts a run writes. The
-heavywork lives in the light, pure :mod:`areno.api.metric_reader` module; this
+heavy work lives in the light, pure :mod:`areno.api.metric_reader` module; this
 file only wires Click options, renders, and turns not-found cases into a clear
 error plus the list of available tags.
 
