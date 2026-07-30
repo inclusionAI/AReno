@@ -123,6 +123,26 @@ class EpisodeFeatures:
         self.difficulty = difficulty
 
 
+def _resolved_empty_cells(source: Any) -> int:
+    """Empty-cell count for fill-ratio shaping, robust to records that omit it.
+
+    Prefer the loader-computed ``empty_cells``; otherwise recount from the
+    stored ``puzzle``. Always >= 1 so ``fill_ratio`` cannot divide by zero or
+    explode if some future record path forgets both fields.
+    """
+
+    cached = int(source.get("empty_cells", 0)) if isinstance(source, dict) else 0
+    if cached > 0:
+        return cached
+    puzzle = source.get("puzzle") if isinstance(source, dict) else None
+    if puzzle:
+        try:
+            return max(1, sum(1 for row in puzzle for v in row if not v))
+        except TypeError:
+            return 1
+    return 1
+
+
 def _extract_features(record: Any) -> EpisodeFeatures:
     """Read tool calls/results from the rollout record into structured features."""
 
@@ -138,7 +158,7 @@ def _extract_features(record: Any) -> EpisodeFeatures:
         invalid_actions=invalid,
         tried_place=bool(place_results),
         inspect_count=_inspect_count(record),
-        empty_cells=int(source.get("empty_cells", 0)) or 1,
+        empty_cells=_resolved_empty_cells(source),
         difficulty=str(source.get("difficulty", sudoku.DEFAULT_DIFFICULTY)).lower(),
     )
 

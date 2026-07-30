@@ -6,13 +6,14 @@ rules; the solution is never part of the record. ``difficulty`` is carried
 through so rewards/metrics can be grouped by band.
 
 Curriculum: AReno's trainer consumes the dataset list sequentially (no
-shuffling), so if the JSONL is ordered easy->medium->hard->extreme the first
-training pass is automatically an easy->hard curriculum. We therefore keep
-the on-disk order and additionally re-sort defensively. ``max_turns`` is
-graduated by difficulty (easy gets fewer turns, extreme gets more), which is
-itself part of the curriculum. Both behaviors are gated on the
-``SUDOKU_CURRICULUM`` env var (default "on"); set it to "off" to restore the
-flat/legacy behavior.
+shuffling), so if the JSONL is ordered tutorial->easy->medium->hard->extreme
+the first training pass is automatically an easy->hard curriculum. We
+therefore keep the on-disk order and additionally re-sort defensively.
+``max_turns`` is sized per puzzle as ``empty_cells + MAX_TURNS_HEADROOM`` so an
+episode can afford the placements plus a few inspect/undo/recovery turns; it
+scales naturally with difficulty (harder puzzles have more empties). Both
+behaviors are gated on the ``SUDOKU_CURRICULUM`` env var (default "on"); set
+it to "off" to restore the flat/legacy behavior.
 """
 
 from __future__ import annotations
@@ -28,14 +29,17 @@ import sudoku  # noqa: E402
 
 DEFAULT_MAX_TURNS = 30
 
-# Per-difficulty turn caps. Easy puzzles solve in few moves; harder ones need
-# more reasoning turns. Capping easy tighter also saves Kaggle wall time.
-DIFFICULTY_MAX_TURNS: dict[str, int] = {
-    "easy": 8,
-    "medium": 12,
-    "hard": 16,
-    "extreme": 20,
-}
+# Per-episode turn headroom on top of the cell count. One turn performs one
+# tool call and fills at most one cell, so solving needs at least ``empty_cells``
+# placement turns. The headroom leaves room for a weak policy to inspect
+# candidates, make and recover from illegal placements, and undo/backtrack —
+# without it a 0.6B model that inspects or errs even once can never fit the
+# solved reward inside the budget, deadlocking the RL cold-start. For an
+# 8-empty tutorial board this is ~16 turns (~1-2k re-rendered context), fine on
+# a 16GB T4; raise only once the policy solves cleanly. The framework's
+# overlong-trajectory filter still drops episodes that exceed the model context
+# length, so larger bands stay safe.
+MAX_TURNS_HEADROOM = 8
 
 
 def _curriculum_enabled() -> bool:
@@ -81,15 +85,16 @@ def _format_record(raw: dict, index: int) -> dict:
     )
     # max_turns is the per-episode LLM turn cap. Each turn performs exactly one
     # tool call and fills at most ONE cell, so a solvable episode needs at least
-    # `empty_cells` place turns. The headroom is kept MINIMAL (+1) because
-    # multi-turn context grows steeply with turns (~800 tokens/turn from the chat
-    # template + tool schemas re-rendered each turn), and the logprob logits
-    # tensor scales with seq_len * batch * vocab — on a 16GB T4 a long context
-    # OOMs even for 0.6B. A tight cap truncates idle/undo episodes before they
-    # blow the context budget, trading a chance at `solved` for completing a
-    # training step. Raise the headroom once the policy reliably solves quickly.
+    # `empty_cells` place turns; MAX_TURNS_HEADROOM adds room for inspect
+    # candidates, illegal-placement recovery, and undo/backtrack. For an 8-empty
+    # tutorial board this is ~16 turns, well within a 16GB T4. A cap that is too
+    # tight makes the solved reward unreachable for a model that inspects or errs
+    # at all, deadlocking RL cold-start, so we keep real headroom rather than +1.
+    # The framework's overlong-trajectory filter still drops episodes that exceed
+    # the model context length, so larger bands stay safe; raise once solving is
+    # clean.
     if _curriculum_enabled() and "max_turns" not in raw:
-        max_turns = empty_cells + 1
+        max_turns = empty_cells + MAX_TURNS_HEADROOM
     else:
         max_turns = int(raw.get("max_turns", DEFAULT_MAX_TURNS))
     return {

@@ -148,7 +148,10 @@ class SudokuEnv:
 
         Candidates are computed from the visible board only (row/column/box
         conflicts). The solution is never consulted, so this call cannot leak
-        the answer.
+        the answer. Like ``place_digit`` and ``undo`` it consumes one action
+        from the budget, so all three tools share one uniform "each call costs
+        one action" accounting instead of inspect being free in one budget and
+        costly in the other.
         """
 
         self._check_coord(row, col)
@@ -156,6 +159,7 @@ class SudokuEnv:
             raise SudokuError(f"cell ({row},{col}) is not empty")
         if self.is_terminal():
             raise SudokuError("episode is terminal; no further actions allowed")
+        self.actions_used += 1
         candidates = sorted(self._candidates(row, col))
         return {
             "action": "inspect_candidates",
@@ -255,6 +259,22 @@ class SudokuEnv:
             if r in (2, 5):
                 lines.append("-----+-----+-----")
         return "\n".join(lines)
+
+    def board_compact(self) -> str:
+        """One-line board for cheap per-turn echoing: 9 rows of 9 chars
+        (``.`` = empty) joined by ``|``.
+
+        ~89 chars (~30 tokens), so it can be appended to every tool result
+        without the per-turn context blowup the full ``board_text`` rendering
+        would cause (~500 tokens/turn), while still letting a small policy see
+        the current board instead of tracking every placement mentally.
+        """
+
+        rows = [
+            "".join(str(v) if v != EMPTY else "." for v in self.puzzle[r])
+            for r in range(9)
+        ]
+        return "|".join(rows)
 
     def public_state(self, include_candidates: bool = False) -> dict[str, Any]:
         """Return everything the agent is allowed to see (no solution)."""

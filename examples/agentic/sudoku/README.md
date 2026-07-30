@@ -42,7 +42,7 @@ The solution is deliberately **not** stored.
 
 ## Defaults and backward compatibility
 
-- `difficulty` defaults to `medium`; `action_budget` defaults to `81`.
+- `difficulty` defaults to `tutorial`; `action_budget` defaults to `81`.
 - When the dataset loader cannot find the JSONL path, it falls back to
   in-memory generation, so the example runs with no external files.
 - This example only adds files under `examples/agentic/sudoku/`; it does not
@@ -56,14 +56,14 @@ python examples/agentic/sudoku/dataset_generator.py \
   --output /tmp/areno-sudoku-puzzles.jsonl \
   --count 256 \
   --seed 2026 \
-  --difficulties easy,medium,hard,extreme
+  --difficulties tutorial,easy,medium,hard,extreme
 ```
 
 ## Train (GPU)
 
 ```bash
 areno train \
-  --ckpt Qwen/Qwen3-1.7B \
+  --ckpt Qwen/Qwen3-0.6B \
   --dataset-path /tmp/areno-sudoku-puzzles.jsonl \
   --dataset-loader-fn examples/agentic/sudoku/dataset_loader.py \
   --reward-fn-path examples/agentic/sudoku/reward.py \
@@ -74,16 +74,33 @@ areno train \
   --max-new-tokens 256
 ```
 
+> **T4 / fp16 note:** a 16GB T4 has no BF16, so training runs in fp16. Watch
+> the first few dozen steps for `NaN` (Qwen3 was trained in BF16; fp16
+> attention logits can overflow). If it appears, lower the LR, use fp32 master
+> weights, or shorten `--max-new-tokens`. Start with a LoRA run for stability
+> and to stay within the 16GB budget, then move to full-param if it converges.
+> `tutorial` (~8 empty cells) keeps multi-turn context at ~1-2k tokens, which is
+> comfortable on a single T4; scale to wider bands once the policy solves it.
+
 `areno train` serves its own OpenAI-compatible policy server; `run_agent.py`
 connects to it, so no external model API is required.
 
 ## Observable output
 
-- Per episode, tool results carry: `action`, `placed`/`undone`,
-  `invalid_action`, `reason` (on rejection), `solved`, `board`, `board_text`,
-  `actions_remaining`, `is_terminal`, `difficulty`.
-- Reward (from `reward.py`): `1.0` solved, `0.0` no solve but ≥1 legal move,
-  `-0.1` no legal move at all.
+- Per turn, tool results carry: `action`, `placed`/`undone`/`invalid_action`,
+  `reason` (on rejection), `solved`, `candidates` (on `inspect_candidates`),
+  `actions_remaining`, `is_terminal`, a compact one-line `board_compact` echo
+  (~30 tokens), and `turns_remaining` (the binding `max_turns` budget; see below).
+  Note `difficulty` rides on the dataset record, not on every tool result; the
+  solution is never echoed (``board_compact`` only shows the visible board).
+- Reward (from `reward.py`, default `SUDOKU_CURRICULUM=on`): tier order is
+  solved > legal-progress > effort > noise. Solved pays a per-difficulty weight
+  (`SOLVED_REWARD`); legal-but-unsolved pays a sub-linear `sqrt(fill)` progress
+  share capped far below solved, minus an invalid-action tax; episodes with no
+  legal placement get a graded effort penalty (`-0.05` tried-to-place /
+  `-0.08` inspect-only / `-0.1` no useful tool call) so within-group advantages
+  stay nonzero. Set `SUDOKU_CURRICULUM=off` for the flat legacy behavior
+  (`1.0` / `0.0` / `-0.1`).
 - Metrics to wire into the trainer config, grouped by `difficulty`:
   `solve_rate` and `invalid_action_rate`. Both are computable from the same
   `place_digit` tool results used by the reward function.

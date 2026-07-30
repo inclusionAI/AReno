@@ -171,6 +171,12 @@ async def _run_episodes(*, client: Any, items: list[Any], model: str) -> list[Ag
                 )
                 continue
             result = _execute_tool(state["env"], call)
+            # The env's action_budget is loose; the binding cap is max_turns.
+            # Surface how many future turns the policy still has so it can budget
+            # its inspect/undo/recovery calls — actions_remaining alone (from the
+            # loose budget) overstates them. turn_idx is this state's (turn_idx)th
+            # response, so after this call it has used turn_idx + 1 turns.
+            result["turns_remaining"] = max(0, state["turn_limit"] - (turn_idx + 1))
             state["messages"].append(
                 {
                     "role": "tool",
@@ -294,14 +300,16 @@ def _execute_tool(env: sudoku.SudokuEnv, call: dict[str, Any]) -> dict[str, Any]
 def _with_board(env: sudoku.SudokuEnv, result: dict[str, Any]) -> dict[str, Any]:
     """Attach lightweight state to a tool result (never the solution).
 
-    We intentionally do NOT echo the full board back every turn. The board is
-    already in the initial user prompt, and re-sending all 81 cells each turn
-    makes multi-turn context explode (101 turns x ~500 tokens = ~50k+ tokens,
-    far over any sane context budget). Instead each tool result carries only
-    the compact action outcome plus a few integers the policy needs to track
-    progress; the policy mentally updates the board from its own moves.
+    We echo a *compact* one-line board each turn (``board_compact``, ~30
+    tokens) plus the action outcome and a few progress integers, but NOT the
+    full ``board_text`` rendering (that would re-send ~500 tokens/turn and blow
+    a multi-turn context budget). The compact echo lets a small policy see the
+    current board instead of tracking every placement mentally, which a 0.6B
+    model cannot do reliably across turns. The solution digit is never
+    included — ``board_compact`` only shows the agent-visible board.
     """
 
     result["is_terminal"] = env.is_terminal()
     result["actions_remaining"] = env._actions_remaining()  # noqa: SLF001
+    result["board_compact"] = env.board_compact()
     return result
