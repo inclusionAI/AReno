@@ -89,3 +89,50 @@ On Kaggle dual-T4 environments (`gpu_count=2`):
 - `mini_bs` and `score_micro_bs` are reduced to 4 to avoid OOM
 - T4 GPUs do not support FlashAttention 2 — consider `--override attn_backend=native` if you encounter attention backend errors
 - Provenance strings explicitly mention the small-GPU downgrade reasoning
+
+## Copyable example
+
+```bash
+# Generate a GSPO recipe for a 2-GPU (Kaggle T4) setup with 4096-token context
+python .agents/skills/areno-run-training/scripts/generate_recipe.py \
+  --mode gspo --gpu-count 2 --context-length 4096 --target-batch 8
+```
+
+Sample output (abbreviated):
+
+```json
+{
+  "ok": true,
+  "mode": "gspo",
+  "recipe": {
+    "algo": "gspo",
+    "ckpt": "<ckpt>",
+    "dataset_path": "<dataset-path>",
+    "tp_size": 1,
+    "world_size": 2,
+    "batch_size": 8,
+    "mini_bs": 4,
+    "n_samples": 8,
+    "gspo_clip_eps": 0.0003
+  },
+  "provenance": {
+    "tp_size": "set to 1 because gpu_count (2) <= 2 (small-GPU friendly)",
+    "mini_bs": "capped to min(target_batch, 4) = 4 for small GPU count (<=2) to avoid OOM"
+  },
+  "command": "areno train --algo gspo --ckpt <ckpt> --dataset-path <dataset-path> --reward-fn-path <reward-fn-path> --tp-size 1 ...",
+  "warnings": [
+    "ckpt is a placeholder; replace <ckpt> with your model checkpoint path or repo ID",
+    "dataset_path is a placeholder; replace <dataset-path> with your dataset path or ref",
+    "reward_fn_path is not set; provide --reward-fn-path before training"
+  ]
+}
+```
+
+## Limitations
+
+- The script does not validate that model or dataset paths actually exist —
+  replace placeholders and run `inspect_dataset.py` before training.
+- GPU-memory-aware defaults (tp_size, mini_bs reductions) are heuristics for
+  <=2 GPU setups; always run `check_capacity.py` to confirm feasibility.
+- The generated command uses real AReno CLI flag names but does not execute
+  `areno train --help` to validate against the current CLI surface.
