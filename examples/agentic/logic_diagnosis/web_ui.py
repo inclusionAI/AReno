@@ -569,6 +569,7 @@ button.danger{background:#e07070;color:#fff}
     </div>
     <div class="btn-row" style="margin-top:6px">
       <button id="agentBtn">Agent Move</button>
+      <button id="autoBtn">Auto Play</button>
       <button id="newBtn">New Circuit</button>
     </div>
   </section>
@@ -728,15 +729,32 @@ async function doSubmit(faultType){
   render();
 }
 
-document.getElementById("agentBtn").onclick = async ()=>{
+async function agentMove(){
   if(state.diagnosis_submitted) return;
   document.getElementById("agentBtn").disabled = true;
+  document.getElementById("autoBtn").disabled = true;
   document.getElementById("agentBtn").textContent = "Thinking...";
   state = await api("api/agent", {});
   selectedGate = null;
   document.getElementById("agentBtn").disabled = state.diagnosis_submitted;
   document.getElementById("agentBtn").textContent = state.diagnosis_submitted ? "Game Over" : "Agent Move";
   render();
+  return state;
+}
+
+document.getElementById("agentBtn").onclick = () => agentMove();
+
+let autoRunning = false;
+document.getElementById("autoBtn").onclick = async ()=>{
+  if(autoRunning) return;
+  autoRunning = true;
+  document.getElementById("autoBtn").textContent = "Running...";
+  while(!state || !state.diagnosis_submitted){
+    await agentMove();
+    await new Promise(r => setTimeout(r, 300));
+  }
+  autoRunning = false;
+  document.getElementById("autoBtn").textContent = "Auto Play";
 };
 
 document.getElementById("newBtn").onclick = async ()=>{
