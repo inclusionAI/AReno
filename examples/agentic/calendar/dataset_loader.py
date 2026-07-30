@@ -38,9 +38,8 @@ def _format_record(raw: dict, index: int) -> dict:
     state = game.record_to_state(raw)
     meeting_id = raw.get("target_meeting_id", state.meetings[0].id if state.meetings else "")
     prompt = game.format_prompt(state, meeting_id)
-    return {
-        "id": raw.get("id", f"calendar-{index:05d}"),
-        "prompt": prompt,
-        "state": raw,
-        "target_meeting_id": meeting_id,
-    }
+    record = dict(raw)
+    record["id"] = raw.get("id", f"calendar-{index:05d}")
+    record["prompt"] = prompt
+    record["target_meeting_id"] = meeting_id
+    return record
