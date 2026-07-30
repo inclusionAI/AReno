@@ -46,6 +46,7 @@ from typing import Any, Literal
 # Precompiled regexes for normalisation.
 _PUNCT_RE = re.compile(r"[^\w\s]", re.UNICODE)
 _MULTI_WS_RE = re.compile(r"\s+")
+_DEFAULT_MAX_COMPARISONS = 250_000
 
 
 def normalize_text(text: str) -> str:
@@ -197,6 +198,8 @@ class DuplicateReport:
         text_keys: Prompt fields checked in priority order, or ``None`` for
             full-sample comparison.
         max_features: Maximum shingles retained per record in near mode.
+        max_comparisons: Maximum candidate pairs evaluated in near mode.
+        candidate_comparisons: Candidate pairs evaluated by the scan.
     """
 
     groups: list[DuplicateGroup]
@@ -209,6 +212,8 @@ class DuplicateReport:
     scope: Literal["prompt", "full"] = "prompt"
     text_keys: tuple[str, ...] | None = None
     max_features: int = 0
+    max_comparisons: int = 0
+    candidate_comparisons: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serialisable dict for structured output."""
@@ -232,6 +237,8 @@ class DuplicateReport:
             "scope": self.scope,
             "text_keys": list(self.text_keys) if self.text_keys is not None else None,
             "max_features": self.max_features,
+            "max_comparisons": self.max_comparisons,
+            "candidate_comparisons": self.candidate_comparisons,
         }
 
     @property
@@ -321,6 +328,7 @@ def find_duplicates(
     threshold: float = 0.8,
     ngram_size: int = 5,
     max_features: int = 2048,
+    max_comparisons: int = _DEFAULT_MAX_COMPARISONS,
 ) -> DuplicateReport:
     """Find near-duplicate training examples without deleting them.
 
@@ -335,6 +343,8 @@ def find_duplicates(
         threshold: Jaccard similarity threshold for ``"near"`` mode (default 0.8).
         ngram_size: Character n-gram size for shingling (default 5).
         max_features: Maximum shingle features per record (default 2048).
+        max_comparisons: Maximum shared-shingle candidate pairs evaluated in
+            near mode (default 250,000).
 
     Returns:
         A :class:`DuplicateReport` with grouped duplicates and summary stats.
@@ -357,6 +367,8 @@ def find_duplicates(
         raise ValueError(f"ngram_size must be a positive integer, got {ngram_size!r}")
     if not isinstance(max_features, int) or isinstance(max_features, bool) or max_features < 1:
         raise ValueError(f"max_features must be a positive integer, got {max_features!r}")
+    if not isinstance(max_comparisons, int) or isinstance(max_comparisons, bool) or max_comparisons < 1:
+        raise ValueError(f"max_comparisons must be a positive integer, got {max_comparisons!r}")
 
     for index, record in enumerate(records):
         if not isinstance(record, dict):
@@ -387,6 +399,7 @@ def find_duplicates(
         threshold=threshold,
         ngram_size=ngram_size,
         max_features=max_features,
+        max_comparisons=max_comparisons,
         scope=scope,
         text_keys=selected_text_keys,
     )
@@ -404,7 +417,10 @@ def _find_exact_duplicates(
     # Map fingerprint -> list of record indices.
     fp_to_indices: dict[str, list[int]] = {}
     for idx, text in enumerate(texts):
-        fp = _fingerprint(text)
+        # Full-sample text is already canonical JSON. Hash it directly so
+        # punctuation stripping cannot collapse distinct JSON types such as
+        # the number 1 and the string "1".
+        fp = hashlib.sha256(text.encode("utf-8")).hexdigest() if scope == "full" else _fingerprint(text)
         fp_to_indices.setdefault(fp, []).append(idx)
 
     groups: list[DuplicateGroup] = []
@@ -452,15 +468,43 @@ def _find_near_duplicates(
     threshold: float,
     ngram_size: int,
     max_features: int,
+    max_comparisons: int,
     scope: Literal["prompt", "full"],
     text_keys: tuple[str, ...] | None,
 ) -> DuplicateReport:
-    """Group records by approximate n-gram similarity using union-find."""
+    """Group records using bounded shared-shingle candidates and union-find."""
 
     # Compute signatures for all records.
     signatures: list[frozenset[str]] = [
         shingle_signature(text, ngram_size=ngram_size, max_features=max_features) for text in texts
     ]
+
+    # Build a deterministic inverted index. Two non-empty shingle sets with
+    # positive Jaccard similarity must share at least one shingle, so disjoint
+    # records never need an explicit comparison. The candidate set is capped
+    # to bound both memory and similarity work.
+    postings: dict[str, list[int]] = {}
+    candidate_pairs: set[tuple[int, int]] = set()
+    candidate_work = 0
+    for index, signature in enumerate(signatures):
+        for shingle in sorted(signature):
+            prior_indices = postings.setdefault(shingle, [])
+            candidate_work += len(prior_indices)
+            if candidate_work > max_comparisons:
+                raise ValueError(
+                    "near-duplicate candidate comparison limit exceeded "
+                    f"({max_comparisons}); reduce the input, increase max_comparisons, "
+                    "reduce max_features, or use exact mode"
+                )
+            for prior_index in prior_indices:
+                candidate_pairs.add((prior_index, index))
+                if len(candidate_pairs) > max_comparisons:
+                    raise ValueError(
+                        "near-duplicate candidate comparison limit exceeded "
+                        f"({max_comparisons}); reduce the input, increase max_comparisons, "
+                        "reduce max_features, or use exact mode"
+                    )
+            prior_indices.append(index)
 
     # Union-find (disjoint set) for grouping.
     parent = list(range(total))
@@ -476,16 +520,14 @@ def _find_near_duplicates(
         if ra != rb:
             parent[ra] = rb
 
-    # Compare all pairs; O(n^2) but bounded by max_features per signature.
-    # For very large datasets this is still memory-bounded because each
-    # signature is a frozenset of at most max_features strings.
-    for i in range(total):
-        for j in range(i + 1, total):
-            if find(i) == find(j):
-                continue
-            sim = jaccard_similarity(signatures[i], signatures[j])
-            if sim >= threshold:
-                union(i, j)
+    # Compare each candidate exactly once. Retain the bounded similarity map
+    # so group reporting does not repeat an unbounded all-pairs pass.
+    pair_similarities: dict[tuple[int, int], float] = {}
+    for i, j in sorted(candidate_pairs):
+        sim = jaccard_similarity(signatures[i], signatures[j])
+        pair_similarities[(i, j)] = sim
+        if sim >= threshold:
+            union(i, j)
 
     # Collect groups from union-find roots.
     root_to_indices: dict[int, list[int]] = {}
@@ -493,18 +535,24 @@ def _find_near_duplicates(
         root = find(idx)
         root_to_indices.setdefault(root, []).append(idx)
 
+    # Missing candidate pairs have disjoint signatures and therefore exact
+    # Jaccard similarity 0. Accumulating the retained candidate similarities
+    # and dividing by all pairs preserves the original mean-pairwise metric
+    # without another quadratic comparison pass.
+    root_similarity_sums: dict[int, float] = {}
+    for (left, right), similarity in pair_similarities.items():
+        root = find(left)
+        if root == find(right):
+            root_similarity_sums[root] = root_similarity_sums.get(root, 0.0) + similarity
+
     groups: list[DuplicateGroup] = []
     duplicate_count = 0
     group_id = 0
     for indices in root_to_indices.values():
         if len(indices) <= 1:
             continue
-        # Compute mean pairwise similarity within the group.
-        sims: list[float] = []
-        for a in range(len(indices)):
-            for b in range(a + 1, len(indices)):
-                sims.append(jaccard_similarity(signatures[indices[a]], signatures[indices[b]]))
-        mean_sim = sum(sims) / len(sims) if sims else 1.0
+        pair_count = len(indices) * (len(indices) - 1) // 2
+        mean_sim = root_similarity_sums.get(find(indices[0]), 0.0) / pair_count
 
         groups.append(
             DuplicateGroup(
@@ -528,6 +576,8 @@ def _find_near_duplicates(
         scope=scope,
         text_keys=text_keys,
         max_features=max_features,
+        max_comparisons=max_comparisons,
+        candidate_comparisons=len(candidate_pairs),
     )
 
 
@@ -559,6 +609,7 @@ def format_duplicate_report(report: DuplicateReport) -> str:
         lines.append(f"  Threshold: {report.threshold}")
         lines.append(f"  N-gram size: {report.ngram_size}")
         lines.append(f"  Max features per record: {report.max_features}")
+        lines.append(f"  Candidate comparisons: {report.candidate_comparisons} (limit: {report.max_comparisons})")
     lines.append(f"  Duplicate groups: {len(report.groups)}")
     if report.groups:
         lines.append("")

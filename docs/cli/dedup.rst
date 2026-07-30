@@ -41,7 +41,8 @@ Options
 
 ``--scope`` (default: ``prompt``)
     Comparison scope: ``prompt`` compares only the primary text field, or
-    ``full`` compares all string fields concatenated.
+    ``full`` compares the canonical complete JSON sample, preserving field
+    names and value types.
 
 ``--threshold`` (default: ``0.8``)
     Jaccard similarity threshold for ``near`` mode.  Must be in (0.0, 1.0].
@@ -54,6 +55,12 @@ Options
     Maximum number of shingles retained per record in ``near`` mode.  AReno
     keeps the bottom-k shingles selected by a stable hash, so the cap does not
     favor the beginning of long records.
+
+``--max-comparisons`` (default: ``250000``)
+    Maximum shared-shingle candidate-discovery work and candidate pairs
+    evaluated in ``near`` mode. The command fails with a clear error instead
+    of exceeding this CPU/memory budget. Disjoint signatures are not candidate
+    pairs.
 
 ``--text-keys`` (default: ``prompt,question,instruction,problem,text,content,input,query``)
     Comma-separated field names for text extraction in ``prompt`` scope.
@@ -79,7 +86,8 @@ The human-readable output includes:
 The JSON output (``--json``) includes the same fields plus per-group
 ``record_indices``, ``similarity``, and ``match_type``.  It also records
 ``scope``, ``text_keys``, ``threshold``, ``ngram_size``, and ``max_features``
-so that a curation scan can be reproduced.
+plus ``max_comparisons`` and ``candidate_comparisons`` so that a curation scan
+can be reproduced and its resource use audited.
 
 Examples
 ~~~~~~~~
@@ -100,7 +108,8 @@ Near mode with a lower threshold:
 .. code-block:: bash
 
    areno dedup --data-path /tmp/areno-dedup.jsonl \
-     --mode near --threshold 0.5 --max-features 1024
+     --mode near --threshold 0.5 --max-features 1024 \
+     --max-comparisons 100000
 
 Full-sample comparison with JSON output:
 
@@ -125,10 +134,11 @@ must be greater than zero:
 Limitations
 ~~~~~~~~~~~
 
-* The ``near`` mode uses O(n^2) pairwise comparison, which may be slow for
-  very large datasets (>10k records).  Signature memory is
-  O(number-of-records * ``max_features``); the cap bounds each record rather
-  than the whole input file.
+* The ``near`` mode indexes shared shingles and compares only candidate pairs.
+  ``--max-comparisons`` bounds the candidate set and similarity work; highly
+  repetitive datasets may hit the limit and require a larger explicit budget
+  or exact mode. Signature memory is O(number-of-records * ``max_features``);
+  the feature cap bounds each record rather than the whole input file.
 * ``full`` scope uses a canonical, key-sorted JSON representation of the
   complete record, so JSON field order does not change the result.
 * The command reports duplicates for review but does not remove, filter, or

@@ -293,6 +293,41 @@ class TestInvalidInputs(unittest.TestCase):
         with self.assertRaises(ValueError):
             find_duplicates([], mode="near", max_features=0)
 
+    def test_bad_max_comparisons(self):
+        with self.assertRaisesRegex(ValueError, "max_comparisons must be a positive integer"):
+            find_duplicates([], mode="near", max_comparisons=0)
+
+    def test_candidate_comparison_budget_is_enforced(self):
+        records = [{"prompt": f"shared text variant {index}"} for index in range(5)]
+        with self.assertRaisesRegex(ValueError, "candidate comparison limit exceeded"):
+            find_duplicates(
+                records,
+                mode="near",
+                ngram_size=1,
+                threshold=0.1,
+                max_comparisons=2,
+            )
+
+    def test_disjoint_signatures_do_not_consume_comparison_budget(self):
+        records = [{"prompt": "aaaa"}, {"prompt": "bbbb"}, {"prompt": "cccc"}]
+        report = find_duplicates(
+            records,
+            mode="near",
+            ngram_size=1,
+            threshold=0.5,
+            max_comparisons=1,
+        )
+        self.assertEqual(report.candidate_comparisons, 0)
+        self.assertEqual(report.groups, [])
+
+    def test_full_exact_scope_preserves_json_value_types(self):
+        report = find_duplicates(
+            [{"value": 1}, {"value": "1"}],
+            mode="exact",
+            scope="full",
+        )
+        self.assertEqual(report.groups, [])
+
 
 # ---------------------------------------------------------------------------
 # Scope: prompt vs full

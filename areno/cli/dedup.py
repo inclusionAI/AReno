@@ -84,7 +84,7 @@ def _load_records(path: str) -> list[dict]:
     type=click.Choice(["prompt", "full"]),
     default="prompt",
     show_default=True,
-    help="Comparison scope: prompt (primary text field) or full (all string fields).",
+    help="Comparison scope: prompt (primary text field) or full (canonical complete sample).",
 )
 @click.option(
     "--threshold",
@@ -108,6 +108,13 @@ def _load_records(path: str) -> list[dict]:
     help="Maximum shingles retained per record in near mode.",
 )
 @click.option(
+    "--max-comparisons",
+    type=click.IntRange(min=1),
+    default=250_000,
+    show_default=True,
+    help="Maximum shared-shingle candidate pairs evaluated in near mode.",
+)
+@click.option(
     "--text-keys",
     default=None,
     help=(
@@ -123,6 +130,7 @@ def dedup_command(
     threshold: float,
     ngram_size: int,
     max_features: int,
+    max_comparisons: int,
     text_keys: str | None,
     as_json: bool,
 ) -> None:
@@ -153,6 +161,7 @@ def dedup_command(
             threshold=threshold,
             ngram_size=ngram_size,
             max_features=max_features,
+            max_comparisons=max_comparisons,
         )
     except (TypeError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc

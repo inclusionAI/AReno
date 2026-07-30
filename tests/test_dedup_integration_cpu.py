@@ -144,6 +144,8 @@ class TestCLINearMode(unittest.TestCase):
                 "0.3",
                 "--max-features",
                 "64",
+                "--max-comparisons",
+                "100",
                 "--json",
             ],
         )
@@ -152,6 +154,8 @@ class TestCLINearMode(unittest.TestCase):
         self.assertEqual(data["match_type"], "near")
         self.assertEqual(data["threshold"], 0.3)
         self.assertEqual(data["max_features"], 64)
+        self.assertEqual(data["max_comparisons"], 100)
+        self.assertGreater(data["candidate_comparisons"], 0)
         self.assertEqual(data["scope"], "prompt")
 
 
@@ -276,6 +280,19 @@ class TestCLIErrorHandling(unittest.TestCase):
             )
             self.assertNotEqual(result.exit_code, 0)
             self.assertIn("--ngram-size", result.output)
+            self.assertNotIsInstance(result.exception, ValueError)
+        finally:
+            os.unlink(path)
+
+    def test_invalid_max_comparisons_is_a_cli_error(self):
+        path = _write_temp_file(_JSONL_NO_DUPES)
+        try:
+            result = self.runner.invoke(
+                dedup_command,
+                ["--data-path", path, "--mode", "near", "--max-comparisons", "0"],
+            )
+            self.assertNotEqual(result.exit_code, 0)
+            self.assertIn("--max-comparisons", result.output)
             self.assertNotIsInstance(result.exception, ValueError)
         finally:
             os.unlink(path)
