@@ -81,12 +81,15 @@ def _format_record(raw: dict, index: int) -> dict:
     )
     # max_turns is the per-episode LLM turn cap. Each turn performs exactly one
     # tool call and fills at most ONE cell, so a solvable episode needs at least
-    # `empty_cells` place turns. We add a modest headroom for a few
-    # inspect_candidates / undo calls. We keep the cap tight (not empty_cells*2)
-    # because multi-turn context grows with turns — a policy that inspects too
-    # much will truncate, which is itself the signal to learn denser moves.
+    # `empty_cells` place turns. The headroom is kept SMALL (not +15) because
+    # multi-turn context grows steeply with turns (~800 tokens/turn from the chat
+    # template + tool schemas re-rendered each turn), and a weak model that cannot
+    # solve will idle/undo and run the cap to the end, blowing the context budget.
+    # A tight cap truncates such episodes before they exceed max_context_len,
+    # trading a chance at `solved` for actually completing a training step. Raise
+    # the headroom once the policy reliably solves within the cap.
     if _curriculum_enabled() and "max_turns" not in raw:
-        max_turns = empty_cells + 15
+        max_turns = empty_cells + 3
     else:
         max_turns = int(raw.get("max_turns", DEFAULT_MAX_TURNS))
     return {
