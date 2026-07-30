@@ -48,9 +48,21 @@ When enabled, AReno checks the reward function before and during training:
 3. **Output validation** (per call): rejects non-numeric return values
    (``None``, ``str``, ``list``, ``dict``), non-finite values (``NaN``,
    ``Inf``), and multi-dimensional tensors.  Each failure message includes
-   the hook name and a truncated prompt preview (100 chars).
+   the hook name, sample index (from ``record.metadata["sample_index"]``),
+   and a truncated prompt preview (100 chars).
 
 Validation is **off by default** and does not change existing behavior.
+
+Limitations:
+
+- The reward function contract is one ``RewardRecord`` in, one ``float``
+  out.  Batch-mode reward functions (returning a list of floats) are not
+  supported; a list return value is rejected with the list length.
+- ``sample_index`` is read from ``record.metadata["sample_index"]``, which
+  is populated by AReno's trainer.  When unavailable (e.g. dry-run or
+  direct SDK calls without metadata), the index is reported as ``unknown``.
+- Serializability of the return value is not checked explicitly, but the
+  validated output is always a plain ``float``, which is serializable.
 
 Environment variables:
 

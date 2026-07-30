@@ -244,12 +244,15 @@ class FinitenessTest(unittest.TestCase):
         return wrapped(record)
 
     def test_runtime_exception_wrapped_with_context(self):
-        """A function that raises at call time should include hook name and prompt."""
+        """A function that raises at call time should include hook name, prompt, and sample index."""
         def fn(record):
             raise KeyError("missing field")
         wrapped = _wrap_inline(fn)
-        record = make_reward_record(prompt="What is 2+2?", completion="4", source_record={})
-        with self.assertRaisesRegex(RewardValidationError, "raised KeyError.*missing field.*What is 2\\+2"):
+        record = make_reward_record(
+            prompt="What is 2+2?", completion="4", source_record={},
+            metadata={"prompt_index": 1, "sample_index": 5},
+        )
+        with self.assertRaisesRegex(RewardValidationError, "raised KeyError.*sample_index: 5.*What is 2\\+2"):
             wrapped(record)
 
     def test_output_rejects_inf(self):

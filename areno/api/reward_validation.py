@@ -92,12 +92,14 @@ def _check_signature(fn: Callable, hook_name: str) -> None:
         )
 
 
-def _validate_scalar_output(value: Any, *, hook_name: str, prompt_preview: str) -> float:
+def _validate_scalar_output(value: Any, *, hook_name: str, prompt_preview: str,
+                            sample_idx: int | str = "unknown") -> float:
     """Validate a single reward output and return it as ``float``.
 
     Raises :class:`RewardValidationError` for invalid types or non-finite
     values.
     """
+    ctx = f"sample_index: {sample_idx}; prompt: {prompt_preview}"
     # --- torch tensor / numpy scalar (duck-typed via .item()) ---------------
     if hasattr(value, "item") and callable(value.item):
         # Reject multi-dimensional tensors
@@ -105,24 +107,23 @@ def _validate_scalar_output(value: Any, *, hook_name: str, prompt_preview: str) 
         if ndim is not None and ndim > 0:
             raise RewardValidationError(
                 f"reward hook '{hook_name}' returned a {ndim}-d tensor, "
-                f"expected a scalar; prompt: {prompt_preview}"
+                f"expected a scalar; {ctx}"
             )
         try:
             value = float(value.item())
         except (TypeError, ValueError) as exc:
             raise RewardValidationError(
                 f"reward hook '{hook_name}' returned a tensor that cannot be "
-                f"converted to float; prompt: {prompt_preview}"
+                f"converted to float; {ctx}"
             ) from exc
     elif value is None:
         raise RewardValidationError(
-            f"reward hook '{hook_name}' returned None; prompt: {prompt_preview}"
+            f"reward hook '{hook_name}' returned None; {ctx}"
         )
     elif isinstance(value, list):
         raise RewardValidationError(
             f"reward hook '{hook_name}' returned a list of length {len(value)}, "
-            f"expected a scalar; reward_fn must return one float per call; "
-            f"prompt: {prompt_preview}"
+            f"expected a scalar; reward_fn must return one float per call; {ctx}"
         )
     elif isinstance(value, bool):
         # bool is a subclass of int; accept and convert
@@ -132,13 +133,12 @@ def _validate_scalar_output(value: Any, *, hook_name: str, prompt_preview: str) 
     else:
         raise RewardValidationError(
             f"reward hook '{hook_name}' returned non-numeric value of type "
-            f"{type(value).__name__}; prompt: {prompt_preview}"
+            f"{type(value).__name__}; {ctx}"
         )
 
     if not math.isfinite(value):
         raise RewardValidationError(
-            f"reward hook '{hook_name}' returned non-finite value: {value}; "
-            f"prompt: {prompt_preview}"
+            f"reward hook '{hook_name}' returned non-finite value: {value}; {ctx}"
         )
 
     return value
@@ -156,15 +156,18 @@ def _wrap(fn: Callable, *, hook_name: str) -> Callable[[RewardRecord], float]:
 
     def validated_reward_fn(record: RewardRecord) -> float:
         prompt_preview = _truncate(getattr(record, "prompt", ""))
+        metadata = getattr(record, "metadata", {}) or {}
+        sample_idx = metadata.get("sample_index", "unknown")
         try:
             result = fn(record)
         except Exception as exc:
             raise RewardValidationError(
                 f"reward hook '{hook_name}' raised {type(exc).__name__}: {exc}; "
-                f"prompt: {prompt_preview}"
+                f"sample_index: {sample_idx}; prompt: {prompt_preview}"
             ) from exc
         return _validate_scalar_output(
-            result, hook_name=hook_name, prompt_preview=prompt_preview
+            result, hook_name=hook_name, prompt_preview=prompt_preview,
+            sample_idx=sample_idx,
         )
 
     return validated_reward_fn
@@ -231,7 +234,8 @@ def validate_and_wrap_reward_fn(
             )
         else:
             _validate_scalar_output(
-                dry_result, hook_name=hook_name, prompt_preview=""
+                dry_result, hook_name=hook_name, prompt_preview="",
+                sample_idx="dry-run",
             )
 
     # 3. Return a wrapper that validates every subsequent call.
