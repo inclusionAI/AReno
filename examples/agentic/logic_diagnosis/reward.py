@@ -59,7 +59,10 @@ def reward_fn(record) -> float:
     if not submitted:
         if interactions > 0:
             return -0.2  # interacted but didn't submit
-        return -1.0  # did nothing — likely format collapse
+        # No tool calls parsed. Use raw completion text to create per-sample
+        # variance so advantages are never all-zero (prevents deadlock).
+        completion = getattr(record, "completion", "") or ""
+        return _no_interaction_penalty(completion)
 
     return score_episode(
         correct_diagnosis=correct_diagnosis,
@@ -67,6 +70,31 @@ def reward_fn(record) -> float:
         max_probes=MAX_PROBES,
         submitted=True,
     )
+
+
+def _no_interaction_penalty(text: str) -> float:
+    """Penalty for producing zero valid tool calls. Range [-1.0, -0.3].
+
+    Two samples with different completion text get different penalties →
+    advantages never all-zero → no deadlock.
+    """
+    t = text.strip() if text else ""
+    if not t:
+        return -1.0  # empty output — worst
+    p = -0.5  # baseline: produced text, but no recognizable JSON
+    if "{" in t:
+        p += 0.05
+    if "}" in t:
+        p += 0.05
+    if ":" in t:
+        p += 0.03
+    if '"' in t:
+        p += 0.03
+    if "true" in t.lower() or "false" in t.lower():
+        p += 0.02
+    if any(ch.isdigit() for ch in t):
+        p += 0.02
+    return max(-1.0, min(-0.3, p))
 
 
 def _parse_args(arguments):

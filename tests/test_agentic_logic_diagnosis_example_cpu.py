@@ -384,11 +384,20 @@ def test_reward_wrong_diagnosis():
 
 def test_reward_no_submission():
     reward = _load_module("reward")
+    # Empty completion → -1.0
     record = SimpleNamespace(
         source_record={"fault": {"node": 5, "stuck_value": 0}},
         tool_calls=[],
+        completion="",
     )
     assert reward.reward_fn(record) == -1.0
+    # Some text but no tool calls → between -0.5 and -0.3
+    record_text = SimpleNamespace(
+        source_record={"fault": {"node": 5, "stuck_value": 0}},
+        tool_calls=[],
+        completion='{"inputs": [true, false]}',
+    )
+    assert -0.5 <= reward.reward_fn(record_text) <= -0.3
 
 
 def test_reward_probes_reduce_score():
