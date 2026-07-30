@@ -43,7 +43,8 @@ SYSTEM_PROMPT = (
     "- Do not fire at the same coordinate twice.\n"
     "- Do not fire outside the A1-H8 range.\n"
     "- Win by sinking all ships with as few shots as possible.\n"
-    "- After each shot, you will see an updated board showing your hits (X), misses (o), and unknown cells (.)."
+    "- After each shot, you will see an updated board showing your hits (X), misses (o), and unknown cells (.).\n"
+    "- You also see 'Already fired: ...' listing every coordinate you have fired this game; do not fire any of them again."
 )
 
 FIRE_TOOL = {
@@ -112,12 +113,17 @@ def _play_game(
         # Feed the updated board back into the running history so the model can
         # reason across turns (mirrors run_agent's per-turn board observation).
         messages.append({"role": "assistant", "content": f"I fired {coord_str or 'nothing'}."})
+        # Append the explicit fired-coordinate list so a small untrained model
+        # does not have to parse o/X symbols to avoid repeats.
+        fired = [game.format_coordinate(r, c) for r, c in state.shots_history]
+        fired_line = f"Already fired: {', '.join(fired)}\n" if fired else ""
         messages.append(
             {
                 "role": "user",
                 "content": (
                     f"Result of {coord_str or 'your shot'}: {status}.\n"
-                    f"Board:\n{game.board_text(state)}\n\nYour next shot:"
+                    f"Board:\n{game.board_text(state)}\n\n"
+                    f"{fired_line}Your next shot:"
                 ),
             }
         )

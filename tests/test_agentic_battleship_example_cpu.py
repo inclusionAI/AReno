@@ -624,6 +624,40 @@ def test_battleship_play_llm_invalid_step_progresses():
     assert captured_messages[-1] > captured_messages[0]
 
 
+def test_battleship_play_llm_observation_includes_fired_list():
+    """Per-turn user observation lists already-fired coordinates (mirrors run_agent)."""
+    game_module = _load_module("game")
+    play_llm = _load_module("play_llm")
+
+    record = game_module.place_fleet(7)
+    captured_user_msgs: list[str] = []
+    fired_coords: list[str] = []
+
+    def step(messages, state):
+        # Capture the latest user observation (built last turn, if any).
+        for msg in reversed(messages):
+            if msg["role"] == "user":
+                captured_user_msgs.append(msg["content"])
+                break
+        legal = sorted(game_module.legal_shots(state))
+        coord = game_module.format_coordinate(*legal[0])
+        fired_coords.append(coord)
+        return coord
+
+    result = play_llm._play_game(step, record, max_turns=3)
+
+    # Opening observation (before any shot) has no fired list.
+    assert "Already fired" not in captured_user_msgs[0]
+    # After the first legal shot, the next observation lists it as already fired.
+    assert "Already fired" in captured_user_msgs[1]
+    assert fired_coords[0] in captured_user_msgs[1]
+    # The list accumulates across turns: after shot 2, both fired coords appear.
+    assert fired_coords[0] in captured_user_msgs[2]
+    assert fired_coords[1] in captured_user_msgs[2]
+    assert result["shots_used"] == 3
+    assert result["invalid_shots"] == 0
+
+
 def test_battleship_play_llm_parse_coord_from_response():
     """Response parser extracts the fire coordinate from a tool-call payload."""
     play_llm = _load_module("play_llm")

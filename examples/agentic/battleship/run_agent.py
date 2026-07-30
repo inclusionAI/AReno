@@ -31,7 +31,8 @@ SYSTEM_PROMPT = (
     "- Do not fire at the same coordinate twice.\n"
     "- Do not fire outside the A1-H8 range.\n"
     "- Win by sinking all ships with as few shots as possible.\n"
-    "- After each shot, you will see an updated board showing your hits (X), misses (o), and unknown cells (.)."
+    "- After each shot, you will see an updated board showing your hits (X), misses (o), and unknown cells (.).\n"
+    "- You also see 'Already fired: ...' listing every coordinate you have fired this game; do not fire any of them again."
 )
 
 # fire 工具的 JSON Schema 定义
@@ -118,7 +119,15 @@ async def run_agent(ctx, batch):
 
             # 添加棋盘观察作为用户消息（让模型看到它的视角）
             # Add board observation as user message (so the model sees its view)
-            board_msg = {"role": "user", "content": f"\nBoard after your shot:\n{game.board_text(state)}\n"}
+            # 追加已射击坐标明文列表，避免小模型需要解析 o/X 符号才能不重复射击
+            # Append the explicit fired-coordinate list so small untrained models
+            # do not have to parse o/X symbols to avoid repeats.
+            fired = [game.format_coordinate(r, c) for r, c in state.shots_history]
+            fired_line = f"Already fired: {', '.join(fired)}\n" if fired else ""
+            board_msg = {
+                "role": "user",
+                "content": f"\nBoard after your shot:\n{game.board_text(state)}\n{fired_line}",
+            }
             messages.append(board_msg)
 
             # 检查游戏是否结束

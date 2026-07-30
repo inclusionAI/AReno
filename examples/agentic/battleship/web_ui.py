@@ -62,7 +62,8 @@ SYSTEM_PROMPT = (
     "- The fire tool returns: miss (no ship), hit (ship not yet sunk), sunk (ship destroyed).\n"
     "- Do not fire at the same coordinate twice. Do not fire outside A1-H8.\n"
     "- Win by sinking all ships in as few shots as possible.\n"
-    "- The board shows your hits as X, misses as o, and unknown cells as '.'."
+    "- The board shows your hits as X, misses as o, and unknown cells as '.'.\n"
+    "- You also see 'Already fired: ...' listing every coordinate you have fired this game; do not fire any of them again."
 )
 
 
@@ -337,12 +338,16 @@ def _neighbors(cell: tuple[int, int]) -> list[tuple[int, int]]:
 
 def _turn_prompt(state: game.GameState) -> str:
     legal = sorted(game.format_coordinate(r, c) for (r, c) in game.legal_shots(state))
+    # Append the explicit fired-coordinate list so a small untrained model does
+    # not have to parse o/X symbols to avoid repeats.
+    fired = [game.format_coordinate(r, c) for r, c in state.shots_history]
+    fired_line = f"Already fired: {', '.join(fired)}\n" if fired else ""
     return (
         "You are playing Battleship. Sink all hidden ships on the 8x8 grid.\n\n"
         "Legend: X = your hit, o = your miss, . = unknown.\n"
         "Call the fire tool with a coordinate like 'C5'. Do not repeat a cell.\n\n"
         f"Board:\n{game.board_text(state)}\n\n"
-        f"Legal shots remaining: {len(legal)}\n\nYour shot:"
+        f"{fired_line}Legal shots remaining: {len(legal)}\n\nYour shot:"
     )
 
 
