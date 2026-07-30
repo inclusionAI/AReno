@@ -197,15 +197,23 @@ def record_training_stats(writer, stats, step, train_res, train_batch, timings: 
         # Binary verifier rewards conventionally use {0,1}; recording the
         # fraction of strictly-positive rewards approximates pass-rate.
         writer.add_scalar("rollout/accuracy", (rewards > 0).mean(), step)
-    # When reward transform is enabled, trainers may supply pre-transform
-    # rewards as "rewards_raw" so the raw distribution is visible alongside
+    # When reward transform is enabled, trainers supply raw and transformed
+    # reward summary scalars via train_res (merged through _augment_train_stats).
+    # Surface them under rollout/ so the raw distribution is visible alongside
     # the transformed one recorded above.
-    raw_rewards = np.asarray(stats.get("rewards_raw", []), dtype=np.float32)
-    if raw_rewards.size:
-        writer.add_scalar("rollout/rewards_raw_mean", raw_rewards.mean(), step)
-        writer.add_scalar("rollout/rewards_raw_std", raw_rewards.std(), step)
-        writer.add_scalar("rollout/rewards_raw_max", raw_rewards.max(), step)
-        writer.add_scalar("rollout/rewards_raw_min", raw_rewards.min(), step)
+    for _key in ("reward_raw_mean", "reward_raw_std", "reward_raw_min", "reward_raw_max"):
+        _val = train_res.get(_key)
+        if _val is not None:
+            writer.add_scalar(f"rollout/{_key}", _val, step)
+    for _key in (
+        "reward_transformed_mean",
+        "reward_transformed_std",
+        "reward_transformed_min",
+        "reward_transformed_max",
+    ):
+        _val = train_res.get(_key)
+        if _val is not None:
+            writer.add_scalar(f"rollout/{_key}", _val, step)
     if advantages.size:
         writer.add_scalar("rollout/advantages_mean", advantages.mean(), step)
         writer.add_scalar("rollout/advantages_std", advantages.std(), step)

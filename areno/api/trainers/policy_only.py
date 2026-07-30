@@ -171,6 +171,11 @@ class PolicyOnlyTrainer:
     def _augment_train_stats(self, result):
         # Hook for PPO to attach role-specific stats (critic loss, KL,
         # reference forward-time, ...) before they reach the metric recorder.
+        # GSPO/GRPO uses it to surface raw reward distribution stats when
+        # reward transform is enabled.
+        raw_stats = getattr(self, "_reward_raw_stats", None)
+        if raw_stats:
+            result.update(raw_stats)
         return result
 
     def _agentic_enabled(self) -> bool:
@@ -413,6 +418,7 @@ class PolicyOnlyTrainer:
 
         # Optional reward transform (cross-group, before advantage computation).
         mode = getattr(self.config, "reward_transform_mode", "disabled")
+        self._reward_raw_stats = None
         if mode != "disabled":
             raw_summary = reward_distribution_summary(rewards_all)
             rewards_all = transform_rewards(
@@ -423,9 +429,18 @@ class PolicyOnlyTrainer:
                 standardize_eps=getattr(self.config, "reward_standardize_eps", 1e-8),
             )
             transformed_summary = reward_distribution_summary(rewards_all)
+            self._reward_raw_stats = {
+                "reward_raw_mean": raw_summary["mean"] or 0.0,
+                "reward_raw_std": raw_summary["std"] or 0.0,
+                "reward_raw_min": raw_summary["min"] or 0.0,
+                "reward_raw_max": raw_summary["max"] or 0.0,
+                "reward_transformed_mean": transformed_summary["mean"] or 0.0,
+                "reward_transformed_std": transformed_summary["std"] or 0.0,
+                "reward_transformed_min": transformed_summary["min"] or 0.0,
+                "reward_transformed_max": transformed_summary["max"] or 0.0,
+            }
             self.logger.info(
-                "metric=reward_transform mode=%s raw_mean=%.6f raw_std=%.6f "
-                "transformed_mean=%.6f transformed_std=%.6f",
+                "metric=reward_transform mode=%s raw_mean=%.6f raw_std=%.6f transformed_mean=%.6f transformed_std=%.6f",
                 mode,
                 raw_summary["mean"] or 0.0,
                 raw_summary["std"] or 0.0,
@@ -588,6 +603,7 @@ class PolicyOnlyTrainer:
 
         # Step 2: optional reward transform (cross-group, before advantage).
         mode = getattr(self.config, "reward_transform_mode", "disabled")
+        self._reward_raw_stats = None
         if mode != "disabled":
             raw_summary = reward_distribution_summary(rewards_all)
             rewards_all = transform_rewards(
@@ -598,9 +614,18 @@ class PolicyOnlyTrainer:
                 standardize_eps=getattr(self.config, "reward_standardize_eps", 1e-8),
             )
             transformed_summary = reward_distribution_summary(rewards_all)
+            self._reward_raw_stats = {
+                "reward_raw_mean": raw_summary["mean"] or 0.0,
+                "reward_raw_std": raw_summary["std"] or 0.0,
+                "reward_raw_min": raw_summary["min"] or 0.0,
+                "reward_raw_max": raw_summary["max"] or 0.0,
+                "reward_transformed_mean": transformed_summary["mean"] or 0.0,
+                "reward_transformed_std": transformed_summary["std"] or 0.0,
+                "reward_transformed_min": transformed_summary["min"] or 0.0,
+                "reward_transformed_max": transformed_summary["max"] or 0.0,
+            }
             self.logger.info(
-                "metric=reward_transform mode=%s raw_mean=%.6f raw_std=%.6f "
-                "transformed_mean=%.6f transformed_std=%.6f",
+                "metric=reward_transform mode=%s raw_mean=%.6f raw_std=%.6f transformed_mean=%.6f transformed_std=%.6f",
                 mode,
                 raw_summary["mean"] or 0.0,
                 raw_summary["std"] or 0.0,

@@ -319,6 +319,37 @@ in its description; flags for other algorithms are ignored.
 ``--grpo-clip-eps FLOAT``
    GRPO token-ratio clipping epsilon. Default: ``0.2``.
 
+``--reward-transform-mode [disabled|clip|standardize]``
+   Reward transformation applied after ``reward_fn`` scoring and before
+   advantage computation. Default: ``disabled`` (no transformation, preserves
+   existing behavior).
+
+   * ``disabled`` — rewards pass through unchanged.
+   * ``clip`` — clamp each reward to ``[reward-clip-min, reward-clip-max]``.
+     Requires both ``--reward-clip-min`` and ``--reward-clip-max``. NaN inputs
+     raise a ``RewardTransformError`` (stage ``reward_transform.clip``).
+   * ``standardize`` — z-score rewards across the full batch (cross-group)
+     using ``mean(r)`` and ``std(r)``. Empty lists and NaN inputs raise
+     ``RewardTransformError``. Constant-reward batches produce all-zero output
+     via the ``eps`` denominator guard.
+
+``--reward-clip-min FLOAT``
+   Lower bound for ``clip`` mode. Required when mode is ``clip``.
+
+``--reward-clip-max FLOAT``
+   Upper bound for ``clip`` mode. Required when mode is ``clip``.
+
+``--reward-standardize-eps FLOAT``
+   Denominator guard for ``standardize`` mode. Must be > 0. Default: ``1e-8``.
+
+.. note::
+
+   ``standardize`` mode computes mean and std from the local rank's batch
+   only — there is no cross-rank all-reduce. When ``world-size > 1``, each
+   rank standardizes against its own partial batch, so the global statistics
+   are approximate. This is acceptable for reward shaping but may affect
+   reproducibility across different parallelism configurations.
+
 ``--dpo-beta FLOAT``
    DPO preference margin temperature. Default: ``0.1``.
 
@@ -457,6 +488,53 @@ PPO with reward and critic roles
      --algo ppo \
      --tp-size 4 \
      --world-size 8
+
+Reward clipping and standardization
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Clip rewards to ``[-5, 5]`` before advantage computation:
+
+.. code-block:: bash
+
+   areno train \
+     --ckpt Qwen/Qwen3-0.6B \
+     --dataset-path gsm8k:main \
+     --reward-fn-path examples/math/math_verify_reward.py \
+     --algo gspo \
+     --tp-size 1 \
+     --world-size 1 \
+     --reward-transform-mode clip \
+     --reward-clip-min -5.0 \
+     --reward-clip-max 5.0
+
+Standardize rewards across the batch (z-score) before advantage computation:
+
+.. code-block:: bash
+
+   areno train \
+     --ckpt Qwen/Qwen3-0.6B \
+     --dataset-path gsm8k:main \
+     --reward-fn-path examples/math/math_verify_reward.py \
+     --algo gspo \
+     --tp-size 1 \
+     --world-size 1 \
+     --reward-transform-mode standardize
+
+When the transform is enabled, TensorBoard logs both the raw and transformed
+reward distributions under the ``rollout/`` namespace:
+
+* ``rollout/reward_raw_mean``, ``rollout/reward_raw_std``,
+  ``rollout/reward_raw_min``, ``rollout/reward_raw_max``
+* ``rollout/reward_transformed_mean``, ``rollout/reward_transformed_std``,
+  ``rollout/reward_transformed_min``, ``rollout/reward_transformed_max``
+
+The trainer also logs a single line per step:
+``metric=reward_transform mode=<mode> raw_mean=... raw_std=... transformed_mean=... transformed_std=...``.
+
+Invalid inputs (NaN in clip/standardize, empty list in standardize, missing
+clip bounds, or unknown mode) raise a ``RewardTransformError`` with a
+``stage`` field and an ``input_summary`` that identifies the problem without
+exposing full training samples.
 
 Agentic Tic-Tac-Toe
 ~~~~~~~~~~~~~~~~~~~

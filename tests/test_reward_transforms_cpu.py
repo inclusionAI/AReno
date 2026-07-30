@@ -18,7 +18,6 @@ from areno.api.rewards import (
 )
 from areno.api.trainer_config import PolicyTrainerConfig
 
-
 # ---------------------------------------------------------------------------
 # transform_rewards — disabled mode
 # ---------------------------------------------------------------------------
@@ -67,10 +66,12 @@ class ClipModeTest(unittest.TestCase):
         out = transform_rewards([], mode="clip", clip_min=0.0, clip_max=8.0)
         self.assertEqual(out, [])
 
-    def test_clip_nan_passthrough(self):
-        # clip should not raise on NaN; the value passes through.
-        out = transform_rewards([float("nan"), 1.0], mode="clip", clip_min=0.0, clip_max=2.0)
-        self.assertEqual(len(out), 2)
+    def test_clip_nan_raises(self):
+        # clip mode requires finite inputs; NaN must raise a clear error.
+        with self.assertRaises(RewardTransformError) as ctx:
+            transform_rewards([float("nan"), 1.0], mode="clip", clip_min=0.0, clip_max=2.0)
+        self.assertEqual(ctx.exception.stage, "reward_transform.clip")
+        self.assertIn("has_nan=True", ctx.exception.input_summary)
 
 
 # ---------------------------------------------------------------------------
@@ -173,15 +174,11 @@ class ConfigValidationTest(unittest.TestCase):
 
     def test_config_clip_missing_min_raises(self):
         with self.assertRaises(ValueError):
-            PolicyTrainerConfig(
-                **self._base_kwargs(), reward_transform_mode="clip", reward_clip_max=5.0
-            )
+            PolicyTrainerConfig(**self._base_kwargs(), reward_transform_mode="clip", reward_clip_max=5.0)
 
     def test_config_clip_missing_max_raises(self):
         with self.assertRaises(ValueError):
-            PolicyTrainerConfig(
-                **self._base_kwargs(), reward_transform_mode="clip", reward_clip_min=-5.0
-            )
+            PolicyTrainerConfig(**self._base_kwargs(), reward_transform_mode="clip", reward_clip_min=-5.0)
 
     def test_config_clip_min_gt_max_raises(self):
         with self.assertRaises(ValueError):
@@ -194,15 +191,11 @@ class ConfigValidationTest(unittest.TestCase):
 
     def test_config_standardize_eps_zero_raises(self):
         with self.assertRaises(ValueError):
-            PolicyTrainerConfig(
-                **self._base_kwargs(), reward_transform_mode="standardize", reward_standardize_eps=0.0
-            )
+            PolicyTrainerConfig(**self._base_kwargs(), reward_transform_mode="standardize", reward_standardize_eps=0.0)
 
     def test_config_standardize_eps_negative_raises(self):
         with self.assertRaises(ValueError):
-            PolicyTrainerConfig(
-                **self._base_kwargs(), reward_transform_mode="standardize", reward_standardize_eps=-1.0
-            )
+            PolicyTrainerConfig(**self._base_kwargs(), reward_transform_mode="standardize", reward_standardize_eps=-1.0)
 
     def test_config_clip_valid(self):
         config = PolicyTrainerConfig(
@@ -214,9 +207,7 @@ class ConfigValidationTest(unittest.TestCase):
         self.assertEqual(config.reward_transform_mode, "clip")
 
     def test_config_standardize_valid(self):
-        config = PolicyTrainerConfig(
-            **self._base_kwargs(), reward_transform_mode="standardize"
-        )
+        config = PolicyTrainerConfig(**self._base_kwargs(), reward_transform_mode="standardize")
         self.assertEqual(config.reward_transform_mode, "standardize")
 
 

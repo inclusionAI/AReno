@@ -92,9 +92,13 @@ def transform_rewards(
     if mode == "disabled":
         return rewards
     if mode == "clip":
-        # NaN passes through because Python's max/min return the non-NaN
-        # operand only when the comparison is True; NaN comparisons are
-        # always False, so max(min(nan, clip_max), clip_min) yields nan.
+        arr = np.asarray(rewards, dtype=np.float32) if rewards else np.array([], dtype=np.float32)
+        if arr.size and np.isnan(arr).any():
+            raise RewardTransformError(
+                "reward_transform.clip",
+                "reward contains NaN; clip mode requires finite inputs",
+                f"count={len(rewards)},has_nan=True",
+            )
         return [max(clip_min, min(clip_max, r)) for r in rewards]
     if mode == "standardize":
         stage = "reward_transform.standardize"
