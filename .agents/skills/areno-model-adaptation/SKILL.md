@@ -34,7 +34,9 @@ python .agents/skills/areno-model-adaptation/scripts/generate_adapter_scaffold.p
 
 Confirm the inferred dense or MoE choice and dimensions. The generated model
 and checkpoint mapping are placeholders; do not treat successful generation as
-adaptation evidence.
+adaptation evidence. Generated forward methods preserve AReno's activation
+checkpoint metadata, but model-specific lifecycle hooks, checkpoint keys, and
+MoE routing still require review and validation through the gated phases below.
 
 ## Gated phases
 

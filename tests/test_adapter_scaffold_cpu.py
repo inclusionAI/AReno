@@ -146,9 +146,33 @@ class TestInferConfig(unittest.TestCase):
         config = infer_config(path, "mymodel", "/tmp/mymodel")
         self.assertTrue(config.is_moe)
 
+    def test_moe_common_aliases_are_supported(self):
+        cfg = {
+            **_DENSE_CONFIG,
+            "architectures": ["AliasModelForCausalLM"],
+            "num_local_experts": 16,
+            "num_selected_experts": 4,
+            "moe_intermediate_size": 1024,
+        }
+        path = _write_hf_config(self.tmpdir, cfg)
+        config = infer_config(path, "alias_model", "/tmp/alias-model")
+        self.assertTrue(config.is_moe)
+        self.assertEqual(config.num_experts, 16)
+        self.assertEqual(config.num_experts_per_tok, 4)
+        self.assertEqual(config.moe_intermediate_size, 1024)
+
+    def test_architectures_must_contain_strings(self):
+        path = _write_hf_config(self.tmpdir, {**_DENSE_CONFIG, "architectures": [None]})
+        with self.assertRaisesRegex(ValueError, "architectures.*strings"):
+            infer_config(path, "test", "/tmp/test")
+
     def test_file_not_found(self):
         with self.assertRaises(FileNotFoundError):
             infer_config("/nonexistent/config.json", "test", "/tmp/test")
+
+    def test_config_path_must_be_a_file(self):
+        with self.assertRaisesRegex(ValueError, "not a file"):
+            infer_config(str(self.tmpdir), "test", "/tmp/test")
 
     def test_missing_model_type(self):
         path = _write_hf_config(self.tmpdir, {"hidden_size": 1024})
@@ -245,6 +269,9 @@ class TestDenseScaffold(unittest.TestCase):
         content = (self.dest_dir / "model.py").read_text(encoding="utf-8")
         self.assertIn("mydense", content)
         self.assertIn("MydenseAdapter", content)
+        self.assertIn("train_meta=train_meta", content)
+        self.assertIn("infer_meta=infer_meta", content)
+        self.assertIn("if position_ids is None:", content)
 
     def test_checkpoint_py_contains_placeholders(self):
         generate_scaffold(self.config)
@@ -323,6 +350,8 @@ class TestMoEScaffold(unittest.TestCase):
         content = (self.dest_dir / "model_moe.py").read_text(encoding="utf-8")
         self.assertIn("enable_moe_block", content)
         self.assertIn("num_experts", content)
+        self.assertIn("moe_intermediate_size", content)
+        self.assertIn("train_meta=train_meta", content)
 
     def test_checkpoint_contains_moe_note(self):
         generate_scaffold(self.config)
@@ -403,6 +432,20 @@ class TestRerunSafety(unittest.TestCase):
         result = generate_scaffold(self.config, overwrite=True)
         self.assertIn("model.py", result.conflicted_files)
         self.assertEqual(outside.read_text(encoding="utf-8"), "# outside\n")
+
+    def test_destination_parent_symlink_is_rejected(self):
+        outside = self.tmpdir / "outside"
+        outside.mkdir()
+        linked_parent = self.tmpdir / "linked"
+        try:
+            linked_parent.symlink_to(outside, target_is_directory=True)
+        except OSError as exc:
+            self.skipTest(f"symlinks unavailable: {exc}")
+        config = infer_config(self.config_path, "mydense", str(linked_parent / "adapter"))
+
+        with self.assertRaisesRegex(ValueError, "symbolic links"):
+            generate_scaffold(config)
+        self.assertFalse((outside / "adapter").exists())
 
 
 # ---------------------------------------------------------------------------
@@ -585,6 +628,8 @@ class TestCLI(unittest.TestCase):
         self.assertEqual(ret, 0)
         payload = json.loads(output.getvalue())
         self.assertIn("model.py", payload["created_files"])
+        self.assertEqual(payload["config"]["scaffold_type"], "dense")
+        self.assertEqual(payload["config"]["model_type"], "mydense")
 
     def test_generation_result_to_dict(self):
         """GenerationResult.to_dict should return all fields."""

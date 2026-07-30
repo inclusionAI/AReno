@@ -79,6 +79,28 @@ class AdapterConfig:
     vocab_size: int = 0
     num_experts: int | None = None
     num_experts_per_tok: int | None = None
+    moe_intermediate_size: int | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return the inferred choices in a stable machine-readable form."""
+
+        return {
+            "adapter_name": self.adapter_name,
+            "model_type": self.model_type,
+            "scaffold_type": "moe" if self.is_moe else "dense",
+            "class_name": self.class_name,
+            "hf_config_path": self.hf_config_path,
+            "dest_dir": self.dest_dir,
+            "hidden_size": self.hidden_size,
+            "num_hidden_layers": self.num_hidden_layers,
+            "num_attention_heads": self.num_attention_heads,
+            "num_key_value_heads": self.num_key_value_heads,
+            "intermediate_size": self.intermediate_size,
+            "vocab_size": self.vocab_size,
+            "num_experts": self.num_experts,
+            "num_experts_per_tok": self.num_experts_per_tok,
+            "moe_intermediate_size": self.moe_intermediate_size,
+        }
 
 
 @dataclass
@@ -144,6 +166,8 @@ def infer_config(
     path = Path(hf_config_path)
     if not path.exists():
         raise FileNotFoundError(f"Config file not found: {hf_config_path}")
+    if not path.is_file():
+        raise ValueError(f"Config path is not a file: {hf_config_path}")
 
     with path.open("r", encoding="utf-8") as f:
         hf_config = json.load(f)
@@ -179,9 +203,20 @@ def infer_config(
 
     num_experts = None
     num_experts_per_tok = None
+    moe_intermediate_size = None
     if is_moe:
-        num_experts = _positive_int(hf_config, "num_experts")
-        num_experts_per_tok = _positive_int(hf_config, "num_experts_per_tok")
+        num_experts = _positive_int_from_aliases(
+            hf_config,
+            ("num_experts", "num_local_experts", "n_routed_experts"),
+        )
+        num_experts_per_tok = _positive_int_from_aliases(
+            hf_config,
+            ("num_experts_per_tok", "num_selected_experts", "num_experts_per_token"),
+        )
+        moe_intermediate_size = _positive_int_from_aliases(
+            hf_config,
+            ("moe_intermediate_size", "intermediate_size"),
+        )
         if num_experts_per_tok > num_experts:
             raise ValueError("num_experts_per_tok must not exceed num_experts")
 
@@ -202,6 +237,7 @@ def infer_config(
         vocab_size=vocab_size,
         num_experts=num_experts,
         num_experts_per_tok=num_experts_per_tok,
+        moe_intermediate_size=moe_intermediate_size,
     )
 
 
@@ -227,16 +263,31 @@ def _positive_int(
 def _detect_moe(hf_config: dict[str, Any]) -> bool:
     """Detect whether a HF config describes a MoE model."""
 
-    if hf_config.get("num_experts"):
+    if any(hf_config.get(key) for key in ("num_experts", "num_local_experts", "n_routed_experts")):
         return True
     if hf_config.get("moe_intermediate_size"):
         return True
     archs = hf_config.get("architectures", [])
-    if isinstance(archs, list):
-        for arch in archs:
-            if "moe" in arch.lower() or "MoE" in arch:
-                return True
+    if archs is None:
+        archs = []
+    if not isinstance(archs, list):
+        raise ValueError("Config field 'architectures' must be a list when present")
+    for arch in archs:
+        if not isinstance(arch, str):
+            raise ValueError("Config field 'architectures' must contain only strings")
+        if "moe" in arch.lower():
+            return True
     return False
+
+
+def _positive_int_from_aliases(config: dict[str, Any], keys: tuple[str, ...]) -> int:
+    """Read the first present positive integer from equivalent HF fields."""
+
+    for key in keys:
+        if config.get(key) is not None:
+            return _positive_int(config, key)
+    joined = ", ".join(repr(key) for key in keys)
+    raise ValueError(f"Config must define one of {joined} as a positive integer")
 
 
 def _to_pascal_case(name: str) -> str:
@@ -360,10 +411,18 @@ class {config.class_name.replace("Adapter", "ForCausalLM")}(nn.Module):
         train_meta: TrainMeta | None = None,
         infer_meta: InferMeta | None = None,
     ) -> CausalLMOutput:
+        if position_ids is None:
+            position_ids = torch.arange(input_ids.shape[1], device=input_ids.device).unsqueeze(0).expand_as(input_ids)
         hidden_states = self.embed_tokens(input_ids)
         for layer in self.layers:
             hidden_states = checkpoint_layer(
-                layer, hidden_states, position_ids, train_meta, infer_meta
+                layer,
+                hidden_states,
+                position_ids,
+                train_meta,
+                infer_meta,
+                train_meta=train_meta,
+                infer_meta=infer_meta,
             )
         hidden_states = self.norm(hidden_states)
         logits = self.lm_head(hidden_states)
@@ -484,10 +543,18 @@ class {config.class_name.replace("Adapter", "ForCausalLM")}(nn.Module):
         train_meta: TrainMeta | None = None,
         infer_meta: InferMeta | None = None,
     ) -> CausalLMOutput:
+        if position_ids is None:
+            position_ids = torch.arange(input_ids.shape[1], device=input_ids.device).unsqueeze(0).expand_as(input_ids)
         hidden_states = self.embed_tokens(input_ids)
         for layer in self.layers:
             hidden_states = checkpoint_layer(
-                layer, hidden_states, position_ids, train_meta, infer_meta
+                layer,
+                hidden_states,
+                position_ids,
+                train_meta,
+                infer_meta,
+                train_meta=train_meta,
+                infer_meta=infer_meta,
             )
         hidden_states = self.norm(hidden_states)
         logits = self.lm_head(hidden_states)
@@ -516,8 +583,24 @@ class {config.class_name}(ModelAdapter):
             rope_theta=float(hf_config.get("rope_theta", 1e6)),
             dtype=_parse_dtype(hf_config.get("torch_dtype", "bfloat16")),
             enable_moe_block=True,
-            num_experts=int(hf_config.get("num_experts", {config.num_experts or 0})),
-            num_experts_per_tok=int(hf_config.get("num_experts_per_tok", {config.num_experts_per_tok or 1})),
+            num_experts=int(
+                hf_config.get(
+                    "num_experts",
+                    hf_config.get("num_local_experts", hf_config.get("n_routed_experts", {config.num_experts or 0})),
+                )
+            ),
+            num_experts_per_tok=int(
+                hf_config.get(
+                    "num_experts_per_tok",
+                    hf_config.get(
+                        "num_selected_experts",
+                        hf_config.get("num_experts_per_token", {config.num_experts_per_tok or 1}),
+                    ),
+                )
+            ),
+            moe_intermediate_size=int(
+                hf_config.get("moe_intermediate_size", {config.moe_intermediate_size or config.intermediate_size})
+            ),
         )
 
     def build(self, config: ModelConfig) -> nn.Module:
@@ -723,6 +806,17 @@ def _is_generated(path: Path) -> bool:
         return False
 
 
+def _validate_destination_path(dest: Path) -> None:
+    """Reject a destination whose existing path components contain symlinks."""
+
+    absolute = dest if dest.is_absolute() else Path.cwd() / dest
+    current = Path(absolute.anchor)
+    for part in absolute.parts[1:]:
+        current /= part
+        if current.is_symlink():
+            raise ValueError(f"Destination path must not contain symbolic links: {current}")
+
+
 def generate_scaffold(
     config: AdapterConfig,
     *,
@@ -749,8 +843,7 @@ def generate_scaffold(
 
     if dest.exists() and not dest.is_dir():
         raise ValueError(f"Destination exists and is not a directory: {dest}")
-    if dest.is_symlink():
-        raise ValueError(f"Destination must not be a symbolic link: {dest}")
+    _validate_destination_path(dest)
 
     # Create destination directory.
     dest.mkdir(parents=True, exist_ok=True)
@@ -890,7 +983,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Error: {exc}", file=sys.stderr)
         return 1
     if args.json:
-        print(json.dumps(result.to_dict(), indent=2))
+        print(json.dumps({"config": config.to_dict(), **result.to_dict()}, indent=2))
     else:
         print(format_result(result))
     return 0
