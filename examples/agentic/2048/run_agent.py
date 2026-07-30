@@ -59,12 +59,19 @@ async def run_agent(ctx, batch):
 
     items = list(batch.iter_samples())
     logger.info("2048 agent start requests=%d max_running_prompts=%d", len(items), ctx.max_running_prompts)
-    max_connections = max(len(items), ctx.max_running_prompts)
+    # Limit concurrent HTTP requests to avoid overwhelming the engine's
+    # single-file command queue.  Without this, the asyncio.gather below
+    # submits *all* requests at once; the proxy/engine serialises them, and
+    # the worker refill logic can lose/defer responses, causing a permanent
+    # hang.  8 is a safe default that keeps the GPU fed without saturation.
+    max_concurrent = min(ctx.max_running_prompts, 8)
+    max_connections = max(max_concurrent, ctx.max_running_prompts)
     http_client = httpx.AsyncClient(
         limits=httpx.Limits(max_connections=max_connections, max_keepalive_connections=max_connections),
         timeout=httpx.Timeout(900.0, connect=30.0),
     )
     client = AsyncOpenAI(base_url=ctx.get_base_url(), api_key=ctx.api_key, http_client=http_client, max_retries=0)
+    semaphore = asyncio.Semaphore(max_concurrent)
 
     async def run_one(item):
         messages = [
@@ -72,13 +79,14 @@ async def run_agent(ctx, batch):
             {"role": "user", "content": item.prompt},
         ]
         tool_choice = {"type": "function", "function": {"name": "choose_moves"}}
-        response = await client.chat.completions.create(
-            model="policy",
-            messages=messages,
-            tools=[CHOOSE_MOVES_TOOL],
-            tool_choice=tool_choice,
-            stream=False,
-        )
+        async with semaphore:
+            response = await client.chat.completions.create(
+                model="policy",
+                messages=messages,
+                tools=[CHOOSE_MOVES_TOOL],
+                tool_choice=tool_choice,
+                stream=False,
+            )
         return AgentTrajectoryTurn(
             item=item,
             messages=messages,
