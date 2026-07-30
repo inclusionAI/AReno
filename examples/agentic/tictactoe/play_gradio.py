@@ -33,11 +33,12 @@ status_box: gr.Markdown | None = None
 State = dict  # board, finished, message
 
 
-def board_to_grid(board: game.Board) -> list[list[str]]:
-    """Convert internal board to display strings (empty -> "")."""
+def board_to_flat(board: game.Board) -> list[str]:
+    """Convert internal board to 9 flat display strings (empty -> "")."""
     return [
-        ["" if cell == EMPTY else ("❌" if cell == "X" else "⭕") for cell in row]
+        "" if cell == EMPTY else ("❌" if cell == "X" else "⭕")
         for row in board
+        for cell in row
     ]
 
 
@@ -71,19 +72,19 @@ def on_cell_click(row: int, col: int, state: State) -> tuple:
     finished: bool = state["finished"]
 
     if finished:
-        return state, state["message"], *board_to_grid(board)
+        return state, state["message"], *board_to_flat(board)
 
     square = row * 3 + col + 1
 
     # ── Human move ──
     if square not in game.legal_moves(board):
-        return state, "⚠️ 该位置已被占用！", *board_to_grid(board)
+        return state, "⚠️ 该位置已被占用！", *board_to_flat(board)
 
     board = game.apply_move(board, square, HUMAN)
     result = check_result(board)
     if result:
         state.update(board=board, finished=True, message=result)
-        return state, result, *board_to_grid(board)
+        return state, result, *board_to_flat(board)
 
     # ── Model move ──
     move = model_move(board)
@@ -95,17 +96,17 @@ def on_cell_click(row: int, col: int, state: State) -> tuple:
     result = check_result(board)
     if result:
         state.update(board=board, finished=True, message=result)
-        return state, result, *board_to_grid(board)
+        return state, result, *board_to_flat(board)
 
     state.update(board=board, finished=False, message="你的回合，请落子 ⭕")
-    return state, "你的回合，请落子 ⭕", *board_to_grid(board)
+    return state, "你的回合，请落子 ⭕", *board_to_flat(board)
 
 
 def reset_game() -> tuple:
     """Reset to a fresh board."""
     board = [[EMPTY] * 3 for _ in range(3)]
     state = {"board": board, "finished": False, "message": "新对局开始！你执 ⭕，模型执 ❌"}
-    return state, state["message"], *board_to_grid(board)
+    return state, state["message"], *board_to_flat(board)
 
 
 def build_ui() -> gr.Blocks:
