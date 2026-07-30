@@ -15,6 +15,28 @@ from areno.api.agentic import AgentTrajectory, AgentTrajectoryTurn
 logger = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
+# Per-sample strategy hints to break symmetry across n_samples.
+# Each sample in a prompt group gets a different hint, so they explore
+# different first moves → different scores → non-zero advantages.
+EXPLORATION_HINTS = [
+    "Try starting with a left move to consolidate the row.",
+    "Try starting with a right move to push tiles rightward.",
+    "Try starting with an up move to merge tiles upward.",
+    "Try starting with a down move to bring tiles down.",
+    "Try an aggressive strategy: make big merges early.",
+    "Try a conservative strategy: keep the board tidy.",
+    "Try focusing on keeping the largest tile in a corner.",
+    "Try building chains: left, down, left, down.",
+    "Always call choose_moves with at least one direction.",
+    "Plan 3-5 moves ahead: look for tiles that can chain.",
+    "Prioritize merging the largest tile with a neighbour.",
+    "Try clearing one row at a time before shifting rows.",
+    "Try alternating direction to bunch tiles together.",
+    "Try moving away from the largest tile to open space.",
+    "Try building toward one corner to keep the board tight.",
+    "Watch for adjacent equal tiles and merge them first.",
+]
+
 SYSTEM_PROMPT = (
     "You are an expert 2048 player. "
     "Choose a sequence of legal directions by calling the choose_moves tool. "
@@ -74,9 +96,11 @@ async def run_agent(ctx, batch):
     semaphore = asyncio.Semaphore(max_concurrent)
 
     async def run_one(item):
+        hint = EXPLORATION_HINTS[item.sample_index % len(EXPLORATION_HINTS)]
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": item.prompt},
+            {"role": "assistant", "content": hint},
         ]
         tool_choice = {"type": "function", "function": {"name": "choose_moves"}}
         async with semaphore:
