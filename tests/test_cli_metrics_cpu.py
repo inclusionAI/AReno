@@ -143,6 +143,43 @@ class CliMetricsTest(unittest.TestCase):
         self.assertEqual(parsed["count"], 10)
         self.assertEqual(parsed["last_step"], 99)
 
+    def test_limit_zero_returns_one_point(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _write_test_events(tmp, tags={"train/loss": [(0, 1.0), (1, 0.5), (2, 0.25)]})
+            result = CliRunner().invoke(
+                main, ["metrics", "--log-dir", tmp, "--name", "train/loss", "--limit", "0", "--json"]
+            )
+
+        self.assertEqual(result.exit_code, 0)
+        parsed = json.loads(result.output)
+        # limit=0 is clamped to max(1, 0) = 1
+        self.assertEqual(parsed["count"], 1)
+
+    def test_limit_negative_returns_one_point(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _write_test_events(tmp, tags={"train/loss": [(0, 1.0), (1, 0.5), (2, 0.25)]})
+            result = CliRunner().invoke(
+                main, ["metrics", "--log-dir", tmp, "--name", "train/loss", "--limit", "-1", "--json"]
+            )
+
+        self.assertEqual(result.exit_code, 0)
+        parsed = json.loads(result.output)
+        # limit=-1 is clamped to max(1, -1) = 1
+        self.assertEqual(parsed["count"], 1)
+
+    def test_limit_exceeds_cap_returns_all(self):
+        points = [(i, float(i)) for i in range(100)]
+        with tempfile.TemporaryDirectory() as tmp:
+            _write_test_events(tmp, tags={"train/loss": points})
+            result = CliRunner().invoke(
+                main, ["metrics", "--log-dir", tmp, "--name", "train/loss", "--limit", "99999", "--json"]
+            )
+
+        self.assertEqual(result.exit_code, 0)
+        parsed = json.loads(result.output)
+        # limit=99999 is capped to min(99999, 10000) = 10000, but only 100 points exist
+        self.assertEqual(parsed["count"], 100)
+
     def test_sparkline_renders_for_constant_values(self):
         self.assertEqual(metrics_module._sparkline([5.0, 5.0, 5.0]), "___")
 
