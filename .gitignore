@@ -73,3 +73,8 @@ Thumbs.db
 # Environment / secrets
 .env
 .env.*
+
+# Local-only design / review notes (generated during the composite-reward
+# review; kept on disk for reference but not tracked in the repo).
+docs/rewards_module_design.md
+docs/REVIEW-组合奖励函数-CodeReview-CN.md
