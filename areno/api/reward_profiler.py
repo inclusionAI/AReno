@@ -7,13 +7,11 @@ absolute threshold, and enforces an optional per-batch wall-clock timeout.
 When disabled (the default), ``score_batch`` degrades to a plain list
 comprehension with zero ``perf_counter`` or dict-allocation overhead.
 
-Thread-safety: when profiling is enabled and a ``batch_timeout_s`` is set,
-each sample is executed inside a ``ThreadPoolExecutor`` thread so the
-caller can enforce the timeout via ``future.result(timeout=...)``.  User
-``reward_fn`` implementations must therefore be thread-safe.  Pure
-computation reward functions (text parsing, scoring) are naturally safe;
-functions with side effects (file I/O, global-state mutation) must be
-made safe by the user.
+Timeout semantics: the timeout is **soft** — the elapsed wall-clock is
+checked before each sample, and ``RewardTimeoutError`` is raised if the
+budget is exhausted.  ``reward_fn`` always executes on the main thread
+(not in a ``ThreadPoolExecutor``) so that reward functions using
+``signal.alarm()`` (e.g. ``math_verify``) work correctly.
 """
 
 from __future__ import annotations
@@ -21,7 +19,6 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from dataclasses import dataclass
 
 from areno.api.rewards import RewardRecord
@@ -113,6 +110,9 @@ class RewardBatchProfile:
 class RewardProfiler:
     """Wraps a reward_fn with per-sample timing, slow-sample flagging, and per-batch timeout.
 
+    ``reward_fn`` always runs on the main thread (no ``ThreadPoolExecutor``)
+    so that reward functions using ``signal`` (e.g. ``math_verify``) work.
+
     Parameters
     ----------
     reward_fn:
@@ -125,10 +125,10 @@ class RewardProfiler:
         ``>=`` this value are added to ``slow_samples``.  ``None`` disables
         slow-sample flagging.
     batch_timeout_s:
-        Per-batch wall-clock budget in seconds.  If the cumulative time of
-        all samples exceeds this value, a ``RewardTimeoutError`` is raised
-        immediately with the current sample's identifier.  ``None`` disables
-        the timeout.
+        Per-batch wall-clock budget in seconds.  Checked before each sample;
+        if exhausted, ``RewardTimeoutError`` is raised.  This is a soft
+        timeout — a single long-running sample cannot be interrupted
+        mid-execution.  ``None`` disables the timeout.
     logger:
         Optional ``logging.Logger`` for slow-sample and timeout warnings.
     """
@@ -162,6 +162,15 @@ class RewardProfiler:
 
         Returns ``(rewards, profile)``.  When disabled, ``profile`` is
         ``None`` and no timing is performed.
+
+        Timeout enforcement: when ``batch_timeout_s`` is set, the elapsed
+        wall-clock is checked **before** each sample.  If the budget is
+        exhausted, ``RewardTimeoutError`` is raised immediately.  This is
+        a **soft** timeout — it cannot interrupt a single sample mid-
+        execution.  This is intentional: many reward functions (e.g.
+        ``math_verify``) use ``signal.alarm()`` which only works in the
+        main thread, so the profiler must execute ``reward_fn`` on the
+        main thread rather than in a ``ThreadPoolExecutor``.
         """
 
         if not self._enabled:
@@ -174,75 +183,35 @@ class RewardProfiler:
         timeout_count = 0
         use_timeout = self._batch_timeout_s is not None
 
-        executor = ThreadPoolExecutor(max_workers=1) if use_timeout else None
-        try:
-            for record in records:
-                prompt_index = record.metadata.get("prompt_index")
-                sample_index = record.metadata.get("sample_index")
+        for record in records:
+            prompt_index = record.metadata.get("prompt_index")
+            sample_index = record.metadata.get("sample_index")
 
-                if use_timeout:
-                    assert executor is not None
-                    remaining = self._batch_timeout_s - (time.perf_counter() - batch_start)  # type: ignore[operator]
-                    if remaining <= 0:
-                        elapsed = time.perf_counter() - batch_start
-                        raise RewardTimeoutError(
-                            REWARD_HOOK_NAME, prompt_index, sample_index, elapsed
-                        )
-
-                    call_start = time.perf_counter()
-                    future = executor.submit(self._reward_fn, record)
-                    try:
-                        result_val = future.result(timeout=remaining)
-                    except FutureTimeout:
-                        call_duration = time.perf_counter() - call_start
-                        timeout_count += 1
-                        timings.append(
-                            RewardSampleTiming(
-                                prompt_index=prompt_index,
-                                sample_index=sample_index,
-                                duration_s=call_duration,
-                                timed_out=True,
-                            )
-                        )
-                        elapsed = time.perf_counter() - batch_start
-                        raise RewardTimeoutError(
-                            REWARD_HOOK_NAME, prompt_index, sample_index, elapsed
-                        ) from None
-                    except Exception:
-                        call_duration = time.perf_counter() - call_start
-                        timings.append(
-                            RewardSampleTiming(
-                                prompt_index=prompt_index,
-                                sample_index=sample_index,
-                                duration_s=call_duration,
-                            )
-                        )
-                        raise
-
-                    call_duration = time.perf_counter() - call_start
-                    rewards.append(float(result_val))
-                    timings.append(
-                        RewardSampleTiming(
-                            prompt_index=prompt_index,
-                            sample_index=sample_index,
-                            duration_s=call_duration,
-                        )
+            # Check remaining budget before each sample (soft timeout).
+            if use_timeout:
+                elapsed_so_far = time.perf_counter() - batch_start
+                if elapsed_so_far >= self._batch_timeout_s:  # type: ignore[operator]
+                    timeout_count += 1
+                    raise RewardTimeoutError(
+                        REWARD_HOOK_NAME, prompt_index, sample_index, elapsed_so_far
                     )
-                else:
-                    call_start = time.perf_counter()
-                    result_val = float(self._reward_fn(record))
-                    call_duration = time.perf_counter() - call_start
-                    rewards.append(result_val)
-                    timings.append(
-                        RewardSampleTiming(
-                            prompt_index=prompt_index,
-                            sample_index=sample_index,
-                            duration_s=call_duration,
-                        )
-                    )
-        finally:
-            if executor is not None:
-                executor.shutdown(wait=False)
+
+            call_start = time.perf_counter()
+            result_val = float(self._reward_fn(record))
+            call_duration = time.perf_counter() - call_start
+
+            rewards.append(result_val)
+            timings.append(
+                RewardSampleTiming(
+                    prompt_index=prompt_index,
+                    sample_index=sample_index,
+                    duration_s=call_duration,
+                )
+            )
+
+            # Also check after each sample — if this sample was slow
+            # enough to exhaust the budget, the next iteration's pre-check
+            # will catch it.
 
         total_s = time.perf_counter() - batch_start
         slow_samples = self._flag_slow(timings)

@@ -97,15 +97,20 @@ class SlowSampleDetectionTest(unittest.TestCase):
 
 
 class BatchTimeoutTest(unittest.TestCase):
-    """Per-batch wall-clock timeout enforcement via ThreadPoolExecutor."""
+    """Per-batch wall-clock timeout enforcement (soft, main-thread)."""
 
     def test_batch_timeout_raises_with_identifiers(self):
-        """Timeout must raise RewardTimeoutError with hook name and sample index."""
+        """Timeout must raise RewardTimeoutError with hook name and sample index.
+
+        Uses a slow first sample to exhaust the budget; the timeout is
+        checked before the second sample, raising with the second sample's
+        identifier.
+        """
 
         profiler = RewardProfiler(
-            _slow_at_index(0, delay_s=5.0), enabled=True, batch_timeout_s=0.01
+            _slow_at_index(0, delay_s=0.06), enabled=True, batch_timeout_s=0.05
         )
-        records = _make_records(2)
+        records = _make_records(4)
         with self.assertRaises(RewardTimeoutError) as ctx:
             profiler.score_batch(records)
 
@@ -219,7 +224,7 @@ class HookNameOutputTest(unittest.TestCase):
         """RewardTimeoutError repr and jsonl records must contain the hook name."""
 
         profiler = RewardProfiler(
-            _slow_at_index(0, delay_s=5.0), enabled=True, batch_timeout_s=0.01
+            _slow_at_index(0, delay_s=0.06), enabled=True, batch_timeout_s=0.05
         )
         records = _make_records(2)
         with self.assertRaises(RewardTimeoutError) as ctx:
