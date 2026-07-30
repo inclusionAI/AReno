@@ -86,9 +86,21 @@ means an invalid operation (e.g., division by zero, number not in the list).
 The `game.py` module provides:
 
 - `random_baseline_score()`: average reward of a random policy
-- `evaluate_moves()`: aggregate metrics (exact-solve rate, invalid-action rate, mean reward)
-- `oracle_solve()`: best achievable score for a puzzle
+- `evaluate_moves()`: aggregate metrics including:
+  - `exact_solve_rate`: fraction of moves that exactly hit the target
+  - `invalid_action_rate`: fraction of moves with invalid operation or unavailable numbers
+  - `mean_reward` / `best_reward`: average and best reward across all moves
+  - `excess_steps`: extra steps the policy took beyond the oracle solver (0 for a single correct move; >0 when the policy wastes additional steps)
+- `oracle_solve()`: best achievable score for a puzzle (always 1 step in single-step Countdown)
 - `format_trace()`: human-readable trace of a single move
+
+## Fixture difficulty
+
+| Level | Numbers | Solvable | Notes |
+|---|---|---|---|
+| Easy | 2 | Always exactly solvable | Simple addition/subtraction |
+| Medium | 4–5 | Always exactly solvable | Requires choosing the right pair |
+| Hard | 6 | Not guaranteed exactly solvable | Large targets; best move may only approximate |
 
 ## Tests
 

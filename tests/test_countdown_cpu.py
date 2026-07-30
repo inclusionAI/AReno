@@ -151,8 +151,19 @@ class EvaluateMovesTest(unittest.TestCase):
         moves = [(1, 5, "+")]
         metrics = game.evaluate_moves([1, 5], 6, moves)
         for field in ["total", "exact_solves", "invalid_actions", "valid_actions",
-                       "exact_solve_rate", "invalid_action_rate", "mean_reward", "best_reward"]:
+                       "exact_solve_rate", "invalid_action_rate", "mean_reward", "best_reward",
+                       "excess_steps"]:
             self.assertIn(field, metrics)
+
+    def test_excess_steps_single_move_is_zero(self):
+        """One policy move matches the oracle's single step — excess = 0."""
+        metrics = game.evaluate_moves([1, 5], 6, [(1, 5, "+")])
+        self.assertEqual(metrics["excess_steps"], 0)
+
+    def test_excess_steps_multiple_moves(self):
+        """Two policy moves means 1 excess step beyond the oracle."""
+        metrics = game.evaluate_moves([1, 5], 6, [(1, 5, "+"), (1, 5, "*")])
+        self.assertEqual(metrics["excess_steps"], 1)
 
 
 class OracleSolverTest(unittest.TestCase):
@@ -187,12 +198,22 @@ class FixtureTest(unittest.TestCase):
             self.assertEqual(score, 1.0, f"Medium fixture {record['id']} should be exactly solvable")
 
     def test_hard_fixtures_load(self):
+        """Hard fixtures are not guaranteed exactly solvable (large targets,
+        6 numbers), but every puzzle must have at least one legal move
+        that yields a positive (non-invalid) score."""
         records = self._load_fixture("hard.jsonl")
         self.assertGreater(len(records), 0)
         for record in records:
             self.assertIn("numbers", record)
             self.assertIn("target", record)
             self.assertGreater(len(record["numbers"]), 0)
+            # Hard puzzles may not be exactly solvable, but the oracle
+            # should still find at least one legal move (score > -1.0).
+            oracle = game.oracle_solve(record["numbers"], record["target"])
+            self.assertGreater(
+                oracle, -1.0,
+                f"Hard fixture {record['id']} should have at least one legal move",
+            )
 
     def test_easy_beats_random_baseline(self):
         """Oracle score should be >= random baseline on easy fixtures."""

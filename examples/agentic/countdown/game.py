@@ -259,6 +259,12 @@ def evaluate_moves(
     - ``invalid_action_rate``: invalid_actions / total
     - ``mean_reward``: average reward across all moves
     - ``best_reward``: best reward across all moves
+    - ``excess_steps``: extra steps the policy took beyond the oracle solver.
+      For single-step Countdown the oracle always uses exactly one move,
+      so ``excess_steps`` is ``max(0, actual_steps - 1)``.  Since each entry
+      in *moves* represents one policy step, ``excess_steps`` equals
+      ``max(0, len(moves) - 1)`` — 0 when the policy makes a single move,
+      >0 when it wastes additional steps.
     """
 
     total = len(moves)
@@ -286,6 +292,9 @@ def evaluate_moves(
         "invalid_action_rate": invalid / total if total else 0.0,
         "mean_reward": sum(rewards) / len(rewards) if rewards else 0.0,
         "best_reward": max(rewards) if rewards else 0.0,
+        # Oracle solver always uses exactly 1 step in single-step Countdown.
+        # excess_steps measures how many extra moves the policy wasted.
+        "excess_steps": max(0, total - 1),
     }
 
 
