@@ -69,9 +69,7 @@ class TrainerConfig:
         if self.model_hub not in {"hf", "modelscope"}:
             raise ValueError("model_hub must be one of: hf, modelscope")
         if self.trainable_turns not in {"all_assistant", "last_assistant", "final_answer"}:
-            raise ValueError(
-                "trainable_turns must be one of: all_assistant, last_assistant, final_answer"
-            )
+            raise ValueError("trainable_turns must be one of: all_assistant, last_assistant, final_answer")
 
     def optimizer_config(self) -> dict:
         """Build the optimizer dict consumed by the backend config."""

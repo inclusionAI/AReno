@@ -1458,7 +1458,7 @@ def test_rollout_log_records_active_mode_and_mask_state(caplog):
     policy = session._loss_mask_policy
     assert policy.trainable_turns == "last_assistant"
     assert policy.mask_tool_call_args is True
-    #exercise the row builder to ensure no error and metrics flow
+    # exercise the row builder to ensure no error and metrics flow
     rows = session._train_rows_from_samples([sample])
     assert rows.trainable_tokens == 1
     # The policy_only trainer log format is verified structurally in policy_only._run_agentic_rollout;

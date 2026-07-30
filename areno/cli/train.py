@@ -797,8 +797,8 @@ def _trainer_config_from_args(args) -> TrainerConfig:
         agent_fn=args.agent_fn,
         agent_timeout_s=args.agent_timeout_s,
         train_tool_results=args.train_tool_results,
-            trainable_turns=args.trainable_turns,
-            mask_tool_call_args=args.mask_tool_call_args,
+        trainable_turns=args.trainable_turns,
+        mask_tool_call_args=args.mask_tool_call_args,
         chat_template_enable_thinking=chat_template_enable_thinking,
     )
 

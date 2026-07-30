@@ -99,7 +99,9 @@ def main() -> None:
     # Illegal input: a mid-trajectory tool call whose result never arrives.
     from areno.api.agentic import RewardEvent
 
-    bad = _spanned_sample([10, 11, 20], [ResponseSpan("assistant_tool_call", 1), ResponseSpan("assistant_text", 2)], [True] * 3)
+    bad = _spanned_sample(
+        [10, 11, 20], [ResponseSpan("assistant_tool_call", 1), ResponseSpan("assistant_text", 2)], [True] * 3
+    )
     bad.trace = [
         RewardEvent(type="assistant_tool_call", name="search", arguments="{}"),
         RewardEvent(type="assistant_text", text="ok"),

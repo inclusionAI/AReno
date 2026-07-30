@@ -447,9 +447,7 @@ class RolloutSession:
             if tokenizer is not None:
                 for (start, end), span in zip(offsets, spans, strict=True):
                     if span.kind == "assistant_tool_call" and end > start:
-                        arg_range = _tool_call_arg_token_range(
-                            tokenizer, sample.response_tokens[start:end]
-                        )
+                        arg_range = _tool_call_arg_token_range(tokenizer, sample.response_tokens[start:end])
                         if arg_range is not None:
                             for idx in range(start + arg_range[0], start + arg_range[1]):
                                 if 0 <= idx < len(base):
@@ -487,16 +485,11 @@ class RolloutSession:
         for sample in samples:
             call_count = sum(1 for event in sample.trace if event.type == "assistant_tool_call")
             result_count = sum(1 for msg in sample.messages if msg.get("role") == "tool")
-            ends_in_call = (
-                bool(sample.response_spans)
-                and sample.response_spans[-1].kind == "assistant_tool_call"
-            )
+            ends_in_call = bool(sample.response_spans) and sample.response_spans[-1].kind == "assistant_tool_call"
             if ends_in_call:
                 call_count -= 1
             if call_count > result_count:
-                raise ValueError(
-                    "agentic trajectory has a tool call without a matching tool result"
-                )
+                raise ValueError("agentic trajectory has a tool call without a matching tool result")
 
     def _train_rows_from_samples(self, samples: list[_AgentSample]) -> _AgentTrainRows:
         token_rows: list[list[int]] = []
@@ -796,9 +789,7 @@ class RolloutSession:
         sample.loss_mask_row = [False] * len(prompt_tokens) + loss_mask
         sample.rollout_logprobs_row = [0.0] * len(prompt_tokens) + list(sample.response_logprobs)
         if not sample.response_spans:
-            sample.response_spans = [
-                ResponseSpan(kind=sample.response_kind, length=len(sample.response_tokens))
-            ]
+            sample.response_spans = [ResponseSpan(kind=sample.response_kind, length=len(sample.response_tokens))]
 
     def _build_pending_chat_response(
         self,
@@ -1002,9 +993,7 @@ def _tool_call_loss_mask(tokenizer, response_tokens: list[int]) -> list[bool]:
     return mask
 
 
-def _select_trainable_span_indices(
-    spans: list[ResponseSpan], mode: LossSelectionMode
-) -> set[int]:
+def _select_trainable_span_indices(spans: list[ResponseSpan], mode: LossSelectionMode) -> set[int]:
     """Return the set of response-span indices that remain trainable under ``mode``.
 
     ``all_assistant`` is handled by the caller (no-op). For ``last_assistant``
@@ -1014,9 +1003,7 @@ def _select_trainable_span_indices(
     call (no following text) yields an empty set (zero trainable signal).
     """
 
-    assistant_indices = [
-        i for i, span in enumerate(spans) if span.kind in ("assistant_text", "assistant_tool_call")
-    ]
+    assistant_indices = [i for i, span in enumerate(spans) if span.kind in ("assistant_text", "assistant_tool_call")]
     if mode == "last_assistant":
         return {assistant_indices[-1]} if assistant_indices else set()
     # final_answer
@@ -1024,9 +1011,7 @@ def _select_trainable_span_indices(
     if not call_indices:
         return {assistant_indices[-1]} if assistant_indices else set()
     last_call = call_indices[-1]
-    post_call_text = [
-        i for i, span in enumerate(spans) if i > last_call and span.kind == "assistant_text"
-    ]
+    post_call_text = [i for i, span in enumerate(spans) if i > last_call and span.kind == "assistant_text"]
     return {post_call_text[-1]} if post_call_text else set()
 
 
@@ -1049,7 +1034,7 @@ def _tool_call_arg_token_range(tokenizer, span_tokens: list[int]) -> tuple[int, 
     key_pos = text.find(key)
     if key_pos < 0:
         return None
-    rest = text[key_pos + len(key):]
+    rest = text[key_pos + len(key) :]
     colon_idx = rest.find(":")
     if colon_idx < 0:
         return None
