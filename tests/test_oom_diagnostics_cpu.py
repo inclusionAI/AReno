@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import json
 import unittest
+from contextlib import redirect_stderr
+from io import StringIO
 
 from areno.engine.runtime.oom_diagnostics import (
     OOMStage,
@@ -262,6 +264,18 @@ class TestStructuredOutput(unittest.TestCase):
             self.assertIsInstance(s.option, str)
             self.assertTrue(s.priority >= 0)
 
+    def test_cli_emits_machine_readable_guidance(self):
+        from areno.cli.train import _print_oom_guidance
+
+        stderr = StringIO()
+        with redirect_stderr(stderr):
+            _print_oom_guidance("training", FakeTrainerConfig())
+
+        structured_line = next(line for line in stderr.getvalue().splitlines() if line.startswith("oom_guidance="))
+        payload = json.loads(structured_line.removeprefix("oom_guidance="))
+        self.assertEqual(payload["stage"], "training")
+        self.assertEqual(payload["config_snapshot"]["mini_bs"], 16)
+
 
 # ---------------------------------------------------------------------------
 # format_oom_guidance
@@ -362,6 +376,12 @@ class TestBoundaryInputs(unittest.TestCase):
 
     def test_cpu_out_of_memory_is_not_cuda_oom(self):
         self.assertFalse(is_oom_error(RuntimeError("CPU allocator out of memory")))
+
+    def test_smoke_error_uses_cuda_oom_classifier(self):
+        from areno.cli.train import _is_cuda_oom_text
+
+        self.assertTrue(_is_cuda_oom_text("CUDA out of memory"))
+        self.assertFalse(_is_cuda_oom_text("CPU allocator out of memory"))
 
     def test_wrapped_cuda_oom_is_detected(self):
         inner = RuntimeError("CUDA out of memory")

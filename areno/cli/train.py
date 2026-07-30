@@ -800,19 +800,33 @@ def _build_oom_config_snapshot(trainer_config: TrainerConfig) -> dict:
 
 
 def _print_oom_guidance(stage_text: str, trainer_config: TrainerConfig) -> None:
-    """Print additional stage-specific OOM guidance to stderr."""
+    """Print human-readable and structured OOM guidance to stderr."""
 
-    from areno.engine.runtime.oom_diagnostics import OOMStage, format_oom_guidance
+    from areno.engine.runtime.oom_diagnostics import OOMStage, build_oom_guidance, format_oom_guidance
 
     try:
         stage = OOMStage(stage_text)
     except (ValueError, KeyError):
         stage = OOMStage.UNKNOWN
 
-    guidance_text = format_oom_guidance(stage, _build_oom_config_snapshot(trainer_config))
+    config_snapshot = _build_oom_config_snapshot(trainer_config)
+    guidance_text = format_oom_guidance(stage, config_snapshot)
     if guidance_text:
+        guidance = build_oom_guidance(stage, config_snapshot)
         click.echo("", err=True)
         click.echo(guidance_text, err=True)
+        click.echo(
+            f"oom_guidance={json.dumps(guidance.to_dict(), sort_keys=True, separators=(',', ':'))}",
+            err=True,
+        )
+
+
+def _is_cuda_oom_text(error_text: str) -> bool:
+    """Classify a smoke-test error using the same CUDA OOM rules as training."""
+
+    from areno.engine.runtime.oom_diagnostics import is_oom_error
+
+    return is_oom_error(RuntimeError(error_text))
 
 
 def run(trainer_config: TrainerConfig):
@@ -1373,7 +1387,7 @@ def train_command(**options) -> None:
         _print_smoke_summary(stage, measurement)
         if not measurement.ok:
             error_text = measurement.error or ""
-            if "out of memory" in error_text.lower():
+            if _is_cuda_oom_text(error_text):
                 # Smoke test OOM: infer stage from smoke type.
                 oom_stage = "rollout" if stage == "infer" else "training"
                 _print_oom_guidance(oom_stage, trainer_config)

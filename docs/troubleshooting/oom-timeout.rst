@@ -44,12 +44,16 @@ The guidance output looks like::
         Option: --drop-rollout-state  (current value: False)
      ...
 
-   See https://github.com/inclusionAI/AReno/blob/main/docs/cli/training.rst#troubleshooting-oom
+   See https://github.com/inclusionAI/AReno/blob/main/docs/troubleshooting/oom-timeout.rst
    for detailed OOM troubleshooting.
+
+   oom_guidance={"config_snapshot":{...},"stage":"training","suggestions":[...],...}
 
 Suggestions are ordered by priority and only include options relevant to the
 failing stage.  Each suggestion shows the AReno option name and the resolved
 value currently in effect so the user knows exactly what to change.
+The final ``oom_guidance=`` line is compact JSON for log collectors and other
+automation. CPU allocator failures do not emit CUDA-specific guidance.
 
 Suggestion summary by stage:
 
