@@ -56,8 +56,21 @@ def _fail(message: str) -> int:
 @click.command(
     name="timing-summary",
     context_settings={"help_option_names": ["-h", "--help"]},
+    help=(
+        "Aggregate wall time spent in each RL training phase (generation, reward, "
+        "training, sync, waiting) for a run's metrics directory. Reports the latest "
+        "update and the whole run, reconciles totals against raw step events, and "
+        "prints a phase table by default or JSON with --json. Read-only; can be run "
+        "while the run is still in progress.\n\n"
+        "RUN_DIR is the metrics directory written by --metrics-log-dir and must "
+        "contain events.out.tfevents.* or dashboard_state.<pid>.json."
+    ),
 )
-@click.argument("run_dir", type=click.Path(exists=False))
+@click.argument(
+    "run_dir",
+    type=click.Path(exists=False),
+    metavar="RUN_DIR",
+)
 @click.option("--json", "as_json", is_flag=True, help="Emit a machine-readable JSON summary instead of a table.")
 def timing_summary_command(run_dir: str, as_json: bool) -> None:
     """Summarize time spent in each RL training phase for a run."""
