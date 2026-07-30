@@ -16,7 +16,7 @@ def load_training_dataset(dataset_path: str, *, default_loader=None, **_: object
 
     del default_loader
     records = _load_records(dataset_path)
-    return [_format_record(raw, idx, xml=False) for idx, raw in enumerate(records, start=1)]
+    return [_format_record(raw, idx) for idx, raw in enumerate(records, start=1)]
 
 
 def _load_records(dataset_path: str) -> list[dict]:
@@ -34,12 +34,12 @@ def _load_records(dataset_path: str) -> list[dict]:
     return records
 
 
-def _format_record(raw: dict, index: int, *, xml: bool) -> dict:
+def _format_record(raw: dict, index: int) -> dict:
     board = game.normalize_board(raw["board"])
     player = raw.get("player", game.next_player(board) or "B")
     return {
         "id": raw.get("id", f"board-{index:05d}"),
-        "prompt": game.format_xml_prompt(board, player) if xml else game.format_prompt(board, player),
+        "prompt": game.format_prompt(board, player),
         "board": board,
         "player": player,
         "valid_moves": game.legal_moves(board, player),

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import random
-import re
 from collections.abc import Callable, Iterable
 
 Board = list[list[str]]
@@ -20,10 +19,6 @@ DIRECTIONS = [
     (1, 0),
     (1, 1),
 ]
-
-_XML_MOVE_RE = re.compile(r'<move\s+row="(\d+)"\s+col="(\d+)"\s*/?>', re.IGNORECASE | re.DOTALL)
-_THINK_RE = re.compile(r"<think\b[^>]*>.*?</think>", re.IGNORECASE | re.DOTALL)
-_CHAT_SPECIAL_RE = re.compile(r"<\|[^>]+?\|>|</?s>", re.IGNORECASE)
 
 
 def normalize_board(board: Iterable[Iterable[str]]) -> Board:
@@ -78,52 +73,6 @@ def format_prompt(board: Board, player: str = "B") -> str:
         f"Board:\n{board_to_text(board)}\n\n"
         f"Call the choose_move tool with row and col (0-indexed, 0-5) to place {player}."
     )
-
-
-def format_xml_prompt(board: Board, player: str = "B") -> str:
-    """Build the one-step prompt for the XML no-tool agent."""
-
-    player = player.upper()
-    opponent = "W" if player == "B" else "B"
-    moves = legal_moves(board, player)
-    move_str = ", ".join(f"({r},{c})" for r, c in moves) if moves else "(none - must pass)"
-    return (
-        f"You are playing 6x6 Othello as {player} ({'Black' if player == 'B' else 'White'}). "
-        "Choose the best legal next move.\n\n"
-        "Rules:\n"
-        f"- {player} and {opponent} are already-placed discs; . is empty.\n"
-        "- A legal move must flank at least one opponent disc in a straight line.\n"
-        "- Answer with exactly one XML tag such as "
-        f'<move row="2" col="3"/> to place {player} at row 2, col 3.\n\n'
-        f"Legal moves for {player}: {move_str}\n\n"
-        f"Board:\n{board_to_text(board)}\n\nMove:"
-    )
-
-
-def parse_xml_move(text: str) -> tuple[int, int] | None:
-    """Extract the final XML move from a model response."""
-
-    text = strip_chat_special_tokens(strip_think_tags(text)).strip()
-    matches = list(_XML_MOVE_RE.finditer(text))
-    if not matches:
-        return None
-    row = int(matches[-1].group(1))
-    col = int(matches[-1].group(2))
-    if not (0 <= row < SIZE and 0 <= col < SIZE):
-        return None
-    return (row, col)
-
-
-def strip_think_tags(text: str) -> str:
-    """Remove reasoning spans before parsing the policy action."""
-
-    return _THINK_RE.sub(" ", text)
-
-
-def strip_chat_special_tokens(text: str) -> str:
-    """Remove chat-template sentinels that may trail generated text."""
-
-    return _CHAT_SPECIAL_RE.sub(" ", text)
 
 
 def _flips_for_move(board: Board, row: int, col: int, player: str) -> list[tuple[int, int]]:
@@ -270,9 +219,8 @@ def play_episode(
     *,
     first_player: str = "B",
     max_moves: int = 40,
-    seed: int = 0,
 ) -> dict:
-    """Play a full episode alternating *policy_fn* (plays ``first_player``) and *opponent_fn*.
+    """Play a full episode alternating *policy_fn* and *opponent_fn*.
 
     Handles forced passes and double-pass termination.  Returns a dict with
     the final board, winner, move history, and statistics.
@@ -303,7 +251,12 @@ def play_episode(
             illegal_moves += 1
             current = "W" if current == "B" else "B"
             continue
-        row, col = move
+        try:
+            row, col = move
+        except (TypeError, ValueError):
+            illegal_moves += 1
+            current = "W" if current == "B" else "B"
+            continue
         flips = _flips_for_move(board, row, col, current)
         if not flips:
             illegal_moves += 1
@@ -323,13 +276,16 @@ def play_episode(
     }
 
 
-def random_policy(board: Board, player: str, rng: random.Random) -> tuple[int, int] | None:
-    """Return a random legal move for *player*, or None if no legal move exists."""
+def random_policy(rng: random.Random) -> Callable[[Board, str], tuple[int, int] | None]:
+    """Return a policy function that picks a random legal move using *rng*."""
 
-    moves = legal_moves(board, player)
-    if not moves:
-        return None
-    return rng.choice(moves)
+    def _policy(board: Board, player: str) -> tuple[int, int] | None:
+        moves = legal_moves(board, player)
+        if not moves:
+            return None
+        return rng.choice(moves)
+
+    return _policy
 
 
 def _flat(board: Board) -> list[str]:

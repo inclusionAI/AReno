@@ -78,6 +78,7 @@ Key parameter choices for Kaggle T4 x2:
 
 If you hit OOM, reduce `--batch-size` to 1 or `--n-samples` to 2, or add
 `--drop-rollout-state` to trade speed for lower VRAM usage.
+
 ## Observable Output
 
 - **Reward**: -1.0 for illegal moves, 0.0 for legal non-terminal moves, 1.0

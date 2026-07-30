@@ -65,9 +65,6 @@ def _random_board(rng: random.Random) -> game.Board:
             if not game.has_legal_move(board, player):
                 break
         moves = game.legal_moves(board, player)
-        if not moves:
-            player = "W" if player == "B" else "B"
-            continue
         move = rng.choice(moves)
         board = game.apply_move(board, move[0], move[1], player)
         player = "W" if player == "B" else "B"

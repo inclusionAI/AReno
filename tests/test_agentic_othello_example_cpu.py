@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import random
 from pathlib import Path
 from types import SimpleNamespace
@@ -51,58 +52,37 @@ def test_othello_initial_board_and_normalize():
 def test_othello_legal_moves_and_flips_cover_all_eight_directions():
     game = _load_module("game")
 
-    # Build a board where W is surrounded by B in all 8 directions,
-    # so B can flank W from multiple angles.
-    # Place B at (2,3), W at (2,4), B at (2,5) — horizontal flip
-    # Place B at (3,3), W at (3,4), B at (3,5) — another horizontal
-    # We test each direction independently with a dedicated mini-board.
-    board = game.initial_board()
-
-    # Clear the board and set up a controlled scenario
+    # Set up a board to test horizontal, vertical, and diagonal flips
     board = [["." for _ in range(6)] for _ in range(6)]
-    # Horizontal: B . W . B — B can play at (0,1) to flank W at (0,2) via B at (0,4)? No.
-    # Let's place: B at (0,0), W at (0,1), . at (0,2) — B plays (0,2) if there's a B beyond W.
-    # Setup: B(0,0) W(0,1) .(0,2) .(0,3) W(0,4) B(0,5)
-    # B plays (0,2): flanks W(0,1) between B(0,0) and B(0,2) -> valid
+    # Horizontal flip: B(0,0) W(0,1) .(0,2) -> B plays (0,2) to flip W(0,1)
     board[0][0] = "B"
     board[0][1] = "W"
     board[0][5] = "B"
     board[0][4] = "W"
-
-    # Vertical: B(1,0) W(2,0) .(3,0) — B plays (3,0) if B exists beyond? No. Need B(4,0).
+    # Vertical flip: B(1,0) W(2,0) .(3,0) -> B plays (3,0) to flip W(2,0)
     board[1][0] = "B"
     board[2][0] = "W"
-
-    # Diagonal: B(1,1) W(2,2) .(3,3) — B plays (3,3) if B beyond at (4,4)
+    # Diagonal flip: B(1,1) W(2,2) .(3,3) -> B plays (3,3) to flip W(2,2)
     board[1][1] = "B"
     board[2][2] = "W"
-
-    # Anti-diagonal: B(1,5) W(2,4) .(3,3) — B plays (3,3) if B beyond at (4,2)
+    # Anti-diagonal flip: B(1,5) W(2,4) .(3,3)
     board[2][4] = "W"
 
     moves = game.legal_moves(board, "B")
-    # (0,2) should be legal: B(0,0)-W(0,1)-B(0,2)
-    assert (0, 2) in moves
-    # (3,0) should be legal: B(1,0)-W(2,0)-B(3,0)
-    assert (3, 0) in moves
+    assert (0, 2) in moves  # horizontal flip
+    assert (3, 0) in moves  # vertical flip
 
-    # Test apply_move flips correctly
+    # Verify apply_move flips correctly
     new_board = game.apply_move(board, 0, 2, "B")
     assert new_board[0][1] == "B"  # W flipped to B
 
-    # Test all 8 directions: place a ring of W around a central B
-    # B at (3,3), W at all 8 neighbors (2,2),(2,3),(2,4),(3,2),(3,4),(4,2),(4,3),(4,4)
-    # Then B at the far end of each direction. B plays the far end to flip.
+    # Test all 8 directions: ring of W around central B
     board2 = [["." for _ in range(6)] for _ in range(6)]
     board2[3][3] = "B"
-    # 8 neighbors as W
     for dr, dc in game.DIRECTIONS:
-        r, c = 3 + dr, 3 + dc
-        board2[r][c] = "W"
-    # Far end for each direction: another empty cell beyond W
-    # direction (-1,-1): far end (1,1) -> B plays there to flip (2,2)
-    # direction (-1,0): far end (1,3) -> B plays there to flip (2,3)
-    # etc.
+        board2[3 + dr][3 + dc] = "W"
+
+    # For each direction, B plays the far-end cell to flip the adjacent W
     for dr, dc in game.DIRECTIONS:
         r_far, c_far = 3 + dr * 2, 3 + dc * 2
         if 0 <= r_far < 6 and 0 <= c_far < 6:
@@ -113,15 +93,11 @@ def test_othello_legal_moves_and_flips_cover_all_eight_directions():
 def test_othello_forced_pass_when_no_legal_moves():
     game = _load_module("game")
 
-    # Construct a board where W has no legal moves but B does.
-    # Fill most of the board with B, leaving one empty cell that only B can use.
+    # Construct a board where W has no legal moves but B does
     board = [["B" for _ in range(6)] for _ in range(6)]
-    # Leave (0,0) empty
     board[0][0] = "."
-    # Make sure W exists somewhere adjacent so it's a valid Othello position
     board[0][1] = "W"
-    # B can play (0,0): B(0,0)-W(0,1)-B(0,2)? board[0][2]="B" -> yes, flips W(0,1)
-    # W cannot play (0,0): need W-B-...-W line, but there's no W to close the flank
+    # B can play (0,0) to flank W(0,1); W has no flanking opportunity
     assert game.has_legal_move(board, "B")
     assert not game.has_legal_move(board, "W")
 
@@ -129,17 +105,14 @@ def test_othello_forced_pass_when_no_legal_moves():
 def test_othello_double_pass_ends_game():
     game = _load_module("game")
 
-    # A board where neither player has a legal move -> terminal
-    # Fill the entire board
+    # Full board -> terminal
     board = [["B" for _ in range(6)] for _ in range(6)]
-    # Set a few W cells
     board[0][0] = "W"
     board[1][1] = "W"
     board[2][2] = "W"
     assert game.is_terminal(board)
 
-    # Test play_episode handles double pass
-    # Force a terminal by filling the board
+    # play_episode on a full board terminates immediately
     full_board = [["B" if (r + c) % 2 == 0 else "W" for c in range(6)] for r in range(6)]
     result = game.play_episode(
         full_board,
@@ -153,7 +126,7 @@ def test_othello_double_pass_ends_game():
 def test_othello_terminal_scoring_counts_discs():
     game = _load_module("game")
 
-    # Board with 20 B and 16 W (36 total, full board)
+    # Board with 20 B and 16 W (full board)
     board = [["B" for _ in range(6)] for _ in range(6)]
     for r in range(4):
         for c in range(6):
@@ -177,7 +150,7 @@ def test_othello_illegal_cell_rejected():
     board = game.initial_board()
 
     # Occupied cell -> illegal
-    assert game.score_move(board, 2, 2, "B") == -1.0  # (2,2) is W in initial board
+    assert game.score_move(board, 2, 2, "B") == -1.0
     try:
         game.apply_move(board, 2, 2, "B")
         assert False, "should reject occupied cell"
@@ -185,7 +158,6 @@ def test_othello_illegal_cell_rejected():
         pass
 
     # Empty cell with no flips -> illegal
-    # (0,0) is empty but has no B-W-B line in the initial board
     assert game.score_move(board, 0, 0, "B") == -1.0
     try:
         game.apply_move(board, 0, 0, "B")
@@ -218,12 +190,9 @@ def test_othello_generator_produces_reachable_boards():
         board = game.normalize_board(record["board"])
         assert len(board) == 6
         assert all(len(row) == 6 for row in board)
-        # Must be B's turn
         assert record["player"] == "B"
         assert game.next_player(board) == "B"
-        # Must not be terminal
         assert not game.is_terminal(board)
-        # Must have legal moves for B
         assert game.has_legal_move(board, "B")
 
 
@@ -232,7 +201,6 @@ def test_othello_reward_scores_tool_move_only():
     reward = _load_module("reward")
 
     board = game.initial_board()
-    # Legal first move for B: (2,4) or (3,5) or (4,2) or (5,3) etc.
     legal = game.legal_moves(board, "B")
     assert len(legal) > 0
     legal_row, legal_col = legal[0]
@@ -258,8 +226,6 @@ def test_othello_reward_scores_tool_move_only():
     assert reward.reward_fn(record) == -1.0
 
     # Arguments as JSON string
-    import json
-
     record.tool_calls = [
         {
             "name": "choose_move",
@@ -276,14 +242,8 @@ def test_othello_reward_scores_tool_move_only():
 def test_othello_seeded_random_opponent_evaluation():
     game = _load_module("game")
 
-    rng_policy = random.Random(42)
-    rng_opponent = random.Random(99)
-
-    def policy_fn(board, player):
-        return game.random_policy(board, player, rng_policy)
-
-    def opponent_fn(board, player):
-        return game.random_policy(board, player, rng_opponent)
+    policy_fn = game.random_policy(random.Random(42))
+    opponent_fn = game.random_policy(random.Random(99))
 
     num_games = 20
     wins = 0
@@ -301,7 +261,6 @@ def test_othello_seeded_random_opponent_evaluation():
             max_moves=40,
         )
         if result["winner"] is not None:
-            # policy_fn plays first_player; check if that side won
             if result["winner"] == first_player:
                 wins += 1
         total_illegal += result["illegal_moves"]
@@ -331,6 +290,5 @@ def test_othello_dataset_loader_formats_records():
         assert "player" in record
         assert "valid_moves" in record
         assert isinstance(record["valid_moves"], list)
-        # Each valid move should be a legal move
         for move in record["valid_moves"]:
             assert move in game.legal_moves(record["board"], record["player"])
