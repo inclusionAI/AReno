@@ -63,6 +63,7 @@ class PolicyOnlyTrainer:
         # Replace the public reward_fn so all call sites (including agentic
         # rollout) go through the timed wrapper transparently.
         self.reward_fn = timed
+        self._timed_reward_fn = timed
         return timed
 
     def _finalize_reward_timing(self, step: int) -> None:
