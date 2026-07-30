@@ -15,7 +15,6 @@ from areno.api.reward_validation import (
 )
 from areno.api.rewards import RewardRecord, load_reward_fn, make_reward_record
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -320,7 +319,7 @@ class LoadRewardFnIntegrationTest(unittest.TestCase):
             try:
                 with warnings.catch_warnings(record=True) as caught:
                     warnings.simplefilter("always")
-                    fn = load_reward_fn(str(path))
+                    load_reward_fn(str(path))
             finally:
                 if old is None:
                     os.environ.pop("ARENO_REWARD_VALIDATION", None)
@@ -426,7 +425,6 @@ class CLIIntegrationTest(unittest.TestCase):
 
     def test_validate_reward_flag_sets_env_var(self):
         """train_command should set ARENO_REWARD_VALIDATION=1 when --validate-reward is passed."""
-        import areno.cli.train as train_cli
 
         # Build a minimal options dict that includes validate_reward=True.
         # We only test the env-var side effect, not the full training run.
