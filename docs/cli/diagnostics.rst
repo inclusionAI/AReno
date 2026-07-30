@@ -78,3 +78,53 @@ Checks include:
 
 ``WARN`` items usually indicate degraded or incomplete setup. ``FAIL`` items
 mean AReno is not ready to run the CUDA training/inference engine.
+
+Tokenizer alignment inspector
+-----------------------------
+
+``areno check --tokenizer-inspect`` renders token IDs, token pieces,
+special-token markers, EOS placement, role labels, and loss-mask spans
+side by side — without modifying the actual tokenizer path.
+
+Plain text inspection:
+
+.. code-block:: bash
+
+   areno check --tokenizer-inspect /path/to/model --inspect-text "hello world"
+
+Chat message inspection (pass messages as JSON):
+
+.. code-block:: bash
+
+   areno check --tokenizer-inspect /path/to/model --inspect-chat \
+     --inspect-text '[{"role":"user","content":"hello"}]'
+
+Tool-call inspection (pass messages and tools as JSON):
+
+.. code-block:: bash
+
+   areno check --tokenizer-inspect /path/to/model \
+     --inspect-text '[{"role":"user","content":"What time is it?"}]' \
+     --inspect-tools '[{"type":"function","function":{"name":"get_time"}}]'
+
+Use ``--inspect-json`` for machine-readable output:
+
+.. code-block:: bash
+
+   areno check --tokenizer-inspect /path/to/model --inspect-text "hello" --inspect-json
+
+Output fields per token:
+
+- **index**: Position in the token sequence (0-based)
+- **token_id**: Integer token ID from the tokenizer
+- **token_piece**: Decoded text for this single token
+- **is_special**: Whether this token is a special token
+- **is_eos**: Whether this token is an EOS token
+- **is_unknown**: Whether this token is the unknown token
+- **role**: ``system``, ``user``, ``assistant``, ``tool``, ``prompt``, or ``generation_prompt``
+- **in_loss**: Whether this token participates in policy loss
+
+Report-level fields:
+
+- **round_trip_lossless**: Whether ``encode(decode(token_ids)) == token_ids``
+- **warnings**: Truncation, round-trip loss, unknown tokens

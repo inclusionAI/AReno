@@ -46,8 +46,29 @@ def env_command(as_json: bool) -> None:
 
 
 @click.command(name="check", context_settings={"help_option_names": ["-h", "--help"]})
-def check_command() -> None:
+@click.option("--tokenizer-inspect", default=None, help="Model path to inspect tokenization for.")
+@click.option("--inspect-text", default=None, help="Plain text to inspect with --tokenizer-inspect.")
+@click.option("--inspect-chat", is_flag=True, help="Inspect as chat messages (JSON via --inspect-text).")
+@click.option("--inspect-tools", default=None, help="JSON tool definitions for tool-call inspection.")
+@click.option("--inspect-json", is_flag=True, help="Output inspection report as JSON.")
+def check_command(
+    tokenizer_inspect: str | None,
+    inspect_text: str | None,
+    inspect_chat: bool,
+    inspect_tools: str | None,
+    inspect_json: bool,
+) -> None:
     """Check whether this machine is ready to run AReno."""
+
+    if tokenizer_inspect is not None:
+        _run_tokenizer_inspection(
+            model_path=tokenizer_inspect,
+            text=inspect_text,
+            as_chat=inspect_chat,
+            tools_json=inspect_tools,
+            as_json=inspect_json,
+        )
+        return
 
     report = collect_env()
     results = run_checks(report)
@@ -482,3 +503,45 @@ def _print_env_report(report: dict[str, Any]) -> None:
     click.echo("  Environment variables:")
     for name, value in report["env"].items():
         click.echo(f"    {name}={value if value is not None else '<unset>'}")
+
+
+def _run_tokenizer_inspection(
+    *,
+    model_path: str,
+    text: str | None,
+    as_chat: bool,
+    tools_json: str | None,
+    as_json: bool,
+) -> None:
+    """Run a standalone tokenizer alignment inspection and print the result."""
+
+    from areno.engine.data.tokenizer import load_tokenizer
+    from areno.cli.tokenizer_inspector import (
+        alignment_to_json,
+        format_alignment_text,
+        inspect_chat_messages,
+        inspect_plain_prompt,
+        inspect_tool_call,
+    )
+
+    tokenizer = load_tokenizer(model_path)
+
+    if tools_json is not None:
+        # Tool-call inspection.
+        import json as _json
+        messages = _json.loads(text or "[]")
+        tools = _json.loads(tools_json)
+        report = inspect_tool_call(tokenizer, messages, tools, model_path=model_path)
+    elif as_chat:
+        # Chat message inspection.
+        import json as _json
+        messages = _json.loads(text or "[]")
+        report = inspect_chat_messages(tokenizer, messages, model_path=model_path)
+    else:
+        # Plain text inspection.
+        report = inspect_plain_prompt(tokenizer, text or "", model_path=model_path)
+
+    if as_json:
+        click.echo(alignment_to_json(report))
+    else:
+        click.echo(format_alignment_text(report))
