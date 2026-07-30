@@ -13,7 +13,7 @@ MAX_INPUTS = 6
 MIN_GATES = 3
 MAX_GATES = 15
 BRUTE_FORCE_GATE_LIMIT = 8
-MAX_PROBES = 5  # per-episode inspect_node limit; keep total trajectory within context window
+MAX_PROBES = 10
 
 # Gate type weights (AND : OR : NOT)
 GATE_TYPE_WEIGHTS = [("and", 4), ("or", 4), ("not", 2)]
