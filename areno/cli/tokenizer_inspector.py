@@ -4,9 +4,8 @@ Renders token IDs, token pieces, special-token markers, EOS placement,
 role labels, and loss-mask spans side by side for plain prompts, chat
 messages, and tool calls — without modifying the actual tokenizer path.
 
-This module intentionally avoids importing from ``areno.api`` at module
-load time to prevent a torch dependency chain. All tokenizer interaction
-uses the tokenizer's own public methods (encode, decode, apply_chat_template).
+Reuses existing public contracts from :mod:`areno.api.tokenizer` for
+encoding, EOS detection, and token-ID normalisation.
 """
 
 from __future__ import annotations
@@ -14,6 +13,13 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass, field
 from typing import Any
+
+from areno.api.tokenizer import (
+    apply_chat_template_with_options,
+    encode_generation_prompt,
+    eos_token_ids,
+    normalize_token_ids,
+)
 
 # Default loss-mask policy matching LossMaskPolicy defaults.
 _DEFAULT_NO_LOSS_ROLES = frozenset({"system", "user", "tool", "prompt", "generation_prompt"})
@@ -175,70 +181,43 @@ def alignment_to_json(report: AlignmentReport) -> str:
 
 
 def _encode_text(tokenizer: Any, text: str) -> list[int]:
-    """Encode text, applying chat template if the tokenizer has one."""
-    chat_template = getattr(tokenizer, "chat_template", None)
-    if chat_template:
-        try:
-            result = tokenizer.apply_chat_template(
-                [{"role": "user", "content": text}],
-                tokenize=True,
-                add_generation_prompt=True,
-            )
-            return _normalize_ids(result)
-        except Exception:
-            pass
-    return _normalize_ids(tokenizer.encode(text))
+    """Encode text using existing :func:`encode_generation_prompt`."""
+    return normalize_token_ids(encode_generation_prompt(tokenizer, text))
 
 
 def _encode_chat(tokenizer: Any, messages: list[dict[str, Any]], *, add_generation_prompt: bool = True) -> list[int]:
-    """Encode chat messages using the tokenizer's chat template."""
-    chat_template = getattr(tokenizer, "chat_template", None)
-    if chat_template:
+    """Encode chat messages using existing :func:`apply_chat_template_with_options`."""
+    if getattr(tokenizer, "chat_template", None):
         try:
-            result = tokenizer.apply_chat_template(
-                messages, tokenize=True, add_generation_prompt=add_generation_prompt,
+            return normalize_token_ids(
+                apply_chat_template_with_options(
+                    tokenizer, messages, tokenize=True,
+                    add_generation_prompt=add_generation_prompt,
+                )
             )
-            return _normalize_ids(result)
         except TypeError:
-            # Some tokenizers don't accept add_generation_prompt.
-            result = tokenizer.apply_chat_template(messages, tokenize=True)
-            return _normalize_ids(result)
-    # Fallback: simple text concatenation.
+            return normalize_token_ids(
+                apply_chat_template_with_options(tokenizer, messages, tokenize=True)
+            )
     text = "\n".join(str(m.get("content", "")) for m in messages)
-    return _normalize_ids(tokenizer.encode(text))
+    return normalize_token_ids(tokenizer.encode(text))
 
 
 def _encode_chat_with_tools(
     tokenizer: Any, messages: list[dict[str, Any]], tools: list[dict[str, Any]]
 ) -> list[int]:
-    """Encode chat messages with tool definitions."""
-    chat_template = getattr(tokenizer, "chat_template", None)
-    if chat_template:
+    """Encode chat messages with tool definitions via :func:`apply_chat_template_with_options`."""
+    if getattr(tokenizer, "chat_template", None):
         try:
-            result = tokenizer.apply_chat_template(
-                messages, tokenize=True, add_generation_prompt=True, tools=tools,
+            return normalize_token_ids(
+                apply_chat_template_with_options(
+                    tokenizer, messages, tokenize=True,
+                    add_generation_prompt=True, tools=tools,
+                )
             )
-            return _normalize_ids(result)
         except TypeError:
             pass
     return _encode_chat(tokenizer, messages)
-
-
-def _normalize_ids(value: Any) -> list[int]:
-    """Convert tokenizer output to a plain list of ints."""
-    if hasattr(value, "ids"):
-        value = value.ids
-    if hasattr(value, "input_ids"):
-        value = value.input_ids
-    if isinstance(value, list | tuple):
-        if value and hasattr(value[0], "ids"):
-            if len(value) == 1:
-                return _normalize_ids(value[0])
-        if value and isinstance(value[0], list | tuple):
-            if len(value) == 1:
-                return _normalize_ids(value[0])
-        return [int(tid) for tid in value]
-    raise TypeError(f"expected token ids, got {type(value).__name__}")
 
 
 def _build_alignments(
@@ -307,7 +286,7 @@ def _check_round_trip(tokenizer: Any, token_ids: list[int]) -> bool:
     """Check if encode(decode(token_ids)) == token_ids."""
     try:
         decoded = tokenizer.decode(token_ids, skip_special_tokens=False)
-        re_encoded = _normalize_ids(tokenizer.encode(decoded))
+        re_encoded = normalize_token_ids(tokenizer.encode(decoded))
         return re_encoded == token_ids
     except Exception:
         return False
@@ -365,29 +344,19 @@ def _get_special_ids(tokenizer: Any) -> set[int]:
 
 
 def _get_eos_ids(tokenizer: Any, model_path: str | None) -> set[int]:
-    """Return the set of EOS token IDs."""
+    """Return the set of EOS token IDs using existing :func:`eos_token_ids`."""
     ids: set[int] = set()
+    if model_path:
+        try:
+            ids.update(eos_token_ids(model_path, tokenizer))
+        except Exception:
+            pass
     eos = getattr(tokenizer, "eos_token_id", None)
     if eos is not None:
         if isinstance(eos, int):
             ids.add(eos)
         elif isinstance(eos, (list, tuple)):
             ids.update(eos)
-    # Also check config.json for additional EOS IDs.
-    if model_path:
-        try:
-            from pathlib import Path
-            config_path = Path(model_path) / "config.json"
-            if config_path.exists():
-                with config_path.open("r", encoding="utf-8") as f:
-                    config = json.load(f)
-                cfg_eos = config.get("eos_token_id")
-                if isinstance(cfg_eos, int):
-                    ids.add(cfg_eos)
-                elif isinstance(cfg_eos, list):
-                    ids.update(cfg_eos)
-        except Exception:
-            pass
     return ids
 
 
