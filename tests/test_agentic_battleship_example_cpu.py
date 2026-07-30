@@ -912,7 +912,7 @@ def test_battleship_run_agent_invalid_turn_advances_shots_used():
     assert result["status"] == "invalid"
     assert result["shots_used"] == before + 1
     assert state.shots_used == before + 1
-    assert state.shots == before  # no cell recorded
+    assert len(state.shots_history) == before  # wasted turn records no cell
     # Repeating keeps advancing so the loop terminates within MAX_TURNS.
     run_agent._run_tool(assistant_message, state)
     assert state.shots_used == before + 2

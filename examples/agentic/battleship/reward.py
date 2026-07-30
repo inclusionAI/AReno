@@ -35,17 +35,16 @@ def reward_fn(record: Any) -> float:
     if not fire_calls:
         return 0.0
 
-    # 从源记录初始化游戏状态
-    # Initialize state from source record
+    # 从源记录初始化船只布局：score_episode 只读取这里的 ships 与 seed，
+    # 并在内部用一份全新的 test_state 重放所有 fire 调用，因此此处无需、
+    # 也不应提前 fire（此前把整个 call dict 当坐标传给 game.fire 会把每发
+    # 都记成 invalid 且从不真正开火，是无效且会误导维护者的死代码）。
+    # Initialize state from source record; score_episode replays the fire
+    # calls into a fresh state and only reads the fleet layout + seed here.
     state = game.init_state(source)
 
-    # 重放整个回合，执行所有 fire 调用
-    # Replay the episode
-    for call in fire_calls:
-        game.fire(state, call)
-
-    # 对回合进行评分
-    # Score the episode
+    # 对回合进行评分（重放在 score_episode 内部完成）
+    # Score the episode (replay happens inside score_episode).
     score = game.score_episode(state, fire_calls)
 
     # 计算形状化奖励
