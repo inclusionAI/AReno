@@ -361,13 +361,15 @@ def test_reward_correct_diagnosis():
     fault = {"node": 5, "stuck_value": 0}
     record = SimpleNamespace(
         source_record={"fault": fault},
+        completion="",
         tool_calls=[
             {"name": "set_input_vector", "arguments": json.dumps({"inputs": [True, False]})},
             {"name": "submit_diagnosis", "arguments": json.dumps({"node_id": 5, "fault_type": "stuck_at_0"})},
         ],
     )
     score = reward.reward_fn(record)
-    assert score >= 0.99, f"expected ~1.0, got {score}"  # 0 probes
+    # fmt(-0.05) + interaction(0.1) + outcome(0.5 + 0.2*1.0) = 0.75
+    assert 0.7 < score <= 0.8, f"expected ~0.75, got {score}"
 
 
 def test_reward_wrong_diagnosis():
@@ -375,32 +377,37 @@ def test_reward_wrong_diagnosis():
     fault = {"node": 5, "stuck_value": 0}
     record = SimpleNamespace(
         source_record={"fault": fault},
+        completion="",
         tool_calls=[
             {"name": "submit_diagnosis", "arguments": json.dumps({"node_id": 3, "fault_type": "stuck_at_1"})},
         ],
     )
-    assert reward.reward_fn(record) == 0.0
+    # fmt(-0.05) + has_any_call(0.1) + submitted_not_correct(0.05) = 0.10
+    assert 0.08 < reward.reward_fn(record) < 0.15
 
 
 def test_reward_no_submission():
     reward = _load_module("reward")
     record = SimpleNamespace(
         source_record={"fault": {"node": 5, "stuck_value": 0}},
+        completion="",
         tool_calls=[],
     )
-    assert reward.reward_fn(record) == -1.0
+    # fmt(-0.05) + no interaction = -0.05 (not -1.0 — format layer provides variance)
+    assert reward.reward_fn(record) == -0.05
 
 
 def test_reward_probes_reduce_score():
     reward = _load_module("reward")
     fault = {"node": 5, "stuck_value": 0}
 
-    # Correct with 10 probes → min score for correct diagnosis
+    # Correct with 5 probes → lower score than 0 probes
     record_many = SimpleNamespace(
         source_record={"fault": fault},
+        completion="",
         tool_calls=[
             {"name": "inspect_node", "arguments": "{}"},
-        ] * 10
+        ] * 5
         + [{"name": "submit_diagnosis", "arguments": json.dumps({"node_id": 5, "fault_type": "stuck_at_0"})}],
     )
     score_many = reward.reward_fn(record_many)
@@ -408,6 +415,7 @@ def test_reward_probes_reduce_score():
     # Correct with 0 probes → max score
     record_few = SimpleNamespace(
         source_record={"fault": fault},
+        completion="",
         tool_calls=[
             {"name": "submit_diagnosis", "arguments": json.dumps({"node_id": 5, "fault_type": "stuck_at_0"})},
         ],
