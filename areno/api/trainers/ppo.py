@@ -130,8 +130,11 @@ class PPOTrainer(PolicyOnlyTrainer):
         if self.reward_fn is not None:
             self._record_ppo_state(stage="score_start", role="reward")
             reward_start = time.perf_counter()
-            rewards_all = [float(self.reward_fn(record)) for record in reward_records]
+            rewards_all, reward_profile = self._reward_profiler.score_batch(reward_records)
             self._last_ppo_stats["reward_score_time_s"] = time.perf_counter() - reward_start
+            if reward_profile is not None:
+                self._last_ppo_stats["reward_profile_slow_count"] = float(len(reward_profile.slow_samples))
+                self._last_ppo_stats["reward_profile_max_s"] = reward_profile.to_scalars()["reward_max_s"]
             self._record_ppo_state(stage="score_end", role="reward")
         else:
             self.logger.info("role=reward stage=score_start rows=%d", len(token_rows))

@@ -145,6 +145,19 @@ class PolicyTrainerConfig(RolloutTrainerConfig):
     reward_fn_path: str | None = None
     gspo_clip_eps: float = 3.0e-4
     grpo_clip_eps: float = 0.2
+    reward_profile: bool = False
+    reward_slow_threshold_s: float | None = None
+    reward_batch_timeout_s: float | None = None
+
+    def __post_init__(self) -> None:
+        # NOTE: @dataclass(slots=True) rewrites the class, so the no-arg
+        # super() cell points at the pre-rewrite class and fails.  Call the
+        # parent __post_init__ explicitly.
+        TrainerConfig.__post_init__(self)
+        if self.reward_slow_threshold_s is not None and self.reward_slow_threshold_s <= 0:
+            raise ValueError("reward_slow_threshold_s must be > 0 or None")
+        if self.reward_batch_timeout_s is not None and self.reward_batch_timeout_s <= 0:
+            raise ValueError("reward_batch_timeout_s must be > 0 or None")
 
 
 @dataclass(slots=True)

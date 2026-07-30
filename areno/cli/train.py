@@ -129,7 +129,7 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         ),
     ),
     ("Checkpoint", ("save_path", "save_interval")),
-    ("Observability", ("metrics_log_dir",)),
+    ("Observability", ("metrics_log_dir", "reward_profile", "reward_slow_threshold_s", "reward_batch_timeout_s")),
 )
 
 
@@ -727,6 +727,9 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             agent_timeout_s=args.agent_timeout_s,
             train_tool_results=args.train_tool_results,
             chat_template_enable_thinking=chat_template_enable_thinking,
+            reward_profile=args.reward_profile,
+            reward_slow_threshold_s=args.reward_slow_threshold_s,
+            reward_batch_timeout_s=args.reward_batch_timeout_s,
         )
     return PPOTrainerConfig(
         algo=algorithm.name,
@@ -788,6 +791,9 @@ def _trainer_config_from_args(args) -> TrainerConfig:
         agent_timeout_s=args.agent_timeout_s,
         train_tool_results=args.train_tool_results,
         chat_template_enable_thinking=chat_template_enable_thinking,
+        reward_profile=args.reward_profile,
+        reward_slow_threshold_s=args.reward_slow_threshold_s,
+        reward_batch_timeout_s=args.reward_batch_timeout_s,
     )
 
 
@@ -951,7 +957,7 @@ def _training_config_settings(config: TrainerConfig) -> dict:
             ],
         ),
         section("Checkpoint", ["save_path", "save_interval"]),
-        section("Observability", ["metrics_log_dir"]),
+        section("Observability", ["metrics_log_dir", "reward_profile", "reward_slow_threshold_s", "reward_batch_timeout_s"]),
     ]
     extras = []
     for field in fields(config):
@@ -1187,6 +1193,15 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
 @click.option("--save-interval", type=int, default=100, show_default=True, help="Save checkpoint every N train steps.")
 @click.option(
     "--metrics-log-dir", default=DEFAULT_METRICS_LOG_DIR, show_default=True, help="TensorBoard metrics log directory."
+)
+@click.option(
+    "--reward-profile", is_flag=True, default=False, help="Enable per-sample reward timing and slow-sample detection."
+)
+@click.option(
+    "--reward-slow-threshold-s", type=float, default=None, help="Flag reward samples slower than this many seconds."
+)
+@click.option(
+    "--reward-batch-timeout-s", type=float, default=None, help="Per-batch reward computation timeout in seconds."
 )
 @click.option("--epochs", type=int, default=10, show_default=True, help="Number of dataset epochs to train.")
 @click.option("--max-steps", type=int, default=None, help="Stop after this many trainer steps.")

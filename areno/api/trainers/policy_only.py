@@ -25,6 +25,20 @@ from areno.api.dashboard import record_dashboard_state
 from areno.api.tokenizer import configure_chat_template_enable_thinking
 
 
+def _build_reward_profiler(trainer):
+    """Construct a RewardProfiler from the trainer's config, guarded for None reward_fn."""
+
+    from areno.api.reward_profiler import RewardProfiler
+
+    return RewardProfiler(
+        trainer.reward_fn,
+        enabled=getattr(trainer.config, "reward_profile", False),
+        slow_threshold_s=getattr(trainer.config, "reward_slow_threshold_s", None),
+        batch_timeout_s=getattr(trainer.config, "reward_batch_timeout_s", None),
+        logger=trainer.logger,
+    )
+
+
 class PolicyOnlyTrainer:
     """Rollout-reward-train loop for policy-only RL algorithms.
 
@@ -42,6 +56,7 @@ class PolicyOnlyTrainer:
         self.loss_fn = loss_fn
         self.logger = logging.getLogger(f"{self.__class__.__module__}.{self.__class__.__name__}")
         self._agent_run_fn = None
+        self._reward_profiler = _build_reward_profiler(self)
 
     def fit(self) -> None:
         self.areno.init()
@@ -242,7 +257,7 @@ class PolicyOnlyTrainer:
                     f"{self._format_agent_filter_diagnostics(filter_diagnostics)}"
                 )
             reward_records = [ctx.reward_record(sample) for sample in samples]
-            rewards = [float(self.reward_fn(record)) for record in reward_records]
+            rewards, _profile = self._reward_profiler.score_batch(reward_records)
             rows = ctx._train_rows_from_samples(samples)
             tool_call_count = sum(len(record.tool_calls) for record in reward_records)
             tool_result_count = sum(len(record.tool_results) for record in reward_records)
@@ -527,23 +542,22 @@ class PolicyOnlyTrainer:
         for item_idx, (item, result) in enumerate(zip(prompt_batch.items, rollout_results, strict=True)):
             prefix_len = len(item.input_tokens)
             completions = [tokenizer.decode(seq.resp_tokens) for seq in result.sequences]
-            rewards = [
-                float(
-                    self.reward_fn(
-                        make_reward_record(
-                            prompt=item.prompt,
-                            completion=completion,
-                            source_record=item.record,
-                            answer=item.solutions,
-                            tokens=item.input_tokens + seq.resp_tokens,
-                            logprobs=[0.0] * prefix_len + seq.resp_logprobs,
-                            loss_mask=[False] * prefix_len + [True] * len(seq.resp_tokens),
-                            metadata={"prompt_index": item_idx, "sample_index": sample_idx},
-                        )
-                    )
+            # Build reward records in a separate step so _reward_profiler can
+            # receive a pre-built list[RewardRecord].
+            item_records = [
+                make_reward_record(
+                    prompt=item.prompt,
+                    completion=completion,
+                    source_record=item.record,
+                    answer=item.solutions,
+                    tokens=item.input_tokens + seq.resp_tokens,
+                    logprobs=[0.0] * prefix_len + seq.resp_logprobs,
+                    loss_mask=[False] * prefix_len + [True] * len(seq.resp_tokens),
+                    metadata={"prompt_index": item_idx, "sample_index": sample_idx},
                 )
                 for sample_idx, (completion, seq) in enumerate(zip(completions, result.sequences, strict=True))
             ]
+            rewards, _profile = self._reward_profiler.score_batch(item_records)
             rewards_all += rewards
             # Group-relative advantage: A_i = (r_i - mean(r))/std(r); shared by
             # every response token of sample i.

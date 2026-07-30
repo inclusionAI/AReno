@@ -29,6 +29,7 @@ class MetricsRecorder:
         self._writer = create_tensorboard_writer(log_dir)
         self._state_file = self._log_dir / f"dashboard_state.{os.getpid()}.json"
         self._sample_file = self._log_dir / f"rollout_samples.{os.getpid()}.jsonl"
+        self._reward_profile_file = self._log_dir / f"reward_profile.{os.getpid()}.jsonl"
         self._closed = False
 
     def record_train_step(self, *, step: int, train_result, train_batch, timings: dict[str, float] | None = None):
@@ -47,6 +48,21 @@ class MetricsRecorder:
         sample.setdefault("pid", os.getpid())
         with self._sample_file.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(sample, ensure_ascii=False) + "\n")
+
+    def record_reward_profile(self, profile) -> None:
+        """Record per-sample reward timing to a jsonl artifact.
+
+        Each line contains only ``prompt_index``, ``sample_index``,
+        ``duration_s``, and ``timed_out`` — never the prompt or completion
+        text.
+        """
+
+        if profile is None:
+            return
+        for rec in profile.to_jsonl_records():
+            rec["pid"] = os.getpid()
+            with self._reward_profile_file.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
     def record_dashboard_state(
         self,
@@ -213,7 +229,10 @@ def record_training_stats(writer, stats, step, train_res, train_batch, timings: 
 
     # Backend-supplied training metrics (loss, policy_loss, ratio_mean, ...).
     for key, value in train_res.items():
-        writer.add_scalar(f"train/{key}", value, step)
+        if key.startswith("reward_profile_"):
+            writer.add_scalar(f"timing/{key}", value, step)
+        else:
+            writer.add_scalar(f"train/{key}", value, step)
     metric_timings = timings or stats
     for key in ("rollout", "reward", "advantage", "train"):
         if key in metric_timings:
