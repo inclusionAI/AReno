@@ -34,6 +34,7 @@ AReno documentation
    :caption: Cookbook
 
    cookbook/math-rlvr
+   cookbook/saved-checkpoint-serving
    cookbook/tictactoe-agentic-rl
    cookbook/duelgrid-visual-agent
 
