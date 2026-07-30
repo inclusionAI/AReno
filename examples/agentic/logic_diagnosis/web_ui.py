@@ -279,11 +279,19 @@ def _make_payload(
             "stuck_value": server.fault["stuck_value"],
         }
 
+    # Compute current output value if inputs are set
+    output_value = None
+    if server.input_vector is not None:
+        values = evaluate(server.nodes, server.input_vector, server.fault)
+        output_id = next(n["id"] for n in server.nodes if n["type"] == "output")
+        output_value = values[output_id]
+
     return {
         "nodes": nodes_payload,
         "n_inputs": server.n_inputs,
         "n_gates": server.n_gates,
         "input_vector": server.input_vector,
+        "output_value": output_value,
         "probes_used": server.probes_used,
         "max_probes": server.max_probes,
         "diagnosis_submitted": server.diagnosis_submitted,
@@ -422,9 +430,10 @@ function render(){
 
   // Output
   const op = document.getElementById("outputPill");
-  if(state.input_vector !== null && !state.diagnosis_submitted){
+  if(state.output_value !== undefined && state.output_value !== null && !state.diagnosis_submitted){
     op.style.display = "inline-block";
-    op.textContent = `Output: computing...`;
+    op.textContent = `Output: ${state.output_value ? 1 : 0}`;
+    op.style.background = state.output_value ? "#9be564" : "#f08888";
   } else {
     op.style.display = "none";
   }
