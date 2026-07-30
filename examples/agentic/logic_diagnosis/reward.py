@@ -53,14 +53,9 @@ def reward_fn(record) -> float:
                 )
 
     if not submitted:
-        # Give partial credit for probing the faulty gate, even without submitting.
-        # This creates a gradient signal: model learns that probing the right
-        # area is better than doing nothing.
-        if probed_faulty:
-            return 0.2  # found the right gate but didn't submit
         if probes_used > 0:
-            return -0.3  # at least interacted
-        return -1.0  # did nothing
+            return -0.3  # interacted but didn't submit — better than nothing
+        return -1.0  # did nothing at all
 
     return score_episode(
         correct_diagnosis=correct_diagnosis,

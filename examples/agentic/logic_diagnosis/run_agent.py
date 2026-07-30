@@ -85,6 +85,7 @@ async def _run_episode(item, client) -> list[AgentTrajectoryTurn]:
             model="policy",
             messages=turn_messages,
             tools=ALL_TOOLS,
+            tool_choice="required",
             stream=False,
         )
         turns.append(
@@ -93,6 +94,7 @@ async def _run_episode(item, client) -> list[AgentTrajectoryTurn]:
                 messages=turn_messages,
                 response=response,
                 tools=ALL_TOOLS,
+                tool_choice="required",
             )
         )
 
