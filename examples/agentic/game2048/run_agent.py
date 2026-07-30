@@ -88,7 +88,6 @@ async def _run_episode(item, client) -> list[AgentTrajectoryTurn]:
 
         direction = _extract_direction(response)
         if direction is None:
-            logger.warning("Game2048 no valid move tool call, falling back to random")
             direction = game.random_action(board, rng)
 
         new_board, score, valid, terminal = game.move(board, direction, rng)
@@ -101,35 +100,28 @@ async def _run_episode(item, client) -> list[AgentTrajectoryTurn]:
 
 
 def _extract_direction(response) -> str | None:
-    """Parse direction from the model's tool call response."""
+    """Parse direction from the model's tool call response, with text fallback."""
 
     choice = response.choices[0]
     message = choice.message
     tool_calls = getattr(message, "tool_calls", None) or []
     content = getattr(message, "content", None)
-    finish_reason = getattr(choice, "finish_reason", None)
-    usage = getattr(response, "usage", None)
-    completion_tokens = getattr(usage, "completion_tokens", None) if usage else None
-    logger.warning(
-        "Game2048 DEBUG: finish_reason=%s completion_tokens=%s content=%r tool_calls=%r",
-        finish_reason,
-        completion_tokens,
-        content,
-        tool_calls,
-    )
-    if not tool_calls:
-        return None
-    call = tool_calls[0]
-    function = getattr(call, "function", None)
-    if function is None or getattr(function, "name", None) != "move":
-        return None
-    try:
-        arguments = json.loads(function.arguments or "")
-    except (json.JSONDecodeError, TypeError):
-        return None
-    if not isinstance(arguments, dict) or "direction" not in arguments:
-        return None
-    direction = str(arguments["direction"]).upper()
-    if direction not in DIRECTIONS:
-        return None
-    return direction
+    if tool_calls:
+        call = tool_calls[0]
+        function = getattr(call, "function", None)
+        if function is not None and getattr(function, "name", None) == "move":
+            try:
+                arguments = json.loads(function.arguments or "")
+            except (json.JSONDecodeError, TypeError):
+                arguments = None
+            if isinstance(arguments, dict) and "direction" in arguments:
+                direction = str(arguments["direction"]).upper()
+                if direction in DIRECTIONS:
+                    return direction
+    if content:
+        direction = game.parse_action(content)
+        if direction is not None:
+            logger.warning("Game2048 text fallback: extracted %s from %r", direction, content)
+            return direction
+    logger.warning("Game2048 no valid move, falling back to random")
+    return None
