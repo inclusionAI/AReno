@@ -1,0 +1,102 @@
+[
+  {
+    "instruction": "Translate the following English text to French.",
+    "input": "Hello, how are you today?",
+    "output": "Bonjour, comment allez-vous aujourd'hui?"
+  },
+  {
+    "instruction": "Explain the concept of early stopping in machine learning.",
+    "input": "",
+    "output": "Early stopping is a regularization technique used to prevent overfitting in iterative machine learning algorithms. It works by monitoring a validation metric during training and stopping the training process when the metric stops improving for a specified number of consecutive rounds (patience). This helps avoid wasting computational resources and prevents the model from memorizing the training data too closely."
+  },
+  {
+    "instruction": "Write a Python function to calculate the factorial of a number.",
+    "input": "",
+    "output": "def factorial(n):\n    if n == 0 or n == 1:\n        return 1\n    else:\n        return n * factorial(n - 1)"
+  },
+  {
+    "instruction": "Summarize the main idea of the following paragraph.",
+    "input": "Machine learning is a subset of artificial intelligence that enables computers to learn and improve from experience without being explicitly programmed. It focuses on developing computer programs that can access data and use it to learn for themselves.",
+    "output": "Machine learning allows computers to learn from data and improve through experience without explicit programming."
+  },
+  {
+    "instruction": "Convert the following temperature from Celsius to Fahrenheit.",
+    "input": "25",
+    "output": "77"
+  },
+  {
+    "instruction": "What is the capital city of Japan?",
+    "input": "",
+    "output": "Tokyo"
+  },
+  {
+    "instruction": "Write a haiku about artificial intelligence.",
+    "input": "",
+    "output": "Silicon dreams wake\nNeural networks learn and grow\nFuture minds take shape"
+  },
+  {
+    "instruction": "Fix the bug in this Python code.",
+    "input": "def add_numbers(a, b):\n    return a + b\nprint(add_numbers(5))",
+    "output": "def add_numbers(a, b=0):\n    return a + b\nprint(add_numbers(5))"
+  },
+  {
+    "instruction": "List three benefits of regular exercise.",
+    "input": "",
+    "output": "1. Improved cardiovascular health and reduced risk of heart disease.\n2. Enhanced mental health through the release of endorphins, reducing stress and anxiety.\n3. Better weight management and increased muscle strength and endurance."
+  },
+  {
+    "instruction": "Rewrite this sentence in passive voice.",
+    "input": "The dog chased the cat.",
+    "output": "The cat was chased by the dog."
+  },
+  {
+    "instruction": "What is the difference between supervised and unsupervised learning?",
+    "input": "",
+    "output": "Supervised learning uses labeled training data where each example has a known output, allowing the model to learn the mapping from inputs to outputs. Unsupervised learning works with unlabeled data, finding hidden patterns and structures in the input data without predefined outputs."
+  },
+  {
+    "instruction": "Calculate the area of a circle with radius 5.",
+    "input": "",
+    "output": "The area is 78.54 square units (using π × r² = 3.14159 × 25)."
+  },
+  {
+    "instruction": "Provide a synonym for the word 'happy'.",
+    "input": "",
+    "output": "Joyful, content, pleased, delighted, or cheerful."
+  },
+  {
+    "instruction": "Describe the water cycle in simple terms.",
+    "input": "",
+    "output": "The water cycle is the continuous movement of water on Earth. Water evaporates from oceans and lakes, forms clouds in the atmosphere, falls as rain or snow, and flows back to bodies of water through rivers and groundwater."
+  },
+  {
+    "instruction": "Sort the following numbers in ascending order.",
+    "input": "[34, 12, 89, 5, 67]",
+    "output": "[5, 12, 34, 67, 89]"
+  },
+  {
+    "instruction": "What are the primary colors?",
+    "input": "",
+    "output": "The primary colors are red, blue, and yellow. These colors cannot be created by mixing other colors, but all other colors can be created by mixing them in different combinations."
+  },
+  {
+    "instruction": "Write a SQL query to select all users older than 18.",
+    "input": "",
+    "output": "SELECT * FROM users WHERE age > 18;"
+  },
+  {
+    "instruction": "Explain why the sky appears blue.",
+    "input": "",
+    "output": "The sky appears blue because of Rayleigh scattering. Sunlight contains all colors of the rainbow, but blue light has shorter wavelengths and is scattered more easily by gas molecules in Earth's atmosphere. This scattered blue light reaches our eyes from all directions, making the sky look blue."
+  },
+  {
+    "instruction": "Create a simple JSON object representing a person.",
+    "input": "Name: John, Age: 30, City: New York",
+    "output": '{\n  "name": "John",\n  "age": 30,\n  "city": "New York"\n}'
+  },
+  {
+    "instruction": "What is the Pythagorean theorem?",
+    "input": "",
+    "output": "The Pythagorean theorem states that in a right-angled triangle, the square of the hypotenuse (the side opposite the right angle) is equal to the sum of the squares of the other two sides. It is expressed as a² + b² = c²."
+  }
+]
