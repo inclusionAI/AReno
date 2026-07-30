@@ -283,6 +283,67 @@ class DiagnosisHandler(BaseHTTPRequestHandler):
         server.events = server.events[:12]
         self._send_json(_make_payload(server))
 
+    def _handle_agent(self) -> None:
+        """Let the LLM agent make one move."""
+        server = self.server
+        if server.diagnosis_submitted:
+            self._send_json(_make_payload(server))
+            return
+        if server.openai_client is None:
+            server.openai_client = _make_openai_client(server.args)
+        messages = [{"role": "system", "content": SYSTEM_PROMPT_AGENT}]
+        from game import make_prompt as game_make_prompt
+        record = {"nodes": server.nodes, "n_inputs": server.n_inputs, "n_gates": server.n_gates, "max_probes": server.max_probes}
+        messages.append({"role": "user", "content": game_make_prompt(record)})
+        if server.input_vector is None:
+            tools = [SET_INPUT_VECTOR_TOOL]
+            tc = {"type": "function", "function": {"name": "set_input_vector"}}
+            turn_msg = {"role": "user", "content": "First, call set_input_vector with your chosen input bits."}
+        elif server.probes_used >= server.max_probes:
+            tools = [SUBMIT_DIAGNOSIS_TOOL]
+            tc = {"type": "function", "function": {"name": "submit_diagnosis"}}
+            turn_msg = {"role": "user", "content": "Out of probes. Call submit_diagnosis with your best guess."}
+        else:
+            tools = [INSPECT_NODE_TOOL, SUBMIT_DIAGNOSIS_TOOL]
+            tc = None
+            turn_msg = {"role": "user", "content": "Call inspect_node to probe a gate, or submit_diagnosis if confident."}
+        messages.append(turn_msg)
+        try:
+            kwargs = {"model": server.args.model, "messages": messages, "tools": tools, "stream": False}
+            if tc:
+                kwargs["tool_choice"] = tc
+            response = server.openai_client.chat.completions.create(**kwargs)
+        except Exception as exc:
+            server.events.insert(0, f"LLM error: {exc}")
+            server.events = server.events[:12]
+            self._send_json(_make_payload(server))
+            return
+        msg = response.choices[0].message
+        calls = list(msg.tool_calls or [])
+        if not calls:
+            server.events.insert(0, "LLM returned no tool call")
+            server.events = server.events[:12]
+            self._send_json(_make_payload(server))
+            return
+        call = calls[0]
+        name = call.function.name
+        try:
+            args = json.loads(call.function.arguments or "{}")
+        except json.JSONDecodeError:
+            args = {}
+        if name == "set_input_vector":
+            bits_raw = args.get("inputs", [])
+            if isinstance(bits_raw, list):
+                self._handle_set_input(bits_raw)
+        elif name == "inspect_node":
+            self._handle_probe(args.get("node_id"))
+        elif name == "submit_diagnosis":
+            self._handle_submit(args.get("node_id"), args.get("fault_type"))
+        else:
+            server.events.insert(0, f"LLM called unknown tool: {name}")
+            server.events = server.events[:12]
+            self._send_json(_make_payload(server))
+
 
 def _make_openai_client(args):
     try:
@@ -290,85 +351,6 @@ def _make_openai_client(args):
     except ImportError as exc:
         raise RuntimeError("LLM mode requires `openai`. Install it with `pip install openai`.") from exc
     return OpenAI(base_url=args.base_url, api_key=args.api_key, max_retries=0)
-
-
-def _handle_agent(self):
-    """Let the LLM agent make one move."""
-    server = self.server
-    if server.diagnosis_submitted:
-        self._send_json(_make_payload(server))
-        return
-
-    if server.openai_client is None:
-        server.openai_client = _make_openai_client(server.args)
-
-    # Build the conversation so far
-    messages = [{"role": "system", "content": SYSTEM_PROMPT_AGENT}]
-    # Add circuit description
-    from game import make_prompt as game_make_prompt
-    record = {"nodes": server.nodes, "n_inputs": server.n_inputs, "n_gates": server.n_gates, "max_probes": server.max_probes}
-    messages.append({"role": "user", "content": game_make_prompt(record)})
-
-    # Build turn based on state
-    if server.input_vector is None:
-        tool_name = "set_input_vector"
-        tools = [SET_INPUT_VECTOR_TOOL]
-        tc = {"type": "function", "function": {"name": tool_name}}
-        turn_msg = {"role": "user", "content": "First, call set_input_vector with your chosen input bits."}
-    elif server.probes_used >= server.max_probes:
-        tool_name = "submit_diagnosis"
-        tools = [SUBMIT_DIAGNOSIS_TOOL]
-        tc = {"type": "function", "function": {"name": tool_name}}
-        turn_msg = {"role": "user", "content": "Out of probes. Call submit_diagnosis with your best guess."}
-    else:
-        tools = [INSPECT_NODE_TOOL, SUBMIT_DIAGNOSIS_TOOL]
-        tc = None
-        turn_msg = {"role": "user", "content": "Call inspect_node to probe a gate, or submit_diagnosis if confident."}
-
-    messages.append(turn_msg)
-
-    try:
-        kwargs = {"model": server.args.model, "messages": messages, "tools": tools, "stream": False}
-        if tc:
-            kwargs["tool_choice"] = tc
-        response = server.openai_client.chat.completions.create(**kwargs)
-    except Exception as exc:
-        server.events.insert(0, f"LLM error: {exc}")
-        server.events = server.events[:12]
-        self._send_json(_make_payload(server))
-        return
-
-    # Parse tool call
-    msg = response.choices[0].message
-    calls = list(msg.tool_calls or [])
-    if not calls:
-        server.events.insert(0, "LLM returned no tool call")
-        server.events = server.events[:12]
-        self._send_json(_make_payload(server))
-        return
-
-    call = calls[0]
-    name = call.function.name
-    try:
-        args = json.loads(call.function.arguments or "{}")
-    except json.JSONDecodeError:
-        args = {}
-
-    # Execute
-    if name == "set_input_vector":
-        bits_raw = args.get("inputs", [])
-        if isinstance(bits_raw, list):
-            self._handle_set_input(bits_raw)
-        else:
-            self._send_json({"error": "invalid inputs"})
-    elif name == "inspect_node":
-        self._handle_probe(args.get("node_id"))
-    elif name == "submit_diagnosis":
-        self._handle_submit(args.get("node_id"), args.get("fault_type"))
-    else:
-        server.events.insert(0, f"LLM called unknown tool: {name}")
-        server.events = server.events[:12]
-        self._send_json(_make_payload(server))
 
 
 SYSTEM_PROMPT_AGENT = (
