@@ -47,7 +47,6 @@ import json
 import math
 import os
 import sys
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -88,18 +87,40 @@ INVALID_PENALTY_RATIO = 0.1
 # --- episode feature extraction --------------------------------------------
 
 
-@dataclass
 class EpisodeFeatures:
-    """Derived signals from one rollout episode, used to pick its reward tier."""
+    """Derived signals from one rollout episode, used to pick its reward tier.
 
-    solved: bool
-    legal_placements: int            # place_digit calls that succeeded
-    total_place_attempts: int        # place_digit calls (legal + illegal)
-    invalid_actions: int             # place_digit calls rejected by the env
-    tried_place: bool                # any place_digit was attempted at all
-    inspect_count: int               # inspect_candidates calls made
-    empty_cells: int                 # board empties at episode start
-    difficulty: str
+    A plain class (not ``@dataclass``) on purpose: AReno loads this file via
+    ``importlib`` dynamic module exec, which does not register the module in
+    ``sys.modules`` — and ``@dataclass`` needs that registration to resolve
+    type annotations, so it would raise ``AttributeError`` at import time.
+    """
+
+    __slots__ = (
+        "solved", "legal_placements", "total_place_attempts", "invalid_actions",
+        "tried_place", "inspect_count", "empty_cells", "difficulty",
+    )
+
+    def __init__(
+        self,
+        *,
+        solved: bool,
+        legal_placements: int,
+        total_place_attempts: int,
+        invalid_actions: int,
+        tried_place: bool,
+        inspect_count: int,
+        empty_cells: int,
+        difficulty: str,
+    ) -> None:
+        self.solved = solved
+        self.legal_placements = legal_placements            # place_digit calls that succeeded
+        self.total_place_attempts = total_place_attempts    # place_digit calls (legal + illegal)
+        self.invalid_actions = invalid_actions              # place_digit calls rejected by the env
+        self.tried_place = tried_place                      # any place_digit was attempted at all
+        self.inspect_count = inspect_count                  # inspect_candidates calls made
+        self.empty_cells = empty_cells                      # board empties at episode start
+        self.difficulty = difficulty
 
 
 def _extract_features(record: Any) -> EpisodeFeatures:
