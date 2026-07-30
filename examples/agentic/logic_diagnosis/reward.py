@@ -1,4 +1,8 @@
-"""Outcome and efficiency reward for logic-circuit diagnosis trajectories."""
+"""Outcome and efficiency reward for logic-circuit diagnosis trajectories.
+
+Gives partial credit for probing the faulty gate so the model has
+a gradient signal even before it learns to submit a diagnosis.
+"""
 
 from __future__ import annotations
 
@@ -11,51 +15,52 @@ from game import MAX_PROBES, score_episode  # noqa: E402
 
 
 def reward_fn(record) -> float:
-    """Reward efficient, correct diagnosis and penalize invalid or missing ones.
-
-    Extracts tool calls from ``record.tool_calls``, counts probes, parses the
-    final ``submit_diagnosis``, and delegates to ``score_episode``.
-    """
+    """Process + outcome reward: partial credit for probing the faulty gate."""
 
     tool_calls = list(record.tool_calls or [])
+    source = dict(record.source_record) if record.source_record is not None else {}
+    fault = source.get("fault", {})
 
-    probes_used = sum(
-        1 for call in tool_calls
-        if isinstance(call, dict) and call.get("name") == "inspect_node"
-    )
-
+    probes_used = 0
+    probed_faulty = False
     submitted = False
     correct_diagnosis = False
 
     for call in tool_calls:
-        if not isinstance(call, dict) or call.get("name") != "submit_diagnosis":
+        if not isinstance(call, dict):
             continue
-        submitted = True
-        args = call.get("arguments")
-        if isinstance(args, str):
-            try:
-                args = json.loads(args)
-            except json.JSONDecodeError:
-                continue
-        if not isinstance(args, dict):
-            continue
-        node_id = args.get("node_id")
-        fault_type = args.get("fault_type")
+        name = call.get("name")
 
-        source = dict(record.source_record) if record.source_record is not None else {}
-        fault = source.get("fault", {})
+        if name == "inspect_node":
+            probes_used += 1
+            args = _parse_args(call.get("arguments"))
+            node_id = args.get("node_id")
+            if isinstance(node_id, int) and node_id == fault.get("node"):
+                probed_faulty = True
 
-        if isinstance(node_id, int) and isinstance(fault_type, str) and isinstance(fault, dict):
-            correct_diagnosis = (
-                node_id == fault.get("node")
-                and (
-                    (fault_type == "stuck_at_0" and fault.get("stuck_value") == 0)
-                    or (fault_type == "stuck_at_1" and fault.get("stuck_value") == 1)
+        elif name == "submit_diagnosis":
+            submitted = True
+            args = _parse_args(call.get("arguments"))
+            node_id = args.get("node_id")
+            fault_type = args.get("fault_type")
+            if isinstance(node_id, int) and isinstance(fault_type, str):
+                correct_diagnosis = (
+                    node_id == fault.get("node")
+                    and (
+                        (fault_type == "stuck_at_0" and fault.get("stuck_value") == 0)
+                        or (fault_type == "stuck_at_1" and fault.get("stuck_value") == 1)
+                    )
                 )
-            )
 
     if not submitted:
-        return -1.0
+        # Give partial credit for probing the faulty gate, even without submitting.
+        # This creates a gradient signal: model learns that probing the right
+        # area is better than doing nothing.
+        if probed_faulty:
+            return 0.2  # found the right gate but didn't submit
+        if probes_used > 0:
+            return -0.3  # at least interacted
+        return -1.0  # did nothing
 
     return score_episode(
         correct_diagnosis=correct_diagnosis,
@@ -63,3 +68,14 @@ def reward_fn(record) -> float:
         max_probes=MAX_PROBES,
         submitted=True,
     )
+
+
+def _parse_args(arguments):
+    if isinstance(arguments, str):
+        try:
+            return json.loads(arguments)
+        except json.JSONDecodeError:
+            return {}
+    if isinstance(arguments, dict):
+        return arguments
+    return {}
