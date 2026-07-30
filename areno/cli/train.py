@@ -176,6 +176,8 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
     args.max_steps = getattr(args, "max_steps", None)
     args.score_micro_bs = getattr(args, "score_micro_bs", 8)
     args.model_hub = getattr(args, "model_hub", "modelscope")
+    args.loader_timeout_s = getattr(args, "loader_timeout_s", 0.0)
+    args.max_loader_records = getattr(args, "max_loader_records", 0)
     smoke_infer = bool(getattr(args, "smoke_infer", False))
     smoke_train = bool(getattr(args, "smoke_train", False))
     if smoke_infer or smoke_train:
@@ -1022,16 +1024,23 @@ def _load_dataset_for_training(
 
     if dataset_loader_fn is not None:
         loader_fn = _load_dataset_loader_fn(dataset_loader_fn)
-        dataset, diag = run_loader_with_limits(
-            loader_fn,
+        if loader_timeout_s > 0 or max_loader_records > 0:
+            dataset, diag = run_loader_with_limits(
+                loader_fn,
+                dataset_path,
+                timeout_s=loader_timeout_s,
+                max_records=max_loader_records,
+                default_loader=default_loader,
+                load_dataset=load_dataset,
+                load_from_disk=load_from_disk,
+            )
+            return dataset
+        return loader_fn(
             dataset_path,
-            timeout_s=loader_timeout_s,
-            max_records=max_loader_records,
             default_loader=default_loader,
             load_dataset=load_dataset,
             load_from_disk=load_from_disk,
         )
-        return dataset
     if loader_timeout_s > 0 or max_loader_records > 0:
         dataset, diag = run_loader_with_limits(
             default_loader,

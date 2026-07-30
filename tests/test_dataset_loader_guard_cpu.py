@@ -333,3 +333,117 @@ class TestCombinedLimits:
         )
         assert len(dataset) == 5
         assert diag.truncated is True
+
+
+# ---------------------------------------------------------------------------
+# Integration-style tests: _load_dataset_for_training -> run_loader_with_limits
+# ---------------------------------------------------------------------------
+
+class TestIntegrationLoadDatasetForTraining:
+    """Integration tests verifying _load_dataset_for_training wraps loaders
+    with run_loader_with_limits and returns the correct dataset."""
+
+    @pytest.fixture(autouse=True)
+    def _skip_if_no_torch(self):
+        """Skip integration tests when torch is unavailable (e.g. macOS CPU)."""
+        try:
+            import torch  # noqa: F401
+        except ImportError:
+            pytest.skip("torch not installed — integration test requires areno.cli.train")
+
+    def test_default_loader_no_limits(self):
+        """Default loader path without limits should return data unchanged."""
+        from areno.cli.train import _load_dataset_for_training
+
+        # Use a tiny inline dataset via load_dataset mock.
+        def mock_load_dataset(name, **kw):
+            return [{"id": i, "text": f"row {i}"} for i in range(5)]
+
+        def mock_load_from_disk(path):
+            raise FileNotFoundError("not a save_to_disk directory")
+
+        dataset = _load_dataset_for_training(
+            "dummy_path",
+            model_hub="hf",
+            dataset_loader_fn=None,
+            load_dataset=mock_load_dataset,
+            load_from_disk=mock_load_from_disk,
+            loader_timeout_s=0.0,
+            max_loader_records=0,
+        )
+        assert len(dataset) == 5
+
+    def test_default_loader_with_record_cap(self):
+        """Default loader with max_loader_records should truncate."""
+        from areno.cli.train import _load_dataset_for_training
+
+        def mock_load_dataset(name, **kw):
+            return [{"id": i} for i in range(100)]
+
+        def mock_load_from_disk(path):
+            raise FileNotFoundError("not a save_to_disk directory")
+
+        dataset = _load_dataset_for_training(
+            "dummy_path",
+            model_hub="hf",
+            dataset_loader_fn=None,
+            load_dataset=mock_load_dataset,
+            load_from_disk=mock_load_from_disk,
+            loader_timeout_s=0.0,
+            max_loader_records=10,
+        )
+        assert len(dataset) == 10
+
+    def test_custom_loader_no_limits(self, tmp_path):
+        """Custom loader path without limits should still work."""
+        from areno.cli.train import _load_dataset_for_training
+
+        loader_script = tmp_path / "my_loader.py"
+        loader_script.write_text(
+            "def load_training_dataset(path, **kw):\n"
+            "    return [{'id': i} for i in range(3)]\n"
+        )
+
+        def mock_load_dataset(name, **kw):
+            return []
+
+        def mock_load_from_disk(path):
+            raise FileNotFoundError("not used")
+
+        dataset = _load_dataset_for_training(
+            "dummy_path",
+            model_hub="hf",
+            dataset_loader_fn=str(loader_script),
+            load_dataset=mock_load_dataset,
+            load_from_disk=mock_load_from_disk,
+            loader_timeout_s=0.0,
+            max_loader_records=0,
+        )
+        assert len(dataset) == 3
+
+    def test_custom_loader_with_record_cap(self, tmp_path):
+        """Custom loader with max_loader_records should truncate."""
+        from areno.cli.train import _load_dataset_for_training
+
+        loader_script = tmp_path / "my_loader.py"
+        loader_script.write_text(
+            "def load_training_dataset(path, **kw):\n"
+            "    return [{'id': i} for i in range(50)]\n"
+        )
+
+        def mock_load_dataset(name, **kw):
+            return []
+
+        def mock_load_from_disk(path):
+            raise FileNotFoundError("not used")
+
+        dataset = _load_dataset_for_training(
+            "dummy_path",
+            model_hub="hf",
+            dataset_loader_fn=str(loader_script),
+            load_dataset=mock_load_dataset,
+            load_from_disk=mock_load_from_disk,
+            loader_timeout_s=0.0,
+            max_loader_records=5,
+        )
+        assert len(dataset) == 5
