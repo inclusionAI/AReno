@@ -353,8 +353,8 @@ class ExampleRegressionTest(unittest.TestCase):
         from examples.math.math_verify_reward import reward_fn as raw_fn
 
         # The math verify reward accesses record.answer and calls math_verify.
-        # The dry-run with an empty RewardRecord raises KeyError (record.answer
-        # is None), which should produce a warning, not a hard failure.
+        # With a well-formed mock record (answer=["4"], completion="4"),
+        # dry-run should succeed without warnings.
         record = make_reward_record(
             prompt="What is 2+2?",
             completion="4",
@@ -372,9 +372,9 @@ class ExampleRegressionTest(unittest.TestCase):
                 os.environ.pop("ARENO_REWARD_VALIDATION", None)
             else:
                 os.environ["ARENO_REWARD_VALIDATION"] = old
-        # Dry-run should have warned about KeyError
-        self.assertTrue(any("dry-run raised KeyError" in str(w.message) for w in caught))
-        # But the function should still be callable with a real record
+        # Dry-run should succeed — no warnings expected
+        self.assertEqual(len(caught), 0)
+        # Function should return a valid score
         result = wrapped(record)
         self.assertIn(result, {0.0, 1.0})
 

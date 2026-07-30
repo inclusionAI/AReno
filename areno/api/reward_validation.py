@@ -214,7 +214,10 @@ def validate_and_wrap_reward_fn(
     #    a successful dry-run is a hard error.
     if os.environ.get("ARENO_REWARD_VALIDATION_DRY_RUN", "1") != "0":
         mock_record = make_reward_record(
-            prompt="", completion="", source_record={}
+            prompt="What is 2+2?",
+            completion="4",
+            source_record={"answer": "4", "question": "What is 2+2?"},
+            answer=["4"],
         )
         try:
             dry_result = fn(mock_record)
