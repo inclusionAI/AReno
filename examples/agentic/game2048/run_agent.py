@@ -60,11 +60,7 @@ async def _run_episode(item, client) -> list[AgentTrajectoryTurn]:
     tool_choice = {"type": "function", "function": {"name": "move"}}
 
     for move_number in range(1, max_moves + 1):
-        user_content = (
-            f"Step {move_number}/{max_moves}.\n"
-            f"Current board:\n{game.board_to_text(board)}\n"
-            f"Call the move tool with the best direction."
-        )
+        user_content = f"Current board:\n{game.board_to_text(board)}"
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_content},

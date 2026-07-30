@@ -19,13 +19,10 @@ SIZE = 4
 DEFAULT_MAX_MOVES = 50
 
 SYSTEM_PROMPT = (
-    "You are a 2048 game AI. The board is a 4x4 grid. Each turn you choose to "
-    "swipe UP, DOWN, LEFT, or RIGHT. Identical tiles merge on collision. After "
-    "each move a new 2 (90%) or 4 (10%) appears in a random empty cell.\n"
-    "Keep your largest tile in a corner.\n"
-    "Do NOT write any explanation or analysis. "
-    "Your ENTIRE response must be a single move tool call with one direction. "
-    "Output the tool call immediately without any text."
+    "You are a 2048 game AI. The board is a 4x4 grid. Swipe UP, DOWN, LEFT, or RIGHT. "
+    "Identical tiles merge. A new 2 (90%) or 4 (10%) appears after each move. "
+    "Keep your largest tile in a corner. "
+    "Respond with only the move tool call, no explanation."
 )
 
 MOVE_TOOL = {
@@ -223,13 +220,12 @@ def total_score(board: Board) -> int:
 
 
 def board_to_text(board: Board) -> str:
-    """Render the board as a 4-line text grid; empty cells are dots."""
+    """Render the board as a compact single-line text grid; empty cells are dots."""
 
-    lines = []
-    for row in normalize_board(board):
-        cells = [str(v) if v != EMPTY else "." for v in row]
-        lines.append("  ".join(f"{c:>4}" for c in cells))
-    return "\n".join(lines)
+    return " | ".join(
+        " ".join(str(v) if v != EMPTY else "." for v in row)
+        for row in normalize_board(board)
+    )
 
 
 def format_prompt(board: Board) -> str:
