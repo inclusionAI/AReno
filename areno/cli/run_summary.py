@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import sys
-from typing import Any, TextIO
+from typing import TextIO
 
 
 # ---------------------------------------------------------------------------
@@ -92,18 +92,6 @@ def _metric_lines(metrics: dict[str, float]) -> list[str]:
     return lines
 
 
-def _outcome_label(outcome: str) -> str:
-    return {
-        "success": "success",
-        "interrupted": "interrupted",
-        "error": "error",
-    }.get(outcome, outcome)
-
-
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
-
 def format_run_summary(
     data: RunSummaryData,
     *,
@@ -162,7 +150,7 @@ def format_run_summary(
     lines.append("=" * width)
     lines.append("  AReno Training Summary")
     lines.append("-" * width)
-    lines.append(f"  Outcome:    {_outcome_label(data.outcome)}")
+    lines.append(f"  Outcome:    {data.outcome}")
     lines.append(f"  Duration:   {_format_duration(data.duration_s)}")
     if data.algo:
         lines.append(f"  Algorithm:  {data.algo}")
@@ -195,7 +183,7 @@ def format_run_summary(
 def print_run_summary(
     data: RunSummaryData,
     *,
-    enabled: bool = True,
+    enabled: bool = False,
     json_output: bool = False,
     stream: TextIO | None = None,
 ) -> None:

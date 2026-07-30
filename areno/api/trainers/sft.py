@@ -96,6 +96,7 @@ class SFTTrainer:
         configure_chat_template_enable_thinking(tokenizer, getattr(self.config, "chat_template_enable_thinking", None))
         # Record total dataset size for summary statistics.
         self._summary_data.samples_processed = len(self.dataset)
+        self._sft_total_skipped = 0
         step = 0
         for epoch in range(self.config.epochs):
             self.logger.info("epoch=%d stage=epoch_start", epoch)
@@ -171,6 +172,8 @@ class SFTTrainer:
                 batch = []
         if skipped:
             self.logger.info("stage=sft_dataset_filter skipped_long_or_empty=%d", skipped)
+            self._sft_total_skipped += skipped
+            self._summary_data.samples_skipped = self._sft_total_skipped
         if accepted == 0:
             raise ValueError(
                 "SFT dataset produced no valid training rows after filtering: "

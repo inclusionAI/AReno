@@ -172,7 +172,7 @@ class TestFormatRunSummaryJson:
 class TestPrintRunSummary:
     def test_prints_to_stream(self):
         buf = io.StringIO()
-        print_run_summary(_make_summary(), stream=buf)
+        print_run_summary(_make_summary(), enabled=True, stream=buf)
         output = buf.getvalue()
         assert "AReno Training Summary" in output
         assert "success" in output
@@ -184,12 +184,12 @@ class TestPrintRunSummary:
 
     def test_json_mode(self):
         buf = io.StringIO()
-        print_run_summary(_make_summary(), json_output=True, stream=buf)
+        print_run_summary(_make_summary(), enabled=True, json_output=True, stream=buf)
         parsed = json.loads(buf.getvalue())
         assert parsed["outcome"] == "success"
 
     def test_defaults_to_stderr(self, capsys):
-        print_run_summary(_make_summary())
+        print_run_summary(_make_summary(), enabled=True)
         captured = capsys.readouterr()
         assert "AReno Training Summary" in captured.err
         assert captured.out == ""

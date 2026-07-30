@@ -196,7 +196,10 @@ class PolicyOnlyTrainer:
                 sd = self._summary_data
                 sd.final_step = step + 1
                 sd.final_epoch = epoch
-                sd.samples_processed += prompt_batch.scanned
+                # Only record dataset size once (first epoch) to avoid
+                # inflating the count across multiple epochs.
+                if epoch == 0:
+                    sd.samples_processed += prompt_batch.scanned
                 sd.samples_skipped += prompt_batch.skipped_long
                 sd.samples_trained += len(train_batch) if train_batch else 0
                 if train_batch and isinstance(result, dict):

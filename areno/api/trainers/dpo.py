@@ -107,6 +107,7 @@ class DPOTrainer:
         configure_chat_template_enable_thinking(tokenizer, getattr(self.config, "chat_template_enable_thinking", None))
         # Record total dataset size for summary statistics.
         self._summary_data.samples_processed = len(self.dataset)
+        self._dpo_total_skipped = 0
         step = 0
         max_seq_len = self.config.max_prompt_tokens + self.config.max_new_tokens
         for epoch in range(self.config.epochs):
@@ -199,6 +200,8 @@ class DPOTrainer:
                 batch = []
         if skipped:
             self.logger.info("stage=dpo_dataset_filter skipped_invalid_or_long=%d", skipped)
+            self._dpo_total_skipped += skipped
+            self._summary_data.samples_skipped = self._dpo_total_skipped
         if batch:
             yield batch
 

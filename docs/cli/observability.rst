@@ -290,3 +290,31 @@ To disable the summary entirely:
 .. code-block:: bash
 
    areno train --algo sft --ckpt /path/to/model --dataset-path /path/to/data --no-summary
+
+Deterministic local example
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Create a tiny JSONL dataset and a minimal loader to test the summary without
+any external model or dataset:
+
+.. code-block:: bash
+
+   # 1. Create a 3-row dataset
+   echo '{"prompt":"hello","response":"world"}' > /tmp/tiny.jsonl
+   echo '{"prompt":"foo","response":"bar"}' >> /tmp/tiny.jsonl
+   echo '{"prompt":"test","response":"case"}' >> /tmp/tiny.jsonl
+
+   # 2. Create a minimal loader
+   cat > /tmp/loader.py << 'EOF'
+   import json
+
+   def load_training_dataset(path, **kw):
+       with open(path) as f:
+           return [json.loads(line) for line in f]
+   EOF
+
+   # 3. Run with summary enabled
+   areno train --algo sft --ckpt Qwen/Qwen3-0.6B \
+     --dataset-path /tmp/tiny.jsonl \
+     --dataset-loader-fn /tmp/loader.py \
+     --max-steps 2 --summary
