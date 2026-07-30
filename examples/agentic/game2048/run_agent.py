@@ -1,14 +1,13 @@
-"""Single-turn tool-call agent loop for 2048.
+"""Single-turn text agent loop for 2048.
 
 Each step is an independent LLM call: the model sees only the system prompt
 and the current board. No conversation history is accumulated. The model
-calls the move tool with a direction, which is parsed from the tool call.
+responds with a direction (UP, DOWN, LEFT, or RIGHT) in plain text.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import random
 import sys
@@ -17,7 +16,7 @@ from pathlib import Path
 from areno.api.agentic import AgentTrajectory, AgentTrajectoryTurn
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from game import MOVE_TOOL, DEFAULT_MAX_MOVES, DIRECTIONS, SYSTEM_PROMPT  # noqa: E402
+from game import DEFAULT_MAX_MOVES, SYSTEM_PROMPT  # noqa: E402
 import game  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -57,7 +56,6 @@ async def _run_episode(item, client) -> list[AgentTrajectoryTurn]:
     rng = random.Random(seed)
 
     turns: list[AgentTrajectoryTurn] = []
-    tool_choice = {"type": "function", "function": {"name": "move"}}
 
     for move_number in range(1, max_moves + 1):
         user_content = f"Current board:\n{game.board_to_text(board)}"
@@ -68,8 +66,6 @@ async def _run_episode(item, client) -> list[AgentTrajectoryTurn]:
         response = await client.chat.completions.create(
             model="policy",
             messages=messages,
-            tools=[MOVE_TOOL],
-            tool_choice=tool_choice,
             stream=False,
         )
         turns.append(
@@ -77,8 +73,6 @@ async def _run_episode(item, client) -> list[AgentTrajectoryTurn]:
                 item=item,
                 messages=messages,
                 response=response,
-                tools=[MOVE_TOOL],
-                tool_choice=tool_choice,
             )
         )
 
@@ -96,28 +90,12 @@ async def _run_episode(item, client) -> list[AgentTrajectoryTurn]:
 
 
 def _extract_direction(response) -> str | None:
-    """Parse direction from the model's tool call response, with text fallback."""
+    """Parse direction from the model's text response."""
 
-    choice = response.choices[0]
-    message = choice.message
-    tool_calls = getattr(message, "tool_calls", None) or []
-    content = getattr(message, "content", None)
-    if tool_calls:
-        call = tool_calls[0]
-        function = getattr(call, "function", None)
-        if function is not None and getattr(function, "name", None) == "move":
-            try:
-                arguments = json.loads(function.arguments or "")
-            except (json.JSONDecodeError, TypeError):
-                arguments = None
-            if isinstance(arguments, dict) and "direction" in arguments:
-                direction = str(arguments["direction"]).upper()
-                if direction in DIRECTIONS:
-                    return direction
+    content = response.choices[0].message.content
     if content:
         direction = game.parse_action(content)
         if direction is not None:
-            logger.warning("Game2048 text fallback: extracted %s from %r", direction, content)
             return direction
     logger.warning("Game2048 no valid move, falling back to random")
     return None

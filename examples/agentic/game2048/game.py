@@ -22,7 +22,7 @@ SYSTEM_PROMPT = (
     "You are a 2048 game AI. The board is a 4x4 grid. Swipe UP, DOWN, LEFT, or RIGHT. "
     "Identical tiles merge. A new 2 (90%) or 4 (10%) appears after each move. "
     "Keep your largest tile in a corner. "
-    "Respond with only the move tool call, no explanation."
+    "Respond with only one word: UP, DOWN, LEFT, or RIGHT."
 )
 
 MOVE_TOOL = {
