@@ -499,7 +499,7 @@ class DashboardState:
             self._save_state()
             return [
                 job.to_summary_json()
-                for job in sorted(self.jobs.values(), key=lambda item: item.created_at, reverse=True)
+                for job in sorted(self.jobs.values(), key=lambda item: _parse_time(item.created_at) or 0, reverse=True)
             ]
 
     def _refresh_job_status(self, job: Job) -> None:

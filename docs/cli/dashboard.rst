@@ -107,19 +107,21 @@ without running real training jobs:
    python scripts/seed_dashboard.py --count 50
    areno dashboard --start
 
-This writes 50 synthetic jobs with mixed states, algorithms, types, and
-timestamps to ``.areno-dashboard-state.json`` in the current directory.
-Half the jobs use the sections-format launch config (matching real
-CLI-registered jobs) and half use flat dict format (matching dashboard
-launched jobs), so both code paths are exercised. The dashboard reads
-this file on startup and on each polling cycle, so a restart is needed
-after generating fresh data:
+By default the script **merges** synthetic jobs into the existing
+``.areno-dashboard-state.json``, preserving any real jobs already
+present. Use ``--replace`` to discard existing jobs and write only
+synthetic data:
 
 .. code-block:: bash
 
    areno dashboard --stop
-   python scripts/seed_dashboard.py --count 50
+   python scripts/seed_dashboard.py --count 50 --replace
    areno dashboard --start
+
+Half the jobs use the sections-format launch config (matching real
+CLI-registered jobs) and half use flat dict format (matching dashboard
+launched jobs), so both code paths are exercised. All timestamps are
+ISO-8601 strings matching the real dashboard format.
 
 Minimal example
 ---------------
