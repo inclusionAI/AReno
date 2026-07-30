@@ -43,7 +43,7 @@ WORD_LIST = frozenset([
     "fluid", "flush", "focal", "focus", "force", "forge", "forth", "forty",
     "forum", "found", "frame", "frank", "fraud", "fresh", "front", "frost",
     "fruit", "fully", "funny", "giant", "given", "glass", "globe", "glory",
-    "glove", "grace", "grade", "grain", "grand", "grant", "grape", "grasp",
+    "glove", "grace", "grade", "grain", "grant", "grape", "grasp",
     "grass", "grave", "great", "green", "greet", "grief", "grill", "gross",
     "group", "grove", "grown", "guard", "guess", "guest", "guide", "guild",
     "guilt", "habit", "happy", "harsh", "haste", "haunt", "haven", "heart",
