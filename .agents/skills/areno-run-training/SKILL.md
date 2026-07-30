@@ -29,6 +29,31 @@ use `examples/math/dataset_loader.py`.
 
 Use [scripts/read_metrics.py](scripts/read_metrics.py) to inspect event keys or selected scalar series. Do not parse stdout as the metric source.
 
+### Recipe generation
+
+When the user provides a training mode, GPU count, context length, and target
+batch but needs the full set of AReno options filled in, generate a complete
+recipe before building the command manually:
+
+```bash
+python .agents/skills/areno-run-training/scripts/generate_recipe.py \
+  --mode <sft|dpo|gspo|grpo|ppo> --gpu-count <N> \
+  --context-length <tokens> --target-batch <N> \
+  [--tp-size N] [--n-samples N] [--mini-bs N] [--max-new-tokens N] \
+  [--override key=value ...]
+```
+
+The script outputs structured JSON with a `recipe` dict, a `provenance` dict
+explaining each value's derivation, a directly runnable `command` string with
+placeholder tokens, a `warnings` list flagging required-but-unset fields, and
+a `human_readable` summary. See [references/recipe-generation.md](references/recipe-generation.md)
+for derivation rules and the per-mode field matrix.
+
+After generating a recipe, replace all `<placeholder>` tokens with real paths,
+then verify the dataset with `inspect_dataset.py` and the topology with
+`.agents/skills/areno-tune-capacity/scripts/check_capacity.py` before
+launching.
+
 ## Workflow
 
 1. Record `git rev-parse HEAD`, environment facts from `areno env --json` and `areno check`, GPU state, checkpoint source, ModelScope dataset source, and resolved local paths.
