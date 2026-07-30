@@ -16,7 +16,7 @@ Board = list[list[int]]
 DIRECTIONS = ("UP", "DOWN", "LEFT", "RIGHT")
 EMPTY = 0
 SIZE = 4
-DEFAULT_MAX_MOVES = 50
+DEFAULT_MAX_MOVES = 30
 
 SYSTEM_PROMPT = (
     "You are a 2048 game AI. The board is a 4x4 grid. Swipe UP, DOWN, LEFT, or RIGHT. "
