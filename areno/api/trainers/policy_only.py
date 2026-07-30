@@ -418,13 +418,22 @@ class PolicyOnlyTrainer:
         advantages_by_row: dict[int, float] = {}
         for row_indices in grouped.values():
             group_rewards = [rewards_all[row_idx] for row_idx in row_indices]
-            group_rewards, _stats = transform_rewards(
+            group_rewards, stats = transform_rewards(
                 group_rewards,
                 mode=transform_mode,
                 clip_min=getattr(self.config, "reward_clip_min", -10.0),
                 clip_max=getattr(self.config, "reward_clip_max", 10.0),
                 standardize_eps=getattr(self.config, "reward_standardize_eps", 1e-8),
             )
+            if stats.get("transform_mode", "disabled") != "disabled":
+                self.logger.info(
+                    "metric=reward_transform mode=%s raw_mean=%.6f raw_std=%.6f transformed_mean=%.6f transformed_std=%.6f",
+                    stats["transform_mode"],
+                    stats.get("raw_mean", 0.0),
+                    stats.get("raw_std", 0.0),
+                    stats.get("transformed_mean", 0.0),
+                    stats.get("transformed_std", 0.0),
+                )
             # Write transformed rewards back so the TrainSequence carries the
             # post-transform value in its ``reward`` field.
             for row_idx, transformed_reward in zip(row_indices, group_rewards, strict=True):
