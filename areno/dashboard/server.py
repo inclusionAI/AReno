@@ -95,10 +95,16 @@ def _launch_value(launch: Any, key: str, default: Any = "") -> Any:
         return default
     if key in launch:
         return launch[key] or default
-    for section in launch.get("sections", []):
+    sections = launch.get("sections")
+    if not isinstance(sections, list):
+        return default
+    for section in sections:
         if not isinstance(section, dict):
             continue
-        for item in section.get("items", []):
+        items = section.get("items")
+        if not isinstance(items, list):
+            continue
+        for item in items:
             if isinstance(item, dict) and item.get("key") == key:
                 return item.get("value", default)
     return default

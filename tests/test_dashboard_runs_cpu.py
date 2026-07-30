@@ -207,6 +207,18 @@ class LaunchValueTest(unittest.TestCase):
         }
         self.assertEqual(_launch_value(launch, "model_path"), "Qwen/Qwen3-0.6B")
 
+    def test_sections_none(self):
+        """Malformed launch with sections=None should not crash."""
+        self.assertEqual(_launch_value({"sections": None}, "algo"), "")
+
+    def test_items_none(self):
+        """Malformed section with items=None should not crash."""
+        self.assertEqual(_launch_value({"sections": [{"items": None}]}, "algo"), "")
+
+    def test_sections_not_list(self):
+        """Malformed launch with sections as string should not crash."""
+        self.assertEqual(_launch_value({"sections": "garbage"}, "algo"), "")
+
 
 class SummarySectionsFormatTest(unittest.TestCase):
     """to_summary_json works with sections-format launch_config (CLI jobs)."""

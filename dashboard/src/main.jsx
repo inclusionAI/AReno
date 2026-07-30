@@ -205,10 +205,26 @@ const SORT_OPTIONS = [
 
 const STATE_OPTIONS = ["all", "running", "succeeded", "failed", "stopped", "exited", "unknown"];
 const TYPE_OPTIONS = ["all", "train", "serve"];
+const VALID_STATES = new Set(STATE_OPTIONS);
+const VALID_TYPES = new Set(TYPE_OPTIONS);
+const VALID_SORTS = new Set(SORT_OPTIONS.map((o) => o.value));
 
 function readUrlParam(key, fallback) {
   const params = new URLSearchParams(window.location.search);
   return params.get(key) || fallback;
+}
+
+function readUrlEnum(key, fallback, valid) {
+  const raw = readUrlParam(key, fallback);
+  return valid.has(raw) ? raw : fallback;
+}
+
+function readUrlPage(fallback = 1) {
+  const raw = readUrlParam("page", "");
+  if (!raw) return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 1) return fallback;
+  return Math.floor(n);
 }
 
 function syncUrlParams(params) {
@@ -247,12 +263,12 @@ function App() {
   const [theme, setTheme] = useState(() => localStorage.getItem("areno-dashboard-theme") || "dark");
   const [busy, setBusy] = useState("");
   const [agentSettingsOpen, setAgentSettingsOpen] = useState(false);
-  const [jobPage, setJobPage] = useState(() => Number(readUrlParam("page", "1")) || 1);
+  const [jobPage, setJobPage] = useState(() => readUrlPage(1));
   const [searchQuery, setSearchQuery] = useState(() => readUrlParam("q", ""));
-  const [stateFilter, setStateFilter] = useState(() => readUrlParam("state", "all"));
-  const [typeFilter, setTypeFilter] = useState(() => readUrlParam("type", "all"));
+  const [stateFilter, setStateFilter] = useState(() => readUrlEnum("state", "all", VALID_STATES));
+  const [typeFilter, setTypeFilter] = useState(() => readUrlEnum("type", "all", VALID_TYPES));
   const [algoFilter, setAlgoFilter] = useState(() => readUrlParam("algo", "all"));
-  const [sortKey, setSortKey] = useState(() => readUrlParam("sort", "newest"));
+  const [sortKey, setSortKey] = useState(() => readUrlEnum("sort", "newest", VALID_SORTS));
   const [refreshNonce, setRefreshNonce] = useState(0);
   const chatMessagesRef = useRef(null);
   const env = usePolling(() => api("/api/env"), 5000);
@@ -321,8 +337,10 @@ function App() {
   }, [jobList.length, selectedJobId]);
 
   useEffect(() => {
-    if (jobPage > jobPageCount) setJobPage(jobPageCount);
-  }, [jobPage, jobPageCount]);
+    // Only clamp page after jobs have loaded — otherwise jobPageCount=1
+    // on initial render would wipe a restored page=2 before data arrives.
+    if (jobList.length > 0 && jobPage > jobPageCount) setJobPage(jobPageCount);
+  }, [jobPage, jobPageCount, jobList.length]);
 
   useEffect(() => {
     syncUrlParams({
