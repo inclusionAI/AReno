@@ -577,3 +577,81 @@ class TestCompareNewFeatures:
         assert "metric_charts" not in result  # early return, not populated
         assert "diff_summary" not in result
         # This is acceptable: early return for same-job skips these fields.
+
+
+class TestCompareSectionsConfig:
+    """Test that compare_jobs handles CLI-style sections config (Issue: hyperparameters table empty)."""
+
+    @staticmethod
+    def _make_sections_job(job_id: str, settings: dict) -> Job:
+        """Simulate a CLI-started job whose config is in sections format."""
+        items = [{"key": k, "value": v} for k, v in settings.items()]
+        sections_config = {"sections": [{"title": "Basic", "items": items}]}
+        job = Job(
+            kind="train",
+            name=f"train {settings.get('algo', '?')} {settings.get('ckpt', '?')}",
+            command=["areno", "train", "--algo", settings.get("algo", "gspo")],
+            config=sections_config,
+            metrics_dir=None,
+        )
+        job.id = job_id
+        job.launch_config = dict(sections_config)
+        job.config = dict(sections_config)
+        job.status = "exited"
+        job.step = 10
+        return job
+
+    def test_sections_config_flattened_for_compare(self):
+        """CLI jobs store config as {'sections': [...]}, compare should flatten and find differences."""
+        job_a = self._make_sections_job("cli-a", {
+            "algo": "gspo", "ckpt": "Qwen/Qwen3-0.6B",
+            "optimizer_lr": 1e-06, "batch_size": 8,
+        })
+        job_b = self._make_sections_job("cli-b", {
+            "algo": "gspo", "ckpt": "Qwen/Qwen3-0.6B",
+            "optimizer_lr": 5e-06, "batch_size": 16,
+        })
+        state = _state_with_jobs([job_a, job_b])
+        result = state.compare_jobs("cli-a", "cli-b")
+
+        config = result["config"]
+        # optimizer_lr should be mapped to lr and show up as different
+        diff_keys = [d["key"] for d in config["different"]]
+        assert "lr" in diff_keys
+        assert "batch_size" in diff_keys
+        # algo and ckpt are identical
+        identical_keys = [d["key"] for d in config["identical"]]
+        assert "algo" in identical_keys
+        assert "ckpt" in identical_keys
+
+    def test_sections_config_all_identical_shows_in_identical_list(self):
+        """When two CLI jobs have identical configs, identical list should be populated."""
+        settings = {"algo": "sft", "ckpt": "Qwen/Qwen3-0.6B", "batch_size": 8}
+        job_a = self._make_sections_job("cli-c", settings)
+        job_b = self._make_sections_job("cli-d", settings)
+        state = _state_with_jobs([job_a, job_b])
+        result = state.compare_jobs("cli-c", "cli-d")
+
+        config = result["config"]
+        assert len(config["different"]) == 0
+        assert len(config["identical"]) > 0
+        identical_keys = [d["key"] for d in config["identical"]]
+        assert "algo" in identical_keys
+        assert "batch_size" in identical_keys
+
+    def test_flat_and_sections_config_mix(self):
+        """A dashboard-started job (flat config) vs CLI-started job (sections) should compare correctly."""
+        job_a = _make_job("dash-a", algo="gspo", ckpt="Qwen/Qwen3-0.6B", extra_config={"lr": 1e-06})
+        job_b = self._make_sections_job("cli-e", {
+            "algo": "gspo", "ckpt": "Qwen/Qwen2-0.5B",
+            "optimizer_lr": 1e-06,
+        })
+        state = _state_with_jobs([job_a, job_b])
+        result = state.compare_jobs("dash-a", "cli-e")
+
+        config = result["config"]
+        diff_keys = [d["key"] for d in config["different"]]
+        assert "ckpt" in diff_keys
+        identical_keys = [d["key"] for d in config["identical"]]
+        assert "algo" in identical_keys
+        assert "lr" in identical_keys  # both have lr=1e-06 after alias mapping

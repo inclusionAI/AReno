@@ -531,6 +531,42 @@ class DashboardState:
     # Keys that are only meaningful for RL algorithms (gspo, grpo, ppo).
     RL_ONLY_KEYS = {"n_samples", "reward_fn_path", "agent_fn", "drop_rollout_state"}
 
+    # Map CLI TrainerConfig field names to COMPARE_CONFIG_KEYS names.
+    _CONFIG_KEY_ALIASES: dict[str, str] = {
+        "optimizer_lr": "lr",
+        "optimizer_min_lr": "min_lr",
+        "optimizer_beta1": "adam_beta1",
+        "optimizer_beta2": "adam_beta2",
+    }
+
+    @staticmethod
+    def _flatten_config(raw: dict[str, Any] | None) -> dict[str, Any]:
+        """Flatten a job config that may be either a flat dict or a
+        ``{"sections": [{"title": ..., "items": [{"key": k, "value": v}, ...]}], ...}``
+        structure (as written by CLI ``_training_config_settings``)."""
+        if not raw:
+            return {}
+        # Already flat (dashboard-started jobs).
+        if "sections" not in raw:
+            return dict(raw)
+        flat: dict[str, Any] = {}
+        for section in raw.get("sections", []):
+            for item in section.get("items", []):
+                key = item.get("key")
+                if key:
+                    flat[key] = item.get("value")
+        return flat
+
+    @classmethod
+    def _normalize_config_keys(cls, flat: dict[str, Any]) -> dict[str, Any]:
+        """Map CLI field names (e.g. optimizer_lr) to compare keys (e.g. lr)."""
+        if not flat:
+            return {}
+        result: dict[str, Any] = {}
+        for key, value in flat.items():
+            result[cls._CONFIG_KEY_ALIASES.get(key, key)] = value
+        return result
+
     def compare_jobs(self, job_a_id: str | None, job_b_id: str | None) -> dict[str, Any]:
         """Compare two jobs and return a structured side-by-side comparison."""
 
@@ -574,8 +610,10 @@ class DashboardState:
             return result
 
         # -- config comparison -------------------------------------------
-        config_a = dict(job_a.launch_config or job_a.config or {})
-        config_b = dict(job_b.launch_config or job_b.config or {})
+        raw_a = job_a.launch_config or job_a.config or {}
+        raw_b = job_b.launch_config or job_b.config or {}
+        config_a = self._normalize_config_keys(self._flatten_config(raw_a))
+        config_b = self._normalize_config_keys(self._flatten_config(raw_b))
         algo_a = str(config_a.get("algo", "")).lower()
         algo_b = str(config_b.get("algo", "")).lower()
 
