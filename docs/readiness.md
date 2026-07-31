@@ -277,6 +277,46 @@ areno_serve_readiness_state == -1
 
 ## 完整示例
 
+### 最简单的 CPU 测试（Kaggle 上直接跑）
+
+这是最直接的验证方式——跑完整的单元测试，不需要 GPU，不需要模型：
+
+```bash
+!python -m pytest tests/test_readiness_cpu.py -v 2>&1
+```
+
+输出类似：
+
+```plain
+============================= test session starts ==============================
+collected 42 items
+
+tests/test_readiness_cpu.py::TestReadinessStateMachine::test_initial_state_when_enabled PASSED
+tests/test_readiness_cpu.py::TestReadinessStateMachine::test_initial_state_when_disabled PASSED
+tests/test_readiness_cpu.py::TestReadinessStateMachine::test_normal_state_transition_flow PASSED
+...
+tests/test_readiness_cpu.py::TestReadinessIntegration::test_metrics_fields_correct PASSED
+
+================================== 42 passed in 0.18s ===========================
+```
+
+如果只想看核心状态机的演示，也可以用一行 Python：
+
+```bash
+!python -c "
+from areno.engine.runtime.readiness import ReadinessStateMachine, ReadinessState
+
+sm = ReadinessStateMachine(enabled=True)
+for s in [ReadinessState.MODEL_LOADING, ReadinessState.WORKER_READY,
+          ReadinessState.ROUTER_READY, ReadinessState.MINIMAL_PROBE]:
+    sm.mark_stage_complete(s)
+    print(f'{s.value} -> {sm.current_state.value}')
+print(f'最终: {sm.current_state.value}')
+assert sm.current_state == ReadinessState.READY
+print('通过!')
+"
+```
+
 ### 纯 CPU 演示（无需 GPU，无需模型）
 
 这个示例不依赖 GPU 和模型文件，直接运行 Python 就能看到状态机的工作原理：
@@ -353,13 +393,6 @@ print('失败 + 清理演示通过！')
 状态: failed, 错误: CUDA OOM
 清理回调执行顺序: ['worker_cleanup', 'gpu_cleanup']
 失败 + 清理演示通过！
-```
-
-或者运行完整的单元测试（最快、最全面）：
-
-```bash
-# 运行全部 42 个 CPU 测试
-python -m pytest tests/test_readiness_cpu.py -v
 ```
 
 ### 启动并验证（需要 GPU）
