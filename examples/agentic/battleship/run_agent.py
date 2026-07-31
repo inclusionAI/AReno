@@ -58,6 +58,10 @@ FIRE_TOOL = {
 
 # 使用游戏模块的最大回合数
 MAX_TURNS = game.MAX_TURNS
+# 每回合模型生成的 token 上限。fire 工具调用本身约 30 token；强制 tool_choice=fire
+# 时小模型仍可能输出冗长 content，不设上限会让多轮轨迹长度不可控（采样涨落时
+# 单回合可达数百 token），易超过 max_context_len 被过滤、或在 train 阶段 OOM。
+MAX_RESPONSE_TOKENS = 128
 
 
 # Agent 入口函数：运行多轮 Battleship 工具调用 rollout
@@ -163,6 +167,7 @@ async def _call_model(item, client, messages: list[dict], state):
         messages=turn_messages,
         tools=tools,
         tool_choice=tool_choice,
+        max_tokens=MAX_RESPONSE_TOKENS,
         stream=False,
     )
 
