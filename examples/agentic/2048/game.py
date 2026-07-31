@@ -34,6 +34,12 @@ INVALID_PENALTY = 2.0
 # advantage-collapse cycle (tool calls → near-zero reward → gradient flip-flop
 # → collapse to no-tool).
 TOOL_CALL_BONUS = 5.0
+# Reward for outputting a well-formed tool-call JSON that parses successfully.
+# Decoupled from game outcome: even if the moves are empty or terrible, the
+# model gets credit for mastering the <tool_call> format first.  This prevents
+# the 0.8B model from drifting off-format during early RL steps — format is the
+# prerequisite for any game reward, so it must be learned first.
+FORMAT_BONUS = 2.0
 # Tiny per-sample offsets so identical moves within a prompt group
 # (sample_index 0, 1, 2, 3 …) get minimally different rewards, breaking
 # the GSPO advantage collapse without drowning the game-score signal.
@@ -152,6 +158,10 @@ def format_prompt(board: Board) -> str:
         "- Moves that do not change the board are invalid and penalized; stop playing "
         f"once no direction changes the board or after at most {DEFAULT_EPISODE_CAP} moves.\n"
         "- Prefer merges that build toward larger tiles.\n\n"
+        "Output format: you MUST call the choose_moves tool by writing EXACTLY ONE\n"
+        '<tool_call>{"name": "choose_moves", "arguments": {"moves": [dir1, dir2, ...]}}</tool_call>\n'
+        "Replace [dir1, dir2, ...] with your direction sequence. "
+        "No text before or after the block.\n\n"
         f"Board:\n{board_to_text(board)}\n\nLegal directions: {legal_moves(board)}\n\nMoves:"
     )
 
@@ -389,10 +399,9 @@ def score_moves(
     result = play_episode(board, moves, seed=seed, cap=cap)
 
     if result.total_moves == 0:
-        # Worse than any legitimate episode (worst legit at full cap is score 0
-        # with every move invalid = -(baseline + INVALID_PENALTY * cap)), so an
-        # empty/unparseable move list can never out-score a real plan.
-        reward = -(float(baseline_score) + INVALID_PENALTY * cap + 1.0)
+        # Mild penalty matching no-tool-call, keeping advantages balanced.
+        offset = _PER_SAMPLE_OFFSETS[sample_index % len(_PER_SAMPLE_OFFSETS)]
+        reward = -5.0 + offset
         logger.info(
             "2048 zero-move penalty id=%s baseline=%.1f reward=%.3f moves=0",
             record_id,

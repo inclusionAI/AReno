@@ -39,10 +39,7 @@ EXPLORATION_HINTS = [
 
 SYSTEM_PROMPT = (
     "You are an expert 2048 player. "
-    "Choose a sequence of legal directions by calling the choose_moves tool. "
-    "The tool name is always choose_moves; never use up, down, left, or right as the tool name. "
-    "Order moves to maximize merges and grow toward larger tiles. "
-    "Stop once no direction changes the board; do not pad with no-op moves."
+    "Follow the output format described below."
 )
 
 CHOOSE_MOVES_TOOL = {
@@ -110,6 +107,23 @@ async def run_agent(ctx, batch):
                 tools=[CHOOSE_MOVES_TOOL],
                 tool_choice=tool_choice,
                 stream=False,
+            )
+        # Log model raw output for debugging collapse/format issues.
+        choice = response.choices[0]
+        raw_text = choice.message.content or ""
+        tool_calls = choice.message.tool_calls or []
+        finish = choice.finish_reason or "?"
+        preview = raw_text[:120].replace("\n", "\\n")
+        if tool_calls:
+            args_preview = str(tool_calls[0].function.arguments)[:80]
+            logger.info(
+                "2048 sample prompt=%d sample=%d finish=%s tool=yes args=%s",
+                item.prompt_index, item.sample_index, finish, args_preview,
+            )
+        else:
+            logger.warning(
+                "2048 sample prompt=%d sample=%d finish=%s tool=NO text=%s",
+                item.prompt_index, item.sample_index, finish, preview,
             )
         return AgentTrajectoryTurn(
             item=item,
