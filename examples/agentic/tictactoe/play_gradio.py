@@ -225,9 +225,13 @@ def main():
 
     global tokenizer, model
     print(f"Loading model from {args.model_path} ...")
-    tokenizer = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=True)
+    is_local = Path(args.model_path).exists()
+    kwargs = {"trust_remote_code": True}
+    if is_local:
+        kwargs["local_files_only"] = True
+    tokenizer = AutoTokenizer.from_pretrained(args.model_path, **kwargs)
     model = AutoModelForCausalLM.from_pretrained(
-        args.model_path, torch_dtype=torch.float16, device_map="auto"
+        args.model_path, torch_dtype=torch.float16, device_map="auto", **kwargs
     )
     print("Model loaded. Starting Gradio UI ...")
 
