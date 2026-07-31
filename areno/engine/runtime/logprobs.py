@@ -7,9 +7,10 @@ recomputes work each rank already did locally. The kernel here instead
 reduces only three scalars per position (per-row max, exp-sum, target logit),
 so the all-reduce volume scales with the number of positions, not the vocab.
 
-The autograd version saves the unnormalized exp-shard and produces the local
-gradient slice in backward, again avoiding any full-vocab tensor on the
-training hot path.
+The autograd version reduces only row maxima, vocab-chunked exp-sums, and
+target logits in forward, and recomputes the per-vocab-chunk softmax in
+backward to form the local gradient slice -- again avoiding any full-vocab
+tensor on the training hot path.
 """
 
 from __future__ import annotations
@@ -117,6 +118,30 @@ def _selected_logprobs_components_forward(
 ) -> torch.Tensor:
     """Forward-only selected logprobs without materializing full-vocab probs."""
 
+    out, _safe_labels, _local_mask, _global_max, _exp_sum = _selected_logprobs_forward(
+        logits_shard, labels, vocab_start, group, world_size, vocab_chunk_size=vocab_chunk_size
+    )
+    return out
+
+
+def _selected_logprobs_forward(
+    logits_shard: torch.Tensor,
+    labels: torch.Tensor,
+    vocab_start: int,
+    group,
+    world_size: int,
+    *,
+    vocab_chunk_size: int = 8192,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Distributed selected-logprob forward that never materializes full-vocab
+    float logits or softmax probabilities.
+
+    Computes the per-row selected log-softmax (`target_logit - logsumexp`) by
+    reducing row maxima, vocab-chunked exp-sums, and target logits (each
+    cross-rank step is one TP all-reduce). Returns the output plus the lean
+    reductions needed to recompute the softmax gradient in backward without
+    saving the full `[positions, vocab]` probs tensor.
+    """
     labels = labels.to(device=logits_shard.device, dtype=torch.long)
     local_vocab = logits_shard.shape[-1]
     local_labels = labels - int(vocab_start)
@@ -135,101 +160,90 @@ def _selected_logprobs_components_forward(
         dist.all_reduce(exp_sum, op=dist.ReduceOp.SUM, group=group)
     logsumexp = global_max + exp_sum.log()
 
+    # Off-shard label indices are clamped to a valid local position; the
+    # resulting target value is zeroed via `local_mask` so the SUM-reduce
+    # picks the correct rank's contribution.
     safe_labels = local_labels.clamp(min=0, max=max(local_vocab - 1, 0))
     target = logits_shard.gather(-1, safe_labels.unsqueeze(-1)).squeeze(-1).float()
     target = target.masked_fill(~local_mask, 0.0)
     if world_size > 1:
         dist.all_reduce(target, op=dist.ReduceOp.SUM, group=group)
-    return target - logsumexp
+    return target - logsumexp, safe_labels, local_mask, global_max, exp_sum
 
 
-def _selected_logprobs_components(
+def _selected_logprobs_recompute_backward(
+    grad_output: torch.Tensor,
     logits_shard: torch.Tensor,
-    labels: torch.Tensor,
-    vocab_start: int,
-    group,
-    world_size: int,
+    safe_labels: torch.Tensor,
+    local_mask: torch.Tensor,
+    global_max: torch.Tensor,
+    exp_sum: torch.Tensor,
     *,
-    save_probs: bool,
-) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor]:
-    """Distributed log-softmax over a vocab shard, selecting label probabilities.
+    vocab_chunk_size: int = 8192,
+) -> torch.Tensor:
+    """Backward recomputing softmax probs per vocab chunk.
 
-    Steps (each cross-rank step is one TP all-reduce):
-    1. Row-wise max within this rank, then MAX-reduce to a global per-row max
-       used to shift logits for numerical stability.
-    2. Compute `exp(logits - global_max)` locally and SUM-reduce row sums to
-       get the partition function (its log is `logsumexp`).
-    3. Each rank fills in target logits only for labels inside its shard,
-       SUM-reduce to combine into the full per-row target logit.
-    Output is `target - logsumexp`, the selected log-softmax value.
+    The gradient of `target - logsumexp` w.r.t. the local logits shard is
+    `grad_output * (onehot(label) - softmax(logits))` restricted to the local
+    shard, where `softmax = exp(logits - global_max) / exp_sum`. Recomputing it
+    in vocab chunks keeps peak memory at `positions * vocab_chunk_size` float
+    instead of the full `positions * vocab` probs tensor that the save-probs
+    form would retain across every position chunk for backward.
     """
-    logits = logits_shard.float()
-    labels = labels.to(device=logits_shard.device, dtype=torch.long)
-    local_vocab = logits.shape[-1]
-    local_labels = labels - int(vocab_start)
-    local_mask = (local_labels >= 0) & (local_labels < local_vocab)
-
-    local_max = logits.max(dim=-1).values
-    global_max = local_max.clone()
-    if world_size > 1:
-        dist.all_reduce(global_max, op=dist.ReduceOp.MAX, group=group)
-
-    exp_logits = torch.exp(logits - global_max.unsqueeze(-1))
-    exp_sum = exp_logits.sum(dim=-1)
-    if world_size > 1:
-        dist.all_reduce(exp_sum, op=dist.ReduceOp.SUM, group=group)
-    logsumexp = global_max + exp_sum.log()
-
-    # Off-shard label indices are clamped to a valid local position; the
-    # resulting target value is zeroed via `local_mask` so the SUM-reduce
-    # picks the correct rank's contribution.
-    safe_labels = local_labels.clamp(min=0, max=max(local_vocab - 1, 0))
-    target = logits.gather(-1, safe_labels.unsqueeze(-1)).squeeze(-1)
-    target = target.masked_fill(~local_mask, 0.0)
-    if world_size > 1:
-        dist.all_reduce(target, op=dist.ReduceOp.SUM, group=group)
-    probs = exp_logits / exp_sum.unsqueeze(-1) if save_probs else None
-    return target - logsumexp, probs, safe_labels, local_mask
+    input_dtype = logits_shard.dtype
+    local_vocab = logits_shard.shape[-1]
+    grad_output_row = grad_output.float().unsqueeze(-1)
+    grad_logits = torch.empty_like(logits_shard)
+    for start in range(0, local_vocab, vocab_chunk_size):
+        end = min(start + vocab_chunk_size, local_vocab)
+        probs_chunk = torch.exp(
+            logits_shard[..., start:end].float() - global_max.unsqueeze(-1)
+        ) / exp_sum.unsqueeze(-1)
+        grad_chunk = -probs_chunk
+        # Add the one-hot for labels whose target falls inside this vocab chunk;
+        # out-of-shard or out-of-chunk labels contribute zero (local_mask False).
+        in_range = local_mask & (safe_labels >= start) & (safe_labels < end)
+        rel_labels = (safe_labels - start).clamp(min=0, max=max(end - start - 1, 0))
+        grad_chunk.scatter_add_(
+            -1, rel_labels.unsqueeze(-1), in_range.to(grad_chunk.dtype).unsqueeze(-1)
+        )
+        grad_chunk.mul_(grad_output_row)
+        grad_logits[..., start:end] = grad_chunk.to(input_dtype)
+    return grad_logits
 
 
 class _VocabParallelSelectedLogprobs(torch.autograd.Function):
     """Autograd function for vocab-parallel selected logprobs.
 
-    Forward computes distributed log-softmax only for target labels. Backward
-    returns the local shard gradient equivalent to full-vocab cross entropy,
-    avoiding a large all-gather on the training path.
+    Forward computes distributed log-softmax only for target labels via
+    vocab-chunked reductions, never materializing full-vocab float logits or
+    probabilities. Backward recomputes the per-vocab-chunk softmax to form the
+    local shard gradient equivalent to full-vocab cross entropy, avoiding both
+    a large all-gather and saving a full `[positions, vocab]` probs tensor on
+    the training hot path (which OOMs on long packed sequences with large
+    vocabularies).
     """
 
     @staticmethod
     def forward(
         ctx, logits_shard: torch.Tensor, labels: torch.Tensor, vocab_start: int, group, world_size: int
     ) -> torch.Tensor:
-        out, probs, safe_labels, local_mask = _selected_logprobs_components(
-            logits_shard,
-            labels,
-            vocab_start,
-            group,
-            world_size,
-            save_probs=True,
+        out, safe_labels, local_mask, global_max, exp_sum = _selected_logprobs_forward(
+            logits_shard, labels, vocab_start, group, world_size
         )
-        ctx.save_for_backward(probs, safe_labels, local_mask)
+        ctx.save_for_backward(logits_shard, safe_labels, local_mask, global_max, exp_sum)
         ctx.input_dtype = logits_shard.dtype
         return out
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor):
-        # Standard log-softmax gradient: `softmax(logits) - onehot(label)`,
-        # multiplied by upstream `grad_output`. We do the onehot piece only on
-        # the rank that owns the label (`local_mask`) so other ranks contribute
-        # only the negative softmax term; the sum across ranks reproduces the
-        # full-vocab gradient.
-        probs, safe_labels, local_mask = ctx.saved_tensors
-        grad = probs
-        grad.neg_()
-        grad.scatter_add_(
-            -1,
-            safe_labels.unsqueeze(-1),
-            local_mask.to(dtype=grad.dtype).unsqueeze(-1),
+        # Standard log-softmax gradient: `onehot(label) - softmax(logits)`,
+        # multiplied by upstream `grad_output`, recomputed per vocab chunk. The
+        # onehot piece is applied only on the rank that owns the label
+        # (`local_mask`) so other ranks contribute only the negative softmax
+        # term; the sum across ranks reproduces the full-vocab gradient.
+        logits_shard, safe_labels, local_mask, global_max, exp_sum = ctx.saved_tensors
+        grad_logits = _selected_logprobs_recompute_backward(
+            grad_output, logits_shard, safe_labels, local_mask, global_max, exp_sum
         )
-        grad.mul_(grad_output.float().unsqueeze(-1))
-        return grad.to(dtype=ctx.input_dtype), None, None, None, None
+        return grad_logits, None, None, None, None
