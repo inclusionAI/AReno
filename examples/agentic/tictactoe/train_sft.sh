@@ -35,8 +35,11 @@ areno train \
   --dataset-loader-fn "$LOADER_FN" \
   --tp-size 1 \
   --world-size 1 \
-  --batch-size 4 \
+  --batch-size 1 \
   --mini-bs 1 \
+  --gradient-accumulation-steps 4 \
+  --activation-checkpointing \
+  --adam-8bit \
   --max-prompt-tokens 128 \
   --max-new-tokens 16 \
   --epochs 3 \
