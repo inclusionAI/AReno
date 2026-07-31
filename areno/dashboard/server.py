@@ -52,6 +52,35 @@ ENV_CHECK_COUNTS_CACHE: dict[str, int] | None = None
 ENV_CACHE_LOCK = threading.Lock()
 FILE_BROWSER = AgentFileBrowser(ROOT)
 
+# OOM error patterns copied from areno/cli/auto_tune.py:_is_oom_error to avoid
+# a dashboard→CLI cross-module dependency. Keep in sync if auto_tune changes.
+OOM_KEYWORDS = (
+    "out of memory",
+    "cuda error: out of memory",
+)
+
+OOM_COMPOSITE_PATTERNS = (
+    # ("worker exited without reporting result", ("exitcode -9", "during op.train", "during op.probe_rollout_cache")),
+    # ("failed during op.probe_rollout_cache", ("nccl", "device error", "external library call failed", "system call")),
+)
+
+
+def _looks_like_oom(line: str) -> bool:
+    """Return True if a log line matches the OOM patterns."""
+
+    lowered = line.lower()
+    for keyword in OOM_KEYWORDS:
+        if keyword in lowered:
+            return True
+    for prefix, suffixes in OOM_COMPOSITE_PATTERNS:
+        if prefix in lowered and any(s in lowered for s in suffixes):
+            return True
+    return False
+
+
+# Event kind constants.
+EVENT_KINDS = ("non_finite", "constant_reward", "invalid_batch", "oom")
+
 
 def now() -> str:
     return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
@@ -93,6 +122,10 @@ class Job:
         self._metric_keys: set[tuple[str, int, float]] = set()
         self._timeperf_keys: set[int] = set()
         self._sample_keys: set[tuple[int, int, int]] = set()
+        # --- training-event derivation state (read-only, not persisted) ---
+        self._events: list[dict[str, Any]] = []
+        self._events_step_max: int = -1
+        self._nonfinite_seen: list[tuple[int, str, str]] = []  # (step, tag, value_str)
 
     @classmethod
     def from_json(cls, item: dict[str, Any]) -> Job:
@@ -284,6 +317,8 @@ class DashboardState:
                         self._add_metric(job, str(item["name"]), float(item["value"]), int(item.get("step", job.step)))
             except Exception:
                 continue
+        # Derive training events from loaded metrics + logs (read-only, no mutation).
+        self._detect_training_events(job)
 
     def _load_dashboard_state(self, job: Job, path: Path) -> None:
         state_file = dashboard_state_source(path, job_pid(job))
@@ -336,7 +371,11 @@ class DashboardState:
                     step = int(event.step)
                     value = float(event.value)
                     if math.isnan(value):
+                        job._nonfinite_seen.append((step, tag, "NaN"))
                         continue
+                    if math.isinf(value):
+                        job._nonfinite_seen.append((step, tag, "Inf"))
+                        # Inf still enters metric series to preserve current behaviour.
                     self._add_metric(job, tag, value, step)
                     time_name = tensorboard_time_segment_name(tag)
                     if time_name:
@@ -514,6 +553,143 @@ class DashboardState:
         ]
         points.sort(key=lambda point: int(point.get("step") or 0))
         return points[-max(1, min(limit, 5000)) :]
+
+    # ------------------------------------------------------------------
+    # Training-event derivation (read-only, no mutation of job.metrics)
+    # ------------------------------------------------------------------
+
+    def _detect_training_events(self, job: Job) -> None:
+        """Derive training events from loaded metrics + logs.
+
+        Called at the end of ``_load_metric_files`` so that every call to
+        ``get_job`` (which feeds the metrics/metric polling routes) refreshes
+        the cached ``job._events``.  The dedicated ``/api/jobs/<id>/events``
+        route reads ``job._events`` directly without another ``get_job`` call.
+        """
+
+        events: list[dict[str, Any]] = []
+
+        # --- non_finite (NaN / ±Inf) ----------------------------------
+        for step, tag, value_str in job._nonfinite_seen:
+            events.append({
+                "kind": "non_finite",
+                "step": step,
+                "time": job.updated_at,
+                "severity": "warn",
+                "detail": f"{tag}={value_str} at step {step}",
+                "fields": {"tag": tag, "value": value_str},
+                "log_hint": {"kind": "metric_context", "ref": tag},
+            })
+
+        # --- constant_reward -----------------------------------------
+        rewards_std = _series_by_step(job, "rollout/rewards_std")
+        rewards_max = _series_by_step(job, "rollout/rewards_max")
+        rewards_min = _series_by_step(job, "rollout/rewards_min")
+        for step in sorted(rewards_std):
+            std = rewards_std[step]
+            if std is None or std > 1e-9:
+                continue
+            mx = rewards_max.get(step)
+            mn = rewards_min.get(step)
+            if mx is not None and mn is not None and mx == mn:
+                events.append({
+                    "kind": "constant_reward",
+                    "step": step,
+                    "time": job.updated_at,
+                    "severity": "info",
+                    "detail": f"rewards constant (std={std:.2e}, max=min={mx}) at step {step}",
+                    "fields": {"rewards_std": std, "rewards_max": mx, "rewards_min": mn},
+                    "log_hint": {"kind": "metric_context", "ref": "rollout/rewards_std"},
+                })
+
+        # --- invalid_batch (consecutive streaks) ---------------------
+        adv_std = _series_by_step(job, "rollout/advantages_std")
+        sorted_steps = sorted(adv_std)
+        streak = 0
+        streak_start: int | None = None
+        for step in sorted_steps:
+            val = adv_std[step]
+            if val is not None and val <= 1e-6:
+                if streak == 0:
+                    streak_start = step
+                streak += 1
+            else:
+                if streak > 0:
+                    assert streak_start is not None
+                    severity = "warn" if streak >= 3 else "info"
+                    events.append({
+                        "kind": "invalid_batch",
+                        "step": streak_start,
+                        "time": job.updated_at,
+                        "severity": severity,
+                        "detail": (
+                            f"advantages_std<=1e-6 for {streak} consecutive "
+                            f"step(s) from step {streak_start}"
+                        ),
+                        "fields": {"streak": streak, "start_step": streak_start},
+                        "log_hint": {"kind": "metric_context", "ref": "rollout/advantages_std"},
+                    })
+                    streak = 0
+                    streak_start = None
+        # Trailing streak (job may still be running).
+        if streak > 0:
+            assert streak_start is not None
+            severity = "warn" if streak >= 3 else "info"
+            events.append({
+                "kind": "invalid_batch",
+                "step": streak_start,
+                "time": job.updated_at,
+                "severity": severity,
+                "detail": (
+                    f"advantages_std<=1e-6 for {streak} consecutive "
+                    f"step(s) from step {streak_start}"
+                ),
+                "fields": {"streak": streak, "start_step": streak_start},
+                "log_hint": {"kind": "metric_context", "ref": "rollout/advantages_std"},
+            })
+
+        # --- OOM (from captured logs) --------------------------------
+        for idx, line in enumerate(job.logs):
+            if _looks_like_oom(line):
+                events.append({
+                    "kind": "oom",
+                    "step": job.step,
+                    "time": job.updated_at,
+                    "severity": "error",
+                    "detail": f"OOM pattern in log line {idx}",
+                    "fields": {"log_index": idx, "preview": line[:200]},
+                    "log_hint": {"kind": "keyword", "ref": str(idx)},
+                })
+
+        # Full rebuild – cheap for ≤500 points per tag.
+        # Sort by step then severity for stable ordering.
+        events.sort(key=lambda e: (e.get("step", 0), EVENT_KINDS.index(e["kind"]) if e["kind"] in EVENT_KINDS else 99))
+        job._events = events
+        job._events_step_max = job.step
+
+    def get_job_events(
+        self,
+        job_id: str | None,
+        *,
+        types: list[str] | None = None,
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        """Return cached training events for *job_id*.
+
+        Reads ``job._events`` directly without triggering ``get_job`` /
+        ``_load_metric_files`` / ``_save_state``.  The cache is refreshed by
+        whichever polling route last called ``get_job`` for this job.
+        """
+
+        with self.lock:
+            job = self.jobs.get(job_id) if job_id else next(iter(self.jobs.values()), None)
+            if job is None:
+                return []
+            events = job._events
+            if types:
+                type_set = set(types)
+                events = [e for e in events if e.get("kind") in type_set]
+            return list(events[-max(1, min(limit, 5000)) :])
 
     def scan_registered_jobs(self) -> None:
         registry_jobs = registered_job_items()
@@ -801,6 +977,26 @@ def number_like(value: Any) -> bool:
         return not math.isnan(float(value))
     except (TypeError, ValueError):
         return False
+
+
+def _series_by_step(job: Job, name: str) -> dict[int, float | None]:
+    """Extract ``{step: value}`` for one metric tag from ``job.metrics``.
+
+    Returns ``None`` for values that cannot be coerced to float so callers can
+    skip them without a separate exception handler.
+    """
+
+    result: dict[int, float | None] = {}
+    for point in job.metrics:
+        if point.get("name") != name:
+            continue
+        step = int(point.get("step") or 0)
+        value = point.get("value")
+        try:
+            result[step] = float(value)
+        except (TypeError, ValueError):
+            result[step] = None
+    return result
 
 
 def tensorboard_event_sources(path: Path, pid: int | None) -> list[Path]:
@@ -1304,6 +1500,26 @@ def agent_tool_schemas() -> list[dict[str, Any]]:
         {
             "type": "function",
             "function": {
+                "name": "fetch_events",
+                "description": "Fetch derived training events (non_finite, constant_reward, invalid_batch, oom) for a job.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "job_id": {"type": "string"},
+                        "types": {
+                            "type": "array",
+                            "items": {"type": "string", "enum": list(EVENT_KINDS)},
+                        },
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 5000},
+                    },
+                    "required": ["job_id"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "stop_job",
                 "description": "Stop a running AReno job by id.",
                 "parameters": {
@@ -1430,6 +1646,15 @@ def execute_agent_tool(tool_call: dict[str, Any]) -> dict[str, Any]:
                 "metric": metric_name,
                 "points": STATE.metric_series(args.get("job_id"), metric_name, limit=limit),
             }
+        if name == "fetch_events":
+            types_raw = args.get("types")
+            types = list(types_raw) if isinstance(types_raw, list) else None
+            limit = int(args.get("limit") or 500)
+            return {
+                "name": name,
+                "ok": True,
+                "events": STATE.get_job_events(args.get("job_id"), types=types, limit=limit),
+            }
         if name == "stop_job":
             return {"name": name, "ok": STATE.stop(str(args.get("job_id") or ""))}
         if name == "start_train":
@@ -1500,6 +1725,13 @@ class Handler(BaseHTTPRequestHandler):
                 metric_name = query.get("name", [""])[0]
                 limit = int(query.get("limit", ["500"])[0] or 500)
                 self.json({"metric": metric_name, "points": STATE.metric_series(job_id, metric_name, limit=limit)})
+            elif path.startswith("/api/jobs/") and path.endswith("/events"):
+                job_id = path.split("/")[-2]
+                query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+                types_raw = query.get("types", [""])[0]
+                types = [t.strip() for t in types_raw.split(",") if t.strip()] if types_raw else None
+                limit = int(query.get("limit", ["500"])[0] or 500)
+                self.json({"events": STATE.get_job_events(job_id, types=types, limit=limit)})
             elif path.startswith("/api/jobs/"):
                 job = STATE.get_job(path.split("/")[-1])
                 if not job:

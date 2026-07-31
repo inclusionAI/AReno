@@ -15,3 +15,4 @@ Reference pages:
 * :doc:`cli`
 * :doc:`/sdk/trainer`
 * :doc:`/models/supported`
+* :doc:`dashboard-training-events`

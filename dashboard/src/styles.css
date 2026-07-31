@@ -2094,3 +2094,139 @@ textarea:focus {
     text-align: left;
   }
 }
+
+/* --- Training event overlay --- */
+
+.chartPlotWrap {
+  position: relative;
+}
+
+.eventMarkers {
+  pointer-events: all;
+}
+
+.eventFilters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  padding: 4px 0 0;
+  font-size: 11px;
+}
+
+.eventFilterLabel {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  color: var(--text-dim, #94a3b8);
+}
+
+.eventFilterLabel input {
+  margin: 0;
+}
+
+.eventFilterSwatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+}
+
+.eventPopover {
+  margin-top: 8px;
+  border: 1px solid var(--border, #334155);
+  border-radius: 6px;
+  background: var(--panel-bg, #1e293b);
+  padding: 10px 12px;
+  font-size: 12px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.eventPopoverHeader {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.eventPopoverTag {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 3px;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.eventPopoverDetail {
+  flex: 1;
+  color: var(--text, #e2e8f0);
+}
+
+.eventPopoverClose {
+  background: none;
+  border: none;
+  color: var(--text-dim, #94a3b8);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 0 2px;
+}
+
+.eventPopoverMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  color: var(--text-dim, #94a3b8);
+  margin-bottom: 8px;
+  font-size: 11px;
+}
+
+.eventLogContext {
+  margin: 0;
+  font-family: monospace;
+  font-size: 11px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.eventLogLine {
+  display: flex;
+  gap: 8px;
+  padding: 1px 0;
+}
+
+.eventLogLineHit {
+  background: rgba(220, 38, 38, 0.15);
+  border-radius: 2px;
+}
+
+.eventLogLineNum {
+  color: var(--text-dim, #64748b);
+  min-width: 30px;
+  text-align: right;
+}
+
+.eventLogLineText {
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.eventMetricContext {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+
+.eventMetricContext th,
+.eventMetricContext td {
+  text-align: left;
+  padding: 2px 8px;
+  border-bottom: 1px solid var(--border, #334155);
+}
+
+.eventMetricRowHit {
+  background: rgba(245, 158, 11, 0.15);
+}

@@ -24,6 +24,14 @@ import {
   Timer,
 } from "lucide-react";
 import "./styles.css";
+import {
+  EVENT_KIND_META,
+  ALL_EVENT_KINDS,
+  eventStepToX,
+  filterEvents,
+  extractLogWindow,
+  extractMetricContext,
+} from "./eventUtils.js";
 
 const API_BASE = new URL(".", window.location.href).pathname;
 
@@ -782,7 +790,7 @@ function JobMetricsView({ job, refreshNonce }) {
   return (
     <div className="jobMetricsGrid">
       <div className="panel insetPanel">
-        <MetricChart jobId={job?.id} metricsDir={job?.metrics_dir} refreshNonce={refreshNonce} />
+        <MetricChart jobId={job?.id} metricsDir={job?.metrics_dir} logs={job?.logs || []} refreshNonce={refreshNonce} />
       </div>
       <div className="panel insetPanel">
         <TimePerfView rows={job?.timeperf || []} />
@@ -1120,13 +1128,16 @@ function resolveActiveMetricName(names, selectedName) {
   return selectedName && names.includes(selectedName) ? selectedName : names[0] || "";
 }
 
-function MetricChart({ jobId, metricsDir, refreshNonce }) {
+function MetricChart({ jobId, metricsDir, logs, refreshNonce }) {
   const [selectedName, setSelectedName] = useState("");
   const [smooth, setSmooth] = useState(0.6);
   const [metricList, setMetricList] = useState([]);
   const [points, setPoints] = useState([]);
   const [metricLoading, setMetricLoading] = useState(false);
   const [prevJobId, setPrevJobId] = useState(jobId);
+  const [events, setEvents] = useState([]);
+  const [eventTypes, setEventTypes] = useState(() => Object.fromEntries(ALL_EVENT_KINDS.map((k) => [k, true])));
+  const [activeEvent, setActiveEvent] = useState(null);
   // Reset the selection during render (not in an effect) when the job changes so
   // the reset happens before any effect runs. This avoids a stale-name fetch and
   // a stuck loading state on job switch, while live polls (refreshNonce) still
@@ -1137,6 +1148,8 @@ function MetricChart({ jobId, metricsDir, refreshNonce }) {
     setMetricList([]);
     setPoints([]);
     setMetricLoading(false);
+    setEvents([]);
+    setActiveEvent(null);
   }
   const names = metricNamesFrom(metricList);
   const effectiveName = resolveActiveMetricName(names, selectedName);
@@ -1184,10 +1197,32 @@ function MetricChart({ jobId, metricsDir, refreshNonce }) {
       cancelled = true;
     };
   }, [jobId, effectiveName, refreshNonce]);
+  // Poll training events (independent of metric curve).
+  useEffect(() => {
+    let cancelled = false;
+    if (!jobId) return undefined;
+    api(`/api/jobs/${jobId}/events?limit=500`)
+      .then((data) => {
+        if (cancelled) return;
+        setEvents(data.events || []);
+      })
+      .catch(() => {
+        if (!cancelled) setEvents([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [jobId, refreshNonce]);
   const activeName = effectiveName;
   const visiblePoints = points.slice(-240);
   const smoothed = smoothTensorboard(visiblePoints, smooth);
   const plot = buildMetricPlot(visiblePoints, smoothed);
+  const plotRange = visiblePoints.length > 0 ? {
+    stepMin: visiblePoints[0].step,
+    stepSpan: Math.max(visiblePoints[visiblePoints.length - 1].step - visiblePoints[0].step, 1),
+    width: 700,
+  } : null;
+  const visibleEvents = filterEvents(events, eventTypes);
   return (
     <div className="chart">
       <div className="chartHeader">
@@ -1205,23 +1240,177 @@ function MetricChart({ jobId, metricsDir, refreshNonce }) {
       {visiblePoints.length === 0 ? (
         <div className="plotEmpty">{metricLoading ? "Loading selected metric..." : "No TensorBoard scalar points loaded yet."}</div>
       ) : (
-        <svg className="metricPlot" viewBox="0 0 720 180" role="img">
-          <g className="plotGrid">
-            {[0, 1, 2, 3].map((item) => <line key={item} x1="0" x2="720" y1={30 + item * 42} y2={30 + item * 42} />)}
-          </g>
-          <polyline className="rawLine" points={plot.raw} />
-          <polyline className="smoothLine" points={plot.smooth} />
-          {visiblePoints.slice(-24).map((point, index) => (
-            <circle key={`${point.step}-${index}`} cx={plot.coords[index + Math.max(0, visiblePoints.length - 24)]?.x || 0} cy={plot.coords[index + Math.max(0, visiblePoints.length - 24)]?.y || 0} r="2.2">
-              <title>{`${activeName} step ${point.step}: ${point.value}`}</title>
-            </circle>
-          ))}
-        </svg>
+        <div className="chartPlotWrap">
+          <svg className="metricPlot" viewBox="0 0 720 180" role="img">
+            <g className="plotGrid">
+              {[0, 1, 2, 3].map((item) => <line key={item} x1="0" x2="720" y1={30 + item * 42} y2={30 + item * 42} />)}
+            </g>
+            <polyline className="rawLine" points={plot.raw} />
+            <polyline className="smoothLine" points={plot.smooth} />
+            {visiblePoints.slice(-24).map((point, index) => (
+              <circle key={`${point.step}-${index}`} cx={plot.coords[index + Math.max(0, visiblePoints.length - 24)]?.x || 0} cy={plot.coords[index + Math.max(0, visiblePoints.length - 24)]?.y || 0} r="2.2">
+                <title>{`${activeName} step ${point.step}: ${point.value}`}</title>
+              </circle>
+            ))}
+            {plotRange && <EventOverlay events={visibleEvents} plotRange={plotRange} onSelect={setActiveEvent} />}
+          </svg>
+        </div>
       )}
-      <div className="plotFooter">
-        <span>{activeName || "metric"} · {points.length} points</span>
-        <span>{metricsDir || "no metrics dir"} · {plot.minLabel} to {plot.maxLabel}</span>
+      <EventFilters eventTypes={eventTypes} setEventTypes={setEventTypes} events={events} />
+      {visiblePoints.length > 0 && (
+        <div className="plotFooter">
+          <span>{activeName || "metric"} · {points.length} points</span>
+          <span>{metricsDir || "no metrics dir"} · {plot.minLabel} to {plot.maxLabel}</span>
+        </div>
+      )}
+      {activeEvent && (
+        <EventContextPopover
+          event={activeEvent}
+          logs={logs}
+          points={points}
+          onClose={() => setActiveEvent(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+// --- Event overlay (SVG markers) ----------------------------------------
+
+function EventOverlay({ events, plotRange, onSelect }) {
+  if (!events || !events.length) return null;
+  return (
+    <g className="eventMarkers">
+      {events.map((event, index) => {
+        const x = eventStepToX(event, plotRange);
+        const meta = EVENT_KIND_META[event.kind] || { color: "#666", shape: "circle" };
+        const y = 168;
+        const common = {
+          key: `${event.kind}-${event.step}-${index}`,
+          transform: `translate(${x.toFixed(1)}, ${y})`,
+          onClick: () => onSelect(event),
+          style: { cursor: "pointer" },
+        };
+        if (meta.shape === "cross") {
+          return (
+            <g {...common}>
+              <line x1="-4" y1="-4" x2="4" y2="4" stroke={meta.color} strokeWidth="2" />
+              <line x1="-4" y1="4" x2="4" y2="-4" stroke={meta.color} strokeWidth="2" />
+              <title>{`${meta.label} @ step ${event.step}: ${event.detail}`}</title>
+            </g>
+          );
+        }
+        if (meta.shape === "diamond") {
+          return (
+            <g {...common}>
+              <polygon points="0,-5 4,0 0,5 -4,0" fill={meta.color} fillOpacity="0.7" stroke={meta.color} strokeWidth="1" />
+              <title>{`${meta.label} @ step ${event.step}: ${event.detail}`}</title>
+            </g>
+          );
+        }
+        if (meta.shape === "square") {
+          return (
+            <g {...common}>
+              <rect x="-4" y="-4" width="8" height="8" fill={meta.color} fillOpacity="0.7" stroke={meta.color} strokeWidth="1" />
+              <title>{`${meta.label} @ step ${event.step}: ${event.detail}`}</title>
+            </g>
+          );
+        }
+        if (meta.shape === "triangle") {
+          return (
+            <g {...common}>
+              <polygon points="0,-5 4,3 -4,3" fill={meta.color} fillOpacity="0.7" stroke={meta.color} strokeWidth="1" />
+              <title>{`${meta.label} @ step ${event.step}: ${event.detail}`}</title>
+            </g>
+          );
+        }
+        return (
+          <g {...common}>
+            <circle r="3" fill={meta.color} fillOpacity="0.7" stroke={meta.color} strokeWidth="1" />
+            <title>{`${meta.label} @ step ${event.step}: ${event.detail}`}</title>
+          </g>
+        );
+      })}
+    </g>
+  );
+}
+
+// --- Event filters (independent of curve) --------------------------------
+
+function EventFilters({ eventTypes, setEventTypes, events }) {
+  if (!events || !events.length) return null;
+  return (
+    <div className="eventFilters">
+      {ALL_EVENT_KINDS.map((kind) => {
+        const meta = EVENT_KIND_META[kind];
+        const count = events.filter((e) => e.kind === kind).length;
+        if (count === 0) return null;
+        return (
+          <label key={kind} className="eventFilterLabel">
+            <input
+              type="checkbox"
+              checked={eventTypes[kind] !== false}
+              onChange={() => setEventTypes((prev) => ({ ...prev, [kind]: prev[kind] === false }))}
+            />
+            <span className="eventFilterSwatch" style={{ background: meta.color }} />
+            {meta.label} ({count})
+          </label>
+        );
+      })}
+    </div>
+  );
+}
+
+// --- Event context popover (click-through) -------------------------------
+
+function EventContextPopover({ event, logs, points, onClose }) {
+  const meta = EVENT_KIND_META[event.kind] || { label: event.kind, color: "#666" };
+  let contextBody = null;
+  if (event.log_hint?.kind === "keyword" && event.log_hint.ref != null) {
+    const lineIndex = parseInt(event.log_hint.ref, 10);
+    const window = extractLogWindow(logs, lineIndex, 20);
+    contextBody = window.length ? (
+      <pre className="eventLogContext">
+        {window.map((line) => (
+          <div key={line.lineIndex} className={line.offset === 0 ? "eventLogLine eventLogLineHit" : "eventLogLine"}>
+            <span className="eventLogLineNum">{line.lineIndex}</span>
+            <span className="eventLogLineText">{line.text}</span>
+          </div>
+        ))}
+      </pre>
+    ) : <em>Log line {lineIndex} no longer available (logs may have rotated).</em>;
+  } else if (event.log_hint?.kind === "metric_context" && event.log_hint.ref) {
+    const context = extractMetricContext(points, event.step, 3);
+    contextBody = context.length ? (
+      <table className="eventMetricContext">
+        <thead><tr><th>step</th><th>{event.log_hint.ref}</th></tr></thead>
+        <tbody>
+          {context.map((p) => (
+            <tr key={p.step} className={Number(p.step) === event.step ? "eventMetricRowHit" : ""}>
+              <td>{p.step}</td><td>{Number(p.value).toFixed(6)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    ) : <em>No metric context available for this tag.</em>;
+  } else {
+    contextBody = <em>No additional context.</em>;
+  }
+  return (
+    <div className="eventPopover">
+      <div className="eventPopoverHeader">
+        <span className="eventPopoverTag" style={{ background: meta.color }}>{meta.label}</span>
+        <span className="eventPopoverDetail">{event.detail}</span>
+        <button className="eventPopoverClose" onClick={onClose}>x</button>
       </div>
+      <div className="eventPopoverMeta">
+        <span>step: {event.step}</span>
+        <span>severity: {event.severity}</span>
+        {event.fields && Object.entries(event.fields).map(([k, v]) => (
+          <span key={k}>{k}: {typeof v === "number" ? (Number.isFinite(v) ? v.toExponential(3) : String(v)) : String(v)}</span>
+        ))}
+      </div>
+      <div className="eventPopoverBody">{contextBody}</div>
     </div>
   );
 }
