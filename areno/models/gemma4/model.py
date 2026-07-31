@@ -575,31 +575,12 @@ class Gemma4DecoderLayer(nn.Module):
         residual = hidden_states
         dense_input = self.pre_feedforward_layernorm(hidden_states)
         if self.moe is not None:
-            if (
-                self.router is None
-                or self.pre_feedforward_layernorm_2 is None
-                or self.post_feedforward_layernorm_1 is None
-                or self.post_feedforward_layernorm_2 is None
-            ):
-                raise RuntimeError("Gemma4 MoE layer is missing router or MoE norms")
-            dense_hidden = checkpoint_layer(
-                self.mlp,
+            hidden_states = _gemma4_moe_feedforward_no_compile(
+                self,
+                residual,
                 dense_input,
-                train_meta=train_meta,
-                infer_meta=infer_meta,
-            )
-            router_logits = self.router(residual)
-            topk_idx, topk_weight = self.moe.route(router_logits)
-            moe_hidden = checkpoint_layer(
-                self.moe.forward_with_routes,
-                self.pre_feedforward_layernorm_2(residual),
-                topk_idx,
-                topk_weight,
-                train_meta=train_meta,
-                infer_meta=infer_meta,
-            )
-            hidden_states = self.post_feedforward_layernorm_1(dense_hidden) + self.post_feedforward_layernorm_2(
-                moe_hidden
+                train_meta,
+                infer_meta,
             )
         else:
             hidden_states = self.mlp(dense_input)
@@ -1094,6 +1075,43 @@ def _gemma4_per_layer_inputs_no_compile(
     # Dynamo-disabled wrapper around the PLE pipeline because get/project rely
     # on data-dependent indexing and reshapes.
     return model.project_per_layer_inputs(hidden_states, model.get_per_layer_inputs(input_ids))
+
+
+@torch._dynamo.disable
+def _gemma4_moe_feedforward_no_compile(
+    layer: Gemma4DecoderLayer,
+    residual: torch.Tensor,
+    dense_input: torch.Tensor,
+    train_meta: TrainMeta | None,
+    infer_meta: InferMeta | None,
+) -> torch.Tensor:
+    """Keep dynamic MoE checkpoint callables out of Dynamo's guard cache."""
+
+    if (
+        layer.moe is None
+        or layer.router is None
+        or layer.pre_feedforward_layernorm_2 is None
+        or layer.post_feedforward_layernorm_1 is None
+        or layer.post_feedforward_layernorm_2 is None
+    ):
+        raise RuntimeError("Gemma4 MoE layer is missing router or MoE norms")
+    dense_hidden = checkpoint_layer(
+        layer.mlp,
+        dense_input,
+        train_meta=train_meta,
+        infer_meta=infer_meta,
+    )
+    router_logits = layer.router(residual)
+    topk_idx, topk_weight = layer.moe.route(router_logits)
+    moe_hidden = checkpoint_layer(
+        layer.moe.forward_with_routes,
+        layer.pre_feedforward_layernorm_2(residual),
+        topk_idx,
+        topk_weight,
+        train_meta=train_meta,
+        infer_meta=infer_meta,
+    )
+    return layer.post_feedforward_layernorm_1(dense_hidden) + layer.post_feedforward_layernorm_2(moe_hidden)
 
 
 @torch._dynamo.disable
