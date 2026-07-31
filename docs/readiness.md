@@ -300,19 +300,3 @@ tests/test_readiness_cpu.py::TestReadinessIntegration::test_metrics_fields_corre
 ================================== 42 passed in 0.18s ===========================
 ```
 
-如果只想看核心状态机的演示，也可以用一行 Python：
-
-```bash
-!python -c "
-from areno.engine.runtime.readiness import ReadinessStateMachine, ReadinessState
-
-sm = ReadinessStateMachine(enabled=True)
-for s in [ReadinessState.MODEL_LOADING, ReadinessState.WORKER_READY,
-          ReadinessState.ROUTER_READY, ReadinessState.MINIMAL_PROBE]:
-    sm.mark_stage_complete(s)
-    print(f'{s.value} -> {sm.current_state.value}')
-print(f'最终: {sm.current_state.value}')
-assert sm.current_state == ReadinessState.READY
-print('通过!')
-"
-```
