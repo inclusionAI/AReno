@@ -706,13 +706,13 @@ only match once). The bundled word list is public domain.
 ## Train
 
     areno train \
-      --ckpt Qwen/Qwen3-0.6B \
+      --ckpt Qwen/Qwen3-1.7B \
       --dataset-path /tmp/wordle.jsonl \
       --dataset-loader-fn examples/agentic/wordle/dataset_loader.py \
       --reward-fn-path examples/agentic/wordle/reward.py \
       --agent-fn examples/agentic/wordle/run_agent.py \
-      --algo gspo --tp-size 1 --world-size 1 \
-      --batch-size 1 --n-samples 2 --max-new-tokens 64
+      --algo gspo --tp-size 2 --world-size 2 \
+      --batch-size 1 --n-samples 8 --max-new-tokens 64
 ```
 
 ### 6.2 Cookbook 文档
@@ -733,12 +733,12 @@ and a multi-turn agent loop.
      --output /tmp/wordle.jsonl --count 256 --seed 2026
 
    areno train \
-     --ckpt Qwen/Qwen3-0.6B \
+     --ckpt Qwen/Qwen3-1.7B \
      --dataset-path /tmp/wordle.jsonl \
      --dataset-loader-fn examples/agentic/wordle/dataset_loader.py \
      --reward-fn-path examples/agentic/wordle/reward.py \
      --agent-fn examples/agentic/wordle/run_agent.py \
-     --algo gspo --tp-size 1 --world-size 1
+     --algo gspo --tp-size 2 --world-size 2
 
 Key files:
 

@@ -28,14 +28,14 @@ python examples/agentic/wordle/dataset_generator.py \
 
 ```bash
 areno train \
-  --ckpt Qwen/Qwen3-0.6B \
-  --model-hub modelscope \
+  --ckpt Qwen/Qwen3-1.7B \
+  --model-hub hf \
   --dataset-path /tmp/wordle.jsonl \
   --dataset-loader-fn examples/agentic/wordle/dataset_loader.py \
   --reward-fn-path examples/agentic/wordle/reward.py \
   --agent-fn examples/agentic/wordle/run_agent.py \
-  --algo gspo --tp-size 1 --world-size 1 \
-  --batch-size 1 --n-samples 2 --max-new-tokens 64
+  --algo gspo --tp-size 2 --world-size 2 \
+  --batch-size 1 --n-samples 8 --max-new-tokens 64
 ```
 
 ## Observable outputs
