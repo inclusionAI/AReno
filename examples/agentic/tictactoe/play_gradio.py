@@ -53,20 +53,20 @@ def get_all_displays() -> list[str]:
 def model_move(board: game.Board) -> int | None:
     """Ask the model for a move."""
     prompt = game.format_xml_prompt(board)
-    # Use chat template for better instruction following
     messages = [
         {"role": "system", "content": "You are a Tic-Tac-Toe player. Output ONLY the XML tag <move>N</move> where N is the square number. No other text."},
         {"role": "user", "content": prompt},
     ]
-    text_input = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    text_input = tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
+    )
     inputs = tokenizer(text_input, return_tensors="pt").to(model.device)
     with torch.inference_mode():
         outputs = model.generate(
             **inputs,
-            max_new_tokens=16,
+            max_new_tokens=64,
             do_sample=False,
             pad_token_id=tokenizer.eos_token_id,
-            temperature=1.0,
         )
     text = tokenizer.decode(outputs[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
     move = game.parse_xml_move(text)
