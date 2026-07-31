@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import sys
 from pathlib import Path
 
@@ -20,9 +21,10 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 _WORDLE_WORD_RE = None
 
 SYSTEM_PROMPT = (
-    "You are a Wordle solver. On every guessing turn call guess_word exactly once. "
-    "Use the exact/present/absent feedback from prior guesses to deduce the hidden word. "
-    "Never repeat a guess. After the game ends, summarize the outcome without a tool call."
+    "You are a Wordle solver. On every guessing turn, output exactly one 5-letter "
+    "English word as your guess. Do not output any other text. "
+    "Use the feedback from prior guesses (exact/present/absent) to deduce the hidden word. "
+    "Never repeat a guess. After the game ends, briefly summarize the outcome."
 )
 
 # Few-shot example: one complete turn showing the correct tool_call format.
@@ -34,9 +36,9 @@ FEWSHOT_MESSAGES = [
         "content": "Guess the hidden 5-letter English word. You have at most 6 guesses. "
                    "After each guess, you receive feedback for each position: 'exact' = "
                    "correct letter in correct position, 'present' = letter exists in the "
-                       "word but in a different position, 'absent' = letter not in the word. "
-                       "Call guess_word once per turn and use the feedback to narrow down "
-                       "the word.\nGuess 1 of 6: call guess_word now.",
+                   "word but in a different position, 'absent' = letter not in the word. "
+                   "Call guess_word once per turn and use the feedback to narrow down "
+                   "the word.\nGuess 1 of 6: call guess_word now.",
     },
     {
         "role": "assistant",
@@ -158,7 +160,14 @@ async def _run_episode(item, client) -> list[AgentTrajectoryTurn]:
             calls = assistant_message.get("tool_calls") or []
             if calls and calls[0].get("function", {}).get("arguments"):
                 tool_call_args = calls[0]["function"]["arguments"]
-            fallback_word = _extract_fallback_guess(content) or _extract_fallback_guess(tool_call_args)
+            # Build the set of words already present in the conversation prompt
+            # so we can exclude them from fallback extraction.
+            prompt_text = _flatten_messages_text(turn_messages)
+            prompt_words = set(_build_wordle_word_re().findall(prompt_text.lower()))
+            fallback_word = (
+                _extract_fallback_guess(content, prompt_words)
+                or _extract_fallback_guess(tool_call_args, prompt_words)
+            )
             if fallback_word is not None:
                 assistant_message = _synth_tool_call_message(content, fallback_word)
                 executed = _execute_guess(assistant_message, item.record)
@@ -234,6 +243,23 @@ async def _run_episode(item, client) -> list[AgentTrajectoryTurn]:
     return turns
 
 
+def _flatten_messages_text(messages: list[dict]) -> str:
+    """Concatenate all text content from a list of chat messages."""
+
+    parts = []
+    for msg in messages:
+        content = msg.get("content")
+        if isinstance(content, str):
+            parts.append(content)
+        # Also scan tool_calls arguments and tool result content.
+        for call in msg.get("tool_calls") or []:
+            func = call.get("function", {})
+            args = func.get("arguments", "")
+            if isinstance(args, str):
+                parts.append(args)
+    return " ".join(parts)
+
+
 def _call_to_parsed_dict(call: dict) -> dict:
     """Convert an internal tool-call dict to the parsed_tool_calls format."""
 
@@ -272,8 +298,6 @@ def _synth_tool_call_message(content: str, word: str) -> dict:
 def _build_wordle_word_re():
     """Build a regex that matches any word from the Wordle word list."""
 
-    import re
-
     global _WORDLE_WORD_RE
     if _WORDLE_WORD_RE is None:
         # Match any valid 5-letter word as a whole word (case-insensitive).
@@ -282,19 +306,30 @@ def _build_wordle_word_re():
     return _WORDLE_WORD_RE
 
 
-def _extract_fallback_guess(content: str | None) -> str | None:
+def _extract_fallback_guess(
+    content: str | None,
+    exclude_words: set[str] | None = None,
+) -> str | None:
     """Extract a Wordle guess from natural-language model output.
 
     Small models without tool-calling fine-tuning often emit a sentence like
     "I'll guess apple" instead of a structured tool call.  This fallback scans
     the text for any known 5-letter word and returns the last match (the final
     guess is most likely the model's intended answer).
+
+    Words that already appear in the conversation prompt (instruction
+    vocabulary like 'exact', 'first', 'guess') are excluded dynamically via
+    *exclude_words* so the fallback doesn't pick up vocabulary from the game
+    description instead of an actual guess.
     """
 
     if not content:
         return None
+    exclude_words = exclude_words or set()
     matches = _build_wordle_word_re().findall(content)
-    return matches[-1].lower() if matches else None
+    # Filter out words that already appear in the prompt text.
+    filtered = [m.lower() for m in matches if m.lower() not in exclude_words]
+    return filtered[-1] if filtered else None
 
 
 def _assistant_message(response) -> dict:
@@ -353,4 +388,3 @@ def _tool_messages(assistant_message: dict, tool_result: dict, chosen_call: dict
             "content": json.dumps(tool_result),
         },
     ]
-
