@@ -12,22 +12,35 @@ Covers:
 
 from __future__ import annotations
 
+import json
 import signal
+import sys
+import threading
 import time
+
 import pytest
 
 from areno.cli.dataset_loader_guard import (
     DatasetLoaderTimeout,
     LoaderDiagnostics,
-    run_loader_with_limits,
-    _safe_len,
     _peak_rss_kb,
+    _safe_len,
+    run_loader_with_limits,
+    write_loader_diagnostics,
 )
+
+# Timeout tests require SIGALRM, which is Unix-only and only works in the
+# main thread.
+_TIMEOUT_AVAILABLE = hasattr(signal, "SIGALRM") and threading.current_thread() is threading.main_thread()
+
+# Memory diagnostics require the resource module (Unix-only).
+_RESOURCE_AVAILABLE = sys.platform != "win32"
 
 
 # ---------------------------------------------------------------------------
 # Fixtures: tiny deterministic loader functions
 # ---------------------------------------------------------------------------
+
 
 def _fast_loader(path: str = "", **kwargs) -> list[dict]:
     """Return a small list of deterministic records."""
@@ -57,6 +70,7 @@ def _exploding_loader(path: str = "", **kwargs) -> list[dict]:
 # ---------------------------------------------------------------------------
 # Tests: normal / default path
 # ---------------------------------------------------------------------------
+
 
 class TestNormalLoader:
     """Default behaviour when no limits are set."""
@@ -97,6 +111,8 @@ class TestNormalLoader:
 # Tests: timeout
 # ---------------------------------------------------------------------------
 
+
+@pytest.mark.skipif(not _TIMEOUT_AVAILABLE, reason="SIGALRM timeout requires Unix main thread")
 class TestTimeout:
     """SIGALRM-based timeout enforcement."""
 
@@ -136,53 +152,96 @@ class TestTimeout:
         # Still alive — alarm was cancelled.
 
     def test_alarm_cancelled_after_timeout(self):
-        """Ensure SIGALRM is cancelled even after a timeout fires."""
+        """Ensure SIGALRM handler is restored after a timeout fires."""
 
+        original_handler = signal.getsignal(signal.SIGALRM)
         with pytest.raises(DatasetLoaderTimeout):
             run_loader_with_limits(_slow_loader, "dummy", timeout_s=1)
-        # Verify the old handler is restored.
-        assert signal.getsignal(signal.SIGALRM) != signal.SIG_DFL or True
+        # Verify the original handler is restored.
+        restored_handler = signal.getsignal(signal.SIGALRM)
+        assert restored_handler is original_handler
         # The key point: we can call again without issues.
         dataset, _ = run_loader_with_limits(_fast_loader, "dummy")
         assert len(dataset) == 5
 
 
 # ---------------------------------------------------------------------------
+# Tests: timeout skipped on unsupported platforms/threads
+# ---------------------------------------------------------------------------
+
+
+class TestTimeoutSkipped:
+    """Timeout is skipped gracefully when SIGALRM is unavailable."""
+
+    def test_no_timeout_when_sigalrm_unavailable(self, monkeypatch):
+        """Guard should not fail when SIGALRM is missing; it just skips timeout."""
+
+        if hasattr(signal, "SIGALRM"):
+            monkeypatch.delattr(signal, "SIGALRM")
+
+        # A loader that would time out should run to completion when timeout
+        # cannot be enforced.
+        def slow_but_short(path: str = "", **kwargs) -> list[dict]:
+            time.sleep(0.05)
+            return [{"id": 1}]
+
+        dataset, diag = run_loader_with_limits(slow_but_short, "dummy", timeout_s=0.01)
+        assert len(dataset) == 1
+        assert diag.error is None
+
+    def test_no_timeout_in_non_main_thread(self):
+        """Timeout must be skipped when called from a background thread."""
+
+        if threading.current_thread() is not threading.main_thread():
+            pytest.skip("already not in main thread")
+
+        result = {}
+
+        def worker():
+            try:
+                dataset, diag = run_loader_with_limits(_slow_loader, "dummy", timeout_s=1)
+                result["dataset"] = dataset
+                result["diag"] = diag
+            except Exception as exc:  # noqa: BLE001
+                result["exc"] = exc
+
+        thread = threading.Thread(target=worker)
+        thread.start()
+        thread.join(timeout=15)
+        assert not thread.is_alive(), "loader without timeout should finish"
+        assert "exc" not in result, f"unexpected exception: {result.get('exc')}"
+        assert result["diag"].error is None
+
+
+# ---------------------------------------------------------------------------
 # Tests: record cap
 # ---------------------------------------------------------------------------
+
 
 class TestRecordCap:
     """Truncation when loader returns more than max_records."""
 
     def test_truncates_to_max_records(self):
-        dataset, diag = run_loader_with_limits(
-            _oversized_loader, "dummy", max_records=10
-        )
+        dataset, diag = run_loader_with_limits(_oversized_loader, "dummy", max_records=10)
         assert len(dataset) == 10
         assert diag.truncated is True
         assert diag.original_record_count == 1000
         assert diag.record_count == 10
 
     def test_no_truncation_when_under_cap(self):
-        dataset, diag = run_loader_with_limits(
-            _fast_loader, "dummy", max_records=10
-        )
+        dataset, diag = run_loader_with_limits(_fast_loader, "dummy", max_records=10)
         assert len(dataset) == 5
         assert diag.truncated is False
         assert diag.original_record_count == 5
 
     def test_truncated_records_are_first_n(self):
-        dataset, diag = run_loader_with_limits(
-            _oversized_loader, "dummy", max_records=3
-        )
+        dataset, diag = run_loader_with_limits(_oversized_loader, "dummy", max_records=3)
         assert dataset[0]["id"] == 0
         assert dataset[1]["id"] == 1
         assert dataset[2]["id"] == 2
 
     def test_max_records_zero_means_unlimited(self):
-        dataset, diag = run_loader_with_limits(
-            _oversized_loader, "dummy", max_records=0
-        )
+        dataset, diag = run_loader_with_limits(_oversized_loader, "dummy", max_records=0)
         assert len(dataset) == 1000
         assert diag.truncated is False
 
@@ -191,6 +250,7 @@ class TestRecordCap:
 # Tests: user exceptions
 # ---------------------------------------------------------------------------
 
+
 class TestUserException:
     """Loader errors are re-raised unchanged."""
 
@@ -198,6 +258,7 @@ class TestUserException:
         with pytest.raises(ValueError, match="bad dataset format"):
             run_loader_with_limits(_exploding_loader, "dummy")
 
+    @pytest.mark.skipif(not _TIMEOUT_AVAILABLE, reason="SIGALRM timeout requires Unix main thread")
     def test_user_exception_not_swallowed_by_timeout(self):
         """Even with a timeout set, user errors should surface as-is."""
 
@@ -214,6 +275,7 @@ class TestUserException:
         _, diag = run_loader_with_limits(_fast_loader, "dummy")
         assert diag.error is None
 
+    @pytest.mark.skipif(not _TIMEOUT_AVAILABLE, reason="SIGALRM timeout requires Unix main thread")
     def test_timeout_distinct_from_user_error(self):
         """Timeout raises DatasetLoaderTimeout, not the user's exception type."""
 
@@ -228,6 +290,7 @@ class TestUserException:
 # ---------------------------------------------------------------------------
 # Tests: diagnostics
 # ---------------------------------------------------------------------------
+
 
 class TestDiagnostics:
     """LoaderDiagnostics fields."""
@@ -255,6 +318,7 @@ class TestDiagnostics:
 # Tests: helpers
 # ---------------------------------------------------------------------------
 
+
 class TestHelpers:
     """Internal helper functions."""
 
@@ -270,13 +334,25 @@ class TestHelpers:
     def test_safe_len_with_none(self):
         assert _safe_len(None) == 0
 
-    def test_peak_rss_kb_positive(self):
-        assert _peak_rss_kb() > 0
+    @pytest.mark.skipif(not _RESOURCE_AVAILABLE, reason="resource module not available")
+    def test_peak_rss_kb_non_negative(self):
+        """Peak RSS is reported when resource is available; always >= 0."""
+
+        assert _peak_rss_kb() >= 0
+
+    def test_peak_rss_kb_zero_without_resource(self, monkeypatch):
+        """When resource is unavailable, memory diagnostics report 0."""
+
+        import areno.cli.dataset_loader_guard as guard
+
+        monkeypatch.setattr(guard, "_resource", None)
+        assert _peak_rss_kb() == 0
 
 
 # ---------------------------------------------------------------------------
 # Tests: config validation
 # ---------------------------------------------------------------------------
+
 
 class TestConfigValidation:
     """TrainerConfig validates the new fields (checked via source inspection)."""
@@ -284,6 +360,7 @@ class TestConfigValidation:
     def test_default_values_in_source(self):
         """Verify the default values are present in trainer_config.py."""
         import ast
+
         with open("areno/api/trainer_config.py") as f:
             tree = ast.parse(f.read())
         fields = {}
@@ -312,15 +389,15 @@ class TestConfigValidation:
 # Tests: combined / integration
 # ---------------------------------------------------------------------------
 
+
 class TestCombinedLimits:
     """Timeout + record cap together."""
 
+    @pytest.mark.skipif(not _TIMEOUT_AVAILABLE, reason="SIGALRM timeout requires Unix main thread")
     def test_timeout_and_cap_on_fast_loader(self):
         """A fast loader with both limits set should succeed and not truncate."""
 
-        dataset, diag = run_loader_with_limits(
-            _fast_loader, "dummy", timeout_s=10, max_records=100
-        )
+        dataset, diag = run_loader_with_limits(_fast_loader, "dummy", timeout_s=10, max_records=100)
         assert len(dataset) == 5
         assert diag.truncated is False
         assert diag.error is None
@@ -328,9 +405,7 @@ class TestCombinedLimits:
     def test_cap_applied_even_with_timeout(self):
         """If the loader finishes within the timeout, cap still applies."""
 
-        dataset, diag = run_loader_with_limits(
-            _oversized_loader, "dummy", timeout_s=30, max_records=5
-        )
+        dataset, diag = run_loader_with_limits(_oversized_loader, "dummy", timeout_s=30, max_records=5)
         assert len(dataset) == 5
         assert diag.truncated is True
 
@@ -338,6 +413,7 @@ class TestCombinedLimits:
 # ---------------------------------------------------------------------------
 # Tests: boundary / edge cases
 # ---------------------------------------------------------------------------
+
 
 class TestBoundaryCases:
     """Edge cases: generators, empty data, max_records=1, sub-second timeout."""
@@ -349,23 +425,22 @@ class TestBoundaryCases:
             for i in range(100):
                 yield {"id": i}
 
-        dataset, diag = run_loader_with_limits(
-            gen_loader, "dummy", max_records=10
-        )
+        dataset, diag = run_loader_with_limits(gen_loader, "dummy", max_records=10)
         assert len(dataset) == 10
         assert diag.truncated is True
 
-    def test_generator_loader_no_cap_returns_materialised(self):
-        """Generator without cap should be materialised by islice fallback."""
+    def test_generator_loader_no_cap_returns_original(self):
+        """Generator without cap is passed through without materialising."""
 
         def gen_loader(path="", **kw):
             for i in range(5):
                 yield {"id": i}
 
         dataset, diag = run_loader_with_limits(gen_loader, "dummy")
-        # Without cap, generator is passed through; len() may be 0.
-        # The guard doesn't materialise generators unless max_records is set.
+        # Without cap, the generator is returned as-is.
+        assert iter(dataset) is dataset
         assert diag.error is None
+        assert diag.record_count == 0
 
     def test_empty_dataset_with_cap(self):
         """Empty list with max_records should not crash."""
@@ -373,9 +448,7 @@ class TestBoundaryCases:
         def empty_loader(path="", **kw):
             return []
 
-        dataset, diag = run_loader_with_limits(
-            empty_loader, "dummy", max_records=10
-        )
+        dataset, diag = run_loader_with_limits(empty_loader, "dummy", max_records=10)
         assert len(dataset) == 0
         assert diag.truncated is False
         assert diag.record_count == 0
@@ -383,13 +456,12 @@ class TestBoundaryCases:
     def test_max_records_one(self):
         """max_records=1 should keep only the first record."""
 
-        dataset, diag = run_loader_with_limits(
-            _oversized_loader, "dummy", max_records=1
-        )
+        dataset, diag = run_loader_with_limits(_oversized_loader, "dummy", max_records=1)
         assert len(dataset) == 1
         assert dataset[0]["id"] == 0
         assert diag.truncated is True
 
+    @pytest.mark.skipif(not _TIMEOUT_AVAILABLE, reason="SIGALRM timeout requires Unix main thread")
     def test_sub_second_timeout(self):
         """timeout_s < 1 should work with setitimer (sub-second precision)."""
 
@@ -400,12 +472,11 @@ class TestBoundaryCases:
         with pytest.raises(DatasetLoaderTimeout):
             run_loader_with_limits(medium_loader, "dummy", timeout_s=0.5)
 
+    @pytest.mark.skipif(not _TIMEOUT_AVAILABLE, reason="SIGALRM timeout requires Unix main thread")
     def test_timeout_does_not_truncate_on_success(self):
         """A fast loader with timeout should return full data, no truncation."""
 
-        dataset, diag = run_loader_with_limits(
-            _fast_loader, "dummy", timeout_s=5
-        )
+        dataset, diag = run_loader_with_limits(_fast_loader, "dummy", timeout_s=5)
         assert len(dataset) == 5
         assert diag.truncated is False
 
@@ -429,9 +500,37 @@ class TestBoundaryCases:
         assert d["error"] is None
 
 
+class TestWriteLoaderDiagnostics:
+    """Persisting loader diagnostics to disk."""
+
+    def test_writes_json_when_metrics_log_dir_set(self, tmp_path):
+        diag = LoaderDiagnostics(
+            duration_s=2.0,
+            mem_before_kb=100,
+            mem_after_kb=300,
+            record_count=10,
+            truncated=True,
+            original_record_count=100,
+        )
+        write_loader_diagnostics(str(tmp_path), diag)
+        payload = json.loads((tmp_path / "areno_loader_diagnostics.json").read_text())
+        assert payload["duration_s"] == 2.0
+        assert payload["mem_delta_kb"] == 200
+        assert payload["record_count"] == 10
+        assert payload["truncated"] is True
+        assert payload["original_record_count"] == 100
+        assert payload["error"] is None
+
+    def test_no_crash_when_metrics_log_dir_none(self):
+        """Calling write_loader_diagnostics with None should not raise."""
+        diag = LoaderDiagnostics(duration_s=1.0)
+        write_loader_diagnostics(None, diag)  # no metrics_log_dir -> just log
+
+
 # ---------------------------------------------------------------------------
 # Integration-style tests: _load_dataset_for_training -> run_loader_with_limits
 # ---------------------------------------------------------------------------
+
 
 class TestIntegrationLoadDatasetForTraining:
     """Integration tests verifying _load_dataset_for_training wraps loaders
@@ -456,7 +555,7 @@ class TestIntegrationLoadDatasetForTraining:
         def mock_load_from_disk(path):
             raise FileNotFoundError("not a save_to_disk directory")
 
-        dataset = _load_dataset_for_training(
+        dataset, diag = _load_dataset_for_training(
             "dummy_path",
             model_hub="hf",
             dataset_loader_fn=None,
@@ -466,6 +565,8 @@ class TestIntegrationLoadDatasetForTraining:
             max_loader_records=0,
         )
         assert len(dataset) == 5
+        assert diag.record_count == 5
+        assert diag.truncated is False
 
     def test_default_loader_with_record_cap(self):
         """Default loader with max_loader_records should truncate."""
@@ -477,7 +578,7 @@ class TestIntegrationLoadDatasetForTraining:
         def mock_load_from_disk(path):
             raise FileNotFoundError("not a save_to_disk directory")
 
-        dataset = _load_dataset_for_training(
+        dataset, diag = _load_dataset_for_training(
             "dummy_path",
             model_hub="hf",
             dataset_loader_fn=None,
@@ -487,16 +588,15 @@ class TestIntegrationLoadDatasetForTraining:
             max_loader_records=10,
         )
         assert len(dataset) == 10
+        assert diag.truncated is True
+        assert diag.original_record_count == 100
 
     def test_custom_loader_no_limits(self, tmp_path):
         """Custom loader path without limits should still work."""
         from areno.cli.train import _load_dataset_for_training
 
         loader_script = tmp_path / "my_loader.py"
-        loader_script.write_text(
-            "def load_training_dataset(path, **kw):\n"
-            "    return [{'id': i} for i in range(3)]\n"
-        )
+        loader_script.write_text("def load_training_dataset(path, **kw):\n    return [{'id': i} for i in range(3)]\n")
 
         def mock_load_dataset(name, **kw):
             return []
@@ -504,7 +604,7 @@ class TestIntegrationLoadDatasetForTraining:
         def mock_load_from_disk(path):
             raise FileNotFoundError("not used")
 
-        dataset = _load_dataset_for_training(
+        dataset, diag = _load_dataset_for_training(
             "dummy_path",
             model_hub="hf",
             dataset_loader_fn=str(loader_script),
@@ -514,16 +614,14 @@ class TestIntegrationLoadDatasetForTraining:
             max_loader_records=0,
         )
         assert len(dataset) == 3
+        assert diag.record_count == 3
 
     def test_custom_loader_with_record_cap(self, tmp_path):
         """Custom loader with max_loader_records should truncate."""
         from areno.cli.train import _load_dataset_for_training
 
         loader_script = tmp_path / "my_loader.py"
-        loader_script.write_text(
-            "def load_training_dataset(path, **kw):\n"
-            "    return [{'id': i} for i in range(50)]\n"
-        )
+        loader_script.write_text("def load_training_dataset(path, **kw):\n    return [{'id': i} for i in range(50)]\n")
 
         def mock_load_dataset(name, **kw):
             return []
@@ -531,7 +629,7 @@ class TestIntegrationLoadDatasetForTraining:
         def mock_load_from_disk(path):
             raise FileNotFoundError("not used")
 
-        dataset = _load_dataset_for_training(
+        dataset, diag = _load_dataset_for_training(
             "dummy_path",
             model_hub="hf",
             dataset_loader_fn=str(loader_script),
@@ -541,3 +639,32 @@ class TestIntegrationLoadDatasetForTraining:
             max_loader_records=5,
         )
         assert len(dataset) == 5
+        assert diag.truncated is True
+
+    def test_default_loader_with_huggingface_dataset(self):
+        """Record cap works with a real HuggingFace Dataset object."""
+        from areno.cli.train import _load_dataset_for_training
+
+        try:
+            from datasets import Dataset  # noqa: F401
+        except ImportError:
+            pytest.skip("datasets library not installed")
+
+        def mock_load_dataset(name, **kw):
+            return Dataset.from_list([{"id": i} for i in range(50)])
+
+        def mock_load_from_disk(path):
+            raise FileNotFoundError("not a save_to_disk directory")
+
+        dataset, diag = _load_dataset_for_training(
+            "dummy_path",
+            model_hub="hf",
+            dataset_loader_fn=None,
+            load_dataset=mock_load_dataset,
+            load_from_disk=mock_load_from_disk,
+            loader_timeout_s=0.0,
+            max_loader_records=10,
+        )
+        assert len(dataset) == 10
+        assert diag.truncated is True
+        assert diag.original_record_count == 50

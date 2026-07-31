@@ -191,10 +191,13 @@ memory.  Two CLI flags bound the loader's resource usage:
 
 ``--max-loader-records N``
    Truncate the dataset to the first *N* records when the loader returns more
-   than *N* rows (default: ``0``, disabled).
+   than *N* rows (default: ``0``, disabled).  The cap materialises generators
+   and other non-sized iterables so their length can be measured.
 
 Both limits are independent and can be combined.  When neither is set (the
-default), the loader runs with no overhead beyond lightweight timing.
+default), the loader still runs through the guard so timing diagnostics are
+emitted, but no timeout or truncation is enforced.  Generators are passed
+through unchanged when ``--max-loader-records`` is disabled.
 
 Minimal example
 ~~~~~~~~~~~~~~~
@@ -212,7 +215,9 @@ Cap the loader to 100 records with a 30-second timeout:
      --max-loader-records 100 \
      --loader-timeout-s 30
 
-When the loader finishes, AReno logs a diagnostic line:
+When the loader finishes, AReno logs a diagnostic line and, if
+``--metrics-log-dir`` is set, writes ``areno_loader_diagnostics.json`` in that
+directory:
 
 .. code-block:: text
 
@@ -252,8 +257,8 @@ User exceptions from the loader itself (e.g. ``ValueError``,
 ``FileNotFoundError``) are re-raised unchanged—only the timeout produces
 ``DatasetLoaderTimeout``.
 
-Platform limitations
-~~~~~~~~~~~~~~~~~~~~
+Platform limitations and side effects
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 The timeout mechanism relies on ``SIGALRM`` and ``setitimer``, which are
 available on Unix (Linux, macOS).  Sub-second precision is supported via
@@ -262,6 +267,18 @@ timeout is not enforced and a warning is logged.  ``--max-loader-records``
 works on all platforms because it only inspects the returned object.
 The ``resource`` module is imported lazily; if it is unavailable (e.g.
 Windows), memory diagnostics report 0.
+
+Because ``signal.signal`` only works in the main thread, ``--loader-timeout-s``
+is silently skipped with a warning when the loader is invoked from a
+background thread.  If your custom loader spawns its own threads or runs in a
+worker thread, the timeout will not interrupt it.
+
+Installing a ``SIGALRM`` handler is a *process-wide* operation.  While AReno
+saves and restores the previous handler around each guarded loader call, any
+other component in the same process that also uses ``SIGALRM`` may be briefly
+affected.  If you have code that depends on a custom ``SIGALRM`` handler, keep
+it outside of the loader invocation, or disable ``--loader-timeout-s`` and rely
+on ``--max-loader-records`` instead.
 
 To disable both limits and use the loader as-is:
 

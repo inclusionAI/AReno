@@ -39,6 +39,8 @@ from areno.engine.config import (
     flash_attention_unsupported_model_reason,
 )
 
+logger = logging.getLogger(__name__)
+
 # Group `areno train --help` flags by user intent rather than as one flat wall.
 # Each entry is (section title, option param names in display order). Every
 # declared option must appear in exactly one group; the help renderer keeps any
@@ -825,7 +827,7 @@ def run(trainer_config: TrainerConfig):
         metrics_log_dir=trainer_config.metrics_log_dir,
         custom_config=trainer_config.areno_config(),
     )
-    dataset = _load_dataset_for_training(
+    dataset, loader_diag = _load_dataset_for_training(
         trainer_config.dataset_path,
         dataset_loader_fn=trainer_config.dataset_loader_fn,
         model_hub=trainer_config.model_hub,
@@ -834,6 +836,9 @@ def run(trainer_config: TrainerConfig):
         loader_timeout_s=trainer_config.loader_timeout_s,
         max_loader_records=trainer_config.max_loader_records,
     )
+    from areno.cli.dataset_loader_guard import write_loader_diagnostics
+
+    write_loader_diagnostics(trainer_config.metrics_log_dir, loader_diag)
     trainer = build_trainer(trainer_config, instance=api_trainer, dataset=dataset, reward_fn=reward_fn, loss_fn=loss_fn)
     trainer.fit()
 
@@ -1024,7 +1029,7 @@ def _load_dataset_for_training(
 
     if dataset_loader_fn is not None:
         loader_fn = _load_dataset_loader_fn(dataset_loader_fn)
-        dataset, diag = run_loader_with_limits(
+        return run_loader_with_limits(
             loader_fn,
             dataset_path,
             timeout_s=loader_timeout_s,
@@ -1033,14 +1038,12 @@ def _load_dataset_for_training(
             load_dataset=load_dataset,
             load_from_disk=load_from_disk,
         )
-        return dataset
-    dataset, diag = run_loader_with_limits(
+    return run_loader_with_limits(
         default_loader,
         dataset_path,
         timeout_s=loader_timeout_s,
         max_records=max_loader_records,
     )
-    return dataset
 
 
 def _load_dataset_loader_fn(spec_text: str):
