@@ -10,7 +10,7 @@ from typing import Optional, Tuple, Union
 # Compact 8x8 board with fleet [4,3,2,2] = 11 cells
 GRID = 8  # 棋盘边长（8x8）
 SHIPS = (4, 3, 2, 2)  # 舰队各舰长度（4/3/2/2，共11格）
-MAX_TURNS = 40  # 最大回合数（< 棋盘 64 格：让"穷举全盘"不可行，RL 才有提升空间）
+MAX_TURNS = 12  # 最大回合数。< 64 格让"穷举全盘"不可行；保持小以控制多轮轨迹长度（每回合累积上下文），避免在单卡上 train 阶段全词表 logprob OOM
 TOTAL_SHIP_CELLS = sum(SHIPS)  # 船只总格子数（11）
 
 # 坐标系统定义：A1..H8（字母 = 行 A-H，数字 = 列 1-8）
