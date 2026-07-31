@@ -466,6 +466,14 @@ class RolloutSession:
             params.temperature = float(body["temperature"])
         if body.get("top_p") is not None:
             params.top_p = float(body["top_p"])
+        if body.get("stop") is not None:
+            stop = [body["stop"]] if isinstance(body["stop"], str) else list(body["stop"])
+            tokenizer = self._trainer.get_tokenizer()
+            stop_ids: list[int] = []
+            for text in stop:
+                stop_ids.extend(tokenizer.encode(text, add_special_tokens=False))
+            params.stop = stop
+            params.stop_token_ids = stop_ids
         pending = _PendingChat(
             item=None,
             messages=messages,
@@ -699,6 +707,7 @@ class RolloutSession:
             response_logprobs=[list(response_logprobs or [])],
             include_areno_metadata=True,
             input_tokens=pending.input_tokens,
+            stop_strings=getattr(pending.params, "stop", None),
         )
 
 

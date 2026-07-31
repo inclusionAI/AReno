@@ -106,6 +106,7 @@ async def run_agent(ctx, batch):
                 messages=messages,
                 tools=[CHOOSE_MOVES_TOOL],
                 tool_choice=tool_choice,
+                stop=["</tool_call>"],
                 stream=False,
             )
         # Log model raw output for debugging collapse/format issues.
