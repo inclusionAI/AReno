@@ -361,11 +361,18 @@ def _turn_prompt(server: CalendarServer, tool_name: str) -> str:
     """Generate a guiding prompt for the current turn."""
     if tool_name == "query_availability":
         meeting = server.state.meeting_by_id(server.meeting_id) if server.state else None
-        queried = [
-            json.loads(c["arguments"]).get("participant", "")
-            for c in server.tool_calls_log
-            if c["name"] == "query_availability" and isinstance(c["arguments"], dict)
-        ]
+        queried = []
+        for c in server.tool_calls_log:
+            if c["name"] != "query_availability":
+                continue
+            cargs = c["arguments"]
+            if isinstance(cargs, str):
+                try:
+                    cargs = json.loads(cargs)
+                except json.JSONDecodeError:
+                    continue
+            if isinstance(cargs, dict):
+                queried.append(cargs.get("participant", ""))
         remaining = [p for p in (meeting.required_participants if meeting else []) if p not in queried]
         if remaining:
             return f"Call query_availability for participant '{remaining[0]}' to learn their UTC availability."
@@ -411,6 +418,8 @@ def _evaluate(server: CalendarServer) -> None:
                     args = json.loads(args)
                 except json.JSONDecodeError:
                     continue
+            if not isinstance(args, dict):
+                continue
             if args.get("meeting_id") != server.meeting_id:
                 continue
             utc_start = int(args.get("utc_start_hour", -1))
