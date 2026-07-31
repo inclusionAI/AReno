@@ -280,7 +280,7 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 -m areno.cli.main train
   --n-samples 2 \
   --max-new-tokens 256 \
   --attn-backend native \
-  --max-context-len 16384 \
+  --max-context-len 32768 \
   --tp-size 2 \
   --world-size 2 \
   --max-steps 500 \
@@ -291,7 +291,11 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 -m areno.cli.main train
   --save-path /root/ckpt_expB
 ```
 
-区别：不禁思考、`--max-new-tokens 256`，从原始 Qwen3-0.6B 开始。
+> **坑17**：思考模式 256 token/轮 × 10 轮对话累积可能到 20K+ token，
+> `--max-context-len 16384` 不够，必须设 `32768`。
+> 如果 32768 导致 OOM，备选：重生成数据用 `--max-steps 6`，或 `--n-samples 1`。
+
+区别：不禁思考、`--max-new-tokens 256`、`--max-context-len 32768`，从原始 Qwen3-0.6B 开始。
 
 ---
 
@@ -333,4 +337,5 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 -m areno.cli.main train
 | 13 | `rich` 包冲突 | Debian 管理的包 | `pip3 install --ignore-installed rich` |
 | 14 | `/workspace: No such file` | Docker 镜像无此目录 | 用 `/root` 替代所有路径 |
 | 15 | epoch 瞬间结束，0 步训练 | `--max-prompt-tokens` 太小过滤了全部 | 不要设 `--max-prompt-tokens` |
-| 16 | `all trajectories exceeded context length` | 默认 max_steps=25 → 34K token/轨迹 | 数据生成加 `--max-steps 10`，训练加 `--max-context-len 8192` |
+| 16 | `all trajectories exceeded context length` | 默认 max_steps=25 → 34K token/轨迹 | 数据生成加 `--max-steps 10`，训练加 `--max-context-len 16384`（实验B 用 32768） |
+| 17 | 实验B 思考模式轨迹超 context | 256 token/轮 × 10 轮累积超 16384 | `--max-context-len 32768`，或减 `--max-steps 6` |
