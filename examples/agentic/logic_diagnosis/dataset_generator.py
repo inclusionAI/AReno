@@ -73,7 +73,7 @@ def generate_records(
                 seed=rng.randint(0, 2**31 - 1),
             )
             gate_nodes = [node for node in nodes if node["type"] in ("and", "or", "not")]
-            if len(gate_nodes) != n_gates:
+            if not (n_gates <= len(gate_nodes) <= n_gates + 2):
                 continue
 
             matching_gates = [node for node in gate_nodes if node["type"] == fault_type]
