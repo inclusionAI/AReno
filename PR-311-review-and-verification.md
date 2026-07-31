@@ -218,6 +218,24 @@ areno train --ckpt Qwen/Qwen3-0.6B \
 
 此实验证明 `_apply_trainable_turn_mode` 在 GPU agentic 路径上真实触发，`trainable_tokens` / `masked_response_tokens` 指标正确输出，CLI 选项 `--trainable-turns` 的行为在端到端训练中与 CPU 单元测试一致。
 
+### Issue #199 验收总结
+
+Issue #199 要求「Make trainable turns configurable for agentic trajectories」。本 PR 全部实现并经验证：
+
+| Issue 需求 | 实现状态 | 验证方式 |
+|---|---|---|
+| 可配置 trainable turns（所有 assistant / 仅最后一轮 / 仅最终答案） | 三模式 `all_assistant` / `last_assistant` / `final_answer` | 18 个 CPU 逐 token 测试 + A10 GPU agentic 路径对比 |
+| 可选屏蔽 tool-call 参数 token | `--mask-tool-call-args` | 2 个 CPU 测试（arg 屏蔽 + 与已有屏蔽的组合） |
+| 默认行为向后兼容 | `all_assistant` + `mask_tool_call_args=False` | parity 测试断言 + 43 个回归测试全绿 |
+| 通过 CLI 暴露 | `--trainable-turns`（`click.Choice`）/ `--mask-tool-call-args` | `--trainable-turns bogus` → exit 2 |
+| 可观测输出 | `trainable_tokens` / `masked_response_tokens` | CPU 测试数值断言 + A10 GPU 日志确认 |
+| 不引入新依赖、不替换 trainer | 10 文件 +781/-5，`areno/` 核心仅 `agentic.py` +211 行 | git diff 确认，ruff clean |
+
+三层验证体系：
+- **CPU 单元测试**（64 passed）：逐 token mask、边界、非法输入、metrics、dual-path
+- **Kaggle T4×2 标准 GSPO**：CLI→config 传递，不破坏现有训练
+- **阿里云 A10×2 agentic 路径**：mask 逻辑在 `_run_agentic_rollout` 中真实触发，`trainable_tokens` 320→0 对比，`grad_norm` 5.31→0 对比
+
 ### ruff lint + format
 
 ```bash
