@@ -163,7 +163,7 @@ validation rejected malformed trajectory: agentic trajectory has a tool call wit
 
 三种模式在同一条 trajectory 上效果一目了然：全训 6 个 vs 只训最后 2 个。非法 trajectory 被拒绝。
 
-### GPU 训练（Kaggle 双 T4 实跑）
+### GPU 训练 — Kaggle 双 T4（标准 GSPO 路径）
 
 ```bash
 PYTORCH_ALLOC_CONF=expandable_segments:True areno train \
@@ -179,7 +179,44 @@ PYTORCH_ALLOC_CONF=expandable_segments:True areno train \
   --trainable-turns final_answer
 ```
 
-config summary 正确显示 `trainable_turns: final_answer`，2 步训练正常到 `max_steps_reached`。走的是标准 GSPO 路径（无 `--agent-fn`），mask 重写在 agentic 路径才触发，所以这验证的是 CLI→config 传递和不破坏训练。
+config summary 正确显示 `trainable_turns: final_answer`，2 步训练正常到 `max_steps_reached`。此实验走标准 GSPO 路径（无 `--agent-fn`），mask 重写在 agentic 路径才触发，因此验证的是 CLI→config 传递和不破坏现有训练。
+
+### GPU 训练 — 阿里云双 A10（agentic 路径，mask 真实触发）
+
+在阿里云 2×A10 24GB 上使用 tictactoe agentic example 跑了两个对比实验，走 `_run_agentic_rollout` 路径（`--agent-fn`），mask 逻辑在 GPU 上真实触发：
+
+实验1（`all_assistant`，默认）：
+```bash
+areno train --ckpt Qwen/Qwen3-0.6B \
+  --dataset-path /tmp/tictactoe_boards.jsonl \
+  --dataset-loader-fn examples/agentic/tictactoe/dataset_loader.py \
+  --reward-fn-path examples/agentic/tictactoe/reward.py \
+  --agent-fn examples/agentic/tictactoe/run_agent.py \
+  --algo gspo --tp-size 2 --world-size 2 \
+  --batch-size 4 --n-samples 4 --max-steps 10 \
+  --max-prompt-tokens 1024 --max-new-tokens 128 \
+  --mini-bs 2 --score-micro-bs 2 \
+  --gradient-accumulation-steps 2 \
+  --activation-checkpointing --drop-rollout-state \
+  --attn-backend native --disable-thinking
+```
+
+实验2（`final_answer`）：同上，末尾加 `--trainable-turns final_answer`。
+
+关键日志行对比：
+
+| 指标 | 实验1 `all_assistant` | 实验2 `final_answer` |
+|---|---|---|
+| `trainable_tokens` | 319~320 | 0 |
+| `masked_response_tokens` | 0 | 320 |
+| `trainable_turns` | `all_assistant` | `final_answer` |
+| `grad_norm`（step 7） | 5.31（有梯度） | 0.0（无梯度） |
+| `tokens` | 5808~5828 | 5828 |
+| `tool_results` | 0 | 0 |
+
+`all_assistant` 模式下全部 320 个 response token 参与 loss 计算（`trainable_tokens=320`，`masked_response_tokens=0`），step 7 出现非零梯度（`grad_norm=5.31`）。`final_answer` 模式下 0 个 token trainable（`trainable_tokens=0`，`masked_response_tokens=320`），因为 tictactoe 的 trajectory 结构是 agent 发 tool call 但环境未返回 tool result（`tool_results=0`），`final_answer` 在 bare trailing tool_call 场景下按设计返回零信号，与 CPU 测试 `test_trainable_turns_final_answer_bare_trailing_tool_call_zero_signal` 断言的行为一致。两者 `trainable_tokens + masked_response_tokens = 320`，数值闭合。
+
+此实验证明 `_apply_trainable_turn_mode` 在 GPU agentic 路径上真实触发，`trainable_tokens` / `masked_response_tokens` 指标正确输出，CLI 选项 `--trainable-turns` 的行为在端到端训练中与 CPU 单元测试一致。
 
 ### ruff lint + format
 
