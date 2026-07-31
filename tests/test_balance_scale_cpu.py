@@ -273,7 +273,7 @@ class RewardTest(unittest.TestCase):
                 {"name": "answer", "arguments": json.dumps({"ball_index": 5, "direction": "heavier"})}
             ],
         )
-        self.assertEqual(reward.reward_fn(record), 0.0)
+        self.assertEqual(reward.reward_fn(record), -0.5)
 
     def test_no_answer_tool_call(self):
         record = _make_record(
@@ -283,11 +283,11 @@ class RewardTest(unittest.TestCase):
                 {"name": "weigh", "arguments": json.dumps({"left_group": [0], "right_group": [1]})},
             ],
         )
-        self.assertEqual(reward.reward_fn(record), 0.0)
+        self.assertEqual(reward.reward_fn(record), -0.5)
 
     def test_no_tool_calls_at_all(self):
         record = _make_record(odd_ball_index=3, odd_ball_direction="heavier", tool_calls=[])
-        self.assertEqual(reward.reward_fn(record), 0.0)
+        self.assertEqual(reward.reward_fn(record), -0.5)
 
     def test_uses_last_answer_call(self):
         """When multiple answer calls exist, the last one is used."""
@@ -319,7 +319,7 @@ class RewardTest(unittest.TestCase):
                 {"name": "answer", "arguments": "not json"},
             ],
         )
-        self.assertEqual(reward.reward_fn(record), 0.0)
+        self.assertEqual(reward.reward_fn(record), -0.5)
 
 
 class ImportBoundaryTest(unittest.TestCase):
@@ -339,7 +339,7 @@ class ImportBoundaryTest(unittest.TestCase):
     def test_reward_constants(self):
         self.assertEqual(reward.FULL_ANSWER_REWARD, 1.0)
         self.assertEqual(reward.IDENTITY_ONLY_REWARD, 0.5)
-        self.assertEqual(reward.WRONG_REWARD, 0.0)
+        self.assertEqual(reward.WRONG_REWARD, -0.5)
 
 
 # ---------------------------------------------------------------------------
@@ -483,7 +483,7 @@ class NoToolRewardTest(unittest.TestCase):
             odd_ball_direction="heavier",
             completion='<answer ball="5" direction="heavier"/>',
         )
-        self.assertEqual(reward_no_tool.reward_fn(record), 0.0)
+        self.assertEqual(reward_no_tool.reward_fn(record), -0.5)
 
     def test_no_answer_tag(self):
         record = _make_no_tool_record(
@@ -491,7 +491,7 @@ class NoToolRewardTest(unittest.TestCase):
             odd_ball_direction="heavier",
             completion="I think the odd ball is 3 but I forgot to use the tag.",
         )
-        self.assertEqual(reward_no_tool.reward_fn(record), 0.0)
+        self.assertEqual(reward_no_tool.reward_fn(record), -0.5)
 
     def test_answer_with_reasoning(self):
         record = _make_no_tool_record(

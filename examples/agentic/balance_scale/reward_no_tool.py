@@ -11,7 +11,7 @@ import game  # noqa: E402
 
 FULL_ANSWER_REWARD = 1.0
 IDENTITY_ONLY_REWARD = 0.5
-WRONG_REWARD = 0.0
+WRONG_REWARD = -0.5
 
 
 def reward_fn(record: Any) -> float:
@@ -20,7 +20,7 @@ def reward_fn(record: Any) -> float:
     Returns:
         1.0 — correct ball identity and weight direction.
         0.5 — correct ball identity only.
-        0.0 — wrong answer or no answer tag found.
+        -0.5 — wrong answer or no answer tag found.
     """
 
     source = record.source_record
