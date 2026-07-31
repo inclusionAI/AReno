@@ -68,9 +68,11 @@ areno train \
 
 ## Observable Output
 
-- **Logs**: The agent logs task count and max running prompts at start.
-- **Metrics**: Reward is emitted per sample; per-dimension breakdown is
-  available in `score_task` return value.
+- **Logs**: The agent logs task count and max running prompts at start. The
+  reward function emits per-dimension scores (`tool_selection`, `arguments`,
+  `order`, `final_answer`) and failure classes via structured log lines at INFO
+  level (logger `areno.multitool.reward`).
+- **Metrics**: Overall reward is emitted per sample as a scalar.
 - **Artifacts**: Trajectories and tool results are captured in the standard
   AReno rollout artifacts.
 

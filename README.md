@@ -288,6 +288,13 @@ areno train \
   --world-size 1
 ```
 
+For a multi-tool task-calling benchmark, see `examples/agentic/multitool`. Each
+task requires two or more correctly ordered tool calls across seven side-effect
+fake tools (contacts, notes, calculator, unit conversion, parcel lookup, note
+search, city filter). The reward function scores tool selection, arguments,
+order, and final answer as separate dimensions. All data is in-memory — no
+network or database is needed.
+
 For a more realistic multi-turn software-engineering loop, see
 `examples/agentic/coding`. It uses a 100-record SWE-bench-style local dataset
 that ranges from easy to hard with most records marked hard, constrained

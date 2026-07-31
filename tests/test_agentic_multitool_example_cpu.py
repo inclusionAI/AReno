@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import logging
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -780,8 +781,66 @@ def test_reward_fn_partial_credit_on_wrong_order():
     assert -1.0 < result < 1.0
 
 
-# ---------------------------------------------------------------------------
-# run_agent tool dispatch tests — verify _run_tool routes to the correct game tool
+def test_reward_fn_logs_per_dimension_metrics(caplog):
+    """Verify reward_fn emits per-dimension scores and failure classes via logging."""
+
+    reward = _load_module("reward")
+    record = {
+        "id": "contact-meeting-0",
+        "description": "Find Alice's phone, then check the meeting note.",
+        "required_tools": ["lookup_contact", "read_note"],
+        "expected_contact": "Alice Chen",
+        "expected_note_key": "meeting",
+    }
+    tool_calls = [
+        {"name": "lookup_contact", "arguments": json.dumps({"name": "Alice"})},
+        {"name": "read_note", "arguments": json.dumps({"note_key": "meeting"})},
+    ]
+    reward_record = SimpleNamespace(source_record=record, tool_calls=tool_calls)
+    logger = logging.getLogger("areno.multitool.reward")
+    logger.addHandler(caplog.handler)
+    prev_level = logger.level
+    logger.setLevel(logging.INFO)
+    try:
+        reward.reward_fn(reward_record)
+    finally:
+        logger.removeHandler(caplog.handler)
+        logger.setLevel(prev_level)
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("tool_selection=1.0000" in m for m in messages)
+    assert any("arguments=1.0000" in m for m in messages)
+    assert any("order=1.0000" in m for m in messages)
+    assert any("final_answer=1.0000" in m for m in messages)
+    assert any("failures=none" in m for m in messages)
+
+
+def test_reward_fn_logs_failure_classes_on_wrong_order(caplog):
+    """Verify reward_fn logs the 'order' failure class when tools are called out of order."""
+
+    reward = _load_module("reward")
+    record = {
+        "id": "contact-meeting-0",
+        "description": "Find Alice's phone, then check the meeting note.",
+        "required_tools": ["lookup_contact", "read_note"],
+        "expected_contact": "Alice Chen",
+        "expected_note_key": "meeting",
+    }
+    tool_calls = [
+        {"name": "read_note", "arguments": json.dumps({"note_key": "meeting"})},
+        {"name": "lookup_contact", "arguments": json.dumps({"name": "Alice"})},
+    ]
+    reward_record = SimpleNamespace(source_record=record, tool_calls=tool_calls)
+    logger = logging.getLogger("areno.multitool.reward")
+    logger.addHandler(caplog.handler)
+    prev_level = logger.level
+    logger.setLevel(logging.INFO)
+    try:
+        reward.reward_fn(reward_record)
+    finally:
+        logger.removeHandler(caplog.handler)
+        logger.setLevel(prev_level)
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("order" in m.split("failures=")[-1] for m in messages)
 # ---------------------------------------------------------------------------
 
 
@@ -1037,3 +1096,120 @@ def test_score_non_dict_arguments_does_not_crash():
     ]
     score = game.score_task(record, tool_calls)
     assert score["arguments"] < 1.0
+
+
+# ---------------------------------------------------------------------------
+# Integration test — crosses modules: generator → loader → reward
+# ---------------------------------------------------------------------------
+
+
+def test_integration_generator_loader_reward_pipeline(tmp_path):
+    """Verify the full pipeline: generate JSONL → load with validation → score with reward_fn.
+
+    Crosses three modules (game, dataset_loader, reward) using a tiny local
+    JSONL fixture written to tmp_path. Asserts that each stage's output fields
+    are correct, not just exit status.
+    """
+
+    game = _load_module("game")
+    loader = _load_module_without_sys_path("dataset_loader")
+    reward = _load_module("reward")
+
+    # 1. Generate a small dataset and write to a local JSONL fixture file.
+    records = game.generate_records(16, seed=42)
+    fixture = tmp_path / "multitool.jsonl"
+    with fixture.open("w", encoding="utf-8") as f:
+        for record in records:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    # 2. Load through the dataset loader (validates + injects prompt).
+    def fake_default_loader(path):
+        with open(path, encoding="utf-8") as f:
+            return [json.loads(line) for line in f]
+
+    loaded = loader.load_training_dataset(str(fixture), default_loader=fake_default_loader)
+    assert len(loaded) == 16
+    for rec in loaded:
+        assert "prompt" in rec
+        assert rec["prompt"].startswith("Task: ")
+
+    # 3. Find the first contact-meeting record to construct a known-good trajectory.
+    contact_record = next(rec for rec in loaded if rec["id"].startswith("contact-meeting"))
+    assert contact_record["expected_contact"] == "Alice Chen"
+    assert contact_record["expected_note_key"] == "meeting"
+
+    # 4. Build correct tool_calls and score through reward_fn.
+    tool_calls = [
+        {"name": "lookup_contact", "arguments": json.dumps({"name": "Alice"})},
+        {"name": "read_note", "arguments": json.dumps({"note_key": "meeting"})},
+    ]
+    reward_record = SimpleNamespace(source_record=contact_record, tool_calls=tool_calls)
+    assert reward.reward_fn(reward_record) == 1.0
+
+    # 5. Verify a wrong trajectory gets penalized through the same pipeline.
+    wrong_calls = [
+        {"name": "read_note", "arguments": json.dumps({"note_key": "meeting"})},
+        {"name": "lookup_contact", "arguments": json.dumps({"name": "Alice"})},
+    ]
+    wrong_record = SimpleNamespace(source_record=contact_record, tool_calls=wrong_calls)
+    assert reward.reward_fn(wrong_record) < 1.0
+
+
+# ---------------------------------------------------------------------------
+# Multi tool-call tests — verify _run_tool and _tool_messages handle parallel calls
+# ---------------------------------------------------------------------------
+
+
+@_requires_areno
+def test_run_tool_multiple_calls_returns_per_call_results():
+    """Verify _run_tool returns a {call_id: result} mapping when given multiple tool calls."""
+
+    run_agent = _load_module_without_sys_path("run_agent")
+    assistant_message = {
+        "tool_calls": [
+            {
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "lookup_contact", "arguments": json.dumps({"name": "Alice"})},
+            },
+            {
+                "id": "call_2",
+                "type": "function",
+                "function": {"name": "calculate", "arguments": json.dumps({"expression": "2 + 3"})},
+            },
+        ]
+    }
+    results = run_agent._run_tool(assistant_message)
+    assert results["call_1"]["name"] == "Alice Chen"
+    assert results["call_2"]["result"] == 5.0
+
+
+@_requires_areno
+def test_tool_messages_multiple_calls_distinct_results():
+    """Verify _tool_messages produces a separate tool-result message per call with its own result."""
+
+    run_agent = _load_module_without_sys_path("run_agent")
+    assistant_message = {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [
+            {
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "lookup_contact", "arguments": json.dumps({"name": "Alice"})},
+            },
+            {
+                "id": "call_2",
+                "type": "function",
+                "function": {"name": "calculate", "arguments": json.dumps({"expression": "2 + 3"})},
+            },
+        ],
+    }
+    tool_results = run_agent._run_tool(assistant_message)
+    messages = run_agent._tool_messages(assistant_message, tool_results)
+    # 1 assistant + 2 tool messages
+    assert len(messages) == 3
+    assert messages[1]["tool_call_id"] == "call_1"
+    assert messages[2]["tool_call_id"] == "call_2"
+    assert "Alice Chen" in messages[1]["content"]
+    assert "5.0" in messages[2]["content"]

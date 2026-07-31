@@ -237,7 +237,7 @@ async def _call_model(item, client, messages: list[dict]):
         stream=False,
     )
     message = response.choices[0].message
-    tool_calls = list(message.tool_calls or [])[:1]
+    tool_calls = list(message.tool_calls or [])
     assistant_message = {
         "role": "assistant",
         "content": message.content,
@@ -271,24 +271,45 @@ async def _call_model(item, client, messages: list[dict]):
 
 
 def _tool_messages(assistant_message: dict, tool_result: dict) -> list[dict]:
+    """Build the assistant + tool-result messages for the next conversation turn.
+
+    When ``tool_result`` is a flat dict (single tool call), it is used for all
+    calls. When it is a ``{call_id: result}`` mapping (multiple calls), each call
+    gets its own corresponding result.
+    """
     messages = [assistant_message]
     for call in assistant_message.get("tool_calls") or []:
+        result = tool_result
+        if isinstance(tool_result, dict) and call["id"] in tool_result:
+            result = tool_result[call["id"]]
         messages.append(
             {
                 "role": "tool",
                 "tool_call_id": call["id"],
                 "name": call["function"]["name"],
-                "content": json.dumps(tool_result, ensure_ascii=False),
+                "content": json.dumps(result, ensure_ascii=False),
             }
         )
     return messages
 
 
 def _run_tool(assistant_message: dict) -> dict:
+    """Execute the tool call(s) in an assistant message and return results.
+
+    When the message contains a single tool call, returns that call's result
+    dict directly (backward-compatible with single-call tests). When it
+    contains multiple calls, returns ``{call_id: result}`` keyed by tool call id.
+    """
     calls = assistant_message.get("tool_calls") or []
     if not calls:
         return {"error": "missing tool call"}
-    call = calls[0]
+    if len(calls) == 1:
+        return _run_single_tool(calls[0])
+    return {call["id"]: _run_single_tool(call) for call in calls}
+
+
+def _run_single_tool(call: dict) -> dict:
+    """Dispatch a single tool call to the corresponding game function."""
     name = call["function"]["name"]
     try:
         args = json.loads(call["function"]["arguments"] or "{}")
