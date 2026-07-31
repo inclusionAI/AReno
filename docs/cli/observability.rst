@@ -175,3 +175,127 @@ When a trajectory is dropped for exceeding the model context window,
 counts, message counts, assistant turn counts, tool-result counts, and a short
 prompt preview. This is the fastest way to debug overlong agentic examples
 without dumping every token in every trajectory.
+
+Dashboard trajectory detail page
+--------------------------------
+
+The AReno dashboard includes a **Trajectory** page that renders the full
+contents of an agentic rollout sample in chronological order. Open the
+dashboard, select a train job that has agentic samples, pick a step and
+sample, and the page renders:
+
+* **Events timeline** — model messages (user / assistant / tool), tool calls
+  attached to the originating assistant message, and interleaved tool results.
+  Long tool output is collapsed by default; click to expand.
+* **Final answer** — the last assistant response extracted from the sample.
+* **Token counts** — prompt tokens, response tokens, and total token-row
+  length.
+* **Training-mask status** — ``loss_mask_true`` / ``loss_mask_total``,
+  ``first_loss_idx``, a visual mask bar, and a ``truncated`` flag when the
+  stored mask is shorter than the declared total.
+* **End reason** — completion cause (defaults to ``completed`` when missing).
+
+Tool calls are displayed as read-only text; the dashboard never executes a
+displayed call. Long tool results are truncated to 200 characters in the inline
+view and can be expanded in the standalone tool-result card.
+
+A **Raw JSON** toggle is available for inspecting the full sample dict
+(messages, tokens, loss_mask, etc.). The structured view omits raw token and
+loss-mask sequences — only counts are surfaced — to keep the default output
+privacy-safe.
+
+API endpoint
+~~~~~~~~~~~~
+
+.. code-block:: text
+
+   GET /api/jobs/<job_id>/trajectory?step=<int>&prompt_idx=<int>&sample_idx=<int>&include_raw=<bool>
+
+Query parameters:
+
+``step``
+   Training step of the desired sample (integer, required).
+
+``prompt_idx``
+   Prompt index within the step (integer, required).
+
+``sample_idx``
+   Sample index within the prompt (integer, required).
+
+``include_raw``
+   Whether to attach the full sample dict under the ``raw`` key. Defaults to
+   ``false``. Set to ``true`` to inspect tokens, loss_mask, and other fields
+   not present in the structured detail.
+
+Response fields (when ``valid`` is ``true``):
+
+.. list-table::
+   :header-rows: 1
+   :widths: 28 72
+
+   * - Field
+     - Meaning
+   * - ``valid``
+     - ``true`` if the sample is a valid agentic trajectory.
+   * - ``step`` / ``prompt_idx`` / ``sample_idx``
+     - Locating indices from the sample.
+   * - ``events``
+     - Chronologically ordered list of message and tool-result entries.
+   * - ``final_answer``
+     - Last assistant response string (may be empty).
+   * - ``token_counts``
+     - ``prompt_tokens``, ``response_tokens``, ``loss_mask_true``,
+       ``loss_mask_total``, ``token_row_len``.
+   * - ``training_mask``
+     - ``loss_mask_true``, ``loss_mask_total``, ``first_loss_idx``,
+       ``truncated``.
+   * - ``end_reason``
+     - Completion cause string; defaults to ``"completed"``.
+   * - ``tool_call_count`` / ``tool_result_count``
+     - Number of tool calls and results in the sample.
+   * - ``raw``
+     - Full original sample dict. **Only present when ``include_raw=true``.**
+
+When ``valid`` is ``false``, the response contains an ``error`` field with a
+human-readable message instead of the fields above.
+
+Example
+~~~~~~~
+
+.. code-block:: bash
+
+   curl "http://127.0.0.1:8765/api/jobs/<job_id>/trajectory?step=1&prompt_idx=0&sample_idx=0"
+
+Returns the structured detail without raw training data:
+
+.. code-block:: json
+
+   {
+     "valid": true,
+     "step": 1,
+     "prompt_idx": 0,
+     "sample_idx": 0,
+     "kind": "agentic",
+     "events": [
+       {"type": "message", "role": "user", "content": "What is 2+2?"},
+       {"type": "message", "role": "assistant", "content": "", "tool_calls": [...]},
+       {"type": "message", "role": "tool", "content": "4", "tool_result": {"name": "calculate", "ok": true, "result": 4}},
+       {"type": "message", "role": "assistant", "content": "The answer is 4."}
+     ],
+     "final_answer": "The answer is 4.",
+     "token_counts": {"prompt_tokens": 4, "response_tokens": 8, "loss_mask_true": 8, "loss_mask_total": 12, "token_row_len": 12},
+     "training_mask": {"loss_mask_true": 8, "loss_mask_total": 12, "first_loss_idx": 4, "truncated": false},
+     "end_reason": "completed",
+     "tool_call_count": 1,
+     "tool_result_count": 1
+   }
+
+Limitations
+~~~~~~~~~~~
+
+* Only ``kind == "agentic"`` samples are supported. Rollout samples without
+  agent messages return a validation error.
+* The page reads existing local rollout-sample artifacts; it does not execute
+  model inference or tool calls.
+* Raw token and loss-mask sequences are omitted from the structured response
+  by default. Use ``include_raw=true`` when full inspection is needed.

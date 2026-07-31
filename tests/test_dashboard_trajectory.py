@@ -6,6 +6,9 @@ Tests cover:
   - Boundary values: empty messages, large tool output, truncated loss mask
   - Privacy-safe defaults: raw sample is included but not executed
   - Deterministic output for the same input
+  - Integration: trajectory_detail resolves samples from registered jobs,
+    validates query parameters, and controls raw-sample exposure via
+    include_raw
 """
 
 from __future__ import annotations
@@ -15,14 +18,17 @@ import json
 import pytest
 
 from areno.dashboard.server import (
+    STATE,
+    Job,
     build_trajectory_detail,
+    trajectory_detail,
     validate_trajectory_sample,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 def _agentic_sample(**overrides):
     """Create a minimal valid agentic rollout sample."""
@@ -72,6 +78,7 @@ def _agentic_sample(**overrides):
 # validate_trajectory_sample
 # ---------------------------------------------------------------------------
 
+
 class TestValidateTrajectorySample:
     def test_valid_agentic_sample_returns_no_errors(self):
         sample = _agentic_sample()
@@ -103,6 +110,7 @@ class TestValidateTrajectorySample:
 # ---------------------------------------------------------------------------
 # build_trajectory_detail — success path
 # ---------------------------------------------------------------------------
+
 
 class TestBuildTrajectoryDetailSuccess:
     def test_returns_valid_flag(self):
@@ -170,6 +178,7 @@ class TestBuildTrajectoryDetailSuccess:
 # build_trajectory_detail — invalid input
 # ---------------------------------------------------------------------------
 
+
 class TestBuildTrajectoryDetailInvalid:
     def test_non_agentic_returns_error(self):
         detail = build_trajectory_detail({"kind": "rollout", "messages": [{"role": "user", "content": "hi"}]})
@@ -186,12 +195,16 @@ class TestBuildTrajectoryDetailInvalid:
 # Boundary values
 # ---------------------------------------------------------------------------
 
+
 class TestBoundaryValues:
     def test_empty_tool_results_with_tool_messages(self):
-        sample = _agentic_sample(tool_results=[], messages=[
-            {"role": "user", "content": "hi"},
-            {"role": "assistant", "content": "hello"},
-        ])
+        sample = _agentic_sample(
+            tool_results=[],
+            messages=[
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "hello"},
+            ],
+        )
         detail = build_trajectory_detail(sample)
         assert detail["valid"] is True
         assert detail["tool_result_count"] == 0
@@ -227,6 +240,7 @@ class TestBoundaryValues:
 # Determinism
 # ---------------------------------------------------------------------------
 
+
 class TestDeterminism:
     def test_same_input_produces_same_output(self):
         sample = _agentic_sample()
@@ -238,6 +252,7 @@ class TestDeterminism:
 # ---------------------------------------------------------------------------
 # Privacy-safe defaults
 # ---------------------------------------------------------------------------
+
 
 class TestPrivacySafeDefaults:
     def test_never_includes_full_training_data_in_detail_fields(self):
@@ -254,3 +269,112 @@ class TestPrivacySafeDefaults:
         assert "loss_mask" not in detail
         assert "training_mask" in detail
         assert isinstance(detail["training_mask"]["loss_mask_true"], int)
+
+
+# ---------------------------------------------------------------------------
+# Integration: trajectory_detail (job + sample resolution, include_raw)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def _registered_job():
+    """Register a job with one agentic sample in the global STATE, clean up after."""
+    job = Job(
+        kind="train",
+        name="test trajectory job",
+        command=["echo", "noop"],
+        config={},
+        metrics_dir=None,
+    )
+    sample = _agentic_sample()
+    job.samples.append(sample)
+    job._sample_keys.add((sample["step"], sample["prompt_idx"], sample["sample_idx"]))
+    STATE.jobs[job.id] = job
+    yield job
+    STATE.jobs.pop(job.id, None)
+
+
+class TestTrajectoryDetailIntegration:
+    def test_resolves_sample_from_registered_job(self, _registered_job):
+        detail = trajectory_detail(_registered_job.id, step=1, prompt_idx=0, sample_idx=0)
+        assert detail["valid"] is True
+        assert detail["step"] == 1
+        assert detail["prompt_idx"] == 0
+        assert detail["sample_idx"] == 0
+
+    def test_job_not_found_returns_error(self):
+        detail = trajectory_detail("nonexistent-job-id", step=0, prompt_idx=0, sample_idx=0)
+        assert detail["valid"] is False
+        assert "job not found" in detail["error"]
+
+    def test_sample_not_found_returns_error(self, _registered_job):
+        detail = trajectory_detail(_registered_job.id, step=999, prompt_idx=0, sample_idx=0)
+        assert detail["valid"] is False
+        assert "trajectory sample not found" in detail["error"]
+
+    def test_raw_omitted_by_default(self, _registered_job):
+        detail = trajectory_detail(_registered_job.id, step=1, prompt_idx=0, sample_idx=0)
+        assert "raw" not in detail
+
+    def test_raw_included_when_requested(self, _registered_job):
+        detail = trajectory_detail(_registered_job.id, step=1, prompt_idx=0, sample_idx=0, include_raw=True)
+        assert "raw" in detail
+        assert detail["raw"]["kind"] == "agentic"
+        # Raw contains the full training data (tokens, loss_mask) that the
+        # structured detail deliberately omits.
+        assert "tokens" in detail["raw"]
+        assert "loss_mask" in detail["raw"]
+
+    def test_non_agentic_sample_in_job_returns_invalid(self, _registered_job):
+        _registered_job.samples.append(
+            {
+                "kind": "rollout",
+                "step": 2,
+                "prompt_idx": 0,
+                "sample_idx": 0,
+                "messages": [{"role": "user", "content": "hi"}],
+            }
+        )
+        _registered_job._sample_keys.add((2, 0, 0))
+        detail = trajectory_detail(_registered_job.id, step=2, prompt_idx=0, sample_idx=0)
+        assert detail["valid"] is False
+        assert "not 'agentic'" in detail["error"]
+
+    def test_large_trace_does_not_crash(self, _registered_job):
+        """A sample with many messages and tool results resolves without error."""
+        messages = [{"role": "user", "content": "start"}]
+        tool_calls = []
+        tool_results = []
+        for i in range(50):
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": f"call-{i}",
+                            "type": "function",
+                            "function": {"name": f"tool_{i}", "arguments": "{}"},
+                        }
+                    ],
+                }
+            )
+            messages.append({"role": "tool", "tool_call_id": f"call-{i}", "content": f"result {i}"})
+            tool_calls.append(
+                {"id": f"call-{i}", "type": "function", "function": {"name": f"tool_{i}", "arguments": "{}"}}
+            )
+            tool_results.append({"name": f"tool_{i}", "ok": True, "result": f"result {i}"})
+        messages.append({"role": "assistant", "content": "done"})
+        sample = _agentic_sample(
+            step=3,
+            messages=messages,
+            tool_calls=tool_calls,
+            tool_results=tool_results,
+        )
+        _registered_job.samples.append(sample)
+        _registered_job._sample_keys.add((3, 0, 0))
+        detail = trajectory_detail(_registered_job.id, step=3, prompt_idx=0, sample_idx=0)
+        assert detail["valid"] is True
+        assert detail["tool_call_count"] == 50
+        assert detail["tool_result_count"] == 50
+        assert len(detail["events"]) == 102  # 50 assistant + 50 tool + 1 user + 1 final assistant

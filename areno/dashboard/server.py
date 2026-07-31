@@ -1506,9 +1506,12 @@ def build_trajectory_detail(sample: dict[str, Any]) -> dict[str, Any]:
       - events: ordered list of {type, role, content, tool_calls, tool_result}
       - final_answer: str
       - token_counts: {prompt_tokens, response_tokens, loss_mask_true, loss_mask_total}
-      - training_mask: {loss_mask_true, loss_mask_total, first_loss_idx}
+      - training_mask: {loss_mask_true, loss_mask_total, first_loss_idx, truncated}
       - end_reason: str
-      - raw: the original sample dict (privacy-safe: no full training data)
+      - tool_call_count, tool_result_count: int
+
+    The raw sample dict is NOT included here; call trajectory_detail() with
+    include_raw=True to attach it under the "raw" key when needed.
     """
     errors = validate_trajectory_sample(sample)
     if errors:
@@ -1569,13 +1572,25 @@ def build_trajectory_detail(sample: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def trajectory_detail(job_id: str | None, step: int, prompt_idx: int, sample_idx: int) -> dict[str, Any]:
-    """Resolve a single trajectory sample from a job's rollout samples."""
+def trajectory_detail(
+    job_id: str | None,
+    step: int,
+    prompt_idx: int,
+    sample_idx: int,
+    *,
+    include_raw: bool = False,
+) -> dict[str, Any]:
+    """Resolve a single trajectory sample from a job's rollout samples.
+
+    By default the response omits the raw sample dict to keep output
+    privacy-safe. Pass ``include_raw=True`` to attach it under the ``raw`` key.
+    """
     job = STATE.get_job(job_id)
     if job is None:
         return {"error": "job not found", "valid": False}
     candidates = [
-        s for s in job.samples
+        s
+        for s in job.samples
         if int(s.get("step", 0)) == step
         and int(s.get("prompt_idx", -1)) == prompt_idx
         and int(s.get("sample_idx", -1)) == sample_idx
@@ -1584,7 +1599,8 @@ def trajectory_detail(job_id: str | None, step: int, prompt_idx: int, sample_idx
         return {"error": "trajectory sample not found", "valid": False}
     sample = candidates[-1]
     detail = build_trajectory_detail(sample)
-    detail["raw"] = sample
+    if include_raw:
+        detail["raw"] = sample
     return detail
 
 
@@ -1618,7 +1634,8 @@ class Handler(BaseHTTPRequestHandler):
                 except ValueError:
                     self.error("step, prompt_idx, and sample_idx must be integers")
                     return
-                self.json(trajectory_detail(job_id, step, prompt_idx, sample_idx))
+                include_raw = query.get("include_raw", ["false"])[0].lower() in ("1", "true", "yes")
+                self.json(trajectory_detail(job_id, step, prompt_idx, sample_idx, include_raw=include_raw))
             elif path.startswith("/api/jobs/"):
                 job = STATE.get_job(path.split("/")[-1])
                 if not job:
