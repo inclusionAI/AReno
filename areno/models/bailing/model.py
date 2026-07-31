@@ -411,8 +411,16 @@ class BailingGroupedExperts(nn.Module):
         )
         if x.shape[0] == 0:
             # No tokens routed to this rank — still need to all_reduce to keep
-            # collective sync with peers.
-            return all_reduce(flat.new_zeros(flat.shape))
+            # collective and gradient sync with peers. The zero-valued graph
+            # edges ensure expert and router gradients exist on every rank.
+            fc1_param = next(self.linear_fc1.parameters())
+            fc2_param = next(self.linear_fc2.parameters())
+            zero = (
+                fc1_param.reshape(-1)[0] * 0
+                + fc2_param.reshape(-1)[0] * 0
+                + topk_weight.sum().to(dtype=fc1_param.dtype) * 0
+            )
+            return all_reduce(flat.new_zeros(flat.shape) + zero)
         hidden, _ = _grouped_linear_forward(self.linear_fc1, x.contiguous(), tokens_per_expert)
         # Apply routing weight before fc2 so it stays inside the fp32 reduction.
         hidden = (

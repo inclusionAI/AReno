@@ -183,7 +183,12 @@ class Gemma4MoeExperts(nn.Module):
             self.local_num_experts,
         )
         if x.shape[0] == 0:
-            return all_reduce(flat.new_zeros(flat.shape))
+            zero = (
+                self.gate_up_weight.reshape(-1)[0] * 0
+                + self.down_weight.reshape(-1)[0] * 0
+                + topk_weight.sum().to(dtype=self.gate_up_weight.dtype) * 0
+            )
+            return all_reduce(flat.new_zeros(flat.shape) + zero)
         hidden = _areno_grouped_linear_no_compile(x.contiguous(), self.gate_up_weight, tokens_per_expert)
         hidden = (
             _areno_gelu_tanh_and_mul_no_compile(hidden) * route_weight.unsqueeze(-1).to(dtype=hidden.dtype)
@@ -249,18 +254,34 @@ class Gemma4MoeMLP(nn.Module):
             routed_scaling_factor=config.routed_scaling_factor,
         )
 
-    def forward(self, hidden_states: torch.Tensor, router_logits: torch.Tensor) -> torch.Tensor:
-        batch, seqlen, hidden = hidden_states.shape
-        flat = hidden_states.reshape(-1, hidden)
+    def route(self, router_logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Compute dynamic expert routing once outside activation recompute."""
+
         topk_idx, topk_weight = _areno_topk_softmax_no_compile(
             router_logits.reshape(-1, self.num_experts), self.top_k, self.norm_topk_prob
         )
         topk_weight = topk_weight * self.per_expert_scale[topk_idx].to(dtype=topk_weight.dtype)
+        return topk_idx, topk_weight
+
+    def forward_with_routes(
+        self,
+        hidden_states: torch.Tensor,
+        topk_idx: torch.Tensor,
+        topk_weight: torch.Tensor,
+    ) -> torch.Tensor:
+        """Run routed experts with a fixed top-k assignment."""
+
+        batch, seqlen, hidden = hidden_states.shape
+        flat = hidden_states.reshape(-1, hidden)
         if self.training:
             out = self.experts(flat, topk_idx.to(torch.long), topk_weight)
         else:
             out = self._forward_fused_moe(flat, topk_idx, topk_weight)
         return out.view(batch, seqlen, hidden)
+
+    def forward(self, hidden_states: torch.Tensor, router_logits: torch.Tensor) -> torch.Tensor:
+        topk_idx, topk_weight = self.route(router_logits)
+        return self.forward_with_routes(hidden_states, topk_idx, topk_weight)
 
     @torch.no_grad()
     def prepare_infer_weights(self) -> None:
@@ -508,6 +529,20 @@ class Gemma4DecoderLayer(nn.Module):
         # Learnable per-layer scalar multiplier on the block output; persistent
         # so it round-trips through the checkpoint as ``{prefix}.layer_scalar``.
         self.register_buffer("layer_scalar", torch.ones(1), persistent=True)
+        self.handles_activation_checkpointing = config.enable_moe_block
+
+    def _attention_block(
+        self,
+        hidden_states: torch.Tensor,
+        position_ids: torch.Tensor,
+        shared_kv: tuple[torch.Tensor, torch.Tensor] | None,
+        train_meta: TrainMeta | None,
+        infer_meta: InferMeta | None,
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor] | None]:
+        residual = hidden_states
+        normalized = self.input_layernorm(hidden_states)
+        attended, kv_for_share = self.self_attn(normalized, position_ids, shared_kv, train_meta, infer_meta)
+        return self.post_attention_layernorm(attended) + residual, kv_for_share
 
     def forward(
         self,
@@ -518,12 +553,24 @@ class Gemma4DecoderLayer(nn.Module):
         train_meta: TrainMeta | None = None,
         infer_meta: InferMeta | None = None,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor] | None]:
-        # Pre-norm attention path (note: norm comes both before AND after attn).
-        residual = hidden_states
-        hidden_states = self.input_layernorm(hidden_states)
-        hidden_states, kv_for_share = self.self_attn(hidden_states, position_ids, shared_kv, train_meta, infer_meta)
-        hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = hidden_states + residual
+        # KV-sharing layers retain the existing direct path. Other MoE layers
+        # checkpoint attention separately so routing can remain outside the
+        # recomputed region.
+        if self.moe is not None and shared_kv is None:
+            hidden_states, kv_for_share = checkpoint_layer(
+                self._attention_block,
+                hidden_states,
+                position_ids,
+                shared_kv,
+                train_meta,
+                infer_meta,
+                train_meta=train_meta,
+                infer_meta=infer_meta,
+            )
+        else:
+            hidden_states, kv_for_share = self._attention_block(
+                hidden_states, position_ids, shared_kv, train_meta, infer_meta
+            )
         # Pre-norm FF path with matching sandwich norm on output.
         residual = hidden_states
         dense_input = self.pre_feedforward_layernorm(hidden_states)
@@ -535,9 +582,22 @@ class Gemma4DecoderLayer(nn.Module):
                 or self.post_feedforward_layernorm_2 is None
             ):
                 raise RuntimeError("Gemma4 MoE layer is missing router or MoE norms")
-            dense_hidden = self.mlp(dense_input)
+            dense_hidden = checkpoint_layer(
+                self.mlp,
+                dense_input,
+                train_meta=train_meta,
+                infer_meta=infer_meta,
+            )
             router_logits = self.router(residual)
-            moe_hidden = self.moe(self.pre_feedforward_layernorm_2(residual), router_logits)
+            topk_idx, topk_weight = self.moe.route(router_logits)
+            moe_hidden = checkpoint_layer(
+                self.moe.forward_with_routes,
+                self.pre_feedforward_layernorm_2(residual),
+                topk_idx,
+                topk_weight,
+                train_meta=train_meta,
+                infer_meta=infer_meta,
+            )
             hidden_states = self.post_feedforward_layernorm_1(dense_hidden) + self.post_feedforward_layernorm_2(
                 moe_hidden
             )
@@ -640,7 +700,7 @@ class Gemma4ForCausalLM(nn.Module):
                 shared_idx = layer.self_attn.kv_shared_layer_index
                 if shared_idx is not None:
                     shared_kv = shared_kv_by_layer.get(shared_idx)
-                if shared_kv is None:
+                if shared_kv is None and not getattr(layer, "handles_activation_checkpointing", False):
                     hidden_states, kv_for_share = checkpoint_layer(
                         layer,
                         hidden_states,
