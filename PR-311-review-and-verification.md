@@ -236,6 +236,31 @@ Issue #199 要求「Make trainable turns configurable for agentic trajectories�
 - **Kaggle T4×2 标准 GSPO**：CLI→config 传递，不破坏现有训练
 - **阿里云 A10×2 agentic 路径**：mask 逻辑在 `_run_agentic_rollout` 中真实触发，`trainable_tokens` 320→0 对比，`grad_norm` 5.31→0 对比
 
+### Issue #199 核心问题回答：多轮 Agent 对话中哪些内容参与训练
+
+一条多轮 agentic trajectory 包含多种内容：user prompt、assistant 推理文本、tool call 调用、tool result 返回、最终答案。issue #199 的核心问题是：哪些 assistant 段的 token 应该计入 policy loss。
+
+三种模式的定位：
+
+- `all_assistant` 是 veRL 式的主流做法——逐轮标 assistant token，全部训。
+- `final_answer` 比 ECHO（2026）更激进——ECHO 只对正 reward 做选择仍保留全部 turn 的负 reward，`final_answer` 正负都丢、只训最终答案 span。
+- `last_assistant` 是中间档——训最后一轮不管类型（可能是 tool_call），介于全训和只训答案之间。
+
+推荐用法：
+
+| 任务类型 | 推荐模式 | 理由 |
+|---|---|---|
+| 单步决策（tictactoe、maze 导航） | `all_assistant` | 只有一轮 assistant 输出，三模式等价，默认最安全 |
+| 多轮工具调用 + 最终答案（math、search） | `final_answer` | 中间轮的推理和工具调用是"过程"，最终答案才是"结果"；只训结果避免过程噪声污染梯度 |
+| 多轮推理链（复杂推理，每步都重要） | `all_assistant` | 每步推理都对最终结果有贡献，丢弃前序会损失监督信号 |
+| 探索性实验 / ablation | `last_assistant` | 退化版，介于全训和只训答案之间 |
+
+默认用 `all_assistant`——最安全的起点，监督密度最高，跟改之前行为一致。
+
+在以下条件下尝试 `final_answer`：trajectory 有完整的多轮工具调用结构（tool call 有匹配的 tool result）；中间轮次的推理/工具调用噪声明显（reward 长期不上升或震荡）；最终答案 span 足够长（太短会导致 trainable_tokens 过少）。
+
+不建议在以下情况用 `final_answer`：trajectory 是 bare trailing tool call（无 tool result → 零信号，A10 实验已验证）；任务只有单轮 assistant 输出（退化为 last span，不如用默认）；模型很小且任务简单（监督信号本来就弱，再丢更学不动）。
+
 ### ruff lint + format
 
 ```bash
