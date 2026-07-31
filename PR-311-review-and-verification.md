@@ -171,35 +171,7 @@ PYTORCH_ALLOC_CONF=expandable_segments:True areno train \
   --dataset-loader-fn examples/math/dataset_loader.py \
   --reward-fn-path examples/math/math_verify_reward.py \
   --algo gspo --tp-size 2 --world-size 2 \
-  --batch-size 2 --n-samples 2 --max-steps 2 \
-  --max-prompt-tokens 384 --max-new-tokens 128 \
-  --mini-bs 1 --score-micro-bs 1 \
-  --gradient-accumulation-steps 4 \
-  --activation-checkpointing --drop-rollout-state --eager-decode \
-  --trainable-turns final_answer
-```
-
-config summary 正确显示 `trainable_turns: final_answer`，2 步训练正常到 `max_steps_reached`。此实验走标准 GSPO 路径（无 `--agent-fn`），mask 重写在 agentic 路径才触发，因此验证的是 CLI→config 传递和不破坏现有训练。
-
-### GPU 训练 — 阿里云双 A10（agentic 路径，mask 真实触发）
-
-在阿里云 2×A10 24GB 上使用 tictactoe agentic example 跑了两个对比实验，走 `_run_agentic_rollout` 路径（`--agent-fn`），mask 逻辑在 GPU 上真实触发：
-
-实验1（`all_assistant`，默认）：
-```bash
-areno train --ckpt Qwen/Qwen3-0.6B \
-  --dataset-path /tmp/tictactoe_boards.jsonl \
-  --dataset-loader-fn examples/agentic/tictactoe/dataset_loader.py \
-  --reward-fn-path examples/agentic/tictactoe/reward.py \
-  --agent-fn examples/agentic/tictactoe/run_agent.py \
-  --algo gspo --tp-size 2 --world-size 2 \
-  --batch-size 4 --n-samples 4 --max-steps 10 \
-  --max-prompt-tokens 1024 --max-new-tokens 128 \
-  --mini-bs 2 --score-micro-bs 2 \
-  --gradient-accumulation-steps 2 \
-  --activation-checkpointing --drop-rollout-state \
-  --attn-backend native --disable-thinking
-```
+  --batch-size 2 --n-samples 2 --max-s
 
 实验2（`final_answer`）：同上，末尾加 `--trainable-turns final_answer`。
 
@@ -217,24 +189,6 @@ areno train --ckpt Qwen/Qwen3-0.6B \
 `all_assistant` 模式下全部 320 个 response token 参与 loss 计算（`trainable_tokens=320`，`masked_response_tokens=0`），step 7 出现非零梯度（`grad_norm=5.31`）。`final_answer` 模式下 0 个 token trainable（`trainable_tokens=0`，`masked_response_tokens=320`），因为 tictactoe 的 trajectory 结构是 agent 发 tool call 但环境未返回 tool result（`tool_results=0`），`final_answer` 在 bare trailing tool_call 场景下按设计返回零信号，与 CPU 测试 `test_trainable_turns_final_answer_bare_trailing_tool_call_zero_signal` 断言的行为一致。两者 `trainable_tokens + masked_response_tokens = 320`，数值闭合。
 
 此实验证明 `_apply_trainable_turn_mode` 在 GPU agentic 路径上真实触发，`trainable_tokens` / `masked_response_tokens` 指标正确输出，CLI 选项 `--trainable-turns` 的行为在端到端训练中与 CPU 单元测试一致。
-
-### Issue #199 验收总结
-
-Issue #199 要求「Make trainable turns configurable for agentic trajectories」。本 PR 全部实现并经验证：
-
-| Issue 需求 | 实现状态 | 验证方式 |
-|---|---|---|
-| 可配置 trainable turns（所有 assistant / 仅最后一轮 / 仅最终答案） | 三模式 `all_assistant` / `last_assistant` / `final_answer` | 18 个 CPU 逐 token 测试 + A10 GPU agentic 路径对比 |
-| 可选屏蔽 tool-call 参数 token | `--mask-tool-call-args` | 2 个 CPU 测试（arg 屏蔽 + 与已有屏蔽的组合） |
-| 默认行为向后兼容 | `all_assistant` + `mask_tool_call_args=False` | parity 测试断言 + 43 个回归测试全绿 |
-| 通过 CLI 暴露 | `--trainable-turns`（`click.Choice`）/ `--mask-tool-call-args` | `--trainable-turns bogus` → exit 2 |
-| 可观测输出 | `trainable_tokens` / `masked_response_tokens` | CPU 测试数值断言 + A10 GPU 日志确认 |
-| 不引入新依赖、不替换 trainer | 10 文件 +781/-5，`areno/` 核心仅 `agentic.py` +211 行 | git diff 确认，ruff clean |
-
-三层验证体系：
-- **CPU 单元测试**（64 passed）：逐 token mask、边界、非法输入、metrics、dual-path
-- **Kaggle T4×2 标准 GSPO**：CLI→config 传递，不破坏现有训练
-- **阿里云 A10×2 agentic 路径**：mask 逻辑在 `_run_agentic_rollout` 中真实触发，`trainable_tokens` 320→0 对比，`grad_norm` 5.31→0 对比
 
 ### Issue #199 核心问题回答：多轮 Agent 对话中哪些内容参与训练
 
@@ -260,6 +214,26 @@ Issue #199 要求「Make trainable turns configurable for agentic trajectories�
 在以下条件下尝试 `final_answer`：trajectory 有完整的多轮工具调用结构（tool call 有匹配的 tool result）；中间轮次的推理/工具调用噪声明显（reward 长期不上升或震荡）；最终答案 span 足够长（太短会导致 trainable_tokens 过少）。
 
 不建议在以下情况用 `final_answer`：trajectory 是 bare trailing tool call（无 tool result → 零信号，A10 实验已验证）；任务只有单轮 assistant 输出（退化为 last span，不如用默认）；模型很小且任务简单（监督信号本来就弱，再丢更学不动）。
+
+### Issue #199 验收总结
+
+Issue #199 要求「Make trainable turns configurable for agentic trajectories」。本 PR 全部实现并经验证：
+
+| Issue 需求 | 实现状态 | 验证方式 |
+|---|---|---|
+| 可配置 trainable turns（所有 assistant / 仅最后一轮 / 仅最终答案） | 三模式 `all_assistant` / `last_assistant` / `final_answer` | 18 个 CPU 逐 token 测试 + A10 GPU agentic 路径对比 |
+| 可选屏蔽 tool-call 参数 token | `--mask-tool-call-args` | 2 个 CPU 测试（arg 屏蔽 + 与已有屏蔽的组合） |
+| 默认行为向后兼容 | `all_assistant` + `mask_tool_call_args=False` | parity 测试断言 + 43 个回归测试全绿 |
+| 通过 CLI 暴露 | `--trainable-turns`（`click.Choice`）/ `--mask-tool-call-args` | `--trainable-turns bogus` → exit 2 |
+| 可观测输出 | `trainable_tokens` / `masked_response_tokens` | CPU 测试数值断言 + A10 GPU 日志确认 |
+| 不引入新依赖、不替换 trainer | 10 文件 +781/-5，`areno/` 核心仅 `agentic.py` +211 行 | git diff 确认，ruff clean |
+
+三层验证体系：
+- **CPU 单元测试**（64 passed）：逐 token mask、边界、非法输入、metrics、dual-path
+- **Kaggle T4×2 标准 GSPO**：CLI→config 传递，不破坏现有训练
+- **阿里云 A10×2 agentic 路径**：mask 逻辑在 `_run_agentic_rollout` 中真实触发，`trainable_tokens` 320→0 对比，`grad_norm` 5.31→0 对比
+  --attn-backend native --disable-thinking
+```
 
 ### ruff lint + format
 
