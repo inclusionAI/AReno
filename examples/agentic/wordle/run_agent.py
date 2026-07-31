@@ -21,10 +21,11 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 _WORDLE_WORD_RE = None
 
 SYSTEM_PROMPT = (
-    "You are a Wordle solver. On every guessing turn, output exactly one 5-letter "
-    "English word as your guess. Do not output any other text. "
-    "Use the feedback from prior guesses (exact/present/absent) to deduce the hidden word. "
-    "Never repeat a guess. After the game ends, briefly summarize the outcome."
+    "You are a Wordle solver. On every turn you MUST immediately call the "
+    "guess_word tool with a 5-letter English word. Do NOT think, reason, or "
+    "output any text before the tool call. Do NOT explain your reasoning. "
+    "Just call guess_word directly. Use the feedback from prior guesses "
+    "(exact/present/absent) to choose your next word. Never repeat a guess."
 )
 
 # Few-shot example: one complete turn showing the correct tool_call format.
@@ -211,7 +212,19 @@ async def _run_episode(item, client) -> list[AgentTrajectoryTurn]:
                 getattr(usage, "prompt_tokens", None) if usage else None,
             )
             logger.warning("Wordle model returned no executable guess_word call")
-            break
+            # Don't break the entire episode on a single failed turn.
+            # The model might succeed on a later guess, and breaking early
+            # means fewer total guesses = less gradient signal.  However,
+            # we must still append a tool_result so the conversation context
+            # stays well-formed for the next turn.
+            messages.append(assistant_message)
+            messages.append({
+                "role": "tool",
+                "tool_call_id": "call_failed",
+                "name": "guess_word",
+                "content": json.dumps({"valid": False, "error": "no tool call", "guess": ""}),
+            })
+            continue
 
         tool_result, chosen_call = executed
         messages.extend(_tool_messages(assistant_message, tool_result, chosen_call))
