@@ -1327,3 +1327,290 @@ def _pending_chat(idx, params):
         model="policy",
         created_at=time.monotonic(),
     )
+
+
+# ---------------------------------------------------------------------------
+# Trainable-turn selection tests (issue #199)
+# ---------------------------------------------------------------------------
+
+ResponseSpan = agentic.ResponseSpan
+
+
+def _multi_turn_sample(session, *, prompt_len=2):
+    """Build a fixed 4-span trajectory: assistant_text → tool_call → tool_result(ctx) → assistant_text.
+
+    The prompt is ``[1, 2]``.  Response tokens simulate:
+      span 0: assistant_text  [10, 11]          (turn 0)
+      span 1: assistant_tool_call [20, 21, 22]  (turn 1)
+      span 2: assistant_text  [30, 31]           (turn 2, after tool result)
+    """
+    item = agentic.AgentItem(record={}, prompt="p", input_tokens=[1] * prompt_len, prompt_index=0, sample_index=0)
+    sample = agentic._AgentSample(
+        item=item,
+        messages=[
+            {"role": "user", "content": "q"},
+            {"role": "assistant", "content": "thinking"},
+            {"role": "tool", "content": "result"},
+            {"role": "assistant", "content": "answer"},
+        ],
+        response_text="thinking\nanswer",
+        last_response_text="answer",
+        response_tokens=[10, 11, 20, 21, 22, 30, 31],
+        response_logprobs=[0.0] * 7,
+        trace=[
+            agentic.RewardEvent(type="request"),
+            agentic.RewardEvent(type="assistant_tool_call"),
+            agentic.RewardEvent(type="tool_result"),
+            agentic.RewardEvent(type="finish"),
+        ],
+        response_kind="assistant_text",
+        response_spans=[
+            ResponseSpan(kind="assistant_text", length=2),
+            ResponseSpan(kind="assistant_tool_call", length=3),
+            ResponseSpan(kind="assistant_text", length=2),
+        ],
+    )
+    session._set_sample_training_row(sample, item.input_tokens)
+    return sample
+
+
+def test_trainable_turns_all_assistant_is_default_and_backward_compatible():
+    session = RolloutSession(None, sampling_params=None, loss_mask_policy=LossMaskPolicy())
+    item = next(AgentBatch(records=[{}], prompts=["p"], input_tokens=[[1]], n_samples=1).iter_samples())
+    sample = _sample(item, "hello", [10, 11])
+    sample.response_spans = [ResponseSpan(kind="assistant_text", length=2)]
+
+    rows = session._train_rows_from_samples([sample])
+
+    assert rows.loss_masks == [[False, True, True]]
+    assert rows.trainable_tokens == 2
+    assert rows.masked_response_tokens == 0
+
+
+def test_trainable_turns_last_assistant_masks_prior_turns():
+    session = RolloutSession(
+        None, sampling_params=None, loss_mask_policy=LossMaskPolicy(trainable_turns="last_assistant")
+    )
+    sample = _multi_turn_sample(session)
+
+    rows = session._train_rows_from_samples([sample])
+
+    # prompt=[1,1] response=[10,11,20,21,22,30,31] → total 9 tokens
+    # last_assistant: only span 2 (tokens [30,31]) is trainable
+    assert rows.loss_masks == [[False, False, False, False, False, False, False, True, True]]
+    assert rows.trainable_tokens == 2
+    assert rows.masked_response_tokens == 5
+
+
+def test_trainable_turns_final_answer_masks_all_but_post_tool_text():
+    session = RolloutSession(
+        None, sampling_params=None, loss_mask_policy=LossMaskPolicy(trainable_turns="final_answer")
+    )
+    sample = _multi_turn_sample(session)
+
+    rows = session._train_rows_from_samples([sample])
+
+    # final_answer: only the assistant_text after the last tool_call → span 2
+    # prompt=[1,1] response=[10,11,20,21,22,30,31] → total 9 tokens
+    assert rows.loss_masks == [[False, False, False, False, False, False, False, True, True]]
+    assert rows.trainable_tokens == 2
+    assert rows.masked_response_tokens == 5
+
+
+def test_final_answer_degenerates_to_last_assistant_without_tool_calls():
+    session = RolloutSession(
+        None, sampling_params=None, loss_mask_policy=LossMaskPolicy(trainable_turns="final_answer")
+    )
+    item = next(AgentBatch(records=[{}], prompts=["p"], input_tokens=[[1]], n_samples=1).iter_samples())
+    sample = _sample(item, "just text", [10, 11, 12])
+    sample.response_spans = [ResponseSpan(kind="assistant_text", length=3)]
+
+    rows = session._train_rows_from_samples([sample])
+
+    # No tool calls → degenerates to last assistant span → all trainable
+    assert rows.loss_masks == [[False, True, True, True]]
+    assert rows.trainable_tokens == 3
+
+
+def test_last_assistant_with_only_tool_call_span():
+    session = RolloutSession(
+        None, sampling_params=None, loss_mask_policy=LossMaskPolicy(trainable_turns="last_assistant")
+    )
+    item = next(AgentBatch(records=[{}], prompts=["p"], input_tokens=[[1]], n_samples=1).iter_samples())
+    sample = _sample(item, '{"name":"go","arguments":{}}', [10, 11])
+    sample.response_kind = "assistant_tool_call"
+    sample.response_spans = [ResponseSpan(kind="assistant_tool_call", length=2)]
+
+    rows = session._train_rows_from_samples([sample])
+
+    # Only span is the tool_call → last_assistant keeps it trainable
+    assert rows.loss_masks == [[False, True, True]]
+    assert rows.trainable_tokens == 2
+
+
+def test_final_answer_with_bare_trailing_tool_call_yields_zero_trainable():
+    session = RolloutSession(
+        None, sampling_params=None, loss_mask_policy=LossMaskPolicy(trainable_turns="final_answer")
+    )
+    item = next(AgentBatch(records=[{}], prompts=["p"], input_tokens=[[1]], n_samples=1).iter_samples())
+    sample = _sample(item, '{"name":"go","arguments":{}}', [10, 11])
+    sample.response_kind = "assistant_tool_call"
+    sample.response_spans = [ResponseSpan(kind="assistant_tool_call", length=2)]
+
+    rows = session._train_rows_from_samples([sample])
+
+    # Trailing tool call, no following text → zero trainable signal, no error
+    assert rows.loss_masks == [[False, False, False]]
+    assert rows.trainable_tokens == 0
+    assert rows.masked_response_tokens == 2
+
+
+def test_validate_call_result_pairing_rejects_missing_tool_result():
+    session = RolloutSession(None, sampling_params=None, loss_mask_policy=LossMaskPolicy())
+    item = next(AgentBatch(records=[{}], prompts=["p"], input_tokens=[[1]], n_samples=1).iter_samples())
+    sample = _sample(item, 'call then answer', [10, 11, 20, 21])
+    sample.response_kind = "assistant_text"
+    # Mid-trajectory: tool_call followed by assistant_text → not a trailing call
+    sample.response_spans = [
+        ResponseSpan(kind="assistant_tool_call", length=2),
+        ResponseSpan(kind="assistant_text", length=2),
+    ]
+    sample.trace = [
+        agentic.RewardEvent(type="request"),
+        agentic.RewardEvent(type="assistant_tool_call"),
+        agentic.RewardEvent(type="finish"),
+    ]
+    sample.messages = [
+        {"role": "user", "content": "q"},
+        {"role": "assistant", "content": None},
+        {"role": "assistant", "content": "answer"},
+    ]
+    # No "tool" message → missing result → should raise
+
+    try:
+        session._train_rows_from_samples([sample])
+        raise AssertionError("expected ValueError for missing tool result")
+    except ValueError as exc:
+        assert "tool call without a matching tool result" in str(exc)
+
+
+def test_validate_call_result_pairing_allows_bare_trailing_call():
+    session = RolloutSession(None, sampling_params=None, loss_mask_policy=LossMaskPolicy())
+    item = next(AgentBatch(records=[{}], prompts=["p"], input_tokens=[[1]], n_samples=1).iter_samples())
+    sample = _sample(item, '{"name":"go","arguments":{}}', [10, 11])
+    sample.response_kind = "assistant_tool_call"
+    sample.response_spans = [ResponseSpan(kind="assistant_tool_call", length=2)]
+    sample.trace = [
+        agentic.RewardEvent(type="request"),
+        agentic.RewardEvent(type="assistant_tool_call"),
+        agentic.RewardEvent(type="finish"),
+    ]
+    sample.messages = [{"role": "user", "content": "q"}, {"role": "assistant", "content": None}]
+    # Trailing call is exempt even without tool result
+
+    # Should NOT raise because the call is trailing (last span is tool_call)
+    rows = session._train_rows_from_samples([sample])
+    assert rows.trainable_tokens == 2  # default all_assistant
+
+
+def test_validate_call_result_pairing_tolerates_orphan_tool_results():
+    session = RolloutSession(None, sampling_params=None, loss_mask_policy=LossMaskPolicy())
+    item = next(AgentBatch(records=[{}], prompts=["p"], input_tokens=[[1]], n_samples=1).iter_samples())
+    sample = _sample(item, "answer", [10, 11])
+    sample.response_spans = [ResponseSpan(kind="assistant_text", length=2)]
+    sample.messages = [
+        {"role": "user", "content": "q"},
+        {"role": "tool", "content": "orphan result"},
+        {"role": "assistant", "content": "answer"},
+    ]
+
+    # Orphan tool results are tolerated
+    rows = session._train_rows_from_samples([sample])
+    assert rows.trainable_tokens == 2
+
+
+def test_select_trainable_span_indices_last_assistant():
+    spans = [
+        ResponseSpan(kind="assistant_text", length=2),
+        ResponseSpan(kind="assistant_tool_call", length=3),
+        ResponseSpan(kind="assistant_text", length=2),
+    ]
+    result = agentic._select_trainable_span_indices(spans, "last_assistant")
+    assert result == {2}
+
+
+def test_select_trainable_span_indices_final_answer_with_tool_call():
+    spans = [
+        ResponseSpan(kind="assistant_text", length=2),
+        ResponseSpan(kind="assistant_tool_call", length=3),
+        ResponseSpan(kind="assistant_text", length=2),
+    ]
+    result = agentic._select_trainable_span_indices(spans, "final_answer")
+    assert result == {2}
+
+
+def test_select_trainable_span_indices_final_answer_without_tool_call():
+    spans = [ResponseSpan(kind="assistant_text", length=3)]
+    result = agentic._select_trainable_span_indices(spans, "final_answer")
+    assert result == {0}
+
+
+def test_select_trainable_span_indices_final_answer_trailing_tool_call():
+    spans = [
+        ResponseSpan(kind="assistant_text", length=2),
+        ResponseSpan(kind="assistant_tool_call", length=3),
+    ]
+    result = agentic._select_trainable_span_indices(spans, "final_answer")
+    assert result == set()
+
+
+def test_trainer_config_rejects_invalid_trainable_turns():
+    from areno.api.trainer_config import TrainerConfig
+
+    try:
+        TrainerConfig(algo="sft", ckpt="test", dataset_path="demo", trainable_turns="bogus")
+        raise AssertionError("expected ValueError for invalid trainable_turns")
+    except ValueError as exc:
+        assert "trainable_turns" in str(exc)
+
+
+def test_trainer_config_accepts_valid_trainable_turns():
+    from areno.api.trainer_config import TrainerConfig
+
+    for mode in ("all_assistant", "last_assistant", "final_answer"):
+        config = TrainerConfig(algo="sft", ckpt="test", dataset_path="demo", trainable_turns=mode)
+        assert config.trainable_turns == mode
+
+
+def test_loss_mask_policy_defaults_are_backward_compatible():
+    policy = LossMaskPolicy()
+    assert policy.trainable_turns == "all_assistant"
+    assert policy.mask_tool_call_args is False
+    assert policy.assistant_text is True
+    assert policy.assistant_tool_calls is True
+
+
+def test_apply_trainable_turn_mode_preserves_tool_result_suppression():
+    """When _tool_call_loss_mask suppressed tool-result sentinels, mode application
+    must not re-enable those tokens. The mode mask is composed on top, never rebuilt."""
+    session = RolloutSession(
+        None, sampling_params=None, loss_mask_policy=LossMaskPolicy(trainable_turns="last_assistant")
+    )
+    item = next(AgentBatch(records=[{}], prompts=["p"], input_tokens=[[1]], n_samples=1).iter_samples())
+    sample = _sample(item, "call result answer", [10, 11, 12, 13, 14])
+    sample.response_kind = "assistant_tool_call"
+    # Simulate _tool_call_loss_mask having suppressed some tokens
+    sample.loss_mask_override = [True, True, False, False, True]
+    sample.response_spans = [
+        ResponseSpan(kind="assistant_tool_call", length=5),
+    ]
+    session._set_sample_training_row(sample, [1])
+
+    rows = session._train_rows_from_samples([sample])
+
+    # last_assistant: only span 0 (the only span), but suppression is preserved
+    # loss_mask_override was [True, True, False, False, True]
+    # mode keeps span 0 trainable, so base = [True, True, False, False, True]
+    # (composed on top, never rebuilt)
+    assert rows.loss_masks == [[False, True, True, False, False, True]]
+    assert rows.trainable_tokens == 3  # only True positions

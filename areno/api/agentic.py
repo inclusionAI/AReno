@@ -44,6 +44,19 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+LossSelectionMode = Literal["all_assistant", "last_assistant", "final_answer"]
+"""Static trainable-turn selection modes for agentic trajectories.
+
+- ``all_assistant``: every assistant span contributes to policy loss (default,
+  backward-compatible with pre-change behavior).
+- ``last_assistant``: only the final assistant span (regardless of kind) is
+  trainable; prior assistant spans are masked to zero.
+- ``final_answer``: only the ``assistant_text`` span following the last tool
+  result is trainable; with no tool result it degenerates to the last assistant
+  span.
+"""
+
+
 @dataclass(slots=True)
 class LossMaskPolicy:
     """Controls which agent trajectory spans contribute to policy loss."""
@@ -51,7 +64,8 @@ class LossMaskPolicy:
     assistant_text: bool = True
     assistant_tool_calls: bool = True
     tool_results: bool = False
-    final_assistant_text: bool = True
+    trainable_turns: LossSelectionMode = "all_assistant"
+    mask_tool_call_args: bool = False
     system_prompt: bool = False
     user_prompt: bool = False
 
@@ -151,6 +165,21 @@ class AgentTrajectory:
 
 
 @dataclass(slots=True)
+class ResponseSpan:
+    """One assistant response span within a multi-turn trajectory.
+
+    Captured during trajectory assembly so trajectory-level trainable-turn
+    selection (``last_assistant`` / ``final_answer``) can locate spans after
+    ``response_kind`` is folded to the last turn. ``length`` is in
+    response-token units and the spans align with ``response_tokens`` (tool
+    results are non-response context and are not recorded here).
+    """
+
+    kind: Literal["assistant_text", "assistant_tool_call"]
+    length: int
+
+
+@dataclass(slots=True)
 class _AgentSample:
     item: AgentItem
     messages: list[dict[str, Any]]
@@ -167,6 +196,7 @@ class _AgentSample:
     loss_mask_row: list[bool] = field(default_factory=list)
     rollout_logprobs_row: list[float] = field(default_factory=list)
     spans: list[LossSpan] = field(default_factory=list)
+    response_spans: list[ResponseSpan] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -183,6 +213,8 @@ class _AgentTrainRows:
     rollout_logprobs: list[list[float]]
     total_tokens: int
     spans: list[list[LossSpan]] = field(default_factory=list)
+    trainable_tokens: int = 0
+    masked_response_tokens: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -388,6 +420,81 @@ class RolloutSession:
             enabled = self._loss_mask_policy.assistant_text
         return [bool(enabled)] * response_len
 
+    def _apply_trainable_turn_mode(self, sample: _AgentSample) -> None:
+        """Apply trainable-turn selection and tool-call arg masking at the trajectory level.
+
+        Composed on top of the existing per-span mask (including any
+        ``_tool_call_loss_mask`` result-region suppression); the mask is never
+        rebuilt from zero, so prior suppression is preserved. Operates on the
+        response-aligned ``loss_mask_override`` and propagates to
+        ``loss_mask_row`` when the full row is already materialized.
+        """
+
+        policy = self._loss_mask_policy
+        mode = policy.trainable_turns
+        mask_args = policy.mask_tool_call_args
+        if mode == "all_assistant" and not mask_args:
+            return
+        spans = sample.response_spans
+        if not spans:
+            return
+        base = self._response_loss_mask(sample)
+        if len(base) != sum(span.length for span in spans):
+            return
+        offsets: list[tuple[int, int]] = []
+        cursor = 0
+        for span in spans:
+            offsets.append((cursor, cursor + span.length))
+            cursor += span.length
+        if mask_args:
+            tokenizer = self._trainer.get_tokenizer() if self._trainer is not None else None
+            if tokenizer is not None:
+                for (start, end), span in zip(offsets, spans, strict=True):
+                    if span.kind == "assistant_tool_call" and end > start:
+                        arg_range = _tool_call_arg_token_range(tokenizer, sample.response_tokens[start:end])
+                        if arg_range is not None:
+                            for idx in range(start + arg_range[0], start + arg_range[1]):
+                                if 0 <= idx < len(base):
+                                    base[idx] = False
+        if mode != "all_assistant":
+            target = _select_trainable_span_indices(spans, mode)
+            for i, (start, end) in enumerate(offsets):
+                if i not in target:
+                    for idx in range(start, end):
+                        base[idx] = False
+        sample.loss_mask_override = base
+        if sample.token_row and sample.response_mask_row:
+            row = list(sample.loss_mask_row)
+            override_idx = 0
+            for row_idx, is_resp in enumerate(sample.response_mask_row):
+                if is_resp and override_idx < len(base):
+                    row[row_idx] = base[override_idx]
+                    override_idx += 1
+            sample.loss_mask_row = row
+
+    def _validate_call_result_pairing(self, samples: list[_AgentSample]) -> None:
+        """Reject tool-call/tool-result mismatches at the turn level before training.
+
+        Pairs ``assistant_tool_call`` trace events against ``tool`` messages in
+        the conversation history. A mid-trajectory tool call without a matching
+        tool result raises ``ValueError``. A trajectory ending in a bare tool
+        call (the final agent action, result never received) is allowed: the
+        trailing call is exempt so ``final_answer`` can yield zero trainable
+        signal without error. Orphan tool results (tool messages without a
+        structured call) are tolerated because the agentic data path permits
+        tool messages as environment context (see existing multi-turn fixtures).
+        Empty ``response_tokens`` is never treated as invalid.
+        """
+
+        for sample in samples:
+            call_count = sum(1 for event in sample.trace if event.type == "assistant_tool_call")
+            result_count = sum(1 for msg in sample.messages if msg.get("role") == "tool")
+            ends_in_call = bool(sample.response_spans) and sample.response_spans[-1].kind == "assistant_tool_call"
+            if ends_in_call:
+                call_count -= 1
+            if call_count > result_count:
+                raise ValueError("agentic trajectory has a tool call without a matching tool result")
+
     def _train_rows_from_samples(self, samples: list[_AgentSample]) -> _AgentTrainRows:
         token_rows: list[list[int]] = []
         response_masks: list[list[bool]] = []
@@ -395,7 +502,9 @@ class RolloutSession:
         rollout_logprobs: list[list[float]] = []
         all_spans: list[list[LossSpan]] = []
         total_tokens = 0
+        self._validate_call_result_pairing(samples)
         for sample in samples:
+            self._apply_trainable_turn_mode(sample)
             if sample.token_row:
                 token_rows.append(list(sample.token_row))
                 response_masks.append(list(sample.response_mask_row))
@@ -413,6 +522,8 @@ class RolloutSession:
             rollout_logprobs.append([0.0] * prompt_len + list(sample.response_logprobs))
             all_spans.append(self._build_sample_spans(sample, prompt_len, turn=0))
             total_tokens += len(token_row)
+        trainable_tokens = sum(sum(mask) for mask in loss_masks)
+        masked_response_tokens = sum(sum(mask) for mask in response_masks) - trainable_tokens
         return _AgentTrainRows(
             token_rows=token_rows,
             response_masks=response_masks,
@@ -420,6 +531,8 @@ class RolloutSession:
             rollout_logprobs=rollout_logprobs,
             total_tokens=total_tokens,
             spans=all_spans,
+            trainable_tokens=trainable_tokens,
+            masked_response_tokens=masked_response_tokens,
         )
 
     def _handler_cls(self):
@@ -647,6 +760,7 @@ class RolloutSession:
             existing.last_tool_calls = list(new_sample.last_tool_calls)
         existing.response_tokens.extend(new_sample.response_tokens)
         existing.response_logprobs.extend(new_sample.response_logprobs)
+        existing.response_spans.extend(new_sample.response_spans)
         existing.trace.extend(new_sample.trace)
         existing.messages = new_sample.messages
         # Each later turn is rendered as: previous messages + new assistant.
@@ -665,15 +779,13 @@ class RolloutSession:
                 if span.end <= prefix_len:
                     continue
                 clipped_start = max(span.start, prefix_len)
-                existing.spans.append(
-                    LossSpan(
-                        role=span.role,
-                        start=old_row_len + clipped_start - prefix_len,
-                        end=old_row_len + span.end - prefix_len,
-                        loss=span.loss,
-                        turn=next_turn,
-                    )
-                )
+                existing.spans.append(LossSpan(
+                    role=span.role,
+                    start=old_row_len + clipped_start - prefix_len,
+                    end=old_row_len + span.end - prefix_len,
+                    loss=span.loss,
+                    turn=next_turn,
+                ))
         elif not existing.token_row:
             existing.token_row = list(existing.item.input_tokens) + list(existing.response_tokens)
             prompt_len = len(existing.item.input_tokens)
@@ -715,9 +827,7 @@ class RolloutSession:
                 start = i
                 current = loss_mask[i]
         role = sample.response_kind if current else ("tool_result" if has_override else sample.response_kind)
-        spans.append(
-            LossSpan(role=role, start=prompt_len + start, end=prompt_len + len(loss_mask), loss=current, turn=turn)
-        )
+        spans.append(LossSpan(role=role, start=prompt_len + start, end=prompt_len + len(loss_mask), loss=current, turn=turn))
         return spans
 
     def _set_sample_training_row(self, sample: _AgentSample, prompt_tokens: list[int]) -> None:
@@ -731,6 +841,8 @@ class RolloutSession:
         sample.loss_mask_row = [False] * prompt_len + loss_mask
         sample.rollout_logprobs_row = [0.0] * prompt_len + list(sample.response_logprobs)
         sample.spans = self._build_sample_spans(sample, prompt_len, turn=0)
+        if not sample.response_spans:
+            sample.response_spans = [ResponseSpan(kind=sample.response_kind, length=len(sample.response_tokens))]
 
     def _build_pending_chat_response(
         self,
@@ -934,6 +1046,84 @@ def _tool_call_loss_mask(tokenizer, response_tokens: list[int]) -> list[bool]:
     return mask
 
 
+def _select_trainable_span_indices(spans: list[ResponseSpan], mode: LossSelectionMode) -> set[int]:
+    """Return the set of response-span indices that remain trainable under ``mode``.
+
+    ``all_assistant`` is handled by the caller (no-op). For ``last_assistant``
+    only the final assistant span is kept. For ``final_answer`` only the
+    ``assistant_text`` span following the last tool call is kept; with no tool
+    call it degenerates to the last assistant span, and a trailing bare tool
+    call (no following text) yields an empty set (zero trainable signal).
+    """
+
+    assistant_indices = [i for i, span in enumerate(spans) if span.kind in ("assistant_text", "assistant_tool_call")]
+    if mode == "last_assistant":
+        return {assistant_indices[-1]} if assistant_indices else set()
+    # final_answer
+    call_indices = [i for i, span in enumerate(spans) if span.kind == "assistant_tool_call"]
+    if not call_indices:
+        return {assistant_indices[-1]} if assistant_indices else set()
+    last_call = call_indices[-1]
+    post_call_text = [i for i, span in enumerate(spans) if i > last_call and span.kind == "assistant_text"]
+    return {post_call_text[-1]} if post_call_text else set()
+
+
+def _tool_call_arg_token_range(tokenizer, span_tokens: list[int]) -> tuple[int, int] | None:
+    """Approximate the JSON-argument token range within a tool-call response span.
+
+    Localizes the ``arguments`` value by decoding the span and brace-matching
+    its JSON value. decode/encode is not round-trip, so the returned
+    ``(start, end)`` token offsets (within ``span_tokens``) are approximate;
+    callers must pin behavior with CPU per-token tests. Returns ``None`` when
+    localization fails. Does NOT reuse ``_tool_call_loss_mask`` sentinel logic
+    (that masks the tool-result region, not tool-call arguments).
+    """
+
+    try:
+        text = tokenizer.decode(span_tokens)
+    except Exception:
+        return None
+    key = '"arguments"'
+    key_pos = text.find(key)
+    if key_pos < 0:
+        return None
+    rest = text[key_pos + len(key) :]
+    colon_idx = rest.find(":")
+    if colon_idx < 0:
+        return None
+    value_start = colon_idx + 1
+    while value_start < len(rest) and rest[value_start].isspace():
+        value_start += 1
+    if value_start >= len(rest) or rest[value_start] not in "{[":
+        return None
+    open_ch = rest[value_start]
+    close_ch = "}" if open_ch == "{" else "]"
+    depth = 0
+    value_end = -1
+    for j in range(value_start, len(rest)):
+        if rest[j] == open_ch:
+            depth += 1
+        elif rest[j] == close_ch:
+            depth -= 1
+            if depth == 0:
+                value_end = j + 1
+                break
+    if value_end < 0:
+        return None
+    abs_start = key_pos + len(key) + value_start
+    abs_end = key_pos + len(key) + value_end
+    try:
+        start_tok = len(tokenizer.encode(text[:abs_start]))
+        end_tok = len(tokenizer.encode(text[:abs_end]))
+    except Exception:
+        return None
+    start_tok = min(start_tok, len(span_tokens))
+    end_tok = min(end_tok, len(span_tokens))
+    if end_tok <= start_tok:
+        return None
+    return (start_tok, end_tok)
+
+
 def _tool_results_from_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Extract OpenAI tool result messages into reward-facing records."""
 
@@ -1047,6 +1237,7 @@ __all__ = [
     "AgentTrajectory",
     "AgentTrajectoryTurn",
     "LossMaskPolicy",
+    "ResponseSpan",
     "RewardEvent",
     "RewardRecord",
     "RolloutSession",

@@ -181,6 +181,8 @@ class PolicyOnlyTrainer:
 
         return LossMaskPolicy(
             tool_results=bool(getattr(self.config, "train_tool_results", False)),
+            trainable_turns=getattr(self.config, "trainable_turns", "all_assistant"),
+            mask_tool_call_args=bool(getattr(self.config, "mask_tool_call_args", False)),
         )
 
     def _get_agent_run_fn(self):
@@ -247,10 +249,16 @@ class PolicyOnlyTrainer:
             tool_call_count = sum(len(record.tool_calls) for record in reward_records)
             tool_result_count = sum(len(record.tool_results) for record in reward_records)
             message_count = sum(len(record.messages) for record in reward_records)
+            loss_policy = self._loss_mask_policy()
             self.logger.info(
-                "agentic train batch built samples=%d tokens=%d messages=%d tool_calls=%d tool_results=%d",
+                "agentic train batch built samples=%d tokens=%d trainable_tokens=%d masked_response_tokens=%d "
+                "trainable_turns=%s mask_tool_call_args=%s messages=%d tool_calls=%d tool_results=%d",
                 len(samples),
                 rows.total_tokens,
+                rows.trainable_tokens,
+                rows.masked_response_tokens,
+                loss_policy.trainable_turns,
+                loss_policy.mask_tool_call_args,
                 message_count,
                 tool_call_count,
                 tool_result_count,

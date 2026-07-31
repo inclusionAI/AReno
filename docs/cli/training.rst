@@ -173,6 +173,33 @@ the same session lifecycle.
    results are environment observations rather than policy actions. Assistant
    text and assistant tool-call spans are trainable by default.
 
+``--trainable-turns {all_assistant,last_assistant,final_answer}``
+   Controls which assistant turns in a multi-turn agentic trajectory contribute
+   to policy loss. Default: ``all_assistant`` (backward-compatible — every
+   assistant span is trainable).
+
+   * ``all_assistant`` — every assistant span contributes to policy loss.
+   * ``last_assistant`` — only the final assistant span is trainable; all prior
+     assistant spans are masked to zero.
+   * ``final_answer`` — only the ``assistant_text`` span following the last tool
+     result is trainable. With no tool calls this degenerates to the last
+     assistant span. A bare trailing tool call (no following text) yields zero
+     trainable signal without error.
+
+   The selection is applied at the trajectory level after the existing per-span
+   mask (including ``--train-tool-results`` suppression). The mask is composed on
+   top, never rebuilt from zero.
+
+   The batch log emits ``trainable_tokens`` and ``masked_response_tokens`` counts
+   so you can verify the effect of each mode.
+
+``--mask-tool-call-args``
+   Mask JSON-argument tokens within tool-call spans while keeping the tool-name
+   trainable. This is a research ablation; industry models (ToolFormer, Gorilla,
+   ToolACE) train the full tool-call span. Argument localization is approximate
+   because tokenizer decode/encode is not round-trip. Pin behavior with
+   per-token CPU tests when using this flag.
+
 Agentic trajectories can contain multiple chat-completion turns for the same
 prompt/sample pair. The agent owns the OpenAI-style message list and returns
 trajectory turns with the model response; Areno converts those turns into token

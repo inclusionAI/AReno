@@ -70,9 +70,7 @@ def spans_from_prompt_mask(prompt_mask: list[bool]) -> list[LossSpan]:
             spans.append(LossSpan(role="prompt" if current else "response", start=start, end=i, loss=not current))
             start = i
             current = prompt_mask[i]
-    spans.append(
-        LossSpan(role="prompt" if current else "response", start=start, end=len(prompt_mask), loss=not current)
-    )
+    spans.append(LossSpan(role="prompt" if current else "response", start=start, end=len(prompt_mask), loss=not current))
     return spans
 
 

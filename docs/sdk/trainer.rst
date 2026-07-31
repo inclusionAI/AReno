@@ -440,14 +440,15 @@ Data classes
    Tool-result/context spans are included in train rows so logprob scoring sees
    the same context as rollout, but they are masked from policy loss by default.
 
-.. py:class:: areno.api.agentic.LossMaskPolicy(assistant_text=True, assistant_tool_calls=True, tool_results=False, final_assistant_text=True, system_prompt=False, user_prompt=False)
+.. py:class:: areno.api.agentic.LossMaskPolicy(assistant_text=True, assistant_tool_calls=True, tool_results=False, trainable_turns="all_assistant", mask_tool_call_args=False, system_prompt=False, user_prompt=False)
 
    Span-level policy-loss controls for agentic trajectories.
 
    :param bool assistant_text: Train assistant text spans.
    :param bool assistant_tool_calls: Train assistant tool-call spans.
    :param bool tool_results: Train tool-result spans. Defaults to ``False``.
-   :param bool final_assistant_text: Reserved for final-response text spans.
+   :param str trainable_turns: Which assistant turns to train. One of ``all_assistant`` (default), ``last_assistant``, ``final_answer``.
+   :param bool mask_tool_call_args: Mask JSON argument tokens within tool-call spans. Defaults to ``False``.
    :param bool system_prompt: Reserved for system prompt spans.
    :param bool user_prompt: Reserved for user prompt spans.
 
