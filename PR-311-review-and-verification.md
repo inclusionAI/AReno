@@ -165,13 +165,45 @@ validation rejected malformed trajectory: agentic trajectory has a tool call wit
 
 ### GPU 训练 — Kaggle 双 T4（标准 GSPO 路径）
 
+此实验走标准 GSPO 路径（无 `--agent-fn`），验证 CLI→config 传递和不破坏现有训练。
+
 ```bash
 PYTORCH_ALLOC_CONF=expandable_segments:True areno train \
   --ckpt Qwen/Qwen3-0.6B --dataset-path gsm8k:main \
   --dataset-loader-fn examples/math/dataset_loader.py \
   --reward-fn-path examples/math/math_verify_reward.py \
   --algo gspo --tp-size 2 --world-size 2 \
-  --batch-size 2 --n-samples 2 --max-s
+  --batch-size 2 --n-samples 2 --max-steps 2 \
+  --max-prompt-tokens 384 --max-new-tokens 128 \
+  --mini-bs 1 --score-micro-bs 1 \
+  --gradient-accumulation-steps 4 \
+  --activation-checkpointing --drop-rollout-state --eager-decode \
+  --trainable-turns final_answer
+```
+
+config summary 正确显示 `trainable_turns: final_answer`，2 步训练正常到 `max_steps_reached`。mask 重写在 agentic 路径才触发，因此此实验验证的是 CLI→config 传递和不破坏现有训练。
+
+### GPU 训练 — 阿里云双 A10（agentic 路径，mask 真实触发）
+
+在阿里云 2×A10 24GB 上使用 tictactoe agentic example 跑了两个对比实验，走 `_run_agentic_rollout` 路径（`--agent-fn`），mask 逻辑在 GPU 上真实触发。
+
+实验1（`all_assistant`，默认）：
+
+```bash
+PYTORCH_ALLOC_CONF=expandable_segments:True areno train \
+  --ckpt Qwen/Qwen3-0.6B \
+  --dataset-path /tmp/tictactoe_boards.jsonl \
+  --dataset-loader-fn examples/agentic/tictactoe/dataset_loader.py \
+  --reward-fn-path examples/agentic/tictactoe/reward.py \
+  --agent-fn examples/agentic/tictactoe/run_agent.py \
+  --algo gspo --tp-size 2 --world-size 2 \
+  --batch-size 4 --n-samples 4 --max-steps 10 \
+  --max-prompt-tokens 1024 --max-new-tokens 128 \
+  --mini-bs 2 --score-micro-bs 2 \
+  --gradient-accumulation-steps 2 \
+  --activation-checkpointing --drop-rollout-state \
+  --attn-backend native --disable-thinking
+```
 
 实验2（`final_answer`）：同上，末尾加 `--trainable-turns final_answer`。
 
@@ -232,8 +264,6 @@ Issue #199 要求「Make trainable turns configurable for agentic trajectories�
 - **CPU 单元测试**（64 passed）：逐 token mask、边界、非法输入、metrics、dual-path
 - **Kaggle T4×2 标准 GSPO**：CLI→config 传递，不破坏现有训练
 - **阿里云 A10×2 agentic 路径**：mask 逻辑在 `_run_agentic_rollout` 中真实触发，`trainable_tokens` 320→0 对比，`grad_norm` 5.31→0 对比
-  --attn-backend native --disable-thinking
-```
 
 ### ruff lint + format
 
