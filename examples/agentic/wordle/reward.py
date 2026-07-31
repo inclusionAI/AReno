@@ -24,9 +24,12 @@ def reward_fn(record) -> float:
                 arguments = json.loads(arguments)
             except json.JSONDecodeError:
                 return -1.0
-        if not isinstance(arguments, dict) or "word" not in arguments:
+        if not isinstance(arguments, dict):
             return -1.0
-        guesses.append(arguments["word"])
+        word = arguments.get("word") or arguments.get("guess")
+        if not word:
+            return -1.0
+        guesses.append(word)
 
     if len(guesses) != len(set(map(str, guesses))):
         return -0.5

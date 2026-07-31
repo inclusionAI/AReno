@@ -369,9 +369,12 @@ def _execute_guess(assistant_message: dict, record: dict) -> tuple[dict, dict] |
             arguments = json.loads(call["function"].get("arguments") or "")
         except (json.JSONDecodeError, TypeError):
             continue
-        if not isinstance(arguments, dict) or "word" not in arguments:
+        if not isinstance(arguments, dict):
             continue
-        result = score_guess(record["secret"], arguments["word"])
+        word = arguments.get("word") or arguments.get("guess")
+        if not word:
+            continue
+        result = score_guess(record["secret"], word)
         return result, call
     return None
 
