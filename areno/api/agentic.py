@@ -641,15 +641,27 @@ class RolloutSession:
         existing.response_logprobs.extend(new_sample.response_logprobs)
         existing.trace.extend(new_sample.trace)
         existing.messages = new_sample.messages
-        # Each later turn is rendered as: previous messages + new assistant.
-        # Append only the suffix so the training row becomes one trajectory
-        # instead of duplicating the shared prefix for every tool call.
-        prefix_len = _common_prefix_len(existing.token_row, new_sample.token_row)
-        if prefix_len < len(new_sample.token_row):
-            existing.token_row.extend(new_sample.token_row[prefix_len:])
-            existing.response_mask_row.extend(new_sample.response_mask_row[prefix_len:])
-            existing.loss_mask_row.extend(new_sample.loss_mask_row[prefix_len:])
-            existing.rollout_logprobs_row.extend(new_sample.rollout_logprobs_row[prefix_len:])
+        # Each later turn re-renders the full conversation as its prompt, so
+        # ``new_sample.token_row`` begins with the previous trajectory
+        # (``existing.token_row``) followed by the new tool/board context and
+        # the new response. Append only that suffix so the training row stays a
+        # single O(N) trajectory.
+        #
+        # Split at ``len(existing.token_row)`` rather than the first diverging
+        # token. The first-divergence split (via _common_prefix_len) only stays
+        # O(N) when raw engine ``response_tokens`` are token-identical to the
+        # chat-template-rendered assistant content; a decode->encode round trip
+        # is not token-idempotent for real BPE tokenizers, so the divergence
+        # lands inside an early assistant span and the re-rendered prior context
+        # is re-appended on every turn, growing the row O(N^2) and blowing past
+        # max_context_len. The previous trajectory is the intended prefix; the
+        # suffix is the per-turn delta, which is bounded.
+        split = min(len(existing.token_row), len(new_sample.token_row))
+        if split < len(new_sample.token_row):
+            existing.token_row.extend(new_sample.token_row[split:])
+            existing.response_mask_row.extend(new_sample.response_mask_row[split:])
+            existing.loss_mask_row.extend(new_sample.loss_mask_row[split:])
+            existing.rollout_logprobs_row.extend(new_sample.rollout_logprobs_row[split:])
         elif not existing.token_row:
             existing.token_row = list(existing.item.input_tokens) + list(existing.response_tokens)
             prompt_len = len(existing.item.input_tokens)
@@ -918,16 +930,6 @@ def _trace_with_tool_results(trace: list[RewardEvent], messages: list[dict[str, 
     if not inserted:
         augmented.extend(tool_result_events)
     return augmented
-
-
-def _common_prefix_len(left: list[int], right: list[int]) -> int:
-    """Return the shared token prefix length for incremental multi-turn rows."""
-
-    limit = min(len(left), len(right))
-    for idx in range(limit):
-        if left[idx] != right[idx]:
-            return idx
-    return limit
 
 
 def _chat_batch_key(params: Any) -> _ChatBatchKey:
