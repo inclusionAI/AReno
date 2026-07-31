@@ -76,6 +76,7 @@ def _train_args(**overrides) -> SimpleNamespace:
         agent_fn=None,
         agent_timeout_s=300.0,
         train_tool_results=False,
+        disable_thinking=False,
         chat_template_enable_thinking=None,
         validate_data_contract=False,
         # DPO specific
