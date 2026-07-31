@@ -15,7 +15,10 @@ from areno.api.agentic import AgentTrajectory, AgentTrajectoryTurn
 logger = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
-SYSTEM_PROMPT = "You are an expert 2048 player. Choose a sequence of moves by calling the choose_moves tool."
+SYSTEM_PROMPT = (
+    "You are an expert 2048 player. "
+    "Reply with ONLY a tool call. Do not explain, analyze, or simulate."
+)
 
 CHOOSE_MOVES_TOOL = {
     "type": "function",
