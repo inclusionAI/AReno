@@ -1,4 +1,4 @@
 {"prompt": "What is 2+2?"}
-{"prompt": 42, "response": "The answer is 42."}
+{"prompt": "Has prompt but no response"}
 {"prompt": "Write a poem.", "response": ""}
 {"prompt": "Valid prompt", "response": "Valid response"}

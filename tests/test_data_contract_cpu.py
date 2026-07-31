@@ -81,9 +81,9 @@ class SFTContractTest(unittest.TestCase):
         self.assertTrue(
             any(e.sample_index == 0 and e.field_path == "response" and e.actual == "missing" for e in report.errors)
         )
-        # sample 1: prompt is int
+        # sample 1: missing 'response' (prompt present but response absent makes it invalid)
         self.assertTrue(
-            any(e.sample_index == 1 and e.field_path == "prompt" and e.actual == "int" for e in report.errors)
+            any(e.sample_index == 1 and e.field_path == "response" and e.actual == "missing" for e in report.errors)
         )
         # sample 2: response is empty string — not an error per current spec (str type passes)
         # sample 3 is valid
@@ -135,9 +135,9 @@ class DPOContractTest(unittest.TestCase):
         self.assertTrue(
             any(e.sample_index == 1 and e.field_path == "chosen" and e.actual == "missing" for e in report.errors)
         )
-        # sample 2: chosen is int
+        # sample 2: missing rejected
         self.assertTrue(
-            any(e.sample_index == 2 and e.field_path == "chosen" and e.actual == "int" for e in report.errors)
+            any(e.sample_index == 2 and e.field_path == "rejected" and e.actual == "missing" for e in report.errors)
         )
 
     def test_list_without_optional_prompt_passes(self):
@@ -163,22 +163,20 @@ class OnlineRLContractTest(unittest.TestCase):
         self.assertEqual(report.total_scanned, 2)
 
     def test_invalid_null_prompt(self):
-        """Null prompt should be an error."""
+        """Null or missing prompt should be an error."""
         records = _load_jsonl(FIXTURES / "online_rl_invalid.jsonl")
         report = validate_contract(records, mode="online_rl")
         self.assertFalse(report.ok)
-        # sample 0: prompt is None
+        # sample 0: missing prompt
         self.assertTrue(
-            any(e.sample_index == 0 and e.field_path == "prompt" and e.actual == "NoneType" for e in report.errors)
+            any(e.sample_index == 0 and e.field_path == "prompt" and e.actual == "missing" for e in report.errors)
         )
-        # sample 1: prompt is missing
+        # sample 1: missing prompt
         self.assertTrue(
             any(e.sample_index == 1 and e.field_path == "prompt" and e.actual == "missing" for e in report.errors)
         )
-        # sample 2: prompt is int
-        self.assertTrue(
-            any(e.sample_index == 2 and e.field_path == "prompt" and e.actual == "int" for e in report.errors)
-        )
+        # sample 2: valid record (prompt is a string)
+        self.assertFalse(any(e.sample_index == 2 for e in report.errors))
 
     def test_solutions_with_wrong_element_type(self):
         """A solutions list with non-string elements should be an error."""

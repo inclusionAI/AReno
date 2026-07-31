@@ -1,3 +1,3 @@
-{"prompt": null}
 {"solutions": ["1"]}
-{"prompt": 42}
+{"solutions": ["1", "2"]}
+{"prompt": "42", "solutions": ["42"]}

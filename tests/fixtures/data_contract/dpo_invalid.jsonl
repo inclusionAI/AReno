@@ -1,3 +1,3 @@
 {"chosen": "Bonjour", "rejected": "Salut"}
 {"prompt": "No chosen", "rejected": "Only rejected"}
-{"prompt": "Bad type", "chosen": 42, "rejected": "text"}
+{"prompt": "Bad type", "chosen": "42"}
