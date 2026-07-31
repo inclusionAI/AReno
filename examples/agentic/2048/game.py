@@ -33,12 +33,13 @@ INVALID_PENALTY = 2.0
 # clearly better than silence even on average boards, preventing the GSPO
 # advantage-collapse cycle (tool calls → near-zero reward → gradient flip-flop
 # → collapse to no-tool).
-TOOL_CALL_BONUS = 15.0
-# Per-sample bonus offsets so identical moves within a prompt group
-# (sample_index 0, 1, 2, 3 …) get distinguishable rewards, preventing
-# the GSPO advantage-collapse cycle.  Rotated across 8 values so that
-# n_samples up to 8 are well-covered.
-_PER_SAMPLE_OFFSETS = [0.0, 1.5, 3.0, 4.5, 0.8, 2.3, 3.8, 5.3]
+TOOL_CALL_BONUS = 5.0
+# Tiny per-sample offsets so identical moves within a prompt group
+# (sample_index 0, 1, 2, 3 …) get minimally different rewards, breaking
+# the GSPO advantage collapse without drowning the game-score signal.
+# Values are small enough that a _single_ extra merge tile (~+4)
+# outweighs the offset variance.
+_PER_SAMPLE_OFFSETS = [0.0, 0.5, 1.0, 1.5, 0.2, 0.7, 1.2, 1.7]
 WIN_TILE = 2048
 
 logger = logging.getLogger(__name__)
