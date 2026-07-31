@@ -117,7 +117,7 @@ class HeuristicPlayer:
 
 
 # 评估玩家策略在给定舰队列表上的表现
-def evaluate_player(player: Player, fleets: list[dict], max_turns: int = None) -> dict:
+def evaluate_player(player: Player, fleets: list[dict], max_turns: int | None = None) -> dict:
     """Evaluate a player policy against a list of fleet records."""
     # 默认使用游戏最大回合数
     if max_turns is None:

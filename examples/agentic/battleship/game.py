@@ -1,10 +1,10 @@
 """Battleship game logic for agentic examples."""
 
 # 导入标准库
+import json
 import random
-from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Any, List, Set, Tuple, Optional, Union
+from typing import Optional, Tuple, Union
 
 # 游戏常量定义
 # Compact 8x8 board with fleet [4,3,2,2] = 11 cells
@@ -92,7 +92,7 @@ def _get_neighbor_cells(cells: list[tuple[int, int]]) -> set[tuple[int, int]]:
 
 # 使用给定种子生成合法的舰队布局
 def place_fleet(seed: int) -> dict:
-    """Generate a seeded legal fleet placement. Returns dict with seed, ships, fleet_cells.
+    """Generate a seeded legal fleet placement. Returns dict with seed, ships, ship_lengths, grid_size.
 
     Ships cannot overlap and cannot be adjacent (including diagonally),
     following standard Battleship game rules.
@@ -101,9 +101,7 @@ def place_fleet(seed: int) -> dict:
     rng = random.Random(seed)
     # 存储生成的船只
     ships: list[Ship] = []
-    # 记录已占用的格子及其相邻格子（间隔缓冲区）
-    occupied: set[tuple[int, int]] = set()
-    # 记录禁止区域（occupied + 相邻格子）
+    # 记录禁止区域（已占用格子 + 相邻格子）
     forbidden: set[tuple[int, int]] = set()
 
     # 依次放置每艘船
@@ -136,8 +134,7 @@ def place_fleet(seed: int) -> dict:
                 # 创建船只对象并添加到列表
                 ship = Ship(length=length, cells=cells)
                 ships.append(ship)
-                # 更新已占用格子和禁止区域
-                occupied.update(cells)
+                # 更新禁止区域：船只自身格子 + 相邻格子
                 forbidden.update(cells)
                 forbidden.update(_get_neighbor_cells(cells))
                 placed = True
@@ -145,12 +142,6 @@ def place_fleet(seed: int) -> dict:
         # 如果无法放置船只，抛出异常
         if not placed:
             raise RuntimeError(f"Failed to place ship of length {length} with seed {seed} after 5000 attempts")
-
-    # 构建格子列表用于快速检查
-    # Build fleet_cells list for easy checking
-    fleet_cells = []
-    for ship in ships:
-        fleet_cells.extend(ship.cells)
 
     # 返回结果字典
     return {
@@ -408,7 +399,6 @@ def score_episode(state: GameState, tool_calls: list[dict]) -> dict:
         args = call.get("arguments", {})
         # 如果是字符串，解析为字典
         if isinstance(args, str):
-            import json
             try:
                 args = json.loads(args)
             except json.JSONDecodeError:
