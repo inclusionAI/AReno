@@ -25,27 +25,6 @@ SPAWN_4_PROB = 0.1
 # 2.0 puts a full-no-op episode at -64 (baseline-scale), making each wasted move
 # genuinely costly against a merge score of comparable magnitude.
 INVALID_PENALTY = 2.0
-# Bonus for any valid tool call (total_moves > 0).  The penalty for no-tool-call
-# is ~ -(baseline + INVALID_PENALTY * cap) ≈ -165 to -230.  Without a positive
-# offset, a one-move tool call that scores 0 (board already terminal or no merge)
-# gets reward ~0, indistinguishable from the no-tool penalty from the policy's
-# perspective.  This floor forces the baseline up so that tool-calling stays
-# clearly better than silence even on average boards, preventing the GSPO
-# advantage-collapse cycle (tool calls → near-zero reward → gradient flip-flop
-# → collapse to no-tool).
-TOOL_CALL_BONUS = 5.0
-# Reward for outputting a well-formed tool-call JSON that parses successfully.
-# Decoupled from game outcome: even if the moves are empty or terrible, the
-# model gets credit for mastering the <tool_call> format first.  This prevents
-# the 0.8B model from drifting off-format during early RL steps — format is the
-# prerequisite for any game reward, so it must be learned first.
-FORMAT_BONUS = 2.0
-# Tiny per-sample offsets so identical moves within a prompt group
-# (sample_index 0, 1, 2, 3 …) get minimally different rewards, breaking
-# the GSPO advantage collapse without drowning the game-score signal.
-# Values are small enough that a _single_ extra merge tile (~+4)
-# outweighs the offset variance.
-_PER_SAMPLE_OFFSETS = [0.0, 0.5, 1.0, 1.5, 0.2, 0.7, 1.2, 1.7]
 WIN_TILE = 2048
 
 logger = logging.getLogger(__name__)
@@ -150,18 +129,12 @@ def format_prompt(board: Board) -> str:
 
     board = normalize_board(board)
     return (
-        "You are playing 2048. Choose a sequence of directions to play from the "
-        "current board by calling the choose_moves tool.\n\n"
+        "You are playing 2048. Choose a sequence of directions.\n\n"
         "Rules:\n"
         "- Directions are up, down, left, right.\n"
-        "- After every move that changes the board, a 2 (90%) or 4 (10%) tile spawns.\n"
-        "- Moves that do not change the board are invalid and penalized; stop playing "
-        f"once no direction changes the board or after at most {DEFAULT_EPISODE_CAP} moves.\n"
+        "- After every valid move a 2 (90%) or 4 (10%) tile spawns.\n"
+        "- Stop when no direction changes the board or after 32 moves.\n"
         "- Prefer merges that build toward larger tiles.\n\n"
-        "Output format: you MUST call the choose_moves tool by writing EXACTLY ONE\n"
-        '<tool_call>{"name": "choose_moves", "arguments": {"moves": [dir1, dir2, ...]}}</tool_call>\n'
-        "Replace [dir1, dir2, ...] with your direction sequence. "
-        "No text before or after the block.\n\n"
         f"Board:\n{board_to_text(board)}\n\nLegal directions: {legal_moves(board)}\n\nMoves:"
     )
 
@@ -365,6 +338,34 @@ def score_episode(result: EpisodeResult) -> float:
     return float(result.score) - INVALID_PENALTY * result.invalid_moves
 
 
+def score_episode_moves(board: Board, moves: list[str] | None, *, seed: int) -> float:
+    """Score one move sequence for RL training.
+
+    Returns a simple reward in [-1, 1]:
+      -1.0  — no valid moves (no tool call, empty, or all invalid)
+       0.0  — break-even vs random baseline
+       1.0  — strong improvement over random
+    """
+
+    if moves is None or not moves:
+        logger.info("2048 no-valid-moves reward=-1.0")
+        return -1.0
+    board = normalize_board(board)
+    result = play_episode(board, moves, seed=seed)
+    if result.total_moves == 0:
+        logger.info("2048 zero-move episode reward=-1.0")
+        return -1.0
+    matched = float(random_episode(board, seed=seed, cap=result.total_moves, trials=4)["score"])
+    improvement = float(result.score) - matched
+    reward = improvement - INVALID_PENALTY * result.invalid_moves
+    reward = max(-1.0, min(1.0, reward / 50.0))
+    logger.info(
+        "2048 episode score=%d max_tile=%d moves=%d invalid=%d baseline=%.1f improvement=%.1f reward=%.3f",
+        result.score, result.max_tile, result.total_moves, result.invalid_moves, matched, improvement, reward,
+    )
+    return reward
+
+
 def score_moves(
     board: Board,
     moves: Iterable[str],
@@ -376,64 +377,23 @@ def score_moves(
     record_id: object = "?",
     sample_index: int = 0,
 ) -> float:
-    """Replay ``moves`` and return one rollout reward scalar.
-
-    Used by both the tool-call and XML no-tool reward functions: the caller only
-    differs in how it parses ``moves``. The reward is a *length-matched*
-    advantage over the random baseline (a short plan is compared against a random
-    baseline at the same move count, not the full 32-move baseline that would
-    otherwise drown it), minus the no-op penalty, plus a tool-call bonus. A zero-move output
-    (empty/unparseable ``moves``) is penalized worse than any >=1-move episode:
-    under the length-matched rule zero moves would collapse the baseline to 0 and
-    let "not outputting" coast at reward ~0. Episode score, max tile, invalid-move
-    rate, matched baseline, improvement, and reward are logged for observability.
-
-    The ``sample_index`` adds a deterministic per-sample offset to the
-    tool-call bonus so that identical action sequences within a prompt group
-    still receive slightly different rewards.  This breaks the GSPO group
-    advantage collapse (all samples identical → all advantages zero → no
-    gradient).
-    """
+    """Replay ``moves`` and return one rollout reward scalar (kept for web UI compat)."""
 
     board = normalize_board(board)
     result = play_episode(board, moves, seed=seed, cap=cap)
-
     if result.total_moves == 0:
-        # Mild penalty matching no-tool-call, keeping advantages balanced.
-        offset = _PER_SAMPLE_OFFSETS[sample_index % len(_PER_SAMPLE_OFFSETS)]
-        reward = -5.0 + offset
-        logger.info(
-            "2048 zero-move penalty id=%s baseline=%.1f reward=%.3f moves=0",
-            record_id,
-            baseline_score,
-            reward,
-        )
+        reward = -1.0
+        logger.info("2048 zero-move penalty id=%s reward=%.3f", record_id, reward)
         return reward
-
-    # Length-matched baseline: a full-length episode (total_moves >= cap) reuses
-    # the precomputed ``baseline_score`` (== the full-cap baseline in real
-    # training, where the dataset cap equals the reward cap); a short plan
-    # recomputes the random baseline at its actual move budget so it is not
-    # measured against 32 moves of random merge opportunity it never had.
     if result.total_moves >= cap:
         matched = float(baseline_score)
     else:
         matched = float(random_episode(board, seed=seed, cap=result.total_moves, trials=trials)["score"])
     improvement = float(result.score) - matched
-    reward = improvement - INVALID_PENALTY * result.invalid_moves + TOOL_CALL_BONUS
-    # Per-sample offset breaks symmetry when all outputs are identical
-    # (common early in training with deterministic sampling).
-    reward += _PER_SAMPLE_OFFSETS[sample_index % len(_PER_SAMPLE_OFFSETS)]
+    reward = improvement - INVALID_PENALTY * result.invalid_moves
     logger.info(
         "2048 episode id=%s score=%d max_tile=%d invalid_rate=%.3f baseline=%.1f improvement=%.3f reward=%.3f moves=%d",
-        record_id,
-        result.score,
-        result.max_tile,
-        result.invalid_rate,
-        matched,
-        improvement,
-        reward,
-        result.total_moves,
+        record_id, result.score, result.max_tile, result.invalid_rate, matched, improvement, reward, result.total_moves,
     )
     return reward
 
