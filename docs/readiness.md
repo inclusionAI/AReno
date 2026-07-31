@@ -300,3 +300,33 @@ tests/test_readiness_cpu.py::TestReadinessIntegration::test_metrics_fields_corre
 ================================== 42 passed in 0.18s ===========================
 ```
 
+### Cleanup 验证（失败时资源清理）
+
+验证失败时清理回调被正确调用：
+
+```bash
+!python -m pytest tests/test_readiness_cpu.py -k "cleanup" -v 2>&1
+```
+
+输出：
+
+```plain
+tests/test_readiness_cpu.py::TestReadinessStateMachine::test_cleanup_called_on_failure PASSED
+tests/test_readiness_cpu.py::TestReadinessStateMachine::test_cleanup_not_called_on_normal_completion PASSED
+tests/test_readiness_cpu.py::TestReadinessStateMachine::test_cleanup_not_called_when_disabled PASSED
+tests/test_readiness_cpu.py::TestReadinessStateMachine::test_multiple_cleanup_fns_called PASSED
+tests/test_readiness_cpu.py::TestReadinessStateMachine::test_cleanup_error_does_not_mask_failure PASSED
+
+================================== 5 passed in 0.03s ===========================
+```
+
+5 个测试覆盖的场景：
+
+| 测试 | 验证内容 |
+|------|---------|
+| `test_cleanup_called_on_failure` | 进入 FAILED 态时，已注册的清理回调被调用 |
+| `test_cleanup_not_called_on_normal_completion` | 正常完成时，清理回调不被调用 |
+| `test_cleanup_not_called_when_disabled` | 未启用 readiness 时，清理回调不被调用 |
+| `test_multiple_cleanup_fns_called` | 多个回调按注册顺序依次执行 |
+| `test_cleanup_error_does_not_mask_failure` | 清理回调抛异常不影响后续回调，不掩盖原始失败 |
+
