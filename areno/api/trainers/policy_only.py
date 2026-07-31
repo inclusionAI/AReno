@@ -72,19 +72,19 @@ class PolicyOnlyTrainer:
                 "reward_raw_std": raw_summary["std"],
                 "reward_raw_min": raw_summary["min"],
                 "reward_raw_max": raw_summary["max"],
-                "reward_transformed_mean": transformed_summary["mean"] or 0.0,
-                "reward_transformed_std": transformed_summary["std"] or 0.0,
-                "reward_transformed_min": transformed_summary["min"] or 0.0,
-                "reward_transformed_max": transformed_summary["max"] or 0.0,
+                "reward_transformed_mean": transformed_summary["mean"],
+                "reward_transformed_std": transformed_summary["std"],
+                "reward_transformed_min": transformed_summary["min"],
+                "reward_transformed_max": transformed_summary["max"],
             }
-        self.logger.info(
-            "metric=reward_transform mode=%s raw_mean=%.6f raw_std=%.6f transformed_mean=%.6f transformed_std=%.6f",
-            mode,
-            raw_summary["mean"] or 0.0,
-            raw_summary["std"] or 0.0,
-            transformed_summary["mean"] or 0.0,
-            transformed_summary["std"] or 0.0,
-        )
+            self.logger.info(
+                "metric=reward_transform mode=%s raw_mean=%.6f raw_std=%.6f transformed_mean=%.6f transformed_std=%.6f",
+                mode,
+                raw_summary["mean"],
+                raw_summary["std"],
+                transformed_summary["mean"],
+                transformed_summary["std"],
+            )
         return rewards_all
 
     def fit(self) -> None:
