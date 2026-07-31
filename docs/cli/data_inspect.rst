@@ -159,6 +159,24 @@ Every error includes:
 Error messages never include raw field values, so they are safe to share in
 bug reports and CI logs.
 
+Limitations
+-----------
+
+* **Bounded scan**: By default only the first 100 records (``--max-samples``)
+  are scanned and at most 20 errors (``--max-errors``) are collected. If the
+  dataset has more issues, fix the reported errors and re-run to see the rest.
+* **Post-loader only**: Validation runs *after* the dataset loader, so rows
+  are checked as the loader yields them. The contract does not inspect raw
+  file contents before loading.
+* **Structural, not semantic**: The validator checks field presence, types,
+  and list lengths. It does not evaluate content quality, deduplication, or
+  domain-specific correctness (e.g. whether a response is a valid answer).
+* **No data modification**: The validator is read-only; it never writes to,
+  filters, or transforms the input dataset.
+* **Missing vs null**: Datasets loaded via pyarrow may represent absent fields
+  as ``None`` (null). Both ``missing`` and ``NoneType`` errors indicate a
+  required field is absent or null; the hint text clarifies which.
+
 Integration with ``areno train``
 --------------------------------
 
