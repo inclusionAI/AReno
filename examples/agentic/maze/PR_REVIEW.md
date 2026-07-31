@@ -336,7 +336,37 @@ areno train --ckpt Qwen/Qwen3-0.6B --dataset-path /kaggle/working/mazes.jsonl \
 - 训练在 step 38 中断：部分轨迹因多轮对话累积的 token 数（8756）超过 `--max-context-len 8192` 被过滤。后续将 `--max-context-len` 调至 16384 解决
 - 对比之前 Kaggle T4×2 的结果（reward_mean 恒定 -0.5，500 步无变化）：BFS shaping 使 agent 在仅 38 步内就产生了正向 reward 趋势
 
-### Step 6: 代码改动统计
+### Step 6: 阿里云 A10 实验B — 思考模式对比（2×A10 24GB, Qwen3-0.6B, GSPO）
+
+**目的**：对比思考模式与禁思考模式在迷宫导航任务上的训练效果。
+
+**配置**：5×5 迷宫、max-steps=10、思考模式（无 --disable-thinking）、--max-new-tokens 256、--max-context-len 32768
+
+**关键输出**：训练运行至 step 44，reward_mean 从 -0.79 上升到 -0.386，仍在负值区间。
+
+![A10 实验B Reward](a10-expB-reward.png)
+
+**解释**：
+- `rollout/rewards_mean` 从 -0.7929 上升到 -0.386（step 44，43 个数据点），呈上升趋势但尚未转正
+- 每步平均 76s（思考模式生成 256 token，比实验A 的 64 token 慢 2.5 倍）
+- 44 步总耗时约 56 分钟，而实验A 38 步仅 19 分钟
+
+### 实验A vs 实验B 对比结论
+
+| 指标 | 实验A（禁思考 64） | 实验B（思考 256） |
+|------|-----------|-----------|
+| 步数 | 38 步 | 44 步 |
+| rewards_mean 起始 | -1 | -0.79 |
+| rewards_mean 最终 | **+0.132** | **-0.386** |
+| 每步耗时 | **30s** | **76s** |
+| 总耗时 | ~19 分钟 | ~56 分钟 |
+
+**结论**：
+1. **BFS reward shaping 有效**：两个实验的 reward 都从起始值上升（之前无 shaping 时恒定 -0.5）
+2. **禁思考模式更高效**：实验A 在 38 步内达到正值 0.132，实验B 44 步仍为 -0.386。对于 0.6B 模型在迷宫导航这类简单单步决策任务上，思考模式没有优势
+3. **推荐配置**：`--disable-thinking --max-new-tokens 64 --max-context-len 16384`，训练快、reward 上升快、OOM 风险低
+
+### Step 7: 代码改动统计
 
 **目的**：确认改动范围符合"零侵入"承诺。
 
