@@ -144,7 +144,7 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 -m areno.cli.main train
   --max-new-tokens 64 \
   --disable-thinking \
   --attn-backend native \
-  --max-context-len 8192 \
+  --max-context-len 16384 \
   --tp-size 2 \
   --world-size 2 \
   --max-steps 500 \
@@ -247,7 +247,7 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 -m areno.cli.main train
   --max-new-tokens 64 \
   --disable-thinking \
   --attn-backend native \
-  --max-context-len 8192 \
+  --max-context-len 16384 \
   --tp-size 2 \
   --world-size 2 \
   --max-steps 500 \
@@ -280,7 +280,7 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python3 -m areno.cli.main train
   --n-samples 2 \
   --max-new-tokens 256 \
   --attn-backend native \
-  --max-context-len 8192 \
+  --max-context-len 16384 \
   --tp-size 2 \
   --world-size 2 \
   --max-steps 500 \

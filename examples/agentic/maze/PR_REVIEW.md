@@ -320,7 +320,23 @@ areno train --ckpt Qwen/Qwen3-0.6B --dataset-path /kaggle/working/mazes.jsonl \
 
 **解释**：双卡张量并行配置下训练成功完成完整 500 步。reward_mean 在 -0.5375 至 -0.5 之间——agent 未到达终点，原因是原始奖励设计过于稀疏（已在后续提交中通过 BFS/PBRS shaping 修复）。
 
-### Step 5: 代码改动统计
+### Step 5: 阿里云 A10 GPU 训练（2×A10 24GB, Qwen3-0.6B, GSPO, BFS shaping）
+
+**目的**：在改进 reward shaping 后的 GPU 环境验证 BFS closest-approach 奖励的有效性。
+
+**配置**：5×5 迷宫、max-steps=10、--disable-thinking、--attn-backend native、--n-samples 2、--max-context-len 8192
+
+**关键输出**：训练跑了 38 步后因部分轨迹 context length 超限中断，但 reward_mean 从 -1 上升到 0.132。
+
+![A10 Training Reward](a10-training-reward.png)
+
+**解释**：
+- `rollout/rewards_mean` 从 -1（起始）上升到 0.132（step 38），说明 BFS closest-approach shaping 提供了有效的距离梯度信号
+- 38 个数据点，每步平均 30.1s（rollout 27s + train 3s），rollout 占主要时间
+- 训练在 step 38 中断：部分轨迹因多轮对话累积的 token 数（8756）超过 `--max-context-len 8192` 被过滤。后续将 `--max-context-len` 调至 16384 解决
+- 对比之前 Kaggle T4×2 的结果（reward_mean 恒定 -0.5，500 步无变化）：BFS shaping 使 agent 在仅 38 步内就产生了正向 reward 趋势
+
+### Step 6: 代码改动统计
 
 **目的**：确认改动范围符合"零侵入"承诺。
 
