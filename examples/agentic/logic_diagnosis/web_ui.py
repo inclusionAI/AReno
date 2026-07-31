@@ -123,6 +123,7 @@ class DiagnosisServer(ThreadingHTTPServer):
         self.n_inputs: int = 0
         self.n_gates: int = 0
         self.events: list[str] = []
+        self._last_probed_value: bool | None = None
         self._new_game()
 
     def _new_game(self) -> None:
@@ -139,10 +140,17 @@ class DiagnosisServer(ThreadingHTTPServer):
             self.n_inputs = sum(1 for n in self.nodes if n["type"] == "input")
             self.n_gates = gate_count
             break
+        else:
+            # Exhausted all attempts — build a minimal guaranteed circuit
+            self.nodes = generate_circuit(3, 4, seed=42)
+            self.fault = inject_fault(self.nodes, seed=1)
+            self.n_inputs = sum(1 for n in self.nodes if n["type"] == "input")
+            self.n_gates = sum(1 for n in self.nodes if n["type"] in ("and", "or", "not"))
         self.input_vector = None
         self.probes_used = 0
         self.diagnosis_submitted = False
         self.correct = None
+        self._last_probed_value = None
         self.max_probes = min(MAX_PROBES, max(1, self.n_gates))
         self.events = [
             f"New circuit: {self.n_inputs} inputs, {self.n_gates} gates. Find the faulty gate!",
@@ -325,6 +333,7 @@ class DiagnosisHandler(BaseHTTPRequestHandler):
                 kwargs["tool_choice"] = tc
             response = server.openai_client.chat.completions.create(**kwargs)
         except Exception as exc:
+            server._messages.pop()  # remove orphaned turn prompt
             server.events.insert(0, f"LLM error: {exc}")
             server.events = server.events[:12]
             self._send_json(_make_payload(server))
@@ -614,7 +623,7 @@ function render(){
     let cls = `node-rect ${n.type}`;
     if(n.type !== "input" && n.type !== "output") cls += " gate";
     if(state.fault_revealed && state.fault_revealed.node === n.id) cls += " faulty";
-    if(state.probed_node === n.id || (state.input_vector && state.probes_used > 0)) cls += " probed";
+    if(state.probed_node === n.id) cls += " probed";
     const onClick = (n.type==="and"||n.type==="or"||n.type==="not")
       ? `onclick="onGateClick(${n.id})"` : "";
     svg += `<rect class="${cls}" x="${n.x}" y="${n.y}" width="${n.w}" height="${n.h}" ${onClick}/>`;
@@ -738,6 +747,7 @@ async function agentMove(){
   selectedGate = null;
   document.getElementById("agentBtn").disabled = state.diagnosis_submitted;
   document.getElementById("agentBtn").textContent = state.diagnosis_submitted ? "Game Over" : "Agent Move";
+  document.getElementById("autoBtn").disabled = state.diagnosis_submitted;
   render();
   return state;
 }

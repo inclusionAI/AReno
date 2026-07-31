@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from game import MAX_PROBES, make_prompt  # noqa: E402
+
+logger = logging.getLogger(__name__)
 
 
 def load_training_dataset(dataset_path: str, *, default_loader, **_: object) -> list[dict]:
@@ -29,6 +32,7 @@ def load_training_dataset(dataset_path: str, *, default_loader, **_: object) -> 
         # Ensure fault field exists
         fault = record.get("fault")
         if not isinstance(fault, dict):
+            logger.warning("Record %s is missing a valid fault dict; using sentinel.", record.get("id", index))
             record["fault"] = {"node": -1, "stuck_value": 0}
 
         # Generate prompt (does NOT include fault info)

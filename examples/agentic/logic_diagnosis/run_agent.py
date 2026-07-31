@@ -69,6 +69,7 @@ async def _run_episode(item, client) -> list[AgentTrajectoryTurn]:
         "input_vector": None,
         "probes_used": 0,
         "diagnosis_submitted": False,
+        "max_probes": max_probes,
     }
 
     for turn_index in range(1, max_turns + 1):
@@ -118,7 +119,7 @@ async def _run_episode(item, client) -> list[AgentTrajectoryTurn]:
                     content = raw.get("choices", [{}])[0].get("message", {}).get("content", "")
                 else:
                     content = getattr(getattr(getattr(raw, "choices", [None])[0], "message", None), "content", "")
-            except Exception:
+            except (AttributeError, IndexError, KeyError, TypeError):
                 content = str(raw)[:500]
             logger.warning(
                 "Logic diagnosis model returned no executable tool call on turn %d. "
@@ -286,6 +287,10 @@ def _tool_inspect_node(args: dict, nodes: list[dict], fault: dict, state: dict) 
     if node["type"] == "output":
         return {"error": f"node {node_id} is the output node — use set_input_vector to observe it"}
 
+    max_probes = state.get("max_probes", MAX_PROBES)
+    if state["probes_used"] >= max_probes:
+        return {"error": f"out of probes ({max_probes} max)"}
+
     state["probes_used"] += 1
     values = evaluate(nodes, state["input_vector"], fault)
 
@@ -294,7 +299,7 @@ def _tool_inspect_node(args: dict, nodes: list[dict], fault: dict, state: dict) 
         "node_type": node["type"],
         "probed_value": values[node_id],
         "probes_used": state["probes_used"],
-        "probes_remaining": MAX_PROBES - state["probes_used"],
+        "probes_remaining": max_probes - state["probes_used"],
     }
 
 
