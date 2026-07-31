@@ -4,6 +4,7 @@ Tests cover:
 - Normal state transition flow
 - Timeout handling
 - Worker/Router failure scenarios
+- Cleanup on failure
 - Input validation
 - Default behavior (backward compatibility)
 - Metrics isolation
@@ -219,6 +220,83 @@ class TestReadinessStateMachine:
         durations = sm.get_stage_durations_for_metrics()
         assert "model_loading" in durations
         assert durations["model_loading"] >= 10  # At least 10ms
+
+    def test_cleanup_called_on_failure(self):
+        """CPU-09: Registered cleanup is called when entering FAILED."""
+        cleanup_called = []
+
+        def my_cleanup():
+            cleanup_called.append(True)
+
+        sm = ReadinessStateMachine(enabled=True)
+        sm.register_cleanup(my_cleanup)
+
+        sm.mark_failed(error="something went wrong")
+
+        assert len(cleanup_called) == 1
+
+    def test_cleanup_not_called_on_normal_completion(self):
+        """CPU-09: Cleanup is NOT called on normal state completion."""
+        cleanup_called = []
+
+        def my_cleanup():
+            cleanup_called.append(True)
+
+        sm = ReadinessStateMachine(enabled=True)
+        sm.register_cleanup(my_cleanup)
+
+        # Complete all stages normally
+        for state in STATE_ORDER[:-1]:
+            sm.mark_stage_complete(state)
+
+        assert sm.current_state == ReadinessState.READY
+        assert len(cleanup_called) == 0
+
+    def test_cleanup_not_called_when_disabled(self):
+        """CPU-09: Cleanup is NOT called when readiness is disabled."""
+        cleanup_called = []
+
+        def my_cleanup():
+            cleanup_called.append(True)
+
+        sm = ReadinessStateMachine(enabled=False)
+        sm.register_cleanup(my_cleanup)
+
+        # These should all be no-ops
+        sm.mark_failed(error="test")
+
+        assert len(cleanup_called) == 0
+
+    def test_multiple_cleanup_fns_called(self):
+        """CPU-09: Multiple cleanup callbacks are all invoked."""
+        order = []
+
+        sm = ReadinessStateMachine(enabled=True)
+        sm.register_cleanup(lambda: order.append(1))
+        sm.register_cleanup(lambda: order.append(2))
+
+        sm.mark_failed(error="fail")
+
+        assert order == [1, 2]
+
+    def test_cleanup_error_does_not_mask_failure(self):
+        """CPU-09: A failing cleanup does not suppress the original error."""
+        called = []
+
+        def broken_cleanup():
+            raise RuntimeError("cleanup oops")
+
+        def good_cleanup():
+            called.append(True)
+
+        sm = ReadinessStateMachine(enabled=True)
+        sm.register_cleanup(broken_cleanup)
+        sm.register_cleanup(good_cleanup)
+
+        sm.mark_failed(error="original failure")
+
+        assert sm.current_state == ReadinessState.FAILED
+        assert called == [True]
 
 
 class TestReadinessValidation:

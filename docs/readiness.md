@@ -277,7 +277,92 @@ areno_serve_readiness_state == -1
 
 ## 完整示例
 
-### 启动并验证
+### 纯 CPU 演示（无需 GPU，无需模型）
+
+这个示例不依赖 GPU 和模型文件，直接运行 Python 就能看到状态机的工作原理：
+
+```bash
+python -c "
+import sys
+sys.path.insert(0, '.')
+from areno.engine.runtime.readiness import ReadinessStateMachine, ReadinessState
+
+sm = ReadinessStateMachine(enabled=True, timeout_per_stage_seconds=5)
+
+def show(label):
+    s = sm.get_status()
+    print(f'{label}: status={s.status}, stage={s.current_stage}')
+
+show('初始状态')
+
+# 推进各个阶段
+import time
+for stage in [ReadinessState.MODEL_LOADING,
+              ReadinessState.WORKER_READY,
+              ReadinessState.ROUTER_READY,
+              ReadinessState.MINIMAL_PROBE]:
+    time.sleep(0.05)
+    sm.mark_stage_complete(stage)
+    show(f'{stage.value} 完成')
+
+# 最终就绪
+show('最终状态')
+assert sm.current_state == ReadinessState.READY
+print('状态机演示通过！')
+"
+```
+
+输出类似：
+
+```
+初始状态: status=not_ready, stage=model_loading
+model_loading 完成: status=not_ready, stage=worker_ready
+worker_ready 完成: status=not_ready, stage=router_ready
+router_ready 完成: status=not_ready, stage=minimal_probe
+minimal_probe 完成: status=ready, stage=ready
+最终状态: status=ready, stage=ready
+状态机演示通过！
+```
+
+还可以演示失败和清理：
+
+```bash
+python -c "
+import sys
+sys.path.insert(0, '.')
+from areno.engine.runtime.readiness import ReadinessStateMachine
+
+cleaned = []
+sm = ReadinessStateMachine(enabled=True, timeout_per_stage_seconds=5)
+sm.register_cleanup(lambda: cleaned.append('worker_cleanup'))
+sm.register_cleanup(lambda: cleaned.append('gpu_cleanup'))
+
+sm.mark_failed(error='CUDA OOM')
+s = sm.get_status()
+print(f'状态: {s.status}, 错误: {s.error}')
+print(f'清理回调执行顺序: {cleaned}')
+assert s.status == 'failed'
+assert cleaned == ['worker_cleanup', 'gpu_cleanup']
+print('失败 + 清理演示通过！')
+"
+```
+
+输出：
+
+```
+状态: failed, 错误: CUDA OOM
+清理回调执行顺序: ['worker_cleanup', 'gpu_cleanup']
+失败 + 清理演示通过！
+```
+
+或者运行完整的单元测试（最快、最全面）：
+
+```bash
+# 运行全部 42 个 CPU 测试
+python -m pytest tests/test_readiness_cpu.py -v
+```
+
+### 启动并验证（需要 GPU）
 
 ```bash
 # 终端 1：启动服务
@@ -298,7 +383,7 @@ done
 curl -s http://localhost:8000/readiness/status | python -m json.tool
 ```
 
-### 程序化使用（Python）
+### 程序化使用（Python，需要服务运行中）
 
 ```python
 import urllib.request, json, time

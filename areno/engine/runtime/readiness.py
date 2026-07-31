@@ -127,6 +127,7 @@ class ReadinessStateMachine:
         self._stage_durations: dict[ReadinessState, float] = {}
         self._failed_stage: ReadinessState | None = None
         self._error_message: str | None = None
+        self._cleanup_fns: list[Callable[[], None]] = []
         self._lock = False  # Simple lock for async safety
 
     @property
@@ -214,6 +215,20 @@ class ReadinessStateMachine:
             next_state = STATE_ORDER[current_idx + 1]
             self.transition_to(next_state)
 
+    def register_cleanup(self, cleanup_fn: Callable[[], None]) -> None:
+        """Register a cleanup callback invoked on failure.
+
+        The callback is called once when the state machine enters the FAILED
+        state.  It receives no arguments and its return value is ignored.
+        Multiple callbacks can be registered; they are called in registration
+        order.  A failing callback does not prevent subsequent callbacks from
+        running or mask the original failure.
+
+        Args:
+            cleanup_fn: A zero-argument callable that releases resources.
+        """
+        self._cleanup_fns.append(cleanup_fn)
+
     def mark_failed(self, stage: ReadinessState | None = None, error: str | None = None) -> None:
         """Mark a stage as failed.
 
@@ -229,6 +244,13 @@ class ReadinessStateMachine:
             self.transition_to(stage)
 
         self.transition_to(ReadinessState.FAILED, error)
+
+        # Invoke registered cleanup callbacks
+        for fn in self._cleanup_fns:
+            try:
+                fn()
+            except Exception:
+                pass  # Don't let cleanup errors mask the original failure
 
     def check_timeout(self) -> bool:
         """Check if current stage has timed out.
