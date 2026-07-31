@@ -5,7 +5,7 @@ from __future__ import annotations
 from areno.api.algorithms import get_algorithm
 
 
-def build_trainer(config, *, instance, dataset, reward_fn, loss_fn):
+def build_trainer(config, *, instance, dataset, reward_fn, loss_fn, reward_fn_batch=None):
     """Create the trainer implementation selected by `config.algo`.
 
     The registry stores lazy trainer loaders, so PPO and other heavier trainers
@@ -13,4 +13,11 @@ def build_trainer(config, *, instance, dataset, reward_fn, loss_fn):
     """
 
     trainer_cls = get_algorithm(config.algo).resolve_trainer_cls()
-    return trainer_cls(config, instance=instance, dataset=dataset, reward_fn=reward_fn, loss_fn=loss_fn)
+    return trainer_cls(
+        config,
+        instance=instance,
+        dataset=dataset,
+        reward_fn=reward_fn,
+        loss_fn=loss_fn,
+        reward_fn_batch=reward_fn_batch,
+    )

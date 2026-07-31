@@ -34,11 +34,12 @@ class PolicyOnlyTrainer:
     advantages are normalized within each prompt group.
     """
 
-    def __init__(self, config, *, instance, dataset, reward_fn, loss_fn):
+    def __init__(self, config, *, instance, dataset, reward_fn, loss_fn, reward_fn_batch=None):
         self.config = config
         self.areno = instance
         self.dataset = dataset
         self.reward_fn = reward_fn
+        self.reward_fn_batch = reward_fn_batch
         self.loss_fn = loss_fn
         self.logger = logging.getLogger(f"{self.__class__.__module__}.{self.__class__.__name__}")
         self._agent_run_fn = None
@@ -242,7 +243,14 @@ class PolicyOnlyTrainer:
                     f"{self._format_agent_filter_diagnostics(filter_diagnostics)}"
                 )
             reward_records = [ctx.reward_record(sample) for sample in samples]
-            rewards = [float(self.reward_fn(record)) for record in reward_records]
+            from areno.api.rewards import compute_rewards
+
+            rewards = compute_rewards(
+                reward_records,
+                self.reward_fn,
+                self.reward_fn_batch,
+                logger=self.logger,
+            )
             rows = ctx._train_rows_from_samples(samples)
             tool_call_count = sum(len(record.tool_calls) for record in reward_records)
             tool_result_count = sum(len(record.tool_results) for record in reward_records)
@@ -519,7 +527,7 @@ class PolicyOnlyTrainer:
         """
 
         import areno.api
-        from areno.api.rewards import compute_group_advantages, make_reward_record
+        from areno.api.rewards import compute_group_advantages, compute_rewards, make_reward_record
 
         train_batch = []
         rewards_all = []
@@ -527,23 +535,26 @@ class PolicyOnlyTrainer:
         for item_idx, (item, result) in enumerate(zip(prompt_batch.items, rollout_results, strict=True)):
             prefix_len = len(item.input_tokens)
             completions = [tokenizer.decode(seq.resp_tokens) for seq in result.sequences]
-            rewards = [
-                float(
-                    self.reward_fn(
-                        make_reward_record(
-                            prompt=item.prompt,
-                            completion=completion,
-                            source_record=item.record,
-                            answer=item.solutions,
-                            tokens=item.input_tokens + seq.resp_tokens,
-                            logprobs=[0.0] * prefix_len + seq.resp_logprobs,
-                            loss_mask=[False] * prefix_len + [True] * len(seq.resp_tokens),
-                            metadata={"prompt_index": item_idx, "sample_index": sample_idx},
-                        )
-                    )
+            records = [
+                make_reward_record(
+                    prompt=item.prompt,
+                    completion=completion,
+                    source_record=item.record,
+                    answer=item.solutions,
+                    tokens=item.input_tokens + seq.resp_tokens,
+                    logprobs=[0.0] * prefix_len + seq.resp_logprobs,
+                    loss_mask=[False] * prefix_len + [True] * len(seq.resp_tokens),
+                    metadata={"prompt_index": item_idx, "sample_index": sample_idx},
                 )
                 for sample_idx, (completion, seq) in enumerate(zip(completions, result.sequences, strict=True))
             ]
+            rewards = compute_rewards(
+                records,
+                self.reward_fn,
+                self.reward_fn_batch,
+                batch_index=item_idx,
+                logger=self.logger,
+            )
             rewards_all += rewards
             # Group-relative advantage: A_i = (r_i - mean(r))/std(r); shared by
             # every response token of sample i.

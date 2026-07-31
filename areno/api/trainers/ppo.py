@@ -44,8 +44,11 @@ class PPOTrainer(PolicyOnlyTrainer):
     without exposing memory APIs to algorithm scripts.
     """
 
-    def __init__(self, config, *, instance, dataset, reward_fn, loss_fn):
-        super().__init__(config, instance=instance, dataset=dataset, reward_fn=reward_fn, loss_fn=loss_fn)
+    def __init__(self, config, *, instance, dataset, reward_fn, loss_fn, reward_fn_batch=None):
+        super().__init__(
+            config, instance=instance, dataset=dataset,
+            reward_fn=reward_fn, loss_fn=loss_fn, reward_fn_batch=reward_fn_batch,
+        )
         # Partially apply PPO knobs so the trainer can pass `loss_fn(data_pack, logp)`
         # without re-specifying clipping/KL configuration each step.
         self.loss_fn = partial(

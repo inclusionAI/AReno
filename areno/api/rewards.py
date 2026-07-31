@@ -4,11 +4,17 @@ GRPO/GSPO compute advantages by standardising rewards within the group of
 `n_samples` rollouts that share a prompt; that helper lives here. Reward
 functions receive one :class:`RewardRecord` per prompt/sample row and return
 one scalar score, which keeps prompt and agentic demos on the same contract.
+
+Users may optionally define ``reward_fn_batch(records) -> list[float]`` in the
+same module to enable batched reward execution.  When present, AReno calls the
+batch interface once per batch instead of looping ``reward_fn`` per record.
 """
 
 from __future__ import annotations
 
 import importlib.util
+import logging
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal
@@ -66,10 +72,25 @@ def load_reward_fn(path: str) -> Callable[[RewardRecord], float]:
     The file must define `reward_fn(record)`, where `record` is a
     :class:`RewardRecord`. Keeping rewards as a loaded callable lets algorithm
     scripts swap verifiers without changing backend or training-loop code.
+
+    If the module also defines ``reward_fn_batch(records) -> list[float]``,
+    it is loaded as a batch reward callable and returned alongside the
+    per-example callable via :func:`load_reward_fns`.
     """
 
-    # spec_from_file_location lets us import a module whose path is supplied
-    # at runtime without polluting `sys.modules` with a stable name.
+    return load_reward_fns(path)[0]
+
+
+def load_reward_fns(
+    path: str,
+) -> tuple[Callable[[RewardRecord], float], Callable[[list[RewardRecord]], list[float]] | None]:
+    """Load the per-example and optional batch reward functions from a file.
+
+    Returns ``(reward_fn, reward_fn_batch)``.  ``reward_fn_batch`` is ``None``
+    when the module does not define it, in which case callers fall back to
+    looping ``reward_fn`` per record.
+    """
+
     module_path = Path(path).expanduser().resolve()
     spec = importlib.util.spec_from_file_location(module_path.stem, module_path)
     if spec is None or spec.loader is None:
@@ -83,7 +104,74 @@ def load_reward_fn(path: str) -> Callable[[RewardRecord], float]:
         raise ValueError(f"{module_path} must define callable reward_fn(record)") from exc
     if not callable(reward_fn):
         raise ValueError(f"{module_path} must define callable reward_fn(record)")
-    return reward_fn
+
+    reward_fn_batch = getattr(module, "reward_fn_batch", None)
+    if reward_fn_batch is not None and not callable(reward_fn_batch):
+        raise ValueError(f"{module_path} defines reward_fn_batch but it is not callable")
+    return reward_fn, reward_fn_batch
+
+
+def validate_batch_rewards(
+    records: list[RewardRecord], rewards: list[float], *, batch_index: int | None = None,
+) -> list[float]:
+    """Check that a batch reward result has the same length as the input.
+
+    Returns the rewards coerced to ``float``.  Raises ``ValueError`` when the
+    counts differ; the error message includes *batch_index* when supplied so
+    the caller can identify which prompt-group batch failed.
+    """
+
+    expected = len(records)
+    actual = len(rewards)
+    if actual != expected:
+        location = f" (batch index {batch_index})" if batch_index is not None else ""
+        raise ValueError(
+            f"reward_fn_batch returned {actual} scores for {expected} records{location}; "
+            f"output cardinality must match input"
+        )
+    return [float(r) for r in rewards]
+
+
+def compute_rewards(
+    records: list[RewardRecord],
+    reward_fn: Callable[[RewardRecord], float],
+    reward_fn_batch: Callable[[list[RewardRecord]], list[float]] | None = None,
+    *,
+    batch_index: int | None = None,
+    logger: logging.Logger | None = None,
+) -> list[float]:
+    """Score a list of reward records, using the batch interface when available.
+
+    When *reward_fn_batch* is provided, it is called once with *records* and
+    the output is validated.  Otherwise each record is scored individually via
+    *reward_fn*.  Execution time is recorded for both paths and logged when a
+    *logger* is supplied.
+    """
+
+    if not records:
+        return []
+
+    if reward_fn_batch is not None:
+        t0 = time.perf_counter()
+        raw_rewards = reward_fn_batch(records)
+        elapsed = time.perf_counter() - t0
+        rewards = validate_batch_rewards(records, raw_rewards, batch_index=batch_index)
+        if logger is not None:
+            logger.info(
+                "batch reward computed records=%d elapsed_ms=%.1f",
+                len(records), elapsed * 1000,
+            )
+        return rewards
+
+    t0 = time.perf_counter()
+    rewards = [float(reward_fn(record)) for record in records]
+    elapsed = time.perf_counter() - t0
+    if logger is not None:
+        logger.info(
+            "per-example reward computed records=%d elapsed_ms=%.1f",
+            len(records), elapsed * 1000,
+        )
+    return rewards
 
 
 def make_reward_record(

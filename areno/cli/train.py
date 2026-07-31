@@ -799,14 +799,17 @@ def run(trainer_config: TrainerConfig):
     from datasets import load_dataset, load_from_disk
 
     import areno.api
-    from areno.api.rewards import load_reward_fn
+    from areno.api.rewards import load_reward_fns
     from areno.api.trainer_factory import build_trainer
 
     trainer_config = resolve_model_refs_for_config(trainer_config)
     _write_dashboard_run_config(trainer_config)
     loss_fn = _loss_fn_for_config(trainer_config)
     reward_fn_path = _reward_fn_path_for_config(trainer_config)
-    reward_fn = load_reward_fn(reward_fn_path) if reward_fn_path else None
+    if reward_fn_path:
+        reward_fn, reward_fn_batch = load_reward_fns(reward_fn_path)
+    else:
+        reward_fn, reward_fn_batch = None, None
 
     api_trainer = areno.api.Trainer(
         trainer_config.world_size,
@@ -822,7 +825,14 @@ def run(trainer_config: TrainerConfig):
         load_dataset=load_dataset,
         load_from_disk=load_from_disk,
     )
-    trainer = build_trainer(trainer_config, instance=api_trainer, dataset=dataset, reward_fn=reward_fn, loss_fn=loss_fn)
+    trainer = build_trainer(
+        trainer_config,
+        instance=api_trainer,
+        dataset=dataset,
+        reward_fn=reward_fn,
+        loss_fn=loss_fn,
+        reward_fn_batch=reward_fn_batch,
+    )
     trainer.fit()
 
 
