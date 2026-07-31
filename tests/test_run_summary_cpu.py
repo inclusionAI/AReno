@@ -326,3 +326,85 @@ class TestSummaryIntegration:
         parsed = json_mod.loads(out)
         assert "loss" not in parsed["metrics"]
         assert "lr" in parsed["metrics"]
+
+
+# ---------------------------------------------------------------------------
+# Tests: safe_len and edge cases
+# ---------------------------------------------------------------------------
+
+class TestSafeLen:
+    """Verify safe_len handles datasets without __len__."""
+
+    def test_safe_len_with_list(self):
+        from areno.cli.run_summary import safe_len
+        assert safe_len([1, 2, 3]) == 3
+
+    def test_safe_len_with_generator(self):
+        from areno.cli.run_summary import safe_len
+
+        def gen():
+            for i in range(5):
+                yield i
+
+        assert safe_len(gen()) == 0
+
+    def test_safe_len_with_iterator(self):
+        from areno.cli.run_summary import safe_len
+        assert safe_len(iter([1, 2, 3])) == 0
+
+    def test_safe_len_with_none(self):
+        from areno.cli.run_summary import safe_len
+        assert safe_len(None) == 0
+
+
+# ---------------------------------------------------------------------------
+# Tests: summary on init failure (should not raise secondary exceptions)
+# ---------------------------------------------------------------------------
+
+class TestSummaryOnFailure:
+    """Verify summary printing does not cause secondary exceptions when
+    the trainer fails during init or _fit_initialized."""
+
+    def test_summary_with_zero_duration(self):
+        """When _run_start_time is None (init failed), duration should be 0."""
+        data = RunSummaryData(algo="sft", model="test")
+        data.outcome = "error"
+        data.duration_s = 0.0
+        data.errors = ["RuntimeError: init failed"]
+        data.metrics = {}
+
+        text = format_run_summary(data)
+        assert "error" in text
+        assert "0s" in text
+        assert "RuntimeError" in text
+
+    def test_summary_with_no_metrics_on_failure(self):
+        """Summary should show placeholder when no metrics recorded."""
+        data = RunSummaryData(algo="ppo", model="test")
+        data.outcome = "error"
+        data.duration_s = 5.0
+        data.errors = ["ValueError: bad config"]
+        data.metrics = {}
+
+        text = format_run_summary(data)
+        assert "(no metrics recorded)" in text
+
+    def test_print_does_not_raise_on_minimal_data(self):
+        """Printing with minimal RunSummaryData should not raise."""
+        import io
+        data = RunSummaryData()  # all defaults
+        stream = io.StringIO()
+        print_run_summary(data, enabled=True, stream=stream)
+        output = stream.getvalue()
+        assert "AReno Training Summary" in output
+        assert "success" in output  # default outcome
+
+    def test_json_fallback_returns_valid_json(self):
+        """When JSON serialization fails, fallback should return valid JSON."""
+        import json as json_mod
+        data = RunSummaryData(algo="sft", model=object())  # model not serializable
+
+        out = format_run_summary(data, json_output=True)
+        parsed = json_mod.loads(out)
+        assert "outcome" in parsed
+        assert parsed["outcome"] == "success"

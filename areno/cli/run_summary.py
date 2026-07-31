@@ -10,8 +10,11 @@ interruption, *and* failure without replacing the original traceback.
 from __future__ import annotations
 
 import json
+import logging
 import sys
 from typing import TextIO
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -135,9 +138,10 @@ def format_run_summary(
                 indent=2,
                 allow_nan=False,
             )
-        except (ValueError, TypeError):
+        except (ValueError, TypeError) as exc:
             # Fallback: if any value is not JSON-serializable, return a
             # minimal JSON with just the outcome.
+            logger.warning("JSON summary serialization failed, using fallback: %s", exc)
             return json.dumps(
                 {"outcome": data.outcome, "errors": bounded_errors},
                 ensure_ascii=False,
@@ -206,3 +210,17 @@ def print_run_summary(
     text = format_run_summary(data, json_output=json_output)
     out = stream if stream is not None else sys.stderr
     print(text, file=out, flush=True)
+
+
+def safe_len(obj) -> int:
+    """Return ``len(obj)`` or 0 if the object does not support ``len()``.
+
+    Some datasets are iterators or generators without ``__len__``; calling
+    ``len()`` on them raises ``TypeError``.  This helper provides a safe
+    fallback so summary statistics do not crash on such datasets.
+    """
+
+    try:
+        return len(obj)
+    except TypeError:
+        return 0

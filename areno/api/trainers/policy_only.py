@@ -69,11 +69,11 @@ class PolicyOnlyTrainer:
             try:
                 self._print_run_summary(outcome, error_msgs)
             except Exception:
-                pass
+                self.logger.exception("Failed to print run-end summary")
             try:
                 self.areno.close()
             except Exception:
-                pass
+                self.logger.exception("Failed to close areno backend")
 
     def _print_run_summary(self, outcome: str, errors: list[str]) -> None:
         """Print a structured terminal summary when a run ends."""

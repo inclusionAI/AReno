@@ -449,11 +449,11 @@ class PPOTrainer(PolicyOnlyTrainer):
             try:
                 self._print_run_summary(outcome, error_msgs)
             except Exception:
-                pass
+                self.logger.exception("Failed to print run-end summary")
             try:
                 self.areno.close()
             except Exception:
-                pass
+                self.logger.exception("Failed to close areno backend")
 
     def _score_logprobs(self, role: str, token_rows: list[list[int]]) -> list[list[float]]:
         return self.areno.score_logprobs(role, token_rows, microbatch_size=self.config.score_micro_bs)

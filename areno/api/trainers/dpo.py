@@ -72,11 +72,11 @@ class DPOTrainer:
             try:
                 self._print_run_summary(outcome, error_msgs)
             except Exception:
-                pass
+                self.logger.exception("Failed to print run-end summary")
             try:
                 self.areno.close()
             except Exception:
-                pass
+                self.logger.exception("Failed to close areno backend")
 
     def _print_run_summary(self, outcome: str, errors: list[str]) -> None:
         """Print a structured terminal summary when a run ends."""
@@ -106,7 +106,9 @@ class DPOTrainer:
         tokenizer = self.areno.get_tokenizer()
         configure_chat_template_enable_thinking(tokenizer, getattr(self.config, "chat_template_enable_thinking", None))
         # Record total dataset size for summary statistics.
-        self._summary_data.samples_processed = len(self.dataset)
+        # Use safe_len because some datasets may not implement __len__.
+        from areno.cli.run_summary import safe_len
+        self._summary_data.samples_processed = safe_len(self.dataset)
         self._dpo_total_skipped = 0
         step = 0
         max_seq_len = self.config.max_prompt_tokens + self.config.max_new_tokens

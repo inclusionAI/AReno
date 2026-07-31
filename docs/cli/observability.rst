@@ -183,8 +183,15 @@ When a training run finishes—whether it succeeds, is interrupted by
 ``Ctrl-C``, or fails with an exception—AReno prints a compact summary block to
 stderr.  The summary includes the outcome, wall-clock duration, final step and
 epoch, sample counts, the last recorded metrics, and a bounded list of error
-messages (at most five).  The original traceback (if any) is preserved and
-printed *before* the summary so it is never lost.
+messages (at most five).  The original traceback (if any) is preserved.
+
+.. note::
+
+   The summary is printed in the ``finally`` block of ``fit()``.  When an
+   exception causes the run to fail, Python's default behaviour prints the
+   traceback *after* the ``finally`` block completes, so the summary typically
+   appears *before* the traceback on stderr.  Both are preserved and neither
+   is lost.
 
 The feature is disabled by default.  Two CLI flags control it:
 
