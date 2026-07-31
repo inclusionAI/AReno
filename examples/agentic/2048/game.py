@@ -25,6 +25,20 @@ SPAWN_4_PROB = 0.1
 # 2.0 puts a full-no-op episode at -64 (baseline-scale), making each wasted move
 # genuinely costly against a merge score of comparable magnitude.
 INVALID_PENALTY = 2.0
+# Bonus for any valid tool call (total_moves > 0).  The penalty for no-tool-call
+# is ~ -(baseline + INVALID_PENALTY * cap) ≈ -165 to -230.  Without a positive
+# offset, a one-move tool call that scores 0 (board already terminal or no merge)
+# gets reward ~0, indistinguishable from the no-tool penalty from the policy's
+# perspective.  This floor forces the baseline up so that tool-calling stays
+# clearly better than silence even on average boards, preventing the GSPO
+# advantage-collapse cycle (tool calls → near-zero reward → gradient flip-flop
+# → collapse to no-tool).
+TOOL_CALL_BONUS = 15.0
+# Per-sample bonus offsets so identical moves within a prompt group
+# (sample_index 0, 1, 2, 3 …) get distinguishable rewards, preventing
+# the GSPO advantage-collapse cycle.  Rotated across 8 values so that
+# n_samples up to 8 are well-covered.
+_PER_SAMPLE_OFFSETS = [0.0, 1.5, 3.0, 4.5, 0.8, 2.3, 3.8, 5.3]
 WIN_TILE = 2048
 
 logger = logging.getLogger(__name__)
@@ -349,6 +363,7 @@ def score_moves(
     cap: int = DEFAULT_EPISODE_CAP,
     trials: int = 8,
     record_id: object = "?",
+    sample_index: int = 0,
 ) -> float:
     """Replay ``moves`` and return one rollout reward scalar.
 
@@ -356,11 +371,17 @@ def score_moves(
     differs in how it parses ``moves``. The reward is a *length-matched*
     advantage over the random baseline (a short plan is compared against a random
     baseline at the same move count, not the full 32-move baseline that would
-    otherwise drown it), minus the no-op penalty. A zero-move output
+    otherwise drown it), minus the no-op penalty, plus a tool-call bonus. A zero-move output
     (empty/unparseable ``moves``) is penalized worse than any >=1-move episode:
     under the length-matched rule zero moves would collapse the baseline to 0 and
     let "not outputting" coast at reward ~0. Episode score, max tile, invalid-move
     rate, matched baseline, improvement, and reward are logged for observability.
+
+    The ``sample_index`` adds a deterministic per-sample offset to the
+    tool-call bonus so that identical action sequences within a prompt group
+    still receive slightly different rewards.  This breaks the GSPO group
+    advantage collapse (all samples identical → all advantages zero → no
+    gradient).
     """
 
     board = normalize_board(board)
@@ -389,7 +410,10 @@ def score_moves(
     else:
         matched = float(random_episode(board, seed=seed, cap=result.total_moves, trials=trials)["score"])
     improvement = float(result.score) - matched
-    reward = improvement - INVALID_PENALTY * result.invalid_moves
+    reward = improvement - INVALID_PENALTY * result.invalid_moves + TOOL_CALL_BONUS
+    # Per-sample offset breaks symmetry when all outputs are identical
+    # (common early in training with deterministic sampling).
+    reward += _PER_SAMPLE_OFFSETS[sample_index % len(_PER_SAMPLE_OFFSETS)]
     logger.info(
         "2048 episode id=%s score=%d max_tile=%d invalid_rate=%.3f baseline=%.1f improvement=%.3f reward=%.3f moves=%d",
         record_id,

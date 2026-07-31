@@ -48,6 +48,7 @@ def reward_fn(record: Any) -> float:
         baseline_score=baseline_score,
         trials=int(source["random_baseline"].get("trials", 8)),
         record_id=record_id,
+        sample_index=int(record.metadata.get("sample_index", 0)),
     )
 
 
