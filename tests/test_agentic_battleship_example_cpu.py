@@ -690,6 +690,36 @@ def test_battleship_play_llm_parse_coord_from_response():
     assert play_llm._parse_coord_from_response(EmptyResponse()) is None
 
 
+def test_battleship_completion_std_consistent_across_evaluators():
+    """completion_std uses the same sample-std (n-1)口径 across the three evaluators.
+
+    Regression: play_llm reported population std (statistics.pstdev, n) while
+    evaluate and compare_modes reported sample std (n-1), so completion_std was
+    not comparable across evaluators.
+    """
+    import math
+    import statistics as _statistics
+
+    evaluate = _load_module("evaluate")
+    compare_modes = _load_module("compare_modes")
+    play_llm = _load_module("play_llm")
+
+    completions = [0.0, 0.5, 0.75, 1.0, 0.25, 0.6]
+    results = [{"win": c == 1.0, "completion": c, "shots_used": 11, "invalid_shots": 0} for c in completions]
+    args = SimpleNamespace(model="policy", base_url="x")
+
+    # evaluate and compare_modes share the identical hand-rolled sample-std formula.
+    assert evaluate._std(completions) == compare_modes._std(completions)
+    sample_std = evaluate._std(completions)
+    pop_std = _statistics.pstdev(completions)
+    assert sample_std != pop_std  # distinguishable only when not all values are equal
+
+    # play_llm now matches the others (sample std), not the old population std.
+    summary = play_llm._summarize(results, args, max_turns=40)
+    assert math.isclose(summary["completion_std"], sample_std, rel_tol=1e-9)
+    assert not math.isclose(summary["completion_std"], pop_std, rel_tol=1e-9)
+
+
 def test_battleship_evaluate_fake_player():
     """Fake deterministic player produces expected behavior."""
     evaluate = _load_module("evaluate")

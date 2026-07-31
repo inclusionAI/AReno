@@ -228,7 +228,9 @@ def _summarize(results: list[dict], args: argparse.Namespace, *, max_turns: int)
         "wins": wins,
         "win_rate": wins / total if total else 0.0,
         "completion_mean": statistics.mean(completions) if completions else 0.0,
-        "completion_std": statistics.pstdev(completions) if len(completions) > 1 else 0.0,
+        # Sample std (n-1), matching evaluate._std / compare_modes._std so completion_std
+        # is comparable across the three evaluators.
+        "completion_std": statistics.stdev(completions) if len(completions) > 1 else 0.0,
         "shots_to_win_mean": statistics.mean(shots_to_win) if shots_to_win else max_turns,
         "invalid_shots_mean": statistics.mean([r["invalid_shots"] for r in results]) if results else 0.0,
     }
