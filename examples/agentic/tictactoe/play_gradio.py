@@ -11,6 +11,7 @@ Usage (Kaggle / local):
 from __future__ import annotations
 
 import argparse
+import os
 import random
 import re
 import sys
@@ -225,13 +226,14 @@ def main():
 
     global tokenizer, model
     print(f"Loading model from {args.model_path} ...")
-    is_local = Path(args.model_path).exists()
-    kwargs = {"trust_remote_code": True}
-    if is_local:
-        kwargs["local_files_only"] = True
-    tokenizer = AutoTokenizer.from_pretrained(args.model_path, **kwargs)
+    from os.path import isdir
+    if isdir(args.model_path):
+        os.environ["HF_HUB_OFFLINE"] = "1"
+        os.environ["TRANSFORMERS_OFFLINE"] = "1"
+    tokenizer = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=True)
     model = AutoModelForCausalLM.from_pretrained(
-        args.model_path, torch_dtype=torch.float16, device_map="auto", **kwargs
+        args.model_path, torch_dtype=torch.float16, device_map="auto",
+        trust_remote_code=True,
     )
     print("Model loaded. Starting Gradio UI ...")
 
