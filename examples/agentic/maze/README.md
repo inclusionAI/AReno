@@ -26,14 +26,18 @@ self-contained (no external services).
 
 ## Generate Mazes
 
+Use 5×5 mazes with `--max-steps 10` for best training results (shortest path
+is 6-8 steps; larger mazes cause multi-turn context to exceed limits):
+
 ```bash
 python examples/agentic/maze/dataset_generator.py \
   --output /tmp/areno-maze.jsonl \
-  --count 2048 \
+  --count 512 \
   --seed 2026 \
-  --width 7 \
-  --height 7 \
-  --vision-radius 1
+  --width 5 \
+  --height 5 \
+  --vision-radius 1 \
+  --max-steps 10
 ```
 
 Options:
@@ -45,22 +49,40 @@ Options:
 | `--width` | 7 | Maze width (min 5, auto-rounded to odd) |
 | `--height` | 7 | Maze height (min 5, auto-rounded to odd) |
 | `--vision-radius` | 1 | Agent's vision radius (1 = 3×3 view) |
-| `--max-steps` | width×height | Maximum steps per episode |
+| `--max-steps` | width×height | Maximum steps per episode (recommended: 10 for 5×5) |
 
 ## Run Training
 
 ```bash
 areno train \
-  --ckpt Qwen/Qwen3-1.7B \
+  --ckpt Qwen/Qwen3-0.6B \
   --dataset-path /tmp/areno-maze.jsonl \
   --dataset-loader-fn examples/agentic/maze/dataset_loader.py \
   --reward-fn-path examples/agentic/maze/reward.py \
   --agent-fn examples/agentic/maze/run_agent.py \
   --algo gspo \
-  --batch-size 2 \
-  --n-samples 4 \
-  --max-new-tokens 64
+  --batch-size 1 \
+  --n-samples 2 \
+  --max-new-tokens 64 \
+  --disable-thinking \
+  --attn-backend native \
+  --max-context-len 16384 \
+  --tp-size 2 \
+  --world-size 2 \
+  --max-steps 500 \
+  --save-interval 100 \
+  --mini-bs 1 \
+  --adam-8bit \
+  --activation-checkpointing
 ```
+
+> **Tips** (verified on 2×A10 24GB):
+> * `--disable-thinking`: Qwen3 thinking mode wastes tokens for single-step
+>   direction choices; disabling it speeds up training 2.5× with better reward
+> * `--max-context-len 16384`: multi-turn episodes accumulate context; 10-step
+>   episodes produce ~8K tokens per trajectory
+> * `--attn-backend native`: avoids Triton/FLA version conflicts
+> * `--adam-8bit --activation-checkpointing`: required for 24GB GPUs
 
 ## How It Works
 
@@ -77,8 +99,11 @@ areno train \
    → append tool result with new observation → repeat until goal or max steps.
 
 4. **Reward**: `reward_fn` extracts the move sequence from `tool_calls`, replays
-   it against the initial state, and scores: goal reached → `1.0 − penalty ×
-   excess_steps`; not reached → `−0.5`; invalid moves → `−0.1` each.
+   it against the initial state, and scores via BFS closest-approach shaping:
+   goal reached → `1.0 − penalty × excess_steps`; not reached → `−0.5 + 0.3 ×
+   (1 − min_dist / maze_size)` (distance-based gradient); invalid moves →
+   `−0.1` each. An optional PBRS mode is available via `source_record["reward_mode"]
+   = "pbrs"`.
 
 ## Testing
 
