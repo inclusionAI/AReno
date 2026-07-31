@@ -389,73 +389,81 @@ def test_missing_tool_call_returns_none():
 # ---------------------------------------------------------------------------
 # Reward
 # ---------------------------------------------------------------------------
+def _simple_nodes():
+    return [
+        {"id": 0, "type": "input", "inputs": []},
+        {"id": 1, "type": "input", "inputs": []},
+        {"id": 2, "type": "and", "inputs": [0, 1]},
+        {"id": 3, "type": "or", "inputs": [0, 1]},
+        {"id": 4, "type": "not", "inputs": [2]},
+        {"id": 5, "type": "output", "inputs": [4]},
+    ]
+
+
 def test_reward_correct_diagnosis():
     reward = _load_module("reward")
-    fault = {"node": 5, "stuck_value": 0}
+    nodes = _simple_nodes()
+    fault = {"node": 2, "stuck_value": 0}
     record = SimpleNamespace(
-        source_record={"fault": fault},
+        source_record={"nodes": nodes, "fault": fault, "max_probes": 5},
         tool_calls=[
             {"name": "set_input_vector", "arguments": json.dumps({"inputs": [True, False]})},
-            {"name": "submit_diagnosis", "arguments": json.dumps({"node_id": 5, "fault_type": "stuck_at_0"})},
+            {"name": "submit_diagnosis", "arguments": json.dumps({"node_id": 2, "fault_type": "stuck_at_0"})},
         ],
     )
     score = reward.reward_fn(record)
-    assert score >= 0.99, f"expected ~1.0, got {score}"  # 0 probes
+    assert 0.8 <= score <= 1.0, f"expected 0.8-1.0, got {score}"
 
 
 def test_reward_wrong_diagnosis():
     reward = _load_module("reward")
-    fault = {"node": 5, "stuck_value": 0}
+    nodes = _simple_nodes()
+    fault = {"node": 2, "stuck_value": 0}
     record = SimpleNamespace(
-        source_record={"fault": fault},
+        source_record={"nodes": nodes, "fault": fault, "max_probes": 5},
         tool_calls=[
-            {"name": "submit_diagnosis", "arguments": json.dumps({"node_id": 3, "fault_type": "stuck_at_1"})},
+            {"name": "set_input_vector", "arguments": json.dumps({"inputs": [True, True]})},
+            {"name": "submit_diagnosis", "arguments": json.dumps({"node_id": 2, "fault_type": "stuck_at_1"})},
         ],
     )
-    assert reward.reward_fn(record) == 0.0
+    # submitted wrong → negative
+    assert reward.reward_fn(record) < 0
 
 
 def test_reward_no_submission():
     reward = _load_module("reward")
-    # Empty completion → -1.0
+    nodes = _simple_nodes()
     record = SimpleNamespace(
-        source_record={"fault": {"node": 5, "stuck_value": 0}},
+        source_record={"nodes": nodes, "fault": {"node": 2, "stuck_value": 0}},
         tool_calls=[],
-        completion="",
     )
     assert reward.reward_fn(record) == -1.0
-    # Some text but no tool calls → between -0.5 and -0.3
-    record_text = SimpleNamespace(
-        source_record={"fault": {"node": 5, "stuck_value": 0}},
-        tool_calls=[],
-        completion='{"inputs": [true, false]}',
-    )
-    assert -0.5 <= reward.reward_fn(record_text) <= -0.3
 
 
 def test_reward_probes_reduce_score():
     reward = _load_module("reward")
-    fault = {"node": 5, "stuck_value": 0}
+    nodes = _simple_nodes()
+    fault = {"node": 2, "stuck_value": 0}
 
-    # Correct with 10 probes → min score for correct diagnosis
     record_many = SimpleNamespace(
-        source_record={"fault": fault},
+        source_record={"nodes": nodes, "fault": fault, "max_probes": 10},
         tool_calls=[
-            {"name": "inspect_node", "arguments": "{}"},
-        ] * 10
-        + [{"name": "submit_diagnosis", "arguments": json.dumps({"node_id": 5, "fault_type": "stuck_at_0"})}],
+            {"name": "set_input_vector", "arguments": json.dumps({"inputs": [True, True]})},
+            {"name": "inspect_node", "arguments": json.dumps({"node_id": 2})},
+            {"name": "inspect_node", "arguments": json.dumps({"node_id": 3})},
+            {"name": "submit_diagnosis", "arguments": json.dumps({"node_id": 2, "fault_type": "stuck_at_0"})},
+        ],
     )
     score_many = reward.reward_fn(record_many)
 
-    # Correct with 0 probes → max score
     record_few = SimpleNamespace(
-        source_record={"fault": fault},
+        source_record={"nodes": nodes, "fault": fault, "max_probes": 10},
         tool_calls=[
-            {"name": "submit_diagnosis", "arguments": json.dumps({"node_id": 5, "fault_type": "stuck_at_0"})},
+            {"name": "set_input_vector", "arguments": json.dumps({"inputs": [True, True]})},
+            {"name": "submit_diagnosis", "arguments": json.dumps({"node_id": 2, "fault_type": "stuck_at_0"})},
         ],
     )
     score_few = reward.reward_fn(record_few)
-
     assert score_few > score_many, f"{score_few} should be > {score_many}"
 
 
