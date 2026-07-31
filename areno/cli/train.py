@@ -186,6 +186,8 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
     args.policy_sync_bucket_mb = getattr(args, "policy_sync_bucket_mb", 64)
     args.train_devices = _parse_cuda_devices(getattr(args, "train_devices", None), "--train-devices")
     args.rollout_devices = _parse_cuda_devices(getattr(args, "rollout_devices", None), "--rollout-devices")
+    if args.train_devices is not None:
+        args.world_size = len(args.train_devices)
     args.rollout_tp_size = getattr(args, "rollout_tp_size", None)
     args.policy_sync_bucket_mb = getattr(args, "policy_sync_bucket_mb", 64)
     smoke_infer = bool(getattr(args, "smoke_infer", False))
@@ -235,8 +237,6 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
         raise click.UsageError("--world-size must be positive")
     if args.world_size % args.tp_size != 0:
         raise click.UsageError("--world-size must be divisible by --tp-size")
-    if args.train_devices is not None and len(args.train_devices) != args.world_size:
-        raise click.UsageError("--train-devices count must equal --world-size")
     has_rollout_topology = args.rollout_devices is not None or args.rollout_tp_size is not None
     if has_rollout_topology and not algorithm.requires_rollout:
         raise click.UsageError("independent rollout devices are only valid for rollout-based algorithms")
@@ -1319,13 +1319,21 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     is_flag=True,
     help="Dummy-load the model and run one minimal synthetic train step, then exit.",
 )
-@click.option("--tp-size", type=int, default=4, show_default=True, help="Tensor parallel size for the backend.")
+@click.option(
+    "--tp-size",
+    "--train-tp-size",
+    "tp_size",
+    type=int,
+    default=4,
+    show_default=True,
+    help="Tensor parallel size for training.",
+)
 @click.option("--world-size", type=int, default=8, show_default=True, help="Total device count for the backend.")
 @click.option(
     "--train-devices",
     type=str,
     default=None,
-    help="CUDA devices for training, with inclusive ranges such as 0..7,10; count must equal --world-size.",
+    help="CUDA devices for training, with inclusive ranges such as 0..7,10; overrides --world-size.",
 )
 @click.option(
     "--rollout-tp-size",

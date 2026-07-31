@@ -436,7 +436,6 @@ def test_independent_rollout_topology_parses_distinct_cuda_devices() -> None:
         ({"train_devices": "0..2,2", "world_size": 4}, "--train-devices must not contain duplicate"),
         ({"train_devices": "0,-1", "world_size": 2}, "--train-devices must not contain negative"),
         ({"train_devices": "0,0", "world_size": 2}, "--train-devices must not contain duplicate"),
-        ({"train_devices": "0", "world_size": 2}, "--train-devices count must equal --world-size"),
         (
             {"world_size": 2, "rollout_devices": "2,3,4", "rollout_tp_size": 2},
             "--rollout-devices count must be divisible",
@@ -472,6 +471,47 @@ def test_cuda_device_ranges_are_inclusive_and_composable() -> None:
         *range(11, 14),
         20,
     ]
+
+
+def test_train_devices_infer_world_size() -> None:
+    cfg = _trainer_config_from_options(
+        **_options(
+            reward_ckpt="reward",
+            train_devices="0..3",
+            world_size=99,
+            tp_size=2,
+        )
+    )
+
+    assert cfg.world_size == 4
+    assert cfg.train_devices == [0, 1, 2, 3]
+
+
+def test_train_tp_size_alias_is_accepted(monkeypatch) -> None:
+    captured = []
+    monkeypatch.setattr(train_cli, "run", lambda config: captured.append(config))
+
+    result = CliRunner().invoke(
+        train_cli.train_command,
+        [
+            "--algo",
+            "sft",
+            "--ckpt",
+            "actor",
+            "--dataset-path",
+            "dataset",
+            "--dataset-loader-fn",
+            "examples/sft/alpaca/dataset_loader.py",
+            "--train-devices",
+            "0..3",
+            "--train-tp-size",
+            "2",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured[0].world_size == 4
+    assert captured[0].tp_size == 2
 
 
 def test_offline_algorithm_rejects_independent_rollout_devices() -> None:

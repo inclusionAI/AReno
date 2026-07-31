@@ -80,18 +80,20 @@ Built-in algorithms: ``sft``, ``dpo``, ``gspo``, ``grpo``, ``ppo``.
    indices have completed, even if the current epoch still has more batches.
 
 ``--world-size INTEGER``
-   Total device count for the backend. Default: ``8``.
+   Total training device count. Default: ``8``. When ``--train-devices`` is
+   provided, AReno infers this value from the expanded device list.
 
-``--tp-size INTEGER``
-   Tensor parallel size for the backend. Default: ``4``.
+``--tp-size INTEGER``, ``--train-tp-size INTEGER``
+   Tensor parallel size for training. The two option names are aliases.
+   Default: ``4``.
 
 ``world-size`` must be divisible by ``tp-size``.
 
 ``--train-devices TEXT``
    Comma-separated logical CUDA device indices or inclusive ranges used by
-   training. For example, ``0..8,11..29`` includes both endpoints. The expanded
-   count must equal ``world-size``. When omitted, AReno uses ``0`` through
-   ``world-size - 1``.
+   training. For example, ``0..8,11..29`` includes both endpoints. AReno
+   derives ``world-size`` from the expanded count. When omitted, AReno uses
+   ``0`` through ``world-size - 1``.
 
 Rollout
 ~~~~~~~
