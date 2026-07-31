@@ -61,7 +61,7 @@ def generate_records(
 
     attempts = 0
     for record_index, (n_inputs, n_gates, fault_class) in enumerate(
-        zip(target_inputs, target_gates, target_faults, strict=True), start=1
+        zip(target_inputs, target_gates, target_faults), start=1
     ):
         fault_type, stuck_value = fault_class
         while attempts < max_attempts:
