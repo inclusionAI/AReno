@@ -109,7 +109,16 @@ class Qwen3MoeExperts(nn.Module):
             self.local_num_experts,
         )
         if x.shape[0] == 0:
-            return all_reduce(flat.new_zeros(flat.shape))
+            # Every TP rank must produce gradients for the same parameter set.
+            # Keep a zero-valued graph edge to the local experts and router
+            # even when this rank receives no routes; otherwise its later TP
+            # gradient all-reduces diverge from ranks that did receive tokens.
+            zero = (
+                self.gate_up_weight.reshape(-1)[0] * 0
+                + self.down_weight.reshape(-1)[0] * 0
+                + topk_weight.sum().to(dtype=self.gate_up_weight.dtype) * 0
+            )
+            return all_reduce(flat.new_zeros(flat.shape) + zero)
         hidden = _areno_grouped_linear_no_compile(x.contiguous(), self.gate_up_weight, tokens_per_expert)
         log_once("qwen3_moe_silu_and_mul", "using ARENO fused silu_and_mul kernel for Qwen3-MoE experts")
         hidden = (

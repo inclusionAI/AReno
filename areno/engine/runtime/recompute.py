@@ -51,6 +51,7 @@ def checkpoint_layer(
     )
 
 
+@_disable_dynamo_frame
 def checkpoint_routed_moe_layer(
     attention_fn: Callable[..., torch.Tensor],
     post_attention_norm: Callable[[torch.Tensor], torch.Tensor],
