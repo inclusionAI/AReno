@@ -54,3 +54,10 @@ AReno documentation
    Troubleshooting <troubleshooting/index>
    FAQ <troubleshooting/faq>
    Report an issue <troubleshooting/report-issue>
+
+.. toctree::
+   :hidden:
+   :maxdepth: 1
+   :caption: Contributing
+
+   Documentation QA <contributing/documentation-qa>
