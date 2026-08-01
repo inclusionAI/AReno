@@ -99,6 +99,51 @@ class LossFunctionTest(unittest.TestCase):
         self.assertIsNotNone(logprobs.grad)
         self.assertEqual(float(stats["response_len"]), 1.5)
 
+    def test_grpo_current_surrogate_ratio_stats_stay_at_one(self):
+        """Current GRPO ratio stats stay at one despite stale rollout logprobs."""
+        data_pack = {
+            "prompt_mask": torch.tensor([[True, True, False, False]]),
+            "advantages": torch.tensor([[0.0, 0.0, 1.0, -1.0]]),
+            "logprobs": torch.tensor([[0.0, 0.0, -1.2, -2.4]]),
+        }
+        logprobs = torch.tensor([[0.0, -0.2, -0.4]], requires_grad=True)
+
+        _, stats = grpo_loss_fn(data_pack, logprobs)
+
+        self.assertAlmostEqual(float(stats["ratio_mean"]), 1.0, places=6)
+        self.assertAlmostEqual(float(stats["ratio_std"]), 0.0, places=6)
+
+    def test_grpo_current_surrogate_reports_rollout_drift_separately(self):
+        """Rollout-vs-train drift remains visible outside current ratio stats."""
+        data_pack = {
+            "prompt_mask": torch.tensor([[True, True, False, False]]),
+            "advantages": torch.tensor([[0.0, 0.0, 1.0, -1.0]]),
+            "logprobs": torch.tensor([[0.0, 0.0, -0.7, -0.1]]),
+        }
+        logprobs = torch.tensor([[0.0, -0.2, -0.4]], requires_grad=True)
+
+        _, stats = grpo_loss_fn(data_pack, logprobs)
+
+        self.assertAlmostEqual(float(stats["rollout_logprobs_mean"]), -0.4, places=6)
+        self.assertAlmostEqual(float(stats["train_logprobs_mean"]), -0.3, places=6)
+        self.assertAlmostEqual(float(stats["logp_diff_mean"]), -0.1, places=6)
+        self.assertAlmostEqual(float(stats["logp_abs_diff_mean"]), 0.4, places=6)
+
+    def test_grpo_current_surrogate_ratio_still_backpropagates(self):
+        """A unit-valued current surrogate ratio still carries policy gradients."""
+        data_pack = {
+            "prompt_mask": torch.tensor([[True, True, False, False]]),
+            "advantages": torch.tensor([[0.0, 0.0, 1.0, -2.0]]),
+            "logprobs": torch.tensor([[0.0, 0.0, -1.2, -2.4]]),
+        }
+        logprobs = torch.tensor([[0.0, -0.2, -0.4]], requires_grad=True)
+
+        loss, stats = grpo_loss_fn(data_pack, logprobs)
+        loss.backward()
+
+        self.assertAlmostEqual(float(stats["ratio_mean"]), 1.0, places=6)
+        torch.testing.assert_close(logprobs.grad, torch.tensor([[0.0, -0.5, 1.0]]))
+
     def test_ppo_padded_loss_reports_kl_and_clip_stats(self):
         """Padded PPO should emit KL and clipping diagnostics."""
         data_pack = {
