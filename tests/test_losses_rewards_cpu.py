@@ -6,6 +6,7 @@ import torch
 
 from areno.api.advantages import _compute_gae_python
 from areno.api.loss_fns.grpo import grpo_loss_fn
+from areno.api.loss_fns.gspo import gspo_loss_fn
 from areno.api.loss_fns.ppo import _kl_penalty, ppo_loss_fn
 from areno.api.rewards import compute_group_advantages
 
@@ -44,7 +45,7 @@ class AdvantageAndRewardTest(unittest.TestCase):
 
 
 class LossFunctionTest(unittest.TestCase):
-    """GRPO/PPO loss tests cover padded and packed response layouts."""
+    """GRPO/GSPO/PPO loss tests cover padded and packed response layouts."""
 
     def test_grpo_padded_loss_backpropagates(self):
         """Padded GRPO should produce finite loss and gradients."""
@@ -98,6 +99,59 @@ class LossFunctionTest(unittest.TestCase):
         self.assertTrue(torch.isfinite(loss))
         self.assertIsNotNone(logprobs.grad)
         self.assertEqual(float(stats["response_len"]), 1.5)
+
+    def test_gspo_current_surrogate_sequence_ratio_stats_stay_at_one(self):
+        """Current GSPO sequence ratios stay at one despite rollout drift."""
+        data_pack = {
+            "packed_response_mask": torch.tensor([True, True, True, True, True]),
+            "packed_seq_ids": torch.tensor([0, 0, 1, 1, 1]),
+            "packed_num_sequences": 2,
+            "packed_advantages": torch.tensor([2.0, 2.0, -3.0, -3.0, -3.0]),
+            "packed_logprobs": torch.tensor([-1.2, -2.4, -0.9, -1.8, -2.7]),
+        }
+        logprobs = torch.tensor([-0.2, -0.4, -0.1, -0.3, -0.5], requires_grad=True)
+
+        _, stats = gspo_loss_fn(data_pack, logprobs)
+
+        self.assertAlmostEqual(float(stats["ratio_mean"]), 1.0, places=6)
+        self.assertAlmostEqual(float(stats["ratio_std"]), 0.0, places=6)
+        self.assertAlmostEqual(float(stats["response_len"]), 2.5, places=6)
+
+    def test_gspo_current_surrogate_reports_token_drift_separately(self):
+        """Rollout-vs-train drift remains visible outside sequence ratios."""
+        data_pack = {
+            "packed_response_mask": torch.tensor([True, True, True, True, True]),
+            "packed_seq_ids": torch.tensor([0, 0, 1, 1, 1]),
+            "packed_num_sequences": 2,
+            "packed_advantages": torch.tensor([2.0, 2.0, -3.0, -3.0, -3.0]),
+            "packed_logprobs": torch.tensor([-0.7, -0.1, -1.0, -0.6, -0.2]),
+        }
+        logprobs = torch.tensor([-0.2, -0.4, -0.5, -0.3, -0.1], requires_grad=True)
+
+        _, stats = gspo_loss_fn(data_pack, logprobs)
+
+        self.assertAlmostEqual(float(stats["ratio_mean"]), 1.0, places=6)
+        self.assertAlmostEqual(float(stats["rollout_logprobs_mean"]), -0.52, places=6)
+        self.assertAlmostEqual(float(stats["train_logprobs_mean"]), -0.3, places=6)
+        self.assertAlmostEqual(float(stats["logp_diff_mean"]), -0.22, places=6)
+        self.assertAlmostEqual(float(stats["logp_abs_diff_mean"]), 0.34, places=6)
+
+    def test_gspo_current_surrogate_sequence_ratio_still_backpropagates(self):
+        """Unit sequence ratios retain length-normalized policy gradients."""
+        data_pack = {
+            "packed_response_mask": torch.tensor([True, True, True, True, True]),
+            "packed_seq_ids": torch.tensor([0, 0, 1, 1, 1]),
+            "packed_num_sequences": 2,
+            "packed_advantages": torch.tensor([2.0, 2.0, -3.0, -3.0, -3.0]),
+            "packed_logprobs": torch.tensor([-1.2, -2.4, -0.9, -1.8, -2.7]),
+        }
+        logprobs = torch.tensor([-0.2, -0.4, -0.1, -0.3, -0.5], requires_grad=True)
+
+        loss, stats = gspo_loss_fn(data_pack, logprobs)
+        loss.backward()
+
+        self.assertAlmostEqual(float(stats["ratio_mean"]), 1.0, places=6)
+        torch.testing.assert_close(logprobs.grad, torch.tensor([-0.5, -0.5, 0.5, 0.5, 0.5]))
 
     def test_ppo_padded_loss_reports_kl_and_clip_stats(self):
         """Padded PPO should emit KL and clipping diagnostics."""
