@@ -156,6 +156,30 @@ The writer lives in ``areno.api.metrics``. It records three namespaces:
    Stage timings when available: ``time/rollout``, ``time/reward``,
    ``time/advantage``, and ``time/train``.
 
+
+Reading metrics during debugging
+--------------------------------
+
+You can read TensorBoard scalar series directly from Python without
+launching the TensorBoard UI. This is useful when you want to inspect
+metrics programmatically during debugging:
+
+.. code-block:: python
+
+   from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
+
+   ea = EventAccumulator("/tmp/areno/tfevent")
+   ea.Reload()
+   for scalar_event in ea.Scalars("rollout/rewards_mean"):
+       print(f"step={scalar_event.step}  reward_mean={scalar_event.value:.4f}")
+
+   # Filter a specific tag to a plain list for plotting or analysis:
+   values = [
+       event.value for event in ea.Scalars("train/loss")
+   ]
+   print(f"loss over {len(values)} steps: min={min(values):.4f}  max={max(values):.4f}")
+
+
 Agentic diagnostics
 -------------------
 
