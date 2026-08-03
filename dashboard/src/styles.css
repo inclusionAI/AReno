@@ -134,6 +134,17 @@ body {
 .attentionItem p { font-size: 12px; }
 .attentionItemBody { min-width: 0; }
 .runtimeFixButton { min-height: 32px; margin-top: 10px; padding-inline: 10px; font-size: 12px; }
+.runtimeFixButton:disabled { cursor: wait; opacity: .62; }
+.runtimeRepairControl { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.runtimeRepairProgress { flex: 1; min-width: 0; margin-top: 10px; }
+.runtimeRepairProgress small { display: block; overflow: hidden; color: var(--deck-muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.runtimeRepairProgress.failed small { color: var(--deck-red); }
+.runtimeRepairProgress.succeeded small { color: var(--deck-green); }
+.runtimeRepairTrack { position: relative; height: 3px; margin-bottom: 5px; overflow: hidden; border-radius: 999px; background: var(--deck-line); }
+.runtimeRepairTrack i { position: absolute; inset-block: 0; left: -35%; width: 35%; border-radius: inherit; background: var(--deck-cyan); animation: runtime-repair-progress 1.1s ease-in-out infinite; }
+.spinIcon { animation: runtime-repair-spin .9s linear infinite; }
+@keyframes runtime-repair-progress { to { left: 100%; } }
+@keyframes runtime-repair-spin { to { transform: rotate(360deg); } }
 .fullButton { width: 100%; justify-content: center; }
 .quickActions .primaryButton, .quickActions .secondaryButton { width: 100%; justify-content: flex-start; margin-top: 8px; }
 

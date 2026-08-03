@@ -70,6 +70,10 @@ const ZH_UI = {
   "Details": "详情",
   "Run Check": "运行检查",
   "Fix": "修复",
+  "Starting...": "正在启动…",
+  "Installing...": "正在安装…",
+  "Installed": "已安装",
+  "Retry fix": "重试修复",
   "Ready": "就绪",
   "Needs attention": "需要关注",
   "Checking": "检查中",
@@ -344,11 +348,17 @@ function App() {
   });
   const [agentRecovering, setAgentRecovering] = useState(false);
   const [runtimeCheckResult, setRuntimeCheckResult] = useState(null);
+  const [runtimeRepair, setRuntimeRepair] = useState(null);
   const chatMessagesRef = useRef(null);
   const env = usePolling(() => api("/api/env"), 5000);
   const jobs = usePolling(() => api("/api/jobs"), 2000);
   const jobDetail = usePolling(() => selectedJobId ? api(`/api/jobs/${selectedJobId}`) : Promise.resolve(null), 3000, [selectedJobId]);
   const runtimeAttention = usePolling(() => api("/api/runtime/attention"), 5000);
+  const runtimeRepairDetail = usePolling(
+    () => runtimeRepair?.jobId ? api(`/api/jobs/${runtimeRepair.jobId}`) : Promise.resolve(null),
+    1000,
+    [runtimeRepair?.jobId],
+  );
   const quickActions = usePolling(() => api("/api/quick-actions"), 30000);
   const launcherPresets = usePolling(() => api("/api/launcher/presets"), 30000);
   const agentRecoveryState = usePolling(
@@ -357,7 +367,8 @@ function App() {
     [selectedJobId],
   );
 
-  const jobList = jobs.data?.jobs || [];
+  const jobList = (jobs.data?.jobs || []).filter((job) => job.kind !== "runtime-repair");
+  const runtimeRepairJob = runtimeRepairDetail.data?.job || runtimeRepair?.job || null;
   const filteredJobs = jobFilter === "all" ? jobList : jobList.filter((job) => job.status === jobFilter);
   const jobPageSize = 3;
   const jobPageCount = Math.max(1, Math.ceil(filteredJobs.length / jobPageSize));
@@ -388,6 +399,20 @@ function App() {
   useEffect(() => {
     if (jobPage > jobPageCount) setJobPage(jobPageCount);
   }, [jobPage, jobPageCount]);
+
+  useEffect(() => {
+    const status = String(runtimeRepairJob?.status || "").toLowerCase();
+    if (!runtimeRepair || runtimeRepair.refreshed || !["succeeded", "failed", "stopped"].includes(status)) return;
+    setRuntimeRepair((current) => current ? { ...current, refreshed: true } : current);
+    void (async () => {
+      try {
+        await api("/api/runtime/refresh", { method: "POST", body: "{}" });
+        await Promise.all([env.refresh(), runtimeAttention.refresh(), jobs.refresh()]);
+      } catch (err) {
+        setBusy(err.message || String(err));
+      }
+    })();
+  }, [runtimeRepair, runtimeRepairJob?.status]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -533,11 +558,11 @@ function App() {
         body: JSON.stringify({ action_id: action.id }),
       });
       if (result.job?.id) {
+        setRuntimeRepair({ actionId: action.id, jobId: result.job.id, job: result.job, refreshed: false });
         await jobs.refresh();
-        setBusy(`${result.job.name} started.`);
-        window.setTimeout(() => setBusy(""), 2400);
       }
       await runtimeAttention.refresh();
+      setBusy("");
     } catch (err) {
       setBusy(err.message || String(err));
     }
@@ -836,6 +861,7 @@ function App() {
           quickActions={quickActions.data?.actions || []}
           onQuickAction={executeOverviewQuickAction}
           onRuntimeRepair={repairRuntime}
+          runtimeRepair={runtimeRepair ? { ...runtimeRepair, job: runtimeRepairJob } : null}
         />
       );
     }
@@ -1063,7 +1089,7 @@ function App() {
   );
 }
 
-function OverviewPage({ env, jobs, runtimeAttention, quickActions, onQuickAction, onRuntimeRepair }) {
+function OverviewPage({ env, jobs, runtimeAttention, quickActions, onQuickAction, onRuntimeRepair, runtimeRepair }) {
   const activeJobs = jobs.filter(isActiveJob);
   const failedJobs = jobs.filter((job) => job.status === "failed");
   const latestJobSummary = newestJob(activeJobs.length ? activeJobs : jobs);
@@ -1077,6 +1103,9 @@ function OverviewPage({ env, jobs, runtimeAttention, quickActions, onQuickAction
   const gpus = env?.gpus || [];
   const checks = env?.checks || [];
   const warning = runtimeAttention?.attention || checks.find((check) => ["warn", "fail"].includes(String(check.status).toLowerCase()));
+  const repairMatchesWarning = warning?.repair?.id && runtimeRepair?.actionId === warning.repair.id;
+  const repairStatus = repairMatchesWarning ? String(runtimeRepair?.job?.status || "created").toLowerCase() : "";
+  const repairInProgress = ["created", "running"].includes(repairStatus);
   const algo = String(configValue(focusJob, "algo") || "").toLowerCase();
   const rewardBearing = ["gspo", "grpo", "ppo"].includes(algo);
   const health = rewardBearing
@@ -1114,9 +1143,17 @@ function OverviewPage({ env, jobs, runtimeAttention, quickActions, onQuickAction
                   <strong>{warning.name || warning.label || "Runtime warning"}</strong>
                   <p>{warning.detail || warning.message || "Review the runtime check details."}</p>
                   {warning.repair?.kind === "install_package" && (
-                    <button className="secondaryButton runtimeFixButton" onClick={() => onRuntimeRepair(warning.repair)}>
-                      <Wrench size={14} /> {warning.repair.label || "Fix"}
-                    </button>
+                    <div className="runtimeRepairControl">
+                      <button
+                        className="secondaryButton runtimeFixButton"
+                        disabled={repairInProgress || repairStatus === "succeeded"}
+                        onClick={() => onRuntimeRepair(warning.repair)}
+                      >
+                        {repairInProgress ? <RefreshCw className="spinIcon" size={14} /> : <Wrench size={14} />}
+                        {repairStatus === "running" ? "Installing..." : repairStatus === "created" ? "Starting..." : repairStatus === "succeeded" ? "Installed" : repairStatus === "failed" ? "Retry fix" : warning.repair.label || "Fix"}
+                      </button>
+                      {repairMatchesWarning && <RuntimeRepairProgress job={runtimeRepair.job} />}
+                    </div>
                   )}
                 </div>
               </div>
@@ -1128,6 +1165,19 @@ function OverviewPage({ env, jobs, runtimeAttention, quickActions, onQuickAction
           </section>
         </aside>
       </div>
+    </div>
+  );
+}
+
+function RuntimeRepairProgress({ job }) {
+  if (!job) return null;
+  const status = String(job.status || "created").toLowerCase();
+  const logs = job.logs || [];
+  const latestLog = logs.length ? logs[logs.length - 1] : "Preparing package installer...";
+  return (
+    <div className={classNames("runtimeRepairProgress", status)} aria-live="polite">
+      {["created", "running"].includes(status) && <div className="runtimeRepairTrack"><i /></div>}
+      <small>{status === "failed" ? "Installation failed" : status === "succeeded" ? "Installation complete" : latestLog}</small>
     </div>
   );
 }
