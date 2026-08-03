@@ -220,24 +220,24 @@ metrics, and rollout samples without requiring TensorBoard.
 Launch it
 ~~~~~~~~~
 
-Start the dashboard server on the default port (8765) and open the web UI:
+Start the dashboard server in the background on the default port (8765):
 
 .. code-block:: bash
 
-   areno dashboard start
+   areno dashboard --start
 
-Pass ``--port`` to use a different port, or ``--no-browser`` to skip
-opening the browser:
-
-.. code-block:: bash
-
-   areno dashboard start --port 9090 --no-browser
-
-Stop a running dashboard server:
+Pass ``--port`` to use a different port:
 
 .. code-block:: bash
 
-   areno dashboard stop
+   areno dashboard --start --port 9090
+
+The command prints the dashboard URL (``http://host:port``) and the process
+PID. Stop a running dashboard server:
+
+.. code-block:: bash
+
+   areno dashboard --stop
 
 The dashboard reads from the same ``--metrics-log-dir`` directory that
 feeds TensorBoard (default ``/tmp/areno/tfevent``). Every training run
