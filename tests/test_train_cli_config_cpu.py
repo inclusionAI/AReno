@@ -712,6 +712,48 @@ def test_train_command_smoke_resolves_model_ref_before_probe(monkeypatch):
     assert events == [("resolve", "actor"), ("smoke", "/cache/actor")]
 
 
+@pytest.mark.parametrize(
+    ("algo", "extra_args", "expected_type"),
+    [
+        ("sft", ["--dataset-loader-fn", "examples/sft/alpaca/dataset_loader.py"], TrainerConfig),
+        ("dpo", [], DPOTrainerConfig),
+    ],
+)
+def test_train_command_smoke_train_supports_offline_algorithms(monkeypatch, algo, extra_args, expected_type):
+    events = []
+
+    def fake_resolve(config):
+        events.append(("resolve", type(config), config.ckpt))
+        return config
+
+    def fake_smoke(config):
+        events.append(("smoke", type(config), config.ckpt))
+        return SimpleNamespace(
+            ok=True,
+            error=None,
+            peak_mem_frac=0.1,
+            candidate=SimpleNamespace(
+                tp_size=1,
+                batch_size=1,
+                n_samples=1,
+                mini_bs=1,
+                max_running_prompts=1,
+                adam_8bit=False,
+                keep_rollout_state=False,
+            ),
+        )
+
+    monkeypatch.setattr(train_cli, "resolve_model_refs_for_config", fake_resolve)
+    monkeypatch.setattr("areno.cli.auto_tune.smoke_train_config", fake_smoke)
+    result = CliRunner().invoke(
+        train_cli.train_command,
+        ["--algo", algo, "--ckpt", "actor", "--dataset-path", "dataset", "--smoke-train", *extra_args],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert events == [("resolve", expected_type, "actor"), ("smoke", expected_type, "actor")]
+
+
 EXPECTED_HELP_SECTIONS = [
     "Basic:",
     "Rollout:",

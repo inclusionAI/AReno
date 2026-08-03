@@ -212,8 +212,8 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
         raise click.UsageError("--smoke-infer and --smoke-train are mutually exclusive")
     if tune_params and not algorithm.requires_rollout:
         raise click.UsageError("--tune-params currently supports rollout-based algorithms")
-    if (smoke_infer or smoke_train) and not algorithm.requires_rollout:
-        raise click.UsageError("--smoke-infer and --smoke-train currently support rollout-based algorithms")
+    if smoke_infer and not algorithm.requires_rollout:
+        raise click.UsageError("--smoke-infer currently supports rollout-based algorithms")
     if mem_frac <= 0 or mem_frac > 1:
         raise click.UsageError("--mem-frac must be in (0, 1]")
     if tune_max_samples <= 0:
