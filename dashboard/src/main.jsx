@@ -1168,15 +1168,10 @@ function OverviewRewardLossChart({ job }) {
             <g className="plotGrid">{[0, 1, 2, 3].map((item) => <line key={item} x1="10" x2="710" y1={35 + item * 52} y2={35 + item * 52} />)}</g>
             <polyline className={`overviewMetricLine ${activeMetric}Line`} points={plot.points} />
             {activeSeries.map((point, index) => (
-              <circle
-                className={`metricHoverPoint ${activeMetric}Point`}
-                key={`${point.step}-${index}`}
-                cx={plot.coords[index]?.x || 0}
-                cy={plot.coords[index]?.y || 0}
-                r="5"
-                onMouseEnter={() => setHoveredPoint({ point, coord: plot.coords[index] })}
-                onMouseLeave={() => setHoveredPoint(null)}
-              />
+              <g key={`${point.step}-${index}`}>
+                <circle className={`metricDataPoint ${activeMetric}Point`} cx={plot.coords[index]?.x || 0} cy={plot.coords[index]?.y || 0} r={metricPointRadius(activeSeries.length)} />
+                <circle className="metricHoverTarget" cx={plot.coords[index]?.x || 0} cy={plot.coords[index]?.y || 0} r="5" onMouseEnter={() => setHoveredPoint({ point, coord: plot.coords[index] })} onMouseLeave={() => setHoveredPoint(null)} />
+              </g>
             ))}
           </svg>
           {hoveredPoint && <MetricPointTooltip name={names[activeMetric] || overviewMetricLabel(activeMetric)} point={hoveredPoint.point} coord={hoveredPoint.coord} width={720} height={220} />}
@@ -1244,6 +1239,12 @@ function MetricPointTooltip({ name, point, coord, width, height }) {
       {point.time && <small>{new Date(point.time).toLocaleString()}</small>}
     </div>
   );
+}
+
+function metricPointRadius(pointCount) {
+  if (pointCount <= 12) return 2.75;
+  if (pointCount <= 60) return 1.9;
+  return 1.15;
 }
 
 function lastMetricValue(points) {
@@ -2133,15 +2134,10 @@ function MetricChart({ jobId, metricsDir, refreshNonce }) {
             <polyline className="rawLine" points={plot.raw} />
             <polyline className="smoothLine" points={plot.smooth} />
             {visiblePoints.map((point, index) => (
-              <circle
-                className="metricHoverPoint"
-                key={`${point.step}-${index}`}
-                cx={plot.coords[index]?.x || 0}
-                cy={plot.coords[index]?.y || 0}
-                r="5"
-                onMouseEnter={() => setHoveredPoint({ point, coord: plot.coords[index] })}
-                onMouseLeave={() => setHoveredPoint(null)}
-              />
+              <g key={`${point.step}-${index}`}>
+                <circle className="metricDataPoint" cx={plot.coords[index]?.x || 0} cy={plot.coords[index]?.y || 0} r={metricPointRadius(visiblePoints.length)} />
+                <circle className="metricHoverTarget" cx={plot.coords[index]?.x || 0} cy={plot.coords[index]?.y || 0} r="5" onMouseEnter={() => setHoveredPoint({ point, coord: plot.coords[index] })} onMouseLeave={() => setHoveredPoint(null)} />
+              </g>
             ))}
           </svg>
           {hoveredPoint && <MetricPointTooltip name={activeName} point={hoveredPoint.point} coord={hoveredPoint.coord} width={720} height={180} />}
