@@ -166,7 +166,7 @@ body {
 .jobTable tbody tr:hover { background: #f9fbfd; }
 .jobTable td:first-child { min-width: 240px; color: var(--deck-ink); }
 .tableAction { min-height: 30px; padding-inline: 10px; }
-.jobsPageStack { display: grid; gap: 14px; width: 100%; max-width: 1560px; margin-inline: auto; }
+.jobsPageStack { display: grid; gap: 14px; width: 100%; max-width: 1360px; margin-inline: auto; }
 .jobsPageStack > .jobListPage { width: 100%; max-width: none; }
 .jobListPage .jobTableWrap { max-height: 250px; overflow: auto; scrollbar-gutter: stable; }
 .jobListPage .jobTable thead { position: sticky; top: 0; z-index: 2; }
@@ -2448,7 +2448,7 @@ textarea:focus {
 .runtimeGpuCard strong, .runtimeGpuCard span { font-size: 11px; }
 .runtimeGpuCard span { color: var(--deck-muted); }
 
-.launcherPrdLayout { display: grid; grid-template-columns: minmax(0, 1fr) 330px; gap: 14px; width: 100%; max-width: none; margin-inline: auto; align-items: stretch; }
+.launcherPrdLayout { display: grid; grid-template-columns: minmax(0, 1fr) 330px; gap: 14px; width: 100%; max-width: 1360px; margin-inline: auto; align-items: stretch; }
 .launcherMainCard { width: 100%; min-width: 0; max-width: none; margin-inline: 0; }
 .launcherPresetRow { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
 .presetPill { min-height: 32px; padding: 6px 10px; border: 1px solid var(--deck-line); border-radius: 999px; color: var(--deck-text); background: var(--deck-panel-2); font-size: 11px; font-weight: 700; }
@@ -2476,7 +2476,7 @@ textarea:focus {
 .commandPreview { min-height: 180px; max-height: 320px; margin: 0; padding: 14px; overflow: auto; border: 1px solid #252b33; border-radius: 8px; color: #ffffff; background: #11161c; font: 400 12px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
 .commandPreview, .commandPreview * { color: #fff !important; -webkit-text-fill-color: #fff; }
 
-.jobFullDetailPage { display: grid; gap: 14px; width: 100%; max-width: 1560px; margin-inline: auto; }
+.jobFullDetailPage { display: grid; gap: 14px; width: 100%; max-width: 1360px; margin-inline: auto; }
 .jobFullDetailPage > .jobOverview.detailPanel { width: 100%; max-width: none; }
 .detailPageToolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .jobDetailSection { min-width: 0; }
@@ -2484,7 +2484,7 @@ textarea:focus {
 .jobDetailDataGrid { display: grid; grid-template-columns: minmax(0, .8fr) minmax(0, 1.2fr); gap: 14px; align-items: stretch; }
 .jobDetailDataGrid > .codeCard { height: 100%; }
 
-.agentPrdLayout { display: grid; grid-template-columns: minmax(0, 1fr) 330px; gap: 14px; width: 100%; max-width: none; margin-inline: auto; align-items: stretch; }
+.agentPrdLayout { display: grid; grid-template-columns: minmax(0, 1fr) 330px; gap: 14px; width: 100%; max-width: 1360px; margin-inline: auto; align-items: stretch; }
 .agentSideRail { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); gap: 14px; height: 100%; }
 .agentContextPills { margin-bottom: 12px; }
 .agentFollowupsCard .secondaryButton { width: 100%; justify-content: flex-start; margin-top: 8px; }
