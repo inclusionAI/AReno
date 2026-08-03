@@ -119,7 +119,8 @@ Important notes for stable training on Tesla T4 (16 GB) with Qwen3.5-0.8B:
 - **`--gspo-clip-eps 0.2`** widens the PPO clip range, which helps GRPO produce
   meaningful gradients on the narrow reward distribution of this task.
 - The SFT → GRPO pipeline consistently achieves score=172, max_tile=32, and
-  reward=1.0 (the cap).
+  reward=1.0 (the cap). `max_tile=32` is the open-loop ceiling, not competence —
+  see "Open-loop planning" in Defaults & Limitations below.
 
 ## Serve the Policy
 
@@ -300,3 +301,37 @@ Serve and play it exactly as the tool-call variant — point `--model-path` at a
   mode) is a uniform-random direction over all four directions, not a
   legal-only policy — so it has a nonzero invalid-move rate, and any policy
   that picks legal directions should beat it on invalid-rate.
+
+### Open-loop planning — design ceiling, not a reactive agent
+
+This example is single-shot, open-loop planning, not closed-loop play. The
+policy sees only the starting board and emits a full move sequence (up to 32
+steps) in **one** `choose_moves` tool call — `run_agent.py` makes a single
+model request per board (one trajectory turn). The engine then replays the
+whole sequence deterministically at reward time (`game._replay`); the policy
+never observes the board after any spawn.
+
+By design, this caps how well the policy can play:
+
+- Only the first move is fully grounded in an observed board. From move 2 on,
+  each step is pre-committed against a tile spawn the policy did not see, so
+  later moves are increasingly a guess. `--disable-thinking` and the system
+  prompt's "Do not … simulate" additionally forbid internal lookahead.
+- Credit assignment is coarse: one scalar reward covers the whole sequence, and
+  spawn variance (unobservable to the policy) dominates the per-sequence reward,
+  so the gradient signal concentrates on the opening and is noisy for later
+  moves. With reward clamped to `[-1, 1]` (`game.score_episode_moves`) and the
+  SFT→GRPO run saturating at the `1.0` cap, the signal collapses before real
+  competence emerges.
+- The empirical ceiling reflects this: the documented run reaches
+  `max_tile=32` (a few small merges), not the 1024–2048 a reactive player
+  reaches. `reward=1.0` here means "soundly beats the random baseline," not
+  "plays 2048 well."
+
+This is intentional — the example mirrors the Tic-Tac-Toe single-shot pattern
+to keep the agentic tool-call + SFT→GRPO pipeline minimal. The agentic API
+itself supports closed-loop play (multi-turn `AgentTrajectory`,
+`_append_sample_response` turn stitching, `tool_result` messages, dense
+per-step rewards via `LossMaskPolicy`); a reactive 2048 agent that re-plans on
+every spawn is a larger, ~32×-more-expensive-rollout design change, not a fix
+to this demo.
