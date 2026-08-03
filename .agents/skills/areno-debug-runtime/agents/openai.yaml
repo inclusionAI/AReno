@@ -1,0 +1,4 @@
+interface:
+  display_name: "Debug AReno Runtime"
+  short_description: "Find the first causal runtime failure"
+  default_prompt: "Diagnose this AReno failure from evidence and verify the narrowest fix."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Tune AReno Capacity"
+  short_description: "Fit AReno workloads to GPU memory"
+  default_prompt: "Measure and tune this AReno workload without changing semantic token limits."

@@ -19,7 +19,7 @@ import traceback
 from dataclasses import dataclass
 from enum import Enum, auto
 from itertools import count
-from typing import Any
+from typing import Any, Literal
 
 import torch
 
@@ -43,6 +43,9 @@ class Op(Enum):
     ROLLOUT_SESSION_SYNC = auto()
     ROLLOUT_SESSION_END = auto()
     SAVE_CHECKPOINT = auto()
+    POLICY_SYNC_PLAN = auto()
+    POLICY_SYNC_PUBLISH = auto()
+    POLICY_SYNC_RECEIVE = auto()
     SHUTDOWN = auto()
 
 
@@ -151,6 +154,42 @@ class SaveCheckpointPayload:
     path: str
 
 
+@dataclass(slots=True, frozen=True)
+class PolicySyncPayload:
+    """Version and fixed GPU bucket bound for one policy transfer."""
+
+    version: int
+    bucket_bytes: int
+
+
+@dataclass(slots=True, frozen=True)
+class ClusterPartition:
+    """One role-local rank range inside a shared distributed world."""
+
+    role: Literal["train", "rollout"]
+    global_rank_offset: int
+    local_world_size: int
+    tp_size: int
+    devices: tuple[int, ...]
+
+    @property
+    def dp_size(self) -> int:
+        """Return this partition's data-parallel size."""
+
+        return self.local_world_size // self.tp_size
+
+
+@dataclass(slots=True, frozen=True)
+class DistributedWorldSpec:
+    """Shared rendezvous and rank layout for train and rollout partitions."""
+
+    master_addr: str
+    master_port: int
+    global_world_size: int
+    train: ClusterPartition
+    rollout: ClusterPartition | None = None
+
+
 @dataclass(slots=True)
 class _PendingClusterCall:
     """Coordinator-side accumulator for one in-flight cluster request."""
@@ -162,6 +201,26 @@ class _PendingClusterCall:
     future: asyncio.Future | None = None
     loop: asyncio.AbstractEventLoop | None = None
     error: BaseException | None = None
+
+
+class ClusterCallHandle:
+    """Small blocking handle returned by :meth:`TPCluster.submit`."""
+
+    def __init__(self, cluster: TPCluster, request_id: int, pending: _PendingClusterCall):
+        self._cluster = cluster
+        self._request_id = request_id
+        self._pending = pending
+
+    def result(self, timeout: float | None = None) -> list[Any]:
+        """Wait for the submitted cluster call and return rank-ordered results."""
+
+        if not self._pending.event.wait(timeout=timeout):
+            with self._cluster._pending_lock:
+                self._cluster._pending_calls.pop(self._request_id, None)
+            raise TimeoutError(f"timed out waiting for {self._pending.op}")
+        if self._pending.error is not None:
+            raise self._pending.error
+        return self._pending.results
 
 
 def find_free_port() -> int:
@@ -205,11 +264,22 @@ class TPCluster:
     has reported success or one rank reports an error.
     """
 
-    def __init__(self, config: EngineConfig, worker_cls: type):
+    def __init__(
+        self,
+        config: EngineConfig,
+        worker_cls: type,
+        *,
+        world_spec: DistributedWorldSpec | None = None,
+        partition: ClusterPartition | None = None,
+    ):
         """Create an unstarted process cluster for a worker class."""
 
         self.config = config
         self.worker_cls = worker_cls
+        if (world_spec is None) != (partition is None):
+            raise ValueError("world_spec and partition must be provided together")
+        self.world_spec = world_spec
+        self.partition = partition
         # `spawn` start method is required by CUDA-aware workers; do not
         # inherit fds/CUDA state from the parent.
         self.ctx = mp.get_context("spawn")
@@ -229,24 +299,56 @@ class TPCluster:
 
         if self.started:
             return
-        # Reserve a unique TCP port for torch.distributed rendezvous; ranks
-        # discover each other through this port over loopback.
-        port = find_free_port()
-        assert self.config.devices is not None
-        devices = self.config.devices
+        if self.world_spec is not None:
+            raise RuntimeError("partitioned clusters must be started with start_partitioned_clusters()")
         world_size = self.config.tp_size * int(self.config.dp_size)
-        if len(devices) != world_size:
-            raise ValueError("len(devices) must equal tp_size * dp_size")
-        for rank in range(world_size):
+        world_spec = DistributedWorldSpec(
+            master_addr="127.0.0.1",
+            master_port=find_free_port(),
+            global_world_size=world_size,
+            train=ClusterPartition(
+                role="train",
+                global_rank_offset=0,
+                local_world_size=world_size,
+                tp_size=self.config.tp_size,
+                devices=tuple(self.config.devices or ()),
+            ),
+        )
+        self.world_spec = world_spec
+        self.partition = world_spec.train
+        self._spawn_workers()
+        try:
+            self._wait_for_worker_ready(set(range(world_size)))
+        except BaseException:
+            self._abort_start()
+            raise
+        else:
+            self.started = True
+            self._start_result_pump()
+
+    def _spawn_workers(self) -> None:
+        """Spawn this partition without waiting for the shared world."""
+
+        if self.processes:
+            return
+        if self.world_spec is None or self.partition is None:
+            raise RuntimeError("cluster partition is not configured")
+        partition = self.partition
+        if len(partition.devices) != partition.local_world_size:
+            raise ValueError("partition devices must equal local_world_size")
+        if partition.local_world_size != self.config.tp_size * int(self.config.dp_size):
+            raise ValueError("partition world size must equal tp_size * dp_size")
+        for rank in range(partition.local_world_size):
             cmd_q = self.ctx.Queue()
             proc = self.ctx.Process(
                 target=_worker_entry,
                 args=(
                     self.worker_cls,
                     rank,
-                    world_size,
-                    devices[rank],
-                    port,
+                    partition.local_world_size,
+                    partition.devices[rank],
+                    self.world_spec,
+                    partition,
                     self.config,
                     cmd_q,
                     self.result_queue,
@@ -256,23 +358,20 @@ class TPCluster:
             proc.start()
             self.cmd_queues.append(cmd_q)
             self.processes.append(proc)
-        try:
-            self._wait_for_worker_ready(set(range(world_size)))
-        except BaseException:
-            for proc in self.processes:
-                if proc.is_alive():
-                    proc.terminate()
-            for proc in self.processes:
-                proc.join(timeout=0)
-            for q in self.cmd_queues:
-                _close_queue(q)
-            _close_queue(self.result_queue)
-            self.cmd_queues = []
-            self.processes = []
-            raise
-        else:
-            self.started = True
-            self._start_result_pump()
+
+    def _abort_start(self) -> None:
+        """Terminate workers and release queues after startup failure."""
+
+        for proc in self.processes:
+            if proc.is_alive():
+                proc.terminate()
+        for proc in self.processes:
+            proc.join(timeout=0)
+        for q in self.cmd_queues:
+            _close_queue(q)
+        _close_queue(self.result_queue)
+        self.cmd_queues = []
+        self.processes = []
 
     def _start_result_pump(self) -> None:
         """Start the single result-demux thread for all concurrent calls."""
@@ -306,15 +405,14 @@ class TPCluster:
         timeout: float | None = None,
     ) -> list[Any]:
         """Broadcast one command and collect one ordered result from every rank."""
+        return self.submit(op, payload).result(timeout=timeout)
+
+    def submit(self, op: Op, payload: Any = None) -> ClusterCallHandle:
+        """Submit a command without waiting, allowing paired collectives."""
+
         request_id = next(self._request_ids)
         pending = self._submit_call(op, payload, request_id=request_id)
-        if not pending.event.wait(timeout=timeout):
-            with self._pending_lock:
-                self._pending_calls.pop(request_id, None)
-            raise TimeoutError(f"timed out waiting for {op}")
-        if pending.error is not None:
-            raise pending.error
-        return pending.results
+        return ClusterCallHandle(self, request_id, pending)
 
     async def call_async(
         self,
@@ -487,7 +585,8 @@ def _worker_entry(
     rank: int,
     world_size: int,
     device_id: int,
-    port: int,
+    world_spec: DistributedWorldSpec,
+    partition: ClusterPartition,
     config: EngineConfig,
     cmd_q: mp.Queue,
     result_q: mp.Queue,
@@ -505,10 +604,19 @@ def _worker_entry(
         init_process_group(
             rank=rank,
             world_size=world_size,
-            master_addr="127.0.0.1",
-            master_port=port,
+            master_addr=world_spec.master_addr,
+            master_port=world_spec.master_port,
             device_id=device_id,
             tp_size=config.tp_size,
+            global_rank=partition.global_rank_offset + rank,
+            global_world_size=world_spec.global_world_size,
+            train_world_size=world_spec.train.local_world_size,
+            train_tp_size=world_spec.train.tp_size,
+            rollout_world_size=world_spec.rollout.local_world_size if world_spec.rollout is not None else None,
+            rollout_tp_size=world_spec.rollout.tp_size if world_spec.rollout is not None else None,
+            train_devices=world_spec.train.devices,
+            rollout_devices=world_spec.rollout.devices if world_spec.rollout is not None else None,
+            role=partition.role,
         )
         torch.set_float32_matmul_precision("high")
         worker = worker_cls(config)
@@ -578,3 +686,28 @@ def _set_async_exception(future: asyncio.Future, exc: BaseException) -> None:
 
     if not future.done():
         future.set_exception(exc)
+
+
+def start_partitioned_clusters(
+    train_cluster: TPCluster,
+    rollout_cluster: TPCluster,
+    world_spec: DistributedWorldSpec,
+) -> None:
+    """Spawn both partitions before waiting for their shared rendezvous."""
+
+    clusters = (train_cluster, rollout_cluster)
+    if train_cluster.world_spec != world_spec or rollout_cluster.world_spec != world_spec:
+        raise ValueError("both clusters must use the supplied world_spec")
+    try:
+        for cluster in clusters:
+            cluster._spawn_workers()
+        for cluster in clusters:
+            assert cluster.partition is not None
+            cluster._wait_for_worker_ready(set(range(cluster.partition.local_world_size)))
+    except BaseException:
+        for cluster in clusters:
+            cluster._abort_start()
+        raise
+    for cluster in clusters:
+        cluster.started = True
+        cluster._start_result_pump()

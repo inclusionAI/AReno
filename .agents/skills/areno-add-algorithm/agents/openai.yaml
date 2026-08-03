@@ -1,0 +1,4 @@
+interface:
+  display_name: "Add an AReno Algorithm"
+  short_description: "Implement registered AReno algorithms"
+  default_prompt: "Implement this algorithm through AReno's registry and validate its math and lifecycle."

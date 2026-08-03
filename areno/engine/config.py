@@ -223,6 +223,8 @@ class EngineConfig:
     dp_size: int | None = None
     devices: list[int] | None = None
     dummy_load: bool = False
+    role: Literal["train", "rollout"] = "train"
+    policy_sync_bucket_mb: int = 64
 
     def __post_init__(self) -> None:
         """Infer DP/devices and validate the distributed layout."""
@@ -238,6 +240,14 @@ class EngineConfig:
                 self.devices = list(range(self.tp_size if self.dp_size is None else self.tp_size * self.dp_size))
         if len(self.devices) < 1:
             raise ValueError("devices must be non-empty")
+        if any(device < 0 for device in self.devices):
+            raise ValueError("devices must contain non-negative CUDA indices")
+        if len(self.devices) != len(set(self.devices)):
+            raise ValueError("devices must not contain duplicate CUDA indices")
+        if torch.cuda.is_available():
+            invalid = [device for device in self.devices if device >= torch.cuda.device_count()]
+            if invalid:
+                raise ValueError(f"devices are outside CUDA_VISIBLE_DEVICES: {invalid}")
         if len(self.devices) % self.tp_size != 0:
             raise ValueError("len(devices) must be divisible by tp_size")
         inferred_dp_size = len(self.devices) // self.tp_size
@@ -247,6 +257,8 @@ class EngineConfig:
             raise ValueError("dp_size must equal len(devices) // tp_size")
         if self.dp_size < 1:
             raise ValueError("dp_size must be >= 1")
+        if self.policy_sync_bucket_mb < 1:
+            raise ValueError("policy_sync_bucket_mb must be >= 1")
         if self.runtime.kv_block_size < 1:
             raise ValueError("runtime.kv_block_size must be >= 1")
         if self.runtime.kv_block_size % 256 != 0:
