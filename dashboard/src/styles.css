@@ -2008,13 +2008,6 @@ textarea:focus {
   max-height: 240px;
 }
 
-.streamingHint {
-  margin-top: 8px;
-  color: var(--deck-cyan);
-  font-size: 11px;
-  font-weight: 700;
-}
-
 .chatComposer {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;

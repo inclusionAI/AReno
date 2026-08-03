@@ -1380,7 +1380,7 @@ def agent_response(payload: dict[str, Any]) -> dict[str, Any]:
     all_tool_calls: list[dict[str, Any]] = []
     all_tool_results: list[dict[str, Any]] = []
     try:
-        for _ in range(6):
+        while True:
             body = {"model": model, "messages": messages, "tools": agent_tool_schemas(), "tool_choice": "auto"}
             message = post_chat_completion(base_url, api_key, body)
             tool_calls = message.get("tool_calls") or []
@@ -1411,11 +1411,6 @@ def agent_response(payload: dict[str, Any]) -> dict[str, Any]:
                         "content": json.dumps(result, ensure_ascii=False),
                     }
                 )
-        return {
-            "content": "Agent stopped after too many tool calls. Inspect the tool results and retry with a narrower request.",
-            "tool_calls": all_tool_calls,
-            "tool_results": all_tool_results,
-        }
     except urllib.error.HTTPError as exc:
         detail = f"HTTP {exc.code}: {exc.read().decode('utf-8', errors='replace')}"
         record_agent_error(detail, kind="provider_http", job_id=payload.get("job_id"))
@@ -1450,7 +1445,8 @@ def agent_event_stream(payload: dict[str, Any]):
         return
     messages = build_agent_messages(payload)
     try:
-        for round_index in range(6):
+        round_index = 0
+        while True:
             body = {
                 "model": model,
                 "messages": messages,
@@ -1484,11 +1480,7 @@ def agent_event_stream(payload: dict[str, Any]):
                         "content": json.dumps(result, ensure_ascii=False),
                     }
                 )
-        yield {
-            "type": "error",
-            "content": "Agent stopped after too many tool calls. Retry with a narrower request.",
-        }
-        yield {"type": "done"}
+            round_index += 1
     except urllib.error.HTTPError as exc:
         detail = f"HTTP {exc.code}: {exc.read().decode('utf-8', errors='replace')}"
         record_agent_error(detail, kind="provider_http", job_id=payload.get("job_id"))

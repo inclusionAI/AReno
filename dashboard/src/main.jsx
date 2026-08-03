@@ -727,7 +727,6 @@ function App() {
                   <div key={`${message.id || message.role}-${index}`} className={classNames("chatBubble", message.role)}>
                     <span>{message.role}</span>
                     {message.events?.length ? <AgentEventList events={message.events} onPlanConfirm={(plan) => runAgent(planConfirmationPrompt(plan))} /> : <MarkdownBlock text={message.content} />}
-                    {message.streaming && <div className="streamingHint">thinking...</div>}
                   </div>
                 ))}
               </div>
