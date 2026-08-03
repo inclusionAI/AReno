@@ -374,6 +374,8 @@ button {
   gap: 8px;
 }
 
+.languageButton { min-width: 72px; white-space: nowrap; }
+
 h1,
 h2,
 p {
@@ -2371,6 +2373,8 @@ textarea:focus {
 .seqlenLegend i { background: var(--deck-green); }
 .overviewPlot { height: 100%; min-height: 220px; }
 .overviewMetricLine { fill: none; stroke-width: 3.5; stroke-linecap: round; stroke-linejoin: round; }
+.metricHoverPoint { fill: transparent; stroke: transparent; stroke-width: 2; cursor: crosshair; pointer-events: all; }
+.metricHoverPoint:hover { fill: var(--deck-panel); stroke: var(--deck-cyan); }
 .rewardLine { stroke: var(--deck-ink); }
 .lossLine { stroke: var(--deck-amber); }
 .gradnormLine { stroke: var(--deck-cyan); }

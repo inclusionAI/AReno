@@ -12,6 +12,7 @@ import {
   FileText,
   History,
   LayoutDashboard,
+  Languages,
   Layers,
   MessageSquare,
   Moon,
@@ -28,6 +29,87 @@ import {
 import "./styles.css";
 
 const API_BASE = new URL(".", window.location.href).pathname;
+const UI_LANGUAGE_STORAGE_KEY = "areno-dashboard-language";
+const ZH_UI = {
+  "Overview": "概览",
+  "Jobs": "任务",
+  "Runtime": "运行环境",
+  "Launcher": "任务启动",
+  "Agent": "智能助手",
+  "Operations Overview": "运行概览",
+  "Runtime health, active work, and the signals that need attention.": "查看运行环境、活跃任务和需要关注的信号。",
+  "Runtime Environment": "运行环境",
+  "Review areno check, areno env, dependencies, GPU state, and repository context.": "检查 AReno 环境、依赖、GPU 状态和仓库上下文。",
+  "Task Launcher": "任务启动",
+  "Start low-intrusion AReno train or serve subprocesses from explicit configs.": "通过明确配置启动 AReno 训练或服务进程。",
+  "Agent Console": "智能助手",
+  "Chat with an operations agent using the selected job context.": "基于所选任务上下文与运维助手对话。",
+  "Running Job Summary": "运行任务摘要",
+  "Current health, route, and stage progression for the latest job.": "最新任务的健康状态、运行路径和阶段进度。",
+  "Metrics": "指标",
+  "Switch between reward and loss for the latest job.": "切换查看最新任务的奖励、损失及训练指标。",
+  "Runtime attention": "运行环境提醒",
+  "Highest-priority environment finding.": "当前最高优先级的环境问题。",
+  "Quick actions": "快捷操作",
+  "Short paths into common workflows.": "快速执行常用工作流。",
+  "Latest health": "最新健康指标",
+  "Active jobs": "活跃任务",
+  "No signal": "暂无信号",
+  "Waiting for metrics": "等待指标上报",
+  "Reward": "奖励",
+  "Loss": "损失",
+  "Grad Norm": "梯度范数",
+  "Sequence Length": "序列长度",
+  "Job Detail: Overview": "任务详情：概览",
+  "Rollout Sample": "采样样例",
+  "Environment Checks": "环境检查",
+  "Runtime requirements, compatibility, and actionable diagnostics.": "运行要求、兼容性和可执行诊断。",
+  "GPU Cards": "GPU 状态",
+  "Memory pressure and utilization before launch.": "启动前的显存压力和利用率。",
+  "Details": "详情",
+  "Run Check": "运行检查",
+  "Ready": "就绪",
+  "Needs attention": "需要关注",
+  "Checking": "检查中",
+  "Dependency Risk": "依赖风险",
+  "No checks reported": "暂无检查结果",
+  "No GPUs reported": "暂无 GPU 信息",
+  "No metrics available": "暂无指标",
+  "No rollout sample captured yet.": "尚未记录采样样例。",
+  "No TensorBoard scalar points loaded yet.": "尚未加载 TensorBoard 标量数据。",
+  "Loading selected metric...": "正在加载所选指标…",
+  "Open": "打开",
+  "Back to Jobs": "返回任务列表",
+  "Stop job": "停止任务",
+  "Stop": "停止",
+  "Prev": "上一页",
+  "Next": "下一页",
+  "All": "全部",
+  "Running": "运行中",
+  "Failed": "失败",
+  "Stopped": "已停止",
+  "Config": "配置",
+  "Logs": "日志",
+  "Command Preview": "命令预览",
+  "Preflight": "预检",
+  "Start Train": "启动训练",
+  "Start Serve": "启动服务",
+  "Send": "发送",
+  "New Chat": "新对话",
+  "Settings": "设置",
+  "Chat": "对话",
+  "History": "历史",
+  "Error Recovery": "错误恢复",
+  "Suggested Follow-ups": "建议追问",
+  "Done": "完成",
+  "Toggle theme": "切换主题",
+  "Translate to Chinese": "切换为中文",
+  "Translate to English": "切换为英文",
+  "Ask about this job, its metrics, or recent logs...": "询问此任务的指标、运行状态或最近日志…",
+  "Ask about the runtime or describe a task to launch...": "询问运行环境，或描述要启动的任务…",
+  "Message the operations agent": "向运维助手发送消息",
+};
+const EN_UI = Object.fromEntries(Object.entries(ZH_UI).map(([english, chinese]) => [chinese, english]));
 
 async function api(path, options) {
   const response = await fetch(`${API_BASE}${path.replace(/^\//, "")}`, {
@@ -44,6 +126,30 @@ async function api(path, options) {
 
 function classNames(...items) {
   return items.filter(Boolean).join(" ");
+}
+
+function translateDashboard(root, language) {
+  if (!root) return;
+  const dictionary = language === "zh" ? ZH_UI : EN_UI;
+  const excluded = "pre, code, .mono, .chatMessages, .runtimeCommandResult, .commandPreview";
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  let node = walker.nextNode();
+  while (node) {
+    const parent = node.parentElement;
+    if (parent && !parent.closest(excluded)) {
+      const trimmed = node.nodeValue.trim();
+      const translated = dictionary[trimmed];
+      if (translated) node.nodeValue = node.nodeValue.replace(trimmed, translated);
+    }
+    node = walker.nextNode();
+  }
+  for (const element of root.querySelectorAll("[title], [placeholder], [aria-label]")) {
+    if (element.closest(excluded)) continue;
+    for (const attribute of ["title", "placeholder", "aria-label"]) {
+      const value = element.getAttribute(attribute);
+      if (value && dictionary[value]) element.setAttribute(attribute, dictionary[value]);
+    }
+  }
 }
 
 function usePolling(loader, delay = 2500, deps = []) {
@@ -67,6 +173,9 @@ function usePolling(loader, delay = 2500, deps = []) {
 
 const defaultAgentMessages = [
   { role: "assistant", content: "Select a job, then ask about metrics, runtime, logs, or how to start the next AReno task." },
+];
+const zhAgentMessages = [
+  { role: "assistant", content: "选择一个任务，然后询问指标、运行环境、日志，或如何启动下一个 AReno 任务。" },
 ];
 
 const AGENT_CHAT_STORAGE_KEY = "areno-dashboard-agent-chat";
@@ -217,6 +326,7 @@ function App() {
   const [jobFilter, setJobFilter] = useState("all");
   const [launcherMode, setLauncherMode] = useState("train");
   const [theme, setTheme] = useState(() => localStorage.getItem("areno-dashboard-theme-v2") || "light");
+  const [language, setLanguage] = useState(() => localStorage.getItem(UI_LANGUAGE_STORAGE_KEY) || "en");
   const [busy, setBusy] = useState("");
   const [agentSettingsOpen, setAgentSettingsOpen] = useState(false);
   const [jobPage, setJobPage] = useState(1);
@@ -283,6 +393,16 @@ function App() {
   }, [theme]);
 
   useEffect(() => {
+    const root = document.getElementById("root");
+    document.documentElement.lang = language === "zh" ? "zh-CN" : "en";
+    localStorage.setItem(UI_LANGUAGE_STORAGE_KEY, language);
+    translateDashboard(root, language);
+    const observer = new MutationObserver(() => translateDashboard(root, language));
+    if (root) observer.observe(root, { childList: true, subtree: true, characterData: true });
+    return () => observer.disconnect();
+  }, [language]);
+
+  useEffect(() => {
     localStorage.setItem("areno-dashboard-agent-provider", JSON.stringify(agentProvider));
   }, [agentProvider]);
 
@@ -292,7 +412,7 @@ function App() {
 
   useEffect(() => {
     if (!agentSessions.length) {
-      const session = createAgentSession();
+      const session = createAgentSession(language === "zh" ? zhAgentMessages : defaultAgentMessages, language === "zh" ? "新对话" : "New chat");
       setAgentSessions([session]);
       setActiveAgentSessionId(session.id);
       return;
@@ -300,7 +420,7 @@ function App() {
     if (!agentSessions.some((session) => session.id === activeAgentSessionId)) {
       setActiveAgentSessionId(agentSessions[0].id);
     }
-  }, [agentSessions, activeAgentSessionId]);
+  }, [agentSessions, activeAgentSessionId, language]);
 
   useEffect(() => {
     if (activeAgentSessionId) {
@@ -441,6 +561,7 @@ function App() {
           job_id: selectedJob?.id || null,
           provider: agentProvider,
           history: historyOverride || compactAgentHistory(agentMessages),
+          language,
         }),
       });
       setAgentFollowUps(result.follow_ups || []);
@@ -473,6 +594,7 @@ function App() {
         job_id: jobIdOverride ?? selectedJob?.id ?? null,
         provider: agentProvider,
         history: compactAgentHistory(agentMessages),
+        language,
         onEvent: (event) => {
           if (event.type === "content_delta") streamedAssistantText += event.content || "";
           if (event.type === "error") {
@@ -547,7 +669,7 @@ function App() {
   }
 
   function newAgentChat() {
-    const session = createAgentSession();
+    const session = createAgentSession(language === "zh" ? zhAgentMessages : defaultAgentMessages, language === "zh" ? "新对话" : "New chat");
     setAgentSessions((sessions) => [session, ...sessions]);
     setActiveAgentSessionId(session.id);
     setAgentPrompt("");
@@ -578,11 +700,11 @@ function App() {
       .trim();
   }
 
-  async function streamAgentResponse({ prompt, job_id, provider, history, onEvent }) {
+  async function streamAgentResponse({ prompt, job_id, provider, history, language: responseLanguage, onEvent }) {
     const response = await fetch(`${API_BASE}api/agent/stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt, job_id, provider, history }),
+        body: JSON.stringify({ prompt, job_id, provider, history, language: responseLanguage }),
       });
     if (!response.ok || !response.body) {
       const text = await response.text();
@@ -901,16 +1023,12 @@ function App() {
               {theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
             </button>
             <button
-              className="iconButton"
-              onClick={() => {
-                env.refresh();
-                jobs.refresh();
-                jobDetail.refresh();
-                setRefreshNonce((value) => value + 1);
-              }}
-              title="Refresh"
+              className="iconButton languageButton"
+              onClick={() => setLanguage(language === "en" ? "zh" : "en")}
+              title={language === "en" ? "Translate to Chinese" : "Translate to English"}
             >
-              <RefreshCw size={16} />
+              <Languages size={16} />
+              <span>{language === "en" ? "中文" : "EN"}</span>
             </button>
           </div>
         </header>
@@ -1047,6 +1165,11 @@ function OverviewRewardLossChart({ job }) {
         <svg className="metricPlot overviewPlot" viewBox="0 0 720 220" role="img" aria-label={`${activeMetric} metrics`}>
           <g className="plotGrid">{[0, 1, 2, 3].map((item) => <line key={item} x1="10" x2="710" y1={35 + item * 52} y2={35 + item * 52} />)}</g>
           <polyline className={`overviewMetricLine ${activeMetric}Line`} points={plot.points} />
+          {activeSeries.map((point, index) => (
+            <circle className="metricHoverPoint" key={`${point.step}-${index}`} cx={plot.coords[index]?.x || 0} cy={plot.coords[index]?.y || 0} r="5">
+              <title>{metricPointTitle(names[activeMetric] || overviewMetricLabel(activeMetric), point)}</title>
+            </circle>
+          ))}
         </svg>
       )}
       <div className="plotFooter"><span>step {plot.stepMin} to {plot.stepMax}</span><span>{plot.minLabel} to {plot.maxLabel}</span></div>
@@ -1078,12 +1201,12 @@ function overviewMetricLabel(kind) {
 function normalizeMetricPoints(points = []) {
   return points
     .filter((point) => Number.isFinite(Number(point.value)))
-    .map((point) => ({ step: Number(point.step || 0), value: Number(point.value) }))
+    .map((point) => ({ step: Number(point.step || 0), value: Number(point.value), time: point.time }))
     .slice(-240);
 }
 
 function buildOverviewMetricPlot(points) {
-  if (!points.length) return { points: "", stepMin: 0, stepMax: 0, minLabel: "n/a", maxLabel: "n/a" };
+  if (!points.length) return { points: "", coords: [], stepMin: 0, stepMax: 0, minLabel: "n/a", maxLabel: "n/a" };
   const values = points.map((point) => point.value);
   const steps = points.map((point) => point.step);
   const min = Math.min(...values);
@@ -1092,12 +1215,18 @@ function buildOverviewMetricPlot(points) {
   const stepMax = Math.max(...steps);
   const valueSpan = Math.max(max - min, 1e-9);
   const stepSpan = Math.max(stepMax - stepMin, 1);
-  const line = points.map((point) => {
+  const coords = points.map((point) => {
     const x = ((point.step - stepMin) / stepSpan) * 680 + 20;
     const y = 200 - ((point.value - min) / valueSpan) * 174;
-    return `${x.toFixed(1)},${y.toFixed(1)}`;
-  }).join(" ");
-  return { points: line, stepMin, stepMax, minLabel: compactNumber(min), maxLabel: compactNumber(max) };
+    return { x, y };
+  });
+  return { points: coords.map(({ x, y }) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" "), coords, stepMin, stepMax, minLabel: compactNumber(min), maxLabel: compactNumber(max) };
+}
+
+function metricPointTitle(name, point) {
+  const lines = [name || "metric", `step: ${point.step}`, `value: ${point.value}`];
+  if (point.time) lines.push(`time: ${new Date(point.time).toLocaleString()}`);
+  return lines.join("\n");
 }
 
 function lastMetricValue(points) {
@@ -1984,9 +2113,9 @@ function MetricChart({ jobId, metricsDir, refreshNonce }) {
           </g>
           <polyline className="rawLine" points={plot.raw} />
           <polyline className="smoothLine" points={plot.smooth} />
-          {visiblePoints.slice(-24).map((point, index) => (
-            <circle key={`${point.step}-${index}`} cx={plot.coords[index + Math.max(0, visiblePoints.length - 24)]?.x || 0} cy={plot.coords[index + Math.max(0, visiblePoints.length - 24)]?.y || 0} r="2.2">
-              <title>{`${activeName} step ${point.step}: ${point.value}`}</title>
+          {visiblePoints.map((point, index) => (
+            <circle className="metricHoverPoint" key={`${point.step}-${index}`} cx={plot.coords[index]?.x || 0} cy={plot.coords[index]?.y || 0} r="5">
+              <title>{metricPointTitle(activeName, point)}</title>
             </circle>
           ))}
         </svg>

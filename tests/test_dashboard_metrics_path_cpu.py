@@ -1,7 +1,7 @@
 from pathlib import Path
 from unittest.mock import patch
 
-from areno.dashboard.server import DashboardState, Job
+from areno.dashboard.server import DashboardState, Job, agent_language_instruction
 
 
 def test_relative_metrics_dir_uses_registered_job_cwd(tmp_path: Path):
@@ -62,3 +62,9 @@ def test_metric_updates_latest_job_perf_signal():
 
     assert job.perf["rollout/rewards_mean"] == 0.75
     assert job.step == 2
+
+
+def test_agent_language_instruction_follows_dashboard_language():
+    assert "Simplified Chinese" in agent_language_instruction({"language": "zh"})
+    assert "commands" in agent_language_instruction({"language": "zh"})
+    assert "English" in agent_language_instruction({"language": "en"})

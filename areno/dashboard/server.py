@@ -1305,7 +1305,8 @@ def agent_follow_ups(payload: dict[str, Any]) -> dict[str, Any]:
             "content": (
                 "Generate exactly three concise AReno operations follow-ups. Return only a JSON array. "
                 "Each item must contain label and prompt strings. Suggestions must be grounded in the supplied context, "
-                "must not claim an action already happened, and must be safe to ask an operations agent."
+                "must not claim an action already happened, and must be safe to ask an operations agent. "
+                + agent_language_instruction(payload)
             ),
         },
         {"role": "user", "content": json.dumps(context, ensure_ascii=False)},
@@ -1341,7 +1342,9 @@ def pid_is_running(pid: int) -> bool:
 def build_agent_messages(payload: dict[str, Any]) -> list[dict[str, Any]]:
     job = STATE.get_job(payload.get("job_id"))
     context = job.to_summary_json() if job else {}
-    messages: list[dict[str, Any]] = [{"role": "system", "content": agent_system_prompt()}]
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": f"{agent_system_prompt()}\n\n{agent_language_instruction(payload)}"}
+    ]
     for item in normalize_agent_history(payload.get("history")):
         messages.append(item)
     messages.append(
@@ -1351,6 +1354,12 @@ def build_agent_messages(payload: dict[str, Any]) -> list[dict[str, Any]]:
         }
     )
     return messages
+
+
+def agent_language_instruction(payload: dict[str, Any]) -> str:
+    if str(payload.get("language") or "en").lower() == "zh":
+        return "Respond in Simplified Chinese, including suggested labels and follow-up prompts. Keep commands, paths, metric keys, and code unchanged."
+    return "Respond in English, including suggested labels and follow-up prompts."
 
 
 def normalize_agent_history(raw_history: Any) -> list[dict[str, str]]:
