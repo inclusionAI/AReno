@@ -45,3 +45,20 @@ def test_job_cwd_round_trips_through_dashboard_state(tmp_path: Path):
     restored = Job.from_json(job.to_json())
 
     assert restored.cwd == str(tmp_path)
+
+
+def test_metric_updates_latest_job_perf_signal():
+    job = Job(
+        kind="train",
+        name="metric train",
+        command=["areno", "train"],
+        config={"algo": "gspo"},
+        metrics_dir=None,
+    )
+    state = DashboardState()
+
+    state._add_metric(job, "rollout/rewards_mean", 0.25, 1)
+    state._add_metric(job, "rollout/rewards_mean", 0.75, 2)
+
+    assert job.perf["rollout/rewards_mean"] == 0.75
+    assert job.step == 2

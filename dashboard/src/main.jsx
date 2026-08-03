@@ -253,7 +253,14 @@ function App() {
   const pagedJobs = filteredJobs.slice((currentJobPage - 1) * jobPageSize, currentJobPage * jobPageSize);
   const selectedJob = jobDetail.data?.job || (selectedJobId ? jobList.find((job) => job.id === selectedJobId) : null) || null;
   const latestJob = newestJob(jobList);
-  const previewJob = latestJob;
+  const latestJobPreviewDetail = usePolling(
+    () => latestJob ? api(`/api/jobs/${latestJob.id}`) : Promise.resolve(null),
+    3000,
+    [latestJob?.id],
+  );
+  const previewJob = latestJob && latestJobPreviewDetail.data?.job?.id === latestJob.id
+    ? latestJobPreviewDetail.data.job
+    : latestJob;
   const activeAgentSession = useMemo(() => {
     return agentSessions.find((session) => session.id === activeAgentSessionId) || agentSessions[0] || createAgentSession();
   }, [agentSessions, activeAgentSessionId]);
@@ -931,7 +938,11 @@ function OverviewPage({ env, jobs, runtimeAttention, quickActions, onQuickAction
   const gpus = env?.gpus || [];
   const checks = env?.checks || [];
   const warning = runtimeAttention?.attention || checks.find((check) => ["warn", "fail"].includes(String(check.status).toLowerCase()));
-  const reward = findJobMetric(focusJob, ["reward_mean", "reward"]);
+  const algo = String(configValue(focusJob, "algo") || "").toLowerCase();
+  const rewardBearing = ["gspo", "grpo", "ppo"].includes(algo);
+  const health = rewardBearing
+    ? findJobMetric(focusJob, ["rollout/rewards_mean", "reward_mean", "reward"])
+    : findJobMetric(focusJob, ["train/loss", "loss", "policy_loss"]);
 
   return (
     <div className="overviewPage">
@@ -939,7 +950,7 @@ function OverviewPage({ env, jobs, runtimeAttention, quickActions, onQuickAction
         <SummaryCard label="Runtime" value={env?.ready ? "Ready" : env ? "Needs attention" : "Checking"} detail={`${env?.check_counts?.ok ?? 0} OK · ${env?.check_counts?.warn ?? 0} WARN`} tone={env?.ready ? "ok" : "warn"} />
         <SummaryCard label="GPU" value={gpus.length ? `${gpus.length} available` : "No GPU data"} detail={gpus[0]?.name || "Reported by runtime API"} />
         <SummaryCard label="Active jobs" value={String(activeJobs.length)} detail={failedJobs.length ? `${failedJobs.length} failed job${failedJobs.length === 1 ? "" : "s"}` : "No failed jobs"} tone={failedJobs.length ? "warn" : "info"} />
-        <SummaryCard label="Latest health" value={reward == null ? "No signal" : formatMetric(reward)} detail={reward == null ? "Waiting for metrics" : "Latest reward signal"} />
+        <SummaryCard label="Latest health" value={health == null ? "No signal" : formatMetric(health)} detail={health == null ? "Waiting for metrics" : `Latest ${rewardBearing ? "reward" : "loss"} signal`} />
       </section>
 
       <div className="overviewLayout">
@@ -949,7 +960,7 @@ function OverviewPage({ env, jobs, runtimeAttention, quickActions, onQuickAction
           )}
 
           <section className="panel overviewSignals">
-            <div className="panelHeader"><div><h2>Metrics</h2><p>Reward and loss for the latest job on one plot.</p></div><span className="sourceBadge">Live API</span></div>
+            <div className="panelHeader"><div><h2>Metrics</h2><p>Switch between reward and loss for the latest job.</p></div><span className="sourceBadge">Live API</span></div>
             {focusJob ? <OverviewRewardLossChart job={focusJob} /> : <EmptyState title="No metrics available" text="Metrics appear after a job starts reporting scalar data." />}
           </section>
         </div>
@@ -976,8 +987,17 @@ function quickActionIcon(kind) {
 }
 
 function OverviewRewardLossChart({ job }) {
-  const [series, setSeries] = useState({ reward: [], loss: [] });
-  const [names, setNames] = useState({ reward: "", loss: "" });
+  const algo = String(configValue(job, "algo") || "").toLowerCase();
+  const metricKinds = ["gspo", "grpo", "ppo"].includes(algo)
+    ? ["reward", "loss", "gradnorm", "seqlen"]
+    : ["loss", "gradnorm", "seqlen"];
+  const [series, setSeries] = useState({ reward: [], loss: [], gradnorm: [], seqlen: [] });
+  const [names, setNames] = useState({ reward: "", loss: "", gradnorm: "", seqlen: "" });
+  const [activeMetric, setActiveMetric] = useState(metricKinds[0]);
+
+  useEffect(() => {
+    if (!metricKinds.includes(activeMetric)) setActiveMetric(metricKinds[0]);
+  }, [algo, activeMetric]);
 
   useEffect(() => {
     let cancelled = false;
@@ -986,17 +1006,20 @@ function OverviewRewardLossChart({ job }) {
       try {
         const data = await api(`/api/jobs/${job.id}/metrics`);
         const metricNames = metricNamesFrom(data.metrics || []);
-        const rewardName = selectOverviewMetric(metricNames, "reward");
-        const lossName = selectOverviewMetric(metricNames, "loss");
-        const [rewardData, lossData] = await Promise.all([
-          rewardName ? api(`/api/jobs/${job.id}/metric?name=${encodeURIComponent(rewardName)}&limit=240`) : Promise.resolve({ points: [] }),
-          lossName ? api(`/api/jobs/${job.id}/metric?name=${encodeURIComponent(lossName)}&limit=240`) : Promise.resolve({ points: [] }),
-        ]);
+        const nextNames = Object.fromEntries(metricKinds.map((kind) => [kind, selectOverviewMetric(metricNames, kind)]));
+        const metricData = await Promise.all(metricKinds.map((kind) => (
+          nextNames[kind]
+            ? api(`/api/jobs/${job.id}/metric?name=${encodeURIComponent(nextNames[kind])}&limit=240`)
+            : Promise.resolve({ points: [] })
+        )));
         if (cancelled) return;
-        setNames({ reward: rewardName, loss: lossName });
-        setSeries({ reward: normalizeMetricPoints(rewardData.points), loss: normalizeMetricPoints(lossData.points) });
+        setNames((current) => ({ ...current, ...nextNames }));
+        setSeries((current) => ({
+          ...current,
+          ...Object.fromEntries(metricKinds.map((kind, index) => [kind, normalizeMetricPoints(metricData[index].points)])),
+        }));
       } catch {
-        if (!cancelled) setSeries({ reward: [], loss: [] });
+        if (!cancelled) setSeries({ reward: [], loss: [], gradnorm: [], seqlen: [] });
       }
     };
     load();
@@ -1005,21 +1028,25 @@ function OverviewRewardLossChart({ job }) {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [job.id]);
+  }, [job.id, algo]);
 
-  const plot = buildCombinedMetricPlot(series);
-  const hasPoints = series.reward.length || series.loss.length;
+  const activeSeries = series[activeMetric] || [];
+  const plot = buildOverviewMetricPlot(activeSeries);
+  const hasPoints = activeSeries.length > 0;
   return (
     <div className="overviewMetricChart">
-      <div className="metricLegend">
-        <span className="rewardLegend"><i />{names.reward || "reward"}<b>{lastMetricValue(series.reward)}</b></span>
-        <span className="lossLegend"><i />{names.loss || "loss"}<b>{lastMetricValue(series.loss)}</b></span>
+      <div className="overviewMetricToolbar">
+        <div className="tabs compactTabs metricSwitch" aria-label="Metric plot">
+          {metricKinds.map((kind) => <button key={kind} className={classNames(activeMetric === kind && "active")} onClick={() => setActiveMetric(kind)}>{overviewMetricLabel(kind)}</button>)}
+        </div>
+        <div className="metricLegend">
+          <span className={`${activeMetric}Legend`}><i />{names[activeMetric] || overviewMetricLabel(activeMetric)}<b>{lastMetricValue(activeSeries)}</b></span>
+        </div>
       </div>
-      {!hasPoints ? <div className="plotEmpty">No reward or loss points reported yet.</div> : (
-        <svg className="metricPlot overviewPlot" viewBox="0 0 720 220" role="img" aria-label="Reward and loss metrics">
+      {!hasPoints ? <div className="plotEmpty">No {activeMetric} points reported yet.</div> : (
+        <svg className="metricPlot overviewPlot" viewBox="0 0 720 220" role="img" aria-label={`${activeMetric} metrics`}>
           <g className="plotGrid">{[0, 1, 2, 3].map((item) => <line key={item} x1="10" x2="710" y1={35 + item * 52} y2={35 + item * 52} />)}</g>
-          {plot.reward && <polyline className="overviewRewardLine" points={plot.reward} />}
-          {plot.loss && <polyline className="overviewLossLine" points={plot.loss} />}
+          <polyline className={`overviewMetricLine ${activeMetric}Line`} points={plot.points} />
         </svg>
       )}
       <div className="plotFooter"><span>step {plot.stepMin} to {plot.stepMax}</span><span>{plot.minLabel} to {plot.maxLabel}</span></div>
@@ -1029,14 +1056,23 @@ function OverviewRewardLossChart({ job }) {
 
 function selectOverviewMetric(names, type) {
   const lowered = names.map((name) => ({ name, key: name.toLowerCase() }));
-  const exactPreferences = type === "reward"
-    ? ["reward_mean", "train/reward_mean", "reward"]
-    : ["loss", "train/loss", "policy_loss", "actor_loss"];
+  const exactPreferences = {
+    reward: ["rollout/rewards_mean"],
+    loss: ["train/loss", "loss", "train/policy_loss", "policy_loss", "actor_loss"],
+    gradnorm: ["train/grad_norm", "grad_norm"],
+    seqlen: ["rollout/seq_len_mean"],
+  }[type] || [];
   for (const preferred of exactPreferences) {
-    const exact = lowered.find((item) => item.key === preferred || item.key.endsWith(`/${preferred}`));
+    const exact = lowered.find((item) => item.key === preferred);
     if (exact) return exact.name;
   }
-  return lowered.find((item) => item.key.includes(type))?.name || "";
+  if (type === "reward" || type === "seqlen") return "";
+  const fallbackNeedle = type === "gradnorm" ? "grad_norm" : type;
+  return lowered.find((item) => item.key.includes(fallbackNeedle))?.name || "";
+}
+
+function overviewMetricLabel(kind) {
+  return { reward: "Reward", loss: "Loss", gradnorm: "Grad Norm", seqlen: "Sequence Length" }[kind] || kind;
 }
 
 function normalizeMetricPoints(points = []) {
@@ -1046,23 +1082,22 @@ function normalizeMetricPoints(points = []) {
     .slice(-240);
 }
 
-function buildCombinedMetricPlot(series) {
-  const all = [...series.reward, ...series.loss];
-  if (!all.length) return { reward: "", loss: "", stepMin: 0, stepMax: 0, minLabel: "n/a", maxLabel: "n/a" };
-  const values = all.map((point) => point.value);
-  const steps = all.map((point) => point.step);
+function buildOverviewMetricPlot(points) {
+  if (!points.length) return { points: "", stepMin: 0, stepMax: 0, minLabel: "n/a", maxLabel: "n/a" };
+  const values = points.map((point) => point.value);
+  const steps = points.map((point) => point.step);
   const min = Math.min(...values);
   const max = Math.max(...values);
   const stepMin = Math.min(...steps);
   const stepMax = Math.max(...steps);
   const valueSpan = Math.max(max - min, 1e-9);
   const stepSpan = Math.max(stepMax - stepMin, 1);
-  const line = (points) => points.map((point) => {
+  const line = points.map((point) => {
     const x = ((point.step - stepMin) / stepSpan) * 680 + 20;
     const y = 200 - ((point.value - min) / valueSpan) * 174;
     return `${x.toFixed(1)},${y.toFixed(1)}`;
   }).join(" ");
-  return { reward: line(series.reward), loss: line(series.loss), stepMin, stepMax, minLabel: compactNumber(min), maxLabel: compactNumber(max) };
+  return { points: line, stepMin, stepMax, minLabel: compactNumber(min), maxLabel: compactNumber(max) };
 }
 
 function lastMetricValue(points) {
@@ -1131,7 +1166,7 @@ function shortModelName(value) {
 }
 
 function JobsSelectedDetail({ job, env, onStop }) {
-  const reward = findJobMetric(job, ["reward_mean", "reward"]);
+  const reward = findJobMetric(job, ["rollout/rewards_mean", "reward_mean", "reward"]);
   const latestTiming = (job.timeperf || []).slice(-1)[0];
   const gpu = env?.gpus?.[0];
   return (
@@ -1264,6 +1299,7 @@ function formatRelativeTime(value) {
 }
 
 function RuntimePrdPage({ env, onRefresh }) {
+  const [selectedCheck, setSelectedCheck] = useState(null);
   const report = env?.report || {};
   const torch = report.torch || {};
   const checks = env?.checks || [];
@@ -1287,7 +1323,7 @@ function RuntimePrdPage({ env, onRefresh }) {
               <div className="runtimeCheckRow" key={`${check.name || check.label}-${index}`}>
                 <StatusBadge status={check.status || "unknown"} />
                 <div><strong>{check.name || check.label || "Runtime check"}</strong><p>{check.detail || check.message || "No additional details."}</p></div>
-                <button className="secondaryButton tableAction" title="Diagnostic details">Details</button>
+                <button className="secondaryButton tableAction" title="Diagnostic details" onClick={() => setSelectedCheck(check)}>Details</button>
               </div>
             ))}
           </div>
@@ -1300,6 +1336,38 @@ function RuntimePrdPage({ env, onRefresh }) {
           </div>
         </section>
       </div>
+      {selectedCheck && (
+        <Modal title={`${selectedCheck.name || selectedCheck.label || "Environment Check"} Details`} onClose={() => setSelectedCheck(null)}>
+          <RuntimeCheckDetails check={selectedCheck} report={report} onClose={() => setSelectedCheck(null)} />
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+function RuntimeCheckDetails({ check, report, onClose }) {
+  const torch = report?.torch || {};
+  const cuda = report?.cuda || {};
+  const facts = [
+    ["AReno", report?.areno?.version],
+    ["Python", report?.python?.version],
+    ["PyTorch", torch.version],
+    ["CUDA build", torch.cuda_build],
+    ["CUDA runtime", torch.cuda_runtime],
+    ["CUDA available", torch.cuda_available],
+    ["Visible GPUs", torch.device_count],
+    ["NVCC", cuda.nvcc?.version || cuda.nvcc?.path],
+    ["NVIDIA driver", cuda.driver?.driver_version],
+    ["Driver CUDA", cuda.driver?.cuda_version],
+    ["Platform", report?.platform?.platform],
+  ].filter(([, value]) => value !== undefined && value !== null && value !== "");
+  return (
+    <div className="runtimeCheckDetails">
+      <div className="runtimeCheckDetailLead"><StatusBadge status={check.status || "unknown"} /><div><strong>{check.detail || check.message || "No diagnostic value reported."}</strong>{check.next_step && <p>{check.next_step}</p>}</div></div>
+      <div className="runtimeVersionGrid">
+        {facts.map(([label, value]) => <div key={label}><span>{label}</span><strong>{String(value)}</strong></div>)}
+      </div>
+      <button className="primaryButton fullButton" onClick={onClose}>Done</button>
     </div>
   );
 }
@@ -1403,7 +1471,7 @@ function JobMetricsView({ job, refreshNonce }) {
         <MetricChart jobId={job?.id} metricsDir={job?.metrics_dir} refreshNonce={refreshNonce} />
       </div>
       <div className="panel insetPanel">
-        <TimePerfView rows={job?.timeperf || []} />
+        <TimePerfView rows={job?.timeperf || []} job={job} />
       </div>
     </div>
   );
@@ -1971,11 +2039,12 @@ function compactNumber(value) {
   return value.toFixed(4).replace(/0+$/, "").replace(/\.$/, "");
 }
 
-function TimePerfView({ rows }) {
-  const visible = sampleTimePerfRows(rows || [], 7).reverse();
-  const avgTotal = rows?.length ? rows.reduce((sum, row) => sum + Number(row.total_s || 0), 0) / rows.length : 0;
+function TimePerfView({ rows, job }) {
+  const normalizedRows = normalizeTimePerfRows(rows || [], job);
+  const visible = sampleTimePerfRows(normalizedRows, 7).reverse();
+  const avgTotal = normalizedRows.length ? normalizedRows.reduce((sum, row) => sum + Number(row.total_s || 0), 0) / normalizedRows.length : 0;
   const maxTotal = Math.max(1, ...visible.map((row) => Number(row.total_s || 0)));
-  const segmentNames = Array.from(new Set((rows || []).flatMap((row) => (row.segments || []).map((segment) => segment.name)))).slice(0, 8);
+  const segmentNames = Array.from(new Set(normalizedRows.flatMap((row) => (row.segments || []).map((segment) => segment.name)))).slice(0, 8);
   return (
     <div className="timePerf">
       <div className="timePerfHeader">
@@ -2026,6 +2095,34 @@ function TimePerfView({ rows }) {
       )}
     </div>
   );
+}
+
+function normalizeTimePerfRows(rows, job) {
+  const algo = String(configValue(job, "algo") || "").toLowerCase();
+  const valid = timePerfSegmentsForAlgorithm(algo, job?.kind);
+  return rows.map((row) => {
+    const kept = [];
+    let other = 0;
+    for (const segment of row.segments || []) {
+      const seconds = Number(segment.seconds || 0);
+      if (valid.has(segment.name)) kept.push({ ...segment, seconds });
+      else other += seconds;
+    }
+    if (other > 0) {
+      const existing = kept.find((segment) => segment.name === "other");
+      if (existing) existing.seconds += other;
+      else kept.push({ name: "other", seconds: other });
+    }
+    return { ...row, segments: kept };
+  });
+}
+
+function timePerfSegmentsForAlgorithm(algo, kind) {
+  if (kind === "serve") return new Set(["load", "prefill", "decode", "other"]);
+  if (algo === "sft") return new Set(["train", "save", "other"]);
+  if (algo === "dpo") return new Set(["ref log probs", "train", "save", "other"]);
+  if (algo === "ppo") return new Set(["rollout", "make_sample", "reward", "old policy log probs", "actor log probs", "ref log probs", "value", "advantages", "sync weight", "train", "save", "other"]);
+  return new Set(["rollout", "make_sample", "reward", "old policy log probs", "actor log probs", "ref log probs", "advantages", "sync weight", "train", "save", "other"]);
 }
 
 function sampleTimePerfRows(rows, limit) {

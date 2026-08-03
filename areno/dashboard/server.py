@@ -422,6 +422,7 @@ class DashboardState:
             return
         job._metric_keys.add(key)
         job.metrics.append({"name": name, "value": value, "step": step, "time": now()})
+        job.perf[name] = value
         job.step = max(job.step, step)
 
     def stop(self, job_id: str) -> bool:

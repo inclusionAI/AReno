@@ -2359,16 +2359,28 @@ textarea:focus {
 
 .overviewSignals { display: flex; flex-direction: column; }
 .overviewMetricChart { display: grid; grid-template-rows: auto minmax(220px, 1fr) auto; flex: 1; min-height: 310px; border: 1px solid var(--deck-line); border-radius: 8px; padding: 12px; background: var(--deck-panel-2); }
-.metricLegend { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; margin-bottom: 8px; }
+.overviewMetricToolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
+.metricSwitch { flex: 0 0 auto; }
+.metricLegend { display: flex; align-items: center; justify-content: flex-end; gap: 18px; min-width: 0; flex-wrap: wrap; }
 .metricLegend span { display: inline-flex; align-items: center; gap: 7px; color: var(--deck-text); font-size: 11px; }
 .metricLegend i { width: 9px; height: 9px; border-radius: 2px; }
 .metricLegend b { color: var(--deck-ink); font-variant-numeric: tabular-nums; }
 .rewardLegend i { background: var(--deck-ink); }
 .lossLegend i { background: var(--deck-amber); }
+.gradnormLegend i { background: var(--deck-cyan); }
+.seqlenLegend i { background: var(--deck-green); }
 .overviewPlot { height: 100%; min-height: 220px; }
-.overviewRewardLine, .overviewLossLine { fill: none; stroke-width: 3.5; stroke-linecap: round; stroke-linejoin: round; }
-.overviewRewardLine { stroke: var(--deck-ink); }
-.overviewLossLine { stroke: var(--deck-amber); }
+.overviewMetricLine { fill: none; stroke-width: 3.5; stroke-linecap: round; stroke-linejoin: round; }
+.rewardLine { stroke: var(--deck-ink); }
+.lossLine { stroke: var(--deck-amber); }
+.gradnormLine { stroke: var(--deck-cyan); }
+.seqlenLine { stroke: var(--deck-green); }
+
+@media (max-width: 620px) {
+  .overviewMetricToolbar { align-items: stretch; flex-direction: column; }
+  .metricSwitch { align-self: flex-start; }
+  .metricLegend { justify-content: flex-start; }
+}
 
 .jobDetailPreviewGrid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; align-items: stretch; }
 .jobDetailPreviewGrid > .panel { height: 100%; }
@@ -2385,13 +2397,23 @@ textarea:focus {
 
 .runtimePrdPage { max-width: 1360px; margin-inline: auto; }
 .runtimeSummaryGrid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
-.runtimePrdLayout { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(300px, .75fr); gap: 14px; margin-top: 14px; align-items: start; }
+.runtimePrdLayout { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(300px, .75fr); gap: 14px; margin-top: 14px; align-items: stretch; }
+.runtimeChecksPanel, .runtimeGpuPanel { height: 100%; }
 .runtimeCheckList, .runtimeGpuList { display: grid; gap: 8px; }
 .runtimeChecksPanel .runtimeCheckList { max-height: clamp(280px, calc(100vh - 300px), 520px); overflow-y: auto; scrollbar-gutter: stable; padding-right: 4px; }
 .runtimeCheckRow { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 12px; align-items: center; min-height: 70px; padding: 10px; border: 1px solid var(--deck-line); border-radius: 8px; }
 .runtimeCheckRow strong { font-size: 12px; }
 .runtimeCheckRow p { font-size: 11px; }
 .runtimeGpuCard { padding: 13px; border: 1px solid var(--deck-line); border-radius: 8px; }
+.runtimeCheckDetails { display: grid; gap: 14px; }
+.runtimeCheckDetailLead { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: 12px; }
+.runtimeCheckDetailLead strong { color: var(--deck-ink); font-size: 13px; }
+.runtimeCheckDetailLead p { margin-top: 7px; color: var(--deck-text); font-size: 12px; }
+.runtimeVersionGrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; overflow: hidden; border: 1px solid var(--deck-line); border-radius: 8px; background: var(--deck-line); }
+.runtimeVersionGrid > div { min-width: 0; padding: 10px; background: var(--deck-panel-2); }
+.runtimeVersionGrid span, .runtimeVersionGrid strong { display: block; overflow-wrap: anywhere; }
+.runtimeVersionGrid span { color: var(--deck-muted); font-size: 10px; text-transform: uppercase; }
+.runtimeVersionGrid strong { margin-top: 5px; color: var(--deck-ink); font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
 .runtimeGpuCard > div:first-child { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
 .runtimeGpuCard strong, .runtimeGpuCard span { font-size: 11px; }
 .runtimeGpuCard span { color: var(--deck-muted); }
