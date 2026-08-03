@@ -950,6 +950,7 @@ function OverviewPage({ env, jobs, runtimeAttention, quickActions, onQuickAction
 }
 
 function quickActionIcon(kind) {
+  if (kind === "launcher_preset") return <Play size={15} />;
   if (kind === "runtime_refresh") return <RefreshCw size={15} />;
   return <Bot size={15} />;
 }

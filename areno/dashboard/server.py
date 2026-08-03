@@ -1008,7 +1008,16 @@ def runtime_attention() -> dict[str, Any]:
 
 
 def dashboard_quick_actions() -> list[dict[str, Any]]:
-    return [
+    presets_by_source = {item["source"]: item for item in launcher_presets()}
+    actions: list[dict[str, Any]] = []
+    for source, action_id, label in (
+        ("examples/math/dataset_loader.py", "launch-gspo-gsm8k", "Launch GSPO / GSM8K"),
+        ("examples/sft/alpaca/dataset_loader.py", "launch-sft-alpaca", "Launch SFT / Alpaca"),
+    ):
+        discovered = presets_by_source.get(source)
+        if discovered:
+            actions.append({"id": action_id, "label": label, "kind": "launcher_preset", "target": "launcher", "mode": "train", "preset": discovered["preset"], "source": source})
+    actions.extend([
         {"id": "run-runtime-check", "label": "Run Runtime Check", "kind": "runtime_refresh", "target": "runtime"},
         {
             "id": "ask-agent-track-job",
@@ -1017,7 +1026,8 @@ def dashboard_quick_actions() -> list[dict[str, Any]]:
             "target": "agent",
             "prompt": "Track the latest job and summarize its health, metrics, and recent errors.",
         },
-    ]
+    ])
+    return actions
 
 
 def _documented_train_configs() -> list[dict[str, Any]]:
@@ -1116,6 +1126,19 @@ def execute_dashboard_quick_action(payload: dict[str, Any]) -> dict[str, Any]:
         counts = env.get("check_counts") or {}
         lines.extend(["", f"Summary: {counts.get('ok', 0)} OK, {counts.get('warn', 0)} WARN, {counts.get('fail', 0)} FAIL"])
         return {"ok": True, "action": action, "command": ["areno", "check"], "output": "\n".join(lines), "env": env}
+    if action["kind"] == "launcher_preset":
+        supplied = payload.get("config") if isinstance(payload.get("config"), dict) else {}
+        config = {**supplied, **action.get("preset", {})}
+        if not config.get("ckpt") or not config.get("dataset_path"):
+            raise ValueError("discovered launcher preset is missing checkpoint or dataset path")
+        job = Job(
+            kind="train",
+            name=f"train {config.get('algo', '')} {config.get('ckpt', '')}",
+            command=build_train_command(config),
+            config=config,
+            metrics_dir=config.get("metrics_dir"),
+        )
+        return {"ok": True, "action": action, "job": STATE.start(job).to_json()}
     raise ValueError("this quick action must be executed through the agent stream")
 
 
