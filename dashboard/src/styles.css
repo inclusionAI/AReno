@@ -1550,12 +1550,14 @@ textarea:focus {
 
 .notice,
 .error {
+  width: 100%;
+  max-width: 1360px;
   min-height: 38px;
   display: flex;
   align-items: center;
   border-radius: var(--radius-md);
   padding: 0 12px;
-  margin-bottom: 12px;
+  margin: 0 auto 12px;
   font-size: 13px;
   border: 1px solid var(--deck-line);
 }
