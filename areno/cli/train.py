@@ -186,8 +186,14 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
     args.policy_sync_bucket_mb = getattr(args, "policy_sync_bucket_mb", 64)
     args.train_devices = _parse_cuda_devices(getattr(args, "train_devices", None), "--train-devices")
     args.rollout_devices = _parse_cuda_devices(getattr(args, "rollout_devices", None), "--rollout-devices")
+    if args.rollout_tp_size is not None and args.rollout_tp_size <= 0:
+        raise click.UsageError("--rollout-tp-size must be positive")
     if args.train_devices is not None:
         args.world_size = len(args.train_devices)
+    else:
+        args.train_devices = list(range(args.world_size))
+    if args.rollout_devices is None and args.rollout_tp_size is not None:
+        args.rollout_devices = list(args.train_devices)
     args.rollout_tp_size = getattr(args, "rollout_tp_size", None)
     args.policy_sync_bucket_mb = getattr(args, "policy_sync_bucket_mb", 64)
     smoke_infer = bool(getattr(args, "smoke_infer", False))
@@ -240,10 +246,6 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
     has_rollout_topology = args.rollout_devices is not None or args.rollout_tp_size is not None
     if has_rollout_topology and not algorithm.requires_rollout:
         raise click.UsageError("independent rollout devices are only valid for rollout-based algorithms")
-    if args.rollout_tp_size is not None and args.rollout_tp_size <= 0:
-        raise click.UsageError("--rollout-tp-size must be positive")
-    if args.rollout_tp_size is not None and args.rollout_devices is None:
-        raise click.UsageError("--rollout-tp-size requires --rollout-devices")
     if args.rollout_devices is not None:
         rollout_tp_size = args.tp_size if args.rollout_tp_size is None else args.rollout_tp_size
         if len(args.rollout_devices) % rollout_tp_size != 0:
@@ -1333,19 +1335,19 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     "--train-devices",
     type=str,
     default=None,
-    help="CUDA devices for training, with inclusive ranges such as 0..7,10; overrides --world-size.",
+    help="CUDA devices for training, with inclusive ranges such as 0..7,10; defaults to devices from --world-size.",
 )
 @click.option(
     "--rollout-tp-size",
     type=int,
     default=None,
-    help="Tensor parallel size for the independent rollout engine; defaults to --tp-size.",
+    help="Tensor parallel size for an independent rollout engine using the training device set by default.",
 )
 @click.option(
     "--rollout-devices",
     type=str,
     default=None,
-    help="CUDA devices for the independent rollout engine, with inclusive ranges such as 0..7,10.",
+    help="CUDA devices for the independent rollout engine; defaults to the training device set when omitted.",
 )
 @click.option(
     "--policy-sync-bucket-mb",

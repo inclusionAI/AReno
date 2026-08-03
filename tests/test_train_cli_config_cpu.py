@@ -440,7 +440,11 @@ def test_independent_rollout_topology_parses_distinct_cuda_devices() -> None:
             {"world_size": 2, "rollout_devices": "2,3,4", "rollout_tp_size": 2},
             "--rollout-devices count must be divisible",
         ),
-        ({"rollout_tp_size": 2}, "--rollout-tp-size requires --rollout-devices"),
+        (
+            {"world_size": 3, "rollout_tp_size": 2},
+            "--rollout-devices count must be divisible",
+        ),
+        ({"rollout_tp_size": 0}, "--rollout-tp-size must be positive"),
         ({"policy_sync_bucket_mb": 0}, "--policy-sync-bucket-mb must be positive"),
     ],
 )
@@ -463,6 +467,36 @@ def test_train_and_rollout_devices_may_overlap() -> None:
 
     assert cfg.train_devices == [0, 1]
     assert cfg.rollout_devices == [0, 1]
+
+
+def test_world_size_infers_shared_train_and_rollout_devices() -> None:
+    cfg = _trainer_config_from_options(
+        **_options(
+            reward_ckpt="reward",
+            world_size=8,
+            tp_size=4,
+            rollout_tp_size=2,
+        )
+    )
+
+    assert cfg.world_size == 8
+    assert cfg.train_devices == list(range(8))
+    assert cfg.rollout_devices == list(range(8))
+    assert cfg.rollout_tp_size == 2
+
+
+def test_world_size_infers_train_devices_without_separate_rollout() -> None:
+    cfg = _trainer_config_from_options(
+        **_options(
+            reward_ckpt="reward",
+            world_size=4,
+            tp_size=2,
+        )
+    )
+
+    assert cfg.world_size == 4
+    assert cfg.train_devices == [0, 1, 2, 3]
+    assert cfg.rollout_devices is None
 
 
 def test_cuda_device_ranges_are_inclusive_and_composable() -> None:
