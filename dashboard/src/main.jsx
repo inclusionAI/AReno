@@ -25,6 +25,7 @@ import {
   Sun,
   TerminalSquare,
   Timer,
+  Wrench,
 } from "lucide-react";
 import "./styles.css";
 
@@ -68,6 +69,7 @@ const ZH_UI = {
   "Memory pressure and utilization before launch.": "启动前的显存压力和利用率。",
   "Details": "详情",
   "Run Check": "运行检查",
+  "Fix": "修复",
   "Ready": "就绪",
   "Needs attention": "需要关注",
   "Checking": "检查中",
@@ -523,6 +525,24 @@ function App() {
     }
   }
 
+  async function repairRuntime(action) {
+    setBusy(`Fixing ${action.package || "runtime dependency"}...`);
+    try {
+      const result = await api("/api/runtime/repair", {
+        method: "POST",
+        body: JSON.stringify({ action_id: action.id }),
+      });
+      if (result.job?.id) {
+        await jobs.refresh();
+        setBusy(`${result.job.name} started.`);
+        window.setTimeout(() => setBusy(""), 2400);
+      }
+      await runtimeAttention.refresh();
+    } catch (err) {
+      setBusy(err.message || String(err));
+    }
+  }
+
   async function executeOverviewQuickAction(action, overviewJob = null) {
     if (action.kind === "agent_prompt") {
       const jobContext = overviewJob ? `\n\nTrack this overview job: ${overviewJob.name} (${overviewJob.id}).` : "";
@@ -815,6 +835,7 @@ function App() {
           runtimeAttention={runtimeAttention.data}
           quickActions={quickActions.data?.actions || []}
           onQuickAction={executeOverviewQuickAction}
+          onRuntimeRepair={repairRuntime}
         />
       );
     }
@@ -1042,7 +1063,7 @@ function App() {
   );
 }
 
-function OverviewPage({ env, jobs, runtimeAttention, quickActions, onQuickAction }) {
+function OverviewPage({ env, jobs, runtimeAttention, quickActions, onQuickAction, onRuntimeRepair }) {
   const activeJobs = jobs.filter(isActiveJob);
   const failedJobs = jobs.filter((job) => job.status === "failed");
   const latestJobSummary = newestJob(activeJobs.length ? activeJobs : jobs);
@@ -1086,7 +1107,20 @@ function OverviewPage({ env, jobs, runtimeAttention, quickActions, onQuickAction
         <aside className="overviewAside">
           <section className="panel attentionCard">
             <div className="panelHeader"><div><h2>Runtime attention</h2><p>Highest-priority environment finding.</p></div></div>
-            {warning ? <div className="attentionItem"><StatusBadge status={warning.status} /><div><strong>{warning.name || warning.label || "Runtime warning"}</strong><p>{warning.detail || warning.message || "Review the runtime check details."}</p></div></div> : <div className="attentionItem"><StatusBadge status="ok" /><div><strong>No blocking checks</strong><p>The current runtime report has no warning or failure.</p></div></div>}
+            {warning ? (
+              <div className="attentionItem">
+                <StatusBadge status={warning.status} />
+                <div className="attentionItemBody">
+                  <strong>{warning.name || warning.label || "Runtime warning"}</strong>
+                  <p>{warning.detail || warning.message || "Review the runtime check details."}</p>
+                  {warning.repair?.kind === "install_package" && (
+                    <button className="secondaryButton runtimeFixButton" onClick={() => onRuntimeRepair(warning.repair)}>
+                      <Wrench size={14} /> {warning.repair.label || "Fix"}
+                    </button>
+                  )}
+                </div>
+              </div>
+            ) : <div className="attentionItem"><StatusBadge status="ok" /><div><strong>No blocking checks</strong><p>The current runtime report has no warning or failure.</p></div></div>}
           </section>
           <section className="panel quickActions">
             <div className="panelHeader"><div><h2>Quick actions</h2><p>Short paths into common workflows.</p></div></div>

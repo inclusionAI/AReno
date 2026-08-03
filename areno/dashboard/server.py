@@ -985,19 +985,45 @@ def repair_action_for_check(check: dict[str, Any]) -> dict[str, Any]:
     name = str(check.get("name") or "runtime-check")
     normalized = name.lower().replace(" ", "-")
     next_step = str(check.get("next_step") or check.get("detail") or "Review the environment check.")
+    package = None
     command = None
     if "flash_attn" in name.lower() or "flash-attn" in name.lower():
-        command = "pip install flash-attn --no-build-isolation"
+        package = "flash-attn"
+        command = [sys.executable, "-m", "pip", "install", "flash-attn", "--no-build-isolation"]
     elif "flash_linear_attention" in name.lower():
-        command = "pip install flash-linear-attention"
+        package = "flash-linear-attention"
+        command = [sys.executable, "-m", "pip", "install", "flash-linear-attention"]
     return {
         "id": f"repair-{re.sub(r'[^a-z0-9-]+', '-', normalized).strip('-')}",
-        "label": "Copy fix" if command else "Review fix",
-        "kind": "copy_command" if command else "guidance",
+        "label": "Fix" if command else None,
+        "kind": "install_package" if command else "guidance",
+        "package": package,
         "command": command,
         "guidance": next_step,
-        "safe_to_run_automatically": False,
+        "safe_to_run_automatically": bool(command),
     }
+
+
+def start_runtime_repair(action: dict[str, Any]) -> Job:
+    if action.get("kind") != "install_package" or not action.get("package") or not action.get("command"):
+        raise ValueError("runtime repair is not executable")
+    package = str(action["package"])
+    command = [str(part) for part in action["command"]]
+    allowed_commands = {
+        "flash-attn": [sys.executable, "-m", "pip", "install", "flash-attn", "--no-build-isolation"],
+        "flash-linear-attention": [sys.executable, "-m", "pip", "install", "flash-linear-attention"],
+    }
+    if allowed_commands.get(package) != command:
+        raise ValueError("runtime repair command is not allowed")
+    return STATE.start(
+        Job(
+            kind="runtime-repair",
+            name=f"Install {package}",
+            command=command,
+            config={"package": package, "repair_action_id": action["id"]},
+            metrics_dir=None,
+        )
+    )
 
 
 def runtime_attention() -> dict[str, Any]:
@@ -2063,6 +2089,11 @@ class Handler(BaseHTTPRequestHandler):
                     action = next((item for item in actions if item.get("id") == action_id), None)
                     if action is None:
                         self.error("unknown repair action", HTTPStatus.NOT_FOUND)
+                    elif action.get("kind") == "install_package":
+                        job = start_runtime_repair(action)
+                        self.json(
+                            {"ok": job.status != "failed", "action": action, "executed": True, "job": job.to_json()}
+                        )
                     else:
                         self.json({"ok": True, "action": action, "executed": False})
             elif path == "/api/agent/follow-ups":

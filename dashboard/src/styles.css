@@ -132,6 +132,8 @@ body {
 .attentionItem { display: grid; grid-template-columns: auto 1fr; gap: 10px; align-items: start; padding: 12px; border: 1px solid var(--deck-line); border-radius: 8px; background: #f9fbfd; margin-bottom: 12px; }
 .attentionItem strong { font-size: 13px; }
 .attentionItem p { font-size: 12px; }
+.attentionItemBody { min-width: 0; }
+.runtimeFixButton { min-height: 32px; margin-top: 10px; padding-inline: 10px; font-size: 12px; }
 .fullButton { width: 100%; justify-content: center; }
 .quickActions .primaryButton, .quickActions .secondaryButton { width: 100%; justify-content: flex-start; margin-top: 8px; }
 
