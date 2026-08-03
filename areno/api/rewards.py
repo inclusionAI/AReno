@@ -9,12 +9,16 @@ one scalar score, which keeps prompt and agentic demos on the same contract.
 from __future__ import annotations
 
 import importlib.util
+import logging
+import math
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal
 
 import numpy as np
 from pydantic import BaseModel, Field
+
+_logger = logging.getLogger(__name__)
 
 
 class RewardEvent(BaseModel):
@@ -111,3 +115,73 @@ def make_reward_record(
         source_record=dict(source_record),
         metadata=dict(metadata or {}),
     )
+
+
+def compose_reward_fn(
+    components: list[tuple[str, Callable[[RewardRecord], float], float]],
+    *,
+    on_error: Literal["raise", "mark_invalid"] = "raise",
+) -> Callable[[RewardRecord], float]:
+    """Combine multiple named reward functions into one weighted callable.
+
+    Each component is a ``(name, fn, weight)`` tuple. The composed function
+    calls every component with the same :class:`RewardRecord`, computes the
+    weighted sum ``total = sum(w_i * r_i)``, and stores per-component values
+    in ``record.metadata["reward_components"]`` for downstream metrics.
+
+    Args:
+        components: List of (name, fn, weight) tuples. Names must be unique.
+            Weights can be any float; no implicit normalization is applied.
+        on_error: Error handling strategy. ``"raise"`` (default) re-raises
+            any exception or non-finite return value immediately. ``"mark_invalid"``
+            sets the offending component's score to 0.0 and continues.
+
+    Returns:
+        A callable ``fn(record) -> float`` with the same contract as a
+        single reward function.
+
+    Raises:
+        ValueError: If component names are duplicated, the list is empty,
+            or any weight is non-finite.
+    """
+
+    if not components:
+        raise ValueError("compose_reward_fn requires at least one component")
+    names = [name for name, _, _ in components]
+    if len(names) != len(set(names)):
+        duplicates = [n for n in names if names.count(n) > 1]
+        raise ValueError(f"duplicate reward component names: {sorted(set(duplicates))}")
+    for name, _, weight in components:
+        if not math.isfinite(weight):
+            raise ValueError(f"weight for component '{name}' must be finite, got {weight}")
+
+    def composed_fn(record: RewardRecord) -> float:
+        component_scores: dict[str, float] = {}
+        total = 0.0
+        for name, fn, weight in components:
+            try:
+                score = float(fn(record))
+                if not math.isfinite(score):
+                    raise ValueError(f"reward component '{name}' returned non-finite value: {score}")
+            except Exception as exc:
+                if on_error == "raise":
+                    raise
+                # mark_invalid: log the failure and treat score as 0.0
+                _logger.warning(
+                    "reward component '%s' failed (%s); treating score as 0.0",
+                    name,
+                    exc,
+                )
+                score = 0.0
+            component_scores[name] = score
+            total += weight * score
+        # Store component values for downstream metrics collection.
+        record.metadata["reward_components"] = dict(component_scores)
+        return total
+
+    # Expose component names and weights for downstream metrics wiring.
+    # Accessed by metrics code to detect whether a reward_fn is composed and
+    # to enumerate component names. The leading underscore signals that the
+    # attribute is set by compose_reward_fn and not part of Callable's type.
+    composed_fn._reward_components = [(name, weight) for name, _, weight in components]  # type: ignore[attr-defined]
+    return composed_fn

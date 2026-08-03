@@ -432,6 +432,7 @@ class PolicyOnlyTrainer:
             advantage = advantages_by_row.get(row_idx, 0.0)
             advantages = [advantage if is_loss else 0.0 for is_loss in loss_mask]
             rollout_logprobs.extend(lp for lp, is_loss in zip(logprobs, loss_mask, strict=True) if is_loss)
+            record = agent_batch.reward_records[row_idx]
             train_batch.append(
                 areno.api.TrainSequence(
                     prompt_mask=prompt_mask,
@@ -440,6 +441,7 @@ class PolicyOnlyTrainer:
                     logprobs=logprobs,
                     advantages=advantages,
                     reward=float(reward),
+                    reward_components=record.metadata.get("reward_components", {}),
                     eos_token_id=tokenizer.eos_token_id,
                 )
             )
@@ -527,28 +529,28 @@ class PolicyOnlyTrainer:
         for item_idx, (item, result) in enumerate(zip(prompt_batch.items, rollout_results, strict=True)):
             prefix_len = len(item.input_tokens)
             completions = [tokenizer.decode(seq.resp_tokens) for seq in result.sequences]
-            rewards = [
-                float(
-                    self.reward_fn(
-                        make_reward_record(
-                            prompt=item.prompt,
-                            completion=completion,
-                            source_record=item.record,
-                            answer=item.solutions,
-                            tokens=item.input_tokens + seq.resp_tokens,
-                            logprobs=[0.0] * prefix_len + seq.resp_logprobs,
-                            loss_mask=[False] * prefix_len + [True] * len(seq.resp_tokens),
-                            metadata={"prompt_index": item_idx, "sample_index": sample_idx},
-                        )
-                    )
+            rewards = []
+            reward_records = []
+            for sample_idx, (completion, seq) in enumerate(zip(completions, result.sequences, strict=True)):
+                record = make_reward_record(
+                    prompt=item.prompt,
+                    completion=completion,
+                    source_record=item.record,
+                    answer=item.solutions,
+                    tokens=item.input_tokens + seq.resp_tokens,
+                    logprobs=[0.0] * prefix_len + seq.resp_logprobs,
+                    loss_mask=[False] * prefix_len + [True] * len(seq.resp_tokens),
+                    metadata={"prompt_index": item_idx, "sample_index": sample_idx},
                 )
-                for sample_idx, (completion, seq) in enumerate(zip(completions, result.sequences, strict=True))
-            ]
+                rewards.append(float(self.reward_fn(record)))
+                reward_records.append(record)
             rewards_all += rewards
             # Group-relative advantage: A_i = (r_i - mean(r))/std(r); shared by
             # every response token of sample i.
             advantages = compute_group_advantages(rewards)
-            for seq, advantage, reward in zip(result.sequences, advantages, rewards, strict=True):
+            for seq, advantage, reward, reward_record in zip(
+                result.sequences, advantages, rewards, reward_records, strict=True
+            ):
                 resp_len = len(seq.resp_tokens)
                 rollout_logprobs += seq.resp_logprobs
                 train_batch.append(
@@ -561,6 +563,7 @@ class PolicyOnlyTrainer:
                         logprobs=[0.0] * prefix_len + seq.resp_logprobs,
                         advantages=[0.0] * prefix_len + [advantage] * resp_len,
                         reward=reward,
+                        reward_components=reward_record.metadata.get("reward_components", {}),
                         eos_token_id=tokenizer.eos_token_id,
                     )
                 )

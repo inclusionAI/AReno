@@ -70,7 +70,8 @@ class TrainSequence(BaseModel):
     positions, so loss functions can train only on response tokens while still
     conditioning on the prompt. Optional fields (`returns`, `values`,
     `ref_logprobs`) are only populated for algorithms that need them (PPO with
-    a critic and reference model).
+    a critic and reference model). `reward_components` stores per-component
+    scores when ``compose_reward_fn`` is used; empty otherwise.
     """
 
     prompt_mask: list[bool] = Field(default_factory=list)
@@ -82,4 +83,5 @@ class TrainSequence(BaseModel):
     values: list[float] = Field(default_factory=list)
     ref_logprobs: list[float] = Field(default_factory=list)
     reward: float = Field(default=0.0)
+    reward_components: dict[str, float] = Field(default_factory=dict)
     eos_token_id: int = Field(default=0)

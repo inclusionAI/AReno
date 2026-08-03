@@ -143,6 +143,9 @@ def collect_train_batch_stats(train_batch) -> dict:
         response_len = len(response_logprobs)
         stats["rewards"].append(seq.reward)
         stats["advantages"].extend(response_advantages)
+        if seq.reward_components:
+            for comp_name, comp_value in seq.reward_components.items():
+                stats["reward_components"].setdefault(comp_name, []).append(comp_value)
         record_rollout_sequence_stats(
             stats,
             prefix_len=prefix_len,
@@ -164,6 +167,7 @@ def init_rollout_stats(skipped_long: int = 0, total_skipped_long: int = 0) -> di
         "response_len": [],
         "skipped_long": skipped_long,
         "total_skipped_long": total_skipped_long,
+        "reward_components": {},
     }
 
 
@@ -206,6 +210,18 @@ def record_training_stats(writer, stats, step, train_res, train_batch, timings: 
         values = stats.get(key, [])
         if values:
             writer.add_scalar(f"rollout/{key}_mean", np.mean(values), step)
+
+    # Per-component reward metrics (only when compose_reward_fn is used).
+    reward_components = stats.get("reward_components", {})
+    for comp_name, comp_values in reward_components.items():
+        # Sanitize: replace '/' and other TensorBoard-special chars to avoid
+        # unintended namespace nesting in the tag path.
+        safe_name = comp_name.replace("/", "_").replace(" ", "_")
+        comp_arr = np.asarray(comp_values, dtype=np.float32)
+        if comp_arr.size:
+            writer.add_scalar(f"rollout/reward_{safe_name}_mean", comp_arr.mean(), step)
+            writer.add_scalar(f"rollout/reward_{safe_name}_std", comp_arr.std(), step)
+
     writer.add_scalar("rollout/num_sequences", len(train_batch), step)
     for key in ("skipped_long", "total_skipped_long"):
         if key in stats:
