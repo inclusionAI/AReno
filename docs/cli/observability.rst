@@ -51,6 +51,17 @@ external agent code is executing tools, tests, sleeps, background commands, or
 other non-model work before asking the OpenAI-compatible proxy for the next
 model response.
 
+Adjust the verbosity with the ``ARENO_LOG_LEVEL`` environment variable
+(default ``INFO``). Set it to ``DEBUG`` to see per-request decode progress
+and fine-grained engine-level diagnostics:
+
+.. code-block:: bash
+
+   ARENO_LOG_LEVEL=DEBUG areno train ...
+
+The log level is resolved once at startup by ``areno.engine.log`` and
+applies to all submodules under the ``areno`` logger.
+
 ``train_stats``
 ---------------
 
