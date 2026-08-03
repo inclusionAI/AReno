@@ -918,9 +918,9 @@ function App() {
 }
 
 function OverviewPage({ env, jobs, runtimeAttention, quickActions, onQuickAction }) {
-  const activeJobs = jobs.filter((job) => job.status === "running");
+  const activeJobs = jobs.filter(isActiveJob);
   const failedJobs = jobs.filter((job) => job.status === "failed");
-  const latestJobSummary = newestJob(jobs);
+  const latestJobSummary = newestJob(activeJobs.length ? activeJobs : jobs);
   const latestJobDetail = usePolling(
     () => latestJobSummary ? api(`/api/jobs/${latestJobSummary.id}`) : Promise.resolve(null),
     2000,
@@ -1079,17 +1079,15 @@ function RunningJobSummary({ job }) {
   const dataset = getJobConfigValue(job, "dataset_path") || getJobConfigValue(job, "dataset");
   const latestTiming = (job.timeperf || []).slice(-1)[0];
   const segments = Object.fromEntries((latestTiming?.segments || []).map((segment) => [segment.name, segment.seconds]));
-  const currentStage = job.stage || (job.status === "running" ? "train" : job.status);
-  const stageOrder = ["created", "rollout", "score", "train", "save", "done"];
-  const currentIndex = Math.max(0, stageOrder.indexOf(currentStage));
-  const isTerminal = ["succeeded", "done"].includes(job.status);
-  const stageDuration = (stage) => {
-    if (stage === "rollout" && Number.isFinite(Number(segments.rollout))) return `${Number(segments.rollout).toFixed(1)}s`;
-    if (stage === "train" && Number.isFinite(Number(segments.train))) return `${Number(segments.train).toFixed(1)}s`;
-    if (stage === "created" && job.created_at) return "created";
-    if (stage === currentStage && job.status === "running") return "running";
-    if (isTerminal && stage === "done") return "complete";
-    return stageOrder.indexOf(stage) < currentIndex ? "complete" : "pending";
+  const steps = timelineSteps(job);
+  const stage = timelineStageId(job);
+  const currentIndex = Math.max(0, steps.findIndex((item) => timelineItemMatches(item, stage, job)));
+  const stageDuration = (item, index) => {
+    if (item.id === "rollout" && Number.isFinite(Number(segments.rollout))) return `${Number(segments.rollout).toFixed(1)}s`;
+    if (["train", "actor_train", "critic_train"].includes(item.id) && Number.isFinite(Number(segments.train))) return `${Number(segments.train).toFixed(1)}s`;
+    if (item.id === "created" && job.created_at) return "created";
+    if (timelineItemMatches(item, stage, job)) return ["succeeded", "done"].includes(job.status) ? "complete" : job.status;
+    return index < currentIndex ? "complete" : "pending";
   };
 
   return (
@@ -1105,10 +1103,9 @@ function RunningJobSummary({ job }) {
         {dataset && <span>dataset: {shortDatasetName(dataset)}</span>}
       </div>
       <div className="stageRow">
-        {stageOrder.map((stage, index) => {
-          const done = isTerminal || index < currentIndex;
-          const current = !isTerminal && (stage === currentStage || (currentStage === "running" && stage === "train"));
-          return <div key={stage} className={classNames("stageCell", done && "done", current && "current")}><strong>{stage}</strong><span>{stageDuration(stage)}</span></div>;
+        {steps.map((item, index) => {
+          const current = timelineItemMatches(item, stage, job);
+          return <div key={item.id} className={classNames("stageCell", index <= currentIndex && "done", current && "current")}><strong>{item.label}</strong><span>{stageDuration(item, index)}</span></div>;
         })}
       </div>
     </section>
@@ -1127,6 +1124,10 @@ function getJobConfigValue(job, key) {
 
 function newestJob(jobs = []) {
   return [...jobs].sort((left, right) => Date.parse(right.created_at || 0) - Date.parse(left.created_at || 0))[0] || null;
+}
+
+function isActiveJob(job) {
+  return ["created", "queued", "starting", "running"].includes(String(job?.status || "").toLowerCase());
 }
 
 function shortModelName(value) {
@@ -1439,14 +1440,16 @@ function AgentPlanCard({ plan, onConfirm }) {
   const [execution, setExecution] = useState(null);
   useEffect(() => setParameters(plan.parameters || {}), [plan.id]);
   const entries = Object.entries(parameters);
-  const editedPlan = { ...plan, parameters };
+  const planTool = plan.tool || inferPlanRunTool(plan);
+  const command = commandForPlan(planTool, parameters);
+  const editedPlan = { ...plan, tool: planTool, parameters, command };
   return (
     <section className="agentPlanCard">
       <div className="agentPlanHeader"><div><span>Execution plan</span><strong>{plan.objective}</strong></div><StatusBadge status={plan.status || "proposed"} /></div>
       {plan.summary && <p className="agentPlanSummary">{plan.summary}</p>}
       {entries.length > 0 && <div className={classNames("agentPlanParams", editing && "editing")}>{entries.map(([label, value]) => <label key={label}><span>{label.replaceAll("_", " ")}</span>{editing ? <input value={String(value)} onChange={(event) => setParameters((current) => ({ ...current, [label]: event.target.value }))} /> : <strong>{String(value)}</strong>}</label>)}</div>}
       <ol className="agentPlanSteps">{(plan.steps || []).map((step, index) => <li key={step.id || index}><span>{index + 1}</span><div><strong>{step.title}</strong>{step.detail && <p>{step.detail}</p>}</div><small>{step.status || "pending"}</small></li>)}</ol>
-      {plan.command && <pre className="agentPlanCommand">{plan.command}</pre>}
+      {command && <pre className="agentPlanCommand">{command}</pre>}
       <div className="agentPlanActions">
         <button
           className="primaryButton"
@@ -1462,7 +1465,7 @@ function AgentPlanCard({ plan, onConfirm }) {
           }}
         >{execution?.status === "running" ? "Executing..." : "Confirm Execution"}</button>
         {entries.length > 0 && <button className="secondaryButton" onClick={() => setEditing((value) => !value)}>{editing ? "Save Parameters" : "Edit Parameters"}</button>}
-        {plan.command && <button className="secondaryButton" onClick={() => navigator.clipboard.writeText(plan.command)}>Copy Command</button>}
+        {command && <button className="secondaryButton" onClick={() => navigator.clipboard.writeText(command)}>Copy Command</button>}
       </div>
       {execution && execution.status !== "running" && <p className={classNames("agentPlanExecution", execution.status)}>{execution.message}</p>}
     </section>
@@ -1475,6 +1478,35 @@ function inferPlanRunTool(plan) {
   if (command.includes("--smoke-infer")) return "smoke_infer";
   if (/\bareno\s+serve\b/.test(command)) return "start_serve";
   return "start_train";
+}
+
+function commandForPlan(tool, parameters = {}) {
+  const mode = tool === "start_serve" ? "serve" : "train";
+  const args = [];
+  const negativeFlags = new Set(["activation_checkpointing", "use_kl_loss"]);
+  for (const [key, value] of Object.entries(parameters)) {
+    if (key === "extra_args" || value === "" || value === null || value === undefined) continue;
+    const flag = `--${key.replaceAll("_", "-")}`;
+    if (isPlanBoolean(value)) {
+      if (planBoolValue(value)) args.push(flag);
+      else if (negativeFlags.has(key)) args.push(`--no-${key.replaceAll("_", "-")}`);
+      continue;
+    }
+    args.push(`${flag} ${shellQuote(value)}`);
+  }
+  if (tool === "smoke_train") args.push("--smoke-train");
+  if (tool === "smoke_infer") args.push("--smoke-infer");
+  const extraArgs = String(parameters.extra_args || "").trim();
+  if (extraArgs) args.push(extraArgs);
+  return [`areno ${mode} \\`, ...args.map((arg, index) => `  ${arg}${index < args.length - 1 ? " \\" : ""}`)].join("\n");
+}
+
+function isPlanBoolean(value) {
+  return typeof value === "boolean" || (typeof value === "string" && ["true", "false"].includes(value.trim().toLowerCase()));
+}
+
+function planBoolValue(value) {
+  return value === true || String(value).trim().toLowerCase() === "true";
 }
 
 function MarkdownBlock({ text }) {
