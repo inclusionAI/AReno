@@ -978,13 +978,11 @@ function quickActionIcon(kind) {
 function OverviewRewardLossChart({ job }) {
   const [series, setSeries] = useState({ reward: [], loss: [] });
   const [names, setNames] = useState({ reward: "", loss: "" });
-  const [loading, setLoading] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
     let timer;
     const load = async () => {
-      setLoading(true);
       try {
         const data = await api(`/api/jobs/${job.id}/metrics`);
         const metricNames = metricNamesFrom(data.metrics || []);
@@ -999,8 +997,6 @@ function OverviewRewardLossChart({ job }) {
         setSeries({ reward: normalizeMetricPoints(rewardData.points), loss: normalizeMetricPoints(lossData.points) });
       } catch {
         if (!cancelled) setSeries({ reward: [], loss: [] });
-      } finally {
-        if (!cancelled) setLoading(false);
       }
     };
     load();
@@ -1019,7 +1015,7 @@ function OverviewRewardLossChart({ job }) {
         <span className="rewardLegend"><i />{names.reward || "reward"}<b>{lastMetricValue(series.reward)}</b></span>
         <span className="lossLegend"><i />{names.loss || "loss"}<b>{lastMetricValue(series.loss)}</b></span>
       </div>
-      {!hasPoints ? <div className="plotEmpty">{loading ? "Loading reward and loss..." : "No reward or loss points reported yet."}</div> : (
+      {!hasPoints ? <div className="plotEmpty">No reward or loss points reported yet.</div> : (
         <svg className="metricPlot overviewPlot" viewBox="0 0 720 220" role="img" aria-label="Reward and loss metrics">
           <g className="plotGrid">{[0, 1, 2, 3].map((item) => <line key={item} x1="10" x2="710" y1={35 + item * 52} y2={35 + item * 52} />)}</g>
           {plot.reward && <polyline className="overviewRewardLine" points={plot.reward} />}
