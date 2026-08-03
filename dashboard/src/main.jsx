@@ -1123,7 +1123,7 @@ function newestJob(jobs = []) {
 }
 
 function isActiveJob(job) {
-  return ["created", "queued", "starting", "running"].includes(String(job?.status || "").toLowerCase());
+  return String(job?.status || "").toLowerCase() === "running";
 }
 
 function shortModelName(value) {

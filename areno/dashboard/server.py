@@ -76,6 +76,7 @@ class Job:
         config: dict[str, Any],
         metrics_dir: str | None,
         pid: int | None = None,
+        cwd: str | None = None,
     ):
         self.id = uuid4().hex[:12]
         self.kind = kind
@@ -83,6 +84,7 @@ class Job:
         self.command = command
         self.config = config
         self.metrics_dir = metrics_dir
+        self.cwd = cwd
         self.status = "created"
         self.stage = "created"
         self.role = ""
@@ -112,6 +114,7 @@ class Job:
             config=dict(item.get("launch") or item.get("config") or {}),
             metrics_dir=item.get("metrics_dir"),
             pid=item.get("pid"),
+            cwd=item.get("cwd"),
         )
         job.id = item.get("id") or job.id
         job.status = item.get("status", "unknown")
@@ -137,6 +140,7 @@ class Job:
             "config_text": self.config_text,
             "launch": self.launch_config,
             "metrics_dir": self.metrics_dir,
+            "cwd": self.cwd,
             "status": self.status,
             "stage": self.stage,
             "role": self.role,
@@ -158,6 +162,7 @@ class Job:
             "kind": self.kind,
             "name": self.name,
             "metrics_dir": self.metrics_dir,
+            "cwd": self.cwd,
             "status": self.status,
             "stage": self.stage,
             "role": self.role,
@@ -276,7 +281,9 @@ class DashboardState:
     def _load_metric_files(self, job: Job) -> None:
         if not job.metrics_dir:
             return
-        path = (ROOT / job.metrics_dir).resolve()
+        metrics_path = Path(job.metrics_dir).expanduser()
+        base_path = Path(job.cwd).expanduser() if job.cwd else ROOT
+        path = metrics_path.resolve() if metrics_path.is_absolute() else (base_path / metrics_path).resolve()
         if not path.exists() or not path.is_dir():
             return
         self._load_dashboard_state(job, path)
@@ -554,6 +561,7 @@ class DashboardState:
                         or parse_command_option(command, "--metrics-log-dir")
                         or DEFAULT_METRICS_LOG_DIR,
                         pid=pid,
+                        cwd=str(item.get("cwd") or "") or None,
                     )
                     job.launch_config = dict(job.config)
                     job.config = {}
@@ -565,6 +573,7 @@ class DashboardState:
                 else:
                     job.command = command_parts or job.command
                     job.metrics_dir = item.get("metrics_dir") or job.metrics_dir
+                    job.cwd = str(item.get("cwd") or job.cwd or "") or None
                     if item.get("config") and not job.config:
                         job.config = dict(item.get("config") or {})
                     if item.get("config") and not job.launch_config:
