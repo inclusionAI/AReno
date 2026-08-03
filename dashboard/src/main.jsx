@@ -252,7 +252,7 @@ function App() {
   const currentJobPage = Math.min(jobPage, jobPageCount);
   const pagedJobs = filteredJobs.slice((currentJobPage - 1) * jobPageSize, currentJobPage * jobPageSize);
   const selectedJob = jobDetail.data?.job || (selectedJobId ? jobList.find((job) => job.id === selectedJobId) : null) || null;
-  const latestJob = [...jobList].sort((left, right) => Date.parse(right.updated_at || right.created_at || 0) - Date.parse(left.updated_at || left.created_at || 0))[0] || null;
+  const latestJob = newestJob(jobList);
   const previewJob = latestJob;
   const activeAgentSession = useMemo(() => {
     return agentSessions.find((session) => session.id === activeAgentSessionId) || agentSessions[0] || createAgentSession();
@@ -351,6 +351,26 @@ function App() {
       const result = await api("/api/jobs/serve", { method: "POST", body: JSON.stringify(serveConfig) });
       setSelectedJobId(result.job.id);
       await jobs.refresh();
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function executeAgentPlan(plan) {
+    setBusy("Executing plan...");
+    try {
+      const result = await api("/api/agent/tools/run", {
+        method: "POST",
+        body: JSON.stringify({
+          tool: plan.tool || inferPlanRunTool(plan),
+          parameters: plan.parameters || {},
+        }),
+      });
+      if (result.job?.id) {
+        setSelectedJobId(result.job.id);
+        await jobs.refresh();
+      }
+      return result;
     } finally {
       setBusy("");
     }
@@ -726,7 +746,7 @@ function App() {
                 {agentMessages.map((message, index) => (
                   <div key={`${message.id || message.role}-${index}`} className={classNames("chatBubble", message.role)}>
                     <span>{message.role}</span>
-                    {message.events?.length ? <AgentEventList events={message.events} onPlanConfirm={(plan) => runAgent(planConfirmationPrompt(plan))} /> : <MarkdownBlock text={message.content} />}
+                    {message.events?.length ? <AgentEventList events={message.events} onPlanConfirm={executeAgentPlan} /> : <MarkdownBlock text={message.content} />}
                   </div>
                 ))}
               </div>
@@ -900,13 +920,14 @@ function App() {
 function OverviewPage({ env, jobs, runtimeAttention, quickActions, onQuickAction }) {
   const activeJobs = jobs.filter((job) => job.status === "running");
   const failedJobs = jobs.filter((job) => job.status === "failed");
-  const latestJobSummary = [...jobs].sort((left, right) => Date.parse(right.updated_at || right.created_at || 0) - Date.parse(left.updated_at || left.created_at || 0))[0] || null;
+  const latestJobSummary = newestJob(jobs);
   const latestJobDetail = usePolling(
     () => latestJobSummary ? api(`/api/jobs/${latestJobSummary.id}`) : Promise.resolve(null),
-    3000,
+    2000,
     [latestJobSummary?.id],
   );
-  const focusJob = latestJobDetail.data?.job || latestJobSummary;
+  const detailedJob = latestJobDetail.data?.job;
+  const focusJob = detailedJob?.id === latestJobSummary?.id ? detailedJob : latestJobSummary;
   const gpus = env?.gpus || [];
   const checks = env?.checks || [];
   const warning = runtimeAttention?.attention || checks.find((check) => ["warn", "fail"].includes(String(check.status).toLowerCase()));
@@ -961,9 +982,11 @@ function OverviewRewardLossChart({ job }) {
 
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
-    api(`/api/jobs/${job.id}/metrics`)
-      .then(async (data) => {
+    let timer;
+    const load = async () => {
+      setLoading(true);
+      try {
+        const data = await api(`/api/jobs/${job.id}/metrics`);
         const metricNames = metricNamesFrom(data.metrics || []);
         const rewardName = selectOverviewMetric(metricNames, "reward");
         const lossName = selectOverviewMetric(metricNames, "loss");
@@ -974,15 +997,19 @@ function OverviewRewardLossChart({ job }) {
         if (cancelled) return;
         setNames({ reward: rewardName, loss: lossName });
         setSeries({ reward: normalizeMetricPoints(rewardData.points), loss: normalizeMetricPoints(lossData.points) });
-      })
-      .catch(() => {
+      } catch {
         if (!cancelled) setSeries({ reward: [], loss: [] });
-      })
-      .finally(() => {
+      } finally {
         if (!cancelled) setLoading(false);
-      });
-    return () => { cancelled = true; };
-  }, [job.id, job.step]);
+      }
+    };
+    load();
+    timer = window.setInterval(load, 2500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [job.id]);
 
   const plot = buildCombinedMetricPlot(series);
   const hasPoints = series.reward.length || series.loss.length;
@@ -1049,7 +1076,7 @@ function lastMetricValue(points) {
 function RunningJobSummary({ job }) {
   const algo = getJobConfigValue(job, "algo");
   const checkpoint = getJobConfigValue(job, "ckpt") || getJobConfigValue(job, "model_path");
-  const dataset = getJobConfigValue(job, "dataset_path");
+  const dataset = getJobConfigValue(job, "dataset_path") || getJobConfigValue(job, "dataset");
   const latestTiming = (job.timeperf || []).slice(-1)[0];
   const segments = Object.fromEntries((latestTiming?.segments || []).map((segment) => [segment.name, segment.seconds]));
   const currentStage = job.stage || (job.status === "running" ? "train" : job.status);
@@ -1089,12 +1116,17 @@ function RunningJobSummary({ job }) {
 }
 
 function getJobConfigValue(job, key) {
-  if (job?.launch?.[key] !== undefined && job.launch[key] !== null && job.launch[key] !== "") return job.launch[key];
+  if (job?.config?.[key] !== undefined && job.config[key] !== null && job.config[key] !== "") return job.config[key];
   for (const section of job?.config?.sections || []) {
     const item = (section.items || []).find((entry) => entry.key === key);
     if (item?.value !== undefined && item.value !== null && item.value !== "") return item.value;
   }
+  if (job?.launch?.[key] !== undefined && job.launch[key] !== null && job.launch[key] !== "") return job.launch[key];
   return null;
+}
+
+function newestJob(jobs = []) {
+  return [...jobs].sort((left, right) => Date.parse(right.created_at || 0) - Date.parse(left.created_at || 0))[0] || null;
 }
 
 function shortModelName(value) {
@@ -1136,7 +1168,6 @@ function JobsSelectedDetail({ job, env, onStop }) {
 
 function JobFullDetailPage({ job, refreshNonce, onBack, onStop }) {
   const logs = job.logs || [];
-  const errors = logs.filter((line) => /error|exception|traceback|failed|fatal/i.test(String(line))).slice(-20);
   return (
     <div className="jobFullDetailPage">
       <div className="detailPageToolbar">
@@ -1151,10 +1182,6 @@ function JobFullDetailPage({ job, refreshNonce, onBack, onStop }) {
       <section className="panel jobDetailSection">
         <div className="panelHeader"><div><h2>Rollout Sample</h2><p>Prompt and completion output captured during rollout.</p></div></div>
         <SampleView samples={job.samples || []} hideTitle />
-      </section>
-      <section className="panel jobDetailSection">
-        <div className="panelHeader"><div><h2>Error Report</h2><p>Errors and failure signatures extracted from the job log.</p></div><StatusBadge status={errors.length ? "failed" : "ok"} /></div>
-        {errors.length ? <pre className="errorReport">{errors.join("\n")}</pre> : <EmptyState title="No errors detected" text="No error, exception, traceback, failed, or fatal lines were found." />}
       </section>
       <div className="jobDetailDataGrid">
         <ConfigView config={job.config} launch={job.launch} />
@@ -1409,6 +1436,7 @@ function AgentEventList({ events, onPlanConfirm }) {
 function AgentPlanCard({ plan, onConfirm }) {
   const [editing, setEditing] = useState(false);
   const [parameters, setParameters] = useState(plan.parameters || {});
+  const [execution, setExecution] = useState(null);
   useEffect(() => setParameters(plan.parameters || {}), [plan.id]);
   const entries = Object.entries(parameters);
   const editedPlan = { ...plan, parameters };
@@ -1420,18 +1448,33 @@ function AgentPlanCard({ plan, onConfirm }) {
       <ol className="agentPlanSteps">{(plan.steps || []).map((step, index) => <li key={step.id || index}><span>{index + 1}</span><div><strong>{step.title}</strong>{step.detail && <p>{step.detail}</p>}</div><small>{step.status || "pending"}</small></li>)}</ol>
       {plan.command && <pre className="agentPlanCommand">{plan.command}</pre>}
       <div className="agentPlanActions">
-        <button className="primaryButton" onClick={() => onConfirm?.(editedPlan)}>Confirm Execution</button>
+        <button
+          className="primaryButton"
+          disabled={execution?.status === "running"}
+          onClick={async () => {
+            setExecution({ status: "running", message: "Starting..." });
+            try {
+              const result = await onConfirm?.(editedPlan);
+              setExecution({ status: result?.ok === false ? "failed" : "ok", message: result?.job?.id ? `Started job ${result.job.id}` : "Execution completed" });
+            } catch (error) {
+              setExecution({ status: "failed", message: error.message || String(error) });
+            }
+          }}
+        >{execution?.status === "running" ? "Executing..." : "Confirm Execution"}</button>
         {entries.length > 0 && <button className="secondaryButton" onClick={() => setEditing((value) => !value)}>{editing ? "Save Parameters" : "Edit Parameters"}</button>}
         {plan.command && <button className="secondaryButton" onClick={() => navigator.clipboard.writeText(plan.command)}>Copy Command</button>}
       </div>
+      {execution && execution.status !== "running" && <p className={classNames("agentPlanExecution", execution.status)}>{execution.message}</p>}
     </section>
   );
 }
 
-function planConfirmationPrompt(plan) {
-  const steps = (plan.steps || []).map((step, index) => `${index + 1}. ${step.title}${step.detail ? `: ${step.detail}` : ""}`).join("\n");
-  const parameters = Object.entries(plan.parameters || {}).map(([key, value]) => `${key}=${value}`).join(", ");
-  return `Confirm execution plan ${plan.id}. Proceed with the proposed task now.\nObjective: ${plan.objective}\n${parameters ? `Parameters: ${parameters}\n` : ""}Steps:\n${steps}`;
+function inferPlanRunTool(plan) {
+  const command = String(plan?.command || "").toLowerCase();
+  if (command.includes("--smoke-train")) return "smoke_train";
+  if (command.includes("--smoke-infer")) return "smoke_infer";
+  if (/\bareno\s+serve\b/.test(command)) return "start_serve";
+  return "start_train";
 }
 
 function MarkdownBlock({ text }) {
@@ -1755,6 +1798,7 @@ function MetricChart({ jobId, metricsDir, refreshNonce }) {
   const [metricList, setMetricList] = useState([]);
   const [points, setPoints] = useState([]);
   const [metricLoading, setMetricLoading] = useState(false);
+  const [pollTick, setPollTick] = useState(0);
   const [prevJobId, setPrevJobId] = useState(jobId);
   // Reset the selection during render (not in an effect) when the job changes so
   // the reset happens before any effect runs. This avoids a stale-name fetch and
@@ -1769,6 +1813,11 @@ function MetricChart({ jobId, metricsDir, refreshNonce }) {
   }
   const names = metricNamesFrom(metricList);
   const effectiveName = resolveActiveMetricName(names, selectedName);
+  useEffect(() => {
+    if (!jobId) return undefined;
+    const timer = window.setInterval(() => setPollTick((value) => value + 1), 2500);
+    return () => window.clearInterval(timer);
+  }, [jobId]);
   useEffect(() => {
     let cancelled = false;
     if (!jobId) return undefined;
@@ -1785,7 +1834,7 @@ function MetricChart({ jobId, metricsDir, refreshNonce }) {
     return () => {
       cancelled = true;
     };
-  }, [jobId, refreshNonce]);
+  }, [jobId, refreshNonce, pollTick]);
   useEffect(() => {
     let cancelled = false;
     if (!jobId || !effectiveName) {
@@ -1812,7 +1861,7 @@ function MetricChart({ jobId, metricsDir, refreshNonce }) {
     return () => {
       cancelled = true;
     };
-  }, [jobId, effectiveName, refreshNonce]);
+  }, [jobId, effectiveName, refreshNonce, pollTick]);
   const activeName = effectiveName;
   const visiblePoints = points.slice(-240);
   const smoothed = smoothTensorboard(visiblePoints, smooth);

@@ -1600,6 +1600,10 @@ def agent_tool_schemas() -> list[dict[str, Any]]:
                             },
                         },
                         "parameters": {"type": "object", "additionalProperties": True},
+                        "tool": {
+                            "type": "string",
+                            "enum": ["start_train", "start_serve", "smoke_train", "smoke_infer"],
+                        },
                         "command": {"type": "string"},
                     },
                     "required": ["objective", "steps"],
@@ -1824,6 +1828,7 @@ def execute_agent_tool(tool_call: dict[str, Any]) -> dict[str, Any]:
                     "summary": str(args.get("summary") or "").strip()[:2000],
                     "steps": steps,
                     "parameters": {str(key)[:80]: str(value)[:500] for key, value in list(parameters.items())[:20]},
+                    "tool": str(args.get("tool") or "")[:40],
                     "command": str(args.get("command") or "").strip()[:4000],
                 },
             }
@@ -2008,6 +2013,18 @@ class Handler(BaseHTTPRequestHandler):
                         self.json({"ok": True, "action": action, "executed": False})
             elif path == "/api/agent/follow-ups":
                 self.json(agent_follow_ups(payload))
+            elif path == "/api/agent/tools/run":
+                tool = str(payload.get("tool") or "")
+                allowed = {"start_train", "start_serve", "smoke_train", "smoke_infer"}
+                if tool not in allowed:
+                    self.error("unsupported plan execution tool", HTTPStatus.BAD_REQUEST)
+                else:
+                    parameters = payload.get("parameters") if isinstance(payload.get("parameters"), dict) else {}
+                    self.json(
+                        execute_agent_tool(
+                            {"function": {"name": tool, "arguments": json.dumps({"config": parameters})}}
+                        )
+                    )
             elif path == "/api/agent/recovery/clear":
                 clear_agent_error()
                 self.json(agent_recovery(payload.get("job_id")))

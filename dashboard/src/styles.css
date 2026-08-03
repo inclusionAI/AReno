@@ -2431,7 +2431,6 @@ textarea:focus {
 .jobDetailSection .jobMetricsGrid { margin: 0; }
 .jobDetailDataGrid { display: grid; grid-template-columns: minmax(0, .8fr) minmax(0, 1.2fr); gap: 14px; align-items: stretch; }
 .jobDetailDataGrid > .codeCard { height: 100%; }
-.errorReport { max-height: 280px; margin: 0; padding: 14px; overflow: auto; border: 1px solid color-mix(in srgb, var(--deck-red) 35%, var(--deck-line)); border-radius: 8px; color: var(--deck-red); background: color-mix(in srgb, var(--deck-red) 5%, var(--deck-panel)); font: 11px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; }
 
 .agentPrdLayout { display: grid; grid-template-columns: minmax(0, 1fr) 330px; gap: 14px; width: 100%; max-width: none; margin-inline: auto; align-items: stretch; }
 .agentSideRail { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); gap: 14px; height: 100%; }
@@ -2465,6 +2464,9 @@ textarea:focus {
 .agentPlanCommand { max-width: 100%; max-height: 180px; margin: 0; padding: 11px; overflow: auto; border-radius: 7px; color: #fff; background: #11161c; font: 400 11px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
 .agentPlanCommand, .agentPlanCommand * { color: #fff !important; -webkit-text-fill-color: #fff; }
 .agentPlanActions { display: flex; flex-wrap: wrap; gap: 8px; }
+.agentPlanExecution { margin: 0; color: var(--deck-text); font-size: 11px; }
+.agentPlanExecution.ok { color: var(--deck-green); }
+.agentPlanExecution.failed { color: var(--deck-red); }
 .agentFollowupsCard button:disabled { cursor: not-allowed; opacity: .45; }
 .agentFollowupsCard { display: flex; flex-direction: column; min-height: 0; }
 .agentFollowupsCard .followupsLoading { color: var(--deck-muted); font-size: 12px; }
