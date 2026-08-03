@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import functools
 import unittest
-
+import pytest
 from areno.api.algorithms import AlgorithmSpec, get_algorithm, list_algorithms, register_algorithm
 from areno.api.loss_fns.gspo import gspo_loss_fn
 from areno.api.loss_fns.ppo import ppo_loss_fn
@@ -20,7 +20,14 @@ class AlgorithmRegistryTest(unittest.TestCase):
         self.assertEqual(set(algorithms), {"dpo", "grpo", "gspo", "ppo", "sft"})
         self.assertFalse(algorithms["sft"].requires_rollout)
         self.assertTrue(algorithms["gspo"].requires_rollout)
+        self.assertTrue(algorithms["grpo"].requires_rollout)
+        self.assertTrue(algorithms["ppo"].requires_rollout)
         self.assertIs(algorithms["ppo"].default_loss_fn, ppo_loss_fn)
+        self.assertFalse(algorithms["sft"].requires_reward)
+        self.assertFalse(algorithms["dpo"].requires_reward)
+        self.assertTrue(algorithms["gspo"].requires_reward)
+        self.assertTrue(algorithms["grpo"].requires_reward)
+        self.assertTrue(algorithms["ppo"].requires_reward)
 
     def test_unknown_algorithm_error_lists_registered_names(self):
         """Unknown names should fail with a useful registry-backed message."""
@@ -70,6 +77,27 @@ class AlgorithmRegistryTest(unittest.TestCase):
         self.assertEqual(trainer.dataset, ["row"])
         self.assertIs(trainer.loss_fn, dummy_loss)
 
+
+def test_reward_requirement_implies_rollout():
+    """Reward-scored algorithms cannot be declared as offline trainers."""
+
+    def dummy_loss(data_pack, logprobs):
+        return data_pack, logprobs
+
+    with pytest.raises(
+        ValueError,
+        match = "require reward must also require rollout",
+    ):
+        register_algorithm(
+            AlgorithmSpec(
+                name="unit_invalid_reward_algo",
+                trainer_cls=object,
+                default_loss_fn=dummy_loss,
+                requires_rollout=False,
+                requires_reward=True,
+                experimental=True,
+            )
+        )
 
 if __name__ == "__main__":
     unittest.main()
