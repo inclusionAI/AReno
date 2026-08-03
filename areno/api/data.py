@@ -4,6 +4,11 @@
 tokenising a dataset row. `PromptBatch` groups a fixed-size set of items
 together and carries diagnostic counters so the trainer can surface how many
 records were skipped for exceeding the prompt-length budget.
+
+`LossSpan` and `LossMaskExplanation` support the human-readable loss-mask
+explainer: they annotate contiguous token spans with role labels and loss
+flags so users can inspect which parts of a packed sequence contribute to
+training loss.
 """
 
 from __future__ import annotations
@@ -48,3 +53,46 @@ class PromptBatch:
         """Return raw prompt strings in batch order for rollout."""
 
         return [item.prompt for item in self.items]
+
+
+@dataclass(slots=True)
+class LossSpan:
+    """One contiguous token span with a role label and loss flag.
+
+    ``role`` is a free-form string using one of the known values:
+
+    * SFT packer: ``"prompt"``, ``"response"``
+    * Agentic packer: ``"system_prompt"``, ``"user_prompt"``,
+      ``"assistant_text"``, ``"assistant_tool_call"``, ``"tool_result"``
+
+    ``start`` / ``end`` are half-open token offsets within the packed
+    sequence.  ``loss`` indicates whether this span contributes to the
+    training loss (i.e. the packer's effective mask is ``True`` here).
+    ``turn`` is the zero-based conversation turn index; SFT spans always
+    use turn 0.
+    """
+
+    role: str
+    start: int
+    end: int
+    loss: bool
+    turn: int = 0
+
+
+@dataclass(slots=True)
+class LossMaskExplanation:
+    """Structured loss-mask report built from packer output.
+
+    ``spans`` is the per-span annotation list.  ``total_tokens`` and
+    ``loss_tokens`` are computed from the span boundaries.  ``summary``
+    contains per-role statistics as a list of dicts with keys ``role``,
+    ``token_count``, and ``loss_tokens``.  ``text_preview`` maps span
+    indices to decoded text and is only populated when text display is
+    explicitly requested.
+    """
+
+    spans: list[LossSpan]
+    total_tokens: int
+    loss_tokens: int
+    summary: list[dict[str, Any]]
+    text_preview: dict[int, str] | None = None
