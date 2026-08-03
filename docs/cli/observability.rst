@@ -210,3 +210,64 @@ When a trajectory is dropped for exceeding the model context window,
 counts, message counts, assistant turn counts, tool-result counts, and a short
 prompt preview. This is the fastest way to debug overlong agentic examples
 without dumping every token in every trajectory.
+
+Dashboard
+---------
+
+AReno ships a lightweight local dashboard that surfaces training progress,
+metrics, and rollout samples without requiring TensorBoard.
+
+Launch it
+~~~~~~~~~
+
+Start the dashboard server on the default port (8765) and open the web UI:
+
+.. code-block:: bash
+
+   areno dashboard start
+
+Pass ``--port`` to use a different port, or ``--no-browser`` to skip
+opening the browser:
+
+.. code-block:: bash
+
+   areno dashboard start --port 9090 --no-browser
+
+Stop a running dashboard server:
+
+.. code-block:: bash
+
+   areno dashboard stop
+
+The dashboard reads from the same ``--metrics-log-dir`` directory that
+feeds TensorBoard (default ``/tmp/areno/tfevent``). Every training run
+that records metrics is automatically discoverable by the dashboard.
+
+Metrics-directory artifacts
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+When ``--metrics-log-dir`` is set, every training step writes a small set
+of JSON and JSONL files alongside the TensorBoard event files:
+
+``dashboard_state.{pid}.json``
+   Per-step lightweight state snapshot with ``stage``, ``step``, ``epoch``,
+   ``role``, and ``status`` fields. Used by the dashboard for low-latency
+   progress tracking without parsing TensorBoard events. At most one file
+   per process.
+
+``rollout_samples.{pid}.jsonl``
+   Decoded prompt/completion pairs written by ``MetricsRecorder``. Each
+   line is a JSON object with ``kind`` (``"rollout"`` or ``"agentic"``),
+   ``epoch``, ``step``, ``prompt_idx``, ``sample_idx``, prompt text, and
+   sampled completion text. The number of samples logged per step is
+   controlled by ``ARENO_LOG_COMPLETIONS`` (default 1).
+
+``areno_run_config.{pid}.json``
+   Run configuration snapshot in machine-readable form. Useful for
+   reproducing a run or correlating metrics with hyperparameters.
+
+``areno_run_config.{pid}.txt``
+   Human-readable summary of the run configuration.
+
+All files are scoped by ``pid`` so concurrent runs writing to the same
+directory do not interfere with each other.
