@@ -1026,23 +1026,39 @@ def dashboard_quick_actions() -> list[dict[str, Any]]:
     ):
         discovered = presets_by_source.get(source)
         if discovered:
-            actions.append({"id": action_id, "label": label, "kind": "launcher_preset", "target": "launcher", "mode": "train", "preset": discovered["preset"], "source": source})
-    actions.extend([
-        {"id": "run-runtime-check", "label": "Run Runtime Check", "kind": "runtime_refresh", "target": "runtime"},
-        {
-            "id": "ask-agent-track-job",
-            "label": "Ask Agent to Track Job",
-            "kind": "agent_prompt",
-            "target": "agent",
-            "prompt": "Track the latest job and summarize its health, metrics, and recent errors.",
-        },
-    ])
+            actions.append(
+                {
+                    "id": action_id,
+                    "label": label,
+                    "kind": "launcher_preset",
+                    "target": "launcher",
+                    "mode": "train",
+                    "preset": discovered["preset"],
+                    "source": source,
+                }
+            )
+    actions.extend(
+        [
+            {"id": "run-runtime-check", "label": "Run Runtime Check", "kind": "runtime_refresh", "target": "runtime"},
+            {
+                "id": "ask-agent-track-job",
+                "label": "Ask Agent to Track Job",
+                "kind": "agent_prompt",
+                "target": "agent",
+                "prompt": "Track the latest job and summarize its health, metrics, and recent errors.",
+            },
+        ]
+    )
     return actions
 
 
 def _documented_train_configs() -> list[dict[str, Any]]:
     configs: list[dict[str, Any]] = []
-    documents = [ROOT / "README.md", *sorted((ROOT / "examples").rglob("README.md")), *sorted((ROOT / "docs").rglob("*.rst"))]
+    documents = [
+        ROOT / "README.md",
+        *sorted((ROOT / "examples").rglob("README.md")),
+        *sorted((ROOT / "docs").rglob("*.rst")),
+    ]
     for document in documents:
         if not document.is_file():
             continue
@@ -1117,7 +1133,15 @@ def launcher_presets() -> list[dict[str, Any]]:
         display_parts = [part.replace("_", " ").title() for part in loader.parent.relative_to(examples_root).parts]
         variant = suffix.lstrip("_").replace("_", " ").title()
         label = " / ".join(display_parts) + (f" / {variant}" if variant else "")
-        presets.append({"id": f"example-{re.sub(r'[^a-z0-9]+', '-', loader_path.lower()).strip('-')}", "label": label, "mode": "train", "preset": config, "source": loader_path})
+        presets.append(
+            {
+                "id": f"example-{re.sub(r'[^a-z0-9]+', '-', loader_path.lower()).strip('-')}",
+                "label": label,
+                "mode": "train",
+                "preset": config,
+                "source": loader_path,
+            }
+        )
     return presets
 
 
@@ -1134,7 +1158,9 @@ def execute_dashboard_quick_action(payload: dict[str, Any]) -> dict[str, Any]:
             if check.get("detail"):
                 lines.append(f"  {check['detail']}")
         counts = env.get("check_counts") or {}
-        lines.extend(["", f"Summary: {counts.get('ok', 0)} OK, {counts.get('warn', 0)} WARN, {counts.get('fail', 0)} FAIL"])
+        lines.extend(
+            ["", f"Summary: {counts.get('ok', 0)} OK, {counts.get('warn', 0)} WARN, {counts.get('fail', 0)} FAIL"]
+        )
         return {"ok": True, "action": action, "command": ["areno", "check"], "output": "\n".join(lines), "env": env}
     if action["kind"] == "launcher_preset":
         supplied = payload.get("config") if isinstance(payload.get("config"), dict) else {}
@@ -1171,9 +1197,7 @@ def launcher_preflight_action(payload: dict[str, Any]) -> dict[str, Any]:
     max_new_tokens = max(0, int(config.get("max_new_tokens") or 0))
     max_running_prompts = max(0, int(config.get("max_running_prompts") or 0))
     batch_relation_ok = (
-        batch_size > 0 and mini_bs > 0 and batch_size % mini_bs == 0
-        if mode == "train"
-        else max_running_prompts > 0
+        batch_size > 0 and mini_bs > 0 and batch_size % mini_bs == 0 if mode == "train" else max_running_prompts > 0
     )
 
     checks: dict[str, dict[str, Any]] = {
@@ -1199,7 +1223,9 @@ def launcher_preflight_action(payload: dict[str, Any]) -> dict[str, Any]:
         "max_new_tokens": {
             "name": "Max new tokens",
             "status": "warn" if mode == "train" and max_new_tokens > 1024 else "ok",
-            "detail": f"max_new_tokens={max_new_tokens} may increase rollout memory." if max_new_tokens > 1024 else f"max_new_tokens={max_new_tokens} is within the preflight target.",
+            "detail": f"max_new_tokens={max_new_tokens} may increase rollout memory."
+            if max_new_tokens > 1024
+            else f"max_new_tokens={max_new_tokens} is within the preflight target.",
         },
     }
 
@@ -1252,14 +1278,23 @@ def launcher_preflight_action(payload: dict[str, Any]) -> dict[str, Any]:
         config=config,
         metrics_dir=config.get("metrics_dir"),
     )
-    result.update({"smoke_stage": stage, "command": command, "tuning_params": tuning_params, "job": STATE.start(job).to_json()})
+    result.update(
+        {"smoke_stage": stage, "command": command, "tuning_params": tuning_params, "job": STATE.start(job).to_json()}
+    )
     return result
 
 
 def record_agent_error(error: str, *, kind: str, job_id: Any = None, retryable: bool = True) -> None:
     with AGENT_RECOVERY_LOCK:
         AGENT_RECOVERY_STATE.update(
-            {"active": True, "error": error[:4000], "kind": kind, "retryable": retryable, "job_id": job_id, "updated_at": now()}
+            {
+                "active": True,
+                "error": error[:4000],
+                "kind": kind,
+                "retryable": retryable,
+                "job_id": job_id,
+                "updated_at": now(),
+            }
         )
 
 
