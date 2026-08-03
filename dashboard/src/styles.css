@@ -2373,8 +2373,21 @@ textarea:focus {
 .seqlenLegend i { background: var(--deck-green); }
 .overviewPlot { height: 100%; min-height: 220px; }
 .overviewMetricLine { fill: none; stroke-width: 3.5; stroke-linecap: round; stroke-linejoin: round; }
-.metricHoverPoint { fill: transparent; stroke: transparent; stroke-width: 2; cursor: crosshair; pointer-events: all; }
-.metricHoverPoint:hover { fill: var(--deck-panel); stroke: var(--deck-cyan); }
+.metricHoverPoint { fill: var(--deck-cyan); stroke: var(--deck-panel); stroke-width: 1.5; cursor: crosshair; pointer-events: all; }
+.metricHoverPoint:hover { stroke: var(--deck-ink); stroke-width: 2.5; }
+.rewardPoint { fill: var(--deck-ink); }
+.lossPoint { fill: var(--deck-amber); }
+.gradnormPoint { fill: var(--deck-cyan); }
+.seqlenPoint { fill: var(--deck-green); }
+.metricPlotWrap { position: relative; min-width: 0; min-height: 0; }
+.overviewMetricChart .metricPlotWrap { height: 100%; min-height: 220px; }
+.metricPointTooltip { position: absolute; z-index: 8; display: grid; gap: 3px; min-width: 132px; max-width: 220px; padding: 8px 10px; border: 1px solid var(--deck-line-strong); border-radius: 7px; color: var(--deck-text); background: var(--deck-panel); box-shadow: 0 8px 24px rgba(0, 0, 0, .2); transform: translate(-50%, calc(-100% - 10px)); pointer-events: none; font-size: 11px; font-variant-numeric: tabular-nums; }
+.metricPointTooltip.start { transform: translate(0, calc(-100% - 10px)); }
+.metricPointTooltip.end { transform: translate(-100%, calc(-100% - 10px)); }
+.metricPointTooltip strong, .metricPointTooltip span, .metricPointTooltip small { display: block; }
+.metricPointTooltip strong { color: var(--deck-ink); overflow-wrap: anywhere; }
+.metricPointTooltip span { display: flex; justify-content: space-between; gap: 14px; }
+.metricPointTooltip small { color: var(--deck-muted); }
 .rewardLine { stroke: var(--deck-ink); }
 .lossLine { stroke: var(--deck-amber); }
 .gradnormLine { stroke: var(--deck-cyan); }

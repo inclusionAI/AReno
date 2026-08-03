@@ -1112,6 +1112,7 @@ function OverviewRewardLossChart({ job }) {
   const [series, setSeries] = useState({ reward: [], loss: [], gradnorm: [], seqlen: [] });
   const [names, setNames] = useState({ reward: "", loss: "", gradnorm: "", seqlen: "" });
   const [activeMetric, setActiveMetric] = useState(metricKinds[0]);
+  const [hoveredPoint, setHoveredPoint] = useState(null);
 
   useEffect(() => {
     if (!metricKinds.includes(activeMetric)) setActiveMetric(metricKinds[0]);
@@ -1162,15 +1163,24 @@ function OverviewRewardLossChart({ job }) {
         </div>
       </div>
       {!hasPoints ? <div className="plotEmpty">No {activeMetric} points reported yet.</div> : (
-        <svg className="metricPlot overviewPlot" viewBox="0 0 720 220" role="img" aria-label={`${activeMetric} metrics`}>
-          <g className="plotGrid">{[0, 1, 2, 3].map((item) => <line key={item} x1="10" x2="710" y1={35 + item * 52} y2={35 + item * 52} />)}</g>
-          <polyline className={`overviewMetricLine ${activeMetric}Line`} points={plot.points} />
-          {activeSeries.map((point, index) => (
-            <circle className="metricHoverPoint" key={`${point.step}-${index}`} cx={plot.coords[index]?.x || 0} cy={plot.coords[index]?.y || 0} r="5">
-              <title>{metricPointTitle(names[activeMetric] || overviewMetricLabel(activeMetric), point)}</title>
-            </circle>
-          ))}
-        </svg>
+        <div className="metricPlotWrap">
+          <svg className="metricPlot overviewPlot" viewBox="0 0 720 220" role="img" aria-label={`${activeMetric} metrics`}>
+            <g className="plotGrid">{[0, 1, 2, 3].map((item) => <line key={item} x1="10" x2="710" y1={35 + item * 52} y2={35 + item * 52} />)}</g>
+            <polyline className={`overviewMetricLine ${activeMetric}Line`} points={plot.points} />
+            {activeSeries.map((point, index) => (
+              <circle
+                className={`metricHoverPoint ${activeMetric}Point`}
+                key={`${point.step}-${index}`}
+                cx={plot.coords[index]?.x || 0}
+                cy={plot.coords[index]?.y || 0}
+                r="5"
+                onMouseEnter={() => setHoveredPoint({ point, coord: plot.coords[index] })}
+                onMouseLeave={() => setHoveredPoint(null)}
+              />
+            ))}
+          </svg>
+          {hoveredPoint && <MetricPointTooltip name={names[activeMetric] || overviewMetricLabel(activeMetric)} point={hoveredPoint.point} coord={hoveredPoint.coord} width={720} height={220} />}
+        </div>
       )}
       <div className="plotFooter"><span>step {plot.stepMin} to {plot.stepMax}</span><span>{plot.minLabel} to {plot.maxLabel}</span></div>
     </div>
@@ -1211,22 +1221,29 @@ function buildOverviewMetricPlot(points) {
   const steps = points.map((point) => point.step);
   const min = Math.min(...values);
   const max = Math.max(...values);
+  const flat = max === min;
   const stepMin = Math.min(...steps);
   const stepMax = Math.max(...steps);
   const valueSpan = Math.max(max - min, 1e-9);
   const stepSpan = Math.max(stepMax - stepMin, 1);
   const coords = points.map((point) => {
     const x = ((point.step - stepMin) / stepSpan) * 680 + 20;
-    const y = 200 - ((point.value - min) / valueSpan) * 174;
+    const y = flat ? 113 : 200 - ((point.value - min) / valueSpan) * 174;
     return { x, y };
   });
   return { points: coords.map(({ x, y }) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" "), coords, stepMin, stepMax, minLabel: compactNumber(min), maxLabel: compactNumber(max) };
 }
 
-function metricPointTitle(name, point) {
-  const lines = [name || "metric", `step: ${point.step}`, `value: ${point.value}`];
-  if (point.time) lines.push(`time: ${new Date(point.time).toLocaleString()}`);
-  return lines.join("\n");
+function MetricPointTooltip({ name, point, coord, width, height }) {
+  const align = coord.x < width * 0.2 ? "start" : coord.x > width * 0.8 ? "end" : "center";
+  return (
+    <div className={`metricPointTooltip ${align}`} style={{ left: `${(coord.x / width) * 100}%`, top: `${(coord.y / height) * 100}%` }}>
+      <strong>{name || "metric"}</strong>
+      <span>Step <b>{point.step}</b></span>
+      <span>Value <b>{compactNumber(point.value)}</b></span>
+      {point.time && <small>{new Date(point.time).toLocaleString()}</small>}
+    </div>
+  );
 }
 
 function lastMetricValue(points) {
@@ -2023,6 +2040,7 @@ function MetricChart({ jobId, metricsDir, refreshNonce }) {
   const [points, setPoints] = useState([]);
   const [metricLoading, setMetricLoading] = useState(false);
   const [pollTick, setPollTick] = useState(0);
+  const [hoveredPoint, setHoveredPoint] = useState(null);
   const [prevJobId, setPrevJobId] = useState(jobId);
   // Reset the selection during render (not in an effect) when the job changes so
   // the reset happens before any effect runs. This avoids a stale-name fetch and
@@ -2107,18 +2125,27 @@ function MetricChart({ jobId, metricsDir, refreshNonce }) {
       {visiblePoints.length === 0 ? (
         <div className="plotEmpty">{metricLoading ? "Loading selected metric..." : "No TensorBoard scalar points loaded yet."}</div>
       ) : (
-        <svg className="metricPlot" viewBox="0 0 720 180" role="img">
-          <g className="plotGrid">
-            {[0, 1, 2, 3].map((item) => <line key={item} x1="0" x2="720" y1={30 + item * 42} y2={30 + item * 42} />)}
-          </g>
-          <polyline className="rawLine" points={plot.raw} />
-          <polyline className="smoothLine" points={plot.smooth} />
-          {visiblePoints.map((point, index) => (
-            <circle className="metricHoverPoint" key={`${point.step}-${index}`} cx={plot.coords[index]?.x || 0} cy={plot.coords[index]?.y || 0} r="5">
-              <title>{metricPointTitle(activeName, point)}</title>
-            </circle>
-          ))}
-        </svg>
+        <div className="metricPlotWrap">
+          <svg className="metricPlot" viewBox="0 0 720 180" role="img">
+            <g className="plotGrid">
+              {[0, 1, 2, 3].map((item) => <line key={item} x1="0" x2="720" y1={30 + item * 42} y2={30 + item * 42} />)}
+            </g>
+            <polyline className="rawLine" points={plot.raw} />
+            <polyline className="smoothLine" points={plot.smooth} />
+            {visiblePoints.map((point, index) => (
+              <circle
+                className="metricHoverPoint"
+                key={`${point.step}-${index}`}
+                cx={plot.coords[index]?.x || 0}
+                cy={plot.coords[index]?.y || 0}
+                r="5"
+                onMouseEnter={() => setHoveredPoint({ point, coord: plot.coords[index] })}
+                onMouseLeave={() => setHoveredPoint(null)}
+              />
+            ))}
+          </svg>
+          {hoveredPoint && <MetricPointTooltip name={activeName} point={hoveredPoint.point} coord={hoveredPoint.coord} width={720} height={180} />}
+        </div>
       )}
       <div className="plotFooter">
         <span>{activeName || "metric"} · {points.length} points</span>
@@ -2143,13 +2170,14 @@ function buildMetricPlot(rawPoints, smoothPoints) {
   const allValues = [...rawPoints, ...smoothPoints].map((point) => point.value);
   const min = Math.min(...allValues);
   const max = Math.max(...allValues);
+  const flat = max === min;
   const span = Math.max(max - min, 1e-9);
   const stepMin = rawPoints[0].step;
   const stepMax = rawPoints[rawPoints.length - 1].step;
   const stepSpan = Math.max(stepMax - stepMin, 1);
   const coord = (point) => ({
     x: ((point.step - stepMin) / stepSpan) * 700 + 10,
-    y: 168 - ((point.value - min) / span) * 146,
+    y: flat ? 95 : 168 - ((point.value - min) / span) * 146,
   });
   const rawCoords = rawPoints.map(coord);
   const smoothCoords = smoothPoints.map(coord);
