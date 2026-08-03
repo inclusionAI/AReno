@@ -1100,7 +1100,7 @@ function RunningJobSummary({ job }) {
         <span>job: {job.id}</span>
         {algo && <span>algo: {algo}</span>}
         {checkpoint && <span>model: {shortModelName(checkpoint)}</span>}
-        {dataset && <span>dataset: {shortDatasetName(dataset)}</span>}
+        {dataset && <span>dataset: {String(dataset)}</span>}
       </div>
       <div className="stageRow">
         {steps.map((item, index) => {
@@ -1132,10 +1132,6 @@ function isActiveJob(job) {
 
 function shortModelName(value) {
   return String(value).replace(/\/$/, "").split("/").pop() || value;
-}
-
-function shortDatasetName(value) {
-  return String(value).split(":")[0].replace(/\/$/, "").split("/").pop() || value;
 }
 
 function JobsSelectedDetail({ job, env, onStop }) {
@@ -1730,7 +1726,7 @@ function timelineSteps(job) {
       { id: "exit", label: "exit", aliases: ["exited", "failed", "succeeded", "stopped"] },
     ];
   }
-  const algo = configValue(job, "algo");
+  const algo = String(configValue(job, "algo") || "").toLowerCase();
   if (algo === "sft") {
     return [
       { id: "created", label: "created", aliases: ["registered", "epoch_start"] },
@@ -1756,8 +1752,9 @@ function timelineSteps(job) {
       { id: "ref_score", label: "ref score", aliases: ["logprob_score_start", "logprob_score_end"], roles: ["ref"] },
       { id: "old_logprob", label: "old logprob", aliases: ["old_logprob_score_start", "old_logprob_score_end"], roles: ["actor"] },
       { id: "critic_value", label: "value", aliases: ["value_score_start", "value_score_end"], roles: ["critic"] },
-      { id: "advantage", label: "advantage", aliases: ["advantage_start", "advantage_end"], roles: ["critic"] },
+      { id: "advantage_prepare", label: "advantage", aliases: ["advantage_start"], roles: ["critic"] },
       { id: "critic_train", label: "critic train", aliases: ["train_start", "train_end"], roles: ["critic"] },
+      { id: "advantage_ready", label: "advantage ready", aliases: ["advantage_end"], roles: ["critic"] },
       { id: "actor_train", label: "actor train", aliases: ["train_start", "train_end", "train_skip"], roles: ["actor"] },
       { id: "save", label: "save", aliases: ["save_checkpoint_start", "save_checkpoint_end"] },
       { id: "done", label: "done", aliases: ["max_steps_reached", "epoch_end", "exited", "failed", "succeeded", "stopped"] },
@@ -1789,18 +1786,20 @@ function timelineSteps(job) {
 }
 
 function timelineStageId(job) {
-  if (job?.status && ["succeeded", "failed", "stopped", "exited"].includes(job.status)) return "done";
-  const stage = String(job?.stage || "created");
+  const status = String(job?.status || "").toLowerCase();
+  if (["succeeded", "failed", "stopped", "exited"].includes(status)) return "done";
+  const stage = String(job?.stage || "created").toLowerCase();
   const steps = timelineSteps(job);
   const match = steps.find((item) => timelineItemMatches(item, stage, job));
   return match?.id || stage;
 }
 
 function timelineItemMatches(item, stage, job) {
-  const stageMatches = item.id === stage || item.aliases?.includes(stage);
+  const normalizedStage = String(stage || "").toLowerCase();
+  const stageMatches = item.id === normalizedStage || item.aliases?.includes(normalizedStage);
   if (!stageMatches) return false;
   if (!item.roles?.length) return true;
-  return item.roles.includes(String(job?.role || ""));
+  return item.roles.includes(String(job?.role || "").toLowerCase());
 }
 
 function configValue(job, key) {
