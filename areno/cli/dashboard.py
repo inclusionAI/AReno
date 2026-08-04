@@ -192,9 +192,7 @@ def metrics_command(job_id: str, names_csv: str, limit: int, as_json: bool) -> N
         collected.append({"name": name, "point_count": len(points), "points": points})
 
     if as_json:
-        click.echo(
-            json.dumps({"job_id": job_id, "limit": limit, "metrics": collected}, ensure_ascii=False, indent=2)
-        )
+        click.echo(json.dumps({"job_id": job_id, "limit": limit, "metrics": collected}, ensure_ascii=False, indent=2))
         return
 
     # Human-readable: one block per metric, step/value aligned.
