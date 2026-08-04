@@ -1160,6 +1160,65 @@ pre {
   font-weight: 700;
 }
 
+.launcherPreview {
+  display: grid;
+  gap: 12px;
+  padding-top: 16px;
+  border-top: 1px solid var(--deck-line);
+}
+
+.launcherActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  grid-column: 1 / -1;
+}
+
+.validationIssues {
+  display: grid;
+  gap: 6px;
+}
+
+.validationIssue {
+  display: grid;
+  grid-template-columns: minmax(120px, 0.25fr) 1fr;
+  gap: 12px;
+  padding: 8px 10px;
+  border-left: 3px solid var(--deck-muted);
+  background: var(--deck-panel-2);
+  color: var(--deck-text);
+  font-size: 12px;
+}
+
+.validationIssue.error { border-left-color: #ef6262; }
+.validationIssue.warning { border-left-color: #e9b949; }
+.validationIssue span { overflow-wrap: anywhere; }
+
+.warningAck {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--deck-text);
+  font-size: 12px;
+}
+
+.warningAck input { width: auto; }
+
+.resolvedArgs summary {
+  cursor: pointer;
+  color: var(--deck-muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.resolvedArgs pre {
+  max-height: 260px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--deck-text);
+}
+
 .launcherSections {
   display: grid;
   gap: 14px;

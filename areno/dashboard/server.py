@@ -27,6 +27,7 @@ from areno.cli.dashboard_registry import GLOBAL_REGISTRY_FILE
 from areno.cli.diagnostics import collect_env, run_checks
 from areno.dashboard.agent_context import agent_system_prompt
 from areno.dashboard.agent_files import AgentFileBrowser
+from areno.dashboard.launcher import preview_launcher
 
 ROOT = Path(os.environ.get("ARENO_DASHBOARD_ROOT", Path.cwd())).resolve()
 STATIC_DIR = Path(__file__).resolve().parent / "dist"
@@ -592,6 +593,12 @@ class DashboardState:
 STATE = DashboardState()
 
 
+def _format_devices(value: Any) -> Any:
+    if isinstance(value, list):
+        return ",".join(str(device) for device in value)
+    return value
+
+
 def build_train_command(config: dict[str, Any]) -> list[str]:
     command = ["areno", "train"]
     pairs = {
@@ -607,6 +614,7 @@ def build_train_command(config: dict[str, Any]) -> list[str]:
         "--agent-fn": config.get("agent_fn"),
         "--world-size": config.get("world_size"),
         "--tp-size": config.get("tp_size"),
+        "--train-devices": _format_devices(config.get("train_devices")),
         "--batch-size": config.get("batch_size"),
         "--n-samples": config.get("n_samples"),
         "--mini-bs": config.get("mini_bs"),
@@ -673,7 +681,7 @@ def build_train_command(config: dict[str, Any]) -> list[str]:
     for key, value in flags.items():
         if bool_like(value):
             command.append(key)
-    command.extend(str(config.get("extra_args") or "").split())
+    command.extend(shlex.split(str(config.get("extra_args") or "")))
     return command
 
 
@@ -721,8 +729,19 @@ def build_serve_command(config: dict[str, Any]) -> list[str]:
         command.append("--eager-decode")
     if bool_like(config.get("disable_thinking")):
         command.append("--disable-thinking")
-    command.extend(str(config.get("extra_args") or "").split())
+    command.extend(shlex.split(str(config.get("extra_args") or "")))
     return command
+
+
+def launcher_preview(kind: str, payload: dict[str, Any]) -> dict[str, Any]:
+    config = payload.get("config") if isinstance(payload.get("config"), dict) else payload
+    builder = build_train_command if kind == "train" else build_serve_command
+    return preview_launcher(
+        kind,
+        config,
+        builder,
+        acknowledge_warnings=bool(payload.get("acknowledge_warnings")),
+    )
 
 
 def detect_areno_job_kind(command: str) -> str | None:
@@ -1515,7 +1534,18 @@ class Handler(BaseHTTPRequestHandler):
         try:
             path = self.route_path()
             payload = self.read_json()
-            if path == "/api/jobs/train":
+            if path == "/api/launcher/preview":
+                kind = str(payload.get("kind") or "")
+                result = launcher_preview(kind, payload)
+                self.json(result)
+            elif path == "/api/jobs/train":
+                result = launcher_preview("train", payload)
+                if result["errors"]:
+                    self.json({"preview": result}, HTTPStatus.BAD_REQUEST)
+                    return
+                if result["requires_acknowledgement"]:
+                    self.json({"preview": result}, HTTPStatus.CONFLICT)
+                    return
                 job = Job(
                     kind="train",
                     name=f"train {payload.get('algo', 'sft')} {payload.get('ckpt', '')}",
@@ -1525,6 +1555,13 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 self.json({"job": STATE.start(job).to_json()})
             elif path == "/api/jobs/serve":
+                result = launcher_preview("serve", payload)
+                if result["errors"]:
+                    self.json({"preview": result}, HTTPStatus.BAD_REQUEST)
+                    return
+                if result["requires_acknowledgement"]:
+                    self.json({"preview": result}, HTTPStatus.CONFLICT)
+                    return
                 model_path = payload.get("model_path") or payload.get("ckpt", "")
                 job = Job(
                     kind="serve",

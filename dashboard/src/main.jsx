@@ -213,6 +213,8 @@ function App() {
   const [launcherMode, setLauncherMode] = useState("train");
   const [theme, setTheme] = useState(() => localStorage.getItem("areno-dashboard-theme") || "dark");
   const [busy, setBusy] = useState("");
+  const [launcherPreview, setLauncherPreview] = useState(null);
+  const [launcherWarningsAcknowledged, setLauncherWarningsAcknowledged] = useState(false);
   const [agentSettingsOpen, setAgentSettingsOpen] = useState(false);
   const [jobPage, setJobPage] = useState(1);
   const [refreshNonce, setRefreshNonce] = useState(0);
@@ -241,6 +243,11 @@ function App() {
   useEffect(() => {
     if (jobPage > jobPageCount) setJobPage(jobPageCount);
   }, [jobPage, jobPageCount]);
+
+  useEffect(() => {
+    setLauncherPreview(null);
+    setLauncherWarningsAcknowledged(false);
+  }, [trainConfig, serveConfig, launcherMode]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -299,10 +306,22 @@ function App() {
     agent: ["Agent Console", "Chat with an operations agent using the selected job context."],
   };
 
+  async function previewLaunch(kind, config) {
+    const result = await api("/api/launcher/preview", {
+      method: "POST",
+      body: JSON.stringify({ kind, config, acknowledge_warnings: launcherWarningsAcknowledged }),
+    });
+    setLauncherPreview(result);
+    return result;
+  }
+
   async function startTrain() {
-    setBusy("Starting train job...");
+    setBusy("Validating train job...");
     try {
-      const result = await api("/api/jobs/train", { method: "POST", body: JSON.stringify(trainConfig) });
+      const preview = await previewLaunch("train", trainConfig);
+      if (!preview.ok) return;
+      const payload = { ...trainConfig, acknowledge_warnings: true };
+      const result = await api("/api/jobs/train", { method: "POST", body: JSON.stringify(payload) });
       setSelectedJobId(result.job.id);
       await jobs.refresh();
     } finally {
@@ -311,9 +330,12 @@ function App() {
   }
 
   async function startServe() {
-    setBusy("Starting serve job...");
+    setBusy("Validating serve job...");
     try {
-      const result = await api("/api/jobs/serve", { method: "POST", body: JSON.stringify(serveConfig) });
+      const preview = await previewLaunch("serve", serveConfig);
+      if (!preview.ok) return;
+      const payload = { ...serveConfig, acknowledge_warnings: true };
+      const result = await api("/api/jobs/serve", { method: "POST", body: JSON.stringify(payload) });
       setSelectedJobId(result.job.id);
       await jobs.refresh();
     } finally {
@@ -534,10 +556,11 @@ function App() {
             </div>
           </div>
           {launcherMode === "train" ? (
-            <TrainForm config={trainConfig} setConfig={setTrainConfig} onStart={startTrain} />
+            <TrainForm config={trainConfig} setConfig={setTrainConfig} onStart={startTrain} onPreview={() => previewLaunch("train", trainConfig)} />
           ) : (
-            <ServeForm config={serveConfig} setConfig={setServeConfig} onStart={startServe} />
+            <ServeForm config={serveConfig} setConfig={setServeConfig} onStart={startServe} onPreview={() => previewLaunch("serve", serveConfig)} />
           )}
+          <LauncherPreview result={launcherPreview} acknowledged={launcherWarningsAcknowledged} onAcknowledge={setLauncherWarningsAcknowledged} />
         </section>
       );
     }
@@ -1490,7 +1513,21 @@ function LogView({ logs }) {
   );
 }
 
-function TrainForm({ config, setConfig, onStart }) {
+function LauncherPreview({ result, acknowledged, onAcknowledge }) {
+  if (!result) return null;
+  const issues = [...result.errors.map((item) => ({ ...item, level: "error" })), ...result.warnings.map((item) => ({ ...item, level: "warning" }))];
+  return (
+    <div className="launcherPreview">
+      <div className="launcherSectionHeader"><strong>Validation</strong><span>{result.errors.length ? "Blocked" : result.requires_acknowledgement ? "Acknowledgement required" : "Ready"}</span></div>
+      {issues.length > 0 && <div className="validationIssues">{issues.map((item, index) => <div className={classNames("validationIssue", item.level)} key={item.field + "-" + index}><strong>{item.field}</strong><span>{item.message}</span></div>)}</div>}
+      {result.warnings.length > 0 && <label className="warningAck"><input type="checkbox" checked={acknowledged} onChange={(event) => onAcknowledge(event.target.checked)} /><span>Acknowledge warnings</span></label>}
+      {result.shell_command && <div className="codeCard"><div className="codeTitle"><TerminalSquare size={14} /> Final command</div><pre>{result.shell_command}</pre></div>}
+      <details className="resolvedArgs"><summary>Resolved arguments</summary><pre>{JSON.stringify(result.resolved_args, null, 2)}</pre></details>
+    </div>
+  );
+}
+
+function TrainForm({ config, setConfig, onStart, onPreview }) {
   const algo = String(config.algo || "sft").toLowerCase();
   const sections = trainLauncherSections(algo);
   const updateField = (key, value) => setConfig({ ...config, [key]: value });
@@ -1517,7 +1554,7 @@ function TrainForm({ config, setConfig, onStart }) {
           </div>
         </div>
       ))}
-      <button className="primaryButton launchButton wide" onClick={onStart}><Play size={16} /> Start train</button>
+      <div className="launcherActions"><button className="secondaryButton" onClick={onPreview}><TerminalSquare size={15} /> Preview command</button><button className="primaryButton launchButton" onClick={onStart}><Play size={16} /> Start train</button></div>
     </div>
   );
 }
@@ -1654,7 +1691,7 @@ function checkField(key, label) {
   return { key, label, compact: true, type: "checkbox" };
 }
 
-function ServeForm({ config, setConfig, onStart }) {
+function ServeForm({ config, setConfig, onStart, onPreview }) {
   return (
     <div className="formGrid">
       {[
@@ -1672,7 +1709,7 @@ function ServeForm({ config, setConfig, onStart }) {
         ["disable_thinking", "Disable thinking"],
         ["extra_args", "Extra args"],
       ].map(([key, label]) => <Field key={key} label={label} value={config[key]} onChange={(value) => setConfig({ ...config, [key]: value })} compact={key !== "model_path"} />)}
-      <button className="primaryButton launchButton wide" onClick={onStart}><Play size={16} /> Start serve</button>
+      <div className="launcherActions"><button className="secondaryButton" onClick={onPreview}><TerminalSquare size={15} /> Preview command</button><button className="primaryButton launchButton" onClick={onStart}><Play size={16} /> Start serve</button></div>
     </div>
   );
 }
