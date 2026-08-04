@@ -82,7 +82,7 @@ link to a reference implementation if one exists. Then:
 - **Model families** are adapters under `areno/models/<family>/`, registered
   through `areno/models/registry.py` — no core changes needed.
 - **Reward functions** are plain Python files exposing
-  `reward_fn(example, completions) -> list[float]`, injected via `--reward-fn-path`
+  `reward_fn(record) -> float` over a `RewardRecord`, injected via `--reward-fn-path`
   (see `examples/math/math_verify_reward.py`).
 
 ## Do you want to add documentation?

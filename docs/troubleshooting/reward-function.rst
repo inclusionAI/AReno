@@ -8,8 +8,8 @@ before changing algorithms.
 
 Check:
 
-* The file passed to ``--reward-fn-path`` exports ``reward_fn``.
-* The reward list length matches the completions list length.
+* The file passed to ``--reward-fn-path`` exports ``reward_fn(record)``.
+* ``reward_fn`` takes one ``RewardRecord`` and returns one scalar float.
 * Parsing handles empty, malformed, or unexpected completions.
 * Scores match a hand-checked example.
 * Logged examples include enough context to explain wrong scores.
