@@ -30,12 +30,11 @@ from areno.api.advantages import compute_gae
 from areno.api.dashboard import record_dashboard_state
 from areno.api.rewards import make_reward_record
 from areno.api.roles import MissingRoleCapability, ModelRole
-from areno.api.trainers.policy_only import PolicyOnlyTrainer
-
+from areno.api.trainers.role_aware import RoleAwarePolicyTrainer
 logger = logging.getLogger(__name__)
 
 
-class PPOTrainer(PolicyOnlyTrainer):
+class PPOTrainer(RoleAwarePolicyTrainer):
     """PPO trainer skeleton with role-owned memory choreography.
 
     PPO needs actor rollout, ref logprob scoring, reward scoring, critic value
@@ -413,34 +412,6 @@ class PPOTrainer(PolicyOnlyTrainer):
             self._last_ppo_stats.update(_summary_stats("normalized_advantage", normalized_advantages))
         self._record_ppo_state(stage="advantage_end", role="critic")
         return train_batch, rewards_all, rollout_logprobs
-
-    def _ensure_roles(self) -> None:
-        # Surfaces a structured log per role so initialisation order is easy
-        # to follow when something fails mid-load.
-        for role in self.roles.values():
-            self.logger.info(
-                "role=%s stage=init_start trainable=%s path=%s",
-                role.name,
-                role.trainable,
-                role.path,
-            )
-        self.areno.ensure_roles(self.roles)
-        for role in self.roles.values():
-            self.logger.info("role=%s stage=init_end trainable=%s", role.name, role.trainable)
-
-    def fit(self) -> None:
-        # Override the base `fit` so role initialisation happens after the
-        # backend is up but before the first rollout/train cycle.
-        self.areno.init()
-        self._ensure_roles()
-        try:
-            self._fit_initialized()
-        finally:
-            self.areno.close()
-
-    def _score_logprobs(self, role: str, token_rows: list[list[int]]) -> list[list[float]]:
-        return self.areno.score_logprobs(role, token_rows, microbatch_size=self.config.score_micro_bs)
-
     def _score_values(self, role: str, token_rows: list[list[int]]) -> list[list[float]]:
         return self.areno.score_values(role, token_rows)
 

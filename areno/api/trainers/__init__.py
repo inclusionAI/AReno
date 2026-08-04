@@ -11,6 +11,10 @@ roles and GAE.
 from areno.api.trainers.dpo import DPOTrainer
 from areno.api.trainers.policy_only import PolicyOnlyTrainer
 from areno.api.trainers.ppo import PPOTrainer
+from areno.api.trainers.role_aware import (
+    RoleAwarePolicyTrainer,
+    RoleAwareTrainerMixin,
+)
 from areno.api.trainers.sft import SFTTrainer
 
-__all__ = ["DPOTrainer", "PolicyOnlyTrainer", "PPOTrainer", "SFTTrainer"]
+__all__ = ["DPOTrainer", "PolicyOnlyTrainer", "PPOTrainer", "SFTTrainer",  "RoleAwarePolicyTrainer", "RoleAwareTrainerMixin",]
