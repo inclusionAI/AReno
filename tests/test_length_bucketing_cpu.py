@@ -29,11 +29,11 @@ bucketed_batch_indices = _mod.bucketed_batch_indices
 # ---------------------------------------------------------------------------
 
 _TOKENS_BY_PROMPT = {
-    "tiny": [1],                    # 1 token
-    "short": [1, 2],                # 2 tokens
-    "medium": [1, 2, 3, 4],         # 4 tokens
+    "tiny": [1],  # 1 token
+    "short": [1, 2],  # 2 tokens
+    "medium": [1, 2, 3, 4],  # 4 tokens
     "long": [1, 2, 3, 4, 5, 6, 7, 8],  # 8 tokens
-    "huge": list(range(16)),        # 16 tokens
+    "huge": list(range(16)),  # 16 tokens
 }
 
 
@@ -44,6 +44,7 @@ def _encode_from_prompt(_tokenizer, prompt: str) -> list[int]:
 # ---------------------------------------------------------------------------
 # Unit tests for bucketed_batch_indices
 # ---------------------------------------------------------------------------
+
 
 class BucketedBatchIndicesTest(unittest.TestCase):
     """Core algorithm tests — pure Python, no trainer or tokenizer needed."""
@@ -141,7 +142,7 @@ class BucketedBatchIndicesTest(unittest.TestCase):
         def sequential_padding(indices, lengths, bs):
             total = 0
             for i in range(0, len(indices), bs):
-                chunk = indices[i:i + bs]
+                chunk = indices[i : i + bs]
                 max_len = max(lengths[j] for j in chunk)
                 total += max_len * len(chunk) - sum(lengths[j] for j in chunk)
             return total
@@ -164,6 +165,7 @@ class BucketedBatchIndicesTest(unittest.TestCase):
 # Integration: Trainer.load_prompt_batches() bucketed mode
 # ---------------------------------------------------------------------------
 
+
 class LoadPromptBatchesBucketedTest(unittest.TestCase):
     """Integration tests for the RL prompt-batch path with length bucketing."""
 
@@ -180,14 +182,24 @@ class LoadPromptBatchesBucketedTest(unittest.TestCase):
         """Every prompt should appear exactly once across all batches."""
         trainer, trainer_mod, PatchedContext = self._make_trainer()
         dataset = [
-            {"prompt": "tiny"}, {"prompt": "huge"}, {"prompt": "short"},
-            {"prompt": "long"}, {"prompt": "medium"}, {"prompt": "medium"},
-            {"prompt": "tiny"}, {"prompt": "long"},
+            {"prompt": "tiny"},
+            {"prompt": "huge"},
+            {"prompt": "short"},
+            {"prompt": "long"},
+            {"prompt": "medium"},
+            {"prompt": "medium"},
+            {"prompt": "tiny"},
+            {"prompt": "long"},
         ]
         with PatchedContext(trainer_mod, encode_generation_prompt=_encode_from_prompt):
-            batches = list(trainer.load_prompt_batches(
-                dataset, batch_size=3, max_prompt_tokens=100, length_bucket_seed=42,
-            ))
+            batches = list(
+                trainer.load_prompt_batches(
+                    dataset,
+                    batch_size=3,
+                    max_prompt_tokens=100,
+                    length_bucket_seed=42,
+                )
+            )
         all_prompts = [item.prompt for batch in batches for item in batch.items]
         self.assertEqual(sorted(all_prompts), sorted(r["prompt"] for r in dataset))
 
@@ -195,14 +207,19 @@ class LoadPromptBatchesBucketedTest(unittest.TestCase):
         """total_skipped_long should reflect the pre-scan skip count."""
         trainer, trainer_mod, PatchedContext = self._make_trainer()
         dataset = [
-            {"prompt": "tiny"},     # 1 token — accepted
-            {"prompt": "huge"},     # 16 tokens — accepted (< 100)
-            {"prompt": "short"},    # 2 tokens — accepted
+            {"prompt": "tiny"},  # 1 token — accepted
+            {"prompt": "huge"},  # 16 tokens — accepted (< 100)
+            {"prompt": "short"},  # 2 tokens — accepted
         ]
         with PatchedContext(trainer_mod, encode_generation_prompt=_encode_from_prompt):
-            batches = list(trainer.load_prompt_batches(
-                dataset, batch_size=2, max_prompt_tokens=10, length_bucket_seed=42,
-            ))
+            batches = list(
+                trainer.load_prompt_batches(
+                    dataset,
+                    batch_size=2,
+                    max_prompt_tokens=10,
+                    length_bucket_seed=42,
+                )
+            )
         # "huge" has 16 tokens > 10, so it should be skipped
         self.assertTrue(all(b.total_skipped_long == 1 for b in batches))
         self.assertTrue(all(b.skipped_long == 0 for b in batches))
@@ -211,8 +228,12 @@ class LoadPromptBatchesBucketedTest(unittest.TestCase):
         """Bucketed mode should produce less padding than sequential mode."""
         trainer, trainer_mod, PatchedContext = self._make_trainer()
         dataset = [
-            {"prompt": "tiny"}, {"prompt": "huge"}, {"prompt": "short"},
-            {"prompt": "long"}, {"prompt": "medium"}, {"prompt": "tiny"},
+            {"prompt": "tiny"},
+            {"prompt": "huge"},
+            {"prompt": "short"},
+            {"prompt": "long"},
+            {"prompt": "medium"},
+            {"prompt": "tiny"},
         ]
 
         def compute_padding(batches):
@@ -224,12 +245,21 @@ class LoadPromptBatchesBucketedTest(unittest.TestCase):
             return total
 
         with PatchedContext(trainer_mod, encode_generation_prompt=_encode_from_prompt):
-            seq_batches = list(trainer.load_prompt_batches(
-                dataset, batch_size=3, max_prompt_tokens=100,
-            ))
-            bucket_batches = list(trainer.load_prompt_batches(
-                dataset, batch_size=3, max_prompt_tokens=100, length_bucket_seed=42,
-            ))
+            seq_batches = list(
+                trainer.load_prompt_batches(
+                    dataset,
+                    batch_size=3,
+                    max_prompt_tokens=100,
+                )
+            )
+            bucket_batches = list(
+                trainer.load_prompt_batches(
+                    dataset,
+                    batch_size=3,
+                    max_prompt_tokens=100,
+                    length_bucket_seed=42,
+                )
+            )
 
         seq_pad = compute_padding(seq_batches)
         bucket_pad = compute_padding(bucket_batches)
@@ -240,12 +270,19 @@ class LoadPromptBatchesBucketedTest(unittest.TestCase):
         original sequential implementation."""
         trainer, trainer_mod, PatchedContext = self._make_trainer()
         dataset = [
-            {"prompt": "a"}, {"prompt": "b"}, {"prompt": "c"},
+            {"prompt": "a"},
+            {"prompt": "b"},
+            {"prompt": "c"},
         ]
         with PatchedContext(trainer_mod, encode_generation_prompt=_encode_from_prompt):
-            batches = list(trainer.load_prompt_batches(
-                dataset, batch_size=2, max_prompt_tokens=100, length_bucket_seed=None,
-            ))
+            batches = list(
+                trainer.load_prompt_batches(
+                    dataset,
+                    batch_size=2,
+                    max_prompt_tokens=100,
+                    length_bucket_seed=None,
+                )
+            )
         # Should match the original sequential order
         self.assertEqual([b.prompts for b in batches], [["a", "b"], ["c"]])
 
@@ -254,15 +291,19 @@ class LoadPromptBatchesBucketedTest(unittest.TestCase):
 # Integration: SFTTrainer._iter_train_batches() bucketed mode
 # ---------------------------------------------------------------------------
 
+
 class SftIterTrainBatchesBucketedTest(unittest.TestCase):
     """Integration tests for the SFT batch path with length bucketing."""
 
     def test_sft_config_validation_negative_seed(self):
         """TrainerConfig should reject negative length_bucket_seed."""
         from areno.api.trainer_config import TrainerConfig
+
         with self.assertRaises(ValueError) as ctx:
             TrainerConfig(
-                algo="sft", ckpt="x", dataset_path="y",
+                algo="sft",
+                ckpt="x",
+                dataset_path="y",
                 length_bucket_seed=-1,
             )
         self.assertIn("non-negative", str(ctx.exception))
@@ -270,8 +311,11 @@ class SftIterTrainBatchesBucketedTest(unittest.TestCase):
     def test_sft_config_accepts_none_seed(self):
         """TrainerConfig should accept length_bucket_seed=None (disabled)."""
         from areno.api.trainer_config import TrainerConfig
+
         config = TrainerConfig(
-            algo="sft", ckpt="x", dataset_path="y",
+            algo="sft",
+            ckpt="x",
+            dataset_path="y",
             length_bucket_seed=None,
         )
         self.assertIsNone(config.length_bucket_seed)
@@ -279,8 +323,11 @@ class SftIterTrainBatchesBucketedTest(unittest.TestCase):
     def test_sft_config_accepts_positive_seed(self):
         """TrainerConfig should accept a positive length_bucket_seed."""
         from areno.api.trainer_config import TrainerConfig
+
         config = TrainerConfig(
-            algo="sft", ckpt="x", dataset_path="y",
+            algo="sft",
+            ckpt="x",
+            dataset_path="y",
             length_bucket_seed=42,
         )
         self.assertEqual(config.length_bucket_seed, 42)
@@ -289,10 +336,13 @@ class SftIterTrainBatchesBucketedTest(unittest.TestCase):
         """Negative seed must be rejected at config construction time,
         before any expensive model or worker initialization."""
         from areno.api.trainer_config import TrainerConfig
+
         # This should fail immediately — no backend, no tokenizer, no GPU needed.
         with self.assertRaises(ValueError) as ctx:
             TrainerConfig(
-                algo="sft", ckpt="x", dataset_path="y",
+                algo="sft",
+                ckpt="x",
+                dataset_path="y",
                 length_bucket_seed=-5,
             )
         msg = str(ctx.exception)
@@ -307,6 +357,7 @@ class SftIterTrainBatchesBucketedTest(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # Integration: SFTTrainer._iter_train_batches() bucketed mode (behavioral)
 # ---------------------------------------------------------------------------
+
 
 class SftBucketedBehaviorTest(unittest.TestCase):
     """Integration tests for SFT bucketed batch behavior: sample coverage,
@@ -323,6 +374,7 @@ class SftBucketedBehaviorTest(unittest.TestCase):
 
         class MockTokenizer:
             """Deterministic char-level tokenizer stub for SFT tests."""
+
             eos_token_id = 0
             chat_template = None  # Must be None so encode_generation_prompt uses .encode() directly
 
@@ -330,9 +382,13 @@ class SftBucketedBehaviorTest(unittest.TestCase):
                 return [ord(c) for c in text]
 
         config = TrainerConfig(
-            algo="sft", ckpt="x", dataset_path="y",
-            batch_size=batch_size, max_prompt_tokens=1000,
-            max_new_tokens=1000, length_bucket_seed=seed,
+            algo="sft",
+            ckpt="x",
+            dataset_path="y",
+            batch_size=batch_size,
+            max_prompt_tokens=1000,
+            max_new_tokens=1000,
+            length_bucket_seed=seed,
         )
 
         class MockInstance:
@@ -376,10 +432,12 @@ class SftBucketedBehaviorTest(unittest.TestCase):
         for i in range(24):
             prompt_len = 1 + (i % 12)  # 1..12
             response_len = 1 + ((i * 3) % 8)  # 1..8
-            dataset.append({
-                "prompt": "a" * prompt_len,
-                "response": "b" * response_len,
-            })
+            dataset.append(
+                {
+                    "prompt": "a" * prompt_len,
+                    "response": "b" * response_len,
+                }
+            )
 
         def compute_padding(batches):
             total = 0
@@ -420,6 +478,7 @@ class SftBucketedBehaviorTest(unittest.TestCase):
 # Cross-module integration: CLI config -> Trainer.load_prompt_batches
 # ---------------------------------------------------------------------------
 
+
 class CliToTrainerIntegrationTest(unittest.TestCase):
     """Integration test crossing module boundaries: CLI option flows through
     config construction into the trainer's batch loading behavior."""
@@ -427,33 +486,74 @@ class CliToTrainerIntegrationTest(unittest.TestCase):
     def test_cli_option_flows_to_trainer_config(self):
         """--length-bucket-seed should appear in the constructed TrainerConfig."""
         from types import SimpleNamespace
+
         from areno.cli.train import _trainer_config_from_options
 
         # Simulate CLI args with length_bucket_seed set.
         args = SimpleNamespace(
-            algo="sft", ckpt="actor", dataset_path="dataset",
-            model_hub="modelscope", dataset_loader_fn="examples/sft/alpaca/dataset_loader.py",
-            reward_fn_path=None, reward_ckpt=None,
-            save_path="save", save_interval=10,
-            tune_params=False, mem_frac=0.9, tune_max_samples=256,
-            epochs=2, max_steps=None, score_micro_bs=8,
-            tp_size=1, world_size=1, batch_size=2, n_samples=2,
-            mini_bs=1, gradient_accumulation_steps=None,
-            max_prompt_tokens=128, max_new_tokens=16, max_context_len=None,
-            greedy=False, temperature=1.0, top_k=-1, top_p=1.0,
-            max_running_prompts=None, lr=1e-6, min_lr=1e-7,
-            lr_decay_steps=100, lr_decay_style="cosine",
-            adam_beta1=0.9, adam_beta2=0.999, adam_8bit=False,
-            weight_decay=1e-2, grad_clip_norm=1.0,
-            activation_checkpointing=True, drop_rollout_state=False,
-            eager_decode=False, attn_backend="flash",
-            disable_thinking=False, metrics_log_dir=None,
-            agent_fn=None, agent_timeout_s=300.0, train_tool_results=False,
-            gspo_clip_eps=3.0e-4, grpo_clip_eps=0.2, ref_ckpt=None,
-            dpo_beta=0.1, critic_ckpt=None, critic_lr=1e-5,
-            use_kl_loss=True, kl_loss_coef=0.001, kl_loss_type="low_var_kl",
-            clip_eps=0.2, clip_ratio_c=3.0, value_clip_eps=0.5,
-            value_loss_coef=0.5, gamma=1.0, lam=0.95, critic_warmup_steps=20,
+            algo="sft",
+            ckpt="actor",
+            dataset_path="dataset",
+            model_hub="modelscope",
+            dataset_loader_fn="examples/sft/alpaca/dataset_loader.py",
+            reward_fn_path=None,
+            reward_ckpt=None,
+            save_path="save",
+            save_interval=10,
+            tune_params=False,
+            mem_frac=0.9,
+            tune_max_samples=256,
+            epochs=2,
+            max_steps=None,
+            score_micro_bs=8,
+            tp_size=1,
+            world_size=1,
+            batch_size=2,
+            n_samples=2,
+            mini_bs=1,
+            gradient_accumulation_steps=None,
+            max_prompt_tokens=128,
+            max_new_tokens=16,
+            max_context_len=None,
+            greedy=False,
+            temperature=1.0,
+            top_k=-1,
+            top_p=1.0,
+            max_running_prompts=None,
+            lr=1e-6,
+            min_lr=1e-7,
+            lr_decay_steps=100,
+            lr_decay_style="cosine",
+            adam_beta1=0.9,
+            adam_beta2=0.999,
+            adam_8bit=False,
+            weight_decay=1e-2,
+            grad_clip_norm=1.0,
+            activation_checkpointing=True,
+            drop_rollout_state=False,
+            eager_decode=False,
+            attn_backend="flash",
+            disable_thinking=False,
+            metrics_log_dir=None,
+            agent_fn=None,
+            agent_timeout_s=300.0,
+            train_tool_results=False,
+            gspo_clip_eps=3.0e-4,
+            grpo_clip_eps=0.2,
+            ref_ckpt=None,
+            dpo_beta=0.1,
+            critic_ckpt=None,
+            critic_lr=1e-5,
+            use_kl_loss=True,
+            kl_loss_coef=0.001,
+            kl_loss_type="low_var_kl",
+            clip_eps=0.2,
+            clip_ratio_c=3.0,
+            value_clip_eps=0.5,
+            value_loss_coef=0.5,
+            gamma=1.0,
+            lam=0.95,
+            critic_warmup_steps=20,
             length_bucket_seed=42,
         )
         config = _trainer_config_from_options(**vars(args))
@@ -462,32 +562,73 @@ class CliToTrainerIntegrationTest(unittest.TestCase):
     def test_cli_option_defaults_to_none(self):
         """When --length-bucket-seed is not passed, config should have None."""
         from types import SimpleNamespace
+
         from areno.cli.train import _trainer_config_from_options
 
         args = SimpleNamespace(
-            algo="sft", ckpt="actor", dataset_path="dataset",
-            model_hub="modelscope", dataset_loader_fn="examples/sft/alpaca/dataset_loader.py",
-            reward_fn_path=None, reward_ckpt=None,
-            save_path="save", save_interval=10,
-            tune_params=False, mem_frac=0.9, tune_max_samples=256,
-            epochs=2, max_steps=None, score_micro_bs=8,
-            tp_size=1, world_size=1, batch_size=2, n_samples=2,
-            mini_bs=1, gradient_accumulation_steps=None,
-            max_prompt_tokens=128, max_new_tokens=16, max_context_len=None,
-            greedy=False, temperature=1.0, top_k=-1, top_p=1.0,
-            max_running_prompts=None, lr=1e-6, min_lr=1e-7,
-            lr_decay_steps=100, lr_decay_style="cosine",
-            adam_beta1=0.9, adam_beta2=0.999, adam_8bit=False,
-            weight_decay=1e-2, grad_clip_norm=1.0,
-            activation_checkpointing=True, drop_rollout_state=False,
-            eager_decode=False, attn_backend="flash",
-            disable_thinking=False, metrics_log_dir=None,
-            agent_fn=None, agent_timeout_s=300.0, train_tool_results=False,
-            gspo_clip_eps=3.0e-4, grpo_clip_eps=0.2, ref_ckpt=None,
-            dpo_beta=0.1, critic_ckpt=None, critic_lr=1e-5,
-            use_kl_loss=True, kl_loss_coef=0.001, kl_loss_type="low_var_kl",
-            clip_eps=0.2, clip_ratio_c=3.0, value_clip_eps=0.5,
-            value_loss_coef=0.5, gamma=1.0, lam=0.95, critic_warmup_steps=20,
+            algo="sft",
+            ckpt="actor",
+            dataset_path="dataset",
+            model_hub="modelscope",
+            dataset_loader_fn="examples/sft/alpaca/dataset_loader.py",
+            reward_fn_path=None,
+            reward_ckpt=None,
+            save_path="save",
+            save_interval=10,
+            tune_params=False,
+            mem_frac=0.9,
+            tune_max_samples=256,
+            epochs=2,
+            max_steps=None,
+            score_micro_bs=8,
+            tp_size=1,
+            world_size=1,
+            batch_size=2,
+            n_samples=2,
+            mini_bs=1,
+            gradient_accumulation_steps=None,
+            max_prompt_tokens=128,
+            max_new_tokens=16,
+            max_context_len=None,
+            greedy=False,
+            temperature=1.0,
+            top_k=-1,
+            top_p=1.0,
+            max_running_prompts=None,
+            lr=1e-6,
+            min_lr=1e-7,
+            lr_decay_steps=100,
+            lr_decay_style="cosine",
+            adam_beta1=0.9,
+            adam_beta2=0.999,
+            adam_8bit=False,
+            weight_decay=1e-2,
+            grad_clip_norm=1.0,
+            activation_checkpointing=True,
+            drop_rollout_state=False,
+            eager_decode=False,
+            attn_backend="flash",
+            disable_thinking=False,
+            metrics_log_dir=None,
+            agent_fn=None,
+            agent_timeout_s=300.0,
+            train_tool_results=False,
+            gspo_clip_eps=3.0e-4,
+            grpo_clip_eps=0.2,
+            ref_ckpt=None,
+            dpo_beta=0.1,
+            critic_ckpt=None,
+            critic_lr=1e-5,
+            use_kl_loss=True,
+            kl_loss_coef=0.001,
+            kl_loss_type="low_var_kl",
+            clip_eps=0.2,
+            clip_ratio_c=3.0,
+            value_clip_eps=0.5,
+            value_loss_coef=0.5,
+            gamma=1.0,
+            lam=0.95,
+            critic_warmup_steps=20,
             length_bucket_seed=None,
         )
         config = _trainer_config_from_options(**vars(args))

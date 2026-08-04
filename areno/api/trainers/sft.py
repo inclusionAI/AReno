@@ -145,9 +145,7 @@ class SFTTrainer:
         if batch:
             yield batch
 
-    def _iter_train_batches_bucketed(
-        self, tokenizer, *, max_prompt_tokens: int, max_new_tokens: int, seed: int
-    ):
+    def _iter_train_batches_bucketed(self, tokenizer, *, max_prompt_tokens: int, max_new_tokens: int, seed: int):
         """Length-bucketed SFT batch iteration.
 
         Pre-scans the dataset, builds ``TrainSequence`` for every valid row,

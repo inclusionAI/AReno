@@ -60,9 +60,7 @@ def bucketed_batch_indices(
     if batch_size < 1:
         raise ValueError(f"batch_size must be >= 1, got {batch_size}")
     if len(indices) != len(lengths):
-        raise ValueError(
-            f"indices and lengths must have equal length, got {len(indices)} vs {len(lengths)}"
-        )
+        raise ValueError(f"indices and lengths must have equal length, got {len(indices)} vs {len(lengths)}")
     if not indices:
         return []
 
