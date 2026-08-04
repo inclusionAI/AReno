@@ -22,10 +22,10 @@ import areno.api
 from areno.api.dashboard import record_dashboard_state
 from areno.api.data_utils import apply_chat_template, encode_prompt_value, response_to_tokens_and_mask
 from areno.api.roles import ModelRole
+from areno.api.trainers.role_aware import RoleAwareTrainerMixin
 from areno.api.tokenizer import configure_chat_template_enable_thinking
 
-
-class DPOTrainer:
+class DPOTrainer(RoleAwareTrainerMixin):
     """Offline preference trainer using one frozen reference policy."""
 
     def __init__(self, config, *, instance, dataset, reward_fn, loss_fn):
@@ -47,21 +47,6 @@ class DPOTrainer:
             "ref": ModelRole("ref", config.ref_ckpt or config.ckpt, trainable=False),
         }
 
-    def fit(self) -> None:
-        self.areno.init()
-        self._ensure_roles()
-        try:
-            self._fit_initialized()
-        finally:
-            self.areno.close()
-
-    def _ensure_roles(self) -> None:
-        for role in self.roles.values():
-            self.logger.info("role=%s stage=init_start trainable=%s path=%s", role.name, role.trainable, role.path)
-        self.areno.ensure_roles(self.roles)
-        for role in self.roles.values():
-            self.logger.info("role=%s stage=init_end trainable=%s", role.name, role.trainable)
-
     def _fit_initialized(self) -> None:
         tokenizer = self.areno.get_tokenizer()
         configure_chat_template_enable_thinking(tokenizer, getattr(self.config, "chat_template_enable_thinking", None))
@@ -80,8 +65,9 @@ class DPOTrainer:
                 ref_start = time.perf_counter()
                 # Score the exact chosen/rejected token rows under the frozen
                 # reference before the actor update.
-                ref_logprob_rows = self.areno.score_logprobs(
-                    "ref", [seq.tokens for seq in train_batch], microbatch_size=self.config.score_micro_bs
+                ref_logprob_rows = self._score_logprobs(
+                    "ref",
+                    [seq.tokens for seq in train_batch],
                 )
                 ref_time_s = time.perf_counter() - ref_start
                 self.logger.info(
@@ -89,8 +75,6 @@ class DPOTrainer:
                 )
                 record_dashboard_state(self.areno, stage="logprob_score_end", epoch=epoch, step=step, role="ref")
                 for seq, ref_logprobs in zip(train_batch, ref_logprob_rows, strict=True):
-                    if len(ref_logprobs) != len(seq.tokens):
-                        raise ValueError("reference role returned misaligned logprobs")
                     # Reuse TrainSequence.ref_logprobs so the existing backend
                     # packer carries reference scores to dpo_loss_fn.
                     seq.ref_logprobs = [float(value) for value in ref_logprobs]

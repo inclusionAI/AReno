@@ -40,6 +40,7 @@ backend-only view.
 
 - Algorithms: `AlgorithmSpec` and `register_algorithm` in
   `areno/api/algorithms.py`; concrete loops in `areno/api/trainers/`;
+  shared auxiliary-role lifecycle in `areno/api/trainers/role_aware.py`;
   construction in `areno/api/trainer_factory.py`.
 - Losses: `sft_loss_fn`, `dpo_loss_fn`, `gspo_loss_fn`, `grpo_loss_fn`, and
   `ppo_loss_fn` under `areno/api/loss_fns/`.
