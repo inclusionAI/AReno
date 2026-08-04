@@ -482,3 +482,133 @@ def _print_env_report(report: dict[str, Any]) -> None:
     click.echo("  Environment variables:")
     for name, value in report["env"].items():
         click.echo(f"    {name}={value if value is not None else '<unset>'}")
+
+
+# ---------------------------------------------------------------------------
+# scan-dataset command
+# ---------------------------------------------------------------------------
+
+
+@click.command(
+    name="scan-dataset",
+    context_settings={"help_option_names": ["-h", "--help"]},
+)
+@click.argument("path", type=click.Path(exists=False), required=False)
+@click.option(
+    "--required-keys",
+    "required_keys",
+    default="",
+    help="Comma-separated keys every JSON object must contain (e.g. prompt,response).",
+)
+@click.option(
+    "--max-issues",
+    "max_issues",
+    type=int,
+    default=50,
+    show_default=True,
+    help="Maximum number of issue details to store in the report.",
+)
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    help="Emit a machine-readable JSON report instead of human-readable text.",
+)
+@click.option(
+    "--loader-fn",
+    "loader_fn",
+    default=None,
+    help="Path to a dataset loader .py file (same format as --dataset-loader-fn). "
+    "When set, PATH is passed to the loader and the loader's output is scanned.",
+)
+def scan_dataset_command(
+    path: str | None,
+    required_keys: str,
+    max_issues: int,
+    as_json: bool,
+    loader_fn: str | None,
+) -> None:
+    """Stream-scan a JSONL file (or stdin) for quality issues.
+
+    Reports blank lines, JSON parse failures, non-object records, and missing
+    required keys without loading the full dataset into memory.  Bad entries
+    are stored as a bounded, redacted preview.
+
+    \b
+    Examples:
+      areno scan-dataset data.jsonl
+      areno scan-dataset data.jsonl --required-keys prompt,response
+      cat data.jsonl | areno scan-dataset --required-keys prompt
+      areno scan-dataset data.jsonl --loader-fn my_loader.py
+    """
+
+    import sys
+
+    from areno.api.data import format_scan_report, scan_jsonl_stream
+
+    keys = tuple(k.strip() for k in required_keys.split(",") if k.strip())
+
+    if loader_fn is not None:
+        report = _scan_with_loader(
+            loader_fn,
+            dataset_path=path or "",
+            required_keys=keys,
+            max_issues=max_issues,
+        )
+    elif path is not None:
+        report = scan_jsonl_stream(path, required_keys=keys, max_issues=max_issues)
+    else:
+        # Read from stdin so users can pipe data in.
+        report = scan_jsonl_stream(sys.stdin, required_keys=keys, max_issues=max_issues)
+
+    click.echo(format_scan_report(report, json_output=as_json))
+
+    if not report.ok:
+        raise click.exceptions.Exit(1)
+
+
+def _scan_with_loader(loader_fn: str, *, dataset_path: str, required_keys: tuple[str, ...], max_issues: int):
+    """Load a dataset via a user loader function and scan its output."""
+
+    import importlib.util
+    from pathlib import Path
+
+    from areno.api.data import scan_loader_output
+
+    loader_path = Path(loader_fn).resolve()
+    if not loader_path.exists():
+        raise click.UsageError(f"loader file not found: {loader_fn}")
+
+    fn_name = "load_training_dataset"
+    if ":" in loader_fn:
+        path_text, fn_name = loader_fn.rsplit(":", 1)
+        loader_path = Path(path_text).resolve()
+        if not loader_path.exists():
+            raise click.UsageError(f"loader file not found: {path_text}")
+        if not fn_name:
+            raise click.UsageError(f"invalid loader spec: {loader_fn}")
+
+    spec = importlib.util.spec_from_file_location(f"areno_scan_loader_{abs(hash(str(loader_path)))}", loader_path)
+    if spec is None or spec.loader is None:
+        raise click.UsageError(f"could not load loader from {loader_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    if not hasattr(module, fn_name):
+        raise click.UsageError(f"{loader_path} must define {fn_name}(...)")
+
+    loader = getattr(module, fn_name)
+    if not callable(loader):
+        raise click.UsageError(f"{loader_path}:{fn_name} is not callable")
+
+    # The loader receives a no-op default_loader; scanning only needs the
+    # loader's own normalisation logic, not the heavy HF datasets stack.
+    def _passthrough_default_loader(p):
+        return []
+
+    records = loader(dataset_path, default_loader=_passthrough_default_loader)
+    return scan_loader_output(
+        records,
+        required_keys=required_keys,
+        max_issues=max_issues,
+        source=f"{loader_path}:{fn_name}({dataset_path or '<no-path>'})",
+    )
