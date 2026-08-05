@@ -5,15 +5,14 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from click.testing import CliRunner
 
-from areno.cli.main import main
 from areno.cli.dashboard_registry import compute_age, compute_duration, derive_status, format_table, read_registry
+from areno.cli.main import main
 
 # ---------------------------------------------------------------------------
 # Fixture helpers
