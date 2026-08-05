@@ -136,6 +136,8 @@ class ModelConfig:
     use_bias: bool = False
     layer_group_size: int = 1
     partial_rotary_factor: float = 1.0
+    mrope_section: tuple[int, int, int] | None = None
+    mrope_interleaved: bool = False
     num_experts: int | None = None
     num_experts_per_tok: int = 1
     n_group: int = 1
@@ -145,6 +147,10 @@ class ModelConfig:
     moe_intermediate_size: int = 0
     num_shared_experts: int | None = None
     shared_expert_intermediate_size: int = 0
+    vision_config: dict[str, Any] | None = None
+    image_token_id: int | None = None
+    vision_start_token_id: int | None = None
+    vision_end_token_id: int | None = None
     moe_router_enable_expert_bias: bool = True
     norm_topk_prob: bool = True
     moe_router_dtype: torch.dtype = torch.float32
@@ -182,7 +188,8 @@ class ModelConfig:
             raise ValueError("num_attention_heads must be divisible by tp_size")
         if self.num_key_value_heads % tp_size != 0:
             allow_replicated_kv = (
-                self.model_type in {"gemma4", "qwen3_moe", "qwen3_5_moe"} and tp_size % self.num_key_value_heads == 0
+                self.model_type in {"gemma4", "qwen3_moe", "qwen3_5", "qwen3_5_moe", "qwen3_5_vl", "qwen3_5_vl_moe"}
+                and tp_size % self.num_key_value_heads == 0
             )
             if not allow_replicated_kv:
                 raise ValueError("num_key_value_heads must be divisible by tp_size")

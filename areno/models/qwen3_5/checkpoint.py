@@ -38,7 +38,16 @@ from areno.engine.checkpoints.io import (
 )
 from areno.engine.layers.linear import _shard_range
 from areno.engine.parallel.context import get_tp_context
-from areno.models.qwen3_5.model import Qwen35DecoderLayer, Qwen35ForCausalLM, Qwen35FullAttention, Qwen35GatedDeltaNet
+from areno.models.qwen3_5.model import (
+    Qwen35DecoderLayer,
+    Qwen35ForCausalLM,
+    Qwen35FullAttention,
+    Qwen35GatedDeltaNet,
+    Qwen35MoeVLForConditionalGeneration,
+    Qwen35VLForConditionalGeneration,
+)
+
+Qwen35VLModel = Qwen35VLForConditionalGeneration | Qwen35MoeVLForConditionalGeneration
 
 LAYER_NORM_SPECS = (
     ReplicatedTensorSpec("{prefix}.input_layernorm.weight", "input_layernorm.weight"),
@@ -89,6 +98,16 @@ def load_qwen35_weights(model: Qwen35ForCausalLM, model_path: str | Path) -> Non
 
 
 @torch.no_grad()
+def load_qwen35_vl_weights(model: Qwen35VLModel, model_path: str | Path) -> None:
+    load_qwen35_weights(model.language_model, model_path)
+    index = SafetensorsIndex(model_path)
+    try:
+        _load_qwen35_visual(model, index)
+    finally:
+        index.close()
+
+
+@torch.no_grad()
 def save_qwen35_weights(
     model: Qwen35ForCausalLM, output_path: str | Path, source_path: str | Path | None
 ) -> str | None:
@@ -101,6 +120,88 @@ def save_qwen35_weights(
     if saved_path is not None and source_path is not None:
         copy_source_passthrough_weights(source_path, saved_path, protected_prefix=f"{prefix}.")
     return saved_path
+
+
+@torch.no_grad()
+def save_qwen35_vl_weights(model: Qwen35VLModel, output_path: str | Path, source_path: str | Path | None) -> str | None:
+    tensors = CheckpointTensorStore()
+    prefix = model.language_model.config.checkpoint_prefix
+    _save_embedding_norm_head(tensors, model.language_model, prefix)
+    for layer_idx, layer in enumerate(model.language_model.layers):
+        _save_layer(tensors, layer, f"{prefix}.layers.{layer_idx}")
+    _save_qwen35_visual(tensors, model)
+    saved_path = write_hf_safetensors_checkpoint(tensors, output_path, source_path)
+    if saved_path is not None and source_path is not None:
+        copy_source_passthrough_weights(source_path, saved_path, protected_prefix=f"{prefix}.")
+    return saved_path
+
+
+def _load_qwen35_visual(model: Qwen35VLModel, index: SafetensorsIndex) -> None:
+    prefix = "model.visual"
+    if f"{prefix}.patch_embed.proj.weight" not in index.weight_map:
+        raise KeyError("could not find Qwen3.5 visual tower weights under model.visual")
+    visual = model.visual
+    keys = [key for key in index.weight_map if key.startswith(f"{prefix}.")]
+    index.prefetch(keys)
+    _copy_param(visual.patch_embed.proj.weight, index.get_tensor(f"{prefix}.patch_embed.proj.weight"))
+    _copy_param(visual.patch_embed.proj.bias, index.get_tensor(f"{prefix}.patch_embed.proj.bias"))
+    _copy_param(visual.pos_embed.weight, index.get_tensor(f"{prefix}.pos_embed.weight"))
+    for idx, block in enumerate(visual.blocks):
+        block_prefix = f"{prefix}.blocks.{idx}"
+        _copy_param(block.attn.qkv.weight, index.get_tensor(f"{block_prefix}.attn.qkv.weight"))
+        _copy_param(block.attn.qkv.bias, index.get_tensor(f"{block_prefix}.attn.qkv.bias"))
+        _copy_param(block.attn.proj.weight, index.get_tensor(f"{block_prefix}.attn.proj.weight"))
+        _copy_param(block.attn.proj.bias, index.get_tensor(f"{block_prefix}.attn.proj.bias"))
+        _copy_param(block.mlp.linear_fc1.weight, index.get_tensor(f"{block_prefix}.mlp.linear_fc1.weight"))
+        _copy_param(block.mlp.linear_fc1.bias, index.get_tensor(f"{block_prefix}.mlp.linear_fc1.bias"))
+        _copy_param(block.mlp.linear_fc2.weight, index.get_tensor(f"{block_prefix}.mlp.linear_fc2.weight"))
+        _copy_param(block.mlp.linear_fc2.bias, index.get_tensor(f"{block_prefix}.mlp.linear_fc2.bias"))
+        _copy_param(block.norm1.weight, index.get_tensor(f"{block_prefix}.norm1.weight"))
+        _copy_param(block.norm1.bias, index.get_tensor(f"{block_prefix}.norm1.bias"))
+        _copy_param(block.norm2.weight, index.get_tensor(f"{block_prefix}.norm2.weight"))
+        _copy_param(block.norm2.bias, index.get_tensor(f"{block_prefix}.norm2.bias"))
+    merger_prefix = f"{prefix}.merger"
+    _copy_param(visual.merger.linear_fc1.weight, index.get_tensor(f"{merger_prefix}.linear_fc1.weight"))
+    _copy_param(visual.merger.linear_fc1.bias, index.get_tensor(f"{merger_prefix}.linear_fc1.bias"))
+    _copy_param(visual.merger.linear_fc2.weight, index.get_tensor(f"{merger_prefix}.linear_fc2.weight"))
+    _copy_param(visual.merger.linear_fc2.bias, index.get_tensor(f"{merger_prefix}.linear_fc2.bias"))
+    _copy_param(visual.merger.norm.weight, index.get_tensor(f"{merger_prefix}.norm.weight"))
+    _copy_param(visual.merger.norm.bias, index.get_tensor(f"{merger_prefix}.norm.bias"))
+
+
+def _save_qwen35_visual(tensors: dict[str, torch.Tensor | None], model: Qwen35VLModel) -> None:
+    prefix = "model.visual"
+    visual = model.visual
+    tensors[f"{prefix}.patch_embed.proj.weight"] = rank0_tensor(visual.patch_embed.proj.weight)
+    tensors[f"{prefix}.patch_embed.proj.bias"] = rank0_tensor(visual.patch_embed.proj.bias)
+    tensors[f"{prefix}.pos_embed.weight"] = rank0_tensor(visual.pos_embed.weight)
+    for idx, block in enumerate(visual.blocks):
+        block_prefix = f"{prefix}.blocks.{idx}"
+        tensors[f"{block_prefix}.attn.qkv.weight"] = rank0_tensor(block.attn.qkv.weight)
+        tensors[f"{block_prefix}.attn.qkv.bias"] = rank0_tensor(block.attn.qkv.bias)
+        tensors[f"{block_prefix}.attn.proj.weight"] = rank0_tensor(block.attn.proj.weight)
+        tensors[f"{block_prefix}.attn.proj.bias"] = rank0_tensor(block.attn.proj.bias)
+        tensors[f"{block_prefix}.mlp.linear_fc1.weight"] = rank0_tensor(block.mlp.linear_fc1.weight)
+        tensors[f"{block_prefix}.mlp.linear_fc1.bias"] = rank0_tensor(block.mlp.linear_fc1.bias)
+        tensors[f"{block_prefix}.mlp.linear_fc2.weight"] = rank0_tensor(block.mlp.linear_fc2.weight)
+        tensors[f"{block_prefix}.mlp.linear_fc2.bias"] = rank0_tensor(block.mlp.linear_fc2.bias)
+        tensors[f"{block_prefix}.norm1.weight"] = rank0_tensor(block.norm1.weight)
+        tensors[f"{block_prefix}.norm1.bias"] = rank0_tensor(block.norm1.bias)
+        tensors[f"{block_prefix}.norm2.weight"] = rank0_tensor(block.norm2.weight)
+        tensors[f"{block_prefix}.norm2.bias"] = rank0_tensor(block.norm2.bias)
+    merger_prefix = f"{prefix}.merger"
+    tensors[f"{merger_prefix}.linear_fc1.weight"] = rank0_tensor(visual.merger.linear_fc1.weight)
+    tensors[f"{merger_prefix}.linear_fc1.bias"] = rank0_tensor(visual.merger.linear_fc1.bias)
+    tensors[f"{merger_prefix}.linear_fc2.weight"] = rank0_tensor(visual.merger.linear_fc2.weight)
+    tensors[f"{merger_prefix}.linear_fc2.bias"] = rank0_tensor(visual.merger.linear_fc2.bias)
+    tensors[f"{merger_prefix}.norm.weight"] = rank0_tensor(visual.merger.norm.weight)
+    tensors[f"{merger_prefix}.norm.bias"] = rank0_tensor(visual.merger.norm.bias)
+
+
+def _copy_param(dst: torch.Tensor, src: torch.Tensor) -> None:
+    if tuple(dst.shape) != tuple(src.shape):
+        raise ValueError(f"checkpoint tensor shape {tuple(src.shape)} does not match model tensor {tuple(dst.shape)}")
+    dst.copy_(src.to(device=dst.device, dtype=dst.dtype))
 
 
 def build_qwen35_policy_plan(model: Qwen35ForCausalLM) -> PolicyTensorStore:

@@ -912,6 +912,7 @@ def run(trainer_config: TrainerConfig):
         backend_type=areno.api.Areno,
         metrics_log_dir=trainer_config.metrics_log_dir,
         custom_config=trainer_config.areno_config(),
+        score_micro_bs=trainer_config.score_micro_bs,
     )
     dataset = _load_dataset_for_training(
         trainer_config.dataset_path,

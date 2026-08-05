@@ -303,6 +303,11 @@ class ArenoWorker:
                 new_request_ids = [cmd.request_id]
                 new_counts = [len(new_payload.prompts_by_dp[ctx.dp_rank])]
                 prompts = [list(prompt) for prompt in new_payload.prompts_by_dp[ctx.dp_rank]]
+                prompt_features = (
+                    list(new_payload.prompt_features_by_dp[ctx.dp_rank])
+                    if new_payload.prompt_features_by_dp is not None
+                    else None
+                )
                 prompt_indices = list(new_payload.prompt_indices_by_dp[ctx.dp_rank])
                 request_ids.extend(new_request_ids)
                 counts.extend(new_counts)
@@ -311,9 +316,13 @@ class ArenoWorker:
                 if not prompts:
                     send_empty_requests()
                     continue
-                appended_rows = state.append_prompts(prompts)
+                appended_rows = state.append_prompts(prompts, prompt_features)
                 if payload.prompts_by_dp[ctx.dp_rank] is not state.prompts:
                     payload.prompts_by_dp[ctx.dp_rank].extend(prompts)
+                if prompt_features is not None:
+                    if payload.prompt_features_by_dp is None:
+                        payload.prompt_features_by_dp = [[None for _ in rows] for rows in payload.prompts_by_dp]
+                    payload.prompt_features_by_dp[ctx.dp_rank].extend(prompt_features)
                 payload.prompt_indices_by_dp[ctx.dp_rank].extend(prompt_indices)
                 request_rows[-1] = appended_rows
                 new_prompt_indices.extend(prompt_indices)
@@ -539,6 +548,7 @@ def _rollout_payloads_compatible(first: RolloutPayload, other: RolloutPayload) -
         and first.sampling_params == other.sampling_params
         and first.block_size == other.block_size
         and first.decode_progress_interval_s == other.decode_progress_interval_s
+        and (first.prompt_features_by_dp is None) == (other.prompt_features_by_dp is None)
         and first.cancel_flags is None
         and other.cancel_flags is None
         and first.cancel_indices_by_dp is None

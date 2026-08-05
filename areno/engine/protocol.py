@@ -77,6 +77,7 @@ class RolloutPayload:
 
     prompts_by_dp: list[list[list[int]]]
     prompt_indices_by_dp: list[list[int]]
+    prompt_features_by_dp: list[list[dict[str, Any] | None]] | None
     max_new_tokens: int
     eos_token_id: int | tuple[int, ...] | None
     sampling_params: SamplingParams
@@ -132,6 +133,7 @@ class ScorePayload:
 
     role: str
     token_rows_by_dp: list[list[list[int]]]
+    features_by_dp: list[list[dict[str, Any] | None]] | None
     pad_token_id: int
     microbatch_size: int = 8
 

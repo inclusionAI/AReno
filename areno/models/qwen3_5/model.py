@@ -125,6 +125,8 @@ class Qwen35FullAttention(nn.Module):
             config.rope_theta,
             config.partial_rotary_factor,
             is_neox_style=True,
+            mrope_section=config.mrope_section,
+            mrope_interleaved=config.mrope_interleaved,
         )
         self.attn_backend = config.attn_backend
         self.train_backend = build_train_attention_backend(self.attn_backend)
@@ -139,11 +141,12 @@ class Qwen35FullAttention(nn.Module):
         train_meta: TrainMeta | None,
         infer_meta: InferMeta | None,
     ) -> torch.Tensor:
-        batch, seqlen, _ = hidden_states.shape
         q_size = self.local_heads * self.head_dim
         q_gate_size = q_size * (2 if self.attn_output_gate else 1)
         kv_size = self.local_kv_heads * self.head_dim
-        q_gate, k, v = self.qkv_proj(hidden_states).split((q_gate_size, kv_size, kv_size), dim=-1)
+        qkv = self.qkv_proj(hidden_states)
+        batch, seqlen, _ = qkv.shape
+        q_gate, k, v = qkv.split((q_gate_size, kv_size, kv_size), dim=-1)
         if self.attn_output_gate:
             q, gate = q_gate.view(batch, seqlen, self.local_heads, 2, self.head_dim).unbind(dim=3)
             gate = gate.reshape(batch, seqlen, q_size)
@@ -152,8 +155,9 @@ class Qwen35FullAttention(nn.Module):
             gate = None
         k = k.view(batch, seqlen, self.local_kv_heads, self.head_dim)
         v = v.view(batch, seqlen, self.local_kv_heads, self.head_dim)
-        q = self.q_norm(q)
-        k = self.k_norm(k)
+        q = self.q_norm(q).to(dtype=q.dtype)
+        k = self.k_norm(k).to(dtype=k.dtype)
+        position_ids = _align_position_ids_to_sequence_len(position_ids, seqlen)
         q, k = self.rope(q, k, position_ids)
         out = (
             self._forward_infer(q, k, v, infer_meta)
@@ -287,9 +291,9 @@ class Qwen35GatedDeltaNet(nn.Module):
         infer_meta: InferMeta | None,
     ) -> torch.Tensor:
         del position_ids
-        batch, seqlen, _ = hidden_states.shape
         qkvz = self.in_proj_qkvz(hidden_states)
         ba = self.in_proj_ba(hidden_states)
+        batch, seqlen, _ = qkvz.shape
         mixed_qkv = self._causal_conv(
             qkvz[..., : self.local_key_dim * 2 + self.local_value_dim], train_meta, infer_meta
         )
@@ -488,11 +492,10 @@ class Qwen35DecoderLayer(nn.Module):
         infer_meta: InferMeta | None,
     ) -> torch.Tensor:
         residual = hidden_states
-        hidden_states = residual + self.attention(
-            self.input_layernorm(hidden_states), position_ids, train_meta, infer_meta
-        )
+        normed = self.input_layernorm(hidden_states).to(dtype=residual.dtype)
+        hidden_states = residual + self.attention(normed, position_ids, train_meta, infer_meta)
         residual = hidden_states
-        hidden_states = residual + self.mlp(self.post_attention_layernorm(hidden_states))
+        hidden_states = residual + self.mlp(self.post_attention_layernorm(hidden_states).to(dtype=residual.dtype))
         return hidden_states
 
 
@@ -619,7 +622,9 @@ class Qwen35MoeDecoderLayer(Qwen35DecoderLayer):
         train_meta: TrainMeta | None,
         infer_meta: InferMeta | None,
     ) -> torch.Tensor:
-        return self.attention(self.input_layernorm(hidden_states), position_ids, train_meta, infer_meta)
+        return self.attention(
+            self.input_layernorm(hidden_states).to(dtype=hidden_states.dtype), position_ids, train_meta, infer_meta
+        )
 
     def forward(
         self,
@@ -639,8 +644,467 @@ class Qwen35MoeDecoderLayer(Qwen35DecoderLayer):
             infer_meta=infer_meta,
         )
         residual = hidden_states
-        hidden_states = residual + self.mlp(self.post_attention_layernorm(hidden_states))
+        hidden_states = residual + self.mlp(self.post_attention_layernorm(hidden_states).to(dtype=residual.dtype))
         return hidden_states
+
+
+def _features_by_row(
+    features: dict[str, Any] | list[dict[str, Any] | None],
+    batch: int,
+) -> list[dict[str, Any] | None]:
+    if isinstance(features, list):
+        if len(features) != batch:
+            raise ValueError(f"multimodal features batch mismatch: got {len(features)} rows for batch {batch}")
+        return features
+    if not isinstance(features, dict):
+        raise TypeError("multimodal features must be a dict or a batch-aligned list of dicts")
+    if batch == 1:
+        return [features]
+    return [_select_feature_row(features, row_idx, batch) for row_idx in range(batch)]
+
+
+def _select_feature_row(features: dict[str, Any], row_idx: int, batch: int) -> dict[str, Any]:
+    row = {}
+    for key, value in features.items():
+        if key == "mrope_position_ids":
+            row[key] = value
+        elif isinstance(value, torch.Tensor) and value.ndim > 0 and int(value.shape[0]) == batch:
+            row[key] = value[row_idx]
+        elif isinstance(value, list) and len(value) == batch:
+            row[key] = value[row_idx]
+        else:
+            row[key] = value
+    return row
+
+
+def _image_embeds_for_row(
+    features: dict[str, Any],
+    row_idx: int,
+    dtype: torch.dtype,
+    device: torch.device,
+) -> torch.Tensor | None:
+    del row_idx
+    image_embeds = None
+    for key in ("image_embeds", "image_features", "projected_image_embeds", "inputs_embeds"):
+        if features.get(key) is not None:
+            image_embeds = features[key]
+            break
+    if image_embeds is None:
+        return None
+    if not isinstance(image_embeds, torch.Tensor):
+        image_embeds = torch.as_tensor(image_embeds)
+    return image_embeds.to(device=device, dtype=dtype)
+
+
+def _image_token_mask_for_row(features: dict[str, Any], input_ids: torch.Tensor, row_idx: int) -> torch.Tensor:
+    mask = features.get("image_token_mask")
+    if mask is not None:
+        if not isinstance(mask, torch.Tensor):
+            mask = torch.as_tensor(mask)
+        if mask.ndim == 2:
+            mask = mask[row_idx]
+        if mask.shape != input_ids.shape:
+            raise ValueError(
+                f"image_token_mask shape {tuple(mask.shape)} does not match input row shape {tuple(input_ids.shape)}"
+            )
+        return mask.to(device=input_ids.device, dtype=torch.bool)
+    image_token_id = features.get("image_token_id")
+    if image_token_id is None:
+        raise ValueError("Qwen3.5 multimodal features require image_token_mask or image_token_id")
+    return input_ids == int(image_token_id)
+
+
+class Qwen35VisionPatchEmbed(nn.Module):
+    def __init__(self, vision_config: dict[str, Any], dtype: torch.dtype):
+        super().__init__()
+        self.in_channels = int(vision_config.get("in_channels", 3))
+        self.temporal_patch_size = int(vision_config.get("temporal_patch_size", 2))
+        self.patch_size = int(vision_config.get("patch_size", 16))
+        self.hidden_size = int(vision_config["hidden_size"])
+        self.proj = nn.Conv3d(
+            self.in_channels,
+            self.hidden_size,
+            kernel_size=(self.temporal_patch_size, self.patch_size, self.patch_size),
+            stride=(self.temporal_patch_size, self.patch_size, self.patch_size),
+            bias=True,
+            dtype=dtype,
+        )
+
+    def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
+        target_dtype = self.proj.weight.dtype
+        if pixel_values.ndim == 2:
+            pixel_values = pixel_values.view(
+                -1,
+                self.in_channels,
+                self.temporal_patch_size,
+                self.patch_size,
+                self.patch_size,
+            )
+        if pixel_values.ndim == 4:
+            pixel_values = pixel_values.unsqueeze(2).expand(-1, -1, self.temporal_patch_size, -1, -1)
+        if pixel_values.ndim != 5:
+            raise ValueError("Qwen3.5-VL pixel_values must have shape (patches, C*T*P*P), (B,C,H,W), or (B,C,T,H,W)")
+        hidden = self.proj(pixel_values.to(dtype=target_dtype))
+        return hidden.flatten(2).transpose(1, 2).reshape(-1, self.hidden_size)
+
+
+class Qwen35VisionAttention(nn.Module):
+    def __init__(self, vision_config: dict[str, Any], dtype: torch.dtype):
+        super().__init__()
+        self.hidden_size = int(vision_config["hidden_size"])
+        self.num_heads = int(vision_config["num_heads"])
+        self.head_dim = self.hidden_size // self.num_heads
+        self.qkv = nn.Linear(self.hidden_size, self.hidden_size * 3, bias=True, dtype=dtype)
+        self.proj = nn.Linear(self.hidden_size, self.hidden_size, bias=True, dtype=dtype)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        rotary_pos_emb_cos: torch.Tensor | None = None,
+        rotary_pos_emb_sin: torch.Tensor | None = None,
+        cu_seqlens: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        seq_len = int(hidden_states.shape[0])
+        qkv = self.qkv(hidden_states).view(seq_len, 3, self.num_heads, self.head_dim).permute(1, 0, 2, 3)
+        q, k, v = qkv.unbind(0)
+        if rotary_pos_emb_cos is not None and rotary_pos_emb_sin is not None:
+            q = _apply_vision_rotary(q, rotary_pos_emb_cos, rotary_pos_emb_sin)
+            k = _apply_vision_rotary(k, rotary_pos_emb_cos, rotary_pos_emb_sin)
+        if cu_seqlens is not None:
+            out = _qwen35_vision_varlen_sdpa_no_compile(q.contiguous(), k.contiguous(), v.contiguous(), cu_seqlens)
+            return self.proj(out.reshape(seq_len, self.hidden_size))
+        q = q.transpose(0, 1).unsqueeze(0)
+        k = k.transpose(0, 1).unsqueeze(0)
+        v = v.transpose(0, 1).unsqueeze(0)
+        out = F.scaled_dot_product_attention(q, k, v, dropout_p=0.0, is_causal=False)
+        out = out.squeeze(0).transpose(0, 1).reshape(seq_len, self.hidden_size)
+        return self.proj(out)
+
+
+class Qwen35VisionMLP(nn.Module):
+    def __init__(self, vision_config: dict[str, Any], dtype: torch.dtype):
+        super().__init__()
+        hidden_size = int(vision_config["hidden_size"])
+        intermediate_size = int(vision_config["intermediate_size"])
+        self.hidden_act = str(vision_config.get("hidden_act", "gelu_pytorch_tanh"))
+        self.linear_fc1 = nn.Linear(hidden_size, intermediate_size, bias=True, dtype=dtype)
+        self.linear_fc2 = nn.Linear(intermediate_size, hidden_size, bias=True, dtype=dtype)
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return self.linear_fc2(_vision_activation(self.linear_fc1(hidden_states), self.hidden_act))
+
+
+def _apply_vision_rotary(
+    tensor: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+) -> torch.Tensor:
+    if int(cos.shape[-1]) * 2 == int(tensor.shape[-1]):
+        cos = torch.cat((cos, cos), dim=-1)
+        sin = torch.cat((sin, sin), dim=-1)
+    rotary_dim = int(cos.shape[-1])
+    rotary = tensor[..., :rotary_dim]
+    passthrough = tensor[..., rotary_dim:]
+    rotated = (rotary * cos[:, None, :]) + (_rotate_half(rotary) * sin[:, None, :])
+    return torch.cat((rotated, passthrough), dim=-1) if passthrough.numel() else rotated
+
+
+def _rotate_half(x: torch.Tensor) -> torch.Tensor:
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
+    return torch.cat((-x2, x1), dim=-1)
+
+
+def _vision_activation(x: torch.Tensor, name: str) -> torch.Tensor:
+    if name in {"gelu_pytorch_tanh", "gelu_new", "gelu_fast"}:
+        return F.gelu(x, approximate="tanh")
+    if name == "gelu":
+        return F.gelu(x, approximate="none")
+    if name == "silu":
+        return F.silu(x)
+    raise ValueError(f"unsupported Qwen3.5-VL vision activation {name!r}")
+
+
+@torch._dynamo.disable
+def _qwen35_vision_varlen_sdpa_no_compile(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+) -> torch.Tensor:
+    """Run non-causal varlen vision attention through PyTorch SDPA.
+
+    Qwen3.5-VL vision attention is short dense self-attention where PyTorch
+    SDPA can use optimized flash/mem-efficient kernels. Keeping this helper
+    Dynamo-opaque also avoids recompiles for request-dependent image grids.
+    """
+
+    outputs = []
+    bounds = cu_seqlens.detach().cpu().to(dtype=torch.long).tolist()
+    for start, end in zip(bounds, bounds[1:], strict=False):
+        q_i = q[start:end].transpose(0, 1).unsqueeze(0)
+        k_i = k[start:end].transpose(0, 1).unsqueeze(0)
+        v_i = v[start:end].transpose(0, 1).unsqueeze(0)
+        out_i = F.scaled_dot_product_attention(q_i, k_i, v_i, dropout_p=0.0, is_causal=False)
+        outputs.append(out_i.squeeze(0).transpose(0, 1))
+    if not outputs:
+        return q.new_empty(q.shape)
+    return torch.cat(outputs, dim=0)
+
+
+class Qwen35VisionBlock(nn.Module):
+    def __init__(self, vision_config: dict[str, Any], dtype: torch.dtype):
+        super().__init__()
+        hidden_size = int(vision_config["hidden_size"])
+        self.norm1 = nn.LayerNorm(hidden_size, eps=1e-6, dtype=dtype)
+        self.attn = Qwen35VisionAttention(vision_config, dtype)
+        self.norm2 = nn.LayerNorm(hidden_size, eps=1e-6, dtype=dtype)
+        self.mlp = Qwen35VisionMLP(vision_config, dtype)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        rotary_pos_emb_cos: torch.Tensor | None = None,
+        rotary_pos_emb_sin: torch.Tensor | None = None,
+        cu_seqlens: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        hidden_states = hidden_states + self.attn(
+            self.norm1(hidden_states),
+            rotary_pos_emb_cos=rotary_pos_emb_cos,
+            rotary_pos_emb_sin=rotary_pos_emb_sin,
+            cu_seqlens=cu_seqlens,
+        )
+        hidden_states = hidden_states + self.mlp(self.norm2(hidden_states))
+        return hidden_states
+
+
+class Qwen35VisionMerger(nn.Module):
+    def __init__(self, vision_config: dict[str, Any], dtype: torch.dtype):
+        super().__init__()
+        self.hidden_size = int(vision_config["hidden_size"])
+        self.out_hidden_size = int(vision_config.get("out_hidden_size", self.hidden_size))
+        self.spatial_merge_size = int(vision_config.get("spatial_merge_size", 2))
+        self.merge_unit = self.spatial_merge_size * self.spatial_merge_size
+        merged_size = self.hidden_size * self.merge_unit
+        intermediate_size = int(vision_config.get("merger_intermediate_size", merged_size))
+        self.norm = nn.LayerNorm(self.hidden_size, eps=1e-6, dtype=dtype)
+        self.linear_fc1 = nn.Linear(merged_size, intermediate_size, bias=True, dtype=dtype)
+        self.linear_fc2 = nn.Linear(intermediate_size, self.out_hidden_size, bias=True, dtype=dtype)
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        hidden_states = self.norm(hidden_states)
+        if int(hidden_states.shape[0]) % self.merge_unit:
+            raise ValueError("Qwen3.5-VL visual token count must be divisible by spatial_merge_size**2")
+        hidden_states = hidden_states.view(-1, self.hidden_size * self.merge_unit)
+        return self.linear_fc2(F.gelu(self.linear_fc1(hidden_states), approximate="none"))
+
+
+class Qwen35VisionTransformer(nn.Module):
+    def __init__(self, vision_config: dict[str, Any], dtype: torch.dtype):
+        super().__init__()
+        self.config = vision_config
+        self.hidden_size = int(vision_config["hidden_size"])
+        self.num_heads = int(vision_config["num_heads"])
+        self.head_dim = self.hidden_size // self.num_heads
+        self.num_position_embeddings = int(vision_config["num_position_embeddings"])
+        self.num_grid_per_side = int(self.num_position_embeddings**0.5)
+        self.spatial_merge_size = int(vision_config.get("spatial_merge_size", 2))
+        self.patch_embed = Qwen35VisionPatchEmbed(vision_config, dtype)
+        self.pos_embed = nn.Embedding(self.num_position_embeddings, self.hidden_size, dtype=dtype)
+        self.blocks = nn.ModuleList(
+            [Qwen35VisionBlock(vision_config, dtype) for _ in range(int(vision_config["depth"]))]
+        )
+        self.merger = Qwen35VisionMerger(vision_config, dtype)
+
+    def forward(self, pixel_values: torch.Tensor, image_grid_thw: torch.Tensor | None = None) -> torch.Tensor:
+        hidden_states = self.patch_embed(pixel_values)
+        grid_thw = self._grid_list(hidden_states.shape[0], image_grid_thw)
+        hidden_states = hidden_states + self._position_embeddings(grid_thw, hidden_states.device, hidden_states.dtype)
+        cu_seqlens = self._frame_cu_seqlens(grid_thw, hidden_states.device)
+        rotary_cos, rotary_sin = self._rot_pos_emb(grid_thw, hidden_states.device, hidden_states.dtype)
+        for block in self.blocks:
+            hidden_states = block(hidden_states, rotary_cos, rotary_sin, cu_seqlens)
+        return self.merger(hidden_states)
+
+    def _grid_list(self, num_patches: int, image_grid_thw: torch.Tensor | None) -> list[tuple[int, int, int]]:
+        if image_grid_thw is None:
+            return [(1, num_patches, 1)]
+        grid = image_grid_thw.detach().cpu().to(dtype=torch.long).reshape(-1, 3).tolist()
+        items = [(int(t), int(h), int(w)) for t, h, w in grid]
+        total = sum(t * h * w for t, h, w in items)
+        if total != num_patches:
+            raise ValueError(f"image_grid_thw patch count {total} does not match pixel_values patches {num_patches}")
+        return items
+
+    @staticmethod
+    def _frame_cu_seqlens(grid_thw: list[tuple[int, int, int]], device: torch.device) -> torch.Tensor:
+        lengths = []
+        for t, h, w in grid_thw:
+            frame_len = h * w
+            lengths.extend([frame_len] * t)
+        cu = [0]
+        for length in lengths:
+            cu.append(cu[-1] + int(length))
+        return torch.tensor(cu, device=device, dtype=torch.int32)
+
+    def _position_embeddings(
+        self,
+        grid_thw: list[tuple[int, int, int]],
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        outputs = []
+        for t, h, w in grid_thw:
+            patch_pos = self._interpolated_patch_positions(h, w, device, dtype)
+            patch_pos = self._merge_order(patch_pos, h, w)
+            outputs.append(patch_pos.expand(t, -1, -1).reshape(-1, self.hidden_size))
+        return torch.cat(outputs, dim=0) if outputs else self.pos_embed.weight.new_empty((0, self.hidden_size))
+
+    def _interpolated_patch_positions(
+        self,
+        height: int,
+        width: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        side = self.num_grid_per_side
+        h_idxs = torch.linspace(0, side - 1, height, dtype=torch.float32, device=device)
+        w_idxs = torch.linspace(0, side - 1, width, dtype=torch.float32, device=device)
+        h_floor = h_idxs.to(torch.long)
+        w_floor = w_idxs.to(torch.long)
+        h_ceil = torch.clamp(h_floor + 1, max=side - 1)
+        w_ceil = torch.clamp(w_floor + 1, max=side - 1)
+        dh = h_idxs - h_floor
+        dw = w_idxs - w_floor
+        dh_grid, dw_grid = torch.meshgrid(dh, dw, indexing="ij")
+        h_floor_grid, w_floor_grid = torch.meshgrid(h_floor, w_floor, indexing="ij")
+        h_ceil_grid, w_ceil_grid = torch.meshgrid(h_ceil, w_ceil, indexing="ij")
+        w11 = dh_grid * dw_grid
+        w10 = dh_grid - w11
+        w01 = dw_grid - w11
+        w00 = 1 - dh_grid - w01
+        h_grid = torch.stack([h_floor_grid, h_floor_grid, h_ceil_grid, h_ceil_grid])
+        w_grid = torch.stack([w_floor_grid, w_ceil_grid, w_floor_grid, w_ceil_grid])
+        indices = (h_grid * side + w_grid).reshape(4, -1)
+        weights = torch.stack([w00, w01, w10, w11], dim=0).reshape(4, -1, 1).to(dtype=dtype)
+        embeds = self.pos_embed(indices).to(dtype=dtype)
+        return (embeds * weights).sum(dim=0).reshape(height, width, self.hidden_size)
+
+    def _merge_order(self, patch_pos: torch.Tensor, height: int, width: int) -> torch.Tensor:
+        merge = self.spatial_merge_size
+        if height % merge or width % merge:
+            raise ValueError("Qwen3.5-VL grid height/width must be divisible by spatial_merge_size")
+        return (
+            patch_pos.view(height // merge, merge, width // merge, merge, self.hidden_size)
+            .permute(0, 2, 1, 3, 4)
+            .reshape(1, height * width, self.hidden_size)
+        )
+
+    def _rot_pos_emb(
+        self,
+        grid_thw: list[tuple[int, int, int]],
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        pos_ids = []
+        max_grid = 1
+        for t, h, w in grid_thw:
+            base = self._rot_pos_ids(h, w, self.spatial_merge_size, device)
+            pos_ids.append(base if t == 1 else base.repeat(t, 1))
+            max_grid = max(max_grid, h, w)
+        ids = torch.cat(pos_ids, dim=0) if pos_ids else torch.empty(0, 2, device=device, dtype=torch.long)
+        inv_freq = 1.0 / (
+            10000.0
+            ** (torch.arange(0, self.head_dim // 2, 2, device=device, dtype=torch.float32) / max(self.head_dim // 2, 1))
+        )
+        positions = torch.arange(max_grid, device=device, dtype=torch.float32)
+        freqs = torch.outer(positions, inv_freq)
+        cos = freqs.cos().to(dtype=dtype)
+        sin = freqs.sin().to(dtype=dtype)
+        return cos[ids].flatten(1), sin[ids].flatten(1)
+
+    @staticmethod
+    def _rot_pos_ids(height: int, width: int, spatial_merge_size: int, device: torch.device) -> torch.Tensor:
+        hpos = torch.arange(height, device=device).view(height, 1).expand(height, width)
+        wpos = torch.arange(width, device=device).view(1, width).expand(height, width)
+        h_div = height // spatial_merge_size
+        w_div = width // spatial_merge_size
+        hpos = hpos.reshape(h_div, spatial_merge_size, w_div, spatial_merge_size).permute(0, 2, 1, 3).flatten()
+        wpos = wpos.reshape(h_div, spatial_merge_size, w_div, spatial_merge_size).permute(0, 2, 1, 3).flatten()
+        return torch.stack((hpos, wpos), dim=-1).to(dtype=torch.long)
+
+
+def _tensor_feature(
+    features: dict[str, Any],
+    key: str,
+    device: torch.device,
+    dtype: torch.dtype | None = None,
+) -> torch.Tensor | None:
+    value = features.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, torch.Tensor):
+        value = torch.as_tensor(value)
+    return value.to(device=device, dtype=dtype or value.dtype)
+
+
+@torch._dynamo.disable
+def _position_ids_from_features(
+    features: dict[str, Any] | list[dict[str, Any] | None] | None,
+    *,
+    batch: int,
+    seqlen: int,
+    device: torch.device,
+) -> torch.Tensor | None:
+    if features is None:
+        return None
+    rows = _features_by_row(features, batch)
+    row_positions = [
+        _tensor_feature(row, "mrope_position_ids", device, torch.long) if row is not None else None for row in rows
+    ]
+    if not any(item is not None for item in row_positions):
+        return None
+    base = torch.arange(seqlen, device=device, dtype=torch.long).view(1, 1, -1).expand(3, batch, -1).clone()
+    for row_idx, item in enumerate(row_positions):
+        if item is None:
+            continue
+        if item.ndim == 3 and int(item.shape[0]) == 3 and int(item.shape[1]) == 1:
+            item = item[:, 0, :]
+        elif item.ndim == 3 and int(item.shape[0]) == 1 and int(item.shape[1]) == 3:
+            item = item[0]
+        elif item.ndim == 3 and int(item.shape[0]) == 3:
+            item = item[:, row_idx, :]
+        elif item.ndim != 2 or int(item.shape[0]) != 3:
+            raise ValueError(
+                "mrope_position_ids must have shape (3, seq_len), (3, batch, seq_len), or (batch, 3, seq_len)"
+            )
+        length = min(int(item.shape[-1]), seqlen)
+        base[:, row_idx, :length] = item[:, :length]
+        if length < seqlen:
+            next_pos = int(item[:, :length].max().item()) + 1 if length > 0 else 0
+            tail_len = seqlen - length
+            base[:, row_idx, length:] = (
+                torch.arange(tail_len, device=device, dtype=torch.long).view(1, -1).expand(3, -1) + next_pos
+            )
+    return base
+
+
+def _align_position_ids_to_sequence_len(position_ids: torch.Tensor, seqlen: int) -> torch.Tensor:
+    current = int(position_ids.shape[-1])
+    if current == seqlen:
+        return position_ids
+    ctx = get_tp_context()
+    if ctx.world_size == 1:
+        raise ValueError(f"position_ids sequence length {current} does not match hidden sequence length {seqlen}")
+    if current * ctx.world_size == seqlen:
+        if position_ids.dim() == 3:
+            return gather_from_sequence_parallel_region(position_ids.permute(1, 2, 0)).permute(2, 0, 1)
+        return gather_from_sequence_parallel_region(position_ids)
+    if current == seqlen * ctx.world_size:
+        if position_ids.dim() == 3:
+            return scatter_to_sequence_parallel_region(position_ids.permute(1, 2, 0)).permute(2, 0, 1)
+        return scatter_to_sequence_parallel_region(position_ids)
+    raise ValueError(f"position_ids sequence length {current} does not match hidden sequence length {seqlen}")
 
 
 class Qwen35ForCausalLM(nn.Module):
@@ -658,13 +1122,40 @@ class Qwen35ForCausalLM(nn.Module):
         position_ids: torch.Tensor | None = None,
         train_meta: TrainMeta | None = None,
         infer_meta: InferMeta | None = None,
+        features: dict[str, Any] | list[dict[str, Any] | None] | None = None,
+    ) -> CausalLMOutput:
+        hidden_states = self.embed_tokens(input_ids)
+        hidden_states = self._apply_multimodal_features(hidden_states, input_ids, features)
+        feature_position_ids = _position_ids_from_features(
+            features,
+            batch=int(input_ids.shape[0]),
+            seqlen=int(input_ids.shape[1]),
+            device=input_ids.device,
+        )
+        if feature_position_ids is not None:
+            position_ids = feature_position_ids
+        return self.forward_from_embeddings(hidden_states, position_ids, train_meta, infer_meta)
+
+    def forward_from_embeddings(
+        self,
+        hidden_states: torch.Tensor,
+        position_ids: torch.Tensor | None = None,
+        train_meta: TrainMeta | None = None,
+        infer_meta: InferMeta | None = None,
     ) -> CausalLMOutput:
         if position_ids is None:
-            position_ids = torch.arange(input_ids.shape[1], device=input_ids.device).unsqueeze(0).expand_as(input_ids)
-        hidden_states = self.embed_tokens(input_ids)
+            position_ids = (
+                torch.arange(hidden_states.shape[1], device=hidden_states.device)
+                .unsqueeze(0)
+                .expand(hidden_states.shape[0], -1)
+            )
         use_sequence_parallel = bool(train_meta is not None and train_meta.sequence_parallel)
         if use_sequence_parallel:
             hidden_states = scatter_to_sequence_parallel_region(hidden_states)
+            if position_ids.dim() == 3:
+                position_ids = scatter_to_sequence_parallel_region(position_ids.permute(1, 2, 0)).permute(2, 0, 1)
+            else:
+                position_ids = scatter_to_sequence_parallel_region(position_ids)
         with sequence_parallel_region(use_sequence_parallel):
             for layer in self.layers:
                 if getattr(layer, "handles_activation_checkpointing", False):
@@ -679,9 +1170,42 @@ class Qwen35ForCausalLM(nn.Module):
                         train_meta=train_meta,
                         infer_meta=infer_meta,
                     )
-            hidden_states = self.norm(hidden_states)
+            hidden_states = self.norm(hidden_states).to(dtype=hidden_states.dtype)
             logits_shard = self.lm_head(hidden_states)
         return CausalLMOutput(logits_shard=logits_shard, hidden_states=hidden_states)
+
+    @torch._dynamo.disable
+    def _apply_multimodal_features(
+        self,
+        hidden_states: torch.Tensor,
+        input_ids: torch.Tensor,
+        features: dict[str, Any] | list[dict[str, Any] | None] | None,
+    ) -> torch.Tensor:
+        if features is None:
+            return hidden_states
+        rows = _features_by_row(features, int(input_ids.shape[0]))
+        if not any(row is not None for row in rows):
+            return hidden_states
+        hidden_states = hidden_states.clone()
+        for row_idx, row_features in enumerate(rows):
+            if row_features is None:
+                continue
+            image_embeds = _image_embeds_for_row(row_features, row_idx, hidden_states.dtype, hidden_states.device)
+            if image_embeds is None:
+                continue
+            if image_embeds.ndim != 2 or int(image_embeds.shape[-1]) != self.config.hidden_size:
+                raise ValueError(
+                    f"Qwen3.5 multimodal image_embeds must have shape (num_image_tokens, {self.config.hidden_size})"
+                )
+            mask = _image_token_mask_for_row(row_features, input_ids[row_idx], row_idx)
+            image_tokens = int(mask.sum().item())
+            if image_tokens != int(image_embeds.shape[0]):
+                raise ValueError(
+                    "Qwen3.5 multimodal image token count does not match image_embeds: "
+                    f"tokens={image_tokens} embeds={int(image_embeds.shape[0])}"
+                )
+            hidden_states[row_idx, mask] = image_embeds
+        return hidden_states
 
     def set_kv_caches(self, kv_caches: list[tuple[torch.Tensor, torch.Tensor]]) -> None:
         idx = 0
@@ -792,6 +1316,102 @@ class Qwen35ForCausalLM(nn.Module):
         return found
 
 
+class Qwen35VLForConditionalGeneration(nn.Module):
+    def __init__(self, config: ModelConfig):
+        super().__init__()
+        if config.vision_config is None:
+            raise ValueError("Qwen3.5-VL requires vision_config")
+        self.config = config
+        self.language_model = Qwen35ForCausalLM(config)
+        self.visual = Qwen35VisionTransformer(config.vision_config, config.dtype)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        position_ids: torch.Tensor | None = None,
+        train_meta: TrainMeta | None = None,
+        infer_meta: InferMeta | None = None,
+        features: dict[str, Any] | list[dict[str, Any] | None] | None = None,
+    ) -> CausalLMOutput:
+        return self.language_model(
+            input_ids,
+            position_ids=position_ids,
+            train_meta=train_meta,
+            infer_meta=infer_meta,
+            features=self._project_pixel_values(features, input_ids.device, input_ids.shape[0]),
+        )
+
+    @torch._dynamo.disable
+    def _project_pixel_values(
+        self,
+        features: dict[str, Any] | list[dict[str, Any] | None] | None,
+        device: torch.device,
+        batch: int,
+    ) -> dict[str, Any] | list[dict[str, Any] | None] | None:
+        if features is None:
+            return None
+        rows = _features_by_row(features, batch)
+        projected: list[dict[str, Any] | None] = []
+        changed = False
+        for row in rows:
+            if row is None:
+                projected.append(None)
+                continue
+            row_features = dict(row)
+            if _image_embeds_for_row(row_features, 0, self.config.dtype, device) is None:
+                image_embeds = self._project_image_feature_rows(row_features, device)
+                if image_embeds is not None:
+                    row_features["image_embeds"] = image_embeds
+                    changed = True
+            if row_features.get("image_token_id") is None and self.config.image_token_id is not None:
+                row_features["image_token_id"] = self.config.image_token_id
+                changed = True
+            projected.append(row_features)
+        if not changed:
+            return features
+        return projected[0] if batch == 1 else projected
+
+    @torch._dynamo.disable
+    def _project_image_feature_rows(self, features: dict[str, Any], device: torch.device) -> torch.Tensor | None:
+        if features.get("image_feature_rows") is not None:
+            embeds = []
+            for row in features["image_feature_rows"]:
+                if row is None:
+                    continue
+                row_features = dict(row)
+                image_embeds = _image_embeds_for_row(row_features, 0, self.config.dtype, device)
+                if image_embeds is None:
+                    image_embeds = self._project_pixel_feature(row_features, device)
+                if image_embeds is not None:
+                    embeds.append(image_embeds)
+            return torch.cat(embeds, dim=0) if embeds else None
+        return self._project_pixel_feature(features, device)
+
+    @torch._dynamo.disable
+    def _project_pixel_feature(self, row_features: dict[str, Any], device: torch.device) -> torch.Tensor | None:
+        if row_features.get("pixel_values") is None:
+            return None
+        pixel_values = _tensor_feature(row_features, "pixel_values", device, self.config.dtype)
+        image_grid_thw = _tensor_feature(row_features, "image_grid_thw", device, torch.long)
+        image_embeds = self.visual(pixel_values, image_grid_thw)
+        offset = int(row_features.get("image_token_offset", 0) or 0)
+        count = row_features.get("image_token_count")
+        if count is not None:
+            image_embeds = image_embeds[offset : offset + int(count)]
+        elif offset:
+            image_embeds = image_embeds[offset:]
+        return image_embeds
+
+    def __getattr__(self, name: str):
+        if name != "language_model":
+            modules = self.__dict__.get("_modules")
+            if modules is not None and "language_model" in modules:
+                language_model = modules["language_model"]
+                if hasattr(language_model, name):
+                    return getattr(language_model, name)
+        return super().__getattr__(name)
+
+
 class Qwen35MoeForCausalLM(Qwen35ForCausalLM):
     def __init__(self, config: ModelConfig):
         super().__init__(config)
@@ -806,6 +1426,25 @@ class Qwen35MoeForCausalLM(Qwen35ForCausalLM):
     def clear_infer_weights(self) -> None:
         for layer in self.layers:
             layer.mlp.clear_infer_weights()
+
+
+class Qwen35MoeVLForConditionalGeneration(Qwen35VLForConditionalGeneration):
+    def __init__(self, config: ModelConfig):
+        nn.Module.__init__(self)
+        if config.vision_config is None:
+            raise ValueError("Qwen3.5-MoE-VL requires vision_config")
+        self.config = config
+        self.language_model = Qwen35MoeForCausalLM(config)
+        self.visual = Qwen35VisionTransformer(config.vision_config, config.dtype)
+
+
+def _mrope_section(rope: dict[str, Any]) -> tuple[int, int, int] | None:
+    section = rope.get("mrope_section")
+    if section is None:
+        return None
+    if len(section) != 3:
+        raise ValueError("Qwen3.5 mrope_section must contain three axis lengths")
+    return tuple(int(item) for item in section)
 
 
 class Qwen35Adapter(ModelAdapter):
@@ -848,6 +1487,8 @@ class Qwen35Adapter(ModelAdapter):
             hidden_act=str(text.get("hidden_act", "silu")),
             layer_types=layer_types,
             partial_rotary_factor=float(rope.get("partial_rotary_factor", text.get("partial_rotary_factor", 0.25))),
+            mrope_section=_mrope_section(rope),
+            mrope_interleaved=bool(rope.get("mrope_interleaved", False)),
             sequence_parallel=bool(text.get("sequence_parallel", True)),
             attn_output_gate=bool(text.get("attn_output_gate", True)),
             linear_conv_kernel_dim=int(text.get("linear_conv_kernel_dim", 4)),
@@ -882,11 +1523,63 @@ class Qwen35Adapter(ModelAdapter):
         return build_qwen35_policy_plan(model)
 
 
+class Qwen35VLAdapter(Qwen35Adapter):
+    name = "qwen3_5_vl"
+
+    def match_hf_config(self, hf_config: dict[str, Any]) -> bool:
+        architectures = {str(item) for item in (hf_config.get("architectures") or [])}
+        model_type = str(hf_config.get("model_type", "")).lower()
+        text = hf_config.get("text_config") or {}
+        text_model_type = str(text.get("model_type", "")).lower()
+        has_vision_config = any(key in hf_config for key in ("vision_config", "visual", "vision_model_config"))
+        return (
+            model_type in {"qwen3_5_vl", "qwen3_5_vision"}
+            or any(
+                "Qwen3_5" in arch and ("VL" in arch or "Vision" in arch) and "Moe" not in arch for arch in architectures
+            )
+            or (has_vision_config and text_model_type in {"qwen3_5", "qwen3_5_text"})
+        )
+
+    def config_from_hf(self, hf_config: dict[str, Any]) -> ModelConfig:
+        config = super().config_from_hf(hf_config)
+        config.model_type = self.name
+        config.vision_config = dict(hf_config.get("vision_config") or {})
+        if hf_config.get("image_token_id") is not None:
+            config.image_token_id = int(hf_config["image_token_id"])
+        if hf_config.get("vision_start_token_id") is not None:
+            config.vision_start_token_id = int(hf_config["vision_start_token_id"])
+        if hf_config.get("vision_end_token_id") is not None:
+            config.vision_end_token_id = int(hf_config["vision_end_token_id"])
+        return config
+
+    def build(self, config: ModelConfig) -> nn.Module:
+        return Qwen35VLForConditionalGeneration(config)
+
+    @torch.no_grad()
+    def load_weights(self, model: nn.Module, model_path: str | Path) -> None:
+        if not isinstance(model, Qwen35VLForConditionalGeneration):
+            raise TypeError(f"Qwen35VLAdapter cannot load weights into {type(model)!r}")
+        from areno.models.qwen3_5.checkpoint import load_qwen35_vl_weights
+
+        load_qwen35_vl_weights(model, model_path)
+
+    @torch.no_grad()
+    def save_weights(self, model: nn.Module, output_path: str | Path, source_path: str | Path | None) -> str | None:
+        if not isinstance(model, Qwen35VLForConditionalGeneration):
+            raise TypeError(f"Qwen35VLAdapter cannot save weights from {type(model)!r}")
+        from areno.models.qwen3_5.checkpoint import save_qwen35_vl_weights
+
+        return save_qwen35_vl_weights(model, output_path, source_path)
+
+
 class Qwen35MoeAdapter(ModelAdapter):
     name = "qwen3_5_moe"
 
     def match_hf_config(self, hf_config: dict[str, Any]) -> bool:
         architectures = set(hf_config.get("architectures") or [])
+        has_vision_config = any(key in hf_config for key in ("vision_config", "visual", "vision_model_config"))
+        if has_vision_config:
+            return False
         return (
             str(hf_config.get("model_type", "")).lower() == "qwen3_5_moe"
             or "Qwen3_5MoeForConditionalGeneration" in architectures
@@ -926,6 +1619,8 @@ class Qwen35MoeAdapter(ModelAdapter):
             hidden_act=str(text.get("hidden_act", "silu")),
             layer_types=layer_types,
             partial_rotary_factor=float(rope.get("partial_rotary_factor", text.get("partial_rotary_factor", 0.25))),
+            mrope_section=_mrope_section(rope),
+            mrope_interleaved=bool(rope.get("mrope_interleaved", False)),
             sequence_parallel=False,
             attn_output_gate=bool(text.get("attn_output_gate", True)),
             linear_conv_kernel_dim=int(text.get("linear_conv_kernel_dim", 4)),
@@ -965,6 +1660,56 @@ class Qwen35MoeAdapter(ModelAdapter):
         from areno.models.qwen3_5.checkpoint import build_qwen35_policy_plan
 
         return build_qwen35_policy_plan(model)
+
+
+class Qwen35MoeVLAdapter(Qwen35MoeAdapter):
+    name = "qwen3_5_vl_moe"
+
+    def match_hf_config(self, hf_config: dict[str, Any]) -> bool:
+        architectures = {str(item) for item in (hf_config.get("architectures") or [])}
+        model_type = str(hf_config.get("model_type", "")).lower()
+        text = hf_config.get("text_config") or {}
+        text_model_type = str(text.get("model_type", "")).lower()
+        has_vision_config = any(key in hf_config for key in ("vision_config", "visual", "vision_model_config"))
+        return (
+            model_type in {"qwen3_5_vl_moe", "qwen3_5_moe_vl"}
+            or any("Qwen3_5" in arch and ("VL" in arch or "Vision" in arch) and "Moe" in arch for arch in architectures)
+            or (
+                has_vision_config
+                and (model_type == "qwen3_5_moe" or text_model_type in {"qwen3_5_moe", "qwen3_5_moe_text"})
+            )
+        )
+
+    def config_from_hf(self, hf_config: dict[str, Any]) -> ModelConfig:
+        config = super().config_from_hf(hf_config)
+        config.model_type = self.name
+        config.vision_config = dict(hf_config.get("vision_config") or {})
+        if hf_config.get("image_token_id") is not None:
+            config.image_token_id = int(hf_config["image_token_id"])
+        if hf_config.get("vision_start_token_id") is not None:
+            config.vision_start_token_id = int(hf_config["vision_start_token_id"])
+        if hf_config.get("vision_end_token_id") is not None:
+            config.vision_end_token_id = int(hf_config["vision_end_token_id"])
+        return config
+
+    def build(self, config: ModelConfig) -> nn.Module:
+        return Qwen35MoeVLForConditionalGeneration(config)
+
+    @torch.no_grad()
+    def load_weights(self, model: nn.Module, model_path: str | Path) -> None:
+        if not isinstance(model, Qwen35MoeVLForConditionalGeneration):
+            raise TypeError(f"Qwen35MoeVLAdapter cannot load weights into {type(model)!r}")
+        from areno.models.qwen3_5.checkpoint import load_qwen35_vl_weights
+
+        load_qwen35_vl_weights(model, model_path)
+
+    @torch.no_grad()
+    def save_weights(self, model: nn.Module, output_path: str | Path, source_path: str | Path | None) -> str | None:
+        if not isinstance(model, Qwen35MoeVLForConditionalGeneration):
+            raise TypeError(f"Qwen35MoeVLAdapter cannot save weights from {type(model)!r}")
+        from areno.models.qwen3_5.checkpoint import save_qwen35_vl_weights
+
+        return save_qwen35_vl_weights(model, output_path, source_path)
 
 
 def _layer_types_from_interval(num_layers: int, full_attention_interval: int) -> list[str]:

@@ -63,6 +63,18 @@ class ConfigAndDataTest(unittest.TestCase):
 
         cfg.validate_tp(4)
 
+    def test_model_config_allows_replicated_kv_for_qwen35_vl_moe(self):
+        """Qwen3.5-VL-MoE uses replicated KV heads when TP is a multiple of KV heads."""
+        cfg = ModelConfig(
+            model_type="qwen3_5_vl_moe",
+            num_attention_heads=8,
+            num_key_value_heads=2,
+            intermediate_size=16,
+            vocab_size=32,
+        )
+
+        cfg.validate_tp(4)
+
     def test_model_config_validates_linear_attention_dims(self):
         """Linear-attention projection dimensions must satisfy TP divisibility."""
         cfg = ModelConfig(

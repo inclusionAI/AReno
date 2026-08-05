@@ -26,6 +26,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
+from areno.api.multimodal import encode_multimodal_prompt
 from areno.api.openai_chat import (
     build_chat_completion_response,
     first_user_text,
@@ -113,6 +114,7 @@ class AgentTrainBatch:
     response_masks: list[list[bool]]
     loss_masks: list[list[bool]]
     rollout_logprobs: list[list[float]]
+    features: list[dict[str, Any] | None]
     rewards: list[float] | None
     records: list[dict[str, Any]]
     reward_records: list[RewardRecord]
@@ -164,6 +166,7 @@ class _AgentSample:
     response_mask_row: list[bool] = field(default_factory=list)
     loss_mask_row: list[bool] = field(default_factory=list)
     rollout_logprobs_row: list[float] = field(default_factory=list)
+    features: dict[str, Any] | None = None
 
 
 @dataclass(slots=True)
@@ -178,6 +181,7 @@ class _AgentTrainRows:
     response_masks: list[list[bool]]
     loss_masks: list[list[bool]]
     rollout_logprobs: list[list[float]]
+    features: list[dict[str, Any] | None]
     total_tokens: int
 
 
@@ -204,6 +208,7 @@ class _PendingChat:
     key: _ChatBatchKey
     model: str
     created_at: float
+    features: dict[str, Any] | None = None
     tools: list[dict[str, Any]] = field(default_factory=list)
     tool_choice: Any = None
     event: threading.Event = field(default_factory=threading.Event)
@@ -389,13 +394,15 @@ class RolloutSession:
         response_masks: list[list[bool]] = []
         loss_masks: list[list[bool]] = []
         rollout_logprobs: list[list[float]] = []
+        features: list[dict[str, Any] | None] = []
         total_tokens = 0
         for sample in samples:
             if sample.token_row:
-                token_rows.append(list(sample.token_row))
-                response_masks.append(list(sample.response_mask_row))
-                loss_masks.append(list(sample.loss_mask_row))
-                rollout_logprobs.append(list(sample.rollout_logprobs_row))
+                token_rows.append(sample.token_row)
+                response_masks.append(sample.response_mask_row)
+                loss_masks.append(sample.loss_mask_row)
+                rollout_logprobs.append(sample.rollout_logprobs_row)
+                features.append(sample.features)
                 total_tokens += len(sample.token_row)
                 continue
             prompt_len = len(sample.item.input_tokens)
@@ -405,12 +412,14 @@ class RolloutSession:
             response_masks.append([False] * prompt_len + [True] * response_len)
             loss_masks.append([False] * prompt_len + self._response_loss_mask(sample))
             rollout_logprobs.append([0.0] * prompt_len + list(sample.response_logprobs))
+            features.append(sample.features)
             total_tokens += len(token_row)
         return _AgentTrainRows(
             token_rows=token_rows,
             response_masks=response_masks,
             loss_masks=loss_masks,
             rollout_logprobs=rollout_logprobs,
+            features=features,
             total_tokens=total_tokens,
         )
 
@@ -470,6 +479,7 @@ class RolloutSession:
             item=None,
             messages=messages,
             input_tokens=[],
+            features=None,
             params=params,
             key=_chat_batch_key(params),
             model=body.get("model") or "policy",
@@ -491,16 +501,10 @@ class RolloutSession:
         return pending.response
 
     async def _run_chat_request(self, pending: _PendingChat) -> None:
-        tokenizer = self._trainer.get_tokenizer()
         if pending.cancelled:
             return
         try:
-            pending.input_tokens = _messages_to_prompt_tokens(
-                tokenizer,
-                pending.messages,
-                tools=pending.tools,
-                fallback_prompt=_first_user_text(pending.messages),
-            )
+            pending.input_tokens, pending.features = self._messages_to_tokens_and_features(pending)
             max_context_len = _max_context_len(pending.params)
             if max_context_len is not None and len(pending.input_tokens) > max_context_len:
                 response = _filtered_chat_response(
@@ -510,7 +514,15 @@ class RolloutSession:
                 )
                 self._set_pending_response(pending, response)
                 return
-            results = await self._trainer.rollout_token_batch_async([pending.input_tokens], 1, pending.params)
+            rollout_kwargs = {}
+            if pending.features is not None:
+                rollout_kwargs["prompt_features"] = [pending.features]
+            results = await self._trainer.rollout_token_batch_async(
+                [pending.input_tokens],
+                1,
+                pending.params,
+                **rollout_kwargs,
+            )
             sequence = results[0].sequences[0] if results and results[0].sequences else None
             if sequence is None:
                 self._set_pending_response(pending, self._build_chat_response(pending, _ResponseData([], [])))
@@ -525,18 +537,31 @@ class RolloutSession:
         except BaseException as exc:
             self._set_pending_error(pending, exc)
 
-    def _sample_from_trajectory_turn(self, turn: AgentTrajectoryTurn) -> _AgentSample:
+    def _messages_to_tokens_and_features(self, pending: _PendingChat) -> tuple[list[int], dict[str, Any] | None]:
         tokenizer = self._trainer.get_tokenizer()
-        input_tokens = _messages_to_prompt_tokens(
-            tokenizer,
-            turn.messages,
-            tools=turn.tools,
-            fallback_prompt=turn.item.prompt,
+        if _messages_have_images(pending.messages):
+            record = {
+                "messages": pending.messages,
+                "tools": pending.tools,
+                "images_base64": _message_images_base64(pending.messages),
+            }
+            return encode_multimodal_prompt(tokenizer, self._trainer.get_processor(), record)
+        return (
+            _messages_to_prompt_tokens(
+                tokenizer,
+                pending.messages,
+                tools=pending.tools,
+                fallback_prompt=_first_user_text(pending.messages),
+            ),
+            None,
         )
+
+    def _sample_from_trajectory_turn(self, turn: AgentTrajectoryTurn) -> _AgentSample:
         pending = _PendingChat(
             item=turn.item,
             messages=_normalize_messages(turn.messages),
-            input_tokens=input_tokens,
+            input_tokens=[],
+            features=None,
             params=self._sampling_params,
             key=_chat_batch_key(self._sampling_params),
             model=turn.model,
@@ -544,6 +569,7 @@ class RolloutSession:
             tool_choice=turn.tool_choice,
             created_at=time.monotonic(),
         )
+        pending.input_tokens, pending.features = self._messages_to_tokens_and_features(pending)
         return self._sample_from_pending_chat(
             pending,
             _ResponseData(response_tokens=list(turn.response_tokens), response_logprobs=list(turn.response_logprobs)),
@@ -604,6 +630,7 @@ class RolloutSession:
             response_logprobs=response.response_logprobs,
             trace=trace,
             response_kind=response_kind,
+            features=pending.features,
             loss_mask_override=_tool_call_loss_mask(tokenizer, response.response_tokens) if tool_calls else None,
         )
         # The prompt tokens are the fully rendered chat context for this turn,
@@ -791,6 +818,8 @@ def _render_messages_for_display(tokenizer, messages: list[dict[str, Any]]) -> s
     """Render a message trajectory with the tokenizer chat template when available."""
 
     messages = _normalize_messages(messages)
+    if _messages_have_images(messages):
+        return _messages_to_text(messages)
     if getattr(tokenizer, "chat_template", None):
         try:
             rendered = apply_chat_template_with_options(
@@ -848,11 +877,66 @@ def _normalize_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _messages_to_text(messages: list[dict[str, Any]]) -> str:
+    if _messages_have_images(messages):
+        parts = []
+        for message in messages:
+            content = message.get("content")
+            if isinstance(content, str):
+                parts.append(content)
+            elif isinstance(content, list):
+                for item in content:
+                    if not isinstance(item, dict):
+                        continue
+                    if item.get("type") in {"image", "image_url"}:
+                        parts.append("<image>")
+                    elif item.get("type") == "text" and item.get("text") is not None:
+                        parts.append(str(item["text"]))
+        return "\n".join(parts)
     return messages_to_text(messages)
 
 
 def _first_user_text(messages: list[dict[str, Any]]) -> str:
     return first_user_text(messages)
+
+
+def _messages_have_images(messages: list[dict[str, Any]]) -> bool:
+    return any(_content_has_image(message.get("content")) for message in messages)
+
+
+def _content_has_image(content: Any) -> bool:
+    return isinstance(content, list) and any(
+        isinstance(item, dict) and item.get("type") in {"image", "image_url"} for item in content
+    )
+
+
+def _message_images_base64(messages: list[dict[str, Any]]) -> list[str]:
+    images = []
+    for message in messages:
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for item in content:
+            if not isinstance(item, dict) or item.get("type") not in {"image", "image_url"}:
+                continue
+            images.append(_image_part_base64(item))
+    if not images:
+        raise ValueError("image request did not include any image parts")
+    return images
+
+
+def _image_part_base64(part: dict[str, Any]) -> str:
+    image_ref = part.get("image")
+    if image_ref is None:
+        image_url = part.get("image_url")
+        image_ref = image_url.get("url") if isinstance(image_url, dict) else image_url
+    if not image_ref or not isinstance(image_ref, str):
+        raise ValueError("image part must include a base64 data URL")
+    if image_ref.startswith("data:"):
+        _, _, payload = image_ref.partition(",")
+        return payload
+    if image_ref.startswith("http://") or image_ref.startswith("https://") or image_ref.startswith("file:"):
+        raise ValueError("agentic image requests require base64 data URLs")
+    return image_ref
 
 
 def _tool_call_loss_mask(tokenizer, response_tokens: list[int]) -> list[bool]:

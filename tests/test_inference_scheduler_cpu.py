@@ -408,7 +408,8 @@ def test_worker_continuous_rollout_refills_from_waiting_request_and_returns_fini
         def __init__(self, prompts):
             self.prompts = prompts
 
-        def append_prompts(self, prompts):
+        def append_prompts(self, prompts, prompt_features=None):
+            del prompt_features
             start = len(self.prompts)
             self.prompts.extend(prompts)
             return list(range(start, start + len(prompts)))
@@ -463,7 +464,8 @@ def test_worker_refill_does_not_double_append_aliased_payload_prompts():
         def __init__(self, prompts):
             self.prompts = prompts
 
-        def append_prompts(self, prompts):
+        def append_prompts(self, prompts, prompt_features=None):
+            del prompt_features
             start = len(self.prompts)
             self.prompts.extend(prompts)
             return list(range(start, start + len(prompts)))
@@ -719,6 +721,7 @@ def _rollout_command(request_id: int, prompts: list[list[int]], *, target: int, 
     payload = RolloutPayload(
         prompts_by_dp=prompts_by_dp,
         prompt_indices_by_dp=prompt_indices_by_dp,
+        prompt_features_by_dp=None,
         max_new_tokens=4,
         eos_token_id=None,
         sampling_params=SamplingParams(),

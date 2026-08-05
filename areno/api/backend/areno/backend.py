@@ -344,16 +344,20 @@ class ArenoBackend(Backend):
         prompt_tokens: list[list[int]],
         n_samples: int,
         sampling_params: SamplingParams,
+        prompt_features: list[dict | None] | None = None,
     ) -> list[RolloutResult]:
         engine = self._require_rollout_engine()
         if not prompt_tokens:
             return []
+        if prompt_features is not None and len(prompt_features) != len(prompt_tokens):
+            raise ValueError("prompt_features must have the same length as prompt_tokens")
         if not self._rollout_session_active:
             self._sync_policy_if_needed()
         # Replicate each already-tokenized prompt `n_samples` times so the
         # engine treats each completion as independent while preserving the
         # `[prompt0_sample0, prompt0_sample1, ..., promptN_sampleK]` layout.
         flat_prompts = [ids for ids in prompt_tokens for _ in range(n_samples)]
+        flat_features = _replicate_prompt_features(prompt_features, n_samples)
         options = _rollout_options(ctx, sampling_params)
 
         if self._step_e2e_start is None:
@@ -363,6 +367,7 @@ class ArenoBackend(Backend):
         # Greedy decoding is implemented by forcing temperature to zero.
         rollout = engine.generate_rollout(
             flat_prompts,
+            prompt_features=flat_features,
             max_new_tokens=sampling_params.max_new_tokens,
             max_running_prompts=options["max_running_prompts"],
             max_prompt_len=options["max_prompt_len"],
@@ -460,21 +465,26 @@ class ArenoBackend(Backend):
         prompt_tokens: list[list[int]],
         n_samples: int,
         sampling_params: SamplingParams,
+        prompt_features: list[dict | None] | None = None,
     ) -> list[RolloutResult]:
         """Async rollout entry for serving/agentic callers."""
 
         engine = self._require_rollout_engine()
         if not prompt_tokens:
             return []
+        if prompt_features is not None and len(prompt_features) != len(prompt_tokens):
+            raise ValueError("prompt_features must have the same length as prompt_tokens")
         if not self._rollout_session_active:
             await asyncio.to_thread(self._sync_policy_if_needed)
         prompts = [tokens for tokens in prompt_tokens for _ in range(n_samples)]
+        flat_features = _replicate_prompt_features(prompt_features, n_samples)
         options = _rollout_options(ctx, sampling_params)
         if self._step_e2e_start is None:
             self._step_e2e_start = time.perf_counter()
             self._step_rollout_time_s = 0.0
         rollout = await engine.generate_rollout_async(
             prompts,
+            prompt_features=flat_features,
             max_new_tokens=sampling_params.max_new_tokens,
             max_running_prompts=options["max_running_prompts"],
             max_prompt_len=options["max_prompt_len"],
@@ -587,23 +597,40 @@ class ArenoBackend(Backend):
         engine.ensure_roles(roles)
 
     def score_logprobs(
-        self, ctx: Context, role: str, token_rows: list[list[int]], *, microbatch_size: int = 8
+        self,
+        ctx: Context,
+        role: str,
+        token_rows: list[list[int]],
+        *,
+        features: list[dict | None] | None = None,
+        microbatch_size: int = 8,
     ) -> list[list[float]]:
         engine = self._require_train_engine()
+        if features is not None and len(features) != len(token_rows):
+            raise ValueError("features must have the same length as token_rows")
         return engine.score_logprobs(
             role,
             token_rows,
             pad_token_id=_pad_token_id(ctx),
+            features=features,
             microbatch_size=microbatch_size,
         )
 
-    def score_values(self, ctx: Context, role: str, token_rows: list[list[int]]) -> list[list[float]]:
+    def score_values(
+        self, ctx: Context, role: str, token_rows: list[list[int]], *, features: list[dict | None] | None = None
+    ) -> list[list[float]]:
         engine = self._require_train_engine()
-        return engine.score_values(role, token_rows, pad_token_id=_pad_token_id(ctx))
+        if features is not None and len(features) != len(token_rows):
+            raise ValueError("features must have the same length as token_rows")
+        return engine.score_values(role, token_rows, pad_token_id=_pad_token_id(ctx), features=features)
 
-    def score_rewards(self, ctx: Context, role: str, token_rows: list[list[int]]) -> list[float]:
+    def score_rewards(
+        self, ctx: Context, role: str, token_rows: list[list[int]], *, features: list[dict | None] | None = None
+    ) -> list[float]:
         engine = self._require_train_engine()
-        return engine.score_rewards(role, token_rows, pad_token_id=_pad_token_id(ctx))
+        if features is not None and len(features) != len(token_rows):
+            raise ValueError("features must have the same length as token_rows")
+        return engine.score_rewards(role, token_rows, pad_token_id=_pad_token_id(ctx), features=features)
 
     def train_values(
         self,
@@ -658,12 +685,11 @@ def _make_train_pack(seqs: list[TrainSequence]) -> dict[str, torch.Tensor]:
     lengths = torch.tensor([len(seq.tokens) for seq in seqs], dtype=torch.int32)
     max_len = int(lengths.max().item()) if batch else 0
     input_ids = pad_rows([seq.tokens for seq in seqs], dtype=torch.long, fill_value=eos_token_id, width=max_len)
-    prompt_mask = pad_rows([seq.prompt_mask for seq in seqs], dtype=torch.bool, fill_value=True, width=max_len)
+    prompt_mask = _make_prompt_mask(seqs, lengths, max_len)
     has_loss_mask = any(bool(seq.loss_mask) for seq in seqs)
-    loss_mask_rows = [seq.loss_mask if seq.loss_mask else [not item for item in seq.prompt_mask] for seq in seqs]
-    loss_mask = pad_rows(loss_mask_rows, dtype=torch.bool, fill_value=False, width=max_len) if has_loss_mask else None
+    loss_mask = _make_loss_mask(seqs, lengths, max_len) if has_loss_mask else None
     logprobs = pad_rows([seq.logprobs for seq in seqs], dtype=torch.float32, width=max_len)
-    advantages = pad_rows([seq.advantages for seq in seqs], dtype=torch.float32, width=max_len)
+    advantages = _make_advantages(seqs, prompt_mask, loss_mask, max_len)
     # Allocate optional fields only when at least one sequence carries them so
     # the engine can branch on key presence and avoid unused tensors.
     has_returns = any(bool(seq.returns) for seq in seqs)
@@ -691,7 +717,79 @@ def _make_train_pack(seqs: list[TrainSequence]) -> dict[str, torch.Tensor]:
         pack["values"] = values
     if ref_logprobs is not None:
         pack["ref_logprobs"] = ref_logprobs
+    features = [seq.features for seq in seqs]
+    if any(feature is not None for feature in features):
+        pack["features"] = features
     return pack
+
+
+def _make_prompt_mask(seqs: list[TrainSequence], lengths: torch.Tensor, max_len: int) -> torch.Tensor:
+    if all(not seq.prompt_mask and seq.prompt_len is not None for seq in seqs):
+        prompt_lens = torch.tensor([int(seq.prompt_len or 0) for seq in seqs], dtype=torch.int64)
+        positions = torch.arange(max_len, dtype=torch.int64).unsqueeze(0)
+        valid_lengths = lengths.to(dtype=torch.int64).unsqueeze(1)
+        return (positions < prompt_lens.unsqueeze(1)) | (positions >= valid_lengths)
+    if any(not seq.prompt_mask and seq.prompt_len is not None for seq in seqs):
+        prompt_mask = torch.ones((len(seqs), max_len), dtype=torch.bool)
+        positions = torch.arange(max_len, dtype=torch.int64)
+        for row, seq in enumerate(seqs):
+            if seq.prompt_mask:
+                prompt_mask[row, : len(seq.prompt_mask)] = torch.as_tensor(seq.prompt_mask, dtype=torch.bool)
+                continue
+            prompt_len = int(seq.prompt_len or 0)
+            length = int(lengths[row].item())
+            prompt_mask[row] = (positions < prompt_len) | (positions >= length)
+        return prompt_mask
+    from areno.engine.runtime.common import pad_rows
+
+    return pad_rows([seq.prompt_mask for seq in seqs], dtype=torch.bool, fill_value=True, width=max_len)
+
+
+def _make_loss_mask(seqs: list[TrainSequence], lengths: torch.Tensor, max_len: int) -> torch.Tensor:
+    loss_mask = torch.zeros((len(seqs), max_len), dtype=torch.bool)
+    positions = torch.arange(max_len, dtype=torch.int64)
+    for row, seq in enumerate(seqs):
+        if seq.loss_mask:
+            loss_mask[row, : len(seq.loss_mask)] = torch.as_tensor(seq.loss_mask, dtype=torch.bool)
+            continue
+        prompt_len = _sequence_prompt_len(seq)
+        length = int(lengths[row].item())
+        loss_mask[row] = (positions >= prompt_len) & (positions < length)
+    return loss_mask
+
+
+def _make_advantages(
+    seqs: list[TrainSequence],
+    prompt_mask: torch.Tensor,
+    loss_mask: torch.Tensor | None,
+    max_len: int,
+) -> torch.Tensor:
+    if all(not seq.advantages and seq.scalar_advantage is not None for seq in seqs):
+        advantages = torch.zeros((len(seqs), max_len), dtype=torch.float32)
+        active_mask = loss_mask if loss_mask is not None else ~prompt_mask
+        for row, seq in enumerate(seqs):
+            advantages[row, active_mask[row]] = float(seq.scalar_advantage or 0.0)
+        return advantages
+    from areno.engine.runtime.common import pad_rows
+
+    return pad_rows([seq.advantages for seq in seqs], dtype=torch.float32, width=max_len)
+
+
+def _sequence_prompt_len(seq: TrainSequence) -> int:
+    if seq.prompt_len is not None:
+        return int(seq.prompt_len)
+    for idx, is_prompt in enumerate(seq.prompt_mask):
+        if not is_prompt:
+            return idx
+    return len(seq.prompt_mask)
+
+
+def _replicate_prompt_features(features: list[dict | None] | None, n_samples: int) -> list[dict | None] | None:
+    """Repeat prompt-aligned multimodal side inputs in the same order as prompts."""
+
+    if features is None:
+        return None
+    return [feature for feature in features for _ in range(n_samples)]
 
 
 def _is_sft_loss_fn(loss_fn: Callable) -> bool:
