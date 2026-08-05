@@ -740,7 +740,14 @@ def _normalize_stop(stop: str | list[str] | None) -> list[str]:
     context_settings={"help_option_names": ["-h", "--help"]},
     help="Serve an OpenAI-compatible /v1/chat/completions API with areno.",
 )
-@click.option("--model-path", required=True, help="Local checkpoint/tokenizer path or Hugging Face repo ID.")
+@click.option("--model-path", required=True, help="Local checkpoint/tokenizer path or remote model repo ID.")
+@click.option(
+    "--model-hub",
+    type=click.Choice(["hf", "modelscope"], case_sensitive=False),
+    default="modelscope",
+    show_default=True,
+    help="Remote hub for non-local model refs. Use 'modelscope' for ModelScope or 'hf' for Hugging Face.",
+)
 @click.option("--tp-size", type=int, default=1, show_default=True, help="Tensor parallel size.")
 @click.option("--world-size", type=int, default=1, show_default=True, help="Total number of local worker ranks.")
 @click.option("--host", default="0.0.0.0", show_default=True, help="HTTP bind host.")
@@ -775,6 +782,7 @@ def _normalize_stop(stop: str | list[str] | None) -> list[str]:
 )
 def serve_command(
     model_path: str,
+    model_hub: Literal["hf", "modelscope"],
     tp_size: int,
     world_size: int,
     host: str,
@@ -789,7 +797,26 @@ def serve_command(
     """Click entry point: build the app and hand it to uvicorn."""
     import uvicorn
 
-    model_path = resolve_model_ref(model_path)
+    model_path = resolve_model_ref(model_path, model_hub=model_hub)
+    from areno.cli.dashboard_registry import register_dashboard_job
+
+    register_dashboard_job(
+        kind="serve",
+        name=f"serve {model_path}",
+        config={
+            "ckpt": model_path,
+            "model_hub": model_hub,
+            "tp_size": tp_size,
+            "world_size": world_size,
+            "host": host,
+            "port": port,
+            "max_running_prompts": max_running_prompts,
+            "default_max_tokens": default_max_tokens,
+            "eager_decode": eager_decode,
+            "attn_backend": attn_backend,
+        },
+        metrics_dir=None,
+    )
     app = create_app(
         model_path=model_path,
         tp_size=tp_size,

@@ -126,6 +126,38 @@ def auto_tune_config(
     return AutoTuneResult(config=tuned, measurement=train_result.measurement, measurements=tuple(measurements))
 
 
+def smoke_infer_config(config: RolloutTrainerConfig) -> AutoTuneMeasurement:
+    """Dummy-load the model and allocate rollout KV cache/decode CUDA graphs."""
+
+    max_running_prompts = int(config.max_running_prompts or config.resolved_max_running_prompts())
+    candidate = AutoTuneCandidate(
+        tp_size=int(config.tp_size),
+        batch_size=1,
+        n_samples=1,
+        mini_bs=1,
+        max_running_prompts=max_running_prompts,
+        adam_8bit=bool(config.adam_8bit),
+        keep_rollout_state=False,
+    )
+    return probe_candidate_with_dummy_run(config, candidate, "rollout")
+
+
+def smoke_train_config(config: TrainerConfig) -> AutoTuneMeasurement:
+    """Dummy-load the model and run one minimal synthetic train step."""
+
+    mini_bs = max(int(config.mini_bs), 1)
+    candidate = AutoTuneCandidate(
+        tp_size=int(config.tp_size),
+        batch_size=mini_bs,
+        n_samples=1,
+        mini_bs=mini_bs,
+        max_running_prompts=1,
+        adam_8bit=bool(config.adam_8bit),
+        keep_rollout_state=False,
+    )
+    return probe_candidate_with_dummy_run(config, candidate, "train")
+
+
 def enumerate_candidates(config: RolloutTrainerConfig, *, auto_max_samples: int = 256) -> list[AutoTuneCandidate]:
     """Generate a compact, monotonic-ish search space around common RL knobs."""
 
@@ -399,9 +431,11 @@ def _run_dummy_probe(config: TrainerConfig, candidate: AutoTuneCandidate, *, sta
 
     probe_config = copy.deepcopy(config)
     probe_config.batch_size = candidate.batch_size
-    probe_config.n_samples = candidate.n_samples
+    if hasattr(probe_config, "n_samples"):
+        probe_config.n_samples = candidate.n_samples
     probe_config.mini_bs = candidate.mini_bs
-    probe_config.max_running_prompts = candidate.max_running_prompts
+    if hasattr(probe_config, "max_running_prompts"):
+        probe_config.max_running_prompts = candidate.max_running_prompts
     probe_config.tp_size = candidate.tp_size
     probe_config.adam_8bit = candidate.adam_8bit
     probe_config.keep_rollout_state = candidate.keep_rollout_state

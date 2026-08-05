@@ -1,0 +1,4 @@
+interface:
+  display_name: "Validate AReno Correctness"
+  short_description: "Compare candidate behavior with a baseline"
+  default_prompt: "Validate this AReno change against an isolated baseline with matched inputs."

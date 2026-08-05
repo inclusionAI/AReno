@@ -10,9 +10,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from agent_loop import initial_messages, run_conversation_turns  # noqa: E402
-from coding_tools import CodingWorkspace  # noqa: E402
+from areno.agent import CodingWorkspace, initial_messages, run_conversation_turns
 
 
 async def _main_async(args: argparse.Namespace) -> int:

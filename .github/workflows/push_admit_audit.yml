@@ -1,0 +1,87 @@
+name: Push Admit Audit
+
+on:
+  push:
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    environment: push_check
+    env:
+      PUSH_ADMIT_SERVER_VAR: ${{ vars.PUSH_ADMIT_SERVER }}
+      PUSH_ADMIT_SERVER_SECRET: ${{ secrets.PUSH_ADMIT_SERVER }}
+      PUSH_ADMIT_REPO: ${{ vars.PUSH_ADMIT_REPO }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Submit push audit
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PUSH_ADMIT_SERVER="${PUSH_ADMIT_SERVER_VAR:-${PUSH_ADMIT_SERVER_SECRET:-}}"
+          if [ -z "${PUSH_ADMIT_SERVER}" ]; then
+            echo "PUSH_ADMIT_SERVER is not configured in GitHub environment push_check" >&2
+            exit 1
+          fi
+          export PUSH_ADMIT_SERVER
+
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          import subprocess
+          import sys
+          import urllib.error
+          import urllib.request
+
+          files = subprocess.check_output(["git", "ls-files", "-co", "--exclude-standard"], text=True).splitlines()
+          digest = hashlib.md5()  # noqa: S324 - compatibility fingerprint for admission matching.
+          for rel in sorted(path for path in files if path and not path.startswith(".git/")):
+              if not os.path.isfile(rel):
+                  continue
+              digest.update(rel.encode("utf-8"))
+              digest.update(b"\0")
+              with open(rel, "rb") as handle:
+                  for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                      digest.update(chunk)
+              digest.update(b"\0")
+
+          repo = (os.environ.get("PUSH_ADMIT_REPO") or os.environ["GITHUB_REPOSITORY"]).strip().strip("/").rsplit("/", 1)[-1].lower()
+          payload = {
+              "repo": repo,
+              "branch": os.environ["GITHUB_REF_NAME"],
+              "md5": digest.hexdigest(),
+              "github_user": os.environ["GITHUB_ACTOR"],
+              "commit_sha": os.environ["GITHUB_SHA"],
+              "ref": os.environ.get("GITHUB_REF", ""),
+          }
+          server = os.environ["PUSH_ADMIT_SERVER"].rstrip("/")
+          request = urllib.request.Request(
+              f"{server}/api/audit",
+              data=json.dumps(payload).encode("utf-8"),
+              headers={"Content-Type": "application/json"},
+              method="POST",
+          )
+          try:
+              with urllib.request.urlopen(request, timeout=10) as response:
+                  body = response.read().decode("utf-8")
+          except TimeoutError as exc:
+              print(f"push admit audit request timed out after 10s: {exc}", file=sys.stderr)
+              raise
+          except urllib.error.HTTPError as exc:
+              print(exc.read().decode("utf-8", errors="replace"), file=sys.stderr)
+              raise
+
+          print(body)
+          result = json.loads(body)
+          if result.get("managed") and not result.get("admitted"):
+              alert = result.get("alert") or {}
+              if alert.get("sent") is False:
+                  print(f"push alert was not sent: {alert.get('message')}", file=sys.stderr)
+              print("push admit audit failed: managed user pushed an unadmitted revision", file=sys.stderr)
+              sys.exit(1)
+          PY

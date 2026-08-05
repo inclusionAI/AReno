@@ -754,6 +754,97 @@ body:has(.landing-page) .sy-main > .flex > .relative {
   line-height: 1.08;
 }
 
+.areno-page-header {
+  align-items: center;
+  display: flex;
+  gap: .75rem;
+  margin: 0 0 1.65rem;
+  min-width: 0;
+  position: relative;
+}
+
+.areno-page-header > h1 {
+  flex: 1 1 auto;
+  margin: 0;
+  min-width: 0;
+}
+
+.areno-page-actions {
+  align-items: center;
+  display: flex;
+  flex: 0 0 auto;
+  justify-content: flex-end;
+  margin-left: auto;
+  min-width: 9.75rem;
+}
+
+.areno-copy-page {
+  align-items: center;
+  background: var(--areno-bg);
+  border: 1px solid var(--areno-border);
+  border-radius: 12px;
+  color: var(--areno-ink);
+  cursor: pointer;
+  display: inline-flex;
+  font: inherit;
+  font-size: .875rem;
+  font-weight: 500;
+  gap: .5rem;
+  justify-content: center;
+  line-height: 1.25rem;
+  min-height: 2.125rem;
+  min-width: 7.75rem;
+  padding: .375rem .75rem;
+  transition:
+    background-color .16s ease,
+    border-color .16s ease,
+    color .16s ease;
+}
+
+.areno-copy-page:hover {
+  background: var(--areno-surface);
+  border-color: var(--areno-border);
+  color: var(--areno-ink);
+}
+
+.areno-copy-page:focus-visible {
+  outline: 2px solid var(--areno-ink);
+  outline-offset: 2px;
+}
+
+.areno-copy-page svg {
+  flex: 0 0 auto;
+}
+
+.areno-copy-page[data-areno-copy-state="copied"] {
+  border-color: color-mix(in srgb, var(--areno-good) 45%, var(--areno-border));
+  color: var(--areno-good);
+}
+
+.areno-copy-page[data-areno-copy-state="error"] {
+  border-color: #b91c1c;
+  color: #b91c1c;
+}
+
+html.dark .areno-copy-page[data-areno-copy-state="error"] {
+  border-color: #f87171;
+  color: #f87171;
+}
+
+@media (max-width: 640px) {
+  .areno-page-header {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: .75rem;
+  }
+
+  .areno-page-actions {
+    justify-content: flex-start;
+    margin-left: 0;
+    min-width: 0;
+  }
+}
+
 .yue h2 {
   border-top: 1px solid var(--areno-border);
   margin-top: 3rem;

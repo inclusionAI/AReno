@@ -34,99 +34,26 @@ AReno's mission is to make LLM RL **accessible** for a broad community of resear
 
 ## Installation
 
-**Requirements:**
+### From source
 
-- Linux with an NVIDIA GPU (CUDA compute capability 8.0+)
-- CUDA toolkit, with `CUDA_HOME` set (so `nvcc` is on the build path)
-- PyTorch >= 2.6, matching your installed CUDA version
-
-> **Platform support:** AReno targets Linux with NVIDIA CUDA. Windows users
-> should use [WSL2](https://learn.microsoft.com/windows/wsl/). macOS, CPU-only,
-> and non-NVIDIA GPU environments are limited to metadata, docs, and lightweight
-> tests.
-
-**To install:**
-
-```bash
-pip install psutil
-pip install flash-linear-attention
-pip install areno --no-build-isolation
-```
-
-`--no-build-isolation` is required so that pip uses your existing CUDA-enabled PyTorch instead of installing a CPU-only torch in an isolated build environment.
-Because build isolation is disabled, build-time helpers are not installed automatically; `psutil` must already be present because PyTorch's CUDA extension builder imports it while sizing parallel compile jobs.
-Install `flash-attn` only when using the default high-throughput `--attn-backend flash` path. If you run with `--attn-backend native`, or AReno automatically falls back to native attention on Turing GPUs like T4, `flash-attn` is optional and does not need to be installed.
-
-**Post-install readiness check:**
-
-```bash
-areno check
-areno env --json  # attach this to setup/support reports
-```
-
-`areno check` fails fast with next steps for common setup problems such as missing or CPU-only PyTorch, unsupported PyTorch versions, missing `CUDA_HOME`/`nvcc`, missing build-time dependencies, unsupported platforms, or a skipped `areno_accel` build. Use `areno env --json` when opening an issue so maintainers can see the Python, CUDA, PyTorch, GPU, and extension state without guessing from low-level build errors.
-
-**From source** (recommended if you want the examples or plan to contribute):
+AReno currently requires Linux (x86_64 or aarch64) with an NVIDIA GPU and CUDA-enabled PyTorch 2.6 or newer; Windows users can use WSL2.
 
 ```bash
 git clone https://github.com/inclusionAI/AReno.git
 cd AReno
-pip install psutil
-pip install flash-linear-attention
-pip install -e . --no-build-isolation
+bash scripts/install.sh
 ```
 
-**Docker setup escape hatch** (recommended when you want to verify AReno before debugging local build state):
+### Docker
+
+Use our official [AReno image](https://ghcr.io/inclusionai/areno) `inclusionai/areno` container. Run:
 
 ```bash
-docker build -t areno .
-docker run --gpus all --rm -it areno areno check
-```
-
-If you need local project files, model files, or a Hugging Face cache inside the container:
-
-```bash
+# Please make sure the host has an NVIDIA driver and NVIDIA Container Toolkit.
 docker run --gpus all --rm -it \
-  -v $PWD:/workspace \
-  -v $HOME/.cache/huggingface:/root/.cache/huggingface \
-  areno \
+  ghcr.io/inclusionai/areno:v0.0.6 \
   areno check
 ```
-
-Host checklist before blaming AReno setup:
-
-```bash
-nvidia-smi
-docker run --gpus all --rm nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi
-docker run --gpus all --rm areno areno check
-```
-
-Docker gives you a known-good Python/PyTorch/CUDA user-space install path and reuses the same `areno check` diagnostic flow. It does not replace host requirements: the host still needs a working NVIDIA driver, NVIDIA Container Toolkit support for `--gpus all`, and a driver new enough for the container CUDA runtime. Docker also does not solve model downloads, Hugging Face tokens, cache paths, network access, disk space, or multi-node networking; those remain user environment concerns.
-
-**Tips:**
-
-- Install `ninja` (`pip install ninja`) before building so CUDA kernels compile in parallel.
-- If installation fails with `No module named 'psutil'`, install it first (`pip install psutil`) and retry. This is required specifically for `--no-build-isolation` builds.
-- Install `flash-attn` before AReno only if you plan to use `--attn-backend flash`, the default high-throughput backend:
-  ```bash
-  pip install flash-attn
-  ```
-  If building `flash-attn` from source is too slow for your environment, install a pre-built wheel from the [flash-attention releases](https://github.com/Dao-AILab/flash-attention/releases) that matches your Python, PyTorch, CUDA, and platform.
-- If you use `--attn-backend native`, `flash-attn` is optional. AReno also automatically falls back to native attention on flash-attn-unsupported GPUs such as Tesla T4 and prints a warning that native attention is a slower compatibility path.
-- By default, source builds target the visible GPU architecture. To build for a specific GPU family or when building on a host where the target GPU is not visible, set `TORCH_CUDA_ARCH_LIST` explicitly. Common values are `9.0` for H100/H200, `8.0` for A100, and `8.9` for L40/RTX 4090:
-  ```bash
-  TORCH_CUDA_ARCH_LIST="9.0" MAX_JOBS=64 pip install -e . --no-build-isolation
-  ```
-- If your machine has many CPU cores but limited RAM, cap the parallel build jobs with `MAX_JOBS`:
-  ```bash
-  MAX_JOBS=4 pip install -e . --no-build-isolation
-  ```
-- For iterative CUDA development, enable `ccache` before rebuilding:
-  ```bash
-  export CC="ccache gcc"
-  export CXX="ccache g++"
-  ```
-- To install the Python package without building the CUDA extension (for docs/metadata or a dry run), set `ARENO_BUILD_EXT=0`. The engine will not run without the extension, but the installation will succeed.
 
 ## Quick Start
 
@@ -233,6 +160,35 @@ See the documentation for the full `Trainer` API.
 
 You can use the AReno Command Line Interface (CLI) to quickly get started with post-training without writing any Python.
 
+### Operations agent
+
+`areno agent` is a local operations assistant for AReno train and serve tasks.
+It uses an OpenAI-compatible model to inspect the current checkout, read command
+help, run diagnostics, and produce or execute AReno commands for the current
+machine. Configure the agent once with your endpoint, model, and API key:
+
+```bash
+areno agent --set \
+  --base-url http://127.0.0.1:8000/v1 \
+  --model deepseek-v4-flash \
+  --api-key "$OPENAI_API_KEY"
+```
+
+Then describe the job in natural language:
+
+```bash
+areno agent "Give me a complete command to run the math demo with n-samples=8, fitting the current GPU and using as much GPU memory as practical."
+```
+
+From a source checkout, you can run the same agent without installing AReno:
+
+```bash
+./agent.sh "Give me a complete command to run the math demo with n-samples=8, fitting the current GPU and using as much GPU memory as practical."
+```
+
+The agent can ask follow-up questions through the terminal when a required
+parameter is missing, and it streams command output while it works.
+
 ### Diagnostics
 
 Check whether the current machine is ready to run AReno:
@@ -283,7 +239,7 @@ areno train \
   --tp-size 4
 ```
 
-`--ckpt` and `--dataset-path` accept either local paths or remote repo IDs. By default, remote refs use Hugging Face. Add `--model-hub modelscope` to pull non-local model and dataset refs from ModelScope, or use `--model-hub hf` explicitly for Hugging Face. Switch algorithms by changing `--algo` (e.g. `--algo grpo`, `--algo sft`).
+`--ckpt` and `--dataset-path` accept either local paths or remote repo IDs. By default, remote refs use ModelScope. Use `--model-hub hf` to pull non-local model and dataset refs from Hugging Face. Switch algorithms by changing `--algo` (e.g. `--algo grpo`, `--algo sft`).
 
 For models whose tokenizer chat template supports a thinking-mode switch, add `--disable-thinking` to pass `enable_thinking=False` during training prompt rendering. Tokenizers that do not support this argument automatically use their normal chat-template path.
 
@@ -377,11 +333,7 @@ If you want to contribute to AReno or customize it for your own needs, read the 
 ```bash
 git clone https://github.com/inclusionAI/AReno.git
 cd AReno
-pip install psutil
-pip install flash-linear-attention
-# Optional: install flash-attn when developing against --attn-backend flash.
-pip install flash-attn
-pip install -e . --no-build-isolation
+bash scripts/install.sh
 
 # Set up pre-commit hooks (formatting, linting, commit message checks)
 pip install pre-commit

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "areno"
-version = "0.0.4"
+version = "0.0.6"
 description = "An easy-to-use, fast toolkit to scale up RL post-training on a single node."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -45,7 +45,11 @@ dependencies = [
   "modelscope>=1.20",
   "addict>=2.4",
   "datasets==4.0.0",
+  "math-verify",
   "numpy",
+  "openai",
+  "prompt-toolkit>=3.0",
+  "rich>=13",
   "tensorboard",
   "pydantic>=2",
   "fastapi>=0.110",
@@ -87,6 +91,9 @@ exclude = ["areno/accel/csrc"]
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["areno*"]
+
+[tool.setuptools.package-data]
+"areno.dashboard" = ["dist/*", "dist/assets/*"]
 
 [project.scripts]
 areno = "areno.cli.main:main"

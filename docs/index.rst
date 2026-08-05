@@ -23,6 +23,7 @@ AReno documentation
    :caption: Conceptual Guides
 
    Training Loop <concepts/training-loop>
+   Backend Topology <concepts/backend-topology>
    Chat Templates <concepts/chat-templates>
    Dataset Formats <concepts/dataset-formats>
    Reward Functions <concepts/reward-functions>

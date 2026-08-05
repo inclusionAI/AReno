@@ -13,9 +13,11 @@ The flow is:
 
 import ast
 import importlib.util
+import json
 import logging
 import shutil
 import textwrap
+from dataclasses import fields
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -60,16 +62,22 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "tune_params",
             "mem_frac",
             "tune_max_samples",
+            "smoke_infer",
+            "smoke_train",
             "epochs",
             "max_steps",
             "world_size",
             "tp_size",
+            "train_devices",
         ),
     ),
     (
         "Rollout",
         (
             "batch_size",
+            "rollout_tp_size",
+            "rollout_devices",
+            "policy_sync_bucket_mb",
             "n_samples",
             "max_running_prompts",
             "max_prompt_tokens",
@@ -171,7 +179,27 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
     args = SimpleNamespace(**options)
     args.max_steps = getattr(args, "max_steps", None)
     args.score_micro_bs = getattr(args, "score_micro_bs", 8)
-    args.model_hub = getattr(args, "model_hub", "hf")
+    args.model_hub = getattr(args, "model_hub", "modelscope")
+    args.train_devices = getattr(args, "train_devices", None)
+    args.rollout_tp_size = getattr(args, "rollout_tp_size", None)
+    args.rollout_devices = getattr(args, "rollout_devices", None)
+    args.policy_sync_bucket_mb = getattr(args, "policy_sync_bucket_mb", 64)
+    args.train_devices = _parse_cuda_devices(getattr(args, "train_devices", None), "--train-devices")
+    args.rollout_devices = _parse_cuda_devices(getattr(args, "rollout_devices", None), "--rollout-devices")
+    if args.rollout_tp_size is not None and args.rollout_tp_size <= 0:
+        raise click.UsageError("--rollout-tp-size must be positive")
+    if args.train_devices is not None:
+        args.world_size = len(args.train_devices)
+    else:
+        args.train_devices = list(range(args.world_size))
+    if args.rollout_devices is None and args.rollout_tp_size is not None:
+        args.rollout_devices = list(args.train_devices)
+    args.rollout_tp_size = getattr(args, "rollout_tp_size", None)
+    args.policy_sync_bucket_mb = getattr(args, "policy_sync_bucket_mb", 64)
+    smoke_infer = bool(getattr(args, "smoke_infer", False))
+    smoke_train = bool(getattr(args, "smoke_train", False))
+    if smoke_infer or smoke_train:
+        args.dataset_path = args.dataset_path or "__smoke__"
     # Required-argument checks live here so offline trainers can omit reward
     # inputs while RL algorithms still require a reward function or model.
     if args.ckpt is None:
@@ -186,13 +214,22 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
     tune_params = bool(getattr(args, "tune_params", False))
     mem_frac = float(getattr(args, "mem_frac", 0.9))
     tune_max_samples = int(getattr(args, "tune_max_samples", 256))
+    if smoke_infer and smoke_train:
+        raise click.UsageError("--smoke-infer and --smoke-train are mutually exclusive")
     if tune_params and not algorithm.requires_rollout:
         raise click.UsageError("--tune-params currently supports rollout-based algorithms")
+    if smoke_infer and not algorithm.requires_rollout:
+        raise click.UsageError("--smoke-infer currently supports rollout-based algorithms")
     if mem_frac <= 0 or mem_frac > 1:
         raise click.UsageError("--mem-frac must be in (0, 1]")
     if tune_max_samples <= 0:
         raise click.UsageError("--tune-max-samples must be positive")
-    if algorithm.requires_rollout and args.reward_fn_path is None and args.reward_ckpt is None:
+    if (
+        algorithm.requires_rollout
+        and not (smoke_infer or smoke_train)
+        and args.reward_fn_path is None
+        and args.reward_ckpt is None
+    ):
         raise click.UsageError("--reward-fn-path or --reward-ckpt is required")
     if args.save_interval <= 0:
         raise click.UsageError("--save-interval must be positive")
@@ -206,6 +243,15 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
         raise click.UsageError("--world-size must be positive")
     if args.world_size % args.tp_size != 0:
         raise click.UsageError("--world-size must be divisible by --tp-size")
+    has_rollout_topology = args.rollout_devices is not None or args.rollout_tp_size is not None
+    if has_rollout_topology and not algorithm.requires_rollout:
+        raise click.UsageError("independent rollout devices are only valid for rollout-based algorithms")
+    if args.rollout_devices is not None:
+        rollout_tp_size = args.tp_size if args.rollout_tp_size is None else args.rollout_tp_size
+        if len(args.rollout_devices) % rollout_tp_size != 0:
+            raise click.UsageError("--rollout-devices count must be divisible by --rollout-tp-size")
+    if args.policy_sync_bucket_mb <= 0:
+        raise click.UsageError("--policy-sync-bucket-mb must be positive")
     if args.batch_size <= 0:
         raise click.UsageError("--batch-size must be positive")
     if algorithm.requires_rollout and args.n_samples <= 0:
@@ -265,6 +311,36 @@ def _require_positive_float(value: float, option_name: str) -> None:
         raise click.UsageError(f"{option_name} must be positive")
 
 
+def _parse_cuda_devices(value: str | None, option_name: str) -> list[int] | None:
+    """Parse CUDA indices and inclusive ranges such as ``0..3,8``."""
+
+    if value is None:
+        return None
+    parts = [part.strip() for part in value.split(",")]
+    if not parts or any(not part for part in parts):
+        raise click.UsageError(f"{option_name} must be a comma-separated list of CUDA indices or ranges")
+    devices = []
+    try:
+        for part in parts:
+            if ".." not in part:
+                devices.append(int(part))
+                continue
+            endpoints = part.split("..")
+            if len(endpoints) != 2 or not all(endpoints):
+                raise ValueError
+            start, end = (int(endpoint) for endpoint in endpoints)
+            if start > end:
+                raise click.UsageError(f"{option_name} range start must not exceed range end: {part}")
+            devices.extend(range(start, end + 1))
+    except ValueError as exc:
+        raise click.UsageError(f"{option_name} must contain only integer CUDA indices or ranges") from exc
+    if any(device < 0 for device in devices):
+        raise click.UsageError(f"{option_name} must not contain negative CUDA device indices")
+    if len(devices) != len(set(devices)):
+        raise click.UsageError(f"{option_name} must not contain duplicate CUDA device indices")
+    return devices
+
+
 def _format_training_config_summary(
     config: TrainerConfig,
     *,
@@ -306,6 +382,12 @@ def _format_training_config_summary(
                 ("world_size", str(config.world_size)),
                 ("tp_size", str(config.tp_size)),
                 ("dp_size", _resolved_dp_size_for_summary(config)),
+                (
+                    "devices",
+                    ",".join(str(device) for device in config.train_devices)
+                    if config.train_devices is not None
+                    else f"0..{config.world_size - 1}",
+                ),
                 ("attn_backend", attn_backend),
                 (
                     "thinking",
@@ -381,6 +463,22 @@ def _print_auto_tune_summary(result) -> None:
     )
 
 
+def _print_smoke_summary(stage: str, measurement) -> None:
+    candidate = measurement.candidate
+    status = "ok" if measurement.ok else "failed"
+    message = _style(
+        f"AReno smoke {stage} {status}", fg="bright_green" if measurement.ok else "red", bold=True, color=True
+    ) + (
+        f": tp_size={candidate.tp_size}, batch_size={candidate.batch_size}, n_samples={candidate.n_samples}, "
+        f"mini_bs={candidate.mini_bs}, max_running_prompts={candidate.max_running_prompts}, "
+        f"adam_8bit={candidate.adam_8bit}, drop_rollout_state={not candidate.keep_rollout_state}, "
+        f"peak_mem_frac={measurement.peak_mem_frac:.4f}"
+    )
+    if measurement.error:
+        message += f", error={measurement.error}"
+    click.echo(message, color=True)
+
+
 def _format_summary_section(section: str, rows: list[tuple[str, str]], *, color: bool) -> list[str]:
     field_width = max([len("Field"), *(len(field) for field, _ in rows)])
     terminal_width = shutil.get_terminal_size(fallback=(100, 24)).columns
@@ -412,6 +510,27 @@ def _rollout_summary_rows(config: TrainerConfig) -> list[tuple[str, str]]:
         ]
     return [
         *base,
+        (
+            "topology",
+            (
+                "shared with train engine"
+                if config.rollout_devices is None
+                else (
+                    f"world={len(config.rollout_devices)}, "
+                    f"tp={config.rollout_tp_size or config.tp_size}, "
+                    f"dp={len(config.rollout_devices) // (config.rollout_tp_size or config.tp_size)}, "
+                    f"devices={','.join(str(device) for device in config.rollout_devices)}"
+                )
+            ),
+        ),
+        (
+            "policy_sync",
+            (
+                "shared weights"
+                if config.rollout_devices is None
+                else f"NCCL direct, lazy, bucket={config.policy_sync_bucket_mb} MiB"
+            ),
+        ),
         ("n_samples", str(config.n_samples)),
         ("max_running_prompts", str(config.resolved_max_running_prompts())),
         (
@@ -564,7 +683,11 @@ def _trainer_config_from_args(args) -> TrainerConfig:
     # trainers do not receive rollout/reward/GSPO fields by construction.
     args.max_steps = getattr(args, "max_steps", None)
     args.score_micro_bs = getattr(args, "score_micro_bs", 8)
-    args.model_hub = getattr(args, "model_hub", "hf")
+    args.model_hub = getattr(args, "model_hub", "modelscope")
+    args.train_devices = getattr(args, "train_devices", None)
+    args.rollout_tp_size = getattr(args, "rollout_tp_size", None)
+    args.rollout_devices = getattr(args, "rollout_devices", None)
+    args.policy_sync_bucket_mb = getattr(args, "policy_sync_bucket_mb", 64)
     algorithm = get_algorithm(args.algo)
     chat_template_enable_thinking = False if args.disable_thinking else None
     if algorithm.name == "dpo":
@@ -580,6 +703,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             max_steps=args.max_steps,
             tp_size=args.tp_size,
             world_size=args.world_size,
+            train_devices=args.train_devices,
             batch_size=args.batch_size,
             mini_bs=args.mini_bs,
             score_micro_bs=args.score_micro_bs,
@@ -621,6 +745,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             max_steps=args.max_steps,
             tp_size=args.tp_size,
             world_size=args.world_size,
+            train_devices=args.train_devices,
             batch_size=args.batch_size,
             mini_bs=args.mini_bs,
             score_micro_bs=args.score_micro_bs,
@@ -661,6 +786,10 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             max_steps=args.max_steps,
             tp_size=args.tp_size,
             world_size=args.world_size,
+            train_devices=args.train_devices,
+            rollout_tp_size=args.rollout_tp_size,
+            rollout_devices=args.rollout_devices,
+            policy_sync_bucket_mb=args.policy_sync_bucket_mb,
             batch_size=args.batch_size,
             n_samples=args.n_samples,
             mini_bs=args.mini_bs,
@@ -708,6 +837,10 @@ def _trainer_config_from_args(args) -> TrainerConfig:
         max_steps=args.max_steps,
         tp_size=args.tp_size,
         world_size=args.world_size,
+        train_devices=args.train_devices,
+        rollout_tp_size=args.rollout_tp_size,
+        rollout_devices=args.rollout_devices,
+        policy_sync_bucket_mb=args.policy_sync_bucket_mb,
         batch_size=args.batch_size,
         n_samples=args.n_samples,
         mini_bs=args.mini_bs,
@@ -770,6 +903,7 @@ def run(trainer_config: TrainerConfig):
     from areno.api.trainer_factory import build_trainer
 
     trainer_config = resolve_model_refs_for_config(trainer_config)
+    _write_dashboard_run_config(trainer_config)
     loss_fn = _loss_fn_for_config(trainer_config)
     reward_fn_path = _reward_fn_path_for_config(trainer_config)
     reward_fn = load_reward_fn(reward_fn_path) if reward_fn_path else None
@@ -791,6 +925,149 @@ def run(trainer_config: TrainerConfig):
     )
     trainer = build_trainer(trainer_config, instance=api_trainer, dataset=dataset, reward_fn=reward_fn, loss_fn=loss_fn)
     trainer.fit()
+
+
+def _write_dashboard_run_config(config: TrainerConfig) -> None:
+    """Persist the same train settings summary that the CLI prints."""
+
+    if not config.metrics_log_dir:
+        return
+    import os
+
+    path = Path(config.metrics_log_dir)
+    path.mkdir(parents=True, exist_ok=True)
+    summary = _format_training_config_summary(config, color=False)
+    pid = os.getpid()
+    payload = {
+        "kind": "train",
+        "pid": pid,
+        "summary_text": summary,
+        "settings": _training_config_settings(config),
+    }
+    (path / f"areno_run_config.{pid}.txt").write_text(summary + "\n", encoding="utf-8")
+    (path / f"areno_run_config.{pid}.json").write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+
+
+def _training_config_settings(config: TrainerConfig) -> dict:
+    used: set[str] = set()
+
+    def section(title: str, names: list[str]) -> dict:
+        items = []
+        for name in names:
+            if not hasattr(config, name):
+                continue
+            used.add(name)
+            items.append({"key": name, "value": getattr(config, name)})
+        return {"title": title, "items": items}
+
+    sections = [
+        section(
+            "Basic",
+            [
+                "algo",
+                "ckpt",
+                "dataset_path",
+                "model_hub",
+                "dataset_loader_fn",
+                "epochs",
+                "max_steps",
+            ],
+        ),
+        section(
+            "Runtime",
+            [
+                "world_size",
+                "tp_size",
+                "attn_backend",
+                "eager_decode",
+                "activation_checkpointing",
+                "keep_rollout_state",
+                "chat_template_enable_thinking",
+            ],
+        ),
+        section(
+            "Rollout",
+            [
+                "batch_size",
+                "n_samples",
+                "max_running_prompts",
+                "max_prompt_tokens",
+                "max_new_tokens",
+                "max_context_len",
+                "greedy",
+                "temperature",
+                "top_k",
+                "top_p",
+                "agent_fn",
+                "agent_timeout_s",
+                "train_tool_results",
+                "reward_fn_path",
+                "reward_ckpt",
+            ],
+        ),
+        section(
+            "Train",
+            [
+                "mini_bs",
+                "score_micro_bs",
+                "gradient_accumulation_steps",
+            ],
+        ),
+        section(
+            "Optimizer",
+            [
+                "optimizer_lr",
+                "optimizer_min_lr",
+                "lr_decay_steps",
+                "lr_decay_style",
+                "optimizer_beta1",
+                "optimizer_beta2",
+                "weight_decay",
+                "grad_clip_norm",
+                "adam_8bit",
+            ],
+        ),
+        section(
+            "Roles and loss",
+            [
+                "ref_ckpt",
+                "critic_ckpt",
+                "critic_lr",
+                "critic_warmup_steps",
+                "gspo_clip_eps",
+                "grpo_clip_eps",
+                "dpo_beta",
+                "kl_coef",
+                "use_kl_loss",
+                "kl_loss_coef",
+                "kl_loss_type",
+                "clip_eps",
+                "clip_ratio_c",
+                "value_clip_eps",
+                "value_loss_coef",
+                "gamma",
+                "lam",
+            ],
+        ),
+        section("Checkpoint", ["save_path", "save_interval"]),
+        section("Observability", ["metrics_log_dir"]),
+    ]
+    extras = []
+    for field in fields(config):
+        if field.name not in used:
+            extras.append({"key": field.name, "value": getattr(config, field.name)})
+    if extras:
+        sections.append({"title": "Other", "items": extras})
+    if isinstance(config, RolloutTrainerConfig):
+        for item in sections:
+            if item["title"] == "Rollout":
+                item["items"].append(
+                    {"key": "resolved_max_running_prompts", "value": config.resolved_max_running_prompts()}
+                )
+                break
+    return {"sections": [item for item in sections if item["items"]]}
 
 
 def _loss_fn_for_config(config: TrainerConfig):
@@ -815,7 +1092,7 @@ def _reward_fn_path_for_config(config: TrainerConfig) -> str | None:
 
 
 def _load_dataset_for_training(
-    dataset_path: str, *, model_hub: str = "hf", dataset_loader_fn: str | None, load_dataset, load_from_disk
+    dataset_path: str, *, model_hub: str = "modelscope", dataset_loader_fn: str | None, load_dataset, load_from_disk
 ):
     def default_loader(path):
         return _load_dataset_from_path(
@@ -860,10 +1137,10 @@ def _split_loader_fn_spec(spec_text: str) -> tuple[Path, str]:
     return Path(spec_text).resolve(), "load_training_dataset"
 
 
-def _load_dataset_from_path(dataset_path: str, *, model_hub: str = "hf", load_dataset, load_from_disk):
+def _load_dataset_from_path(dataset_path: str, *, model_hub: str = "modelscope", load_dataset, load_from_disk):
     # Existing local paths may be either HF `save_to_disk` outputs or raw
     # files. Non-existing values without a known suffix are treated as
-    # Hugging Face dataset IDs such as `gsm8k:main` or `AI-MO/NuminaMath-TIR`.
+    # Remote dataset IDs such as `gsm8k:main` or `AI-MO/NuminaMath-TIR`.
     path = Path(dataset_path)
     if path.is_dir():
         try:
@@ -994,7 +1271,7 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
 @click.option(
     "--model-hub",
     type=click.Choice(["hf", "modelscope"], case_sensitive=False),
-    default="hf",
+    default="modelscope",
     show_default=True,
     help="Remote hub for non-local model and dataset refs. Use 'modelscope' for ModelScope or 'hf' for Hugging Face.",
 )
@@ -1035,8 +1312,51 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     show_default=True,
     help="Maximum sampled rollout/train rows considered by --tune-params probing.",
 )
-@click.option("--tp-size", type=int, default=4, show_default=True, help="Tensor parallel size for the backend.")
+@click.option(
+    "--smoke-infer",
+    is_flag=True,
+    help="Dummy-load the model and allocate rollout KV cache/decode CUDA graphs, then exit.",
+)
+@click.option(
+    "--smoke-train",
+    is_flag=True,
+    help="Dummy-load the model and run one minimal synthetic train step, then exit.",
+)
+@click.option(
+    "--tp-size",
+    "--train-tp-size",
+    "tp_size",
+    type=int,
+    default=4,
+    show_default=True,
+    help="Tensor parallel size for training.",
+)
 @click.option("--world-size", type=int, default=8, show_default=True, help="Total device count for the backend.")
+@click.option(
+    "--train-devices",
+    type=str,
+    default=None,
+    help="CUDA devices for training, with inclusive ranges such as 0..7,10; defaults to devices from --world-size.",
+)
+@click.option(
+    "--rollout-tp-size",
+    type=int,
+    default=None,
+    help="Tensor parallel size for an independent rollout engine using the training device set by default.",
+)
+@click.option(
+    "--rollout-devices",
+    type=str,
+    default=None,
+    help="CUDA devices for the independent rollout engine; defaults to the training device set when omitted.",
+)
+@click.option(
+    "--policy-sync-bucket-mb",
+    type=int,
+    default=64,
+    show_default=True,
+    help="Maximum GPU buffer size used by direct NCCL policy synchronization.",
+)
 @click.option("--batch-size", type=int, default=32, show_default=True, help="Prompt/pair batch size.")
 @click.option(
     "--n-samples", type=int, default=8, show_default=True, help="Rollout samples per prompt for RL algorithms."
@@ -1143,9 +1463,20 @@ def train_command(**options) -> None:
 
     trainer_config = _trainer_config_from_options(**options)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    if options.get("smoke_infer") or options.get("smoke_train"):
+        from areno.cli.auto_tune import smoke_infer_config, smoke_train_config
+
+        trainer_config = resolve_model_refs_for_config(trainer_config)
+        stage = "infer" if options.get("smoke_infer") else "train"
+        measurement = smoke_infer_config(trainer_config) if stage == "infer" else smoke_train_config(trainer_config)
+        _print_smoke_summary(stage, measurement)
+        if not measurement.ok:
+            raise click.ClickException(measurement.error or f"smoke {stage} failed")
+        return
     if options.get("tune_params"):
         from areno.cli.auto_tune import auto_tune_config
 
+        trainer_config = resolve_model_refs_for_config(trainer_config)
         result = auto_tune_config(
             trainer_config,
             mem_frac=options["mem_frac"],
@@ -1157,6 +1488,14 @@ def train_command(**options) -> None:
         trainer_config,
         reward_ckpt=options.get("reward_ckpt"),
         model_config=_model_config_for_summary(trainer_config),
+    )
+    from areno.cli.dashboard_registry import register_dashboard_job
+
+    register_dashboard_job(
+        kind="train",
+        name=f"train {trainer_config.algo} {trainer_config.ckpt}",
+        config=_training_config_settings(trainer_config),
+        metrics_dir=trainer_config.metrics_log_dir,
     )
     run(trainer_config)
 

@@ -1517,6 +1517,11 @@ class Qwen35Adapter(ModelAdapter):
 
         return save_qwen35_weights(model, output_path, source_path)
 
+    def build_policy_plan(self, model: nn.Module):
+        from areno.models.qwen3_5.checkpoint import build_qwen35_policy_plan
+
+        return build_qwen35_policy_plan(model)
+
 
 class Qwen35VLAdapter(Qwen35Adapter):
     name = "qwen3_5_vl"
@@ -1650,6 +1655,11 @@ class Qwen35MoeAdapter(ModelAdapter):
         from areno.models.qwen3_5.checkpoint import save_qwen35_weights
 
         return save_qwen35_weights(model, output_path, source_path)
+
+    def build_policy_plan(self, model: nn.Module):
+        from areno.models.qwen3_5.checkpoint import build_qwen35_policy_plan
+
+        return build_qwen35_policy_plan(model)
 
 
 class Qwen35MoeVLAdapter(Qwen35MoeAdapter):

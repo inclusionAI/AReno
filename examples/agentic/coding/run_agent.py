@@ -2,11 +2,7 @@
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from agent_loop import run_agentic_coding_loop  # noqa: E402
+from areno.agent import run_agentic_coding_loop
 
 
 async def run_agent(ctx, batch):

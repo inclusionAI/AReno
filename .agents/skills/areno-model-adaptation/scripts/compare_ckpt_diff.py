@@ -7,9 +7,7 @@ import json
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-
-import torch
-from safetensors import safe_open
+from typing import Any
 
 
 @dataclass
@@ -79,6 +77,8 @@ def main() -> None:
 
 
 def load_index(path: Path) -> dict[str, TensorRef]:
+    from safetensors import safe_open
+
     index_path = path / "model.safetensors.index.json"
     if index_path.exists():
         data = json.loads(index_path.read_text())
@@ -119,6 +119,9 @@ def compare_tensors(
     device: str,
     max_elements: int,
 ) -> list[dict[str, object]]:
+    import torch
+    from safetensors import safe_open
+
     rows: list[dict[str, object]] = []
     key_groups: dict[tuple[str, str], list[str]] = defaultdict(list)
     for key in keys:
@@ -134,9 +137,9 @@ def compare_tensors(
     return rows
 
 
-def compare_one(
-    key: str, shape: tuple[int, ...], a: torch.Tensor, b: torch.Tensor, max_elements: int
-) -> dict[str, object]:
+def compare_one(key: str, shape: tuple[int, ...], a: Any, b: Any, max_elements: int) -> dict[str, object]:
+    import torch
+
     if max_elements > 0 and a.numel() > max_elements:
         stride = max(1, a.numel() // max_elements)
         a = a.reshape(-1)[::stride][:max_elements]
@@ -157,6 +160,8 @@ def compare_one(
 
 
 def resolve_device(device: str) -> str:
+    import torch
+
     if device != "auto":
         return device
     return "cuda" if torch.cuda.is_available() else "cpu"

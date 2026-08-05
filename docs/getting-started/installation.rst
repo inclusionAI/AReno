@@ -1,9 +1,47 @@
 Installation
 ============
 
-This page covers the setup paths used by contributors and local operators:
-Docker images, editable installs, source/wheel distributions, and local
-installation.
+The installer is the single entry point for local AReno setup. Users do not
+need to choose PyTorch packages, set CUDA build variables, or order Python
+dependencies before running it.
+
+Install AReno
+-------------
+
+Clone the repository and run one command:
+
+.. code-block:: bash
+
+   git clone https://github.com/inclusionAI/AReno.git
+   cd AReno
+   bash scripts/install.sh
+
+Before changing Python, the installer checks required system tools, rejects
+WSL1, and verifies that ``nvidia-smi`` can see a GPU. It then uses an active
+virtualenv or conda environment when available, reuses the repository's
+``.venv`` when it is ready, or creates ``.venv`` automatically. If an IDE does
+not expose environment activation metadata, the installer detects and reuses a
+Python interpreter that already provides PyTorch instead of creating an empty
+``.venv``. Finally, it checks for CUDA-enabled PyTorch 2.6 or newer, detects
+CUDA build support, installs AReno's remaining dependencies, selects the
+attention setup, builds the CUDA extension, and runs ``areno check``. The
+installer never installs or upgrades PyTorch because the correct build depends
+on the machine's CUDA platform. If PyTorch is missing or incompatible, it stops
+with guidance for the selected Python environment. Other packages that already
+satisfy AReno's requirements are reused; only missing or incompatible packages
+are installed or updated.
+
+Successful installation ends with ``AReno is ready`` and the exact command to
+start using AReno. If installation stops, the same script reports the failed
+stage, explains the immediate reason, prints targeted suggestions, and
+preserves complete command output in the user state directory, usually
+``~/.local/state/areno/install.log``.
+
+To preview the plan without changing the environment:
+
+.. code-block:: bash
+
+   bash scripts/install.sh --dry-run
 
 Compatibility matrix
 --------------------
@@ -19,16 +57,16 @@ Compatibility matrix
      - Primary training/serving target. Use CUDA-enabled PyTorch >= 2.6 and build ``areno_accel``.
    * - Linux aarch64 / Grace-Blackwell
      - Supported
-     - Install a matching ``aarch64`` CUDA PyTorch build first, then build AReno with ``--no-build-isolation``.
+     - Start from a compatible CUDA-enabled ``aarch64`` PyTorch environment, such as a current NVIDIA NGC PyTorch development container. The installer validates it and builds AReno against it.
    * - Windows WSL2 + NVIDIA GPU
      - Supported
      - Follow the Linux install path inside WSL2. Native Windows is not supported.
    * - macOS Apple Silicon
-     - Metadata/docs only
-     - Use ``ARENO_BUILD_EXT=0`` for docs or packaging checks. Training/serving is not supported.
+     - Not supported
+     - The installer requires Linux with NVIDIA CUDA.
    * - CPU-only environments
-     - Metadata/docs/tests only
-     - CPU-only PyTorch can run lightweight docs/tests, but cannot train or serve AReno models.
+     - Not supported
+     - AReno training and serving require an NVIDIA GPU and CUDA-enabled PyTorch.
 
 Docker
 ------
@@ -72,71 +110,11 @@ enough for the container CUDA runtime. Model downloads, Hugging Face tokens,
 cache paths, network access, disk space, and multi-node or custom networking
 remain user environment concerns and are outside the first Docker setup path.
 
-Python distributions
---------------------
-
-By default, package builds compile the ``areno_accel`` CUDA extension. Run the
-build in an environment with PyTorch extension tooling and ``CUDA_HOME``:
-
-.. code-block:: bash
-
-   python -m pip install build
-   python -m build --no-isolation
-
-The generated artifacts are written to ``dist/``. That directory is ignored by
-git.
-
-For metadata or pure-Python packaging checks that should not require local
-PyTorch/CUDA, explicitly skip extension compilation:
-
-.. code-block:: bash
-
-   ARENO_BUILD_EXT=0 python -m build --no-isolation
-
-Installation
-------------
-
-Install a CUDA-enabled PyTorch environment first. Then install the project from
-the repository root:
-
-.. code-block:: bash
-
-   pip install psutil
-   pip install flash-linear-attention
-   pip install -e . --no-build-isolation
-
-.. note::
-
-   ``--no-build-isolation`` uses the packages already installed in your
-   environment. Install ``psutil`` first because PyTorch's CUDA extension
-   builder imports it while sizing parallel compile jobs. CUDA and PyTorch
-   must be ABI compatible. The editable install builds the ``areno_accel``
-   CUDA extension used by local kernels.
-   Install ``flash-attn`` before AReno only if you use the default
-   ``--attn-backend flash`` high-throughput path. ``flash-attn`` is optional
-   when running with ``--attn-backend native``; AReno automatically falls back
-   to native attention on flash-attn-unsupported GPUs such as Tesla T4 and
-   warns that native attention is a slower compatibility path. If building
-   ``flash-attn`` from source is too slow for your environment, install a
-   pre-built wheel from the
-   `flash-attention releases <https://github.com/Dao-AILab/flash-attention/releases>`_
-   that matches your Python, PyTorch, CUDA, and platform.
-   When ``TORCH_CUDA_ARCH_LIST`` is not set, AReno targets the visible GPU
-   architectures. Set it explicitly when cross-building or narrowing the build
-   target. Common values include ``9.0`` for H100/H200, ``8.0`` for A100, and
-   ``8.9`` for L40/RTX 4090:
-
-   .. code-block:: bash
-
-      TORCH_CUDA_ARCH_LIST="9.0" MAX_JOBS=64 pip install -e . --no-build-isolation
-
-   For iterative CUDA work, configure ``ccache`` with ``CC="ccache gcc"`` and
-   ``CXX="ccache g++"`` before rebuilding.
-
 Post-install checklist
 ----------------------
 
-Run the readiness check after every fresh install:
+The installer runs the readiness check automatically. You can rerun it at any
+time:
 
 .. code-block:: bash
 
@@ -151,5 +129,4 @@ For setup reports, also collect a machine-readable environment bundle:
 ``areno check`` reports common build-time and runtime setup problems with next
 steps: missing or CPU-only PyTorch, unsupported PyTorch versions, missing
 ``CUDA_HOME`` or ``nvcc``, missing build-time dependencies such as ``psutil``,
-unsupported platforms, and ``ARENO_BUILD_EXT=0`` installs that try to train or
-serve without the compiled ``areno_accel`` extension.
+and unsupported platforms.

@@ -39,7 +39,11 @@ from areno.accel import (
     areno_topk_softmax,
 )
 from areno.accel.ops import FusedMoeConfig, areno_fused_experts, areno_gelu_tanh_and_mul, log_once
-from areno.engine.checkpoints.common import load_checkpoint_weights, save_checkpoint_weights
+from areno.engine.checkpoints.common import (
+    build_checkpoint_policy_plan,
+    load_checkpoint_weights,
+    save_checkpoint_weights,
+)
 from areno.engine.config import ModelConfig, _parse_dtype
 from areno.engine.layers.attention_backend.infer import FlashAttnInferBackend, build_infer_attention_backend
 from areno.engine.layers.attention_backend.train import build_train_attention_backend
@@ -179,7 +183,12 @@ class Gemma4MoeExperts(nn.Module):
             self.local_num_experts,
         )
         if x.shape[0] == 0:
-            return all_reduce(flat.new_zeros(flat.shape))
+            zero = (
+                self.gate_up_weight.reshape(-1)[0] * 0
+                + self.down_weight.reshape(-1)[0] * 0
+                + topk_weight.sum().to(dtype=self.gate_up_weight.dtype) * 0
+            )
+            return all_reduce(flat.new_zeros(flat.shape) + zero)
         hidden = _areno_grouped_linear_no_compile(x.contiguous(), self.gate_up_weight, tokens_per_expert)
         hidden = (
             _areno_gelu_tanh_and_mul_no_compile(hidden) * route_weight.unsqueeze(-1).to(dtype=hidden.dtype)
@@ -245,18 +254,34 @@ class Gemma4MoeMLP(nn.Module):
             routed_scaling_factor=config.routed_scaling_factor,
         )
 
-    def forward(self, hidden_states: torch.Tensor, router_logits: torch.Tensor) -> torch.Tensor:
-        batch, seqlen, hidden = hidden_states.shape
-        flat = hidden_states.reshape(-1, hidden)
+    def route(self, router_logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Compute dynamic expert routing once outside activation recompute."""
+
         topk_idx, topk_weight = _areno_topk_softmax_no_compile(
             router_logits.reshape(-1, self.num_experts), self.top_k, self.norm_topk_prob
         )
         topk_weight = topk_weight * self.per_expert_scale[topk_idx].to(dtype=topk_weight.dtype)
+        return topk_idx, topk_weight
+
+    def forward_with_routes(
+        self,
+        hidden_states: torch.Tensor,
+        topk_idx: torch.Tensor,
+        topk_weight: torch.Tensor,
+    ) -> torch.Tensor:
+        """Run routed experts with a fixed top-k assignment."""
+
+        batch, seqlen, hidden = hidden_states.shape
+        flat = hidden_states.reshape(-1, hidden)
         if self.training:
             out = self.experts(flat, topk_idx.to(torch.long), topk_weight)
         else:
             out = self._forward_fused_moe(flat, topk_idx, topk_weight)
         return out.view(batch, seqlen, hidden)
+
+    def forward(self, hidden_states: torch.Tensor, router_logits: torch.Tensor) -> torch.Tensor:
+        topk_idx, topk_weight = self.route(router_logits)
+        return self.forward_with_routes(hidden_states, topk_idx, topk_weight)
 
     @torch.no_grad()
     def prepare_infer_weights(self) -> None:
@@ -504,6 +529,20 @@ class Gemma4DecoderLayer(nn.Module):
         # Learnable per-layer scalar multiplier on the block output; persistent
         # so it round-trips through the checkpoint as ``{prefix}.layer_scalar``.
         self.register_buffer("layer_scalar", torch.ones(1), persistent=True)
+        self.handles_activation_checkpointing = config.enable_moe_block
+
+    def _attention_block(
+        self,
+        hidden_states: torch.Tensor,
+        position_ids: torch.Tensor,
+        shared_kv: tuple[torch.Tensor, torch.Tensor] | None,
+        train_meta: TrainMeta | None,
+        infer_meta: InferMeta | None,
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor] | None]:
+        residual = hidden_states
+        normalized = self.input_layernorm(hidden_states)
+        attended, kv_for_share = self.self_attn(normalized, position_ids, shared_kv, train_meta, infer_meta)
+        return self.post_attention_layernorm(attended) + residual, kv_for_share
 
     def forward(
         self,
@@ -514,28 +553,34 @@ class Gemma4DecoderLayer(nn.Module):
         train_meta: TrainMeta | None = None,
         infer_meta: InferMeta | None = None,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor] | None]:
-        # Pre-norm attention path (note: norm comes both before AND after attn).
-        residual = hidden_states
-        hidden_states = self.input_layernorm(hidden_states)
-        hidden_states, kv_for_share = self.self_attn(hidden_states, position_ids, shared_kv, train_meta, infer_meta)
-        hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = hidden_states + residual
+        # KV-sharing layers retain the existing direct path. Other MoE layers
+        # checkpoint attention separately so routing can remain outside the
+        # recomputed region.
+        if self.moe is not None and shared_kv is None:
+            hidden_states, kv_for_share = checkpoint_layer(
+                self._attention_block,
+                hidden_states,
+                position_ids,
+                shared_kv,
+                train_meta,
+                infer_meta,
+                train_meta=train_meta,
+                infer_meta=infer_meta,
+            )
+        else:
+            hidden_states, kv_for_share = self._attention_block(
+                hidden_states, position_ids, shared_kv, train_meta, infer_meta
+            )
         # Pre-norm FF path with matching sandwich norm on output.
         residual = hidden_states
         dense_input = self.pre_feedforward_layernorm(hidden_states)
         if self.moe is not None:
-            if (
-                self.router is None
-                or self.pre_feedforward_layernorm_2 is None
-                or self.post_feedforward_layernorm_1 is None
-                or self.post_feedforward_layernorm_2 is None
-            ):
-                raise RuntimeError("Gemma4 MoE layer is missing router or MoE norms")
-            dense_hidden = self.mlp(dense_input)
-            router_logits = self.router(residual)
-            moe_hidden = self.moe(self.pre_feedforward_layernorm_2(residual), router_logits)
-            hidden_states = self.post_feedforward_layernorm_1(dense_hidden) + self.post_feedforward_layernorm_2(
-                moe_hidden
+            hidden_states = _gemma4_moe_feedforward_no_compile(
+                self,
+                residual,
+                dense_input,
+                train_meta,
+                infer_meta,
             )
         else:
             hidden_states = self.mlp(dense_input)
@@ -636,7 +681,7 @@ class Gemma4ForCausalLM(nn.Module):
                 shared_idx = layer.self_attn.kv_shared_layer_index
                 if shared_idx is not None:
                     shared_kv = shared_kv_by_layer.get(shared_idx)
-                if shared_kv is None:
+                if shared_kv is None and not getattr(layer, "handles_activation_checkpointing", False):
                     hidden_states, kv_for_share = checkpoint_layer(
                         layer,
                         hidden_states,
@@ -921,6 +966,9 @@ class Gemma4Adapter(ModelAdapter):
             raise TypeError(f"Gemma4Adapter cannot save weights from {type(model)!r}")
         return save_checkpoint_weights(model, output_path, source_path, checkpoint_spec(model.config.checkpoint_prefix))
 
+    def build_policy_plan(self, model: nn.Module):
+        return build_checkpoint_policy_plan(model, checkpoint_spec(model.config.checkpoint_prefix))
+
 
 def _layer_type(config: ModelConfig, layer_idx: int) -> str:
     """Return ``full_attention``/``sliding_attention`` for the given layer index."""
@@ -1027,6 +1075,43 @@ def _gemma4_per_layer_inputs_no_compile(
     # Dynamo-disabled wrapper around the PLE pipeline because get/project rely
     # on data-dependent indexing and reshapes.
     return model.project_per_layer_inputs(hidden_states, model.get_per_layer_inputs(input_ids))
+
+
+@torch._dynamo.disable
+def _gemma4_moe_feedforward_no_compile(
+    layer: Gemma4DecoderLayer,
+    residual: torch.Tensor,
+    dense_input: torch.Tensor,
+    train_meta: TrainMeta | None,
+    infer_meta: InferMeta | None,
+) -> torch.Tensor:
+    """Keep dynamic MoE checkpoint callables out of Dynamo's guard cache."""
+
+    if (
+        layer.moe is None
+        or layer.router is None
+        or layer.pre_feedforward_layernorm_2 is None
+        or layer.post_feedforward_layernorm_1 is None
+        or layer.post_feedforward_layernorm_2 is None
+    ):
+        raise RuntimeError("Gemma4 MoE layer is missing router or MoE norms")
+    dense_hidden = checkpoint_layer(
+        layer.mlp,
+        dense_input,
+        train_meta=train_meta,
+        infer_meta=infer_meta,
+    )
+    router_logits = layer.router(residual)
+    topk_idx, topk_weight = layer.moe.route(router_logits)
+    moe_hidden = checkpoint_layer(
+        layer.moe.forward_with_routes,
+        layer.pre_feedforward_layernorm_2(residual),
+        topk_idx,
+        topk_weight,
+        train_meta=train_meta,
+        infer_meta=infer_meta,
+    )
+    return layer.post_feedforward_layernorm_1(dense_hidden) + layer.post_feedforward_layernorm_2(moe_hidden)
 
 
 @torch._dynamo.disable
