@@ -33,6 +33,7 @@ AReno documentation
    :maxdepth: 1
    :caption: Cookbook
 
+   cookbook/tiny-training-smoke
    cookbook/math-rlvr
    cookbook/tictactoe-agentic-rl
    cookbook/duelgrid-visual-agent
