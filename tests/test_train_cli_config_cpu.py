@@ -402,6 +402,184 @@ def test_training_config_summary_section_handles_empty_rows():
     assert _format_summary_section("Empty", [], color=False) == ["", "Empty", "-----"]
 
 
+def test_independent_rollout_topology_parses_distinct_cuda_devices() -> None:
+    cfg = _trainer_config_from_options(
+        **_options(
+            train_devices="0, 2",
+            world_size=2,
+            tp_size=2,
+            rollout_devices="1,3",
+            rollout_tp_size=1,
+            policy_sync_bucket_mb=32,
+            reward_ckpt="reward",
+        )
+    )
+
+    assert cfg.train_devices == [0, 2]
+    assert cfg.rollout_devices == [1, 3]
+    assert cfg.rollout_tp_size == 1
+    assert cfg.policy_sync_bucket_mb == 32
+    backend = cfg.areno_config()
+    assert backend.devices == [0, 2]
+    assert backend.rollout_devices == [1, 3]
+    assert backend.resolved_rollout_tp_size() == 1
+    assert backend.uses_separate_rollout_engine()
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"train_devices": "0,,1", "world_size": 2}, "--train-devices must be a comma-separated"),
+        ({"train_devices": "0,a", "world_size": 2}, "--train-devices must contain only integer"),
+        ({"train_devices": "0..", "world_size": 2}, "--train-devices must contain only integer"),
+        ({"train_devices": "3..1", "world_size": 2}, "--train-devices range start must not exceed"),
+        ({"train_devices": "0..2,2", "world_size": 4}, "--train-devices must not contain duplicate"),
+        ({"train_devices": "0,-1", "world_size": 2}, "--train-devices must not contain negative"),
+        ({"train_devices": "0,0", "world_size": 2}, "--train-devices must not contain duplicate"),
+        (
+            {"world_size": 2, "rollout_devices": "2,3,4", "rollout_tp_size": 2},
+            "--rollout-devices count must be divisible",
+        ),
+        (
+            {"world_size": 3, "rollout_tp_size": 2},
+            "--rollout-devices count must be divisible",
+        ),
+        ({"rollout_tp_size": 0}, "--rollout-tp-size must be positive"),
+        ({"policy_sync_bucket_mb": 0}, "--policy-sync-bucket-mb must be positive"),
+    ],
+)
+def test_independent_rollout_topology_rejects_invalid_values(overrides, message) -> None:
+    with pytest.raises(UsageError, match=message):
+        _trainer_config_from_options(**_options(reward_ckpt="reward", **overrides))
+
+
+def test_train_and_rollout_devices_may_overlap() -> None:
+    cfg = _trainer_config_from_options(
+        **_options(
+            reward_ckpt="reward",
+            train_devices="0,1",
+            world_size=2,
+            tp_size=2,
+            rollout_devices="0,1",
+            rollout_tp_size=1,
+        )
+    )
+
+    assert cfg.train_devices == [0, 1]
+    assert cfg.rollout_devices == [0, 1]
+
+
+def test_world_size_infers_shared_train_and_rollout_devices() -> None:
+    cfg = _trainer_config_from_options(
+        **_options(
+            reward_ckpt="reward",
+            world_size=8,
+            tp_size=4,
+            rollout_tp_size=2,
+        )
+    )
+
+    assert cfg.world_size == 8
+    assert cfg.train_devices == list(range(8))
+    assert cfg.rollout_devices == list(range(8))
+    assert cfg.rollout_tp_size == 2
+
+
+def test_world_size_infers_train_devices_without_separate_rollout() -> None:
+    cfg = _trainer_config_from_options(
+        **_options(
+            reward_ckpt="reward",
+            world_size=4,
+            tp_size=2,
+        )
+    )
+
+    assert cfg.world_size == 4
+    assert cfg.train_devices == [0, 1, 2, 3]
+    assert cfg.rollout_devices is None
+
+
+def test_cuda_device_ranges_are_inclusive_and_composable() -> None:
+    assert train_cli._parse_cuda_devices("0..8,11..13,20", "--train-devices") == [
+        *range(0, 9),
+        *range(11, 14),
+        20,
+    ]
+
+
+def test_train_devices_infer_world_size() -> None:
+    cfg = _trainer_config_from_options(
+        **_options(
+            reward_ckpt="reward",
+            train_devices="0..3",
+            world_size=99,
+            tp_size=2,
+        )
+    )
+
+    assert cfg.world_size == 4
+    assert cfg.train_devices == [0, 1, 2, 3]
+
+
+def test_train_tp_size_alias_is_accepted(monkeypatch) -> None:
+    captured = []
+    monkeypatch.setattr(train_cli, "run", lambda config: captured.append(config))
+
+    result = CliRunner().invoke(
+        train_cli.train_command,
+        [
+            "--algo",
+            "sft",
+            "--ckpt",
+            "actor",
+            "--dataset-path",
+            "dataset",
+            "--dataset-loader-fn",
+            "examples/sft/alpaca/dataset_loader.py",
+            "--train-devices",
+            "0..3",
+            "--train-tp-size",
+            "2",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured[0].world_size == 4
+    assert captured[0].tp_size == 2
+
+
+def test_offline_algorithm_rejects_independent_rollout_devices() -> None:
+    with pytest.raises(UsageError, match="only valid for rollout-based algorithms"):
+        _trainer_config_from_options(
+            **_options(
+                algo="sft",
+                dataset_loader_fn="examples/sft/alpaca/dataset_loader.py",
+                reward_fn_path=None,
+                reward_ckpt=None,
+                rollout_devices="2",
+            )
+        )
+
+
+def test_training_summary_shows_independent_rollout_topology() -> None:
+    cfg = _trainer_config_from_options(
+        **_options(
+            world_size=2,
+            tp_size=2,
+            train_devices="0,1",
+            rollout_devices="2,3",
+            rollout_tp_size=1,
+            reward_ckpt="reward",
+        )
+    )
+
+    summary = _format_training_config_summary(cfg)
+
+    assert "devices       0,1" in summary
+    assert "topology             world=2, tp=1, dp=2, devices=2,3" in summary
+    assert "policy_sync          NCCL direct, lazy, bucket=64 MiB" in summary
+
+
 def test_training_config_summary_callable_name_handles_callable_objects():
     class CallableLoss:
         def __call__(self):
@@ -566,6 +744,48 @@ def test_train_command_smoke_resolves_model_ref_before_probe(monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert events == [("resolve", "actor"), ("smoke", "/cache/actor")]
+
+
+@pytest.mark.parametrize(
+    ("algo", "extra_args", "expected_type"),
+    [
+        ("sft", ["--dataset-loader-fn", "examples/sft/alpaca/dataset_loader.py"], TrainerConfig),
+        ("dpo", [], DPOTrainerConfig),
+    ],
+)
+def test_train_command_smoke_train_supports_offline_algorithms(monkeypatch, algo, extra_args, expected_type):
+    events = []
+
+    def fake_resolve(config):
+        events.append(("resolve", type(config), config.ckpt))
+        return config
+
+    def fake_smoke(config):
+        events.append(("smoke", type(config), config.ckpt))
+        return SimpleNamespace(
+            ok=True,
+            error=None,
+            peak_mem_frac=0.1,
+            candidate=SimpleNamespace(
+                tp_size=1,
+                batch_size=1,
+                n_samples=1,
+                mini_bs=1,
+                max_running_prompts=1,
+                adam_8bit=False,
+                keep_rollout_state=False,
+            ),
+        )
+
+    monkeypatch.setattr(train_cli, "resolve_model_refs_for_config", fake_resolve)
+    monkeypatch.setattr("areno.cli.auto_tune.smoke_train_config", fake_smoke)
+    result = CliRunner().invoke(
+        train_cli.train_command,
+        ["--algo", algo, "--ckpt", "actor", "--dataset-path", "dataset", "--smoke-train", *extra_args],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert events == [("resolve", expected_type, "actor"), ("smoke", expected_type, "actor")]
 
 
 EXPECTED_HELP_SECTIONS = [

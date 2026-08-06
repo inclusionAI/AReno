@@ -54,7 +54,9 @@ class PolicyOnlyTrainer:
         import areno.api
 
         tokenizer = self.areno.get_tokenizer()
+        processor = self.areno.get_processor()
         configure_chat_template_enable_thinking(tokenizer, getattr(self.config, "chat_template_enable_thinking", None))
+        configure_chat_template_enable_thinking(processor, getattr(self.config, "chat_template_enable_thinking", None))
         sampling_params = areno.api.SamplingParams(
             greedy=self.config.greedy,
             temperature=self.config.temperature,
@@ -197,7 +199,15 @@ class PolicyOnlyTrainer:
             proxy=False,
         ):
             prompt_tokens = [item.input_tokens for item in prompt_batch.items]
-            return await self.areno.rollout_token_batch_async(prompt_tokens, self.config.n_samples, sampling_params)
+            prompt_features = [item.record.get("features") for item in prompt_batch.items]
+            if not any(feature is not None for feature in prompt_features):
+                prompt_features = None
+            return await self.areno.rollout_token_batch_async(
+                prompt_tokens,
+                self.config.n_samples,
+                sampling_params,
+                prompt_features=prompt_features,
+            )
 
     async def _run_agentic_rollout(self, sampling_params, prompt_batch):
         from areno.api.agentic import AgentBatch, AgentTrainBatch, maybe_await
@@ -260,6 +270,7 @@ class PolicyOnlyTrainer:
                 response_masks=rows.response_masks,
                 loss_masks=rows.loss_masks,
                 rollout_logprobs=rows.rollout_logprobs,
+                features=rows.features,
                 rewards=rewards,
                 records=[sample.item.record for sample in samples],
                 reward_records=reward_records,
@@ -416,31 +427,44 @@ class PolicyOnlyTrainer:
             group_rewards = [rewards_all[row_idx] for row_idx in row_indices]
             for row_idx, advantage in zip(row_indices, compute_group_advantages(group_rewards), strict=True):
                 advantages_by_row[row_idx] = float(advantage)
-        for row_idx, (tokens, response_mask, loss_mask, logprobs, reward) in enumerate(
+        row_features = getattr(agent_batch, "features", [None] * len(agent_batch.token_rows))
+        for row_idx, (tokens, response_mask, loss_mask, logprobs, reward, features) in enumerate(
             zip(
                 agent_batch.token_rows,
                 agent_batch.response_masks,
                 agent_batch.loss_masks,
                 agent_batch.rollout_logprobs,
                 rewards_all,
+                row_features,
                 strict=True,
             )
         ):
             if len(tokens) != len(response_mask) or len(tokens) != len(loss_mask) or len(tokens) != len(logprobs):
                 raise ValueError("agentic train batch has misaligned token/mask/logprob rows")
-            prompt_mask = [not item for item in response_mask]
+            prompt_len = _agentic_prompt_len(response_mask)
             advantage = advantages_by_row.get(row_idx, 0.0)
-            advantages = [advantage if is_loss else 0.0 for is_loss in loss_mask]
-            rollout_logprobs.extend(lp for lp, is_loss in zip(logprobs, loss_mask, strict=True) if is_loss)
+            effective_loss_mask = loss_mask if any(not item for item in loss_mask[prompt_len:]) else []
+            if effective_loss_mask:
+                rollout_logprobs.extend(
+                    lp for lp, is_loss in zip(logprobs, effective_loss_mask, strict=True) if is_loss
+                )
+            else:
+                rollout_logprobs.extend(logprobs[prompt_len:])
             train_batch.append(
-                areno.api.TrainSequence(
-                    prompt_mask=prompt_mask,
-                    loss_mask=loss_mask,
+                areno.api.TrainSequence.model_construct(
+                    prompt_mask=[],
+                    loss_mask=effective_loss_mask,
                     tokens=tokens,
                     logprobs=logprobs,
-                    advantages=advantages,
+                    advantages=[],
+                    prompt_len=prompt_len,
+                    scalar_advantage=advantage,
+                    features=features,
                     reward=float(reward),
                     eos_token_id=tokenizer.eos_token_id,
+                    returns=[],
+                    values=[],
+                    ref_logprobs=[],
                 )
             )
         return train_batch, rewards_all, rollout_logprobs
@@ -560,6 +584,7 @@ class PolicyOnlyTrainer:
                         # zero prefix keeps tensor lengths aligned with tokens.
                         logprobs=[0.0] * prefix_len + seq.resp_logprobs,
                         advantages=[0.0] * prefix_len + [advantage] * resp_len,
+                        features=item.record.get("features"),
                         reward=reward,
                         eos_token_id=tokenizer.eos_token_id,
                     )
@@ -581,3 +606,10 @@ class PolicyOnlyTrainer:
         record_dashboard_state(
             self.areno, stage="save_checkpoint_end", epoch=epoch, step=step, role=self._policy_role_name()
         )
+
+
+def _agentic_prompt_len(response_mask: list[bool]) -> int:
+    for idx, is_response in enumerate(response_mask):
+        if is_response:
+            return idx
+    return len(response_mask)

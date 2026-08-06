@@ -18,6 +18,9 @@ import shutil
 import zlib
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 from pathlib import Path
 
 import torch
@@ -30,6 +33,7 @@ from areno.engine.parallel.context import get_tp_context
 
 _ASYNC_CPU_COPY_MAX_BYTES = 2 * 1024**3
 _PENDING_CPU_COPY_BUCKETS: list[tuple[torch.cuda.Stream, int, torch.Tensor]] = []
+_POLICY_PLAN_ACTIVE: ContextVar[bool] = ContextVar("areno_policy_plan_active", default=False)
 
 try:
     from tqdm.auto import tqdm
@@ -42,6 +46,88 @@ class _CheckpointTensorTask:
 
     def materialize(self, key: str) -> torch.Tensor | None:
         raise NotImplementedError
+
+    def policy_layout(self) -> PolicyTensorLayout:
+        """Describe this task as canonical tensor ranges for policy sync."""
+
+        raise NotImplementedError
+
+
+@dataclass(slots=True, frozen=True)
+class PolicyTensorPiece:
+    """One local tensor view mapped into a canonical flattened tensor."""
+
+    tensor: torch.Tensor
+    canonical_shape: tuple[int, ...]
+    shard_dim: int
+    shard_start: int
+    shard_end: int
+    publish: bool = True
+
+
+@dataclass(slots=True, frozen=True)
+class PolicyFlatPiece:
+    """A local tensor mapped to one contiguous canonical flat interval."""
+
+    tensor: torch.Tensor
+    canonical_offset: int
+    publish: bool = True
+
+
+@dataclass(slots=True, frozen=True)
+class PolicyTensorLayout:
+    """Canonical metadata and local views for one checkpoint tensor."""
+
+    shape: tuple[int, ...]
+    dtype: torch.dtype
+    pieces: tuple[PolicyTensorPiece, ...]
+    flat_pieces: tuple[PolicyFlatPiece, ...] = ()
+    replicated: bool = False
+
+    @property
+    def numel(self) -> int:
+        """Return canonical element count."""
+
+        result = 1
+        for size in self.shape:
+            result *= size
+        return result
+
+    @property
+    def nbytes(self) -> int:
+        """Return canonical byte size."""
+
+        return self.numel * torch.empty((), dtype=self.dtype).element_size()
+
+    def read_chunk(self, offset: int, output: torch.Tensor, *, include_replicated: bool = True) -> None:
+        """Copy local contributions intersecting one canonical flat chunk."""
+
+        output.zero_()
+        if self.replicated and not include_replicated:
+            return
+        if self.replicated:
+            flat = self.pieces[0].tensor.reshape(-1)
+            output.copy_(flat[offset : offset + output.numel()])
+            return
+        for piece in self.pieces:
+            if not piece.publish:
+                continue
+            _copy_piece_to_chunk(piece, offset, output)
+        for piece in self.flat_pieces:
+            if piece.publish:
+                _copy_flat_piece_to_chunk(piece, offset, output)
+
+    def write_chunk(self, offset: int, source: torch.Tensor) -> None:
+        """Copy one canonical flat chunk into intersecting local tensor views."""
+
+        if self.replicated:
+            flat = self.pieces[0].tensor.reshape(-1)
+            flat[offset : offset + source.numel()].copy_(source.to(dtype=flat.dtype))
+            return
+        for piece in self.pieces:
+            _copy_chunk_to_piece(piece, offset, source)
+        for piece in self.flat_pieces:
+            _copy_chunk_to_flat_piece(piece, offset, source)
 
 
 class _ReplicatedTensorTask(_CheckpointTensorTask):
@@ -56,6 +142,22 @@ class _ReplicatedTensorTask(_CheckpointTensorTask):
         # Replicated tensors are identical across ranks, so only the global
         # rank 0 writes them to disk.
         return _tensor_to_cpu(self.tensor) if ctx.dp_rank == 0 and ctx.rank == 0 else None
+
+    def policy_layout(self) -> PolicyTensorLayout:
+        return PolicyTensorLayout(
+            shape=tuple(self.tensor.shape),
+            dtype=self.tensor.dtype,
+            pieces=(
+                PolicyTensorPiece(
+                    tensor=self.tensor,
+                    canonical_shape=tuple(self.tensor.shape),
+                    shard_dim=0,
+                    shard_start=0,
+                    shard_end=self.tensor.shape[0] if self.tensor.ndim else 1,
+                ),
+            ),
+            replicated=True,
+        )
 
 
 class _TensorParallelGatherTask(_CheckpointTensorTask):
@@ -74,6 +176,25 @@ class _TensorParallelGatherTask(_CheckpointTensorTask):
         if self._gathered is None:
             self._gathered = _all_gather_tensor_parallel(self.local)
         return _gathered_tensor_to_cpu(self._gathered, dim=self.dim) if _owns_checkpoint_tensor(key) else None
+
+    def policy_layout(self) -> PolicyTensorLayout:
+        ctx = get_tp_context()
+        shape = list(self.local.shape)
+        shape[self.dim] *= ctx.world_size
+        start = ctx.rank * self.local.shape[self.dim]
+        return PolicyTensorLayout(
+            shape=tuple(shape),
+            dtype=self.local.dtype,
+            pieces=(
+                PolicyTensorPiece(
+                    tensor=self.local,
+                    canonical_shape=tuple(shape),
+                    shard_dim=self.dim,
+                    shard_start=start,
+                    shard_end=start + self.local.shape[self.dim],
+                ),
+            ),
+        )
 
 
 class _ColumnGatherTask:
@@ -119,6 +240,17 @@ class _ColumnGatherResult(_CheckpointTensorTask):
     def materialize(self, key: str) -> torch.Tensor | None:
         return self.task.materialize(key, self.index)
 
+    def policy_layout(self) -> PolicyTensorLayout:
+        ctx = get_tp_context()
+        local = self.task.locals[self.index]
+        shape = (local.shape[0] * ctx.world_size, *local.shape[1:])
+        start = ctx.rank * local.shape[0]
+        return PolicyTensorLayout(
+            shape=shape,
+            dtype=local.dtype,
+            pieces=(PolicyTensorPiece(local, shape, 0, start, start + local.shape[0]),),
+        )
+
 
 class _SplitColumnGatherTask(_CheckpointTensorTask):
     """All-gather a fused tensor and re-split into the original sub-tensors.
@@ -152,6 +284,68 @@ class _SplitColumnGatherTask(_CheckpointTensorTask):
             offset += row_size
         return _tensor_to_cpu(torch.cat(outputs, dim=0).contiguous())
 
+    def policy_layout(self) -> PolicyTensorLayout:
+        ctx = get_tp_context()
+        total_rows = sum(part.shape[0] * ctx.world_size for part in self.parts)
+        shape = (total_rows, *self.parts[0].shape[1:])
+        pieces = []
+        part_offset = 0
+        for part in self.parts:
+            start = part_offset + ctx.rank * part.shape[0]
+            pieces.append(PolicyTensorPiece(part, shape, 0, start, start + part.shape[0]))
+            part_offset += part.shape[0] * ctx.world_size
+        return PolicyTensorLayout(shape=shape, dtype=self.parts[0].dtype, pieces=tuple(pieces))
+
+
+class _RangedTensorParallelGatherTask(_CheckpointTensorTask):
+    """Column shard with an explicit global range, including replicated ranges."""
+
+    def __init__(self, local: torch.Tensor, start: int, end: int, global_size: int):
+        self.local = local.detach().contiguous()
+        self.start = start
+        self.end = end
+        self.global_size = global_size
+
+    def materialize(self, key: str) -> torch.Tensor | None:
+        ctx = get_tp_context()
+        if ctx.world_size == 1:
+            return _tensor_to_cpu(self.local) if _owns_checkpoint_tensor(key) else None
+        gathered = torch.empty((ctx.world_size, *self.local.shape), dtype=self.local.dtype, device=self.local.device)
+        dist.all_gather_into_tensor(gathered, self.local, group=ctx.group)
+        all_ranges: list[tuple[int, int] | None] = [None] * ctx.world_size
+        dist.all_gather_object(all_ranges, (self.start, self.end), group=ctx.group)
+        output = torch.empty(
+            (self.global_size, *self.local.shape[1:]), dtype=self.local.dtype, device=self.local.device
+        )
+        for rank, rank_range in enumerate(all_ranges):
+            if rank_range is None:
+                raise RuntimeError(f"missing TP shard range for rank {rank}")
+            start, end = rank_range
+            output[start:end].copy_(gathered[rank, : end - start])
+        return _tensor_to_cpu(output) if _owns_checkpoint_tensor(key) else None
+
+    def policy_layout(self) -> PolicyTensorLayout:
+        ctx = get_tp_context()
+        shape = (self.global_size, *self.local.shape[1:])
+        local_width = self.end - self.start
+        unique_shards = self.global_size // local_width
+        repeats = ctx.world_size // unique_shards
+        owner_rank = (self.start // local_width) * repeats
+        return PolicyTensorLayout(
+            shape=shape,
+            dtype=self.local.dtype,
+            pieces=(
+                PolicyTensorPiece(
+                    self.local,
+                    shape,
+                    0,
+                    self.start,
+                    self.end,
+                    publish=ctx.rank == owner_rank,
+                ),
+            ),
+        )
+
 
 class CheckpointTensorStore(dict[str, torch.Tensor | _CheckpointTensorTask | None]):
     """Dict-like staging area for distributed HF safetensors writing.
@@ -174,6 +368,116 @@ class CheckpointTensorStore(dict[str, torch.Tensor | _CheckpointTensorTask | Non
 
     def close_progress(self) -> None:
         return
+
+
+class PolicyTensorStore(dict[str, _CheckpointTensorTask]):
+    """Ordered in-memory checkpoint layout without materialization or CPU I/O."""
+
+    def __setitem__(self, key: str, value: torch.Tensor | _CheckpointTensorTask | None) -> None:
+        if value is None:
+            return
+        task = value if isinstance(value, _CheckpointTensorTask) else _ReplicatedTensorTask(value)
+        super().__setitem__(key, task)
+
+    def add_layout(self, key: str, layout: PolicyTensorLayout) -> None:
+        """Insert a precomputed layout task."""
+
+        super().__setitem__(key, _PolicyLayoutTask(layout))
+
+
+class _PolicyLayoutTask(_CheckpointTensorTask):
+    """Policy-only task for layouts that checkpoint save materializes eagerly."""
+
+    def __init__(self, layout: PolicyTensorLayout):
+        self.layout = layout
+
+    def materialize(self, key: str) -> torch.Tensor | None:
+        raise RuntimeError(f"policy-only tensor task {key!r} cannot be materialized as a checkpoint")
+
+    def policy_layout(self) -> PolicyTensorLayout:
+        return self.layout
+
+
+@contextmanager
+def policy_plan_scope():
+    """Keep gather tasks on every DP replica while building a sync plan."""
+
+    token = _POLICY_PLAN_ACTIVE.set(True)
+    try:
+        yield
+    finally:
+        _POLICY_PLAN_ACTIVE.reset(token)
+
+
+def _copy_piece_to_chunk(piece: PolicyTensorPiece, chunk_offset: int, output: torch.Tensor) -> None:
+    """Copy contiguous shard blocks from a local tensor into a flat chunk."""
+
+    local = piece.tensor.reshape(-1)
+    chunk_end = chunk_offset + output.numel()
+    dim = piece.shard_dim
+    inner = _shape_numel(piece.canonical_shape[dim + 1 :])
+    outer = _shape_numel(piece.canonical_shape[:dim])
+    canonical_width = piece.canonical_shape[dim] * inner
+    local_width = (piece.shard_end - piece.shard_start) * inner
+    for outer_idx in range(outer):
+        canonical_start = outer_idx * canonical_width + piece.shard_start * inner
+        canonical_end = canonical_start + local_width
+        start = max(canonical_start, chunk_offset)
+        end = min(canonical_end, chunk_end)
+        if start >= end:
+            continue
+        local_start = outer_idx * local_width + start - canonical_start
+        output[start - chunk_offset : end - chunk_offset].copy_(local[local_start : local_start + end - start])
+
+
+def _copy_chunk_to_piece(piece: PolicyTensorPiece, chunk_offset: int, source: torch.Tensor) -> None:
+    """Copy intersecting flat chunk blocks into a local tensor view."""
+
+    local = piece.tensor.reshape(-1)
+    chunk_end = chunk_offset + source.numel()
+    dim = piece.shard_dim
+    inner = _shape_numel(piece.canonical_shape[dim + 1 :])
+    outer = _shape_numel(piece.canonical_shape[:dim])
+    canonical_width = piece.canonical_shape[dim] * inner
+    local_width = (piece.shard_end - piece.shard_start) * inner
+    for outer_idx in range(outer):
+        canonical_start = outer_idx * canonical_width + piece.shard_start * inner
+        canonical_end = canonical_start + local_width
+        start = max(canonical_start, chunk_offset)
+        end = min(canonical_end, chunk_end)
+        if start >= end:
+            continue
+        local_start = outer_idx * local_width + start - canonical_start
+        local[local_start : local_start + end - start].copy_(
+            source[start - chunk_offset : end - chunk_offset].to(dtype=local.dtype)
+        )
+
+
+def _copy_flat_piece_to_chunk(piece: PolicyFlatPiece, chunk_offset: int, output: torch.Tensor) -> None:
+    local = piece.tensor.reshape(-1)
+    start = max(piece.canonical_offset, chunk_offset)
+    end = min(piece.canonical_offset + local.numel(), chunk_offset + output.numel())
+    if start < end:
+        output[start - chunk_offset : end - chunk_offset].copy_(
+            local[start - piece.canonical_offset : end - piece.canonical_offset]
+        )
+
+
+def _copy_chunk_to_flat_piece(piece: PolicyFlatPiece, chunk_offset: int, source: torch.Tensor) -> None:
+    local = piece.tensor.reshape(-1)
+    start = max(piece.canonical_offset, chunk_offset)
+    end = min(piece.canonical_offset + local.numel(), chunk_offset + source.numel())
+    if start < end:
+        local[start - piece.canonical_offset : end - piece.canonical_offset].copy_(
+            source[start - chunk_offset : end - chunk_offset].to(dtype=local.dtype)
+        )
+
+
+def _shape_numel(shape: tuple[int, ...]) -> int:
+    result = 1
+    for size in shape:
+        result *= size
+    return result
 
 
 def _checkpoint_tensor_owner(key: str) -> int:
@@ -383,8 +687,9 @@ class SafetensorsIndex:
         """Broadcast one tensor from rank 0 to the rest of the TP group."""
 
         ctx = get_tp_context()
-        # In multi-DP setups, each DP replica needs its own broadcast root.
-        src = ctx.dp_rank * ctx.world_size
+        # PyTorch's ``src`` is a default-world rank even when ``group`` is
+        # supplied. Partitioned train/rollout TP groups may start above rank 0.
+        src = ctx.tp_global_rank(0)
         tensor = None
         meta = [None]
         if ctx.rank == 0:
@@ -468,7 +773,7 @@ def gather_tensor_parallel_tensor(tensor: torch.Tensor, dim: int) -> _Checkpoint
 
     ctx = get_tp_context()
     # Non-DP-rank-0 replicas skip checkpoint saving entirely.
-    if ctx.dp_rank != 0:
+    if ctx.dp_rank != 0 and not _POLICY_PLAN_ACTIVE.get():
         return None
     local = tensor.detach().contiguous()
     if ctx.world_size == 1:
@@ -480,7 +785,7 @@ def gather_tensor_parallel_column_tensors(tensors: list[torch.Tensor]) -> list[_
     """Build fused-gather tasks for a list of column-parallel tensors."""
 
     ctx = get_tp_context()
-    if ctx.dp_rank != 0:
+    if ctx.dp_rank != 0 and not _POLICY_PLAN_ACTIVE.get():
         return [None for _ in tensors]
     if not tensors:
         return []
@@ -495,9 +800,24 @@ def gather_tensor_parallel_split_column_tensor(tensor: torch.Tensor, sizes: list
     """Build a lazy gather for a fused tensor that must be re-split before save."""
 
     ctx = get_tp_context()
-    if ctx.dp_rank != 0:
+    if ctx.dp_rank != 0 and not _POLICY_PLAN_ACTIVE.get():
         return None
     return _SplitColumnGatherTask(list(tensor.detach().split(sizes, dim=0)))
+
+
+def gather_tensor_parallel_ranged_tensor(
+    tensor: torch.Tensor,
+    *,
+    start: int,
+    end: int,
+    global_size: int,
+) -> _CheckpointTensorTask | None:
+    """Build a lazy task for an explicit possibly-replicated column range."""
+
+    ctx = get_tp_context()
+    if ctx.dp_rank != 0 and not _POLICY_PLAN_ACTIVE.get():
+        return None
+    return _RangedTensorParallelGatherTask(tensor, start, end, global_size)
 
 
 def _gathered_tensor_to_cpu(gathered: torch.Tensor, dim: int) -> torch.Tensor:
@@ -576,7 +896,7 @@ def rank0_tensor(tensor: torch.Tensor) -> _CheckpointTensorTask | None:
     """Wrap a replicated tensor for saving; returns None on non-DP-rank-0."""
 
     ctx = get_tp_context()
-    return _ReplicatedTensorTask(tensor) if ctx.dp_rank == 0 else None
+    return _ReplicatedTensorTask(tensor) if ctx.dp_rank == 0 or _POLICY_PLAN_ACTIVE.get() else None
 
 
 def write_hf_safetensors_checkpoint(

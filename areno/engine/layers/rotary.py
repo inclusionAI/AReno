@@ -22,6 +22,27 @@ def rotate_half(x: torch.Tensor) -> torch.Tensor:
     return torch.cat((-x2, x1), dim=-1)
 
 
+def _normalize_mrope_positions(position_ids: torch.Tensor) -> torch.Tensor | None:
+    """Return Qwen-style MRoPE positions as (3, batch, seqlen), if present."""
+
+    if position_ids.ndim == 2 and int(position_ids.shape[0]) == 3:
+        return position_ids.unsqueeze(1)
+    if position_ids.ndim == 3 and int(position_ids.shape[0]) == 3:
+        return position_ids
+    if position_ids.ndim == 3 and int(position_ids.shape[1]) == 3:
+        return position_ids.permute(1, 0, 2)
+    return None
+
+
+def _apply_interleaved_mrope(x: torch.Tensor, mrope_section: tuple[int, int, int]) -> torch.Tensor:
+    """Match SGLang/Qwen3.5-VL's interleaved T/H/W RoPE axis selection."""
+
+    out = x[0].clone()
+    out[..., 1 : mrope_section[1] * 3 : 3] = x[1, ..., 1 : mrope_section[1] * 3 : 3]
+    out[..., 2 : mrope_section[2] * 3 : 3] = x[2, ..., 2 : mrope_section[2] * 3 : 3]
+    return out
+
+
 class RotaryEmbedding(nn.Module):
     """Standard RoPE that rotates every (i, i+head_dim/2) pair.
 
@@ -61,10 +82,20 @@ class PartialRotaryEmbedding(nn.Module):
     """
 
     def __init__(
-        self, head_dim: int, max_position: int, theta: float, partial_rotary_factor: float, *, is_neox_style: bool
+        self,
+        head_dim: int,
+        max_position: int,
+        theta: float,
+        partial_rotary_factor: float,
+        *,
+        is_neox_style: bool,
+        mrope_section: tuple[int, int, int] | None = None,
+        mrope_interleaved: bool = False,
     ):
         super().__init__()
         self.is_neox_style = is_neox_style
+        self.mrope_section = mrope_section
+        self.mrope_interleaved = mrope_interleaved
         # Only this many leading channels get rotated.
         self.rope_dim = int(head_dim * partial_rotary_factor)
         inv_freq = 1.0 / (theta ** (torch.arange(0, self.rope_dim, 2, dtype=torch.float32) / self.rope_dim))
@@ -77,14 +108,32 @@ class PartialRotaryEmbedding(nn.Module):
     def forward(
         self, q: torch.Tensor, k: torch.Tensor, position_ids: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        cos = self.cos_cached[position_ids].unsqueeze(2).to(dtype=q.dtype)
-        sin = self.sin_cached[position_ids].unsqueeze(2).to(dtype=q.dtype)
+        cos, sin = self._cos_sin(position_ids, q.dtype)
         # Split each head into rotated and pass-through segments.
         q_rot, q_pass = q[..., : self.rope_dim], q[..., self.rope_dim :]
         k_rot, k_pass = k[..., : self.rope_dim], k[..., self.rope_dim :]
         q_rot = apply_rotary(q_rot, cos, sin, self.is_neox_style)
         k_rot = apply_rotary(k_rot, cos, sin, self.is_neox_style)
         return torch.cat((q_rot, q_pass), dim=-1), torch.cat((k_rot, k_pass), dim=-1)
+
+    def _cos_sin(self, position_ids: torch.Tensor, dtype: torch.dtype) -> tuple[torch.Tensor, torch.Tensor]:
+        mrope_positions = _normalize_mrope_positions(position_ids)
+        if mrope_positions is None or self.mrope_section is None:
+            cos = self.cos_cached[position_ids].unsqueeze(2).to(dtype=dtype)
+            sin = self.sin_cached[position_ids].unsqueeze(2).to(dtype=dtype)
+            return cos, sin
+        half_dim = self.rope_dim // 2
+        cos = self.cos_cached[:, :half_dim][mrope_positions]
+        sin = self.sin_cached[:, :half_dim][mrope_positions]
+        if self.mrope_interleaved:
+            cos = _apply_interleaved_mrope(cos, self.mrope_section)
+            sin = _apply_interleaved_mrope(sin, self.mrope_section)
+        else:
+            cos = torch.cat([part[idx] for idx, part in enumerate(cos.split(self.mrope_section, dim=-1))], dim=-1)
+            sin = torch.cat([part[idx] for idx, part in enumerate(sin.split(self.mrope_section, dim=-1))], dim=-1)
+        cos = torch.cat((cos, cos), dim=-1)
+        sin = torch.cat((sin, sin), dim=-1)
+        return cos.unsqueeze(2).to(dtype=dtype), sin.unsqueeze(2).to(dtype=dtype)
 
 
 class Gemma4RotaryEmbedding(nn.Module):

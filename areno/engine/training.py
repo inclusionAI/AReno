@@ -78,7 +78,14 @@ class TrainingManager:
         data_pack["_activation_checkpointing_enabled"] = worker.config.runtime.activation_checkpointing
         tokens = data_pack["input_ids"].long()
         position_ids = data_pack.get("position_ids")
-        out = worker.model(input_ids=tokens, position_ids=position_ids, train_meta=_train_meta(data_pack, tokens))
+        model_kwargs = {
+            "input_ids": tokens,
+            "position_ids": position_ids,
+            "train_meta": _train_meta(data_pack, tokens),
+        }
+        if data_pack.get("features") is not None:
+            model_kwargs["features"] = data_pack["features"]
+        out = worker.model(**model_kwargs)
         if "train_cu_seqlens" in data_pack:
             logprobs = packed_next_token_logprobs(out.logits_shard, tokens, data_pack["train_cu_seqlens"])
         else:

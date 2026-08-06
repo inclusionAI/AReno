@@ -14,7 +14,7 @@ def register_models() -> None:
     from areno.models.minicpmv46 import MiniCPMV46Adapter
     from areno.models.olmo2 import Olmo2Adapter
     from areno.models.qwen3 import Qwen3Adapter, Qwen3MoeAdapter
-    from areno.models.qwen3_5 import Qwen35Adapter, Qwen35MoeAdapter
+    from areno.models.qwen3_5 import Qwen35Adapter, Qwen35MoeAdapter, Qwen35MoeVLAdapter, Qwen35VLAdapter
     from areno.models.registry import register_adapter
 
     # Order here is not semantically meaningful; adapters are keyed by name
@@ -22,7 +22,9 @@ def register_models() -> None:
     register_adapter(LlamaAdapter())
     register_adapter(Qwen3Adapter())
     register_adapter(Qwen3MoeAdapter())
+    register_adapter(Qwen35MoeVLAdapter())
     register_adapter(Qwen35MoeAdapter())
+    register_adapter(Qwen35VLAdapter())
     register_adapter(Qwen35Adapter())
     register_adapter(BailingMoeLinearV2Adapter())
     register_adapter(Gemma4Adapter())

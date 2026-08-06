@@ -131,7 +131,13 @@ class ArenoEngine:
       rollout paths.
     """
 
-    def __init__(self, config: EngineConfig):
+    def __init__(
+        self,
+        config: EngineConfig,
+        *,
+        start: bool = True,
+        cluster_kwargs: dict[str, Any] | None = None,
+    ):
         """Start rank workers for a validated engine config.
 
         Constructs the :class:`TPCluster` and starts the underlying worker
@@ -140,13 +146,14 @@ class ArenoEngine:
 
         # Loss function is required because the engine always carries a trainer
         # path; pure-inference engines should still set a no-op loss.
-        if config.train_loss_fn is None:
+        if config.role == "train" and config.train_loss_fn is None:
             raise ValueError("ArenoEngine requires train_loss_fn")
         self.config = config
         # TPCluster owns the per-rank worker processes and the IPC channels;
         # ``ArenoWorker`` is the rank-side command loop.
-        self.cluster = TPCluster(config, ArenoWorker)
-        self.cluster.start()
+        self.cluster = TPCluster(config, ArenoWorker, **(cluster_kwargs or {}))
+        if start:
+            self.cluster.start()
         self._async_dp_cursor = count()
 
     def begin_rollout_session(self) -> None:
@@ -186,6 +193,10 @@ class ArenoEngine:
         optimizer_config: OptimizerConfig | None = None,
         runtime_config: RuntimeConfig | None = None,
         loss_fn: Callable[[Any, torch.Tensor], torch.Tensor | tuple[torch.Tensor, dict[str, Any]]] | None = None,
+        role: str = "train",
+        start: bool = True,
+        cluster_kwargs: dict[str, Any] | None = None,
+        policy_sync_bucket_mb: int = 64,
     ) -> ArenoEngine:
         """Build an engine by reading model config from a checkpoint path.
 
@@ -213,8 +224,10 @@ class ArenoEngine:
             dummy_load=dummy_load,
             optimizer=optimizer_config or OptimizerConfig(),
             runtime=runtime_config or RuntimeConfig(),
+            role=role,
+            policy_sync_bucket_mb=policy_sync_bucket_mb,
         )
-        return cls(cfg)
+        return cls(cfg, start=start, cluster_kwargs=cluster_kwargs)
 
     def generate_rollout(
         self,
@@ -225,6 +238,7 @@ class ArenoEngine:
         max_prompt_len: int | None = None,
         eos_token_id: int | None = None,
         sampling_params: SamplingParams | None = None,
+        prompt_features: list[dict[str, Any] | None] | None = None,
         decode_progress_interval_s: float = 0.0,
         cancel_flags: torch.Tensor | None = None,
     ) -> RolloutOutput:
@@ -242,6 +256,8 @@ class ArenoEngine:
 
         if not prompts:
             raise ValueError("prompts must be non-empty")
+        if prompt_features is not None and len(prompt_features) != len(prompts):
+            raise ValueError("prompt_features must have the same length as prompts")
         if max_running_prompts < 1:
             raise ValueError("max_running_prompts must be >= 1")
         sampling_params = sampling_params or SamplingParams()
@@ -269,6 +285,11 @@ class ArenoEngine:
             chunk_start = sum(len(output.prompt_ids) for output in outputs)
             # Round-robin chunk rows across DP ranks; per-rank token rows.
             prompts_by_dp = split_list_by_dp(chunk, int(self.config.dp_size))
+            chunk_features = None
+            prompt_features_by_dp = None
+            if prompt_features is not None:
+                chunk_features = prompt_features[chunk_start : chunk_start + len(chunk)]
+                prompt_features_by_dp = split_list_by_dp(chunk_features, int(self.config.dp_size))
             # Parallel split of the global prompt indices for downstream mapping.
             prompt_indices_by_dp = split_list_by_dp(
                 list(range(chunk_start, chunk_start + len(chunk))), int(self.config.dp_size)
@@ -288,6 +309,7 @@ class ArenoEngine:
                 RolloutPayload(
                     prompts_by_dp=prompts_by_dp,
                     prompt_indices_by_dp=prompt_indices_by_dp,
+                    prompt_features_by_dp=prompt_features_by_dp,
                     max_new_tokens=max_new_tokens,
                     eos_token_id=eos_token_id,
                     sampling_params=sampling_params,
@@ -360,6 +382,7 @@ class ArenoEngine:
         max_prompt_len: int | None = None,
         eos_token_id: int | None = None,
         sampling_params: SamplingParams | None = None,
+        prompt_features: list[dict[str, Any] | None] | None = None,
         decode_progress_interval_s: float = 0.0,
         cancel_flags: torch.Tensor | None = None,
     ) -> RolloutOutput:
@@ -372,6 +395,7 @@ class ArenoEngine:
             max_prompt_len=max_prompt_len,
             eos_token_id=eos_token_id,
             sampling_params=sampling_params,
+            prompt_features=prompt_features,
             decode_progress_interval_s=decode_progress_interval_s,
             cancel_flags=cancel_flags,
         )
@@ -385,6 +409,7 @@ class ArenoEngine:
         max_prompt_len: int | None = None,
         eos_token_id: int | None = None,
         sampling_params: SamplingParams | None = None,
+        prompt_features: list[dict[str, Any] | None] | None = None,
         decode_progress_interval_s: float = 0.0,
         cancel_flags: torch.Tensor | None = None,
     ) -> RolloutOutput:
@@ -392,6 +417,8 @@ class ArenoEngine:
 
         if not prompts:
             raise ValueError("prompts must be non-empty")
+        if prompt_features is not None and len(prompt_features) != len(prompts):
+            raise ValueError("prompt_features must have the same length as prompts")
         if max_running_prompts < 1:
             raise ValueError("max_running_prompts must be >= 1")
         sampling_params = sampling_params or SamplingParams()
@@ -415,6 +442,10 @@ class ArenoEngine:
         for chunk in chunks:
             chunk_start = sum(len(output.prompt_ids) for output in outputs)
             prompts_by_dp = _split_list_by_dp_with_offset(chunk, dp_size, dp_start)
+            prompt_features_by_dp = None
+            if prompt_features is not None:
+                chunk_features = prompt_features[chunk_start : chunk_start + len(chunk)]
+                prompt_features_by_dp = _split_list_by_dp_with_offset(chunk_features, dp_size, dp_start)
             prompt_indices_by_dp = _split_list_by_dp_with_offset(
                 list(range(chunk_start, chunk_start + len(chunk))), dp_size, dp_start
             )
@@ -425,6 +456,7 @@ class ArenoEngine:
             payload = RolloutPayload(
                 prompts_by_dp=prompts_by_dp,
                 prompt_indices_by_dp=prompt_indices_by_dp,
+                prompt_features_by_dp=prompt_features_by_dp,
                 max_new_tokens=max_new_tokens,
                 eos_token_id=eos_token_id,
                 sampling_params=sampling_params,
@@ -520,7 +552,13 @@ class ArenoEngine:
         self.cluster.call(Op.ENSURE_ROLES, payload)
 
     def score_logprobs(
-        self, role: str, token_rows: list[list[int]], *, pad_token_id: int, microbatch_size: int = 8
+        self,
+        role: str,
+        token_rows: list[list[int]],
+        *,
+        pad_token_id: int,
+        features: list[dict[str, Any] | None] | None = None,
+        microbatch_size: int = 8,
     ) -> list[list[float]]:
         """Score fixed token rows with a model role.
 
@@ -531,18 +569,28 @@ class ArenoEngine:
 
         if not token_rows:
             return []
+        if features is not None and len(features) != len(token_rows):
+            raise ValueError("features must have the same length as token_rows")
         results = self.cluster.call(
             Op.SCORE_LOGPROBS,
             ScorePayload(
                 role=role,
                 token_rows_by_dp=split_list_by_dp(token_rows, int(self.config.dp_size)),
+                features_by_dp=split_list_by_dp(features, int(self.config.dp_size)) if features is not None else None,
                 pad_token_id=int(pad_token_id),
                 microbatch_size=int(microbatch_size),
             ),
         )
         return _merge_dp_rank0_strided_results(results, self.config.tp_size, int(self.config.dp_size))
 
-    def score_values(self, role: str, token_rows: list[list[int]], *, pad_token_id: int) -> list[list[float]]:
+    def score_values(
+        self,
+        role: str,
+        token_rows: list[list[int]],
+        *,
+        pad_token_id: int,
+        features: list[dict[str, Any] | None] | None = None,
+    ) -> list[list[float]]:
         """Score per-token values with a critic role.
 
         Dispatches ``Op.SCORE_VALUES`` (blocking). Same shape contract as
@@ -551,17 +599,27 @@ class ArenoEngine:
 
         if not token_rows:
             return []
+        if features is not None and len(features) != len(token_rows):
+            raise ValueError("features must have the same length as token_rows")
         results = self.cluster.call(
             Op.SCORE_VALUES,
             ScorePayload(
                 role=role,
                 token_rows_by_dp=split_list_by_dp(token_rows, int(self.config.dp_size)),
+                features_by_dp=split_list_by_dp(features, int(self.config.dp_size)) if features is not None else None,
                 pad_token_id=int(pad_token_id),
             ),
         )
         return _merge_dp_rank0_strided_results(results, self.config.tp_size, int(self.config.dp_size))
 
-    def score_rewards(self, role: str, token_rows: list[list[int]], *, pad_token_id: int) -> list[float]:
+    def score_rewards(
+        self,
+        role: str,
+        token_rows: list[list[int]],
+        *,
+        pad_token_id: int,
+        features: list[dict[str, Any] | None] | None = None,
+    ) -> list[float]:
         """Score sequence rewards with a reward model role.
 
         Dispatches ``Op.SCORE_REWARDS`` (blocking). Returns one scalar reward
@@ -570,11 +628,14 @@ class ArenoEngine:
 
         if not token_rows:
             return []
+        if features is not None and len(features) != len(token_rows):
+            raise ValueError("features must have the same length as token_rows")
         results = self.cluster.call(
             Op.SCORE_REWARDS,
             ScorePayload(
                 role=role,
                 token_rows_by_dp=split_list_by_dp(token_rows, int(self.config.dp_size)),
+                features_by_dp=split_list_by_dp(features, int(self.config.dp_size)) if features is not None else None,
                 pad_token_id=int(pad_token_id),
             ),
         )

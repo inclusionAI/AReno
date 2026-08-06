@@ -134,10 +134,7 @@ def broadcast_object(obj: object | None, src: int = 0) -> object:
 def _tp_local_to_global_rank(rank: int) -> int:
     """Translate a TP-local rank (0..tp_size-1) into a global process rank."""
 
-    ctx = get_tp_context()
-    if rank < 0 or rank >= ctx.world_size:
-        raise ValueError(f"rank={rank} is outside TP group size {ctx.world_size}")
-    return ctx.dp_rank * ctx.world_size + rank
+    return get_tp_context().tp_global_rank(rank)
 
 
 class _AllReduceSum(torch.autograd.Function):

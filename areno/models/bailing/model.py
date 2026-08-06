@@ -62,7 +62,11 @@ from areno.accel.ops import (
     log_once,
     seg_la_fwd,
 )
-from areno.engine.checkpoints.common import load_checkpoint_weights, save_checkpoint_weights
+from areno.engine.checkpoints.common import (
+    build_checkpoint_policy_plan,
+    load_checkpoint_weights,
+    save_checkpoint_weights,
+)
 from areno.engine.config import ModelConfig, _parse_dtype
 from areno.engine.layers.attention_backend.infer import FlashAttnInferBackend, build_infer_attention_backend
 from areno.engine.layers.attention_backend.train import build_train_attention_backend
@@ -407,8 +411,16 @@ class BailingGroupedExperts(nn.Module):
         )
         if x.shape[0] == 0:
             # No tokens routed to this rank — still need to all_reduce to keep
-            # collective sync with peers.
-            return all_reduce(flat.new_zeros(flat.shape))
+            # collective and gradient sync with peers. The zero-valued graph
+            # edges ensure expert and router gradients exist on every rank.
+            fc1_param = next(self.linear_fc1.parameters())
+            fc2_param = next(self.linear_fc2.parameters())
+            zero = (
+                fc1_param.reshape(-1)[0] * 0
+                + fc2_param.reshape(-1)[0] * 0
+                + topk_weight.sum().to(dtype=fc1_param.dtype) * 0
+            )
+            return all_reduce(flat.new_zeros(flat.shape) + zero)
         hidden, _ = _grouped_linear_forward(self.linear_fc1, x.contiguous(), tokens_per_expert)
         # Apply routing weight before fc2 so it stays inside the fp32 reduction.
         hidden = (
@@ -593,11 +605,12 @@ def _gather_expert_parallel_tensor(tensor: torch.Tensor) -> torch.Tensor | None:
     local = tensor.detach().contiguous()
     if ctx.world_size == 1:
         return local.cpu()
+    dst = ctx.tp_global_rank(0)
     if ctx.rank == 0:
         chunks = [torch.empty_like(local) for _ in range(ctx.world_size)]
-        dist.gather(local, gather_list=chunks, dst=ctx.dp_rank * ctx.world_size, group=ctx.group)
+        dist.gather(local, gather_list=chunks, dst=dst, group=ctx.group)
         return torch.cat(chunks, dim=0).cpu()
-    dist.gather(local, dst=ctx.dp_rank * ctx.world_size, group=ctx.group)
+    dist.gather(local, dst=dst, group=ctx.group)
     return None
 
 
@@ -1356,6 +1369,9 @@ class BailingMoeLinearV2Adapter(ModelAdapter):
         if not isinstance(model, BailingMoeLinearV2ForCausalLM):
             raise TypeError(f"BailingMoeLinearV2Adapter cannot save weights from {type(model)!r}")
         return save_checkpoint_weights(model, output_path, source_path, CHECKPOINT_SPEC)
+
+    def build_policy_plan(self, model: nn.Module):
+        return build_checkpoint_policy_plan(model, CHECKPOINT_SPEC)
 
 
 def _is_softmax_layer(config: ModelConfig, layer_idx: int) -> bool:
