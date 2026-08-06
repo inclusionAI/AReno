@@ -30,9 +30,7 @@ class _FakeAreno:
         self.events.append("init")
 
     def ensure_roles(self, roles):
-        self.events.append(
-            ("ensure_roles", tuple(roles))
-        )
+        self.events.append(("ensure_roles", tuple(roles)))
 
         if self.ensure_error is not None:
             raise self.ensure_error
@@ -47,21 +45,15 @@ class _FakeAreno:
         *,
         microbatch_size,
     ):
-        self.score_calls.append(
-            (role, token_rows, microbatch_size)
-        )
+        self.score_calls.append((role, token_rows, microbatch_size))
         return self.score_rows
 
 
 class _DummyRoleTrainer(RoleAwareTrainerMixin):
     def __init__(self, areno):
         self.areno = areno
-        self.config = SimpleNamespace(
-            score_micro_bs=3
-        )
-        self.logger = logging.getLogger(
-            "test.role_aware"
-        )
+        self.config = SimpleNamespace(score_micro_bs=3)
+        self.logger = logging.getLogger("test.role_aware")
         self.roles = {
             "teacher": ModelRole(
                 "teacher",
@@ -73,9 +65,7 @@ class _DummyRoleTrainer(RoleAwareTrainerMixin):
 
     def _fit_initialized(self):
         self.initialized_fit_called = True
-        self.areno.events.append(
-            "fit_initialized"
-        )
+        self.areno.events.append("fit_initialized")
 
 
 def test_existing_role_trainers_use_shared_role_boundary():
@@ -105,9 +95,7 @@ def test_role_aware_fit_initializes_roles_before_training_and_closes():
 
 
 def test_role_aware_fit_closes_when_role_initialization_fails():
-    areno = _FakeAreno(
-        ensure_error=RuntimeError("load failed")
-    )
+    areno = _FakeAreno(ensure_error=RuntimeError("load failed"))
     trainer = _DummyRoleTrainer(areno)
 
     with pytest.raises(
@@ -145,22 +133,15 @@ def test_role_logprob_scoring_forwards_microbatch_and_validates_alignment():
         [-0.1, -0.2],
         [-0.3],
     ]
-    assert areno.score_calls == [
-        ("teacher", token_rows, 3)
-    ]
+    assert areno.score_calls == [("teacher", token_rows, 3)]
 
 
 def test_role_logprob_scoring_rejects_missing_rows():
-    trainer = _DummyRoleTrainer(
-        _FakeAreno(score_rows=[])
-    )
+    trainer = _DummyRoleTrainer(_FakeAreno(score_rows=[]))
 
     with pytest.raises(
         ValueError,
-        match=(
-            "returned 0 logprob rows "
-            "for 1 token rows"
-        ),
+        match=("returned 0 logprob rows for 1 token rows"),
     ):
         trainer._score_logprobs(
             "teacher",
@@ -169,18 +150,11 @@ def test_role_logprob_scoring_rejects_missing_rows():
 
 
 def test_role_logprob_scoring_rejects_misaligned_token_scores():
-    trainer = _DummyRoleTrainer(
-        _FakeAreno(
-            score_rows=[[-0.1]]
-        )
-    )
+    trainer = _DummyRoleTrainer(_FakeAreno(score_rows=[[-0.1]]))
 
     with pytest.raises(
         ValueError,
-        match=(
-            "returned 1 logprobs for token row 0 "
-            "with 2 tokens"
-        ),
+        match=("returned 1 logprobs for token row 0 with 2 tokens"),
     ):
         trainer._score_logprobs(
             "teacher",

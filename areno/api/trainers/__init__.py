@@ -17,4 +17,11 @@ from areno.api.trainers.role_aware import (
 )
 from areno.api.trainers.sft import SFTTrainer
 
-__all__ = ["DPOTrainer", "PolicyOnlyTrainer", "PPOTrainer", "SFTTrainer",  "RoleAwarePolicyTrainer", "RoleAwareTrainerMixin",]
+__all__ = [
+    "DPOTrainer",
+    "PolicyOnlyTrainer",
+    "PPOTrainer",
+    "SFTTrainer",
+    "RoleAwarePolicyTrainer",
+    "RoleAwareTrainerMixin",
+]

@@ -22,8 +22,9 @@ import areno.api
 from areno.api.dashboard import record_dashboard_state
 from areno.api.data_utils import apply_chat_template, encode_prompt_value, response_to_tokens_and_mask
 from areno.api.roles import ModelRole
-from areno.api.trainers.role_aware import RoleAwareTrainerMixin
 from areno.api.tokenizer import configure_chat_template_enable_thinking
+from areno.api.trainers.role_aware import RoleAwareTrainerMixin
+
 
 class DPOTrainer(RoleAwareTrainerMixin):
     """Offline preference trainer using one frozen reference policy."""

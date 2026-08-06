@@ -8,7 +8,10 @@ reuse the same boundary for a frozen teacher.
 """
 
 from __future__ import annotations
+
 from areno.api.trainers.policy_only import PolicyOnlyTrainer
+
+
 class RoleAwareTrainerMixin:
     """Provide role initialization and validated log-probability scoring.
 
@@ -55,18 +58,12 @@ class RoleAwareTrainerMixin:
         )
 
         if len(rows) != len(token_rows):
-            raise ValueError(
-                f"role {role!r} returned {len(rows)} logprob rows "
-                f"for {len(token_rows)} token rows"
-            )
+            raise ValueError(f"role {role!r} returned {len(rows)} logprob rows for {len(token_rows)} token rows")
 
-        for row_idx, (tokens, logprobs) in enumerate(
-            zip(token_rows, rows, strict=True)
-        ):
+        for row_idx, (tokens, logprobs) in enumerate(zip(token_rows, rows, strict=True)):
             if len(logprobs) != len(tokens):
                 raise ValueError(
-                    f"role {role!r} returned {len(logprobs)} logprobs "
-                    f"for token row {row_idx} with {len(tokens)} tokens"
+                    f"role {role!r} returned {len(logprobs)} logprobs for token row {row_idx} with {len(tokens)} tokens"
                 )
 
         return rows

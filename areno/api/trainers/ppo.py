@@ -31,6 +31,7 @@ from areno.api.dashboard import record_dashboard_state
 from areno.api.rewards import make_reward_record
 from areno.api.roles import MissingRoleCapability, ModelRole
 from areno.api.trainers.role_aware import RoleAwarePolicyTrainer
+
 logger = logging.getLogger(__name__)
 
 
@@ -412,6 +413,7 @@ class PPOTrainer(RoleAwarePolicyTrainer):
             self._last_ppo_stats.update(_summary_stats("normalized_advantage", normalized_advantages))
         self._record_ppo_state(stage="advantage_end", role="critic")
         return train_batch, rewards_all, rollout_logprobs
+
     def _score_values(self, role: str, token_rows: list[list[int]]) -> list[list[float]]:
         return self.areno.score_values(role, token_rows)
 
