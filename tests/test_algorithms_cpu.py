@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import functools
 import unittest
+
 import pytest
+
 from areno.api.algorithms import AlgorithmSpec, get_algorithm, list_algorithms, register_algorithm
 from areno.api.loss_fns.gspo import gspo_loss_fn
 from areno.api.loss_fns.ppo import ppo_loss_fn
@@ -86,7 +88,7 @@ def test_reward_requirement_implies_rollout():
 
     with pytest.raises(
         ValueError,
-        match = "require reward must also require rollout",
+        match="require reward must also require rollout",
     ):
         register_algorithm(
             AlgorithmSpec(
@@ -98,6 +100,7 @@ def test_reward_requirement_implies_rollout():
                 experimental=True,
             )
         )
+
 
 if __name__ == "__main__":
     unittest.main()

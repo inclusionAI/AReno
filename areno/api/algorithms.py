@@ -178,7 +178,7 @@ def _register_builtin_algorithms() -> None:
             trainer_cls=_load_policy_trainer,
             default_loss_fn=gspo_loss_fn,
             requires_rollout=True,
-            requires_reward=True, 
+            requires_reward=True,
             loss_fn_factory=_bind_gspo_loss,
         )
     )

@@ -7,6 +7,7 @@ import pytest
 from click import UsageError, unstyle
 from click.testing import CliRunner
 
+from areno.api.algorithms import AlgorithmSpec, register_algorithm
 from areno.api.trainer_config import DPOTrainerConfig, PolicyTrainerConfig, PPOTrainerConfig, TrainerConfig
 from areno.cli import train as train_cli
 from areno.cli.train import (
@@ -16,7 +17,7 @@ from areno.cli.train import (
     _format_training_config_summary,
     _trainer_config_from_options,
 )
-from areno.api.algorithms import AlgorithmSpec, register_algorithm
+
 
 def test_train_config_requires_ckpt():
     with pytest.raises(UsageError, match="--ckpt is required"):
@@ -42,6 +43,7 @@ def test_train_config_requires_reward_source_for_rollout_algorithms():
     with pytest.raises(UsageError, match="--reward-fn-path or --reward-ckpt is required"):
         _trainer_config_from_options(**_options(algo="gspo", reward_fn_path=None, reward_ckpt=None))
 
+
 def test_train_config_unknown_algorithm_message_lists_registered_algorithms():
     with pytest.raises(UsageError, match=r"unknown algorithm 'bogus'; registered: .*dpo.*gspo.*ppo.*sft"):
         _trainer_config_from_options(**_options(algo="bogus"))
@@ -50,6 +52,7 @@ def test_train_config_unknown_algorithm_message_lists_registered_algorithms():
 def test_train_config_requires_world_size_divisible_by_tp_size():
     with pytest.raises(UsageError, match="--world-size must be divisible by --tp-size"):
         _trainer_config_from_options(**_options(algo="sft", world_size=3, tp_size=2))
+
 
 def test_rollout_algorithm_can_omit_reward_when_registry_allows_it():
     class DummyTrainer:
@@ -80,6 +83,7 @@ def test_rollout_algorithm_can_omit_reward_when_registry_allows_it():
 
     assert isinstance(cfg, PolicyTrainerConfig)
     assert cfg.reward_fn_path is None
+
 
 @pytest.mark.parametrize(
     ("field", "value", "message"),
@@ -362,6 +366,7 @@ def test_training_config_summary_shows_resolved_values_and_warning():
     assert "requires_rollout  yes" in summary
     assert "requires_reward   yes" in summary
 
+
 def test_training_config_summary_warns_about_native_attention_fallback(monkeypatch):
     cfg = _trainer_config_from_options(**_options(algo="sft", reward_fn_path=None, reward_ckpt=None, world_size=1))
     monkeypatch.setattr(
@@ -422,6 +427,7 @@ def test_training_config_summary_marks_non_rollout_fields_not_applicable():
     assert "requires_rollout  no" in summary
     assert "requires_reward   no" in summary
     assert "reward_fn       n/a" in summary
+
 
 def test_training_config_summary_handles_invalid_tp_size_defensively():
     cfg = TrainerConfig(algo="sft", ckpt="actor", dataset_path="dataset", tp_size=0, world_size=8)
