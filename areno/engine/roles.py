@@ -316,21 +316,36 @@ class RoleManager:
         model.eval()
         try:
             token_rows = payload.token_rows_by_dp[ctx.dp_rank]
-            local = [] if not token_rows else self._score_logprob_rows(model, token_rows, payload)
+            features = payload.features_by_dp[ctx.dp_rank] if payload.features_by_dp is not None else None
+            local = [] if not token_rows else self._score_logprob_rows(model, token_rows, payload, features=features)
             return local if ctx.rank == 0 else None
         finally:
             if offload_role is not None:
                 offload_role.offload()
 
-    def _score_logprob_rows(self, model, token_rows: list[list[int]], payload: ScorePayload) -> list[list[float]]:
+    def _score_logprob_rows(
+        self,
+        model,
+        token_rows: list[list[int]],
+        payload: ScorePayload,
+        *,
+        features: list[dict | None] | None = None,
+    ) -> list[list[float]]:
         """Score token logprobs in bounded microbatches."""
 
         local = []
         microbatch_size = _score_microbatch_size(payload.microbatch_size)
         for start in range(0, len(token_rows), microbatch_size):
             rows = token_rows[start : start + microbatch_size]
+            row_features = features[start : start + microbatch_size] if features is not None else None
             tokens, lengths = _pad_token_rows(rows, self.worker.device, int(payload.pad_token_id))
-            out = model(input_ids=tokens, train_meta=_dense_train_meta(tokens, sequence_parallel_enabled=False))
+            model_kwargs = {
+                "input_ids": tokens,
+                "train_meta": _dense_train_meta(tokens, sequence_parallel_enabled=False),
+            }
+            if row_features is not None:
+                model_kwargs["features"] = row_features
+            out = model(**model_kwargs)
             logprobs = next_token_logprobs(out.logits_shard, tokens)
             local.extend(_unpad_action_rows(logprobs, lengths))
         return local
@@ -348,13 +363,19 @@ class RoleManager:
         role.value_head.eval()
         try:
             token_rows = payload.token_rows_by_dp[ctx.dp_rank]
-            local = [] if not token_rows else self._score_value_rows(role, token_rows, payload)
+            features = payload.features_by_dp[ctx.dp_rank] if payload.features_by_dp is not None else None
+            local = [] if not token_rows else self._score_value_rows(role, token_rows, payload, features=features)
             return local if ctx.rank == 0 else None
         finally:
             role.offload()
 
     def _score_value_rows(
-        self, role: WorkerRole, token_rows: list[list[int]], payload: ScorePayload
+        self,
+        role: WorkerRole,
+        token_rows: list[list[int]],
+        payload: ScorePayload,
+        *,
+        features: list[dict | None] | None = None,
     ) -> list[list[float]]:
         """Score critic values in bounded microbatches."""
 
@@ -362,8 +383,15 @@ class RoleManager:
         microbatch_size = _score_microbatch_size(payload.microbatch_size)
         for start in range(0, len(token_rows), microbatch_size):
             rows = token_rows[start : start + microbatch_size]
+            row_features = features[start : start + microbatch_size] if features is not None else None
             tokens, lengths = _pad_token_rows(rows, self.worker.device, int(payload.pad_token_id))
-            out = role.model(input_ids=tokens, train_meta=_dense_train_meta(tokens, sequence_parallel_enabled=False))
+            model_kwargs = {
+                "input_ids": tokens,
+                "train_meta": _dense_train_meta(tokens, sequence_parallel_enabled=False),
+            }
+            if row_features is not None:
+                model_kwargs["features"] = row_features
+            out = role.model(**model_kwargs)
             if out.hidden_states is None:
                 raise RuntimeError("critic model output must include hidden_states for value scoring")
             values = role.value_head(out.hidden_states).squeeze(-1).float()
@@ -385,20 +413,35 @@ class RoleManager:
         role.value_head.eval()
         try:
             token_rows = payload.token_rows_by_dp[ctx.dp_rank]
-            local = [] if not token_rows else self._score_reward_rows(role, token_rows, payload)
+            features = payload.features_by_dp[ctx.dp_rank] if payload.features_by_dp is not None else None
+            local = [] if not token_rows else self._score_reward_rows(role, token_rows, payload, features=features)
             return local if ctx.rank == 0 else None
         finally:
             role.offload()
 
-    def _score_reward_rows(self, role: WorkerRole, token_rows: list[list[int]], payload: ScorePayload) -> list[float]:
+    def _score_reward_rows(
+        self,
+        role: WorkerRole,
+        token_rows: list[list[int]],
+        payload: ScorePayload,
+        *,
+        features: list[dict | None] | None = None,
+    ) -> list[float]:
         """Score scalar rewards in bounded microbatches."""
 
         local = []
         microbatch_size = _score_microbatch_size(payload.microbatch_size)
         for start in range(0, len(token_rows), microbatch_size):
             rows = token_rows[start : start + microbatch_size]
+            row_features = features[start : start + microbatch_size] if features is not None else None
             tokens, lengths = _pad_token_rows(rows, self.worker.device, int(payload.pad_token_id))
-            out = role.model(input_ids=tokens, train_meta=_dense_train_meta(tokens, sequence_parallel_enabled=False))
+            model_kwargs = {
+                "input_ids": tokens,
+                "train_meta": _dense_train_meta(tokens, sequence_parallel_enabled=False),
+            }
+            if row_features is not None:
+                model_kwargs["features"] = row_features
+            out = role.model(**model_kwargs)
             if out.hidden_states is None:
                 raise RuntimeError("reward model output must include hidden_states for reward scoring")
             values = role.value_head(out.hidden_states).float()

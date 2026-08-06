@@ -130,7 +130,8 @@ class TrainerPromptBatchTest(unittest.TestCase):
             async def end_rollout_session_async(self, _ctx):
                 self.end_rollout_session(_ctx)
 
-            def rollout_batch(self, _ctx, prompt_tokens, n_samples, _sampling_params):
+            def rollout_batch(self, _ctx, prompt_tokens, n_samples, _sampling_params, *, prompt_features=None):
+                del prompt_features
                 self.prompt_tokens = prompt_tokens
                 self.n_samples = n_samples
                 return []
@@ -197,7 +198,8 @@ class TrainerPromptBatchTest(unittest.TestCase):
             async def end_rollout_session_async(self, _ctx):
                 self.end_rollout_session(_ctx)
 
-            def rollout_batch(self, _ctx, _prompt_tokens, _n_samples, _sampling_params):
+            def rollout_batch(self, _ctx, _prompt_tokens, _n_samples, _sampling_params, *, prompt_features=None):
+                del prompt_features
                 return []
 
             def train(self, _ctx, _batch_data, _loss_fn, _mini_bs, _gradient_accumulation_steps):
@@ -223,7 +225,8 @@ class TrainerPromptBatchTest(unittest.TestCase):
         """Rollout callers must own the rollout session lifecycle explicitly."""
 
         class BackendStub:
-            def rollout_batch(self, _ctx, _prompt_tokens, _n_samples, _sampling_params):
+            def rollout_batch(self, _ctx, _prompt_tokens, _n_samples, _sampling_params, *, prompt_features=None):
+                del prompt_features
                 return []
 
         trainer = Trainer(world_size=1, model_path="unused")
@@ -247,6 +250,49 @@ class TrainerPromptBatchTest(unittest.TestCase):
         trainer.train([], lambda _pack, _logprobs: None, mini_bs=1)
 
         self.assertEqual(trainer._ctx.global_step, 0)
+
+    def test_score_logprobs_passes_configured_microbatch_size(self):
+        """PPO/DPO role scoring should honor the trainer's score microbatch size."""
+
+        class BackendStub:
+            def score_logprobs(self, _ctx, role, token_rows, *, features=None, microbatch_size=8):
+                self.role = role
+                self.token_rows = token_rows
+                self.features = features
+                self.microbatch_size = microbatch_size
+                return [[0.0, 0.0]]
+
+        backend = BackendStub()
+        trainer = Trainer(world_size=1, model_path="unused", score_micro_bs=3)
+        trainer._backend = backend
+        trainer._ctx = Context(1, "unused", object())
+        features = [{"image_token_id": 99}]
+
+        result = trainer.score_logprobs("ref", [[1, 2]], features=features)
+
+        self.assertEqual(result, [[0.0, 0.0]])
+        self.assertEqual(backend.role, "ref")
+        self.assertEqual(backend.token_rows, [[1, 2]])
+        self.assertIs(backend.features, features)
+        self.assertEqual(backend.microbatch_size, 3)
+
+    def test_score_logprobs_defaults_to_microbatch_size_eight(self):
+        """Direct Trainer users should keep the previous role scoring default."""
+
+        class BackendStub:
+            def score_logprobs(self, _ctx, _role, _token_rows, *, features=None, microbatch_size=8):
+                del features
+                self.microbatch_size = microbatch_size
+                return [[]]
+
+        backend = BackendStub()
+        trainer = Trainer(world_size=1, model_path="unused")
+        trainer._backend = backend
+        trainer._ctx = Context(1, "unused", object())
+
+        trainer.score_logprobs("ref", [[]])
+
+        self.assertEqual(backend.microbatch_size, 8)
 
 
 if __name__ == "__main__":

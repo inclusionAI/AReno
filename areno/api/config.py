@@ -23,11 +23,24 @@ class ArenoConfig:
     tp_size: int = 1
     dp_size: int | None = None
     devices: list[int] | None = None
+    rollout_tp_size: int | None = None
+    rollout_devices: list[int] | None = None
+    policy_sync_bucket_mb: int = 64
     dummy_load: bool = False
     optimizer: dict[str, Any] = field(default_factory=dict)
     runtime: dict[str, Any] = field(default_factory=dict)
     max_running_prompts: int = 64
     decode_progress_interval_s: float = 10.0
+
+    def uses_separate_rollout_engine(self) -> bool:
+        """Return whether rollout runs on its own CUDA device partition."""
+
+        return self.rollout_devices is not None
+
+    def resolved_rollout_tp_size(self) -> int:
+        """Return the explicit rollout TP size or the training TP size."""
+
+        return self.tp_size if self.rollout_tp_size is None else self.rollout_tp_size
 
 
 BackendConfig = ArenoConfig

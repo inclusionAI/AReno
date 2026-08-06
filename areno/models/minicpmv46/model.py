@@ -715,3 +715,8 @@ class MiniCPMV46Adapter(ModelAdapter):
         from areno.models.minicpmv46.checkpoint import save_minicpmv46_weights
 
         return save_minicpmv46_weights(model, output_path, source_path)
+
+    def build_policy_plan(self, model: nn.Module):
+        from areno.models.minicpmv46.checkpoint import build_minicpmv46_policy_plan
+
+        return build_minicpmv46_policy_plan(model)

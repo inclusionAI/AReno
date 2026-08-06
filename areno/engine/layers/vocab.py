@@ -70,6 +70,7 @@ class VocabParallelLMHead(nn.Module):
         mark_tensor_parallel_parameter(self.weight, True, sequence_parallel=True)
         nn.init.normal_(self.weight, mean=0.0, std=0.02)
 
+    @torch._dynamo.disable
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         # Reassemble the full hidden activation: in SP mode it is sharded
         # along the sequence dim and must be gathered; otherwise we just
