@@ -36,15 +36,9 @@ def ipo_loss_fn(data_pack, logprobs, *, beta: float = 0.1):
         need_sequences=True,
     )
 
-    num_sequences = (
-        int(layout.num_sequences)
-        if layout.packed
-        else int(logprobs.shape[0])
-    )
+    num_sequences = int(layout.num_sequences) if layout.packed else int(logprobs.shape[0])
     if num_sequences % 2 != 0:
-        raise ValueError(
-            "IPO requires an even number of sequences per microbatch"
-        )
+        raise ValueError("IPO requires an even number of sequences per microbatch")
 
     ref_logprobs = layout.ref_logprobs.to(dtype=logprobs.dtype)
 

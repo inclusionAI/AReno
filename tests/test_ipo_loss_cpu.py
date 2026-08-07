@@ -8,6 +8,7 @@ from areno.api.loss_fns.ipo import (
     ipo_loss_fn,
 )
 
+
 def test_ipo_sequence_loss_matches_hand_calculation():
     # Policy:
     # chosen - rejected = -2 - (-4) = 2
