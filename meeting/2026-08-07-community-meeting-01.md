@@ -1,8 +1,8 @@
 # AReno Community Meeting #1
 
-Date: 2026-08-07  
-Time: 14:00-15:00 China Time (UTC+8)  
-Participants: 18  
+Date: 2026-08-07
+Time: 14:00-15:00 China Time (UTC+8)
+Participants: 18
 Format: Online community meeting
 
 ## Summary
@@ -135,8 +135,8 @@ Notes:
 
 ## Next Meeting
 
-Date: 2026-08-21  
-Time: 13:00-14:00 China Time (UTC+8)  
+Date: 2026-08-21
+Time: 13:00-14:00 China Time (UTC+8)
 Suggested agenda:
 
 - Review installation bad cases collected from users.
