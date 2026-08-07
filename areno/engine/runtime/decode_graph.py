@@ -89,6 +89,7 @@ class DecodeGraph:
         self.input_ids = torch.zeros((1, bucket), device=device, dtype=torch.long)
         self.position_ids = torch.zeros((1, bucket), device=device, dtype=torch.long)
         self.cache_seqlens = torch.zeros(bucket, device=device, dtype=torch.int32)
+        self.recurrent_slots = torch.arange(bucket, device=device, dtype=torch.long)
         # Padding columns point to `scratch_block`, a dedicated block that the
         # scheduler never assigns to a real sequence. This keeps the attention
         # kernel safe when actual batch size < bucket.
@@ -98,6 +99,7 @@ class DecodeGraph:
             sample_indices=torch.arange(bucket, device=device, dtype=torch.long),
             cache_seqlens=self.cache_seqlens,
             block_table=self.block_table,
+            recurrent_slots=self.recurrent_slots,
         )
         self.graph = torch.cuda.CUDAGraph()
         self.logits_shard: torch.Tensor | None = None
@@ -143,6 +145,7 @@ class DecodeGraph:
         position_ids: torch.Tensor,
         cache_seqlens: torch.Tensor,
         block_table: torch.Tensor,
+        recurrent_slots: torch.Tensor,
     ) -> torch.Tensor:
         """Copy one dynamic decode step into static buffers and replay the graph."""
         actual = int(input_ids.numel())
@@ -155,6 +158,7 @@ class DecodeGraph:
         self.input_ids[0, :actual].copy_(input_ids)
         self.position_ids[0, :actual].copy_(position_ids)
         self.cache_seqlens[:actual].copy_(cache_seqlens)
+        self.recurrent_slots[:actual].copy_(recurrent_slots)
         block_cols = int(block_table.shape[1])
         if block_cols > self.block_table.shape[1]:
             raise ValueError(
@@ -172,6 +176,7 @@ class DecodeGraph:
             self.position_ids[0, actual : self.bucket].fill_(0)
             self.block_table[actual : self.bucket].fill_(self.scratch_block)
             self.cache_seqlens[actual : self.bucket].fill_(0)
+            self.recurrent_slots[actual : self.bucket].fill_(0)
 
         self.graph.replay()
         assert self.logits_shard is not None

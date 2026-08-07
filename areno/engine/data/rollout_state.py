@@ -56,6 +56,8 @@ class InferenceBatchState:
         self._pending_seq_id = 0
         self._free_blocks = list(range(self.num_cache_blocks))
         self._seq_to_blocks: dict[int, list[int]] = {}
+        self._free_recurrent_slots = list(range(self.max_running_seqs))
+        self._seq_to_recurrent_slot: dict[int, int] = {}
         self._prefill_cursor_by_seq: dict[int, int] = {}
         self._last_active_ids: list[int] = []
 
@@ -116,6 +118,7 @@ class InferenceBatchState:
         block_table: list[list[int]] = []
         cache_block_ids: list[int] = []
         cache_block_offsets: list[int] = []
+        recurrent_slots: list[int] = []
         active_ids: list[int] = []
 
         while self._pending_seq_id < len(self.prompts):
@@ -136,6 +139,9 @@ class InferenceBatchState:
             if blocks is None:
                 blocks = []
                 self._seq_to_blocks[seq_id] = blocks
+                if not self._free_recurrent_slots:
+                    raise RuntimeError("recurrent state slots exhausted during prefill")
+                self._seq_to_recurrent_slot[seq_id] = self._free_recurrent_slots.pop(0)
             required_blocks = ceil_div(cursor + chunk_len, self.kv_block_size)
             while len(blocks) < required_blocks:
                 if not self._free_blocks:
@@ -155,6 +161,7 @@ class InferenceBatchState:
                             block_table,
                             cache_block_ids,
                             cache_block_offsets,
+                            recurrent_slots,
                             active_ids,
                         )
                     )
@@ -192,6 +199,7 @@ class InferenceBatchState:
             # Pad the per-sequence block table to a uniform width so the model
             # can treat the entire batch as one rectangular tensor.
             block_table.append(_pad_blocks(blocks, self.max_blocks_per_seq))
+            recurrent_slots.append(self._seq_to_recurrent_slot[seq_id])
             cursor += chunk_len
             if cursor >= len(prompt):
                 sample_indices.append(len(input_ids) - 1)
@@ -216,6 +224,7 @@ class InferenceBatchState:
             block_table,
             cache_block_ids,
             cache_block_offsets,
+            recurrent_slots,
             active_ids,
         )
 
@@ -231,6 +240,7 @@ class InferenceBatchState:
         block_table: list[list[int]],
         cache_block_ids: list[int],
         cache_block_offsets: list[int],
+        recurrent_slots: list[int],
         active_ids: list[int],
     ) -> dict:
         self._last_active_ids = active_ids
@@ -244,6 +254,7 @@ class InferenceBatchState:
             "block_table": torch.tensor(block_table, dtype=torch.int32),
             "cache_block_ids": torch.tensor(cache_block_ids, dtype=torch.long),
             "cache_block_offsets": torch.tensor(cache_block_offsets, dtype=torch.long),
+            "recurrent_slots": torch.tensor(recurrent_slots, dtype=torch.long),
         }
         if any(feature_mask) or image_features or mrope_position_parts is not None:
             payload["features"] = _prefill_multimodal_features(feature_mask, image_features, mrope_position_parts)
@@ -312,7 +323,7 @@ def _slice_prompt_image_features(
     if image_embeds is None:
         image_embeds = _feature_tensor(features, "projected_image_embeds")
     if image_embeds is None:
-        if not any(key in features for key in ("pixel_values", "image_grid_thw")):
+        if not any(key in features for key in ("pixel_values", "image_grid_thw", "target_sizes")):
             return [False] * chunk_len, None
     full_mask = _prompt_image_mask(features, prompt)
     local_mask = full_mask[cursor : cursor + chunk_len]
@@ -326,7 +337,15 @@ def _slice_prompt_image_features(
             "image_token_offset": start,
             "image_token_count": local_count,
         }
-        for key in ("pixel_values", "image_grid_thw", "image_token_id"):
+        for key in (
+            "pixel_values",
+            "image_grid_thw",
+            "target_sizes",
+            "num_patches_per_image",
+            "downsample_mode",
+            "processor_expanded_image_tokens",
+            "image_token_id",
+        ):
             if features.get(key) is not None:
                 payload_features[key] = features[key]
         return local_mask, payload_features
@@ -422,6 +441,7 @@ def payload_to_infer_meta(payload: dict, device: torch.device) -> InferMeta:
             block_table=payload["block_table"].to(device, non_blocking=True),
             cache_block_ids=payload["cache_block_ids"].to(device, non_blocking=True),
             cache_block_offsets=payload["cache_block_offsets"].to(device, non_blocking=True),
+            recurrent_slots=payload["recurrent_slots"].to(device, non_blocking=True),
         )
     # Decode runs one token per active sequence and reads previously written
     # KV through the same `block_table`, with `cache_seqlens` giving how many
@@ -431,6 +451,11 @@ def payload_to_infer_meta(payload: dict, device: torch.device) -> InferMeta:
         sample_indices=payload["sample_indices"].to(device, non_blocking=True),
         cache_seqlens=payload["cache_seqlens"].to(device, non_blocking=True),
         block_table=payload["block_table"].to(device, non_blocking=True),
+        recurrent_slots=(
+            payload["recurrent_slots"].to(device, non_blocking=True)
+            if payload.get("recurrent_slots") is not None
+            else None
+        ),
     )
 
 

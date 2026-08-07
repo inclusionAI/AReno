@@ -34,8 +34,6 @@ from areno.engine.checkpoints.io import (
 from areno.engine.layers.linear import _shard_range
 from areno.engine.parallel.context import get_tp_context
 from areno.models.minicpmv46.model import (
-    _LINEAR_HEAD_DIM,
-    _LINEAR_NUM_HEADS,
     MiniCPMDecoderLayer,
     MiniCPMFullAttention,
     MiniCPMGatedDeltaNet,
@@ -80,7 +78,7 @@ GDN_KEYS = (
 
 @torch.no_grad()
 def load_minicpmv46_weights(model: MiniCPMV46ForCausalLM, model_path: str | Path) -> None:
-    """Load MiniCPM-V-4.6 text weights from the HF safetensors checkpoint.
+    """Load MiniCPM-V-4.6 text, vision, and projector weights.
 
     The HF checkpoint wraps the language model under `model.language_model`.
     Full-attention q projection stores q and output-gate rows in one tensor,
@@ -93,11 +91,15 @@ def load_minicpmv46_weights(model: MiniCPMV46ForCausalLM, model_path: str | Path
     index = SafetensorsIndex(model_path)
     try:
         prefix = model.config.checkpoint_prefix
-        index.set_progress_total(1 + len(model.layers), unit="stage", manual=True)
+        vision_stages = 1 if model.vision_tower is not None else 0
+        index.set_progress_total(1 + len(model.layers) + vision_stages, unit="stage", manual=True)
         _load_embedding_norm_head(model, index, ctx.rank, ctx.world_size)
         index.advance_progress()
         for layer_idx, layer in enumerate(model.layers):
             _load_layer(index, layer, f"{prefix}.layers.{layer_idx}", ctx.rank, ctx.world_size)
+            index.advance_progress()
+        if model.vision_tower is not None:
+            _load_vision_weights(model, index)
             index.advance_progress()
     finally:
         index.close()
@@ -107,10 +109,11 @@ def load_minicpmv46_weights(model: MiniCPMV46ForCausalLM, model_path: str | Path
 def save_minicpmv46_weights(
     model: MiniCPMV46ForCausalLM, output_path: str | Path, source_path: str | Path | None
 ) -> str | None:
-    """Save MiniCPM-V-4.6 text weights back to HF safetensors layout."""
+    """Save MiniCPM-V-4.6 text, vision, and projector weights."""
 
     tensors = CheckpointTensorStore()
     _save_embedding_norm_head(tensors, model)
+    _save_vision_weights(tensors, model)
     prefix = model.config.checkpoint_prefix
     for layer_idx, layer in enumerate(model.layers):
         _save_layer(tensors, layer, f"{prefix}.layers.{layer_idx}")
@@ -126,6 +129,7 @@ def build_minicpmv46_policy_plan(model: MiniCPMV46ForCausalLM) -> PolicyTensorSt
     tensors = PolicyTensorStore()
     with policy_plan_scope():
         _save_embedding_norm_head(tensors, model)
+        _save_vision_weights(tensors, model)
         prefix = model.config.checkpoint_prefix
         for layer_idx, layer in enumerate(model.layers):
             _save_layer(tensors, layer, f"{prefix}.layers.{layer_idx}")
@@ -144,6 +148,30 @@ def _save_embedding_norm_head(tensors: dict[str, torch.Tensor | None], model: Mi
     tensors[TOP_LEVEL_SPEC.norm_key] = rank0_tensor(
         model.norm.weight if isinstance(tensors, PolicyTensorStore) else model.norm.weight - 1.0
     )
+
+
+@torch.no_grad()
+def _load_vision_weights(model: MiniCPMV46ForCausalLM, index: SafetensorsIndex) -> None:
+    """Load replicated vision/projector parameters from the HF layout."""
+
+    for module_name, module in (("vision_tower", model.vision_tower), ("merger", model.merger)):
+        if module is None:
+            continue
+        for name, parameter in module.named_parameters():
+            key = f"model.{module_name}.{name}"
+            if key not in index.weight_map:
+                raise KeyError(f"missing MiniCPM-V vision weight {key}")
+            parameter.copy_(index.get_tensor(key).to(device=parameter.device, dtype=parameter.dtype))
+
+
+def _save_vision_weights(tensors: dict[str, torch.Tensor | None], model: MiniCPMV46ForCausalLM) -> None:
+    """Save replicated vision/projector parameters under the HF prefixes."""
+
+    for module_name, module in (("vision_tower", model.vision_tower), ("merger", model.merger)):
+        if module is None:
+            continue
+        for name, parameter in module.named_parameters():
+            tensors[f"model.{module_name}.{name}"] = rank0_tensor(parameter)
 
 
 def _load_layer(index: SafetensorsIndex, layer: MiniCPMDecoderLayer, prefix: str, rank: int, world_size: int) -> None:
@@ -237,14 +265,7 @@ def _load_gated_delta_net(
     index: SafetensorsIndex, attn: MiniCPMGatedDeltaNet, prefix: str, rank: int, world_size: int
 ) -> None:
     qkv = index.get_tensor(f"{prefix}.linear_attn.in_proj_qkv.weight")
-    q, k, v = qkv.split(
-        (
-            _LINEAR_NUM_HEADS * _LINEAR_HEAD_DIM,
-            _LINEAR_NUM_HEADS * _LINEAR_HEAD_DIM,
-            _LINEAR_NUM_HEADS * _LINEAR_HEAD_DIM,
-        ),
-        dim=0,
-    )
+    q, k, v = qkv.split((attn.key_dim, attn.key_dim, attn.value_dim), dim=0)
     copy_merged_column(
         attn.in_proj_qkvz.weight,
         [q, k, v, index.get_tensor(f"{prefix}.linear_attn.in_proj_z.weight")],
@@ -261,16 +282,9 @@ def _load_gated_delta_net(
         world_size,
     )
     conv_qkv = index.get_tensor(f"{prefix}.linear_attn.conv1d.weight")
-    conv_parts = conv_qkv.split(
-        (
-            _LINEAR_NUM_HEADS * _LINEAR_HEAD_DIM,
-            _LINEAR_NUM_HEADS * _LINEAR_HEAD_DIM,
-            _LINEAR_NUM_HEADS * _LINEAR_HEAD_DIM,
-        ),
-        dim=0,
-    )
+    conv_parts = conv_qkv.split((attn.key_dim, attn.key_dim, attn.value_dim), dim=0)
     copy_merged_column(attn.conv1d_weight, list(conv_parts), rank, world_size)
-    start, end = _shard_range(_LINEAR_NUM_HEADS, rank, world_size)
+    start, end = _shard_range(attn.num_value_heads, rank, world_size)
     attn.dt_bias.copy_(index.get_tensor(f"{prefix}.linear_attn.dt_bias")[start:end].to(dtype=attn.dt_bias.dtype))
     attn.A_log.copy_(index.get_tensor(f"{prefix}.linear_attn.A_log")[start:end].to(dtype=attn.A_log.dtype))
     attn.norm_weight.copy_(index.get_tensor(f"{prefix}.linear_attn.norm.weight").to(dtype=attn.norm_weight.dtype))

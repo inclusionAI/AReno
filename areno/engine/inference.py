@@ -186,7 +186,7 @@ class InferenceManager:
             self._max_blocks_per_seq,
         )
         caches = self.model.allocate_kv_caches(self._infer_cache_blocks, block_size, self.device)
-        self.model.set_kv_caches(caches)
+        self.model.set_kv_caches(caches, num_slots=max_running_seqs)
         self._train_state_ready = False
         # Materialise infer weights from train weights (e.g. dequantize / fuse),
         # then drop the train copies for the rollout's duration.
@@ -408,11 +408,13 @@ class InferenceManager:
                 continue
             self._ensure_decode_kv_blocks(state, active_rows, cache_seqlens)
             block_table = self._block_table_for_active_rows(state, active_rows)
+            recurrent_slots = self._recurrent_slots_for_active_rows(state, active_rows)
             next_tokens, next_logprobs = self._infer_decode_next_token_tensor(
                 next_tokens,
                 position_ids,
                 cache_seqlens,
                 block_table,
+                recurrent_slots,
                 active_count,
                 sampling_params,
                 sample_generator,
@@ -582,6 +584,12 @@ class InferenceManager:
             rows.append(blocks + [blocks[-1]] * (state.max_blocks_per_seq - len(blocks)))
         return torch.tensor(rows, device=self.device, dtype=torch.int32)
 
+    def _recurrent_slots_for_active_rows(
+        self, state: InferenceBatchState, active_rows: torch.Tensor
+    ) -> torch.Tensor:
+        slots = [state._seq_to_recurrent_slot[int(row)] for row in active_rows.detach().cpu().tolist()]
+        return torch.tensor(slots, device=self.device, dtype=torch.long)
+
     def _record_decode_progress(
         self,
         *,
@@ -652,13 +660,20 @@ class InferenceManager:
         return local_flags[active_rows] != 0
 
     def _free_rollout_rows(self, state: InferenceBatchState, rows: torch.Tensor) -> None:
-        """Return the KV blocks owned by `rows` to the free pool."""
+        """Return KV blocks and recurrent-state slots owned by `rows`."""
         if rows.numel() == 0:
             return
-        for row in rows.detach().cpu().tolist():
-            blocks = state._seq_to_blocks.pop(int(row), None)
+        row_ids = [int(row) for row in rows.detach().cpu().tolist()]
+        recurrent_slots = [state._seq_to_recurrent_slot[row] for row in row_ids]
+        reset_recurrent_slots = getattr(getattr(self.worker, "model", None), "reset_recurrent_cache_slots", None)
+        if reset_recurrent_slots is not None:
+            reset_recurrent_slots(torch.tensor(recurrent_slots, device=self.device, dtype=torch.long))
+        for row in row_ids:
+            blocks = state._seq_to_blocks.pop(row, None)
             if blocks:
                 state._free_blocks.extend(blocks)
+            slot = state._seq_to_recurrent_slot.pop(row)
+            state._free_recurrent_slots.append(slot)
 
     def _admit_pending_rollout_rows(
         self,
@@ -927,6 +942,7 @@ class InferenceManager:
         position_ids: torch.Tensor,
         cache_seqlens: torch.Tensor,
         block_table: torch.Tensor,
+        recurrent_slots: torch.Tensor,
         active_count: int,
         sampling_params: SamplingParams,
         sample_generator: torch.Generator | None,
@@ -949,6 +965,7 @@ class InferenceManager:
                 sample_indices=torch.arange(active_count, device=self.device, dtype=torch.long),
                 cache_seqlens=cache_seqlens,
                 block_table=block_table,
+                recurrent_slots=recurrent_slots,
             )
             logits_shard = self.model(
                 input_ids=input_ids[:active_count].view(1, active_count),
@@ -960,7 +977,9 @@ class InferenceManager:
             # and replays. Only the first `active_count` rows are meaningful;
             # the rest are padding pointed at the scratch block.
             self._decode_progress_cuda_graph = True
-            logits_shard = graph.replay_tensors(input_ids, position_ids, cache_seqlens, block_table)[0, :active_count]
+            logits_shard = graph.replay_tensors(
+                input_ids, position_ids, cache_seqlens, block_table, recurrent_slots
+            )[0, :active_count]
 
         if sampling_params.temperature == 0.0:
             next_tokens = _sample_greedy_sharded(

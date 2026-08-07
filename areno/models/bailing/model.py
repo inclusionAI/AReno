@@ -1114,7 +1114,9 @@ class BailingMoeLinearV2ForCausalLM(nn.Module):
             hidden_states = self.norm(hidden_states)
             return CausalLMOutput(logits_shard=self.lm_head(hidden_states), hidden_states=hidden_states)
 
-    def set_kv_caches(self, kv_caches: list[tuple[torch.Tensor, torch.Tensor]]) -> None:
+    def set_kv_caches(
+        self, kv_caches: list[tuple[torch.Tensor, torch.Tensor]], *, num_slots: int | None = None
+    ) -> None:
         """Bind per-softmax-layer KV caches and pre-allocate per-linear-layer
         recurrent state cache.
 
@@ -1123,6 +1125,7 @@ class BailingMoeLinearV2ForCausalLM(nn.Module):
         ``[num_slots, heads, head_dim, head_dim]`` sized from the first KV
         cache.
         """
+        del num_slots
         softmax_idx = 0
         for layer in self.layers:
             if isinstance(layer.attention, BailingSoftmaxAttention):

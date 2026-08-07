@@ -43,3 +43,4 @@ class InferMeta:
     block_table: torch.Tensor | None = None
     cache_block_ids: torch.Tensor | None = None
     cache_block_offsets: torch.Tensor | None = None
+    recurrent_slots: torch.Tensor | None = None

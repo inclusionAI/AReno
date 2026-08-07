@@ -340,7 +340,11 @@ class Qwen35GatedDeltaNet(nn.Module):
             raise RuntimeError("Qwen3.5 GDN inference requires block_table")
         if self.conv_cache.numel() == 0:
             raise RuntimeError("Qwen3.5 GDN inference requires conv state cache")
-        slots = infer_meta.block_table[:, 0].long()
+        slots = (
+            infer_meta.recurrent_slots.long()
+            if infer_meta.recurrent_slots is not None
+            else infer_meta.block_table[:, 0].long()
+        )
         if infer_meta.mode == "decode":
             current = x.reshape(-1, x.shape[-1])
             history = self.conv_cache.index_select(0, slots).to(dtype=current.dtype)
@@ -400,7 +404,11 @@ class Qwen35GatedDeltaNet(nn.Module):
             raise RuntimeError("Qwen3.5 GDN inference requires block_table")
         if self.state_cache.numel() == 0:
             raise RuntimeError("Qwen3.5 GDN inference requires recurrent state cache")
-        slots = infer_meta.block_table[:, 0].long()
+        slots = (
+            infer_meta.recurrent_slots.long()
+            if infer_meta.recurrent_slots is not None
+            else infer_meta.block_table[:, 0].long()
+        )
         cu = infer_meta.cu_seqlens
         _require_fla_gdn()
         if infer_meta.mode == "decode":
@@ -1207,10 +1215,12 @@ class Qwen35ForCausalLM(nn.Module):
             hidden_states[row_idx, mask] = image_embeds
         return hidden_states
 
-    def set_kv_caches(self, kv_caches: list[tuple[torch.Tensor, torch.Tensor]]) -> None:
+    def set_kv_caches(
+        self, kv_caches: list[tuple[torch.Tensor, torch.Tensor]], *, num_slots: int | None = None
+    ) -> None:
         idx = 0
         device = next(self.parameters()).device
-        num_slots = kv_caches[0][0].shape[0] if kv_caches else 1
+        num_slots = int(num_slots) if num_slots is not None else (int(kv_caches[0][0].shape[0]) if kv_caches else 1)
         for layer in self.layers:
             attn = layer.attention
             if isinstance(attn, Qwen35FullAttention):
@@ -1290,6 +1300,15 @@ class Qwen35ForCausalLM(nn.Module):
     def reset_kv_caches(self) -> None:
         for layer in self.layers:
             layer.attention.reset_kv_cache()
+
+    @torch.no_grad()
+    def reset_recurrent_cache_slots(self, slots: torch.Tensor) -> None:
+        slots = slots.to(device=next(self.parameters()).device, dtype=torch.long)
+        for layer in self.layers:
+            attn = layer.attention
+            if isinstance(attn, Qwen35GatedDeltaNet):
+                attn.state_cache.index_fill_(0, slots, 0)
+                attn.conv_cache.index_fill_(0, slots, 0)
 
     @torch.no_grad()
     def offload_kv_caches(self) -> None:
@@ -1537,7 +1556,11 @@ class Qwen35VLAdapter(Qwen35Adapter):
             or any(
                 "Qwen3_5" in arch and ("VL" in arch or "Vision" in arch) and "Moe" not in arch for arch in architectures
             )
-            or (has_vision_config and text_model_type in {"qwen3_5", "qwen3_5_text"})
+            or (
+                model_type.startswith("qwen3_5")
+                and has_vision_config
+                and text_model_type in {"qwen3_5", "qwen3_5_text"}
+            )
         )
 
     def config_from_hf(self, hf_config: dict[str, Any]) -> ModelConfig:

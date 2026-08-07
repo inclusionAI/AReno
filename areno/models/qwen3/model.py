@@ -343,8 +343,11 @@ class Qwen3ForCausalLM(nn.Module):
             logits_shard = self.lm_head(hidden_states)
         return CausalLMOutput(logits_shard=logits_shard, hidden_states=hidden_states)
 
-    def set_kv_caches(self, kv_caches: list[tuple[torch.Tensor, torch.Tensor]]) -> None:
+    def set_kv_caches(
+        self, kv_caches: list[tuple[torch.Tensor, torch.Tensor]], *, num_slots: int | None = None
+    ) -> None:
         """Bind one (k_cache, v_cache) pair per decoder layer for inference."""
+        del num_slots
         if len(kv_caches) != len(self.layers):
             raise ValueError(f"expected {len(self.layers)} layer caches, got {len(kv_caches)}")
         for layer, (k_cache, v_cache) in zip(self.layers, kv_caches, strict=True):

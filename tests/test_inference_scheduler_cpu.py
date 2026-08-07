@@ -41,6 +41,7 @@ class _FakeInferenceManager(InferenceManager):
         position_ids,
         cache_seqlens,
         block_table,
+        recurrent_slots,
         active_count,
         sampling_params,
         sample_generator,
@@ -48,7 +49,16 @@ class _FakeInferenceManager(InferenceManager):
         sample_step,
         eos_token_id,
     ):
-        del position_ids, cache_seqlens, block_table, active_count, sampling_params, sample_generator, eos_token_id
+        del (
+            position_ids,
+            cache_seqlens,
+            block_table,
+            recurrent_slots,
+            active_count,
+            sampling_params,
+            sample_generator,
+            eos_token_id,
+        )
         self.ops.append(("decode", int(next_tokens.numel())))
         return next_tokens + 1, torch.zeros_like(next_tokens, dtype=torch.float32) - float(sample_step)
 
@@ -155,6 +165,39 @@ def test_prefill_reserves_prompt_blocks_without_max_new_token_overreservation():
     assert state._free_blocks == [1]
     state.ensure_decode_blocks([0], [4])
     assert state._seq_to_blocks == {0: [0, 1]}
+
+
+def test_finished_row_resets_and_reuses_recurrent_slot():
+    """Dense recurrent slots must be cleared before a later request reuses them."""
+
+    class ModelStub:
+        def __init__(self):
+            self.reset_slots = []
+
+        def reset_recurrent_cache_slots(self, slots):
+            self.reset_slots.append(slots.tolist())
+
+    manager = _FakeInferenceManager()
+    manager.worker.model = ModelStub()
+    state = InferenceBatchState(
+        prompts=[[10], [20]],
+        max_new_tokens=1,
+        max_running_seqs=1,
+        max_cache_len=4,
+        kv_block_size=4,
+        num_cache_blocks=1,
+    )
+
+    first = state.build_prefill_payload()
+    assert first is not None
+    assert first["recurrent_slots"].tolist() == [0]
+
+    manager._free_rollout_rows(state, torch.tensor([0], dtype=torch.long))
+    second = state.build_prefill_payload()
+
+    assert manager.worker.model.reset_slots == [[0]]
+    assert second is not None
+    assert second["recurrent_slots"].tolist() == [0]
 
 
 def test_chunked_prefill_interleaves_with_active_decode():

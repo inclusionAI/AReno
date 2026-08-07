@@ -741,8 +741,11 @@ class Gemma4ForCausalLM(nn.Module):
         # the combined signal keeps unit variance.
         return (projected + per_layer_inputs) * self.per_layer_input_scale.to(hidden_states.device)
 
-    def set_kv_caches(self, kv_caches: list[tuple[torch.Tensor, torch.Tensor]]) -> None:
+    def set_kv_caches(
+        self, kv_caches: list[tuple[torch.Tensor, torch.Tensor]], *, num_slots: int | None = None
+    ) -> None:
         """Bind KV cache slots, redirecting KV-shared layers to their source."""
+        del num_slots
         if len(kv_caches) != len(self.layers):
             raise ValueError(f"expected {len(self.layers)} layer caches, got {len(kv_caches)}")
         for layer_idx, layer in enumerate(self.layers):
