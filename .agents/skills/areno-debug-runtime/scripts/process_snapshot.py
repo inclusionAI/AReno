@@ -9,14 +9,13 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / "scripts"))
+
 from areno_skill_sdk import build_parser, skill_main
-
-
-from typing import Optional
 
 # ... (existing code) ...
 
-def read(path: Path) -> Optional[str]:
+
+def read(path: Path) -> str | None:
     try:
         return path.read_text(errors="replace")
     except OSError:

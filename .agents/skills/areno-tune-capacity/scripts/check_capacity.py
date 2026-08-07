@@ -26,9 +26,7 @@ def main() -> Result:
     values = vars(args)
 
     errors: list[str] = [
-        f"{key} must be positive"
-        for key, value in values.items()
-        if key != "memory_fraction" and value <= 0
+        f"{key} must be positive" for key, value in values.items() if key != "memory_fraction" and value <= 0
     ]
     if not 0 < args.memory_fraction <= 0.9:
         errors.append("memory_fraction must be in (0, 0.9]")

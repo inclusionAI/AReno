@@ -37,9 +37,7 @@ def emit(
     """
     if json_mode:
         target = stream if stream is not None else sys.stdout
-        target.write(
-            json.dumps(result, indent=indent, sort_keys=sort_keys, ensure_ascii=ensure_ascii) + "\n"
-        )
+        target.write(json.dumps(result, indent=indent, sort_keys=sort_keys, ensure_ascii=ensure_ascii) + "\n")
         target.flush()
     else:
         _emit_human(result)
@@ -111,7 +109,9 @@ def _render_table_plain(rows: list[dict[str, Any]], stream: TextIO, *, title: st
     stream.write(f"\n{title}\n")
     stream.write("  " + "  ".join(column.ljust(widths[i]) for i, column in enumerate(columns)) + "\n")
     for row in rows:
-        stream.write("  " + "  ".join(_format_cell(row.get(column)).ljust(widths[i]) for i, column in enumerate(columns)) + "\n")
+        stream.write(
+            "  " + "  ".join(_format_cell(row.get(column)).ljust(widths[i]) for i, column in enumerate(columns)) + "\n"
+        )
 
 
 def _format_cell(value: Any) -> str:

@@ -42,7 +42,8 @@ Typical usage
 from __future__ import annotations
 
 import functools
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from .args import build_parser, validate_positive
 from .errors import SkillError, envelope

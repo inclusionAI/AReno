@@ -36,7 +36,6 @@ from areno_skill_sdk import (  # noqa: E402
     validate_positive,
 )
 
-
 # ---------------------------------------------------------------------------
 # Result objects + exit codes
 # ---------------------------------------------------------------------------
@@ -311,8 +310,18 @@ CHECK_CAPACITY = ROOT / ".agents/skills/areno-tune-capacity/scripts/check_capaci
 def test_check_capacity_migrated_success():
     proc = _run(
         CHECK_CAPACITY,
-        "--batch-size", "4", "--n-samples", "16", "--max-running-prompts", "8",
-        "--mini-bs", "2", "--world-size", "4", "--tp-size", "2",
+        "--batch-size",
+        "4",
+        "--n-samples",
+        "16",
+        "--max-running-prompts",
+        "8",
+        "--mini-bs",
+        "2",
+        "--world-size",
+        "4",
+        "--tp-size",
+        "2",
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     result = json.loads(proc.stdout)
@@ -325,8 +334,18 @@ def test_check_capacity_migrated_success():
 def test_check_capacity_migrated_invalid_negative():
     proc = _run(
         CHECK_CAPACITY,
-        "--batch-size", "-1", "--n-samples", "16", "--max-running-prompts", "8",
-        "--mini-bs", "2", "--world-size", "4", "--tp-size", "2",
+        "--batch-size",
+        "-1",
+        "--n-samples",
+        "16",
+        "--max-running-prompts",
+        "8",
+        "--mini-bs",
+        "2",
+        "--world-size",
+        "4",
+        "--tp-size",
+        "2",
     )
     assert proc.returncode == 1
     result = json.loads(proc.stdout)
@@ -337,8 +356,18 @@ def test_check_capacity_migrated_invalid_negative():
 def test_check_capacity_migrated_invalid_divisibility():
     proc = _run(
         CHECK_CAPACITY,
-        "--batch-size", "4", "--n-samples", "16", "--max-running-prompts", "8",
-        "--mini-bs", "2", "--world-size", "4", "--tp-size", "3",
+        "--batch-size",
+        "4",
+        "--n-samples",
+        "16",
+        "--max-running-prompts",
+        "8",
+        "--mini-bs",
+        "2",
+        "--world-size",
+        "4",
+        "--tp-size",
+        "3",
     )
     assert proc.returncode == 1
     result = json.loads(proc.stdout)
@@ -350,15 +379,29 @@ def test_check_capacity_backward_compat_flags_unchanged():
     """Old flags must work identically: same JSON shape, same exit codes."""
     success = _run(
         CHECK_CAPACITY,
-        "--batch-size", "2", "--n-samples", "4", "--max-running-prompts", "4",
-        "--mini-bs", "1", "--world-size", "2", "--tp-size", "1",
+        "--batch-size",
+        "2",
+        "--n-samples",
+        "4",
+        "--max-running-prompts",
+        "4",
+        "--mini-bs",
+        "1",
+        "--world-size",
+        "2",
+        "--tp-size",
+        "1",
     )
     assert success.returncode == 0
     payload = json.loads(success.stdout)
     # Same top-level fields as the pre-migration script.
     assert set(payload) == {
-        "ok", "errors", "rollout_demand", "minimum_admission_waves",
-        "data_parallel_size", "settings",
+        "ok",
+        "errors",
+        "rollout_demand",
+        "minimum_admission_waves",
+        "data_parallel_size",
+        "settings",
     }
     assert payload["settings"]["memory_fraction"] == 0.9  # default preserved
 
