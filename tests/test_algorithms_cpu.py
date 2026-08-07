@@ -4,9 +4,10 @@ import functools
 import unittest
 
 from areno.api.algorithms import AlgorithmSpec, get_algorithm, list_algorithms, register_algorithm
+from areno.api.loss_fns import dpo_loss_fn, ipo_loss_fn
 from areno.api.loss_fns.gspo import gspo_loss_fn
 from areno.api.loss_fns.ppo import ppo_loss_fn
-from areno.api.trainer_config import PolicyTrainerConfig, TrainerConfig
+from areno.api.trainer_config import DPOTrainerConfig, IPOTrainerConfig, PolicyTrainerConfig, TrainerConfig
 from areno.api.trainer_factory import build_trainer
 
 
@@ -17,7 +18,9 @@ class AlgorithmRegistryTest(unittest.TestCase):
         """Built-ins should expose rollout and role requirements in one place."""
         algorithms = list_algorithms(include_experimental=False)
 
-        self.assertEqual(set(algorithms), {"dpo", "grpo", "gspo", "ppo", "sft"})
+        self.assertEqual(set(algorithms), {"dpo", "ipo", "grpo", "gspo", "ppo", "sft"})
+        self.assertFalse(algorithms["ipo"].requires_rollout)
+        self.assertIs(algorithms["ipo"].default_loss_fn, ipo_loss_fn)
         self.assertFalse(algorithms["sft"].requires_rollout)
         self.assertTrue(algorithms["gspo"].requires_rollout)
         self.assertIs(algorithms["ppo"].default_loss_fn, ppo_loss_fn)
@@ -26,6 +29,40 @@ class AlgorithmRegistryTest(unittest.TestCase):
         """Unknown names should fail with a useful registry-backed message."""
         with self.assertRaisesRegex(ValueError, "registered: .*gspo.*ppo"):
             get_algorithm("not_an_algorithm")
+
+    def test_registered_dpo_loss_binds_beta(self):
+        config = DPOTrainerConfig(
+            algo="dpo",
+            ckpt="unused",
+            dataset_path="unused",
+            dpo_beta=0.25,
+        )
+
+        loss_fn = get_algorithm("dpo").make_loss_fn(config)
+
+        self.assertIsInstance(loss_fn, functools.partial)
+        self.assertIs(loss_fn.func, dpo_loss_fn)
+        self.assertEqual(
+            loss_fn.keywords,
+            {"beta": 0.25},
+        )
+
+    def test_registered_ipo_loss_binds_beta(self):
+        config = IPOTrainerConfig(
+            algo="ipo",
+            ckpt="unused",
+            dataset_path="unused",
+            ipo_beta=0.2,
+        )
+
+        loss_fn = get_algorithm("ipo").make_loss_fn(config)
+
+        self.assertIsInstance(loss_fn, functools.partial)
+        self.assertIs(loss_fn.func, ipo_loss_fn)
+        self.assertEqual(
+            loss_fn.keywords,
+            {"beta": 0.2},
+        )
 
     def test_registered_gspo_loss_binds_config_clip_eps(self):
         """Algorithm specs can adapt the default loss with config parameters."""

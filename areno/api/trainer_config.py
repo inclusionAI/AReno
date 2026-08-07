@@ -170,6 +170,19 @@ class DPOTrainerConfig(TrainerConfig):
 
 
 @dataclass(slots=True)
+class IPOTrainerConfig(TrainerConfig):
+    """IPO role configuration.
+
+    IPO uses offline chosen/rejected preference pairs plus one frozen reference
+    policy. `ipo_beta` is the regularization parameter denoted by tau in the
+    IPO paper and sets the sampled-loss target to 1 / (2 * ipo_beta).
+    """
+
+    ref_ckpt: str | None = None
+    ipo_beta: float = 0.1
+
+
+@dataclass(slots=True)
 class PPOTrainerConfig(PolicyTrainerConfig):
     """PPO role configuration.
 

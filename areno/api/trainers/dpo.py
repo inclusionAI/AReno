@@ -1,20 +1,19 @@
-"""Direct Preference Optimization trainer.
+"""Offline pairwise preference trainer used by DPO and IPO.
 
-DPO consumes offline preference pairs instead of sampling rollouts:
-    1. Convert each dataset row into a chosen/rejected token pair.
-    2. Score both rows with a frozen reference policy role.
-    3. Train the policy with `dpo_loss_fn`, which compares chosen-vs-rejected
-       sequence logprob margins against the reference margins.
+The trainer consumes offline preference pairs instead of sampling rollouts:
 
-Rows are handed to the backend as consecutive `[chosen, rejected]` pairs so the
-loss can stay backend-agnostic and recover pairs from row order.
+1. Convert each dataset row into a chosen/rejected token pair.
+2. Score both rows with a frozen reference policy role.
+3. Train the policy with the algorithm-selected pairwise preference loss.
+
+Rows are handed to the backend as consecutive `[chosen, rejected]` pairs so
+the selected loss can recover pairs from row order.
 """
 
 from __future__ import annotations
 
 import logging
 import time
-from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -33,13 +32,16 @@ class DPOTrainer:
         # Each DPO pair is represented as two adjacent rows. Keeping microbatch
         # size even prevents the backend from splitting chosen/rejected rows.
         if int(config.mini_bs) % 2 != 0:
-            raise ValueError("DPO requires --mini-bs to be even so chosen/rejected pairs stay together")
+            raise ValueError(
+                f"{str(config.algo).upper()} requires --mini-bs to be even so chosen/rejected pairs stay together"
+            )
         self.config = config
         self.areno = instance
         self.dataset = dataset
-        # DPO beta is an algorithm hyperparameter, so bind it once here and
-        # leave the backend-facing loss signature as loss_fn(data_pack, logprobs).
-        self.loss_fn = partial(loss_fn, beta=config.dpo_beta)
+        # Algorithm-specific loss parameters are bound by AlgorithmSpec before the
+        # trainer is constructed. The trainer only needs the common backend-facing
+        # loss signature: loss_fn(data_pack, logprobs).
+        self.loss_fn = loss_fn
         self.logger = logging.getLogger(f"{self.__class__.__module__}.{self.__class__.__name__}")
         self.roles = {
             # DPO only needs a frozen reference policy; no rollout, reward, or
@@ -166,7 +168,7 @@ def _record_to_train_pair(record: Any, tokenizer, *, max_seq_len: int):
     record = dict(record)
     eos_token_id = tokenizer.eos_token_id if tokenizer.eos_token_id is not None else 0
     if "chosen" not in record or "rejected" not in record:
-        raise ValueError("DPO dataset row must contain `chosen` and `rejected`")
+        raise ValueError("preference dataset row must contain `chosen` and `rejected`")
     chosen, rejected = record["chosen"], record["rejected"]
 
     if isinstance(chosen, list) and isinstance(rejected, list):
@@ -182,7 +184,7 @@ def _record_to_train_pair(record: Any, tokenizer, *, max_seq_len: int):
         # Prompt/response preference rows share one encoded prompt and differ
         # only in the chosen/rejected response suffix.
         if "prompt" not in record:
-            raise ValueError("DPO prompt/response rows must contain `prompt`")
+            raise ValueError("preference prompt/response rows must contain `prompt`")
         prompt = record["prompt"]
         prompt_ids = encode_prompt_value(tokenizer, prompt)
         chosen_tokens, chosen_mask = response_to_tokens_and_mask(prompt_ids, str(chosen), tokenizer, eos_token_id)

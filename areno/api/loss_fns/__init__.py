@@ -1,7 +1,8 @@
 """Loss functions consumed by `Trainer.train`.
 
-Five flavours are bundled:
+Six flavours are bundled:
     dpo_loss_fn  - pairwise preference loss over chosen/rejected rows.
+    ipo_loss_fn  - squared preference-margin regression over chosen/rejected rows.
     grpo_loss_fn - PPO-style clipping applied per response token (GRPO).
     gspo_loss_fn - sequence-level clipping using a length-averaged log ratio.
     ppo_loss_fn  - clipped actor loss with optional KL penalty, matching the
@@ -14,7 +15,8 @@ swap algorithms without re-shaping its data path.
 from areno.api.loss_fns.dpo import dpo_loss_fn
 from areno.api.loss_fns.grpo import grpo_loss_fn
 from areno.api.loss_fns.gspo import gspo_loss_fn
+from areno.api.loss_fns.ipo import ipo_loss_fn
 from areno.api.loss_fns.ppo import ppo_loss_fn
 from areno.api.loss_fns.sft import sft_loss_fn
 
-__all__ = ["dpo_loss_fn", "grpo_loss_fn", "gspo_loss_fn", "ppo_loss_fn", "sft_loss_fn"]
+__all__ = ["dpo_loss_fn", "ipo_loss_fn", "grpo_loss_fn", "gspo_loss_fn", "ppo_loss_fn", "sft_loss_fn"]

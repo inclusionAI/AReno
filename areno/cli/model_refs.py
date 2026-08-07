@@ -48,7 +48,7 @@ def resolve_model_refs_for_config(config: ConfigT) -> ConfigT:
     model_hub = str(getattr(config, "model_hub", "modelscope"))
     config.ckpt = resolve_model_ref(config.ckpt, cache, model_hub=model_hub)
     algo = str(getattr(config, "algo", "")).lower()
-    if algo == "dpo" and getattr(config, "ref_ckpt", None) is not None:
+    if algo in {"dpo", "ipo"} and getattr(config, "ref_ckpt", None) is not None:
         config.ref_ckpt = resolve_model_ref(config.ref_ckpt, cache, model_hub=model_hub)
     if algo == "ppo":
         if getattr(config, "ref_ckpt", None) is not None:

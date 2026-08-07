@@ -18,7 +18,7 @@ from areno.api.agentic import (
 from areno.api.algorithms import AlgorithmSpec, get_algorithm, list_algorithms, register_algorithm
 from areno.api.config import ArenoConfig
 from areno.api.data import PromptBatch, PromptItem
-from areno.api.loss_fns import dpo_loss_fn, grpo_loss_fn, gspo_loss_fn, ppo_loss_fn, sft_loss_fn
+from areno.api.loss_fns import dpo_loss_fn, grpo_loss_fn, gspo_loss_fn, ipo_loss_fn, ppo_loss_fn, sft_loss_fn
 from areno.api.models import (
     BackendType,
     RolloutResult,
@@ -59,6 +59,7 @@ __all__ = [
     "list_algorithms",
     "register_algorithm",
     "dpo_loss_fn",
+    "ipo_loss_fn",
     "gspo_loss_fn",
     "grpo_loss_fn",
     "ppo_loss_fn",
