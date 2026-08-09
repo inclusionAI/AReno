@@ -463,7 +463,7 @@ def _build_response_from(
     data = build_chat_completion_response(
         tokenizer=tokenizer,
         model=request.model or model_path,
-        prompt_tokens=len(prompt) * len(response_ids),
+        prompt_tokens=len(prompt),
         response_ids=response_ids,
         finish_reasons=finish_reasons,
         tools=request.tools,
