@@ -4,23 +4,11 @@ Quickstart
 Use these commands after installation to validate the main AReno paths. Full
 training and agentic rollout require a CUDA-capable NVIDIA GPU.
 
-Training smoke test
--------------------
+Tiny training smoke tutorial
+----------------------------
 
-Run the smallest official training task to verify that the CLI can load a
-model, build batches, execute the training loop, and write outputs locally.
-
-.. code-block:: bash
-
-   areno train \
-     --ckpt Qwen/Qwen3-0.6B \
-     --dataset-path gsm8k:main \
-     --dataset-loader-fn examples/math/dataset_loader.py \
-     --reward-fn-path examples/math/math_verify_reward.py \
-     --algo gspo \
-     --tp-size 1 \
-     --world-size 1 \
-     --batch-size 1
+Follow :doc:`tiny-training-smoke` for the runnable step-by-step walkthrough of
+the smallest official AReno training task.
 
 RLVR path
 ---------

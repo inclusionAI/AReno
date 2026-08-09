@@ -16,6 +16,7 @@ AReno documentation
    Welcome <getting-started/welcome>
    getting-started/installation
    getting-started/quickstart
+   getting-started/tiny-training-smoke
 
 .. toctree::
    :hidden:

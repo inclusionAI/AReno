@@ -408,26 +408,13 @@ Observability
 Examples
 --------
 
-Tiny training smoke test
-~~~~~~~~~~~~~~~~~~~~~~~~
+Tiny training smoke tutorial
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Use this command when you only want to check that a machine can run one small
-official training task end to end:
-
-.. code-block:: bash
-
-   areno train \
-     --ckpt Qwen/Qwen3-0.6B \
-     --dataset-path gsm8k:main \
-     --dataset-loader-fn examples/math/dataset_loader.py \
-     --reward-fn-path examples/math/math_verify_reward.py \
-     --algo gspo \
-     --tp-size 1 \
-     --world-size 1 \
-     --batch-size 1
-
-This verifies the training wiring; it is not intended to measure final model
-quality.
+See :doc:`../getting-started/tiny-training-smoke` for the runnable tutorial
+version of the smallest official AReno training task. It covers the CLI,
+dataset loader, reward function, rollout path, checkpoint writing, and
+TensorBoard metrics export.
 
 GSPO math training
 ~~~~~~~~~~~~~~~~~~
