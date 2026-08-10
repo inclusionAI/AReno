@@ -107,7 +107,9 @@ def test_all_ok_when_limits_exceed_demand():
 
 def test_boundary_observed_equals_required_is_ok():
     demand = estimate_resource_demand(2, 1)
-    limits = _limits(fd_value=demand["file_descriptors"], nproc_value=demand["processes"], shm_value=demand["shared_memory"])
+    limits = _limits(
+        fd_value=demand["file_descriptors"], nproc_value=demand["processes"], shm_value=demand["shared_memory"]
+    )
     results = preflight_host_resources(2, 1, policy="warn", limits=limits)
     assert _names(results) == [RESOURCE_OK, RESOURCE_OK, RESOURCE_OK]
     # fd/processes use unit="" -> "delta=0"; shm uses unit=" bytes" -> "delta bytes=0".
