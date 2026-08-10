@@ -59,21 +59,19 @@ async def run_agent(ctx, batch):
     try:
         import httpx
         from openai import AsyncOpenAI
+
         from areno.api.agentic import AgentTrajectory, AgentTrajectoryTurn
     except ImportError as exc:
         raise RuntimeError(
-            "The water-jug agentic example requires `openai` and `httpx`. "
-            "Install them with `pip install openai httpx`."
+            "The water-jug agentic example requires `openai` and `httpx`. Install them with `pip install openai httpx`."
         ) from exc
 
     items = list(batch.iter_samples())
-    logger.info("Water-jug agent start requests=%d max_running_prompts=%d",
-                len(items), ctx.max_running_prompts)
+    logger.info("Water-jug agent start requests=%d max_running_prompts=%d", len(items), ctx.max_running_prompts)
 
     max_connections = max(len(items), ctx.max_running_prompts)
     http_client = httpx.AsyncClient(
-        limits=httpx.Limits(max_connections=max_connections,
-                            max_keepalive_connections=max_connections),
+        limits=httpx.Limits(max_connections=max_connections, max_keepalive_connections=max_connections),
         timeout=httpx.Timeout(900.0, connect=30.0),
     )
     client = AsyncOpenAI(
@@ -112,13 +110,15 @@ async def run_agent(ctx, batch):
                 logger.warning("Model request failed: %s", exc)
                 break
 
-            turns.append(AgentTrajectoryTurn(
-                item=item,
-                messages=list(messages),
-                response=response,
-                tools=[WATER_JUG_TOOL],
-                tool_choice="auto",
-            ))
+            turns.append(
+                AgentTrajectoryTurn(
+                    item=item,
+                    messages=list(messages),
+                    response=response,
+                    tools=[WATER_JUG_TOOL],
+                    tool_choice="auto",
+                )
+            )
 
             choice = response.choices[0]
             msg = choice.message
@@ -141,24 +141,38 @@ async def run_agent(ctx, batch):
                 else:
                     board = game.format_board(caps, state, target)
 
-                messages.append({
-                    "role": "assistant",
-                    "content": msg.content or "",
-                    "tool_calls": [{
-                        "id": tc.id, "type": "function",
-                        "function": {"name": fn_name, "arguments": tc.function.arguments},
-                    }],
-                })
-                messages.append({
-                    "role": "tool", "tool_call_id": tc.id,
-                    "name": fn_name, "content": board,
-                })
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": msg.content or "",
+                        "tool_calls": [
+                            {
+                                "id": tc.id,
+                                "type": "function",
+                                "function": {"name": fn_name, "arguments": tc.function.arguments},
+                            }
+                        ],
+                    }
+                )
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "name": fn_name,
+                        "content": board,
+                    }
+                )
 
         if not turns:
-            turns.append(AgentTrajectoryTurn(
-                item=item, messages=messages, response=None,
-                tools=[WATER_JUG_TOOL], tool_choice="auto",
-            ))
+            turns.append(
+                AgentTrajectoryTurn(
+                    item=item,
+                    messages=messages,
+                    response=None,
+                    tools=[WATER_JUG_TOOL],
+                    tool_choice="auto",
+                )
+            )
         return turns
 
     try:

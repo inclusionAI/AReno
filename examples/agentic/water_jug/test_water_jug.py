@@ -16,15 +16,14 @@ from pathlib import Path
 # Ensure we can import game, dataset_loader, reward, dataset_generator
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import game
-import dataset_generator
 import dataset_loader
+import game
 import reward
-
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 class FakeRecord:
     """Minimal stand-in for AReno's RewardRecord used by reward_fn."""
@@ -49,6 +48,7 @@ def solve_actions(caps, target):
 # ---------------------------------------------------------------------------
 # 1. Game logic: solvable puzzles
 # ---------------------------------------------------------------------------
+
 
 def test_classic_3_5_target4():
     """Classic 3L/5L jug puzzle, target 4L."""
@@ -82,6 +82,7 @@ def test_three_jugs():
 # 2. Unsolvable inputs
 # ---------------------------------------------------------------------------
 
+
 def test_unsolvable_target():
     """Target 4 with jugs (3, 6) is unsolvable (gcd=3, 4 not divisible)."""
     path = game.shortest_path((3, 6), (0, 0), 4)
@@ -105,6 +106,7 @@ def test_unsolvable_reward_is_zero():
 # ---------------------------------------------------------------------------
 # 3. Invalid jug identifiers
 # ---------------------------------------------------------------------------
+
 
 def test_invalid_jug_index_high():
     """Jug index out of range raises ValueError."""
@@ -146,6 +148,7 @@ def test_unknown_action():
 # 4. No-op pours (pour when source is empty or dest is full)
 # ---------------------------------------------------------------------------
 
+
 def test_noop_pour_empty_source():
     """Pouring from an empty jug is a no-op (state unchanged)."""
     state = game.apply_action((3, 5), (0, 0), "pour(0,1)")
@@ -162,6 +165,7 @@ def test_noop_pour_full_dest():
 # ---------------------------------------------------------------------------
 # 5. Seeded generation (deterministic)
 # ---------------------------------------------------------------------------
+
 
 def test_seed_deterministic(tmp_path):
     """Same seed produces identical puzzles."""
@@ -196,6 +200,7 @@ def test_all_generated_solvable(tmp_path):
 # 6. Action exhaustion (max turns without solving)
 # ---------------------------------------------------------------------------
 
+
 def test_action_exhaustion_reward():
     """Many actions that don't solve should give partial/zero reward."""
     image = {"capacities": [7, 10], "initial_state": [0, 0], "target": 9, "oracle_steps": 10}
@@ -209,6 +214,7 @@ def test_action_exhaustion_reward():
 # ---------------------------------------------------------------------------
 # 7. Reward function: solved and efficiency
 # ---------------------------------------------------------------------------
+
 
 def test_reward_solved_optimal():
     """Solving in optimal steps gives >1.0 reward (efficiency bonus)."""
@@ -247,13 +253,14 @@ def test_reward_no_actions():
 # 8. Dataset loader
 # ---------------------------------------------------------------------------
 
+
 def test_dataset_loader(tmp_path):
     """Dataset loader produces correct prompt and image fields."""
     p = tmp_path / "test.jsonl"
-    p.write_text(json.dumps({
-        "id": "test-0", "capacities": [3, 5],
-        "initial_state": [0, 0], "target": 4, "oracle_steps": 6
-    }) + "\n")
+    p.write_text(
+        json.dumps({"id": "test-0", "capacities": [3, 5], "initial_state": [0, 0], "target": 4, "oracle_steps": 6})
+        + "\n"
+    )
     items = dataset_loader.load_training_dataset(str(p))
     assert len(items) == 1
     assert "prompt" in items[0]
@@ -274,6 +281,7 @@ def test_dataset_loader_missing_file():
 # ---------------------------------------------------------------------------
 # 9. Board formatting
 # ---------------------------------------------------------------------------
+
 
 def test_format_board():
     """format_board produces readable output with target and jug info."""
@@ -297,6 +305,7 @@ def test_build_user_prompt():
 # ---------------------------------------------------------------------------
 # 10. Solve rate and excess actions metric (acceptance criterion)
 # ---------------------------------------------------------------------------
+
 
 def test_solve_rate_and_excess_actions(tmp_path):
     """Generate puzzles, solve them, and report solve rate + excess actions."""
@@ -393,10 +402,10 @@ if __name__ == "__main__":
     # 10. Solve rate
     run_test("test_solve_rate_and_excess_actions", lambda: test_solve_rate_and_excess_actions(tmp))
 
-    print(f"\n{'='*50}")
+    print(f"\n{'=' * 50}")
     print(f"Results: {state['passed']} passed, {state['failed']} failed, {state['passed'] + state['failed']} total")
     if state["failures"]:
         print("\nFailures:")
         for name, err in state["failures"]:
             print(f"  - {name}: {err}")
-    print(f"{'='*50}")
+    print(f"{'=' * 50}")

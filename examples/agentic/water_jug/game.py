@@ -53,7 +53,7 @@ def apply_action(capacities: Iterable[int], state: Iterable[int], action: str) -
 
 
 def _parse_index(action: str, name: str, n: int) -> int:
-    inner = action[len(name) + 1: -1].strip()
+    inner = action[len(name) + 1 : -1].strip()
     idx = int(inner)
     if not 0 <= idx < n:
         raise ValueError(f"Jug index {idx} out of range (0-{n - 1})")
@@ -192,7 +192,6 @@ def parse_trajectory(messages: list[dict[str, Any]]) -> tuple[State, list[str]]:
     Returns (final_state, action_list).
     """
     caps: tuple[int, ...] | None = None
-    target: int | None = None
     state: State = ()
     actions: list[str] = []
 
@@ -215,6 +214,7 @@ def parse_trajectory(messages: list[dict[str, Any]]) -> tuple[State, list[str]]:
                 fn_name = tc.get("function", {}).get("name", "")
                 if fn_name == "water_jug_action":
                     import json
+
                     args = json.loads(tc["function"]["arguments"])
                     action = args.get("action", "")
                     if action:

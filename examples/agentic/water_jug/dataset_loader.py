@@ -34,14 +34,16 @@ def load_training_dataset(dataset_path: str, *, default_loader=None, **_: object
         caps = raw["capacities"]
         target = raw["target"]
         prompt = game.build_user_prompt(caps, target)
-        items.append({
-            "id": raw.get("id", f"puzzle-{idx:05d}"),
-            "prompt": prompt,
-            "image": {
-                "capacities": caps,
-                "initial_state": raw.get("initial_state", [0] * len(caps)),
-                "target": target,
-                "oracle_steps": raw.get("oracle_steps", 0),
-            },
-        })
+        items.append(
+            {
+                "id": raw.get("id", f"puzzle-{idx:05d}"),
+                "prompt": prompt,
+                "image": {
+                    "capacities": caps,
+                    "initial_state": raw.get("initial_state", [0] * len(caps)),
+                    "target": target,
+                    "oracle_steps": raw.get("oracle_steps", 0),
+                },
+            }
+        )
     return items
