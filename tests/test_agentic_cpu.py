@@ -1,16 +1,19 @@
 import asyncio
 import importlib.util
+import json
 import logging
 import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
 
+from areno.api.agentic import AgentTrajectory as RuntimeAgentTrajectory
 from areno.api.tool_call_parser import (
     Gemma4ToolCallParser,
     JsonToolCallParser,
     MiniCPMToolCallParser,
     QwenToolCallParser,
+    infer_tool_call_parser_name,
 )
 from areno.api.trainers.policy_only import PolicyOnlyTrainer
 
@@ -122,10 +125,17 @@ def test_agent_trajectory_turn_extracts_response_metadata():
     turn = AgentTrajectoryTurn(
         item=item,
         messages=[{"role": "user", "content": "same prompt"}],
-        response={"areno": {"response_tokens": [10, 11], "response_logprobs": [-0.1, -0.2]}},
+        response={
+            "areno": {
+                "input_tokens": [1, 2, 3],
+                "response_tokens": [10, 11],
+                "response_logprobs": [-0.1, -0.2],
+            }
+        },
     )
 
     assert turn.item.record == {"task": "same"}
+    assert turn.input_tokens == [1, 2, 3]
     assert turn.response_tokens == [10, 11]
     assert turn.response_logprobs == [-0.1, -0.2]
 
@@ -220,6 +230,39 @@ def test_normalize_messages_rewrites_null_tool_call_content_for_templates():
 
     assert tokens == [3]
     assert messages[1]["content"] == ""
+
+
+def test_normalize_messages_flattens_openai_text_parts_for_templates():
+    tokenizer = _StrictContentTokenizer()
+    messages = agentic._normalize_messages(
+        [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "inspect "},
+                    {"type": "text", "text": "the repository"},
+                ],
+            },
+            {"role": "tool", "content": [{"type": "text", "text": "README.md"}]},
+        ]
+    )
+
+    tokens = agentic._messages_to_prompt_tokens(tokenizer, messages, tools=[], fallback_prompt="fallback")
+
+    assert tokens == [2]
+    assert messages[0]["content"] == "inspect the repository"
+    assert messages[1]["content"] == "README.md"
+
+
+def test_normalize_messages_preserves_multimodal_content_parts():
+    content = [
+        {"type": "text", "text": "describe"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}},
+    ]
+
+    messages = agentic._normalize_messages([{"role": "user", "content": content}])
+
+    assert messages[0]["content"] == content
 
 
 def test_messages_to_prompt_tokens_normalizes_tool_call_arguments_for_templates():
@@ -355,6 +398,28 @@ def test_explicit_trajectory_tokenization_normalizes_null_tool_call_content():
     sample = session._sample_from_trajectory_turn(turn)
 
     assert sample.token_row == [3, 1]
+
+
+def test_explicit_trajectory_uses_exact_input_tokens_from_response_metadata():
+    trainer = _FakeTrainer(world_size=1, tp_size=1)
+    trainer.tokenizer = _ExactInputTokenizer()
+    session = RolloutSession(trainer, sampling_params=_FakeSamplingParams(), loss_mask_policy=LossMaskPolicy())
+    item = next(AgentBatch(records=[{}], prompts=["p"], input_tokens=[[1]], n_samples=1).iter_samples())
+    turn = AgentTrajectoryTurn(
+        item=item,
+        messages=[{"role": "user", "content": [{"type": "text", "text": "Pi-owned prompt"}]}],
+        response={
+            "areno": {
+                "input_tokens": [7, 8, 9],
+                "response_tokens": [10],
+                "response_logprobs": [-0.1],
+            }
+        },
+    )
+
+    sample = session._sample_from_trajectory_turn(turn)
+
+    assert sample.token_row == [7, 8, 9, 10]
 
 
 def test_messages_to_prompt_tokens_falls_back_when_template_rejects_tools():
@@ -899,7 +964,7 @@ def test_agentic_tool_request_returns_tool_call_and_reward_record():
     assert record.loss_mask == [True, True]
 
 
-def test_json_tool_call_parser_prefers_explicit_final_direction():
+def test_json_tool_call_parser_rejects_explicit_direction_in_plain_text():
     tools = [
         {
             "type": "function",
@@ -919,8 +984,8 @@ def test_json_tool_call_parser_prefers_explicit_final_direction():
         {"type": "function", "function": {"name": "choose_move"}},
     )
 
-    assert len(parsed.tool_calls) == 1
-    assert '"direction":"left"' in parsed.tool_calls[0]["function"]["arguments"]
+    assert parsed.tool_calls == []
+    assert parsed.normal_text == "Valid moves are up, down, left, right. I choose left."
 
 
 def test_json_tool_call_parser_rejects_plain_reasoning_without_action():
@@ -1011,6 +1076,95 @@ def test_qwen_tool_call_parser_supports_angle_function_blocks():
     assert parsed.tool_calls[0]["function"]["name"] == "inspect_tree"
     assert '"path":"."' in parsed.tool_calls[0]["function"]["arguments"]
     assert '"max_depth":3' in parsed.tool_calls[0]["function"]["arguments"]
+
+
+def test_qwen_tool_call_parser_supports_ling_arg_key_value_blocks():
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "bash",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "command": {"type": "string"},
+                        "timeout": {"type": "integer"},
+                    },
+                },
+            },
+        }
+    ]
+
+    parsed = QwenToolCallParser().parse(
+        "Inspecting the workspace.</think><tool_call>bash\n"
+        "<arg_key>command</arg_key>\n"
+        "<arg_value>ls -la /tmp/pi-rollout/</arg_value>\n"
+        "<arg_key>timeout</arg_key>\n"
+        "<arg_value>30</arg_value>\n"
+        "</tool_call>",
+        tools,
+        "required",
+    )
+
+    assert parsed.normal_text == "Inspecting the workspace.</think>"
+    assert len(parsed.tool_calls) == 1
+    assert parsed.tool_calls[0]["function"]["name"] == "bash"
+    assert json.loads(parsed.tool_calls[0]["function"]["arguments"]) == {
+        "command": "ls -la /tmp/pi-rollout/",
+        "timeout": 30,
+    }
+
+
+def test_qwen_tool_call_parser_does_not_infer_auto_call_from_truncated_reasoning():
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "move",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"direction": {"type": "string", "enum": ["up", "down", "left", "right"]}},
+                },
+            },
+        }
+    ]
+    content = "I considered every move. The best move is up, but let me reconsider. <tool_call>move\n<arg_key>direction"
+
+    parsed = QwenToolCallParser().parse(content, tools, "auto")
+
+    assert parsed.tool_calls == []
+    assert parsed.normal_text == content
+
+
+def test_qwen_tool_call_parser_accepts_complete_ling_block_in_auto_mode():
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "move",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"direction": {"type": "string", "enum": ["up", "down", "left", "right"]}},
+                },
+            },
+        }
+    ]
+    content = (
+        "The best move is up.</think><tool_call>move\n"
+        "<arg_key>direction</arg_key>\n<arg_value>up</arg_value>\n</tool_call>"
+    )
+
+    parsed = QwenToolCallParser().parse(content, tools, "auto")
+
+    assert len(parsed.tool_calls) == 1
+    assert json.loads(parsed.tool_calls[0]["function"]["arguments"]) == {"direction": "up"}
+
+
+def test_tool_call_parser_infers_qwen_protocol_for_ling_model():
+    tokenizer = SimpleNamespace(chat_template="", name_or_path="Ling-Tiny-v3")
+    trainer = SimpleNamespace(get_tokenizer=lambda: tokenizer, _model_path="/models/Ling-Tiny-v3")
+
+    assert infer_tool_call_parser_name(trainer) == "qwen"
 
 
 def test_gemma4_tool_call_parser_supports_chat_completions_tools():
@@ -1156,6 +1310,14 @@ def test_tool_call_parser_supports_flat_tool_schema():
     assert parsed.tool_calls[0]["function"]["name"] == "choose_move"
 
 
+def test_policy_trainer_counts_explicitly_invalid_agent_items():
+    trainer = PolicyOnlyTrainer.__new__(PolicyOnlyTrainer)
+    trajectory = RuntimeAgentTrajectory(invalid_items=[object(), object()])
+
+    assert trainer._agent_trajectory_invalid_count(trajectory) == 2
+    assert trainer._agent_trajectory_invalid_count([trajectory, RuntimeAgentTrajectory()]) == 2
+
+
 def test_json_tool_call_parser_rejects_tool_choice_mismatch():
     tools = [
         {
@@ -1298,6 +1460,13 @@ class _StrictContentTokenizer(_FakeTokenizer):
         for message in messages:
             assert isinstance(message.get("content"), str)
         return [len(messages)]
+
+
+class _ExactInputTokenizer(_FakeTokenizer):
+    chat_template = "template"
+
+    def apply_chat_template(self, *args, **kwargs):
+        raise AssertionError("exact Pi input tokens must bypass chat-template reconstruction")
 
 
 class _ToolCallArgumentsMappingTokenizer(_StrictContentTokenizer):

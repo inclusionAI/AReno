@@ -9,6 +9,7 @@ def register_models() -> None:
     """Register all bundled model adapters with the global registry."""
 
     from areno.models.bailing import BailingMoeLinearV2Adapter
+    from areno.models.bailing_v3 import BailingMoeV3Adapter
     from areno.models.gemma4 import Gemma4Adapter
     from areno.models.llama import LlamaAdapter
     from areno.models.minicpmv46 import MiniCPMV46Adapter
@@ -27,6 +28,7 @@ def register_models() -> None:
     register_adapter(Qwen35VLAdapter())
     register_adapter(Qwen35Adapter())
     register_adapter(BailingMoeLinearV2Adapter())
+    register_adapter(BailingMoeV3Adapter())
     register_adapter(Gemma4Adapter())
     register_adapter(MiniCPMV46Adapter())
     register_adapter(Olmo2Adapter())

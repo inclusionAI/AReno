@@ -162,7 +162,11 @@ class ModelConfig:
     qk_nope_head_dim: int = 0
     qk_rope_head_dim: int = 0
     v_head_dim: int = 0
+    q_lora_rank: int | None = None
     kv_lora_rank: int | None = None
+    kda_safe_gate: bool = False
+    kda_lower_bound: float | None = None
+    no_kda_lora: bool = False
     linear_backend: str = "minimax"
     linear_scale: bool = True
     linear_silu: bool = False

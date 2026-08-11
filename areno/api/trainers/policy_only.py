@@ -14,6 +14,7 @@ role-management hooks; this is why the helpers are designed to be small.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import time
@@ -230,6 +231,7 @@ class PolicyOnlyTrainer:
             trajectories = await maybe_await(self._get_agent_run_fn()(ctx, agent_batch))
             if trajectories is None:
                 raise RuntimeError("agent run function must return explicit trajectories")
+            agent_filtered_count = self._agent_trajectory_invalid_count(trajectories)
             samples = []
             for turn in self._agent_trajectory_turns(ctx, trajectories):
                 sample = ctx._sample_from_trajectory_turn(turn)
@@ -242,14 +244,22 @@ class PolicyOnlyTrainer:
                 ctx, samples, sampling_params
             )
             expected = len(agent_batch)
-            if len(samples) + filtered_count != expected:
+            if len(samples) + filtered_count + agent_filtered_count != expected:
                 raise RuntimeError(
-                    f"agent rollout produced {len(samples)} trajectories and filtered {filtered_count}, expected {expected}"
+                    f"agent rollout produced {len(samples)} trajectories, filtered {filtered_count} overlong and "
+                    f"{agent_filtered_count} invalid, expected {expected}"
                 )
             if not samples:
                 raise RuntimeError(
-                    f"all {filtered_count} agent trajectories exceeded the configured context length; "
+                    f"all agent trajectories were filtered ({filtered_count} overlong, "
+                    f"{agent_filtered_count} invalid); "
                     f"{self._format_agent_filter_diagnostics(filter_diagnostics)}"
+                )
+            if agent_filtered_count:
+                self.logger.warning(
+                    "agentic rollout filtered invalid samples=%d valid_samples=%d",
+                    agent_filtered_count,
+                    len(samples),
                 )
             reward_records = [ctx.reward_record(sample) for sample in samples]
             rewards = [float(self.reward_fn(record)) for record in reward_records]
@@ -397,6 +407,17 @@ class PolicyOnlyTrainer:
             else:
                 yield from trajectory
 
+    def _agent_trajectory_invalid_count(self, trajectories):
+        from areno.api.agentic import AgentTrajectory
+
+        if isinstance(trajectories, AgentTrajectory):
+            return len(trajectories.invalid_items)
+        if isinstance(trajectories, (list, tuple)):
+            return sum(
+                len(trajectory.invalid_items) for trajectory in trajectories if isinstance(trajectory, AgentTrajectory)
+            )
+        return 0
+
     def _find_agent_sample(self, samples, item):
         if item.prompt_index < 0 or item.sample_index < 0:
             return None
@@ -472,13 +493,13 @@ class PolicyOnlyTrainer:
     def _record_sample_completions(self, tokenizer, epoch: int, step: int, prompt_batch, rollout_results) -> None:
         # Diagnostics knob: setting ARENO_LOG_COMPLETIONS=N records up to N
         # decoded completions per step in the metrics directory.
-        limit = int(os.getenv("ARENO_LOG_COMPLETIONS", "1"))
+        limit = int(os.getenv("ARENO_LOG_COMPLETIONS", "0"))
         if limit <= 0:
             return
         logged = 0
         for prompt_idx, (item, result) in enumerate(zip(prompt_batch.items, rollout_results, strict=True)):
             for sample_idx, seq in enumerate(result.sequences):
-                self.areno.record_rollout_sample(
+                self._emit_completion_sample(
                     {
                         "kind": "rollout",
                         "epoch": epoch,
@@ -499,7 +520,7 @@ class PolicyOnlyTrainer:
     def _log_agentic_sample_completions(self, epoch: int, step: int, agent_batch) -> None:
         # Match non-agentic rollout diagnostics so reward/debug workflows do
         # not depend on rollout mode.
-        limit = int(os.getenv("ARENO_LOG_COMPLETIONS", "1"))
+        limit = int(os.getenv("ARENO_LOG_COMPLETIONS", "0"))
         if limit <= 0:
             return
         for logged, record in enumerate(agent_batch.reward_records):
@@ -508,7 +529,7 @@ class PolicyOnlyTrainer:
             loss_mask = agent_batch.loss_masks[logged]
             token_row = agent_batch.token_rows[logged]
             first_loss_idx = next((idx for idx, enabled in enumerate(loss_mask) if enabled), -1)
-            self.areno.record_rollout_sample(
+            self._emit_completion_sample(
                 {
                     "kind": "agentic",
                     "epoch": epoch,
@@ -529,6 +550,12 @@ class PolicyOnlyTrainer:
             )
             if logged + 1 >= limit:
                 return
+
+    def _emit_completion_sample(self, sample: dict) -> None:
+        """Log an opted-in completion and persist it with rollout metrics."""
+
+        self.logger.info("rollout_completion=%s", json.dumps(sample, ensure_ascii=False, default=str))
+        self.areno.record_rollout_sample(sample)
 
     def _materialize_train_batch(self, tokenizer, prompt_batch, rollout_results):
         """Assemble TrainSequence rows for one rollout batch.

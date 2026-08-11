@@ -127,6 +127,7 @@ class AgentTrajectoryTurn:
     item: AgentItem
     messages: list[dict[str, Any]]
     response: Any | None = None
+    input_tokens: list[int] = field(default_factory=list)
     response_tokens: list[int] = field(default_factory=list)
     response_logprobs: list[float] = field(default_factory=list)
     parsed_tool_calls: list[dict[str, Any]] = field(default_factory=list)
@@ -138,6 +139,7 @@ class AgentTrajectoryTurn:
         if self.response is None:
             return
         metadata = _chat_response_agentic_metadata(self.response)
+        self.input_tokens = list(metadata.get("input_tokens") or [])
         self.response_tokens = list(metadata["response_tokens"])
         self.response_logprobs = [float(value) for value in metadata["response_logprobs"]]
         self.parsed_tool_calls = _chat_response_message_tool_calls(self.response)
@@ -148,6 +150,7 @@ class AgentTrajectory:
     """Explicit trajectories returned by ``run_agent`` for one rollout batch."""
 
     turns: list[AgentTrajectoryTurn] = field(default_factory=list)
+    invalid_items: list[AgentItem] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -569,7 +572,10 @@ class RolloutSession:
             tool_choice=turn.tool_choice,
             created_at=time.monotonic(),
         )
-        pending.input_tokens, pending.features = self._messages_to_tokens_and_features(pending)
+        if turn.input_tokens:
+            pending.input_tokens = list(turn.input_tokens)
+        else:
+            pending.input_tokens, pending.features = self._messages_to_tokens_and_features(pending)
         return self._sample_from_pending_chat(
             pending,
             _ResponseData(response_tokens=list(turn.response_tokens), response_logprobs=list(turn.response_logprobs)),

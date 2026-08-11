@@ -245,6 +245,8 @@ class Trainer:
 
         cursor = 0
         total_skipped_long = 0
+        shortest_skipped = None
+        longest_skipped = None
         while cursor < len(dataset):
             items = []
             scanned = 0
@@ -301,6 +303,12 @@ class Trainer:
                 if len(input_tokens) > max_prompt_tokens:
                     skipped_long += 1
                     total_skipped_long += 1
+                    shortest_skipped = (
+                        len(input_tokens) if shortest_skipped is None else min(shortest_skipped, len(input_tokens))
+                    )
+                    longest_skipped = (
+                        len(input_tokens) if longest_skipped is None else max(longest_skipped, len(input_tokens))
+                    )
                     continue
                 items.append(
                     PromptItem(
@@ -311,6 +319,13 @@ class Trainer:
                     )
                 )
             if not items:
+                if total_skipped_long == len(dataset) and total_skipped_long > 0:
+                    raise ValueError(
+                        f"all {total_skipped_long} dataset prompts exceed "
+                        f"--max-prompt-tokens={max_prompt_tokens} "
+                        f"(shortest={shortest_skipped}, longest={longest_skipped}); "
+                        "increase --max-prompt-tokens or shorten the dataset prompts"
+                    )
                 break
             yield PromptBatch(
                 items=items,

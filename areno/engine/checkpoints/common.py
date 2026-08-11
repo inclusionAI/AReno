@@ -30,6 +30,7 @@ from torch import nn
 
 from areno.engine.checkpoints.io import (
     CheckpointTensorStore,
+    IncrementalHFSafetensorsWriter,
     PolicyTensorLayout,
     PolicyTensorPiece,
     PolicyTensorStore,
@@ -42,9 +43,9 @@ from areno.engine.checkpoints.io import (
     gather_tensor_parallel_ranged_tensor,
     gather_tensor_parallel_split_column_tensor,
     gather_tensor_parallel_tensor,
+    pageable_checkpoint_staging,
     policy_plan_scope,
     rank0_tensor,
-    write_hf_safetensors_checkpoint,
 )
 from areno.engine.layers.linear import _shard_range
 from areno.engine.parallel.context import get_tp_context
@@ -200,6 +201,7 @@ class LayerSpec:
     save_ops: tuple[object, ...] = ()
     load_handlers: tuple[Callable[[nn.Module, SafetensorsIndex, str, int, int], None], ...] = ()
     save_handlers: tuple[Callable[[dict[str, torch.Tensor | None], str, nn.Module, object | None], None], ...] = ()
+    prefetch_layer: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -400,15 +402,26 @@ def save_checkpoint_weights(
 ) -> str | None:
     """Save a tensor-parallel model as a HF sharded safetensors checkpoint."""
 
-    tensors = CheckpointTensorStore()
-    save_embedding_norm_head(tensors, model, spec.top_level)
-    # Some column-parallel tensors are batched until all layers are visited so
-    # that a single fused all-gather can be reused across shapes.
-    delayed_column_tensors: list[tuple[str, torch.Tensor]] = []
-    save_layer_specs(tensors, model, spec.layer, context=delayed_column_tensors)
-    if delayed_column_tensors:
-        save_column_tensors(tensors, delayed_column_tensors)
-    saved_path = write_hf_safetensors_checkpoint(tensors, output_path, source_path)
+    writer = IncrementalHFSafetensorsWriter(output_path, source_path)
+    with pageable_checkpoint_staging():
+        tensors = CheckpointTensorStore()
+        save_embedding_norm_head(tensors, model, spec.top_level)
+        writer.write(tensors, "top-level")
+        tensors.clear()
+
+        for layer_idx, layer in enumerate(model.layers):
+            prefix = spec.layer.prefix.format(layer=layer_idx)
+            delayed_column_tensors: list[tuple[str, torch.Tensor]] = []
+            save_replicated_tensors(tensors, layer, prefix, spec.layer.replicated)
+            for op in spec.layer.save_ops:
+                save_layer_op(tensors, layer, prefix, op, delayed_column_tensors)
+            for handler in spec.layer.save_handlers:
+                handler(tensors, prefix, layer, delayed_column_tensors)
+            if delayed_column_tensors:
+                save_column_tensors(tensors, delayed_column_tensors)
+            writer.write(tensors, f"layer-{layer_idx:05d}")
+            tensors.clear()
+    saved_path = writer.finish()
     if saved_path is not None and source_path is not None:
         copy_source_passthrough_weights(
             source_path, saved_path, protected_prefix=_protected_prefix_from_top_level(spec.top_level)
@@ -496,11 +509,14 @@ def load_layer_specs(model: nn.Module, index: SafetensorsIndex, spec: LayerSpec,
 
     for layer_idx, layer in enumerate(model.layers):
         prefix = spec.prefix.format(layer=layer_idx)
-        # Prefetch only small replicated keys. TP-sharded matrices are loaded
-        # with safetensors slicing in `load_layer_op`.
         layer_keys = index.keys_for_prefix(f"{prefix}.")
-        replicated_keys = [key(rep.key, prefix) for rep in spec.replicated]
-        index.prefetch(replicated_keys)
+        if spec.prefetch_layer:
+            index.prefetch(layer_keys)
+        else:
+            # Prefetch only small replicated keys. TP-sharded matrices are
+            # loaded on demand to avoid keeping a whole layer in CPU memory.
+            replicated_keys = [key(rep.key, prefix) for rep in spec.replicated]
+            index.prefetch(replicated_keys)
         load_replicated_tensors(layer, index, prefix, spec.replicated)
         for op in spec.load_ops:
             load_layer_op(layer, index, prefix, op, rank, world_size)
