@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from areno.api.config import ArenoConfig, coerce_backend_config, resolve_backend_type
 from areno.api.models import BackendType, SamplingParams, TrainSequence
@@ -14,6 +15,8 @@ from areno.api.tokenizer import (
     configure_chat_template_enable_thinking,
     encode_generation_prompt,
     eos_token_ids,
+    load_processor,
+    load_tokenizer,
     normalize_token_ids,
 )
 
@@ -97,6 +100,22 @@ class TokenizerApiTest(unittest.TestCase):
 
         self.assertEqual(normalize_token_ids(encoding), [1, 2, 3])
         self.assertEqual(normalize_token_ids(batch_encoding), [4, 5, 6])
+
+    def test_loader_wrappers_delegate_to_engine_implementations(self):
+        """The public loader seam stays lazy without changing call semantics."""
+        model_path = Path("model")
+        tokenizer = object()
+        processor = object()
+
+        with (
+            patch("areno.engine.data.tokenizer.load_tokenizer", return_value=tokenizer) as engine_tokenizer,
+            patch("areno.engine.data.tokenizer.load_processor", return_value=processor) as engine_processor,
+        ):
+            self.assertIs(load_tokenizer(model_path), tokenizer)
+            self.assertIs(load_processor(model_path), processor)
+
+        engine_tokenizer.assert_called_once_with(model_path)
+        engine_processor.assert_called_once_with(model_path)
 
     def test_sampling_params_defaults_are_backend_agnostic(self):
         """Public sampling defaults are part of the backend API contract."""
