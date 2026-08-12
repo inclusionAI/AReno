@@ -8,6 +8,7 @@ on:
       - "areno/**"
       - "tests/**"
       - "pyproject.toml"
+      - "VERSION"
       - ".github/workflows/cpu_unit_tests.yml"
   pull_request:
     branches:
@@ -16,6 +17,7 @@ on:
       - "areno/**"
       - "tests/**"
       - "pyproject.toml"
+      - "VERSION"
       - ".github/workflows/cpu_unit_tests.yml"
   workflow_dispatch:
 
