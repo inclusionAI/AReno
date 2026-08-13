@@ -343,7 +343,7 @@ class RoleManager:
                 "input_ids": tokens,
                 "train_meta": _dense_train_meta(tokens, sequence_parallel_enabled=False),
             }
-            if row_features is not None:
+            if row_features is not None and any(feature is not None for feature in row_features):
                 model_kwargs["features"] = row_features
             out = model(**model_kwargs)
             logprobs = next_token_logprobs(out.logits_shard, tokens)
@@ -389,7 +389,7 @@ class RoleManager:
                 "input_ids": tokens,
                 "train_meta": _dense_train_meta(tokens, sequence_parallel_enabled=False),
             }
-            if row_features is not None:
+            if row_features is not None and any(feature is not None for feature in row_features):
                 model_kwargs["features"] = row_features
             out = role.model(**model_kwargs)
             if out.hidden_states is None:
@@ -439,7 +439,7 @@ class RoleManager:
                 "input_ids": tokens,
                 "train_meta": _dense_train_meta(tokens, sequence_parallel_enabled=False),
             }
-            if row_features is not None:
+            if row_features is not None and any(feature is not None for feature in row_features):
                 model_kwargs["features"] = row_features
             out = role.model(**model_kwargs)
             if out.hidden_states is None:
