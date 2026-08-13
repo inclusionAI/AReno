@@ -422,6 +422,71 @@ def test_explicit_trajectory_uses_exact_input_tokens_from_response_metadata():
     assert sample.token_row == [7, 8, 9, 10]
 
 
+def test_explicit_multimodal_trajectory_rebuilds_features_for_training(monkeypatch):
+    trainer = _FakeTrainer(world_size=1, tp_size=1)
+    session = RolloutSession(trainer, sampling_params=_FakeSamplingParams(), loss_mask_policy=LossMaskPolicy())
+    item = next(AgentBatch(records=[{}], prompts=["p"], input_tokens=[[1]], n_samples=1).iter_samples())
+    turn = AgentTrajectoryTurn(
+        item=item,
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "video_url", "video_url": {"url": "/tmp/sample.mp4"}},
+                    {"type": "text", "text": "count"},
+                ],
+            }
+        ],
+        response={
+            "areno": {
+                "input_tokens": [7, 8, 9],
+                "response_tokens": [10],
+                "response_logprobs": [-0.1],
+            }
+        },
+    )
+    features = {"pixel_values_videos": object()}
+    monkeypatch.setattr(
+        RolloutSession,
+        "_messages_to_tokens_and_features",
+        lambda self, pending: ([7, 8, 9], features),
+    )
+
+    sample = session._sample_from_trajectory_turn(turn)
+
+    assert sample.token_row == [7, 8, 9, 10]
+    assert sample.features is features
+
+
+def test_explicit_multimodal_trajectory_rejects_reencoded_token_drift(monkeypatch):
+    trainer = _FakeTrainer(world_size=1, tp_size=1)
+    session = RolloutSession(trainer, sampling_params=_FakeSamplingParams(), loss_mask_policy=LossMaskPolicy())
+    item = next(AgentBatch(records=[{}], prompts=["p"], input_tokens=[[1]], n_samples=1).iter_samples())
+    turn = AgentTrajectoryTurn(
+        item=item,
+        messages=[{"role": "user", "content": [{"type": "audio_url", "audio_url": {"url": "/tmp/a.wav"}}]}],
+        response={
+            "areno": {
+                "input_tokens": [7, 8, 9],
+                "response_tokens": [10],
+                "response_logprobs": [-0.1],
+            }
+        },
+    )
+    monkeypatch.setattr(
+        RolloutSession,
+        "_messages_to_tokens_and_features",
+        lambda self, pending: ([7, 8], {"input_features": object()}),
+    )
+
+    try:
+        session._sample_from_trajectory_turn(turn)
+    except ValueError as exc:
+        assert "differ from the original rollout request" in str(exc)
+    else:
+        raise AssertionError("expected multimodal token drift to be rejected")
+
+
 def test_messages_to_prompt_tokens_falls_back_when_template_rejects_tools():
     tokenizer = _ToolRejectingTokenizer()
     messages = [{"role": "user", "content": "choose"}]

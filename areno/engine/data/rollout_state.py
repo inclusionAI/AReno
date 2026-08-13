@@ -312,7 +312,16 @@ def _slice_prompt_image_features(
     if image_embeds is None:
         image_embeds = _feature_tensor(features, "projected_image_embeds")
     if image_embeds is None:
-        if not any(key in features for key in ("pixel_values", "image_grid_thw")):
+        if not any(
+            key in features
+            for key in (
+                "pixel_values",
+                "image_grid_thw",
+                "pixel_values_videos",
+                "input_features",
+                "multimodal_feature_rows",
+            )
+        ):
             return [False] * chunk_len, None
     full_mask = _prompt_image_mask(features, prompt)
     local_mask = full_mask[cursor : cursor + chunk_len]
@@ -322,10 +331,27 @@ def _slice_prompt_image_features(
     start = sum(full_mask[:cursor])
     end = start + local_count
     if image_embeds is None:
-        payload_features = {
-            "image_token_offset": start,
-            "image_token_count": local_count,
-        }
+        payload_features = dict(features)
+        modality_token_ids = dict(features.get("modality_token_ids") or {})
+        if features.get("image_token_id") is not None:
+            modality_token_ids.setdefault("image", int(features["image_token_id"]))
+        modality_offsets = {}
+        modality_counts = {}
+        chunk = prompt[cursor : cursor + chunk_len]
+        for modality, token_id in modality_token_ids.items():
+            token_id = int(token_id)
+            modality_offsets[modality] = sum(int(token) == token_id for token in prompt[:cursor])
+            modality_counts[modality] = sum(int(token) == token_id for token in chunk)
+        payload_features.update(
+            {
+                "multimodal_token_offset": start,
+                "multimodal_token_count": local_count,
+                "modality_token_offsets": modality_offsets,
+                "modality_token_counts": modality_counts,
+                "image_token_offset": start,
+                "image_token_count": local_count,
+            }
+        )
         for key in ("pixel_values", "image_grid_thw", "image_token_id"):
             if features.get(key) is not None:
                 payload_features[key] = features[key]
@@ -401,10 +427,13 @@ def _prompt_image_mask(features: dict, prompt: list[int]) -> list[bool]:
         if len(mask_list) != len(prompt):
             raise ValueError("image_token_mask length must match prompt length")
         return mask_list
-    image_token_id = features.get("image_token_id")
-    if image_token_id is None:
-        raise ValueError("image multimodal features require image_token_mask or image_token_id")
-    return [int(token) == int(image_token_id) for token in prompt]
+    token_ids = dict(features.get("modality_token_ids") or {})
+    if features.get("image_token_id") is not None:
+        token_ids.setdefault("image", int(features["image_token_id"]))
+    if not token_ids:
+        raise ValueError("multimodal features require a token mask or modality token ids")
+    values = {int(value) for value in token_ids.values()}
+    return [int(token) in values for token in prompt]
 
 
 def payload_to_infer_meta(payload: dict, device: torch.device) -> InferMeta:

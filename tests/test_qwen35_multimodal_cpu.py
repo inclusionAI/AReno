@@ -230,6 +230,19 @@ def test_qwen35_vl_adapter_matches_vision_text_config():
     assert config.image_token_id == 99
 
 
+def test_qwen35_vl_adapter_rejects_minicpm_vision_config():
+    pytest.importorskip("triton")
+    from areno.models.qwen3_5.model import Qwen35VLAdapter
+
+    assert not Qwen35VLAdapter().match_hf_config(
+        {
+            "model_type": "minicpmv4_6",
+            "text_config": {"model_type": "qwen3_5"},
+            "vision_config": {"hidden_size": 1152},
+        }
+    )
+
+
 def test_qwen35_moe_vl_adapter_matches_vision_moe_text_config():
     pytest.importorskip("triton")
     from areno.models.qwen3_5.model import (
@@ -415,12 +428,36 @@ def test_qwen35_vl_projects_pixel_values_to_image_embeds():
     model = adapter.build(config)
     features = {
         "pixel_values": torch.zeros(4, 3 * 1 * 2 * 2),
+        "image_grid_thw": torch.tensor([[1, 2, 2]]),
         "image_token_id": 99,
     }
 
     projected = model._project_pixel_values(features, torch.device("cpu"), batch=1)
 
     assert projected["image_embeds"].shape == (1, 16)
+
+
+def test_qwen35_vl_rejects_pixel_values_without_a_mergeable_grid():
+    pytest.importorskip("triton")
+    from areno.models.qwen3_5.model import Qwen35VLAdapter
+
+    adapter = Qwen35VLAdapter()
+    config = adapter.config_from_hf(
+        {
+            "model_type": "qwen3_5_vl",
+            "text_config": _qwen35_text_config(),
+            "vision_config": _qwen35_vision_config(),
+            "image_token_id": 99,
+        }
+    )
+    model = adapter.build(config)
+
+    with pytest.raises(ValueError, match="divisible by spatial_merge_size"):
+        model._project_pixel_values(
+            {"pixel_values": torch.zeros(4, 3 * 1 * 2 * 2), "image_token_id": 99},
+            torch.device("cpu"),
+            batch=1,
+        )
 
 
 def test_qwen35_vision_merger_uses_exact_gelu_not_hidden_act():

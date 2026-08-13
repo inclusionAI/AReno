@@ -8,7 +8,7 @@ import torch
 import torch.distributed as dist
 
 from areno.engine.data import to_device
-from areno.engine.modeling import param_grad
+from areno.engine.modeling import param_grad, unwrap_model
 from areno.engine.parallel.context import get_tp_context
 from areno.engine.protocol import TrainPayload
 from areno.engine.runtime.logprobs import next_token_logprobs, packed_next_token_logprobs
@@ -65,7 +65,8 @@ class TrainingManager:
         ctx = get_tp_context()
         if not worker._train_state_ready:
             worker._prepare_for_train()
-        worker.model.train()
+        train_model = _actor_train_model(worker)
+        train_model.train()
         data_pack_obj = data_pack_shards[ctx.dp_rank]
         data_pack = _pack_train_data(data_pack_obj)
         pack_loss_fn = data_pack.get("_loss_fn")
@@ -85,7 +86,7 @@ class TrainingManager:
         }
         if data_pack.get("features") is not None:
             model_kwargs["features"] = data_pack["features"]
-        out = worker.model(**model_kwargs)
+        out = train_model(**model_kwargs)
         if "train_cu_seqlens" in data_pack:
             logprobs = packed_next_token_logprobs(out.logits_shard, tokens, data_pack["train_cu_seqlens"])
         else:
@@ -207,3 +208,11 @@ class TrainingManager:
 
         ctx = get_tp_context()
         self.worker.model.finalize_router_expert_bias(ctx.group, ctx.dp_group)
+
+
+def _actor_train_model(worker):
+    """Use eager Gemma4 backward while preserving compiled rollout forward."""
+
+    if worker.config.model.model_type == "gemma4":
+        return unwrap_model(worker.model)
+    return worker.model

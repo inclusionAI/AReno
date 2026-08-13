@@ -490,7 +490,7 @@ def _encode_messages_with_features(
     tools: list[dict[str, Any]] | None = None,
 ) -> tuple[list[int], dict[str, Any] | None]:
     payload = [_chat_message_payload(msg, preserve_content_parts=True) for msg in messages]
-    if not _messages_have_images(payload):
+    if not _messages_have_multimodal(payload):
         return (
             messages_to_prompt_tokens(
                 tokenizer, payload, tools=tools, fallback_prompt=_messages_fallback_text(payload)
@@ -498,7 +498,11 @@ def _encode_messages_with_features(
             None,
         )
     if processor is None:
-        raise ValueError("image input requires a checkpoint processor")
+        raise ValueError("multimodal input requires a checkpoint processor")
+    from areno.api.multimodal import encode_processor_messages, modality_token_ids
+
+    if modality_token_ids(processor).keys() & {"audio", "video"}:
+        return encode_processor_messages(processor, payload, tools=tools)
     images = _load_message_images(payload)
     text = _processor_chat_text(processor, payload, tools=tools)
     encoded = _encode_text_and_images(tokenizer, processor, text, images)
@@ -593,6 +597,20 @@ def _message_content(content: str | list[Any] | None) -> str:
 
 def _messages_have_images(messages: list[dict[str, Any]]) -> bool:
     return any(_content_has_image(message.get("content")) for message in messages)
+
+
+def _messages_have_multimodal(messages: list[dict[str, Any]]) -> bool:
+    return any(_content_has_multimodal(message.get("content")) for message in messages)
+
+
+def _content_has_multimodal(content: Any) -> bool:
+    if not isinstance(content, list):
+        return False
+    return any(
+        isinstance(item, dict)
+        and item.get("type") in {"image", "image_url", "audio", "audio_url", "input_audio", "video", "video_url"}
+        for item in content
+    )
 
 
 def _content_has_image(content: Any) -> bool:

@@ -43,12 +43,6 @@ def _rollout_options(ctx: Context, sampling_params: SamplingParams):
     max_prompt_len = sampling_params.max_prompt_len
     eos_token_ids = () if sampling_params.ignore_eos else ctx.eos_token_ids
     stop_token_ids = tuple(sampling_params.stop_token_ids or ())
-    suppress_candidates = set(_explicit_suppress_token_ids(ctx.tokenizer))
-    if not sampling_params.ignore_eos:
-        suppress_candidates.update(int(token_id) for token_id in getattr(ctx.tokenizer, "all_special_ids", ()) or ())
-    suppress_token_ids = tuple(
-        sorted(token_id for token_id in suppress_candidates if token_id not in {*eos_token_ids, *stop_token_ids})
-    )
     cfg = ctx.custom_config
     if cfg is None:
         cfg = ArenoConfig()
@@ -67,8 +61,6 @@ def _rollout_options(ctx: Context, sampling_params: SamplingParams):
             top_p=sampling_params.top_p,
             top_k=max(0, sampling_params.top_k),
             stop_token_ids=stop_token_ids,
-            suppress_token_ids=suppress_token_ids,
-            suppress_special_tokens=not sampling_params.ignore_eos,
         ),
     }
 
@@ -842,17 +834,6 @@ def _pad_token_id(ctx: Context) -> int:
     if token_id is None:
         raise ValueError("tokenizer must define pad_token_id or eos_token_id")
     return int(token_id)
-
-
-def _explicit_suppress_token_ids(tokenizer) -> tuple[int, ...]:
-    """Return marker ids that should never be sampled as normal text."""
-
-    out: list[int] = []
-    for attr in ("pad_token_id", "bos_token_id", "unk_token_id"):
-        value = getattr(tokenizer, attr, None)
-        if isinstance(value, int):
-            out.append(value)
-    return tuple(dict.fromkeys(out))
 
 
 def _is_rollout_policy_metric(key: str) -> bool:
