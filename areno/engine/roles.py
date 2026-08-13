@@ -237,6 +237,16 @@ class WorkerRole:
         if self.optimizer is not None:
             self.optimizer.onload_state(device)
 
+    def onload_for_inference(self, device: torch.device) -> None:
+        """Move this role to `device` and materialize derived inference weights."""
+
+        self.model.to(device)
+        self.model.onload_train_weights(device)
+        self.model.prepare_infer_weights()
+        self.model.offload_train_weights()
+        if self.value_head is not None:
+            self.value_head.to(device)
+
     def offload(self) -> None:
         """Free all HBM held by this role."""
 
@@ -311,7 +321,7 @@ class RoleManager:
         else:
             offload_role = self.roles[role_name]
             worker._prepare_actor_offloaded()
-            offload_role.onload(worker.device)
+            offload_role.onload_for_inference(worker.device)
             model = offload_role.model
         model.eval()
         try:
@@ -358,7 +368,7 @@ class RoleManager:
         ctx = get_tp_context()
         role = self.roles[payload.role]
         worker._prepare_actor_offloaded()
-        role.onload(worker.device)
+        role.onload_for_inference(worker.device)
         role.model.eval()
         role.value_head.eval()
         try:
@@ -408,7 +418,7 @@ class RoleManager:
         if role.value_head is None:
             raise RuntimeError("reward role must have a scalar reward head")
         worker._prepare_actor_offloaded()
-        role.onload(worker.device)
+        role.onload_for_inference(worker.device)
         role.model.eval()
         role.value_head.eval()
         try:
