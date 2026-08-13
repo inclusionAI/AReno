@@ -315,7 +315,7 @@ class RoleManager:
         ctx = get_tp_context()
         role_name = payload.role
         if role_name == "actor":
-            worker._prepare_actor_onloaded()
+            worker._prepare_actor_for_inference()
             model = worker.model
             offload_role = None
         else:

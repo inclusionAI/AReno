@@ -435,6 +435,15 @@ class ArenoWorker:
             self.optimizer.onload_state(self.device)
         self._actor_on_device = True
 
+    def _prepare_actor_for_inference(self) -> None:
+        """Materialize actor inference weights without retaining source expert tiles."""
+
+        self._prepare_actor_onloaded()
+        self.model.onload_train_weights(self.device)
+        self.model.prepare_infer_weights()
+        self.model.offload_train_weights()
+        self._train_state_ready = False
+
     def _prepare_actor_offloaded(self) -> None:
         """Push the actor to CPU and drop all HBM state, including decode graphs.
 
