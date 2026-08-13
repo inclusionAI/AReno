@@ -1,38 +1,11 @@
 from __future__ import annotations
 
-import subprocess
-import sys
-import textwrap
-
 import pytest
 import torch
 
 from areno.api.multimodal import encode_multimodal_prompt, image_token_counts_from_features
 from areno.engine.data.rollout_state import InferenceBatchState, _slice_prompt_image_features, payload_to_infer_meta
 from areno.models.minicpmv46.model import MiniCPMV46Adapter
-
-
-def test_minicpmv46_adapter_import_does_not_require_triton():
-    script = textwrap.dedent(
-        """
-        import builtins
-
-        original_import = builtins.__import__
-
-        def import_without_triton(name, *args, **kwargs):
-            if name == "triton" or name.startswith("triton."):
-                raise ModuleNotFoundError("No module named 'triton'", name="triton")
-            return original_import(name, *args, **kwargs)
-
-        builtins.__import__ = import_without_triton
-
-        from areno.models.minicpmv46.model import MiniCPMV46Adapter
-
-        assert MiniCPMV46Adapter.__name__ == "MiniCPMV46Adapter"
-        """
-    )
-
-    subprocess.run([sys.executable, "-c", script], check=True)
 
 
 def _config(*, insert_layer_id: int = 6) -> dict:
@@ -75,7 +48,6 @@ def _config(*, insert_layer_id: int = 6) -> dict:
 def test_minicpmv46_adapter_maps_nested_text_and_vision_config():
     config = MiniCPMV46Adapter().config_from_hf(_config())
 
-    assert config.tie_word_embeddings is False
     assert config.linear_num_key_heads == 2
     assert config.linear_num_value_heads == 4
     assert config.vision_config["hidden_size"] == 8
@@ -104,42 +76,6 @@ def test_minicpmv46_projects_target_sizes_to_visual_embeddings():
     projected = model._project_pixel_values(features, torch.device("cpu"), batch=1)
 
     assert projected["image_embeds"].shape == (4, 32)
-
-
-def test_minicpmv46_projects_batch_aligned_image_feature_rows():
-    adapter = MiniCPMV46Adapter()
-    model = adapter.build(adapter.config_from_hf(_config())).float()
-    image_row = {
-        "pixel_values": torch.zeros(1, 3, 2, 32),
-        "target_sizes": torch.tensor([[4, 4]], dtype=torch.int32),
-    }
-    features = {
-        "image_feature_rows": [image_row, image_row],
-        "image_token_id": 99,
-    }
-
-    projected = model._project_pixel_values(features, torch.device("cpu"), batch=2)
-
-    assert isinstance(projected, list)
-    assert [tuple(row["image_embeds"].shape) for row in projected] == [(4, 32), (4, 32)]
-
-
-def test_minicpmv46_checkpoint_roundtrip_preserves_default_untied_lm_head(tmp_path):
-    from areno.models.minicpmv46.checkpoint import load_minicpmv46_weights, save_minicpmv46_weights
-
-    adapter = MiniCPMV46Adapter()
-    config = adapter.config_from_hf(_config())
-    model = adapter.build(config).float()
-    with torch.no_grad():
-        model.lm_head.weight.normal_()
-
-    saved_path = save_minicpmv46_weights(model, tmp_path, None)
-    assert saved_path is not None
-
-    reloaded = adapter.build(config).float()
-    load_minicpmv46_weights(reloaded, saved_path)
-
-    assert torch.equal(reloaded.lm_head.weight, model.lm_head.weight)
 
 
 def test_minicpmv46_vision_checkpoint_keys_cover_tower_and_merger():

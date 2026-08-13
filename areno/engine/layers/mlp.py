@@ -10,10 +10,9 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-from areno.accel import areno_silu_and_mul
+from areno.accel.ops import areno_silu_and_mul, log_once
 from areno.engine.config import ModelConfig
 from areno.engine.layers.linear import MergedColumnParallelLinear, RowParallelLinear
-from areno.engine.log import log_once
 
 
 class GatedMLP(nn.Module):

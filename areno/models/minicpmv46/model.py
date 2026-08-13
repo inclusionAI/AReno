@@ -33,6 +33,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from areno.accel.ops import log_once
 from areno.engine.config import ModelConfig, _parse_dtype
 from areno.engine.layers.attention_backend.infer import FlashAttnInferBackend, build_infer_attention_backend
 from areno.engine.layers.attention_backend.train import build_train_attention_backend
@@ -41,7 +42,6 @@ from areno.engine.layers.mlp import GatedMLP
 from areno.engine.layers.norm import RMSNorm
 from areno.engine.layers.rotary import PartialRotaryEmbedding
 from areno.engine.layers.vocab import VocabParallelEmbedding, VocabParallelLMHead
-from areno.engine.log import log_once
 from areno.engine.parallel.collectives import scatter_to_sequence_parallel_region, sequence_parallel_region
 from areno.engine.parallel.context import get_tp_context
 from areno.engine.runtime.metadata import InferMeta, TrainMeta
@@ -926,16 +926,10 @@ class MiniCPMV46ForCausalLM(nn.Module):
     def _project_image_feature_rows(self, features: dict[str, Any], device: torch.device) -> torch.Tensor | None:
         rows = features.get("image_feature_rows")
         if rows is not None:
-            if isinstance(rows, dict):
-                rows = [rows]
-            elif not isinstance(rows, list):
-                raise TypeError("MiniCPM image_feature_rows must be a dict or a list of dicts")
             embeds = []
             for row in rows:
                 if row is None:
                     continue
-                if not isinstance(row, dict):
-                    raise TypeError("MiniCPM image_feature_rows entries must be dicts")
                 value = _image_embeds_for_row(dict(row), device, self.config.dtype)
                 if value is None:
                     value = self._project_pixel_feature(dict(row), device)
@@ -1136,7 +1130,7 @@ class MiniCPMV46Adapter(ModelAdapter):
             rms_norm_eps=float(text.get("rms_norm_eps", 1e-6)),
             rope_theta=float(rope.get("rope_theta", 10_000.0)),
             max_position_embeddings=int(text.get("max_position_embeddings", 262144)),
-            tie_word_embeddings=bool(hf_config.get("tie_word_embeddings", False)),
+            tie_word_embeddings=bool(hf_config.get("tie_word_embeddings", True)),
             qkv_bias=False,
             qk_norm=True,
             dtype=dtype,
