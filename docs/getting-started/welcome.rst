@@ -75,7 +75,7 @@ Core workflows
    <div class="areno-command-grid areno-command-grid-wide">
      <div class="areno-command-card">
        <p class="areno-card-kicker">Training</p>
-       <h3>Run a small GSPO smoke task.</h3>
+       <h3>Run the tiny smoke tutorial.</h3>
       <pre><code>areno train \
      --ckpt Qwen/Qwen3-0.6B \
      --dataset-path gsm8k:main \
@@ -84,7 +84,12 @@ Core workflows
      --algo gspo \
      --tp-size 1 \
      --world-size 1 \
-     --batch-size 1</code></pre>
+     --batch-size 1 \
+     --max-steps 1 \
+     --save-path outputs/tiny-smoke \
+     --save-interval 1 \
+     --metrics-log-dir outputs/tiny-smoke/metrics</code></pre>
+       <p>Follow the smoke tutorial for the expected logs, checkpoint, and TensorBoard output.</p>
      </div>
      <div class="areno-command-card">
        <p class="areno-card-kicker">Serving</p>

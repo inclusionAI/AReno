@@ -209,11 +209,14 @@ The report includes AReno, Python, platform, PyTorch/CUDA, GPU, `nvcc`, dependen
 
 ### Training
 
-#### Tiny training smoke test
+#### Tiny training smoke tutorial
 
-Use this command when you only want to check that a machine can run one small official training task end to end:
+Use the tutorial when you want to run the smallest official training task end
+to end and verify the checkpoint and metrics outputs:
 
 ```bash
+mkdir -p outputs/tiny-smoke
+
 areno train \
   --ckpt Qwen/Qwen3-0.6B \
   --dataset-path gsm8k:main \
@@ -222,10 +225,21 @@ areno train \
   --algo gspo \
   --tp-size 1 \
   --world-size 1 \
-  --batch-size 1
+  --batch-size 1 \
+  --max-steps 1 \
+  --save-path outputs/tiny-smoke \
+  --save-interval 1 \
+  --metrics-log-dir outputs/tiny-smoke/metrics
 ```
 
-This is a smoke/sanity task for the CLI, dataset loader, reward function, rollout, and training-step wiring. It is not a quality benchmark. It requires a CUDA-capable NVIDIA GPU; CPU-only machines can install the package for docs and metadata checks, but cannot run the AReno training engine. A successful run should reach rollout logs and a `train_stats=...` line without raising an exception.
+This is a smoke/sanity task for the CLI, dataset loader, reward function,
+rollout, training-step wiring, checkpoint saving, and TensorBoard metrics. It
+is not a quality benchmark. It requires a CUDA-capable NVIDIA GPU; CPU-only
+machines can install the package for docs and metadata checks, but cannot run
+the AReno training engine. A successful run should reach rollout logs, a
+`train_stats=...` line, and `step_000001/` under `outputs/tiny-smoke`.
+
+See the full [tiny training smoke tutorial](docs/getting-started/tiny-training-smoke.rst) for the step-by-step walkthrough and expected logs.
 
 Run GSPO on a GSM8K-style dataset with a reward function:
 
