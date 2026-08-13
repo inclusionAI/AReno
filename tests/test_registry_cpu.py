@@ -185,13 +185,21 @@ class RegistryTest(unittest.TestCase):
         self.assertEqual(sorted(registry._ADAPTERS), ["fake"])
 
     def test_bundled_model_registration_is_lazy_and_idempotent(self):
-        """Qwen selection must not import Bailing/FLA, while Bailing remains loadable."""
+        """Selecting one bundled group must not import unrelated runtimes."""
         code = """
 import sys
 import types
 
 from areno.models import register_models
 from areno.models.registry import _adapter
+
+# Keep this registry unit test independent of CUDA/Triton/FLA. The real Qwen
+# implementation is exercised by the GPU serving smoke; here the fake module
+# makes the selected import boundary directly observable.
+qwen = types.ModuleType("areno.models.qwen3")
+qwen.Qwen3Adapter = type("Qwen3Adapter", (), {"name": "qwen3"})
+qwen.Qwen3MoeAdapter = type("Qwen3MoeAdapter", (), {"name": "qwen3_moe"})
+sys.modules["areno.models.qwen3"] = qwen
 
 assert register_models("qwen3")
 assert register_models("qwen3")
@@ -201,17 +209,11 @@ assert "areno.models.bailing" not in sys.modules
 assert "areno.models.bailing_v3" not in sys.modules
 assert not any(name == "fla" or name.startswith("fla.") for name in sys.modules)
 
-# Registration only needs the imported symbol to exist; the real FLA runtime
-# is exercised by Bailing integration tests, not this CPU registry test.
-fla = types.ModuleType("fla")
-fla_ops = types.ModuleType("fla.ops")
-fla_lightning = types.ModuleType("fla.ops.lightning_attn")
-fla_lightning.chunk_lightning_attn = lambda *args, **kwargs: None
-sys.modules.update({
-    "fla": fla,
-    "fla.ops": fla_ops,
-    "fla.ops.lightning_attn": fla_lightning,
-})
+bailing_v3 = types.ModuleType("areno.models.bailing_v3")
+bailing_v3.BailingMoeV3Adapter = type(
+    "BailingMoeV3Adapter", (), {"name": "bailing_moe_v3"}
+)
+sys.modules["areno.models.bailing_v3"] = bailing_v3
 assert register_models("bailing_moe_v3")
 assert _adapter("bailing_moe_v3").name == "bailing_moe_v3"
 assert "areno.models.bailing_v3" in sys.modules
