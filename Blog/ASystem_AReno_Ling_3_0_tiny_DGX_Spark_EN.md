@@ -77,6 +77,8 @@ Before training, Ling-3.0-tiny already understands part of the task context. Onc
 
 For example, in the initial behavior, the model may make judgment errors or even place a move in an already occupied square. This is a typical issue in Agentic RL: the model appears to "know the rules," but tool-call parameters, state understanding, and action selection all become stress points in real interaction.
 
+![Ling-3.0-tiny tic-tac-toe behavior before training](assets/ling-tiny-tictactoe-before.gif)
+
 This is the value of an interactive task.
 
 If we only test offline question answering, it is hard to tell whether the model failed because it did not know the rules, misunderstood the state, produced an invalid tool call, or knew a legal move but chose a poor strategy. An interactive environment separates these issues clearly: each step can be evaluated for legality, state constraint violations, and missed opportunities.
@@ -127,13 +129,19 @@ This experiment was run on DGX Spark using AReno's GSPO algorithm for 400 steps.
 
 During training, `rollout/rewards_mean` increased from around `-0.5` to about `0.4`. This indicates that the model gradually reduced invalid actions, increased the ratio of effective actions, and learned to choose more reasonable moves.
 
+![rollout/rewards_mean curve](assets/ling-tiny-rewards-mean.png)
+
 At the same time, `response_len` dropped to around `850 tokens`. This means the model became more concise when completing the task, reducing unnecessary long reasoning and ineffective output. For Agentic tasks, this also matters: the model should not only be correct, but also complete the task in a more stable and efficient way.
+
+![response_len curve](assets/ling-tiny-response-len.png)
 
 One metric reflects better task feedback, while the other reflects more converged model output. Taken together, they show that post-training is changing the model's behavior.
 
 Beyond metrics, the more intuitive test is to return to the same interactive environment and evaluate the model again.
 
 After training, Ling-3.0-tiny becomes much more stable in tool calling and action selection. It better respects the board state and chooses more reasonable moves at key moments.
+
+![Ling-3.0-tiny tic-tac-toe behavior after training](assets/ling-tiny-tictactoe-after.gif)
 
 For AReno, the significance is not just that the reward goes up.
 
