@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from areno.models.base import CausalLMOutput, ModelAdapter
 
-
 _REGISTERED_GROUPS: set[str] = set()
 
 
