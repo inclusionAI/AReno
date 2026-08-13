@@ -5,7 +5,6 @@ import torch
 
 from areno.api.multimodal import encode_multimodal_prompt, image_token_counts_from_features
 from areno.engine.data.rollout_state import InferenceBatchState, _slice_prompt_image_features, payload_to_infer_meta
-from areno.models.minicpmv46.model import MiniCPMV46Adapter
 
 
 def _config(*, insert_layer_id: int = 6) -> dict:
@@ -46,6 +45,9 @@ def _config(*, insert_layer_id: int = 6) -> dict:
 
 
 def test_minicpmv46_adapter_maps_nested_text_and_vision_config():
+    pytest.importorskip("triton")
+    from areno.models.minicpmv46.model import MiniCPMV46Adapter
+
     config = MiniCPMV46Adapter().config_from_hf(_config())
 
     assert config.linear_num_key_heads == 2
@@ -56,6 +58,8 @@ def test_minicpmv46_adapter_maps_nested_text_and_vision_config():
 
 
 def test_minicpmv46_config_is_not_claimed_by_qwen35_vl_adapter():
+    pytest.importorskip("triton")
+    from areno.models.minicpmv46.model import MiniCPMV46Adapter
     from areno.models.qwen3_5.model import Qwen35VLAdapter
 
     hf_config = _config()
@@ -65,6 +69,9 @@ def test_minicpmv46_config_is_not_claimed_by_qwen35_vl_adapter():
 
 
 def test_minicpmv46_projects_target_sizes_to_visual_embeddings():
+    pytest.importorskip("triton")
+    from areno.models.minicpmv46.model import MiniCPMV46Adapter
+
     adapter = MiniCPMV46Adapter()
     model = adapter.build(adapter.config_from_hf(_config())).float()
     features = {
@@ -79,7 +86,9 @@ def test_minicpmv46_projects_target_sizes_to_visual_embeddings():
 
 
 def test_minicpmv46_vision_checkpoint_keys_cover_tower_and_merger():
+    pytest.importorskip("triton")
     from areno.models.minicpmv46.checkpoint import _load_vision_weights
+    from areno.models.minicpmv46.model import MiniCPMV46Adapter
 
     adapter = MiniCPMV46Adapter()
     model = adapter.build(adapter.config_from_hf(_config())).float()
@@ -104,6 +113,9 @@ def test_minicpmv46_vision_checkpoint_keys_cover_tower_and_merger():
 
 
 def test_minicpmv46_gdn_uses_configured_key_and_value_heads():
+    pytest.importorskip("triton")
+    from areno.models.minicpmv46.model import MiniCPMV46Adapter
+
     config_data = _config()
     config_data["text_config"]["layer_types"] = ["linear_attention"]
     model = MiniCPMV46Adapter().build(MiniCPMV46Adapter().config_from_hf(config_data))
@@ -117,6 +129,9 @@ def test_minicpmv46_gdn_uses_configured_key_and_value_heads():
 
 
 def test_minicpmv46_window_merger_downsamples_visual_tokens():
+    pytest.importorskip("triton")
+    from areno.models.minicpmv46.model import MiniCPMV46Adapter
+
     adapter = MiniCPMV46Adapter()
     config = adapter.config_from_hf(_config(insert_layer_id=0))
     config.vision_config["num_hidden_layers"] = 2
@@ -210,6 +225,9 @@ def test_minicpmv46_processor_expanded_tokens_are_not_repeated():
 
 @pytest.mark.parametrize("downsample_mode, expected", [("16x", 1), ("4x", 4)])
 def test_minicpmv46_downsample_mode_controls_token_count(downsample_mode: str, expected: int):
+    pytest.importorskip("triton")
+    from areno.models.minicpmv46.model import MiniCPMV46Adapter
+
     adapter = MiniCPMV46Adapter()
     config = adapter.config_from_hf(_config(insert_layer_id=0))
     config.vision_config["num_hidden_layers"] = 2
