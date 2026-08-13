@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import tempfile
 import threading
@@ -182,6 +183,35 @@ class RegistryTest(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertEqual(len(register_calls), 1)
         self.assertEqual(sorted(registry._ADAPTERS), ["fake"])
+
+    def test_bundled_model_registration_is_lazy_and_idempotent(self):
+        """Qwen selection must not import Bailing/FLA, while Bailing remains loadable."""
+        code = """
+import sys
+
+from areno.models import register_models
+from areno.models.registry import _adapter
+
+assert register_models("qwen3")
+assert register_models("qwen3")
+assert _adapter("qwen3").name == "qwen3"
+assert "areno.models.qwen3" in sys.modules
+assert "areno.models.bailing" not in sys.modules
+assert "areno.models.bailing_v3" not in sys.modules
+assert not any(name == "fla" or name.startswith("fla.") for name in sys.modules)
+
+assert register_models("bailing_moe_v3")
+assert _adapter("bailing_moe_v3").name == "bailing_moe_v3"
+assert "areno.models.bailing_v3" in sys.modules
+"""
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 
 if __name__ == "__main__":
