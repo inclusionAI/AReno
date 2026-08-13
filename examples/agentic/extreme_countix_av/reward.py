@@ -1,4 +1,4 @@
-"""Reward for audiovisual action recognition and repetition counting."""
+"""Reward for audiovisual repetition counting."""
 
 from __future__ import annotations
 
@@ -9,11 +9,11 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import action_similarity, count_similarity  # noqa: E402
+from common import count_similarity  # noqa: E402
 
 
 def reward_fn(record: Any) -> float:
-    """Score tool validity, action-label similarity, and relative count error."""
+    """Score only relative repetition-count accuracy."""
 
     prediction = _tool_prediction(getattr(record, "tool_calls", None))
     if prediction is None:
@@ -21,10 +21,7 @@ def reward_fn(record: Any) -> float:
     if prediction is None:
         return -1.0
     source = record.source_record
-    action_score = action_similarity(prediction.get("action_class"), source["action_class"])
-    count_score = count_similarity(prediction.get("repetition_count"), source["repetition_count"])
-    validity = 0.05 if prediction.get("from_tool") else 0.0
-    return round(max(-1.0, min(1.0, 0.55 * action_score + 0.40 * count_score + validity)), 6)
+    return round(count_similarity(prediction.get("repetition_count"), source["repetition_count"]), 6)
 
 
 def _tool_prediction(tool_calls: Any) -> dict[str, Any] | None:
@@ -37,7 +34,7 @@ def _tool_prediction(tool_calls: Any) -> dict[str, Any] | None:
                 arguments = json.loads(arguments)
             except json.JSONDecodeError:
                 return None
-        if isinstance(arguments, dict) and arguments.get("action_class") is not None:
+        if isinstance(arguments, dict) and arguments.get("repetition_count") is not None:
             return {**arguments, "from_tool": True}
     return None
 

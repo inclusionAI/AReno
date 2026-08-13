@@ -2,8 +2,8 @@
 
 This example trains Gemma4 to recognize a repetitive physical activity from
 paired video and audio and to count its completed repetitions. The policy
-returns one structured `report_repetitions` tool call. The reward combines
-semantic action-label similarity with relative count accuracy.
+returns one structured `report_repetitions` tool call. The reward scores only
+relative repetition-count accuracy; the reported action class is diagnostic.
 
 ## Download the dataset
 
@@ -35,8 +35,8 @@ multiple challenge-condition directories remains a separate training sample.
   generated manifest.
 - `run_agent.py` sends paired `video_url` and `audio_url` inputs and requires a
   `report_repetitions` tool call.
-- `reward.py` scores action similarity (55%), relative count accuracy (40%),
-  and valid tool use (5%).
+- `reward.py` scores relative repetition-count accuracy only. Action-class
+  correctness does not affect training reward.
 - `web_ui.py` provides synchronized playback, filtering, inference, and reward
   inspection.
 

@@ -17,7 +17,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import action_similarity, count_similarity, discover_samples, prompt_text  # noqa: E402
+from common import count_similarity, discover_samples, prompt_text  # noqa: E402
 from run_agent import REPORT_TOOL, SYSTEM_PROMPT  # noqa: E402
 
 DEFAULT_HOST = "127.0.0.1"
@@ -66,10 +66,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             prediction = _predict(self.server.args, sample, request_origin=_origin(self))
-            action_score = action_similarity(prediction.get("action_class"), sample.action_class)
             count_score = count_similarity(prediction.get("repetition_count"), sample.repetition_count)
-            prediction["reward"] = round(0.55 * action_score + 0.40 * count_score + 0.05, 6)
-            prediction["action_score"] = round(action_score, 6)
+            prediction["reward"] = round(count_score, 6)
             prediction["count_score"] = round(count_score, 6)
             self._json(prediction)
         except Exception as exc:  # noqa: BLE001
@@ -740,7 +738,7 @@ $('live').onclick=()=>startLive().catch(e=>{liveRunning=false;liveResult(null,e.
 $('stop').onclick=()=>{const action=LIVE_ONLY?stopLive():stopRecording();action.catch(e=>$('result').innerHTML=`<p class="empty">${esc(e.message)}</p>`)};
 $('run').onclick=async()=>{
   if(!state.current&&!liveVideo)return;const b=$('run');b.disabled=true;b.textContent='Running';$('result').innerHTML='<p class="empty">Processing video and audio...</p>';
-  try{let endpoint='api/predict',payload={id:state.current.id};if(liveVideo){endpoint='api/live-predict';payload={video:await blobUrl(liveVideo),audio:await blobUrl(liveAudio)}}const r=await fetch(api(endpoint),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});const d=await r.json();if(!r.ok)throw Error(d.error||'Inference failed');let details=`<div class="prediction-primary"><span>Model prediction</span><strong>${esc(d.action_class)}</strong><em>${d.repetition_count}</em></div>`;if(d.reward!==undefined)details+=`<div class="metric"><span>Overall similarity</span><strong class="score">${d.reward.toFixed(3)}</strong></div><div class="metric"><span>Action similarity</span><strong>${d.action_score.toFixed(3)}</strong></div><div class="metric"><span>Count similarity</span><strong>${d.count_score.toFixed(3)}</strong></div>`;$('result').innerHTML=details+`<pre class="raw">${esc(d.raw)}</pre>`}catch(e){$('result').innerHTML=`<p class="empty">${esc(e.message)}</p>`}finally{b.disabled=false;b.textContent=liveVideo?'Analyze capture':'Run Gemma4'}
+  try{let endpoint='api/predict',payload={id:state.current.id};if(liveVideo){endpoint='api/live-predict';payload={video:await blobUrl(liveVideo),audio:await blobUrl(liveAudio)}}const r=await fetch(api(endpoint),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});const d=await r.json();if(!r.ok)throw Error(d.error||'Inference failed');let details=`<div class="prediction-primary"><span>Model prediction</span><strong>${esc(d.action_class)}</strong><em>${d.repetition_count}</em></div>`;if(d.reward!==undefined)details+=`<div class="metric"><span>Count reward</span><strong class="score">${d.reward.toFixed(3)}</strong></div>`;$('result').innerHTML=details+`<pre class="raw">${esc(d.raw)}</pre>`}catch(e){$('result').innerHTML=`<p class="empty">${esc(e.message)}</p>`}finally{b.disabled=false;b.textContent=liveVideo?'Analyze capture':'Run Gemma4'}
 };
 $('search').oninput=apply;$('condition').onchange=apply;load().catch(e=>$('status').textContent=e.message);
 </script></body></html>"""
