@@ -153,7 +153,7 @@ ______________________________________________________________________
 
 **Loss functions** (`areno/api/loss_fns/`): `sft`, `dpo`, `gspo`, `grpo`, `ppo`, passed into `Trainer.train`.
 
-**Rewards**: plain Python files exposing `reward_fn(example, completions) -> list[float]`, injected via `--reward-fn-path`.
+**Rewards**: plain Python files exposing `reward_fn(record) -> float` over a `RewardRecord`, injected via `--reward-fn-path`.
 
 **Models** (`areno/models/`): per-family adapters with HF-compatible config and weights; each `<family>/` defines the model and checkpoint logic, registered through `areno/models/registry.py` (`register_adapter`, with `load_model_weights` / `save_model_weights` for weight I/O).
 

@@ -84,6 +84,7 @@ from areno.api import (
     ArenoConfig,
     SamplingParams,
     Trainer,
+    RewardRecord,
     TrainSequence,
     gspo_loss_fn,
 )
@@ -125,8 +126,19 @@ async def main():
             )[0]
 
         # 3. Score with the same reward function the CLI uses, then form advantages
-        completions = [trainer.get_tokenizer().decode(seq.resp_tokens) for seq in rollout.sequences]
-        rewards = reward_fn(row, completions)
+        raw_answer = str(row["answer"])
+        final = raw_answer.rsplit("####", 1)[-1].strip()
+        rewards = [
+            reward_fn(
+                RewardRecord(
+                    prompt=prompt,
+                    completion=trainer.get_tokenizer().decode(seq.resp_tokens),
+                    answer=[final],
+                    source_record=dict(row),
+                )
+            )
+            for seq in rollout.sequences
+        ]
         advantages = to_advantages(rewards)
 
         batch = []
