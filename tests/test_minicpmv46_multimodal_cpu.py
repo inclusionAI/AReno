@@ -98,8 +98,7 @@ def test_minicpmv46_vision_checkpoint_keys_cover_tower_and_merger():
     _load_vision_weights(model, Index())
 
     assert all(
-        torch.equal(parameter, torch.full_like(parameter, 0.25))
-        for parameter in model.vision_tower.parameters()
+        torch.equal(parameter, torch.full_like(parameter, 0.25)) for parameter in model.vision_tower.parameters()
     )
     assert all(torch.equal(parameter, torch.full_like(parameter, 0.25)) for parameter in model.merger.parameters())
 

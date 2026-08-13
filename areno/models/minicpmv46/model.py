@@ -241,10 +241,7 @@ class MiniCPMV46VisionEncoder(nn.Module):
     def __init__(self, vision_config: dict[str, Any], dtype: torch.dtype):
         super().__init__()
         self.layers = nn.ModuleList(
-            [
-                MiniCPMV46VisionEncoderLayer(vision_config, dtype)
-                for _ in range(int(vision_config["num_hidden_layers"]))
-            ]
+            [MiniCPMV46VisionEncoderLayer(vision_config, dtype) for _ in range(int(vision_config["num_hidden_layers"]))]
         )
 
     def forward(self, hidden_states: torch.Tensor, cu_seqlens: torch.Tensor) -> torch.Tensor:
@@ -824,7 +821,7 @@ class MiniCPMV46ForCausalLM(nn.Module):
             self.merger = None
 
     @property
-    def language_model(self) -> "MiniCPMV46ForCausalLM":
+    def language_model(self) -> MiniCPMV46ForCausalLM:
         """Expose the direct AReno text trunk under the HF-compatible name."""
 
         return self
@@ -885,9 +882,7 @@ class MiniCPMV46ForCausalLM(nn.Module):
             if image_embeds is None:
                 continue
             if image_embeds.ndim != 2 or int(image_embeds.shape[-1]) != self.config.hidden_size:
-                raise ValueError(
-                    f"MiniCPM image_embeds must have shape (num_image_tokens, {self.config.hidden_size})"
-                )
+                raise ValueError(f"MiniCPM image_embeds must have shape (num_image_tokens, {self.config.hidden_size})")
             mask = _image_token_mask(row, input_ids[row_idx])
             if int(mask.sum().item()) != int(image_embeds.shape[0]):
                 raise ValueError(
@@ -959,9 +954,7 @@ class MiniCPMV46ForCausalLM(nn.Module):
             target_sizes = target_sizes // 2
         per_image = self.merger(hidden, target_sizes)
         image_embeds = (
-            torch.cat(per_image, dim=0)
-            if per_image
-            else torch.empty((0, self.config.hidden_size), device=device)
+            torch.cat(per_image, dim=0) if per_image else torch.empty((0, self.config.hidden_size), device=device)
         )
         offset = int(features.get("image_token_offset", 0) or 0)
         count = features.get("image_token_count")

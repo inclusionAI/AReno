@@ -584,9 +584,7 @@ class InferenceManager:
             rows.append(blocks + [blocks[-1]] * (state.max_blocks_per_seq - len(blocks)))
         return torch.tensor(rows, device=self.device, dtype=torch.int32)
 
-    def _recurrent_slots_for_active_rows(
-        self, state: InferenceBatchState, active_rows: torch.Tensor
-    ) -> torch.Tensor:
+    def _recurrent_slots_for_active_rows(self, state: InferenceBatchState, active_rows: torch.Tensor) -> torch.Tensor:
         slots = [state._seq_to_recurrent_slot[int(row)] for row in active_rows.detach().cpu().tolist()]
         return torch.tensor(slots, device=self.device, dtype=torch.long)
 
@@ -977,9 +975,9 @@ class InferenceManager:
             # and replays. Only the first `active_count` rows are meaningful;
             # the rest are padding pointed at the scratch block.
             self._decode_progress_cuda_graph = True
-            logits_shard = graph.replay_tensors(
-                input_ids, position_ids, cache_seqlens, block_table, recurrent_slots
-            )[0, :active_count]
+            logits_shard = graph.replay_tensors(input_ids, position_ids, cache_seqlens, block_table, recurrent_slots)[
+                0, :active_count
+            ]
 
         if sampling_params.temperature == 0.0:
             next_tokens = _sample_greedy_sharded(
