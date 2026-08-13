@@ -188,6 +188,7 @@ class RegistryTest(unittest.TestCase):
         """Qwen selection must not import Bailing/FLA, while Bailing remains loadable."""
         code = """
 import sys
+import types
 
 from areno.models import register_models
 from areno.models.registry import _adapter
@@ -200,6 +201,17 @@ assert "areno.models.bailing" not in sys.modules
 assert "areno.models.bailing_v3" not in sys.modules
 assert not any(name == "fla" or name.startswith("fla.") for name in sys.modules)
 
+# Registration only needs the imported symbol to exist; the real FLA runtime
+# is exercised by Bailing integration tests, not this CPU registry test.
+fla = types.ModuleType("fla")
+fla_ops = types.ModuleType("fla.ops")
+fla_lightning = types.ModuleType("fla.ops.lightning_attn")
+fla_lightning.chunk_lightning_attn = lambda *args, **kwargs: None
+sys.modules.update({
+    "fla": fla,
+    "fla.ops": fla_ops,
+    "fla.ops.lightning_attn": fla_lightning,
+})
 assert register_models("bailing_moe_v3")
 assert _adapter("bailing_moe_v3").name == "bailing_moe_v3"
 assert "areno.models.bailing_v3" in sys.modules
