@@ -9,14 +9,14 @@ from types import SimpleNamespace
 
 import pytest
 
-EXAMPLE = Path(__file__).parents[1] / "examples" / "agentic" / "ave_temporal_grounding"
+EXAMPLE = Path(__file__).parents[1] / "examples" / "multimodal" / "ave_event_recognition"
 
 
 def _load(name: str):
     previous_common = sys.modules.pop("common", None)
     sys.path.insert(0, str(EXAMPLE))
     try:
-        spec = importlib.util.spec_from_file_location(f"ave_temporal_{name}", EXAMPLE / f"{name}.py")
+        spec = importlib.util.spec_from_file_location(f"ave_event_recognition_{name}", EXAMPLE / f"{name}.py")
         assert spec is not None and spec.loader is not None
         module = importlib.util.module_from_spec(spec)
         sys.modules[spec.name] = module

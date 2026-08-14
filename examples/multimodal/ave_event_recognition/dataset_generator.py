@@ -1,4 +1,4 @@
-"""Download AVE from Hugging Face and generate event-level temporal-grounding JSONL."""
+"""Download AVE from Hugging Face and generate event-recognition JSONL."""
 
 from __future__ import annotations
 

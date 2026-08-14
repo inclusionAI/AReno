@@ -38,7 +38,7 @@ ffmpeg -version | head
 Download and extract AVE automatically:
 
 ```bash
-python examples/agentic/ave_temporal_grounding/dataset_generator.py \
+python examples/multimodal/ave_event_recognition/dataset_generator.py \
   --dataset-root ~/datasets/AVE \
   --output ~/datasets/AVE/train.jsonl \
   --split train
@@ -47,7 +47,7 @@ python examples/agentic/ave_temporal_grounding/dataset_generator.py \
 For an existing extracted `AVE.zip`, use `--skip-download`:
 
 ```bash
-python examples/agentic/ave_temporal_grounding/dataset_generator.py \
+python examples/multimodal/ave_event_recognition/dataset_generator.py \
   --dataset-root /home/admin/tiny/AVE \
   --output /home/admin/tiny/AVE/train.jsonl \
   --split train \
@@ -68,8 +68,8 @@ event-list schema:
 }
 ```
 
-Old temporal-grounding manifests containing only `event_class` are not
-compatible; regenerate them with the command above.
+Old single-label manifests containing only `event_class` are not compatible;
+regenerate them with the command above.
 
 ## Judge reward
 
@@ -105,9 +105,9 @@ python -m areno.cli.main train \
   --ckpt /home/admin/gemma-4-E2B-it \
   --model-hub hf \
   --dataset-path /home/admin/tiny/AVE/train.jsonl \
-  --dataset-loader-fn examples/agentic/ave_temporal_grounding/dataset_loader.py \
-  --reward-fn-path examples/agentic/ave_temporal_grounding/reward.py \
-  --agent-fn examples/agentic/ave_temporal_grounding/run_agent.py \
+  --dataset-loader-fn examples/multimodal/ave_event_recognition/dataset_loader.py \
+  --reward-fn-path examples/multimodal/ave_event_recognition/reward.py \
+  --agent-fn examples/multimodal/ave_event_recognition/run_agent.py \
   --algo grpo \
   --tp-size 1 \
   --world-size 1 \
