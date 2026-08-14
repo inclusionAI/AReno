@@ -96,3 +96,25 @@ def test_generator_emits_one_record_per_split_annotation(tmp_path, monkeypatch):
     assert {record["event_class"] for record in records} == {"Bell", "Speech"}
     assert {record["video_path"] for record in records} == {"videos/abc.mp4"}
     assert {(record["start_seconds"], record["end_seconds"]) for record in records} == {(1.0, 3.0), (5.0, 8.0)}
+
+
+def test_ffmpeg_retries_without_inherited_loader_paths(monkeypatch):
+    generator = _load("dataset_generator")
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append((command, kwargs))
+        if len(calls) == 1:
+            raise generator.subprocess.CalledProcessError(127, command)
+        return generator.subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/opt/conda/lib")
+    monkeypatch.setenv("LD_PRELOAD", "/opt/conda/lib/libfoo.so")
+    monkeypatch.setattr(generator.subprocess, "run", run)
+
+    generator._run_ffmpeg(["ffmpeg", "-version"])
+
+    assert len(calls) == 2
+    assert "env" not in calls[0][1]
+    assert "LD_LIBRARY_PATH" not in calls[1][1]["env"]
+    assert "LD_PRELOAD" not in calls[1][1]["env"]
