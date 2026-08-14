@@ -1,9 +1,8 @@
-"""Shared annotation, manifest, and scoring helpers for AVE temporal grounding."""
+"""Shared annotation and manifest helpers for AVE event recognition."""
 
 from __future__ import annotations
 
 import json
-import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -68,44 +67,20 @@ def load_manifest(path: str | Path) -> list[dict[str, Any]]:
 
 def validate_record(record: dict[str, Any], *, line_number: int | None = None) -> None:
     prefix = f"manifest row {line_number}" if line_number is not None else "record"
-    if not str(record.get("event_class", "")).strip():
-        raise ValueError(f"{prefix} has no event_class")
+    labels = record.get("event_classes")
+    if not isinstance(labels, list) or not labels or any(not str(label).strip() for label in labels):
+        raise ValueError(f"{prefix} has no valid event_classes")
     start = float(record["start_seconds"])
     end = float(record["end_seconds"])
     if not 0 <= start < end <= CLIP_SECONDS:
         raise ValueError(f"{prefix} has invalid interval {start}-{end}")
 
 
-def prompt_text(event_class: str) -> str:
+def prompt_text(start_seconds: float, end_seconds: float) -> str:
     return (
-        f'Locate the audiovisual event "{event_class}" in this 10-second clip. '
-        "Use both visible action and synchronized sound, then report its start and end times in seconds."
+        f"Which audiovisual events occur between {start_seconds:g} and {end_seconds:g} seconds in this clip? "
+        "Use synchronized visual and audio evidence and report the concise event label list."
     )
-
-
-def timestamp_reward(predicted_start: Any, predicted_end: Any, expected_start: Any, expected_end: Any) -> float:
-    """Score temporal IoU and boundary accuracy with a strict dense curve."""
-
-    try:
-        start = float(predicted_start)
-        end = float(predicted_end)
-        target_start = float(expected_start)
-        target_end = float(expected_end)
-    except (TypeError, ValueError):
-        return -1.0
-    if not all(math.isfinite(value) for value in (start, end, target_start, target_end)):
-        return -1.0
-    if start < 0 or end > CLIP_SECONDS or start >= end:
-        return -1.0
-
-    intersection = max(0.0, min(end, target_end) - max(start, target_start))
-    union = max(end, target_end) - min(start, target_start)
-    temporal_iou = intersection / union if union > 0 else 0.0
-    boundary_error = (abs(start - target_start) + abs(end - target_end)) / (2 * CLIP_SECONDS)
-    boundary_score = max(0.0, 1.0 - boundary_error)
-    quality = 0.75 * temporal_iou**2 + 0.25 * boundary_score**2
-    polarized_quality = quality**2 * (3.0 - 2.0 * quality)
-    return round(2.0 * polarized_quality - 1.0, 6)
 
 
 def relative_path(path: Path, root: Path) -> str:

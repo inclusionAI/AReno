@@ -8,6 +8,7 @@ import random
 import shutil
 import subprocess
 import zipfile
+from collections import defaultdict
 from pathlib import Path
 
 from common import EventAnnotation, read_annotations, relative_path
@@ -49,11 +50,22 @@ def generate_manifest(
     split_rows = read_annotations(root / SPLIT_FILES[split], has_header=False)
     annotations_by_key = {annotation.key: annotation for annotation in annotations}
     selected = [annotations_by_key.get(row.key, row) for row in split_rows]
-    records: list[dict] = []
+    annotations_by_video: dict[str, list[EventAnnotation]] = defaultdict(list)
     for annotation in selected:
-        video = _find_video(root / "videos", annotation.video_id)
-        audio = _ensure_audio(root / "audio", video, annotation.video_id)
-        records.append(_record(annotation, root, video, audio, split))
+        annotations_by_video[annotation.video_id].append(annotation)
+
+    records: list[dict] = []
+    for video_id, video_annotations in annotations_by_video.items():
+        video = _find_video(root / "videos", video_id)
+        audio = _ensure_audio(root / "audio", video, video_id)
+        intervals = sorted({(row.start_seconds, row.end_seconds) for row in video_annotations})
+        for start, end in intervals:
+            overlapping = [
+                row for row in video_annotations if max(start, row.start_seconds) < min(end, row.end_seconds)
+            ]
+            labels = sorted({row.event_class for row in overlapping})
+            qualities = sorted({row.quality for row in overlapping})
+            records.append(_record(video_id, labels, qualities, start, end, root, video, audio, split))
 
     random.Random(seed).shuffle(records)
     output_path = Path(output).expanduser().resolve()
@@ -64,18 +76,28 @@ def generate_manifest(
     return records
 
 
-def _record(annotation: EventAnnotation, root: Path, video: Path, audio: Path, split: str) -> dict:
+def _record(
+    video_id: str,
+    event_classes: list[str],
+    qualities: list[str],
+    start_seconds: float,
+    end_seconds: float,
+    root: Path,
+    video: Path,
+    audio: Path,
+    split: str,
+) -> dict:
     return {
-        "id": f"{annotation.video_id}:{annotation.event_class}:{annotation.start_seconds:g}-{annotation.end_seconds:g}",
+        "id": f"{video_id}:events:{start_seconds:g}-{end_seconds:g}",
         "dataset_root": str(root),
         "split": split,
-        "video_id": annotation.video_id,
+        "video_id": video_id,
         "video_path": relative_path(video, root),
         "audio_path": relative_path(audio, root),
-        "event_class": annotation.event_class,
-        "quality": annotation.quality,
-        "start_seconds": annotation.start_seconds,
-        "end_seconds": annotation.end_seconds,
+        "event_classes": event_classes,
+        "qualities": qualities,
+        "start_seconds": start_seconds,
+        "end_seconds": end_seconds,
     }
 
 

@@ -1,4 +1,4 @@
-"""Audiovisual event temporal-grounding rollout agent."""
+"""Audiovisual event-recognition rollout agent."""
 
 from __future__ import annotations
 
@@ -11,35 +11,28 @@ logger = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 SYSTEM_PROMPT = (
-    "You localize a named audiovisual event in a 10-second video. Use synchronized visible and audible evidence, "
-    "not unrelated background activity. Identify the first and last supported moments instead of defaulting to the "
-    "whole clip; report 0 to 10 only when the event is continuously supported throughout. Return exactly one "
-    "report_event_range tool call. Times are seconds from the clip start and must satisfy "
-    "0 <= start_seconds < end_seconds <= 10."
+    "You recognize audiovisual events inside a specified interval of a 10-second clip. Use synchronized visible and "
+    "audible evidence, ignore unrelated activity outside the requested interval, and include every supported event "
+    "without adding speculative labels. Return exactly one report_events tool call."
 )
 
 REPORT_TOOL = {
     "type": "function",
     "function": {
-        "name": "report_event_range",
-        "description": "Report the temporal range of the requested event in the audiovisual clip.",
+        "name": "report_events",
+        "description": "Report all audiovisual event labels supported inside the requested time interval.",
         "parameters": {
             "type": "object",
             "properties": {
-                "start_seconds": {
-                    "type": "number",
-                    "minimum": 0,
-                    "maximum": 10,
-                    "description": "Event start time in seconds from the clip beginning.",
-                },
-                "end_seconds": {
-                    "type": "number",
-                    "minimum": 0,
-                    "maximum": 10,
-                    "description": "Event end time in seconds from the clip beginning.",
+                "events": {
+                    "type": "array",
+                    "items": {"type": "string", "minLength": 1},
+                    "minItems": 1,
+                    "uniqueItems": True,
+                    "description": "Concise event category labels, with no explanations.",
                 },
             },
-            "required": ["start_seconds", "end_seconds"],
+            "required": ["events"],
             "additionalProperties": False,
         },
     },
@@ -75,7 +68,7 @@ async def run_agent(ctx, batch):
                 ],
             },
         ]
-        tool_choice = {"type": "function", "function": {"name": "report_event_range"}}
+        tool_choice = {"type": "function", "function": {"name": "report_events"}}
         async with semaphore:
             response = await client.chat.completions.create(
                 model="policy",
@@ -93,7 +86,7 @@ async def run_agent(ctx, batch):
         )
 
     try:
-        logger.info("AVE temporal-grounding requests=%d concurrency=%d", len(items), max_connections)
+        logger.info("AVE event-recognition requests=%d concurrency=%d", len(items), max_connections)
         return AgentTrajectory(turns=list(await asyncio.gather(*(run_one(item) for item in items))))
     finally:
         await client.close()

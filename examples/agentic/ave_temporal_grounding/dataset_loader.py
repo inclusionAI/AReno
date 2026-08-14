@@ -1,7 +1,8 @@
-"""Dataset loader for AVE audiovisual temporal grounding."""
+"""Dataset loader for AVE audiovisual event recognition."""
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -13,18 +14,16 @@ def load_training_dataset(dataset_path: str, *, default_loader=None, **_: object
     """Load an event-level JSONL manifest produced by dataset_generator.py."""
 
     del default_loader
-    records = load_manifest(dataset_path)
-    return [_format_record(record) for record in records]
+    return [_format_record(record) for record in load_manifest(dataset_path)]
 
 
 def _format_record(record: dict) -> dict:
-    start = float(record["start_seconds"])
-    end = float(record["end_seconds"])
-    response = f"{start:g}-{end:g} seconds"
+    labels = [str(label) for label in record["event_classes"]]
+    response = json.dumps({"events": labels}, ensure_ascii=False)
     return {
         **record,
-        "prompt": prompt_text(str(record["event_class"])),
+        "prompt": prompt_text(float(record["start_seconds"]), float(record["end_seconds"])),
         "response": response,
-        "reference": response,
+        "reference": labels,
         "solutions": [response],
     }

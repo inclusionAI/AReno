@@ -6,6 +6,8 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 EXAMPLE = Path(__file__).parents[1] / "examples" / "agentic" / "ave_temporal_grounding"
 
 
@@ -26,54 +28,13 @@ def _load(name: str):
             sys.modules["common"] = previous_common
 
 
-def test_timestamp_reward_is_dense_and_rejects_invalid_ranges():
+def test_prompt_asks_for_events_in_interval_without_leaking_labels():
     common = _load("common")
 
-    assert common.timestamp_reward(2, 6, 2, 6) == 1.0
-    assert -1 < common.timestamp_reward(3, 7, 2, 6) < 1
-    assert common.timestamp_reward(0, 10, 2, 6) <= 0.0
-    assert -1 < common.timestamp_reward(7, 8, 2, 6) < 0
-    assert common.timestamp_reward(6, 2, 2, 6) == -1.0
-    assert common.timestamp_reward(-1, 6, 2, 6) == -1.0
+    prompt = common.prompt_text(1.5, 7)
 
-
-def test_timestamp_reward_is_strict_without_collapsing_valid_ranges():
-    common = _load("common")
-
-    assert common.timestamp_reward(1, 9, 0, 10) == 0.523186
-    assert -1 < common.timestamp_reward(7, 8, 2, 6) < 0
-    assert common.timestamp_reward(3, 7, 2, 6) < 0
-
-
-def test_timestamp_reward_polarizes_weak_and_accurate_predictions():
-    common = _load("common")
-
-    weak = common.timestamp_reward(0, 10, 7, 9)
-    close = common.timestamp_reward(7, 8, 7, 9)
-    exact = common.timestamp_reward(7, 9, 7, 9)
-
-    assert weak == -0.920512
-    assert weak < close < exact
-    assert exact == 1.0
-
-
-def test_reward_reads_report_event_range_tool_call():
-    reward = _load("reward")
-    record = SimpleNamespace(
-        source_record={"start_seconds": 2, "end_seconds": 6},
-        completion="",
-        tool_calls=[
-            {
-                "name": "report_event_range",
-                "arguments": json.dumps({"start_seconds": 2, "end_seconds": 6}),
-            }
-        ],
-    )
-
-    assert reward.reward_fn(record) == 1.0
-
-    record.tool_calls.append(record.tool_calls[0])
-    assert reward.reward_fn(record) == -1.0
+    assert "between 1.5 and 7 seconds" in prompt
+    assert "Bell" not in prompt
 
 
 def test_annotations_skip_zero_duration_events(tmp_path):
@@ -87,24 +48,140 @@ def test_annotations_skip_zero_duration_events(tmp_path):
     assert [row.video_id for row in common.read_annotations(annotations, has_header=True)] == ["def"]
 
 
-def test_generator_emits_one_record_per_split_annotation(tmp_path, monkeypatch):
+def test_generator_aggregates_overlapping_events_by_interval(tmp_path, monkeypatch):
     generator = _load("dataset_generator")
     (tmp_path / "Annotations.txt").write_text(
-        "Category&VideoID&Quality&StartTime&EndTime\nBell&abc&good&1&3\nSpeech&abc&good&5&8\n",
+        "Category&VideoID&Quality&StartTime&EndTime\nBell&abc&good&1&5\nSpeech&abc&good&3&8\nCat&def&good&0&10\n",
         encoding="utf-8",
     )
-    (tmp_path / "trainSet.txt").write_text("Bell&abc&good&1&3\nSpeech&abc&good&5&8\n", encoding="utf-8")
+    (tmp_path / "trainSet.txt").write_text(
+        "Bell&abc&good&1&5\nSpeech&abc&good&3&8\nCat&def&good&0&10\n",
+        encoding="utf-8",
+    )
     (tmp_path / "videos").mkdir()
-    video = tmp_path / "videos" / "abc.mp4"
-    video.write_bytes(b"video")
-    audio = tmp_path / "audio" / "abc.wav"
-    audio.parent.mkdir()
-    audio.write_bytes(b"audio")
-    monkeypatch.setattr(generator, "_ensure_audio", lambda *_: audio)
+    for video_id in ("abc", "def"):
+        (tmp_path / "videos" / f"{video_id}.mp4").write_bytes(b"video")
+    audio_dir = tmp_path / "audio"
+    audio_dir.mkdir()
+
+    def fake_audio(_audio_dir, _video, video_id):
+        audio = audio_dir / f"{video_id}.wav"
+        audio.write_bytes(b"audio")
+        return audio
+
+    monkeypatch.setattr(generator, "_ensure_audio", fake_audio)
 
     records = generator.generate_manifest(tmp_path, tmp_path / "train.jsonl", split="train", seed=7)
 
-    assert len(records) == 2
-    assert {record["event_class"] for record in records} == {"Bell", "Speech"}
-    assert {record["video_path"] for record in records} == {"videos/abc.mp4"}
-    assert {(record["start_seconds"], record["end_seconds"]) for record in records} == {(1.0, 3.0), (5.0, 8.0)}
+    by_interval = {(record["video_id"], record["start_seconds"], record["end_seconds"]): record for record in records}
+    assert len(records) == 3
+    assert by_interval[("abc", 1.0, 5.0)]["event_classes"] == ["Bell", "Speech"]
+    assert by_interval[("abc", 3.0, 8.0)]["event_classes"] == ["Bell", "Speech"]
+    assert by_interval[("def", 0.0, 10.0)]["event_classes"] == ["Cat"]
+    assert all("event_class" not in record for record in records)
+    assert {record["video_path"] for record in records} == {"videos/abc.mp4", "videos/def.mp4"}
+
+
+def test_dataset_loader_formats_event_list_schema(tmp_path):
+    loader = _load("dataset_loader")
+    manifest = tmp_path / "train.jsonl"
+    manifest.write_text(
+        json.dumps(
+            {
+                "id": "abc:events:1-5",
+                "dataset_root": str(tmp_path),
+                "video_path": "videos/abc.mp4",
+                "audio_path": "audio/abc.wav",
+                "event_classes": ["Bell", "Speech"],
+                "start_seconds": 1,
+                "end_seconds": 5,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    record = loader.load_training_dataset(str(manifest))[0]
+
+    assert "between 1 and 5 seconds" in record["prompt"]
+    assert "Bell" not in record["prompt"]
+    assert json.loads(record["response"]) == {"events": ["Bell", "Speech"]}
+    assert record["reference"] == ["Bell", "Speech"]
+
+
+def test_dataset_loader_rejects_old_single_label_schema(tmp_path):
+    loader = _load("dataset_loader")
+    manifest = tmp_path / "old.jsonl"
+    manifest.write_text(
+        json.dumps(
+            {
+                "event_class": "Bell",
+                "video_path": "videos/abc.mp4",
+                "audio_path": "audio/abc.wav",
+                "start_seconds": 1,
+                "end_seconds": 5,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="no valid event_classes"):
+        loader.load_training_dataset(str(manifest))
+
+
+def test_reward_reads_exactly_one_report_events_tool_call(monkeypatch):
+    reward = _load("reward")
+    monkeypatch.setattr(
+        reward,
+        "_judge_same_events",
+        lambda expected, predicted: expected == ("Bark",) and predicted == ("dog barking",),
+    )
+    call = {"name": "report_events", "arguments": json.dumps({"events": ["dog barking"]})}
+    record = SimpleNamespace(source_record={"event_classes": ["Bark"]}, tool_calls=[call])
+
+    assert reward.reward_fn(record) == 1.0
+
+    record.tool_calls.append(call)
+    assert reward.reward_fn(record) == -1.0
+    record.tool_calls = [{"name": "report_events", "arguments": json.dumps({"events": []})}]
+    assert reward.reward_fn(record) == -1.0
+
+
+def test_reward_reads_judge_configuration_from_environment(monkeypatch):
+    reward = _load("reward")
+    seen = {}
+
+    def fake_request(base_url, model, api_key, expected, predicted):
+        seen.update(
+            base_url=base_url,
+            model=model,
+            api_key=api_key,
+            expected=expected,
+            predicted=predicted,
+        )
+        return True
+
+    monkeypatch.setenv("JUDGE_BASE_URL", "http://judge.example/v1")
+    monkeypatch.setenv("JUDGE_MODEL", "judge-model")
+    monkeypatch.setenv("JUDGE_API_KEY", "secret")
+    monkeypatch.setattr(reward, "_judge_request", fake_request)
+
+    assert reward._judge_same_events(("Bark",), ("dog barking",))
+    assert seen == {
+        "base_url": "http://judge.example/v1",
+        "model": "judge-model",
+        "api_key": "secret",
+        "expected": ("Bark",),
+        "predicted": ("dog barking",),
+    }
+
+
+def test_reward_fails_loudly_without_judge_configuration(monkeypatch):
+    reward = _load("reward")
+    for name in ("JUDGE_BASE_URL", "JUDGE_MODEL", "JUDGE_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+        monkeypatch.delenv(name.lower(), raising=False)
+
+    with pytest.raises(RuntimeError, match="JUDGE_BASE_URL"):
+        reward._judge_same_events(("Bark",), ("Bark",))
