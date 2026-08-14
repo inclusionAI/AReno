@@ -38,7 +38,7 @@ classifiers = [
 ]
 dependencies = [
   "torch>=2.6",
-  "flash-linear-attention @ git+https://github.com/fla-org/flash-linear-attention.git@v0.5.2",
+  "flash-linear-attention==0.5.2",
   "safetensors>=0.4",
   "transformers>=4.56",
   "huggingface-hub>=0.25",
