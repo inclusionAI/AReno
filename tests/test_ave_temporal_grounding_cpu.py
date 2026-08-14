@@ -40,9 +40,21 @@ def test_timestamp_reward_is_dense_and_rejects_invalid_ranges():
 def test_timestamp_reward_is_strict_without_collapsing_valid_ranges():
     common = _load("common")
 
-    assert common.timestamp_reward(1, 9, 0, 10) == 0.365
+    assert common.timestamp_reward(1, 9, 0, 10) == 0.523186
     assert -1 < common.timestamp_reward(7, 8, 2, 6) < 0
     assert common.timestamp_reward(3, 7, 2, 6) < 0
+
+
+def test_timestamp_reward_polarizes_weak_and_accurate_predictions():
+    common = _load("common")
+
+    weak = common.timestamp_reward(0, 10, 7, 9)
+    close = common.timestamp_reward(7, 8, 7, 9)
+    exact = common.timestamp_reward(7, 9, 7, 9)
+
+    assert weak == -0.920512
+    assert weak < close < exact
+    assert exact == 1.0
 
 
 def test_reward_reads_report_event_range_tool_call():

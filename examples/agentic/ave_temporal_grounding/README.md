@@ -48,15 +48,26 @@ The numerical reward is a strict but dense score:
 
 ```text
 quality = 0.75 * temporal_IoU^2 + 0.25 * boundary_accuracy^2
-reward = 2 * quality - 1
+polarized_quality = quality^2 * (3 - 2 * quality)
+reward = 2 * polarized_quality - 1
 boundary_accuracy = max(0, 1 - (|start-start*| + |end-end*|) / 20)
 ```
 
-A perfect range receives `1.0`. Squaring overlap and boundary accuracy makes
-near misses noticeably less rewarding, while preserving a continuous signal
-for valid predictions instead of collapsing them all to `-1.0`.
+A perfect range receives `1.0`. The smoothstep polarization pushes weak
+predictions lower and accurate predictions higher while preserving a monotonic,
+continuous signal instead of collapsing valid predictions to `-1.0`.
 Malformed, non-finite, reversed, negative, or greater-than-10-second ranges
 receive `-1.0`. Missing or repeated tool calls also receive `-1.0`.
+
+About two thirds of the official AVE training annotations span the complete
+10-second clip. Those rows are useful for event recognition but provide no
+temporal-boundary supervision and can make `0-10` a profitable shortcut. Create
+a localization-focused manifest from an existing generated manifest with:
+
+```bash
+jq -c 'select(.start_seconds != 0 or .end_seconds != 10)' \
+  ~/datasets/AVE/train.jsonl > ~/datasets/AVE/train_temporal.jsonl
+```
 
 ## Train
 
@@ -73,6 +84,8 @@ ARENO_LOG_COMPLETIONS=1 areno train \
   --batch-size 1 \
   --mini-bs 1 \
   --max-running-prompts 1 \
+  --temperature 1.3 \
+  --top-p 0.95 \
   --max-new-tokens 64 \
   --max-prompt-tokens 8192
 ```

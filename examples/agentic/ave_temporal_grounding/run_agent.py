@@ -12,8 +12,10 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 
 SYSTEM_PROMPT = (
     "You localize a named audiovisual event in a 10-second video. Use synchronized visible and audible evidence, "
-    "not unrelated background activity. Return exactly one report_event_range tool call. Times are seconds from "
-    "the clip start and must satisfy 0 <= start_seconds < end_seconds <= 10."
+    "not unrelated background activity. Identify the first and last supported moments instead of defaulting to the "
+    "whole clip; report 0 to 10 only when the event is continuously supported throughout. Return exactly one "
+    "report_event_range tool call. Times are seconds from the clip start and must satisfy "
+    "0 <= start_seconds < end_seconds <= 10."
 )
 
 REPORT_TOOL = {

@@ -104,7 +104,8 @@ def timestamp_reward(predicted_start: Any, predicted_end: Any, expected_start: A
     boundary_error = (abs(start - target_start) + abs(end - target_end)) / (2 * CLIP_SECONDS)
     boundary_score = max(0.0, 1.0 - boundary_error)
     quality = 0.75 * temporal_iou**2 + 0.25 * boundary_score**2
-    return round(2.0 * quality - 1.0, 6)
+    polarized_quality = quality**2 * (3.0 - 2.0 * quality)
+    return round(2.0 * polarized_quality - 1.0, 6)
 
 
 def relative_path(path: Path, root: Path) -> str:
