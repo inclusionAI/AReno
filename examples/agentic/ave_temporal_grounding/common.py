@@ -84,7 +84,7 @@ def prompt_text(event_class: str) -> str:
 
 
 def timestamp_reward(predicted_start: Any, predicted_end: Any, expected_start: Any, expected_end: Any) -> float:
-    """Combine temporal IoU with normalized start/end boundary accuracy."""
+    """Score temporal IoU and boundary accuracy with a strict dense curve."""
 
     try:
         start = float(predicted_start)
@@ -101,10 +101,10 @@ def timestamp_reward(predicted_start: Any, predicted_end: Any, expected_start: A
     intersection = max(0.0, min(end, target_end) - max(start, target_start))
     union = max(end, target_end) - min(start, target_start)
     temporal_iou = intersection / union if union > 0 else 0.0
-    overlap_score = 2.0 * temporal_iou - 1.0
     boundary_error = (abs(start - target_start) + abs(end - target_end)) / (2 * CLIP_SECONDS)
     boundary_score = max(0.0, 1.0 - boundary_error)
-    return round(0.8 * overlap_score + 0.2 * boundary_score, 6)
+    quality = 0.75 * temporal_iou**2 + 0.25 * boundary_score**2
+    return round(2.0 * quality - 1.0, 6)
 
 
 def relative_path(path: Path, root: Path) -> str:
