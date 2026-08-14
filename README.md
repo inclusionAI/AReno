@@ -36,7 +36,7 @@ AReno's mission is to make LLM RL **accessible** for a broad community of resear
 
 ### From source
 
-AReno currently requires Linux (x86_64 or aarch64) with an NVIDIA GPU and CUDA-enabled PyTorch 2.6 or newer; Windows users can use WSL2.
+AReno currently requires Linux (x86_64 or aarch64) with NVIDIA GPU and CUDA-enabled PyTorch 2.6 or newer; For Windows users can use WSL2 or below Docker way.
 
 ```bash
 git clone https://github.com/inclusionAI/AReno.git
@@ -57,98 +57,71 @@ docker run --gpus all --rm -it \
 
 ## Quick Start
 
-With the SDK, RL loop is a short cycle of `Trainer` calls. Each step below maps a concept to the SDK call that performs it:
+AReno provides core API abstractions for LLM post-training, with AReno SDK, RL loop is a short cycle of `Trainer` calls. Each step below maps a concept to the SDK call that performs it:
 
-```mermaid
-flowchart LR
-    A["Trainer<br/>init()"] -->
-    B["rollout_batch<br/>on-policy samples"] -->
-    C["reward fn<br/>score"] -->
-    D["train<br/>optimizer step"] -->|repeat| B
-```
+![AReno training loop](docs/_static/train_loop.png)
 
 1. **Create the trainer** — construct a `Trainer` on the AReno backend and `init()` it to load the tokenizer and start workers.
-2. **Roll out** — inside `rollout_session(...)`, `rollout_batch(...)` generates on-policy completions for each prompt.
+2. **Rollout** — inside `rollout_session(...)`, `rollout_batch(...)` generates on-policy completions for each prompt.
 3. **Score** — reward each completion and turn rewards into advantages (your reward function, not AReno's).
 4. **Train** — pack the rollout into `TrainSequence` objects and call `train(batch, loss_fn)` to run one optimizer step.
 5. **Repeat** — new weights produce new rollouts; loop until done, then `close()`.
 
 ```python
 import asyncio
-from functools import partial
 
 from datasets import load_dataset
 
-from areno.api import (
-    Areno,
-    ArenoConfig,
-    SamplingParams,
-    Trainer,
-    TrainSequence,
-    gspo_loss_fn,
-)
+from areno import Trainer
+from areno.api import RewardRecord, SamplingParams, TrainSequence, gspo_loss_fn
+from areno.api.rewards import compute_group_advantages
 from examples.math.math_verify_reward import reward_fn
-
-
-def to_advantages(rewards):
-    mean = sum(rewards) / len(rewards)
-    var = sum((r - mean) ** 2 for r in rewards) / max(len(rewards), 1)
-    std = max(var**0.5, 1e-6)
-    return [(r - mean) / std for r in rewards]
 
 
 async def main():
     # 1. Create the trainer
-    trainer = Trainer(
-        world_size=1,
-        model_path="Qwen/Qwen3-0.6B",
-        backend_type=Areno,
-        custom_config=ArenoConfig(tp_size=1),
-    )
+    trainer = Trainer(world_size=1, model_path="Qwen/Qwen3-0.6B")
     trainer.init()
+    tokenizer = trainer.get_tokenizer()
 
-    try:
-        # 2. Roll out on-policy completions for one GSM8K prompt
-        row = load_dataset("gsm8k", "main", split="train[0:1]")[0]
-        prompt = (
-            "Solve the problem and put the final answer in \\boxed{}.\n\n"
-            f"Problem: {row['question']}\nSolution:"
+    row = load_dataset("gsm8k", "main", split="train[0:1]")[0]
+    target = str(row["answer"]).rsplit("####", 1)[-1].strip()
+    prompt = (
+        "Solve the problem and put the final answer in \\boxed{}.\n\n"
+        f"Problem: {row['question']}\nSolution:"
+    )
+    prompt_tokens = tokenizer.encode(prompt)
+    sampling = SamplingParams(max_new_tokens=512)
+
+    # 2. Rollout on-policy completions
+    async with trainer.rollout_session(sampling_params=sampling, proxy=False):
+        sequences = trainer.rollout_token_batch(
+            [prompt_tokens], n_samples=8, sampling_params=sampling
+        )[0].sequences
+
+    # 3. Score and normalize rewards within the sample group
+    rewards = [
+        reward_fn(RewardRecord(prompt=prompt, completion=tokenizer.decode(seq.resp_tokens), answer=[target]))
+        for seq in sequences
+    ]
+    advantages = compute_group_advantages(rewards)
+
+    # 4. Train one step
+    batch = [
+        TrainSequence(
+            tokens=prompt_tokens + seq.resp_tokens,
+            logprobs=[0.0] * len(prompt_tokens) + seq.resp_logprobs,
+            prompt_len=len(prompt_tokens),
+            scalar_advantage=advantage,
+            reward=reward,
+            eos_token_id=tokenizer.eos_token_id,
         )
-        prompt_tokens = trainer.get_tokenizer().encode(prompt)
-        sampling = SamplingParams(max_new_tokens=512, temperature=1.0)
+        for seq, reward, advantage in zip(sequences, rewards, advantages, strict=True)
+    ]
+    trainer.train(batch, gspo_loss_fn)
 
-        async with trainer.rollout_session(sampling_params=sampling, proxy=False):
-            rollout = trainer.rollout_batch(
-                [prompt],
-                n_samples=8,
-                sampling_params=sampling,
-            )[0]
-
-        # 3. Score with the same reward function the CLI uses, then form advantages
-        completions = [trainer.get_tokenizer().decode(seq.resp_tokens) for seq in rollout.sequences]
-        rewards = reward_fn(row, completions)
-        advantages = to_advantages(rewards)
-
-        batch = []
-        for seq, reward, advantage in zip(rollout.sequences, rewards, advantages, strict=True):
-            response_len = len(seq.resp_tokens)
-            batch.append(
-                TrainSequence(
-                    prompt_mask=[True] * len(prompt_tokens) + [False] * response_len,
-                    tokens=prompt_tokens + seq.resp_tokens,
-                    logprobs=[0.0] * len(prompt_tokens) + seq.resp_logprobs,
-                    advantages=[0.0] * len(prompt_tokens) + [advantage] * response_len,
-                    reward=reward,
-                    eos_token_id=trainer.get_tokenizer().eos_token_id,
-                )
-            )
-
-        # 4. Train one step
-        stats = trainer.train(batch, partial(gspo_loss_fn, clip_eps=3.0e-4), mini_bs=4)
-
-        # 5. Repeat the loop over more prompts
-    finally:
-        trainer.close()
+    # 5. Repeat for more prompts, then close
+    trainer.close()
 
 
 asyncio.run(main())
