@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
-import re
 from functools import lru_cache
 from typing import Any
 
@@ -13,16 +13,22 @@ logger = logging.getLogger(__name__)
 
 
 def reward_fn(record: Any) -> float:
-    """Return 1 when the judge accepts the predicted event set, otherwise -1."""
+    """Return normalized semantic event-list similarity from 0 to 1."""
 
     prediction = _tool_prediction(getattr(record, "tool_calls", None))
     if prediction is None:
-        return -1.0
+        return 0.0
     expected = _label_list(record.source_record.get("event_classes"))
     predicted = _label_list(prediction.get("events"))
     if expected is None or predicted is None:
-        return -1.0
-    return 1.0 if _judge_same_events(tuple(expected), tuple(predicted)) else -1.0
+        return 0.0
+    return _judge_event_similarity(tuple(expected), tuple(predicted)) / 10.0
+
+
+try:
+    reward_fn.parallel_workers = max(1, min(64, int(os.environ.get("JUDGE_MAX_WORKERS", "16"))))
+except ValueError as exc:
+    raise RuntimeError("JUDGE_MAX_WORKERS must be an integer from 1 to 64") from exc
 
 
 def _tool_prediction(tool_calls: Any) -> dict[str, Any] | None:
@@ -54,7 +60,7 @@ def _env(name: str) -> str:
     return value
 
 
-def _judge_same_events(expected: tuple[str, ...], predicted: tuple[str, ...]) -> bool:
+def _judge_event_similarity(expected: tuple[str, ...], predicted: tuple[str, ...]) -> float:
     return _judge_request(
         _env("JUDGE_BASE_URL"),
         _env("JUDGE_MODEL"),
@@ -71,7 +77,7 @@ def _judge_request(
     api_key: str,
     expected: tuple[str, ...],
     predicted: tuple[str, ...],
-) -> bool:
+) -> float:
     try:
         from openai import OpenAI
     except ImportError as exc:
@@ -82,14 +88,19 @@ def _judge_request(
         model=model,
         temperature=0,
         max_tokens=32,
+        response_format={"type": "json_object"},
         messages=[
             {
                 "role": "system",
                 "content": (
-                    "You are a strict audiovisual event-label judge. Decide whether the predicted labels and "
-                    "reference labels denote exactly the same event set. Accept ordinary synonyms, singular/plural "
-                    "variants, and equivalent specific/common names. Reject missing events, extra events, merely "
-                    "related objects, and explanations that are not labels. Reply with exactly SAME or DIFFERENT."
+                    "You score the semantic similarity of a predicted audiovisual event-label set against a "
+                    "reference set from 0 to 10. Treat ordinary synonyms, singular/plural variants, and equivalent "
+                    "specific/common names as matches. Score 10 only when the sets are semantically equivalent with "
+                    "no missing or extra events; score 7-9 for a nearly complete match with a minor specificity "
+                    "difference; score 4-6 for meaningful partial overlap; score 1-3 for weakly related events; "
+                    "score 0 when unrelated. Penalize every missing or extra event. Use a floating-point score to "
+                    'express partial similarity and reply with exactly one JSON object such as {"score": 7.35}, '
+                    "with no other fields or text."
                 ),
             },
             {
@@ -101,9 +112,10 @@ def _judge_request(
             },
         ],
     )
-    content = response.choices[0].message.content or ""
-    verdicts = re.findall(r"\b(SAME|DIFFERENT)\b", content.upper())
-    if not verdicts:
+    content = (response.choices[0].message.content or "").strip()
+    try:
+        body = json.loads(content)
+    except json.JSONDecodeError as exc:
         logger.warning(
             "AVE judge returned invalid response model=%s expected=%s predicted=%s response=%r",
             model,
@@ -111,14 +123,38 @@ def _judge_request(
             predicted,
             content,
         )
-        raise RuntimeError(f"judge returned an invalid verdict: {content!r}")
-    equivalent = verdicts[-1] == "SAME"
+        raise RuntimeError(f"judge returned invalid JSON: {content!r}") from exc
+    if (
+        not isinstance(body, dict)
+        or set(body) != {"score"}
+        or isinstance(body["score"], bool)
+        or not isinstance(body["score"], (int, float))
+    ):
+        logger.warning(
+            "AVE judge returned invalid body model=%s expected=%s predicted=%s response=%r",
+            model,
+            expected,
+            predicted,
+            content,
+        )
+        raise RuntimeError(f"judge returned an invalid similarity body: {body!r}")
+    score = float(body["score"])
+    if not math.isfinite(score) or not 0.0 <= score <= 10.0:
+        logger.warning(
+            "AVE judge returned out-of-range score model=%s expected=%s predicted=%s response=%r",
+            model,
+            expected,
+            predicted,
+            content,
+        )
+        raise RuntimeError(f"judge returned an out-of-range similarity score: {score}")
     logger.info(
-        "AVE judge result model=%s expected=%s predicted=%s response=%r equivalent=%s",
+        "AVE judge result model=%s expected=%s predicted=%s response=%r score=%.3f normalized_reward=%.3f",
         model,
         expected,
         predicted,
         content,
-        equivalent,
+        score,
+        score / 10.0,
     )
-    return equivalent
+    return score

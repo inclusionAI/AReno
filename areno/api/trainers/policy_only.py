@@ -262,7 +262,7 @@ class PolicyOnlyTrainer:
                     len(samples),
                 )
             reward_records = [ctx.reward_record(sample) for sample in samples]
-            rewards = [float(self.reward_fn(record)) for record in reward_records]
+            rewards = self._score_reward_records(reward_records)
             rows = ctx._train_rows_from_samples(samples)
             tool_call_count = sum(len(record.tool_calls) for record in reward_records)
             tool_result_count = sum(len(record.tool_results) for record in reward_records)
@@ -578,23 +578,20 @@ class PolicyOnlyTrainer:
         for item_idx, (item, result) in enumerate(zip(prompt_batch.items, rollout_results, strict=True)):
             prefix_len = len(item.input_tokens)
             completions = [tokenizer.decode(seq.resp_tokens) for seq in result.sequences]
-            rewards = [
-                float(
-                    self.reward_fn(
-                        make_reward_record(
-                            prompt=item.prompt,
-                            completion=completion,
-                            source_record=item.record,
-                            answer=item.solutions,
-                            tokens=item.input_tokens + seq.resp_tokens,
-                            logprobs=[0.0] * prefix_len + seq.resp_logprobs,
-                            loss_mask=[False] * prefix_len + [True] * len(seq.resp_tokens),
-                            metadata={"prompt_index": item_idx, "sample_index": sample_idx},
-                        )
-                    )
+            reward_records = [
+                make_reward_record(
+                    prompt=item.prompt,
+                    completion=completion,
+                    source_record=item.record,
+                    answer=item.solutions,
+                    tokens=item.input_tokens + seq.resp_tokens,
+                    logprobs=[0.0] * prefix_len + seq.resp_logprobs,
+                    loss_mask=[False] * prefix_len + [True] * len(seq.resp_tokens),
+                    metadata={"prompt_index": item_idx, "sample_index": sample_idx},
                 )
                 for sample_idx, (completion, seq) in enumerate(zip(completions, result.sequences, strict=True))
             ]
+            rewards = self._score_reward_records(reward_records)
             rewards_all += rewards
             # Group-relative advantage: A_i = (r_i - mean(r))/std(r); shared by
             # every response token of sample i.
@@ -617,6 +614,11 @@ class PolicyOnlyTrainer:
                     )
                 )
         return train_batch, rewards_all, rollout_logprobs
+
+    def _score_reward_records(self, records):
+        from areno.api.rewards import score_reward_records
+
+        return score_reward_records(self.reward_fn, records)
 
     def _maybe_save(self, epoch: int, step: int) -> None:
         # Checkpoint cadence is "save_interval" steps; `step + 1` mirrors the

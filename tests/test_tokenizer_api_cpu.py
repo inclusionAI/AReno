@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
 from areno.api.config import ArenoConfig, coerce_backend_config, resolve_backend_type
 from areno.api.models import BackendType, SamplingParams, TrainSequence
-from areno.api.rewards import load_reward_fn
+from areno.api.rewards import load_reward_fn, score_reward_records
 from areno.api.tokenizer import (
     _looks_chat_formatted,
     configure_chat_template_enable_thinking,
@@ -143,6 +144,18 @@ class TokenizerApiTest(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "callable reward_fn"):
                 load_reward_fn(str(path))
+
+    def test_reward_scoring_honors_opt_in_parallel_workers_and_input_order(self):
+        barrier = threading.Barrier(2)
+
+        def reward_fn(record):
+            barrier.wait(timeout=2)
+            return record.value
+
+        reward_fn.parallel_workers = 2
+        records = [SimpleNamespace(value=2.5), SimpleNamespace(value=7.5)]
+
+        self.assertEqual(score_reward_records(reward_fn, records), [2.5, 7.5])
 
 
 if __name__ == "__main__":

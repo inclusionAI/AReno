@@ -75,19 +75,24 @@ compatible; regenerate them with the command above.
 
 The reward calls an OpenAI-compatible judge model to compare the predicted and
 reference event sets semantically. It accepts synonyms such as `dog barking`
-and `bark`, but rejects missing or extra events. Configure it with:
+and `bark`, while penalizing missing or extra events. Configure it with:
 
 ```bash
 export JUDGE_BASE_URL=http://judge-host:8000/v1
 export JUDGE_MODEL=judge-model
 export JUDGE_API_KEY=your-key
+export JUDGE_MAX_WORKERS=16
 ```
 
 Lowercase forms (`judge_base_url`, `judge_model`, and `judge_api_key`) are also
-accepted. A valid equivalent list receives `1.0`; a different or malformed list
-receives `-1.0`. Missing judge configuration, request failures, and invalid
-judge responses fail loudly instead of silently assigning bad rewards. Repeated
-label-pair decisions are cached within each trainer process.
+accepted. The judge returns semantic similarity from `0` for unrelated events
+to `10` for an exact semantic set match, with partial matches receiving
+intermediate scores. Training normalizes this to `reward = score / 10`, giving
+a `0–1` reward range. Malformed tool calls receive `0`. Missing judge
+configuration, request failures, and invalid judge responses fail loudly
+instead of silently assigning bad rewards. Repeated label-pair decisions are
+cached within each trainer process. Judge calls run in parallel while preserving
+rollout order; `JUDGE_MAX_WORKERS` controls concurrency and defaults to 16.
 
 ## Train
 

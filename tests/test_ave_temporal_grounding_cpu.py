@@ -135,18 +135,18 @@ def test_reward_reads_exactly_one_report_events_tool_call(monkeypatch):
     reward = _load("reward")
     monkeypatch.setattr(
         reward,
-        "_judge_same_events",
-        lambda expected, predicted: expected == ("Bark",) and predicted == ("dog barking",),
+        "_judge_event_similarity",
+        lambda expected, predicted: 8.75 if expected == ("Bark",) and predicted == ("dog barking",) else 0.0,
     )
     call = {"name": "report_events", "arguments": json.dumps({"events": ["dog barking"]})}
     record = SimpleNamespace(source_record={"event_classes": ["Bark"]}, tool_calls=[call])
 
-    assert reward.reward_fn(record) == 1.0
+    assert reward.reward_fn(record) == 0.875
 
     record.tool_calls.append(call)
-    assert reward.reward_fn(record) == -1.0
+    assert reward.reward_fn(record) == 0.0
     record.tool_calls = [{"name": "report_events", "arguments": json.dumps({"events": []})}]
-    assert reward.reward_fn(record) == -1.0
+    assert reward.reward_fn(record) == 0.0
 
 
 def test_reward_reads_judge_configuration_from_environment(monkeypatch):
@@ -161,14 +161,14 @@ def test_reward_reads_judge_configuration_from_environment(monkeypatch):
             expected=expected,
             predicted=predicted,
         )
-        return True
+        return 8.25
 
     monkeypatch.setenv("JUDGE_BASE_URL", "http://judge.example/v1")
     monkeypatch.setenv("JUDGE_MODEL", "judge-model")
     monkeypatch.setenv("JUDGE_API_KEY", "secret")
     monkeypatch.setattr(reward, "_judge_request", fake_request)
 
-    assert reward._judge_same_events(("Bark",), ("dog barking",))
+    assert reward._judge_event_similarity(("Bark",), ("dog barking",)) == 8.25
     assert seen == {
         "base_url": "http://judge.example/v1",
         "model": "judge-model",
@@ -178,6 +178,14 @@ def test_reward_reads_judge_configuration_from_environment(monkeypatch):
     }
 
 
+def test_reward_exposes_configured_parallel_workers(monkeypatch):
+    monkeypatch.setenv("JUDGE_MAX_WORKERS", "7")
+
+    reward = _load("reward")
+
+    assert reward.reward_fn.parallel_workers == 7
+
+
 def test_reward_fails_loudly_without_judge_configuration(monkeypatch):
     reward = _load("reward")
     for name in ("JUDGE_BASE_URL", "JUDGE_MODEL", "JUDGE_API_KEY"):
@@ -185,25 +193,27 @@ def test_reward_fails_loudly_without_judge_configuration(monkeypatch):
         monkeypatch.delenv(name.lower(), raising=False)
 
     with pytest.raises(RuntimeError, match="JUDGE_BASE_URL"):
-        reward._judge_same_events(("Bark",), ("Bark",))
+        reward._judge_event_similarity(("Bark",), ("Bark",))
 
 
 def test_reward_logs_remote_judge_response(monkeypatch, caplog):
     reward = _load("reward")
+    requests = []
 
     class FakeClient:
         def __init__(self, **_kwargs):
-            self.chat = SimpleNamespace(
-                completions=SimpleNamespace(
-                    create=lambda **_request: SimpleNamespace(
-                        choices=[SimpleNamespace(message=SimpleNamespace(content="SAME"))]
-                    )
-                )
-            )
+            def create(**request):
+                requests.append(request)
+                return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content='{"score":8.375}'))])
+
+            self.chat = SimpleNamespace(completions=SimpleNamespace(create=create))
 
     monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=FakeClient))
     caplog.set_level(logging.INFO, logger=reward.__name__)
     reward._judge_request.cache_clear()
 
-    assert reward._judge_request("http://judge/v1", "judge", "secret", ("Bark",), ("dog barking",))
-    assert "response='SAME' equivalent=True" in caplog.text
+    score = reward._judge_request("http://judge/v1", "judge", "secret", ("Bark",), ("dog barking",))
+
+    assert score == 8.375
+    assert requests[0]["response_format"] == {"type": "json_object"}
+    assert "response='{\"score\":8.375}' score=8.375 normalized_reward=0.838" in caplog.text
