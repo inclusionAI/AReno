@@ -6,6 +6,7 @@ import torch
 
 import areno.api.multimodal as multimodal
 from areno.api.multimodal import encode_processor_messages, record_has_multimodal
+from areno.engine.data.batch import to_device
 from areno.engine.data.rollout_state import InferenceBatchState
 
 
@@ -127,3 +128,23 @@ def test_gemma4_embedding_ids_replace_all_media_tokens():
     result = text_embedding_ids(ids, modality_token_ids=(101, 102, 103), pad_token_id=0)
 
     assert result.tolist() == [[1, 0, 0, 0, 2]]
+
+
+def test_gemma4_frozen_media_modules_stay_in_eval_mode():
+    from areno.models.gemma4_utils import keep_frozen_modules_in_eval
+
+    modules = [torch.nn.Dropout(0.5), torch.nn.Linear(2, 2)]
+    for module in modules:
+        module.train()
+
+    keep_frozen_modules_in_eval(modules)
+
+    assert all(not module.training for module in modules)
+
+
+def test_to_device_preserves_repeated_media_tensor_aliases():
+    media = torch.ones(2, 3)
+
+    moved = to_device([{"pixel_values": media}, {"pixel_values": media}], torch.device("meta"))
+
+    assert moved[0]["pixel_values"] is moved[1]["pixel_values"]

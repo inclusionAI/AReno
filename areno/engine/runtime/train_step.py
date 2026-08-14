@@ -295,6 +295,50 @@ def _grad_norm(parameters) -> float:
     return float(total.sqrt().cpu())
 
 
+def _grad_norm_by_group(named_parameters) -> dict[str, float]:
+    """Compute TP-aware L2 gradient norms grouped by model component."""
+
+    totals: dict[str, torch.Tensor] = {}
+    ctx = get_tp_context()
+    for name, param in named_parameters:
+        grad = _param_grad(param)
+        if grad is None:
+            continue
+        is_tp_parallel = bool(getattr(param, "tensor_model_parallel", False))
+        if not is_tp_parallel and ctx.rank != 0:
+            continue
+        group = _gradient_group_name(name)
+        value = grad.detach().float().pow(2).sum()
+        totals[group] = value if group not in totals else totals[group] + value
+
+    if ctx.world_size > 1:
+        for total in totals.values():
+            dist.all_reduce(total, op=dist.ReduceOp.SUM, group=ctx.group)
+    return {group: float(total.sqrt().cpu()) for group, total in totals.items()}
+
+
+def _gradient_group_name(name: str) -> str:
+    """Map a parameter name to a stable diagnostic component name."""
+
+    canonical = name.removeprefix("_orig_mod.")
+    if canonical.startswith(("vision_tower.", "audio_tower.", "embed_vision.", "embed_audio.")):
+        return "media_towers"
+    if canonical.startswith("embed_tokens_per_layer."):
+        return "ple_embeddings"
+    if canonical.startswith(("per_layer_model_projection.", "per_layer_projection_norm.")):
+        return "ple_projection"
+    if canonical.startswith("embed_tokens."):
+        return "text_embeddings"
+    if canonical.startswith("lm_head."):
+        return "lm_head"
+    if canonical.startswith("norm."):
+        return "final_norm"
+    if canonical.startswith("layers."):
+        parts = canonical.split(".", 2)
+        return f"layer_{parts[1]}" if len(parts) > 1 else "layers"
+    return "other"
+
+
 def _clip_grad_norm(parameters, grad_norm: float, max_norm: float) -> None:
     """Scale all gradients in place if their global norm exceeds `max_norm`."""
 

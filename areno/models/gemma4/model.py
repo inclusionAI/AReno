@@ -64,7 +64,7 @@ from areno.engine.runtime.metadata import InferMeta, TrainMeta
 from areno.engine.runtime.recompute import checkpoint_layer
 from areno.models.base import CausalLMOutput, ModelAdapter
 from areno.models.gemma4.checkpoint import checkpoint_spec
-from areno.models.gemma4_utils import text_embedding_ids
+from areno.models.gemma4_utils import keep_frozen_modules_in_eval, text_embedding_ids
 
 
 class Gemma4RMSNorm(nn.Module):
@@ -697,6 +697,14 @@ class Gemma4ForCausalLM(nn.Module):
         for module in (self.vision_tower, self.audio_tower, self.embed_vision, self.embed_audio):
             if module is not None:
                 module.requires_grad_(False)
+        keep_frozen_modules_in_eval((self.vision_tower, self.audio_tower, self.embed_vision, self.embed_audio))
+
+    def train(self, mode: bool = True):
+        """Train the language model while keeping frozen media encoders deterministic."""
+
+        super().train(mode)
+        keep_frozen_modules_in_eval((self.vision_tower, self.audio_tower, self.embed_vision, self.embed_audio))
+        return self
 
     def _build_e2b_multimodal_towers(self) -> None:
         try:
@@ -729,6 +737,7 @@ class Gemma4ForCausalLM(nn.Module):
         train_meta: TrainMeta | None = None,
         infer_meta: InferMeta | None = None,
         features: dict[str, Any] | list[dict[str, Any] | None] | None = None,
+        defer_lm_head: bool = False,
     ) -> CausalLMOutput:
         if position_ids is None:
             position_ids = torch.arange(input_ids.shape[1], device=input_ids.device).unsqueeze(0).expand_as(input_ids)
@@ -773,8 +782,8 @@ class Gemma4ForCausalLM(nn.Module):
                 if kv_for_share is not None:
                     shared_kv_by_layer[layer_idx] = kv_for_share
             hidden_states = self.norm(hidden_states)
-            logits_shard = self.lm_head(hidden_states)
-            if self.final_logit_softcapping:
+            logits_shard = None if defer_lm_head else self.lm_head(hidden_states)
+            if logits_shard is not None and self.final_logit_softcapping:
                 # Gemma uses tanh-based logit softcap to limit extreme values.
                 cap = float(self.final_logit_softcapping)
                 logits_shard = cap * torch.tanh(logits_shard / cap)
@@ -818,6 +827,7 @@ class Gemma4ForCausalLM(nn.Module):
         input_row: torch.Tensor,
         rows: list[dict[str, Any] | None],
     ) -> None:
+        projection_cache: dict[tuple[Any, ...], torch.Tensor] = {}
         for modality, token_id in self._modality_token_ids().items():
             mask = input_row == token_id
             expected = int(mask.sum().item())
@@ -827,12 +837,34 @@ class Gemma4ForCausalLM(nn.Module):
             for row in rows:
                 if row is None:
                     continue
-                piece = self._project_modality(row, modality, hidden_row.device, hidden_row.dtype)
+                cache_key = self._modality_projection_cache_key(row, modality)
+                piece = projection_cache.get(cache_key) if cache_key is not None else None
+                if piece is None:
+                    piece = self._project_modality(row, modality, hidden_row.device, hidden_row.dtype)
+                    if cache_key is not None and piece is not None:
+                        projection_cache[cache_key] = piece
                 if piece is not None:
                     pieces.append(piece)
             embeds = torch.cat(pieces, dim=0) if pieces else None
             _gemma4_check_feature_count(modality, expected, embeds)
             hidden_row[mask] = embeds
+
+    @staticmethod
+    def _modality_projection_cache_key(features: dict[str, Any], modality: str) -> tuple[Any, ...] | None:
+        keys = {
+            "image": ("pixel_values", "image_position_ids"),
+            "video": ("pixel_values_videos", "video_position_ids"),
+            "audio": ("input_features", "input_features_mask"),
+        }[modality]
+        values = tuple(features.get(key) for key in keys)
+        value = values[0]
+        if value is None:
+            return None
+        offsets = dict(features.get("modality_token_offsets") or {})
+        counts = dict(features.get("modality_token_counts") or {})
+        offset = int(offsets.get(modality, features.get("multimodal_token_offset", 0)) or 0)
+        count = counts.get(modality, features.get("multimodal_token_count"))
+        return modality, offset, count, *(id(item) for item in values)
 
     def _scatter_multimodal_row(
         self,
