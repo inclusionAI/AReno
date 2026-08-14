@@ -44,16 +44,17 @@ Each JSONL row is one event question:
 
 ## Reward
 
-The numerical reward is:
+The numerical reward is a strict but dense score:
 
 ```text
-0.8 * (2 * temporal_IoU - 1) + 0.2 * boundary_accuracy
+quality = 0.75 * temporal_IoU^2 + 0.25 * boundary_accuracy^2
+reward = 2 * quality - 1
 boundary_accuracy = max(0, 1 - (|start-start*| + |end-end*|) / 20)
 ```
 
-A perfect range receives `1.0`. The signed IoU term prevents a generic `0-10`
-full-clip prediction from earning an easy positive reward, while the boundary
-term still orders disjoint predictions by distance from the target.
+A perfect range receives `1.0`. Squaring overlap and boundary accuracy makes
+near misses noticeably less rewarding, while preserving a continuous signal
+for valid predictions instead of collapsing them all to `-1.0`.
 Malformed, non-finite, reversed, negative, or greater-than-10-second ranges
 receive `-1.0`. Missing or repeated tool calls also receive `-1.0`.
 
