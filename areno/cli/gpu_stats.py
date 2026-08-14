@@ -58,6 +58,7 @@ class GPUSampler:
         interval_s: float,
         max_history: int,
         device_selectors: Sequence[str] | None = None,
+        logical_device_indices: Sequence[int] | None = None,
         sample_fn: Callable[[], list[GPUSample]] | None = None,
         jsonl_path: str | None = None,
     ):
@@ -70,6 +71,14 @@ class GPUSampler:
         self._device_selectors = (
             None if device_selectors is None else tuple(str(item).strip() for item in device_selectors)
         )
+        self._logical_device_indices = (
+            None if logical_device_indices is None else tuple(int(index) for index in logical_device_indices)
+        )
+        if self._logical_device_indices is not None:
+            if self._device_selectors is None:
+                raise ValueError("logical_device_indices requires device_selectors")
+            if len(self._logical_device_indices) != len(self._device_selectors):
+                raise ValueError("logical_device_indices and device_selectors must have equal length")
         self._uses_default_sampler = sample_fn is None
         self._sample_fn = sample_fn or self._default_sample_once
         self._history: deque[GPUSample] = deque(maxlen=self._max_history)
@@ -206,7 +215,11 @@ class GPUSampler:
     def _run(self) -> None:
         while not self._stop.is_set():
             try:
-                samples = map_visible_devices(self._sample_fn(), self._device_selectors)
+                samples = map_visible_devices(
+                    self._sample_fn(),
+                    self._device_selectors,
+                    logical_device_indices=self._logical_device_indices,
+                )
                 if self._device_selectors is not None and len(samples) < len(self._device_selectors):
                     matched = {str(sample.physical_index) for sample in samples}
                     self._record_failure(
@@ -264,29 +277,61 @@ class GPUSampler:
         self._reason = f"GPU stats {stage} failed: {detail}"
 
 
-def visible_device_selectors(world_size: int, environ: dict[str, str] | None = None) -> list[str]:
+def visible_device_selectors(
+    world_size: int,
+    environ: dict[str, str] | None = None,
+    *,
+    logical_device_indices: Sequence[int] | None = None,
+) -> list[str]:
     """Resolve the physical device selectors used by this AReno run.
 
     CUDA accepts physical indices and GPU/MIG UUIDs in ``CUDA_VISIBLE_DEVICES``.
-    When it is unset, AReno's logical ranks map to the first ``world_size``
-    physical indices.
+    ``logical_device_indices`` follows the CUDA indices selected by AReno's
+    train/rollout topology. When it is omitted, the first ``world_size`` CUDA
+    devices are selected for backward compatibility.
     """
 
+    logical_devices = (
+        list(range(world_size)) if logical_device_indices is None else [int(index) for index in logical_device_indices]
+    )
+    if any(index < 0 for index in logical_devices):
+        raise ValueError("logical CUDA device indices must be non-negative")
     env = os.environ if environ is None else environ
     configured = env.get("CUDA_VISIBLE_DEVICES")
     if configured is None:
-        return [str(index) for index in range(world_size)]
+        return [str(index) for index in logical_devices]
     selectors = [token.strip() for token in configured.split(",") if token.strip()]
-    return selectors[:world_size]
+    if not selectors:
+        return []
+    unavailable = [index for index in logical_devices if index >= len(selectors)]
+    if unavailable:
+        raise ValueError(
+            f"logical CUDA devices {unavailable!r} are outside CUDA_VISIBLE_DEVICES with {len(selectors)} entries"
+        )
+    return [selectors[index] for index in logical_devices]
 
 
-def map_visible_devices(samples: Sequence[GPUSample], selectors: Sequence[str] | None) -> list[GPUSample]:
+def map_visible_devices(
+    samples: Sequence[GPUSample],
+    selectors: Sequence[str] | None,
+    *,
+    logical_device_indices: Sequence[int] | None = None,
+) -> list[GPUSample]:
     """Filter physical samples and assign the run's logical CUDA indices."""
 
     if selectors is None:
+        if logical_device_indices is not None:
+            raise ValueError("logical_device_indices requires selectors")
         return list(samples)
+    logical_devices = (
+        list(range(len(selectors)))
+        if logical_device_indices is None
+        else [int(index) for index in logical_device_indices]
+    )
+    if len(logical_devices) != len(selectors):
+        raise ValueError("logical_device_indices and selectors must have equal length")
     mapped: list[GPUSample] = []
-    for logical_index, selector in enumerate(selectors):
+    for logical_index, selector in zip(logical_devices, selectors, strict=True):
         match = next((sample for sample in samples if _matches_selector(sample, selector)), None)
         if match is None:
             continue

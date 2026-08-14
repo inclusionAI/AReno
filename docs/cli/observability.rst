@@ -178,9 +178,10 @@ defaults to ``1000``, and bounds both the in-memory history and the JSONL
 snapshot. With multiple visible GPUs, each tick contributes one sample per
 device, so the bound is a total row count rather than a per-device count.
 
-AReno follows ``CUDA_VISIBLE_DEVICES`` order. For example,
-``CUDA_VISIBLE_DEVICES=3,1`` maps logical ``device 0`` to physical GPU 3 and
-logical ``device 1`` to physical GPU 1. GPU UUID selectors are also supported.
+AReno samples the union of ``--train-devices`` and ``--rollout-devices`` and
+follows ``CUDA_VISIBLE_DEVICES`` order. For example,
+``CUDA_VISIBLE_DEVICES=3,1,7`` maps logical ``device 0`` to physical GPU 3 and
+logical ``device 2`` to physical GPU 7. GPU UUID selectors are also supported.
 The summary preserves logical index, physical index, UUID, and model name.
 MIG UUIDs depend on whether the installed driver exposes them through
 ``nvidia-smi --query-gpu``; unsupported selectors produce no matching sample

@@ -8,7 +8,7 @@ from dataclasses import replace
 
 import pytest
 
-from areno.api.trainer_config import TrainerConfig
+from areno.api.trainer_config import PolicyTrainerConfig, TrainerConfig
 from areno.cli import gpu_stats as gpu_stats_mod
 from areno.cli import train as train_cli
 from areno.cli.gpu_stats import (
@@ -96,12 +96,39 @@ def test_visible_device_selectors_use_cuda_order_and_world_size():
     assert visible_device_selectors(1, {"CUDA_VISIBLE_DEVICES": ""}) == []
 
 
+def test_visible_device_selectors_support_non_contiguous_logical_devices():
+    assert visible_device_selectors(
+        2,
+        {"CUDA_VISIBLE_DEVICES": "3,1,7,5"},
+        logical_device_indices=[0, 2, 3],
+    ) == ["3", "7", "5"]
+
+    with pytest.raises(ValueError, match="outside CUDA_VISIBLE_DEVICES"):
+        visible_device_selectors(
+            2,
+            {"CUDA_VISIBLE_DEVICES": "3,1"},
+            logical_device_indices=[0, 2],
+        )
+
+
 def test_map_visible_devices_reorders_physical_indices_to_logical_indices():
     physical = [_sample(1.0, 0), _sample(1.0, 1), _sample(1.0, 2)]
 
     mapped = map_visible_devices(physical, ["2", "0"])
 
     assert [(sample.index, sample.physical_index) for sample in mapped] == [(0, 2), (1, 0)]
+
+
+def test_map_visible_devices_preserves_requested_logical_indices():
+    physical = [_sample(1.0, 0), _sample(1.0, 1), _sample(1.0, 2)]
+
+    mapped = map_visible_devices(
+        physical,
+        ["2", "0"],
+        logical_device_indices=[5, 1],
+    )
+
+    assert [(sample.index, sample.physical_index) for sample in mapped] == [(5, 2), (1, 0)]
 
 
 def test_map_visible_devices_accepts_gpu_uuid_prefixes():
@@ -269,6 +296,22 @@ def test_disabled_config_does_not_start_sampler(tmp_path):
 
     assert train_cli._maybe_start_gpu_sampler(config) is None
     assert not list(tmp_path.glob("gpu_stats*"))
+
+
+def test_gpu_stats_cover_train_and_independent_rollout_devices(tmp_path):
+    config = PolicyTrainerConfig(
+        algo="gspo",
+        ckpt="unused",
+        dataset_path="unused",
+        world_size=2,
+        tp_size=1,
+        train_devices=[0, 2],
+        rollout_devices=[1, 3],
+        metrics_log_dir=str(tmp_path),
+        gpu_stats=True,
+    )
+
+    assert train_cli._gpu_stats_logical_devices(config) == [0, 2, 1, 3]
 
 
 def test_cli_lifecycle_writes_bounded_artifacts_with_fake_sampler(tmp_path, monkeypatch):

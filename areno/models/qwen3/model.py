@@ -30,7 +30,11 @@ from areno.accel import (
     areno_topk_softmax,
 )
 from areno.accel.ops import FusedMoeConfig, areno_fused_experts, areno_silu_and_mul, log_once
-from areno.engine.checkpoints.common import load_checkpoint_weights, save_checkpoint_weights
+from areno.engine.checkpoints.common import (
+    build_checkpoint_policy_plan,
+    load_checkpoint_weights,
+    save_checkpoint_weights,
+)
 from areno.engine.config import ModelConfig, _parse_dtype
 from areno.engine.layers.attention import CausalSelfAttention
 from areno.engine.layers.linear import mark_tensor_parallel_parameter
@@ -40,7 +44,7 @@ from areno.engine.layers.vocab import VocabParallelEmbedding, VocabParallelLMHea
 from areno.engine.parallel.collectives import all_reduce, scatter_to_sequence_parallel_region, sequence_parallel_region
 from areno.engine.parallel.context import get_tp_context
 from areno.engine.runtime.metadata import InferMeta, TrainMeta
-from areno.engine.runtime.recompute import checkpoint_layer
+from areno.engine.runtime.recompute import checkpoint_layer, checkpoint_routed_moe_layer
 from areno.models.base import CausalLMOutput, ModelAdapter
 from areno.models.qwen3.checkpoint import CHECKPOINT_SPEC, QWEN3_MOE_CHECKPOINT_SPEC
 
@@ -105,7 +109,16 @@ class Qwen3MoeExperts(nn.Module):
             self.local_num_experts,
         )
         if x.shape[0] == 0:
-            return all_reduce(flat.new_zeros(flat.shape))
+            # Every TP rank must produce gradients for the same parameter set.
+            # Keep a zero-valued graph edge to the local experts and router
+            # even when this rank receives no routes; otherwise its later TP
+            # gradient all-reduces diverge from ranks that did receive tokens.
+            zero = (
+                self.gate_up_weight.reshape(-1)[0] * 0
+                + self.down_weight.reshape(-1)[0] * 0
+                + topk_weight.sum().to(dtype=self.gate_up_weight.dtype) * 0
+            )
+            return all_reduce(flat.new_zeros(flat.shape) + zero)
         hidden = _areno_grouped_linear_no_compile(x.contiguous(), self.gate_up_weight, tokens_per_expert)
         log_once("qwen3_moe_silu_and_mul", "using ARENO fused silu_and_mul kernel for Qwen3-MoE experts")
         hidden = (
@@ -168,17 +181,33 @@ class Qwen3MoeMLP(nn.Module):
             routed_scaling_factor=config.routed_scaling_factor,
         )
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        batch, seqlen, hidden = hidden_states.shape
-        flat = hidden_states.reshape(-1, hidden)
+    def route(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Compute routing once so activation recompute can reuse the decision."""
+
+        flat = hidden_states.reshape(-1, hidden_states.shape[-1])
         logits = _areno_linear_no_compile(flat.to(dtype=self.gate.dtype), self.gate)
         log_once("qwen3_moe_topk_softmax", "using ARENO fused topk_softmax router for Qwen3-MoE")
-        topk_idx, topk_weight = _areno_topk_softmax_no_compile(logits, self.top_k, self.norm_topk_prob)
+        return _areno_topk_softmax_no_compile(logits, self.top_k, self.norm_topk_prob)
+
+    def forward_with_routes(
+        self,
+        hidden_states: torch.Tensor,
+        topk_idx: torch.Tensor,
+        topk_weight: torch.Tensor,
+    ) -> torch.Tensor:
+        """Run experts with a fixed routing decision."""
+
+        batch, seqlen, hidden = hidden_states.shape
+        flat = hidden_states.reshape(-1, hidden)
         if self.training:
             out = self.experts(flat, topk_idx.to(torch.long), topk_weight)
         else:
             out = self._forward_fused_moe(flat, topk_idx, topk_weight)
         return out.view(batch, seqlen, hidden)
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        topk_idx, topk_weight = self.route(hidden_states)
+        return self.forward_with_routes(hidden_states, topk_idx, topk_weight)
 
     @torch.no_grad()
     def prepare_infer_weights(self) -> None:
@@ -226,9 +255,45 @@ class Qwen3MoeMLP(nn.Module):
 class Qwen3MoeDecoderLayer(QwenDecoderLayer):
     """Qwen3 block with routed MoE MLP."""
 
+    checkpoint_internally = True
+
     def __init__(self, config: ModelConfig, layer_idx: int):
         super().__init__(config, layer_idx)
         self.mlp = Qwen3MoeMLP(config)
+
+    def _attention_block(
+        self,
+        hidden_states: torch.Tensor,
+        position_ids: torch.Tensor,
+        train_meta: TrainMeta | None,
+        infer_meta: InferMeta | None,
+    ) -> torch.Tensor:
+        residual = hidden_states
+        normalized = self.input_layernorm(hidden_states)
+        return residual + self.self_attn(normalized, position_ids, train_meta, infer_meta)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        position_ids: torch.Tensor,
+        train_meta: TrainMeta | None = None,
+        infer_meta: InferMeta | None = None,
+    ) -> torch.Tensor:
+        # Router top-k can change after a numerically non-bitwise-identical
+        # attention recompute. Keep routing outside the checkpoint boundary,
+        # then checkpoint the expensive expert MLP with fixed route tensors.
+        return checkpoint_routed_moe_layer(
+            self._attention_block,
+            self.post_attention_layernorm,
+            self.mlp.route,
+            self.mlp.forward_with_routes,
+            hidden_states,
+            position_ids,
+            train_meta,
+            infer_meta,
+            train_meta=train_meta,
+            infer_meta=infer_meta,
+        )
 
 
 class Qwen3ForCausalLM(nn.Module):
@@ -262,15 +327,18 @@ class Qwen3ForCausalLM(nn.Module):
             hidden_states = scatter_to_sequence_parallel_region(hidden_states)
         with sequence_parallel_region(use_sequence_parallel):
             for layer in self.layers:
-                hidden_states = checkpoint_layer(
-                    layer,
-                    hidden_states,
-                    position_ids,
-                    train_meta,
-                    infer_meta,
-                    train_meta=train_meta,
-                    infer_meta=infer_meta,
-                )
+                if getattr(layer, "checkpoint_internally", False):
+                    hidden_states = layer(hidden_states, position_ids, train_meta, infer_meta)
+                else:
+                    hidden_states = checkpoint_layer(
+                        layer,
+                        hidden_states,
+                        position_ids,
+                        train_meta,
+                        infer_meta,
+                        train_meta=train_meta,
+                        infer_meta=infer_meta,
+                    )
             hidden_states = self.norm(hidden_states)
             logits_shard = self.lm_head(hidden_states)
         return CausalLMOutput(logits_shard=logits_shard, hidden_states=hidden_states)
@@ -439,6 +507,9 @@ class Qwen3Adapter(ModelAdapter):
             raise TypeError(f"Qwen3Adapter cannot save weights from {type(model)!r}")
         return save_checkpoint_weights(model, output_path, source_path, CHECKPOINT_SPEC)
 
+    def build_policy_plan(self, model: nn.Module):
+        return build_checkpoint_policy_plan(model, CHECKPOINT_SPEC)
+
 
 class Qwen3MoeAdapter(ModelAdapter):
     """Adapter for Qwen3 MoE checkpoints (for example Qwen3-30B-A3B)."""
@@ -489,6 +560,9 @@ class Qwen3MoeAdapter(ModelAdapter):
         if not isinstance(model, Qwen3MoeForCausalLM):
             raise TypeError(f"Qwen3MoeAdapter cannot save weights from {type(model)!r}")
         return save_checkpoint_weights(model, output_path, source_path, QWEN3_MOE_CHECKPOINT_SPEC)
+
+    def build_policy_plan(self, model: nn.Module):
+        return build_checkpoint_policy_plan(model, QWEN3_MOE_CHECKPOINT_SPEC)
 
 
 @torch._dynamo.disable

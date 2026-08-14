@@ -10,6 +10,7 @@ loss functions.
 from __future__ import annotations
 
 from enum import Enum
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -78,8 +79,11 @@ class TrainSequence(BaseModel):
     tokens: list[int] = Field(default_factory=list)
     logprobs: list[float] = Field(default_factory=list)
     advantages: list[float] = Field(default_factory=list)
+    prompt_len: int | None = Field(default=None)
+    scalar_advantage: float | None = Field(default=None)
     returns: list[float] = Field(default_factory=list)
     values: list[float] = Field(default_factory=list)
     ref_logprobs: list[float] = Field(default_factory=list)
+    features: dict[str, Any] | list[dict[str, Any] | None] | None = Field(default=None)
     reward: float = Field(default=0.0)
     eos_token_id: int = Field(default=0)

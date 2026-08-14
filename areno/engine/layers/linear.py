@@ -14,6 +14,7 @@ from __future__ import annotations
 import math
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 from areno.accel import areno_linear
@@ -247,4 +248,6 @@ class RowParallelLinear(nn.Module):
 def _areno_linear_forward(x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None) -> torch.Tensor:
     """Single entry point so all parallel linears share the areno.accel matmul."""
 
+    if x.ndim >= 3 and torch.is_grad_enabled():
+        return F.linear(x, weight, bias)
     return areno_linear(x, weight, bias)

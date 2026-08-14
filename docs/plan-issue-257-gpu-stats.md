@@ -30,9 +30,11 @@ identities and maps them to the logical CUDA order used by the run:
 
 - With `CUDA_VISIBLE_DEVICES=3,1`, physical GPU 3 becomes logical device 0
   and physical GPU 1 becomes logical device 1.
+- Explicit `--train-devices` and `--rollout-devices` are combined so an
+  independent rollout topology is sampled alongside the training topology.
 - GPU UUID selectors and unambiguous UUID prefixes are supported.
-- Without `CUDA_VISIBLE_DEVICES`, the first `world_size` physical indices are
-  selected.
+- Without `CUDA_VISIBLE_DEVICES`, the configured logical device indices are
+  treated as physical indices.
 
 Every sample contains logical `index`, `physical_index`, and `uuid`. This makes
 multi-GPU results auditable after the run instead of relying on host-global

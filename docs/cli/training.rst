@@ -80,12 +80,20 @@ Built-in algorithms: ``sft``, ``dpo``, ``gspo``, ``grpo``, ``ppo``.
    indices have completed, even if the current epoch still has more batches.
 
 ``--world-size INTEGER``
-   Total device count for the backend. Default: ``8``.
+   Total training device count. Default: ``8``. When ``--train-devices`` is
+   provided, AReno infers this value from the expanded device list.
 
-``--tp-size INTEGER``
-   Tensor parallel size for the backend. Default: ``4``.
+``--tp-size INTEGER``, ``--train-tp-size INTEGER``
+   Tensor parallel size for training. The two option names are aliases.
+   Default: ``4``.
 
 ``world-size`` must be divisible by ``tp-size``.
+
+``--train-devices TEXT``
+   Comma-separated logical CUDA device indices or inclusive ranges used by
+   training. For example, ``0..8,11..29`` includes both endpoints. AReno
+   derives ``world-size`` from the expanded count. When omitted, AReno uses
+   ``0`` through ``world-size - 1``.
 
 Rollout
 ~~~~~~~
@@ -93,6 +101,37 @@ Rollout
 Everything that generates and scores completions: batch volume, sequence
 limits, sampling, decode runtime, the agentic-rollout hooks, and the reward
 signal.
+
+``--rollout-devices TEXT``
+   Comma-separated logical CUDA device indices or inclusive ranges for an
+   independent rollout engine. They may overlap ``--train-devices`` when the
+   GPU has enough memory for both worker processes. This option is valid only
+   for online algorithms that generate rollouts.
+
+``--rollout-tp-size INTEGER``
+   Tensor parallel size of the independent rollout engine. It defaults to the
+   training ``tp-size``. The rollout device count must be divisible by this
+   value.
+
+``--policy-sync-bucket-mb INTEGER``
+   Maximum reusable GPU buffer used while streaming policy weights from the
+   training engine to the rollout engine. Default: ``64`` MiB.
+
+For example, the following uses four visible GPUs for training and two
+different visible GPUs for rollout:
+
+.. code-block:: bash
+
+   areno train \
+     --algo gspo \
+     --ckpt Qwen/Qwen3-8B \
+     --dataset-path ... \
+     --reward-fn-path ... \
+     --world-size 4 \
+     --tp-size 4 \
+     --train-devices 0,1,2,3 \
+     --rollout-devices 4,5 \
+     --rollout-tp-size 2
 
 ``--batch-size INTEGER``
    Prompt or pair batch size. Default: ``32``.

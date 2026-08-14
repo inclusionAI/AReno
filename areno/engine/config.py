@@ -136,6 +136,8 @@ class ModelConfig:
     use_bias: bool = False
     layer_group_size: int = 1
     partial_rotary_factor: float = 1.0
+    mrope_section: tuple[int, int, int] | None = None
+    mrope_interleaved: bool = False
     num_experts: int | None = None
     num_experts_per_tok: int = 1
     n_group: int = 1
@@ -145,6 +147,10 @@ class ModelConfig:
     moe_intermediate_size: int = 0
     num_shared_experts: int | None = None
     shared_expert_intermediate_size: int = 0
+    vision_config: dict[str, Any] | None = None
+    image_token_id: int | None = None
+    vision_start_token_id: int | None = None
+    vision_end_token_id: int | None = None
     moe_router_enable_expert_bias: bool = True
     norm_topk_prob: bool = True
     moe_router_dtype: torch.dtype = torch.float32
@@ -156,7 +162,11 @@ class ModelConfig:
     qk_nope_head_dim: int = 0
     qk_rope_head_dim: int = 0
     v_head_dim: int = 0
+    q_lora_rank: int | None = None
     kv_lora_rank: int | None = None
+    kda_safe_gate: bool = False
+    kda_lower_bound: float | None = None
+    no_kda_lora: bool = False
     linear_backend: str = "minimax"
     linear_scale: bool = True
     linear_silu: bool = False
@@ -182,7 +192,8 @@ class ModelConfig:
             raise ValueError("num_attention_heads must be divisible by tp_size")
         if self.num_key_value_heads % tp_size != 0:
             allow_replicated_kv = (
-                self.model_type in {"gemma4", "qwen3_moe", "qwen3_5_moe"} and tp_size % self.num_key_value_heads == 0
+                self.model_type in {"gemma4", "qwen3_moe", "qwen3_5", "qwen3_5_moe", "qwen3_5_vl", "qwen3_5_vl_moe"}
+                and tp_size % self.num_key_value_heads == 0
             )
             if not allow_replicated_kv:
                 raise ValueError("num_key_value_heads must be divisible by tp_size")
@@ -223,6 +234,8 @@ class EngineConfig:
     dp_size: int | None = None
     devices: list[int] | None = None
     dummy_load: bool = False
+    role: Literal["train", "rollout"] = "train"
+    policy_sync_bucket_mb: int = 64
 
     def __post_init__(self) -> None:
         """Infer DP/devices and validate the distributed layout."""
@@ -238,6 +251,14 @@ class EngineConfig:
                 self.devices = list(range(self.tp_size if self.dp_size is None else self.tp_size * self.dp_size))
         if len(self.devices) < 1:
             raise ValueError("devices must be non-empty")
+        if any(device < 0 for device in self.devices):
+            raise ValueError("devices must contain non-negative CUDA indices")
+        if len(self.devices) != len(set(self.devices)):
+            raise ValueError("devices must not contain duplicate CUDA indices")
+        if torch.cuda.is_available():
+            invalid = [device for device in self.devices if device >= torch.cuda.device_count()]
+            if invalid:
+                raise ValueError(f"devices are outside CUDA_VISIBLE_DEVICES: {invalid}")
         if len(self.devices) % self.tp_size != 0:
             raise ValueError("len(devices) must be divisible by tp_size")
         inferred_dp_size = len(self.devices) // self.tp_size
@@ -247,6 +268,8 @@ class EngineConfig:
             raise ValueError("dp_size must equal len(devices) // tp_size")
         if self.dp_size < 1:
             raise ValueError("dp_size must be >= 1")
+        if self.policy_sync_bucket_mb < 1:
+            raise ValueError("policy_sync_bucket_mb must be >= 1")
         if self.runtime.kv_block_size < 1:
             raise ValueError("runtime.kv_block_size must be >= 1")
         if self.runtime.kv_block_size % 256 != 0:
