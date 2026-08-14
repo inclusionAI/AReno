@@ -180,6 +180,34 @@ Request fields
 ``content``
    Message content as ``str | list | None``.
 
+Multimodal content
+------------------
+
+For a checkpoint with a compatible processor, ``content`` may be a list of
+text, image, audio, and video parts. AReno accepts OpenAI-style ``*_url``
+parts and forwards normalized media references to the checkpoint processor:
+
+.. code-block:: json
+
+   {
+     "role": "user",
+     "content": [
+       {"type": "video_url", "video_url": {"url": "/data/clip.mp4"}},
+       {"type": "audio_url", "audio_url": {"url": "/data/clip.wav"}},
+       {"type": "text", "text": "Describe the synchronized event."}
+     ]
+   }
+
+Supported part types are ``image_url``, ``audio_url``, ``video_url``, and
+``input_audio``. The direct processor forms ``image``, ``audio``, and
+``video`` are also accepted. ``input_audio`` contains base64 data and a format
+such as ``wav`` or ``mp3``. Local paths are resolved on the server, not on the
+client, so the media files must be visible to the serving process. Data URLs
+can be used when the client and server do not share a filesystem.
+
+Media support depends on the loaded model processor. See
+:doc:`../concepts/multimodal-inputs` for serving and training guidance.
+
 Continuous batching behavior
 ----------------------------
 

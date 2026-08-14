@@ -26,6 +26,7 @@ AReno documentation
    Backend Topology <concepts/backend-topology>
    Chat Templates <concepts/chat-templates>
    Dataset Formats <concepts/dataset-formats>
+   Multimodal Inputs <concepts/multimodal-inputs>
    Reward Functions <concepts/reward-functions>
 
 .. toctree::

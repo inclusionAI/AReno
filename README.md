@@ -30,6 +30,7 @@ AReno's mission is to make LLM RL **accessible** for a broad community of resear
 - ✨ **Plug-and-play**: various post-training methods are easily accessible via the `--algo` flag or the same `Trainer` class from Python, no cluster or launcher to set up.
 - 🪶 **Lightweight**: single self-contained package, no external training/inference backend, just PyTorch, FlashAttention, and a handful of other libraries.
 - 🧰 **Agentic RL ready**: run an agent function against AReno's local OpenAI-compatible proxy, return explicit trajectories, and train from tokens, logprobs, rewards, and loss masks derived by the trainer.
+- 🎞️ **Multimodal**: use image, audio, and video content with compatible model processors through the same OpenAI-style message format in serving and agentic training.
 - 🧩 **Extensible**: easily register new algorithms, model adapters, reward functions, and hardware backends without changing the core.
 
 ## Installation
