@@ -4,12 +4,15 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
   Activity,
+  ArrowLeft,
   Bot,
   Box,
   CircleStop,
   Cpu,
   FileText,
   History,
+  LayoutDashboard,
+  Languages,
   Layers,
   MessageSquare,
   Moon,
@@ -22,10 +25,97 @@ import {
   Sun,
   TerminalSquare,
   Timer,
+  Wrench,
 } from "lucide-react";
 import "./styles.css";
 
 const API_BASE = new URL(".", window.location.href).pathname;
+const UI_LANGUAGE_STORAGE_KEY = "areno-dashboard-language";
+const ZH_UI = {
+  "Overview": "概览",
+  "Jobs": "任务",
+  "Runtime": "运行环境",
+  "Launcher": "任务启动",
+  "Agent": "智能助手",
+  "Operations Overview": "运行概览",
+  "Runtime health, active work, and the signals that need attention.": "查看运行环境、活跃任务和需要关注的信号。",
+  "Runtime Environment": "运行环境",
+  "Review areno check, areno env, dependencies, GPU state, and repository context.": "检查 AReno 环境、依赖、GPU 状态和仓库上下文。",
+  "Task Launcher": "任务启动",
+  "Start low-intrusion AReno train or serve subprocesses from explicit configs.": "通过明确配置启动 AReno 训练或服务进程。",
+  "Agent Console": "智能助手",
+  "Chat with an operations agent using the selected job context.": "基于所选任务上下文与运维助手对话。",
+  "Running Job Summary": "运行任务摘要",
+  "Current health, route, and stage progression for the latest job.": "最新任务的健康状态、运行路径和阶段进度。",
+  "Metrics": "指标",
+  "Switch between reward and loss for the latest job.": "切换查看最新任务的奖励、损失及训练指标。",
+  "Runtime attention": "运行环境提醒",
+  "Highest-priority environment finding.": "当前最高优先级的环境问题。",
+  "Quick actions": "快捷操作",
+  "Short paths into common workflows.": "快速执行常用工作流。",
+  "Latest health": "最新健康指标",
+  "Active jobs": "活跃任务",
+  "No signal": "暂无信号",
+  "Waiting for metrics": "等待指标上报",
+  "Reward": "奖励",
+  "Loss": "损失",
+  "Grad Norm": "梯度范数",
+  "Sequence Length": "序列长度",
+  "Job Detail: Overview": "任务详情：概览",
+  "Rollout Sample": "采样样例",
+  "Environment Checks": "环境检查",
+  "Runtime requirements, compatibility, and actionable diagnostics.": "运行要求、兼容性和可执行诊断。",
+  "GPU Cards": "GPU 状态",
+  "Memory pressure and utilization before launch.": "启动前的显存压力和利用率。",
+  "Details": "详情",
+  "Run Check": "运行检查",
+  "Fix": "修复",
+  "Starting...": "正在启动…",
+  "Installing...": "正在安装…",
+  "Installed": "已安装",
+  "Retry fix": "重试修复",
+  "Ready": "就绪",
+  "Needs attention": "需要关注",
+  "Checking": "检查中",
+  "Dependency Risk": "依赖风险",
+  "No checks reported": "暂无检查结果",
+  "No GPUs reported": "暂无 GPU 信息",
+  "No metrics available": "暂无指标",
+  "No rollout sample captured yet.": "尚未记录采样样例。",
+  "No TensorBoard scalar points loaded yet.": "尚未加载 TensorBoard 标量数据。",
+  "Loading selected metric...": "正在加载所选指标…",
+  "Open": "打开",
+  "Back to Jobs": "返回任务列表",
+  "Stop job": "停止任务",
+  "Stop": "停止",
+  "Prev": "上一页",
+  "Next": "下一页",
+  "All": "全部",
+  "Running": "运行中",
+  "Failed": "失败",
+  "Stopped": "已停止",
+  "Config": "配置",
+  "Logs": "日志",
+  "Command Preview": "命令预览",
+  "Preflight": "预检",
+  "Start Train": "启动训练",
+  "Start Serve": "启动服务",
+  "Send": "发送",
+  "New Chat": "新对话",
+  "Settings": "设置",
+  "Chat": "对话",
+  "History": "历史",
+  "Error Recovery": "错误恢复",
+  "Suggested Follow-ups": "建议追问",
+  "Done": "完成",
+  "Toggle theme": "切换主题",
+  "Translate to Chinese": "切换为中文",
+  "Translate to English": "切换为英文",
+  "Ask about this job, its metrics, or recent logs...": "询问此任务的指标、运行状态或最近日志…",
+  "Ask about the runtime or describe a task to launch...": "询问运行环境，或描述要启动的任务…",
+  "Message the operations agent": "向运维助手发送消息",
+};
+const EN_UI = Object.fromEntries(Object.entries(ZH_UI).map(([english, chinese]) => [chinese, english]));
 
 async function api(path, options) {
   const response = await fetch(`${API_BASE}${path.replace(/^\//, "")}`, {
@@ -42,6 +132,30 @@ async function api(path, options) {
 
 function classNames(...items) {
   return items.filter(Boolean).join(" ");
+}
+
+function translateDashboard(root, language) {
+  if (!root) return;
+  const dictionary = language === "zh" ? ZH_UI : EN_UI;
+  const excluded = "pre, code, .mono, .chatMessages, .runtimeCommandResult, .commandPreview";
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  let node = walker.nextNode();
+  while (node) {
+    const parent = node.parentElement;
+    if (parent && !parent.closest(excluded)) {
+      const trimmed = node.nodeValue.trim();
+      const translated = dictionary[trimmed];
+      if (translated) node.nodeValue = node.nodeValue.replace(trimmed, translated);
+    }
+    node = walker.nextNode();
+  }
+  for (const element of root.querySelectorAll("[title], [placeholder], [aria-label]")) {
+    if (element.closest(excluded)) continue;
+    for (const attribute of ["title", "placeholder", "aria-label"]) {
+      const value = element.getAttribute(attribute);
+      if (value && dictionary[value]) element.setAttribute(attribute, dictionary[value]);
+    }
+  }
 }
 
 function usePolling(loader, delay = 2500, deps = []) {
@@ -66,11 +180,15 @@ function usePolling(loader, delay = 2500, deps = []) {
 const defaultAgentMessages = [
   { role: "assistant", content: "Select a job, then ask about metrics, runtime, logs, or how to start the next AReno task." },
 ];
+const zhAgentMessages = [
+  { role: "assistant", content: "选择一个任务，然后询问指标、运行环境、日志，或如何启动下一个 AReno 任务。" },
+];
 
 const AGENT_CHAT_STORAGE_KEY = "areno-dashboard-agent-chat";
 const AGENT_SESSIONS_STORAGE_KEY = "areno-dashboard-agent-chat-sessions";
 const AGENT_ACTIVE_SESSION_STORAGE_KEY = "areno-dashboard-agent-active-chat";
 const AGENT_DRAFT_STORAGE_KEY = "areno-dashboard-agent-draft";
+const AGENT_FAILURE_STORAGE_KEY = "areno-dashboard-agent-failure";
 
 function loadAgentMessages() {
   try {
@@ -89,6 +207,7 @@ function createAgentSession(messages = defaultAgentMessages, title = "New chat")
     createdAt: now,
     updatedAt: now,
     messages,
+    followUps: [],
   };
 }
 
@@ -96,7 +215,7 @@ function loadAgentSessions() {
   try {
     const parsed = JSON.parse(localStorage.getItem(AGENT_SESSIONS_STORAGE_KEY) || "[]");
     if (Array.isArray(parsed) && parsed.length) {
-      return parsed.map((session) => ({ ...session, messages: session.messages?.length ? session.messages : defaultAgentMessages }));
+      return parsed.map((session) => ({ ...session, messages: session.messages?.length ? session.messages : defaultAgentMessages, followUps: Array.isArray(session.followUps) ? session.followUps : [] }));
     }
   } catch {
     // Fall through to migrate the legacy single-chat storage.
@@ -112,9 +231,9 @@ function inferAgentSessionTitle(messages, fallback = "New chat") {
 }
 
 const defaultTrainConfig = {
-  ckpt: "Qwen/Qwen3-0.6B",
-  dataset_path: "yahma/alpaca-cleaned:train",
-  dataset_loader_fn: "examples/sft/alpaca/dataset_loader.py",
+  ckpt: "",
+  dataset_path: "",
+  dataset_loader_fn: "",
   reward_fn_path: "",
   ref_ckpt: "",
   reward_ckpt: "",
@@ -179,7 +298,7 @@ const defaultTrainConfig = {
 };
 
 const defaultServeConfig = {
-  model_path: "Qwen/Qwen3-0.6B",
+  model_path: "",
   model_hub: "modelscope",
   host: "0.0.0.0",
   port: 8000,
@@ -209,28 +328,67 @@ function App() {
       return {};
     }
   });
-  const [activePage, setActivePage] = useState("jobs");
+  const [activePage, setActivePage] = useState("overview");
+  const [jobFilter, setJobFilter] = useState("all");
   const [launcherMode, setLauncherMode] = useState("train");
-  const [theme, setTheme] = useState(() => localStorage.getItem("areno-dashboard-theme") || "dark");
+  const [theme, setTheme] = useState(() => localStorage.getItem("areno-dashboard-theme-v2") || "light");
+  const [language, setLanguage] = useState(() => localStorage.getItem(UI_LANGUAGE_STORAGE_KEY) || "en");
   const [busy, setBusy] = useState("");
   const [agentSettingsOpen, setAgentSettingsOpen] = useState(false);
   const [jobPage, setJobPage] = useState(1);
+  const [jobDetailOpen, setJobDetailOpen] = useState(false);
   const [refreshNonce, setRefreshNonce] = useState(0);
+  const [followUpsLoading, setFollowUpsLoading] = useState(false);
+  const [agentFailure, setAgentFailure] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem(AGENT_FAILURE_STORAGE_KEY) || "null");
+    } catch {
+      return null;
+    }
+  });
+  const [agentRecovering, setAgentRecovering] = useState(false);
+  const [runtimeCheckResult, setRuntimeCheckResult] = useState(null);
+  const [runtimeRepair, setRuntimeRepair] = useState(null);
   const chatMessagesRef = useRef(null);
   const env = usePolling(() => api("/api/env"), 5000);
   const jobs = usePolling(() => api("/api/jobs"), 2000);
   const jobDetail = usePolling(() => selectedJobId ? api(`/api/jobs/${selectedJobId}`) : Promise.resolve(null), 3000, [selectedJobId]);
+  const runtimeAttention = usePolling(() => api("/api/runtime/attention"), 5000);
+  const runtimeRepairDetail = usePolling(
+    () => runtimeRepair?.jobId ? api(`/api/jobs/${runtimeRepair.jobId}`) : Promise.resolve(null),
+    1000,
+    [runtimeRepair?.jobId],
+  );
+  const quickActions = usePolling(() => api("/api/quick-actions"), 30000);
+  const launcherPresets = usePolling(() => api("/api/launcher/presets"), 30000);
+  const agentRecoveryState = usePolling(
+    () => api(`/api/agent/recovery${selectedJobId ? `?job_id=${encodeURIComponent(selectedJobId)}` : ""}`),
+    3000,
+    [selectedJobId],
+  );
 
-  const jobList = jobs.data?.jobs || [];
-  const jobPageSize = 10;
-  const jobPageCount = Math.max(1, Math.ceil(jobList.length / jobPageSize));
+  const jobList = (jobs.data?.jobs || []).filter((job) => job.kind !== "runtime-repair");
+  const runtimeRepairJob = runtimeRepairDetail.data?.job || runtimeRepair?.job || null;
+  const filteredJobs = jobFilter === "all" ? jobList : jobList.filter((job) => job.status === jobFilter);
+  const jobPageSize = 3;
+  const jobPageCount = Math.max(1, Math.ceil(filteredJobs.length / jobPageSize));
   const currentJobPage = Math.min(jobPage, jobPageCount);
-  const pagedJobs = jobList.slice((currentJobPage - 1) * jobPageSize, currentJobPage * jobPageSize);
+  const pagedJobs = filteredJobs.slice((currentJobPage - 1) * jobPageSize, currentJobPage * jobPageSize);
   const selectedJob = jobDetail.data?.job || (selectedJobId ? jobList.find((job) => job.id === selectedJobId) : null) || null;
+  const latestJob = newestJob(jobList);
+  const latestJobPreviewDetail = usePolling(
+    () => latestJob ? api(`/api/jobs/${latestJob.id}`) : Promise.resolve(null),
+    3000,
+    [latestJob?.id],
+  );
+  const previewJob = latestJob && latestJobPreviewDetail.data?.job?.id === latestJob.id
+    ? latestJobPreviewDetail.data.job
+    : latestJob;
   const activeAgentSession = useMemo(() => {
     return agentSessions.find((session) => session.id === activeAgentSessionId) || agentSessions[0] || createAgentSession();
   }, [agentSessions, activeAgentSessionId]);
   const agentMessages = activeAgentSession.messages || defaultAgentMessages;
+  const agentFollowUps = activeAgentSession.followUps || [];
 
   useEffect(() => {
     if (selectedJobId && jobList.length && !jobList.some((job) => job.id === selectedJobId)) {
@@ -243,9 +401,33 @@ function App() {
   }, [jobPage, jobPageCount]);
 
   useEffect(() => {
+    const status = String(runtimeRepairJob?.status || "").toLowerCase();
+    if (!runtimeRepair || runtimeRepair.refreshed || !["succeeded", "failed", "stopped"].includes(status)) return;
+    setRuntimeRepair((current) => current ? { ...current, refreshed: true } : current);
+    void (async () => {
+      try {
+        await api("/api/runtime/refresh", { method: "POST", body: "{}" });
+        await Promise.all([env.refresh(), runtimeAttention.refresh(), jobs.refresh()]);
+      } catch (err) {
+        setBusy(err.message || String(err));
+      }
+    })();
+  }, [runtimeRepair, runtimeRepairJob?.status]);
+
+  useEffect(() => {
     document.documentElement.dataset.theme = theme;
-    localStorage.setItem("areno-dashboard-theme", theme);
+    localStorage.setItem("areno-dashboard-theme-v2", theme);
   }, [theme]);
+
+  useEffect(() => {
+    const root = document.getElementById("root");
+    document.documentElement.lang = language === "zh" ? "zh-CN" : "en";
+    localStorage.setItem(UI_LANGUAGE_STORAGE_KEY, language);
+    translateDashboard(root, language);
+    const observer = new MutationObserver(() => translateDashboard(root, language));
+    if (root) observer.observe(root, { childList: true, subtree: true, characterData: true });
+    return () => observer.disconnect();
+  }, [language]);
 
   useEffect(() => {
     localStorage.setItem("areno-dashboard-agent-provider", JSON.stringify(agentProvider));
@@ -257,7 +439,7 @@ function App() {
 
   useEffect(() => {
     if (!agentSessions.length) {
-      const session = createAgentSession();
+      const session = createAgentSession(language === "zh" ? zhAgentMessages : defaultAgentMessages, language === "zh" ? "新对话" : "New chat");
       setAgentSessions([session]);
       setActiveAgentSessionId(session.id);
       return;
@@ -265,7 +447,7 @@ function App() {
     if (!agentSessions.some((session) => session.id === activeAgentSessionId)) {
       setActiveAgentSessionId(agentSessions[0].id);
     }
-  }, [agentSessions, activeAgentSessionId]);
+  }, [agentSessions, activeAgentSessionId, language]);
 
   useEffect(() => {
     if (activeAgentSessionId) {
@@ -278,6 +460,11 @@ function App() {
   }, [agentPrompt]);
 
   useEffect(() => {
+    if (agentFailure) localStorage.setItem(AGENT_FAILURE_STORAGE_KEY, JSON.stringify(agentFailure));
+    else localStorage.removeItem(AGENT_FAILURE_STORAGE_KEY);
+  }, [agentFailure]);
+
+  useEffect(() => {
     const node = chatMessagesRef.current;
     if (node) {
       node.scrollTop = node.scrollHeight;
@@ -285,13 +472,15 @@ function App() {
   }, [agentMessages, agentChatTab]);
 
   const pages = [
+    { id: "overview", label: "Overview", icon: <LayoutDashboard size={17} /> },
     { id: "jobs", label: "Jobs", icon: <Activity size={16} /> },
     { id: "runtime", label: "Runtime", icon: <Server size={16} /> },
     { id: "launcher", label: "Launcher", icon: <Play size={16} /> },
     { id: "agent", label: "Agent", icon: <Bot size={16} /> },
   ];
   const pageCopy = {
-    jobs: selectedJob
+    overview: ["Operations Overview", "Runtime health, active work, and the signals that need attention."],
+    jobs: jobDetailOpen && selectedJob
       ? [selectedJob.name, `${selectedJob.kind} · ${selectedJob.status} · step ${selectedJob.step ?? 0}`]
       : ["Jobs", "Open an AReno train or serve task to inspect metrics, samples, config, and logs."],
     runtime: ["Runtime Environment", "Review areno check, areno env, dependencies, GPU state, and repository context."],
@@ -321,6 +510,26 @@ function App() {
     }
   }
 
+  async function executeAgentPlan(plan) {
+    setBusy("Executing plan...");
+    try {
+      const result = await api("/api/agent/tools/run", {
+        method: "POST",
+        body: JSON.stringify({
+          tool: plan.tool || inferPlanRunTool(plan),
+          parameters: plan.parameters || {},
+        }),
+      });
+      if (result.job?.id) {
+        setSelectedJobId(result.job.id);
+        await jobs.refresh();
+      }
+      return result;
+    } finally {
+      setBusy("");
+    }
+  }
+
   async function stopJob(id) {
     setBusy("Stopping job...");
     try {
@@ -331,10 +540,89 @@ function App() {
     }
   }
 
-  async function runAgent() {
-    const prompt = agentPrompt.trim();
+  async function refreshRuntime() {
+    setBusy("Running environment checks...");
+    try {
+      await api("/api/runtime/refresh", { method: "POST", body: "{}" });
+      await Promise.all([env.refresh(), runtimeAttention.refresh()]);
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function repairRuntime(action) {
+    setBusy(`Fixing ${action.package || "runtime dependency"}...`);
+    try {
+      const result = await api("/api/runtime/repair", {
+        method: "POST",
+        body: JSON.stringify({ action_id: action.id }),
+      });
+      if (result.job?.id) {
+        setRuntimeRepair({ actionId: action.id, jobId: result.job.id, job: result.job, refreshed: false });
+        await jobs.refresh();
+      }
+      await runtimeAttention.refresh();
+      setBusy("");
+    } catch (err) {
+      setBusy(err.message || String(err));
+    }
+  }
+
+  async function executeOverviewQuickAction(action, overviewJob = null) {
+    if (action.kind === "agent_prompt") {
+      const jobContext = overviewJob ? `\n\nTrack this overview job: ${overviewJob.name} (${overviewJob.id}).` : "";
+      setSelectedJobId(overviewJob?.id || null);
+      setActivePage("agent");
+      await runAgent(`${action.prompt || "Track the latest job and summarize its health."}${jobContext}`, false, overviewJob?.id || null);
+      return;
+    }
+    setBusy(`Running ${action.label}...`);
+    try {
+      const result = await api("/api/quick-actions/run", {
+        method: "POST",
+        body: JSON.stringify({ action_id: action.id, config: trainConfig }),
+      });
+      if (result.job?.id) {
+        setSelectedJobId(result.job.id);
+        await jobs.refresh();
+        setBusy(`${result.job.name || "Job"} started.`);
+        window.setTimeout(() => setBusy(""), 2400);
+      } else if (result.env) {
+        await Promise.all([env.refresh(), runtimeAttention.refresh()]);
+        setRuntimeCheckResult(result);
+        setBusy("");
+      }
+    } catch (err) {
+      setBusy(err.message || String(err));
+    }
+  }
+
+  async function generateAgentFollowUps(historyOverride = null) {
+    setFollowUpsLoading(true);
+    try {
+      const result = await api("/api/agent/follow-ups", {
+        method: "POST",
+        body: JSON.stringify({
+          job_id: selectedJob?.id || null,
+          provider: agentProvider,
+          history: historyOverride || compactAgentHistory(agentMessages),
+          language,
+        }),
+      });
+      setAgentFollowUps(result.follow_ups || []);
+    } catch (err) {
+      setBusy(err.message || String(err));
+    } finally {
+      setFollowUpsLoading(false);
+    }
+  }
+
+  async function runAgent(promptOverride = null, recovery = false, jobIdOverride = null) {
+    const prompt = String(promptOverride ?? agentPrompt).trim();
     if (!prompt) return;
-    setAgentPrompt("");
+    if (promptOverride == null) setAgentPrompt("");
+    setAgentFollowUps([]);
+    if (recovery) setAgentRecovering(true);
     const assistantId = `assistant-${Date.now()}`;
     setAgentMessages((messages) => [
       ...messages,
@@ -342,20 +630,61 @@ function App() {
       { id: assistantId, role: "assistant", content: "", events: [], streaming: true },
     ]);
     setBusy("Agent analyzing...");
+    let streamedAssistantText = "";
+    let agentFailed = false;
+    let failureMessage = "";
     try {
       await streamAgentResponse({
         prompt,
-        job_id: selectedJob?.id || null,
+        job_id: jobIdOverride ?? selectedJob?.id ?? null,
         provider: agentProvider,
         history: compactAgentHistory(agentMessages),
-        onEvent: (event) => applyAgentEvent(assistantId, event),
+        language,
+        onEvent: (event) => {
+          if (event.type === "content_delta") streamedAssistantText += event.content || "";
+          if (event.type === "error") {
+            agentFailed = true;
+            failureMessage = event.content || "The agent stream reported an error.";
+          }
+          applyAgentEvent(assistantId, event);
+        },
       });
     } catch (err) {
-      applyAgentEvent(assistantId, { type: "error", content: `Agent request failed: ${err.message || err}` });
+      agentFailed = true;
+      failureMessage = err.message || String(err);
+      applyAgentEvent(assistantId, { type: "error", content: `Agent request failed: ${failureMessage}` });
     } finally {
       applyAgentEvent(assistantId, { type: "done" });
       setBusy("");
+      setAgentRecovering(false);
+      if (agentFailed) {
+        setAgentFailure((previous) => ({
+          prompt,
+          error: failureMessage || "Agent request failed before producing a complete response.",
+          jobId: jobIdOverride ?? selectedJob?.id ?? null,
+          attempts: recovery ? Number(previous?.attempts || 1) + 1 : 1,
+          failedAt: Date.now(),
+        }));
+        agentRecoveryState.refresh();
+      } else {
+        setAgentFailure(null);
+        api("/api/agent/recovery/clear", { method: "POST", body: JSON.stringify({ job_id: jobIdOverride ?? selectedJob?.id ?? null }) }).catch(() => {});
+        agentRecoveryState.refresh();
+      }
+      if (!agentFailed && streamedAssistantText.trim()) {
+        await generateAgentFollowUps([
+          ...compactAgentHistory(agentMessages),
+          { role: "user", content: prompt },
+          { role: "assistant", content: streamedAssistantText.trim() },
+        ]);
+      }
     }
+  }
+
+  async function dismissAgentFailure() {
+    setAgentFailure(null);
+    await api("/api/agent/recovery/clear", { method: "POST", body: JSON.stringify({ job_id: selectedJob?.id || null }) }).catch(() => {});
+    agentRecoveryState.refresh();
   }
 
   function setAgentMessages(updater) {
@@ -375,11 +704,22 @@ function App() {
     );
   }
 
+  function setAgentFollowUps(updater) {
+    const sessionId = activeAgentSession.id;
+    setAgentSessions((sessions) => sessions.map((session) => {
+      if (session.id !== sessionId) return session;
+      const current = session.followUps || [];
+      return { ...session, followUps: typeof updater === "function" ? updater(current) : updater, updatedAt: Date.now() };
+    }));
+  }
+
   function newAgentChat() {
-    const session = createAgentSession();
+    const session = createAgentSession(language === "zh" ? zhAgentMessages : defaultAgentMessages, language === "zh" ? "新对话" : "New chat");
     setAgentSessions((sessions) => [session, ...sessions]);
     setActiveAgentSessionId(session.id);
     setAgentPrompt("");
+    setAgentFailure(null);
+    api("/api/agent/recovery/clear", { method: "POST", body: "{}" }).catch(() => {});
     setAgentChatTab("chat");
   }
 
@@ -405,11 +745,11 @@ function App() {
       .trim();
   }
 
-  async function streamAgentResponse({ prompt, job_id, provider, history, onEvent }) {
+  async function streamAgentResponse({ prompt, job_id, provider, history, language: responseLanguage, onEvent }) {
     const response = await fetch(`${API_BASE}api/agent/stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt, job_id, provider, history }),
+        body: JSON.stringify({ prompt, job_id, provider, history, language: responseLanguage }),
       });
     if (!response.ok || !response.body) {
       const text = await response.text();
@@ -512,47 +852,59 @@ function App() {
   }
 
   function renderPage() {
-    if (activePage === "runtime") {
+    if (activePage === "overview") {
       return (
-        <div className="tabGrid">
-          <RuntimeDeck env={env.data} />
-          <GpuDeck gpus={env.data?.gpus || []} />
-        </div>
+        <OverviewPage
+          env={env.data}
+          jobs={jobList}
+          runtimeAttention={runtimeAttention.data}
+          quickActions={quickActions.data?.actions || []}
+          onQuickAction={executeOverviewQuickAction}
+          onRuntimeRepair={repairRuntime}
+          runtimeRepair={runtimeRepair ? { ...runtimeRepair, job: runtimeRepairJob } : null}
+        />
       );
+    }
+    if (activePage === "runtime") {
+      return <RuntimePrdPage env={env.data} onRefresh={refreshRuntime} />;
     }
     if (activePage === "launcher") {
       return (
-        <section className="panel launcher">
-          <div className="panelHeader">
-            <div>
-              <h2>Task Launcher</h2>
-              <p>Builds AReno CLI commands without importing training internals.</p>
-            </div>
-            <div className="tabs">
-              <button className={classNames(launcherMode === "train" && "active")} onClick={() => setLauncherMode("train")}>Train</button>
-              <button className={classNames(launcherMode === "serve" && "active")} onClick={() => setLauncherMode("serve")}>Serve</button>
-            </div>
-          </div>
-          {launcherMode === "train" ? (
-            <TrainForm config={trainConfig} setConfig={setTrainConfig} onStart={startTrain} />
-          ) : (
-            <ServeForm config={serveConfig} setConfig={setServeConfig} onStart={startServe} />
-          )}
-        </section>
+        <LauncherPrdPage
+          mode={launcherMode}
+          setMode={setLauncherMode}
+          trainConfig={trainConfig}
+          setTrainConfig={setTrainConfig}
+          serveConfig={serveConfig}
+          setServeConfig={setServeConfig}
+          onStartTrain={startTrain}
+          onStartServe={startServe}
+          env={env.data}
+          presets={launcherPresets.data?.presets || []}
+        />
       );
     }
     if (activePage === "agent") {
+      const serverRecovery = agentRecoveryState.data?.recovery || {};
+      const recovery = agentFailure || (serverRecovery.active ? { error: serverRecovery.error, attempts: 1 } : null);
       return (
+        <div className="agentPrdLayout">
         <section className="panel chatPanel">
           <div className="panelHeader">
             <div>
-              <h2>Agent Chat</h2>
-              <p>{selectedJob ? `Context: ${selectedJob.name}` : "No job selected. The agent will use runtime context only."}</p>
+              <h2>Agent Console</h2>
+              <p>Natural-language operations with explicit runtime and job context.</p>
             </div>
             <div className="agentHeaderActions">
+              <StatusBadge status={env.data?.ready ? "ok" : "warn"} />
               <button className="secondaryButton" onClick={newAgentChat}><Plus size={15} /> New Chat</button>
               <button className="secondaryButton" onClick={() => setAgentSettingsOpen(true)}><Settings2 size={15} /> Settings</button>
             </div>
+          </div>
+          <div className="pillRow agentContextPills">
+            <span>repo: {env.data?.repo?.branch || "unknown"}</span>
+            <span>job: {selectedJob?.id || "none selected"}</span>
+            <span>GPU: {env.data?.gpus?.length || 0} visible</span>
           </div>
           <div className="agentTabs">
             <button className={classNames(agentChatTab === "chat" && "active")} onClick={() => setAgentChatTab("chat")}>
@@ -570,23 +922,26 @@ function App() {
                 {agentMessages.map((message, index) => (
                   <div key={`${message.id || message.role}-${index}`} className={classNames("chatBubble", message.role)}>
                     <span>{message.role}</span>
-                    {message.events?.length ? <AgentEventList events={message.events} /> : <MarkdownBlock text={message.content} />}
-                    {message.streaming && <div className="streamingHint">thinking...</div>}
+                    {message.events?.length ? <AgentEventList events={message.events} onPlanConfirm={executeAgentPlan} /> : <MarkdownBlock text={message.content} />}
                   </div>
                 ))}
               </div>
               <div className="chatComposer">
-                <textarea
-                  value={agentPrompt}
-                  onChange={(event) => setAgentPrompt(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter" && !event.shiftKey) {
-                      event.preventDefault();
-                      runAgent();
-                    }
-                  }}
-                />
-                <button className="primaryButton" onClick={runAgent}><Send size={16} /> Send</button>
+                <label className="chatInputField">
+                  <textarea
+                    aria-label="Message the operations agent"
+                    placeholder={selectedJob ? "Ask about this job, its metrics, or recent logs..." : "Ask about the runtime or describe a task to launch..."}
+                    value={agentPrompt}
+                    onChange={(event) => setAgentPrompt(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" && !event.shiftKey) {
+                        event.preventDefault();
+                        runAgent();
+                      }
+                    }}
+                  />
+                </label>
+                <button className="primaryButton chatSendButton" disabled={!agentPrompt.trim()} onClick={() => runAgent()}><Send size={16} /> Send</button>
               </div>
             </>
           )}
@@ -596,67 +951,84 @@ function App() {
             </Modal>
           )}
         </section>
+        <aside className="agentSideRail">
+          <section className="panel agentRecoveryCard">
+            <div className="panelHeader"><div><h2>Error Recovery</h2><p>Detect and retry failed agent requests.</p></div><StatusBadge status={recovery ? "failed" : "ok"} /></div>
+            {recovery ? (
+              <div className="attentionItem"><StatusBadge status="failed" /><div><strong>Agent request failed</strong><p>{recovery.error}</p>{recovery.attempts > 1 && <small>{recovery.attempts} recovery attempts</small>}</div></div>
+            ) : (
+              <div className="attentionItem"><StatusBadge status="ok" /><div><strong>No active agent errors</strong><p>The current conversation has no failed request.</p></div></div>
+            )}
+            {agentFailure && <div className="recoveryButtons"><button className="primaryButton fullButton recoveryAction" disabled={agentRecovering} onClick={() => runAgent(agentFailure.prompt, true)}>{agentRecovering ? "Recovering..." : "Retry failed request"}</button><button className="secondaryButton fullButton recoveryAction" disabled={agentRecovering} onClick={dismissAgentFailure}>Dismiss</button></div>}
+          </section>
+          <section className="panel agentFollowupsCard">
+            <div className="panelHeader"><div><h2>Suggested Follow-ups</h2><p>LLM-generated actions grounded in the current context.</p></div></div>
+            {followUpsLoading && <div className="followupsLoading">Generating follow-ups...</div>}
+            {!followUpsLoading && agentFollowUps.length === 0 && <p>Follow-ups appear after the current response completes.</p>}
+            {agentFollowUps.map((followUp) => <button key={followUp.id} className="secondaryButton" onClick={() => { setAgentChatTab("chat"); runAgent(followUp.prompt); }}>{followUp.label}</button>)}
+          </section>
+        </aside>
+        </div>
       );
     }
-    if (!selectedJob) {
-      return (
+    if (jobDetailOpen && selectedJob) {
+      return <JobFullDetailPage job={selectedJob} refreshNonce={refreshNonce} onBack={() => setJobDetailOpen(false)} onStop={() => stopJob(selectedJob.id)} />;
+    }
+    return (
+      <div className="jobsPageStack">
         <section className="panel jobListPage">
           <div className="panelHeader">
             <div>
               <h2>Jobs</h2>
-              <p>Registered AReno train/serve processes. Select a row to open job details.</p>
+              <p>Registered AReno train and serve processes. Open a job to inspect its full detail page.</p>
             </div>
-            <div className="pagerControls">
+            <div className="jobsToolbar">
+              <div className="tabs compactTabs">
+                {["all", "running", "failed", "stopped"].map((status) => (
+                  <button key={status} className={classNames(jobFilter === status && "active")} onClick={() => { setJobFilter(status); setJobPage(1); }}>
+                    {status[0].toUpperCase() + status.slice(1)}
+                  </button>
+                ))}
+              </div>
+              <div className="pagerControls">
               <button className="secondaryButton" disabled={currentJobPage <= 1} onClick={() => setJobPage((page) => Math.max(1, page - 1))}>Prev</button>
               <span>{currentJobPage} / {jobPageCount}</span>
               <button className="secondaryButton" disabled={currentJobPage >= jobPageCount} onClick={() => setJobPage((page) => Math.min(jobPageCount, page + 1))}>Next</button>
+              </div>
             </div>
           </div>
-          <div className="jobList">
-            {jobList.length === 0 && <EmptyState title="No jobs yet" text="Start a train or serve task from the launcher." />}
+          <div className="jobTableWrap">
+            {filteredJobs.length === 0 && <EmptyState title="No matching jobs" text="Start a task from Launcher or select another status." />}
+            {filteredJobs.length > 0 && <table className="jobTable">
+              <thead><tr><th>Job</th><th>Status</th><th>Stage</th><th>Metric</th><th>Elapsed</th><th>Action</th></tr></thead>
+              <tbody>
             {pagedJobs.map((job) => (
-              <button key={job.id} className="jobRow large" onClick={() => setSelectedJobId(job.id)}>
-                <div className="jobIcon">{job.kind === "serve" ? <Server size={16} /> : <Layers size={16} />}</div>
-                <div className="jobInfo">
-                  <div className="jobTitle">{job.name}</div>
-                  <div className="jobMeta">
-                    {job.kind} · {job.status} · step {job.step ?? 0}
-                  </div>
-                </div>
-                <span className={classNames("statusDot", job.status)} />
-              </button>
+              <tr key={job.id}>
+                <td><strong>{job.name}</strong><span className="mono subline">{job.id} · {job.kind}</span></td>
+                <td><StatusBadge status={job.status} /></td>
+                <td>{job.stage || "unknown"} · step {job.step ?? 0}</td>
+                <td>{latestPerfSignal(job)}</td>
+                <td>{formatElapsed(job)}</td>
+                <td><button className="secondaryButton tableAction" onClick={() => { setSelectedJobId(job.id); setJobDetailOpen(true); }}>Open</button></td>
+              </tr>
             ))}
+              </tbody>
+            </table>}
           </div>
-          {jobList.length > jobPageSize && (
+          {filteredJobs.length > jobPageSize && (
             <div className="listFooter">
-              Showing {(currentJobPage - 1) * jobPageSize + 1}-{Math.min(currentJobPage * jobPageSize, jobList.length)} of {jobList.length} jobs
+              Showing {(currentJobPage - 1) * jobPageSize + 1}-{Math.min(currentJobPage * jobPageSize, filteredJobs.length)} of {filteredJobs.length} jobs
             </div>
           )}
         </section>
-      );
-    }
-    return (
-      <section className="panel detailPanel">
-          <div className="panelHeader">
-            <div>
-              <h2>{selectedJob.name}</h2>
-              <p>{selectedJob.kind} · {selectedJob.status}</p>
-            </div>
-            <div className="detailActions">
-              <button className="secondaryButton" onClick={() => setSelectedJobId(null)}>Back</button>
-              {selectedJob.status === "running" && (
-                <button className="dangerButton" onClick={() => stopJob(selectedJob.id)}><CircleStop size={16} /> Stop</button>
-              )}
-            </div>
-          </div>
-          <Timeline job={selectedJob} />
-          <JobMetricsView job={selectedJob} refreshNonce={refreshNonce} />
-          <SampleView samples={selectedJob?.samples || []} />
-          <div className="split">
-            <ConfigView config={selectedJob?.config} launch={selectedJob?.launch} />
-            <LogView logs={selectedJob?.logs || []} />
-          </div>
-      </section>
+        {previewJob ? (
+          <JobsSelectedDetail
+            job={previewJob}
+            env={env.data}
+            onStop={() => stopJob(previewJob.id)}
+          />
+        ) : <div className="jobDetailPreviewGrid"><section className="panel"><EmptyState title="No job overview" text="Launch a task to populate the job overview." /></section><section className="panel"><EmptyState title="No rollout sample" text="Samples appear after a rollout completes." /></section></div>}
+      </div>
     );
   }
 
@@ -666,7 +1038,7 @@ function App() {
     <div className="shell">
       <aside className="rail">
         <div className="brand">
-          <div className="brandMark">A</div>
+          <img className="brandMark" src="https://mdn.alipayobjects.com/huamei_fz8c8n/afts/img/6aFwRZclmL8AAAAAQyAAAAgADpuRAQJr/original" alt="AReno logo" />
           <div>
             <div className="brandName">AReno Ops</div>
             <div className="brandMeta">runtime workbench</div>
@@ -674,18 +1046,20 @@ function App() {
         </div>
         <nav className="nav">
           {pages.map((page) => (
-            <button key={page.id} className={classNames("navItem", activePage === page.id && "active")} onClick={() => setActivePage(page.id)}>
+            <button key={page.id} className={classNames("navItem", activePage === page.id && "active")} onClick={() => { if (page.id === "jobs") setJobDetailOpen(false); setActivePage(page.id); }}>
               {page.icon} {page.label}
             </button>
           ))}
         </nav>
-        <div className="railFooter">
-          <div className="tinyLabel">Repo</div>
-          <div className="monoLine">{env.data?.repo?.branch || "unknown"} · {env.data?.repo?.commit || "no git"}</div>
-        </div>
       </aside>
 
       <main className="main">
+        <div className="mobileNav">
+          <strong>AReno Ops</strong>
+          <select value={activePage} onChange={(event) => { if (event.target.value === "jobs") setJobDetailOpen(false); setActivePage(event.target.value); }}>
+            {pages.map((page) => <option key={page.id} value={page.id}>{page.label}</option>)}
+          </select>
+        </div>
         <header className="topbar">
           <div>
             <h1>{pageTitle}</h1>
@@ -696,16 +1070,12 @@ function App() {
               {theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
             </button>
             <button
-              className="iconButton"
-              onClick={() => {
-                env.refresh();
-                jobs.refresh();
-                jobDetail.refresh();
-                setRefreshNonce((value) => value + 1);
-              }}
-              title="Refresh"
+              className="iconButton languageButton"
+              onClick={() => setLanguage(language === "en" ? "zh" : "en")}
+              title={language === "en" ? "Translate to Chinese" : "Translate to English"}
             >
-              <RefreshCw size={16} />
+              <Languages size={16} />
+              <span>{language === "en" ? "中文" : "EN"}</span>
             </button>
           </div>
         </header>
@@ -713,7 +1083,540 @@ function App() {
         {busy && <div className="notice">{busy}</div>}
 
         {renderPage()}
+        {runtimeCheckResult && <RuntimeCheckResultModal result={runtimeCheckResult} onClose={() => setRuntimeCheckResult(null)} />}
       </main>
+    </div>
+  );
+}
+
+function OverviewPage({ env, jobs, runtimeAttention, quickActions, onQuickAction, onRuntimeRepair, runtimeRepair }) {
+  const activeJobs = jobs.filter(isActiveJob);
+  const failedJobs = jobs.filter((job) => job.status === "failed");
+  const latestJobSummary = newestJob(activeJobs.length ? activeJobs : jobs);
+  const latestJobDetail = usePolling(
+    () => latestJobSummary ? api(`/api/jobs/${latestJobSummary.id}`) : Promise.resolve(null),
+    2000,
+    [latestJobSummary?.id],
+  );
+  const detailedJob = latestJobDetail.data?.job;
+  const focusJob = detailedJob?.id === latestJobSummary?.id ? detailedJob : latestJobSummary;
+  const gpus = env?.gpus || [];
+  const checks = env?.checks || [];
+  const warning = runtimeAttention?.attention || checks.find((check) => ["warn", "fail"].includes(String(check.status).toLowerCase()));
+  const repairMatchesWarning = warning?.repair?.id && runtimeRepair?.actionId === warning.repair.id;
+  const repairStatus = repairMatchesWarning ? String(runtimeRepair?.job?.status || "created").toLowerCase() : "";
+  const repairInProgress = ["created", "running"].includes(repairStatus);
+  const algo = String(configValue(focusJob, "algo") || "").toLowerCase();
+  const rewardBearing = ["gspo", "grpo", "ppo"].includes(algo);
+  const health = rewardBearing
+    ? findJobMetric(focusJob, ["rollout/rewards_mean", "reward_mean", "reward"])
+    : findJobMetric(focusJob, ["train/loss", "loss", "policy_loss"]);
+
+  return (
+    <div className="overviewPage">
+      <section className="summaryGrid">
+        <SummaryCard label="Runtime" value={env?.ready ? "Ready" : env ? "Needs attention" : "Checking"} detail={`${env?.check_counts?.ok ?? 0} OK · ${env?.check_counts?.warn ?? 0} WARN`} tone={env?.ready ? "ok" : "warn"} />
+        <SummaryCard label="GPU" value={gpus.length ? `${gpus.length} available` : "No GPU data"} detail={gpus[0]?.name || "Reported by runtime API"} />
+        <SummaryCard label="Active jobs" value={String(activeJobs.length)} detail={failedJobs.length ? `${failedJobs.length} failed job${failedJobs.length === 1 ? "" : "s"}` : "No failed jobs"} tone={failedJobs.length ? "warn" : "info"} />
+        <SummaryCard label="Latest health" value={health == null ? "No signal" : formatMetric(health)} detail={health == null ? "Waiting for metrics" : `Latest ${rewardBearing ? "reward" : "loss"} signal`} />
+      </section>
+
+      <div className="overviewLayout">
+        <div className="overviewPrimary">
+          {focusJob ? <RunningJobSummary job={focusJob} /> : (
+            <section className="panel"><EmptyState title="No jobs yet" text="Launch a train or serve task to populate live operations data." /></section>
+          )}
+
+          <section className="panel overviewSignals">
+            <div className="panelHeader"><div><h2>Metrics</h2><p>Switch between reward and loss for the latest job.</p></div><span className="sourceBadge">Live API</span></div>
+            {focusJob ? <OverviewRewardLossChart job={focusJob} /> : <EmptyState title="No metrics available" text="Metrics appear after a job starts reporting scalar data." />}
+          </section>
+        </div>
+
+        <aside className="overviewAside">
+          <section className="panel attentionCard">
+            <div className="panelHeader"><div><h2>Runtime attention</h2><p>Highest-priority environment finding.</p></div></div>
+            {warning ? (
+              <div className="attentionItem">
+                <StatusBadge status={warning.status} />
+                <div className="attentionItemBody">
+                  <strong>{warning.name || warning.label || "Runtime warning"}</strong>
+                  <p>{warning.detail || warning.message || "Review the runtime check details."}</p>
+                  {warning.repair?.kind === "install_package" && (
+                    <div className="runtimeRepairControl">
+                      <button
+                        className="secondaryButton runtimeFixButton"
+                        disabled={repairInProgress || repairStatus === "succeeded"}
+                        onClick={() => onRuntimeRepair(warning.repair)}
+                      >
+                        {repairInProgress ? <RefreshCw className="spinIcon" size={14} /> : <Wrench size={14} />}
+                        {repairStatus === "running" ? "Installing..." : repairStatus === "created" ? "Starting..." : repairStatus === "succeeded" ? "Installed" : repairStatus === "failed" ? "Retry fix" : warning.repair.label || "Fix"}
+                      </button>
+                      {repairMatchesWarning && <RuntimeRepairProgress job={runtimeRepair.job} />}
+                    </div>
+                  )}
+                </div>
+              </div>
+            ) : <div className="attentionItem"><StatusBadge status="ok" /><div><strong>No blocking checks</strong><p>The current runtime report has no warning or failure.</p></div></div>}
+          </section>
+          <section className="panel quickActions">
+            <div className="panelHeader"><div><h2>Quick actions</h2><p>Short paths into common workflows.</p></div></div>
+            {quickActions.map((action, index) => <button key={action.id} className={index === 0 ? "primaryButton" : "secondaryButton"} onClick={() => onQuickAction(action, focusJob)}>{quickActionIcon(action.kind)} {action.label}</button>)}
+          </section>
+        </aside>
+      </div>
+    </div>
+  );
+}
+
+function RuntimeRepairProgress({ job }) {
+  if (!job) return null;
+  const status = String(job.status || "created").toLowerCase();
+  const logs = job.logs || [];
+  const latestLog = logs.length ? logs[logs.length - 1] : "Preparing package installer...";
+  return (
+    <div className={classNames("runtimeRepairProgress", status)} aria-live="polite">
+      {["created", "running"].includes(status) && <div className="runtimeRepairTrack"><i /></div>}
+      <small>{status === "failed" ? "Installation failed" : status === "succeeded" ? "Installation complete" : latestLog}</small>
+    </div>
+  );
+}
+
+function quickActionIcon(kind) {
+  if (kind === "launcher_preset") return <Play size={15} />;
+  if (kind === "runtime_refresh") return <RefreshCw size={15} />;
+  return <Bot size={15} />;
+}
+
+function OverviewRewardLossChart({ job }) {
+  const algo = String(configValue(job, "algo") || "").toLowerCase();
+  const metricKinds = ["gspo", "grpo", "ppo"].includes(algo)
+    ? ["reward", "loss", "gradnorm", "seqlen"]
+    : ["loss", "gradnorm", "seqlen"];
+  const [series, setSeries] = useState({ reward: [], loss: [], gradnorm: [], seqlen: [] });
+  const [names, setNames] = useState({ reward: "", loss: "", gradnorm: "", seqlen: "" });
+  const [activeMetric, setActiveMetric] = useState(metricKinds[0]);
+  const [hoveredPoint, setHoveredPoint] = useState(null);
+
+  useEffect(() => {
+    if (!metricKinds.includes(activeMetric)) setActiveMetric(metricKinds[0]);
+  }, [algo, activeMetric]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let timer;
+    const load = async () => {
+      try {
+        const data = await api(`/api/jobs/${job.id}/metrics`);
+        const metricNames = metricNamesFrom(data.metrics || []);
+        const nextNames = Object.fromEntries(metricKinds.map((kind) => [kind, selectOverviewMetric(metricNames, kind)]));
+        const metricData = await Promise.all(metricKinds.map((kind) => (
+          nextNames[kind]
+            ? api(`/api/jobs/${job.id}/metric?name=${encodeURIComponent(nextNames[kind])}&limit=240`)
+            : Promise.resolve({ points: [] })
+        )));
+        if (cancelled) return;
+        setNames((current) => ({ ...current, ...nextNames }));
+        setSeries((current) => ({
+          ...current,
+          ...Object.fromEntries(metricKinds.map((kind, index) => [kind, normalizeMetricPoints(metricData[index].points)])),
+        }));
+      } catch {
+        if (!cancelled) setSeries({ reward: [], loss: [], gradnorm: [], seqlen: [] });
+      }
+    };
+    load();
+    timer = window.setInterval(load, 2500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [job.id, algo]);
+
+  const activeSeries = series[activeMetric] || [];
+  const plot = buildOverviewMetricPlot(activeSeries);
+  const hasPoints = activeSeries.length > 0;
+  return (
+    <div className="overviewMetricChart">
+      <div className="overviewMetricToolbar">
+        <div className="tabs compactTabs metricSwitch" aria-label="Metric plot">
+          {metricKinds.map((kind) => <button key={kind} className={classNames(activeMetric === kind && "active")} onClick={() => setActiveMetric(kind)}>{overviewMetricLabel(kind)}</button>)}
+        </div>
+        <div className="metricLegend">
+          <span className={`${activeMetric}Legend`}><i />{names[activeMetric] || overviewMetricLabel(activeMetric)}<b>{lastMetricValue(activeSeries)}</b></span>
+        </div>
+      </div>
+      {!hasPoints ? <div className="plotEmpty">No {activeMetric} points reported yet.</div> : (
+        <div className="metricPlotWrap">
+          <svg className="metricPlot overviewPlot" viewBox="0 0 720 220" role="img" aria-label={`${activeMetric} metrics`}>
+            <g className="plotGrid">{[0, 1, 2, 3].map((item) => <line key={item} x1="10" x2="710" y1={35 + item * 52} y2={35 + item * 52} />)}</g>
+            <polyline className={`overviewMetricLine ${activeMetric}Line`} points={plot.points} />
+            {activeSeries.map((point, index) => (
+              <g key={`${point.step}-${index}`}>
+                <circle className={`metricDataPoint ${activeMetric}Point`} cx={plot.coords[index]?.x || 0} cy={plot.coords[index]?.y || 0} r={metricPointRadius(activeSeries.length)} />
+                <circle className="metricHoverTarget" cx={plot.coords[index]?.x || 0} cy={plot.coords[index]?.y || 0} r="5" onMouseEnter={() => setHoveredPoint({ point, coord: plot.coords[index] })} onMouseLeave={() => setHoveredPoint(null)} />
+              </g>
+            ))}
+          </svg>
+          {hoveredPoint && <MetricPointTooltip name={names[activeMetric] || overviewMetricLabel(activeMetric)} point={hoveredPoint.point} coord={hoveredPoint.coord} width={720} height={220} />}
+        </div>
+      )}
+      <div className="plotFooter"><span>step {plot.stepMin} to {plot.stepMax}</span><span>{plot.minLabel} to {plot.maxLabel}</span></div>
+    </div>
+  );
+}
+
+function selectOverviewMetric(names, type) {
+  const lowered = names.map((name) => ({ name, key: name.toLowerCase() }));
+  const exactPreferences = {
+    reward: ["rollout/rewards_mean"],
+    loss: ["train/loss", "loss", "train/policy_loss", "policy_loss", "actor_loss"],
+    gradnorm: ["train/grad_norm", "grad_norm"],
+    seqlen: ["rollout/seq_len_mean"],
+  }[type] || [];
+  for (const preferred of exactPreferences) {
+    const exact = lowered.find((item) => item.key === preferred);
+    if (exact) return exact.name;
+  }
+  if (type === "reward" || type === "seqlen") return "";
+  const fallbackNeedle = type === "gradnorm" ? "grad_norm" : type;
+  return lowered.find((item) => item.key.includes(fallbackNeedle))?.name || "";
+}
+
+function overviewMetricLabel(kind) {
+  return { reward: "Reward", loss: "Loss", gradnorm: "Grad Norm", seqlen: "Sequence Length" }[kind] || kind;
+}
+
+function normalizeMetricPoints(points = []) {
+  return points
+    .filter((point) => Number.isFinite(Number(point.value)))
+    .map((point) => ({ step: Number(point.step || 0), value: Number(point.value), time: point.time }))
+    .slice(-240);
+}
+
+function buildOverviewMetricPlot(points) {
+  if (!points.length) return { points: "", coords: [], stepMin: 0, stepMax: 0, minLabel: "n/a", maxLabel: "n/a" };
+  const values = points.map((point) => point.value);
+  const steps = points.map((point) => point.step);
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const flat = max === min;
+  const stepMin = Math.min(...steps);
+  const stepMax = Math.max(...steps);
+  const valueSpan = Math.max(max - min, 1e-9);
+  const stepSpan = Math.max(stepMax - stepMin, 1);
+  const coords = points.map((point) => {
+    const x = ((point.step - stepMin) / stepSpan) * 680 + 20;
+    const y = flat ? 113 : 200 - ((point.value - min) / valueSpan) * 174;
+    return { x, y };
+  });
+  return { points: coords.map(({ x, y }) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" "), coords, stepMin, stepMax, minLabel: compactNumber(min), maxLabel: compactNumber(max) };
+}
+
+function MetricPointTooltip({ name, point, coord, width, height }) {
+  const align = coord.x < width * 0.2 ? "start" : coord.x > width * 0.8 ? "end" : "center";
+  return (
+    <div className={`metricPointTooltip ${align}`} style={{ left: `${(coord.x / width) * 100}%`, top: `${(coord.y / height) * 100}%` }}>
+      <strong>{name || "metric"}</strong>
+      <span>Step <b>{point.step}</b></span>
+      <span>Value <b>{compactNumber(point.value)}</b></span>
+      {point.time && <small>{new Date(point.time).toLocaleString()}</small>}
+    </div>
+  );
+}
+
+function metricPointRadius(pointCount) {
+  if (pointCount <= 12) return 2.75;
+  if (pointCount <= 60) return 1.9;
+  return 1.15;
+}
+
+function lastMetricValue(points) {
+  return points.length ? compactNumber(points[points.length - 1].value) : "—";
+}
+
+function RunningJobSummary({ job }) {
+  const algo = getJobConfigValue(job, "algo");
+  const checkpoint = getJobConfigValue(job, "ckpt") || getJobConfigValue(job, "model_path");
+  const dataset = getJobConfigValue(job, "dataset_path") || getJobConfigValue(job, "dataset");
+  const latestTiming = (job.timeperf || []).slice(-1)[0];
+  const segments = Object.fromEntries((latestTiming?.segments || []).map((segment) => [segment.name, segment.seconds]));
+  const steps = timelineSteps(job);
+  const stage = timelineStageId(job);
+  const currentIndex = Math.max(0, steps.findIndex((item) => timelineItemMatches(item, stage, job)));
+  const stageDuration = (item, index) => {
+    if (item.id === "rollout" && Number.isFinite(Number(segments.rollout))) return `${Number(segments.rollout).toFixed(1)}s`;
+    if (["train", "actor_train", "critic_train"].includes(item.id) && Number.isFinite(Number(segments.train))) return `${Number(segments.train).toFixed(1)}s`;
+    if (item.id === "created" && job.created_at) return "created";
+    if (timelineItemMatches(item, stage, job)) return ["succeeded", "done"].includes(job.status) ? "complete" : job.status;
+    return index < currentIndex ? "complete" : "pending";
+  };
+
+  return (
+    <section className="panel runningSummary">
+      <div className="panelHeader">
+        <div><h2>Running Job Summary</h2><p>Current health, route, and stage progression for the latest job.</p></div>
+        <div className="summaryHeaderActions"><StatusBadge status={job.status} /><span className="stepBadge">step {job.step ?? 0}</span></div>
+      </div>
+      <div className="pillRow summaryPills">
+        <span>job: {job.id}</span>
+        {algo && <span>algo: {algo}</span>}
+        {checkpoint && <span>model: {shortModelName(checkpoint)}</span>}
+        {dataset && <span>dataset: {String(dataset)}</span>}
+      </div>
+      <div className="stageRow">
+        {steps.map((item, index) => {
+          const current = timelineItemMatches(item, stage, job);
+          return <div key={item.id} className={classNames("stageCell", index <= currentIndex && "done", current && "current")}><strong>{item.label}</strong><span>{stageDuration(item, index)}</span></div>;
+        })}
+      </div>
+    </section>
+  );
+}
+
+function getJobConfigValue(job, key) {
+  if (job?.config?.[key] !== undefined && job.config[key] !== null && job.config[key] !== "") return job.config[key];
+  for (const section of job?.config?.sections || []) {
+    const item = (section.items || []).find((entry) => entry.key === key);
+    if (item?.value !== undefined && item.value !== null && item.value !== "") return item.value;
+  }
+  if (job?.launch?.[key] !== undefined && job.launch[key] !== null && job.launch[key] !== "") return job.launch[key];
+  return null;
+}
+
+function newestJob(jobs = []) {
+  return [...jobs].sort((left, right) => Date.parse(right.created_at || 0) - Date.parse(left.created_at || 0))[0] || null;
+}
+
+function isActiveJob(job) {
+  return String(job?.status || "").toLowerCase() === "running";
+}
+
+function shortModelName(value) {
+  return String(value).replace(/\/$/, "").split("/").pop() || value;
+}
+
+function JobsSelectedDetail({ job, env, onStop }) {
+  const reward = findJobMetric(job, ["rollout/rewards_mean", "reward_mean", "reward"]);
+  const latestTiming = (job.timeperf || []).slice(-1)[0];
+  const gpu = env?.gpus?.[0];
+  return (
+    <div className="selectedJobArea">
+      <div className="jobDetailPreviewGrid">
+        <section className="panel jobDetailOverviewCard">
+          <div className="panelHeader">
+            <div><h2>Job Detail: Overview</h2><p>Current health and recent progress for the selected job.</p></div>
+            <div className="detailActions"><StatusBadge status={job.status} />{job.status === "running" && <button className="dangerButton" onClick={onStop}><CircleStop size={16} /> Stop</button>}</div>
+          </div>
+          <div className="jobIdentity"><strong>{job.name}</strong><span className="mono subline">{job.id}</span></div>
+          <p className="healthSummary"><strong>Health summary:</strong> {jobHealthSummary(job)}</p>
+          <div className="detailMetricGrid">
+            <div><span>Reward</span><strong>{reward == null ? "No data" : formatMetric(reward)}</strong></div>
+            <div><span>Step time</span><strong>{latestTiming?.total_s ? `${Number(latestTiming.total_s).toFixed(1)}s` : "No data"}</strong></div>
+            <div><span>GPU memory</span><strong>{gpu ? `${gpu.memory_used_mb ?? 0} MB` : "No data"}</strong></div>
+          </div>
+        </section>
+        <section className="panel rolloutSamplePanel">
+          <div className="panelHeader"><div><h2>Rollout Sample</h2><p>Inspect prompt and completion pairs by step and sample.</p></div></div>
+          <SampleView samples={job.samples || []} hideTitle />
+        </section>
+      </div>
+    </div>
+  );
+}
+
+function JobFullDetailPage({ job, refreshNonce, onBack, onStop }) {
+  const logs = job.logs || [];
+  return (
+    <div className="jobFullDetailPage">
+      <div className="detailPageToolbar">
+        <button className="secondaryButton" onClick={onBack}><ArrowLeft size={16} /> Back to Jobs</button>
+        {job.status === "running" && <button className="dangerButton" onClick={onStop}><CircleStop size={16} /> Stop job</button>}
+      </div>
+      <JobOverview job={job} detail refreshNonce={refreshNonce} />
+      <section className="panel jobDetailSection">
+        <div className="panelHeader"><div><h2>Metrics</h2><p>Training quality and stage timing for this job.</p></div></div>
+        <JobMetricsView job={job} refreshNonce={refreshNonce} />
+      </section>
+      <section className="panel jobDetailSection">
+        <div className="panelHeader"><div><h2>Rollout Sample</h2><p>Prompt and completion output captured during rollout.</p></div></div>
+        <SampleView samples={job.samples || []} hideTitle />
+      </section>
+      <div className="jobDetailDataGrid">
+        <ConfigView config={job.config} launch={job.launch} />
+        <LogView logs={logs} />
+      </div>
+    </div>
+  );
+}
+
+function jobHealthSummary(job) {
+  if (job.status === "running") return `The job is running at ${job.stage || "its current stage"}, step ${job.step ?? 0}, with no terminal status reported.`;
+  if (job.status === "failed") return `The job failed during ${job.stage || "an unknown stage"}. Review metrics and logs below.`;
+  if (["succeeded", "done"].includes(job.status)) return `The job completed successfully after ${job.step ?? 0} steps.`;
+  return `The job is ${job.status || "unknown"} at ${job.stage || "an unknown stage"}, step ${job.step ?? 0}.`;
+}
+
+function formatElapsed(job) {
+  const start = Date.parse(job?.created_at || "");
+  const end = Date.parse(job?.status === "running" ? new Date().toISOString() : job?.updated_at || "");
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return "—";
+  const seconds = Math.max(0, Math.round((end - start) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+  return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
+}
+
+function JobOverview({ job, compact = false, detail = false, refreshNonce = 0, onOpen, onStop }) {
+  return (
+    <section className={classNames("panel", "jobOverview", detail && "detailPanel")}>
+      <div className="panelHeader">
+        <div>
+          <span className="sectionEyebrow">{compact ? "Latest job" : "Selected job"}</span>
+          <h2>{detail ? "Job Detail: Overview" : job.name}</h2>
+          {detail && <strong className="detailJobName">{job.name}</strong>}
+          <p className="mono">{job.id} · updated {formatRelativeTime(job.updated_at)}</p>
+        </div>
+        <div className="detailActions"><StatusBadge status={job.status} />{compact && <button className="secondaryButton" onClick={onOpen}>Open job</button>}</div>
+      </div>
+      <div className="jobOverviewStats">
+        <div><span>Stage</span><strong>{job.stage || "unknown"}</strong></div>
+        <div><span>Step</span><strong>{job.step ?? 0}</strong></div>
+        <div><span>Latest signal</span><strong>{latestPerfSignal(job)}</strong></div>
+        <div><span>Process</span><strong>{job.pid ? `PID ${job.pid}` : job.kind}</strong></div>
+      </div>
+      <Timeline job={job} />
+    </section>
+  );
+}
+
+function SummaryCard({ label, value, detail, tone = "neutral" }) {
+  return <div className={classNames("summaryCard", tone)}><span>{label}</span><strong>{value}</strong><small>{detail}</small></div>;
+}
+
+function StatusBadge({ status = "unknown" }) {
+  const statusText = String(status).toLowerCase();
+  const normalized = statusText === "succeeded" || statusText === "done" ? "ok" : statusText;
+  return <span className={classNames("statusBadge", normalized)}><i />{status}</span>;
+}
+
+function findJobMetric(job, names) {
+  if (!job?.perf) return null;
+  for (const name of names) if (Number.isFinite(Number(job.perf[name]))) return Number(job.perf[name]);
+  return null;
+}
+
+function formatMetric(value) {
+  if (!Number.isFinite(Number(value))) return "—";
+  const number = Number(value);
+  return Math.abs(number) >= 100 ? number.toFixed(0) : number.toFixed(3).replace(/0+$/, "").replace(/\.$/, "");
+}
+
+function latestPerfSignal(job) {
+  const entries = Object.entries(job?.perf || {}).filter(([, value]) => Number.isFinite(Number(value)));
+  if (!entries.length) return "No metrics";
+  const [name, value] = entries[0];
+  return `${name} ${formatMetric(value)}`;
+}
+
+function formatRelativeTime(value) {
+  const time = Date.parse(value || "");
+  if (!Number.isFinite(time)) return "—";
+  const seconds = Math.max(0, Math.round((Date.now() - time) / 1000));
+  if (seconds < 60) return `${seconds}s ago`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
+  return `${Math.floor(seconds / 86400)}d ago`;
+}
+
+function RuntimePrdPage({ env, onRefresh }) {
+  const [selectedCheck, setSelectedCheck] = useState(null);
+  const report = env?.report || {};
+  const torch = report.torch || {};
+  const checks = env?.checks || [];
+  const gpus = env?.gpus || report?.torch?.gpus || [];
+  const warnCount = env?.check_counts?.warn ?? checks.filter((check) => String(check.status).toLowerCase() === "warn").length;
+  const failCount = env?.check_counts?.fail ?? checks.filter((check) => String(check.status).toLowerCase() === "fail").length;
+  const dependencyRisk = failCount ? `${failCount} FAIL` : warnCount ? `${warnCount} WARN` : "Clear";
+  return (
+    <div className="runtimePrdPage">
+      <section className="runtimeSummaryGrid">
+        <SummaryCard label="AReno Check" value={env?.ready ? "Ready" : env ? "Needs attention" : "Checking"} detail={`Last refreshed ${new Date().toLocaleTimeString()}`} tone={env?.ready ? "ok" : "warn"} />
+        <SummaryCard label="PyTorch / CUDA" value={`${torch.version || "n/a"} / ${torch.cuda_runtime || torch.cuda_build || "n/a"}`} detail={torch.cuda_available ? "Compatible runtime detected" : "CUDA runtime unavailable"} tone={torch.cuda_available ? "ok" : "warn"} />
+        <SummaryCard label="Dependency Risk" value={dependencyRisk} detail={runtimeRiskLabel(checks)} tone={failCount || warnCount ? "warn" : "ok"} />
+      </section>
+      <div className="runtimePrdLayout">
+        <section className="panel runtimeChecksPanel">
+          <div className="panelHeader"><div><h2>Environment Checks</h2><p>Runtime requirements, compatibility, and actionable diagnostics.</p></div><button className="secondaryButton" onClick={onRefresh}><RefreshCw size={15} /> Run Check</button></div>
+          <div className="runtimeCheckList">
+            {checks.length === 0 && <EmptyState title="No checks reported" text="Run the environment check to populate diagnostics." />}
+            {checks.slice(0, 12).map((check, index) => (
+              <div className="runtimeCheckRow" key={`${check.name || check.label}-${index}`}>
+                <StatusBadge status={check.status || "unknown"} />
+                <div><strong>{check.name || check.label || "Runtime check"}</strong><p>{check.detail || check.message || "No additional details."}</p></div>
+                <button className="secondaryButton tableAction" title="Diagnostic details" onClick={() => setSelectedCheck(check)}>Details</button>
+              </div>
+            ))}
+          </div>
+        </section>
+        <section className="panel runtimeGpuPanel">
+          <div className="panelHeader"><div><h2>GPU Cards</h2><p>Memory pressure and utilization before launch.</p></div></div>
+          <div className="runtimeGpuList">
+            {gpus.length === 0 && <EmptyState title="No GPUs reported" text="GPU cards appear when CUDA devices are visible." />}
+            {gpus.map((gpu, index) => <RuntimeGpuCard key={gpu.index ?? index} gpu={gpu} index={index} />)}
+          </div>
+        </section>
+      </div>
+      {selectedCheck && (
+        <Modal title={`${selectedCheck.name || selectedCheck.label || "Environment Check"} Details`} onClose={() => setSelectedCheck(null)}>
+          <RuntimeCheckDetails check={selectedCheck} report={report} onClose={() => setSelectedCheck(null)} />
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+function RuntimeCheckDetails({ check, report, onClose }) {
+  const torch = report?.torch || {};
+  const cuda = report?.cuda || {};
+  const facts = [
+    ["AReno", report?.areno?.version],
+    ["Python", report?.python?.version],
+    ["PyTorch", torch.version],
+    ["CUDA build", torch.cuda_build],
+    ["CUDA runtime", torch.cuda_runtime],
+    ["CUDA available", torch.cuda_available],
+    ["Visible GPUs", torch.device_count],
+    ["NVCC", cuda.nvcc?.version || cuda.nvcc?.path],
+    ["NVIDIA driver", cuda.driver?.driver_version],
+    ["Driver CUDA", cuda.driver?.cuda_version],
+    ["Platform", report?.platform?.platform],
+  ].filter(([, value]) => value !== undefined && value !== null && value !== "");
+  return (
+    <div className="runtimeCheckDetails">
+      <div className="runtimeCheckDetailLead"><StatusBadge status={check.status || "unknown"} /><div><strong>{check.detail || check.message || "No diagnostic value reported."}</strong>{check.next_step && <p>{check.next_step}</p>}</div></div>
+      <div className="runtimeVersionGrid">
+        {facts.map(([label, value]) => <div key={label}><span>{label}</span><strong>{String(value)}</strong></div>)}
+      </div>
+      <button className="primaryButton fullButton" onClick={onClose}>Done</button>
+    </div>
+  );
+}
+
+function runtimeRiskLabel(checks) {
+  const risk = checks.find((check) => ["fail", "warn"].includes(String(check.status).toLowerCase()));
+  return risk?.name || risk?.label || "No dependency warnings";
+}
+
+function RuntimeGpuCard({ gpu, index }) {
+  const used = Number(gpu.memory_used_mb ?? gpu.memory_used ?? 0);
+  const total = Number(gpu.memory_total_mb ?? gpu.memory_total ?? 0);
+  const util = Number(gpu.utilization ?? gpu.utilization_gpu ?? 0);
+  const memoryPct = total > 0 ? Math.min(100, (used / total) * 100) : 0;
+  return (
+    <div className="runtimeGpuCard">
+      <div><strong>GPU {gpu.index ?? index} · {gpu.name || "CUDA device"}</strong><span>{used.toFixed(0)} / {total.toFixed(0)} MB · Util {util.toFixed(0)}%</span></div>
+      <div className="meterTrack"><i style={{ width: `${memoryPct}%` }} /></div>
     </div>
   );
 }
@@ -778,6 +1681,20 @@ function Modal({ title, children, onClose }) {
   );
 }
 
+function RuntimeCheckResultModal({ result, onClose }) {
+  const counts = result.env?.check_counts || {};
+  return (
+    <Modal title="Runtime Check Result" onClose={onClose}>
+      <div className="runtimeResultSummary">
+        <StatusBadge status={result.env?.ready ? "ok" : "warn"} />
+        <span>{counts.ok || 0} OK · {counts.warn || 0} WARN · {counts.fail || 0} FAIL</span>
+      </div>
+      <pre className="runtimeCommandResult">{result.output || "$ areno check\nNo output returned."}</pre>
+      <button className="primaryButton fullButton" onClick={onClose}>Done</button>
+    </Modal>
+  );
+}
+
 function JobMetricsView({ job, refreshNonce }) {
   return (
     <div className="jobMetricsGrid">
@@ -785,24 +1702,102 @@ function JobMetricsView({ job, refreshNonce }) {
         <MetricChart jobId={job?.id} metricsDir={job?.metrics_dir} refreshNonce={refreshNonce} />
       </div>
       <div className="panel insetPanel">
-        <TimePerfView rows={job?.timeperf || []} />
+        <TimePerfView rows={job?.timeperf || []} job={job} />
       </div>
     </div>
   );
 }
 
-function AgentEventList({ events }) {
+function AgentEventList({ events, onPlanConfirm }) {
+  const planEvents = events.filter((event) => event.type === "tool_result" && event.result?.plan);
+  const otherEvents = events.filter((event) => !(event.type === "tool_result" && event.result?.plan));
   return (
     <div className="agentEventList">
-      {events.map((event, index) => {
+      {otherEvents.map((event, index) => {
         if (event.type === "reasoning") return <ReasoningBlock key={index} text={event.text} />;
         if (event.type === "content") return <MarkdownBlock key={index} text={event.text} />;
         if (event.type === "tool_call") return <ToolCallCard key={index} call={event.call} live={event.live} />;
         if (event.type === "tool_result") return <ToolResultCard key={index} result={event.result} />;
         return null;
       })}
+      {planEvents.map((event, index) => <AgentPlanCard key={event.result.plan.id || index} plan={event.result.plan} onConfirm={onPlanConfirm} />)}
     </div>
   );
+}
+
+function AgentPlanCard({ plan, onConfirm }) {
+  const [editing, setEditing] = useState(false);
+  const [parameters, setParameters] = useState(plan.parameters || {});
+  const [execution, setExecution] = useState(null);
+  useEffect(() => setParameters(plan.parameters || {}), [plan.id]);
+  const entries = Object.entries(parameters);
+  const planTool = plan.tool || inferPlanRunTool(plan);
+  const command = commandForPlan(planTool, parameters);
+  const editedPlan = { ...plan, tool: planTool, parameters, command };
+  return (
+    <section className="agentPlanCard">
+      <div className="agentPlanHeader"><div><span>Execution plan</span><strong>{plan.objective}</strong></div><StatusBadge status={plan.status || "proposed"} /></div>
+      {plan.summary && <p className="agentPlanSummary">{plan.summary}</p>}
+      {entries.length > 0 && <div className={classNames("agentPlanParams", editing && "editing")}>{entries.map(([label, value]) => <label key={label}><span>{label.replaceAll("_", " ")}</span>{editing ? <input value={String(value)} onChange={(event) => setParameters((current) => ({ ...current, [label]: event.target.value }))} /> : <strong>{String(value)}</strong>}</label>)}</div>}
+      <ol className="agentPlanSteps">{(plan.steps || []).map((step, index) => <li key={step.id || index}><span>{index + 1}</span><div><strong>{step.title}</strong>{step.detail && <p>{step.detail}</p>}</div><small>{step.status || "pending"}</small></li>)}</ol>
+      {command && <pre className="agentPlanCommand">{command}</pre>}
+      <div className="agentPlanActions">
+        <button
+          className="primaryButton"
+          disabled={execution?.status === "running"}
+          onClick={async () => {
+            setExecution({ status: "running", message: "Starting..." });
+            try {
+              const result = await onConfirm?.(editedPlan);
+              setExecution({ status: result?.ok === false ? "failed" : "ok", message: result?.job?.id ? `Started job ${result.job.id}` : "Execution completed" });
+            } catch (error) {
+              setExecution({ status: "failed", message: error.message || String(error) });
+            }
+          }}
+        >{execution?.status === "running" ? "Executing..." : "Confirm Execution"}</button>
+        {entries.length > 0 && <button className="secondaryButton" onClick={() => setEditing((value) => !value)}>{editing ? "Save Parameters" : "Edit Parameters"}</button>}
+        {command && <button className="secondaryButton" onClick={() => navigator.clipboard.writeText(command)}>Copy Command</button>}
+      </div>
+      {execution && execution.status !== "running" && <p className={classNames("agentPlanExecution", execution.status)}>{execution.message}</p>}
+    </section>
+  );
+}
+
+function inferPlanRunTool(plan) {
+  const command = String(plan?.command || "").toLowerCase();
+  if (command.includes("--smoke-train")) return "smoke_train";
+  if (command.includes("--smoke-infer")) return "smoke_infer";
+  if (/\bareno\s+serve\b/.test(command)) return "start_serve";
+  return "start_train";
+}
+
+function commandForPlan(tool, parameters = {}) {
+  const mode = tool === "start_serve" ? "serve" : "train";
+  const args = [];
+  const negativeFlags = new Set(["activation_checkpointing", "use_kl_loss"]);
+  for (const [key, value] of Object.entries(parameters)) {
+    if (key === "extra_args" || value === "" || value === null || value === undefined) continue;
+    const flag = `--${key.replaceAll("_", "-")}`;
+    if (isPlanBoolean(value)) {
+      if (planBoolValue(value)) args.push(flag);
+      else if (negativeFlags.has(key)) args.push(`--no-${key.replaceAll("_", "-")}`);
+      continue;
+    }
+    args.push(`${flag} ${shellQuote(value)}`);
+  }
+  if (tool === "smoke_train") args.push("--smoke-train");
+  if (tool === "smoke_infer") args.push("--smoke-infer");
+  const extraArgs = String(parameters.extra_args || "").trim();
+  if (extraArgs) args.push(extraArgs);
+  return [`areno ${mode} \\`, ...args.map((arg, index) => `  ${arg}${index < args.length - 1 ? " \\" : ""}`)].join("\n");
+}
+
+function isPlanBoolean(value) {
+  return typeof value === "boolean" || (typeof value === "string" && ["true", "false"].includes(value.trim().toLowerCase()));
+}
+
+function planBoolValue(value) {
+  return value === true || String(value).trim().toLowerCase() === "true";
 }
 
 function MarkdownBlock({ text }) {
@@ -1026,7 +2021,7 @@ function timelineSteps(job) {
       { id: "exit", label: "exit", aliases: ["exited", "failed", "succeeded", "stopped"] },
     ];
   }
-  const algo = configValue(job, "algo");
+  const algo = String(configValue(job, "algo") || "").toLowerCase();
   if (algo === "sft") {
     return [
       { id: "created", label: "created", aliases: ["registered", "epoch_start"] },
@@ -1052,8 +2047,9 @@ function timelineSteps(job) {
       { id: "ref_score", label: "ref score", aliases: ["logprob_score_start", "logprob_score_end"], roles: ["ref"] },
       { id: "old_logprob", label: "old logprob", aliases: ["old_logprob_score_start", "old_logprob_score_end"], roles: ["actor"] },
       { id: "critic_value", label: "value", aliases: ["value_score_start", "value_score_end"], roles: ["critic"] },
-      { id: "advantage", label: "advantage", aliases: ["advantage_start", "advantage_end"], roles: ["critic"] },
+      { id: "advantage_prepare", label: "advantage", aliases: ["advantage_start"], roles: ["critic"] },
       { id: "critic_train", label: "critic train", aliases: ["train_start", "train_end"], roles: ["critic"] },
+      { id: "advantage_ready", label: "advantage ready", aliases: ["advantage_end"], roles: ["critic"] },
       { id: "actor_train", label: "actor train", aliases: ["train_start", "train_end", "train_skip"], roles: ["actor"] },
       { id: "save", label: "save", aliases: ["save_checkpoint_start", "save_checkpoint_end"] },
       { id: "done", label: "done", aliases: ["max_steps_reached", "epoch_end", "exited", "failed", "succeeded", "stopped"] },
@@ -1085,18 +2081,20 @@ function timelineSteps(job) {
 }
 
 function timelineStageId(job) {
-  if (job?.status && ["succeeded", "failed", "stopped", "exited"].includes(job.status)) return "done";
-  const stage = String(job?.stage || "created");
+  const status = String(job?.status || "").toLowerCase();
+  if (["succeeded", "failed", "stopped", "exited"].includes(status)) return "done";
+  const stage = String(job?.stage || "created").toLowerCase();
   const steps = timelineSteps(job);
   const match = steps.find((item) => timelineItemMatches(item, stage, job));
   return match?.id || stage;
 }
 
 function timelineItemMatches(item, stage, job) {
-  const stageMatches = item.id === stage || item.aliases?.includes(stage);
+  const normalizedStage = String(stage || "").toLowerCase();
+  const stageMatches = item.id === normalizedStage || item.aliases?.includes(normalizedStage);
   if (!stageMatches) return false;
   if (!item.roles?.length) return true;
-  return item.roles.includes(String(job?.role || ""));
+  return item.roles.includes(String(job?.role || "").toLowerCase());
 }
 
 function configValue(job, key) {
@@ -1126,6 +2124,8 @@ function MetricChart({ jobId, metricsDir, refreshNonce }) {
   const [metricList, setMetricList] = useState([]);
   const [points, setPoints] = useState([]);
   const [metricLoading, setMetricLoading] = useState(false);
+  const [pollTick, setPollTick] = useState(0);
+  const [hoveredPoint, setHoveredPoint] = useState(null);
   const [prevJobId, setPrevJobId] = useState(jobId);
   // Reset the selection during render (not in an effect) when the job changes so
   // the reset happens before any effect runs. This avoids a stale-name fetch and
@@ -1140,6 +2140,11 @@ function MetricChart({ jobId, metricsDir, refreshNonce }) {
   }
   const names = metricNamesFrom(metricList);
   const effectiveName = resolveActiveMetricName(names, selectedName);
+  useEffect(() => {
+    if (!jobId) return undefined;
+    const timer = window.setInterval(() => setPollTick((value) => value + 1), 2500);
+    return () => window.clearInterval(timer);
+  }, [jobId]);
   useEffect(() => {
     let cancelled = false;
     if (!jobId) return undefined;
@@ -1156,7 +2161,7 @@ function MetricChart({ jobId, metricsDir, refreshNonce }) {
     return () => {
       cancelled = true;
     };
-  }, [jobId, refreshNonce]);
+  }, [jobId, refreshNonce, pollTick]);
   useEffect(() => {
     let cancelled = false;
     if (!jobId || !effectiveName) {
@@ -1183,7 +2188,7 @@ function MetricChart({ jobId, metricsDir, refreshNonce }) {
     return () => {
       cancelled = true;
     };
-  }, [jobId, effectiveName, refreshNonce]);
+  }, [jobId, effectiveName, refreshNonce, pollTick]);
   const activeName = effectiveName;
   const visiblePoints = points.slice(-240);
   const smoothed = smoothTensorboard(visiblePoints, smooth);
@@ -1205,18 +2210,22 @@ function MetricChart({ jobId, metricsDir, refreshNonce }) {
       {visiblePoints.length === 0 ? (
         <div className="plotEmpty">{metricLoading ? "Loading selected metric..." : "No TensorBoard scalar points loaded yet."}</div>
       ) : (
-        <svg className="metricPlot" viewBox="0 0 720 180" role="img">
-          <g className="plotGrid">
-            {[0, 1, 2, 3].map((item) => <line key={item} x1="0" x2="720" y1={30 + item * 42} y2={30 + item * 42} />)}
-          </g>
-          <polyline className="rawLine" points={plot.raw} />
-          <polyline className="smoothLine" points={plot.smooth} />
-          {visiblePoints.slice(-24).map((point, index) => (
-            <circle key={`${point.step}-${index}`} cx={plot.coords[index + Math.max(0, visiblePoints.length - 24)]?.x || 0} cy={plot.coords[index + Math.max(0, visiblePoints.length - 24)]?.y || 0} r="2.2">
-              <title>{`${activeName} step ${point.step}: ${point.value}`}</title>
-            </circle>
-          ))}
-        </svg>
+        <div className="metricPlotWrap">
+          <svg className="metricPlot" viewBox="0 0 720 180" role="img">
+            <g className="plotGrid">
+              {[0, 1, 2, 3].map((item) => <line key={item} x1="0" x2="720" y1={30 + item * 42} y2={30 + item * 42} />)}
+            </g>
+            <polyline className="rawLine" points={plot.raw} />
+            <polyline className="smoothLine" points={plot.smooth} />
+            {visiblePoints.map((point, index) => (
+              <g key={`${point.step}-${index}`}>
+                <circle className="metricDataPoint" cx={plot.coords[index]?.x || 0} cy={plot.coords[index]?.y || 0} r={metricPointRadius(visiblePoints.length)} />
+                <circle className="metricHoverTarget" cx={plot.coords[index]?.x || 0} cy={plot.coords[index]?.y || 0} r="5" onMouseEnter={() => setHoveredPoint({ point, coord: plot.coords[index] })} onMouseLeave={() => setHoveredPoint(null)} />
+              </g>
+            ))}
+          </svg>
+          {hoveredPoint && <MetricPointTooltip name={activeName} point={hoveredPoint.point} coord={hoveredPoint.coord} width={720} height={180} />}
+        </div>
       )}
       <div className="plotFooter">
         <span>{activeName || "metric"} · {points.length} points</span>
@@ -1241,13 +2250,14 @@ function buildMetricPlot(rawPoints, smoothPoints) {
   const allValues = [...rawPoints, ...smoothPoints].map((point) => point.value);
   const min = Math.min(...allValues);
   const max = Math.max(...allValues);
+  const flat = max === min;
   const span = Math.max(max - min, 1e-9);
   const stepMin = rawPoints[0].step;
   const stepMax = rawPoints[rawPoints.length - 1].step;
   const stepSpan = Math.max(stepMax - stepMin, 1);
   const coord = (point) => ({
     x: ((point.step - stepMin) / stepSpan) * 700 + 10,
-    y: 168 - ((point.value - min) / span) * 146,
+    y: flat ? 95 : 168 - ((point.value - min) / span) * 146,
   });
   const rawCoords = rawPoints.map(coord);
   const smoothCoords = smoothPoints.map(coord);
@@ -1266,11 +2276,12 @@ function compactNumber(value) {
   return value.toFixed(4).replace(/0+$/, "").replace(/\.$/, "");
 }
 
-function TimePerfView({ rows }) {
-  const visible = sampleTimePerfRows(rows || [], 7).reverse();
-  const avgTotal = rows?.length ? rows.reduce((sum, row) => sum + Number(row.total_s || 0), 0) / rows.length : 0;
+function TimePerfView({ rows, job }) {
+  const normalizedRows = normalizeTimePerfRows(rows || [], job);
+  const visible = sampleTimePerfRows(normalizedRows, 7).reverse();
+  const avgTotal = normalizedRows.length ? normalizedRows.reduce((sum, row) => sum + Number(row.total_s || 0), 0) / normalizedRows.length : 0;
   const maxTotal = Math.max(1, ...visible.map((row) => Number(row.total_s || 0)));
-  const segmentNames = Array.from(new Set((rows || []).flatMap((row) => (row.segments || []).map((segment) => segment.name)))).slice(0, 8);
+  const segmentNames = Array.from(new Set(normalizedRows.flatMap((row) => (row.segments || []).map((segment) => segment.name)))).slice(0, 8);
   return (
     <div className="timePerf">
       <div className="timePerfHeader">
@@ -1323,6 +2334,34 @@ function TimePerfView({ rows }) {
   );
 }
 
+function normalizeTimePerfRows(rows, job) {
+  const algo = String(configValue(job, "algo") || "").toLowerCase();
+  const valid = timePerfSegmentsForAlgorithm(algo, job?.kind);
+  return rows.map((row) => {
+    const kept = [];
+    let other = 0;
+    for (const segment of row.segments || []) {
+      const seconds = Number(segment.seconds || 0);
+      if (valid.has(segment.name)) kept.push({ ...segment, seconds });
+      else other += seconds;
+    }
+    if (other > 0) {
+      const existing = kept.find((segment) => segment.name === "other");
+      if (existing) existing.seconds += other;
+      else kept.push({ name: "other", seconds: other });
+    }
+    return { ...row, segments: kept };
+  });
+}
+
+function timePerfSegmentsForAlgorithm(algo, kind) {
+  if (kind === "serve") return new Set(["load", "prefill", "decode", "other"]);
+  if (algo === "sft") return new Set(["train", "save", "other"]);
+  if (algo === "dpo") return new Set(["ref log probs", "train", "save", "other"]);
+  if (algo === "ppo") return new Set(["rollout", "make_sample", "reward", "old policy log probs", "actor log probs", "ref log probs", "value", "advantages", "sync weight", "train", "save", "other"]);
+  return new Set(["rollout", "make_sample", "reward", "old policy log probs", "actor log probs", "ref log probs", "advantages", "sync weight", "train", "save", "other"]);
+}
+
 function sampleTimePerfRows(rows, limit) {
   if (rows.length <= limit) return rows.slice();
   if (limit <= 1) return rows.slice(-1);
@@ -1350,7 +2389,7 @@ function normalizeDisplayName(name) {
     .trim();
 }
 
-function SampleView({ samples }) {
+function SampleView({ samples, hideTitle = false }) {
   const orderedSamples = useMemo(
     () =>
       [...(samples || [])].sort(
@@ -1389,7 +2428,7 @@ function SampleView({ samples }) {
   const sample = activeOption?.sample || null;
   return (
     <div className="sampleCard">
-      <div className="codeTitle sampleTitle">
+      {!hideTitle && <div className="codeTitle sampleTitle">
         <span><FileText size={14} /> Rollout sample</span>
         {!!orderedSamples.length && (
           <div className="sampleControls">
@@ -1401,7 +2440,7 @@ function SampleView({ samples }) {
             </select>
           </div>
         )}
-      </div>
+      </div>}
       {sample ? (
         <div className="sampleGrid">
           <div>
@@ -1490,33 +2529,176 @@ function LogView({ logs }) {
   );
 }
 
+function LauncherPrdPage({ mode, setMode, trainConfig, setTrainConfig, serveConfig, setServeConfig, onStartTrain, onStartServe, env, presets }) {
+  const config = mode === "train" ? trainConfig : serveConfig;
+  const [preflightResult, setPreflightResult] = useState(null);
+  const [preflightBusy, setPreflightBusy] = useState("");
+  const [preflightJob, setPreflightJob] = useState(null);
+  const worldSize = Number(config.world_size || 0);
+  const tpSize = Number(config.tp_size || 0);
+  const gpuCount = env?.gpus?.length || 0;
+  const smokeTrainTunable = mode === "train";
+  const smokeInferTunable = smokeTrainTunable && ["gspo", "grpo", "ppo"].includes(String(config.algo || "").toLowerCase());
+  useEffect(() => {
+    if (!preflightJob?.job?.id || !["created", "running"].includes(preflightJob.job.status)) return undefined;
+    let cancelled = false;
+    const refresh = async () => {
+      try {
+        const result = await api(`/api/jobs/${preflightJob.job.id}`);
+        if (cancelled || !result.job) return;
+        const updated = { ...preflightJob, job: result.job };
+        setPreflightJob(updated);
+        if (!["created", "running"].includes(result.job.status)) {
+          setPreflightResult({ ...updated, ok: result.job.status === "succeeded", output: (result.job.logs || []).join("\n") });
+        }
+      } catch (error) {
+        if (!cancelled) setPreflightResult({ ok: false, check: preflightJob.check, output: error.message });
+      }
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 1000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [preflightJob?.job?.id, preflightJob?.job?.status]);
+  const checks = [
+    {
+      id: "gpu_count",
+      name: "GPU count",
+      status: gpuCount === 0 ? "warn" : worldSize <= gpuCount ? "ok" : "warn",
+      detail: gpuCount ? `World size ${worldSize} uses ${gpuCount} visible GPU${gpuCount === 1 ? "" : "s"}.` : "No visible GPU inventory is available.",
+      tunable: smokeInferTunable && gpuCount > 0,
+    },
+    {
+      id: "tensor_parallel",
+      name: "Tensor parallelism",
+      status: worldSize > 0 && tpSize > 0 && worldSize % tpSize === 0 ? "ok" : "fail",
+      detail: worldSize > 0 && tpSize > 0 && worldSize % tpSize === 0 ? `World size ${worldSize} is divisible by TP size ${tpSize}.` : "World size must be divisible by TP size.",
+      tunable: smokeTrainTunable,
+    },
+    mode === "train" ? {
+      id: "batch_relation",
+      name: "Batch relation",
+      status: Number(config.batch_size) > 0 && Number(config.mini_bs) > 0 && Number(config.batch_size) % Number(config.mini_bs) === 0 ? "ok" : "fail",
+      detail: `Batch ${config.batch_size} × samples ${config.n_samples || 1}; mini batch ${config.mini_bs}.`,
+      tunable: smokeTrainTunable,
+    } : {
+      id: "batch_relation",
+      name: "Serving capacity",
+      status: Number(config.max_running_prompts) > 0 ? "ok" : "warn",
+      detail: `${config.max_running_prompts || 0} concurrent prompts configured.`,
+      tunable: false,
+    },
+    ...(mode === "train" ? [{
+      id: "max_new_tokens",
+      name: "Max new tokens",
+      status: Number(config.max_new_tokens) > 1024 ? "warn" : "ok",
+      detail: Number(config.max_new_tokens) > 1024 ? `${config.max_new_tokens} may increase rollout memory.` : `${config.max_new_tokens || 0} is within the preflight target.`,
+      tunable: smokeInferTunable,
+    }] : []),
+  ];
+  const command = launcherCommand(mode, config);
+  const hasFailure = checks.some((check) => check.status === "fail");
+  const runPreflightAction = async (check) => {
+    const action = check.status !== "ok" && check.tunable ? "tune" : "view";
+    setPreflightBusy(check.id);
+    try {
+      const result = await api("/api/launcher/preflight", { method: "POST", body: JSON.stringify({ mode, config, check_id: check.id, action }) });
+      if (action === "tune" && result.job) {
+        setPreflightResult(null);
+        setPreflightJob({ ...result, check, job: result.job });
+      } else {
+        setPreflightResult(result);
+      }
+    } catch (error) {
+      setPreflightResult({ ok: false, check: { name: check.name, status: "fail", detail: error.message }, patch: {} });
+    } finally {
+      setPreflightBusy("");
+    }
+  };
+  return (
+    <>
+    <div className="launcherPrdLayout">
+      <section className="panel launcher launcherMainCard">
+        <div className="panelHeader">
+          <div><h2>Task Launcher</h2><p>Configure, validate, and review the generated command before launch.</p></div>
+          <div className="tabs"><button className={classNames(mode === "train" && "active")} onClick={() => setMode("train")}>Train</button><button className={classNames(mode === "serve" && "active")} onClick={() => setMode("serve")}>Serve</button></div>
+        </div>
+        {mode === "train" && presets.length > 0 && <div className="launcherPresetRow">
+          {presets.map((preset) => <button key={preset.id} className="presetPill" title={preset.source} onClick={() => setTrainConfig((current) => ({ ...current, ...(preset.preset || {}) }))}>{preset.label}</button>)}
+        </div>}
+        <div className="launcherFormScroll">
+          {mode === "train" ? <TrainForm config={trainConfig} setConfig={setTrainConfig} onStart={onStartTrain} /> : <ServeForm config={serveConfig} setConfig={setServeConfig} onStart={onStartServe} />}
+        </div>
+      </section>
+      <aside className="launcherSideRail">
+        <section className="panel launcherPreflight">
+          <div className="panelHeader"><div><h2>Preflight</h2><p>Resolve launch risks before allocating workers.</p></div><StatusBadge status={hasFailure ? "failed" : "ok"} /></div>
+          <div className="runtimeCheckList">{checks.map((check) => {
+            const launching = preflightBusy === check.id && check.status !== "ok" && check.tunable;
+            const tuning = preflightJob?.check_id === check.id && ["created", "running"].includes(preflightJob.job?.status);
+            const smokeLabel = preflightJob?.smoke_stage === "infer" ? "Smoke infer" : "Smoke train";
+            const elapsed = tuning && preflightJob.job?.created_at ? Math.max(0, Math.floor((Date.now() - Date.parse(preflightJob.job.created_at)) / 1000)) : 0;
+            const latestLog = tuning ? [...(preflightJob.job?.logs || [])].reverse().find((line) => line && !String(line).startsWith("$ ")) : "";
+            const progressText = launching ? "Starting smoke tuning job..." : tuning ? `${smokeLabel}: ${preflightJob.job?.stage || "starting"} · step ${preflightJob.job?.step ?? 0} · ${elapsed}s` : check.detail;
+            return <div className="runtimeCheckRow launcherCheck" key={check.id}><StatusBadge status={tuning ? "running" : check.status} /><div><strong>{check.name}</strong><p>{progressText}</p>{(launching || tuning) && <div className="preflightProgress" role="progressbar" aria-label={`Tuning ${check.name}`}><span /></div>}{tuning && <div className="preflightTuneDetails"><div>{Object.entries(preflightJob.tuning_params || {}).map(([key, value]) => <span key={key}><b>{key.replaceAll("_", " ")}</b>{String(value)}</span>)}</div>{latestLog && <code>{latestLog}</code>}</div>}</div><button className="secondaryButton tableAction" disabled={Boolean(preflightBusy) || Boolean(preflightJob && ["created", "running"].includes(preflightJob.job?.status))} onClick={() => runPreflightAction(check)}>{launching ? "Starting..." : tuning ? `${smokeLabel}...` : check.status !== "ok" && check.tunable ? "Tune" : "View"}</button></div>;
+          })}</div>
+        </section>
+        <section className="panel commandPreviewPanel">
+          <div className="panelHeader"><div><h2>Command Preview</h2><p>Review the final CLI mapping.</p></div><button className="secondaryButton" onClick={() => navigator.clipboard.writeText(command)}>Copy</button></div>
+          <pre className="commandPreview">{command}</pre>
+        </section>
+      </aside>
+    </div>
+    {preflightResult && <Modal title="Preflight Result" onClose={() => setPreflightResult(null)}>
+      <div className="runtimeResultSummary"><StatusBadge status={preflightResult.job?.status || preflightResult.check?.status || (preflightResult.ok ? "ok" : "failed")} /><span>{preflightResult.check?.name || "Launcher check"}</span></div>
+      {Object.keys(preflightResult.tuning_params || {}).length > 0 && <div className="preflightResultParams">{Object.entries(preflightResult.tuning_params).map(([key, value]) => <span key={key}><b>{key.replaceAll("_", " ")}</b>{String(value)}</span>)}</div>}
+      <pre className="runtimeCommandResult">{preflightResult.command?.length ? `$ ${preflightResult.command.map(shellQuote).join(" ")}\n\n` : ""}{preflightResult.output || preflightResult.check?.detail || "No details returned."}</pre>
+      <button className="primaryButton fullButton" onClick={() => setPreflightResult(null)}>Done</button>
+    </Modal>}
+    </>
+  );
+}
+
+function launcherCommand(mode, config) {
+  const pairs = mode === "train"
+    ? [["algo", config.algo], ["ckpt", config.ckpt], ["dataset-path", config.dataset_path], ["dataset-loader-fn", config.dataset_loader_fn], ["reward-fn-path", config.reward_fn_path], ["world-size", config.world_size], ["tp-size", config.tp_size], ["batch-size", config.batch_size], ["mini-bs", config.mini_bs], ["n-samples", config.n_samples], ["max-new-tokens", config.max_new_tokens]]
+    : [["model-path", config.model_path], ["host", config.host], ["port", config.port], ["world-size", config.world_size], ["tp-size", config.tp_size], ["max-running-prompts", config.max_running_prompts], ["default-max-tokens", config.default_max_tokens]];
+  const args = pairs.filter(([, value]) => value !== "" && value !== undefined && value !== null).map(([name, value]) => `  --${name} ${shellQuote(value)}`);
+  return [`areno ${mode} \\`, ...args.map((line, index) => `${line}${index < args.length - 1 ? " \\" : ""}`)].join("\n");
+}
+
+function shellQuote(value) {
+  const text = String(value);
+  return /^[a-zA-Z0-9_./:@+-]+$/.test(text) ? text : `'${text.replaceAll("'", `'\\''`)}'`;
+}
+
 function TrainForm({ config, setConfig, onStart }) {
   const algo = String(config.algo || "sft").toLowerCase();
   const sections = trainLauncherSections(algo);
   const updateField = (key, value) => setConfig({ ...config, [key]: value });
+  const primaryFields = [
+    selectField("algo", "Algorithm", ["sft", "dpo", "gspo", "grpo", "ppo"], true),
+    field("ckpt", "Checkpoint"),
+    field("dataset_path", "Dataset path"),
+    field("dataset_loader_fn", "Dataset loader"),
+    field("reward_fn_path", "Reward function"),
+    selectField("model_hub", "Model hub", ["modelscope", "hf"], true),
+    field("world_size", "World size", true),
+    field("tp_size", "TP size", true),
+    field("batch_size", "Batch size", true),
+    field("mini_bs", "Mini batch size", true),
+    field("n_samples", "N samples", true),
+    field("max_new_tokens", "Max new tokens", true),
+  ];
+  const primaryKeys = new Set(primaryFields.map((item) => item.key));
+  const advancedSections = sections.map((section) => ({ ...section, fields: section.fields.filter((item) => !primaryKeys.has(item.key)) })).filter((section) => section.fields.length);
+  const renderLauncherField = (item) => <Field key={item.key} label={item.label} value={config[item.key]} onChange={(value) => updateField(item.key, value)} compact={item.compact} type={item.type} options={item.options} />;
   return (
     <div className="launcherSections">
-      {sections.map((section) => (
-        <div className="launcherSection" key={section.title}>
-          <div className="launcherSectionHeader">
-            <strong>{section.title}</strong>
-            {section.note && <span>{section.note}</span>}
-          </div>
-          <div className="formGrid">
-            {section.fields.map((field) => (
-              <Field
-                key={field.key}
-                label={field.label}
-                value={config[field.key]}
-                onChange={(value) => updateField(field.key, value)}
-                compact={field.compact}
-                type={field.type}
-                options={field.options}
-              />
-            ))}
-          </div>
-        </div>
-      ))}
+      <div className="formGrid launcherPrimaryFields">{primaryFields.map(renderLauncherField)}</div>
+      <details className="launcherAdvanced">
+        <summary>Advanced settings</summary>
+        <div className="launcherAdvancedBody">{advancedSections.map((section) => <div className="launcherSection" key={section.title}><div className="launcherSectionHeader"><strong>{section.title}</strong>{section.note && <span>{section.note}</span>}</div><div className="formGrid">{section.fields.map(renderLauncherField)}</div></div>)}</div>
+      </details>
       <button className="primaryButton launchButton wide" onClick={onStart}><Play size={16} /> Start train</button>
     </div>
   );

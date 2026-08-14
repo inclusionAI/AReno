@@ -12,6 +12,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from areno.engine.data.tokenizer import load_processor as load_processor  # noqa: F401
 from areno.engine.data.tokenizer import load_tokenizer as load_tokenizer  # noqa: F401
 
 _CHAT_TEMPLATE_ENABLE_THINKING_ATTR = "_areno_chat_template_enable_thinking"
@@ -24,6 +25,8 @@ def configure_chat_template_enable_thinking(tokenizer, enable_thinking: bool | N
     ``apply_chat_template`` calls when the tokenizer/template supports it.
     """
 
+    if tokenizer is None:
+        return
     if enable_thinking is None:
         if hasattr(tokenizer, _CHAT_TEMPLATE_ENABLE_THINKING_ATTR):
             delattr(tokenizer, _CHAT_TEMPLATE_ENABLE_THINKING_ATTR)

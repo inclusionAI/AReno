@@ -78,12 +78,16 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "max_steps",
             "world_size",
             "tp_size",
+            "train_devices",
         ),
     ),
     (
         "Rollout",
         (
             "batch_size",
+            "rollout_tp_size",
+            "rollout_devices",
+            "policy_sync_bucket_mb",
             "n_samples",
             "max_running_prompts",
             "max_prompt_tokens",
@@ -192,6 +196,22 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
     args.dataset_mix_seed = getattr(args, "dataset_mix_seed", 42)
     args.dataset_mix_exhaustion = getattr(args, "dataset_mix_exhaustion", "cycle")
     args.dataset_mix_samples_per_epoch = getattr(args, "dataset_mix_samples_per_epoch", None)
+    args.train_devices = getattr(args, "train_devices", None)
+    args.rollout_tp_size = getattr(args, "rollout_tp_size", None)
+    args.rollout_devices = getattr(args, "rollout_devices", None)
+    args.policy_sync_bucket_mb = getattr(args, "policy_sync_bucket_mb", 64)
+    args.train_devices = _parse_cuda_devices(getattr(args, "train_devices", None), "--train-devices")
+    args.rollout_devices = _parse_cuda_devices(getattr(args, "rollout_devices", None), "--rollout-devices")
+    if args.rollout_tp_size is not None and args.rollout_tp_size <= 0:
+        raise click.UsageError("--rollout-tp-size must be positive")
+    if args.train_devices is not None:
+        args.world_size = len(args.train_devices)
+    else:
+        args.train_devices = list(range(args.world_size))
+    if args.rollout_devices is None and args.rollout_tp_size is not None:
+        args.rollout_devices = list(args.train_devices)
+    args.rollout_tp_size = getattr(args, "rollout_tp_size", None)
+    args.policy_sync_bucket_mb = getattr(args, "policy_sync_bucket_mb", 64)
     smoke_infer = bool(getattr(args, "smoke_infer", False))
     smoke_train = bool(getattr(args, "smoke_train", False))
     if smoke_infer or smoke_train:
@@ -244,8 +264,8 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
         raise click.UsageError("--smoke-infer and --smoke-train are mutually exclusive")
     if tune_params and not algorithm.requires_rollout:
         raise click.UsageError("--tune-params currently supports rollout-based algorithms")
-    if (smoke_infer or smoke_train) and not algorithm.requires_rollout:
-        raise click.UsageError("--smoke-infer and --smoke-train currently support rollout-based algorithms")
+    if smoke_infer and not algorithm.requires_rollout:
+        raise click.UsageError("--smoke-infer currently supports rollout-based algorithms")
     if mem_frac <= 0 or mem_frac > 1:
         raise click.UsageError("--mem-frac must be in (0, 1]")
     if tune_max_samples <= 0:
@@ -269,6 +289,15 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
         raise click.UsageError("--world-size must be positive")
     if args.world_size % args.tp_size != 0:
         raise click.UsageError("--world-size must be divisible by --tp-size")
+    has_rollout_topology = args.rollout_devices is not None or args.rollout_tp_size is not None
+    if has_rollout_topology and not algorithm.requires_rollout:
+        raise click.UsageError("independent rollout devices are only valid for rollout-based algorithms")
+    if args.rollout_devices is not None:
+        rollout_tp_size = args.tp_size if args.rollout_tp_size is None else args.rollout_tp_size
+        if len(args.rollout_devices) % rollout_tp_size != 0:
+            raise click.UsageError("--rollout-devices count must be divisible by --rollout-tp-size")
+    if args.policy_sync_bucket_mb <= 0:
+        raise click.UsageError("--policy-sync-bucket-mb must be positive")
     if args.batch_size <= 0:
         raise click.UsageError("--batch-size must be positive")
     if algorithm.requires_rollout and args.n_samples <= 0:
@@ -438,6 +467,36 @@ def _validate_dataset_mix_weight_range(weights: list[float], label: str) -> None
         raise ValueError(f"{label} have an unsupported numeric range")
 
 
+def _parse_cuda_devices(value: str | None, option_name: str) -> list[int] | None:
+    """Parse CUDA indices and inclusive ranges such as ``0..3,8``."""
+
+    if value is None:
+        return None
+    parts = [part.strip() for part in value.split(",")]
+    if not parts or any(not part for part in parts):
+        raise click.UsageError(f"{option_name} must be a comma-separated list of CUDA indices or ranges")
+    devices = []
+    try:
+        for part in parts:
+            if ".." not in part:
+                devices.append(int(part))
+                continue
+            endpoints = part.split("..")
+            if len(endpoints) != 2 or not all(endpoints):
+                raise ValueError
+            start, end = (int(endpoint) for endpoint in endpoints)
+            if start > end:
+                raise click.UsageError(f"{option_name} range start must not exceed range end: {part}")
+            devices.extend(range(start, end + 1))
+    except ValueError as exc:
+        raise click.UsageError(f"{option_name} must contain only integer CUDA indices or ranges") from exc
+    if any(device < 0 for device in devices):
+        raise click.UsageError(f"{option_name} must not contain negative CUDA device indices")
+    if len(devices) != len(set(devices)):
+        raise click.UsageError(f"{option_name} must not contain duplicate CUDA device indices")
+    return devices
+
+
 def _format_training_config_summary(
     config: TrainerConfig,
     *,
@@ -487,6 +546,12 @@ def _format_training_config_summary(
                 ("world_size", str(config.world_size)),
                 ("tp_size", str(config.tp_size)),
                 ("dp_size", _resolved_dp_size_for_summary(config)),
+                (
+                    "devices",
+                    ",".join(str(device) for device in config.train_devices)
+                    if config.train_devices is not None
+                    else f"0..{config.world_size - 1}",
+                ),
                 ("attn_backend", attn_backend),
                 (
                     "thinking",
@@ -609,6 +674,27 @@ def _rollout_summary_rows(config: TrainerConfig) -> list[tuple[str, str]]:
         ]
     return [
         *base,
+        (
+            "topology",
+            (
+                "shared with train engine"
+                if config.rollout_devices is None
+                else (
+                    f"world={len(config.rollout_devices)}, "
+                    f"tp={config.rollout_tp_size or config.tp_size}, "
+                    f"dp={len(config.rollout_devices) // (config.rollout_tp_size or config.tp_size)}, "
+                    f"devices={','.join(str(device) for device in config.rollout_devices)}"
+                )
+            ),
+        ),
+        (
+            "policy_sync",
+            (
+                "shared weights"
+                if config.rollout_devices is None
+                else f"NCCL direct, lazy, bucket={config.policy_sync_bucket_mb} MiB"
+            ),
+        ),
         ("n_samples", str(config.n_samples)),
         ("max_running_prompts", str(config.resolved_max_running_prompts())),
         (
@@ -767,6 +853,10 @@ def _trainer_config_from_args(args) -> TrainerConfig:
     args.dataset_mix_seed = getattr(args, "dataset_mix_seed", 42)
     args.dataset_mix_exhaustion = getattr(args, "dataset_mix_exhaustion", "cycle")
     args.dataset_mix_samples_per_epoch = getattr(args, "dataset_mix_samples_per_epoch", None)
+    args.train_devices = getattr(args, "train_devices", None)
+    args.rollout_tp_size = getattr(args, "rollout_tp_size", None)
+    args.rollout_devices = getattr(args, "rollout_devices", None)
+    args.policy_sync_bucket_mb = getattr(args, "policy_sync_bucket_mb", 64)
     algorithm = get_algorithm(args.algo)
     chat_template_enable_thinking = False if args.disable_thinking else None
     if algorithm.name == "dpo":
@@ -787,6 +877,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             max_steps=args.max_steps,
             tp_size=args.tp_size,
             world_size=args.world_size,
+            train_devices=args.train_devices,
             batch_size=args.batch_size,
             mini_bs=args.mini_bs,
             score_micro_bs=args.score_micro_bs,
@@ -833,6 +924,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             max_steps=args.max_steps,
             tp_size=args.tp_size,
             world_size=args.world_size,
+            train_devices=args.train_devices,
             batch_size=args.batch_size,
             mini_bs=args.mini_bs,
             score_micro_bs=args.score_micro_bs,
@@ -878,6 +970,10 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             max_steps=args.max_steps,
             tp_size=args.tp_size,
             world_size=args.world_size,
+            train_devices=args.train_devices,
+            rollout_tp_size=args.rollout_tp_size,
+            rollout_devices=args.rollout_devices,
+            policy_sync_bucket_mb=args.policy_sync_bucket_mb,
             batch_size=args.batch_size,
             n_samples=args.n_samples,
             mini_bs=args.mini_bs,
@@ -930,6 +1026,10 @@ def _trainer_config_from_args(args) -> TrainerConfig:
         max_steps=args.max_steps,
         tp_size=args.tp_size,
         world_size=args.world_size,
+        train_devices=args.train_devices,
+        rollout_tp_size=args.rollout_tp_size,
+        rollout_devices=args.rollout_devices,
+        policy_sync_bucket_mb=args.policy_sync_bucket_mb,
         batch_size=args.batch_size,
         n_samples=args.n_samples,
         mini_bs=args.mini_bs,
@@ -1026,6 +1126,7 @@ def run(trainer_config: TrainerConfig):
         backend_type=areno.api.Areno,
         metrics_log_dir=trainer_config.metrics_log_dir,
         custom_config=trainer_config.areno_config(),
+        score_micro_bs=trainer_config.score_micro_bs,
     )
     if mixed_dataset is None:
         if trainer_config.dataset_path is None:
@@ -1444,20 +1545,32 @@ def _validate_sft_mix_source(source_name: str, dataset) -> None:
         raise ValueError("source is empty")
     columns = getattr(dataset, "column_names", None)
     if columns is not None:
-        missing = [field for field in ("prompt", "response") if field not in columns]
-        if missing:
-            raise ValueError(f"missing required SFT field(s): {', '.join(missing)}")
+        _validate_sft_mix_fields(set(columns))
         if DATASET_MIX_METADATA_KEY in columns:
             raise ValueError(f"source contains reserved field '{DATASET_MIX_METADATA_KEY}'")
     rows = [dataset[0]] if columns is not None else (dataset[index] for index in range(len(dataset)))
     for index, row in enumerate(rows):
         if not isinstance(row, Mapping):
             raise ValueError(f"row {index} must be a mapping")
-        missing = [field for field in ("prompt", "response") if field not in row]
-        if missing:
-            raise ValueError(f"row {index} missing required SFT field(s): {', '.join(missing)}")
+        try:
+            _validate_sft_mix_fields(set(row))
+        except ValueError as exc:
+            raise ValueError(f"row {index} {exc}") from exc
         if DATASET_MIX_METADATA_KEY in row:
             raise ValueError(f"row {index} contains reserved field '{DATASET_MIX_METADATA_KEY}'")
+
+
+def _validate_sft_mix_fields(fields: set[str]) -> None:
+    supported = (
+        {"prompt", "response"}.issubset(fields)
+        or {"tokens", "prompt_mask"}.issubset(fields)
+        or ("response" in fields and bool({"image_base64", "images_base64"} & fields))
+    )
+    if not supported:
+        raise ValueError(
+            "missing required SFT field(s) for a supported row schema: "
+            "prompt+response, tokens+prompt_mask, or image_base64/images_base64+response"
+        )
 
 
 def _format_dataset_mix_summary(summary: dict) -> str:
@@ -1729,8 +1842,41 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     is_flag=True,
     help="Dummy-load the model and run one minimal synthetic train step, then exit.",
 )
-@click.option("--tp-size", type=int, default=4, show_default=True, help="Tensor parallel size for the backend.")
+@click.option(
+    "--tp-size",
+    "--train-tp-size",
+    "tp_size",
+    type=int,
+    default=4,
+    show_default=True,
+    help="Tensor parallel size for training.",
+)
 @click.option("--world-size", type=int, default=8, show_default=True, help="Total device count for the backend.")
+@click.option(
+    "--train-devices",
+    type=str,
+    default=None,
+    help="CUDA devices for training, with inclusive ranges such as 0..7,10; defaults to devices from --world-size.",
+)
+@click.option(
+    "--rollout-tp-size",
+    type=int,
+    default=None,
+    help="Tensor parallel size for an independent rollout engine using the training device set by default.",
+)
+@click.option(
+    "--rollout-devices",
+    type=str,
+    default=None,
+    help="CUDA devices for the independent rollout engine; defaults to the training device set when omitted.",
+)
+@click.option(
+    "--policy-sync-bucket-mb",
+    type=int,
+    default=64,
+    show_default=True,
+    help="Maximum GPU buffer size used by direct NCCL policy synchronization.",
+)
 @click.option("--batch-size", type=int, default=32, show_default=True, help="Prompt/pair batch size.")
 @click.option(
     "--n-samples", type=int, default=8, show_default=True, help="Rollout samples per prompt for RL algorithms."

@@ -21,7 +21,16 @@ from areno.engine.checkpoints.common import (
     save_embedding_norm_head,
     write_hf_safetensors_checkpoint,
 )
-from areno.engine.checkpoints.io import SafetensorsIndex, _CheckpointTensorTask, _copy_row, _sync_pending_cpu_copies
+from areno.engine.checkpoints.io import (
+    PolicyFlatPiece,
+    PolicyTensorLayout,
+    PolicyTensorStore,
+    SafetensorsIndex,
+    _CheckpointTensorTask,
+    _copy_row,
+    _sync_pending_cpu_copies,
+    policy_plan_scope,
+)
 from areno.engine.layers.linear import _shard_range
 from areno.engine.parallel.context import get_tp_context
 from areno.models.minicpmv46.model import (
@@ -111,6 +120,18 @@ def save_minicpmv46_weights(
     return saved_path
 
 
+def build_minicpmv46_policy_plan(model: MiniCPMV46ForCausalLM) -> PolicyTensorStore:
+    """Build live canonical tasks without checkpoint materialization."""
+
+    tensors = PolicyTensorStore()
+    with policy_plan_scope():
+        _save_embedding_norm_head(tensors, model)
+        prefix = model.config.checkpoint_prefix
+        for layer_idx, layer in enumerate(model.layers):
+            _save_layer(tensors, layer, f"{prefix}.layers.{layer_idx}")
+    return tensors
+
+
 def _load_embedding_norm_head(
     model: MiniCPMV46ForCausalLM, index: SafetensorsIndex, rank: int, world_size: int
 ) -> None:
@@ -120,7 +141,9 @@ def _load_embedding_norm_head(
 
 def _save_embedding_norm_head(tensors: dict[str, torch.Tensor | None], model: MiniCPMV46ForCausalLM) -> None:
     save_embedding_norm_head(tensors, model, TOP_LEVEL_SPEC)
-    tensors[TOP_LEVEL_SPEC.norm_key] = rank0_tensor(model.norm.weight - 1.0)
+    tensors[TOP_LEVEL_SPEC.norm_key] = rank0_tensor(
+        model.norm.weight if isinstance(tensors, PolicyTensorStore) else model.norm.weight - 1.0
+    )
 
 
 def _load_layer(index: SafetensorsIndex, layer: MiniCPMDecoderLayer, prefix: str, rank: int, world_size: int) -> None:
@@ -156,7 +179,10 @@ def _load_layer(index: SafetensorsIndex, layer: MiniCPMDecoderLayer, prefix: str
 
 def _save_layer(tensors: dict[str, torch.Tensor | None], layer: MiniCPMDecoderLayer, prefix: str) -> None:
     for spec in LAYER_NORM_SPECS:
-        tensors[spec.key.format(prefix=prefix)] = rank0_tensor(_attr_path(layer, spec.attr) - 1.0)
+        value = _attr_path(layer, spec.attr)
+        tensors[spec.key.format(prefix=prefix)] = rank0_tensor(
+            value if isinstance(tensors, PolicyTensorStore) else value - 1.0
+        )
     gate_weight, up_weight = gather_tensor_parallel_column_tensors(
         list(_attr_path(layer, GATE_UP_WEIGHT_SPEC.dst_attr).split(layer.mlp.gate_up_proj.local_out_features, dim=0))
     )
@@ -257,16 +283,46 @@ def _save_full_attention(tensors: dict[str, torch.Tensor | None], attn: MiniCPMF
     gate = attn.qkv_proj.weight[q_size : q_size + gate_size]
     k = attn.qkv_proj.weight[q_size + gate_size : q_size + gate_size + k_size]
     v = attn.qkv_proj.weight[q_size + gate_size + k_size : q_size + gate_size + k_size + v_size]
-    q_weight, gate_weight = gather_tensor_parallel_column_tensors([q, gate])
-    tensors[f"{prefix}.self_attn.q_proj.weight"] = _merge_q_gate_by_head(
-        q_weight, gate_weight, attn.num_heads, attn.head_dim
-    )
+    q_key = f"{prefix}.self_attn.q_proj.weight"
+    if isinstance(tensors, PolicyTensorStore):
+        ctx = get_tp_context()
+        local_heads = q.shape[0] // attn.head_dim
+        head_numel = attn.head_dim * q.shape[1]
+        pieces = []
+        q_heads = q.reshape(local_heads, attn.head_dim, q.shape[1])
+        gate_heads = gate.reshape(local_heads, attn.head_dim, gate.shape[1])
+        for local_head in range(local_heads):
+            global_head = ctx.rank * local_heads + local_head
+            base = global_head * 2 * head_numel
+            pieces.extend(
+                (
+                    PolicyFlatPiece(q_heads[local_head], base),
+                    PolicyFlatPiece(gate_heads[local_head], base + head_numel),
+                )
+            )
+        tensors.add_layout(
+            q_key,
+            PolicyTensorLayout(
+                shape=(attn.num_heads * 2 * attn.head_dim, q.shape[1]),
+                dtype=q.dtype,
+                pieces=(),
+                flat_pieces=tuple(pieces),
+            ),
+        )
+    else:
+        q_weight, gate_weight = gather_tensor_parallel_column_tensors([q, gate])
+        tensors[q_key] = _merge_q_gate_by_head(q_weight, gate_weight, attn.num_heads, attn.head_dim)
     k_weight, v_weight = gather_tensor_parallel_column_tensors([k, v])
     tensors[f"{prefix}.self_attn.k_proj.weight"] = k_weight
     tensors[f"{prefix}.self_attn.v_proj.weight"] = v_weight
     tensors[f"{prefix}.self_attn.o_proj.weight"] = gather_tensor_parallel_tensor(attn.o_proj.weight, dim=1)
-    tensors[f"{prefix}.self_attn.q_norm.weight"] = rank0_tensor(attn.q_norm.weight - 1.0)
-    tensors[f"{prefix}.self_attn.k_norm.weight"] = rank0_tensor(attn.k_norm.weight - 1.0)
+    policy = isinstance(tensors, PolicyTensorStore)
+    tensors[f"{prefix}.self_attn.q_norm.weight"] = rank0_tensor(
+        attn.q_norm.weight if policy else attn.q_norm.weight - 1.0
+    )
+    tensors[f"{prefix}.self_attn.k_norm.weight"] = rank0_tensor(
+        attn.k_norm.weight if policy else attn.k_norm.weight - 1.0
+    )
 
 
 def _save_gated_delta_net(tensors: dict[str, torch.Tensor | None], attn: MiniCPMGatedDeltaNet, prefix: str) -> None:

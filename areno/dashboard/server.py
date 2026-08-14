@@ -50,6 +50,15 @@ ENV_REPORT_CACHE: dict[str, Any] | None = None
 ENV_CHECKS_CACHE: list[Any] | None = None
 ENV_CHECK_COUNTS_CACHE: dict[str, int] | None = None
 ENV_CACHE_LOCK = threading.Lock()
+AGENT_RECOVERY_LOCK = threading.Lock()
+AGENT_RECOVERY_STATE: dict[str, Any] = {
+    "active": False,
+    "error": None,
+    "kind": None,
+    "retryable": False,
+    "job_id": None,
+    "updated_at": None,
+}
 FILE_BROWSER = AgentFileBrowser(ROOT)
 
 
@@ -67,6 +76,7 @@ class Job:
         config: dict[str, Any],
         metrics_dir: str | None,
         pid: int | None = None,
+        cwd: str | None = None,
     ):
         self.id = uuid4().hex[:12]
         self.kind = kind
@@ -74,6 +84,7 @@ class Job:
         self.command = command
         self.config = config
         self.metrics_dir = metrics_dir
+        self.cwd = cwd
         self.status = "created"
         self.stage = "created"
         self.role = ""
@@ -103,6 +114,7 @@ class Job:
             config=dict(item.get("launch") or item.get("config") or {}),
             metrics_dir=item.get("metrics_dir"),
             pid=item.get("pid"),
+            cwd=item.get("cwd"),
         )
         job.id = item.get("id") or job.id
         job.status = item.get("status", "unknown")
@@ -128,6 +140,7 @@ class Job:
             "config_text": self.config_text,
             "launch": self.launch_config,
             "metrics_dir": self.metrics_dir,
+            "cwd": self.cwd,
             "status": self.status,
             "stage": self.stage,
             "role": self.role,
@@ -149,6 +162,7 @@ class Job:
             "kind": self.kind,
             "name": self.name,
             "metrics_dir": self.metrics_dir,
+            "cwd": self.cwd,
             "status": self.status,
             "stage": self.stage,
             "role": self.role,
@@ -267,7 +281,9 @@ class DashboardState:
     def _load_metric_files(self, job: Job) -> None:
         if not job.metrics_dir:
             return
-        path = (ROOT / job.metrics_dir).resolve()
+        metrics_path = Path(job.metrics_dir).expanduser()
+        base_path = Path(job.cwd).expanduser() if job.cwd else ROOT
+        path = metrics_path.resolve() if metrics_path.is_absolute() else (base_path / metrics_path).resolve()
         if not path.exists() or not path.is_dir():
             return
         self._load_dashboard_state(job, path)
@@ -406,6 +422,7 @@ class DashboardState:
             return
         job._metric_keys.add(key)
         job.metrics.append({"name": name, "value": value, "step": step, "time": now()})
+        job.perf[name] = value
         job.step = max(job.step, step)
 
     def stop(self, job_id: str) -> bool:
@@ -545,6 +562,7 @@ class DashboardState:
                         or parse_command_option(command, "--metrics-log-dir")
                         or DEFAULT_METRICS_LOG_DIR,
                         pid=pid,
+                        cwd=str(item.get("cwd") or "") or None,
                     )
                     job.launch_config = dict(job.config)
                     job.config = {}
@@ -556,6 +574,7 @@ class DashboardState:
                 else:
                     job.command = command_parts or job.command
                     job.metrics_dir = item.get("metrics_dir") or job.metrics_dir
+                    job.cwd = str(item.get("cwd") or job.cwd or "") or None
                     if item.get("config") and not job.config:
                         job.config = dict(item.get("config") or {})
                     if item.get("config") and not job.launch_config:
@@ -953,6 +972,426 @@ def cached_env_checks() -> tuple[dict[str, Any], list[dict[str, Any]], dict[str,
         return ENV_REPORT_CACHE, ENV_CHECKS_CACHE, ENV_CHECK_COUNTS_CACHE
 
 
+def refresh_runtime_diagnostics() -> dict[str, Any]:
+    global ENV_REPORT_CACHE, ENV_CHECKS_CACHE, ENV_CHECK_COUNTS_CACHE
+    with ENV_CACHE_LOCK:
+        ENV_REPORT_CACHE = None
+        ENV_CHECKS_CACHE = None
+        ENV_CHECK_COUNTS_CACHE = None
+    return runtime_env()
+
+
+def repair_action_for_check(check: dict[str, Any]) -> dict[str, Any]:
+    name = str(check.get("name") or "runtime-check")
+    normalized = name.lower().replace(" ", "-")
+    next_step = str(check.get("next_step") or check.get("detail") or "Review the environment check.")
+    package = None
+    command = None
+    if "flash_attn" in name.lower() or "flash-attn" in name.lower():
+        package = "flash-attn"
+        command = [sys.executable, "-m", "pip", "install", "flash-attn", "--no-build-isolation"]
+    elif "flash_linear_attention" in name.lower():
+        package = "flash-linear-attention"
+        command = [sys.executable, "-m", "pip", "install", "flash-linear-attention"]
+    return {
+        "id": f"repair-{re.sub(r'[^a-z0-9-]+', '-', normalized).strip('-')}",
+        "label": "Fix" if command else None,
+        "kind": "install_package" if command else "guidance",
+        "package": package,
+        "command": command,
+        "guidance": next_step,
+        "safe_to_run_automatically": bool(command),
+    }
+
+
+def start_runtime_repair(action: dict[str, Any]) -> Job:
+    if action.get("kind") != "install_package" or not action.get("package") or not action.get("command"):
+        raise ValueError("runtime repair is not executable")
+    package = str(action["package"])
+    command = [str(part) for part in action["command"]]
+    allowed_commands = {
+        "flash-attn": [sys.executable, "-m", "pip", "install", "flash-attn", "--no-build-isolation"],
+        "flash-linear-attention": [sys.executable, "-m", "pip", "install", "flash-linear-attention"],
+    }
+    if allowed_commands.get(package) != command:
+        raise ValueError("runtime repair command is not allowed")
+    return STATE.start(
+        Job(
+            kind="runtime-repair",
+            name=f"Install {package}",
+            command=command,
+            config={"package": package, "repair_action_id": action["id"]},
+            metrics_dir=None,
+        )
+    )
+
+
+def runtime_attention() -> dict[str, Any]:
+    env = runtime_env()
+    checks = env.get("checks") or []
+    actionable = [check for check in checks if str(check.get("status", "")).upper() in {"FAIL", "WARN"}]
+    actionable.sort(key=lambda check: 0 if str(check.get("status", "")).upper() == "FAIL" else 1)
+    items = [
+        {
+            "status": str(check.get("status") or "WARN").lower(),
+            "name": check.get("name") or "Runtime check",
+            "detail": check.get("detail") or "No details reported.",
+            "repair": repair_action_for_check(check),
+        }
+        for check in actionable
+    ]
+    return {"attention": items[0] if items else None, "items": items, "ready": env.get("ready", False)}
+
+
+def dashboard_quick_actions() -> list[dict[str, Any]]:
+    presets_by_source = {item["source"]: item for item in launcher_presets()}
+    actions: list[dict[str, Any]] = []
+    for source, action_id, label in (
+        ("examples/math/dataset_loader.py", "launch-gspo-gsm8k", "Launch GSPO / GSM8K"),
+        ("examples/sft/alpaca/dataset_loader.py", "launch-sft-alpaca", "Launch SFT / Alpaca"),
+    ):
+        discovered = presets_by_source.get(source)
+        if discovered:
+            actions.append(
+                {
+                    "id": action_id,
+                    "label": label,
+                    "kind": "launcher_preset",
+                    "target": "launcher",
+                    "mode": "train",
+                    "preset": discovered["preset"],
+                    "source": source,
+                }
+            )
+    actions.extend(
+        [
+            {"id": "run-runtime-check", "label": "Run Runtime Check", "kind": "runtime_refresh", "target": "runtime"},
+            {
+                "id": "ask-agent-track-job",
+                "label": "Ask Agent to Track Job",
+                "kind": "agent_prompt",
+                "target": "agent",
+                "prompt": "Track the latest job and summarize its health, metrics, and recent errors.",
+            },
+        ]
+    )
+    return actions
+
+
+def _documented_train_configs() -> list[dict[str, Any]]:
+    configs: list[dict[str, Any]] = []
+    documents = [
+        ROOT / "README.md",
+        *sorted((ROOT / "examples").rglob("README.md")),
+        *sorted((ROOT / "docs").rglob("*.rst")),
+    ]
+    for document in documents:
+        if not document.is_file():
+            continue
+        try:
+            lines = document.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        index = 0
+        while index < len(lines):
+            if not lines[index].strip().startswith("areno train"):
+                index += 1
+                continue
+            command_lines = [lines[index].strip()]
+            index += 1
+            while index < len(lines):
+                candidate = lines[index].strip()
+                if not candidate.startswith("--") and not command_lines[-1].endswith("\\"):
+                    break
+                if candidate:
+                    command_lines.append(candidate)
+                index += 1
+                if command_lines[-1] and not command_lines[-1].endswith("\\"):
+                    break
+            command_text = " ".join(line.removesuffix("\\").strip() for line in command_lines)
+            try:
+                tokens = shlex.split(command_text)
+            except ValueError:
+                continue
+            config: dict[str, Any] = {}
+            position = 2
+            while position < len(tokens):
+                token = tokens[position]
+                if not token.startswith("--"):
+                    position += 1
+                    continue
+                key = token[2:].replace("-", "_")
+                if position + 1 < len(tokens) and not tokens[position + 1].startswith("--"):
+                    config[key] = tokens[position + 1]
+                    position += 2
+                else:
+                    config[key] = True
+                    position += 1
+            if config:
+                configs.append(config)
+    return configs
+
+
+def launcher_presets() -> list[dict[str, Any]]:
+    examples_root = ROOT / "examples"
+    if not examples_root.is_dir():
+        return []
+    documented = _documented_train_configs()
+    presets: list[dict[str, Any]] = []
+    for loader in sorted(examples_root.rglob("dataset_loader*.py")):
+        if "__pycache__" in loader.parts:
+            continue
+        loader_path = loader.relative_to(ROOT).as_posix()
+        suffix = loader.stem.removeprefix("dataset_loader")
+        matching = next((item for item in documented if item.get("dataset_loader_fn") == loader_path), {})
+        config = dict(matching)
+        config["dataset_loader_fn"] = loader_path
+        config.setdefault("algo", "sft" if "sft" in loader.parts else "gspo")
+        reward = loader.with_name(f"reward{suffix}.py")
+        agent = loader.with_name(f"run_agent{suffix}.py")
+        local_datasets = sorted(loader.parent.glob("dataset.*"))
+        if reward.is_file():
+            config["reward_fn_path"] = reward.relative_to(ROOT).as_posix()
+        if agent.is_file():
+            config["agent_fn"] = agent.relative_to(ROOT).as_posix()
+        if not config.get("dataset_path") and local_datasets:
+            config["dataset_path"] = local_datasets[0].relative_to(ROOT).as_posix()
+        display_parts = [part.replace("_", " ").title() for part in loader.parent.relative_to(examples_root).parts]
+        variant = suffix.lstrip("_").replace("_", " ").title()
+        label = " / ".join(display_parts) + (f" / {variant}" if variant else "")
+        presets.append(
+            {
+                "id": f"example-{re.sub(r'[^a-z0-9]+', '-', loader_path.lower()).strip('-')}",
+                "label": label,
+                "mode": "train",
+                "preset": config,
+                "source": loader_path,
+            }
+        )
+    return presets
+
+
+def execute_dashboard_quick_action(payload: dict[str, Any]) -> dict[str, Any]:
+    action_id = str(payload.get("action_id") or "")
+    action = next((item for item in dashboard_quick_actions() if item["id"] == action_id), None)
+    if action is None:
+        raise ValueError("unknown quick action")
+    if action["kind"] == "runtime_refresh":
+        env = refresh_runtime_diagnostics()
+        lines = ["$ areno check", ""]
+        for check in env.get("checks") or []:
+            lines.append(f"[{str(check.get('status') or 'UNKNOWN').upper()}] {check.get('name') or 'Runtime check'}")
+            if check.get("detail"):
+                lines.append(f"  {check['detail']}")
+        counts = env.get("check_counts") or {}
+        lines.extend(
+            ["", f"Summary: {counts.get('ok', 0)} OK, {counts.get('warn', 0)} WARN, {counts.get('fail', 0)} FAIL"]
+        )
+        return {"ok": True, "action": action, "command": ["areno", "check"], "output": "\n".join(lines), "env": env}
+    if action["kind"] == "launcher_preset":
+        supplied = payload.get("config") if isinstance(payload.get("config"), dict) else {}
+        config = {**supplied, **action.get("preset", {})}
+        if not config.get("ckpt") or not config.get("dataset_path"):
+            raise ValueError("discovered launcher preset is missing checkpoint or dataset path")
+        job = Job(
+            kind="train",
+            name=f"train {config.get('algo', '')} {config.get('ckpt', '')}",
+            command=build_train_command(config),
+            config=config,
+            metrics_dir=config.get("metrics_dir"),
+        )
+        return {"ok": True, "action": action, "job": STATE.start(job).to_json()}
+    raise ValueError("this quick action must be executed through the agent stream")
+
+
+def launcher_preflight_action(payload: dict[str, Any]) -> dict[str, Any]:
+    mode = str(payload.get("mode") or "train")
+    config = payload.get("config") if isinstance(payload.get("config"), dict) else {}
+    check_id = str(payload.get("check_id") or "")
+    action = str(payload.get("action") or "view")
+    if mode not in {"train", "serve"}:
+        raise ValueError("launcher preflight mode must be train or serve")
+    if action not in {"view", "tune"}:
+        raise ValueError("launcher preflight action must be view or tune")
+
+    env = runtime_env()
+    visible_gpus = len(env.get("gpus") or [])
+    world_size = max(0, int(config.get("world_size") or 0))
+    tp_size = max(0, int(config.get("tp_size") or 0))
+    batch_size = max(0, int(config.get("batch_size") or 0))
+    mini_bs = max(0, int(config.get("mini_bs") or 0))
+    max_new_tokens = max(0, int(config.get("max_new_tokens") or 0))
+    max_running_prompts = max(0, int(config.get("max_running_prompts") or 0))
+    batch_relation_ok = (
+        batch_size > 0 and mini_bs > 0 and batch_size % mini_bs == 0 if mode == "train" else max_running_prompts > 0
+    )
+
+    checks: dict[str, dict[str, Any]] = {
+        "gpu_count": {
+            "name": "GPU count",
+            "status": "ok" if world_size > 0 and visible_gpus >= world_size else "fail",
+            "detail": f"World size {world_size} requires {world_size} GPUs; {visible_gpus} are visible.",
+        },
+        "tensor_parallel": {
+            "name": "Tensor parallelism",
+            "status": "ok" if world_size > 0 and tp_size > 0 and world_size % tp_size == 0 else "fail",
+            "detail": f"World size {world_size} must be divisible by TP size {tp_size}.",
+        },
+        "batch_relation": {
+            "name": "Batch relation" if mode == "train" else "Serving capacity",
+            "status": "ok" if batch_relation_ok else "fail",
+            "detail": (
+                f"Batch size {batch_size} must be divisible by mini batch size {mini_bs}."
+                if mode == "train"
+                else f"Maximum running prompts is {max_running_prompts}."
+            ),
+        },
+        "max_new_tokens": {
+            "name": "Max new tokens",
+            "status": "warn" if mode == "train" and max_new_tokens > 1024 else "ok",
+            "detail": f"max_new_tokens={max_new_tokens} may increase rollout memory."
+            if max_new_tokens > 1024
+            else f"max_new_tokens={max_new_tokens} is within the preflight target.",
+        },
+    }
+
+    check = checks.get(check_id)
+    if check is None:
+        raise ValueError("unknown launcher preflight check")
+    result = {
+        "ok": True,
+        "action": action,
+        "check_id": check_id,
+        "check": check,
+        "environment": {"visible_gpus": visible_gpus},
+    }
+    if action == "view":
+        return result
+    if mode != "train":
+        raise ValueError("smoke tuning is available for train configurations only")
+    if not config.get("ckpt") or not config.get("dataset_path"):
+        raise ValueError("smoke tuning requires checkpoint and dataset path")
+    stage = "infer" if check_id in {"gpu_count", "max_new_tokens"} else "train"
+    command = build_smoke_infer_command(config) if stage == "infer" else build_smoke_train_command(config)
+    mini_bs = max(1, int(config.get("mini_bs") or 1))
+    tuning_params = (
+        {
+            "world_size": world_size,
+            "tp_size": tp_size,
+            "batch_size": 1,
+            "n_samples": 1,
+            "mini_bs": 1,
+            "max_running_prompts": config.get("max_running_prompts") or "auto",
+            "max_prompt_tokens": int(config.get("max_prompt_tokens") or 1024),
+            "max_new_tokens": max_new_tokens,
+        }
+        if stage == "infer"
+        else {
+            "world_size": world_size,
+            "tp_size": tp_size,
+            "batch_size": mini_bs,
+            "n_samples": 1,
+            "mini_bs": mini_bs,
+            "max_running_prompts": 1,
+            "adam_8bit": bool_like(config.get("adam_8bit")),
+            "keep_rollout_state": False,
+        }
+    )
+    job = Job(
+        kind="train",
+        name=f"smoke {stage} {config.get('algo', '')} {config.get('ckpt', '')}",
+        command=command,
+        config=config,
+        metrics_dir=config.get("metrics_dir"),
+    )
+    result.update(
+        {"smoke_stage": stage, "command": command, "tuning_params": tuning_params, "job": STATE.start(job).to_json()}
+    )
+    return result
+
+
+def record_agent_error(error: str, *, kind: str, job_id: Any = None, retryable: bool = True) -> None:
+    with AGENT_RECOVERY_LOCK:
+        AGENT_RECOVERY_STATE.update(
+            {
+                "active": True,
+                "error": error[:4000],
+                "kind": kind,
+                "retryable": retryable,
+                "job_id": job_id,
+                "updated_at": now(),
+            }
+        )
+
+
+def clear_agent_error() -> None:
+    with AGENT_RECOVERY_LOCK:
+        AGENT_RECOVERY_STATE.update(
+            {"active": False, "error": None, "kind": None, "retryable": False, "job_id": None, "updated_at": now()}
+        )
+
+
+def agent_recovery(job_id: Any = None) -> dict[str, Any]:
+    with AGENT_RECOVERY_LOCK:
+        state = dict(AGENT_RECOVERY_STATE)
+    actions = []
+    if state.get("retryable"):
+        actions.append({"id": "retry-agent", "label": "Retry failed request", "kind": "agent_retry"})
+    if state.get("active"):
+        actions.append({"id": "dismiss-agent-error", "label": "Dismiss", "kind": "agent_dismiss"})
+    return {"recovery": state, "actions": actions}
+
+
+def agent_follow_ups(payload: dict[str, Any]) -> dict[str, Any]:
+    provider = payload.get("provider") if isinstance(payload.get("provider"), dict) else {}
+    base_url = str(provider.get("base_url") or os.environ.get("OPENAI_BASE_URL", "")).rstrip("/")
+    api_key = str(provider.get("api_key") or os.environ.get("OPENAI_API_KEY", ""))
+    model = str(provider.get("model") or os.environ.get("OPENAI_MODEL", "gpt-4.1-mini"))
+    if not base_url or not api_key:
+        raise ValueError("Configure the agent provider before generating follow-ups")
+    job = STATE.get_job(payload.get("job_id"))
+    env = runtime_env()
+    context = {
+        "job": job.to_summary_json() if job else None,
+        "runtime": {
+            "ready": env.get("ready"),
+            "check_counts": env.get("check_counts"),
+            "gpu_summary": env.get("gpu_summary"),
+        },
+        "conversation": normalize_agent_history(payload.get("history"))[-6:],
+    }
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "Generate exactly three concise AReno operations follow-ups. Return only a JSON array. "
+                "Each item must contain label and prompt strings. Suggestions must be grounded in the supplied context, "
+                "must not claim an action already happened, and must be safe to ask an operations agent. "
+                + agent_language_instruction(payload)
+            ),
+        },
+        {"role": "user", "content": json.dumps(context, ensure_ascii=False)},
+    ]
+    message = post_chat_completion(base_url, api_key, {"model": model, "messages": messages, "temperature": 0.2})
+    content = str(message.get("content") or "").strip()
+    if content.startswith("```"):
+        content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content, flags=re.IGNORECASE)
+    parsed = json.loads(content)
+    if not isinstance(parsed, list):
+        raise ValueError("follow-up response must be a JSON array")
+    follow_ups = []
+    for index, item in enumerate(parsed[:3]):
+        if not isinstance(item, dict):
+            continue
+        label = str(item.get("label") or "").strip()[:80]
+        prompt = str(item.get("prompt") or "").strip()[:2000]
+        if label and prompt:
+            follow_ups.append({"id": f"llm-follow-up-{index + 1}", "label": label, "prompt": prompt})
+    if len(follow_ups) != 3:
+        raise ValueError("follow-up response did not contain exactly three valid actions")
+    return {"follow_ups": follow_ups, "model": model, "generated_at": now()}
+
+
 def pid_is_running(pid: int) -> bool:
     try:
         os.kill(pid, 0)
@@ -964,7 +1403,9 @@ def pid_is_running(pid: int) -> bool:
 def build_agent_messages(payload: dict[str, Any]) -> list[dict[str, Any]]:
     job = STATE.get_job(payload.get("job_id"))
     context = job.to_summary_json() if job else {}
-    messages: list[dict[str, Any]] = [{"role": "system", "content": agent_system_prompt()}]
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": f"{agent_system_prompt()}\n\n{agent_language_instruction(payload)}"}
+    ]
     for item in normalize_agent_history(payload.get("history")):
         messages.append(item)
     messages.append(
@@ -974,6 +1415,12 @@ def build_agent_messages(payload: dict[str, Any]) -> list[dict[str, Any]]:
         }
     )
     return messages
+
+
+def agent_language_instruction(payload: dict[str, Any]) -> str:
+    if str(payload.get("language") or "en").lower() == "zh":
+        return "Respond in Simplified Chinese, including suggested labels and follow-up prompts. Keep commands, paths, metric keys, and code unchanged."
+    return "Respond in English, including suggested labels and follow-up prompts."
 
 
 def normalize_agent_history(raw_history: Any) -> list[dict[str, str]]:
@@ -999,6 +1446,12 @@ def agent_response(payload: dict[str, Any]) -> dict[str, Any]:
     api_key = str(provider.get("api_key") or os.environ.get("OPENAI_API_KEY", ""))
     model = str(provider.get("model") or os.environ.get("OPENAI_MODEL", "gpt-4.1-mini"))
     if not base_url or not api_key:
+        record_agent_error(
+            "Configure base URL, API key, and model before asking the agent.",
+            kind="provider_configuration",
+            job_id=payload.get("job_id"),
+            retryable=False,
+        )
         return {
             "content": "Configure base URL, API key, and model before asking the agent.",
             "tool_calls": [],
@@ -1007,11 +1460,12 @@ def agent_response(payload: dict[str, Any]) -> dict[str, Any]:
     all_tool_calls: list[dict[str, Any]] = []
     all_tool_results: list[dict[str, Any]] = []
     try:
-        for _ in range(6):
+        while True:
             body = {"model": model, "messages": messages, "tools": agent_tool_schemas(), "tool_choice": "auto"}
             message = post_chat_completion(base_url, api_key, body)
             tool_calls = message.get("tool_calls") or []
             if not tool_calls:
+                clear_agent_error()
                 return {
                     "content": message.get("content") or "",
                     "tool_calls": all_tool_calls,
@@ -1037,18 +1491,16 @@ def agent_response(payload: dict[str, Any]) -> dict[str, Any]:
                         "content": json.dumps(result, ensure_ascii=False),
                     }
                 )
-        return {
-            "content": "Agent stopped after too many tool calls. Inspect the tool results and retry with a narrower request.",
-            "tool_calls": all_tool_calls,
-            "tool_results": all_tool_results,
-        }
     except urllib.error.HTTPError as exc:
+        detail = f"HTTP {exc.code}: {exc.read().decode('utf-8', errors='replace')}"
+        record_agent_error(detail, kind="provider_http", job_id=payload.get("job_id"))
         return {
-            "content": f"Agent request failed: HTTP {exc.code}: {exc.read().decode('utf-8', errors='replace')}",
+            "content": f"Agent request failed: {detail}",
             "tool_calls": all_tool_calls,
             "tool_results": all_tool_results,
         }
     except Exception as exc:
+        record_agent_error(str(exc), kind="agent_request", job_id=payload.get("job_id"))
         return {
             "content": f"Agent request failed: {exc}",
             "tool_calls": all_tool_calls,
@@ -1062,12 +1514,19 @@ def agent_event_stream(payload: dict[str, Any]):
     api_key = str(provider.get("api_key") or os.environ.get("OPENAI_API_KEY", ""))
     model = str(provider.get("model") or os.environ.get("OPENAI_MODEL", "gpt-4.1-mini"))
     if not base_url or not api_key:
+        record_agent_error(
+            "Configure base URL, API key, and model before asking the agent.",
+            kind="provider_configuration",
+            job_id=payload.get("job_id"),
+            retryable=False,
+        )
         yield {"type": "error", "content": "Configure base URL, API key, and model before asking the agent."}
         yield {"type": "done"}
         return
     messages = build_agent_messages(payload)
     try:
-        for round_index in range(6):
+        round_index = 0
+        while True:
             body = {
                 "model": model,
                 "messages": messages,
@@ -1078,6 +1537,7 @@ def agent_event_stream(payload: dict[str, Any]):
             message = yield from stream_chat_completion(base_url, api_key, body, round_index=round_index)
             tool_calls = message.get("tool_calls") or []
             if not tool_calls:
+                clear_agent_error()
                 yield {"type": "done", "content": message.get("content") or ""}
                 return
             assistant_message = {
@@ -1100,15 +1560,14 @@ def agent_event_stream(payload: dict[str, Any]):
                         "content": json.dumps(result, ensure_ascii=False),
                     }
                 )
-        yield {
-            "type": "error",
-            "content": "Agent stopped after too many tool calls. Retry with a narrower request.",
-        }
-        yield {"type": "done"}
+            round_index += 1
     except urllib.error.HTTPError as exc:
-        yield {"type": "error", "content": f"HTTP {exc.code}: {exc.read().decode('utf-8', errors='replace')}"}
+        detail = f"HTTP {exc.code}: {exc.read().decode('utf-8', errors='replace')}"
+        record_agent_error(detail, kind="provider_http", job_id=payload.get("job_id"))
+        yield {"type": "error", "content": detail}
         yield {"type": "done"}
     except Exception as exc:
+        record_agent_error(str(exc), kind="agent_request", job_id=payload.get("job_id"))
         yield {"type": "error", "content": str(exc)}
         yield {"type": "done"}
 
@@ -1196,6 +1655,42 @@ def post_chat_completion(base_url: str, api_key: str, body: dict[str, Any]) -> d
 
 def agent_tool_schemas() -> list[dict[str, Any]]:
     return [
+        {
+            "type": "function",
+            "function": {
+                "name": "create_plan",
+                "description": "Create a proposed task execution plan for user review before calling tools that start or stop work.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "objective": {"type": "string"},
+                        "summary": {"type": "string"},
+                        "steps": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": 12,
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "title": {"type": "string"},
+                                    "detail": {"type": "string"},
+                                },
+                                "required": ["title"],
+                                "additionalProperties": False,
+                            },
+                        },
+                        "parameters": {"type": "object", "additionalProperties": True},
+                        "tool": {
+                            "type": "string",
+                            "enum": ["start_train", "start_serve", "smoke_train", "smoke_infer"],
+                        },
+                        "command": {"type": "string"},
+                    },
+                    "required": ["objective", "steps"],
+                    "additionalProperties": False,
+                },
+            },
+        },
         {
             "type": "function",
             "function": {
@@ -1385,6 +1880,38 @@ def execute_agent_tool(tool_call: dict[str, Any]) -> dict[str, Any]:
     except json.JSONDecodeError:
         args = {}
     try:
+        if name == "create_plan":
+            objective = str(args.get("objective") or "").strip()
+            raw_steps = args.get("steps") if isinstance(args.get("steps"), list) else []
+            steps = []
+            for index, item in enumerate(raw_steps[:12]):
+                if not isinstance(item, dict) or not str(item.get("title") or "").strip():
+                    continue
+                steps.append(
+                    {
+                        "id": index + 1,
+                        "title": str(item["title"]).strip()[:160],
+                        "detail": str(item.get("detail") or "").strip()[:1000],
+                        "status": "pending",
+                    }
+                )
+            if not objective or not steps:
+                return {"name": name, "ok": False, "error": "objective and at least one valid step are required"}
+            parameters = args.get("parameters") if isinstance(args.get("parameters"), dict) else {}
+            return {
+                "name": name,
+                "ok": True,
+                "plan": {
+                    "id": uuid4().hex[:12],
+                    "status": "proposed",
+                    "objective": objective[:500],
+                    "summary": str(args.get("summary") or "").strip()[:2000],
+                    "steps": steps,
+                    "parameters": {str(key)[:80]: str(value)[:500] for key, value in list(parameters.items())[:20]},
+                    "tool": str(args.get("tool") or "")[:40],
+                    "command": str(args.get("command") or "").strip()[:4000],
+                },
+            }
         if name == "list_folder":
             return {"name": name, "ok": True, **FILE_BROWSER.list_folder(args.get("path"))}
         if name == "cd":
@@ -1489,6 +2016,15 @@ class Handler(BaseHTTPRequestHandler):
             path = self.route_path()
             if path == "/api/env":
                 self.json(runtime_env())
+            elif path == "/api/runtime/attention":
+                self.json(runtime_attention())
+            elif path == "/api/quick-actions":
+                self.json({"actions": dashboard_quick_actions()})
+            elif path == "/api/launcher/presets":
+                self.json({"presets": launcher_presets()})
+            elif path == "/api/agent/recovery":
+                query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+                self.json(agent_recovery(query.get("job_id", [None])[0]))
             elif path == "/api/jobs":
                 self.json({"jobs": STATE.list_jobs()})
             elif path.startswith("/api/jobs/") and path.endswith("/metrics"):
@@ -1536,6 +2072,47 @@ class Handler(BaseHTTPRequestHandler):
                 self.json({"job": STATE.start(job).to_json()})
             elif path.startswith("/api/jobs/") and path.endswith("/stop"):
                 self.json({"stopped": STATE.stop(path.split("/")[-2])})
+            elif path == "/api/runtime/refresh":
+                env = refresh_runtime_diagnostics()
+                self.json({"env": env, **runtime_attention()})
+            elif path == "/api/quick-actions/run":
+                self.json(execute_dashboard_quick_action(payload))
+            elif path == "/api/launcher/preflight":
+                self.json(launcher_preflight_action(payload))
+            elif path == "/api/runtime/repair":
+                action_id = str(payload.get("action_id") or "")
+                if action_id == "refresh-runtime":
+                    env = refresh_runtime_diagnostics()
+                    self.json({"ok": True, "env": env, **runtime_attention()})
+                else:
+                    actions = [item["repair"] for item in runtime_attention().get("items", [])]
+                    action = next((item for item in actions if item.get("id") == action_id), None)
+                    if action is None:
+                        self.error("unknown repair action", HTTPStatus.NOT_FOUND)
+                    elif action.get("kind") == "install_package":
+                        job = start_runtime_repair(action)
+                        self.json(
+                            {"ok": job.status != "failed", "action": action, "executed": True, "job": job.to_json()}
+                        )
+                    else:
+                        self.json({"ok": True, "action": action, "executed": False})
+            elif path == "/api/agent/follow-ups":
+                self.json(agent_follow_ups(payload))
+            elif path == "/api/agent/tools/run":
+                tool = str(payload.get("tool") or "")
+                allowed = {"start_train", "start_serve", "smoke_train", "smoke_infer"}
+                if tool not in allowed:
+                    self.error("unsupported plan execution tool", HTTPStatus.BAD_REQUEST)
+                else:
+                    parameters = payload.get("parameters") if isinstance(payload.get("parameters"), dict) else {}
+                    self.json(
+                        execute_agent_tool(
+                            {"function": {"name": tool, "arguments": json.dumps({"config": parameters})}}
+                        )
+                    )
+            elif path == "/api/agent/recovery/clear":
+                clear_agent_error()
+                self.json(agent_recovery(payload.get("job_id")))
             elif path == "/api/agent/stream":
                 self.stream_jsonl(agent_event_stream(payload))
             elif path == "/api/agent":
@@ -1600,6 +2177,7 @@ class Handler(BaseHTTPRequestHandler):
             content_type = "text/css"
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", content_type)
+        self.send_header("Cache-Control", "no-cache")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)

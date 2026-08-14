@@ -544,6 +544,18 @@ def test_mix_validation_checks_later_rows_before_backend_initialization(tmp_path
         )
 
 
+@pytest.mark.parametrize(
+    "row",
+    [
+        {"tokens": [1, 2], "prompt_mask": [True, False]},
+        {"image_base64": "fixture", "response": "answer"},
+        {"images_base64": ["fixture"], "response": "answer"},
+    ],
+)
+def test_mix_validation_accepts_current_sft_row_contracts(row):
+    train_cli._validate_sft_mix_source("source", [row])
+
+
 def test_mix_imports_shared_loader_only_once(tmp_path):
     marker = tmp_path / "imports.txt"
     loader = tmp_path / "loader.py"

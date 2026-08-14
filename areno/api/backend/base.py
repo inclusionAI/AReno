@@ -76,6 +76,7 @@ class Backend(ABC):
         prompt_tokens: list[list[int]],
         n_samples: int,
         sampling_params: SamplingParams,
+        prompt_features: list[dict | None] | None = None,
     ) -> list[RolloutResult]:
         """Generate samples for a prompt batch, preserving input order."""
 
@@ -155,18 +156,28 @@ class Backend(ABC):
         self.end_rollout_session(ctx)
 
     def score_logprobs(
-        self, ctx: Context, role: str, token_rows: list[list[int]], *, microbatch_size: int = 8
+        self,
+        ctx: Context,
+        role: str,
+        token_rows: list[list[int]],
+        *,
+        features: list[dict | None] | None = None,
+        microbatch_size: int = 8,
     ) -> list[list[float]]:
         """Score fixed token rows with a backend-owned role."""
 
         raise NotImplementedError(f"{type(self).__name__} does not support role logprob scoring")
 
-    def score_values(self, ctx: Context, role: str, token_rows: list[list[int]]) -> list[list[float]]:
+    def score_values(
+        self, ctx: Context, role: str, token_rows: list[list[int]], *, features: list[dict | None] | None = None
+    ) -> list[list[float]]:
         """Score fixed token rows with a backend-owned critic role."""
 
         raise NotImplementedError(f"{type(self).__name__} does not support role value scoring")
 
-    def score_rewards(self, ctx: Context, role: str, token_rows: list[list[int]]) -> list[float]:
+    def score_rewards(
+        self, ctx: Context, role: str, token_rows: list[list[int]], *, features: list[dict | None] | None = None
+    ) -> list[float]:
         """Score fixed token rows with a backend-owned reward role."""
 
         raise NotImplementedError(f"{type(self).__name__} does not support role reward scoring")

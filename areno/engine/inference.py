@@ -228,6 +228,9 @@ class InferenceManager:
                 max_prefill_tokens=int(payload.max_prefill_tokens),
                 kv_block_size=int(payload.block_size),
                 num_cache_blocks=int(payload.num_blocks),
+                prompt_features=payload.prompt_features_by_dp[ctx.dp_rank]
+                if payload.prompt_features_by_dp is not None
+                else None,
             )
             self._init_infer_cache(
                 InferCacheSpec(
@@ -730,7 +733,10 @@ class InferenceManager:
         new_cache_seqlens = torch.tensor(
             [len(state.prompts[int(row)]) for row in new_rows.tolist()], device=self.device, dtype=torch.int32
         )
-        new_position_ids = new_cache_seqlens.to(torch.long)
+        new_position_deltas = torch.tensor(
+            state.decode_position_deltas(new_rows.detach().cpu().tolist()), device=self.device, dtype=torch.long
+        )
+        new_position_ids = new_cache_seqlens.to(torch.long) + new_position_deltas
         new_block_table = prefill.block_table.to(self.device, non_blocking=True).int()
         remove = torch.zeros(int(new_rows.numel()), device=self.device, dtype=torch.bool)
         finished = None
@@ -832,7 +838,10 @@ class InferenceManager:
         infer_meta = payload.infer_meta
         if infer_meta is None:
             infer_meta = payload_to_infer_meta(payload.raw, self.device)
-        self.model(input_ids=input_ids, position_ids=position_ids, infer_meta=infer_meta)
+        model_kwargs = {"input_ids": input_ids, "position_ids": position_ids, "infer_meta": infer_meta}
+        if payload.raw.get("features") is not None:
+            model_kwargs["features"] = payload.raw["features"]
+        self.model(**model_kwargs)
 
     def _mark_rollout_finished_rows(
         self,
@@ -868,7 +877,10 @@ class InferenceManager:
         infer_meta = payload.infer_meta
         if infer_meta is None:
             infer_meta = payload_to_infer_meta(payload.raw, self.device)
-        out = self.model(input_ids=input_ids, position_ids=position_ids, infer_meta=infer_meta)
+        model_kwargs = {"input_ids": input_ids, "position_ids": position_ids, "infer_meta": infer_meta}
+        if payload.raw.get("features") is not None:
+            model_kwargs["features"] = payload.raw["features"]
+        out = self.model(**model_kwargs)
         logits_shard = out.logits_shard
         sampling_params = payload.sampling_params
         if sampling_params.temperature == 0.0:

@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+import torch
 
 from areno.api.tokenizer import configure_chat_template_enable_thinking
 from areno.api.tool_call_parser import QwenToolCallParser
@@ -167,6 +168,71 @@ def test_serve_response_reuses_tool_call_parser():
     assert '"direction":"left"' in choice.message["tool_calls"][0]["function"]["arguments"]
 
 
+def test_serve_text_response_preserves_decoded_content():
+    class ThinkTokenizer:
+        def decode(self, token_ids, *, skip_special_tokens=False):
+            del token_ids
+            if skip_special_tokens:
+                return "plan the answer</think>\n\nFinal answer"
+            return "plan the answer</think>\n\nFinal answer<|im_end|>"
+
+    request = serve_mod.ChatCompletionRequest(
+        model="areno",
+        messages=[serve_mod.ChatMessage(role="user", content="describe")],
+    )
+
+    response = serve_mod._build_response_from(
+        ThinkTokenizer(),
+        "model",
+        QwenToolCallParser(),
+        request,
+        [10, 11],
+        [[1, 2, 3]],
+        ["stop"],
+    )
+
+    choice = response.choices[0]
+    assert "reasoning_content" not in choice.message
+    assert choice.message["content"] == "plan the answer</think>\n\nFinal answer"
+
+
+def test_serve_tool_call_response_does_not_attach_reasoning_content():
+    tokenizer = _TokenTokenizer(
+        {
+            1: "<think>block the fork</think>",
+            2: "<tool_call>",
+            3: '{"name":"choose_move","arguments":{"direction":"left"}}',
+            4: "</tool_call>",
+        }
+    )
+    request = serve_mod.ChatCompletionRequest(
+        model="areno",
+        messages=[serve_mod.ChatMessage(role="user", content="choose")],
+        tools=[
+            {
+                "type": "function",
+                "function": {"name": "choose_move"},
+            }
+        ],
+        tool_choice={"type": "function", "function": {"name": "choose_move"}},
+    )
+
+    response = serve_mod._build_response_from(
+        tokenizer,
+        "model",
+        QwenToolCallParser(),
+        request,
+        [10, 11],
+        [[1, 2, 3, 4]],
+        ["stop"],
+    )
+
+    choice = response.choices[0]
+    assert choice.message["content"] is None
+    assert "reasoning_content" not in choice.message
+    assert choice.message["tool_calls"][0]["function"]["name"] == "choose_move"
+
+
 def test_serve_chat_template_receives_tools_and_tool_messages():
     tokenizer = _ToolAwareTokenizer()
     messages = [
@@ -194,6 +260,188 @@ def test_serve_chat_template_can_disable_thinking():
 
     assert serve_mod._encode_messages(tokenizer, [serve_mod.ChatMessage(role="user", content="hello")]) == [1]
     assert tokenizer.calls[0][1]["enable_thinking"] is False
+
+
+def test_serve_multimodal_processor_chat_template_can_disable_thinking():
+    image = (
+        "data:image/png;base64,"
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADUlEQVR4nGP8z8BQDwAFgwJ/lwJw6QAAAABJRU5ErkJggg=="
+    )
+
+    class FakeProcessor:
+        image_token_id = 99
+
+        def __init__(self):
+            self.calls = []
+
+        def apply_chat_template(self, messages, **kwargs):
+            self.calls.append((messages, dict(kwargs)))
+            return "<image> describe"
+
+        def __call__(self, *, text, images, return_tensors):
+            del text, images, return_tensors
+            return {
+                "input_ids": torch.tensor([[1, 99, 2]]),
+                "image_embeds": torch.ones(1, 4),
+            }
+
+    processor = FakeProcessor()
+    configure_chat_template_enable_thinking(processor, False)
+    messages = [
+        serve_mod.ChatMessage(
+            role="user",
+            content=[
+                {"type": "image_url", "image_url": {"url": image}},
+                {"type": "text", "text": "describe"},
+            ],
+        )
+    ]
+
+    serve_mod._encode_messages_with_features(SimpleNamespace(eos_token_id=1), processor, messages)
+
+    assert processor.calls[0][1]["enable_thinking"] is False
+
+
+def test_serve_multimodal_encoder_uses_processor_for_image_data_url():
+    image = (
+        "data:image/png;base64,"
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADUlEQVR4nGP8z8BQDwAFgwJ/lwJw6QAAAABJRU5ErkJggg=="
+    )
+
+    class FakeProcessor:
+        image_token_id = 99
+
+        def apply_chat_template(self, messages, *, tokenize, add_generation_prompt):
+            self.messages = messages
+            self.template_args = (tokenize, add_generation_prompt)
+            return "<image> describe"
+
+        def __call__(self, *, text, images, return_tensors):
+            self.call_args = (text, len(images), return_tensors)
+            return {
+                "input_ids": torch.tensor([[1, 99, 2]]),
+                "image_embeds": torch.ones(1, 4),
+            }
+
+    tokenizer = SimpleNamespace(eos_token_id=1)
+    processor = FakeProcessor()
+    messages = [
+        serve_mod.ChatMessage(
+            role="user",
+            content=[
+                {"type": "image_url", "image_url": {"url": image}},
+                {"type": "text", "text": "describe"},
+            ],
+        )
+    ]
+
+    tokens, features = serve_mod._encode_messages_with_features(tokenizer, processor, messages)
+
+    assert tokens == [1, 99, 2]
+    assert features["image_token_id"] == 99
+    assert torch.equal(features["image_embeds"], torch.ones(1, 4))
+    assert processor.call_args == (["<image> describe"], 1, "pt")
+    assert processor.messages[0]["content"][0]["type"] == "image"
+    assert processor.messages[0]["content"][0]["image"] == image
+    assert "image_url" not in processor.messages[0]["content"][0]
+
+
+def test_serve_multimodal_encoder_passes_tools_to_processor_chat_template():
+    image = (
+        "data:image/png;base64,"
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADUlEQVR4nGP8z8BQDwAFgwJ/lwJw6QAAAABJRU5ErkJggg=="
+    )
+
+    class FakeProcessor:
+        image_token_id = 99
+
+        def apply_chat_template(self, messages, *, tokenize, add_generation_prompt, tools=None):
+            self.messages = messages
+            self.kwargs = {
+                "tokenize": tokenize,
+                "add_generation_prompt": add_generation_prompt,
+                "tools": tools,
+            }
+            return "<image> choose"
+
+        def __call__(self, *, text, images, return_tensors):
+            self.call_args = (text, len(images), return_tensors)
+            return {
+                "input_ids": torch.tensor([[1, 99, 2]]),
+                "image_embeds": torch.ones(1, 4),
+            }
+
+    tools = [{"type": "function", "function": {"name": "choose_square"}}]
+    processor = FakeProcessor()
+    messages = [
+        serve_mod.ChatMessage(
+            role="user",
+            content=[
+                {"type": "image_url", "image_url": {"url": image}},
+                {"type": "text", "text": "choose"},
+            ],
+        )
+    ]
+
+    tokens, features = serve_mod._encode_messages_with_features(
+        SimpleNamespace(eos_token_id=1),
+        processor,
+        messages,
+        tools=tools,
+    )
+
+    assert tokens == [1, 99, 2]
+    assert features["image_token_id"] == 99
+    assert processor.kwargs["tools"] == tools
+    assert processor.messages[0]["content"][0]["type"] == "image"
+    assert processor.call_args == (["<image> choose"], 1, "pt")
+
+
+def test_serve_multimodal_encoder_expands_qwen_image_grid_tokens():
+    image = (
+        "data:image/png;base64,"
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADUlEQVR4nGP8z8BQDwAFgwJ/lwJw6QAAAABJRU5ErkJggg=="
+    )
+
+    class FakeProcessor:
+        image_token_id = 99
+
+        def apply_chat_template(self, messages, *, tokenize, add_generation_prompt):
+            del messages, tokenize, add_generation_prompt
+            return "<image> describe"
+
+        def __call__(self, *, text, images, return_tensors):
+            del text, images, return_tensors
+            return {
+                "input_ids": torch.tensor([[1, 99, 2]]),
+                "pixel_values": torch.zeros(256, 1536),
+                "image_grid_thw": torch.tensor([[1, 16, 16]]),
+            }
+
+    tokens, features = serve_mod._encode_messages_with_features(
+        SimpleNamespace(eos_token_id=1),
+        FakeProcessor(),
+        [
+            serve_mod.ChatMessage(
+                role="user",
+                content=[
+                    {"type": "image_url", "image_url": {"url": image}},
+                    {"type": "text", "text": "describe"},
+                ],
+            )
+        ],
+    )
+
+    assert len(tokens) == 66
+    assert tokens.count(99) == 64
+    assert features["image_token_id"] == 99
+
+
+def test_serve_multimodal_encoder_rejects_images_without_processor():
+    messages = [serve_mod.ChatMessage(role="user", content=[{"type": "image", "image": "/tmp/missing.png"}])]
+
+    with pytest.raises(ValueError, match="requires a checkpoint processor"):
+        serve_mod._encode_messages_with_features(SimpleNamespace(), None, messages)
 
 
 class _TokenTokenizer:

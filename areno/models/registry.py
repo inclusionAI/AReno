@@ -99,6 +99,12 @@ def save_model_weights(
     return _adapter(config.model_type).save_weights(_unwrap_compiled_model(model), output_path, source_path)
 
 
+def build_policy_weight_plan(model, config: ModelConfig):
+    """Build an adapter-owned canonical layout over the live model tensors."""
+
+    return _adapter(config.model_type).build_policy_plan(_unwrap_compiled_model(model))
+
+
 def _unwrap_compiled_model(model):
     """Strip any number of ``torch.compile`` wrappers to reveal the raw module."""
 

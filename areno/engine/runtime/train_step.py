@@ -130,9 +130,11 @@ def _pack_train_data(data_pack: dict[str, Any]) -> dict[str, Any]:
     ref_logprobs = data_pack.get("ref_logprobs")
     values = data_pack.get("values")
     returns = data_pack.get("returns")
+    features = data_pack.get("features")
     if not all(isinstance(x, torch.Tensor) for x in (prompt_mask, advantages, rollout_logprobs)):
         return data_pack
     has_ppo_fields = all(isinstance(x, torch.Tensor) for x in (ref_logprobs, values, returns))
+    packed_features = _pack_multimodal_features(features, input_ids, lengths, packed_ids.device)
 
     token_offset = 0
     action_offset = 0
@@ -181,6 +183,8 @@ def _pack_train_data(data_pack: dict[str, Any]) -> dict[str, Any]:
             "packed_num_sequences": batch,
         }
     )
+    if packed_features is not None:
+        packed["features"] = packed_features
     if has_ppo_fields:
         packed.update(
             {
@@ -190,6 +194,91 @@ def _pack_train_data(data_pack: dict[str, Any]) -> dict[str, Any]:
             }
         )
     return packed
+
+
+def _pack_multimodal_features(
+    features: object,
+    input_ids: torch.Tensor,
+    lengths: torch.Tensor,
+    device: torch.device,
+) -> dict | None:
+    if features is None:
+        return None
+    if not isinstance(features, list):
+        return features if isinstance(features, dict) else None
+    if len(features) != int(input_ids.shape[0]):
+        return None
+    packed_rows: list[dict] = []
+    packed_masks: list[torch.Tensor] = []
+    packed_positions: list[torch.Tensor] = []
+    image_token_id = None
+    has_any_feature = False
+    for row_idx, row in enumerate(features):
+        length = int(lengths[row_idx].item())
+        row_tokens = input_ids[row_idx, :length]
+        if not isinstance(row, dict):
+            packed_masks.append(torch.zeros(length, device=device, dtype=torch.bool))
+            packed_positions.append(torch.arange(length, device=device, dtype=torch.long).view(1, -1).expand(3, -1))
+            continue
+        has_any_feature = True
+        packed_rows.append(row)
+        row_image_token_id = row.get("image_token_id")
+        if row_image_token_id is not None:
+            image_token_id = int(row_image_token_id)
+        packed_masks.append(_row_image_token_mask(row, row_tokens, row_idx, image_token_id))
+        packed_positions.append(_row_mrope_positions(row, length, device))
+    if not has_any_feature:
+        return None
+    packed: dict = {"image_feature_rows": packed_rows}
+    if image_token_id is not None:
+        packed["image_token_id"] = image_token_id
+    if packed_masks:
+        packed["image_token_mask"] = torch.cat(packed_masks, dim=0).to(device=device, dtype=torch.bool)
+    if packed_positions:
+        packed["mrope_position_ids"] = torch.cat(packed_positions, dim=1).to(device=device, dtype=torch.long)
+    return packed
+
+
+def _row_image_token_mask(
+    row: dict, row_tokens: torch.Tensor, row_idx: int, image_token_id: int | None
+) -> torch.Tensor:
+    mask = row.get("image_token_mask")
+    if mask is not None:
+        mask = mask if isinstance(mask, torch.Tensor) else torch.as_tensor(mask)
+        if mask.ndim == 2:
+            mask = mask[row_idx]
+        mask = mask.reshape(-1).to(device=row_tokens.device, dtype=torch.bool)
+        if int(mask.numel()) >= int(row_tokens.numel()):
+            return mask[: row_tokens.numel()]
+    if image_token_id is not None:
+        return row_tokens == int(image_token_id)
+    return torch.zeros(int(row_tokens.numel()), device=row_tokens.device, dtype=torch.bool)
+
+
+def _row_mrope_positions(row: dict, length: int, device: torch.device) -> torch.Tensor:
+    positions = row.get("mrope_position_ids")
+    if positions is None:
+        return torch.arange(length, device=device, dtype=torch.long).view(1, -1).expand(3, -1)
+    positions = positions if isinstance(positions, torch.Tensor) else torch.as_tensor(positions)
+    positions = positions.to(device=device, dtype=torch.long)
+    if positions.ndim == 3 and int(positions.shape[0]) == 3 and int(positions.shape[1]) == 1:
+        positions = positions[:, 0, :]
+    elif positions.ndim == 3 and int(positions.shape[0]) == 1 and int(positions.shape[1]) == 3:
+        positions = positions[0]
+    if positions.ndim != 2 or int(positions.shape[0]) != 3:
+        return torch.arange(length, device=device, dtype=torch.long).view(1, -1).expand(3, -1)
+    current = min(int(positions.shape[-1]), length)
+    if current == length:
+        return positions[:, :length]
+    full = torch.empty((3, length), device=device, dtype=torch.long)
+    if current > 0:
+        full[:, :current] = positions[:, :current]
+        next_pos = int(positions[:, :current].max().item()) + 1
+    else:
+        next_pos = 0
+    tail_len = length - current
+    full[:, current:] = torch.arange(tail_len, device=device, dtype=torch.long).view(1, -1).expand(3, -1) + next_pos
+    return full
 
 
 def _grad_norm(parameters) -> float:

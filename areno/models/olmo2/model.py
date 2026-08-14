@@ -14,7 +14,11 @@ import torch
 import torch.distributed.nn.functional as dist_nn
 from torch import nn
 
-from areno.engine.checkpoints.common import load_checkpoint_weights, save_checkpoint_weights
+from areno.engine.checkpoints.common import (
+    build_checkpoint_policy_plan,
+    load_checkpoint_weights,
+    save_checkpoint_weights,
+)
 from areno.engine.config import ModelConfig
 from areno.engine.layers.attention import CausalSelfAttention
 from areno.engine.layers.linear import mark_tensor_parallel_parameter
@@ -141,3 +145,6 @@ class Olmo2Adapter(ModelAdapter):
         if not isinstance(model, Olmo2ForCausalLM):
             raise TypeError(f"Olmo2Adapter cannot save weights from {type(model)!r}")
         return save_checkpoint_weights(model, output_path, source_path, CHECKPOINT_SPEC)
+
+    def build_policy_plan(self, model: nn.Module):
+        return build_checkpoint_policy_plan(model, CHECKPOINT_SPEC)
