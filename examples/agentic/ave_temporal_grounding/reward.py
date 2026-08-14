@@ -10,6 +10,7 @@ from functools import lru_cache
 from typing import Any
 
 logger = logging.getLogger(__name__)
+JSON_QUOTE_TRANSLATION = str.maketrans({"\u201c": '"', "\u201d": '"'})
 
 
 def reward_fn(record: Any) -> float:
@@ -114,7 +115,7 @@ def _judge_request(
     )
     content = (response.choices[0].message.content or "").strip()
     try:
-        body = json.loads(content)
+        body = json.loads(content.translate(JSON_QUOTE_TRANSLATION))
     except json.JSONDecodeError as exc:
         logger.warning(
             "AVE judge returned invalid response model=%s expected=%s predicted=%s response=%r",

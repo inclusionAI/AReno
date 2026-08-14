@@ -204,7 +204,7 @@ def test_reward_logs_remote_judge_response(monkeypatch, caplog):
         def __init__(self, **_kwargs):
             def create(**request):
                 requests.append(request)
-                return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content='{"score":8.375}'))])
+                return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="{“score”:8.375}"))])
 
             self.chat = SimpleNamespace(completions=SimpleNamespace(create=create))
 
@@ -216,4 +216,4 @@ def test_reward_logs_remote_judge_response(monkeypatch, caplog):
 
     assert score == 8.375
     assert requests[0]["response_format"] == {"type": "json_object"}
-    assert "response='{\"score\":8.375}' score=8.375 normalized_reward=0.838" in caplog.text
+    assert "response='{“score”:8.375}' score=8.375 normalized_reward=0.838" in caplog.text
