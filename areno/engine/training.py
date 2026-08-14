@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-import json
-import logging
 import math
-import os
 
 import torch
 import torch.distributed as dist
@@ -22,15 +19,11 @@ from areno.engine.runtime.logprobs import (
 from areno.engine.runtime.train_step import (
     _clip_grad_norm,
     _grad_norm,
-    _grad_norm_by_group,
     _grad_zero_metrics,
     _merge_metrics,
     _pack_train_data,
     _train_meta,
 )
-
-logger = logging.getLogger(__name__)
-
 
 class TrainingManager:
     """Own actor forward/backward, gradient sync, and optimizer stepping."""
@@ -134,10 +127,6 @@ class TrainingManager:
             self._sync_tensor_parallel_replicated_gradients()
             self._finalize_router_expert_bias()
             grad_norm = _grad_norm(worker.model.parameters())
-            if os.getenv("ARENO_LOG_GRAD_NORMS", "0") == "1":
-                grouped_norms = _grad_norm_by_group(unwrap_model(worker.model).named_parameters())
-                if ctx.is_rank0:
-                    logger.info("gradient_norms_by_group=%s", json.dumps(grouped_norms, sort_keys=True))
             grad_zero_metrics = _grad_zero_metrics(worker.model.parameters())
             clipped_grad_norm = grad_norm
             if worker.grad_clip_norm is not None:
