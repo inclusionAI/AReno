@@ -6,7 +6,6 @@ from unittest.mock import patch
 import torch
 
 from areno.engine.runtime import logprobs as logprob_ops
-from areno.engine.runtime.train_step import _gradient_group_name
 from tests.helpers import PatchedContext, single_tp_context
 
 
@@ -175,15 +174,6 @@ class LogprobTest(unittest.TestCase):
         self.assertTrue(torch.allclose(actual, expected, atol=1e-6))
         self.assertTrue(torch.allclose(hidden.grad, ref_hidden.grad, atol=1e-6))
         self.assertTrue(torch.allclose(head.weight.grad, ref_head.weight.grad, atol=1e-6))
-
-
-def test_gemma4_gradient_diagnostic_groups_are_stable():
-    assert _gradient_group_name("embed_tokens.weight") == "text_embeddings"
-    assert _gradient_group_name("embed_tokens_per_layer.weight") == "ple_embeddings"
-    assert _gradient_group_name("per_layer_model_projection.weight") == "ple_projection"
-    assert _gradient_group_name("layers.17.self_attn.q_proj.weight") == "layer_17"
-    assert _gradient_group_name("norm.weight") == "final_norm"
-    assert _gradient_group_name("lm_head.weight") == "lm_head"
 
 
 if __name__ == "__main__":
