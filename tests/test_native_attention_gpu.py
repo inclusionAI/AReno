@@ -7,7 +7,6 @@ from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from areno.accel.attention import areno_paged_causal_attention_decode, areno_varlen_causal_attention
 
-
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="native attention equivalence tests require CUDA")
 
 
@@ -85,7 +84,8 @@ def _varlen_reference(
                 query_start=0,
                 window_left=window_left,
                 softmax_scale=softmax_scale,
-            ).squeeze(0)
+            )
+            .squeeze(0)
             .transpose(0, 1)
         )
     return torch.cat(outputs, dim=0)
@@ -120,7 +120,9 @@ def _paged_reference(
                 query_start=length - 1,
                 window_left=window_left,
                 softmax_scale=softmax_scale,
-            ).squeeze(2).squeeze(0)
+            )
+            .squeeze(2)
+            .squeeze(0)
         )
     return torch.stack(outputs, dim=0)
 
@@ -135,9 +137,7 @@ def _make_inputs(dtype: torch.dtype, device: torch.device) -> tuple[torch.Tensor
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16], ids=["float32", "float16"])
 @pytest.mark.parametrize("window_left", [None, 2], ids=["full", "window2"])
-def test_varlen_native_attention_matches_sdpa_forward_and_backward(
-    dtype: torch.dtype, window_left: int | None
-) -> None:
+def test_varlen_native_attention_matches_sdpa_forward_and_backward(dtype: torch.dtype, window_left: int | None) -> None:
     device = torch.device("cuda")
     q, k, v = _make_inputs(dtype, device)
     cu_seqlens = torch.tensor([0, 1, 4, 9], device=device, dtype=torch.int32)
@@ -178,18 +178,16 @@ def _make_paged_inputs(dtype: torch.dtype, device: torch.device) -> tuple[torch.
     q = torch.randn(2, 4, 32, device=device, dtype=dtype)
     k_update = torch.randn(2, 2, 32, device=device, dtype=dtype)
     v_update = torch.randn(2, 2, 32, device=device, dtype=dtype)
-    k_cache = torch.randn(4, 4, 2, 32, device=device, dtype=dtype)
-    v_cache = torch.randn(4, 4, 2, 32, device=device, dtype=dtype)
-    block_table = torch.tensor([[2, 0, 3], [1, 3, 0]], device=device, dtype=torch.int32)
+    k_cache = torch.randn(5, 4, 2, 32, device=device, dtype=dtype)
+    v_cache = torch.randn(5, 4, 2, 32, device=device, dtype=dtype)
+    block_table = torch.tensor([[2, 0, 0], [1, 3, 4]], device=device, dtype=torch.int32)
     cache_seqlens = torch.tensor([5, 8], device=device, dtype=torch.int32)
     return q, k_update, v_update, k_cache, v_cache, block_table, cache_seqlens
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16], ids=["float32", "float16"])
 @pytest.mark.parametrize("window_left", [None, 2], ids=["full", "window2"])
-def test_paged_native_attention_matches_sdpa_and_updates_cache(
-    dtype: torch.dtype, window_left: int | None
-) -> None:
+def test_paged_native_attention_matches_sdpa_and_updates_cache(dtype: torch.dtype, window_left: int | None) -> None:
     device = torch.device("cuda")
     q, k_update, v_update, k_cache, v_cache, block_table, cache_seqlens = _make_paged_inputs(dtype, device)
     expected_k_cache = k_cache.clone()
