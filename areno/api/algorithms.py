@@ -93,7 +93,7 @@ def list_algorithms(*, include_experimental: bool = True) -> dict[str, Algorithm
 
     if include_experimental:
         load_experimental_algorithms()
-    return dict(_ALGORITHMS)
+    return {name: spec for name, spec in _ALGORITHMS.items() if include_experimental or not spec.experimental}
 
 
 def load_experimental_algorithms() -> None:

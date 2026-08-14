@@ -534,7 +534,9 @@ class ArenoBackend(Backend):
         # forward worker can call it without having to know about the loss API.
         packs = []
         is_sft = _is_sft_loss_fn(loss_fn)
+        is_fixed_sequence_mean = _is_fixed_sequence_mean_loss_fn(loss_fn)
         sft_target_counts = [] if is_sft else None
+        sequence_counts = [] if is_fixed_sequence_mean else None
         for start in range(0, len(batch_data), mini_bs):
             seqs = batch_data[start : start + mini_bs]
             pack = _make_train_pack(seqs)
@@ -542,11 +544,20 @@ class ArenoBackend(Backend):
             packs.append(pack)
             if is_sft:
                 sft_target_counts.append(_sft_target_token_count(seqs))
+            if is_fixed_sequence_mean:
+                sequence_counts.append(len(seqs))
         if is_sft:
             _annotate_sft_token_mean_packs(
                 packs,
                 sft_target_counts,
                 gradient_accumulation_steps=gradient_accumulation_steps,
+            )
+        if is_fixed_sequence_mean:
+            _annotate_fixed_sequence_mean_packs(
+                packs,
+                sequence_counts,
+                gradient_accumulation_steps=gradient_accumulation_steps,
+                dp_size=int(engine.config.dp_size),
             )
         stats_list = engine.step(packs, gradient_accumulation_steps=gradient_accumulation_steps)
         if self._separate_rollout and any(bool(stats.stepped) for stats in stats_list):
@@ -796,6 +807,41 @@ def _is_sft_loss_fn(loss_fn: Callable) -> bool:
     """Return true for the built-in SFT loss, including simple partial wrappers."""
 
     return loss_fn is sft_loss_fn or getattr(loss_fn, "func", None) is sft_loss_fn
+
+
+def _is_fixed_sequence_mean_loss_fn(loss_fn: Callable) -> bool:
+    """Return true for losses normalized by a fixed constant per sequence."""
+
+    return getattr(loss_fn, "_areno_loss_reduction", None) == "fixed_sequence_mean"
+
+
+def _annotate_fixed_sequence_mean_packs(
+    packs: list[dict],
+    sequence_counts: list[int],
+    *,
+    gradient_accumulation_steps: int | None,
+    dp_size: int,
+) -> None:
+    """Attach sequence normalizers for one optimizer-step accumulation group."""
+
+    if not packs:
+        return
+    accumulation_steps = len(packs) if gradient_accumulation_steps is None else max(int(gradient_accumulation_steps), 1)
+    dp_size = max(int(dp_size), 1)
+    for group_start in range(0, len(packs), accumulation_steps):
+        group_end = min(group_start + accumulation_steps, len(packs))
+        group_total = max(sum(sequence_counts[group_start:group_end]), 1)
+        group_size = group_end - group_start
+        for pack, sequence_count in zip(
+            packs[group_start:group_end],
+            sequence_counts[group_start:group_end],
+            strict=True,
+        ):
+            pack["_fixed_sequence_total"] = group_total
+            # DP averages gradients across ranks. Sharded packs need the
+            # matching multiplier; packs smaller than DP are replicated.
+            dp_grad_scale = dp_size if int(sequence_count) >= dp_size else 1
+            pack["_fixed_sequence_grad_scale"] = group_size * dp_grad_scale
 
 
 def _annotate_sft_token_mean_packs(

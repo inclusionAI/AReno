@@ -176,6 +176,13 @@ class PolicyOnlyTrainer:
         # reference forward-time, ...) before they reach the metric recorder.
         return result
 
+    def _compute_group_advantages(self, rewards: list[float]) -> list[float]:
+        """Return the algorithm's scalar advantages for one prompt group."""
+
+        from areno.api.rewards import compute_group_advantages
+
+        return compute_group_advantages(rewards)
+
     def _agentic_enabled(self) -> bool:
         return bool(getattr(self.config, "agent_fn", None))
 
@@ -431,7 +438,6 @@ class PolicyOnlyTrainer:
         """Assemble TrainSequence rows from an agentic rollout batch."""
 
         import areno.api
-        from areno.api.rewards import compute_group_advantages
 
         del prompt_batch
         if agent_batch.rewards is None:
@@ -446,7 +452,7 @@ class PolicyOnlyTrainer:
         advantages_by_row: dict[int, float] = {}
         for row_indices in grouped.values():
             group_rewards = [rewards_all[row_idx] for row_idx in row_indices]
-            for row_idx, advantage in zip(row_indices, compute_group_advantages(group_rewards), strict=True):
+            for row_idx, advantage in zip(row_indices, self._compute_group_advantages(group_rewards), strict=True):
                 advantages_by_row[row_idx] = float(advantage)
         row_features = getattr(agent_batch, "features", [None] * len(agent_batch.token_rows))
         for row_idx, (tokens, response_mask, loss_mask, logprobs, reward, features) in enumerate(
@@ -562,15 +568,15 @@ class PolicyOnlyTrainer:
 
         Steps:
             1. Decode each completion and score it with `reward_fn`.
-            2. Standardise rewards within each prompt group to get advantages
-               (`compute_group_advantages`); this is the GRPO/GSPO baseline.
+            2. Compute one group-relative advantage per completion. The
+               default hook standardises rewards for the GRPO/GSPO baseline.
             3. Stitch each prompt prefix with its response tokens and copy the
                group-level advantage onto every response position; prompt
                positions carry zero advantage and zero logprob.
         """
 
         import areno.api
-        from areno.api.rewards import compute_group_advantages, make_reward_record
+        from areno.api.rewards import make_reward_record
 
         train_batch = []
         rewards_all = []
@@ -596,9 +602,9 @@ class PolicyOnlyTrainer:
                 for sample_idx, (completion, seq) in enumerate(zip(completions, result.sequences, strict=True))
             ]
             rewards_all += rewards
-            # Group-relative advantage: A_i = (r_i - mean(r))/std(r); shared by
-            # every response token of sample i.
-            advantages = compute_group_advantages(rewards)
+            # The group-relative scalar is shared by every response token of
+            # sample i.
+            advantages = self._compute_group_advantages(rewards)
             for seq, advantage, reward in zip(result.sequences, advantages, rewards, strict=True):
                 resp_len = len(seq.resp_tokens)
                 rollout_logprobs += seq.resp_logprobs
