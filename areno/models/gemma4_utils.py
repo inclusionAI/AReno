@@ -5,6 +5,14 @@ from __future__ import annotations
 import torch
 
 
+def keep_frozen_modules_in_eval(modules) -> None:
+    """Keep frozen feature extractors deterministic when their parent trains."""
+
+    for module in modules:
+        if module is not None:
+            module.eval()
+
+
 def text_embedding_ids(
     input_ids: torch.Tensor,
     *,

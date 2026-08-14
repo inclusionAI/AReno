@@ -458,6 +458,33 @@ def test_explicit_multimodal_trajectory_rebuilds_features_for_training(monkeypat
     assert sample.features is features
 
 
+def test_multimodal_request_encoding_is_cached_within_rollout_session(monkeypatch):
+    trainer = _FakeTrainer(world_size=1, tp_size=1)
+    processor = object()
+    trainer.get_processor = lambda: processor
+    session = RolloutSession(trainer, sampling_params=_FakeSamplingParams(), loss_mask_policy=LossMaskPolicy())
+    pending = SimpleNamespace(
+        messages=[{"role": "user", "content": [{"type": "video_url", "video_url": {"url": "/tmp/v.mp4"}}]}],
+        tools=[{"type": "function", "function": {"name": "report", "parameters": {}}}],
+    )
+    features = {"pixel_values_videos": object()}
+    calls = []
+
+    monkeypatch.setattr(agentic, "modality_token_ids", lambda value: {"video": 42})
+    monkeypatch.setattr(
+        agentic,
+        "encode_processor_messages",
+        lambda value, messages, tools: calls.append((value, messages, tools)) or ([1, 2], features),
+    )
+
+    first = session._messages_to_tokens_and_features(pending)
+    second = session._messages_to_tokens_and_features(pending)
+
+    assert len(calls) == 1
+    assert first[0] == second[0] == [1, 2]
+    assert first[1] is second[1] is features
+
+
 def test_explicit_multimodal_trajectory_rejects_reencoded_token_drift(monkeypatch):
     trainer = _FakeTrainer(world_size=1, tp_size=1)
     session = RolloutSession(trainer, sampling_params=_FakeSamplingParams(), loss_mask_policy=LossMaskPolicy())

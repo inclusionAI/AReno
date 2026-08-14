@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
+import logging
 import math
+import os
 
 import torch
 import torch.distributed as dist
@@ -11,15 +14,22 @@ from areno.engine.data import to_device
 from areno.engine.modeling import param_grad, unwrap_model
 from areno.engine.parallel.context import get_tp_context
 from areno.engine.protocol import TrainPayload
-from areno.engine.runtime.logprobs import next_token_logprobs, packed_next_token_logprobs
+from areno.engine.runtime.logprobs import (
+    next_token_logprobs,
+    packed_next_token_logprobs,
+    packed_next_token_logprobs_from_hidden,
+)
 from areno.engine.runtime.train_step import (
     _clip_grad_norm,
     _grad_norm,
+    _grad_norm_by_group,
     _grad_zero_metrics,
     _merge_metrics,
     _pack_train_data,
     _train_meta,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class TrainingManager:
@@ -86,9 +96,23 @@ class TrainingManager:
         }
         if data_pack.get("features") is not None:
             model_kwargs["features"] = data_pack["features"]
+        defer_lm_head = (
+            worker.config.model.model_type == "gemma4" and ctx.world_size == 1 and "train_cu_seqlens" in data_pack
+        )
+        if defer_lm_head:
+            model_kwargs["defer_lm_head"] = True
         out = train_model(**model_kwargs)
         if "train_cu_seqlens" in data_pack:
-            logprobs = packed_next_token_logprobs(out.logits_shard, tokens, data_pack["train_cu_seqlens"])
+            if defer_lm_head:
+                logprobs = packed_next_token_logprobs_from_hidden(
+                    out.hidden_states,
+                    tokens,
+                    data_pack["train_cu_seqlens"],
+                    train_model.lm_head,
+                    logit_softcap=getattr(train_model, "final_logit_softcapping", None),
+                )
+            else:
+                logprobs = packed_next_token_logprobs(out.logits_shard, tokens, data_pack["train_cu_seqlens"])
         else:
             logprobs = next_token_logprobs(out.logits_shard, tokens)
         loss_out = worker.loss_fn(data_pack, logprobs)
@@ -103,15 +127,22 @@ class TrainingManager:
         self._accumulate_main_gradients()
         stepped = allow_step
         grad_norm = None
+        clipped_grad_norm = None
         grad_zero_metrics = None
         if stepped:
             self._sync_data_parallel_gradients()
             self._sync_tensor_parallel_replicated_gradients()
             self._finalize_router_expert_bias()
             grad_norm = _grad_norm(worker.model.parameters())
+            if os.getenv("ARENO_LOG_GRAD_NORMS", "0") == "1":
+                grouped_norms = _grad_norm_by_group(unwrap_model(worker.model).named_parameters())
+                if ctx.is_rank0:
+                    logger.info("gradient_norms_by_group=%s", json.dumps(grouped_norms, sort_keys=True))
             grad_zero_metrics = _grad_zero_metrics(worker.model.parameters())
+            clipped_grad_norm = grad_norm
             if worker.grad_clip_norm is not None:
                 _clip_grad_norm(worker.model.parameters(), grad_norm, worker.grad_clip_norm)
+                clipped_grad_norm = min(grad_norm, float(worker.grad_clip_norm))
             current_lr = self._lr_for_step(worker._global_step + 1)
             worker.optimizer.lr = current_lr
             worker.optimizer.step()
@@ -138,6 +169,7 @@ class TrainingManager:
                     None,
                     {"lr": current_lr},
                     {"grad_norm": grad_norm} if grad_norm is not None else None,
+                    {"clipped_grad_norm": clipped_grad_norm} if clipped_grad_norm is not None else None,
                     grad_zero_metrics,
                 ),
             }

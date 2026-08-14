@@ -14,6 +14,7 @@ coverage can be added without changing trainer boundaries.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib.util
 import json
 import logging
@@ -276,6 +277,8 @@ class RolloutSession:
         self._closing = False
         self._base_url = ""
         self._proxy_enabled = bool(proxy)
+        self._multimodal_encoding_cache: dict[str, tuple[list[int], dict[str, Any] | None]] = {}
+        self._multimodal_encoding_cache_limit = max(self._max_running_prompts * 2, 32)
 
     @property
     def max_running_prompts(self) -> int:
@@ -543,17 +546,26 @@ class RolloutSession:
     def _messages_to_tokens_and_features(self, pending: _PendingChat) -> tuple[list[int], dict[str, Any] | None]:
         tokenizer = self._trainer.get_tokenizer()
         if _messages_have_multimodal(pending.messages):
+            cache_key = _multimodal_encoding_cache_key(pending.messages, pending.tools)
+            cached = self._multimodal_encoding_cache.get(cache_key)
+            if cached is not None:
+                return list(cached[0]), cached[1]
             processor = self._trainer.get_processor()
             if processor is None:
                 raise ValueError("multimodal input requires a checkpoint processor")
             if modality_token_ids(processor).keys() & {"audio", "video"}:
-                return encode_processor_messages(processor, pending.messages, tools=pending.tools)
-            record = {
-                "messages": pending.messages,
-                "tools": pending.tools,
-                "images_base64": _message_images_base64(pending.messages),
-            }
-            return encode_multimodal_prompt(tokenizer, processor, record)
+                encoded = encode_processor_messages(processor, pending.messages, tools=pending.tools)
+            else:
+                record = {
+                    "messages": pending.messages,
+                    "tools": pending.tools,
+                    "images_base64": _message_images_base64(pending.messages),
+                }
+                encoded = encode_multimodal_prompt(tokenizer, processor, record)
+            if len(self._multimodal_encoding_cache) >= self._multimodal_encoding_cache_limit:
+                self._multimodal_encoding_cache.pop(next(iter(self._multimodal_encoding_cache)))
+            self._multimodal_encoding_cache[cache_key] = encoded
+            return list(encoded[0]), encoded[1]
         return (
             _messages_to_prompt_tokens(
                 tokenizer,
@@ -745,6 +757,11 @@ class RolloutSession:
             include_areno_metadata=True,
             input_tokens=pending.input_tokens,
         )
+
+
+def _multimodal_encoding_cache_key(messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> str:
+    payload = json.dumps([messages, tools], sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def load_agent_run_fn(path: str) -> Callable[[RolloutSession, AgentBatch], Any]:

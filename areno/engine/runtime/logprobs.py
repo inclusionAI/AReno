@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import torch
 import torch.distributed as dist
+from torch.utils.checkpoint import checkpoint
 
 from areno.engine.parallel.context import get_tp_context
 
@@ -23,7 +24,7 @@ from areno.engine.parallel.context import get_tp_context
 def next_token_logprobs(
     logits_shard: torch.Tensor,
     tokens: torch.Tensor,
-    chunk_size: int = 4096,
+    chunk_size: int = 256,
 ) -> torch.Tensor:
     """Compute selected next-token logprobs for padded train rows."""
 
@@ -44,7 +45,7 @@ def packed_next_token_logprobs(
     logits_shard: torch.Tensor,
     tokens: torch.Tensor,
     cu_seqlens: torch.Tensor,
-    chunk_size: int = 4096,
+    chunk_size: int = 256,
 ) -> torch.Tensor:
     """Compute selected next-token logprobs for packed varlen train rows."""
 
@@ -74,6 +75,55 @@ def packed_next_token_logprobs(
         end = min(start + chunk_size, action_count)
         local_logits = logits_shard[:, positions[start:end]].squeeze(0)
         selected[start:end] = vocab_parallel_selected_logprobs(local_logits, labels[start:end])
+    return selected
+
+
+def packed_next_token_logprobs_from_hidden(
+    hidden_states: torch.Tensor,
+    tokens: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    lm_head,
+    *,
+    logit_softcap: float | None = None,
+    chunk_size: int = 256,
+) -> torch.Tensor:
+    """Score packed tokens while checkpointing the vocabulary projection.
+
+    Long multimodal rows make the ``[tokens, vocab]`` LM-head output several
+    gigabytes even in BF16. Checkpoint each position chunk so its logits are
+    recomputed during backward instead of retained for the entire loss graph.
+    """
+
+    flat_tokens = tokens.reshape(-1)
+    cu_seqlens = cu_seqlens.to(device=tokens.device, dtype=torch.long)
+    action_count = max(flat_tokens.numel() - (cu_seqlens.numel() - 1), 0)
+    selected = torch.empty(action_count, device=hidden_states.device, dtype=torch.float32)
+    if action_count == 0:
+        return selected
+
+    positions = torch.arange(flat_tokens.numel(), device=tokens.device)
+    keep = torch.ones(flat_tokens.numel(), device=tokens.device, dtype=torch.bool)
+    keep[cu_seqlens[1:] - 1] = False
+    positions = positions[keep]
+    labels = flat_tokens[positions + 1]
+    flat_hidden = hidden_states.reshape(-1, hidden_states.shape[-1])
+    cap = float(logit_softcap or 0.0)
+
+    def score_chunk(chunk_hidden: torch.Tensor, chunk_labels: torch.Tensor) -> torch.Tensor:
+        logits = lm_head(chunk_hidden)
+        if cap:
+            logits = cap * torch.tanh(logits / cap)
+        return vocab_parallel_selected_logprobs(logits, chunk_labels)
+
+    for start in range(0, action_count, chunk_size):
+        end = min(start + chunk_size, action_count)
+        chunk_hidden = flat_hidden.index_select(0, positions[start:end])
+        selected[start:end] = checkpoint(
+            score_chunk,
+            chunk_hidden,
+            labels[start:end],
+            use_reentrant=False,
+        )
     return selected
 
 
@@ -150,8 +200,8 @@ def _selected_logprobs_components(
     group,
     world_size: int,
     *,
-    save_probs: bool,
-) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor]:
+    vocab_chunk_size: int = 8192,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Distributed log-softmax over a vocab shard, selecting label probabilities.
 
     Steps (each cross-rank step is one TP all-reduce):
@@ -163,19 +213,21 @@ def _selected_logprobs_components(
        SUM-reduce to combine into the full per-row target logit.
     Output is `target - logsumexp`, the selected log-softmax value.
     """
-    logits = logits_shard.float()
     labels = labels.to(device=logits_shard.device, dtype=torch.long)
-    local_vocab = logits.shape[-1]
+    local_vocab = logits_shard.shape[-1]
     local_labels = labels - int(vocab_start)
     local_mask = (local_labels >= 0) & (local_labels < local_vocab)
 
-    local_max = logits.max(dim=-1).values
+    local_max = logits_shard.max(dim=-1).values.float()
     global_max = local_max.clone()
     if world_size > 1:
         dist.all_reduce(global_max, op=dist.ReduceOp.MAX, group=group)
 
-    exp_logits = torch.exp(logits - global_max.unsqueeze(-1))
-    exp_sum = exp_logits.sum(dim=-1)
+    exp_sum = torch.zeros_like(global_max, dtype=torch.float32)
+    for start in range(0, local_vocab, vocab_chunk_size):
+        end = min(start + vocab_chunk_size, local_vocab)
+        shifted = logits_shard[..., start:end].float() - global_max.unsqueeze(-1)
+        exp_sum += torch.exp(shifted).sum(dim=-1)
     if world_size > 1:
         dist.all_reduce(exp_sum, op=dist.ReduceOp.SUM, group=group)
     logsumexp = global_max + exp_sum.log()
@@ -184,12 +236,11 @@ def _selected_logprobs_components(
     # resulting target value is zeroed via `local_mask` so the SUM-reduce
     # picks the correct rank's contribution.
     safe_labels = local_labels.clamp(min=0, max=max(local_vocab - 1, 0))
-    target = logits.gather(-1, safe_labels.unsqueeze(-1)).squeeze(-1)
+    target = logits_shard.gather(-1, safe_labels.unsqueeze(-1)).squeeze(-1).float()
     target = target.masked_fill(~local_mask, 0.0)
     if world_size > 1:
         dist.all_reduce(target, op=dist.ReduceOp.SUM, group=group)
-    probs = exp_logits / exp_sum.unsqueeze(-1) if save_probs else None
-    return target - logsumexp, probs, safe_labels, local_mask
+    return target - logsumexp, logsumexp, safe_labels, local_mask
 
 
 class _VocabParallelSelectedLogprobs(torch.autograd.Function):
@@ -204,32 +255,35 @@ class _VocabParallelSelectedLogprobs(torch.autograd.Function):
     def forward(
         ctx, logits_shard: torch.Tensor, labels: torch.Tensor, vocab_start: int, group, world_size: int
     ) -> torch.Tensor:
-        out, probs, safe_labels, local_mask = _selected_logprobs_components(
+        out, logsumexp, safe_labels, local_mask = _selected_logprobs_components(
             logits_shard,
             labels,
             vocab_start,
             group,
             world_size,
-            save_probs=True,
         )
-        ctx.save_for_backward(probs, safe_labels, local_mask)
+        ctx.save_for_backward(logits_shard, logsumexp, safe_labels, local_mask)
         ctx.input_dtype = logits_shard.dtype
+        ctx.vocab_chunk_size = 8192
         return out
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor):
-        # Standard log-softmax gradient: `softmax(logits) - onehot(label)`,
-        # multiplied by upstream `grad_output`. We do the onehot piece only on
-        # the rank that owns the label (`local_mask`) so other ranks contribute
-        # only the negative softmax term; the sum across ranks reproduces the
-        # full-vocab gradient.
-        probs, safe_labels, local_mask = ctx.saved_tensors
-        grad = probs
-        grad.neg_()
+        # Selected log-softmax gradient: `onehot(label) - softmax(logits)`,
+        # multiplied by upstream `grad_output`. Recompute softmax in vocabulary
+        # chunks so long multimodal rows do not retain a full FP32 probability
+        # tensor between forward and backward.
+        logits_shard, logsumexp, safe_labels, local_mask = ctx.saved_tensors
+        grad = torch.empty_like(logits_shard)
+        scale = -grad_output.float().unsqueeze(-1)
+        local_vocab = logits_shard.shape[-1]
+        for start in range(0, local_vocab, ctx.vocab_chunk_size):
+            end = min(start + ctx.vocab_chunk_size, local_vocab)
+            probs = torch.exp(logits_shard[..., start:end].float() - logsumexp.unsqueeze(-1))
+            grad[..., start:end] = (probs * scale).to(dtype=ctx.input_dtype)
         grad.scatter_add_(
             -1,
             safe_labels.unsqueeze(-1),
-            local_mask.to(dtype=grad.dtype).unsqueeze(-1),
+            (local_mask.to(dtype=grad.dtype) * grad_output.to(dtype=grad.dtype)).unsqueeze(-1),
         )
-        grad.mul_(grad_output.float().unsqueeze(-1))
-        return grad.to(dtype=ctx.input_dtype), None, None, None, None
+        return grad, None, None, None, None
