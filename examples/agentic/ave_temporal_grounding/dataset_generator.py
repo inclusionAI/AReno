@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import random
 import shutil
 import subprocess
@@ -93,7 +92,7 @@ def _ensure_audio(audio_root: Path, video: Path, video_id: str) -> Path:
     if output.is_file():
         return output
     try:
-        _run_ffmpeg(
+        subprocess.run(
             [
                 "ffmpeg",
                 "-nostdin",
@@ -108,30 +107,14 @@ def _ensure_audio(audio_root: Path, video: Path, video_id: str) -> Path:
                 "-ar",
                 "16000",
                 str(output),
-            ]
+            ],
+            check=True,
         )
     except FileNotFoundError as exc:
         raise RuntimeError("ffmpeg is required to extract AVE audio tracks") from exc
     except subprocess.CalledProcessError as exc:
         raise RuntimeError(f"failed to extract audio from {video}") from exc
     return output
-
-
-def _run_ffmpeg(command: list[str]) -> None:
-    """Retry ffmpeg without inherited loader variables after a link failure."""
-
-    try:
-        subprocess.run(command, check=True)
-        return
-    except subprocess.CalledProcessError:
-        loader_variables = ("LD_LIBRARY_PATH", "LD_PRELOAD")
-        if not any(os.environ.get(name) for name in loader_variables):
-            raise
-
-    clean_env = os.environ.copy()
-    for name in loader_variables:
-        clean_env.pop(name, None)
-    subprocess.run(command, check=True, env=clean_env)
 
 
 def _safe_extract(archive: zipfile.ZipFile, destination: Path) -> None:
