@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from functools import lru_cache
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 def reward_fn(record: Any) -> float:
@@ -101,5 +104,21 @@ def _judge_request(
     content = response.choices[0].message.content or ""
     verdicts = re.findall(r"\b(SAME|DIFFERENT)\b", content.upper())
     if not verdicts:
+        logger.warning(
+            "AVE judge returned invalid response model=%s expected=%s predicted=%s response=%r",
+            model,
+            expected,
+            predicted,
+            content,
+        )
         raise RuntimeError(f"judge returned an invalid verdict: {content!r}")
-    return verdicts[-1] == "SAME"
+    equivalent = verdicts[-1] == "SAME"
+    logger.info(
+        "AVE judge result model=%s expected=%s predicted=%s response=%r equivalent=%s",
+        model,
+        expected,
+        predicted,
+        content,
+        equivalent,
+    )
+    return equivalent

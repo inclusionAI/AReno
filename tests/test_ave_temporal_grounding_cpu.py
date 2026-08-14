@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import logging
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -185,3 +186,24 @@ def test_reward_fails_loudly_without_judge_configuration(monkeypatch):
 
     with pytest.raises(RuntimeError, match="JUDGE_BASE_URL"):
         reward._judge_same_events(("Bark",), ("Bark",))
+
+
+def test_reward_logs_remote_judge_response(monkeypatch, caplog):
+    reward = _load("reward")
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            self.chat = SimpleNamespace(
+                completions=SimpleNamespace(
+                    create=lambda **_request: SimpleNamespace(
+                        choices=[SimpleNamespace(message=SimpleNamespace(content="SAME"))]
+                    )
+                )
+            )
+
+    monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=FakeClient))
+    caplog.set_level(logging.INFO, logger=reward.__name__)
+    reward._judge_request.cache_clear()
+
+    assert reward._judge_request("http://judge/v1", "judge", "secret", ("Bark",), ("dog barking",))
+    assert "response='SAME' equivalent=True" in caplog.text
