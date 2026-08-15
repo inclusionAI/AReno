@@ -154,6 +154,7 @@ class PolicyTrainerConfig(RolloutTrainerConfig):
     reward_fn_path: str | None = None
     gspo_clip_eps: float = 3.0e-4
     grpo_clip_eps: float = 0.2
+    max_consecutive_skipped_steps: int | None = None
 
 
 @dataclass(slots=True)
