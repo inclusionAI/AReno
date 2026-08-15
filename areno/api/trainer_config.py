@@ -152,6 +152,10 @@ class PolicyTrainerConfig(RolloutTrainerConfig):
     """Reward-driven policy trainer configuration for GSPO/GRPO."""
 
     reward_fn_path: str | None = None
+    # Issue #225: opt in to batched reward-hook execution. When True and the
+    # loaded reward module defines reward_batch, the training loop scores the
+    # whole rollout batch in one call instead of looping reward_fn.
+    reward_use_batch: bool = False
     gspo_clip_eps: float = 3.0e-4
     grpo_clip_eps: float = 0.2
 

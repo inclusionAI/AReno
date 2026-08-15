@@ -23,6 +23,7 @@ from pathlib import Path
 import numpy as np
 
 from areno.api.dashboard import record_dashboard_state
+from areno.api.rewards import call_reward, compute_group_advantages, make_reward_record
 from areno.api.tokenizer import configure_chat_template_enable_thinking
 
 
@@ -35,12 +36,14 @@ class PolicyOnlyTrainer:
     advantages are normalized within each prompt group.
     """
 
-    def __init__(self, config, *, instance, dataset, reward_fn, loss_fn):
+    def __init__(self, config, *, instance, dataset, reward_fn, loss_fn, reward_bundle=None):
         self.config = config
         self.areno = instance
         self.dataset = dataset
         self.reward_fn = reward_fn
         self.loss_fn = loss_fn
+        # Issue #225: optional bundle carrying both reward_fn and reward_batch.
+        self.reward_bundle = reward_bundle
         self.logger = logging.getLogger(f"{self.__class__.__module__}.{self.__class__.__name__}")
         self._agent_run_fn = None
 
@@ -262,7 +265,11 @@ class PolicyOnlyTrainer:
                     len(samples),
                 )
             reward_records = [ctx.reward_record(sample) for sample in samples]
-            rewards = [float(self.reward_fn(record)) for record in reward_records]
+            prefer_batch = bool(getattr(self.config, "reward_use_batch", False))
+            if self.reward_bundle is not None:
+                rewards, _stats = call_reward(self.reward_bundle, reward_records, prefer_batch=prefer_batch)
+            else:
+                rewards = [float(self.reward_fn(record)) for record in reward_records]
             rows = ctx._train_rows_from_samples(samples)
             tool_call_count = sum(len(record.tool_calls) for record in reward_records)
             tool_result_count = sum(len(record.tool_results) for record in reward_records)
@@ -431,7 +438,6 @@ class PolicyOnlyTrainer:
         """Assemble TrainSequence rows from an agentic rollout batch."""
 
         import areno.api
-        from areno.api.rewards import compute_group_advantages
 
         del prompt_batch
         if agent_batch.rewards is None:
@@ -570,45 +576,54 @@ class PolicyOnlyTrainer:
         """
 
         import areno.api
-        from areno.api.rewards import compute_group_advantages, make_reward_record
+        from areno.api.rewards import call_reward
 
         train_batch = []
         rewards_all = []
         rollout_logprobs = []
+        # Issue #225: build all reward records for this batch first, then score
+        # them in one call_reward() so a batched verifier can run vectorised.
+        batch_records: list = []
+        batch_index_pairs: list[tuple[int, int]] = []
         for item_idx, (item, result) in enumerate(zip(prompt_batch.items, rollout_results, strict=True)):
             prefix_len = len(item.input_tokens)
             completions = [tokenizer.decode(seq.resp_tokens) for seq in result.sequences]
-            rewards = [
-                float(
-                    self.reward_fn(
-                        make_reward_record(
-                            prompt=item.prompt,
-                            completion=completion,
-                            source_record=item.record,
-                            answer=item.solutions,
-                            tokens=item.input_tokens + seq.resp_tokens,
-                            logprobs=[0.0] * prefix_len + seq.resp_logprobs,
-                            loss_mask=[False] * prefix_len + [True] * len(seq.resp_tokens),
-                            metadata={"prompt_index": item_idx, "sample_index": sample_idx},
-                        )
+            for sample_idx, (completion, seq) in enumerate(zip(completions, result.sequences, strict=True)):
+                batch_records.append(
+                    make_reward_record(
+                        prompt=item.prompt,
+                        completion=completion,
+                        source_record=item.record,
+                        answer=item.solutions,
+                        tokens=item.input_tokens + seq.resp_tokens,
+                        logprobs=[0.0] * prefix_len + seq.resp_logprobs,
+                        loss_mask=[False] * prefix_len + [True] * len(seq.resp_tokens),
+                        metadata={"prompt_index": item_idx, "sample_index": sample_idx},
                     )
                 )
-                for sample_idx, (completion, seq) in enumerate(zip(completions, result.sequences, strict=True))
-            ]
-            rewards_all += rewards
-            # Group-relative advantage: A_i = (r_i - mean(r))/std(r); shared by
-            # every response token of sample i.
+                batch_index_pairs.append((item_idx, sample_idx))
+        rewards_list: list[float] = []
+        if batch_records:
+            prefer_batch = bool(getattr(self.config, "reward_use_batch", False))
+            if self.reward_bundle is not None:
+                rewards_list, _stats = call_reward(self.reward_bundle, batch_records, prefer_batch=prefer_batch)
+            else:
+                rewards_list = [float(self.reward_fn(r)) for r in batch_records]
+        rewards_all += rewards_list
+        per_item_rewards: dict[int, list[float]] = {}
+        for (item_idx, sample_idx), reward in zip(batch_index_pairs, rewards_list, strict=True):
+            per_item_rewards.setdefault(item_idx, []).append(float(reward))
+        for item_idx, (item, result) in enumerate(zip(prompt_batch.items, rollout_results, strict=True)):
+            prefix_len = len(item.input_tokens)
+            rewards = per_item_rewards.get(item_idx, [])
             advantages = compute_group_advantages(rewards)
             for seq, advantage, reward in zip(result.sequences, advantages, rewards, strict=True):
                 resp_len = len(seq.resp_tokens)
                 rollout_logprobs += seq.resp_logprobs
                 train_batch.append(
                     areno.api.TrainSequence(
-                        # Prompt positions are masked (1=prompt, 0=response).
                         prompt_mask=[1] * prefix_len + [0] * resp_len,
                         tokens=item.input_tokens + seq.resp_tokens,
-                        # Rollout logprobs play the role of "old logprobs"; the
-                        # zero prefix keeps tensor lengths aligned with tokens.
                         logprobs=[0.0] * prefix_len + seq.resp_logprobs,
                         advantages=[0.0] * prefix_len + [advantage] * resp_len,
                         features=item.record.get("features"),
