@@ -154,6 +154,9 @@ class PolicyTrainerConfig(RolloutTrainerConfig):
     reward_fn_path: str | None = None
     gspo_clip_eps: float = 3.0e-4
     grpo_clip_eps: float = 0.2
+    reward_timing_enabled: bool = False
+    reward_slow_threshold_s: float | None = None
+    reward_timeout_s: float | None = None
 
 
 @dataclass(slots=True)
