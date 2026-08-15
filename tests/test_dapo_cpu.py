@@ -182,6 +182,18 @@ class DAPOLossTest(unittest.TestCase):
 class DAPOBackendNormalizationTest(unittest.TestCase):
     """Backend metadata compensates for accumulation and DP gradient averaging."""
 
+    @staticmethod
+    def _train_sequence(advantage: float, *, response_tokens: int = 1):
+        from areno.api.models import TrainSequence
+
+        return TrainSequence(
+            prompt_mask=[True] + [False] * response_tokens,
+            tokens=[1] + list(range(2, response_tokens + 2)),
+            logprobs=[0.0] * (response_tokens + 1),
+            advantages=[0.0] + [advantage] * response_tokens,
+            eos_token_id=99,
+        )
+
     def test_annotations_cover_sharded_and_replicated_microbatches(self):
         from areno.api.backend.cuda.training import annotate_response_token_mean_packs
 
@@ -246,6 +258,89 @@ class DAPOBackendNormalizationTest(unittest.TestCase):
 
         self.assertAlmostEqual(float(dp_averaged_loss.detach()), -5.0 / 3.0, places=6)
         self.assertAlmostEqual(float(theta.grad), -5.0 / 3.0, places=6)
+
+    def test_real_uneven_dp_split_matches_unsplit_response_token_gradient(self):
+        """A real 3-to-2 DP split must preserve the global token mean."""
+        from areno.api.backend.cuda.training import annotate_response_token_mean_packs, make_train_pack
+        from areno.engine.runtime.common import split_data_pack_by_dp
+        from areno.engine.runtime.train_step import _pack_train_data
+
+        sequences = [self._train_sequence(value) for value in (1.0, 2.0, 3.0)]
+        pack = make_train_pack(sequences)
+        annotate_response_token_mean_packs(
+            [pack],
+            [3],
+            gradient_accumulation_steps=1,
+            data_parallel_size=2,
+        )
+        shards = split_data_pack_by_dp(pack, 2)
+        theta = torch.tensor(0.0, requires_grad=True)
+        shard_losses = []
+        for shard in shards:
+            packed = _pack_train_data(shard)
+            loss, _ = dapo_loss_fn(
+                packed,
+                theta.expand(int(packed["packed_response_mask"].numel())),
+            )
+            shard_losses.append(loss)
+        dp_averaged_loss = sum(shard_losses) / 2
+        dp_averaged_loss.backward()
+
+        self.assertEqual([int(shard["input_ids"].shape[0]) for shard in shards], [2, 1])
+        self.assertAlmostEqual(float(dp_averaged_loss.detach()), -2.0, places=6)
+        self.assertAlmostEqual(float(theta.grad), -2.0, places=6)
+
+    def test_real_dp_split_and_accumulation_match_unsplit_response_token_gradient(self):
+        """Sharded and replicated packs in one accumulation group must normalize together."""
+        from areno.api.backend.cuda.training import annotate_response_token_mean_packs, make_train_pack
+        from areno.engine.runtime.common import split_data_pack_by_dp
+        from areno.engine.runtime.train_step import _pack_train_data
+
+        sequences = [
+            self._train_sequence(1.0),
+            self._train_sequence(3.0),
+            self._train_sequence(5.0, response_tokens=2),
+        ]
+        packs = [make_train_pack(sequences[:2]), make_train_pack(sequences[2:])]
+        annotate_response_token_mean_packs(
+            packs,
+            [2, 2],
+            gradient_accumulation_steps=2,
+            data_parallel_size=2,
+        )
+        shards_by_pack = [split_data_pack_by_dp(pack, 2) for pack in packs]
+
+        theta = torch.tensor(0.0, requires_grad=True)
+        rank_losses = []
+        for rank in range(2):
+            accumulated_loss = torch.zeros(())
+            for shards in shards_by_pack:
+                packed = _pack_train_data(shards[rank])
+                loss, _ = dapo_loss_fn(
+                    packed,
+                    theta.expand(int(packed["packed_response_mask"].numel())),
+                )
+                accumulated_loss = accumulated_loss + loss / 2
+            rank_losses.append(accumulated_loss)
+        dp_averaged_loss = sum(rank_losses) / 2
+        dp_averaged_loss.backward()
+
+        reference_theta = torch.tensor(0.0, requires_grad=True)
+        reference_pack = _pack_train_data(make_train_pack(sequences))
+        reference_loss, _ = dapo_loss_fn(
+            reference_pack,
+            reference_theta.expand(int(reference_pack["packed_response_mask"].numel())),
+        )
+        reference_loss.backward()
+
+        self.assertEqual(
+            [[int(shard["input_ids"].shape[0]) for shard in shards] for shards in shards_by_pack],
+            [[1, 1], [1, 1]],
+        )
+        self.assertAlmostEqual(float(dp_averaged_loss.detach()), -3.5, places=6)
+        self.assertAlmostEqual(float(theta.grad), -3.5, places=6)
+        self.assertAlmostEqual(float(dp_averaged_loss.detach()), float(reference_loss.detach()), places=6)
+        self.assertAlmostEqual(float(theta.grad), float(reference_theta.grad), places=6)
 
 
 class DAPORegistrationTest(unittest.TestCase):
@@ -369,6 +464,16 @@ class _ScriptedDAPOTrainer(DAPOTrainer):
         return groups if isinstance(groups, list) else [groups]
 
 
+class _ScriptedRolloutDAPOTrainer(DAPOTrainer):
+    def __init__(self, *args, rollout_results, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.rollout_results = rollout_results
+
+    async def _run_prompt_rollout(self, sampling_params, prompt_batch):
+        del sampling_params, prompt_batch
+        return self.rollout_results
+
+
 def _dapo_config(**overrides) -> DAPOTrainerConfig:
     values = dict(
         algo="dapo",
@@ -441,6 +546,25 @@ class DAPODynamicSamplingTest(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(ValueError, "finite rollout logprobs"):
+            trainer._score_prompt_group(
+                _TokenIdTokenizer(),
+                _prompt_batch(0).items[0],
+                result,
+                prompt_index=0,
+            )
+
+    def test_scoring_rejects_incomplete_prompt_group(self):
+        """Dynamic sampling must never train a group smaller than n_samples."""
+        trainer = DAPOTrainer(
+            _dapo_config(n_samples=2),
+            instance=SimpleNamespace(),
+            dataset=[],
+            reward_fn=lambda _record: 0.0,
+            loss_fn=dapo_loss_fn,
+        )
+        result = RolloutResult(sequences=[RolloutSequence(resp_tokens=[1], resp_logprobs=[-0.1])])
+
+        with self.assertRaisesRegex(ValueError, "expected n_samples=2, got 1"):
             trainer._score_prompt_group(
                 _TokenIdTokenizer(),
                 _prompt_batch(0).items[0],
@@ -526,6 +650,57 @@ class DAPODynamicSamplingTest(unittest.TestCase):
         batch = areno.train_calls[0][0]
         self.assertEqual([sequence.reward for sequence in batch], [0.0, 1.0, 1.0, 2.0])
         self.assertEqual(areno.train_result["dapo_discarded_qualified_groups"], 1.0)
+
+    def test_real_multi_prompt_generation_filters_and_truncates_whole_groups(self):
+        """Real scoring preserves prompt order across filtering and overflow."""
+        prompt_batch = PromptBatch(
+            items=[_prompt_batch(index).items[0] for index in range(3)],
+            scanned=3,
+            skipped_long=0,
+            total_skipped_long=0,
+        )
+        rollout_results = [
+            RolloutResult(
+                sequences=[
+                    RolloutSequence(resp_tokens=[index * 10 + sample + 1], resp_logprobs=[-0.1]) for sample in range(2)
+                ]
+            )
+            for index in range(3)
+        ]
+
+        def reward_fn(record):
+            prompt_index = int(record.metadata["prompt_index"])
+            sample_index = int(record.metadata["sample_index"])
+            if prompt_index == 0:
+                return 1.0
+            return float(prompt_index + sample_index)
+
+        trainer = _ScriptedRolloutDAPOTrainer(
+            _dapo_config(batch_size=1, dapo_gen_batch_size=3, dapo_max_num_gen_batches=1),
+            instance=SimpleNamespace(record_rollout_sample=lambda _sample: None),
+            dataset=[],
+            reward_fn=reward_fn,
+            loss_fn=dapo_loss_fn,
+            rollout_results=rollout_results,
+        )
+
+        collection = trainer._collect_qualified_groups(
+            _TokenIdTokenizer(),
+            SimpleNamespace(),
+            iter([prompt_batch]),
+            epoch=0,
+            step=0,
+        )
+
+        self.assertEqual(collection.generated_groups, 3)
+        self.assertEqual(collection.filtered_groups, 1)
+        self.assertEqual(collection.discarded_qualified_groups, 1)
+        self.assertEqual([group.item.prompt for group in collection.groups], ["prompt-1"])
+        self.assertEqual(collection.groups[0].raw_rewards, [1.0, 2.0])
+        self.assertEqual(
+            [sequence.resp_tokens for sequence in collection.groups[0].rollout_result.sequences],
+            [[11], [12]],
+        )
 
     def test_dataset_exhaustion_drops_incomplete_batch(self):
         areno = _DAPOFakeAreno(candidate_count=1)

@@ -239,6 +239,9 @@ class DAPOTrainer(PolicyOnlyTrainer):
     def _score_prompt_group(self, tokenizer, item, result, *, prompt_index: int) -> _DAPOPromptGroup:
         from areno.api.rewards import make_reward_record
 
+        sequence_count = len(result.sequences)
+        if sequence_count != self.config.n_samples:
+            raise ValueError(f"DAPO rollout expected n_samples={self.config.n_samples}, got {sequence_count}")
         raw_rewards = []
         shaped_rewards = []
         prefix_len = len(item.input_tokens)
