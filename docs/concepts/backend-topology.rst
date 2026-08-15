@@ -56,3 +56,32 @@ bytes, tensor count, and effective throughput. The same values are emitted
 with the next training metrics as ``policy_sync_time_s``,
 ``policy_sync_transfer_time_s``, ``policy_sync_bytes``,
 ``policy_sync_tensors``, and ``policy_sync_throughput_gbps``.
+
+Runtime scope
+-------------
+
+The current backend runtime is entirely AReno-owned CUDA/NVIDIA code.
+``ArenoEngine`` (``areno/engine/api.py``) manages a local worker cluster on a
+single node. Both rollout and training use custom CUDA kernels shipped in
+``areno/accel/`` for attention, activation, normalization, embedding, linear,
+MoE, and routing operations. All inter-GPU communication goes through NCCL
+collectives managed by AReno's cluster protocol (``areno/engine/protocol/``).
+
+The colocated path runs one ``ArenoEngine`` that handles both
+``generate_rollout`` and ``step``. The partitioned path starts two independent
+``ArenoEngine`` instances — one for training, one for rollout — within the
+same distributed world.
+
+Out of scope
+------------
+
+This backend topology document describes the current implementation only. The
+following are explicitly **not** promised or implied by this document:
+
+* MLX, TPU, or non-NVIDIA accelerator backends.
+* vLLM, SGLang, Megatron-LM, or Ray integration.
+* Multi-node distributed training (the cluster protocol is single-node).
+* A pluggable backend interface that third-party engines can implement without
+  modifying AReno source.
+
+Future architecture changes will be documented in the PR that introduces them.

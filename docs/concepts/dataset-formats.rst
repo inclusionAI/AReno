@@ -38,5 +38,6 @@ and reward files.
 Where to go next
 ----------------
 
+* :doc:`/cookbook/writing-loaders-and-rewards` — step-by-step tutorial.
 * :doc:`/cli/dataset_loaders` documents loader shapes and examples.
 * :doc:`reward-functions` explains how preserved metadata is used for scoring.
