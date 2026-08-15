@@ -7,7 +7,13 @@ import pytest
 from click import UsageError, unstyle
 from click.testing import CliRunner
 
-from areno.api.trainer_config import DPOTrainerConfig, PolicyTrainerConfig, PPOTrainerConfig, TrainerConfig
+from areno.api.trainer_config import (
+    DPOTrainerConfig,
+    IPOTrainerConfig,
+    PolicyTrainerConfig,
+    PPOTrainerConfig,
+    TrainerConfig,
+)
 from areno.cli import train as train_cli
 from areno.cli.train import (
     TRAIN_OPTION_GROUPS,
@@ -130,6 +136,17 @@ def test_train_config_validates_dpo_positive_fields(field, value, message):
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [
+        ("ipo_beta", 0.0, "--ipo-beta must be positive"),
+    ],
+)
+def test_train_config_validates_ipo_positive_fields(field, value, message):
+    with pytest.raises(UsageError, match=message):
+        _trainer_config_from_options(**_options(algo="ipo", **{field: value}))
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
         ("critic_lr", 0.0, "--critic-lr must be positive"),
         ("kl_loss_coef", 0.0, "--kl-loss-coef must be positive"),
         ("clip_eps", 0.0, "--clip-eps must be positive"),
@@ -192,6 +209,25 @@ def test_train_config_builds_dpo_shape_and_ref_ckpt():
     assert cfg.algo == "dpo"
     assert cfg.ref_ckpt == "reference"
     assert cfg.dpo_beta == 0.25
+    assert not hasattr(cfg, "n_samples")
+    assert not hasattr(cfg, "reward_fn_path")
+
+
+def test_train_config_builds_ipo_shape_and_ref_ckpt():
+    cfg = _trainer_config_from_options(
+        **_options(
+            algo="ipo",
+            reward_fn_path=None,
+            reward_ckpt=None,
+            ref_ckpt="reference",
+            ipo_beta=0.25,
+        )
+    )
+
+    assert isinstance(cfg, IPOTrainerConfig)
+    assert cfg.algo == "ipo"
+    assert cfg.ref_ckpt == "reference"
+    assert cfg.ipo_beta == 0.25
     assert not hasattr(cfg, "n_samples")
     assert not hasattr(cfg, "reward_fn_path")
 
@@ -751,6 +787,7 @@ def test_train_command_smoke_resolves_model_ref_before_probe(monkeypatch):
     [
         ("sft", ["--dataset-loader-fn", "examples/sft/alpaca/dataset_loader.py"], TrainerConfig),
         ("dpo", [], DPOTrainerConfig),
+        ("ipo", [], IPOTrainerConfig),
     ],
 )
 def test_train_command_smoke_train_supports_offline_algorithms(monkeypatch, algo, extra_args, expected_type):
@@ -898,6 +935,7 @@ def _options(**overrides):
         grpo_clip_eps=0.2,
         ref_ckpt=None,
         dpo_beta=0.1,
+        ipo_beta=0.1,
         reward_ckpt="reward-model",
         critic_ckpt=None,
         critic_lr=1e-5,

@@ -43,6 +43,27 @@ class CliModelReferenceTest(unittest.TestCase):
         self.assertEqual(resolved, "/cache/Qwen/Qwen3-4B")
         self.assertEqual(calls, ["Qwen/Qwen3-4B"])
 
+    def test_resolve_model_refs_for_ipo_config_resolves_reference(self):
+        """IPO should resolve both student and frozen-reference checkpoints."""
+
+        calls: list[str] = []
+
+        fake_modelscope = types.SimpleNamespace(snapshot_download=lambda repo: calls.append(repo) or f"/ms/{repo}")
+
+        config = SimpleNamespace(
+            algo="ipo",
+            model_hub="modelscope",
+            ckpt="org/student",
+            ref_ckpt="org/reference",
+        )
+
+        with patch.dict(sys.modules, {"modelscope": fake_modelscope}):
+            resolved = model_refs.resolve_model_refs_for_config(config)
+
+        self.assertEqual(resolved.ckpt, "/ms/org/student")
+        self.assertEqual(resolved.ref_ckpt, "/ms/org/reference")
+        self.assertEqual(calls, ["org/student", "org/reference"])
+
     def test_resolve_model_refs_for_ppo_config_reuses_duplicate_roles(self):
         """Train config resolution should not download the same repo once per role."""
         calls: list[str] = []

@@ -8,7 +8,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
 
-from areno.api.loss_fns import dpo_loss_fn, grpo_loss_fn, gspo_loss_fn, ppo_loss_fn, sft_loss_fn
+from areno.api.loss_fns import dpo_loss_fn, grpo_loss_fn, gspo_loss_fn, ipo_loss_fn, ppo_loss_fn, sft_loss_fn
 from areno.api.trainer_config import TrainerConfig
 
 
@@ -139,6 +139,30 @@ def _load_ppo_trainer() -> type:
     return PPOTrainer
 
 
+def _bind_dpo_loss(
+    config: TrainerConfig,
+    loss_fn: Callable,
+) -> Callable:
+    from functools import partial
+
+    return partial(
+        loss_fn,
+        beta=getattr(config, "dpo_beta"),
+    )
+
+
+def _bind_ipo_loss(
+    config: TrainerConfig,
+    loss_fn: Callable,
+) -> Callable:
+    from functools import partial
+
+    return partial(
+        loss_fn,
+        beta=getattr(config, "ipo_beta"),
+    )
+
+
 def _bind_gspo_loss(config: TrainerConfig, loss_fn: Callable) -> Callable:
     from functools import partial
 
@@ -166,6 +190,16 @@ def _register_builtin_algorithms() -> None:
             trainer_cls=_load_dpo_trainer,
             default_loss_fn=dpo_loss_fn,
             requires_rollout=False,
+            loss_fn_factory=_bind_dpo_loss,
+        )
+    )
+    register_algorithm(
+        AlgorithmSpec(
+            name="ipo",
+            trainer_cls=_load_dpo_trainer,
+            default_loss_fn=ipo_loss_fn,
+            requires_rollout=False,
+            loss_fn_factory=_bind_ipo_loss,
         )
     )
     register_algorithm(

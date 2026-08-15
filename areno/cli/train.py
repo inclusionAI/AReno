@@ -27,6 +27,7 @@ from areno.api.algorithms import get_algorithm
 from areno.api.defaults import DEFAULT_METRICS_LOG_DIR
 from areno.api.trainer_config import (
     DPOTrainerConfig,
+    IPOTrainerConfig,
     PolicyTrainerConfig,
     PPOTrainerConfig,
     RolloutTrainerConfig,
@@ -121,6 +122,7 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "gspo_clip_eps",
             "grpo_clip_eps",
             "dpo_beta",
+            "ipo_beta",
             "use_kl_loss",
             "kl_loss_coef",
             "kl_loss_type",
@@ -291,6 +293,8 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
         _require_positive_float(args.grpo_clip_eps, "--grpo-clip-eps")
     if algorithm.name == "dpo":
         _require_positive_float(args.dpo_beta, "--dpo-beta")
+    if algorithm.name == "ipo":
+        _require_positive_float(args.ipo_beta, "--ipo-beta")
     if algorithm.name == "ppo":
         _require_positive_float(args.critic_lr, "--critic-lr")
         _require_positive_float(args.kl_loss_coef, "--kl-loss-coef")
@@ -732,6 +736,48 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             ref_ckpt=args.ref_ckpt,
             dpo_beta=args.dpo_beta,
         )
+    if algorithm.name == "ipo":
+        return IPOTrainerConfig(
+            algo=algorithm.name,
+            ckpt=args.ckpt,
+            dataset_path=args.dataset_path,
+            model_hub=args.model_hub,
+            dataset_loader_fn=args.dataset_loader_fn,
+            save_path=args.save_path,
+            save_interval=args.save_interval,
+            epochs=args.epochs,
+            max_steps=args.max_steps,
+            tp_size=args.tp_size,
+            world_size=args.world_size,
+            train_devices=args.train_devices,
+            batch_size=args.batch_size,
+            mini_bs=args.mini_bs,
+            score_micro_bs=args.score_micro_bs,
+            gradient_accumulation_steps=args.gradient_accumulation_steps,
+            max_prompt_tokens=args.max_prompt_tokens,
+            max_new_tokens=args.max_new_tokens,
+            max_context_len=args.max_context_len,
+            optimizer_lr=args.lr,
+            optimizer_min_lr=args.min_lr,
+            lr_decay_steps=args.lr_decay_steps,
+            lr_decay_style=args.lr_decay_style,
+            optimizer_beta1=args.adam_beta1,
+            optimizer_beta2=args.adam_beta2,
+            weight_decay=args.weight_decay,
+            grad_clip_norm=args.grad_clip_norm,
+            adam_8bit=args.adam_8bit,
+            activation_checkpointing=args.activation_checkpointing,
+            keep_rollout_state=not args.drop_rollout_state,
+            eager_decode=args.eager_decode,
+            attn_backend=args.attn_backend,
+            metrics_log_dir=args.metrics_log_dir,
+            agent_fn=args.agent_fn,
+            agent_timeout_s=args.agent_timeout_s,
+            train_tool_results=args.train_tool_results,
+            chat_template_enable_thinking=chat_template_enable_thinking,
+            ref_ckpt=args.ref_ckpt,
+            ipo_beta=args.ipo_beta,
+        )
     if algorithm.name == "sft":
         return TrainerConfig(
             algo=algorithm.name,
@@ -1039,6 +1085,7 @@ def _training_config_settings(config: TrainerConfig) -> dict:
                 "gspo_clip_eps",
                 "grpo_clip_eps",
                 "dpo_beta",
+                "ipo_beta",
                 "kl_coef",
                 "use_kl_loss",
                 "kl_loss_coef",
@@ -1261,7 +1308,7 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     cls=GroupedOptionsCommand,
     option_groups=TRAIN_OPTION_GROUPS,
     context_settings={"help_option_names": ["-h", "--help"]},
-    help="Run SFT, DPO, GSPO, GRPO, or PPO training with the areno backend.",
+    help="Run SFT, DPO, IPO, GSPO, GRPO, or PPO training with the areno backend.",
 )
 @click.option("--algo", type=str, default="gspo", show_default=True, help="Training algorithm registered in areno.api.")
 @click.option("--ckpt", default=None, help="Actor model/tokenizer checkpoint path or remote model repo ID.")
@@ -1280,7 +1327,7 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
 )
 @click.option("--reward-fn-path", default=None, help="Python file defining reward_fn(record).")
 @click.option(
-    "--ref-ckpt", default=None, help="Optional PPO/DPO reference model checkpoint path or remote model repo ID."
+    "--ref-ckpt", default=None, help="Optional PPO/DPO/IPO reference model checkpoint path or remote model repo ID."
 )
 @click.option("--reward-ckpt", default=None, help="Optional PPO reward model checkpoint path or remote model repo ID.")
 @click.option("--critic-ckpt", default=None, help="Optional PPO critic model checkpoint path or remote model repo ID.")
@@ -1439,6 +1486,13 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
 )
 @click.option("--grpo-clip-eps", type=float, default=0.2, show_default=True, help="GRPO token-ratio clipping epsilon.")
 @click.option("--dpo-beta", type=float, default=0.1, show_default=True, help="DPO preference margin temperature.")
+@click.option(
+    "--ipo-beta",
+    type=float,
+    default=0.1,
+    show_default=True,
+    help="IPO regularization parameter (tau in the paper); target = 1 / (2 * beta).",
+)
 @click.option(
     "--critic-warmup-steps",
     type=int,

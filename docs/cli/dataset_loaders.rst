@@ -43,10 +43,10 @@ SFT always requires ``--dataset-loader-fn``. The loader must return rows with
 For a concrete example, use ``--dataset-path yahma/alpaca-cleaned`` with
 ``examples/sft/alpaca/dataset_loader.py``.
 
-DPO
----
+DPO and IPO
+-----------
 
-DPO loaders should return ``prompt``, ``chosen``, and ``rejected``. ``prompt``
+DPO and IPO loaders should return ``prompt``, ``chosen``, and ``rejected``. ``prompt``
 is the shared context, ``chosen`` is the preferred answer, and ``rejected`` is
 the lower-ranked answer.
 

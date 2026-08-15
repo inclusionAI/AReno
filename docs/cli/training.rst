@@ -5,7 +5,7 @@ Training CLI reference
 
 ``areno train``
 
-Run SFT, DPO, GSPO, GRPO, or PPO training with the local Areno backend. The
+Run SFT, DPO, IPO, GSPO, GRPO, or PPO training with the local Areno backend. The
 command owns the full loop: dataset loading, optional normalization, rollout,
 reward scoring, loss computation, optimizer steps, metrics, and checkpoint
 saving.
@@ -70,7 +70,7 @@ per-algorithm loader contracts.
 ``--algo TEXT``
    Training algorithm registered in ``areno.api``. Default: ``gspo``.
 
-Built-in algorithms: ``sft``, ``dpo``, ``gspo``, ``grpo``, ``ppo``.
+Built-in algorithms: ``sft``, ``dpo``, ``ipo``, ``gspo``, ``grpo``, ``ppo``.
 
 ``--epochs INTEGER``
    Number of dataset epochs to train. Default: ``10``.
@@ -341,7 +341,7 @@ in its description; flags for other algorithms are ignored.
    Policy gradient clipping norm. Default: ``1.0``.
 
 ``--ref-ckpt TEXT``
-   Optional PPO/DPO reference model checkpoint path or remote model repo ID.
+   Optional PPO/DPO/IPO reference model checkpoint path or remote model repo ID.
 
 ``--critic-ckpt TEXT``
    Optional PPO critic model checkpoint path or remote model repo ID.
@@ -360,6 +360,11 @@ in its description; flags for other algorithms are ignored.
 
 ``--dpo-beta FLOAT``
    DPO preference margin temperature. Default: ``0.1``.
+
+``--ipo-beta FLOAT``
+   IPO regularization parameter, corresponding to tau in the IPO paper.
+   The sampled sequence-level loss target is ``1 / (2 * beta)``.
+   Default: ``0.1``.
 
 ``--use-kl-loss / --no-use-kl-loss``
    Enable PPO actor KL loss. Default: enabled.
@@ -480,6 +485,21 @@ DPO preference training
 
 The DPO loader should normalize each row to ``prompt``, ``chosen``, and
 ``rejected``.
+
+IPO preference training
+~~~~~~~~~~~~~~~~~~~~~~~
+
+.. code-block:: bash
+
+   areno train \
+     --ckpt /path/to/policy \
+     --ref-ckpt /path/to/reference \
+     --dataset-path /path/to/preferences.jsonl \
+     --dataset-loader-fn /path/to/preference_dataset_loader.py \
+     --algo ipo \
+     --ipo-beta 0.1 \
+     --tp-size 1 \
+     --world-size 1
 
 PPO with reward and critic roles
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
