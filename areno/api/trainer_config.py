@@ -154,6 +154,15 @@ class PolicyTrainerConfig(RolloutTrainerConfig):
     reward_fn_path: str | None = None
     gspo_clip_eps: float = 3.0e-4
     grpo_clip_eps: float = 0.2
+    # Reward clipping / standardization applied after raw reward calculation
+    # and before advantage computation.  ``disabled`` (default) preserves the
+    # existing behaviour exactly; ``clip`` clamps to [min, max]; ``standardize``
+    # subtracts the batch mean and divides by the batch std.  These are opt-in
+    # and only take effect when ``reward_transform_mode`` is not ``disabled``.
+    reward_transform_mode: str = "disabled"
+    reward_clip_min: float = -10.0
+    reward_clip_max: float = 10.0
+    reward_standardize_eps: float = 1e-8
 
 
 @dataclass(slots=True)
