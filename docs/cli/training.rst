@@ -5,10 +5,10 @@ Training CLI reference
 
 ``areno train``
 
-Run SFT, DPO, GSPO, GRPO, or PPO training with the local Areno backend. The
-command owns the full loop: dataset loading, optional normalization, rollout,
-reward scoring, loss computation, optimizer steps, metrics, and checkpoint
-saving.
+Run SFT, DPO, GSPO, GRPO, PPO, or an experimental registered algorithm such
+as DAPO with the local Areno backend. The command owns the full loop: dataset
+loading, optional normalization, rollout, reward scoring, loss computation,
+optimizer steps, metrics, and checkpoint saving.
 
 The command selects CUDA on Linux and MLX on native Apple Silicon. It has no
 backend flag and does not fall back between runtimes. See
@@ -75,6 +75,8 @@ per-algorithm loader contracts.
    Training algorithm registered in ``areno.api``. Default: ``gspo``.
 
 Built-in algorithms: ``sft``, ``dpo``, ``gspo``, ``grpo``, ``ppo``.
+Experimental algorithms are discovered on demand. See
+:doc:`/reference/experimental` for their stability and usage constraints.
 
 ``--epochs INTEGER``
    Number of dataset epochs to train. Default: ``10``.
@@ -259,6 +261,26 @@ Reward files should expose:
 ``--reward-ckpt TEXT``
    Optional PPO reward model checkpoint path or remote model repo ID.
 
+``--dapo-gen-batch-size INTEGER``
+   Candidate prompt groups generated in each DAPO dynamic-sampling attempt.
+   Defaults to ``--batch-size``. It may be larger than the final training
+   batch when many prompt groups have constant raw rewards.
+
+``--dapo-max-num-gen-batches INTEGER``
+   Maximum candidate batches DAPO may generate while filling one complete
+   training batch. Default: ``10``. Reaching the limit raises an error with
+   generated, qualified, and filtered group counts instead of training an
+   undersized batch.
+
+``--dapo-overlong-buffer-len INTEGER``
+   Response-token buffer over which DAPO linearly increases its soft overlong
+   penalty. ``0`` disables reward shaping. Default: ``0``.
+
+``--dapo-overlong-penalty-factor FLOAT``
+   Maximum magnitude of DAPO's soft overlong penalty. Default: ``1.0``. The
+   penalty is applied after raw reward variance determines dynamic-sampling
+   eligibility.
+
 Parameter tuning
 ~~~~~~~~~~~~~~~~
 
@@ -333,7 +355,9 @@ in its description; flags for other algorithms are ignored.
 
 ``--gradient-accumulation-steps INTEGER``
    Optimizer step interval in microbatches. Defaults to accumulating all
-   mini-batches in one train call.
+   mini-batches in one train call. Experimental DAPO defaults to ``1`` so
+   later microbatches can observe a non-unit ratio against stored rollout
+   logprobs; an explicit value overrides this behavior.
 
 ``--activation-checkpointing / --no-activation-checkpointing``
    Enable decoder-layer activation recompute during training. Default:
@@ -441,6 +465,14 @@ in its description; flags for other algorithms are ignored.
 
 ``--grpo-clip-eps FLOAT``
    GRPO token-ratio clipping epsilon. Default: ``0.2``.
+
+``--dapo-clip-eps-low FLOAT``
+   DAPO lower token-ratio clipping epsilon. Default: ``0.2``.
+
+``--dapo-clip-eps-high FLOAT``
+   DAPO upper token-ratio clipping epsilon used by Clip-Higher. Default:
+   ``0.28``. It must be greater than or equal to
+   ``--dapo-clip-eps-low``.
 
 ``--dpo-beta FLOAT``
    DPO preference margin temperature. Default: ``0.1``.
