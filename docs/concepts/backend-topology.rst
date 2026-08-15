@@ -20,6 +20,16 @@ training to that backend.
 training loop. ``ArenoBackend`` is the registered AReno implementation in
 ``areno/api/backend/areno/backend.py``.
 
+Runtime scope
+-------------
+
+The current runtime path is AReno-owned CUDA/NVIDIA code. All inference and
+training execution flows through ``areno/engine/`` (``ArenoEngine``,
+``ArenoWorker``, ``TPCluster``, ``InferenceManager``, ``TrainingManager``) and
+``areno/accel/`` (fused CUDA kernels in ``areno/accel/csrc/*.cu``, wrapped by
+Python modules under ``areno/accel/``). There is no third-party inference or
+training runtime in the loop.
+
 Colocated and partitioned engines
 ---------------------------------
 
@@ -56,3 +66,14 @@ bytes, tensor count, and effective throughput. The same values are emitted
 with the next training metrics as ``policy_sync_time_s``,
 ``policy_sync_transfer_time_s``, ``policy_sync_bytes``,
 ``policy_sync_tensors``, and ``policy_sync_throughput_gbps``.
+
+Out of scope
+------------
+
+The current backend topology does not include and makes no promises about:
+
+* MLX or Apple Silicon backends.
+* TPU or other non-NVIDIA accelerator backends.
+* Third-party inference engines (vLLM, SGLang, TensorRT-LLM).
+* Third-party training frameworks (Megatron-LM, DeepSpeed, FSDP-only paths).
+* Distributed orchestration frameworks (Ray, Kubernetes operators).
