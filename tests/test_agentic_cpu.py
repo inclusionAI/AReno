@@ -834,6 +834,56 @@ def test_agentic_multi_turn_calls_merge_into_one_training_sample():
     assert record.source_record == {"task": "multi"}
 
 
+def test_agentic_multi_turn_merge_stays_linear_when_response_tokens_differ_from_render():
+    """Regression: merging multi-turn rows must not re-append re-rendered context.
+
+    Each turn's prompt re-renders the prior assistant message from its decoded
+    text, which (for real BPE tokenizers) is not token-idempotent with the raw
+    engine ``response_tokens``. The merge must split at the previous trajectory
+    length (the intended prefix), not at the first diverging token -- otherwise
+    the re-rendered prior context is re-appended every turn, the row grows
+    O(N**2), blows past max_context_len, and rollout crashes with "all agent
+    trajectories exceeded the configured context length".
+    """
+    trainer = _FakeTrainer(world_size=1, tp_size=1)
+    session = RolloutSession(
+        trainer, sampling_params=_FakeSamplingParams(), loss_mask_policy=LossMaskPolicy()
+    )
+    item = agentic.AgentItem(record={}, prompt="p0", input_tokens=[1, 2], prompt_index=0, sample_index=0)
+
+    # Turn 0: prompt [1, 2], engine generated [10, 11].
+    first = _sample(item, "first", [10, 11])
+    session._set_sample_training_row(first, [1, 2])
+
+    # Turn 1: prompt re-renders assistant 0 as [12, 13] (decode->encode round
+    # trip of [10, 11]); new tool/board header [30, 31]; new response [20, 21].
+    second = _sample(item, "second", [20, 21])
+    session._set_sample_training_row(second, [1, 2, 12, 13, 30, 31])
+
+    # Turn 2: prompt re-renders assistant 1 as [44, 55] (round trip of [20, 21]);
+    # new tool/board header [40, 41]; new response [50].
+    third = _sample(item, "third", [50])
+    session._set_sample_training_row(third, [1, 2, 12, 13, 30, 31, 44, 55, 40, 41])
+
+    session._append_sample_response(first, second)
+    session._append_sample_response(first, third)
+
+    # One O(N) trajectory: raw responses [10,11]/[20,21]/[50] separated by the
+    # per-turn context deltas -- no duplicated re-rendered spans. Under the old
+    # first-divergence split this row was [1,2,10,11,12,13,30,31,20,21,
+    # 12,13,30,31,44,55,40,41,50] (length 19) and grew quadratically from there.
+    assert first.token_row == [1, 2, 10, 11, 30, 31, 20, 21, 40, 41, 50]
+    assert first.response_mask_row == [
+        False, False, True, True,    # R_0
+        False, False,               # tool/board header
+        True, True,                 # R_1
+        False, False,               # tool/board header
+        True,                       # R_2
+    ]
+    rows = session._train_rows_from_samples([first])
+    assert rows.token_rows == [[1, 2, 10, 11, 30, 31, 20, 21, 40, 41, 50]]
+
+
 def test_agentic_interleaved_trajectories_do_not_cross_items():
     """Interleaved agent turns must only merge with the matching AgentItem."""
 

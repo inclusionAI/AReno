@@ -91,6 +91,34 @@ class LogprobTest(unittest.TestCase):
 
         self.assertEqual(actual.numel(), 0)
 
+    def test_selected_logprobs_recompute_backward_matches_full_softmax_chunked(self):
+        """Recompute backward must match full-vocab CE grad across vocab chunks.
+
+        Forces multiple backward vocab chunks (vocab_chunk_size < vocab) so the
+        per-chunk scatter/accumulate path in `_selected_logprobs_recompute_backward`
+        is exercised, and checks it against the reference `grad * (onehot - softmax)`.
+        """
+        torch.manual_seed(0)
+        logits = torch.randn(4, 10)
+        labels = torch.tensor([2, 9, 0, 5])
+        grad_output = torch.tensor([0.5, -0.25, 1.0, 2.0])
+
+        softmax = torch.softmax(logits, dim=-1)
+        onehot = torch.zeros_like(softmax)
+        onehot[torch.arange(4), labels] = 1.0
+        ref_grad = grad_output.unsqueeze(-1) * (onehot - softmax)
+        ref_out = torch.log_softmax(logits, dim=-1).gather(-1, labels[:, None]).squeeze(-1)
+
+        out, safe_labels, local_mask, global_max, exp_sum = logprob_ops._selected_logprobs_forward(
+            logits, labels, vocab_start=0, group=None, world_size=1
+        )
+        grad = logprob_ops._selected_logprobs_recompute_backward(
+            grad_output, logits, safe_labels, local_mask, global_max, exp_sum, vocab_chunk_size=3
+        )
+
+        self.assertTrue(torch.allclose(out, ref_out, atol=1e-6))
+        self.assertTrue(torch.allclose(grad, ref_grad, atol=1e-6))
+
     def test_forward_selected_logprobs_chunks_vocab_exp(self):
         """Forward-only selected logprobs should avoid full-vocab exp tensors."""
         logits = torch.tensor(
