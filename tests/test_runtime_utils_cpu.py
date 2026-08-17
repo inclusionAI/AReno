@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
@@ -19,6 +20,7 @@ from areno.engine.runtime.common import (
 )
 from areno.engine.runtime.decode_graph import bucket_for, ceil_div
 from areno.engine.runtime.rollout import _empty_rollout, _merge_dp_rollouts_in_input_order, _merge_rollouts
+from areno.engine.runtime.train_step import _grad_norms
 
 
 def _rollout(prompt_ids, response_ids, logprobs, finish_reason=None, metrics=None):
@@ -111,6 +113,28 @@ class RuntimeCommonTest(unittest.TestCase):
             _check_token_ids(converted, vocab_size=3, name="sample")
             with self.assertRaisesRegex(RuntimeError, "sample out of vocab range"):
                 _check_token_ids(torch.tensor([0, 3]), vocab_size=3, name="sample")
+
+    def test_grad_norms_fuses_global_and_parameter_groups(self):
+        """One gradient pass should produce exact global and group norms."""
+
+        text = torch.nn.Parameter(torch.zeros(2))
+        tower = torch.nn.Parameter(torch.zeros(2))
+        projector = torch.nn.Parameter(torch.zeros(1))
+        text.main_grad = torch.tensor([3.0, 4.0])
+        tower.main_grad = torch.tensor([5.0, 12.0])
+        projector.main_grad = torch.tensor([84.0])
+        tower._areno_lr_group = "tower"
+        projector._areno_lr_group = "projector"
+
+        with patch(
+            "areno.engine.runtime.train_step.get_tp_context",
+            return_value=SimpleNamespace(world_size=1, rank=0, group=None),
+        ):
+            norms = _grad_norms([text, tower, projector], ("tower", "projector"))
+
+        self.assertAlmostEqual(norms["global"], 85.14693450927734)
+        self.assertEqual(norms["tower"], 13.0)
+        self.assertEqual(norms["projector"], 84.0)
 
 
 class DecodeGraphUtilityTest(unittest.TestCase):

@@ -18,7 +18,7 @@ from areno.engine.runtime.logprobs import (
 )
 from areno.engine.runtime.train_step import (
     _clip_grad_norm,
-    _grad_norm,
+    _grad_norms,
     _merge_metrics,
     _pack_train_data,
     _train_meta,
@@ -126,8 +126,16 @@ class TrainingManager:
             self._sync_data_parallel_gradients()
             self._sync_tensor_parallel_replicated_gradients()
             self._finalize_router_expert_bias()
-            multimodal_grad_metrics = self._multimodal_grad_norms()
-            grad_norm = _grad_norm(worker.model.parameters())
+            multimodal_groups = tuple(
+                group
+                for group in worker.multimodal_lr_schedules
+                if any(getattr(param, "_areno_lr_group", None) == group for param in worker.model.parameters())
+            )
+            grad_norms = _grad_norms(worker.model.parameters(), multimodal_groups)
+            grad_norm = grad_norms.pop("global")
+            multimodal_grad_metrics = (
+                {f"{group}_grad_norm": grad_norms[group] for group in multimodal_groups} if multimodal_groups else None
+            )
             clipped_grad_norm = grad_norm
             if worker.grad_clip_norm is not None:
                 _clip_grad_norm(worker.model.parameters(), grad_norm, worker.grad_clip_norm)
@@ -225,16 +233,6 @@ class TrainingManager:
             if group is not None:
                 values[f"{group}_lr"] = float(getattr(param, "_areno_lr", self.worker.optimizer.lr))
         return values
-
-    def _multimodal_grad_norms(self) -> dict[str, float] | None:
-        values = {}
-        for group in self.worker.multimodal_lr_schedules:
-            params = [
-                param for param in self.worker.model.parameters() if getattr(param, "_areno_lr_group", None) == group
-            ]
-            if params:
-                values[f"{group}_grad_norm"] = _grad_norm(params)
-        return values or None
 
     def _sync_data_parallel_gradients(self) -> None:
         """Average actor gradients across data-parallel replicas."""

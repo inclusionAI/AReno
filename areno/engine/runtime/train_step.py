@@ -283,16 +283,51 @@ def _row_mrope_positions(row: dict, length: int, device: torch.device) -> torch.
 
 def _grad_norm(parameters) -> float:
     """Compute global L2 grad norm across tensor-parallel ranks."""
-    total = _grad_square_sum(_grads_for_norm(parameters))
-    if total is None:
-        return 0.0
+    return _grad_norms(parameters)["global"]
+
+
+def _grad_norms(parameters, groups=()) -> dict[str, float]:
+    """Compute global and selected parameter-group L2 norms in one pass."""
+
+    names = ("global", *groups)
+    totals = None
+    group_indexes = {name: index for index, name in enumerate(names[1:], start=1)}
+    buckets = {}
+    for param in _grads_for_norm(parameters):
+        grad = _param_grad(param)
+        if grad is None:
+            continue
+        key = (grad.device, grad.dtype)
+        bucket = buckets.setdefault(key, ([], []))
+        bucket[0].append(param)
+        bucket[1].append(grad.detach())
+
+    for params, grads in buckets.values():
+        # foreach_norm batches kernel launches and only materializes one scalar
+        # per parameter instead of a squared tensor as large as every gradient.
+        if grads[0].dtype in {torch.float32, torch.float64}:
+            norms = torch._foreach_norm(grads, 2)
+        else:
+            norms = [torch.linalg.vector_norm(grad, ord=2, dtype=torch.float32) for grad in grads]
+        squared_norms = torch.stack(norms).float().square()
+        if totals is None:
+            totals = torch.zeros(len(names), device=squared_norms.device, dtype=torch.float32)
+        totals[0].add_(squared_norms.sum())
+        for group, group_index in group_indexes.items():
+            indexes = [index for index, param in enumerate(params) if getattr(param, "_areno_lr_group", None) == group]
+            if indexes:
+                totals[group_index].add_(squared_norms[indexes].sum())
+
+    if totals is None:
+        return dict.fromkeys(names, 0.0)
     ctx = get_tp_context()
     # Summing only TP-sharded contributions (`_grads_for_norm`) and then
     # all-reducing across TP gives the same value every rank would compute on
     # the unsharded model, without double-counting replicated parameters.
     if ctx.world_size > 1:
-        dist.all_reduce(total, op=dist.ReduceOp.SUM, group=ctx.group)
-    return float(total.sqrt().cpu())
+        dist.all_reduce(totals, op=dist.ReduceOp.SUM, group=ctx.group)
+    values = totals.sqrt().cpu().tolist()
+    return dict(zip(names, values, strict=True))
 
 
 def _clip_grad_norm(parameters, grad_norm: float, max_norm: float) -> None:
@@ -311,20 +346,6 @@ def _clip_grad_norm(parameters, grad_norm: float, max_norm: float) -> None:
         if coef is None:
             coef = torch.tensor(clip_coef, device=grad.device, dtype=grad.dtype)
         grad.mul_(coef)
-
-
-def _grad_square_sum(parameters) -> torch.Tensor | None:
-    """Local sum of squared gradient elements; returns None when no grads."""
-
-    total = None
-    for param in parameters:
-        grad = _param_grad(param)
-        if grad is None:
-            continue
-        grad = grad.detach().float()
-        value = grad.pow(2).sum()
-        total = value if total is None else total + value
-    return total
 
 
 def _grads_for_norm(parameters):
