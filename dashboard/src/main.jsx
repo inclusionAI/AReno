@@ -1306,13 +1306,9 @@ function normalizeMetricPoints(points = []) {
 
 function buildOverviewMetricPlot(points) {
   if (!points.length) return { points: "", coords: [], stepMin: 0, stepMax: 0, minLabel: "n/a", maxLabel: "n/a" };
-  const values = points.map((point) => point.value);
-  const steps = points.map((point) => point.step);
-  const min = Math.min(...values);
-  const max = Math.max(...values);
+  const { min, max } = numericExtent(points, (point) => point.value);
   const flat = max === min;
-  const stepMin = Math.min(...steps);
-  const stepMax = Math.max(...steps);
+  const { min: stepMin, max: stepMax } = numericExtent(points, (point) => point.step);
   const valueSpan = Math.max(max - min, 1e-9);
   const stepSpan = Math.max(stepMax - stepMin, 1);
   const coords = points.map((point) => {
@@ -2202,7 +2198,9 @@ function MetricChart({ jobId, metricsDir, refreshNonce }) {
   const activeName = effectiveName;
   const visiblePoints = points;
   const smoothed = smoothTensorboard(visiblePoints, smooth);
-  const plot = buildMetricPlot(visiblePoints, smoothed);
+  const smoothingEnabled = smooth > 0;
+  const displayedPoints = smoothingEnabled ? smoothed : visiblePoints;
+  const plot = buildMetricPlot(displayedPoints);
   return (
     <div className="chart">
       <div className="chartHeader">
@@ -2225,11 +2223,10 @@ function MetricChart({ jobId, metricsDir, refreshNonce }) {
             <g className="plotGrid">
               {[0, 1, 2, 3].map((item) => <line key={item} x1="0" x2="720" y1={30 + item * 42} y2={30 + item * 42} />)}
             </g>
-            <polyline className="rawLine" points={plot.raw} />
-            <polyline className="smoothLine" points={plot.smooth} />
-            {visiblePoints.map((point, index) => (
+            <polyline className={smoothingEnabled ? "smoothLine" : "rawLine"} points={plot.line} />
+            {displayedPoints.map((point, index) => (
               <g key={`${point.step}-${index}`}>
-                <circle className="metricDataPoint" cx={plot.coords[index]?.x || 0} cy={plot.coords[index]?.y || 0} r={metricPointRadius(visiblePoints.length)} />
+                <circle className="metricDataPoint" cx={plot.coords[index]?.x || 0} cy={plot.coords[index]?.y || 0} r={metricPointRadius(displayedPoints.length)} />
                 <circle className="metricHoverTarget" cx={plot.coords[index]?.x || 0} cy={plot.coords[index]?.y || 0} r="5" onMouseEnter={() => setHoveredPoint({ point, coord: plot.coords[index] })} onMouseLeave={() => setHoveredPoint(null)} />
               </g>
             ))}
@@ -2255,29 +2252,36 @@ function smoothTensorboard(points, smooth) {
   });
 }
 
-function buildMetricPlot(rawPoints, smoothPoints) {
-  if (!rawPoints.length) return { raw: "", smooth: "", coords: [], minLabel: "n/a", maxLabel: "n/a" };
-  const allValues = [...rawPoints, ...smoothPoints].map((point) => point.value);
-  const min = Math.min(...allValues);
-  const max = Math.max(...allValues);
+function buildMetricPlot(points) {
+  if (!points.length) return { line: "", coords: [], minLabel: "n/a", maxLabel: "n/a" };
+  const { min, max } = numericExtent(points, (point) => point.value);
   const flat = max === min;
   const span = Math.max(max - min, 1e-9);
-  const stepMin = rawPoints[0].step;
-  const stepMax = rawPoints[rawPoints.length - 1].step;
+  const stepMin = points[0].step;
+  const stepMax = points[points.length - 1].step;
   const stepSpan = Math.max(stepMax - stepMin, 1);
   const coord = (point) => ({
     x: ((point.step - stepMin) / stepSpan) * 700 + 10,
     y: flat ? 95 : 168 - ((point.value - min) / span) * 146,
   });
-  const rawCoords = rawPoints.map(coord);
-  const smoothCoords = smoothPoints.map(coord);
+  const coords = points.map(coord);
   return {
-    raw: rawCoords.map((point) => `${point.x.toFixed(1)},${point.y.toFixed(1)}`).join(" "),
-    smooth: smoothCoords.map((point) => `${point.x.toFixed(1)},${point.y.toFixed(1)}`).join(" "),
-    coords: rawCoords,
+    line: coords.map((point) => `${point.x.toFixed(1)},${point.y.toFixed(1)}`).join(" "),
+    coords,
     minLabel: compactNumber(min),
     maxLabel: compactNumber(max),
   };
+}
+
+function numericExtent(values, accessor) {
+  let min = Infinity;
+  let max = -Infinity;
+  for (const value of values) {
+    const numeric = Number(accessor(value));
+    if (numeric < min) min = numeric;
+    if (numeric > max) max = numeric;
+  }
+  return { min, max };
 }
 
 function compactNumber(value) {
