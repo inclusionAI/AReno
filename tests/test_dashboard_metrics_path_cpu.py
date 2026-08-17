@@ -74,6 +74,17 @@ def test_metric_updates_latest_job_perf_signal():
     assert job.step == 2
 
 
+def test_metric_series_returns_all_points_unless_limit_is_explicit():
+    job = Job(kind="train", name="full metric", command=[], config={}, metrics_dir=None)
+    state = DashboardState()
+    state.jobs = {job.id: job}
+    for step in range(6001):
+        state._add_metric(job, "train/loss", float(step), step)
+
+    assert len(state.metric_series(job.id, "train/loss")) == 6001
+    assert [point["step"] for point in state.metric_series(job.id, "train/loss", limit=2)] == [5999, 6000]
+
+
 def test_agent_language_instruction_follows_dashboard_language():
     assert "Simplified Chinese" in agent_language_instruction({"language": "zh"})
     assert "commands" in agent_language_instruction({"language": "zh"})

@@ -339,14 +339,14 @@ class DashboardState:
         by_step: dict[int, dict[str, float]] = {}
         for accumulator_path in tensorboard_event_sources(path, job_pid(job)):
             try:
-                accumulator = EventAccumulator(str(accumulator_path), size_guidance={"scalars": 10000})
+                accumulator = EventAccumulator(str(accumulator_path), size_guidance={"scalars": 0})
                 accumulator.Reload()
                 tags = accumulator.Tags().get("scalars", [])
             except Exception:
                 continue
             for tag in tags:
                 try:
-                    events = accumulator.Scalars(tag)[-500:]
+                    events = accumulator.Scalars(tag)
                 except Exception:
                     continue
                 for event in events:
@@ -540,7 +540,7 @@ class DashboardState:
                 current["latest_value"] = value
         return sorted(grouped.values(), key=lambda item: item["name"])
 
-    def metric_series(self, job_id: str | None, metric_name: str, *, limit: int = 500) -> list[dict[str, Any]]:
+    def metric_series(self, job_id: str | None, metric_name: str, *, limit: int | None = None) -> list[dict[str, Any]]:
         job = self.get_job(job_id)
         if job is None or not metric_name:
             return []
@@ -555,7 +555,9 @@ class DashboardState:
             if point.get("name") == metric_name and number_like(point.get("value"))
         ]
         points.sort(key=lambda point: int(point.get("step") or 0))
-        return points[-max(1, min(limit, 5000)) :]
+        if limit is None:
+            return points
+        return points[-max(1, limit) :]
 
     def scan_registered_jobs(self) -> None:
         registry_jobs = registered_job_items()
@@ -2117,7 +2119,8 @@ class Handler(BaseHTTPRequestHandler):
                 job_id = path.split("/")[-2]
                 query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
                 metric_name = query.get("name", [""])[0]
-                limit = int(query.get("limit", ["500"])[0] or 500)
+                raw_limit = query.get("limit", [None])[0]
+                limit = int(raw_limit) if raw_limit else None
                 self.json({"metric": metric_name, "points": STATE.metric_series(job_id, metric_name, limit=limit)})
             elif path.startswith("/api/jobs/") and path.endswith("/media"):
                 job_id = path.split("/")[-2]

@@ -1223,7 +1223,7 @@ function OverviewRewardLossChart({ job }) {
         const nextNames = Object.fromEntries(metricKinds.map((kind) => [kind, selectOverviewMetric(metricNames, kind)]));
         const metricData = await Promise.all(metricKinds.map((kind) => (
           nextNames[kind]
-            ? api(`/api/jobs/${job.id}/metric?name=${encodeURIComponent(nextNames[kind])}&limit=240`)
+            ? api(`/api/jobs/${job.id}/metric?name=${encodeURIComponent(nextNames[kind])}`)
             : Promise.resolve({ points: [] })
         )));
         if (cancelled) return;
@@ -1301,8 +1301,7 @@ function overviewMetricLabel(kind) {
 function normalizeMetricPoints(points = []) {
   return points
     .filter((point) => Number.isFinite(Number(point.value)))
-    .map((point) => ({ step: Number(point.step || 0), value: Number(point.value), time: point.time }))
-    .slice(-240);
+    .map((point) => ({ step: Number(point.step || 0), value: Number(point.value), time: point.time }));
 }
 
 function buildOverviewMetricPlot(points) {
@@ -2181,7 +2180,7 @@ function MetricChart({ jobId, metricsDir, refreshNonce }) {
       return undefined;
     }
     setMetricLoading(true);
-    api(`/api/jobs/${jobId}/metric?name=${encodeURIComponent(effectiveName)}&limit=500`)
+    api(`/api/jobs/${jobId}/metric?name=${encodeURIComponent(effectiveName)}`)
       .then((data) => {
         if (cancelled) return;
         setPoints((data.points || []).filter((point) => Number.isFinite(Number(point.value))).map((point) => ({
@@ -2201,7 +2200,7 @@ function MetricChart({ jobId, metricsDir, refreshNonce }) {
     };
   }, [jobId, effectiveName, refreshNonce, pollTick]);
   const activeName = effectiveName;
-  const visiblePoints = points.slice(-240);
+  const visiblePoints = points;
   const smoothed = smoothTensorboard(visiblePoints, smooth);
   const plot = buildMetricPlot(visiblePoints, smoothed);
   return (
