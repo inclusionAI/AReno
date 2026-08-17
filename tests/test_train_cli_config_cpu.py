@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import replace
 from types import SimpleNamespace
@@ -383,6 +384,27 @@ def test_training_config_summary_can_colorize_output():
 
     assert "\x1b[" in summary
     assert "AReno training config" in summary
+
+
+def test_dashboard_run_config_serializes_lora(tmp_path):
+    cfg = _trainer_config_from_options(**_options(lora_rank=8, lora_alpha=16.0, metrics_log_dir=str(tmp_path)))
+
+    train_cli._write_dashboard_run_config(cfg)
+
+    payload = json.loads(next(tmp_path.glob("areno_run_config.*.json")).read_text())
+    settings = payload["settings"]["sections"]
+    other = next(section for section in settings if section["title"] == "Other")
+    lora = next(item["value"] for item in other["items"] if item["key"] == "lora")
+    assert lora["rank"] == 8
+    assert lora["target_modules"] == [
+        "q_proj",
+        "k_proj",
+        "v_proj",
+        "o_proj",
+        "gate_proj",
+        "up_proj",
+        "down_proj",
+    ]
 
 
 def test_training_config_summary_wraps_for_narrow_terminals(monkeypatch):
@@ -916,6 +938,11 @@ def _options(**overrides):
         top_k=-1,
         top_p=1.0,
         max_running_prompts=None,
+        lora_rank=None,
+        lora_alpha=16.0,
+        lora_dropout=0.0,
+        lora_target_modules="q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj",
+        lora_adapter_path=None,
         lr=1e-6,
         min_lr=1e-7,
         lr_decay_steps=100,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import types
@@ -12,6 +13,7 @@ import click
 import torch
 from click.testing import CliRunner
 
+from areno.adapters import LoraConfig
 from areno.api.data import PromptBatch, PromptItem
 from areno.api.trainer_config import RolloutTrainerConfig, TrainerConfig
 from areno.cli import train as train_cli
@@ -198,6 +200,57 @@ class ConfigAndDataTest(unittest.TestCase):
 
         tp1 = EngineConfig(model=model, tp_size=1, devices=[0], sequence_parallel=True)
         self.assertFalse(tp1.effective_sequence_parallel)
+
+    def test_engine_config_rejects_replicated_kv_lora_targets(self):
+        """Replicated Qwen3 KV requires range-aware LoRA support."""
+        for model_type in ("qwen3", "qwen3_moe"):
+            with self.subTest(model_type=model_type):
+                model = ModelConfig(
+                    model_type=model_type,
+                    num_attention_heads=8,
+                    num_key_value_heads=2,
+                    intermediate_size=16,
+                    vocab_size=32,
+                )
+
+                with self.assertRaisesRegex(ValueError, "replicated-KV.*k_proj"):
+                    EngineConfig(model=model, tp_size=4, devices=[0, 1, 2, 3], lora=LoraConfig())
+
+                EngineConfig(
+                    model=model,
+                    tp_size=4,
+                    devices=[0, 1, 2, 3],
+                    lora=LoraConfig(target_modules=("q_proj", "o_proj")),
+                )
+
+    def test_trainer_config_rejects_lora_ppo_and_dpo(self):
+        """Reference and critic roles are outside the initial native-LoRA scope."""
+        for algo in ("ppo", "dpo"):
+            with self.subTest(algo=algo), self.assertRaisesRegex(ValueError, "PPO/DPO"):
+                TrainerConfig(algo=algo, ckpt="actor", dataset_path="dataset", lora=LoraConfig())
+
+    def test_adapter_path_uses_peft_metadata(self):
+        """A PEFT artifact should configure non-default native slots itself."""
+        with tempfile.TemporaryDirectory() as adapter_path:
+            Path(adapter_path, "adapter_config.json").write_text(
+                json.dumps(
+                    {
+                        "peft_type": "LORA",
+                        "r": 4,
+                        "lora_alpha": 8,
+                        "lora_dropout": 0,
+                        "bias": "none",
+                        "target_modules": ["q_proj", "o_proj"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            config = LoraConfig(adapter_path=adapter_path)
+
+        self.assertEqual(config.rank, 4)
+        self.assertEqual(config.alpha, 8)
+        self.assertEqual(config.target_modules, ("q_proj", "o_proj"))
 
     def test_runtime_config_attn_backend_propagates_to_model_config(self):
         """The runtime attention backend should reach model layer construction."""
