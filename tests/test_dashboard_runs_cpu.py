@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from areno.dashboard.server import Job, _parse_time, _duration_seconds, _launch_value
+from areno.dashboard.server import Job, _duration_seconds, _launch_value, _parse_time
 
 
 class ParseTimeTest(unittest.TestCase):
@@ -95,8 +95,19 @@ class SummaryJsonTest(unittest.TestCase):
         job = _make_job()
         summary = job.to_summary_json()
         for key in (
-            "id", "kind", "name", "metrics_dir", "status", "stage", "role",
-            "step", "created_at", "updated_at", "returncode", "pid", "perf",
+            "id",
+            "kind",
+            "name",
+            "metrics_dir",
+            "status",
+            "stage",
+            "role",
+            "step",
+            "created_at",
+            "updated_at",
+            "returncode",
+            "pid",
+            "perf",
         ):
             self.assertIn(key, summary, f"missing pre-existing field: {key}")
 
@@ -175,14 +186,20 @@ class LaunchValueTest(unittest.TestCase):
         """CLI-registered jobs store launch config as sections arrays."""
         launch = {
             "sections": [
-                {"title": "Basic", "items": [
-                    {"key": "algo", "value": "gspo"},
-                    {"key": "ckpt", "value": "Qwen/Qwen3-0.6B"},
-                    {"key": "dataset_path", "value": "tictactoe.jsonl"},
-                ]},
-                {"title": "Runtime", "items": [
-                    {"key": "tp_size", "value": 2},
-                ]},
+                {
+                    "title": "Basic",
+                    "items": [
+                        {"key": "algo", "value": "gspo"},
+                        {"key": "ckpt", "value": "Qwen/Qwen3-0.6B"},
+                        {"key": "dataset_path", "value": "tictactoe.jsonl"},
+                    ],
+                },
+                {
+                    "title": "Runtime",
+                    "items": [
+                        {"key": "tp_size", "value": 2},
+                    ],
+                },
             ]
         }
         self.assertEqual(_launch_value(launch, "algo"), "gspo")
@@ -200,9 +217,12 @@ class LaunchValueTest(unittest.TestCase):
     def test_serve_sections_with_model_path(self):
         launch = {
             "sections": [
-                {"title": "Basic", "items": [
-                    {"key": "model_path", "value": "Qwen/Qwen3-0.6B"},
-                ]},
+                {
+                    "title": "Basic",
+                    "items": [
+                        {"key": "model_path", "value": "Qwen/Qwen3-0.6B"},
+                    ],
+                },
             ]
         }
         self.assertEqual(_launch_value(launch, "model_path"), "Qwen/Qwen3-0.6B")
@@ -227,11 +247,14 @@ class SummarySectionsFormatTest(unittest.TestCase):
         job = _make_job()
         job.launch_config = {
             "sections": [
-                {"title": "Basic", "items": [
-                    {"key": "algo", "value": "gspo"},
-                    {"key": "ckpt", "value": "Qwen/Qwen3-0.6B"},
-                    {"key": "dataset_path", "value": "tictactoe.jsonl"},
-                ]},
+                {
+                    "title": "Basic",
+                    "items": [
+                        {"key": "algo", "value": "gspo"},
+                        {"key": "ckpt", "value": "Qwen/Qwen3-0.6B"},
+                        {"key": "dataset_path", "value": "tictactoe.jsonl"},
+                    ],
+                },
             ]
         }
         summary = job.to_summary_json()
@@ -243,9 +266,12 @@ class SummarySectionsFormatTest(unittest.TestCase):
         job = _make_job(kind="serve")
         job.launch_config = {
             "sections": [
-                {"title": "Basic", "items": [
-                    {"key": "model_path", "value": "Qwen/Qwen3-0.6B"},
-                ]},
+                {
+                    "title": "Basic",
+                    "items": [
+                        {"key": "model_path", "value": "Qwen/Qwen3-0.6B"},
+                    ],
+                },
             ]
         }
         summary = job.to_summary_json()
@@ -257,11 +283,14 @@ class SummarySectionsFormatTest(unittest.TestCase):
         job = _make_job()
         job.launch_config = {
             "sections": [
-                {"title": "Basic", "items": [
-                    {"key": "algo", "value": "dpo"},
-                    {"key": "ckpt", "value": "Qwen/Qwen2.5-0.5B"},
-                    {"key": "dataset_path", "value": "alpaca.jsonl"},
-                ]},
+                {
+                    "title": "Basic",
+                    "items": [
+                        {"key": "algo", "value": "dpo"},
+                        {"key": "ckpt", "value": "Qwen/Qwen2.5-0.5B"},
+                        {"key": "dataset_path", "value": "alpaca.jsonl"},
+                    ],
+                },
             ]
         }
         payload = job.to_json()

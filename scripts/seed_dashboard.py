@@ -24,7 +24,6 @@ from uuid import uuid4
 
 from areno.dashboard.server import _launch_value
 
-
 STATES = ["running", "succeeded", "failed", "stopped", "exited"]
 ALGOS = ["sft", "dpo", "gspo", "grpo", "ppo"]
 MODELS = [
@@ -85,13 +84,17 @@ def make_job(index: int) -> dict:
         name = f"serve {model}"
     else:
         if use_sections:
-            launch = _make_sections_launch([
-                ("algo", algo), ("ckpt", model), ("dataset_path", dataset),
-                ("model_hub", "modelscope"),
-                ("world_size", random.choice([1, 2, 4])),
-                ("tp_size", random.choice([1, 2])),
-                ("attn_backend", "flash"),
-            ])
+            launch = _make_sections_launch(
+                [
+                    ("algo", algo),
+                    ("ckpt", model),
+                    ("dataset_path", dataset),
+                    ("model_hub", "modelscope"),
+                    ("world_size", random.choice([1, 2, 4])),
+                    ("tp_size", random.choice([1, 2])),
+                    ("attn_backend", "flash"),
+                ]
+            )
         else:
             launch = {"algo": algo, "ckpt": model, "dataset_path": dataset, "model_hub": "modelscope"}
         name = f"train {algo} {model}"
@@ -146,7 +149,7 @@ def main() -> None:
     action = "Replaced" if args.replace else "Merged"
     print(f"{action} {args.count} synthetic jobs into {args.output} ({len(all_jobs)} total)")
     print(f"States: {', '.join(sorted(set(j['status'] for j in all_jobs)))}")
-    algos = sorted(set(filter(None, (_launch_value(j.get('launch', {}), 'algo') for j in all_jobs))))
+    algos = sorted(set(filter(None, (_launch_value(j.get("launch", {}), "algo") for j in all_jobs))))
     print(f"Algorithms: {', '.join(algos)}")
     print(f"Types: {', '.join(sorted(set(j['kind'] for j in all_jobs)))}")
 
