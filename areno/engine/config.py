@@ -37,6 +37,16 @@ class OptimizerConfig:
     grad_clip_norm: float | None = None
     adam_8bit: bool = False
     fp32_master_bucket_numel: int = 16 * 1024 * 1024
+    unfreeze_multimodal_tower: bool = False
+    unfreeze_multimodal_projector: bool = False
+    multimodal_tower_lr: float | None = None
+    multimodal_tower_min_lr: float | None = None
+    multimodal_tower_lr_decay_steps: int | None = None
+    multimodal_tower_lr_decay_style: Literal["constant", "linear", "cosine"] | None = None
+    multimodal_projector_lr: float | None = None
+    multimodal_projector_min_lr: float | None = None
+    multimodal_projector_lr_decay_steps: int | None = None
+    multimodal_projector_lr_decay_style: Literal["constant", "linear", "cosine"] | None = None
 
 
 @dataclass(slots=True)

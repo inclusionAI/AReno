@@ -88,6 +88,35 @@ def test_train_config_validates_common_positive_fields(field, value, message):
         _trainer_config_from_options(**_options(algo="gspo", **{field: value}))
 
 
+def test_train_config_supports_independent_multimodal_lr_schedules():
+    config = _trainer_config_from_options(
+        **_options(
+            algo="sft",
+            unfreeze_multimodal_tower=True,
+            multimodal_tower_lr=2e-6,
+            multimodal_tower_min_lr=2e-7,
+            multimodal_tower_lr_decay_steps=200,
+            multimodal_tower_lr_decay_style="linear",
+            unfreeze_multimodal_projector=True,
+            multimodal_projector_lr=3e-6,
+            multimodal_projector_min_lr=3e-7,
+            multimodal_projector_lr_decay_steps=300,
+            multimodal_projector_lr_decay_style="constant",
+        )
+    )
+
+    optimizer = config.optimizer_config()
+    assert optimizer["multimodal_tower_lr"] == 2e-6
+    assert optimizer["multimodal_tower_lr_decay_style"] == "linear"
+    assert optimizer["multimodal_projector_lr"] == 3e-6
+    assert optimizer["multimodal_projector_lr_decay_steps"] == 300
+
+
+def test_train_config_rejects_multimodal_lr_for_frozen_group():
+    with pytest.raises(UsageError, match="--mm-tower-lr requires --unfreeze-mm-tower"):
+        _trainer_config_from_options(**_options(multimodal_tower_lr=2e-6))
+
+
 def test_train_config_validates_tune_params_for_rollout_algorithms():
     with pytest.raises(UsageError, match="--tune-params currently supports rollout-based algorithms"):
         _trainer_config_from_options(**_options(algo="sft", reward_fn_path=None, reward_ckpt=None, tune_params=True))
@@ -883,6 +912,16 @@ def _options(**overrides):
         adam_beta1=0.9,
         adam_beta2=0.999,
         adam_8bit=False,
+        unfreeze_multimodal_tower=False,
+        unfreeze_multimodal_projector=False,
+        multimodal_tower_lr=None,
+        multimodal_tower_min_lr=None,
+        multimodal_tower_lr_decay_steps=None,
+        multimodal_tower_lr_decay_style=None,
+        multimodal_projector_lr=None,
+        multimodal_projector_min_lr=None,
+        multimodal_projector_lr_decay_steps=None,
+        multimodal_projector_lr_decay_style=None,
         weight_decay=1e-2,
         grad_clip_norm=1.0,
         activation_checkpointing=True,

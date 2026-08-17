@@ -44,7 +44,7 @@ from areno.engine.checkpoints.common import (
     load_checkpoint_weights,
     save_checkpoint_weights,
 )
-from areno.engine.checkpoints.io import SafetensorsIndex
+from areno.engine.checkpoints.io import SafetensorsIndex, rank0_tensor
 from areno.engine.config import ModelConfig, _parse_dtype
 from areno.engine.layers.attention_backend.infer import FlashAttnInferBackend, build_infer_attention_backend
 from areno.engine.layers.attention_backend.train import build_train_attention_backend
@@ -64,7 +64,7 @@ from areno.engine.runtime.metadata import InferMeta, TrainMeta
 from areno.engine.runtime.recompute import checkpoint_layer
 from areno.models.base import CausalLMOutput, ModelAdapter
 from areno.models.gemma4.checkpoint import checkpoint_spec
-from areno.models.gemma4_utils import keep_frozen_modules_in_eval, text_embedding_ids
+from areno.models.gemma4_utils import text_embedding_ids
 
 
 class Gemma4RMSNorm(nn.Module):
@@ -660,6 +660,8 @@ class Gemma4ForCausalLM(nn.Module):
         self.audio_tower = None
         self.embed_vision = None
         self.embed_audio = None
+        self._train_multimodal_tower = False
+        self._train_multimodal_projector = False
         self._build_multimodal_towers()
 
     def _build_multimodal_towers(self) -> None:
@@ -697,13 +699,96 @@ class Gemma4ForCausalLM(nn.Module):
         for module in (self.vision_tower, self.audio_tower, self.embed_vision, self.embed_audio):
             if module is not None:
                 module.requires_grad_(False)
-        keep_frozen_modules_in_eval((self.vision_tower, self.audio_tower, self.embed_vision, self.embed_audio))
+        self._apply_multimodal_module_modes()
+
+    def configure_multimodal_training(
+        self,
+        *,
+        unfreeze_tower: bool,
+        unfreeze_projector: bool,
+        tower_lr: float | None,
+        projector_lr: float | None,
+        base_lr: float,
+        trainable: bool = True,
+    ) -> None:
+        """Configure media encoder/projector trainability and optimizer LR groups."""
+
+        tower_params, projector_params = self._multimodal_parameter_groups()
+        if unfreeze_tower and not tower_params:
+            raise ValueError("Gemma4 checkpoint has no multimodal tower parameters to unfreeze")
+        if unfreeze_projector and not projector_params:
+            raise ValueError("Gemma4 checkpoint has no multimodal projector parameters to unfreeze")
+        self._configure_multimodal_parameters(
+            tower_params, "tower", unfreeze_tower, tower_lr, base_lr, trainable=trainable
+        )
+        self._configure_multimodal_parameters(
+            projector_params,
+            "projector",
+            unfreeze_projector,
+            projector_lr,
+            base_lr,
+            trainable=trainable,
+        )
+        self._train_multimodal_tower = unfreeze_tower and trainable
+        self._train_multimodal_projector = unfreeze_projector and trainable
+        self.train(self.training)
+
+    def _multimodal_parameter_groups(self) -> tuple[list[nn.Parameter], list[nn.Parameter]]:
+        projector_modules = [module for module in (self.embed_vision, self.embed_audio) if module is not None]
+        nested_projector = getattr(self.vision_tower, "multimodal_embedder", None)
+        if nested_projector is not None:
+            projector_modules.append(nested_projector)
+        projector_params = list(
+            {id(param): param for module in projector_modules for param in module.parameters()}.values()
+        )
+        projector_ids = {id(param) for param in projector_params}
+        tower_params = [
+            param
+            for module in (self.vision_tower, self.audio_tower)
+            if module is not None
+            for param in module.parameters()
+            if id(param) not in projector_ids
+        ]
+        return tower_params, projector_params
+
+    @staticmethod
+    def _configure_multimodal_parameters(
+        params: list[nn.Parameter],
+        group: str,
+        unfreeze: bool,
+        configured_lr: float | None,
+        base_lr: float,
+        *,
+        trainable: bool,
+    ) -> None:
+        for param in params:
+            param.requires_grad_(unfreeze and trainable)
+            param._areno_policy_sync = unfreeze
+            if unfreeze and trainable:
+                param._areno_lr_group = group
+                param._areno_lr = base_lr if configured_lr is None else configured_lr
+            else:
+                for attribute in ("_areno_lr_group", "_areno_lr"):
+                    if hasattr(param, attribute):
+                        delattr(param, attribute)
+
+    def _apply_multimodal_module_modes(self) -> None:
+        tower_modules = tuple(module for module in (self.vision_tower, self.audio_tower) if module is not None)
+        projector_modules = [module for module in (self.embed_vision, self.embed_audio) if module is not None]
+        nested_projector = getattr(self.vision_tower, "multimodal_embedder", None)
+        if nested_projector is not None:
+            projector_modules.append(nested_projector)
+        for module in tower_modules:
+            module.train(self.training and self._train_multimodal_tower)
+        # Apply projector mode last because Unified nests its vision projector in the tower.
+        for module in projector_modules:
+            module.train(self.training and self._train_multimodal_projector)
 
     def train(self, mode: bool = True):
         """Train the language model while keeping frozen media encoders deterministic."""
 
         super().train(mode)
-        keep_frozen_modules_in_eval((self.vision_tower, self.audio_tower, self.embed_vision, self.embed_audio))
+        self._apply_multimodal_module_modes()
         return self
 
     def _build_e2b_multimodal_towers(self) -> None:
@@ -1183,6 +1268,37 @@ def _load_gemma4_multimodal_weights(model: Gemma4ForCausalLM, model_path: str | 
         index.close()
 
 
+def _save_gemma4_multimodal_weights(model: Gemma4ForCausalLM, tensors, *, trainable_only: bool = False) -> None:
+    """Add live E2B or Unified media parameters to checkpoint and policy layouts."""
+
+    unified = str((model.config.vision_config or model.config.audio_config or {}).get("model_type", "")).startswith(
+        "gemma4_unified_"
+    )
+    modules = (
+        (
+            "model.vision_embedder" if unified else "model.vision_tower",
+            model.vision_tower,
+            {"multimodal_embedder.": "model.embed_vision."} if unified else None,
+        ),
+        ("model.audio_tower", model.audio_tower, None),
+        ("model.embed_vision", model.embed_vision, None),
+        ("model.embed_audio", model.embed_audio, None),
+    )
+    for prefix, module, aliases in modules:
+        if module is None:
+            continue
+        state = dict(module.named_parameters()) if trainable_only else module.state_dict()
+        for name, tensor in state.items():
+            if trainable_only and not getattr(tensor, "_areno_policy_sync", False):
+                continue
+            key = f"{prefix}.{name}"
+            for local_prefix, checkpoint_prefix in (aliases or {}).items():
+                if name.startswith(local_prefix):
+                    key = checkpoint_prefix + name.removeprefix(local_prefix)
+                    break
+            tensors[key] = rank0_tensor(tensor)
+
+
 def _load_frozen_module_weights(
     module: nn.Module,
     prefix: str,
@@ -1323,10 +1439,20 @@ class Gemma4Adapter(ModelAdapter):
     def save_weights(self, model: nn.Module, output_path: str | Path, source_path: str | Path | None) -> str | None:
         if not isinstance(model, Gemma4ForCausalLM):
             raise TypeError(f"Gemma4Adapter cannot save weights from {type(model)!r}")
-        return save_checkpoint_weights(model, output_path, source_path, checkpoint_spec(model.config.checkpoint_prefix))
+        return save_checkpoint_weights(
+            model,
+            output_path,
+            source_path,
+            checkpoint_spec(model.config.checkpoint_prefix),
+            extra_tensors_fn=lambda tensors: _save_gemma4_multimodal_weights(model, tensors, trainable_only=True),
+        )
 
     def build_policy_plan(self, model: nn.Module):
-        return build_checkpoint_policy_plan(model, checkpoint_spec(model.config.checkpoint_prefix))
+        return build_checkpoint_policy_plan(
+            model,
+            checkpoint_spec(model.config.checkpoint_prefix),
+            extra_tensors_fn=lambda tensors: _save_gemma4_multimodal_weights(model, tensors, trainable_only=True),
+        )
 
 
 def _layer_type(config: ModelConfig, layer_idx: int) -> str:

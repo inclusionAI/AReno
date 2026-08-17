@@ -52,6 +52,16 @@ class TrainerConfig:
     weight_decay: float = 1.0e-2
     grad_clip_norm: float = 1.0
     adam_8bit: bool = False
+    unfreeze_multimodal_tower: bool = False
+    unfreeze_multimodal_projector: bool = False
+    multimodal_tower_lr: float | None = None
+    multimodal_tower_min_lr: float | None = None
+    multimodal_tower_lr_decay_steps: int | None = None
+    multimodal_tower_lr_decay_style: str | None = None
+    multimodal_projector_lr: float | None = None
+    multimodal_projector_min_lr: float | None = None
+    multimodal_projector_lr_decay_steps: int | None = None
+    multimodal_projector_lr_decay_style: str | None = None
     activation_checkpointing: bool = True
     keep_rollout_state: bool = True
     eager_decode: bool = False
@@ -67,6 +77,42 @@ class TrainerConfig:
             raise ValueError("attn_backend must be one of: flash, native")
         if self.model_hub not in {"hf", "modelscope"}:
             raise ValueError("model_hub must be one of: hf, modelscope")
+        self._validate_multimodal_optimizer_group(
+            "tower",
+            self.unfreeze_multimodal_tower,
+            self.multimodal_tower_lr,
+            self.multimodal_tower_min_lr,
+            self.multimodal_tower_lr_decay_steps,
+            self.multimodal_tower_lr_decay_style,
+        )
+        self._validate_multimodal_optimizer_group(
+            "projector",
+            self.unfreeze_multimodal_projector,
+            self.multimodal_projector_lr,
+            self.multimodal_projector_min_lr,
+            self.multimodal_projector_lr_decay_steps,
+            self.multimodal_projector_lr_decay_style,
+        )
+
+    @staticmethod
+    def _validate_multimodal_optimizer_group(
+        group: str,
+        enabled: bool,
+        lr: float | None,
+        min_lr: float | None,
+        decay_steps: int | None,
+        decay_style: str | None,
+    ) -> None:
+        if lr is not None and lr <= 0:
+            raise ValueError(f"multimodal_{group}_lr must be positive")
+        if min_lr is not None and min_lr < 0:
+            raise ValueError(f"multimodal_{group}_min_lr must be non-negative")
+        if decay_steps is not None and decay_steps <= 0:
+            raise ValueError(f"multimodal_{group}_lr_decay_steps must be positive")
+        if decay_style is not None and decay_style not in {"constant", "linear", "cosine"}:
+            raise ValueError(f"multimodal_{group}_lr_decay_style must be one of: constant, linear, cosine")
+        if not enabled and any(value is not None for value in (lr, min_lr, decay_steps, decay_style)):
+            raise ValueError(f"multimodal {group} LR options require unfreeze_multimodal_{group}=True")
 
     def optimizer_config(self) -> dict:
         """Build the optimizer dict consumed by the backend config."""
@@ -80,6 +126,16 @@ class TrainerConfig:
             "weight_decay": self.weight_decay,
             "grad_clip_norm": self.grad_clip_norm,
             "adam_8bit": self.adam_8bit,
+            "unfreeze_multimodal_tower": self.unfreeze_multimodal_tower,
+            "unfreeze_multimodal_projector": self.unfreeze_multimodal_projector,
+            "multimodal_tower_lr": self.multimodal_tower_lr,
+            "multimodal_tower_min_lr": self.multimodal_tower_min_lr,
+            "multimodal_tower_lr_decay_steps": self.multimodal_tower_lr_decay_steps,
+            "multimodal_tower_lr_decay_style": self.multimodal_tower_lr_decay_style,
+            "multimodal_projector_lr": self.multimodal_projector_lr,
+            "multimodal_projector_min_lr": self.multimodal_projector_min_lr,
+            "multimodal_projector_lr_decay_steps": self.multimodal_projector_lr_decay_steps,
+            "multimodal_projector_lr_decay_style": self.multimodal_projector_lr_decay_style,
         }
 
     def areno_config(self):

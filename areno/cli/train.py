@@ -112,6 +112,16 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "adam_beta1",
             "adam_beta2",
             "adam_8bit",
+            "unfreeze_multimodal_tower",
+            "unfreeze_multimodal_projector",
+            "multimodal_tower_lr",
+            "multimodal_tower_min_lr",
+            "multimodal_tower_lr_decay_steps",
+            "multimodal_tower_lr_decay_style",
+            "multimodal_projector_lr",
+            "multimodal_projector_min_lr",
+            "multimodal_projector_lr_decay_steps",
+            "multimodal_projector_lr_decay_style",
             "weight_decay",
             "grad_clip_norm",
             "ref_ckpt",
@@ -273,6 +283,25 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
     if args.agent_timeout_s <= 0:
         raise click.UsageError("--agent-timeout-s must be positive")
     _require_positive_float(args.lr, "--lr")
+    if args.multimodal_tower_lr is not None:
+        _require_positive_float(args.multimodal_tower_lr, "--mm-tower-lr")
+        if not args.unfreeze_multimodal_tower:
+            raise click.UsageError("--mm-tower-lr requires --unfreeze-mm-tower")
+    if args.multimodal_projector_lr is not None:
+        _require_positive_float(args.multimodal_projector_lr, "--mm-projector-lr")
+        if not args.unfreeze_multimodal_projector:
+            raise click.UsageError("--mm-projector-lr requires --unfreeze-mm-projector")
+    for group in ("tower", "projector"):
+        enabled = getattr(args, f"unfreeze_multimodal_{group}")
+        min_lr = getattr(args, f"multimodal_{group}_min_lr")
+        decay_steps = getattr(args, f"multimodal_{group}_lr_decay_steps")
+        decay_style = getattr(args, f"multimodal_{group}_lr_decay_style")
+        if min_lr is not None and min_lr < 0:
+            raise click.UsageError(f"--mm-{group}-min-lr must be non-negative")
+        if decay_steps is not None and decay_steps <= 0:
+            raise click.UsageError(f"--mm-{group}-lr-steps must be positive")
+        if any(value is not None for value in (min_lr, decay_steps, decay_style)) and not enabled:
+            raise click.UsageError(f"multimodal {group} LR options require --unfreeze-mm-{group}")
     if args.min_lr < 0:
         raise click.UsageError("--min-lr must be non-negative")
     if args.lr_decay_steps <= 0:
@@ -688,6 +717,16 @@ def _trainer_config_from_args(args) -> TrainerConfig:
     args.rollout_tp_size = getattr(args, "rollout_tp_size", None)
     args.rollout_devices = getattr(args, "rollout_devices", None)
     args.policy_sync_bucket_mb = getattr(args, "policy_sync_bucket_mb", 64)
+    args.unfreeze_multimodal_tower = getattr(args, "unfreeze_multimodal_tower", False)
+    args.unfreeze_multimodal_projector = getattr(args, "unfreeze_multimodal_projector", False)
+    args.multimodal_tower_lr = getattr(args, "multimodal_tower_lr", None)
+    args.multimodal_tower_min_lr = getattr(args, "multimodal_tower_min_lr", None)
+    args.multimodal_tower_lr_decay_steps = getattr(args, "multimodal_tower_lr_decay_steps", None)
+    args.multimodal_tower_lr_decay_style = getattr(args, "multimodal_tower_lr_decay_style", None)
+    args.multimodal_projector_lr = getattr(args, "multimodal_projector_lr", None)
+    args.multimodal_projector_min_lr = getattr(args, "multimodal_projector_min_lr", None)
+    args.multimodal_projector_lr_decay_steps = getattr(args, "multimodal_projector_lr_decay_steps", None)
+    args.multimodal_projector_lr_decay_style = getattr(args, "multimodal_projector_lr_decay_style", None)
     algorithm = get_algorithm(args.algo)
     chat_template_enable_thinking = False if args.disable_thinking else None
     if algorithm.name == "dpo":
@@ -720,6 +759,16 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             weight_decay=args.weight_decay,
             grad_clip_norm=args.grad_clip_norm,
             adam_8bit=args.adam_8bit,
+            unfreeze_multimodal_tower=args.unfreeze_multimodal_tower,
+            unfreeze_multimodal_projector=args.unfreeze_multimodal_projector,
+            multimodal_tower_lr=args.multimodal_tower_lr,
+            multimodal_tower_min_lr=args.multimodal_tower_min_lr,
+            multimodal_tower_lr_decay_steps=args.multimodal_tower_lr_decay_steps,
+            multimodal_tower_lr_decay_style=args.multimodal_tower_lr_decay_style,
+            multimodal_projector_lr=args.multimodal_projector_lr,
+            multimodal_projector_min_lr=args.multimodal_projector_min_lr,
+            multimodal_projector_lr_decay_steps=args.multimodal_projector_lr_decay_steps,
+            multimodal_projector_lr_decay_style=args.multimodal_projector_lr_decay_style,
             activation_checkpointing=args.activation_checkpointing,
             keep_rollout_state=not args.drop_rollout_state,
             eager_decode=args.eager_decode,
@@ -762,6 +811,16 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             weight_decay=args.weight_decay,
             grad_clip_norm=args.grad_clip_norm,
             adam_8bit=args.adam_8bit,
+            unfreeze_multimodal_tower=args.unfreeze_multimodal_tower,
+            unfreeze_multimodal_projector=args.unfreeze_multimodal_projector,
+            multimodal_tower_lr=args.multimodal_tower_lr,
+            multimodal_tower_min_lr=args.multimodal_tower_min_lr,
+            multimodal_tower_lr_decay_steps=args.multimodal_tower_lr_decay_steps,
+            multimodal_tower_lr_decay_style=args.multimodal_tower_lr_decay_style,
+            multimodal_projector_lr=args.multimodal_projector_lr,
+            multimodal_projector_min_lr=args.multimodal_projector_min_lr,
+            multimodal_projector_lr_decay_steps=args.multimodal_projector_lr_decay_steps,
+            multimodal_projector_lr_decay_style=args.multimodal_projector_lr_decay_style,
             activation_checkpointing=args.activation_checkpointing,
             keep_rollout_state=not args.drop_rollout_state,
             eager_decode=args.eager_decode,
@@ -812,6 +871,16 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             weight_decay=args.weight_decay,
             grad_clip_norm=args.grad_clip_norm,
             adam_8bit=args.adam_8bit,
+            unfreeze_multimodal_tower=args.unfreeze_multimodal_tower,
+            unfreeze_multimodal_projector=args.unfreeze_multimodal_projector,
+            multimodal_tower_lr=args.multimodal_tower_lr,
+            multimodal_tower_min_lr=args.multimodal_tower_min_lr,
+            multimodal_tower_lr_decay_steps=args.multimodal_tower_lr_decay_steps,
+            multimodal_tower_lr_decay_style=args.multimodal_tower_lr_decay_style,
+            multimodal_projector_lr=args.multimodal_projector_lr,
+            multimodal_projector_min_lr=args.multimodal_projector_min_lr,
+            multimodal_projector_lr_decay_steps=args.multimodal_projector_lr_decay_steps,
+            multimodal_projector_lr_decay_style=args.multimodal_projector_lr_decay_style,
             activation_checkpointing=args.activation_checkpointing,
             keep_rollout_state=not args.drop_rollout_state,
             eager_decode=args.eager_decode,
@@ -863,6 +932,16 @@ def _trainer_config_from_args(args) -> TrainerConfig:
         weight_decay=args.weight_decay,
         grad_clip_norm=args.grad_clip_norm,
         adam_8bit=args.adam_8bit,
+        unfreeze_multimodal_tower=args.unfreeze_multimodal_tower,
+        unfreeze_multimodal_projector=args.unfreeze_multimodal_projector,
+        multimodal_tower_lr=args.multimodal_tower_lr,
+        multimodal_tower_min_lr=args.multimodal_tower_min_lr,
+        multimodal_tower_lr_decay_steps=args.multimodal_tower_lr_decay_steps,
+        multimodal_tower_lr_decay_style=args.multimodal_tower_lr_decay_style,
+        multimodal_projector_lr=args.multimodal_projector_lr,
+        multimodal_projector_min_lr=args.multimodal_projector_min_lr,
+        multimodal_projector_lr_decay_steps=args.multimodal_projector_lr_decay_steps,
+        multimodal_projector_lr_decay_style=args.multimodal_projector_lr_decay_style,
         activation_checkpointing=args.activation_checkpointing,
         keep_rollout_state=not args.drop_rollout_state,
         eager_decode=args.eager_decode,
@@ -1403,6 +1482,52 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
 @click.option("--adam-beta1", type=float, default=0.9, show_default=True, help="Policy optimizer Adam beta1.")
 @click.option("--adam-beta2", type=float, default=0.999, show_default=True, help="Policy optimizer Adam beta2.")
 @click.option("--adam-8bit", is_flag=True, help="Use 8-bit Adam moment states instead of FP32 Adam states.")
+@click.option("--unfreeze-mm-tower", "unfreeze_multimodal_tower", is_flag=True, help="Train multimodal encoder towers.")
+@click.option(
+    "--unfreeze-mm-projector", "unfreeze_multimodal_projector", is_flag=True, help="Train multimodal projectors."
+)
+@click.option(
+    "--mm-tower-lr",
+    "multimodal_tower_lr",
+    type=float,
+    default=None,
+    help="Learning rate for unfrozen multimodal towers; defaults to --lr.",
+)
+@click.option("--mm-tower-min-lr", "multimodal_tower_min_lr", type=float, default=None, help="Tower minimum LR.")
+@click.option(
+    "--mm-tower-lr-steps", "multimodal_tower_lr_decay_steps", type=int, default=None, help="Tower LR decay steps."
+)
+@click.option(
+    "--mm-tower-lr-style",
+    "multimodal_tower_lr_decay_style",
+    type=click.Choice(["constant", "linear", "cosine"]),
+    default=None,
+    help="Tower LR decay style.",
+)
+@click.option(
+    "--mm-projector-lr",
+    "multimodal_projector_lr",
+    type=float,
+    default=None,
+    help="Learning rate for unfrozen multimodal projectors; defaults to --lr.",
+)
+@click.option(
+    "--mm-projector-min-lr", "multimodal_projector_min_lr", type=float, default=None, help="Projector minimum LR."
+)
+@click.option(
+    "--mm-projector-lr-steps",
+    "multimodal_projector_lr_decay_steps",
+    type=int,
+    default=None,
+    help="Projector LR decay steps.",
+)
+@click.option(
+    "--mm-projector-lr-style",
+    "multimodal_projector_lr_decay_style",
+    type=click.Choice(["constant", "linear", "cosine"]),
+    default=None,
+    help="Projector LR decay style.",
+)
 @click.option("--weight-decay", type=float, default=1.0e-2, show_default=True, help="Policy optimizer weight decay.")
 @click.option("--grad-clip-norm", type=float, default=1.0, show_default=True, help="Policy gradient clipping norm.")
 @click.option(

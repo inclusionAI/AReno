@@ -135,6 +135,7 @@ class TrainingManager:
                 clipped_grad_norm = min(grad_norm, float(worker.grad_clip_norm))
             current_lr = self._lr_for_step(worker._global_step + 1)
             worker.optimizer.lr = current_lr
+            multimodal_lrs = self._set_multimodal_lrs(worker._global_step + 1)
             worker.optimizer.step()
             worker.optimizer.zero_grad(set_to_none=True)
             worker._global_step += 1
@@ -142,6 +143,7 @@ class TrainingManager:
                 torch.cuda.empty_cache()
         else:
             current_lr = worker.optimizer.lr
+            multimodal_lrs = self._current_multimodal_lrs()
         if ctx.is_rank0:
             if auto_tune_probe and worker.device.type == "cuda":
                 torch.cuda.synchronize(worker.device)
@@ -158,6 +160,7 @@ class TrainingManager:
                     metrics,
                     None,
                     {"lr": current_lr},
+                    multimodal_lrs,
                     {"grad_norm": grad_norm} if grad_norm is not None else None,
                     {"clipped_grad_norm": clipped_grad_norm} if clipped_grad_norm is not None else None,
                     grad_zero_metrics,
@@ -169,20 +172,60 @@ class TrainingManager:
         """Compute the actor learning rate for a given optimizer step."""
 
         worker = self.worker
-        if worker.lr_warmup_steps > 0 and step <= worker.lr_warmup_steps:
-            return worker.base_lr * step / worker.lr_warmup_steps
-        if worker.lr_decay_style == "constant" or worker.lr_decay_steps <= 0:
-            return worker.base_lr
-        decay_step = step - worker.lr_warmup_steps
-        decay_steps = max(worker.lr_decay_steps - worker.lr_warmup_steps, 1)
+        return self._scheduled_lr(
+            step,
+            base_lr=worker.base_lr,
+            min_lr=worker.min_lr,
+            decay_steps=worker.lr_decay_steps,
+            decay_style=worker.lr_decay_style,
+            warmup_steps=worker.lr_warmup_steps,
+        )
+
+    @staticmethod
+    def _scheduled_lr(
+        step: int, *, base_lr: float, min_lr: float, decay_steps: int, decay_style: str, warmup_steps: int = 0
+    ) -> float:
+        if warmup_steps > 0 and step <= warmup_steps:
+            return base_lr * step / warmup_steps
+        if decay_style == "constant" or decay_steps <= 0:
+            return base_lr
+        decay_step = step - warmup_steps
+        decay_steps = max(decay_steps - warmup_steps, 1)
         progress = min(max(decay_step / decay_steps, 0.0), 1.0)
-        if worker.lr_decay_style == "linear":
+        if decay_style == "linear":
             coeff = 1.0 - progress
-        elif worker.lr_decay_style == "cosine":
+        elif decay_style == "cosine":
             coeff = 0.5 * (1.0 + math.cos(math.pi * progress))
         else:
-            raise ValueError(f"unsupported lr_decay_style: {worker.lr_decay_style}")
-        return worker.min_lr + coeff * (worker.base_lr - worker.min_lr)
+            raise ValueError(f"unsupported lr_decay_style: {decay_style}")
+        return min_lr + coeff * (base_lr - min_lr)
+
+    def _set_multimodal_lrs(self, step: int) -> dict[str, float]:
+        values = {}
+        for group, schedule in self.worker.multimodal_lr_schedules.items():
+            lr = self._scheduled_lr(
+                step,
+                base_lr=schedule["lr"],
+                min_lr=schedule["min_lr"],
+                decay_steps=schedule["decay_steps"],
+                decay_style=schedule["decay_style"],
+            )
+            found = False
+            for param in self.worker.optimizer.model_params:
+                if getattr(param, "_areno_lr_group", None) == group:
+                    param._areno_lr = lr
+                    found = True
+            if found:
+                values[f"{group}_lr"] = lr
+        return values
+
+    def _current_multimodal_lrs(self) -> dict[str, float]:
+        values = {}
+        for param in self.worker.optimizer.model_params:
+            group = getattr(param, "_areno_lr_group", None)
+            if group is not None:
+                values[f"{group}_lr"] = float(getattr(param, "_areno_lr", self.worker.optimizer.lr))
+        return values
 
     def _sync_data_parallel_gradients(self) -> None:
         """Average actor gradients across data-parallel replicas."""
