@@ -84,8 +84,8 @@ Common fields include:
        GRPO, and PPO.
    * - ``grad_norm``
      - Global gradient norm after clipping/accounting.
-   * - ``grad_zero_ratio`` / ``grad_nonzero_ratio``
-     - Fraction of parameter-gradient entries that are zero/non-zero.
+   * - ``tower_grad_norm`` / ``projector_grad_norm``
+     - Gradient norms for enabled multimodal parameter groups.
    * - ``lr``
      - Current optimizer learning rate.
    * - ``step_rollout_time_s`` / ``step_train_time_s`` / ``step_e2e_time_s``

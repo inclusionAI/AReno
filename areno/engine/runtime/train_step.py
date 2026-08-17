@@ -6,7 +6,7 @@ reduces the train forward FLOPs to just the valid tokens while keeping every
 per-action signal (advantage, rollout logprob, ref logprob, value, return)
 indexed in lock-step with the per-action axis used by `packed_next_token_logprobs`.
 
-`_grad_norm`, `_clip_grad_norm`, and `_grad_zero_metrics` are TP-aware: they
+`_grad_norm` and `_clip_grad_norm` are TP-aware: they
 combine local contributions across the TP group and ignore parameters whose
 gradients are replicated across ranks (so each parameter contributes exactly
 once to the global norm).
@@ -311,38 +311,6 @@ def _clip_grad_norm(parameters, grad_norm: float, max_norm: float) -> None:
         if coef is None:
             coef = torch.tensor(clip_coef, device=grad.device, dtype=grad.dtype)
         grad.mul_(coef)
-
-
-def _grad_zero_metrics(parameters) -> dict[str, float] | None:
-    """Report what fraction of gradient elements collapsed to zero."""
-
-    total = None
-    nonzero = None
-    for param in _grads_for_norm(parameters):
-        grad = _param_grad(param)
-        if grad is None:
-            continue
-        grad = grad.detach()
-        value_total = torch.tensor(grad.numel(), device=grad.device, dtype=torch.float64)
-        value_nonzero = torch.count_nonzero(grad).to(device=grad.device, dtype=torch.float64)
-        total = value_total if total is None else total + value_total
-        nonzero = value_nonzero if nonzero is None else nonzero + value_nonzero
-    if total is None or nonzero is None:
-        return None
-    ctx = get_tp_context()
-    if ctx.world_size > 1:
-        dist.all_reduce(total, op=dist.ReduceOp.SUM, group=ctx.group)
-        dist.all_reduce(nonzero, op=dist.ReduceOp.SUM, group=ctx.group)
-    total_float = float(total.cpu())
-    nonzero_float = float(nonzero.cpu())
-    zero_float = total_float - nonzero_float
-    return {
-        "grad_zero_count": zero_float,
-        "grad_nonzero_count": nonzero_float,
-        "grad_total_count": total_float,
-        "grad_zero_ratio": zero_float / max(total_float, 1.0),
-        "grad_nonzero_ratio": nonzero_float / max(total_float, 1.0),
-    }
 
 
 def _grad_square_sum(parameters) -> torch.Tensor | None:

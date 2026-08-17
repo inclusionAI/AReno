@@ -19,7 +19,6 @@ from areno.engine.runtime.logprobs import (
 from areno.engine.runtime.train_step import (
     _clip_grad_norm,
     _grad_norm,
-    _grad_zero_metrics,
     _merge_metrics,
     _pack_train_data,
     _train_meta,
@@ -123,14 +122,12 @@ class TrainingManager:
         grad_norm = None
         multimodal_grad_metrics = None
         clipped_grad_norm = None
-        grad_zero_metrics = None
         if stepped:
             self._sync_data_parallel_gradients()
             self._sync_tensor_parallel_replicated_gradients()
             self._finalize_router_expert_bias()
             multimodal_grad_metrics = self._multimodal_grad_norms()
             grad_norm = _grad_norm(worker.model.parameters())
-            grad_zero_metrics = _grad_zero_metrics(worker.model.parameters())
             clipped_grad_norm = grad_norm
             if worker.grad_clip_norm is not None:
                 _clip_grad_norm(worker.model.parameters(), grad_norm, worker.grad_clip_norm)
@@ -166,7 +163,6 @@ class TrainingManager:
                     {"grad_norm": grad_norm} if grad_norm is not None else None,
                     multimodal_grad_metrics,
                     {"clipped_grad_norm": clipped_grad_norm} if clipped_grad_norm is not None else None,
-                    grad_zero_metrics,
                 ),
             }
         return None
