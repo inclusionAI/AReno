@@ -2226,7 +2226,7 @@ function MetricChart({ jobId, metricsDir, refreshNonce }) {
             <polyline className={smoothingEnabled ? "smoothLine" : "rawLine"} points={plot.line} />
             {displayedPoints.map((point, index) => (
               <g key={`${point.step}-${index}`}>
-                <circle className="metricDataPoint" cx={plot.coords[index]?.x || 0} cy={plot.coords[index]?.y || 0} r={metricPointRadius(displayedPoints.length)} />
+                {!smoothingEnabled && <circle className="metricDataPoint" cx={plot.coords[index]?.x || 0} cy={plot.coords[index]?.y || 0} r={metricPointRadius(displayedPoints.length)} />}
                 <circle className="metricHoverTarget" cx={plot.coords[index]?.x || 0} cy={plot.coords[index]?.y || 0} r="5" onMouseEnter={() => setHoveredPoint({ point, coord: plot.coords[index] })} onMouseLeave={() => setHoveredPoint(null)} />
               </g>
             ))}
