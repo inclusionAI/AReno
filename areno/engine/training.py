@@ -121,12 +121,14 @@ class TrainingManager:
         self._accumulate_main_gradients()
         stepped = allow_step
         grad_norm = None
+        multimodal_grad_metrics = None
         clipped_grad_norm = None
         grad_zero_metrics = None
         if stepped:
             self._sync_data_parallel_gradients()
             self._sync_tensor_parallel_replicated_gradients()
             self._finalize_router_expert_bias()
+            multimodal_grad_metrics = self._multimodal_grad_norms()
             grad_norm = _grad_norm(worker.model.parameters())
             grad_zero_metrics = _grad_zero_metrics(worker.model.parameters())
             clipped_grad_norm = grad_norm
@@ -162,6 +164,7 @@ class TrainingManager:
                     {"lr": current_lr},
                     multimodal_lrs,
                     {"grad_norm": grad_norm} if grad_norm is not None else None,
+                    multimodal_grad_metrics,
                     {"clipped_grad_norm": clipped_grad_norm} if clipped_grad_norm is not None else None,
                     grad_zero_metrics,
                 ),
@@ -226,6 +229,16 @@ class TrainingManager:
             if group is not None:
                 values[f"{group}_lr"] = float(getattr(param, "_areno_lr", self.worker.optimizer.lr))
         return values
+
+    def _multimodal_grad_norms(self) -> dict[str, float] | None:
+        values = {}
+        for group in self.worker.multimodal_lr_schedules:
+            params = [
+                param for param in self.worker.model.parameters() if getattr(param, "_areno_lr_group", None) == group
+            ]
+            if params:
+                values[f"{group}_grad_norm"] = _grad_norm(params)
+        return values or None
 
     def _sync_data_parallel_gradients(self) -> None:
         """Average actor gradients across data-parallel replicas."""
