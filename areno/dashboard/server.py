@@ -7,6 +7,7 @@ import argparse
 import datetime as dt
 import json
 import math
+import mimetypes
 import os
 import re
 import shlex
@@ -494,6 +495,30 @@ class DashboardState:
                 self._save_state()
             return job
 
+    def resolve_sample_media(self, job_id: str, reference: str) -> Path | None:
+        """Resolve a local media reference already exposed by a captured sample."""
+
+        job = self.get_job(job_id)
+        if job is None or reference not in sample_media_references(job.samples):
+            return None
+        parsed = urllib.parse.urlparse(reference)
+        if parsed.scheme == "file":
+            candidate = Path(urllib.request.url2pathname(parsed.path)).expanduser()
+        elif parsed.scheme:
+            return None
+        else:
+            candidate = Path(reference).expanduser()
+        roots = [Path(job.cwd).expanduser() if job.cwd else ROOT, ROOT]
+        candidates = [candidate] if candidate.is_absolute() else [root / candidate for root in roots]
+        for item in candidates:
+            try:
+                resolved = item.resolve()
+            except OSError:
+                continue
+            if resolved.is_file():
+                return resolved
+        return None
+
     def metric_summaries(self, job_id: str | None) -> list[dict[str, Any]]:
         job = self.get_job(job_id)
         if job is None:
@@ -842,6 +867,64 @@ def rollout_sample_sources(path: Path, pid: int | None) -> list[Path]:
         return [file for file in candidates if file.exists()]
     legacy = path / "rollout_samples.jsonl"
     return [legacy] if legacy.exists() else sorted(path.glob("rollout_samples.*.jsonl"))
+
+
+def sample_media_references(samples: list[dict[str, Any]]) -> set[str]:
+    """Collect local media references from structured messages and source records."""
+
+    references: set[str] = set()
+    for sample in samples:
+        messages = sample.get("prompt_messages") or sample.get("messages") or []
+        if isinstance(messages, list):
+            for message in messages:
+                if not isinstance(message, dict) or not isinstance(message.get("content"), list):
+                    continue
+                for part in message["content"]:
+                    media_type, reference = _message_media_reference(part)
+                    if media_type and _is_local_media_reference(reference):
+                        references.add(reference)
+        _record_media_references(sample.get("source_record"), references)
+    return references
+
+
+def _message_media_reference(part: Any) -> tuple[str | None, str]:
+    if not isinstance(part, dict):
+        return None, ""
+    part_type = str(part.get("type") or "")
+    media_type = part_type.removesuffix("_url")
+    if media_type not in {"image", "audio", "video"}:
+        return None, ""
+    value = part.get(part_type)
+    if value is None:
+        value = part.get(media_type, part.get("url"))
+    if isinstance(value, dict):
+        value = value.get("url")
+    return media_type, str(value or "")
+
+
+def _record_media_references(value: Any, references: set[str], *, key: str = "") -> None:
+    if isinstance(value, dict):
+        for item_key, item_value in value.items():
+            _record_media_references(item_value, references, key=str(item_key))
+        return
+    if isinstance(value, list):
+        for item in value:
+            _record_media_references(item, references, key=key)
+        return
+    normalized_key = key.lower()
+    if not isinstance(value, str) or not any(kind in normalized_key for kind in ("image", "audio", "video")):
+        return
+    media_key = normalized_key.rstrip("s") in {"image", "audio", "video"}
+    if (media_key or any(marker in normalized_key for marker in ("path", "url", "file"))) and _is_local_media_reference(
+        value
+    ):
+        references.add(value)
+
+
+def _is_local_media_reference(reference: str) -> bool:
+    if not reference or reference.startswith(("data:", "blob:")):
+        return False
+    return urllib.parse.urlparse(reference).scheme in {"", "file"}
 
 
 def dashboard_state_source(path: Path, pid: int | None) -> Path | None:
@@ -2036,6 +2119,15 @@ class Handler(BaseHTTPRequestHandler):
                 metric_name = query.get("name", [""])[0]
                 limit = int(query.get("limit", ["500"])[0] or 500)
                 self.json({"metric": metric_name, "points": STATE.metric_series(job_id, metric_name, limit=limit)})
+            elif path.startswith("/api/jobs/") and path.endswith("/media"):
+                job_id = path.split("/")[-2]
+                query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+                reference = query.get("path", [""])[0]
+                target = STATE.resolve_sample_media(job_id, reference)
+                if target is None:
+                    self.error("sample media not found", HTTPStatus.NOT_FOUND)
+                else:
+                    self.media(target)
             elif path.startswith("/api/jobs/"):
                 job = STATE.get_job(path.split("/")[-1])
                 if not job:
@@ -2157,6 +2249,53 @@ class Handler(BaseHTTPRequestHandler):
 
     def error(self, message: str, status: HTTPStatus = HTTPStatus.BAD_REQUEST) -> None:
         self.json({"error": message}, status)
+
+    def media(self, target: Path) -> None:
+        size = target.stat().st_size
+        start = 0
+        end = max(size - 1, 0)
+        status = HTTPStatus.OK
+        range_header = self.headers.get("Range")
+        if range_header:
+            match = re.fullmatch(r"bytes=(\d*)-(\d*)", range_header.strip())
+            if not match:
+                self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
+                self.send_header("Content-Range", f"bytes */{size}")
+                self.end_headers()
+                return
+            first, last = match.groups()
+            if first:
+                start = int(first)
+                end = min(int(last), size - 1) if last else size - 1
+            elif last:
+                suffix = min(int(last), size)
+                start = size - suffix
+                end = size - 1
+            if start > end or start >= size:
+                self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
+                self.send_header("Content-Range", f"bytes */{size}")
+                self.end_headers()
+                return
+            status = HTTPStatus.PARTIAL_CONTENT
+        length = max(end - start + 1, 0)
+        content_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Content-Length", str(length))
+        if status == HTTPStatus.PARTIAL_CONTENT:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        self.send_header("Cache-Control", "private, max-age=60")
+        self.end_headers()
+        with target.open("rb") as handle:
+            handle.seek(start)
+            remaining = length
+            while remaining > 0:
+                chunk = handle.read(min(remaining, 1024 * 1024))
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                remaining -= len(chunk)
 
     def static(self, path: str) -> None:
         if "/assets/" in path:

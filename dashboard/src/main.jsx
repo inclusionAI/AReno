@@ -9,8 +9,11 @@ import {
   Box,
   CircleStop,
   Cpu,
+  Database,
   FileText,
+  Film,
   History,
+  Image as ImageIcon,
   LayoutDashboard,
   Languages,
   Layers,
@@ -25,6 +28,7 @@ import {
   Sun,
   TerminalSquare,
   Timer,
+  Volume2,
   Wrench,
 } from "lucide-react";
 import "./styles.css";
@@ -1418,7 +1422,7 @@ function JobsSelectedDetail({ job, env, onStop }) {
         </section>
         <section className="panel rolloutSamplePanel">
           <div className="panelHeader"><div><h2>Rollout Sample</h2><p>Inspect prompt and completion pairs by step and sample.</p></div></div>
-          <SampleView samples={job.samples || []} hideTitle />
+          <SampleView samples={job.samples || []} jobId={job.id} hideTitle />
         </section>
       </div>
     </div>
@@ -1440,7 +1444,7 @@ function JobFullDetailPage({ job, refreshNonce, onBack, onStop }) {
       </section>
       <section className="panel jobDetailSection">
         <div className="panelHeader"><div><h2>Rollout Sample</h2><p>Prompt and completion output captured during rollout.</p></div></div>
-        <SampleView samples={job.samples || []} hideTitle />
+        <SampleView samples={job.samples || []} jobId={job.id} hideTitle />
       </section>
       <div className="jobDetailDataGrid">
         <ConfigView config={job.config} launch={job.launch} />
@@ -2389,7 +2393,110 @@ function normalizeDisplayName(name) {
     .trim();
 }
 
-function SampleView({ samples, hideTitle = false }) {
+function sampleOutput(sample) {
+  for (const value of [sample.completion, sample.rendered_completion, sample.final_answer]) {
+    if (typeof value === "string" && value.trim()) return value;
+  }
+  if (Array.isArray(sample.tool_calls) && sample.tool_calls.length) {
+    return JSON.stringify(sample.tool_calls, null, 2);
+  }
+  return "No assistant output was captured.";
+}
+
+function samplePromptMessages(sample) {
+  if (Array.isArray(sample.prompt_messages)) return sample.prompt_messages;
+  if (!Array.isArray(sample.messages)) return [];
+  const messages = [...sample.messages];
+  if (messages.at(-1)?.role === "assistant") messages.pop();
+  return messages;
+}
+
+function messageMediaPart(part) {
+  if (!part || typeof part !== "object") return null;
+  const rawType = String(part.type || "");
+  if (rawType === "input_audio") {
+    const input = part.input_audio;
+    if (!input?.data || String(input.data).includes("<truncated>")) return null;
+    const format = String(input.format || "wav").toLowerCase();
+    const mime = format === "mp3" ? "audio/mpeg" : `audio/${format}`;
+    const source = String(input.data).startsWith("data:") ? input.data : `data:${mime};base64,${input.data}`;
+    return { type: "audio", source };
+  }
+  const type = rawType.replace(/_url$/, "");
+  if (!["image", "audio", "video"].includes(type)) return null;
+  let source = part[rawType] ?? part[type] ?? part.url;
+  if (source && typeof source === "object") source = source.url;
+  return typeof source === "string" && source ? { type, source } : null;
+}
+
+function sampleMedia(sample) {
+  const items = [];
+  const add = (item) => {
+    if (item && !items.some((existing) => existing.type === item.type && existing.source === item.source)) items.push(item);
+  };
+  for (const message of samplePromptMessages(sample)) {
+    if (!Array.isArray(message?.content)) continue;
+    for (const part of message.content) add(messageMediaPart(part));
+  }
+  const walkRecord = (value, key = "") => {
+    if (Array.isArray(value)) {
+      value.forEach((item) => walkRecord(item, key));
+      return;
+    }
+    if (value && typeof value === "object") {
+      Object.entries(value).forEach(([itemKey, item]) => walkRecord(item, itemKey));
+      return;
+    }
+    if (typeof value !== "string") return;
+    const normalized = key.toLowerCase();
+    const type = ["video", "audio", "image"].find((kind) => normalized.includes(kind));
+    const directMediaKey = ["video", "videos", "audio", "audios", "image", "images"].includes(normalized);
+    if (type && (directMediaKey || ["path", "url", "file"].some((marker) => normalized.includes(marker)))) {
+      add({ type, source: value });
+    }
+  };
+  walkRecord(sample.source_record);
+  return items;
+}
+
+function sampleMediaUrl(jobId, source) {
+  if (/^(data:|blob:|https?:)/.test(source)) return source;
+  return `${API_BASE}api/jobs/${encodeURIComponent(jobId)}/media?path=${encodeURIComponent(source)}`;
+}
+
+function SampleMedia({ jobId, media }) {
+  if (!jobId || !media.length) return null;
+  const hasVideo = media.some((item) => item.type === "video");
+  const hasAudio = media.some((item) => item.type === "audio");
+  const label = hasVideo && hasAudio ? "Video + audio" : hasVideo ? "Video" : hasAudio ? "Audio" : "Image";
+  return (
+    <section className="sampleMediaSection">
+      <div className="sampleSectionLabel">
+        {hasVideo ? <Film size={14} /> : hasAudio ? <Volume2 size={14} /> : <ImageIcon size={14} />}
+        {label}
+      </div>
+      <div className={classNames("sampleMediaGrid", media.length === 1 && "single")}>
+        {media.map((item, index) => {
+          const source = sampleMediaUrl(jobId, item.source);
+          if (item.type === "video") return <video key={`${item.type}-${item.source}`} src={source} controls preload="metadata" />;
+          if (item.type === "audio") return <audio key={`${item.type}-${item.source}`} src={source} controls preload="metadata" />;
+          return <img key={`${item.type}-${item.source}`} src={source} alt={`Sample media ${index + 1}`} loading="lazy" />;
+        })}
+      </div>
+    </section>
+  );
+}
+
+function JsonSampleSection({ icon, label, value, emptyText }) {
+  return (
+    <section className="sampleDetailSection">
+      <div className="sampleSectionLabel">{icon}{label}</div>
+      <pre>{value == null ? emptyText : JSON.stringify(value, null, 2)}</pre>
+    </section>
+  );
+}
+
+function SampleView({ samples, jobId, hideTitle = false }) {
   const orderedSamples = useMemo(
     () =>
       [...(samples || [])].sort(
@@ -2426,6 +2533,8 @@ function SampleView({ samples, hideTitle = false }) {
   const activeOption =
     sampleOptions.find((option) => option.key === selectedSampleKey) || sampleOptions[sampleOptions.length - 1] || null;
   const sample = activeOption?.sample || null;
+  const media = useMemo(() => (sample ? sampleMedia(sample) : []), [sample]);
+  const promptMessages = sample ? samplePromptMessages(sample) : [];
   return (
     <div className="sampleCard">
       {!hideTitle && <div className="codeTitle sampleTitle">
@@ -2442,14 +2551,31 @@ function SampleView({ samples, hideTitle = false }) {
         )}
       </div>}
       {sample ? (
-        <div className="sampleGrid">
-          <div>
-            <span>Prompt</span>
-            <p>{sample.prompt || "n/a"}</p>
+        <div className="sampleContent">
+          <SampleMedia jobId={jobId} media={media} />
+          <div className="sampleGrid">
+            <div>
+              <span>Prompt</span>
+              <p>{sample.prompt || "No prompt text was captured."}</p>
+            </div>
+            <div>
+              <span>Output</span>
+              <p>{sampleOutput(sample)}</p>
+            </div>
           </div>
-          <div>
-            <span>Completion</span>
-            <p>{sample.completion || "n/a"}</p>
+          <div className="sampleDetailGrid">
+            <JsonSampleSection
+              icon={<FileText size={14} />}
+              label="Full prompt"
+              value={promptMessages.length ? promptMessages : null}
+              emptyText="No structured prompt messages were captured."
+            />
+            <JsonSampleSection
+              icon={<Database size={14} />}
+              label="Data record"
+              value={sample.source_record}
+              emptyText="No source dataset record was captured."
+            />
           </div>
         </div>
       ) : (
