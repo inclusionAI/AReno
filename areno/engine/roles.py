@@ -237,6 +237,16 @@ class WorkerRole:
         if self.optimizer is not None:
             self.optimizer.onload_state(device)
 
+    def onload_for_inference(self, device: torch.device) -> None:
+        """Move this role to `device` and materialize derived inference weights."""
+
+        self.model.to(device)
+        self.model.onload_train_weights(device)
+        self.model.prepare_infer_weights()
+        self.model.offload_train_weights()
+        if self.value_head is not None:
+            self.value_head.to(device)
+
     def offload(self) -> None:
         """Free all HBM held by this role."""
 
@@ -305,32 +315,47 @@ class RoleManager:
         ctx = get_tp_context()
         role_name = payload.role
         if role_name == "actor":
-            worker._prepare_actor_onloaded()
+            worker._prepare_actor_for_inference()
             model = worker.model
             offload_role = None
         else:
             offload_role = self.roles[role_name]
             worker._prepare_actor_offloaded()
-            offload_role.onload(worker.device)
+            offload_role.onload_for_inference(worker.device)
             model = offload_role.model
         model.eval()
         try:
             token_rows = payload.token_rows_by_dp[ctx.dp_rank]
-            local = [] if not token_rows else self._score_logprob_rows(model, token_rows, payload)
+            features = payload.features_by_dp[ctx.dp_rank] if payload.features_by_dp is not None else None
+            local = [] if not token_rows else self._score_logprob_rows(model, token_rows, payload, features=features)
             return local if ctx.rank == 0 else None
         finally:
             if offload_role is not None:
                 offload_role.offload()
 
-    def _score_logprob_rows(self, model, token_rows: list[list[int]], payload: ScorePayload) -> list[list[float]]:
+    def _score_logprob_rows(
+        self,
+        model,
+        token_rows: list[list[int]],
+        payload: ScorePayload,
+        *,
+        features: list[dict | None] | None = None,
+    ) -> list[list[float]]:
         """Score token logprobs in bounded microbatches."""
 
         local = []
         microbatch_size = _score_microbatch_size(payload.microbatch_size)
         for start in range(0, len(token_rows), microbatch_size):
             rows = token_rows[start : start + microbatch_size]
+            row_features = features[start : start + microbatch_size] if features is not None else None
             tokens, lengths = _pad_token_rows(rows, self.worker.device, int(payload.pad_token_id))
-            out = model(input_ids=tokens, train_meta=_dense_train_meta(tokens, sequence_parallel_enabled=False))
+            model_kwargs = {
+                "input_ids": tokens,
+                "train_meta": _dense_train_meta(tokens, sequence_parallel_enabled=False),
+            }
+            if row_features is not None and any(feature is not None for feature in row_features):
+                model_kwargs["features"] = row_features
+            out = model(**model_kwargs)
             logprobs = next_token_logprobs(out.logits_shard, tokens)
             local.extend(_unpad_action_rows(logprobs, lengths))
         return local
@@ -343,18 +368,24 @@ class RoleManager:
         ctx = get_tp_context()
         role = self.roles[payload.role]
         worker._prepare_actor_offloaded()
-        role.onload(worker.device)
+        role.onload_for_inference(worker.device)
         role.model.eval()
         role.value_head.eval()
         try:
             token_rows = payload.token_rows_by_dp[ctx.dp_rank]
-            local = [] if not token_rows else self._score_value_rows(role, token_rows, payload)
+            features = payload.features_by_dp[ctx.dp_rank] if payload.features_by_dp is not None else None
+            local = [] if not token_rows else self._score_value_rows(role, token_rows, payload, features=features)
             return local if ctx.rank == 0 else None
         finally:
             role.offload()
 
     def _score_value_rows(
-        self, role: WorkerRole, token_rows: list[list[int]], payload: ScorePayload
+        self,
+        role: WorkerRole,
+        token_rows: list[list[int]],
+        payload: ScorePayload,
+        *,
+        features: list[dict | None] | None = None,
     ) -> list[list[float]]:
         """Score critic values in bounded microbatches."""
 
@@ -362,8 +393,15 @@ class RoleManager:
         microbatch_size = _score_microbatch_size(payload.microbatch_size)
         for start in range(0, len(token_rows), microbatch_size):
             rows = token_rows[start : start + microbatch_size]
+            row_features = features[start : start + microbatch_size] if features is not None else None
             tokens, lengths = _pad_token_rows(rows, self.worker.device, int(payload.pad_token_id))
-            out = role.model(input_ids=tokens, train_meta=_dense_train_meta(tokens, sequence_parallel_enabled=False))
+            model_kwargs = {
+                "input_ids": tokens,
+                "train_meta": _dense_train_meta(tokens, sequence_parallel_enabled=False),
+            }
+            if row_features is not None and any(feature is not None for feature in row_features):
+                model_kwargs["features"] = row_features
+            out = role.model(**model_kwargs)
             if out.hidden_states is None:
                 raise RuntimeError("critic model output must include hidden_states for value scoring")
             values = role.value_head(out.hidden_states).squeeze(-1).float()
@@ -380,25 +418,40 @@ class RoleManager:
         if role.value_head is None:
             raise RuntimeError("reward role must have a scalar reward head")
         worker._prepare_actor_offloaded()
-        role.onload(worker.device)
+        role.onload_for_inference(worker.device)
         role.model.eval()
         role.value_head.eval()
         try:
             token_rows = payload.token_rows_by_dp[ctx.dp_rank]
-            local = [] if not token_rows else self._score_reward_rows(role, token_rows, payload)
+            features = payload.features_by_dp[ctx.dp_rank] if payload.features_by_dp is not None else None
+            local = [] if not token_rows else self._score_reward_rows(role, token_rows, payload, features=features)
             return local if ctx.rank == 0 else None
         finally:
             role.offload()
 
-    def _score_reward_rows(self, role: WorkerRole, token_rows: list[list[int]], payload: ScorePayload) -> list[float]:
+    def _score_reward_rows(
+        self,
+        role: WorkerRole,
+        token_rows: list[list[int]],
+        payload: ScorePayload,
+        *,
+        features: list[dict | None] | None = None,
+    ) -> list[float]:
         """Score scalar rewards in bounded microbatches."""
 
         local = []
         microbatch_size = _score_microbatch_size(payload.microbatch_size)
         for start in range(0, len(token_rows), microbatch_size):
             rows = token_rows[start : start + microbatch_size]
+            row_features = features[start : start + microbatch_size] if features is not None else None
             tokens, lengths = _pad_token_rows(rows, self.worker.device, int(payload.pad_token_id))
-            out = role.model(input_ids=tokens, train_meta=_dense_train_meta(tokens, sequence_parallel_enabled=False))
+            model_kwargs = {
+                "input_ids": tokens,
+                "train_meta": _dense_train_meta(tokens, sequence_parallel_enabled=False),
+            }
+            if row_features is not None and any(feature is not None for feature in row_features):
+                model_kwargs["features"] = row_features
+            out = role.model(**model_kwargs)
             if out.hidden_states is None:
                 raise RuntimeError("reward model output must include hidden_states for reward scoring")
             values = role.value_head(out.hidden_states).float()

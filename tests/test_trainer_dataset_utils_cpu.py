@@ -42,6 +42,9 @@ class FakeSFTBackend:
     def get_tokenizer(self):
         return FakeTextTokenizer()
 
+    def get_processor(self):
+        return None
+
     def train(self, _batch, _loss_fn, *, mini_bs, gradient_accumulation_steps):
         del mini_bs, gradient_accumulation_steps
         self.train_calls += 1
@@ -81,6 +84,26 @@ class TrainerDatasetUtilityTest(unittest.TestCase):
         self.assertEqual(seq.tokens[-1], 99)
         self.assertEqual(seq.prompt_mask.count(True), 1)
         self.assertTrue(any(not item for item in seq.prompt_mask[1:]))
+
+    def test_sft_encoded_row_preserves_multimodal_features(self):
+        """SFT loaders may return pre-encoded multimodal rows with side features."""
+        tokenizer = FakeTextTokenizer()
+        features = {"image_token_id": 99, "image_embeds": [[0.1, 0.2]]}
+
+        seq = sft_mod._record_to_train_sequence(
+            {
+                "tokens": [1, 99, 2],
+                "prompt_mask": [True, True, False],
+                "features": features,
+            },
+            tokenizer,
+            max_prompt_tokens=8,
+            max_new_tokens=8,
+        )
+
+        self.assertIsNotNone(seq)
+        self.assertEqual(seq.features, features)
+        self.assertEqual(seq.tokens, [1, 99, 2])
 
     def test_sft_rejects_raw_rows_that_loader_did_not_normalize(self):
         """SFT requires the dataset loader to emit prompt/response rows."""

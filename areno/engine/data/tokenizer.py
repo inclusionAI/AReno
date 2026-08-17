@@ -28,3 +28,16 @@ def load_tokenizer(model_path: str | Path):
             trust_remote_code=True,
             extra_special_tokens={},
         )
+
+
+def load_processor(model_path: str | Path):
+    """Load a HF processor when the checkpoint provides one, otherwise return None."""
+
+    try:
+        from transformers import AutoProcessor
+    except ImportError:
+        return None
+    try:
+        return AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
+    except Exception:
+        return None

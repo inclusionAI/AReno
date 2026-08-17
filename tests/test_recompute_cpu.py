@@ -5,7 +5,7 @@ import unittest
 import torch
 
 from areno.engine.runtime.metadata import InferMeta, TrainMeta
-from areno.engine.runtime.recompute import checkpoint_layer, should_checkpoint_layer
+from areno.engine.runtime.recompute import checkpoint_layer, checkpoint_routed_moe_layer, should_checkpoint_layer
 
 
 class RecomputeTest(unittest.TestCase):
@@ -58,6 +58,43 @@ class RecomputeTest(unittest.TestCase):
 
         self.assertEqual(out.tolist(), [2.0])
         self.assertEqual(calls["count"], 1)
+
+    def test_routed_moe_checkpoint_reuses_one_route_and_preserves_gradients(self):
+        """Dynamic routing stays outside recompute while all gradients survive."""
+        route_calls = 0
+        router_scale = torch.nn.Parameter(torch.tensor(0.5))
+        expert_scale = torch.nn.Parameter(torch.tensor(2.0))
+        states = torch.ones((1, 3, 4), requires_grad=True)
+
+        def attention_fn(x):
+            return x * 3
+
+        def route_fn(x):
+            nonlocal route_calls
+            route_calls += 1
+            tokens = x.numel() // x.shape[-1]
+            indices = torch.zeros((tokens, 1), dtype=torch.long)
+            weights = x.mean(dim=-1).reshape(tokens, 1) * router_scale
+            return indices, weights
+
+        def expert_fn(x, indices, weights):
+            del indices
+            return x * weights.view(*x.shape[:-1], 1) * expert_scale
+
+        output = checkpoint_routed_moe_layer(
+            attention_fn,
+            torch.nn.Identity(),
+            route_fn,
+            expert_fn,
+            states,
+            train_meta=TrainMeta(activation_checkpointing=True),
+        )
+        output.sum().backward()
+
+        self.assertEqual(route_calls, 1)
+        self.assertIsNotNone(states.grad)
+        self.assertIsNotNone(router_scale.grad)
+        self.assertIsNotNone(expert_scale.grad)
 
 
 if __name__ == "__main__":

@@ -67,7 +67,7 @@ def infer_tool_call_parser_name(trainer: Any) -> str:
         return "gemma4"
     if "minicpm" in haystack:
         return "minicpm"
-    if "<tool_call>" in template or "qwen" in haystack:
+    if "<tool_call>" in template or "qwen" in haystack or "ling" in haystack:
         return "qwen"
     return "json"
 
@@ -84,13 +84,7 @@ class JsonToolCallParser:
         calls = _parse_json_tool_calls(content, tools, chosen_name)
         if calls:
             return ToolCallParseResult(normal_text="", tool_calls=calls)
-
-        if chosen_name is None:
-            return ToolCallParseResult(normal_text=content)
-        args = _parse_explicit_arguments_text(content, tools, chosen_name)
-        if args is None:
-            return ToolCallParseResult(normal_text=content)
-        return ToolCallParseResult(normal_text="", tool_calls=[_openai_tool_call(chosen_name, args)])
+        return ToolCallParseResult(normal_text=content)
 
 
 class QwenToolCallParser(JsonToolCallParser):
@@ -104,9 +98,12 @@ class QwenToolCallParser(JsonToolCallParser):
         for block in self._block_re.findall(content):
             calls.extend(_parse_json_tool_calls(block, tools, _chosen_tool_name(tools, tool_choice)))
             calls.extend(_parse_angle_tool_calls(block, tools, tool_choice))
+            calls.extend(_parse_arg_key_value_tool_calls(block, tools, tool_choice))
         if calls:
             normal = content[: content.find("<tool_call>")].strip()
             return ToolCallParseResult(normal_text=normal, tool_calls=calls)
+        if _chosen_tool_name(tools, tool_choice) is None:
+            return ToolCallParseResult(normal_text=content)
         return super().parse(content, tools, tool_choice)
 
 
@@ -253,23 +250,12 @@ def _load_json_object(text: str) -> Any | None:
     return None
 
 
-def _parse_explicit_arguments_text(content: str, tools: list[dict[str, Any]], name: str) -> dict[str, Any] | None:
-    enum_arg = _single_enum_argument(tools, name)
-    if enum_arg is None:
-        return None
-    key, values = enum_arg
-    parsed = _single_enum_value_from_text(content, key, values)
-    if parsed is None:
-        return None
-    return {key: parsed}
-
-
 def _chosen_tool_name(tools: list[dict[str, Any]], tool_choice: Any) -> str | None:
     if isinstance(tool_choice, dict):
         function = tool_choice.get("function")
         if isinstance(function, dict) and isinstance(function.get("name"), str):
             return function["name"]
-    if len(tools) == 1:
+    if tool_choice == "required" and len(tools) == 1:
         function = _tool_function(tools[0])
         if isinstance(function, dict) and isinstance(function.get("name"), str):
             return function["name"]
@@ -298,24 +284,6 @@ def _tool_names(tools: list[dict[str, Any]]) -> set[str]:
     return names
 
 
-def _single_enum_argument(tools: list[dict[str, Any]], name: str) -> tuple[str, list[Any]] | None:
-    for tool in tools:
-        function = _tool_function(tool)
-        if not isinstance(function, dict) or function.get("name") != name:
-            continue
-        parameters = function.get("parameters")
-        properties = parameters.get("properties") if isinstance(parameters, dict) else None
-        if not isinstance(properties, dict):
-            return None
-        enum_fields = []
-        for key, spec in properties.items():
-            enum = spec.get("enum") if isinstance(spec, dict) else None
-            if isinstance(enum, list) and enum:
-                enum_fields.append((key, enum))
-        return enum_fields[0] if len(enum_fields) == 1 else None
-    return None
-
-
 def _tool_function(tool: dict[str, Any]) -> dict[str, Any] | None:
     """Return an OpenAI function schema from chat or flat tool syntax."""
 
@@ -330,23 +298,6 @@ def _tool_function(tool: dict[str, Any]) -> dict[str, Any] | None:
             "description": tool.get("description"),
             "parameters": tool.get("parameters"),
         }
-    return None
-
-
-def _single_enum_value_from_text(text: str, key: str, values: list[Any]) -> Any | None:
-    value_by_lower = {str(value).lower(): value for value in values}
-    if not value_by_lower:
-        return None
-    alternatives = "|".join(re.escape(value) for value in value_by_lower)
-    patterns = [
-        rf'["\']?{re.escape(key)}["\']?\s*[:=]\s*["\']?\b({alternatives})\b',
-        rf"<(?:{re.escape(key)}|move|action)>\s*({alternatives})\s*</(?:{re.escape(key)}|move|action)>",
-        rf"\b(?:choose|select|play|move|slide|go|answer|direction)\s*(?:is|:|=|to)?\s*\b({alternatives})\b",
-    ]
-    for pattern in patterns:
-        matches = re.findall(pattern, text, flags=re.IGNORECASE)
-        if matches:
-            return value_by_lower[str(matches[-1]).lower()]
     return None
 
 
@@ -479,6 +430,10 @@ def _parse_minicpm_param_value(value: str) -> Any:
 _ANGLE_TOOL_BLOCK_RE = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL | re.IGNORECASE)
 _ANGLE_FUNCTION_RE = re.compile(r"<function=([^>\s]+)>\s*(.*?)</function>", re.DOTALL | re.IGNORECASE)
 _ANGLE_PARAM_RE = re.compile(r"<parameter=([^>\s]+)>\s*(.*?)</parameter>", re.DOTALL | re.IGNORECASE)
+_ARG_PAIR_RE = re.compile(
+    r"<arg_key>\s*(.*?)\s*</arg_key>\s*<arg_value>\s*(.*?)\s*</arg_value>",
+    re.DOTALL | re.IGNORECASE,
+)
 
 
 def _parse_angle_tool_call_blocks(content: str, tools: list[dict[str, Any]], tool_choice: Any) -> list[dict[str, Any]]:
@@ -496,6 +451,62 @@ def _parse_angle_tool_calls(content: str, tools: list[dict[str, Any]], tool_choi
         args = {key.strip(): _parse_minicpm_param_value(value.strip()) for key, value in _ANGLE_PARAM_RE.findall(body)}
         calls.append(_openai_tool_call(name.strip(), args))
     return calls
+
+
+def _parse_arg_key_value_tool_calls(
+    content: str, tools: list[dict[str, Any]], tool_choice: Any
+) -> list[dict[str, Any]]:
+    """Parse Ling-style ``tool_name + arg_key/arg_value`` blocks."""
+
+    first_arg = content.lower().find("<arg_key>")
+    if first_arg < 0:
+        return []
+    name = content[:first_arg].strip()
+    if not name or "<" in name or not _tool_name_allowed(name, tools, tool_choice):
+        return []
+    properties = _tool_parameter_properties(name, tools)
+    args = {
+        key.strip(): _parse_schema_parameter_value(value.strip(), properties.get(key.strip()))
+        for key, value in _ARG_PAIR_RE.findall(content)
+    }
+    return [_openai_tool_call(name, args)] if args else []
+
+
+def _tool_parameter_properties(name: str, tools: list[dict[str, Any]]) -> dict[str, Any]:
+    for tool in tools:
+        function = tool.get("function") if isinstance(tool.get("function"), dict) else tool
+        if function.get("name") == name:
+            parameters = function.get("parameters") or {}
+            properties = parameters.get("properties") or {}
+            return properties if isinstance(properties, dict) else {}
+    return {}
+
+
+def _parse_schema_parameter_value(value: str, schema: Any) -> Any:
+    expected_type = schema.get("type") if isinstance(schema, dict) else None
+    if expected_type == "string":
+        return value
+    if expected_type == "integer":
+        try:
+            return int(value)
+        except ValueError:
+            return value
+    if expected_type == "number":
+        try:
+            return float(value)
+        except ValueError:
+            return value
+    if expected_type == "boolean":
+        if value.lower() in {"true", "false"}:
+            return value.lower() == "true"
+        return value
+    if expected_type in {"array", "object"}:
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return value
+        return parsed
+    return _parse_minicpm_param_value(value)
 
 
 def _first_nonnegative(*values: int) -> int | None:

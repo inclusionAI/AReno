@@ -40,7 +40,14 @@ from areno.engine.checkpoints.common import (
     save_split_column_spec,
     split_local_tensors,
 )
-from areno.engine.checkpoints.io import _owns_checkpoint_tensor, _tensor_to_cpu
+from areno.engine.checkpoints.io import (
+    PolicyFlatPiece,
+    PolicyTensorLayout,
+    PolicyTensorStore,
+    _owns_checkpoint_tensor,
+    _tensor_to_cpu,
+)
+from areno.engine.parallel.context import get_tp_context
 
 
 def top_level_spec(prefix: str) -> TopLevelSpec:
@@ -210,7 +217,11 @@ def save_gemma4_attention(tensors, prefix: str, layer, context) -> None:
     parts = split_local_tensors(qkv.weight, qkv.local_out_features)
     gathered = _gather_ranged_column_tensors(list(parts), qkv.shard_ranges, qkv.out_features)
     templates = QKV_SAVE_SPEC.keys
-    if attention.attention_k_eq_v and attention.layer_type == "full_attention":
+    if (
+        not isinstance(tensors, PolicyTensorStore)
+        and attention.attention_k_eq_v
+        and attention.layer_type == "full_attention"
+    ):
         templates = templates[:2]
         gathered = gathered[:2]
     for template, tensor in zip(templates, gathered, strict=True):
@@ -219,7 +230,11 @@ def save_gemma4_attention(tensors, prefix: str, layer, context) -> None:
         bias_parts = split_local_tensors(qkv.bias, qkv.local_out_features)
         bias_gathered = _gather_ranged_column_tensors(list(bias_parts), qkv.shard_ranges, qkv.out_features)
         bias_templates = QKV_BIAS_SAVE_SPEC.keys
-        if attention.attention_k_eq_v and attention.layer_type == "full_attention":
+        if (
+            not isinstance(tensors, PolicyTensorStore)
+            and attention.attention_k_eq_v
+            and attention.layer_type == "full_attention"
+        ):
             bias_templates = bias_templates[:2]
             bias_gathered = bias_gathered[:2]
         for template, tensor in zip(bias_templates, bias_gathered, strict=True):
@@ -294,6 +309,47 @@ def _save_gemma4_moe(tensors, prefix: str, layer) -> None:
     tensors[f"{prefix}.router.scale"] = rank0_tensor(router.scale)
     tensors[f"{prefix}.router.proj.weight"] = rank0_tensor(router.proj.weight)
     tensors[f"{prefix}.router.per_expert_scale"] = rank0_tensor(moe.per_expert_scale)
+    if isinstance(tensors, PolicyTensorStore):
+        gate_weights, up_weights, down_weights = moe.experts.expert_weights()
+        local_start = int(moe.experts.local_expert_start)
+        num_experts = int(moe.experts.local_num_experts) * get_tp_context().world_size
+        gate_shape = tuple(gate_weights[0].shape)
+        up_shape = tuple(up_weights[0].shape)
+        down_shape = tuple(down_weights[0].shape)
+        gate_up_shape = (num_experts, gate_shape[0] + up_shape[0], *gate_shape[1:])
+        gate_up_stride = (gate_shape[0] + up_shape[0]) * _numel(gate_shape[1:])
+        gate_stride = gate_shape[0] * _numel(gate_shape[1:])
+        gate_up_pieces = []
+        down_pieces = []
+        for local_index, (gate, up, down) in enumerate(zip(gate_weights, up_weights, down_weights, strict=True)):
+            expert_id = local_start + local_index
+            base = expert_id * gate_up_stride
+            gate_up_pieces.extend(
+                (
+                    PolicyFlatPiece(gate.detach(), base),
+                    PolicyFlatPiece(up.detach(), base + gate_stride),
+                )
+            )
+            down_pieces.append(PolicyFlatPiece(down.detach(), expert_id * down.numel()))
+        tensors.add_layout(
+            f"{prefix}.experts.gate_up_proj",
+            PolicyTensorLayout(
+                shape=gate_up_shape,
+                dtype=gate_weights[0].dtype,
+                pieces=(),
+                flat_pieces=tuple(gate_up_pieces),
+            ),
+        )
+        tensors.add_layout(
+            f"{prefix}.experts.down_proj",
+            PolicyTensorLayout(
+                shape=(num_experts, *down_shape),
+                dtype=down_weights[0].dtype,
+                pieces=(),
+                flat_pieces=tuple(down_pieces),
+            ),
+        )
+        return
     full_weights = gather_moe_expert_weights(moe.experts)
     gate_up_key = f"{prefix}.experts.gate_up_proj"
     down_key = f"{prefix}.experts.down_proj"
@@ -305,6 +361,13 @@ def _save_gemma4_moe(tensors, prefix: str, layer) -> None:
     gate_up = torch.cat((gate_weights, up_weights), dim=1).contiguous()
     tensors[gate_up_key] = _tensor_to_cpu(gate_up) if _owns_checkpoint_tensor(gate_up_key) else None
     tensors[down_key] = _tensor_to_cpu(down_weights.contiguous()) if _owns_checkpoint_tensor(down_key) else None
+
+
+def _numel(shape: tuple[int, ...]) -> int:
+    result = 1
+    for size in shape:
+        result *= size
+    return result
 
 
 def checkpoint_spec(prefix: str) -> CheckpointSpec:

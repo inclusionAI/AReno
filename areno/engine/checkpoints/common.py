@@ -30,16 +30,22 @@ from torch import nn
 
 from areno.engine.checkpoints.io import (
     CheckpointTensorStore,
+    IncrementalHFSafetensorsWriter,
+    PolicyTensorLayout,
+    PolicyTensorPiece,
+    PolicyTensorStore,
     SafetensorsIndex,
     _copy_column,
     _copy_row,
     _owns_checkpoint_tensor,
     _tensor_to_cpu,
     gather_tensor_parallel_column_tensors,
+    gather_tensor_parallel_ranged_tensor,
     gather_tensor_parallel_split_column_tensor,
     gather_tensor_parallel_tensor,
+    pageable_checkpoint_staging,
+    policy_plan_scope,
     rank0_tensor,
-    write_hf_safetensors_checkpoint,
 )
 from areno.engine.layers.linear import _shard_range
 from areno.engine.parallel.context import get_tp_context
@@ -195,6 +201,7 @@ class LayerSpec:
     save_ops: tuple[object, ...] = ()
     load_handlers: tuple[Callable[[nn.Module, SafetensorsIndex, str, int, int], None], ...] = ()
     save_handlers: tuple[Callable[[dict[str, torch.Tensor | None], str, nn.Module, object | None], None], ...] = ()
+    prefetch_layer: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -395,20 +402,44 @@ def save_checkpoint_weights(
 ) -> str | None:
     """Save a tensor-parallel model as a HF sharded safetensors checkpoint."""
 
-    tensors = CheckpointTensorStore()
-    save_embedding_norm_head(tensors, model, spec.top_level)
-    # Some column-parallel tensors are batched until all layers are visited so
-    # that a single fused all-gather can be reused across shapes.
-    delayed_column_tensors: list[tuple[str, torch.Tensor]] = []
-    save_layer_specs(tensors, model, spec.layer, context=delayed_column_tensors)
-    if delayed_column_tensors:
-        save_column_tensors(tensors, delayed_column_tensors)
-    saved_path = write_hf_safetensors_checkpoint(tensors, output_path, source_path)
+    writer = IncrementalHFSafetensorsWriter(output_path, source_path)
+    with pageable_checkpoint_staging():
+        tensors = CheckpointTensorStore()
+        save_embedding_norm_head(tensors, model, spec.top_level)
+        writer.write(tensors, "top-level")
+        tensors.clear()
+
+        for layer_idx, layer in enumerate(model.layers):
+            prefix = spec.layer.prefix.format(layer=layer_idx)
+            delayed_column_tensors: list[tuple[str, torch.Tensor]] = []
+            save_replicated_tensors(tensors, layer, prefix, spec.layer.replicated)
+            for op in spec.layer.save_ops:
+                save_layer_op(tensors, layer, prefix, op, delayed_column_tensors)
+            for handler in spec.layer.save_handlers:
+                handler(tensors, prefix, layer, delayed_column_tensors)
+            if delayed_column_tensors:
+                save_column_tensors(tensors, delayed_column_tensors)
+            writer.write(tensors, f"layer-{layer_idx:05d}")
+            tensors.clear()
+    saved_path = writer.finish()
     if saved_path is not None and source_path is not None:
         copy_source_passthrough_weights(
             source_path, saved_path, protected_prefix=_protected_prefix_from_top_level(spec.top_level)
         )
     return saved_path
+
+
+def build_checkpoint_policy_plan(model: nn.Module, spec: CheckpointSpec) -> PolicyTensorStore:
+    """Build the canonical checkpoint layout while retaining live GPU views."""
+
+    tensors = PolicyTensorStore()
+    with policy_plan_scope():
+        save_embedding_norm_head(tensors, model, spec.top_level)
+        delayed_column_tensors: list[tuple[str, torch.Tensor]] = []
+        save_layer_specs(tensors, model, spec.layer, context=delayed_column_tensors)
+        if delayed_column_tensors:
+            save_column_tensors(tensors, delayed_column_tensors)
+    return tensors
 
 
 def copy_source_passthrough_weights(source_path: str | Path, output_path: str | Path, protected_prefix: str) -> None:
@@ -478,11 +509,14 @@ def load_layer_specs(model: nn.Module, index: SafetensorsIndex, spec: LayerSpec,
 
     for layer_idx, layer in enumerate(model.layers):
         prefix = spec.prefix.format(layer=layer_idx)
-        # Prefetch only small replicated keys. TP-sharded matrices are loaded
-        # with safetensors slicing in `load_layer_op`.
         layer_keys = index.keys_for_prefix(f"{prefix}.")
-        replicated_keys = [key(rep.key, prefix) for rep in spec.replicated]
-        index.prefetch(replicated_keys)
+        if spec.prefetch_layer:
+            index.prefetch(layer_keys)
+        else:
+            # Prefetch only small replicated keys. TP-sharded matrices are
+            # loaded on demand to avoid keeping a whole layer in CPU memory.
+            replicated_keys = [key(rep.key, prefix) for rep in spec.replicated]
+            index.prefetch(replicated_keys)
         load_replicated_tensors(layer, index, prefix, spec.replicated)
         for op in spec.load_ops:
             load_layer_op(layer, index, prefix, op, rank, world_size)
@@ -783,28 +817,10 @@ def _gather_ranged_column_tensors(
 ) -> list[torch.Tensor | None]:
     """Gather column tensors when each rank reports an explicit row range."""
 
-    ctx = get_tp_context()
-    if ctx.dp_rank != 0:
-        return [None for _ in tensors]
-    outputs: list[torch.Tensor | None] = []
-    for tensor, (start, end), global_size in zip(tensors, ranges, global_sizes, strict=True):
-        local = tensor.detach().contiguous()
-        if ctx.world_size == 1:
-            outputs.append(_tensor_to_cpu(local))
-            continue
-        gathered = torch.empty((ctx.world_size, *local.shape), dtype=local.dtype, device=local.device)
-        dist.all_gather_into_tensor(gathered, local, group=ctx.group)
-        all_ranges: list[tuple[int, int] | None] = [None for _ in range(ctx.world_size)]
-        dist.all_gather_object(all_ranges, (start, end), group=ctx.group)
-        global_tensor = torch.empty((global_size, *local.shape[1:]), dtype=local.dtype, device=local.device)
-        for rank in range(ctx.world_size):
-            rank_range = all_ranges[rank]
-            if rank_range is None:
-                raise RuntimeError(f"missing TP shard range for rank {rank}")
-            range_start, range_end = rank_range
-            global_tensor[range_start:range_end].copy_(gathered[rank, : range_end - range_start])
-        outputs.append(_tensor_to_cpu(global_tensor.contiguous()))
-    return outputs
+    return [
+        gather_tensor_parallel_ranged_tensor(tensor, start=start, end=end, global_size=global_size)
+        for tensor, (start, end), global_size in zip(tensors, ranges, global_sizes, strict=True)
+    ]
 
 
 def load_row_parallel_tensors(
@@ -1162,6 +1178,14 @@ def save_moe_spec(tensors: dict[str, torch.Tensor | None], prefix: str, module: 
     if spec.expert_bias_key is not None and spec.expert_bias_attr is not None:
         tensors[key(spec.expert_bias_key, prefix)] = rank0_tensor(attr_path(module, spec.expert_bias_attr))
 
+    if isinstance(tensors, PolicyTensorStore):
+        _stage_policy_moe_experts(tensors, prefix, module, spec)
+        if spec.shared_experts_attr is not None and spec.shared_experts_prefix is not None:
+            shared_experts = attr_path(module, spec.shared_experts_attr)
+            if shared_experts is not None:
+                save_dense_mlp(tensors, key(spec.shared_experts_prefix, prefix), shared_experts)
+        return
+
     # One TP/EP all-gather collects every expert's gate/up/down at once.
     full_weights = gather_moe_expert_weights(attr_path(module, spec.experts_attr))
     if full_weights is None:
@@ -1187,6 +1211,47 @@ def save_moe_spec(tensors: dict[str, torch.Tensor | None], prefix: str, module: 
         shared_experts = attr_path(module, spec.shared_experts_attr)
         if shared_experts is not None:
             save_dense_mlp(tensors, key(spec.shared_experts_prefix, prefix), shared_experts)
+
+
+def _stage_policy_moe_experts(
+    tensors: PolicyTensorStore,
+    prefix: str,
+    module: nn.Module,
+    spec: MoeSpec,
+) -> None:
+    """Map expert-parallel live views to one canonical key per expert."""
+
+    experts = attr_path(module, spec.experts_attr)
+    gate_weights, up_weights, down_weights = experts.expert_weights()
+    local_start = int(getattr(experts, "local_expert_start"))
+    num_experts = int(attr_path(module, spec.num_experts_attr))
+    if not gate_weights or not up_weights or not down_weights:
+        raise RuntimeError("policy sync requires at least one local expert per TP rank")
+    templates = (spec.expert_gate_key, spec.expert_up_key, spec.expert_down_key)
+    locals_by_kind = (gate_weights, up_weights, down_weights)
+    for expert_id in range(num_experts):
+        local_index = expert_id - local_start
+        for template, local_weights in zip(templates, locals_by_kind, strict=True):
+            sample = local_weights[0]
+            pieces = ()
+            if 0 <= local_index < len(local_weights):
+                local = local_weights[local_index].detach()
+                shape = tuple(local.shape)
+                pieces = (
+                    PolicyTensorPiece(
+                        local,
+                        shape,
+                        0,
+                        0,
+                        shape[0] if shape else 1,
+                    ),
+                )
+            else:
+                shape = tuple(sample.shape)
+            tensors.add_layout(
+                expert_key(template, prefix, expert_id),
+                PolicyTensorLayout(shape=shape, dtype=sample.dtype, pieces=pieces),
+            )
 
 
 @torch.no_grad()
