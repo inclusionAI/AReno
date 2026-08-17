@@ -177,6 +177,7 @@ def format_gpu_warnings(warnings: list[GpuWarning], statuses: list[GpuStatus]) -
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+
 def _run_smi(smi: str, query_flag: str, query_fields: str, indices: str) -> list[list[str]] | None:
     """Run nvidia-smi with *query_flag* and *query_fields* for *indices*.
 
@@ -270,8 +271,5 @@ def _format_processes(status: GpuStatus) -> str:
 
     if not status.processes:
         return "none"
-    parts = [
-        f"{p['name']}(pid={p['pid']}, {p['used_mem_mb']} MB)"
-        for p in status.processes
-    ]
+    parts = [f"{p['name']}(pid={p['pid']}, {p['used_mem_mb']} MB)" for p in status.processes]
     return ", ".join(parts)

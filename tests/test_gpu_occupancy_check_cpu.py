@@ -19,9 +19,7 @@ from areno.engine.runtime.gpu_check import (
 
 
 def _make_proc_result(stdout: str, returncode: int = 0) -> subprocess.CompletedProcess:
-    return subprocess.CompletedProcess(
-        args=[], returncode=returncode, stdout=stdout, stderr=""
-    )
+    return subprocess.CompletedProcess(args=[], returncode=returncode, stdout=stdout, stderr="")
 
 
 class QueryGpuStatusTest(unittest.TestCase):
@@ -127,9 +125,13 @@ class CheckGpuOccupancyTest(unittest.TestCase):
 
     def test_low_memory_warning(self):
         status = GpuStatus(
-            index=0, name="H100",
-            total_mem_mb=81920, free_mem_mb=4000, used_mem_mb=77920,
-            utilization_pct=30, processes=[{"pid": 123, "name": "python", "used_mem_mb": 77920}],
+            index=0,
+            name="H100",
+            total_mem_mb=81920,
+            free_mem_mb=4000,
+            used_mem_mb=77920,
+            utilization_pct=30,
+            processes=[{"pid": 123, "name": "python", "used_mem_mb": 77920}],
         )
         warnings = check_gpu_occupancy([status], mem_free_warn_pct=10, util_warn_pct=90)
         low_mem = [w for w in warnings if w.kind == "low_memory"]
@@ -140,9 +142,13 @@ class CheckGpuOccupancyTest(unittest.TestCase):
 
     def test_high_utilization_warning(self):
         status = GpuStatus(
-            index=1, name="H100",
-            total_mem_mb=81920, free_mem_mb=70000, used_mem_mb=11920,
-            utilization_pct=95, processes=[{"pid": 456, "name": "trainer", "used_mem_mb": 11920}],
+            index=1,
+            name="H100",
+            total_mem_mb=81920,
+            free_mem_mb=70000,
+            used_mem_mb=11920,
+            utilization_pct=95,
+            processes=[{"pid": 456, "name": "trainer", "used_mem_mb": 11920}],
         )
         warnings = check_gpu_occupancy([status], mem_free_warn_pct=10, util_warn_pct=90)
         high_util = [w for w in warnings if w.kind == "high_utilization"]
@@ -153,18 +159,26 @@ class CheckGpuOccupancyTest(unittest.TestCase):
 
     def test_no_warnings_when_healthy(self):
         status = GpuStatus(
-            index=0, name="H100",
-            total_mem_mb=81920, free_mem_mb=70000, used_mem_mb=11920,
-            utilization_pct=30, processes=[],
+            index=0,
+            name="H100",
+            total_mem_mb=81920,
+            free_mem_mb=70000,
+            used_mem_mb=11920,
+            utilization_pct=30,
+            processes=[],
         )
         warnings = check_gpu_occupancy([status], mem_free_warn_pct=10, util_warn_pct=90)
         self.assertEqual(warnings, [])
 
     def test_both_warnings_on_same_gpu(self):
         status = GpuStatus(
-            index=0, name="H100",
-            total_mem_mb=81920, free_mem_mb=2000, used_mem_mb=79920,
-            utilization_pct=99, processes=[{"pid": 1, "name": "python", "used_mem_mb": 79920}],
+            index=0,
+            name="H100",
+            total_mem_mb=81920,
+            free_mem_mb=2000,
+            used_mem_mb=79920,
+            utilization_pct=99,
+            processes=[{"pid": 1, "name": "python", "used_mem_mb": 79920}],
         )
         warnings = check_gpu_occupancy([status], mem_free_warn_pct=10, util_warn_pct=90)
         self.assertEqual(len(warnings), 2)
@@ -173,18 +187,26 @@ class CheckGpuOccupancyTest(unittest.TestCase):
 
     def test_zero_total_mem_skipped(self):
         status = GpuStatus(
-            index=0, name="unknown",
-            total_mem_mb=0, free_mem_mb=0, used_mem_mb=0,
-            utilization_pct=0, processes=[],
+            index=0,
+            name="unknown",
+            total_mem_mb=0,
+            free_mem_mb=0,
+            used_mem_mb=0,
+            utilization_pct=0,
+            processes=[],
         )
         warnings = check_gpu_occupancy([status], mem_free_warn_pct=10, util_warn_pct=90)
         self.assertEqual(warnings, [])
 
     def test_custom_thresholds(self):
         status = GpuStatus(
-            index=0, name="H100",
-            total_mem_mb=81920, free_mem_mb=60000, used_mem_mb=21920,
-            utilization_pct=50, processes=[],
+            index=0,
+            name="H100",
+            total_mem_mb=81920,
+            free_mem_mb=60000,
+            used_mem_mb=21920,
+            utilization_pct=50,
+            processes=[],
         )
         # Default thresholds would not warn; stricter ones should.
         warnings = check_gpu_occupancy([status], mem_free_warn_pct=80, util_warn_pct=40)
@@ -192,9 +214,13 @@ class CheckGpuOccupancyTest(unittest.TestCase):
 
     def test_warning_includes_process_info(self):
         status = GpuStatus(
-            index=0, name="H100",
-            total_mem_mb=81920, free_mem_mb=1000, used_mem_mb=80920,
-            utilization_pct=10, processes=[{"pid": 42, "name": "big_model", "used_mem_mb": 80000}],
+            index=0,
+            name="H100",
+            total_mem_mb=81920,
+            free_mem_mb=1000,
+            used_mem_mb=80920,
+            utilization_pct=10,
+            processes=[{"pid": 42, "name": "big_model", "used_mem_mb": 80000}],
         )
         warnings = check_gpu_occupancy([status], mem_free_warn_pct=10, util_warn_pct=90)
         self.assertEqual(len(warnings), 1)
@@ -203,9 +229,13 @@ class CheckGpuOccupancyTest(unittest.TestCase):
 
     def test_no_processes_shows_none(self):
         status = GpuStatus(
-            index=0, name="H100",
-            total_mem_mb=81920, free_mem_mb=1000, used_mem_mb=80920,
-            utilization_pct=10, processes=[],
+            index=0,
+            name="H100",
+            total_mem_mb=81920,
+            free_mem_mb=1000,
+            used_mem_mb=80920,
+            utilization_pct=10,
+            processes=[],
         )
         warnings = check_gpu_occupancy([status], mem_free_warn_pct=10, util_warn_pct=90)
         self.assertEqual(len(warnings), 1)
@@ -220,12 +250,17 @@ class FormatGpuWarningsTest(unittest.TestCase):
 
     def test_format_includes_gpu_index_and_key_info(self):
         status = GpuStatus(
-            index=0, name="NVIDIA H100",
-            total_mem_mb=81920, free_mem_mb=4000, used_mem_mb=77920,
-            utilization_pct=50, processes=[{"pid": 1, "name": "python", "used_mem_mb": 77920}],
+            index=0,
+            name="NVIDIA H100",
+            total_mem_mb=81920,
+            free_mem_mb=4000,
+            used_mem_mb=77920,
+            utilization_pct=50,
+            processes=[{"pid": 1, "name": "python", "used_mem_mb": 77920}],
         )
         warning = GpuWarning(
-            device_index=0, kind="low_memory",
+            device_index=0,
+            kind="low_memory",
             message="GPU 0 has low memory",
         )
         text = format_gpu_warnings([warning], [status])
@@ -239,14 +274,22 @@ class FormatGpuWarningsTest(unittest.TestCase):
     def test_format_includes_overview_for_all_gpus(self):
         statuses = [
             GpuStatus(
-                index=0, name="H100",
-                total_mem_mb=81920, free_mem_mb=40000, used_mem_mb=41920,
-                utilization_pct=30, processes=[],
+                index=0,
+                name="H100",
+                total_mem_mb=81920,
+                free_mem_mb=40000,
+                used_mem_mb=41920,
+                utilization_pct=30,
+                processes=[],
             ),
             GpuStatus(
-                index=1, name="H100",
-                total_mem_mb=81920, free_mem_mb=2000, used_mem_mb=79920,
-                utilization_pct=95, processes=[{"pid": 1, "name": "python", "used_mem_mb": 79920}],
+                index=1,
+                name="H100",
+                total_mem_mb=81920,
+                free_mem_mb=2000,
+                used_mem_mb=79920,
+                utilization_pct=95,
+                processes=[{"pid": 1, "name": "python", "used_mem_mb": 79920}],
             ),
         ]
         warnings = [GpuWarning(device_index=1, kind="low_memory", message="GPU 1 low mem")]
