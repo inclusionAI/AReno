@@ -33,7 +33,14 @@ import {
 } from "lucide-react";
 import "./styles.css";
 
-const API_BASE = new URL(".", window.location.href).pathname;
+function dashboardBasePath() {
+  const moduleScript = document.querySelector('script[type="module"][src]');
+  if (moduleScript?.src) return new URL("../", moduleScript.src).pathname;
+  const pathname = window.location.pathname;
+  return pathname.endsWith("/") ? pathname : `${pathname}/`;
+}
+
+const API_BASE = dashboardBasePath();
 const UI_LANGUAGE_STORAGE_KEY = "areno-dashboard-language";
 const ZH_UI = {
   "Overview": "概览",
