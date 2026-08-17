@@ -2224,14 +2224,14 @@ function MetricChart({ jobId, metricsDir, refreshNonce }) {
               {[0, 1, 2, 3].map((item) => <line key={item} x1="0" x2="720" y1={30 + item * 42} y2={30 + item * 42} />)}
             </g>
             <polyline className={smoothingEnabled ? "smoothLine" : "rawLine"} points={plot.line} />
-            {displayedPoints.map((point, index) => (
+            {!smoothingEnabled && displayedPoints.map((point, index) => (
               <g key={`${point.step}-${index}`}>
-                {!smoothingEnabled && <circle className="metricDataPoint" cx={plot.coords[index]?.x || 0} cy={plot.coords[index]?.y || 0} r={metricPointRadius(displayedPoints.length)} />}
+                <circle className="metricDataPoint" cx={plot.coords[index]?.x || 0} cy={plot.coords[index]?.y || 0} r={metricPointRadius(displayedPoints.length)} />
                 <circle className="metricHoverTarget" cx={plot.coords[index]?.x || 0} cy={plot.coords[index]?.y || 0} r="5" onMouseEnter={() => setHoveredPoint({ point, coord: plot.coords[index] })} onMouseLeave={() => setHoveredPoint(null)} />
               </g>
             ))}
           </svg>
-          {hoveredPoint && <MetricPointTooltip name={activeName} point={hoveredPoint.point} coord={hoveredPoint.coord} width={720} height={180} />}
+          {!smoothingEnabled && hoveredPoint && <MetricPointTooltip name={activeName} point={hoveredPoint.point} coord={hoveredPoint.coord} width={720} height={180} />}
         </div>
       )}
       <div className="plotFooter">
