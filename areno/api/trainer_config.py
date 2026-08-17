@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from areno.adapters.config import LoraConfig
 from areno.api.defaults import DEFAULT_METRICS_LOG_DIR
 
 
@@ -76,6 +77,7 @@ class TrainerConfig:
     agent_timeout_s: float = 300.0
     train_tool_results: bool = False
     chat_template_enable_thinking: bool | None = None
+    lora: LoraConfig | None = None
 
     def __post_init__(self) -> None:
         if self.backend is None:
@@ -116,6 +118,10 @@ class TrainerConfig:
             self.multimodal_projector_lr_decay_steps,
             self.multimodal_projector_lr_decay_style,
         )
+        if self.lora is not None and self.backend != "cuda":
+            raise ValueError("native LoRA is only supported by the CUDA backend")
+        if self.lora is not None and self.algo.lower() in {"ppo", "dpo"}:
+            raise ValueError("native LoRA does not yet support PPO/DPO reference and critic roles")
 
     @staticmethod
     def _validate_multimodal_optimizer_group(
@@ -210,6 +216,7 @@ class TrainerConfig:
                 "eager_decode": self.eager_decode,
                 "attn_backend": self.attn_backend,
             },
+            lora=self.lora,
         )
 
 
@@ -257,6 +264,7 @@ class RolloutTrainerConfig(TrainerConfig):
                 "eager_decode": self.eager_decode,
                 "attn_backend": self.attn_backend,
             },
+            lora=self.lora,
         )
 
     def mlx_config(self):

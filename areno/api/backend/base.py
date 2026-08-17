@@ -133,6 +133,11 @@ class Backend(ABC):
 
         raise NotImplementedError(f"{type(self).__name__} does not support checkpoint saving")
 
+    def export_adapter(self, ctx: Context, path: str) -> str:
+        """Persist a standard adapter artifact, or raise when unsupported."""
+
+        raise NotImplementedError(f"{type(self).__name__} does not support adapter export")
+
     def ensure_roles(self, ctx: Context, roles: dict[str, ModelRole]) -> None:
         """Prepare backend-owned auxiliary model roles, or raise if unsupported."""
 

@@ -156,6 +156,8 @@ class CudaBackend(Backend):
             raise ValueError(f"training device count must equal world_size={world_size}")
         if cfg.rollout_tp_size is not None and cfg.rollout_devices is None:
             raise ValueError("rollout_tp_size requires rollout_devices")
+        if cfg.lora is not None and cfg.uses_separate_rollout_engine():
+            raise ValueError("native LoRA currently supports colocated rollout only")
 
         if not cfg.uses_separate_rollout_engine():
             self._train_engine = ArenoEngine.from_pretrained(
@@ -169,6 +171,7 @@ class CudaBackend(Backend):
                 runtime_config=RuntimeConfig(**cfg.runtime),
                 loss_fn=dispatch_loss,
                 policy_sync_bucket_mb=cfg.policy_sync_bucket_mb,
+                lora_config=cfg.lora,
             )
             return
         self._policy_sync_bucket_bytes = cfg.policy_sync_bucket_mb * 1024 * 1024
@@ -355,7 +358,12 @@ class CudaBackend(Backend):
             RolloutSequence(resp_tokens=tokens, resp_logprobs=rollout.logprobs[index, : len(tokens)].tolist())
             for index, tokens in enumerate(rollout.response_ids)
         ]
-        return group_rollout_sequences(sequences, len(prompt_tokens), n_samples)
+        return group_rollout_sequences(
+            sequences,
+            len(prompt_tokens),
+            n_samples,
+            adapter_version=rollout.adapter_version,
+        )
 
     def begin_rollout_session(self, ctx: Context) -> None:
         """Prepare colocated actor state before rollout requests are issued."""
@@ -459,7 +467,12 @@ class CudaBackend(Backend):
             RolloutSequence(resp_tokens=tokens, resp_logprobs=rollout.logprobs[index, : len(tokens)].tolist())
             for index, tokens in enumerate(rollout.response_ids)
         ]
-        return group_rollout_sequences(sequences, len(prompt_tokens), n_samples)
+        return group_rollout_sequences(
+            sequences,
+            len(prompt_tokens),
+            n_samples,
+            adapter_version=rollout.adapter_version,
+        )
 
     def train(
         self,
@@ -510,6 +523,8 @@ class CudaBackend(Backend):
                 metric_rows.append({str(key): float(value) for key, value in stats.metrics.items()})
         metrics = reduce_microbatch_metrics(metric_rows)
         result = {"loss": sum(losses) / max(len(losses), 1)}
+        if stats_list and stats_list[-1].adapter_version is not None:
+            result["adapter_version"] = stats_list[-1].adapter_version
         result.update(metrics)
         result.update(self._pending_policy_sync_metrics)
         self._pending_policy_sync_metrics = {}
@@ -530,6 +545,10 @@ class CudaBackend(Backend):
     def save_checkpoint(self, ctx: Context, path: str) -> str:
         engine = self._require_train_engine()
         return save_checkpoint(engine, path)
+
+    def export_adapter(self, ctx: Context, path: str) -> str:
+        del ctx
+        return self._require_train_engine().export_adapter(path)
 
     def ensure_roles(self, ctx: Context, roles: dict[str, ModelRole]) -> None:
         engine = self._require_train_engine()

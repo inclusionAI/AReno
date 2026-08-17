@@ -38,6 +38,7 @@ def _merge_rollouts(outputs: list[RolloutOutput]) -> RolloutOutput:
         logprobs=logprobs,
         finish_reason=finish_reason,
         metrics=_merge_rollout_metrics(outputs),
+        adapter_version=_merge_adapter_version(outputs),
     )
 
 
@@ -73,6 +74,7 @@ def _merge_dp_rollouts_in_input_order(outputs: list[RolloutOutput | None], total
         finish_reason,
         logprob_rows,
         metrics=_merge_rollout_metrics(outputs),
+        adapter_version=_merge_adapter_version(outputs),
     )
 
 
@@ -83,6 +85,7 @@ def _build_rollout_from_rows(
     logprob_rows: list[torch.Tensor],
     *,
     metrics: dict[str, float] | None,
+    adapter_version: int | None = None,
 ) -> RolloutOutput:
     """Build padded rollout tensors from variable-length Python rows."""
     if not prompt_ids:
@@ -97,6 +100,7 @@ def _build_rollout_from_rows(
         logprobs=logprobs,
         finish_reason=finish_reason,
         metrics=metrics,
+        adapter_version=adapter_version,
     )
 
 
@@ -125,3 +129,10 @@ def _merge_rollout_metrics(outputs: list[RolloutOutput]) -> dict[str, float] | N
         for key, value in output.metrics.items():
             merged[key] = merged.get(key, 0.0) + float(value)
     return merged or None
+
+
+def _merge_adapter_version(outputs: list[RolloutOutput]) -> int | None:
+    versions = {output.adapter_version for output in outputs}
+    if len(versions) != 1:
+        raise RuntimeError(f"rollout shards reported different adapter versions: {versions}")
+    return versions.pop()

@@ -15,7 +15,10 @@ std::vector<torch::Tensor> areno_linear_backward_cuda(
     torch::Tensor grad_output,
     torch::Tensor input,
     torch::Tensor weight,
-    bool use_bias);
+    bool use_bias,
+    bool need_grad_input,
+    bool need_grad_weight,
+    bool need_grad_bias);
 torch::Tensor areno_causal_attention_forward_cuda(
     torch::Tensor q,
     torch::Tensor k,
@@ -71,12 +74,16 @@ std::vector<torch::Tensor> areno_grouped_linear_backward_cuda(
     torch::Tensor grad_output,
     torch::Tensor input,
     torch::Tensor weight,
-    std::vector<int64_t> tokens_per_expert);
+    std::vector<int64_t> tokens_per_expert,
+    bool need_grad_input,
+    bool need_grad_weight);
 std::vector<torch::Tensor> areno_grouped_linear_backward_counts_cuda(
     torch::Tensor grad_output,
     torch::Tensor input,
     torch::Tensor weight,
-    torch::Tensor tokens_per_expert);
+    torch::Tensor tokens_per_expert,
+    bool need_grad_input,
+    bool need_grad_weight);
 std::vector<torch::Tensor> areno_depthwise_causal_conv1d_silu_forward_cuda(torch::Tensor input, torch::Tensor weight);
 std::vector<torch::Tensor> areno_depthwise_causal_conv1d_silu_decode_cuda(
     torch::Tensor current,

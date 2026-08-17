@@ -115,7 +115,10 @@ def merge_train_stats(results: list[dict[str, Any]]) -> TrainStats:
     loss = sum(float(result["loss"]) for result in results) / len(results)
     stepped = all(bool(result["stepped"]) for result in results)
     metrics = merge_metric_dicts([result.get("metrics") for result in results])
-    return TrainStats(loss=loss, stepped=stepped, metrics=metrics)
+    versions = {result.get("adapter_version") for result in results}
+    if len(versions) != 1:
+        raise RuntimeError(f"DP replicas reported different adapter versions: {versions}")
+    return TrainStats(loss=loss, stepped=stepped, metrics=metrics, adapter_version=versions.pop())
 
 
 def merge_metric_dicts(metrics_list: list[dict[str, Any] | None]) -> dict[str, float] | None:

@@ -64,6 +64,7 @@ class RolloutResult(BaseModel):
     """All sampled completions for one prompt."""
 
     sequences: list[RolloutSequence] = Field(default_factory=list)
+    adapter_version: int | None = Field(default=None)
 
 
 class TrainSequence(BaseModel):

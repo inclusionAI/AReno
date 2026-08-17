@@ -21,6 +21,8 @@ import torch
 import torch.distributed as dist
 
 from areno.api.backend.cuda.roles import RoleManager, WorkerRole
+from areno.adapters import initialize_lora
+from areno.adapters.peft import export_peft_adapter, load_peft_adapter
 from areno.engine.config import EngineConfig
 from areno.engine.data import RolloutOutput
 from areno.engine.data.sampling import _truncate_generated
@@ -30,6 +32,7 @@ from areno.engine.parallel.context import get_tp_context
 from areno.engine.policy_sync import policy_plan_metadata, transfer_policy_weights
 from areno.engine.protocol import (
     Command,
+    ExportAdapterPayload,
     Op,
     PolicySyncPayload,
     RolloutCacheProbePayload,
@@ -63,10 +66,18 @@ class ArenoWorker:
         if config.model_path is not None and not config.dummy_load:
             load_model_weights(self.model, config.model, config.model_path)
         configure_multimodal_training(self.model, config.optimizer, trainable=config.role == "train")
+        self.adapter_registry = (
+            initialize_lora(self.model, config.lora, seed=config.lora_seed) if config.lora is not None else None
+        )
         if config.runtime.compile_model:
             self.model = torch.compile(self.model)
+        if self.adapter_registry is not None and config.lora.adapter_path is not None:
+            load_peft_adapter(self.adapter_registry, config.lora.adapter_path)
         opt = config.optimizer
-        self.optimizer = build_optimizer(self.model.parameters(), opt, ctx) if config.role == "train" else None
+        optimizer_parameters = (
+            self.adapter_registry.parameters() if self.adapter_registry is not None else self.model.parameters()
+        )
+        self.optimizer = build_optimizer(optimizer_parameters, opt, ctx) if config.role == "train" else None
         self.grad_clip_norm = opt.grad_clip_norm
         self.base_lr = opt.lr
         self.min_lr = opt.min_lr
@@ -165,6 +176,8 @@ class ArenoWorker:
             return self.train_values(cmd.payload)
         if cmd.op is Op.SAVE_CHECKPOINT:
             return self.save_checkpoint(cmd.payload)
+        if cmd.op is Op.EXPORT_ADAPTER:
+            return self.export_adapter(cmd.payload)
         if cmd.op is Op.POLICY_SYNC_PLAN:
             return self.policy_sync_plan(cmd.payload)
         if cmd.op is Op.POLICY_SYNC_PUBLISH:
@@ -219,11 +232,14 @@ class ArenoWorker:
 
     def infer_rollout(self, payload: dict, finished_callback=None, refill_callback=None) -> RolloutOutput | None:
         """Delegate rollout generation to `InferenceManager`."""
-        return self.inference.infer_rollout(
+        output = self.inference.infer_rollout(
             payload,
             finished_callback=finished_callback,
             refill_callback=refill_callback,
         )
+        if output is not None and self.adapter_registry is not None:
+            output.adapter_version = self.adapter_registry.version
+        return output
 
     def probe_rollout_cache(self, payload: RolloutCacheProbePayload) -> float:
         """Allocate rollout KV cache and capture decode graphs without decoding."""
@@ -279,7 +295,9 @@ class ArenoWorker:
                     (
                         self._rank,
                         WorkerResult(
-                            ok=True, payload=_empty_rollout() if ctx.is_rank0 else None, request_id=request_id
+                            ok=True,
+                            payload=self._stamp_adapter_version(_empty_rollout()) if ctx.is_rank0 else None,
+                            request_id=request_id,
                         ),
                     )
                 )
@@ -315,6 +333,7 @@ class ArenoWorker:
                         row_ids,
                         truncate_stop_token_ids,
                     )
+                    result_payload = self._stamp_adapter_version(result_payload)
                 request_id = request_ids[request_idx]
                 self._result_queue.put(
                     (self._rank, WorkerResult(ok=True, payload=result_payload, request_id=request_id))
@@ -373,6 +392,12 @@ class ArenoWorker:
             for idx, (request_id, part) in enumerate(zip(request_ids, parts, strict=True))
             if idx not in sent
         ]
+
+    def _stamp_adapter_version(self, output: RolloutOutput) -> RolloutOutput:
+        adapter_registry = getattr(self, "adapter_registry", None)
+        if adapter_registry is not None:
+            output.adapter_version = adapter_registry.version
+        return output
 
     def _next_refill_command(self) -> Command | None:
         """Fetch the next queued command consistently across TP ranks."""
@@ -627,6 +652,18 @@ class ArenoWorker:
         path = save_model_weights(self.model, self.config.model, payload.path, self.config.model_path)
         return {"path": path} if path is not None else None
 
+    def export_adapter(self, payload: ExportAdapterPayload) -> dict | None:
+        """Write the native adapter in standard PEFT format."""
+
+        if self.adapter_registry is None:
+            raise RuntimeError("export_adapter requires native LoRA")
+        self._prepare_actor_onloaded()
+        path = export_peft_adapter(
+            self.adapter_registry,
+            payload.path,
+            base_model_name_or_path=self.config.model_path,
+        )
+        return {"path": path} if path is not None else None
 
 def _rollout_payloads_compatible(first: RolloutPayload, other: RolloutPayload) -> bool:
     """Return whether two rollout payloads can share one InferenceBatchState."""
@@ -793,6 +830,7 @@ def _slice_rollout_output(output: RolloutOutput, start: int, end: int) -> Rollou
         logprobs=logprobs,
         finish_reason=finish_reason,
         metrics=output.metrics,
+        adapter_version=output.adapter_version,
     )
 
 
@@ -815,4 +853,5 @@ def _slice_rollout_output_rows(output: RolloutOutput, rows: list[int]) -> Rollou
         logprobs=logprobs,
         finish_reason=finish_reason,
         metrics=output.metrics,
+        adapter_version=output.adapter_version,
     )

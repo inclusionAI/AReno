@@ -122,13 +122,21 @@ def group_rollout_sequences(
     sequences: list[RolloutSequence],
     prompt_count: int,
     n_samples: int,
+    *,
+    adapter_version: int | None = None,
 ) -> list[RolloutResult]:
     """Restore a flat prompt-major sequence list to the public result layout."""
 
     expected = prompt_count * n_samples
     if len(sequences) != expected:
         raise ValueError(f"backend returned {len(sequences)} sequences; expected {expected}")
-    return [RolloutResult(sequences=sequences[start : start + n_samples]) for start in range(0, expected, n_samples)]
+    return [
+        RolloutResult(
+            sequences=sequences[start : start + n_samples],
+            adapter_version=adapter_version,
+        )
+        for start in range(0, expected, n_samples)
+    ]
 
 
 __all__ = [

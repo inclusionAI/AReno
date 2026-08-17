@@ -16,6 +16,8 @@ from typing import Any, Literal
 
 import torch
 
+from areno.adapters.config import LoraConfig
+
 # AReno's flash path uses flash-attn features beyond the Turing-compatible
 # forward kernels, including paged KV/cache and training paths, so require
 # Ampere+ even though flash-attn 2.x has partial sm75 forward support.
@@ -118,6 +120,19 @@ class RuntimeConfig:
             stacklevel=2,
         )
         self.compile_model = False
+
+    def resolve_eager_decode(self, *, model: ModelConfig, lora: LoraConfig | None) -> None:
+        """Use eager decode when routed-expert adapters need grouped execution."""
+
+        if self.eager_decode or lora is None:
+            return
+        if model.model_type == "qwen3_moe" and {"gate_proj", "up_proj", "down_proj"} & set(lora.target_modules):
+            warnings.warn(
+                "Qwen3-MoE expert LoRA uses grouped execution during rollout; falling back to eager decode.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            self.eager_decode = True
 
 
 @dataclass(slots=True)
@@ -263,6 +278,8 @@ class EngineConfig:
     dummy_load: bool = False
     role: Literal["train", "rollout"] = "train"
     policy_sync_bucket_mb: int = 64
+    lora: LoraConfig | None = None
+    lora_seed: int = 0
 
     def __post_init__(self) -> None:
         """Infer DP/devices and validate the distributed layout."""
@@ -270,6 +287,18 @@ class EngineConfig:
         if self.sequence_parallel is not None:
             self.model.sequence_parallel = bool(self.sequence_parallel)
         self.model.validate_tp(self.tp_size)
+        if self.lora is not None:
+            replicated_kv_targets = {"k_proj", "v_proj"} & set(self.lora.target_modules)
+            if (
+                self.model.model_type in {"qwen3", "qwen3_moe"}
+                and self.tp_size > self.model.num_key_value_heads
+                and replicated_kv_targets
+            ):
+                targets = ", ".join(sorted(replicated_kv_targets))
+                raise ValueError(
+                    f"Qwen3-MoE replicated-KV topology does not support LoRA targets {targets}; "
+                    "omit k_proj/v_proj or use tp_size <= num_key_value_heads"
+                )
         if self.devices is None:
             if torch.cuda.is_available():
                 device_count = torch.cuda.device_count()
@@ -305,6 +334,7 @@ class EngineConfig:
             raise ValueError("runtime.kv_block_size must be a multiple of 256 for FlashAttention paged KV")
         self.runtime.resolve_attn_backend(model=self.model, devices=self.devices)
         self.runtime.resolve_compile_model(model=self.model, devices=self.devices)
+        self.runtime.resolve_eager_decode(model=self.model, lora=self.lora)
         self.model.attn_backend = self.runtime.attn_backend
 
     @property
