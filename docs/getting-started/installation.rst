@@ -5,7 +5,8 @@ AReno has native CUDA and MLX installation paths. Linux and WSL2 use the CUDA
 installer; Apple Silicon uses a normal pip source install with platform-marked
 MLX dependencies.
 
-The platform guides describe the complete, parallel train/serve setup:
+The :doc:`backends` guide compares both native runtimes. Its platform pages
+describe the complete, parallel train/serve setup:
 
 * :doc:`cuda` for Linux, WSL2, NVIDIA CUDA, distributed topology, and CUDA
   checkpoints.

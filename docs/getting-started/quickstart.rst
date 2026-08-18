@@ -4,8 +4,7 @@ Quickstart
 Use these commands after installation to validate the main AReno paths. Full
 training and agentic rollout require either a CUDA-capable NVIDIA GPU on Linux
 or Apple Silicon with MLX. The CLI selects the native backend automatically.
-Use :doc:`cuda` or :doc:`mlx` for the symmetric platform-specific setup and
-runtime details.
+Use :doc:`backends` for the shared contract and platform-specific setup.
 
 Training smoke test
 -------------------

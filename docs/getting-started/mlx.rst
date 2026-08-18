@@ -1,3 +1,5 @@
+:orphan:
+
 Apple Silicon and MLX
 =====================
 

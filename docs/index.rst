@@ -15,8 +15,7 @@ AReno documentation
 
    Welcome <getting-started/welcome>
    getting-started/installation
-   Linux and CUDA <getting-started/cuda>
-   Apple Silicon and MLX <getting-started/mlx>
+   Backends <getting-started/backends>
    getting-started/quickstart
 
 .. toctree::
