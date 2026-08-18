@@ -4,9 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from areno.api.backend.areno.backend import ArenoBackend, _rollout_options
-from areno.api.config import ArenoConfig
-from areno.api.models import SamplingParams
+from areno.api.backend.cuda.backend import CudaBackend
 from areno.engine.policy_sync import PolicyTensorMeta
 from areno.engine.protocol import Op
 
@@ -76,34 +74,16 @@ class _Engine:
         self.events.append("close")
 
 
-def _backend(*, rollout_error: Exception | None = None) -> tuple[ArenoBackend, _Engine, _Engine]:
+def _backend(*, rollout_error: Exception | None = None) -> tuple[CudaBackend, _Engine, _Engine]:
     plan = (PolicyTensorMeta("weight", (4,), "float32", 16),)
     train = _Engine("train", plan)
     rollout = _Engine("rollout", plan, sync_error=rollout_error)
-    backend = ArenoBackend()
+    backend = CudaBackend()
     backend._train_engine = train
     backend._rollout_engine = rollout
     backend._separate_rollout = True
     backend._policy_sync_bucket_bytes = 1024
     return backend, train, rollout
-
-
-def test_rollout_sampling_matches_serve_and_allows_special_tool_tokens() -> None:
-    tokenizer = SimpleNamespace(
-        all_special_ids=[0, 1, 48, 49],
-        pad_token_id=0,
-        bos_token_id=1,
-        unk_token_id=2,
-    )
-    ctx = SimpleNamespace(tokenizer=tokenizer, eos_token_ids=(106,), custom_config=ArenoConfig())
-
-    options = _rollout_options(ctx, SamplingParams(stop_token_ids=[107]))
-    native = options["sampling_params"]
-
-    assert options["eos_token_id"] == (106,)
-    assert native.stop_token_ids == (107,)
-    assert native.suppress_token_ids == ()
-    assert native.suppress_special_tokens is True
 
 
 def test_dual_backend_routes_rollout_lifecycle_and_checkpoint() -> None:

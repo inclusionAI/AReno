@@ -18,7 +18,8 @@ from pydantic import BaseModel, Field
 class BackendType(Enum):
     """Available execution backends for an `Trainer`."""
 
-    Areno = "Areno"
+    CUDA = "CUDA"
+    MLX = "MLX"
 
 
 class SamplingParams(BaseModel):

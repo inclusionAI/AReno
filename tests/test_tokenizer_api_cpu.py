@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from areno.api.config import ArenoConfig, coerce_backend_config, resolve_backend_type
+from areno.api.config import CudaConfig, coerce_backend_config, default_backend_type, resolve_backend_type
 from areno.api.models import BackendType, SamplingParams, TrainSequence
 from areno.api.rewards import load_reward_fn, score_reward_records
 from areno.api.tokenizer import (
@@ -119,12 +119,12 @@ class TokenizerApiTest(unittest.TestCase):
 
     def test_backend_config_coercion_rejects_wrong_type(self):
         """Typed backend configs should fail early when callers pass the wrong type."""
-        cfg = ArenoConfig(tp_size=2)
+        cfg = CudaConfig(tp_size=2)
 
-        self.assertIs(resolve_backend_type(None, None), BackendType.Areno)
-        self.assertIs(coerce_backend_config(BackendType.Areno, cfg), cfg)
+        self.assertIs(resolve_backend_type(None, None), default_backend_type())
+        self.assertIs(coerce_backend_config(BackendType.CUDA, cfg), cfg)
         with self.assertRaisesRegex(TypeError, "requires its typed backend config"):
-            coerce_backend_config(BackendType.Areno, object())
+            coerce_backend_config(BackendType.CUDA, object())
 
     def test_load_reward_fn_imports_callable_from_file(self):
         """Reward functions are loaded from plain Python files at runtime."""

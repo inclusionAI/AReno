@@ -6,9 +6,10 @@ import base64
 import io
 import threading
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-import torch
+if TYPE_CHECKING:
+    import torch
 
 from areno.api.tokenizer import apply_chat_template_with_options, normalize_token_ids
 
@@ -439,6 +440,8 @@ def image_token_counts_from_features(features: dict[str, Any] | None) -> list[in
     grid = features.get("image_grid_thw")
     if grid is None:
         return []
+    import torch
+
     if not isinstance(grid, torch.Tensor):
         grid = torch.as_tensor(grid)
     grid = grid.detach().cpu().to(dtype=torch.long).reshape(-1, 3)
@@ -523,6 +526,8 @@ def mrope_position_ids_from_image_grid(
 
     if image_token_id is None or not features:
         return None
+    import torch
+
     grid = features.get("image_grid_thw")
     if grid is None:
         return None

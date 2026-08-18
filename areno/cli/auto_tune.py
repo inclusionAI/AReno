@@ -439,7 +439,7 @@ def _run_dummy_probe(config: TrainerConfig, candidate: AutoTuneCandidate, *, sta
     probe_config.tp_size = candidate.tp_size
     probe_config.adam_8bit = candidate.adam_8bit
     probe_config.keep_rollout_state = candidate.keep_rollout_state
-    custom_config = probe_config.areno_config()
+    custom_config = probe_config.cuda_config()
     custom_config.dummy_load = True
     custom_config.max_running_prompts = candidate.max_running_prompts
     devices = _probe_devices(probe_config.world_size)
@@ -448,7 +448,7 @@ def _run_dummy_probe(config: TrainerConfig, candidate: AutoTuneCandidate, *, sta
     trainer = areno.api.Trainer(
         probe_config.world_size,
         probe_config.ckpt,
-        backend_type=BackendType.Areno,
+        backend_type=BackendType.CUDA,
         custom_config=custom_config,
         metrics_log_dir=None,
     )
@@ -543,7 +543,7 @@ def _repeat_to_width(tokens: list[int], width: int) -> list[int]:
 
 
 def _dummy_policy_loss(pack: dict, logprobs):
-    from areno.api.loss_fns.layout import response_layout
+    from areno.api.backend.cuda.losses import response_layout
 
     layout = response_layout(pack, logprobs, need_advantages=True)
     advantages = layout.advantages

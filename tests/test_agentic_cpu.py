@@ -348,7 +348,7 @@ def test_render_messages_for_display_skips_template_for_image_payloads():
 
 
 def test_agentic_policy_train_sequence_uses_compact_prompt_and_advantage_rows():
-    from areno.api.backend.areno.backend import _make_train_pack
+    from areno.api.backend.cuda.training import make_train_pack
     from areno.api.models import TrainSequence
 
     seq = TrainSequence.model_construct(
@@ -367,7 +367,7 @@ def test_agentic_policy_train_sequence_uses_compact_prompt_and_advantage_rows():
         reward=1.0,
     )
 
-    pack = _make_train_pack([seq])
+    pack = make_train_pack([seq])
 
     assert pack["prompt_mask"].tolist() == [[True, True, False, False]]
     assert "loss_mask" not in pack

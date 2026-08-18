@@ -9,6 +9,7 @@ and are imported lazily from `BACKEND_MODULES`.
 
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+from dataclasses import dataclass
 
 from areno.api.context import Context
 from areno.api.models import RolloutResult, SamplingParams, TrainSequence
@@ -20,8 +21,20 @@ BACKEND_CLS = {}
 # module the first time a backend is requested, which both registers the class
 # and avoids paying the import cost for backends that are never used.
 BACKEND_MODULES = {
-    "Areno": "areno.api.backend.areno",
+    "CUDA": "areno.api.backend.cuda.backend",
+    "MLX": "areno.api.backend.mlx.backend",
 }
+
+
+@dataclass(frozen=True, slots=True)
+class BackendCapabilities:
+    """Features a backend can execute without fallback or emulation."""
+
+    algorithms: frozenset[str]
+    model_roles: frozenset[str] = frozenset()
+    multimodal: bool = False
+    distributed: bool = False
+    custom_loss: bool = False
 
 
 def register_backend(backend_type):
@@ -61,6 +74,13 @@ class Backend(ABC):
     @abstractmethod
     def initialize(self, ctx: Context):
         """Start backend resources and load model state."""
+
+        pass
+
+    @classmethod
+    @abstractmethod
+    def capabilities(cls) -> BackendCapabilities:
+        """Describe supported algorithms and runtime features."""
 
         pass
 

@@ -4,7 +4,7 @@ import pytest
 import torch
 
 from areno.api import TrainSequence
-from areno.api.backend.areno.backend import _make_train_pack
+from areno.api.backend.cuda.training import make_train_pack
 from areno.api.multimodal import (
     encode_multimodal_prompt,
     expand_image_tokens,
@@ -75,7 +75,7 @@ def test_train_pack_preserves_multimodal_features():
         features={"image_token_id": 99, "image_embeds": image_embeds},
     )
 
-    pack = _make_train_pack([seq])
+    pack = make_train_pack([seq])
 
     assert pack["features"][0]["image_token_id"] == 99
     assert torch.equal(pack["features"][0]["image_embeds"], image_embeds)

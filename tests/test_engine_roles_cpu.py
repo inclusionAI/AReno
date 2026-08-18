@@ -3,8 +3,8 @@ from unittest.mock import patch
 
 import torch
 
+from areno.api.backend.cuda.roles import RoleManager, WorkerRole
 from areno.engine.protocol import ScorePayload
-from areno.engine.roles import RoleManager, WorkerRole
 from areno.engine.worker import ArenoWorker
 
 
@@ -22,7 +22,7 @@ def test_score_logprobs_omits_empty_feature_rows_for_text_model():
         pad_token_id=0,
     )
 
-    with patch("areno.engine.roles.next_token_logprobs", return_value=torch.zeros((1, 2))):
+    with patch("areno.api.backend.cuda.roles.next_token_logprobs", return_value=torch.zeros((1, 2))):
         rows = manager._score_logprob_rows(TextModel(), [[1, 2, 3]], payload, features=[None])
 
     assert rows == [[0.0, 0.0, 0.0]]
@@ -81,7 +81,7 @@ def test_actor_logprob_scoring_prepares_inference_weights():
     ctx = SimpleNamespace(dp_rank=0, rank=0)
 
     with (
-        patch("areno.engine.roles.get_tp_context", return_value=ctx),
+        patch("areno.api.backend.cuda.roles.get_tp_context", return_value=ctx),
         patch.object(manager, "_score_logprob_rows", return_value=[[0.0, 0.0, 0.0]]),
     ):
         rows = manager.score_logprobs(payload)

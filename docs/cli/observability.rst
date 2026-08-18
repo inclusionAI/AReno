@@ -27,7 +27,7 @@ algorithms, ``areno.api.trainers.policy_only.PolicyOnlyTrainer`` emits:
   loss function.
 
 The local AReno backend also logs step timing from
-``areno.api.backend.areno.backend``:
+``areno.api.backend.cuda.backend``:
 
 .. code-block:: text
 

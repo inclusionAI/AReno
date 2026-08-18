@@ -20,6 +20,7 @@ import queue
 import torch
 import torch.distributed as dist
 
+from areno.api.backend.cuda.roles import RoleManager, WorkerRole
 from areno.engine.config import EngineConfig
 from areno.engine.data import RolloutOutput
 from areno.engine.data.sampling import _truncate_generated
@@ -36,7 +37,6 @@ from areno.engine.protocol import (
     SaveCheckpointPayload,
     WorkerResult,
 )
-from areno.engine.roles import RoleManager, WorkerRole
 from areno.engine.runtime.common import pad_rollout_rows
 from areno.engine.runtime.decode_graph import DecodeGraph
 from areno.engine.runtime.rollout import _empty_rollout

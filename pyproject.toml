@@ -37,8 +37,10 @@ classifiers = [
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
-  "torch>=2.6",
-  "flash-linear-attention==0.5.2",
+  "torch>=2.6; platform_system == 'Linux'",
+  "flash-linear-attention==0.5.2; platform_system == 'Linux'",
+  "mlx>=0.31.2; platform_system == 'Darwin' and platform_machine == 'arm64'",
+  "mlx-lm>=0.31.3; platform_system == 'Darwin' and platform_machine == 'arm64'",
   "safetensors>=0.4",
   "transformers>=5.15,<6",
   "huggingface-hub>=0.25",
@@ -56,10 +58,10 @@ dependencies = [
   "click>=8.1",
   "tqdm>=4.66",
   "uvicorn>=0.27",
-  "av>=12",
-  "librosa>=0.11",
-  "soundfile>=0.13",
-  "torchvision>=0.21",
+  "av>=12; platform_system == 'Linux'",
+  "librosa>=0.11; platform_system == 'Linux'",
+  "soundfile>=0.13; platform_system == 'Linux'",
+  "torchvision>=0.21; platform_system == 'Linux'",
 ]
 
 [project.optional-dependencies]

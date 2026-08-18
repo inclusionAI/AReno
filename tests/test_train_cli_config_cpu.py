@@ -186,7 +186,7 @@ def test_train_config_builds_sft_shape_without_rollout_or_role_fields():
     assert cfg.model_hub == "modelscope"
     assert cfg.optimizer_min_lr == 0.0
     assert cfg.attn_backend == "native"
-    assert cfg.areno_config().runtime["attn_backend"] == "native"
+    assert cfg.cuda_config().runtime["attn_backend"] == "native"
     assert cfg.batch_size == 2
     assert cfg.mini_bs == 1
     assert not hasattr(cfg, "n_samples")
@@ -448,7 +448,7 @@ def test_independent_rollout_topology_parses_distinct_cuda_devices() -> None:
     assert cfg.rollout_devices == [1, 3]
     assert cfg.rollout_tp_size == 1
     assert cfg.policy_sync_bucket_mb == 32
-    backend = cfg.areno_config()
+    backend = cfg.cuda_config()
     assert backend.devices == [0, 2]
     assert backend.rollout_devices == [1, 3]
     assert backend.resolved_rollout_tp_size() == 1
@@ -878,6 +878,7 @@ def test_train_help_remains_complete_and_groups_every_declared_option():
 def _options(**overrides):
     defaults = dict(
         algo="gspo",
+        backend="cuda",
         ckpt="actor",
         dataset_path="dataset",
         model_hub="modelscope",

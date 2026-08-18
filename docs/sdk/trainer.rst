@@ -42,8 +42,8 @@ directly from Python.
           trainer = Trainer(
               world_size=1,
               model_path="Qwen/Qwen3.5-4B",
-              backend_type=areno.Areno,
-              custom_config=areno.ArenoConfig(tp_size=1),
+              backend_type=areno.CUDA,
+              custom_config=areno.CudaConfig(tp_size=1),
           )
 
           # Takes a moment: loads tokenizer, starts workers, loads checkpoint.
@@ -78,8 +78,8 @@ directly from Python.
       trainer = Trainer(
           world_size=1,
           model_path="Qwen/Qwen3.5-4B",
-          backend_type=areno.Areno,
-          custom_config=areno.ArenoConfig(tp_size=1),
+          backend_type=areno.CUDA,
+          custom_config=areno.CudaConfig(tp_size=1),
       )
       trainer.init()
 
@@ -87,7 +87,7 @@ directly from Python.
    :param str model_path: Local checkpoint path or Hugging Face repo ID.
    :param backend_type: Backend selector. Defaults to Areno when omitted.
    :param custom_config: Backend-specific configuration, such as
-      ``areno.ArenoConfig(tp_size=1)``.
+      ``areno.CudaConfig(tp_size=1)``.
    :param str | None metrics_log_dir: Optional TensorBoard metrics directory.
 
    .. py:method:: init()
@@ -387,7 +387,7 @@ Data classes
    :param bool trainable: Whether the role has an optimizer.
    :param float | None optimizer_lr: Optimizer LR for trainable roles.
 
-.. py:class:: areno.ArenoConfig(model_path=None, tp_size=1, dp_size=None, devices=None, dummy_load=False, optimizer=None, runtime=None, max_running_prompts=64, decode_progress_interval_s=10.0)
+.. py:class:: areno.CudaConfig(model_path=None, tp_size=1, dp_size=None, devices=None, dummy_load=False, optimizer=None, runtime=None, max_running_prompts=64, decode_progress_interval_s=10.0)
 
    Backend configuration for the local Areno engine.
 
@@ -477,8 +477,8 @@ One GSPO-style rollout/train step
        trainer = Trainer(
            world_size=1,
            model_path="Qwen/Qwen3.5-4B",
-           backend_type=areno.Areno,
-           custom_config=areno.ArenoConfig(tp_size=1),
+           backend_type=areno.CUDA,
+           custom_config=areno.CudaConfig(tp_size=1),
        )
        trainer.init()
 
@@ -605,8 +605,8 @@ token, logprob, reward, and loss-mask rows used by regular rollouts.
    trainer = Trainer(
        world_size=1,
        model_path="Qwen/Qwen3-0.6B",
-       backend_type=areno.Areno,
-       custom_config=areno.ArenoConfig(tp_size=1),
+       backend_type=areno.CUDA,
+       custom_config=areno.CudaConfig(tp_size=1),
    )
    trainer.init()
 

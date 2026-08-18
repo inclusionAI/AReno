@@ -1,13 +1,12 @@
-"""Adapter from the public `Trainer` API onto the areno `ArenoEngine`.
+"""CUDA adapter from the public `Trainer` API onto `ArenoEngine`.
 
 areno runs a co-located train + rollout engine in the same process group.
 This file is the thin glue that:
 
-- starts the engine with the dataclass-validated `ArenoConfig`,
+- starts the engine with the dataclass-validated `CudaConfig`,
 - forwards rollout requests through `generate_rollout` while translating
   SDK `SamplingParams` into the engine's own type,
-- packs a list of `TrainSequence` objects into the tensor batch
-  (`_make_train_pack`) the engine consumes, and
+- packs `TrainSequence` objects with the CUDA training adapter, and
 - routes the caller's loss function into the engine's training step via the
   small `_external_loss_dispatcher` hook so the engine itself stays
   algorithm-agnostic.
@@ -23,46 +22,27 @@ from collections.abc import Callable
 from pathlib import Path
 from threading import Lock
 
-import torch
-
-from areno.api.backend.base import Backend, register_backend
-from areno.api.config import ArenoConfig
+from areno.api.backend.base import Backend, BackendCapabilities, register_backend
+from areno.api.backend.common import expand_prompt_features, expand_prompts, group_rollout_sequences
+from areno.api.backend.cuda.checkpoint import save_checkpoint
+from areno.api.backend.cuda.generation import rollout_options
+from areno.api.backend.cuda.losses import dispatch_loss
+from areno.api.backend.cuda.training import (
+    annotate_sft_token_mean_packs,
+    is_rollout_policy_metric,
+    is_sft_loss_fn,
+    make_train_pack,
+    pad_token_id,
+    sft_target_token_count,
+)
+from areno.api.config import CudaConfig
 from areno.api.context import Context
-from areno.api.loss_fns.sft import sft_loss_fn
 from areno.api.models import BackendType, RolloutResult, RolloutSequence, SamplingParams, TrainSequence
 from areno.api.roles import ModelRole
 
 logger = logging.getLogger(__name__)
 _SYS_PATH_LOCK = Lock()
 _SYS_PATH_PREFERRED = False
-
-
-def _rollout_options(ctx: Context, sampling_params: SamplingParams):
-    """Translate public rollout params to areno engine-native options."""
-
-    max_prompt_len = sampling_params.max_prompt_len
-    eos_token_ids = () if sampling_params.ignore_eos else ctx.eos_token_ids
-    stop_token_ids = tuple(sampling_params.stop_token_ids or ())
-    cfg = ctx.custom_config
-    if cfg is None:
-        cfg = ArenoConfig()
-    if not isinstance(cfg, ArenoConfig):
-        raise TypeError(f"ArenoBackend requires ArenoConfig, got {type(cfg)!r}")
-
-    from areno import SamplingParams as ArenoSamplingParams
-
-    return {
-        "max_prompt_len": max_prompt_len,
-        "eos_token_id": eos_token_ids,
-        "max_running_prompts": cfg.max_running_prompts,
-        "decode_progress_interval_s": cfg.decode_progress_interval_s,
-        "sampling_params": ArenoSamplingParams(
-            temperature=0.0 if sampling_params.greedy else sampling_params.temperature,
-            top_p=sampling_params.top_p,
-            top_k=max(0, sampling_params.top_k),
-            stop_token_ids=stop_token_ids,
-        ),
-    }
 
 
 def _prefer_repo_areno() -> None:
@@ -89,22 +69,8 @@ def _prefer_repo_areno() -> None:
         _SYS_PATH_PREFERRED = True
 
 
-def _external_loss_dispatcher(pack: dict, logprobs: torch.Tensor):
-    """Call the loss function attached to an areno train pack.
-
-    areno workers execute in a backend-owned process/thread. Carrying the
-    callable inside each pack keeps the engine API stable while allowing the
-    algorithm script to provide GSPO, GRPO, or custom losses.
-    """
-
-    loss_fn = pack.get("_loss_fn")
-    if not callable(loss_fn):
-        raise ValueError("Areno train data pack is missing callable _loss_fn")
-    return loss_fn(pack, logprobs)
-
-
-@register_backend(BackendType.Areno)
-class ArenoBackend(Backend):
+@register_backend(BackendType.CUDA)
+class CudaBackend(Backend):
     """Backend adapter that maps `Trainer` calls onto `areno.ArenoEngine`."""
 
     def __init__(self):
@@ -125,11 +91,21 @@ class ArenoBackend(Backend):
         self._step_e2e_start: float | None = None
         self._step_rollout_time_s = 0.0
 
+    @classmethod
+    def capabilities(cls) -> BackendCapabilities:
+        return BackendCapabilities(
+            algorithms=frozenset({"sft", "dpo", "gspo", "grpo", "ppo"}),
+            model_roles=frozenset({"actor", "ref", "reward", "critic"}),
+            multimodal=True,
+            distributed=True,
+            custom_loss=True,
+        )
+
     def _require_train_engine(self):
         """Return the initialized training engine."""
 
         if self._train_engine is None:
-            raise RuntimeError("ArenoBackend is not initialized")
+            raise RuntimeError("CudaBackend is not initialized")
         return self._train_engine
 
     def _require_rollout_engine(self):
@@ -155,9 +131,9 @@ class ArenoBackend(Backend):
 
         cfg = ctx.custom_config
         if cfg is None:
-            cfg = ArenoConfig()
-        if not isinstance(cfg, ArenoConfig):
-            raise TypeError(f"ArenoBackend requires ArenoConfig, got {type(cfg)!r}")
+            cfg = CudaConfig()
+        if not isinstance(cfg, CudaConfig):
+            raise TypeError(f"CudaBackend requires CudaConfig, got {type(cfg)!r}")
 
         # Derive the DP/TP layout: world = dp * tp must hold exactly. When the
         # caller omits `dp_size` we infer it from `world_size / tp_size`.
@@ -186,7 +162,7 @@ class ArenoBackend(Backend):
                 dummy_load=cfg.dummy_load,
                 optimizer_config=OptimizerConfig(**cfg.optimizer),
                 runtime_config=RuntimeConfig(**cfg.runtime),
-                loss_fn=_external_loss_dispatcher,
+                loss_fn=dispatch_loss,
                 policy_sync_bucket_mb=cfg.policy_sync_bucket_mb,
             )
             return
@@ -238,7 +214,7 @@ class ArenoBackend(Backend):
             dp_size=dp_size,
             devices=devices,
             optimizer_config=OptimizerConfig(**cfg.optimizer),
-            loss_fn=_external_loss_dispatcher,
+            loss_fn=dispatch_loss,
             role="train",
             cluster_kwargs={"world_spec": world_spec, "partition": train_partition},
             **common,
@@ -250,7 +226,6 @@ class ArenoBackend(Backend):
             dp_size=len(rollout_devices) // rollout_tp_size,
             devices=rollout_devices,
             dummy_load=cfg.dummy_load,
-            optimizer_config=OptimizerConfig(**cfg.optimizer),
             runtime_config=rollout_runtime,
             loss_fn=None,
             role="rollout",
@@ -349,9 +324,9 @@ class ArenoBackend(Backend):
         # Replicate each already-tokenized prompt `n_samples` times so the
         # engine treats each completion as independent while preserving the
         # `[prompt0_sample0, prompt0_sample1, ..., promptN_sampleK]` layout.
-        flat_prompts = [ids for ids in prompt_tokens for _ in range(n_samples)]
-        flat_features = _replicate_prompt_features(prompt_features, n_samples)
-        options = _rollout_options(ctx, sampling_params)
+        flat_prompts = expand_prompts(prompt_tokens, n_samples)
+        flat_features = expand_prompt_features(prompt_features, len(prompt_tokens), n_samples)
+        options = rollout_options(ctx, sampling_params)
 
         if self._step_e2e_start is None:
             self._step_e2e_start = time.perf_counter()
@@ -370,22 +345,11 @@ class ArenoBackend(Backend):
         )
         # Repack the flat result into per-prompt groups of `n_samples`
         # completions so downstream code can iterate `for item, result`.
-        results = []
-        for prompt_idx in range(len(prompt_tokens)):
-            start = prompt_idx * n_samples
-            end = start + n_samples
-            results.append(
-                RolloutResult(
-                    sequences=[
-                        RolloutSequence(
-                            resp_tokens=tokens,
-                            resp_logprobs=rollout.logprobs[i, : len(tokens)].tolist(),
-                        )
-                        for i, tokens in enumerate(rollout.response_ids[start:end], start=start)
-                    ]
-                )
-            )
-        return results
+        sequences = [
+            RolloutSequence(resp_tokens=tokens, resp_logprobs=rollout.logprobs[index, : len(tokens)].tolist())
+            for index, tokens in enumerate(rollout.response_ids)
+        ]
+        return group_rollout_sequences(sequences, len(prompt_tokens), n_samples)
 
     def begin_rollout_session(self, ctx: Context) -> None:
         """Prepare colocated actor state before rollout requests are issued."""
@@ -469,9 +433,9 @@ class ArenoBackend(Backend):
             raise ValueError("prompt_features must have the same length as prompt_tokens")
         if not self._rollout_session_active:
             await asyncio.to_thread(self._sync_policy_if_needed)
-        prompts = [tokens for tokens in prompt_tokens for _ in range(n_samples)]
-        flat_features = _replicate_prompt_features(prompt_features, n_samples)
-        options = _rollout_options(ctx, sampling_params)
+        prompts = expand_prompts(prompt_tokens, n_samples)
+        flat_features = expand_prompt_features(prompt_features, len(prompt_tokens), n_samples)
+        options = rollout_options(ctx, sampling_params)
         if self._step_e2e_start is None:
             self._step_e2e_start = time.perf_counter()
             self._step_rollout_time_s = 0.0
@@ -485,22 +449,11 @@ class ArenoBackend(Backend):
             decode_progress_interval_s=options["decode_progress_interval_s"],
             sampling_params=options["sampling_params"],
         )
-        results = []
-        for prompt_idx in range(len(prompt_tokens)):
-            start = prompt_idx * n_samples
-            end = start + n_samples
-            results.append(
-                RolloutResult(
-                    sequences=[
-                        RolloutSequence(
-                            resp_tokens=tokens,
-                            resp_logprobs=rollout.logprobs[i, : len(tokens)].tolist(),
-                        )
-                        for i, tokens in enumerate(rollout.response_ids[start:end], start=start)
-                    ]
-                )
-            )
-        return results
+        sequences = [
+            RolloutSequence(resp_tokens=tokens, resp_logprobs=rollout.logprobs[index, : len(tokens)].tolist())
+            for index, tokens in enumerate(rollout.response_ids)
+        ]
+        return group_rollout_sequences(sequences, len(prompt_tokens), n_samples)
 
     def train(
         self,
@@ -512,7 +465,7 @@ class ArenoBackend(Backend):
     ) -> dict[str, float]:
         engine = self._require_train_engine()
         if not callable(loss_fn):
-            raise ValueError("ArenoBackend requires a callable loss_fn")
+            raise ValueError("CudaBackend requires a callable loss_fn")
         if self._separate_rollout and self._rollout_session_active:
             raise RuntimeError("cannot update policy weights during an active rollout session")
 
@@ -526,17 +479,17 @@ class ArenoBackend(Backend):
         # pack and the loss function is stamped onto each pack so the engine's
         # forward worker can call it without having to know about the loss API.
         packs = []
-        is_sft = _is_sft_loss_fn(loss_fn)
+        is_sft = is_sft_loss_fn(loss_fn)
         sft_target_counts = [] if is_sft else None
         for start in range(0, len(batch_data), mini_bs):
             seqs = batch_data[start : start + mini_bs]
-            pack = _make_train_pack(seqs)
+            pack = make_train_pack(seqs)
             pack["_loss_fn"] = loss_fn
             packs.append(pack)
             if is_sft:
-                sft_target_counts.append(_sft_target_token_count(seqs))
+                sft_target_counts.append(sft_target_token_count(seqs))
         if is_sft:
-            _annotate_sft_token_mean_packs(
+            annotate_sft_token_mean_packs(
                 packs,
                 sft_target_counts,
                 gradient_accumulation_steps=gradient_accumulation_steps,
@@ -555,7 +508,7 @@ class ArenoBackend(Backend):
             if stats.metrics:
                 for key, value in stats.metrics.items():
                     value_float = float(value)
-                    if _is_rollout_policy_metric(key):
+                    if is_rollout_policy_metric(key):
                         first_policy_metrics.setdefault(key, value_float)
                     else:
                         metrics[key] = metrics.get(key, 0.0) + value_float
@@ -583,7 +536,7 @@ class ArenoBackend(Backend):
 
     def save_checkpoint(self, ctx: Context, path: str) -> str:
         engine = self._require_train_engine()
-        return engine.save_checkpoint(path)
+        return save_checkpoint(engine, path)
 
     def ensure_roles(self, ctx: Context, roles: dict[str, ModelRole]) -> None:
         engine = self._require_train_engine()
@@ -604,7 +557,7 @@ class ArenoBackend(Backend):
         return engine.score_logprobs(
             role,
             token_rows,
-            pad_token_id=_pad_token_id(ctx),
+            pad_token_id=pad_token_id(ctx),
             features=features,
             microbatch_size=microbatch_size,
         )
@@ -615,7 +568,7 @@ class ArenoBackend(Backend):
         engine = self._require_train_engine()
         if features is not None and len(features) != len(token_rows):
             raise ValueError("features must have the same length as token_rows")
-        return engine.score_values(role, token_rows, pad_token_id=_pad_token_id(ctx), features=features)
+        return engine.score_values(role, token_rows, pad_token_id=pad_token_id(ctx), features=features)
 
     def score_rewards(
         self, ctx: Context, role: str, token_rows: list[list[int]], *, features: list[dict | None] | None = None
@@ -623,7 +576,7 @@ class ArenoBackend(Backend):
         engine = self._require_train_engine()
         if features is not None and len(features) != len(token_rows):
             raise ValueError("features must have the same length as token_rows")
-        return engine.score_rewards(role, token_rows, pad_token_id=_pad_token_id(ctx), features=features)
+        return engine.score_rewards(role, token_rows, pad_token_id=pad_token_id(ctx), features=features)
 
     def train_values(
         self,
@@ -642,7 +595,7 @@ class ArenoBackend(Backend):
         # value loss path that takes (cliprange_value, value_loss_coef)).
         packs = []
         for start in range(0, len(batch_data), mini_bs):
-            packs.append(_make_train_pack(batch_data[start : start + mini_bs]))
+            packs.append(make_train_pack(batch_data[start : start + mini_bs]))
         return engine.train_values(
             role,
             packs,
@@ -650,197 +603,3 @@ class ArenoBackend(Backend):
             cliprange_value=cliprange_value,
             value_loss_coef=value_loss_coef,
         )
-
-
-def _make_train_pack(seqs: list[TrainSequence]) -> dict[str, torch.Tensor]:
-    """Pack a list of `TrainSequence` rows into right-padded 2D tensors.
-
-    Output layout (all shapes are (B, max_len) unless noted):
-        input_ids       int64,  prompt+response token ids, padded with EOS
-        labels          int64,  copy of input_ids reused as next-token targets
-        lengths         int32,  (B,), real sequence length before padding
-        prompt_mask     bool,   True at prompt positions (and on padded tail)
-        logprobs        float,  rollout-policy logprobs aligned with input_ids
-        advantages      float,  per-token advantage (zero on prompt prefix)
-        returns/values/ref_logprobs (optional, only populated when at least one
-            sequence carries the field; needed for PPO critic + reference KL).
-    `prompt_mask` defaults to True for padding tokens so loss functions
-    automatically ignore them when they restrict computation to response
-    positions.
-    """
-
-    if not seqs:
-        raise ValueError("train batch is empty")
-    from areno.engine.runtime.common import pad_rows
-
-    eos_token_id = seqs[0].eos_token_id
-    batch = len(seqs)
-    lengths = torch.tensor([len(seq.tokens) for seq in seqs], dtype=torch.int32)
-    max_len = int(lengths.max().item()) if batch else 0
-    input_ids = pad_rows([seq.tokens for seq in seqs], dtype=torch.long, fill_value=eos_token_id, width=max_len)
-    prompt_mask = _make_prompt_mask(seqs, lengths, max_len)
-    has_loss_mask = any(bool(seq.loss_mask) for seq in seqs)
-    loss_mask = _make_loss_mask(seqs, lengths, max_len) if has_loss_mask else None
-    logprobs = pad_rows([seq.logprobs for seq in seqs], dtype=torch.float32, width=max_len)
-    advantages = _make_advantages(seqs, prompt_mask, loss_mask, max_len)
-    # Allocate optional fields only when at least one sequence carries them so
-    # the engine can branch on key presence and avoid unused tensors.
-    has_returns = any(bool(seq.returns) for seq in seqs)
-    has_values = any(bool(seq.values) for seq in seqs)
-    has_ref_logprobs = any(bool(seq.ref_logprobs) for seq in seqs)
-    returns = pad_rows([seq.returns for seq in seqs], dtype=torch.float32, width=max_len) if has_returns else None
-    values = pad_rows([seq.values for seq in seqs], dtype=torch.float32, width=max_len) if has_values else None
-    ref_logprobs = (
-        pad_rows([seq.ref_logprobs for seq in seqs], dtype=torch.float32, width=max_len) if has_ref_logprobs else None
-    )
-
-    pack = {
-        "input_ids": input_ids,
-        "labels": input_ids.clone(),
-        "lengths": lengths,
-        "prompt_mask": prompt_mask,
-        "logprobs": logprobs,
-        "advantages": advantages,
-    }
-    if loss_mask is not None:
-        pack["loss_mask"] = loss_mask
-    if returns is not None:
-        pack["returns"] = returns
-    if values is not None:
-        pack["values"] = values
-    if ref_logprobs is not None:
-        pack["ref_logprobs"] = ref_logprobs
-    features = [seq.features for seq in seqs]
-    if any(feature is not None for feature in features):
-        pack["features"] = features
-    return pack
-
-
-def _make_prompt_mask(seqs: list[TrainSequence], lengths: torch.Tensor, max_len: int) -> torch.Tensor:
-    if all(not seq.prompt_mask and seq.prompt_len is not None for seq in seqs):
-        prompt_lens = torch.tensor([int(seq.prompt_len or 0) for seq in seqs], dtype=torch.int64)
-        positions = torch.arange(max_len, dtype=torch.int64).unsqueeze(0)
-        valid_lengths = lengths.to(dtype=torch.int64).unsqueeze(1)
-        return (positions < prompt_lens.unsqueeze(1)) | (positions >= valid_lengths)
-    if any(not seq.prompt_mask and seq.prompt_len is not None for seq in seqs):
-        prompt_mask = torch.ones((len(seqs), max_len), dtype=torch.bool)
-        positions = torch.arange(max_len, dtype=torch.int64)
-        for row, seq in enumerate(seqs):
-            if seq.prompt_mask:
-                prompt_mask[row, : len(seq.prompt_mask)] = torch.as_tensor(seq.prompt_mask, dtype=torch.bool)
-                continue
-            prompt_len = int(seq.prompt_len or 0)
-            length = int(lengths[row].item())
-            prompt_mask[row] = (positions < prompt_len) | (positions >= length)
-        return prompt_mask
-    from areno.engine.runtime.common import pad_rows
-
-    return pad_rows([seq.prompt_mask for seq in seqs], dtype=torch.bool, fill_value=True, width=max_len)
-
-
-def _make_loss_mask(seqs: list[TrainSequence], lengths: torch.Tensor, max_len: int) -> torch.Tensor:
-    loss_mask = torch.zeros((len(seqs), max_len), dtype=torch.bool)
-    positions = torch.arange(max_len, dtype=torch.int64)
-    for row, seq in enumerate(seqs):
-        if seq.loss_mask:
-            loss_mask[row, : len(seq.loss_mask)] = torch.as_tensor(seq.loss_mask, dtype=torch.bool)
-            continue
-        prompt_len = _sequence_prompt_len(seq)
-        length = int(lengths[row].item())
-        loss_mask[row] = (positions >= prompt_len) & (positions < length)
-    return loss_mask
-
-
-def _make_advantages(
-    seqs: list[TrainSequence],
-    prompt_mask: torch.Tensor,
-    loss_mask: torch.Tensor | None,
-    max_len: int,
-) -> torch.Tensor:
-    if all(not seq.advantages and seq.scalar_advantage is not None for seq in seqs):
-        advantages = torch.zeros((len(seqs), max_len), dtype=torch.float32)
-        active_mask = loss_mask if loss_mask is not None else ~prompt_mask
-        for row, seq in enumerate(seqs):
-            advantages[row, active_mask[row]] = float(seq.scalar_advantage or 0.0)
-        return advantages
-    from areno.engine.runtime.common import pad_rows
-
-    return pad_rows([seq.advantages for seq in seqs], dtype=torch.float32, width=max_len)
-
-
-def _sequence_prompt_len(seq: TrainSequence) -> int:
-    if seq.prompt_len is not None:
-        return int(seq.prompt_len)
-    for idx, is_prompt in enumerate(seq.prompt_mask):
-        if not is_prompt:
-            return idx
-    return len(seq.prompt_mask)
-
-
-def _replicate_prompt_features(features: list[dict | None] | None, n_samples: int) -> list[dict | None] | None:
-    """Repeat prompt-aligned multimodal side inputs in the same order as prompts."""
-
-    if features is None:
-        return None
-    return [feature for feature in features for _ in range(n_samples)]
-
-
-def _is_sft_loss_fn(loss_fn: Callable) -> bool:
-    """Return true for the built-in SFT loss, including simple partial wrappers."""
-
-    return loss_fn is sft_loss_fn or getattr(loss_fn, "func", None) is sft_loss_fn
-
-
-def _annotate_sft_token_mean_packs(
-    packs: list[dict],
-    target_counts: list[int],
-    *,
-    gradient_accumulation_steps: int | None,
-) -> None:
-    """Attach per-accumulation-group token normalizers for global token-mean SFT."""
-
-    if not packs:
-        return
-    accumulation_steps = len(packs) if gradient_accumulation_steps is None else max(int(gradient_accumulation_steps), 1)
-    for group_start in range(0, len(packs), accumulation_steps):
-        group_end = min(group_start + accumulation_steps, len(packs))
-        group_total = max(sum(target_counts[group_start:group_end]), 1)
-        group_size = group_end - group_start
-        for pack in packs[group_start:group_end]:
-            pack["_sft_total_target_tokens"] = group_total
-            pack["_sft_grad_scale"] = group_size
-
-
-def _sft_target_token_count(seqs: list[TrainSequence]) -> int:
-    """Count target tokens using the same next-token masks as packed training."""
-
-    count = 0
-    for seq in seqs:
-        length = min(len(seq.tokens), len(seq.prompt_mask))
-        for idx in range(1, length):
-            is_target = not seq.prompt_mask[idx]
-            if seq.loss_mask:
-                is_target = is_target and idx < len(seq.loss_mask) and seq.loss_mask[idx]
-            if is_target:
-                count += 1
-    return count
-
-
-def _pad_token_id(ctx: Context) -> int:
-    # Score helpers right-pad their batched inputs with this id; fall back to
-    # the EOS token when the tokenizer does not define a dedicated pad token.
-    token_id = ctx.tokenizer.pad_token_id
-    if token_id is None:
-        token_id = ctx.tokenizer.eos_token_id
-    if token_id is None:
-        raise ValueError("tokenizer must define pad_token_id or eos_token_id")
-    return int(token_id)
-
-
-def _is_rollout_policy_metric(key: str) -> bool:
-    # These metrics describe the rollout-vs-train policy gap; the value on the
-    # first microbatch is most representative because subsequent microbatches
-    # already see updated weights once the engine fires gradient steps.
-    return key in {"ratio_mean", "ratio_std", "rollout_logprobs_mean", "train_logprobs_mean"} or key.startswith(
-        "logp_diff"
-    )

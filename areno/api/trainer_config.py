@@ -27,6 +27,7 @@ class TrainerConfig:
     algo: str
     ckpt: str
     dataset_path: str
+    backend: str | None = None
     model_hub: str = "modelscope"
     dataset_loader_fn: str | None = None
     save_path: str | None = None
@@ -73,6 +74,14 @@ class TrainerConfig:
     chat_template_enable_thinking: bool | None = None
 
     def __post_init__(self) -> None:
+        if self.backend is None:
+            from areno.api.config import default_backend_type
+
+            self.backend = default_backend_type().value.lower()
+        else:
+            self.backend = self.backend.lower()
+        if self.backend not in {"cuda", "mlx"}:
+            raise ValueError("backend must be one of: cuda, mlx")
         if self.attn_backend not in {"flash", "native"}:
             raise ValueError("attn_backend must be one of: flash, native")
         if self.model_hub not in {"hf", "modelscope"}:
@@ -138,16 +147,41 @@ class TrainerConfig:
             "multimodal_projector_lr_decay_style": self.multimodal_projector_lr_decay_style,
         }
 
-    def areno_config(self):
+    def backend_type(self):
+        """Return the selected execution backend without importing it eagerly."""
+
+        from areno.api.models import BackendType
+
+        return BackendType.MLX if self.backend.lower() == "mlx" else BackendType.CUDA
+
+    def backend_config(self):
+        """Build the typed configuration for the selected backend."""
+
+        if self.backend.lower() == "mlx":
+            return self.mlx_config()
+        return self.cuda_config()
+
+    def mlx_config(self):
+        """Build the MLX backend config using common optimizer settings."""
+
+        from areno.api.config import MlxConfig
+
+        return MlxConfig(
+            optimizer=self.optimizer_config(),
+            compile_train_step=True,
+            gradient_checkpointing=self.activation_checkpointing,
+        )
+
+    def cuda_config(self):
         """Build the backend config exposed by this trainer config.
 
         Imported lazily so consumers that never touch areno (e.g. the verl
         wrapper) avoid pulling in its dependency tree.
         """
 
-        from areno.api.config import ArenoConfig
+        from areno.api.config import CudaConfig
 
-        return ArenoConfig(
+        return CudaConfig(
             tp_size=self.tp_size,
             devices=self.train_devices,
             optimizer=self.optimizer_config(),
@@ -181,12 +215,12 @@ class RolloutTrainerConfig(TrainerConfig):
             return self.max_running_prompts
         return max(self.batch_size * self.n_samples, 1)
 
-    def areno_config(self):
+    def cuda_config(self):
         """Build backend config including rollout cache capacity."""
 
-        from areno.api.config import ArenoConfig
+        from areno.api.config import CudaConfig
 
-        return ArenoConfig(
+        return CudaConfig(
             tp_size=self.tp_size,
             devices=self.train_devices,
             rollout_tp_size=self.rollout_tp_size,
@@ -200,6 +234,21 @@ class RolloutTrainerConfig(TrainerConfig):
                 "eager_decode": self.eager_decode,
                 "attn_backend": self.attn_backend,
             },
+        )
+
+    def mlx_config(self):
+        """Build MLX config with rollout concurrency from this trainer."""
+
+        from areno.api.config import MlxConfig
+
+        max_running = self.resolved_max_running_prompts()
+        return MlxConfig(
+            optimizer=self.optimizer_config(),
+            max_running_prompts=max_running,
+            completion_batch_size=max_running,
+            prefill_batch_size=min(max_running, 8),
+            compile_train_step=True,
+            gradient_checkpointing=self.activation_checkpointing,
         )
 
 

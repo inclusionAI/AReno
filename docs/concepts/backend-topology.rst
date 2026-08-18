@@ -7,7 +7,7 @@ The current SDK runtime follows one AReno backend path:
 
    Trainer
      -> Backend
-       -> ArenoBackend
+       -> CudaBackend
          -> ArenoEngine
 
 ``Trainer`` is the public coordinator. In ``areno/api/trainer.py``,
@@ -17,17 +17,17 @@ training to that backend.
 
 ``Backend`` is the execution contract in ``areno/api/backend/base.py``. Its
 ``rollout_batch`` and ``train`` methods define the operations required by the
-training loop. ``ArenoBackend`` is the registered AReno implementation in
-``areno/api/backend/areno/backend.py``.
+training loop. ``CudaBackend`` is the registered AReno implementation in
+``areno/api/backend/cuda/backend.py``.
 
 Colocated and partitioned engines
 ---------------------------------
 
-By default, ``ArenoBackend.initialize`` creates one ``ArenoEngine``. The same
+By default, ``CudaBackend.initialize`` creates one ``ArenoEngine``. The same
 engine handles both sides of the loop:
 
-* ``ArenoBackend.rollout_batch`` calls ``ArenoEngine.generate_rollout``.
-* ``ArenoBackend.train`` calls ``ArenoEngine.step``.
+* ``CudaBackend.rollout_batch`` calls ``ArenoEngine.generate_rollout``.
+* ``CudaBackend.train`` calls ``ArenoEngine.step``.
 
 ``ArenoEngine`` is implemented in ``areno/engine/api.py``. It coordinates the
 worker cluster used by both rollout and training.
