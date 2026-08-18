@@ -8,13 +8,21 @@ from functools import partial
 from typing import Any
 
 from areno.api.algorithms import describe_loss_fn
-from areno.api.backend.base import Backend, BackendCapabilities, register_backend
+from areno.api.backend.base import Backend, BackendCapabilities, BackendRuntimeComponents, register_backend
+from areno.api.backend.common import (
+    MetricReduction,
+    accumulation_group_size,
+    accumulation_steps,
+    metric_reduction,
+)
 from areno.api.backend.mlx.checkpoint import save_checkpoint
 from areno.api.backend.mlx.generation import ContinuousBatchScheduler, GenerationConfig
 from areno.api.backend.mlx.losses import mlx_loss
 from areno.api.backend.mlx.numerics import selected_token_logprobs
+from areno.api.backend.mlx.optimizer import apply_optimizer_update, build_optimizer, set_group_learning_rates
+from areno.api.backend.mlx.provider import MlxModelProvider, load_provider
 from areno.api.backend.mlx.roles import MlxRole, load_language_role, load_value_role, role_output
-from areno.api.backend.mlx.training import clip_grad_norm, learning_rate_for_step, make_train_batch
+from areno.api.backend.mlx.training import clip_grad_norm, make_train_batch, sft_target_token_count
 from areno.api.config import MlxConfig
 from areno.api.context import Context
 from areno.api.models import BackendType, RolloutResult, SamplingParams, TrainSequence
@@ -27,8 +35,11 @@ class MlxBackend(Backend):
 
     def __init__(self) -> None:
         self.model = None
+        self.provider: MlxModelProvider | None = None
         self.tokenizer = None
+        self.processor = None
         self.optimizer = None
+        self._optimizer_groups: list[tuple[str, Any, dict[str, Any]]] = []
         self.config: MlxConfig | None = None
         self.model_config: dict[str, Any] = {}
         self._rollout_active = False
@@ -43,6 +54,7 @@ class MlxBackend(Backend):
         return BackendCapabilities(
             algorithms=frozenset({"sft", "dpo", "gspo", "grpo", "ppo"}),
             model_roles=frozenset({"actor", "ref", "reward", "critic"}),
+            multimodal=True,
         )
 
     def initialize(self, ctx: Context):
@@ -54,35 +66,40 @@ class MlxBackend(Backend):
             raise TypeError("MLX backend requires MlxConfig")
         try:
             import mlx.core as mx
-            import mlx.optimizers as optim
-            from mlx_lm import load
         except ImportError as exc:
-            raise RuntimeError("MLX backend requires `pip install 'areno[mlx]'`") from exc
+            raise RuntimeError("MLX backend requires an Apple Silicon AReno installation") from exc
 
         self.config = ctx.custom_config
         model_path = self.config.model_path or ctx.model_path
-        self.model, self.tokenizer, self.model_config = load(
-            model_path,
-            adapter_path=self.config.adapter_path,
-            return_config=True,
-        )
+        self.provider = load_provider(model_path, adapter_path=self.config.adapter_path)
+        self.model = self.provider.model
+        self.tokenizer = self.provider.tokenizer
+        self.processor = self.provider.processor
+        self.model_config = self.provider.config
+        if mx.metal.is_available():
+            max_working_set_size = mx.device_info().get("max_recommended_working_set_size")
+            if max_working_set_size is not None:
+                mx.set_wired_limit(int(max_working_set_size))
+            # A unified rollout/training process cannot let Metal retain all
+            # temporary generation buffers for reuse across the phase change.
+            mx.set_cache_limit(0)
         if self.model_config.get("quantization") is not None:
             raise ValueError(
                 "MLX training requires a non-quantized checkpoint so saved weights remain loadable by Transformers"
             )
         self._validate_tokenizer(ctx.tokenizer)
         optimizer_config = self.config.optimizer
-        if optimizer_config.get("adam_8bit"):
-            raise ValueError("MLX backend does not support adam_8bit")
-        self.optimizer = optim.AdamW(
-            learning_rate=float(optimizer_config.get("lr", 1e-6)),
-            betas=tuple(optimizer_config.get("betas", (0.9, 0.999))),
-            weight_decay=float(optimizer_config.get("weight_decay", 1e-2)),
-        )
+        self.provider.configure_trainability(optimizer_config)
+        self.optimizer, self._optimizer_groups = build_optimizer(optimizer_config)
         if self.config.gradient_checkpointing:
             self._enable_gradient_checkpointing()
         self.model.train()
         mx.eval(self.model.parameters(), self.optimizer.state)
+
+    def runtime_components(self) -> BackendRuntimeComponents:
+        """Expose the provider tokenizer and multimodal processor through the backend contract."""
+
+        return BackendRuntimeComponents(tokenizer=self.tokenizer, processor=self.processor)
 
     def close(self) -> None:
         try:
@@ -94,8 +111,11 @@ class MlxBackend(Backend):
             self._rollout_scheduler.close()
             self._rollout_scheduler = None
         self._roles.clear()
+        self.provider = None
         self.model = None
+        self.processor = None
         self.optimizer = None
+        self._optimizer_groups = []
         mx.clear_cache()
 
     def begin_rollout_session(self, ctx: Context) -> None:
@@ -104,16 +124,16 @@ class MlxBackend(Backend):
             raise RuntimeError("MLX rollout session is already active")
         self._require_runtime()
         self.model.eval()
-        self._rollout_scheduler = ContinuousBatchScheduler(
-            self.model,
-            self.tokenizer,
-            GenerationConfig(
-                completion_batch_size=self.config.completion_batch_size,
-                prefill_batch_size=self.config.prefill_batch_size,
-                prefill_step_size=self.config.prefill_step_size,
-                max_kv_size=self.config.max_kv_size,
-            ),
-        )
+        if self._rollout_scheduler is None:
+            self._rollout_scheduler = ContinuousBatchScheduler(
+                self.provider,
+                GenerationConfig(
+                    completion_batch_size=self.config.completion_batch_size,
+                    prefill_batch_size=self.config.prefill_batch_size,
+                    prefill_step_size=self.config.prefill_step_size,
+                    max_kv_size=self.config.max_kv_size,
+                ),
+            )
         self._rollout_version = self._policy_version
         self._rollout_active = True
 
@@ -127,10 +147,9 @@ class MlxBackend(Backend):
 
     def end_rollout_session(self, ctx: Context) -> None:
         del ctx
-        if self._rollout_scheduler is not None:
-            self._rollout_scheduler.close()
-            self._rollout_scheduler = None
         self._rollout_active = False
+        if not self.config.keep_rollout_state and self._rollout_scheduler is not None:
+            self._rollout_scheduler.drop_state()
         if self.model is not None:
             self.model.train()
 
@@ -150,11 +169,9 @@ class MlxBackend(Backend):
         self._require_runtime()
         if not self._rollout_active:
             raise RuntimeError("rollout_batch must run inside a rollout session")
-        if prompt_features is not None and any(feature is not None for feature in prompt_features):
-            raise NotImplementedError("MLX text backend does not support prompt_features")
         if self._rollout_scheduler is None:
             raise RuntimeError("MLX rollout scheduler is not initialized")
-        return self._rollout_scheduler.submit(prompt_tokens, n_samples, sampling_params).result()
+        return self._rollout_scheduler.submit(prompt_tokens, n_samples, sampling_params, prompt_features).result()
 
     async def rollout_batch_async(
         self,
@@ -169,9 +186,7 @@ class MlxBackend(Backend):
         self._require_runtime()
         if not self._rollout_active or self._rollout_scheduler is None:
             raise RuntimeError("rollout_batch_async must run inside a rollout session")
-        if prompt_features is not None and any(feature is not None for feature in prompt_features):
-            raise NotImplementedError("MLX text backend does not support prompt_features")
-        return await self._rollout_scheduler.submit_async(prompt_tokens, n_samples, sampling_params)
+        return await self._rollout_scheduler.submit_async(prompt_tokens, n_samples, sampling_params, prompt_features)
 
     def train(
         self,
@@ -196,9 +211,7 @@ class MlxBackend(Backend):
 
         spec = describe_loss_fn(loss_fn)
         microbatches = [batch_data[start : start + mini_bs] for start in range(0, len(batch_data), mini_bs)]
-        accumulation = gradient_accumulation_steps or len(microbatches)
-        if accumulation < 1:
-            raise ValueError("gradient_accumulation_steps must be positive")
+        accumulation = accumulation_steps(len(microbatches), gradient_accumulation_steps)
 
         self.model.train()
         started = time.perf_counter()
@@ -207,22 +220,34 @@ class MlxBackend(Backend):
         losses: list[float] = []
         metric_totals: dict[str, float] = {}
         metric_counts: dict[str, int] = {}
+        first_policy_metrics: dict[str, float] = {}
         grad_norms: list[float] = []
-        learning_rate = learning_rate_for_step(self.config.optimizer, ctx.global_step)
-        self.optimizer.learning_rate = mx.array(learning_rate)
+        learning_rates = set_group_learning_rates(self._optimizer_groups, ctx.global_step)
+        learning_rate = learning_rates["model"]
         value_and_grad = self._value_and_grad(spec.name, spec.kwargs)
 
         for index, rows in enumerate(microbatches):
-            batch = make_train_batch(rows)
+            batch = self.provider.prepare_train_batch(make_train_batch(rows), rows)
+            if spec.name == "sft":
+                group_size = accumulation_group_size(index, len(microbatches), accumulation)
+                group_start = (index // accumulation) * accumulation
+                group_end = group_start + group_size
+                batch["_sft_total_target_tokens"] = mx.array(
+                    sum(sft_target_token_count(group) for group in microbatches[group_start:group_end]),
+                    dtype=mx.float32,
+                )
+                batch["_sft_grad_scale"] = mx.array(group_size, dtype=mx.float32)
             (loss, stats), grads = value_and_grad(batch)
             grad_accum = grads if grad_accum is None else tree_map(lambda left, right: left + right, grad_accum, grads)
             group_count += 1
             should_step = group_count == accumulation or index + 1 == len(microbatches)
             if should_step:
+                mx.eval(loss, grad_accum)
+                mx.clear_cache()
                 grads = tree_map(lambda value: value / group_count, grad_accum)
                 grads, grad_norm = clip_grad_norm(grads, self.config.optimizer.get("grad_clip_norm"))
-                self.optimizer.update(self.model, grads)
-                mx.eval(self.model.parameters(), self.optimizer.state, loss, grad_norm)
+                mx.eval(grad_norm)
+                apply_optimizer_update(self.model, self.optimizer, grads)
                 grad_norms.append(float(grad_norm.item()))
                 grad_accum = None
                 group_count = 0
@@ -231,14 +256,19 @@ class MlxBackend(Backend):
 
             losses.append(float(loss.item()))
             for key, value in stats.items():
+                key = str(key)
                 scalar = float(value.item())
-                metric_totals[key] = metric_totals.get(key, 0.0) + scalar
-                metric_counts[key] = metric_counts.get(key, 0) + 1
+                if metric_reduction(key) is MetricReduction.FIRST:
+                    first_policy_metrics.setdefault(key, scalar)
+                else:
+                    metric_totals[key] = metric_totals.get(key, 0.0) + scalar
+                    metric_counts[key] = metric_counts.get(key, 0) + 1
 
         self._policy_version += 1
         self._rollout_version = -1
         mx.clear_cache()
         result = {key: value / metric_counts[key] for key, value in metric_totals.items()}
+        result.update(first_policy_metrics)
         result.update(
             {
                 "loss": sum(losses) / len(losses),
@@ -247,6 +277,9 @@ class MlxBackend(Backend):
                 "policy_train_wall_time_s": time.perf_counter() - started,
             }
         )
+        for group, rate in learning_rates.items():
+            if group != "model":
+                result[f"{group}_lr"] = rate
         return result
 
     def save_checkpoint(self, ctx: Context, path: str) -> str:
@@ -254,10 +287,8 @@ class MlxBackend(Backend):
 
         self._require_runtime()
         return save_checkpoint(
-            self.model,
-            self.tokenizer,
+            self.provider,
             self.optimizer,
-            model_config=self.model_config,
             source_path=self.config.model_path or ctx.model_path,
             destination_path=path,
             policy_version=self._policy_version,
@@ -311,21 +342,27 @@ class MlxBackend(Backend):
 
         del ctx
         self._require_runtime()
-        if features is not None and any(feature is not None for feature in features):
-            raise NotImplementedError("MLX text backend does not support scoring prompt_features")
         if microbatch_size < 1:
             raise ValueError("microbatch_size must be positive")
         if role == "actor":
-            model = self.model
+            provider = self.provider
         else:
             loaded = self._roles.get(role)
             if loaded is None:
                 raise RuntimeError(f"MLX model role {role!r} is not initialized")
-            model = loaded.model
+            provider = loaded.provider
 
         results: list[list[float]] = []
         for start in range(0, len(token_rows), microbatch_size):
-            results.extend(_score_token_rows(model, token_rows[start : start + microbatch_size], self.tokenizer))
+            row_features = features[start : start + microbatch_size] if features is not None else None
+            results.extend(
+                _score_token_rows(
+                    provider,
+                    token_rows[start : start + microbatch_size],
+                    self.tokenizer,
+                    row_features,
+                )
+            )
         return results
 
     def score_values(
@@ -340,7 +377,7 @@ class MlxBackend(Backend):
 
         del ctx
         loaded = self._require_value_role(role, features)
-        return _score_value_rows(loaded, token_rows, self.tokenizer)
+        return _score_value_rows(loaded, token_rows, self.tokenizer, features=features)
 
     def score_rewards(
         self,
@@ -354,7 +391,7 @@ class MlxBackend(Backend):
 
         del ctx
         loaded = self._require_value_role(role, features)
-        rows = _score_value_rows(loaded, token_rows, self.tokenizer, all_outputs=True)
+        rows = _score_value_rows(loaded, token_rows, self.tokenizer, features=features, all_outputs=True)
         return [float(row[-1][-1] if isinstance(row[-1], list) else row[-1]) for row in rows]
 
     def train_values(
@@ -384,7 +421,7 @@ class MlxBackend(Backend):
         from mlx.utils import tree_map
 
         microbatches = [batch_data[start : start + mini_bs] for start in range(0, len(batch_data), mini_bs)]
-        accumulation = gradient_accumulation_steps or len(microbatches)
+        accumulation = accumulation_steps(len(microbatches), gradient_accumulation_steps)
         value_and_grad = nn.value_and_grad(
             loaded.module,
             partial(
@@ -400,7 +437,7 @@ class MlxBackend(Backend):
         clipfracs: list[float] = []
         grad_norms: list[float] = []
         for index, rows in enumerate(microbatches):
-            batch = make_train_batch(rows)
+            batch = loaded.provider.prepare_train_batch(make_train_batch(rows), rows)
             (loss, stats), grads = value_and_grad(loaded.module, batch)
             grad_accum = grads if grad_accum is None else tree_map(lambda left, right: left + right, grad_accum, grads)
             group_count += 1
@@ -458,16 +495,16 @@ class MlxBackend(Backend):
             return cached
 
         def loss(model, batch):
-            logits = model(batch["input_ids"])
-            if hasattr(logits, "logits"):
-                logits = logits.logits
-            logits = logits[:, :-1, :]
             targets = batch["input_ids"][:, 1:]
-            selected = selected_token_logprobs(logits, targets)
+            selected = self.provider.selected_token_logprobs(
+                batch,
+                targets,
+                chunk_size=self.config.logits_chunk_size,
+            )
             return mlx_loss(name, batch, selected, **kwargs)
 
         value_and_grad = nn.value_and_grad(self.model, loss)
-        if self.config.compile_train_step:
+        if self.config.compile_train_step and not self.provider.is_multimodal:
             state = [self.model.state, mx.random.state]
 
             @partial(mx.compile, inputs=state, outputs=state)
@@ -499,8 +536,6 @@ class MlxBackend(Backend):
 
     def _require_value_role(self, role: str, features: list[dict | None] | None) -> MlxRole:
         self._require_runtime()
-        if features is not None and any(feature is not None for feature in features):
-            raise NotImplementedError("MLX text backend does not support scoring prompt_features")
         loaded = self._roles.get(role)
         if loaded is None or loaded.module is None:
             raise RuntimeError(f"MLX value role {role!r} is not initialized")
@@ -511,20 +546,32 @@ class MlxBackend(Backend):
         try:
             from mlx_lm.tuner.trainer import grad_checkpoint
 
-            layers = getattr(self.model, "layers", None)
-            if layers is None and hasattr(self.model, "model"):
-                layers = getattr(self.model.model, "layers", None)
+            model = self.provider.generation_model
+            layers = getattr(model, "layers", None)
+            if layers is None and hasattr(model, "model"):
+                layers = getattr(model.model, "layers", None)
             if layers:
                 grad_checkpoint(layers[0])
         except (AttributeError, IndexError, TypeError):
             return
 
     def _require_runtime(self) -> None:
-        if self.model is None or self.tokenizer is None or self.optimizer is None or self.config is None:
+        if (
+            self.provider is None
+            or self.model is None
+            or self.tokenizer is None
+            or self.optimizer is None
+            or self.config is None
+        ):
             raise RuntimeError("MLX backend is not initialized")
 
 
-def _score_token_rows(model: Any, token_rows: list[list[int]], tokenizer: Any) -> list[list[float]]:
+def _score_token_rows(
+    provider: MlxModelProvider,
+    token_rows: list[list[int]],
+    tokenizer: Any,
+    features: list[dict | None] | None,
+) -> list[list[float]]:
     import mlx.core as mx
     import numpy as np
 
@@ -541,10 +588,9 @@ def _score_token_rows(model: Any, token_rows: list[list[int]], tokenizer: Any) -
     for index, row in enumerate(token_rows):
         tokens[index, : len(row)] = row
     input_ids = mx.array(tokens)
-    logits = model(input_ids)
-    if hasattr(logits, "logits"):
-        logits = logits.logits
-    selected = selected_token_logprobs(logits[:, :-1, :], input_ids[:, 1:])
+    batch = provider.prepare_score_batch(input_ids, lengths, features)
+    logits = provider.forward_logits(batch)
+    selected = selected_token_logprobs(logits, input_ids[:, 1:])
     mx.eval(selected)
     values = np.asarray(selected.astype(mx.float32))
     return [[0.0, *values[index, : length - 1].astype(float).tolist()] for index, length in enumerate(lengths)]
@@ -555,6 +601,7 @@ def _score_value_rows(
     token_rows: list[list[int]],
     tokenizer: Any,
     *,
+    features: list[dict | None] | None = None,
     all_outputs: bool = False,
 ) -> list[list[Any]]:
     import mlx.core as mx
@@ -572,7 +619,9 @@ def _score_value_rows(
     tokens = np.full((len(token_rows), width), int(pad_id or 0), dtype=np.int32)
     for index, row in enumerate(token_rows):
         tokens[index, : len(row)] = row
-    output = role_output(role, mx.array(tokens))
+    input_ids = mx.array(tokens)
+    batch = role.provider.prepare_score_batch(input_ids, lengths, features)
+    output = role_output(role, batch)
     mx.eval(output)
     values = np.asarray(output.astype(mx.float32))
     if values.ndim == 3 and values.shape[-1] == 1:
@@ -587,7 +636,7 @@ def _score_value_rows(
 def _critic_loss(module: Any, batch: dict[str, Any], *, cliprange_value: float, value_loss_coef: float):
     import mlx.core as mx
 
-    predicted = module(batch["input_ids"])
+    predicted = module(batch)
     if predicted.shape[-1] != 1:
         raise ValueError("critic head must return exactly one value per token")
     predicted = predicted[:, :-1, 0]

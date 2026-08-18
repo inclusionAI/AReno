@@ -460,6 +460,7 @@ class ConfigAndDataTest(unittest.TestCase):
 
         self.assertTrue(cfg.keep_rollout_state)
         self.assertTrue(cfg.cuda_config().runtime["keep_rollout_state"])
+        self.assertTrue(cfg.mlx_config().keep_rollout_state)
 
     def test_train_cli_drop_rollout_state_inverts_runtime_flag(self):
         """The public CLI exposes the memory-saving inverse of keep_rollout_state."""
@@ -468,6 +469,7 @@ class ConfigAndDataTest(unittest.TestCase):
         cfg = train_cli._trainer_config_from_args(args)
 
         self.assertFalse(cfg.keep_rollout_state)
+        self.assertFalse(cfg.mlx_config().keep_rollout_state)
 
     def test_train_cli_attn_backend_reaches_backend_runtime_config(self):
         """The train CLI attention backend flag should pass through SDK config."""

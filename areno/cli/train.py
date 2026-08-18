@@ -55,7 +55,6 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
         "Basic",
         (
-            "backend",
             "algo",
             "ckpt",
             "dataset_path",
@@ -214,9 +213,9 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
     args.multimodal_projector_lr_decay_style = getattr(args, "multimodal_projector_lr_decay_style", None)
     if args.backend == "mlx":
         if args.train_devices is not None or args.rollout_devices is not None or args.rollout_tp_size is not None:
-            raise click.UsageError("--backend mlx does not use CUDA device or rollout TP options")
+            raise click.UsageError("MLX does not use CUDA device or rollout TP options")
         if args.tp_size not in {1, 4} or args.world_size not in {1, 8}:
-            raise click.UsageError("--backend mlx currently supports only one process and one device")
+            raise click.UsageError("MLX currently supports only one process and one device")
         args.tp_size = 1
         args.world_size = 1
         args.train_devices = None
@@ -1447,12 +1446,6 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     help="Dummy-load the model and run one minimal synthetic train step, then exit.",
 )
 @click.option(
-    "--backend",
-    type=click.Choice(["cuda", "mlx"], case_sensitive=False),
-    default=None,
-    help="Override platform detection (Linux: CUDA; Apple Silicon: MLX).",
-)
-@click.option(
     "--tp-size",
     "--train-tp-size",
     "tp_size",
@@ -1535,7 +1528,11 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
 @click.option("--adam-8bit", is_flag=True, help="Use 8-bit Adam moment states instead of FP32 Adam states.")
 @click.option("--unfreeze-mm-tower", "unfreeze_multimodal_tower", is_flag=True, help="Train multimodal encoder towers.")
 @click.option(
-    "--unfreeze-mm-projector", "unfreeze_multimodal_projector", is_flag=True, help="Train multimodal projectors."
+    "--unfreeze-mm-projector",
+    "--unfreeze-mm-merger",
+    "unfreeze_multimodal_projector",
+    is_flag=True,
+    help="Train multimodal projectors/mergers.",
 )
 @click.option(
     "--mm-tower-lr",
@@ -1557,27 +1554,35 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
 )
 @click.option(
     "--mm-projector-lr",
+    "--mm-merger-lr",
     "multimodal_projector_lr",
     type=float,
     default=None,
-    help="Learning rate for unfrozen multimodal projectors; defaults to --lr.",
+    help="Learning rate for unfrozen multimodal projectors/mergers; defaults to --lr.",
 )
 @click.option(
-    "--mm-projector-min-lr", "multimodal_projector_min_lr", type=float, default=None, help="Projector minimum LR."
+    "--mm-projector-min-lr",
+    "--mm-merger-min-lr",
+    "multimodal_projector_min_lr",
+    type=float,
+    default=None,
+    help="Projector/merger minimum LR.",
 )
 @click.option(
     "--mm-projector-lr-steps",
+    "--mm-merger-lr-steps",
     "multimodal_projector_lr_decay_steps",
     type=int,
     default=None,
-    help="Projector LR decay steps.",
+    help="Projector/merger LR decay steps.",
 )
 @click.option(
     "--mm-projector-lr-style",
+    "--mm-merger-lr-style",
     "multimodal_projector_lr_decay_style",
     type=click.Choice(["constant", "linear", "cosine"]),
     default=None,
-    help="Projector LR decay style.",
+    help="Projector/merger LR decay style.",
 )
 @click.option("--weight-decay", type=float, default=1.0e-2, show_default=True, help="Policy optimizer weight decay.")
 @click.option("--grad-clip-norm", type=float, default=1.0, show_default=True, help="Policy gradient clipping norm.")
@@ -1590,7 +1595,7 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
 @click.option(
     "--drop-rollout-state",
     is_flag=True,
-    help="Drop rollout state after each step to save GPU memory.",
+    help="Release completed rollout KV/cache state after each step.",
 )
 @click.option("--eager-decode", is_flag=True, help="Disable decode CUDA graph and run rollout decode eagerly.")
 @click.option(

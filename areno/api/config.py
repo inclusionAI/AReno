@@ -56,6 +56,8 @@ class MlxConfig:
     prefill_batch_size: int = 8
     prefill_step_size: int = 2048
     max_kv_size: int | None = None
+    keep_rollout_state: bool = True
+    logits_chunk_size: int = 4096
     compile_train_step: bool = True
     gradient_checkpointing: bool = True
 
@@ -73,8 +75,7 @@ def default_backend_type() -> BackendType:
     if system == "Darwin" and machine in {"arm64", "aarch64"}:
         return BackendType.MLX
     raise RuntimeError(
-        f"AReno has no native backend for {system}/{machine}; "
-        "CUDA requires Linux and MLX requires Apple Silicon"
+        f"AReno has no native backend for {system}/{machine}; CUDA requires Linux and MLX requires Apple Silicon"
     )
 
 

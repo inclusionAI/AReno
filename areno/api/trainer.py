@@ -93,6 +93,13 @@ class Trainer:
             raise ValueError(f"unsupported backend type: {self._backend_type}")
         self._backend = backend_cls()
         self._backend.initialize(self._ctx)
+        components = self._backend.runtime_components()
+        if components.tokenizer is not None:
+            self._tokenizer = components.tokenizer
+            self._ctx.tokenizer = components.tokenizer
+            self._ctx.eos_token_ids = eos_token_ids(real_path, components.tokenizer)
+        if components.processor is not None:
+            self._processor = components.processor
         self._initialized = True
 
     def get_tokenizer(self) -> Any:
@@ -529,7 +536,7 @@ class Trainer:
         )
 
     def save_checkpoint(self, path: str) -> str:
-        """Save a HuggingFace-compatible checkpoint when supported by backend."""
+        """Save a checkpoint in the selected backend's native format."""
 
         return self._backend.save_checkpoint(self._ctx, path)
 

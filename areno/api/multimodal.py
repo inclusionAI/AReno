@@ -55,7 +55,7 @@ def encode_multimodal_prompt(
 
     if processor is None:
         raise ValueError("multimodal rows require a checkpoint processor")
-    if _processor_handles_native_multimodal(processor):
+    if _record_requires_native_multimodal(record):
         messages = record.get("messages")
         if not isinstance(messages, list):
             prompt = str(record.get(prompt_key, ""))
@@ -116,7 +116,7 @@ def encode_processor_messages(
         "tokenize": True,
         "add_generation_prompt": True,
         "return_dict": True,
-        "return_tensors": "pt",
+        "return_tensors": getattr(processor, "_areno_return_tensors", "pt"),
     }
     if tools:
         kwargs["tools"] = tools
@@ -190,8 +190,13 @@ def modality_token_ids(processor: Any) -> dict[str, int]:
     return result
 
 
-def _processor_handles_native_multimodal(processor: Any) -> bool:
-    return bool(modality_token_ids(processor).keys() & {"audio", "video"})
+def _record_requires_native_multimodal(record: dict[str, Any]) -> bool:
+    if any(record.get(key) is not None for key in ("audio_base64", "audios_base64", "video_base64", "videos_base64")):
+        return True
+    messages = record.get("messages")
+    return isinstance(messages, list) and any(
+        _content_has_audio_or_video(message.get("content")) for message in messages if isinstance(message, dict)
+    )
 
 
 def _record_multimodal_parts(record: dict[str, Any]) -> list[dict[str, str]]:
@@ -266,6 +271,18 @@ def _content_has_multimodal(content: Any) -> bool:
             continue
         kind = str(part.get("type", ""))
         if kind == "input_audio" or kind.removesuffix("_url") in _MODALITIES:
+            return True
+    return False
+
+
+def _content_has_audio_or_video(content: Any) -> bool:
+    if not isinstance(content, list):
+        return False
+    for part in content:
+        if not isinstance(part, dict):
+            continue
+        kind = str(part.get("type", ""))
+        if kind == "input_audio" or kind.removesuffix("_url") in {"audio", "video"}:
             return True
     return False
 
@@ -374,14 +391,15 @@ def _messages_fallback_text(messages: list[dict[str, Any]]) -> str:
 
 
 def _encode_text_and_images(tokenizer: Any, processor: Any, text: str, images: list[Any]) -> dict[str, Any]:
+    return_tensors = getattr(processor, "_areno_return_tensors", "pt")
     try:
-        return dict(processor(text=[text], images=images, return_tensors="pt"))
+        return dict(processor(text=[text], images=images, return_tensors=return_tensors))
     except TypeError as exc:
         if "images" not in str(exc):
             raise
     image_processor = _image_processor_from_processor(processor)
-    text_encoded = tokenizer([text], return_tensors="pt")
-    image_encoded = image_processor(images=images, return_tensors="pt")
+    text_encoded = tokenizer([text], return_tensors=return_tensors)
+    image_encoded = image_processor(images=images, return_tensors=return_tensors)
     encoded = dict(image_encoded)
     encoded["input_ids"] = text_encoded["input_ids"]
     if text_encoded.get("attention_mask") is not None:

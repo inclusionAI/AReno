@@ -345,7 +345,10 @@ class RolloutSession:
         return type(
             "AgenticRolloutHTTPServer",
             (_AgenticHTTPServer,),
-            {"request_queue_size": max(2048, self._max_running_prompts), "max_threads": 2048},
+            {
+                "request_queue_size": max(2048, self._max_running_prompts),
+                "max_threads": self._local_max_running_prompts,
+            },
         )
 
     def reward_record(self, sample: _AgentSample) -> RewardRecord:

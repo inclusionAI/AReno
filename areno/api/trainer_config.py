@@ -168,6 +168,7 @@ class TrainerConfig:
 
         return MlxConfig(
             optimizer=self.optimizer_config(),
+            keep_rollout_state=self.keep_rollout_state,
             compile_train_step=True,
             gradient_checkpointing=self.activation_checkpointing,
         )
@@ -247,6 +248,7 @@ class RolloutTrainerConfig(TrainerConfig):
             max_running_prompts=max_running,
             completion_batch_size=max_running,
             prefill_batch_size=min(max_running, 8),
+            keep_rollout_state=self.keep_rollout_state,
             compile_train_step=True,
             gradient_checkpointing=self.activation_checkpointing,
         )

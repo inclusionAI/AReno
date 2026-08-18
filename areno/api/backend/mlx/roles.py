@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from areno.api.backend.mlx.provider import MlxModelProvider, load_provider
+
 _HEAD_WEIGHT_KEYS = (
     "score.weight",
     "v_head.weight",
@@ -25,20 +27,25 @@ _HEAD_WEIGHT_KEYS = (
 class MlxRole:
     """One backend-owned auxiliary model role."""
 
-    model: Any
-    tokenizer: Any
+    provider: MlxModelProvider
     module: Any | None = None
     optimizer: Any | None = None
+
+    @property
+    def model(self) -> Any:
+        return self.provider.model
+
+    @property
+    def tokenizer(self) -> Any:
+        return self.provider.tokenizer
 
 
 def load_language_role(path: str) -> MlxRole:
     """Load a frozen language-model role."""
 
-    from mlx_lm import load
-
-    model, tokenizer = load(path)
-    model.eval()
-    return MlxRole(model=model, tokenizer=tokenizer)
+    provider = load_provider(path)
+    provider.model.eval()
+    return MlxRole(provider=provider)
 
 
 def load_value_role(path: str, *, trainable: bool, learning_rate: float | None, reward: bool) -> MlxRole:
@@ -46,15 +53,15 @@ def load_value_role(path: str, *, trainable: bool, learning_rate: float | None, 
 
     import mlx.core as mx
     import mlx.optimizers as optim
-    from mlx_lm import load
 
-    model, tokenizer, config = load(path, return_config=True)
+    provider = load_provider(path)
+    config = provider.config
     head_state = _load_head_state(path)
     if reward and head_state is None:
         raise KeyError("reward checkpoint must contain one of: " + ", ".join(_HEAD_WEIGHT_KEYS))
     hidden_size = _hidden_size(config)
     output_size = 1 if head_state is None else int(head_state[0].shape[0])
-    module = _make_value_module(model, hidden_size, output_size, head_state)
+    module = _make_value_module(provider, hidden_size, output_size, head_state)
     optimizer = optim.AdamW(learning_rate=float(learning_rate or 1e-5)) if trainable else None
     if trainable:
         module.train()
@@ -62,44 +69,40 @@ def load_value_role(path: str, *, trainable: bool, learning_rate: float | None, 
     else:
         module.eval()
         mx.eval(module.parameters())
-    return MlxRole(model=model, tokenizer=tokenizer, module=module, optimizer=optimizer)
+    return MlxRole(provider=provider, module=module, optimizer=optimizer)
 
 
-def hidden_states(model: Any, tokens: Any):
-    """Run the model body without the language-model projection."""
+def hidden_states(provider: MlxModelProvider, batch: dict[str, Any]):
+    """Run a provider's text or multimodal body without the LM projection."""
 
-    body = getattr(model, "model", None)
-    if body is None or not callable(body):
-        raise RuntimeError(f"{type(model).__name__} does not expose a callable hidden-state model body")
-    output = body(tokens)
-    if isinstance(output, tuple):
-        output = output[0]
+    output = provider.forward_hidden_states(batch)
     if not hasattr(output, "shape") or len(output.shape) != 3:
         raise RuntimeError("MLX role model body must return [batch, sequence, hidden] states")
     return output
 
 
-def role_output(role: MlxRole, tokens: Any):
+def role_output(role: MlxRole, batch: dict[str, Any]):
     """Return critic/reward logits from a value-bearing role."""
 
     if role.module is None:
         raise RuntimeError("MLX role does not contain a value head")
-    return role.module(tokens)
+    return role.module(batch)
 
 
-def _make_value_module(model: Any, hidden_size: int, output_size: int, head_state):
+def _make_value_module(provider: MlxModelProvider, hidden_size: int, output_size: int, head_state):
     import mlx.core as mx
     import mlx.nn as nn
 
     class ValueModel(nn.Module):
         def __init__(self):
             super().__init__()
-            self.backbone = model
+            self.backbone = provider.model
             self.head = nn.Linear(hidden_size, output_size, bias=head_state is not None and head_state[1] is not None)
             if head_state is None:
                 self.head.weight = mx.zeros_like(self.head.weight)
-                if self.head.bias is not None:
-                    self.head.bias = mx.zeros_like(self.head.bias)
+                bias = getattr(self.head, "bias", None)
+                if bias is not None:
+                    self.head.bias = mx.zeros_like(bias)
             else:
                 weight, bias = head_state
                 expected = tuple(self.head.weight.shape)
@@ -109,13 +112,13 @@ def _make_value_module(model: Any, hidden_size: int, output_size: int, head_stat
                     self.head.weight = weight.T
                 else:
                     raise ValueError(f"value head shape {tuple(weight.shape)} does not match {expected}")
-                if self.head.bias is not None:
+                if getattr(self.head, "bias", None) is not None:
                     if bias is None:
                         raise KeyError("value head checkpoint is missing its bias")
                     self.head.bias = bias.reshape(self.head.bias.shape)
 
-        def __call__(self, tokens):
-            return self.head(hidden_states(self.backbone, tokens))
+        def __call__(self, batch):
+            return self.head(hidden_states(provider, batch))
 
     return ValueModel()
 

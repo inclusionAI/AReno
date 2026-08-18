@@ -75,6 +75,24 @@ def make_train_batch(rows: list[TrainSequence]) -> dict[str, Any]:
     return batch
 
 
+def sft_target_token_count(rows: list[TrainSequence]) -> int:
+    """Count shifted SFT targets using the same mask construction as CUDA."""
+
+    count = 0
+    for row in rows:
+        length = len(row.tokens)
+        if length < 2:
+            continue
+        active = ~_prompt_mask(row, length)
+        if row.loss_mask:
+            loss_mask = np.zeros(length, dtype=np.bool_)
+            values = np.asarray(row.loss_mask[:length], dtype=np.bool_)
+            loss_mask[: len(values)] = values
+            active &= loss_mask
+        count += int(active[1:].sum())
+    return count
+
+
 def clip_grad_norm(grads: Any, max_norm: float | None):
     """Return clipped MLX gradients and their pre-clip global norm."""
 
@@ -127,4 +145,4 @@ def _copy_vector(destination: np.ndarray, values: list[float]) -> None:
         destination[:count] = values[:count]
 
 
-__all__ = ["clip_grad_norm", "learning_rate_for_step", "make_train_batch"]
+__all__ = ["clip_grad_norm", "learning_rate_for_step", "make_train_batch", "sft_target_token_count"]

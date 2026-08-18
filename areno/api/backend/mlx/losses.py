@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
+from areno.api.backend.common import TrainMetric
+
 MlxLoss = Callable[[dict[str, Any], Any], tuple[Any, dict[str, Any]]]
 
 
@@ -24,7 +26,13 @@ def sft_loss(batch, logprobs, **_):
 
     mask = batch["response_mask"]
     count = mx.maximum(mask.sum(), mx.array(1.0))
-    loss = -(logprobs * mask).sum() / count
+    logprob_sum = (logprobs * mask).sum()
+    total_target_tokens = batch.get("_sft_total_target_tokens")
+    if total_target_tokens is None:
+        loss = -logprob_sum / count
+    else:
+        denominator = mx.maximum(total_target_tokens, mx.array(1.0))
+        loss = -(logprob_sum / denominator) * batch.get("_sft_grad_scale", mx.array(1.0))
     return loss, {
         "sft_loss": loss,
         "sft_target_tokens": count,
@@ -38,7 +46,7 @@ def grpo_loss(batch, logprobs, *, clip_eps: float = 0.2, **_):
     mask = batch["response_mask"]
     count = mx.maximum(mask.sum(), mx.array(1.0))
     advantages = batch["advantages"]
-    ratio = mx.exp(mx.clip(logprobs - batch["old_logprobs"], -20.0, 20.0))
+    ratio = mx.exp(logprobs - mx.stop_gradient(logprobs))
     clipped = mx.clip(ratio, 1.0 - float(clip_eps), 1.0 + float(clip_eps))
     loss = (-mx.minimum(ratio * advantages, clipped * advantages) * mask).sum() / count
     return loss, _policy_stats(batch, logprobs, ratio, loss)
@@ -49,12 +57,14 @@ def gspo_loss(batch, logprobs, *, clip_eps: float = 3e-4, **_):
 
     mask = batch["response_mask"]
     lengths = mx.maximum(mask.sum(axis=-1), mx.array(1.0))
-    seq_log_ratio = ((logprobs - batch["old_logprobs"]) * mask).sum(axis=-1) / lengths
+    seq_log_ratio = ((logprobs - mx.stop_gradient(logprobs)) * mask).sum(axis=-1) / lengths
     ratio = mx.exp(seq_log_ratio)
     clipped = mx.clip(ratio, 1.0 - float(clip_eps), 1.0 + float(clip_eps))
     seq_advantage = (batch["advantages"] * mask).sum(axis=-1) / lengths
     loss = -mx.minimum(ratio * seq_advantage, clipped * seq_advantage).mean()
-    stats = _policy_stats(batch, logprobs, ratio, loss)
+    stats = _policy_stats(batch, logprobs, mx.ones_like(logprobs), loss)
+    stats[TrainMetric.RATIO_MEAN] = ratio.mean()
+    stats[TrainMetric.RATIO_STD] = mx.sqrt(mx.maximum(((ratio - ratio.mean()) ** 2).mean(), mx.array(0.0)))
     stats["advantage_mean"] = seq_advantage.mean()
     return loss, stats
 
@@ -128,8 +138,8 @@ def ppo_loss(
         "pg_clipfrac_lower": masked_mean(((clipped_losses > dual_losses) & (advantages < 0.0)).astype(mx.float32)),
         "ppo_kl": masked_mean(-log_ratio),
         "total_loss": total_loss,
-        "ratio_mean": valid_ratio_mean,
-        "ratio_std": mx.sqrt(mx.maximum(ratio_variance, mx.array(0.0))),
+        TrainMetric.RATIO_MEAN: valid_ratio_mean,
+        TrainMetric.RATIO_STD: mx.sqrt(mx.maximum(ratio_variance, mx.array(0.0))),
         "advantage_mean": masked_mean(advantages),
     }
 
@@ -164,16 +174,14 @@ def _policy_stats(batch, logprobs, ratio, loss):
     return {
         "policy_loss": loss,
         "total_loss": loss,
-        "ratio_mean": masked_mean(ratio),
-        "ratio_std": mx.sqrt(
-            mx.maximum(masked_mean((ratio - masked_mean(ratio)) ** 2), mx.array(0.0))
-        ),
+        TrainMetric.RATIO_MEAN: masked_mean(ratio),
+        TrainMetric.RATIO_STD: mx.sqrt(mx.maximum(masked_mean((ratio - masked_mean(ratio)) ** 2), mx.array(0.0))),
         "advantage_mean": masked_mean(batch["advantages"]),
         "response_len": mx.maximum(mask.sum(axis=-1), mx.array(1.0)).mean(),
-        "rollout_logprobs_mean": masked_mean(old),
-        "train_logprobs_mean": masked_mean(mx.stop_gradient(logprobs)),
-        "logp_diff_mean": masked_mean(diff),
-        "logp_abs_diff_mean": masked_mean(mx.abs(diff)),
+        TrainMetric.ROLLOUT_LOGPROBS_MEAN: masked_mean(old),
+        TrainMetric.TRAIN_LOGPROBS_MEAN: masked_mean(mx.stop_gradient(logprobs)),
+        TrainMetric.LOGP_DIFF_MEAN: masked_mean(diff),
+        TrainMetric.LOGP_ABS_DIFF_MEAN: masked_mean(mx.abs(diff)),
     }
 
 

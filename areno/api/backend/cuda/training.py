@@ -7,6 +7,7 @@ from collections.abc import Callable
 import torch
 
 from areno.api.algorithms import sft_loss_fn
+from areno.api.backend.common import accumulation_steps
 from areno.api.context import Context
 from areno.api.models import TrainSequence
 
@@ -62,7 +63,7 @@ def annotate_sft_token_mean_packs(
 
     if not packs:
         return
-    accumulation = len(packs) if gradient_accumulation_steps is None else max(int(gradient_accumulation_steps), 1)
+    accumulation = accumulation_steps(len(packs), gradient_accumulation_steps)
     for start in range(0, len(packs), accumulation):
         end = min(start + accumulation, len(packs))
         total = max(sum(target_counts[start:end]), 1)
@@ -76,9 +77,12 @@ def sft_target_token_count(seqs: list[TrainSequence]) -> int:
 
     count = 0
     for seq in seqs:
-        length = min(len(seq.tokens), len(seq.prompt_mask))
+        length = len(seq.tokens)
         for index in range(1, length):
-            target = not seq.prompt_mask[index]
+            if seq.prompt_mask:
+                target = index < len(seq.prompt_mask) and not seq.prompt_mask[index]
+            else:
+                target = index >= _sequence_prompt_len(seq)
             if seq.loss_mask:
                 target = target and index < len(seq.loss_mask) and seq.loss_mask[index]
             count += int(target)
@@ -94,14 +98,6 @@ def pad_token_id(ctx: Context) -> int:
     if token_id is None:
         raise ValueError("tokenizer must define pad_token_id or eos_token_id")
     return int(token_id)
-
-
-def is_rollout_policy_metric(key: str) -> bool:
-    """Return metrics that should use the first microbatch, not an average."""
-
-    return key in {"ratio_mean", "ratio_std", "rollout_logprobs_mean", "train_logprobs_mean"} or key.startswith(
-        "logp_diff"
-    )
 
 
 def _make_prompt_mask(seqs: list[TrainSequence], lengths: torch.Tensor, max_len: int) -> torch.Tensor:
@@ -159,7 +155,6 @@ def _sequence_prompt_len(seq: TrainSequence) -> int:
 
 __all__ = [
     "annotate_sft_token_mean_packs",
-    "is_rollout_policy_metric",
     "is_sft_loss_fn",
     "make_train_pack",
     "pad_token_id",

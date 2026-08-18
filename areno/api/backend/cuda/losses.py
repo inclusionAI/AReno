@@ -11,6 +11,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from areno.api.backend.common import TrainMetric
+
 if TYPE_CHECKING:
     import torch
 
@@ -261,14 +263,16 @@ def grpo_loss_fn(data_pack, logprobs, *, clip_eps: float = 0.2):
     return loss, {
         "policy_loss": loss.detach(),
         "total_loss": loss.detach(),
-        "ratio_mean": valid_ratio.mean().detach() if valid_ratio.numel() else ratio.mean().detach(),
-        "ratio_std": valid_ratio.std().detach() if valid_ratio.numel() > 1 else torch.zeros((), device=logprobs.device),
+        TrainMetric.RATIO_MEAN: valid_ratio.mean().detach() if valid_ratio.numel() else ratio.mean().detach(),
+        TrainMetric.RATIO_STD: valid_ratio.std().detach()
+        if valid_ratio.numel() > 1
+        else torch.zeros((), device=logprobs.device),
         "advantage_mean": masked_mean(layout.advantages, layout).detach(),
         "response_len": layout.response_len.mean().detach(),
-        "rollout_logprobs_mean": masked_mean(layout.old_logprobs, layout).detach(),
-        "train_logprobs_mean": masked_mean(logprobs.detach(), layout).detach(),
-        "logp_diff_mean": masked_mean(difference, layout).detach(),
-        "logp_abs_diff_mean": masked_mean(difference.abs(), layout).detach(),
+        TrainMetric.ROLLOUT_LOGPROBS_MEAN: masked_mean(layout.old_logprobs, layout).detach(),
+        TrainMetric.TRAIN_LOGPROBS_MEAN: masked_mean(logprobs.detach(), layout).detach(),
+        TrainMetric.LOGP_DIFF_MEAN: masked_mean(difference, layout).detach(),
+        TrainMetric.LOGP_ABS_DIFF_MEAN: masked_mean(difference.abs(), layout).detach(),
     }
 
 
@@ -286,14 +290,14 @@ def gspo_loss_fn(data_pack, logprobs, *, clip_eps: float = 3e-4):
     return loss, {
         "policy_loss": loss.detach(),
         "total_loss": loss.detach(),
-        "ratio_mean": seq_ratio.mean().detach(),
-        "ratio_std": seq_ratio.std(unbiased=False).detach(),
+        TrainMetric.RATIO_MEAN: seq_ratio.mean().detach(),
+        TrainMetric.RATIO_STD: seq_ratio.std(unbiased=False).detach(),
         "advantage_mean": seq_advantage.mean().detach(),
         "response_len": layout.response_len.mean().detach(),
-        "rollout_logprobs_mean": masked_mean(layout.old_logprobs, layout).detach(),
-        "train_logprobs_mean": masked_mean(logprobs.detach(), layout).detach(),
-        "logp_diff_mean": masked_mean(difference, layout).detach(),
-        "logp_abs_diff_mean": masked_mean(difference.abs(), layout).detach(),
+        TrainMetric.ROLLOUT_LOGPROBS_MEAN: masked_mean(layout.old_logprobs, layout).detach(),
+        TrainMetric.TRAIN_LOGPROBS_MEAN: masked_mean(logprobs.detach(), layout).detach(),
+        TrainMetric.LOGP_DIFF_MEAN: masked_mean(difference, layout).detach(),
+        TrainMetric.LOGP_ABS_DIFF_MEAN: masked_mean(difference.abs(), layout).detach(),
     }
 
 
@@ -339,8 +343,10 @@ def ppo_loss_fn(
         ).detach(),
         "ppo_kl": masked_mean(-log_ratio, layout).detach(),
         "total_loss": total_loss.detach(),
-        "ratio_mean": valid_ratio.mean().detach() if valid_ratio.numel() else ratio.mean().detach(),
-        "ratio_std": valid_ratio.std().detach() if valid_ratio.numel() > 1 else torch.zeros((), device=logprobs.device),
+        TrainMetric.RATIO_MEAN: valid_ratio.mean().detach() if valid_ratio.numel() else ratio.mean().detach(),
+        TrainMetric.RATIO_STD: valid_ratio.std().detach()
+        if valid_ratio.numel() > 1
+        else torch.zeros((), device=logprobs.device),
         "advantage_mean": masked_mean(layout.advantages, layout).detach(),
     }
 

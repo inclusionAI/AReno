@@ -23,13 +23,18 @@ from pathlib import Path
 from threading import Lock
 
 from areno.api.backend.base import Backend, BackendCapabilities, register_backend
-from areno.api.backend.common import expand_prompt_features, expand_prompts, group_rollout_sequences
+from areno.api.backend.common import (
+    MetricReduction,
+    expand_prompt_features,
+    expand_prompts,
+    group_rollout_sequences,
+    metric_reduction,
+)
 from areno.api.backend.cuda.checkpoint import save_checkpoint
 from areno.api.backend.cuda.generation import rollout_options
 from areno.api.backend.cuda.losses import dispatch_loss
 from areno.api.backend.cuda.training import (
     annotate_sft_token_mean_packs,
-    is_rollout_policy_metric,
     is_sft_loss_fn,
     make_train_pack,
     pad_token_id,
@@ -507,8 +512,9 @@ class CudaBackend(Backend):
             losses.append(stats.loss)
             if stats.metrics:
                 for key, value in stats.metrics.items():
+                    key = str(key)
                     value_float = float(value)
-                    if is_rollout_policy_metric(key):
+                    if metric_reduction(key) is MetricReduction.FIRST:
                         first_policy_metrics.setdefault(key, value_float)
                     else:
                         metrics[key] = metrics.get(key, 0.0) + value_float

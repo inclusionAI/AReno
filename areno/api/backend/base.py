@@ -37,6 +37,14 @@ class BackendCapabilities:
     custom_loss: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class BackendRuntimeComponents:
+    """Backend-native text and media processors exposed through one contract."""
+
+    tokenizer: object | None = None
+    processor: object | None = None
+
+
 def register_backend(backend_type):
     """Register a backend implementation class for `Trainer` construction."""
 
@@ -88,6 +96,11 @@ class Backend(ABC):
         """Release backend-owned resources."""
 
         return None
+
+    def runtime_components(self) -> BackendRuntimeComponents:
+        """Return backend-native tokenizer/processor overrides when required."""
+
+        return BackendRuntimeComponents()
 
     @abstractmethod
     def rollout_batch(
