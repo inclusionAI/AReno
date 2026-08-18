@@ -13,6 +13,12 @@ checkpoints can expose image, audio, and video inputs. Consult
 :doc:`../models/supported` and the checkpoint's processor configuration before
 building a dataset.
 
+They also depend on the selected backend. CUDA support is defined by AReno's
+model adapters. On Apple Silicon, the checkpoint must be implemented by
+``mlx-vlm`` and its processor must support the requested modality. A family
+working on CUDA does not automatically imply an MLX implementation, or vice
+versa.
+
 Message format
 --------------
 
@@ -119,6 +125,19 @@ model. This avoids updating large encoders and keeps frozen modules in
 evaluation mode, while their output features still condition the trainable
 language model. The exact trainable parameter set is model-specific.
 
+Towers and projectors/mergers are frozen by default. Use
+``--unfreeze-mm-tower`` and ``--unfreeze-mm-projector`` to train them, with
+optional independent schedules through ``--mm-tower-lr`` and
+``--mm-projector-lr``. Unfreezing either group adds activation, gradient, and
+optimizer-state memory; start with the projector before unfreezing a large
+encoder tower.
+
+On MLX, processor output uses NumPy as the interchange format and is converted
+to MLX arrays by the provider. Supported PIL image processors therefore do not
+require Torch. Multimodal training uses the native lazy MLX graph rather than
+compiling the full media forward, while text training may compile its train
+step.
+
 Media features can make the processor-expanded prompt much longer than its
 text. Choose ``--max-prompt-tokens`` and ``--max-context-len`` from the encoded
 sequence length rather than from text token counts alone. Start with
@@ -136,3 +155,6 @@ Troubleshooting
   remuxing when their container omits it.
 * Set ``ARENO_LOG_COMPLETIONS=1`` during agentic smoke tests to verify output
   and tool-call formatting before launching a long run.
+* On Apple Silicon, reduce ``--mini-bs`` and ``--max-running-prompts`` first;
+  use ``--drop-rollout-state`` when retained KV/cache state competes with
+  training activations. See :doc:`../getting-started/mlx`.

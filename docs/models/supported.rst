@@ -3,6 +3,11 @@ Supported models
 
 areno currently supports the following checkpoint families:
 
+The table describes CUDA model adapters. Apple Silicon support is determined
+by the installed ``mlx-lm`` or ``mlx-vlm`` version and the checkpoint's model
+type; consult :doc:`../getting-started/mlx` before assuming that the same
+family is available on both backends.
+
 .. list-table::
    :header-rows: 1
    :widths: 32 68
@@ -35,6 +40,11 @@ areno currently supports the following checkpoint families:
    Model support means the checkpoint can be loaded through an Areno model
    adapter. Some model families may support inference before every training or
    save path is fully optimized.
+
+   On MLX, AReno delegates model construction and weight sanitization to
+   ``mlx-lm``/``mlx-vlm`` and saves a native MLX checkpoint. Backend support
+   must be validated independently, especially for quantized and multimodal
+   checkpoints.
 
 For the common media message format and runtime behavior, see
 :doc:`../concepts/multimodal-inputs`.

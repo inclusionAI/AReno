@@ -15,6 +15,7 @@ AReno documentation
 
    Welcome <getting-started/welcome>
    getting-started/installation
+   Apple Silicon and MLX <getting-started/mlx>
    getting-started/quickstart
 
 .. toctree::

@@ -12,18 +12,18 @@ directly from Python.
 
    ``Trainer`` initializes tokenizer and backend workers, generates rollout
    batches, runs policy training steps, manages PPO/DPO auxiliary roles, scores
-   logprobs/values/rewards, and saves Hugging Face-compatible checkpoints.
+   logprobs/values/rewards, and saves backend-native checkpoints.
 
    It provides methods to:
 
-   * create a local tensor-parallel Areno backend
+   * create a native CUDA or MLX backend
    * load prompt batches from dataset-like objects
    * generate text rollouts from string prompts or token ids
    * run agentic rollouts through a local OpenAI-compatible proxy
    * train policy batches with caller-provided loss functions
    * prepare reference, reward, and critic roles for PPO/DPO workflows
    * score logprobs, values, and rewards through backend-owned roles
-   * save Hugging Face-compatible checkpoints
+   * save backend-native checkpoints
 
    Direct rollout calls must run inside ``async with
    trainer.rollout_session(...)``. The session is the lifecycle boundary for
@@ -39,12 +39,7 @@ directly from Python.
 
       async def main():
           # Near-instant: constructs the Python wrapper only.
-          trainer = Trainer(
-              world_size=1,
-              model_path="Qwen/Qwen3.5-4B",
-              backend_type=areno.CUDA,
-              custom_config=areno.CudaConfig(tp_size=1),
-          )
+          trainer = Trainer(world_size=1, model_path="Qwen/Qwen3.5-4B")
 
           # Takes a moment: loads tokenizer, starts workers, loads checkpoint.
           trainer.init()
@@ -85,7 +80,9 @@ directly from Python.
 
    :param int world_size: Total number of devices or local worker ranks.
    :param str model_path: Local checkpoint path or Hugging Face repo ID.
-   :param backend_type: Backend selector. Defaults to Areno when omitted.
+   :param backend_type: Optional backend selector. When omitted, Linux selects
+      CUDA and native Apple Silicon selects MLX. No cross-platform fallback is
+      attempted.
    :param custom_config: Backend-specific configuration, such as
       ``areno.CudaConfig(tp_size=1)``.
    :param str | None metrics_log_dir: Optional TensorBoard metrics directory.
@@ -326,7 +323,10 @@ directly from Python.
 
    .. py:method:: save_checkpoint(path)
 
-      Save a Hugging Face-compatible checkpoint when supported by the backend.
+      Save a checkpoint in the selected backend's native format. CUDA writes
+      its Hugging Face-oriented layout; MLX writes MLX safetensors plus model,
+      tokenizer/processor, and ``areno_mlx_state.json`` metadata. The MLX
+      checkpoint does not currently include optimizer or scheduler state.
 
       :param str path: Output directory.
       :returns: saved checkpoint path as ``str``.

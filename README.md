@@ -6,6 +6,7 @@ and maintained by the AReno community.
   <a href="LICENSE"><img alt="License: Apache 2.0" src="https://img.shields.io/badge/License-Apache_2.0-blue.svg"></a>
   <a href="https://www.python.org/downloads/"><img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-blue.svg"></a>
   <a href="https://pytorch.org/"><img alt="PyTorch 2.6+" src="https://img.shields.io/badge/PyTorch-2.6%2B-ee4c2c.svg"></a>
+  <a href="https://github.com/ml-explore/mlx"><img alt="MLX" src="https://img.shields.io/badge/Apple_Silicon-MLX-555555.svg"></a>
   <a href="https://asystem-ai.io/docs/areno/"><img alt="Documentation" src="https://img.shields.io/badge/documentation-AReno-2ea44f.svg"></a>
 </p>
 
@@ -28,7 +29,7 @@ AReno's mission is to make LLM RL **accessible** for a broad community of resear
 ## Highlights
 
 - ✨ **Plug-and-play**: various post-training methods are easily accessible via the `--algo` flag or the same `Trainer` class from Python, no cluster or launcher to set up.
-- 🪶 **Lightweight**: single self-contained package, no external training/inference backend, just PyTorch, FlashAttention, and a handful of other libraries.
+- 🪶 **Lightweight**: one self-contained train/serve stack that installs and loads only the native backend needed by the host—CUDA on Linux or MLX on Apple Silicon.
 - 🧰 **Agentic RL ready**: run an agent function against AReno's local OpenAI-compatible proxy, return explicit trajectories, and train from tokens, logprobs, rewards, and loss masks derived by the trainer.
 - 🎞️ **Multimodal**: use image, audio, and video content with compatible model processors through the same OpenAI-style message format in serving and agentic training.
 - 🧩 **Extensible**: easily register new algorithms, model adapters, reward functions, and hardware backends without changing the core.
@@ -37,13 +38,34 @@ AReno's mission is to make LLM RL **accessible** for a broad community of resear
 
 ### From source
 
-AReno currently requires Linux (x86_64 or aarch64) with NVIDIA GPU and CUDA-enabled PyTorch 2.6 or newer; For Windows users can use WSL2 or below Docker way.
+AReno supports Linux (x86_64 or aarch64) with an NVIDIA GPU and CUDA-enabled
+PyTorch 2.6 or newer, plus Apple Silicon macOS through MLX. Windows users can
+use WSL2 for the CUDA path. The CLI selects CUDA on Linux and MLX on native
+``arm64`` macOS; it does not silently fall back between backends.
+
+CUDA/WSL2 installation:
 
 ```bash
 git clone https://github.com/inclusionAI/AReno.git
 cd AReno
 bash scripts/install.sh
 ```
+
+Apple Silicon installation:
+
+```bash
+git clone https://github.com/inclusionAI/AReno.git
+cd AReno
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -U pip
+python -m pip install -e .
+```
+
+Platform dependency markers install the MLX stack on Apple Silicon without
+pulling in Linux-only Torch/CUDA packages. See the
+[Apple Silicon and MLX guide](docs/getting-started/mlx.rst) for supported
+algorithms, checkpoints, serving, multimodal behavior, and memory controls.
 
 ### Docker
 
@@ -199,7 +221,12 @@ areno train \
   --batch-size 1
 ```
 
-This is a smoke/sanity task for the CLI, dataset loader, reward function, rollout, and training-step wiring. It is not a quality benchmark. It requires a CUDA-capable NVIDIA GPU; CPU-only machines can install the package for docs and metadata checks, but cannot run the AReno training engine. A successful run should reach rollout logs and a `train_stats=...` line without raising an exception.
+This is a smoke/sanity task for the CLI, dataset loader, reward function,
+rollout, and training-step wiring. It is not a quality benchmark. It requires
+either a CUDA-capable NVIDIA GPU on Linux or Apple Silicon with MLX. A
+successful run should reach rollout logs and a `train_stats=...` line without
+raising an exception. On Apple Silicon, use a checkpoint implemented by
+`mlx-lm` and start with `--tp-size 1 --world-size 1 --mini-bs 1`.
 
 Run GSPO on a GSM8K-style dataset with a reward function:
 
@@ -295,6 +322,10 @@ areno serve \
   --world-size 1 \
   --port 8000
 ```
+
+The command selects CUDA or MLX from the host platform. MLX serving is
+single-process (`--tp-size 1 --world-size 1`) and uses the same long-lived
+continuous-batch request scheduler and HTTP API.
 
 Point any OpenAI client at `http://localhost:8000/v1/chat/completions` to start generating. For the full list of serving options, run `areno serve --help`.
 
