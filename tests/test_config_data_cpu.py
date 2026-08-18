@@ -223,11 +223,32 @@ class ConfigAndDataTest(unittest.TestCase):
                     lora=LoraConfig(target_modules=("q_proj", "o_proj")),
                 )
 
-    def test_trainer_config_rejects_lora_ppo_and_dpo(self):
-        """Reference and critic roles are outside the initial native-LoRA scope."""
-        for algo in ("ppo", "dpo"):
-            with self.subTest(algo=algo), self.assertRaisesRegex(ValueError, "PPO/DPO"):
-                TrainerConfig(algo=algo, ckpt="actor", dataset_path="dataset", lora=LoraConfig())
+    def test_reference_view_requires_lora_at_engine_boundary(self):
+        """The actor base can be reused only when the actor owns a native adapter."""
+        model = ModelConfig(num_attention_heads=4, num_key_value_heads=4, intermediate_size=16, vocab_size=32)
+
+        with self.assertRaisesRegex(ValueError, "requires native LoRA"):
+            EngineConfig(model=model, tp_size=1, devices=[0], reference_mode="reuse_actor_base")
+
+        config = EngineConfig(
+            model=model,
+            tp_size=1,
+            devices=[0],
+            lora=LoraConfig(),
+            reference_mode="reuse_actor_base",
+        )
+        self.assertEqual(config.reference_mode, "reuse_actor_base")
+
+    def test_trainer_config_propagates_lora_reference_view(self):
+        config = TrainerConfig(
+            algo="dpo",
+            ckpt="actor",
+            dataset_path="dataset",
+            lora=LoraConfig(),
+            reference_mode="reuse_actor_base",
+        )
+
+        self.assertEqual(config.cuda_config().reference_mode, "reuse_actor_base")
 
     def test_adapter_path_uses_peft_metadata(self):
         """A PEFT artifact should configure non-default native slots itself."""

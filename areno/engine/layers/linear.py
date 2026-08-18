@@ -178,6 +178,8 @@ class MergedColumnParallelLinear(nn.Module):
             return out
         parts = list(out.split(self.local_out_features, dim=-1))
         for component, slot in self.lora_slots.items():
+            if not slot.enabled:
+                continue
             index = self._lora_component_indices[component]
             parts[index] = parts[index] + slot(x)
         return torch.cat(parts, dim=-1)
@@ -269,7 +271,7 @@ class RowParallelLinear(nn.Module):
             start, end = _shard_range(self.in_features, ctx.rank, ctx.world_size)
             x = x[..., start:end]
         out = _areno_linear_forward(x, self.weight, None)
-        if self.lora_slot is not None:
+        if self.lora_slot is not None and self.lora_slot.enabled:
             out = out + self.lora_slot(x)
         # Partial sum -> cross-rank reduction. SP mode also re-shards along
         # the sequence dim via reduce-scatter, saving activation memory.

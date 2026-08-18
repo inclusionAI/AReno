@@ -12,6 +12,7 @@ critic warmup window.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 from areno.adapters.config import LoraConfig
 from areno.api.defaults import DEFAULT_METRICS_LOG_DIR
@@ -78,6 +79,7 @@ class TrainerConfig:
     train_tool_results: bool = False
     chat_template_enable_thinking: bool | None = None
     lora: LoraConfig | None = None
+    reference_mode: Literal["independent", "reuse_actor_base"] = "independent"
 
     def __post_init__(self) -> None:
         if self.backend is None:
@@ -120,8 +122,6 @@ class TrainerConfig:
         )
         if self.lora is not None and self.backend != "cuda":
             raise ValueError("native LoRA is only supported by the CUDA backend")
-        if self.lora is not None and self.algo.lower() in {"ppo", "dpo"}:
-            raise ValueError("native LoRA does not yet support PPO/DPO reference and critic roles")
 
     @staticmethod
     def _validate_multimodal_optimizer_group(
@@ -217,6 +217,7 @@ class TrainerConfig:
                 "attn_backend": self.attn_backend,
             },
             lora=self.lora,
+            reference_mode=self.reference_mode,
         )
 
 
@@ -265,6 +266,7 @@ class RolloutTrainerConfig(TrainerConfig):
                 "attn_backend": self.attn_backend,
             },
             lora=self.lora,
+            reference_mode=self.reference_mode,
         )
 
     def mlx_config(self):

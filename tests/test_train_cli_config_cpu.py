@@ -407,6 +407,15 @@ def test_dashboard_run_config_serializes_lora(tmp_path):
     ]
 
 
+def test_train_config_propagates_reference_view():
+    config = _trainer_config_from_options(
+        **_options(algo="dpo", lora_rank=8, reference_mode="reuse_actor_base", reward_ckpt=None)
+    )
+
+    assert config.reference_mode == "reuse_actor_base"
+    assert config.cuda_config().reference_mode == "reuse_actor_base"
+
+
 def test_training_config_summary_wraps_for_narrow_terminals(monkeypatch):
     monkeypatch.setattr(
         train_cli.shutil, "get_terminal_size", lambda fallback: train_cli.shutil.os.terminal_size((48, 24))
@@ -943,6 +952,7 @@ def _options(**overrides):
         lora_dropout=0.0,
         lora_target_modules="q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj",
         lora_adapter_path=None,
+        reference_mode="independent",
         lr=1e-6,
         min_lr=1e-7,
         lr_decay_steps=100,

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
+
 import torch
 
 from areno.engine.checkpoints.io import SafetensorsIndex
@@ -322,6 +324,7 @@ class RoleManager:
     def __init__(self, worker):
         self.worker = worker
         self.roles: dict[str, WorkerRole] = {}
+        self.actor_base_roles: set[str] = set()
 
     def ensure_roles(self, payload: EnsureRolesPayload) -> None:
         """Lazily instantiate non-actor roles."""
@@ -330,14 +333,17 @@ class RoleManager:
         worker._prepare_actor_offloaded()
         model_sources: dict[str, torch.nn.Module] = {}
         actor_path = canonical_model_path(worker.config.model_path)
-        if actor_path is not None:
+        if actor_path is not None and worker.adapter_registry is None:
             model_sources[actor_path] = unwrap_model(worker.model)
         for role in self.roles.values():
             role_path = canonical_model_path(role.path)
             if role_path is not None:
                 model_sources.setdefault(role_path, role.model)
         for name, spec in payload.roles.items():
-            if name == "actor" or name in self.roles:
+            if name == "actor" or name in self.roles or name in self.actor_base_roles:
+                continue
+            if spec.reference_mode == "reuse_actor_base":
+                self.actor_base_roles.add(name)
                 continue
             path = spec.path
             cache_key = canonical_model_path(path)
@@ -369,36 +375,36 @@ class RoleManager:
         worker = self.worker
         ctx = get_tp_context()
         role_name = payload.role
-        if role_name == "actor":
-            worker._prepare_actor_for_inference()
-            model = worker.model
-            offload_role = None
-            sequence_parallel = worker.config.effective_sequence_parallel
-        else:
-            offload_role = self.roles[role_name]
-            worker._prepare_actor_offloaded()
-            offload_role.onload_for_inference(worker.device)
-            model = offload_role.model
-            sequence_parallel = offload_role.sequence_parallel
-        model.eval()
-        try:
-            token_rows = payload.token_rows_by_dp[ctx.dp_rank]
-            features = payload.features_by_dp[ctx.dp_rank] if payload.features_by_dp is not None else None
-            local = (
-                []
-                if not token_rows
-                else self._score_logprob_rows(
+        actor_view = role_name == "actor" or role_name in self.actor_base_roles
+        base_only = role_name in self.actor_base_roles
+        view = worker.adapter_registry.base_only() if base_only else nullcontext()
+        with view:
+            if actor_view:
+                worker._prepare_actor_for_inference()
+                model = worker.model
+                offload_role = None
+                sequence_parallel = worker.config.effective_sequence_parallel
+            else:
+                offload_role = self.roles[role_name]
+                worker._prepare_actor_offloaded()
+                offload_role.onload_for_inference(worker.device)
+                model = offload_role.model
+                sequence_parallel = offload_role.sequence_parallel
+            model.eval()
+            try:
+                token_rows = payload.token_rows_by_dp[ctx.dp_rank]
+                features = payload.features_by_dp[ctx.dp_rank] if payload.features_by_dp is not None else None
+                local = [] if not token_rows else self._score_logprob_rows(
                     model,
                     token_rows,
                     payload,
                     features=features,
                     sequence_parallel=sequence_parallel,
                 )
-            )
-            return local if ctx.rank == 0 else None
-        finally:
-            if offload_role is not None:
-                offload_role.offload()
+                return local if ctx.rank == 0 else None
+            finally:
+                if offload_role is not None:
+                    offload_role.offload()
 
     def _score_logprob_rows(
         self,

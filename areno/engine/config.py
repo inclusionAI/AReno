@@ -280,6 +280,7 @@ class EngineConfig:
     policy_sync_bucket_mb: int = 64
     lora: LoraConfig | None = None
     lora_seed: int = 0
+    reference_mode: Literal["independent", "reuse_actor_base"] = "independent"
 
     def __post_init__(self) -> None:
         """Infer DP/devices and validate the distributed layout."""
@@ -287,6 +288,10 @@ class EngineConfig:
         if self.sequence_parallel is not None:
             self.model.sequence_parallel = bool(self.sequence_parallel)
         self.model.validate_tp(self.tp_size)
+        if self.reference_mode not in {"independent", "reuse_actor_base"}:
+            raise ValueError("reference_mode must be one of: independent, reuse_actor_base")
+        if self.reference_mode == "reuse_actor_base" and self.lora is None:
+            raise ValueError("reference_mode='reuse_actor_base' requires native LoRA")
         if self.lora is not None:
             replicated_kv_targets = {"k_proj", "v_proj"} & set(self.lora.target_modules)
             if (
@@ -296,7 +301,7 @@ class EngineConfig:
             ):
                 targets = ", ".join(sorted(replicated_kv_targets))
                 raise ValueError(
-                    f"Qwen3-MoE replicated-KV topology does not support LoRA targets {targets}; "
+                    f"Qwen3 replicated-KV topology does not support LoRA targets {targets}; "
                     "omit k_proj/v_proj or use tp_size <= num_key_value_heads"
                 )
         if self.devices is None:

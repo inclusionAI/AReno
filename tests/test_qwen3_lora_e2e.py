@@ -14,6 +14,7 @@ from safetensors.torch import load_file
 from areno.adapters import LoraConfig
 from areno.api import ArenoConfig, Trainer
 from areno.api.algorithms import get_algorithm
+from areno.api.roles import ModelRole
 from areno.api.trainer_config import PolicyTrainerConfig
 from areno.api.trainers.policy_only import PolicyOnlyTrainer
 
@@ -62,6 +63,7 @@ def test_qwen3_lora_tp2_dp2_rollout_train_peft(tmp_path: Path, model_env: str, m
         dp_size=2,
         devices=[0, 1, 2, 3],
         lora=lora,
+        reference_mode="reuse_actor_base",
         max_running_prompts=4,
         optimizer={
             "lr": 1.0e-4,
@@ -127,11 +129,20 @@ def test_qwen3_lora_tp2_dp2_rollout_train_peft(tmp_path: Path, model_env: str, m
         initial_native_logprobs = observed.score_logprobs("actor", [parity_tokens], microbatch_size=1)[0]
         policy._fit_initialized()
         trained_logprobs = observed.score_logprobs("actor", [parity_tokens], microbatch_size=1)[0]
+        observed.ensure_roles({"ref": ModelRole("ref", os.fspath(model_path), trainable=False)})
+        reference_logprobs = observed.score_logprobs("ref", [parity_tokens], microbatch_size=1)[0]
+        restored_actor_logprobs = observed.score_logprobs("actor", [parity_tokens], microbatch_size=1)[0]
     finally:
         observed.close()
 
     assert observed.rollout_versions == [0, 1]
     assert observed.train_versions == [1, 2]
+    torch.testing.assert_close(
+        torch.tensor(reference_logprobs), torch.tensor(initial_native_logprobs), rtol=0.0, atol=1.0e-5
+    )
+    torch.testing.assert_close(
+        torch.tensor(restored_actor_logprobs), torch.tensor(trained_logprobs), rtol=0.0, atol=1.0e-5
+    )
     assert (final_path / "adapter_config.json").is_file()
     assert (final_path / "adapter_model.safetensors").is_file()
     initial = load_file(initial_path / "adapter_model.safetensors")

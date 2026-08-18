@@ -30,6 +30,7 @@ from areno.adapters.config import LoraConfig
 from areno.engine.checkpoints.io import resolve_model_path
 from areno.engine.config import EngineConfig, OptimizerConfig, RuntimeConfig
 from areno.engine.data import RolloutOutput, SamplingParams, TrainStats, to_cpu
+from areno.engine.modeling import canonical_model_path
 from areno.engine.protocol import (
     EnsureRolesPayload,
     ExportAdapterPayload,
@@ -211,6 +212,7 @@ class ArenoEngine:
         cluster_kwargs: dict[str, Any] | None = None,
         policy_sync_bucket_mb: int = 64,
         lora_config: LoraConfig | None = None,
+        reference_mode: str = "independent",
     ) -> ArenoEngine:
         """Build an engine by reading model config from a checkpoint path.
 
@@ -243,6 +245,7 @@ class ArenoEngine:
             policy_sync_bucket_mb=policy_sync_bucket_mb,
             lora=lora_config,
             lora_seed=torch.initial_seed(),
+            reference_mode=reference_mode,
         )
         return cls(cfg, start=start, cluster_kwargs=cluster_kwargs)
 
@@ -562,11 +565,18 @@ class ArenoEngine:
                     path=str(spec.path),
                     trainable=bool(spec.trainable),
                     optimizer_lr=getattr(spec, "optimizer_lr", None),
+                    reference_mode=self._role_reference_mode(name, str(spec.path)),
                 )
                 for name, spec in roles.items()
             }
         )
         self.cluster.call(Op.ENSURE_ROLES, payload)
+
+    def _role_reference_mode(self, name: str, path: str) -> str:
+        mode = self.config.reference_mode if name == "ref" else "independent"
+        if mode == "reuse_actor_base" and canonical_model_path(path) != canonical_model_path(self.config.model_path):
+            raise ValueError("reuse_actor_base requires the reference checkpoint to match the actor base checkpoint")
+        return mode
 
     def score_logprobs(
         self,

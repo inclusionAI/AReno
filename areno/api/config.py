@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import platform
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 from areno.adapters.config import LoraConfig
 from areno.api.models import BackendType
@@ -37,6 +37,7 @@ class CudaConfig:
     max_running_prompts: int = 64
     decode_progress_interval_s: float = 10.0
     lora: LoraConfig | None = None
+    reference_mode: Literal["independent", "reuse_actor_base"] = "independent"
 
     def uses_separate_rollout_engine(self) -> bool:
         """Return whether rollout runs on its own CUDA device partition."""

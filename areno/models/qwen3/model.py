@@ -112,12 +112,15 @@ class Qwen3MoeExperts(nn.Module):
 
         self.lora_slots[component] = slot
 
-    def has_active_lora(self) -> bool:
+    def has_lora(self) -> bool:
         return bool(self.lora_slots)
+
+    def has_active_lora(self) -> bool:
+        return self.has_lora() and next(iter(self.lora_slots.values())).enabled
 
     def _gate_up_forward(self, x: torch.Tensor, tokens_per_expert: torch.Tensor) -> torch.Tensor:
         base = _areno_grouped_linear_no_compile(x.contiguous(), self.gate_up_weight, tokens_per_expert)
-        if not self.lora_slots:
+        if not self.has_active_lora():
             return base
         gate, up = base.chunk(2, dim=-1)
         if "gate_proj" in self.lora_slots:
@@ -128,7 +131,7 @@ class Qwen3MoeExperts(nn.Module):
 
     def _down_forward(self, x: torch.Tensor, tokens_per_expert: torch.Tensor) -> torch.Tensor:
         out = _areno_grouped_linear_no_compile(x, self.down_weight, tokens_per_expert)
-        if "down_proj" in self.lora_slots:
+        if self.has_active_lora() and "down_proj" in self.lora_slots:
             out = out + self.lora_slots["down_proj"](x, tokens_per_expert)
         return out
 
@@ -150,8 +153,9 @@ class Qwen3MoeExperts(nn.Module):
                 + self.down_weight.reshape(-1)[0] * 0
                 + topk_weight.sum().to(dtype=self.gate_up_weight.dtype) * 0
             )
-            for slot in self.lora_slots.values():
-                zero = zero + slot.lora_A.reshape(-1)[0] * 0 + slot.lora_B.reshape(-1)[0] * 0
+            if self.has_active_lora():
+                for slot in self.lora_slots.values():
+                    zero = zero + slot.lora_A.reshape(-1)[0] * 0 + slot.lora_B.reshape(-1)[0] * 0
             return all_reduce(flat.new_zeros(flat.shape) + zero)
         hidden = self._gate_up_forward(x, tokens_per_expert)
         log_once("qwen3_moe_silu_and_mul", "using ARENO fused silu_and_mul kernel for Qwen3-MoE experts")
@@ -159,7 +163,7 @@ class Qwen3MoeExperts(nn.Module):
             _areno_silu_and_mul_no_compile(hidden) * route_weight.unsqueeze(-1).to(dtype=hidden.dtype)
         ).contiguous()
         out = self._down_forward(hidden, tokens_per_expert)
-        if self.has_active_lora():
+        if self.has_lora():
             # Stabilize routed-expert LoRA without changing the base/fullweight MoE path.
             out = _areno_moe_unpermute_no_compile(out.float(), token_idx, flat.shape)
             out = out.to(dtype=flat.dtype)
@@ -245,7 +249,7 @@ class Qwen3MoeMLP(nn.Module):
         batch, seqlen, hidden = hidden_states.shape
         flat = hidden_states.reshape(-1, hidden)
         with sequence_parallel_region(False):
-            if self.training or self.experts.has_active_lora():
+            if self.training or self.experts.has_lora():
                 out = self.experts(flat, topk_idx.to(torch.long), topk_weight)
             else:
                 out = self._forward_fused_moe(flat, topk_idx, topk_weight)
@@ -258,7 +262,7 @@ class Qwen3MoeMLP(nn.Module):
 
     @torch.no_grad()
     def prepare_infer_weights(self) -> None:
-        if self.experts.has_active_lora():
+        if self.experts.has_lora():
             self.clear_infer_weights()
             return
         self._infer_w1_weight = self._updated_infer_weight(

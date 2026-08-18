@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import math
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 import torch
 import torch.nn.functional as F
@@ -13,6 +15,17 @@ from areno.accel import areno_grouped_linear
 from areno.adapters.config import LoraConfig
 from areno.engine.layers.linear import RowParallelLinear, mark_tensor_parallel_parameter
 from areno.engine.parallel.context import get_tp_context
+
+
+class _AdapterRuntimeState:
+    """Shared control state for one model's adapter view."""
+
+    def __init__(self) -> None:
+        self.base_only_depth = 0
+
+    @property
+    def enabled(self) -> bool:
+        return self.base_only_depth == 0
 
 
 class LoraSlot(nn.Module):
@@ -30,6 +43,7 @@ class LoraSlot(nn.Module):
         row_parallel: bool,
         config: LoraConfig,
         seed: int,
+        runtime_state: _AdapterRuntimeState,
     ) -> None:
         super().__init__()
         ctx = get_tp_context()
@@ -40,6 +54,7 @@ class LoraSlot(nn.Module):
         self.local_in_features = int(local_in_features)
         self.local_out_features = int(local_out_features)
         self.row_parallel = bool(row_parallel)
+        self._runtime_state = runtime_state
         self.lora_A = nn.Parameter(
             torch.empty(self.rank, self.local_in_features, device=base_weight.device, dtype=base_weight.dtype)
         )
@@ -72,6 +87,10 @@ class LoraSlot(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return F.linear(F.linear(x, self.lora_A), self.lora_B) * self.scale
 
+    @property
+    def enabled(self) -> bool:
+        return self._runtime_state.enabled
+
 
 class RoutedExpertLoraSlot(nn.Module):
     """One expert-sharded canonical LoRA A/B pair for grouped Qwen3-MoE GEMMs."""
@@ -87,6 +106,7 @@ class RoutedExpertLoraSlot(nn.Module):
         out_features: int,
         config: LoraConfig,
         seed: int,
+        runtime_state: _AdapterRuntimeState,
     ) -> None:
         super().__init__()
         self.logical_name = logical_name
@@ -95,6 +115,7 @@ class RoutedExpertLoraSlot(nn.Module):
         self.local_expert_start = int(local_expert_start)
         self.in_features = int(in_features)
         self.out_features = int(out_features)
+        self._runtime_state = runtime_state
         self.lora_A = nn.Parameter(
             torch.empty(
                 self.local_num_experts,
@@ -135,13 +156,23 @@ class RoutedExpertLoraSlot(nn.Module):
         hidden = areno_grouped_linear(x.contiguous(), self.lora_A, tokens_per_expert)
         return areno_grouped_linear(hidden, self.lora_B, tokens_per_expert) * self.scale
 
+    @property
+    def enabled(self) -> bool:
+        return self._runtime_state.enabled
+
 
 class AdapterRegistry:
     """Non-owning index over LoRA slots; projection modules remain sole owners."""
 
-    def __init__(self, slots: dict[str, LoraSlot | RoutedExpertLoraSlot], config: LoraConfig) -> None:
+    def __init__(
+        self,
+        slots: dict[str, LoraSlot | RoutedExpertLoraSlot],
+        config: LoraConfig,
+        runtime_state: _AdapterRuntimeState,
+    ) -> None:
         self.slots = slots
         self.config = config
+        self._runtime_state = runtime_state
         self.version = 0
 
     def named_parameters(self):
@@ -156,6 +187,16 @@ class AdapterRegistry:
         self.version += 1
         return self.version
 
+    @contextmanager
+    def base_only(self) -> Iterator[None]:
+        """Temporarily expose the frozen base policy without evaluating A/B."""
+
+        self._runtime_state.base_only_depth += 1
+        try:
+            yield
+        finally:
+            self._runtime_state.base_only_depth -= 1
+
 
 def initialize_lora(model: nn.Module, config: LoraConfig, *, seed: int) -> AdapterRegistry:
     """Freeze a Qwen3 dense or MoE base and attach canonical targets."""
@@ -167,6 +208,7 @@ def initialize_lora(model: nn.Module, config: LoraConfig, *, seed: int) -> Adapt
         parameter.requires_grad_(False)
 
     requested = set(config.target_modules)
+    runtime_state = _AdapterRuntimeState()
     slots: dict[str, LoraSlot | RoutedExpertLoraSlot] = {}
     for layer_index, layer in enumerate(model.layers):
         prefix = f"layers.{layer_index}"
@@ -185,6 +227,7 @@ def initialize_lora(model: nn.Module, config: LoraConfig, *, seed: int) -> Adapt
                 row_parallel=False,
                 config=config,
                 seed=seed,
+                runtime_state=runtime_state,
             )
             qkv.install_lora_component(component, component_index, slot)
             slots[logical_name] = slot
@@ -192,12 +235,12 @@ def initialize_lora(model: nn.Module, config: LoraConfig, *, seed: int) -> Adapt
         if "o_proj" in requested:
             owner = layer.self_attn.o_proj
             logical_name = f"{prefix}.self_attn.o_proj"
-            slot = _row_slot(logical_name, owner, config, seed)
+            slot = _row_slot(logical_name, owner, config, seed, runtime_state)
             owner.install_lora(slot)
             slots[logical_name] = slot
 
         if getattr(model_config, "enable_moe_block", False):
-            _install_moe_slots(layer.mlp.experts, prefix, requested, config, seed, slots)
+            _install_moe_slots(layer.mlp.experts, prefix, requested, config, seed, runtime_state, slots)
         else:
             gate_up = layer.mlp.gate_up_proj
             for component_index, component in enumerate(("gate_proj", "up_proj")):
@@ -214,6 +257,7 @@ def initialize_lora(model: nn.Module, config: LoraConfig, *, seed: int) -> Adapt
                     row_parallel=False,
                     config=config,
                     seed=seed,
+                    runtime_state=runtime_state,
                 )
                 gate_up.install_lora_component(component, component_index, slot)
                 slots[logical_name] = slot
@@ -221,14 +265,20 @@ def initialize_lora(model: nn.Module, config: LoraConfig, *, seed: int) -> Adapt
             if "down_proj" in requested:
                 owner = layer.mlp.down_proj
                 logical_name = f"{prefix}.mlp.down_proj"
-                slot = _row_slot(logical_name, owner, config, seed)
+                slot = _row_slot(logical_name, owner, config, seed, runtime_state)
                 owner.install_lora(slot)
                 slots[logical_name] = slot
 
-    return AdapterRegistry(slots, config)
+    return AdapterRegistry(slots, config, runtime_state)
 
 
-def _row_slot(logical_name: str, owner: RowParallelLinear, config: LoraConfig, seed: int) -> LoraSlot:
+def _row_slot(
+    logical_name: str,
+    owner: RowParallelLinear,
+    config: LoraConfig,
+    seed: int,
+    runtime_state: _AdapterRuntimeState,
+) -> LoraSlot:
     return LoraSlot(
         logical_name=logical_name,
         base_weight=owner.weight,
@@ -239,6 +289,7 @@ def _row_slot(logical_name: str, owner: RowParallelLinear, config: LoraConfig, s
         row_parallel=True,
         config=config,
         seed=seed,
+        runtime_state=runtime_state,
     )
 
 
@@ -248,6 +299,7 @@ def _install_moe_slots(
     requested: set[str],
     config: LoraConfig,
     seed: int,
+    runtime_state: _AdapterRuntimeState,
     slots: dict[str, LoraSlot | RoutedExpertLoraSlot],
 ) -> None:
     components = (
@@ -268,6 +320,7 @@ def _install_moe_slots(
             out_features=out_features,
             config=config,
             seed=seed,
+            runtime_state=runtime_state,
         )
         experts.install_lora_component(component, slot)
         slots[logical_name] = slot

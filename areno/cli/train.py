@@ -137,6 +137,7 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "lora_dropout",
             "lora_target_modules",
             "lora_adapter_path",
+            "reference_mode",
             "lr",
             "min_lr",
             "lr_decay_steps",
@@ -249,6 +250,7 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
     args.multimodal_projector_min_lr = getattr(args, "multimodal_projector_min_lr", None)
     args.multimodal_projector_lr_decay_steps = getattr(args, "multimodal_projector_lr_decay_steps", None)
     args.multimodal_projector_lr_decay_style = getattr(args, "multimodal_projector_lr_decay_style", None)
+    args.reference_mode = getattr(args, "reference_mode", "independent")
     args.lora = _lora_config_from_options(args)
     if args.backend == "mlx":
         if args.train_devices is not None or args.rollout_devices is not None or args.rollout_tp_size is not None:
@@ -901,6 +903,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             ref_ckpt=args.ref_ckpt,
             dpo_beta=args.dpo_beta,
             lora=lora,
+            reference_mode=args.reference_mode,
         )
     if algorithm.name == "sft":
         return TrainerConfig(
@@ -957,6 +960,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             train_tool_results=args.train_tool_results,
             chat_template_enable_thinking=chat_template_enable_thinking,
             lora=lora,
+            reference_mode=args.reference_mode,
         )
     if algorithm.name != "ppo":
         return PolicyTrainerConfig(
@@ -1025,6 +1029,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             train_tool_results=args.train_tool_results,
             chat_template_enable_thinking=chat_template_enable_thinking,
             lora=lora,
+            reference_mode=args.reference_mode,
         )
     return PPOTrainerConfig(
         algo=algorithm.name,
@@ -1106,6 +1111,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
         train_tool_results=args.train_tool_results,
         chat_template_enable_thinking=chat_template_enable_thinking,
         lora=lora,
+        reference_mode=args.reference_mode,
     )
 
 
@@ -1638,6 +1644,13 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     help="Comma-separated Qwen3 projection targets (MoE MLP targets apply to each routed expert).",
 )
 @click.option("--lora-adapter-path", default=None, help="Standard PEFT adapter used to initialize native LoRA.")
+@click.option(
+    "--reference-mode",
+    type=click.Choice(["independent", "reuse_actor_base"]),
+    default="independent",
+    show_default=True,
+    help="Use the frozen actor base as the PPO/DPO reference instead of loading a second reference model.",
+)
 @click.option("--min-lr", type=float, default=1.0e-7, show_default=True, help="Policy optimizer minimum learning rate.")
 @click.option("--lr-decay-steps", type=int, default=1000, show_default=True, help="Policy LR decay steps.")
 @click.option("--lr-decay-style", default="cosine", show_default=True, help="Policy LR decay style.")

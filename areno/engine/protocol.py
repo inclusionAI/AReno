@@ -119,6 +119,7 @@ class RoleSpecPayload:
     path: str
     trainable: bool
     optimizer_lr: float | None = None
+    reference_mode: str = "independent"
 
 
 @dataclass(slots=True)

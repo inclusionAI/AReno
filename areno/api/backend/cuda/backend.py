@@ -172,6 +172,7 @@ class CudaBackend(Backend):
                 loss_fn=dispatch_loss,
                 policy_sync_bucket_mb=cfg.policy_sync_bucket_mb,
                 lora_config=cfg.lora,
+                reference_mode=cfg.reference_mode,
             )
             return
         self._policy_sync_bucket_bytes = cfg.policy_sync_bucket_mb * 1024 * 1024
