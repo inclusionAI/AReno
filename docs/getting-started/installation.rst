@@ -5,6 +5,13 @@ AReno has native CUDA and MLX installation paths. Linux and WSL2 use the CUDA
 installer; Apple Silicon uses a normal pip source install with platform-marked
 MLX dependencies.
 
+The platform guides describe the complete, parallel train/serve setup:
+
+* :doc:`cuda` for Linux, WSL2, NVIDIA CUDA, distributed topology, and CUDA
+  checkpoints.
+* :doc:`mlx` for Apple Silicon, unified memory, MLX checkpoints, and the
+  single-process runtime.
+
 Install CUDA AReno
 ------------------
 
@@ -42,6 +49,9 @@ To preview the plan without changing the environment:
 .. code-block:: bash
 
    bash scripts/install.sh --dry-run
+
+Continue with :doc:`cuda` for CUDA training, serving, memory controls,
+checkpoints, model support, and SDK configuration.
 
 Compatibility matrix
 --------------------

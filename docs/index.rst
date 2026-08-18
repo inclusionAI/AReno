@@ -15,6 +15,7 @@ AReno documentation
 
    Welcome <getting-started/welcome>
    getting-started/installation
+   Linux and CUDA <getting-started/cuda>
    Apple Silicon and MLX <getting-started/mlx>
    getting-started/quickstart
 
