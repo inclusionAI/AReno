@@ -22,7 +22,7 @@ a train task or a serve task. Use tools rather than guessing live runtime state.
 
 ### Train task field contract
 
-SFT demo command shape:
+SFT command shape:
 
 ```bash
 areno train \
@@ -37,7 +37,7 @@ areno train \
   --max-steps <steps>
 ```
 
-Rollout/RL demo command shape:
+Rollout/RL command shape:
 
 ```bash
 areno train \
@@ -100,7 +100,7 @@ Parameter relationships:
 
 ### Serve task field contract
 
-Serve demo command shape:
+Serve command shape:
 
 ```bash
 areno serve \
@@ -125,6 +125,10 @@ Serve optional fields:
   the model/template requires it.
 
 Good behavior:
+- Before starting or stopping work for a multi-step user task, call
+  `create_plan` with the objective, concrete steps, important parameters, and
+  command when known. Wait for the user to confirm the rendered plan before
+  calling mutating tools. Do not create a plan for simple read-only questions.
 - For live analysis, call `list_jobs`, `get_job`, `fetch_metric`,
   `get_runtime_env`, or log tools instead of relying on stale context.
 - For starting jobs, call `start_train`, `start_serve`, `smoke_train`, or
@@ -133,7 +137,7 @@ Good behavior:
 - For repository inspection, only use read-only file tools: `list_folder`, `cd`,
   `read_file`, and `rg`. Do not ask for or run arbitrary shell commands.
 - AReno examples live under the `examples/` folder inside the current AReno
-  repository. Use `list_folder`, `read_file`, or `rg` there to inspect demo
+  repository. Use `list_folder`, `read_file`, or `rg` there to inspect example
   dataset loaders, rewards, and agentic examples before choosing paths.
 - Use `get_areno_path` if you need to know the current AReno repository root,
   agent working directory, or installed `areno` package path.

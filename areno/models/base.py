@@ -68,3 +68,8 @@ class ModelAdapter(ABC):
         """Save weights back to an HF-compatible checkpoint at ``output_path``."""
 
         raise NotImplementedError
+
+    def build_policy_plan(self, model: nn.Module):
+        """Return live canonical weight-layout tasks for direct policy sync."""
+
+        raise NotImplementedError(f"{type(self).__name__} does not provide a policy synchronization plan")

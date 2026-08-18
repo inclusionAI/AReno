@@ -35,10 +35,12 @@ class InferenceBatchState:
         max_prefill_tokens: int = 8192,
         kv_block_size: int = 256,
         num_cache_blocks: int | None = None,
+        prompt_features: list[dict | None] | None = None,
     ):
         """Create rollout state and reserve bookkeeping for paged KV blocks."""
 
         self.prompts = prompts
+        self.prompt_features = _normalize_prompt_features(prompt_features, len(prompts))
         self.generated = [[] for _ in prompts]
         self.logprobs = [[] for _ in prompts]
         self.max_new_tokens = max_new_tokens
@@ -57,13 +59,14 @@ class InferenceBatchState:
         self._prefill_cursor_by_seq: dict[int, int] = {}
         self._last_active_ids: list[int] = []
 
-    def append_prompts(self, prompts: list[list[int]]) -> list[int]:
+    def append_prompts(self, prompts: list[list[int]], prompt_features: list[dict | None] | None = None) -> list[int]:
         """Append newly arrived prompts and return their row ids."""
 
         if not prompts:
             return []
         start = len(self.prompts)
         self.prompts.extend(prompts)
+        self.prompt_features.extend(_normalize_prompt_features(prompt_features, len(prompts)))
         self.generated.extend([] for _ in prompts)
         self.logprobs.extend([] for _ in prompts)
         self.finished.extend(False for _ in prompts)
@@ -104,6 +107,10 @@ class InferenceBatchState:
         # for the next-token positions.
         input_ids: list[int] = []
         position_ids: list[int] = []
+        mrope_position_parts: list[torch.Tensor] = []
+        has_mrope_positions = False
+        feature_mask: list[bool] = []
+        image_features: list[dict] = []
         cu_seqlens = [0]
         sample_indices: list[int] = []
         block_table: list[list[int]] = []
@@ -140,6 +147,9 @@ class InferenceBatchState:
                         else self._prefill_payload(
                             input_ids,
                             position_ids,
+                            mrope_position_parts if has_mrope_positions else None,
+                            feature_mask,
+                            image_features,
                             cu_seqlens,
                             sample_indices,
                             block_table,
@@ -151,6 +161,27 @@ class InferenceBatchState:
                 blocks.append(self._free_blocks.pop(0))
             chunk = prompt[cursor : cursor + chunk_len]
             input_ids.extend(chunk)
+            local_mask, local_features = _slice_prompt_image_features(
+                self.prompt_features[seq_id],
+                prompt,
+                cursor,
+                chunk_len,
+            )
+            feature_mask.extend(local_mask)
+            if local_features is not None:
+                image_features.append(local_features)
+            local_mrope_positions = _slice_prompt_mrope_positions(
+                self.prompt_features[seq_id],
+                cursor,
+                chunk_len,
+            )
+            if local_mrope_positions is not None:
+                has_mrope_positions = True
+                mrope_position_parts.append(local_mrope_positions)
+            else:
+                mrope_position_parts.append(
+                    torch.arange(cursor, cursor + chunk_len, dtype=torch.long).view(1, -1).expand(3, -1)
+                )
             position_ids.extend(range(cursor, cursor + chunk_len))
             # Per-token mapping from this prompt's token index to (block, offset)
             # inside the paged KV cache.
@@ -177,6 +208,9 @@ class InferenceBatchState:
         return self._prefill_payload(
             input_ids,
             position_ids,
+            mrope_position_parts if has_mrope_positions else None,
+            feature_mask,
+            image_features,
             cu_seqlens,
             sample_indices,
             block_table,
@@ -189,6 +223,9 @@ class InferenceBatchState:
         self,
         input_ids: list[int],
         position_ids: list[int],
+        mrope_position_parts: list[torch.Tensor] | None,
+        feature_mask: list[bool],
+        image_features: list[dict],
         cu_seqlens: list[int],
         sample_indices: list[int],
         block_table: list[list[int]],
@@ -197,7 +234,7 @@ class InferenceBatchState:
         active_ids: list[int],
     ) -> dict:
         self._last_active_ids = active_ids
-        return {
+        payload = {
             "mode": "prefill",
             "input_ids": torch.tensor(input_ids, dtype=torch.long),
             "position_ids": torch.tensor(position_ids, dtype=torch.long),
@@ -208,6 +245,9 @@ class InferenceBatchState:
             "cache_block_ids": torch.tensor(cache_block_ids, dtype=torch.long),
             "cache_block_offsets": torch.tensor(cache_block_offsets, dtype=torch.long),
         }
+        if any(feature_mask) or image_features or mrope_position_parts is not None:
+            payload["features"] = _prefill_multimodal_features(feature_mask, image_features, mrope_position_parts)
+        return payload
 
     def ensure_decode_blocks(self, seq_ids: list[int], next_positions: list[int]) -> None:
         """Allocate one decode KV block for rows whose next token starts a block."""
@@ -223,6 +263,14 @@ class InferenceBatchState:
                 if not self._free_blocks:
                     raise RuntimeError("paged KV cache exhausted during decode")
                 blocks.append(self._free_blocks.pop(0))
+
+    def decode_position_deltas(self, seq_ids: list[int]) -> list[int]:
+        """Return per-sequence MRoPE decode position deltas."""
+
+        return [
+            _prompt_mrope_position_delta(self.prompt_features[int(seq_id)], len(self.prompts[int(seq_id)]))
+            for seq_id in seq_ids
+        ]
 
     def to_rollout(self) -> RolloutOutput:
         """Materialize Python rollout state into padded tensors for the API."""
@@ -240,6 +288,123 @@ class InferenceBatchState:
             finish_reason=reasons,
             metrics=self.metrics,
         )
+
+
+def _normalize_prompt_features(features: list[dict | None] | None, count: int) -> list[dict | None]:
+    if features is None:
+        return [None for _ in range(count)]
+    if len(features) != count:
+        raise ValueError(f"prompt_features length mismatch: got {len(features)} for {count} prompts")
+    return list(features)
+
+
+def _slice_prompt_image_features(
+    features: dict | None,
+    prompt: list[int],
+    cursor: int,
+    chunk_len: int,
+) -> tuple[list[bool], dict | None]:
+    if features is None:
+        return [False] * chunk_len, None
+    image_embeds = _feature_tensor(features, "image_embeds")
+    if image_embeds is None:
+        image_embeds = _feature_tensor(features, "image_features")
+    if image_embeds is None:
+        image_embeds = _feature_tensor(features, "projected_image_embeds")
+    if image_embeds is None:
+        if not any(key in features for key in ("pixel_values", "image_grid_thw")):
+            return [False] * chunk_len, None
+    full_mask = _prompt_image_mask(features, prompt)
+    local_mask = full_mask[cursor : cursor + chunk_len]
+    local_count = sum(local_mask)
+    if local_count == 0:
+        return local_mask, None
+    start = sum(full_mask[:cursor])
+    end = start + local_count
+    if image_embeds is None:
+        payload_features = {
+            "image_token_offset": start,
+            "image_token_count": local_count,
+        }
+        for key in ("pixel_values", "image_grid_thw", "image_token_id"):
+            if features.get(key) is not None:
+                payload_features[key] = features[key]
+        return local_mask, payload_features
+    if image_embeds.ndim != 2:
+        raise ValueError("image_embeds must have shape (num_image_tokens, hidden_size)")
+    if int(image_embeds.shape[0]) < end:
+        raise ValueError("image_embeds has fewer rows than image placeholder tokens")
+    return local_mask, {"image_embeds": image_embeds[start:end]}
+
+
+def _slice_prompt_mrope_positions(features: dict | None, cursor: int, chunk_len: int) -> torch.Tensor | None:
+    if features is None or features.get("mrope_position_ids") is None:
+        return None
+    positions = _feature_tensor(features, "mrope_position_ids")
+    if positions is None:
+        return None
+    if positions.ndim == 3 and int(positions.shape[0]) == 3 and int(positions.shape[1]) == 1:
+        positions = positions[:, 0, :]
+    elif positions.ndim == 3 and int(positions.shape[0]) == 1 and int(positions.shape[1]) == 3:
+        positions = positions[0]
+    if positions.ndim != 2 or int(positions.shape[0]) != 3:
+        raise ValueError("mrope_position_ids must have shape (3, prompt_len)")
+    end = cursor + chunk_len
+    if int(positions.shape[-1]) < end:
+        raise ValueError("mrope_position_ids length must cover the full prompt")
+    return positions[:, cursor:end].to(dtype=torch.long).cpu()
+
+
+def _prompt_mrope_position_delta(features: dict | None, prompt_len: int) -> int:
+    positions = _slice_prompt_mrope_positions(features, 0, prompt_len)
+    if positions is None or positions.numel() == 0:
+        return 0
+    return int(positions.max().item()) + 1 - int(prompt_len)
+
+
+def _prefill_multimodal_features(
+    feature_mask: list[bool],
+    image_features: list[dict],
+    mrope_position_parts: list[torch.Tensor] | None = None,
+) -> dict:
+    features = {}
+    if mrope_position_parts is not None:
+        features["mrope_position_ids"] = torch.cat(mrope_position_parts, dim=1).to(dtype=torch.long)
+    if not image_features:
+        if any(feature_mask):
+            features.update(
+                {"image_token_mask": torch.tensor(feature_mask, dtype=torch.bool), "image_embeds": torch.empty(0, 0)}
+            )
+        return features
+    features.update(
+        {
+            "image_token_mask": torch.tensor(feature_mask, dtype=torch.bool),
+            "image_feature_rows": image_features,
+        }
+    )
+    return features
+
+
+def _feature_tensor(features: dict, key: str) -> torch.Tensor | None:
+    value = features.get(key)
+    if value is None:
+        return None
+    return value if isinstance(value, torch.Tensor) else torch.as_tensor(value)
+
+
+def _prompt_image_mask(features: dict, prompt: list[int]) -> list[bool]:
+    mask = features.get("image_token_mask")
+    if mask is not None:
+        if not isinstance(mask, torch.Tensor):
+            mask = torch.as_tensor(mask)
+        mask_list = [bool(item) for item in mask.reshape(-1).tolist()]
+        if len(mask_list) != len(prompt):
+            raise ValueError("image_token_mask length must match prompt length")
+        return mask_list
+    image_token_id = features.get("image_token_id")
+    if image_token_id is None:
+        raise ValueError("image multimodal features require image_token_mask or image_token_id")
+    return [int(token) == int(image_token_id) for token in prompt]
 
 
 def payload_to_infer_meta(payload: dict, device: torch.device) -> InferMeta:

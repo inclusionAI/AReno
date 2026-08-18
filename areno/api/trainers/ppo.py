@@ -103,6 +103,7 @@ class PPOTrainer(PolicyOnlyTrainer):
         # Collect (full_token_row, metadata) for every prompt/sample pair so
         # we can issue a single batched forward to each role.
         token_rows: list[list[int]] = []
+        token_features: list[dict | None] = []
         row_meta = []
         reward_records = []
         for item_idx, (item, result) in enumerate(zip(prompt_batch.items, rollout_results, strict=True)):
@@ -111,6 +112,7 @@ class PPOTrainer(PolicyOnlyTrainer):
             for sample_idx, (completion, seq) in enumerate(zip(completions, result.sequences, strict=True)):
                 tokens = item.input_tokens + seq.resp_tokens
                 token_rows.append(tokens)
+                token_features.append(item.record.get("features"))
                 row_meta.append((item, seq, prefix_len, len(seq.resp_tokens)))
                 reward_records.append(
                     make_reward_record(
@@ -137,7 +139,7 @@ class PPOTrainer(PolicyOnlyTrainer):
             self.logger.info("role=reward stage=score_start rows=%d", len(token_rows))
             self._record_ppo_state(stage="score_start", role="reward")
             reward_start = time.perf_counter()
-            raw_rewards = [float(reward) for reward in self._score_rewards(token_rows)]
+            raw_rewards = [float(reward) for reward in self._score_rewards(token_rows, features=token_features)]
             rewards_all = raw_rewards
             self._last_ppo_stats.update(_summary_stats("reward_model_raw_reward", raw_rewards))
             self._last_ppo_stats["reward_score_time_s"] = time.perf_counter() - reward_start
@@ -150,7 +152,7 @@ class PPOTrainer(PolicyOnlyTrainer):
         self.logger.info("role=ref stage=logprob_score_start rows=%d", len(token_rows))
         self._record_ppo_state(stage="logprob_score_start", role="ref")
         ref_start = time.perf_counter()
-        ref_logprob_rows = self._score_logprobs("ref", token_rows)
+        ref_logprob_rows = self._score_logprobs("ref", token_rows, features=token_features)
         self._last_ppo_stats["ref_logprob_forward_time_s"] = time.perf_counter() - ref_start
         self.logger.info("role=ref stage=logprob_score_end rows=%d", len(token_rows))
         self._record_ppo_state(stage="logprob_score_end", role="ref")
@@ -160,14 +162,14 @@ class PPOTrainer(PolicyOnlyTrainer):
         # Even though we already have rollout logprobs, PPO needs an actor
         # forward pass at the same parameters used by the upcoming update to
         # form the "old logprobs" baseline in the importance ratio.
-        old_logprob_rows = self._score_logprobs("actor", token_rows)
+        old_logprob_rows = self._score_logprobs("actor", token_rows, features=token_features)
         self._last_ppo_stats["actor_old_logprob_forward_time_s"] = time.perf_counter() - actor_logprob_start
         self.logger.info("role=actor stage=old_logprob_score_end rows=%d", len(token_rows))
         self._record_ppo_state(stage="old_logprob_score_end", role="actor")
         self.logger.info("role=critic stage=value_score_start rows=%d", len(token_rows))
         self._record_ppo_state(stage="value_score_start", role="critic")
         critic_value_start = time.perf_counter()
-        value_rows = self._score_values("critic", token_rows)
+        value_rows = self._score_values("critic", token_rows, features=token_features)
         self._last_ppo_stats["critic_value_forward_time_s"] = time.perf_counter() - critic_value_start
         self.logger.info("role=critic stage=value_score_end rows=%d", len(token_rows))
         self._record_ppo_state(stage="value_score_end", role="critic")
@@ -175,8 +177,9 @@ class PPOTrainer(PolicyOnlyTrainer):
         self._record_ppo_state(stage="advantage_start", role="critic")
         old_logprobs_all = []
         logp_diff_all = []
-        for (item, seq, prefix_len, resp_len), reward, ref_logprobs, old_logprobs, values in zip(
+        for (item, seq, prefix_len, resp_len), row_features, reward, ref_logprobs, old_logprobs, values in zip(
             row_meta,
+            token_features,
             rewards_all,
             ref_logprob_rows,
             old_logprob_rows,
@@ -230,6 +233,7 @@ class PPOTrainer(PolicyOnlyTrainer):
                     returns=full_returns,
                     values=full_values,
                     ref_logprobs=ref_logprobs,
+                    features=row_features,
                     reward=float(reward),
                     eos_token_id=tokenizer.eos_token_id,
                 )
@@ -280,6 +284,7 @@ class PPOTrainer(PolicyOnlyTrainer):
         returns_all = []
         advantages_all = []
         token_rows = agent_batch.token_rows
+        token_features = getattr(agent_batch, "features", None)
 
         if agent_batch.rewards is not None:
             self._record_ppo_state(stage="score_start", role="reward")
@@ -289,7 +294,7 @@ class PPOTrainer(PolicyOnlyTrainer):
             self.logger.info("role=reward stage=score_start rows=%d", len(token_rows))
             self._record_ppo_state(stage="score_start", role="reward")
             reward_start = time.perf_counter()
-            rewards_all = [float(reward) for reward in self._score_rewards(token_rows)]
+            rewards_all = [float(reward) for reward in self._score_rewards(token_rows, features=token_features)]
             self._last_ppo_stats.update(_summary_stats("reward_model_raw_reward", rewards_all))
             self._last_ppo_stats["reward_score_time_s"] = time.perf_counter() - reward_start
             self.logger.info("role=reward stage=score_end rows=%d", len(token_rows))
@@ -298,21 +303,21 @@ class PPOTrainer(PolicyOnlyTrainer):
         self.logger.info("role=ref stage=logprob_score_start rows=%d", len(token_rows))
         self._record_ppo_state(stage="logprob_score_start", role="ref")
         ref_start = time.perf_counter()
-        ref_logprob_rows = self._score_logprobs("ref", token_rows)
+        ref_logprob_rows = self._score_logprobs("ref", token_rows, features=token_features)
         self._last_ppo_stats["ref_logprob_forward_time_s"] = time.perf_counter() - ref_start
         self.logger.info("role=ref stage=logprob_score_end rows=%d", len(token_rows))
         self._record_ppo_state(stage="logprob_score_end", role="ref")
         self.logger.info("role=actor stage=old_logprob_score_start rows=%d", len(token_rows))
         self._record_ppo_state(stage="old_logprob_score_start", role="actor")
         actor_logprob_start = time.perf_counter()
-        old_logprob_rows = self._score_logprobs("actor", token_rows)
+        old_logprob_rows = self._score_logprobs("actor", token_rows, features=token_features)
         self._last_ppo_stats["actor_old_logprob_forward_time_s"] = time.perf_counter() - actor_logprob_start
         self.logger.info("role=actor stage=old_logprob_score_end rows=%d", len(token_rows))
         self._record_ppo_state(stage="old_logprob_score_end", role="actor")
         self.logger.info("role=critic stage=value_score_start rows=%d", len(token_rows))
         self._record_ppo_state(stage="value_score_start", role="critic")
         critic_value_start = time.perf_counter()
-        value_rows = self._score_values("critic", token_rows)
+        value_rows = self._score_values("critic", token_rows, features=token_features)
         self._last_ppo_stats["critic_value_forward_time_s"] = time.perf_counter() - critic_value_start
         self.logger.info("role=critic stage=value_score_end rows=%d", len(token_rows))
         self._record_ppo_state(stage="value_score_end", role="critic")
@@ -320,11 +325,13 @@ class PPOTrainer(PolicyOnlyTrainer):
         self._record_ppo_state(stage="advantage_start", role="critic")
         old_logprobs_all = []
         logp_diff_all = []
-        for tokens, response_mask, loss_mask, rollout_row, reward, ref_logprobs, old_logprobs, values in zip(
+        row_features = token_features or [None] * len(token_rows)
+        for tokens, response_mask, loss_mask, rollout_row, features, reward, ref_logprobs, old_logprobs, values in zip(
             token_rows,
             agent_batch.response_masks,
             agent_batch.loss_masks,
             agent_batch.rollout_logprobs,
+            row_features,
             rewards_all,
             ref_logprob_rows,
             old_logprob_rows,
@@ -382,6 +389,7 @@ class PPOTrainer(PolicyOnlyTrainer):
                     returns=full_returns,
                     values=full_values,
                     ref_logprobs=ref_logprobs,
+                    features=features,
                     reward=float(reward),
                     eos_token_id=tokenizer.eos_token_id,
                 )
@@ -438,14 +446,23 @@ class PPOTrainer(PolicyOnlyTrainer):
         finally:
             self.areno.close()
 
-    def _score_logprobs(self, role: str, token_rows: list[list[int]]) -> list[list[float]]:
-        return self.areno.score_logprobs(role, token_rows, microbatch_size=self.config.score_micro_bs)
+    def _score_logprobs(
+        self, role: str, token_rows: list[list[int]], *, features: list[dict | None] | None = None
+    ) -> list[list[float]]:
+        return self.areno.score_logprobs(
+            role,
+            token_rows,
+            features=features,
+            microbatch_size=self.config.score_micro_bs,
+        )
 
-    def _score_values(self, role: str, token_rows: list[list[int]]) -> list[list[float]]:
-        return self.areno.score_values(role, token_rows)
+    def _score_values(
+        self, role: str, token_rows: list[list[int]], *, features: list[dict | None] | None = None
+    ) -> list[list[float]]:
+        return self.areno.score_values(role, token_rows, features=features)
 
-    def _score_rewards(self, token_rows: list[list[int]]) -> list[float]:
-        return self.areno.score_rewards("reward", token_rows)
+    def _score_rewards(self, token_rows: list[list[int]], *, features: list[dict | None] | None = None) -> list[float]:
+        return self.areno.score_rewards("reward", token_rows, features=features)
 
     def _train_values(self, train_batch) -> dict[str, float]:
         return self.areno.train_values(

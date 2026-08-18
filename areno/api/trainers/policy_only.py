@@ -14,6 +14,7 @@ role-management hooks; this is why the helpers are designed to be small.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import time
@@ -55,7 +56,9 @@ class PolicyOnlyTrainer:
         import areno.api
 
         tokenizer = self.areno.get_tokenizer()
+        processor = self.areno.get_processor()
         configure_chat_template_enable_thinking(tokenizer, getattr(self.config, "chat_template_enable_thinking", None))
+        configure_chat_template_enable_thinking(processor, getattr(self.config, "chat_template_enable_thinking", None))
         sampling_params = areno.api.SamplingParams(
             greedy=self.config.greedy,
             temperature=self.config.temperature,
@@ -237,7 +240,15 @@ class PolicyOnlyTrainer:
             proxy=False,
         ):
             prompt_tokens = [item.input_tokens for item in prompt_batch.items]
-            return await self.areno.rollout_token_batch_async(prompt_tokens, self.config.n_samples, sampling_params)
+            prompt_features = [item.record.get("features") for item in prompt_batch.items]
+            if not any(feature is not None for feature in prompt_features):
+                prompt_features = None
+            return await self.areno.rollout_token_batch_async(
+                prompt_tokens,
+                self.config.n_samples,
+                sampling_params,
+                prompt_features=prompt_features,
+            )
 
     async def _run_agentic_rollout(self, sampling_params, prompt_batch):
         from areno.api.agentic import AgentBatch, AgentTrainBatch, maybe_await
@@ -260,6 +271,7 @@ class PolicyOnlyTrainer:
             trajectories = await maybe_await(self._get_agent_run_fn()(ctx, agent_batch))
             if trajectories is None:
                 raise RuntimeError("agent run function must return explicit trajectories")
+            agent_filtered_count = self._agent_trajectory_invalid_count(trajectories)
             samples = []
             for turn in self._agent_trajectory_turns(ctx, trajectories):
                 sample = ctx._sample_from_trajectory_turn(turn)
@@ -272,14 +284,22 @@ class PolicyOnlyTrainer:
                 ctx, samples, sampling_params
             )
             expected = len(agent_batch)
-            if len(samples) + filtered_count != expected:
+            if len(samples) + filtered_count + agent_filtered_count != expected:
                 raise RuntimeError(
-                    f"agent rollout produced {len(samples)} trajectories and filtered {filtered_count}, expected {expected}"
+                    f"agent rollout produced {len(samples)} trajectories, filtered {filtered_count} overlong and "
+                    f"{agent_filtered_count} invalid, expected {expected}"
                 )
             if not samples:
                 raise RuntimeError(
-                    f"all {filtered_count} agent trajectories exceeded the configured context length; "
+                    f"all agent trajectories were filtered ({filtered_count} overlong, "
+                    f"{agent_filtered_count} invalid); "
                     f"{self._format_agent_filter_diagnostics(filter_diagnostics)}"
+                )
+            if agent_filtered_count:
+                self.logger.warning(
+                    "agentic rollout filtered invalid samples=%d valid_samples=%d",
+                    agent_filtered_count,
+                    len(samples),
                 )
             reward_records = [ctx.reward_record(sample) for sample in samples]
             rewards = [float(self.reward_fn(record)) for record in reward_records]
@@ -300,6 +320,7 @@ class PolicyOnlyTrainer:
                 response_masks=rows.response_masks,
                 loss_masks=rows.loss_masks,
                 rollout_logprobs=rows.rollout_logprobs,
+                features=rows.features,
                 rewards=rewards,
                 records=[sample.item.record for sample in samples],
                 reward_records=reward_records,
@@ -426,6 +447,17 @@ class PolicyOnlyTrainer:
             else:
                 yield from trajectory
 
+    def _agent_trajectory_invalid_count(self, trajectories):
+        from areno.api.agentic import AgentTrajectory
+
+        if isinstance(trajectories, AgentTrajectory):
+            return len(trajectories.invalid_items)
+        if isinstance(trajectories, (list, tuple)):
+            return sum(
+                len(trajectory.invalid_items) for trajectory in trajectories if isinstance(trajectory, AgentTrajectory)
+            )
+        return 0
+
     def _find_agent_sample(self, samples, item):
         if item.prompt_index < 0 or item.sample_index < 0:
             return None
@@ -456,31 +488,44 @@ class PolicyOnlyTrainer:
             group_rewards = [rewards_all[row_idx] for row_idx in row_indices]
             for row_idx, advantage in zip(row_indices, compute_group_advantages(group_rewards), strict=True):
                 advantages_by_row[row_idx] = float(advantage)
-        for row_idx, (tokens, response_mask, loss_mask, logprobs, reward) in enumerate(
+        row_features = getattr(agent_batch, "features", [None] * len(agent_batch.token_rows))
+        for row_idx, (tokens, response_mask, loss_mask, logprobs, reward, features) in enumerate(
             zip(
                 agent_batch.token_rows,
                 agent_batch.response_masks,
                 agent_batch.loss_masks,
                 agent_batch.rollout_logprobs,
                 rewards_all,
+                row_features,
                 strict=True,
             )
         ):
             if len(tokens) != len(response_mask) or len(tokens) != len(loss_mask) or len(tokens) != len(logprobs):
                 raise ValueError("agentic train batch has misaligned token/mask/logprob rows")
-            prompt_mask = [not item for item in response_mask]
+            prompt_len = _agentic_prompt_len(response_mask)
             advantage = advantages_by_row.get(row_idx, 0.0)
-            advantages = [advantage if is_loss else 0.0 for is_loss in loss_mask]
-            rollout_logprobs.extend(lp for lp, is_loss in zip(logprobs, loss_mask, strict=True) if is_loss)
+            effective_loss_mask = loss_mask if any(not item for item in loss_mask[prompt_len:]) else []
+            if effective_loss_mask:
+                rollout_logprobs.extend(
+                    lp for lp, is_loss in zip(logprobs, effective_loss_mask, strict=True) if is_loss
+                )
+            else:
+                rollout_logprobs.extend(logprobs[prompt_len:])
             train_batch.append(
-                areno.api.TrainSequence(
-                    prompt_mask=prompt_mask,
-                    loss_mask=loss_mask,
+                areno.api.TrainSequence.model_construct(
+                    prompt_mask=[],
+                    loss_mask=effective_loss_mask,
                     tokens=tokens,
                     logprobs=logprobs,
-                    advantages=advantages,
+                    advantages=[],
+                    prompt_len=prompt_len,
+                    scalar_advantage=advantage,
+                    features=features,
                     reward=float(reward),
                     eos_token_id=tokenizer.eos_token_id,
+                    returns=[],
+                    values=[],
+                    ref_logprobs=[],
                 )
             )
         return train_batch, rewards_all, rollout_logprobs
@@ -488,13 +533,13 @@ class PolicyOnlyTrainer:
     def _record_sample_completions(self, tokenizer, epoch: int, step: int, prompt_batch, rollout_results) -> None:
         # Diagnostics knob: setting ARENO_LOG_COMPLETIONS=N records up to N
         # decoded completions per step in the metrics directory.
-        limit = int(os.getenv("ARENO_LOG_COMPLETIONS", "1"))
+        limit = int(os.getenv("ARENO_LOG_COMPLETIONS", "0"))
         if limit <= 0:
             return
         logged = 0
         for prompt_idx, (item, result) in enumerate(zip(prompt_batch.items, rollout_results, strict=True)):
             for sample_idx, seq in enumerate(result.sequences):
-                self.areno.record_rollout_sample(
+                self._emit_completion_sample(
                     {
                         "kind": "rollout",
                         "epoch": epoch,
@@ -515,7 +560,7 @@ class PolicyOnlyTrainer:
     def _log_agentic_sample_completions(self, epoch: int, step: int, agent_batch) -> None:
         # Match non-agentic rollout diagnostics so reward/debug workflows do
         # not depend on rollout mode.
-        limit = int(os.getenv("ARENO_LOG_COMPLETIONS", "1"))
+        limit = int(os.getenv("ARENO_LOG_COMPLETIONS", "0"))
         if limit <= 0:
             return
         for logged, record in enumerate(agent_batch.reward_records):
@@ -524,7 +569,7 @@ class PolicyOnlyTrainer:
             loss_mask = agent_batch.loss_masks[logged]
             token_row = agent_batch.token_rows[logged]
             first_loss_idx = next((idx for idx, enabled in enumerate(loss_mask) if enabled), -1)
-            self.areno.record_rollout_sample(
+            self._emit_completion_sample(
                 {
                     "kind": "agentic",
                     "epoch": epoch,
@@ -545,6 +590,12 @@ class PolicyOnlyTrainer:
             )
             if logged + 1 >= limit:
                 return
+
+    def _emit_completion_sample(self, sample: dict) -> None:
+        """Log an opted-in completion and persist it with rollout metrics."""
+
+        self.logger.info("rollout_completion=%s", json.dumps(sample, ensure_ascii=False, default=str))
+        self.areno.record_rollout_sample(sample)
 
     def _materialize_train_batch(self, tokenizer, prompt_batch, rollout_results):
         """Assemble TrainSequence rows for one rollout batch.
@@ -600,6 +651,7 @@ class PolicyOnlyTrainer:
                         # zero prefix keeps tensor lengths aligned with tokens.
                         logprobs=[0.0] * prefix_len + seq.resp_logprobs,
                         advantages=[0.0] * prefix_len + [advantage] * resp_len,
+                        features=item.record.get("features"),
                         reward=reward,
                         eos_token_id=tokenizer.eos_token_id,
                     )
@@ -621,3 +673,10 @@ class PolicyOnlyTrainer:
         record_dashboard_state(
             self.areno, stage="save_checkpoint_end", epoch=epoch, step=step, role=self._policy_role_name()
         )
+
+
+def _agentic_prompt_len(response_mask: list[bool]) -> int:
+    for idx, is_response in enumerate(response_mask):
+        if is_response:
+            return idx
+    return len(response_mask)

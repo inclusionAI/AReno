@@ -13,7 +13,11 @@ from typing import Any
 import torch
 from torch import nn
 
-from areno.engine.checkpoints.common import load_checkpoint_weights, save_checkpoint_weights
+from areno.engine.checkpoints.common import (
+    build_checkpoint_policy_plan,
+    load_checkpoint_weights,
+    save_checkpoint_weights,
+)
 from areno.engine.config import ModelConfig, _parse_dtype
 from areno.models.base import ModelAdapter
 from areno.models.llama.checkpoint import CHECKPOINT_SPEC
@@ -68,3 +72,6 @@ class LlamaAdapter(ModelAdapter):
         if not isinstance(model, Qwen3ForCausalLM):
             raise TypeError(f"LlamaAdapter cannot save weights from {type(model)!r}")
         return save_checkpoint_weights(model, output_path, source_path, CHECKPOINT_SPEC)
+
+    def build_policy_plan(self, model: nn.Module):
+        return build_checkpoint_policy_plan(model, CHECKPOINT_SPEC)
