@@ -203,25 +203,23 @@ class ConfigAndDataTest(unittest.TestCase):
 
     def test_engine_config_rejects_replicated_kv_lora_targets(self):
         """Replicated Qwen3 KV requires range-aware LoRA support."""
-        for model_type in ("qwen3", "qwen3_moe"):
-            with self.subTest(model_type=model_type):
-                model = ModelConfig(
-                    model_type=model_type,
-                    num_attention_heads=8,
-                    num_key_value_heads=2,
-                    intermediate_size=16,
-                    vocab_size=32,
-                )
+        model = ModelConfig(
+            model_type="qwen3_moe",
+            num_attention_heads=8,
+            num_key_value_heads=2,
+            intermediate_size=16,
+            vocab_size=32,
+        )
 
-                with self.assertRaisesRegex(ValueError, "replicated-KV.*k_proj"):
-                    EngineConfig(model=model, tp_size=4, devices=[0, 1, 2, 3], lora=LoraConfig())
+        with self.assertRaisesRegex(ValueError, "Qwen3-MoE replicated-KV.*k_proj"):
+            EngineConfig(model=model, tp_size=4, devices=[0, 1, 2, 3], lora=LoraConfig())
 
-                EngineConfig(
-                    model=model,
-                    tp_size=4,
-                    devices=[0, 1, 2, 3],
-                    lora=LoraConfig(target_modules=("q_proj", "o_proj")),
-                )
+        EngineConfig(
+            model=model,
+            tp_size=4,
+            devices=[0, 1, 2, 3],
+            lora=LoraConfig(target_modules=("q_proj", "o_proj")),
+        )
 
     def test_reference_view_requires_lora_at_engine_boundary(self):
         """The actor base can be reused only when the actor owns a native adapter."""

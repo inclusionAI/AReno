@@ -843,6 +843,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
     args.multimodal_projector_min_lr = getattr(args, "multimodal_projector_min_lr", None)
     args.multimodal_projector_lr_decay_steps = getattr(args, "multimodal_projector_lr_decay_steps", None)
     args.multimodal_projector_lr_decay_style = getattr(args, "multimodal_projector_lr_decay_style", None)
+    args.reference_mode = getattr(args, "reference_mode", "independent")
     lora = getattr(args, "lora", None)
     algorithm = get_algorithm(args.algo)
     chat_template_enable_thinking = False if args.disable_thinking else None
