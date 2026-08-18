@@ -182,10 +182,6 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
     args.max_steps = getattr(args, "max_steps", None)
     args.score_micro_bs = getattr(args, "score_micro_bs", 8)
     args.model_hub = getattr(args, "model_hub", "modelscope")
-    args.train_devices = getattr(args, "train_devices", None)
-    args.rollout_tp_size = getattr(args, "rollout_tp_size", None)
-    args.rollout_devices = getattr(args, "rollout_devices", None)
-    args.policy_sync_bucket_mb = getattr(args, "policy_sync_bucket_mb", 64)
     args.train_devices = _parse_cuda_devices(getattr(args, "train_devices", None), "--train-devices")
     args.rollout_devices = _parse_cuda_devices(getattr(args, "rollout_devices", None), "--rollout-devices")
     if args.rollout_tp_size is not None and args.rollout_tp_size <= 0:
@@ -196,8 +192,6 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
         args.train_devices = list(range(args.world_size))
     if args.rollout_devices is None and args.rollout_tp_size is not None:
         args.rollout_devices = list(args.train_devices)
-    args.rollout_tp_size = getattr(args, "rollout_tp_size", None)
-    args.policy_sync_bucket_mb = getattr(args, "policy_sync_bucket_mb", 64)
     smoke_infer = bool(getattr(args, "smoke_infer", False))
     smoke_train = bool(getattr(args, "smoke_train", False))
     if smoke_infer or smoke_train:
