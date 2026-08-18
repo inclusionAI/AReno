@@ -70,12 +70,16 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "tp_size",
             "gpu_warn_mem_free_pct",
             "gpu_warn_util_pct",
+            "train_devices",
         ),
     ),
     (
         "Rollout",
         (
             "batch_size",
+            "rollout_tp_size",
+            "rollout_devices",
+            "policy_sync_bucket_mb",
             "n_samples",
             "max_running_prompts",
             "max_prompt_tokens",
@@ -178,6 +182,22 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
     args.max_steps = getattr(args, "max_steps", None)
     args.score_micro_bs = getattr(args, "score_micro_bs", 8)
     args.model_hub = getattr(args, "model_hub", "modelscope")
+    args.train_devices = getattr(args, "train_devices", None)
+    args.rollout_tp_size = getattr(args, "rollout_tp_size", None)
+    args.rollout_devices = getattr(args, "rollout_devices", None)
+    args.policy_sync_bucket_mb = getattr(args, "policy_sync_bucket_mb", 64)
+    args.train_devices = _parse_cuda_devices(getattr(args, "train_devices", None), "--train-devices")
+    args.rollout_devices = _parse_cuda_devices(getattr(args, "rollout_devices", None), "--rollout-devices")
+    if args.rollout_tp_size is not None and args.rollout_tp_size <= 0:
+        raise click.UsageError("--rollout-tp-size must be positive")
+    if args.train_devices is not None:
+        args.world_size = len(args.train_devices)
+    else:
+        args.train_devices = list(range(args.world_size))
+    if args.rollout_devices is None and args.rollout_tp_size is not None:
+        args.rollout_devices = list(args.train_devices)
+    args.rollout_tp_size = getattr(args, "rollout_tp_size", None)
+    args.policy_sync_bucket_mb = getattr(args, "policy_sync_bucket_mb", 64)
     smoke_infer = bool(getattr(args, "smoke_infer", False))
     smoke_train = bool(getattr(args, "smoke_train", False))
     if smoke_infer or smoke_train:
@@ -200,8 +220,8 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
         raise click.UsageError("--smoke-infer and --smoke-train are mutually exclusive")
     if tune_params and not algorithm.requires_rollout:
         raise click.UsageError("--tune-params currently supports rollout-based algorithms")
-    if (smoke_infer or smoke_train) and not algorithm.requires_rollout:
-        raise click.UsageError("--smoke-infer and --smoke-train currently support rollout-based algorithms")
+    if smoke_infer and not algorithm.requires_rollout:
+        raise click.UsageError("--smoke-infer currently supports rollout-based algorithms")
     if mem_frac <= 0 or mem_frac > 1:
         raise click.UsageError("--mem-frac must be in (0, 1]")
     if tune_max_samples <= 0:
@@ -229,6 +249,15 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
         raise click.UsageError("--gpu-warn-mem-free-pct must be in [0, 100]")
     if not (0 <= args.gpu_warn_util_pct <= 100):
         raise click.UsageError("--gpu-warn-util-pct must be in [0, 100]")
+    has_rollout_topology = args.rollout_devices is not None or args.rollout_tp_size is not None
+    if has_rollout_topology and not algorithm.requires_rollout:
+        raise click.UsageError("independent rollout devices are only valid for rollout-based algorithms")
+    if args.rollout_devices is not None:
+        rollout_tp_size = args.tp_size if args.rollout_tp_size is None else args.rollout_tp_size
+        if len(args.rollout_devices) % rollout_tp_size != 0:
+            raise click.UsageError("--rollout-devices count must be divisible by --rollout-tp-size")
+    if args.policy_sync_bucket_mb <= 0:
+        raise click.UsageError("--policy-sync-bucket-mb must be positive")
     if args.batch_size <= 0:
         raise click.UsageError("--batch-size must be positive")
     if algorithm.requires_rollout and args.n_samples <= 0:
@@ -288,6 +317,36 @@ def _require_positive_float(value: float, option_name: str) -> None:
         raise click.UsageError(f"{option_name} must be positive")
 
 
+def _parse_cuda_devices(value: str | None, option_name: str) -> list[int] | None:
+    """Parse CUDA indices and inclusive ranges such as ``0..3,8``."""
+
+    if value is None:
+        return None
+    parts = [part.strip() for part in value.split(",")]
+    if not parts or any(not part for part in parts):
+        raise click.UsageError(f"{option_name} must be a comma-separated list of CUDA indices or ranges")
+    devices = []
+    try:
+        for part in parts:
+            if ".." not in part:
+                devices.append(int(part))
+                continue
+            endpoints = part.split("..")
+            if len(endpoints) != 2 or not all(endpoints):
+                raise ValueError
+            start, end = (int(endpoint) for endpoint in endpoints)
+            if start > end:
+                raise click.UsageError(f"{option_name} range start must not exceed range end: {part}")
+            devices.extend(range(start, end + 1))
+    except ValueError as exc:
+        raise click.UsageError(f"{option_name} must contain only integer CUDA indices or ranges") from exc
+    if any(device < 0 for device in devices):
+        raise click.UsageError(f"{option_name} must not contain negative CUDA device indices")
+    if len(devices) != len(set(devices)):
+        raise click.UsageError(f"{option_name} must not contain duplicate CUDA device indices")
+    return devices
+
+
 def _format_training_config_summary(
     config: TrainerConfig,
     *,
@@ -329,6 +388,12 @@ def _format_training_config_summary(
                 ("world_size", str(config.world_size)),
                 ("tp_size", str(config.tp_size)),
                 ("dp_size", _resolved_dp_size_for_summary(config)),
+                (
+                    "devices",
+                    ",".join(str(device) for device in config.train_devices)
+                    if config.train_devices is not None
+                    else f"0..{config.world_size - 1}",
+                ),
                 ("attn_backend", attn_backend),
                 (
                     "thinking",
@@ -451,6 +516,27 @@ def _rollout_summary_rows(config: TrainerConfig) -> list[tuple[str, str]]:
         ]
     return [
         *base,
+        (
+            "topology",
+            (
+                "shared with train engine"
+                if config.rollout_devices is None
+                else (
+                    f"world={len(config.rollout_devices)}, "
+                    f"tp={config.rollout_tp_size or config.tp_size}, "
+                    f"dp={len(config.rollout_devices) // (config.rollout_tp_size or config.tp_size)}, "
+                    f"devices={','.join(str(device) for device in config.rollout_devices)}"
+                )
+            ),
+        ),
+        (
+            "policy_sync",
+            (
+                "shared weights"
+                if config.rollout_devices is None
+                else f"NCCL direct, lazy, bucket={config.policy_sync_bucket_mb} MiB"
+            ),
+        ),
         ("n_samples", str(config.n_samples)),
         ("max_running_prompts", str(config.resolved_max_running_prompts())),
         (
@@ -604,6 +690,10 @@ def _trainer_config_from_args(args) -> TrainerConfig:
     args.max_steps = getattr(args, "max_steps", None)
     args.score_micro_bs = getattr(args, "score_micro_bs", 8)
     args.model_hub = getattr(args, "model_hub", "modelscope")
+    args.train_devices = getattr(args, "train_devices", None)
+    args.rollout_tp_size = getattr(args, "rollout_tp_size", None)
+    args.rollout_devices = getattr(args, "rollout_devices", None)
+    args.policy_sync_bucket_mb = getattr(args, "policy_sync_bucket_mb", 64)
     algorithm = get_algorithm(args.algo)
     chat_template_enable_thinking = False if args.disable_thinking else None
     if algorithm.name == "dpo":
@@ -619,6 +709,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             max_steps=args.max_steps,
             tp_size=args.tp_size,
             world_size=args.world_size,
+            train_devices=args.train_devices,
             batch_size=args.batch_size,
             mini_bs=args.mini_bs,
             score_micro_bs=args.score_micro_bs,
@@ -660,6 +751,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             max_steps=args.max_steps,
             tp_size=args.tp_size,
             world_size=args.world_size,
+            train_devices=args.train_devices,
             batch_size=args.batch_size,
             mini_bs=args.mini_bs,
             score_micro_bs=args.score_micro_bs,
@@ -700,6 +792,10 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             max_steps=args.max_steps,
             tp_size=args.tp_size,
             world_size=args.world_size,
+            train_devices=args.train_devices,
+            rollout_tp_size=args.rollout_tp_size,
+            rollout_devices=args.rollout_devices,
+            policy_sync_bucket_mb=args.policy_sync_bucket_mb,
             batch_size=args.batch_size,
             n_samples=args.n_samples,
             mini_bs=args.mini_bs,
@@ -747,6 +843,10 @@ def _trainer_config_from_args(args) -> TrainerConfig:
         max_steps=args.max_steps,
         tp_size=args.tp_size,
         world_size=args.world_size,
+        train_devices=args.train_devices,
+        rollout_tp_size=args.rollout_tp_size,
+        rollout_devices=args.rollout_devices,
+        policy_sync_bucket_mb=args.policy_sync_bucket_mb,
         batch_size=args.batch_size,
         n_samples=args.n_samples,
         mini_bs=args.mini_bs,
@@ -805,9 +905,9 @@ def _warn_gpu_occupancy(config: TrainerConfig, *, mem_free_warn_pct: int, util_w
     warn only, never terminate or alter other processes.
     """
 
-    # Derive the list of GPU indices from world_size, matching the pattern
-    # used by _resolved_attn_backend_for_summary (line 474).
-    devices = list(range(config.world_size))
+    # Derive the list of GPU indices from train_devices if specified,
+    # otherwise fall back to world_size range.
+    devices = config.train_devices if config.train_devices is not None else list(range(config.world_size))
 
     # Lazy import: gpu_check is pure stdlib but we follow the project convention
     # of importing heavy/relevant modules inside functions so `areno train --help`
@@ -856,6 +956,7 @@ def run(trainer_config: TrainerConfig):
         backend_type=areno.api.Areno,
         metrics_log_dir=trainer_config.metrics_log_dir,
         custom_config=trainer_config.areno_config(),
+        score_micro_bs=trainer_config.score_micro_bs,
     )
     dataset = _load_dataset_for_training(
         trainer_config.dataset_path,
@@ -1263,7 +1364,15 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     is_flag=True,
     help="Dummy-load the model and run one minimal synthetic train step, then exit.",
 )
-@click.option("--tp-size", type=int, default=4, show_default=True, help="Tensor parallel size for the backend.")
+@click.option(
+    "--tp-size",
+    "--train-tp-size",
+    "tp_size",
+    type=int,
+    default=4,
+    show_default=True,
+    help="Tensor parallel size for training.",
+)
 @click.option("--world-size", type=int, default=8, show_default=True, help="Total device count for the backend.")
 @click.option(
     "--gpu-warn-mem-free-pct",
@@ -1278,6 +1387,31 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     default=90,
     show_default=True,
     help="Warn before launch when a selected GPU utilization exceeds this percentage.",
+)
+@click.option(
+    "--train-devices",
+    type=str,
+    default=None,
+    help="CUDA devices for training, with inclusive ranges such as 0..7,10; defaults to devices from --world-size.",
+)
+@click.option(
+    "--rollout-tp-size",
+    type=int,
+    default=None,
+    help="Tensor parallel size for an independent rollout engine using the training device set by default.",
+)
+@click.option(
+    "--rollout-devices",
+    type=str,
+    default=None,
+    help="CUDA devices for the independent rollout engine; defaults to the training device set when omitted.",
+)
+@click.option(
+    "--policy-sync-bucket-mb",
+    type=int,
+    default=64,
+    show_default=True,
+    help="Maximum GPU buffer size used by direct NCCL policy synchronization.",
 )
 @click.option("--batch-size", type=int, default=32, show_default=True, help="Prompt/pair batch size.")
 @click.option(

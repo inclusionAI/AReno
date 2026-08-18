@@ -22,10 +22,27 @@ def normalize_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         # the tool_calls payload.
         if item.get("content") is None:
             item["content"] = ""
+        elif isinstance(item.get("content"), list):
+            text_content = _text_only_content(item["content"])
+            if text_content is not None:
+                item["content"] = text_content
         if isinstance(item.get("tool_calls"), list):
             item["tool_calls"] = [_normalize_message_tool_call(call) for call in item["tool_calls"]]
         normalized.append(item)
     return normalized
+
+
+def _text_only_content(content: list[Any]) -> str | None:
+    """Flatten OpenAI text parts while preserving multimodal content lists."""
+
+    parts: list[str] = []
+    for part in content:
+        if not isinstance(part, dict) or part.get("type") not in {"text", "input_text"}:
+            return None
+        text = part.get("text")
+        if text is not None:
+            parts.append(str(text))
+    return "".join(parts)
 
 
 def _normalize_message_tool_call(call: Any) -> Any:

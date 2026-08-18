@@ -26,9 +26,11 @@ from areno.engine.data.sampling import _truncate_generated
 from areno.engine.inference import InferCacheSpec, InferenceManager
 from areno.engine.modeling import build_model_on_device, build_optimizer, param_grad
 from areno.engine.parallel.context import get_tp_context
+from areno.engine.policy_sync import policy_plan_metadata, transfer_policy_weights
 from areno.engine.protocol import (
     Command,
     Op,
+    PolicySyncPayload,
     RolloutCacheProbePayload,
     RolloutPayload,
     SaveCheckpointPayload,
@@ -63,7 +65,7 @@ class ArenoWorker:
         if config.runtime.compile_model:
             self.model = torch.compile(self.model)
         opt = config.optimizer
-        self.optimizer = build_optimizer(self.model.parameters(), opt, ctx)
+        self.optimizer = build_optimizer(self.model.parameters(), opt, ctx) if config.role == "train" else None
         self.grad_clip_norm = opt.grad_clip_norm
         self.base_lr = opt.lr
         self.min_lr = opt.min_lr
@@ -88,10 +90,14 @@ class ArenoWorker:
         self._train_state_ready = False
         self._actor_on_device = True
         self._current_request_ids: list[int | None] = []
+        self._policy_sync_plan = None
+        self._policy_sync_metadata = None
+        self._policy_sync_buffer = None
+        self._loaded_policy_version = 0
         self.inference = InferenceManager(self)
         self.roles = RoleManager(self)
-        self.training = TrainingManager(self)
-        if config.train_loss_fn is None:
+        self.training = TrainingManager(self) if config.role == "train" else None
+        if config.role == "train" and config.train_loss_fn is None:
             raise ValueError("ArenoEngine requires train_loss_fn")
         self.loss_fn = config.train_loss_fn
 
@@ -110,6 +116,8 @@ class ArenoWorker:
         if cmd.op is Op.ROLLOUT_SESSION_END:
             return self.rollout_session_end(cmd.payload)
         if cmd.op is Op.TRAIN:
+            if self.training is None:
+                raise RuntimeError("rollout workers cannot execute training operations")
             return self.train(cmd.payload)
         if cmd.op is Op.SCORE_LOGPROBS:
             return self.score_logprobs(cmd.payload)
@@ -121,7 +129,53 @@ class ArenoWorker:
             return self.train_values(cmd.payload)
         if cmd.op is Op.SAVE_CHECKPOINT:
             return self.save_checkpoint(cmd.payload)
+        if cmd.op is Op.POLICY_SYNC_PLAN:
+            return self.policy_sync_plan(cmd.payload)
+        if cmd.op is Op.POLICY_SYNC_PUBLISH:
+            return self.publish_policy(cmd.payload)
+        if cmd.op is Op.POLICY_SYNC_RECEIVE:
+            return self.receive_policy(cmd.payload)
         raise ValueError(f"unsupported areno op: {cmd.op}")
+
+    def policy_sync_plan(self, payload: None):
+        """Build canonical metadata before paired cross-partition collectives."""
+
+        del payload
+        if self.config.role == "rollout":
+            self._prepare_policy_receive()
+        else:
+            self._prepare_actor_onloaded()
+            self.model.onload_train_weights(self.device)
+        return policy_plan_metadata(self)
+
+    def publish_policy(self, payload: PolicySyncPayload) -> dict[str, object]:
+        """Publish authoritative train shards to the rollout partition."""
+
+        self._prepare_actor_onloaded()
+        self.model.onload_train_weights(self.device)
+        return transfer_policy_weights(self, payload)
+
+    @torch.no_grad()
+    def receive_policy(self, payload: PolicySyncPayload) -> dict[str, object]:
+        """Replace rollout shards in place and rebuild inference weights."""
+
+        self._prepare_policy_receive()
+        result = transfer_policy_weights(self, payload)
+        self.model.prepare_infer_weights()
+        self.model.offload_train_weights()
+        self._train_state_ready = False
+        self._loaded_policy_version = payload.version
+        return result
+
+    def _prepare_policy_receive(self) -> None:
+        """Release stale derived rollout state before receiving live weights."""
+
+        self._prepare_actor_onloaded()
+        self._release_decode_graphs()
+        self._infer_cache_spec = None
+        self.model.clear_infer_weights()
+        self.model.clear_kv_caches()
+        self.model.onload_train_weights(self.device)
 
     def ensure_roles(self, payload: dict) -> None:
         """Delegate non-actor role lifecycle to `RoleManager`."""
@@ -249,6 +303,11 @@ class ArenoWorker:
                 new_request_ids = [cmd.request_id]
                 new_counts = [len(new_payload.prompts_by_dp[ctx.dp_rank])]
                 prompts = [list(prompt) for prompt in new_payload.prompts_by_dp[ctx.dp_rank]]
+                prompt_features = (
+                    list(new_payload.prompt_features_by_dp[ctx.dp_rank])
+                    if new_payload.prompt_features_by_dp is not None
+                    else None
+                )
                 prompt_indices = list(new_payload.prompt_indices_by_dp[ctx.dp_rank])
                 request_ids.extend(new_request_ids)
                 counts.extend(new_counts)
@@ -257,9 +316,13 @@ class ArenoWorker:
                 if not prompts:
                     send_empty_requests()
                     continue
-                appended_rows = state.append_prompts(prompts)
+                appended_rows = state.append_prompts(prompts, prompt_features)
                 if payload.prompts_by_dp[ctx.dp_rank] is not state.prompts:
                     payload.prompts_by_dp[ctx.dp_rank].extend(prompts)
+                if prompt_features is not None:
+                    if payload.prompt_features_by_dp is None:
+                        payload.prompt_features_by_dp = [[None for _ in rows] for rows in payload.prompts_by_dp]
+                    payload.prompt_features_by_dp[ctx.dp_rank].extend(prompt_features)
                 payload.prompt_indices_by_dp[ctx.dp_rank].extend(prompt_indices)
                 request_rows[-1] = appended_rows
                 new_prompt_indices.extend(prompt_indices)
@@ -309,8 +372,7 @@ class ArenoWorker:
             request_id = -1 if cmd.request_id is None else int(cmd.request_id)
         header = torch.tensor([has_command, op_value, request_id], device=ctx.device, dtype=torch.long)
         if ctx.world_size > 1:
-            src = ctx.dp_rank * ctx.world_size
-            dist.broadcast(header, src=src, group=ctx.group)
+            dist.broadcast(header, src=ctx.tp_global_rank(0), group=ctx.group)
         if int(header[0].item()) == 0:
             return None
         return Op(int(header[1].item())), None if int(header[2].item()) < 0 else int(header[2].item())
@@ -354,7 +416,8 @@ class ArenoWorker:
         del payload
         if not self.config.runtime.keep_rollout_state:
             self._drop_rollout_hbm()
-        self._prepare_for_train()
+        if self.config.role == "train":
+            self._prepare_for_train()
 
     def _prepare_for_train(self) -> None:
         """Ensure the actor is on-device and train weights are loaded."""
@@ -368,8 +431,18 @@ class ArenoWorker:
             return
         self.model.to(self.device)
         self.model.onload_train_weights(self.device)
-        self.optimizer.onload_state(self.device)
+        if self.optimizer is not None:
+            self.optimizer.onload_state(self.device)
         self._actor_on_device = True
+
+    def _prepare_actor_for_inference(self) -> None:
+        """Materialize actor inference weights without retaining source expert tiles."""
+
+        self._prepare_actor_onloaded()
+        self.model.onload_train_weights(self.device)
+        self.model.prepare_infer_weights()
+        self.model.offload_train_weights()
+        self._train_state_ready = False
 
     def _prepare_actor_offloaded(self) -> None:
         """Push the actor to CPU and drop all HBM state, including decode graphs.
@@ -385,7 +458,8 @@ class ArenoWorker:
         self.model.clear_kv_caches()
         self.model.offload_train_weights()
         self.model.to("cpu")
-        self.optimizer.offload_state()
+        if self.optimizer is not None:
+            self.optimizer.offload_state()
         self._train_state_ready = False
         self._actor_on_device = False
         if self.device.type == "cuda":
@@ -434,6 +508,8 @@ class ArenoWorker:
 
     def train(self, payload: dict) -> list[dict | None]:
         """Delegate actor training to `TrainingManager`."""
+        if self.training is None:
+            raise RuntimeError("rollout workers cannot execute training operations")
         return self.training.train(payload)
 
     def _sync_role_grads(self, role: WorkerRole) -> None:
@@ -481,6 +557,7 @@ def _rollout_payloads_compatible(first: RolloutPayload, other: RolloutPayload) -
         and first.sampling_params == other.sampling_params
         and first.block_size == other.block_size
         and first.decode_progress_interval_s == other.decode_progress_interval_s
+        and (first.prompt_features_by_dp is None) == (other.prompt_features_by_dp is None)
         and first.cancel_flags is None
         and other.cancel_flags is None
         and first.cancel_indices_by_dp is None

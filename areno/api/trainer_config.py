@@ -35,6 +35,7 @@ class TrainerConfig:
     max_steps: int | None = None
     tp_size: int = 4
     world_size: int = 8
+    train_devices: list[int] | None = None
     batch_size: int = 32
     mini_bs: int = 16
     score_micro_bs: int = 8
@@ -92,6 +93,7 @@ class TrainerConfig:
 
         return ArenoConfig(
             tp_size=self.tp_size,
+            devices=self.train_devices,
             optimizer=self.optimizer_config(),
             runtime={
                 "activation_checkpointing": self.activation_checkpointing,
@@ -112,6 +114,9 @@ class RolloutTrainerConfig(TrainerConfig):
     top_k: int = -1
     top_p: float = 1.0
     max_running_prompts: int | None = None
+    rollout_tp_size: int | None = None
+    rollout_devices: list[int] | None = None
+    policy_sync_bucket_mb: int = 64
 
     def resolved_max_running_prompts(self) -> int:
         """Return explicit or full-batch rollout concurrency."""
@@ -127,6 +132,10 @@ class RolloutTrainerConfig(TrainerConfig):
 
         return ArenoConfig(
             tp_size=self.tp_size,
+            devices=self.train_devices,
+            rollout_tp_size=self.rollout_tp_size,
+            rollout_devices=self.rollout_devices,
+            policy_sync_bucket_mb=self.policy_sync_bucket_mb,
             max_running_prompts=self.resolved_max_running_prompts(),
             optimizer=self.optimizer_config(),
             runtime={
