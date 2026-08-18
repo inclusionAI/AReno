@@ -245,7 +245,7 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
     if tune_max_samples <= 0:
         raise click.UsageError("--tune-max-samples must be positive")
     if (
-        algorithm.requires_rollout
+        algorithm.requires_reward
         and not (smoke_infer or smoke_train)
         and args.reward_fn_path is None
         and args.reward_ckpt is None
@@ -398,6 +398,7 @@ def _format_training_config_summary(
                 ("name", algorithm.name),
                 ("default_loss", _callable_name(algorithm.default_loss_fn)),
                 ("requires_rollout", _format_bool(algorithm.requires_rollout)),
+                ("requires_reward", _format_bool(algorithm.requires_reward)),
             ],
         ),
         (

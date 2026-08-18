@@ -7,6 +7,7 @@ import pytest
 from click import UsageError, unstyle
 from click.testing import CliRunner
 
+from areno.api.algorithms import AlgorithmSpec, register_algorithm
 from areno.api.trainer_config import DPOTrainerConfig, PolicyTrainerConfig, PPOTrainerConfig, TrainerConfig
 from areno.cli import train as train_cli
 from areno.cli.train import (
@@ -51,6 +52,37 @@ def test_train_config_unknown_algorithm_message_lists_registered_algorithms():
 def test_train_config_requires_world_size_divisible_by_tp_size():
     with pytest.raises(UsageError, match="--world-size must be divisible by --tp-size"):
         _trainer_config_from_options(**_options(algo="sft", world_size=3, tp_size=2))
+
+
+def test_rollout_algorithm_can_omit_reward_when_registry_allows_it():
+    class DummyTrainer:
+        pass
+
+    def dummy_loss(data_pack, logprobs):
+        return data_pack, logprobs
+
+    register_algorithm(
+        AlgorithmSpec(
+            name="unit_rollout_without_reward",
+            trainer_cls=DummyTrainer,
+            default_loss_fn=dummy_loss,
+            requires_rollout=True,
+            requires_reward=False,
+            experimental=True,
+        ),
+        replace=True,
+    )
+
+    cfg = _trainer_config_from_options(
+        **_options(
+            algo="unit_rollout_without_reward",
+            reward_fn_path=None,
+            reward_ckpt=None,
+        )
+    )
+
+    assert isinstance(cfg, PolicyTrainerConfig)
+    assert cfg.reward_fn_path is None
 
 
 @pytest.mark.parametrize(
@@ -358,6 +390,10 @@ def test_training_config_summary_shows_resolved_values_and_warning():
     assert "optimizer                    lr=2e-06, min_lr=0.0, decay=cosine/100" in summary
     assert "metrics_log_dir  /tmp/metrics" in summary
     assert "WARNING: no checkpoint output path configured (--save-path)" in summary
+    assert "name              gspo" in summary
+    assert "default_loss      gspo_loss_fn" in summary
+    assert "requires_rollout  yes" in summary
+    assert "requires_reward   yes" in summary
 
 
 def test_training_config_summary_warns_about_native_attention_fallback(monkeypatch):
@@ -416,6 +452,10 @@ def test_training_config_summary_marks_non_rollout_fields_not_applicable():
     assert "n_samples            n/a" in summary
     assert "max_running_prompts  n/a" in summary
     assert "sampling             n/a" in summary
+    assert "name              sft" in summary
+    assert "requires_rollout  no" in summary
+    assert "requires_reward   no" in summary
+    assert "reward_fn       n/a" in summary
 
 
 def test_training_config_summary_handles_invalid_tp_size_defensively():

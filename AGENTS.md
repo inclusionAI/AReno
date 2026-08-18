@@ -149,7 +149,7 @@ ______________________________________________________________________
 
 **Trainer** (`areno/api/trainer.py`): the high-level entry. A typical RL loop is `init()` -> `rollout_batch()` -> score -> `train()` -> repeat -> `close()`. The CLI builds the same `Trainer` under the hood (`areno/cli/train.py`).
 
-**Algorithm registry** (`areno/api/algorithms.py`): each algorithm is an `AlgorithmSpec` (trainer class, default loss, `requires_rollout`). `--algo` selects one; discover them with `from areno.api import list_algorithms`.
+**Algorithm registry** (`areno/api/algorithms.py`): each algorithm is an `AlgorithmSpec` (trainer class, default loss, `requires_rollout`, `requires_reward`). `--algo` selects one; discover them with `from areno.api import list_algorithms`.
 
 **Loss functions** (`areno/api/loss_fns/`): `sft`, `dpo`, `gspo`, `grpo`, `ppo`, passed into `Trainer.train`.
 

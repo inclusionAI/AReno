@@ -30,6 +30,7 @@ class AlgorithmSpec:
     trainer_cls: type | TrainerFactory
     default_loss_fn: Callable
     requires_rollout: bool
+    requires_reward: bool = False
     loss_fn_factory: LossFnFactory | None = None
     experimental: bool = False
 
@@ -62,6 +63,8 @@ def register_algorithm(spec: AlgorithmSpec, *, replace: bool = False) -> None:
     name = spec.name.strip().lower()
     if not name:
         raise ValueError("algorithm name must be non-empty")
+    if spec.requires_reward and not spec.requires_rollout:
+        raise ValueError("algorithms that require reward must also require rollout")
     if name in _ALGORITHMS and not replace:
         raise ValueError(f"algorithm {name!r} is already registered")
     if name != spec.name:
@@ -70,6 +73,7 @@ def register_algorithm(spec: AlgorithmSpec, *, replace: bool = False) -> None:
             trainer_cls=spec.trainer_cls,
             default_loss_fn=spec.default_loss_fn,
             requires_rollout=spec.requires_rollout,
+            requires_reward=spec.requires_reward,
             loss_fn_factory=spec.loss_fn_factory,
             experimental=spec.experimental,
         )
@@ -174,6 +178,7 @@ def _register_builtin_algorithms() -> None:
             trainer_cls=_load_policy_trainer,
             default_loss_fn=gspo_loss_fn,
             requires_rollout=True,
+            requires_reward=True,
             loss_fn_factory=_bind_gspo_loss,
         )
     )
@@ -183,6 +188,7 @@ def _register_builtin_algorithms() -> None:
             trainer_cls=_load_policy_trainer,
             default_loss_fn=grpo_loss_fn,
             requires_rollout=True,
+            requires_reward=True,
             loss_fn_factory=_bind_grpo_loss,
         )
     )
@@ -192,6 +198,7 @@ def _register_builtin_algorithms() -> None:
             trainer_cls=_load_ppo_trainer,
             default_loss_fn=ppo_loss_fn,
             requires_rollout=True,
+            requires_reward=True,
         )
     )
 

@@ -74,7 +74,8 @@ open an issue with a short description of the method, a link to the paper, and a
 link to a reference implementation if one exists. Then:
 
 - **Algorithms** are registered, not branched. Add an `AlgorithmSpec` via
-  `register_algorithm(...)` in `areno/api/algorithms.py`, with a loss function in
+  `register_algorithm(...)` in `areno/api/algorithms.py`, declare its rollout and
+  reward requirements explicitly, and provide a loss function in
   `areno/api/loss_fns/`. New or unstable algorithms should land in
   `areno/experimental/` first and graduate to `areno/api/` once they have proven
   out — this keeps the stable API surface protected while lowering the bar to

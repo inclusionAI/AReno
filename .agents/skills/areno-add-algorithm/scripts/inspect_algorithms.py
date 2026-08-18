@@ -19,6 +19,7 @@ def main() -> int:
                 {
                     "name": name,
                     "requires_rollout": spec.requires_rollout,
+                    "requires_reward": spec.requires_reward,
                     "experimental": spec.experimental,
                     "trainer": f"{trainer.__module__}.{trainer.__name__}",
                     "loss": f"{spec.default_loss_fn.__module__}.{spec.default_loss_fn.__name__}",
