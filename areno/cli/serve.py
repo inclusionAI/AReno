@@ -246,8 +246,18 @@ class _CudaServeRuntime:
 class _MlxServeRuntime:
     """Serve adapter over the same public Trainer lifecycle used by training."""
 
-    def __init__(self, model_path: str, *, max_running_prompts: int) -> None:
-        config = MlxConfig(model_path=model_path, max_running_prompts=max_running_prompts)
+    def __init__(
+        self,
+        model_path: str,
+        *,
+        max_running_prompts: int,
+        decode_progress_interval_s: float,
+    ) -> None:
+        config = MlxConfig(
+            model_path=model_path,
+            max_running_prompts=max_running_prompts,
+            decode_progress_interval_s=decode_progress_interval_s,
+        )
         self._trainer = Trainer(1, model_path, backend_type=MLX, custom_config=config)
         self._trainer.init()
         self.tokenizer = self._trainer.get_tokenizer()
@@ -300,8 +310,12 @@ def _create_serve_runtime(
     if backend_type == MLX:
         if world_size != 1 or tp_size != 1:
             raise ValueError("MLX serving requires --world-size 1 and --tp-size 1")
-        return _MlxServeRuntime(model_path, max_running_prompts=max_running_prompts)
-    del max_running_prompts, decode_progress_interval_s
+        return _MlxServeRuntime(
+            model_path,
+            max_running_prompts=max_running_prompts,
+            decode_progress_interval_s=decode_progress_interval_s,
+        )
+    del max_running_prompts
     return _CudaServeRuntime(
         model_path,
         tp_size=tp_size,

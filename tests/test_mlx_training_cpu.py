@@ -1,5 +1,7 @@
 """CPU-only checks for MLX training batch semantics."""
 
+import logging
+
 import numpy as np
 import pytest
 
@@ -10,6 +12,7 @@ from areno.api.backend.common import (
     accumulation_steps,
     metric_reduction,
 )
+from areno.api.backend.mlx.generation import ContinuousBatchScheduler, GenerationConfig
 from areno.api.backend.mlx.provider import parameter_group
 from areno.api.backend.mlx.training import sft_target_token_count
 from areno.api.models import TrainSequence
@@ -78,6 +81,30 @@ def test_multimodal_image_grid_helpers_accept_backend_native_arrays():
     assert counts == [4]
     assert isinstance(positions, np.ndarray)
     assert positions.shape == (3, 6)
+
+
+def test_mlx_decode_progress_matches_cuda_log_shape(monkeypatch, caplog):
+    scheduler = object.__new__(ContinuousBatchScheduler)
+    scheduler._config = GenerationConfig(
+        completion_batch_size=2,
+        prefill_batch_size=2,
+        prefill_step_size=128,
+        max_kv_size=None,
+        decode_progress_interval_s=10.0,
+    )
+    scheduler._requests_by_handle = {(None, 1): object(), (None, 2): object()}
+    scheduler._decode_progress_next_time = 0.0
+    scheduler._decode_progress_window_start = 0.0
+    scheduler._decode_progress_window_tokens = 0
+    timestamps = iter((1.0, 2.0, 12.0))
+    monkeypatch.setattr("areno.api.backend.mlx.generation.time.perf_counter", lambda: next(timestamps))
+
+    with caplog.at_level(logging.INFO, logger="areno.api.backend.mlx.generation"):
+        scheduler._record_decode_progress(0)
+        scheduler._record_decode_progress(2)
+        scheduler._record_decode_progress(20)
+
+    assert caplog.messages == ["rollout decode progress: dp=0/1 active=2 cuda_graph=False tokens_per_second=2.0"]
 
 
 def test_adam8bit_lazy_state_remains_stable_after_zero_gradient_steps():

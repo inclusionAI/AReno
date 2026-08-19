@@ -6,6 +6,7 @@ import asyncio
 import importlib.metadata
 import logging
 import queue
+import time
 from concurrent.futures import Future
 from dataclasses import dataclass, field
 from threading import Event, Thread
@@ -25,6 +26,7 @@ class GenerationConfig:
     prefill_batch_size: int
     prefill_step_size: int
     max_kv_size: int | None
+    decode_progress_interval_s: float
 
 
 @dataclass(slots=True)
@@ -182,6 +184,9 @@ class ContinuousBatchScheduler:
         self._requests_by_handle: dict[tuple[object, int], _Request] = {}
         self._closed = False
         self._failure: BaseException | None = None
+        self._decode_progress_next_time = 0.0
+        self._decode_progress_window_start = 0.0
+        self._decode_progress_window_tokens = 0
         self._shutdown_complete = Event()
         self._park_on_shutdown = _needs_compile_cache_thread_workaround()
         self._park = Event()
@@ -254,8 +259,11 @@ class ContinuousBatchScheduler:
                     self._process(command)
                 closing = self._drain_commands() or closing
                 for key, generator in tuple(self._generators.items()):
-                    for response in generator.next():
+                    responses = generator.next()
+                    token_delta = sum(response.finish_reason != "stop" for response in responses)
+                    for response in responses:
                         self._record_response(key, generator, response)
+                    self._record_decode_progress(token_delta)
                 if closing and not self._requests_by_handle:
                     break
         except BaseException as exc:
@@ -351,6 +359,33 @@ class ContinuousBatchScheduler:
         self._requests_by_handle.pop(handle, None)
         if len(request.finished) == len(request.handles):
             request.future.set_result(_request_result(request))
+
+    def _record_decode_progress(self, token_delta: int) -> None:
+        """Emit the same throttled decode progress line as the CUDA backend."""
+
+        interval_s = float(self._config.decode_progress_interval_s)
+        if interval_s <= 0:
+            return
+        now = time.perf_counter()
+        if self._decode_progress_next_time <= 0.0:
+            if token_delta <= 0:
+                return
+            self._decode_progress_window_start = now
+            self._decode_progress_next_time = now + interval_s
+            return
+        self._decode_progress_window_tokens += int(token_delta)
+        if now < self._decode_progress_next_time:
+            return
+        elapsed = max(now - self._decode_progress_window_start, 1e-9)
+        tokens = self._decode_progress_window_tokens
+        self._decode_progress_window_start = now
+        self._decode_progress_next_time = now + interval_s
+        self._decode_progress_window_tokens = 0
+        logger.info(
+            "rollout decode progress: dp=0/1 active=%d cuda_graph=False tokens_per_second=%.1f",
+            len(self._requests_by_handle),
+            tokens / elapsed,
+        )
 
     def _fail_all(self, exc: BaseException) -> None:
         requests = {id(request): request for request in self._requests_by_handle.values()}

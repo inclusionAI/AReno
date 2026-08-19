@@ -132,6 +132,7 @@ class MlxBackend(Backend):
                     prefill_batch_size=self.config.prefill_batch_size,
                     prefill_step_size=self.config.prefill_step_size,
                     max_kv_size=self.config.max_kv_size,
+                    decode_progress_interval_s=self.config.decode_progress_interval_s,
                 ),
             )
         self._rollout_version = self._policy_version
