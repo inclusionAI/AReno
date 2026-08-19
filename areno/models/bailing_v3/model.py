@@ -289,7 +289,7 @@ class BailingSparseMoeBlock(nn.Module):
         with sequence_parallel_region(False):
             topk_idx, topk_weight, _ = self.gate(hidden_states, num_padding_tokens)
             flat = expert_input.view(-1, hidden)
-            if self.training:
+            if self.training or self.experts.has_lora():
                 # Permute/unpermute path is autograd-friendly.
                 out = self.experts(flat, topk_idx, topk_weight).view(bsz, seqlen, hidden)
             else:
@@ -311,6 +311,9 @@ class BailingSparseMoeBlock(nn.Module):
         down projection. Buffers are reused across calls if the shape/device
         already match to avoid reallocating on every weight refresh.
         """
+        if self.experts.has_lora():
+            self.clear_infer_weights()
+            return
         gate_weights, up_weights, down_weights = self.experts.expert_weights()
         self._infer_gate_weight = self._updated_infer_weight(
             self._infer_gate_weight,
@@ -411,10 +414,20 @@ class BailingGroupedExperts(nn.Module):
             self.hidden_size,
             dtype=config.dtype,
         )
+        self.lora_slots = nn.ModuleDict()
         # Expert weights are sharded by EP (collapsed into TP); flag them as
         # not-TP/not-SP so the standard TP collectives leave them alone.
         for param in self.parameters():
             mark_tensor_parallel_parameter(param, False, sequence_parallel=False)
+
+    def install_lora_component(self, component: str, slot: nn.Module) -> None:
+        self.lora_slots[component] = slot
+
+    def has_lora(self) -> bool:
+        return bool(self.lora_slots)
+
+    def has_active_lora(self) -> bool:
+        return self.has_lora() and next(iter(self.lora_slots.values())).enabled
 
     def forward(self, flat: torch.Tensor, topk_idx: torch.Tensor, topk_weight: torch.Tensor) -> torch.Tensor:
         return self._forward_fused_permute(flat, topk_idx, topk_weight)
@@ -438,15 +451,29 @@ class BailingGroupedExperts(nn.Module):
             # collective sync with peers.
             return all_reduce(flat.new_zeros(flat.shape))
         hidden, _ = _grouped_linear_forward(self.linear_fc1, x.contiguous(), tokens_per_expert)
+        if self.has_active_lora():
+            gate, up = hidden.chunk(2, dim=-1)
+            if "gate_proj" in self.lora_slots:
+                gate = gate + self.lora_slots["gate_proj"](x, tokens_per_expert)
+            if "up_proj" in self.lora_slots:
+                up = up + self.lora_slots["up_proj"](x, tokens_per_expert)
+            hidden = torch.cat((gate, up), dim=-1)
         # Apply routing weight before fc2 so it stays inside the fp32 reduction.
         hidden = (
             _areno_silu_and_mul_no_compile(hidden) * sorted_route_weight.unsqueeze(-1).to(dtype=hidden.dtype)
         ).contiguous()
         expert_out, _ = _grouped_linear_forward(self.linear_fc2, hidden, tokens_per_expert)
+        if self.has_active_lora() and "down_proj" in self.lora_slots:
+            expert_out = expert_out + self.lora_slots["down_proj"](hidden, tokens_per_expert)
         # Unpermute back to original (batch, seq) order, then scale and reduce.
-        out = _areno_moe_unpermute_no_compile(
-            expert_out, sorted_token_idx, merging_probs=None, restore_shape=flat.shape
-        )
+        if self.has_lora():
+            out = _areno_moe_unpermute_no_compile(
+                expert_out.float(), sorted_token_idx, merging_probs=None, restore_shape=flat.shape
+            ).to(dtype=flat.dtype)
+        else:
+            out = _areno_moe_unpermute_no_compile(
+                expert_out, sorted_token_idx, merging_probs=None, restore_shape=flat.shape
+            )
         return all_reduce(out * self.config.routed_scaling_factor)
 
     def local_routes(self, topk_idx: torch.Tensor, topk_weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -676,6 +703,7 @@ class BailingSoftmaxAttention(nn.Module):
 
     def __init__(self, config: ModelConfig, layer_idx: int):
         super().__init__()
+        self.lora_slots = nn.ModuleDict()
         ctx = get_tp_context()
         self.layer_idx = layer_idx
         # Head-dim split: rope vs non-rope channels on Q/K, plus separate V dim.
@@ -774,6 +802,15 @@ class BailingSoftmaxAttention(nn.Module):
         self.k_cache = torch.tensor([])
         self.v_cache = torch.tensor([])
 
+    def install_lora_component(self, component: str, slot: nn.Module) -> None:
+        """Attach an adapter to one replicated MLA projection."""
+
+        self.lora_slots[component] = slot
+
+    def _with_lora(self, component: str, x: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
+        slot = self.lora_slots[component] if component in self.lora_slots else None
+        return output + slot(x) if slot is not None and slot.enabled else output
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -827,11 +864,14 @@ class BailingSoftmaxAttention(nn.Module):
             q = self.q_proj(mla_input)
         else:
             assert self.q_a_proj is not None and self.q_a_layernorm is not None and self.q_b_proj is not None
-            q = self.q_b_proj(self.q_a_layernorm(self.q_a_proj(mla_input)))
+            q_a = self._with_lora("q_a_proj", mla_input, self.q_a_proj(mla_input))
+            q = self.q_b_proj(self.q_a_layernorm(q_a))
         bsz, seqlen = q.shape[:2]
         q = q.view(bsz, seqlen, self.local_heads, self.head_dim)
         q_nope, q_rope = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
-        kv_a = self.kv_a_proj_with_mqa(mla_input)
+        kv_a = self._with_lora(
+            "kv_a_proj_with_mqa", mla_input, self.kv_a_proj_with_mqa(mla_input)
+        )
         compressed_kv, k_rope = kv_a.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
         if is_sequence_parallel_active():
             k_rope = gather_from_sequence_parallel_region(k_rope)
@@ -1514,7 +1554,7 @@ class BailingMoeV3ForCausalLM(nn.Module):
     @torch.no_grad()
     def offload_train_weights(self) -> None:
         for layer in self.layers:
-            if isinstance(layer.mlp, BailingSparseMoeBlock):
+            if isinstance(layer.mlp, BailingSparseMoeBlock) and not layer.mlp.experts.has_lora():
                 layer.mlp.experts.offload_to_cpu()
 
     @torch.no_grad()

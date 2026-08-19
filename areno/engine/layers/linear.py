@@ -86,6 +86,7 @@ class ColumnParallelLinear(nn.Module):
         input_grad_allreduce: bool = True,
     ):
         super().__init__()
+        self.lora_slot: nn.Module | None = None
         ctx = get_tp_context()
         start, end = _shard_range(out_features, ctx.rank, ctx.world_size)
         self.in_features = in_features
@@ -98,6 +99,11 @@ class ColumnParallelLinear(nn.Module):
         mark_tensor_parallel_parameter(self.weight, True, sequence_parallel=True)
         mark_tensor_parallel_parameter(self.bias, True, sequence_parallel=True)
         self.reset_parameters()
+
+    def install_lora(self, slot: nn.Module) -> None:
+        """Attach one adapter before compilation and optimizer construction."""
+
+        self.lora_slot = slot
 
     def reset_parameters(self) -> None:
         nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
@@ -116,6 +122,8 @@ class ColumnParallelLinear(nn.Module):
         elif self.input_grad_allreduce:
             x = copy_to_tensor_parallel_region(x)
         out = _areno_linear_forward(x, self.weight, self.bias)
+        if self.lora_slot is not None and self.lora_slot.enabled:
+            out = out + self.lora_slot(x)
         if self.gather_output:
             # Concatenate column-shards along the last dim to recover the
             # full output (only used when downstream code needs it dense).

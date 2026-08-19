@@ -126,9 +126,13 @@ class RuntimeConfig:
 
         if self.eager_decode or lora is None:
             return
-        if model.model_type == "qwen3_moe" and {"gate_proj", "up_proj", "down_proj"} & set(lora.target_modules):
+        if model.model_type in {"qwen3_moe", "bailing_moe_v3"} and {
+            "gate_proj",
+            "up_proj",
+            "down_proj",
+        } & set(lora.target_modules):
             warnings.warn(
-                "Qwen3-MoE expert LoRA uses grouped execution during rollout; falling back to eager decode.",
+                "routed-expert LoRA uses grouped execution during rollout; falling back to eager decode.",
                 RuntimeWarning,
                 stacklevel=2,
             )

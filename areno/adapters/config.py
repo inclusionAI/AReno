@@ -1,4 +1,4 @@
-"""Public configuration for the Qwen3 dense and MoE LoRA runtime."""
+"""Public configuration for the native LoRA runtime."""
 
 from __future__ import annotations
 
@@ -16,10 +16,27 @@ QWEN3_DENSE_TARGETS = (
     "down_proj",
 )
 
+BAILING_V3_TARGETS = (
+    "q_proj",
+    "k_proj",
+    "v_proj",
+    "o_proj",
+    "q_a_proj",
+    "q_b_proj",
+    "kv_a_proj_with_mqa",
+    "kv_b_proj",
+    "dense",
+    "gate_proj",
+    "up_proj",
+    "down_proj",
+)
+
+NATIVE_LORA_TARGETS = tuple(dict.fromkeys((*QWEN3_DENSE_TARGETS, *BAILING_V3_TARGETS)))
+
 
 @dataclass(frozen=True, slots=True)
 class LoraConfig:
-    """Supported PEFT-compatible LoRA subset for Qwen3 dense and MoE models.
+    """Supported PEFT-compatible subset for native LoRA model families.
 
     When ``adapter_path`` is set, its standard PEFT metadata is authoritative
     for rank, alpha, dropout, and targets.
@@ -44,11 +61,11 @@ class LoraConfig:
         if self.alpha <= 0:
             raise ValueError("lora alpha must be > 0")
         if self.dropout != 0.0:
-            raise ValueError("native Qwen3 LoRA currently requires dropout=0")
+            raise ValueError("native LoRA currently requires dropout=0")
         requested = set(self.target_modules)
-        supported = set(QWEN3_DENSE_TARGETS)
+        supported = set(NATIVE_LORA_TARGETS)
         if not requested or not requested <= supported:
-            raise ValueError(f"target_modules must be a non-empty subset of {QWEN3_DENSE_TARGETS}")
+            raise ValueError(f"target_modules must be a non-empty subset of {NATIVE_LORA_TARGETS}")
 
     @property
     def scale(self) -> float:

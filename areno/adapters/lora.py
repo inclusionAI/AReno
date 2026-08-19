@@ -1,4 +1,4 @@
-"""TP-aware native LoRA slots for Qwen3 dense and routed-expert projections."""
+"""TP-aware native LoRA slots for dense and routed-expert projections."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from torch import nn
 
 from areno.accel import areno_grouped_linear
 from areno.adapters.config import LoraConfig
-from areno.engine.layers.linear import RowParallelLinear, mark_tensor_parallel_parameter
+from areno.engine.layers.linear import ColumnParallelLinear, RowParallelLinear, mark_tensor_parallel_parameter
 from areno.engine.parallel.context import get_tp_context
 
 
@@ -110,7 +110,7 @@ class LoraSlot(nn.Module):
 
 
 class RoutedExpertLoraSlot(nn.Module):
-    """One expert-sharded canonical LoRA A/B pair for grouped Qwen3-MoE GEMMs."""
+    """One expert-sharded canonical LoRA A/B pair for grouped MoE GEMMs."""
 
     def __init__(
         self,
@@ -216,23 +216,47 @@ class AdapterRegistry:
 
 
 def initialize_lora(model: nn.Module, config: LoraConfig, *, seed: int) -> AdapterRegistry:
-    """Freeze a Qwen3 dense or MoE base and attach canonical targets."""
+    """Freeze one supported native base and attach its canonical targets."""
 
     model_config = getattr(model, "config", None)
-    if getattr(model_config, "model_type", None) not in {"qwen3", "qwen3_moe"}:
-        raise ValueError("native LoRA currently supports Qwen3 models only")
+    model_type = getattr(model_config, "model_type", None)
+    if model_type not in {"qwen3", "qwen3_moe", "bailing_moe_v3"}:
+        raise ValueError("native LoRA currently supports Qwen3 and Bailing-MoE V3 models only")
+    if model_type == "bailing_moe_v3" and not bool(getattr(model_config, "no_kda_lora", False)):
+        raise ValueError("Bailing-MoE V3 native LoRA currently requires no_kda_lora=true")
     for parameter in model.parameters():
         parameter.requires_grad_(False)
 
     requested = set(config.target_modules)
     runtime_state = _AdapterRuntimeState()
     slots: dict[str, LoraSlot | RoutedExpertLoraSlot] = {}
+    if model_type == "bailing_moe_v3":
+        matched = _initialize_bailing_v3_lora(model, requested, config, seed, runtime_state, slots)
+    else:
+        matched = _initialize_qwen3_lora(model, requested, config, seed, runtime_state, slots)
+    missing = requested - matched
+    if missing:
+        raise ValueError(f"target_modules are not present in {model_type}: {', '.join(sorted(missing))}")
+    return AdapterRegistry(slots, config, runtime_state)
+
+
+def _initialize_qwen3_lora(
+    model: nn.Module,
+    requested: set[str],
+    config: LoraConfig,
+    seed: int,
+    runtime_state: _AdapterRuntimeState,
+    slots: dict[str, LoraSlot | RoutedExpertLoraSlot],
+) -> set[str]:
+    matched: set[str] = set()
+    model_config = model.config
     for layer_index, layer in enumerate(model.layers):
         prefix = f"layers.{layer_index}"
         qkv = layer.self_attn.qkv_proj
         for component_index, component in enumerate(("q_proj", "k_proj", "v_proj")):
             if component not in requested:
                 continue
+            matched.add(component)
             logical_name = f"{prefix}.self_attn.{component}"
             slot = LoraSlot(
                 logical_name=logical_name,
@@ -251,6 +275,7 @@ def initialize_lora(model: nn.Module, config: LoraConfig, *, seed: int) -> Adapt
             slots[logical_name] = slot
 
         if "o_proj" in requested:
+            matched.add("o_proj")
             owner = layer.self_attn.o_proj
             logical_name = f"{prefix}.self_attn.o_proj"
             slot = _row_slot(logical_name, owner, config, seed, runtime_state)
@@ -258,12 +283,15 @@ def initialize_lora(model: nn.Module, config: LoraConfig, *, seed: int) -> Adapt
             slots[logical_name] = slot
 
         if getattr(model_config, "enable_moe_block", False):
-            _install_moe_slots(layer.mlp.experts, prefix, requested, config, seed, runtime_state, slots)
+            matched.update(
+                _install_moe_slots(layer.mlp.experts, prefix, requested, config, seed, runtime_state, slots)
+            )
         else:
             gate_up = layer.mlp.gate_up_proj
             for component_index, component in enumerate(("gate_proj", "up_proj")):
                 if component not in requested:
                     continue
+                matched.add(component)
                 logical_name = f"{prefix}.mlp.{component}"
                 slot = LoraSlot(
                     logical_name=logical_name,
@@ -281,13 +309,196 @@ def initialize_lora(model: nn.Module, config: LoraConfig, *, seed: int) -> Adapt
                 slots[logical_name] = slot
 
             if "down_proj" in requested:
+                matched.add("down_proj")
                 owner = layer.mlp.down_proj
                 logical_name = f"{prefix}.mlp.down_proj"
                 slot = _row_slot(logical_name, owner, config, seed, runtime_state)
                 owner.install_lora(slot)
                 slots[logical_name] = slot
 
-    return AdapterRegistry(slots, config, runtime_state)
+    return matched
+
+
+def _initialize_bailing_v3_lora(
+    model: nn.Module,
+    requested: set[str],
+    config: LoraConfig,
+    seed: int,
+    runtime_state: _AdapterRuntimeState,
+    slots: dict[str, LoraSlot | RoutedExpertLoraSlot],
+) -> set[str]:
+    matched: set[str] = set()
+    for layer_index, layer in enumerate(model.layers):
+        prefix = f"layers.{layer_index}"
+        attention = layer.attention
+        attention_prefix = f"{prefix}.attention"
+        if hasattr(attention, "q_conv1d_weight"):
+            for component in ("q_proj", "k_proj", "v_proj"):
+                if component in requested:
+                    matched.add(component)
+                    _install_column_slot(
+                        f"{attention_prefix}.{component}",
+                        getattr(attention, component),
+                        config,
+                        seed,
+                        runtime_state,
+                        slots,
+                    )
+            if "o_proj" in requested:
+                matched.add("o_proj")
+                _install_row_slot(
+                    f"{attention_prefix}.o_proj",
+                    attention.o_proj,
+                    config,
+                    seed,
+                    runtime_state,
+                    slots,
+                )
+        else:
+            if "q_proj" in requested and attention.q_proj is not None:
+                matched.add("q_proj")
+                _install_column_slot(
+                    f"{attention_prefix}.q_proj",
+                    attention.q_proj,
+                    config,
+                    seed,
+                    runtime_state,
+                    slots,
+                )
+            for component in ("q_a_proj", "kv_a_proj_with_mqa"):
+                owner = getattr(attention, component, None)
+                if component in requested and owner is not None:
+                    matched.add(component)
+                    slot = _replicated_slot(
+                        f"{attention_prefix}.{component}", owner, config, seed, runtime_state
+                    )
+                    attention.install_lora_component(component, slot)
+                    slots[slot.logical_name] = slot
+            for component in ("q_b_proj", "kv_b_proj"):
+                owner = getattr(attention, component, None)
+                if component in requested and owner is not None:
+                    matched.add(component)
+                    _install_column_slot(
+                        f"{attention_prefix}.{component}", owner, config, seed, runtime_state, slots
+                    )
+            if "dense" in requested:
+                matched.add("dense")
+                _install_row_slot(
+                    f"{attention_prefix}.dense",
+                    attention.dense,
+                    config,
+                    seed,
+                    runtime_state,
+                    slots,
+                )
+
+        mlp_prefix = f"{prefix}.mlp"
+        if hasattr(layer.mlp, "experts"):
+            matched.update(
+                _install_moe_slots(layer.mlp.experts, prefix, requested, config, seed, runtime_state, slots)
+            )
+            if layer.mlp.shared_experts is not None:
+                matched.update(
+                    _install_dense_mlp_slots(
+                        layer.mlp.shared_experts,
+                        f"{mlp_prefix}.shared_experts",
+                        requested,
+                        config,
+                        seed,
+                        runtime_state,
+                        slots,
+                    )
+                )
+        else:
+            matched.update(
+                _install_dense_mlp_slots(
+                    layer.mlp, mlp_prefix, requested, config, seed, runtime_state, slots
+                )
+            )
+    return matched
+
+
+def _install_column_slot(
+    logical_name: str,
+    owner: ColumnParallelLinear,
+    config: LoraConfig,
+    seed: int,
+    runtime_state: _AdapterRuntimeState,
+    slots: dict[str, LoraSlot | RoutedExpertLoraSlot],
+) -> None:
+    slot = LoraSlot(
+        logical_name=logical_name,
+        base_weight=owner.weight,
+        global_in_features=owner.in_features,
+        global_out_features=owner.out_features,
+        local_in_features=owner.in_features,
+        local_out_features=owner.local_out_features,
+        row_parallel=False,
+        config=config,
+        seed=seed,
+        runtime_state=runtime_state,
+    )
+    owner.install_lora(slot)
+    slots[logical_name] = slot
+
+
+def _install_row_slot(
+    logical_name: str,
+    owner: RowParallelLinear,
+    config: LoraConfig,
+    seed: int,
+    runtime_state: _AdapterRuntimeState,
+    slots: dict[str, LoraSlot | RoutedExpertLoraSlot],
+) -> None:
+    slot = _row_slot(logical_name, owner, config, seed, runtime_state)
+    owner.install_lora(slot)
+    slots[logical_name] = slot
+
+
+def _replicated_slot(
+    logical_name: str,
+    owner: nn.Linear,
+    config: LoraConfig,
+    seed: int,
+    runtime_state: _AdapterRuntimeState,
+) -> LoraSlot:
+    return LoraSlot(
+        logical_name=logical_name,
+        base_weight=owner.weight,
+        global_in_features=owner.in_features,
+        global_out_features=owner.out_features,
+        local_in_features=owner.in_features,
+        local_out_features=owner.out_features,
+        row_parallel=False,
+        output_range=(0, owner.out_features),
+        config=config,
+        seed=seed,
+        runtime_state=runtime_state,
+    )
+
+
+def _install_dense_mlp_slots(
+    mlp: nn.Module,
+    prefix: str,
+    requested: set[str],
+    config: LoraConfig,
+    seed: int,
+    runtime_state: _AdapterRuntimeState,
+    slots: dict[str, LoraSlot | RoutedExpertLoraSlot],
+) -> set[str]:
+    matched: set[str] = set()
+    for component in ("gate_proj", "up_proj"):
+        if component in requested:
+            matched.add(component)
+            _install_column_slot(
+                f"{prefix}.{component}", getattr(mlp, component), config, seed, runtime_state, slots
+            )
+    if "down_proj" in requested:
+        matched.add("down_proj")
+        _install_row_slot(
+            f"{prefix}.down_proj", mlp.down_proj, config, seed, runtime_state, slots
+        )
+    return matched
 
 
 def _row_slot(
@@ -319,15 +530,19 @@ def _install_moe_slots(
     seed: int,
     runtime_state: _AdapterRuntimeState,
     slots: dict[str, LoraSlot | RoutedExpertLoraSlot],
-) -> None:
+) -> set[str]:
+    gate_up_weight = experts.gate_up_weight if hasattr(experts, "gate_up_weight") else experts.linear_fc1.weight
+    down_weight = experts.down_weight if hasattr(experts, "down_weight") else experts.linear_fc2.weight
     components = (
-        ("gate_proj", experts.hidden_size, experts.intermediate_size, experts.gate_up_weight),
-        ("up_proj", experts.hidden_size, experts.intermediate_size, experts.gate_up_weight),
-        ("down_proj", experts.intermediate_size, experts.hidden_size, experts.down_weight),
+        ("gate_proj", experts.hidden_size, experts.intermediate_size, gate_up_weight),
+        ("up_proj", experts.hidden_size, experts.intermediate_size, gate_up_weight),
+        ("down_proj", experts.intermediate_size, experts.hidden_size, down_weight),
     )
+    matched: set[str] = set()
     for component, in_features, out_features, base_weight in components:
         if component not in requested:
             continue
+        matched.add(component)
         logical_name = f"{prefix}.mlp.experts.{{expert}}.{component}"
         slot = RoutedExpertLoraSlot(
             logical_name=logical_name,
@@ -342,3 +557,4 @@ def _install_moe_slots(
         )
         experts.install_lora_component(component, slot)
         slots[logical_name] = slot
+    return matched
