@@ -62,14 +62,17 @@ class MlxBackend(Backend):
 
         if ctx.world_size != 1:
             raise ValueError("MLX backend currently requires world_size=1")
-        if not isinstance(ctx.custom_config, MlxConfig):
-            raise TypeError("MLX backend requires MlxConfig")
+        config = ctx.custom_config
+        if config is None:
+            config = MlxConfig()
+        if not isinstance(config, MlxConfig):
+            raise TypeError(f"MlxBackend requires MlxConfig, got {type(config)!r}")
         try:
             import mlx.core as mx
         except ImportError as exc:
             raise RuntimeError("MLX backend requires an Apple Silicon AReno installation") from exc
 
-        self.config = ctx.custom_config
+        self.config = config
         model_path = self.config.model_path or ctx.model_path
         self.provider = load_provider(model_path, adapter_path=self.config.adapter_path)
         self.model = self.provider.model

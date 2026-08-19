@@ -25,8 +25,8 @@ MLX does not import Torch/CUDA and selecting CUDA does not import MLX.
 
 The CLI selects the backend from the host: Linux uses CUDA and native Apple
 Silicon uses MLX. There is no runtime fallback. SDK callers may pass
-``backend_type=areno.CUDA`` with ``CudaConfig`` or
-``backend_type=areno.MLX`` with ``MlxConfig`` explicitly.
+``backend_type=CUDA`` with ``CudaConfig`` or ``backend_type=MLX`` with
+``MlxConfig`` explicitly. These backend symbols are exported by ``areno.api``.
 
 CUDA colocated and partitioned engines
 --------------------------------------

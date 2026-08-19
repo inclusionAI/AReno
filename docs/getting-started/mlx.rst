@@ -40,7 +40,7 @@ runtime from Python:
 
 .. code-block:: bash
 
-   python -c "import areno; print(areno.DefaultBackend)"
+   python -c "from areno.api import DefaultBackend; print(DefaultBackend)"
 
 The result is ``BackendType.MLX``.
 
@@ -171,13 +171,14 @@ shared Trainer API:
 
 .. code-block:: python
 
-   import areno
+   from areno import Trainer
+   from areno.api import MLX, MlxConfig
 
-   trainer = areno.Trainer(
+   trainer = Trainer(
        world_size=1,
        model_path="/path/to/model",
-       backend_type=areno.MLX,
-       custom_config=areno.MlxConfig(
+       backend_type=MLX,
+       custom_config=MlxConfig(
            max_running_prompts=8,
            prefill_batch_size=2,
            completion_batch_size=8,
@@ -189,6 +190,6 @@ shared Trainer API:
    )
    trainer.init()
 
-Do not pass ``CudaConfig`` with ``backend_type=areno.MLX`` or ``MlxConfig``
-with ``backend_type=areno.CUDA``; typed configuration mismatches fail during
+Do not pass ``CudaConfig`` with ``backend_type=MLX`` or ``MlxConfig``
+with ``backend_type=CUDA``; typed configuration mismatches fail during
 construction.

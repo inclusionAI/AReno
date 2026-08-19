@@ -170,13 +170,14 @@ automatically. Advanced SDK users can configure CUDA explicitly:
 
 .. code-block:: python
 
-   import areno
+   from areno import Trainer
+   from areno.api import CUDA, CudaConfig
 
-   trainer = areno.Trainer(
+   trainer = Trainer(
        world_size=4,
        model_path="/path/to/model",
-       backend_type=areno.CUDA,
-       custom_config=areno.CudaConfig(
+       backend_type=CUDA,
+       custom_config=CudaConfig(
            tp_size=4,
            devices=[0, 1, 2, 3],
            max_running_prompts=32,
@@ -185,6 +186,6 @@ automatically. Advanced SDK users can configure CUDA explicitly:
    )
    trainer.init()
 
-Do not pass ``MlxConfig`` with ``backend_type=areno.CUDA`` or ``CudaConfig``
-with ``backend_type=areno.MLX``; typed configuration mismatches fail during
+Do not pass ``MlxConfig`` with ``backend_type=CUDA`` or ``CudaConfig``
+with ``backend_type=MLX``; typed configuration mismatches fail during
 construction.

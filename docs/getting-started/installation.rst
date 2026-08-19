@@ -99,7 +99,7 @@ dependencies only on Linux. Verify that Python is not running through Rosetta:
 
 .. code-block:: bash
 
-   python -c "import platform, areno; print(platform.machine(), areno.DefaultBackend)"
+   python -c "import platform; from areno.api import DefaultBackend; print(platform.machine(), DefaultBackend)"
 
 Expected output contains ``arm64`` and ``BackendType.MLX``. Continue with
 :doc:`mlx` for training, serving, checkpoints, memory controls, and

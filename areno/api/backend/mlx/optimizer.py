@@ -87,7 +87,7 @@ def _adamw(config: dict[str, Any]):
         "weight_decay": float(config.get("weight_decay", 1e-2)),
     }
     if not config.get("adam_8bit"):
-        return optim.AdamW(**kwargs)
+        return optim.AdamW(**kwargs, bias_correction=True)
     return _quantized_adamw_class()(**kwargs)
 
 
@@ -123,6 +123,9 @@ def _quantized_adamw_class():
         def apply_single(self, gradient, parameter, state: dict):
             beta1, beta2 = self.betas
             lr = self.learning_rate.astype(mx.float32)
+            step = self.step.astype(mx.float32)
+            bias_correction1 = 1.0 - beta1**step
+            bias_correction2_sqrt = mx.sqrt(1.0 - beta2**step)
             size = int(state["size"])
             initialized = bool(state["initialized"])
             block_count = (size + self.block_size - 1) // self.block_size
@@ -164,8 +167,10 @@ def _quantized_adamw_class():
                     v = (1.0 - beta2) * mx.square(grad_chunk)
                 next_m_q, next_m_scale = _quantize_signed(m, self.block_size)
                 next_v_q, next_v_scale = _quantize_unsigned(mx.sqrt(v), self.block_size)
-                update = m / (mx.sqrt(v) + self.eps) + self.weight_decay * value_chunk
-                updated = (value_chunk - lr * update)[:actual].astype(parameter.dtype)
+                denom = mx.sqrt(v) / bias_correction2_sqrt + self.eps
+                updated = (value_chunk * (1.0 - lr * self.weight_decay) - (lr / bias_correction1) * m / denom)[
+                    :actual
+                ].astype(parameter.dtype)
                 mx.eval(updated, next_m_q, next_m_scale, next_v_q, next_v_scale)
                 mx.clear_cache()
                 outputs.append(updated)

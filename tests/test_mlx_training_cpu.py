@@ -1,8 +1,9 @@
 """CPU-only checks for MLX training batch semantics."""
 
 import logging
+import sys
 from collections import deque
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import numpy as np
 import pytest
@@ -19,6 +20,16 @@ from areno.api.backend.mlx.provider import parameter_group
 from areno.api.backend.mlx.training import sft_target_token_count
 from areno.api.models import TrainSequence
 from areno.api.multimodal import image_token_counts_from_features, mrope_position_ids_from_image_grid
+
+
+def _require_mlx_device(mx):
+    try:
+        probe = mx.zeros((1,))
+        mx.eval(probe)
+    except RuntimeError as exc:
+        if "No Metal device available" in str(exc):
+            pytest.skip("MLX device is unavailable in this environment")
+        raise
 
 
 def test_sft_target_count_matches_shifted_prompt_and_loss_masks():
@@ -155,6 +166,34 @@ def test_mlx_scheduler_admission_respects_max_running_prompts():
     assert len(request.future.result()) == 3
 
 
+def test_mlx_backend_uses_default_config_before_loading_provider(monkeypatch):
+    from areno.api.backend.mlx.backend import MlxBackend
+    from areno.api.config import MlxConfig
+
+    mlx_module = ModuleType("mlx")
+    mlx_core_module = ModuleType("mlx.core")
+    mlx_module.core = mlx_core_module
+    monkeypatch.setitem(sys.modules, "mlx", mlx_module)
+    monkeypatch.setitem(sys.modules, "mlx.core", mlx_core_module)
+
+    class ProviderLoadReached(Exception):
+        pass
+
+    def load_provider(model_path, *, adapter_path=None):
+        assert model_path == "model"
+        assert adapter_path is None
+        raise ProviderLoadReached
+
+    monkeypatch.setattr("areno.api.backend.mlx.backend.load_provider", load_provider)
+    backend = MlxBackend()
+    ctx = SimpleNamespace(world_size=1, custom_config=None, model_path="model")
+
+    with pytest.raises(ProviderLoadReached):
+        backend.initialize(ctx)
+
+    assert backend.config == MlxConfig()
+
+
 def test_adam8bit_lazy_state_remains_stable_after_zero_gradient_steps():
     mx = pytest.importorskip("mlx.core")
     nn = pytest.importorskip("mlx.nn")
@@ -162,6 +201,7 @@ def test_adam8bit_lazy_state_remains_stable_after_zero_gradient_steps():
 
     from areno.api.backend.mlx.optimizer import _quantized_adamw_class, apply_optimizer_update
 
+    _require_mlx_device(mx)
     model = nn.Linear(256, 1, bias=False)
     optimizer = _quantized_adamw_class()(learning_rate=1e-3, weight_decay=0.0)
     optimizer.init(model.trainable_parameters())
@@ -181,3 +221,37 @@ def test_adam8bit_lazy_state_remains_stable_after_zero_gradient_steps():
 
     assert max(max_updates) < 6e-3
     assert bool(mx.all(mx.isfinite(model.weight)).item())
+
+
+def test_mlx_fp_optimizer_enables_bias_correction():
+    pytest.importorskip("mlx.core")
+    pytest.importorskip("mlx.optimizers")
+
+    from areno.api.backend.mlx.optimizer import _adamw
+
+    assert _adamw({}).bias_correction is True
+
+
+def test_adam8bit_matches_bias_corrected_adamw_for_uniform_moments():
+    mx = pytest.importorskip("mlx.core")
+    nn = pytest.importorskip("mlx.nn")
+    optim = pytest.importorskip("mlx.optimizers")
+    from mlx.utils import tree_flatten, tree_unflatten
+
+    from areno.api.backend.mlx.optimizer import _quantized_adamw_class, apply_optimizer_update
+
+    _require_mlx_device(mx)
+    reference_model = nn.Linear(256, 1, bias=False)
+    quantized_model = nn.Linear(256, 1, bias=False)
+    quantized_model.update(reference_model.parameters())
+    reference = optim.AdamW(learning_rate=1e-3, weight_decay=0.01, bias_correction=True)
+    quantized = _quantized_adamw_class()(learning_rate=1e-3, weight_decay=0.01)
+    path = tree_flatten(reference_model.trainable_parameters())[0][0]
+
+    for value in (0.25, -0.5, 0.125):
+        gradient = mx.full(reference_model.weight.shape, value)
+        reference.update(reference_model, tree_unflatten([(path, gradient)]))
+        apply_optimizer_update(quantized_model, quantized, tree_unflatten([(path, gradient)]))
+        mx.eval(reference_model.parameters(), quantized_model.parameters())
+
+    assert bool(mx.allclose(reference_model.weight, quantized_model.weight, atol=2e-5, rtol=2e-5).item())
