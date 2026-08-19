@@ -37,6 +37,30 @@ from areno.engine.data.tokenizer import load_processor, load_tokenizer
 ArenoEngine = None
 
 
+def config_from_hf(model_path: str):
+    """Load CUDA model config lazily while preserving the injectable CLI seam."""
+
+    from areno.models.registry import config_from_hf as load_config
+
+    return load_config(model_path)
+
+
+def flash_attention_unsupported_gpu_reason(devices):
+    """Resolve CUDA capability lazily so MLX-only imports do not require Torch."""
+
+    from areno.engine.config import flash_attention_unsupported_gpu_reason as resolve_reason
+
+    return resolve_reason(devices)
+
+
+def flash_attention_unsupported_model_reason(model_config):
+    """Resolve model attention support lazily so tests can replace the probe."""
+
+    from areno.engine.config import flash_attention_unsupported_model_reason as resolve_reason
+
+    return resolve_reason(model_config)
+
+
 def _serve_loss_fn(*_: Any) -> Any:
     """Placeholder loss function; serving never trains, so any invocation is an error."""
     raise RuntimeError("areno serve engine does not support training")
@@ -445,9 +469,6 @@ def _resolve_serve_attn_backend(
         return "native", None
     if attn_backend != "flash":
         return attn_backend, None
-    from areno.engine.config import flash_attention_unsupported_gpu_reason, flash_attention_unsupported_model_reason
-    from areno.models.registry import config_from_hf
-
     model_config = None
     try:
         model_config = config_from_hf(model_path)

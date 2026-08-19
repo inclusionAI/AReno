@@ -40,6 +40,31 @@ from areno.cli.model_refs import resolve_model_refs_for_config
 if TYPE_CHECKING:
     from areno.engine.config import ModelConfig
 
+
+def config_from_hf(model_path: str):
+    """Load CUDA model config lazily while preserving the injectable CLI seam."""
+
+    from areno.models.registry import config_from_hf as load_config
+
+    return load_config(model_path)
+
+
+def flash_attention_unsupported_gpu_reason(devices):
+    """Resolve CUDA capability lazily so MLX-only imports do not require Torch."""
+
+    from areno.engine.config import flash_attention_unsupported_gpu_reason as resolve_reason
+
+    return resolve_reason(devices)
+
+
+def flash_attention_unsupported_model_reason(model_config):
+    """Resolve model attention support lazily so tests can replace the probe."""
+
+    from areno.engine.config import flash_attention_unsupported_model_reason as resolve_reason
+
+    return resolve_reason(model_config)
+
+
 # Group `areno train --help` flags by user intent rather than as one flat wall.
 # Each entry is (section title, option param names in display order). Every
 # declared option must appear in exactly one group; the help renderer keeps any
@@ -616,8 +641,6 @@ def _resolved_attn_backend_for_summary(
 ) -> tuple[str, str | None]:
     if config.backend == "mlx":
         return "mlx", None
-    from areno.engine.config import flash_attention_unsupported_gpu_reason, flash_attention_unsupported_model_reason
-
     if config.attn_backend != "flash":
         return config.attn_backend, None
     reasons = [
@@ -645,8 +668,6 @@ def _model_config_for_summary(config: TrainerConfig) -> ModelConfig | None:
     if not Path(config.ckpt).exists():
         return None
     try:
-        from areno.models.registry import config_from_hf
-
         return config_from_hf(config.ckpt)
     except Exception:
         return None
