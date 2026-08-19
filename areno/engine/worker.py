@@ -214,6 +214,8 @@ class ArenoWorker:
         self.model.offload_train_weights()
         self._train_state_ready = False
         self._loaded_policy_version = payload.version
+        if self.adapter_registry is not None:
+            self.adapter_registry.version = payload.version
         return result
 
     def _prepare_policy_receive(self) -> None:
