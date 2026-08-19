@@ -1,4 +1,4 @@
-"""Qwen3 dense and MoE TP2/DP2 native-LoRA rollout/train/PEFT E2E."""
+"""Qwen3 dense and MoE native-LoRA rollout/train/PEFT E2E."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import torch
 from safetensors.torch import load_file
 
 from areno.adapters import LoraConfig
-from areno.api import ArenoConfig, Trainer
+from areno.api import ArenoConfig, SamplingParams, Trainer
 from areno.api.algorithms import get_algorithm
 from areno.api.roles import ModelRole
 from areno.api.trainer_config import DPOTrainerConfig, PolicyTrainerConfig, PPOTrainerConfig
@@ -25,6 +25,7 @@ class _ObservedTrainer:
         self.inner = inner
         self.rollout_versions: list[int | None] = []
         self.train_versions: list[int | None] = []
+        self.train_results: list[dict[str, float]] = []
 
     def __getattr__(self, name: str):
         return getattr(self.inner, name)
@@ -42,6 +43,7 @@ class _ObservedTrainer:
     def train(self, batch_data, loss_fn, mini_bs=8, gradient_accumulation_steps=None):
         result = self.inner.train(batch_data, loss_fn, mini_bs, gradient_accumulation_steps)
         self.train_versions.append(result.get("adapter_version"))
+        self.train_results.append(result)
         return result
 
 
@@ -379,6 +381,128 @@ def test_qwen3_lora_tp2_dp2_rollout_train_peft(tmp_path: Path, model_env: str, m
         torch.testing.assert_close(native_delta, peft_delta, rtol=0.0, atol=1.5e-1)
     else:
         assert torch.isfinite(torch.tensor(peft_logprobs)).all()
+
+
+@pytest.mark.parametrize(
+    ("model_env", "model_kind", "rollout_tp_size", "rollout_devices"),
+    (
+        ("ARENO_E2E_QWEN3_MODEL", "dense", 1, [2]),
+        ("ARENO_E2E_QWEN3_MODEL", "dense", 2, [2, 3]),
+        ("ARENO_E2E_QWEN3_MOE_MODEL", "moe", 2, [2, 3]),
+    ),
+)
+def test_qwen3_lora_independent_rollout_two_step(
+    tmp_path: Path,
+    model_env: str,
+    model_kind: str,
+    rollout_tp_size: int,
+    rollout_devices: list[int],
+) -> None:
+    model_path_value = os.getenv(model_env)
+    if not model_path_value:
+        pytest.skip(f"set {model_env} to run the Qwen3 {model_kind} independent-rollout LoRA E2E")
+    model_path = Path(model_path_value)
+    initial_path = tmp_path / "adapter-initial"
+    trained_path = tmp_path / "adapter-trained"
+    rollout_path = tmp_path / "adapter-rollout"
+    lora = LoraConfig(rank=8, alpha=16.0)
+    config = PolicyTrainerConfig(
+        algo="grpo",
+        ckpt=os.fspath(model_path),
+        dataset_path="e2e://independent-rollout",
+        epochs=1,
+        max_steps=2,
+        world_size=2,
+        tp_size=2,
+        train_devices=[0, 1],
+        rollout_tp_size=rollout_tp_size,
+        rollout_devices=rollout_devices,
+        batch_size=1,
+        mini_bs=4,
+        n_samples=4,
+        greedy=True,
+        max_running_prompts=4,
+        max_prompt_tokens=64,
+        max_new_tokens=4,
+        optimizer_lr=1.0e-4,
+        optimizer_min_lr=1.0e-4,
+        lr_decay_style="constant",
+        weight_decay=0.0,
+        activation_checkpointing=False,
+        keep_rollout_state=False,
+        eager_decode=True,
+        metrics_log_dir=None,
+        lora=lora,
+    )
+    backend_config = config.areno_config()
+    backend_config.dp_size = 1
+    backend_config.runtime["compile_model"] = False
+    inner = Trainer(2, os.fspath(model_path), custom_config=backend_config)
+    observed = _ObservedTrainer(inner)
+    dataset = [
+        {"prompt": "Write one uncommon English noun. Output only the noun."},
+        {"prompt": "Write one uncommon English noun. Output only the noun."},
+    ]
+
+    def reward_fn(record) -> float:
+        return float(record.metadata["sample_index"])
+
+    policy = PolicyOnlyTrainer(
+        config,
+        instance=observed,
+        dataset=dataset,
+        reward_fn=reward_fn,
+        loss_fn=get_algorithm("grpo").make_loss_fn(config),
+    )
+
+    observed.init()
+    try:
+        observed.export_adapter(os.fspath(initial_path))
+        policy._fit_initialized()
+        observed.export_adapter(os.fspath(trained_path))
+
+        sampling_params = SamplingParams(greedy=True, max_new_tokens=2, max_prompt_len=64)
+        prompt_tokens = observed.get_tokenizer().encode(
+            "A fixed independent-rollout adapter check.", add_special_tokens=True
+        )
+        observed.begin_rollout_session()
+        try:
+            final_rollout = observed.rollout_token_batch([prompt_tokens], 1, sampling_params)
+        finally:
+            observed.end_rollout_session()
+            observed.finish_step()
+
+        backend = inner._backend
+        assert backend is not None
+        backend._require_rollout_engine().export_adapter(os.fspath(rollout_path))
+    finally:
+        observed.close()
+
+    assert observed.rollout_versions == [0, 1]
+    assert observed.train_versions == [1, 2]
+    assert final_rollout[0].adapter_version == 2
+    assert observed.train_results[1]["policy_sync_tensors"] > 0
+    assert observed.train_results[1]["policy_sync_bytes"] > 0
+
+    initial = load_file(initial_path / "adapter_model.safetensors")
+    trained = load_file(trained_path / "adapter_model.safetensors")
+    rollout = load_file(rollout_path / "adapter_model.safetensors")
+    changed = {name for name in initial if not torch.equal(initial[name], trained[name])}
+    assert any(".self_attn." in name for name in changed)
+    if model_kind == "moe":
+        assert any(".experts." in name for name in changed)
+        representative_keys = [
+            next(name for name in changed if ".self_attn." in name),
+            next(name for name in changed if ".experts." in name),
+        ]
+    else:
+        assert any(".mlp." in name for name in changed)
+        representative_keys = [
+            next(name for name in changed if ".self_attn." in name),
+            next(name for name in changed if ".mlp." in name),
+        ]
+    assert rollout.keys() == trained.keys()
+    assert all(torch.equal(rollout[name], trained[name]) for name in representative_keys)
 
 
 def _peft_logprobs(
