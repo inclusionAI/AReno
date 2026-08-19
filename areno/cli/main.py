@@ -19,6 +19,7 @@ class ArenoCli(click.Group):
         "env": ("areno.cli.diagnostics", "env_command", "Print an AReno environment/support report."),
         "agent": ("areno.cli.agent", "agent_command", "Ask a coding agent to run an AReno train/serve job."),
         "dashboard": ("areno.cli.dashboard", "dashboard_command", "Start or stop the AReno React dashboard."),
+        "dedup": ("areno.cli.dedup", "dedup_command", "Find near-duplicate training examples without deleting them."),
         "train": ("areno.cli.train", "train_command", "Run SFT, DPO, GSPO, GRPO, or PPO training."),
         "serve": ("areno.cli.serve", "serve_command", "Serve an OpenAI-compatible chat API."),
     }
