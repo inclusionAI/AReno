@@ -274,30 +274,32 @@ class WorkerRole:
     def onload(self, device: torch.device) -> None:
         """Move this role's model, value head, and optimizer state to `device`."""
 
-        self.model.to(device)
-        self.model.onload_train_weights(device)
-        if self.value_head is not None:
-            self.value_head.to(device)
-        if self.optimizer is not None:
-            if self.optimizer_offload_mode == "disk":
-                self.optimizer.configure_state_offload(
-                    mode="disk",
-                    directory=self.optimizer_offload_dir,
-                    batch_size=self.optimizer_offload_batch_size,
-                )
-                self.optimizer.prefetch_state()
-            else:
-                self.optimizer.onload_state(device)
+        with torch.inference_mode(False), torch.no_grad():
+            self.model.to(device)
+            self.model.onload_train_weights(device)
+            if self.value_head is not None:
+                self.value_head.to(device)
+            if self.optimizer is not None:
+                if self.optimizer_offload_mode == "disk":
+                    self.optimizer.configure_state_offload(
+                        mode="disk",
+                        directory=self.optimizer_offload_dir,
+                        batch_size=self.optimizer_offload_batch_size,
+                    )
+                    self.optimizer.prefetch_state()
+                else:
+                    self.optimizer.onload_state(device)
 
     def onload_for_inference(self, device: torch.device) -> None:
         """Move this role to `device` and materialize derived inference weights."""
 
-        self.model.to(device)
-        self.model.onload_train_weights(device)
+        with torch.inference_mode(False), torch.no_grad():
+            self.model.to(device)
+            self.model.onload_train_weights(device)
+            if self.value_head is not None:
+                self.value_head.to(device)
         self.model.prepare_infer_weights()
         self.model.offload_train_weights()
-        if self.value_head is not None:
-            self.value_head.to(device)
 
     def offload(self) -> None:
         """Free all HBM held by this role."""

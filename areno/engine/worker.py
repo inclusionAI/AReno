@@ -510,20 +510,21 @@ class ArenoWorker:
         """Move the actor model + optimizer state back to `device` if offloaded."""
         if self._actor_on_device:
             return
-        self.model.to(self.device)
-        self.model.onload_train_weights(self.device)
-        if self.optimizer is not None:
-            mode, directory, batch_size = self._optimizer_offload_options()
-            if mode == "disk":
-                # Keep mmap-backed state out of HBM. The optimizer step loads
-                # only its current bucket after TrainingManager starts prefetch.
-                self.optimizer.configure_state_offload(
-                    mode=mode,
-                    directory=directory,
-                    batch_size=batch_size,
-                )
-            else:
-                self.optimizer.onload_state(self.device)
+        with torch.inference_mode(False), torch.no_grad():
+            self.model.to(self.device)
+            self.model.onload_train_weights(self.device)
+            if self.optimizer is not None:
+                mode, directory, batch_size = self._optimizer_offload_options()
+                if mode == "disk":
+                    # Keep mmap-backed state out of HBM. The optimizer step loads
+                    # only its current bucket after TrainingManager starts prefetch.
+                    self.optimizer.configure_state_offload(
+                        mode=mode,
+                        directory=directory,
+                        batch_size=batch_size,
+                    )
+                else:
+                    self.optimizer.onload_state(self.device)
         self._actor_on_device = True
 
     def _prepare_actor_for_inference(self) -> None:
