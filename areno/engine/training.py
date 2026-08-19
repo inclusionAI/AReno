@@ -209,6 +209,7 @@ class TrainingManager:
                     None,
                     {"lr": current_lr},
                     multimodal_lrs,
+                    {"sequence_parallel": float(model_kwargs["train_meta"].sequence_parallel)},
                     {"grad_norm": grad_norm} if grad_norm is not None else None,
                     multimodal_grad_metrics,
                     {"clipped_grad_norm": clipped_grad_norm} if clipped_grad_norm is not None else None,
