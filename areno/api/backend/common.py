@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from enum import StrEnum
+from enum import Enum
 
 from areno.api.models import RolloutResult, RolloutSequence
 
 
-class TrainMetric(StrEnum):
+class TrainMetric(str, Enum):
     """Metric names whose reduction semantics are shared by all backends."""
 
     RATIO_MEAN = "ratio_mean"
@@ -18,7 +18,7 @@ class TrainMetric(StrEnum):
     LOGP_ABS_DIFF_MEAN = "logp_abs_diff_mean"
 
 
-class MetricReduction(StrEnum):
+class MetricReduction(str, Enum):
     """Supported reductions for microbatch metrics."""
 
     FIRST = "first"
