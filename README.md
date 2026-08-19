@@ -109,18 +109,13 @@ async def main():
 
     row = load_dataset("gsm8k", "main", split="train[0:1]")[0]
     target = str(row["answer"]).rsplit("####", 1)[-1].strip()
-    prompt = (
-        "Solve the problem and put the final answer in \\boxed{}.\n\n"
-        f"Problem: {row['question']}\nSolution:"
-    )
+    prompt = f"Solve the problem and put the final answer in \\boxed{{}}.\n\nProblem: {row['question']}\nSolution:"
     prompt_tokens = tokenizer.encode(prompt)
     sampling = SamplingParams(max_new_tokens=512)
 
     # 2. Rollout on-policy completions
     async with trainer.rollout_session(sampling_params=sampling, proxy=False):
-        sequences = trainer.rollout_token_batch(
-            [prompt_tokens], n_samples=8, sampling_params=sampling
-        )[0].sequences
+        sequences = trainer.rollout_token_batch([prompt_tokens], n_samples=8, sampling_params=sampling)[0].sequences
 
     # 3. Score and normalize rewards within the sample group
     rewards = [
