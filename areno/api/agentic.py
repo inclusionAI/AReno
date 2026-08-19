@@ -269,7 +269,6 @@ class RolloutSession:
         self._max_running_prompts = (
             max(1, int(max_running_prompts)) if max_running_prompts is not None else self._dp_size
         )
-        self._local_max_running_prompts = max(_ceil_div(self._max_running_prompts, self._dp_size), 1)
         self._timeout_s = float(timeout_s)
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
@@ -347,7 +346,7 @@ class RolloutSession:
             (_AgenticHTTPServer,),
             {
                 "request_queue_size": max(2048, self._max_running_prompts),
-                "max_threads": self._local_max_running_prompts,
+                "max_threads": 2048,
             },
         )
 
@@ -1093,10 +1092,6 @@ def _trainer_dp_size(trainer: Any) -> int:
         if tp_size <= 0:
             return 1
         return max(world_size // tp_size, 1)
-
-
-def _ceil_div(a: int, b: int) -> int:
-    return (a + b - 1) // b
 
 
 def _write_json(handler: BaseHTTPRequestHandler, status: int, payload: dict[str, Any]) -> None:
