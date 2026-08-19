@@ -201,8 +201,8 @@ class ConfigAndDataTest(unittest.TestCase):
         tp1 = EngineConfig(model=model, tp_size=1, devices=[0], sequence_parallel=True)
         self.assertFalse(tp1.effective_sequence_parallel)
 
-    def test_engine_config_rejects_replicated_kv_lora_targets(self):
-        """Replicated Qwen3 KV requires range-aware LoRA support."""
+    def test_engine_config_allows_replicated_kv_lora_targets(self):
+        """Range-aware LoRA supports Qwen3 KV replication across wider TP."""
         model = ModelConfig(
             model_type="qwen3_moe",
             num_attention_heads=8,
@@ -211,14 +211,11 @@ class ConfigAndDataTest(unittest.TestCase):
             vocab_size=32,
         )
 
-        with self.assertRaisesRegex(ValueError, "Qwen3-MoE replicated-KV.*k_proj"):
-            EngineConfig(model=model, tp_size=4, devices=[0, 1, 2, 3], lora=LoraConfig())
-
         EngineConfig(
             model=model,
             tp_size=4,
             devices=[0, 1, 2, 3],
-            lora=LoraConfig(target_modules=("q_proj", "o_proj")),
+            lora=LoraConfig(),
         )
 
     def test_reference_view_requires_lora_at_engine_boundary(self):

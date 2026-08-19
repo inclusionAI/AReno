@@ -292,18 +292,6 @@ class EngineConfig:
             raise ValueError("reference_mode must be one of: independent, reuse_actor_base")
         if self.reference_mode == "reuse_actor_base" and self.lora is None:
             raise ValueError("reference_mode='reuse_actor_base' requires native LoRA")
-        if self.lora is not None:
-            replicated_kv_targets = {"k_proj", "v_proj"} & set(self.lora.target_modules)
-            if (
-                self.model.model_type == "qwen3_moe"
-                and self.tp_size > self.model.num_key_value_heads
-                and replicated_kv_targets
-            ):
-                targets = ", ".join(sorted(replicated_kv_targets))
-                raise ValueError(
-                    f"Qwen3-MoE replicated-KV topology does not support LoRA targets {targets}; "
-                    "omit k_proj/v_proj or use tp_size <= num_key_value_heads"
-                )
         if self.devices is None:
             if torch.cuda.is_available():
                 device_count = torch.cuda.device_count()

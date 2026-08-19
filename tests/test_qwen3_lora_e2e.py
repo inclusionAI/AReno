@@ -383,6 +383,116 @@ def test_qwen3_lora_tp2_dp2_rollout_train_peft(tmp_path: Path, model_env: str, m
         assert torch.isfinite(torch.tensor(peft_logprobs)).all()
 
 
+def test_qwen3_moe_lora_tp8_replicated_kv_roundtrip(tmp_path: Path) -> None:
+    model_path_value = os.getenv("ARENO_E2E_QWEN3_MOE_MODEL")
+    if not model_path_value:
+        pytest.skip("set ARENO_E2E_QWEN3_MOE_MODEL to run the 8-GPU replicated-KV LoRA E2E")
+    model_path = Path(model_path_value)
+    initial_path = tmp_path / "adapter-initial"
+    checkpoint_path = tmp_path / "checkpoints"
+    final_path = checkpoint_path / "step_000001"
+    reexported_path = tmp_path / "adapter-reexported"
+    lora = LoraConfig(rank=8, alpha=16.0)
+    backend_config = ArenoConfig(
+        tp_size=8,
+        dp_size=1,
+        devices=list(range(8)),
+        lora=lora,
+        max_running_prompts=2,
+        optimizer={
+            "lr": 1.0e-4,
+            "min_lr": 1.0e-4,
+            "lr_decay_style": "constant",
+            "weight_decay": 0.0,
+        },
+        runtime={
+            "compile_model": False,
+            "activation_checkpointing": False,
+            "keep_rollout_state": False,
+            "eager_decode": True,
+        },
+    )
+    observed = _ObservedTrainer(Trainer(8, os.fspath(model_path), custom_config=backend_config))
+    config = PolicyTrainerConfig(
+        algo="grpo",
+        ckpt=os.fspath(model_path),
+        dataset_path="e2e://replicated-kv",
+        save_path=os.fspath(checkpoint_path),
+        save_interval=1,
+        epochs=1,
+        max_steps=1,
+        world_size=8,
+        tp_size=8,
+        train_devices=list(range(8)),
+        batch_size=1,
+        mini_bs=2,
+        n_samples=2,
+        greedy=True,
+        max_running_prompts=2,
+        max_prompt_tokens=64,
+        max_new_tokens=4,
+        optimizer_lr=1.0e-4,
+        optimizer_min_lr=1.0e-4,
+        lr_decay_style="constant",
+        weight_decay=0.0,
+        activation_checkpointing=False,
+        keep_rollout_state=False,
+        eager_decode=True,
+        metrics_log_dir=None,
+        lora=lora,
+    )
+
+    def reward_fn(record) -> float:
+        return float(record.metadata["sample_index"])
+
+    policy = PolicyOnlyTrainer(
+        config,
+        instance=observed,
+        dataset=[{"prompt": "Write one uncommon English noun. Output only the noun."}],
+        reward_fn=reward_fn,
+        loss_fn=get_algorithm("grpo").make_loss_fn(config),
+    )
+    observed.init()
+    try:
+        parity_tokens = observed.get_tokenizer().encode("A replicated KV adapter check.", add_special_tokens=True)
+        observed.export_adapter(os.fspath(initial_path))
+        policy._fit_initialized()
+        trained_logprobs = observed.score_logprobs("actor", [parity_tokens], microbatch_size=1)[0]
+    finally:
+        observed.close()
+
+    initial = load_file(initial_path / "adapter_model.safetensors")
+    final = load_file(final_path / "adapter_model.safetensors")
+    kv_keys = [name for name in final if ".self_attn.k_proj." in name or ".self_attn.v_proj." in name]
+    assert kv_keys
+    assert any(not torch.equal(initial[name], final[name]) for name in kv_keys)
+    assert all(final[name].shape[0] == 512 for name in kv_keys if name.endswith("lora_B.weight"))
+
+    imported = Trainer(
+        8,
+        os.fspath(model_path),
+        custom_config=ArenoConfig(
+            tp_size=8,
+            dp_size=1,
+            devices=list(range(8)),
+            lora=LoraConfig(adapter_path=os.fspath(final_path)),
+            runtime={"compile_model": False, "activation_checkpointing": False, "eager_decode": True},
+        ),
+    )
+    imported.init()
+    try:
+        imported.export_adapter(os.fspath(reexported_path))
+        imported_logprobs = imported.score_logprobs("actor", [parity_tokens], microbatch_size=1)[0]
+    finally:
+        imported.close()
+    reexported = load_file(reexported_path / "adapter_model.safetensors")
+    assert reexported.keys() == final.keys()
+    assert all(torch.equal(reexported[name], final[name]) for name in final)
+    torch.testing.assert_close(
+        torch.tensor(imported_logprobs), torch.tensor(trained_logprobs), rtol=0.0, atol=1.0e-5
+    )
+
+
 @pytest.mark.parametrize(
     ("model_env", "model_kind", "rollout_tp_size", "rollout_devices"),
     (

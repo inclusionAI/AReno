@@ -44,6 +44,7 @@ class LoraSlot(nn.Module):
         config: LoraConfig,
         seed: int,
         runtime_state: _AdapterRuntimeState,
+        output_range: tuple[int, int] | None = None,
     ) -> None:
         super().__init__()
         ctx = get_tp_context()
@@ -54,6 +55,16 @@ class LoraSlot(nn.Module):
         self.local_in_features = int(local_in_features)
         self.local_out_features = int(local_out_features)
         self.row_parallel = bool(row_parallel)
+        if output_range is None:
+            output_range = (
+                (0, self.global_out_features)
+                if self.row_parallel
+                else (ctx.rank * self.local_out_features, (ctx.rank + 1) * self.local_out_features)
+            )
+        self.output_start, self.output_end = (int(value) for value in output_range)
+        self.output_replicated = (
+            not self.row_parallel and self.local_out_features * ctx.world_size > self.global_out_features
+        )
         self._runtime_state = runtime_state
         self.lora_A = nn.Parameter(
             torch.empty(self.rank, self.local_in_features, device=base_weight.device, dtype=base_weight.dtype)
@@ -68,6 +79,12 @@ class LoraSlot(nn.Module):
         else:
             mark_tensor_parallel_parameter(self.lora_A, False, sequence_parallel=True, tp_grad_allreduce=True)
             mark_tensor_parallel_parameter(self.lora_B, True, sequence_parallel=True)
+            if self.output_replicated:
+                setattr(
+                    self.lora_B,
+                    "tp_replicated_output_range",
+                    (self.output_start, self.output_end, self.global_out_features),
+                )
         self._reset_parameters(seed, ctx.rank, ctx.world_size)
 
     @torch.no_grad()
@@ -225,6 +242,7 @@ def initialize_lora(model: nn.Module, config: LoraConfig, *, seed: int) -> Adapt
                 local_in_features=qkv.in_features,
                 local_out_features=qkv.local_out_features[component_index],
                 row_parallel=False,
+                output_range=qkv.shard_ranges[component_index],
                 config=config,
                 seed=seed,
                 runtime_state=runtime_state,

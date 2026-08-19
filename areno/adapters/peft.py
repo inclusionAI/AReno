@@ -9,7 +9,7 @@ import torch
 import torch.distributed as dist
 from safetensors.torch import load_file, save_file
 
-from areno.adapters.lora import AdapterRegistry, RoutedExpertLoraSlot
+from areno.adapters.lora import AdapterRegistry, LoraSlot, RoutedExpertLoraSlot
 from areno.engine.parallel.context import get_tp_context
 
 _PREFIX = "base_model.model.model."
@@ -41,9 +41,8 @@ def load_peft_adapter(registry: AdapterRegistry, path: str | Path) -> None:
             local_A = canonical_A[:, ctx.rank * width : (ctx.rank + 1) * width]
             local_B = canonical_B
         else:
-            height = slot.local_out_features
             local_A = canonical_A
-            local_B = canonical_B[ctx.rank * height : (ctx.rank + 1) * height]
+            local_B = canonical_B[slot.output_start : slot.output_end]
         slot.lora_A.copy_(local_A.to(device=slot.lora_A.device, dtype=slot.lora_A.dtype))
         slot.lora_B.copy_(local_B.to(device=slot.lora_B.device, dtype=slot.lora_B.dtype))
 
@@ -85,7 +84,11 @@ def export_peft_adapter(
             if ctx.rank != 0:
                 continue
             canonical_A = slot.lora_A.detach()
-            canonical_B = torch.cat(gathered_B, dim=0)
+            canonical_B = (
+                _gather_replicated_column(slot, gathered_B, ctx.world_size)
+                if slot.output_replicated
+                else torch.cat(gathered_B, dim=0)
+            )
         state[_key(logical_name, "A")] = canonical_A.float().cpu().contiguous()
         state[_key(logical_name, "B")] = canonical_B.float().cpu().contiguous()
     if ctx.rank != 0:
@@ -118,6 +121,23 @@ def _all_gather(tensor: torch.Tensor, world_size: int, group) -> list[torch.Tens
     gathered = [torch.empty_like(tensor) for _ in range(world_size)]
     dist.all_gather(gathered, tensor, group=group)
     return gathered
+
+
+def _gather_replicated_column(slot: LoraSlot, gathered: list[torch.Tensor], world_size: int) -> torch.Tensor:
+    """Keep one authoritative copy of every unique replicated output range."""
+
+    local_rows = slot.local_out_features
+    unique_shards = slot.global_out_features // local_rows
+    ranks_per_shard = world_size // unique_shards
+    output = torch.empty(
+        (slot.global_out_features, slot.rank),
+        device=gathered[0].device,
+        dtype=gathered[0].dtype,
+    )
+    for shard_index in range(unique_shards):
+        start = shard_index * local_rows
+        output[start : start + local_rows].copy_(gathered[shard_index * ranks_per_shard])
+    return output
 
 
 def _key(logical_name: str, component: str) -> str:

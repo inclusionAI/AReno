@@ -8,7 +8,7 @@ from dataclasses import dataclass
 import torch
 import torch.distributed as dist
 
-from areno.adapters.lora import AdapterRegistry, RoutedExpertLoraSlot
+from areno.adapters.lora import AdapterRegistry, LoraSlot, RoutedExpertLoraSlot
 from areno.engine.checkpoints.io import PolicyTensorLayout, PolicyTensorPiece, PolicyTensorStore
 from areno.engine.parallel.context import get_tp_context
 from areno.engine.protocol import PolicySyncPayload
@@ -96,7 +96,8 @@ def build_adapter_policy_plan(registry: AdapterRegistry) -> PolicyTensorStore:
                     slot.lora_B,
                     (slot.global_out_features, slot.rank),
                     dim=0,
-                    start=ctx.rank * slot.local_out_features,
+                    start=slot.output_start,
+                    publish=_column_range_publisher(slot, ctx.rank, ctx.world_size),
                 ),
             )
     return plan
@@ -108,13 +109,23 @@ def _sharded_layout(
     *,
     dim: int,
     start: int,
+    publish: bool = True,
 ) -> PolicyTensorLayout:
     local_size = tensor.shape[dim]
     return PolicyTensorLayout(
         shape=shape,
         dtype=tensor.dtype,
-        pieces=(PolicyTensorPiece(tensor.detach(), shape, dim, start, start + local_size),),
+        pieces=(PolicyTensorPiece(tensor.detach(), shape, dim, start, start + local_size, publish=publish),),
     )
+
+
+def _column_range_publisher(slot: LoraSlot, tp_rank: int, tp_size: int) -> bool:
+    if not slot.output_replicated:
+        return True
+    unique_shards = slot.global_out_features // slot.local_out_features
+    ranks_per_shard = tp_size // unique_shards
+    owner_rank = (slot.output_start // slot.local_out_features) * ranks_per_shard
+    return tp_rank == owner_rank
 
 
 def _replicated_layout(tensor: torch.Tensor) -> PolicyTensorLayout:
