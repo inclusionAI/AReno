@@ -517,6 +517,31 @@ class ConfigAndDataTest(unittest.TestCase):
         self.assertIs(captured["meta"], meta)
         self.assertEqual(tuple(out.shape), (1, 2, 2, 4))
 
+    def test_native_decode_pads_value_dim_and_trims_output(self):
+        """Native decode should return the original V dim after using a QK-sized cache."""
+        backend = FlashAttnInferBackend("native")
+        q = torch.zeros(1, 1, 2, 6)
+        k = torch.zeros(1, 1, 2, 6)
+        v = torch.zeros(1, 1, 2, 4)
+        k_cache = torch.zeros(1, 2, 2, 6)
+        v_cache = torch.zeros(1, 2, 2, 6)
+        meta = InferMeta(
+            mode="decode",
+            cache_seqlens=torch.tensor([1], dtype=torch.int32),
+            block_table=torch.zeros(1, 1, dtype=torch.int32),
+        )
+        captured = {}
+
+        def fake_native_decode(**kwargs):
+            captured["v_update_shape"] = tuple(kwargs["v_update"].shape)
+            return torch.ones_like(kwargs["q"])
+
+        with patch("areno.engine.layers.attention_backend.infer._native_decode", fake_native_decode):
+            out = backend(q, k, v, k_cache, v_cache, meta)
+
+        self.assertEqual(captured["v_update_shape"], (1, 2, 6))
+        self.assertEqual(tuple(out.shape), (1, 1, 2, 4))
+
     def test_native_attention_backend_does_not_require_flash_attn_import(self):
         """Native train/infer backends should construct without flash-attn installed."""
         from areno.engine.layers.attention_backend.infer import build_infer_attention_backend

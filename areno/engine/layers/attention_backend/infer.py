@@ -128,6 +128,7 @@ class FlashAttnInferBackend(nn.Module):
                     window_size=call.window_size,
                     softmax_scale=call.softmax_scale,
                 )
+                out = call.trim_value_dim(out)
                 return out.view(q.shape[0], q.shape[1], q.shape[2], call.value_dim)
             require_flash_attention_supported(call, mode="decode attention")
             # When value head dim < cache head dim we pad to match the cache
