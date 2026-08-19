@@ -15,7 +15,8 @@ from areno.adapters import LoraConfig
 from areno.api import ArenoConfig, Trainer
 from areno.api.algorithms import get_algorithm
 from areno.api.roles import ModelRole
-from areno.api.trainer_config import PolicyTrainerConfig
+from areno.api.trainer_config import DPOTrainerConfig, PolicyTrainerConfig, PPOTrainerConfig
+from areno.api.trainer_factory import build_trainer
 from areno.api.trainers.policy_only import PolicyOnlyTrainer
 
 
@@ -42,6 +43,184 @@ class _ObservedTrainer:
         result = self.inner.train(batch_data, loss_fn, mini_bs, gradient_accumulation_steps)
         self.train_versions.append(result.get("adapter_version"))
         return result
+
+
+class _ObservedReferenceTrainer(_ObservedTrainer):
+    """Observe the public PPO/DPO lifecycle without inspecting adapter slots."""
+
+    def __init__(self, inner: Trainer) -> None:
+        super().__init__(inner)
+        self.reference_versions: list[int] = []
+        self.critic_train_count = 0
+        self.roles: set[str] = set()
+        self.parity_scores: dict[str, list[float]] = {}
+        self.parity_tokens: list[int] | None = None
+
+    def ensure_roles(self, roles: dict[str, ModelRole]) -> None:
+        self.roles = set(roles)
+        self.inner.ensure_roles(roles)
+        self.parity_tokens = self.inner.get_tokenizer().encode(
+            "A fixed actor-base reference check.", add_special_tokens=True
+        )
+        self.parity_scores["initial_actor"] = self.inner.score_logprobs(
+            "actor", [self.parity_tokens], microbatch_size=1
+        )[0]
+        self.parity_scores["initial_reference"] = self.inner.score_logprobs(
+            "ref", [self.parity_tokens], microbatch_size=1
+        )[0]
+
+    def score_logprobs(self, role, token_rows, *, features=None, microbatch_size=None):
+        if role == "ref":
+            self.reference_versions.append(len(self.train_versions))
+        return self.inner.score_logprobs(
+            role,
+            token_rows,
+            features=features,
+            microbatch_size=microbatch_size,
+        )
+
+    def train_values(
+        self,
+        role,
+        batch_data,
+        mini_bs,
+        gradient_accumulation_steps=None,
+        *,
+        cliprange_value=0.5,
+        value_loss_coef=0.5,
+    ):
+        result = self.inner.train_values(
+            role,
+            batch_data,
+            mini_bs,
+            gradient_accumulation_steps,
+            cliprange_value=cliprange_value,
+            value_loss_coef=value_loss_coef,
+        )
+        self.critic_train_count += 1
+        return result
+
+    def close(self) -> None:
+        if self.parity_tokens is not None and self.train_versions == [1, 2]:
+            self.parity_scores["final_actor_before_reference"] = self.inner.score_logprobs(
+                "actor", [self.parity_tokens], microbatch_size=1
+            )[0]
+            self.parity_scores["final_reference"] = self.inner.score_logprobs(
+                "ref", [self.parity_tokens], microbatch_size=1
+            )[0]
+            self.parity_scores["final_actor_after_reference"] = self.inner.score_logprobs(
+                "actor", [self.parity_tokens], microbatch_size=1
+            )[0]
+        self.inner.close()
+
+
+@pytest.mark.parametrize("algorithm", ("ppo", "dpo"))
+def test_qwen3_lora_tp2_dp2_reference_two_step(algorithm: str) -> None:
+    model_path_value = os.getenv("ARENO_E2E_QWEN3_MODEL")
+    if not model_path_value:
+        pytest.skip("set ARENO_E2E_QWEN3_MODEL to run the 4-GPU Qwen3 LoRA PPO/DPO E2E")
+    model_path = Path(model_path_value)
+    common = {
+        "algo": algorithm,
+        "ckpt": os.fspath(model_path),
+        "dataset_path": f"e2e://{algorithm}-in-memory",
+        "epochs": 1,
+        "max_steps": 2,
+        "world_size": 4,
+        "tp_size": 2,
+        "train_devices": [0, 1, 2, 3],
+        "batch_size": 2,
+        "score_micro_bs": 2,
+        "gradient_accumulation_steps": 1,
+        "max_prompt_tokens": 64,
+        "optimizer_lr": 1.0e-4,
+        "optimizer_min_lr": 1.0e-4,
+        "lr_decay_style": "constant",
+        "weight_decay": 0.0,
+        "activation_checkpointing": False,
+        "keep_rollout_state": False,
+        "eager_decode": True,
+        "metrics_log_dir": None,
+        "lora": LoraConfig(rank=8, alpha=16.0),
+        "reference_mode": "reuse_actor_base",
+        "ref_ckpt": os.fspath(model_path),
+    }
+    if algorithm == "ppo":
+        config = PPOTrainerConfig(
+            **common,
+            mini_bs=2,
+            n_samples=1,
+            greedy=True,
+            max_new_tokens=3,
+            max_running_prompts=2,
+            critic_ckpt=os.fspath(model_path),
+            critic_lr=1.0e-4,
+            critic_warmup_steps=0,
+        )
+        dataset = [
+            {"prompt": "Reply with the English word for the number one."},
+            {"prompt": "Reply with the English word for the number two."},
+            {"prompt": "Reply with the English word for the number three."},
+            {"prompt": "Reply with the English word for the number four."},
+        ]
+
+        def reward_fn(record) -> float:
+            return float(record.metadata["prompt_index"])
+
+    else:
+        config = DPOTrainerConfig(**common, mini_bs=4, max_new_tokens=8, dpo_beta=0.1)
+        dataset = [
+            {"prompt": "What is 1 + 1?", "chosen": "2", "rejected": "3"},
+            {"prompt": "What is 2 + 2?", "chosen": "4", "rejected": "5"},
+            {"prompt": "What is 3 + 3?", "chosen": "6", "rejected": "7"},
+            {"prompt": "What is 4 + 4?", "chosen": "8", "rejected": "9"},
+        ]
+        reward_fn = None
+
+    backend_config = config.areno_config()
+    backend_config.dp_size = 2
+    backend_config.runtime["compile_model"] = False
+    observed = _ObservedReferenceTrainer(
+        Trainer(
+            config.world_size,
+            config.ckpt,
+            custom_config=backend_config,
+            metrics_log_dir=None,
+            score_micro_bs=config.score_micro_bs,
+        )
+    )
+    trainer = build_trainer(
+        config,
+        instance=observed,
+        dataset=dataset,
+        reward_fn=reward_fn,
+        loss_fn=get_algorithm(algorithm).make_loss_fn(config),
+    )
+    trainer.fit()
+
+    assert observed.reference_versions == [0, 1]
+    assert observed.train_versions == [1, 2]
+    assert observed.roles == ({"actor", "ref", "critic"} if algorithm == "ppo" else {"ref"})
+    assert observed.rollout_versions == ([0, 0, 1, 1] if algorithm == "ppo" else [])
+    assert observed.critic_train_count == (2 if algorithm == "ppo" else 0)
+    torch.testing.assert_close(
+        torch.tensor(observed.parity_scores["initial_reference"]),
+        torch.tensor(observed.parity_scores["initial_actor"]),
+        rtol=0.0,
+        atol=1.0e-5,
+    )
+    torch.testing.assert_close(
+        torch.tensor(observed.parity_scores["final_reference"]),
+        torch.tensor(observed.parity_scores["initial_reference"]),
+        rtol=0.0,
+        atol=1.0e-5,
+    )
+    torch.testing.assert_close(
+        torch.tensor(observed.parity_scores["final_actor_after_reference"]),
+        torch.tensor(observed.parity_scores["final_actor_before_reference"]),
+        rtol=0.0,
+        atol=1.0e-5,
+    )
 
 
 @pytest.mark.parametrize(
