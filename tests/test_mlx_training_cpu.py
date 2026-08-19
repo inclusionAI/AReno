@@ -136,9 +136,7 @@ def test_mlx_scheduler_admission_respects_max_running_prompts():
     scheduler._requests_by_handle = {}
     scheduler._pending_requests = deque()
     sampling = SimpleNamespace()
-    request = _Request(
-        prompts=[[1], [2], [3]], n_samples=1, sampling=sampling, features=None
-    )
+    request = _Request(prompts=[[1], [2], [3]], n_samples=1, sampling=sampling, features=None)
 
     scheduler._insert_or_fail(request)
 
@@ -152,9 +150,7 @@ def test_mlx_scheduler_admission_respects_max_running_prompts():
     assert len(scheduler._requests_by_handle) == 1
     assert request.next_insert == 3
     final_handle = request.handles[-1]
-    scheduler._record_response(
-        final_handle[0], generator, SimpleNamespace(uid=final_handle[1], finish_reason="stop")
-    )
+    scheduler._record_response(final_handle[0], generator, SimpleNamespace(uid=final_handle[1], finish_reason="stop"))
     assert request.future.done()
     assert len(request.future.result()) == 3
 
