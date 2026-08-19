@@ -40,9 +40,13 @@ def _canonical(layouts: list[PolicyTensorLayout], *, chunk_size: int = 5) -> tor
     output = torch.empty(layouts[0].numel, dtype=layouts[0].dtype)
     for offset in range(0, output.numel(), chunk_size):
         chunk = torch.zeros(min(chunk_size, output.numel() - offset), dtype=output.dtype)
-        for layout in layouts:
+        for rank, layout in enumerate(layouts):
             contribution = torch.empty_like(chunk)
-            layout.read_chunk(offset, contribution)
+            layout.read_chunk(
+                offset,
+                contribution,
+                include_replicated=not layout.replicated or rank == 0,
+            )
             chunk.add_(contribution)
         output[offset : offset + chunk.numel()].copy_(chunk)
     return output.reshape(layouts[0].shape)
