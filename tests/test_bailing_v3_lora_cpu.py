@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-import torch
 import pytest
+import torch
 from torch import nn
 
 from areno.adapters.config import BAILING_V3_TARGETS, LoraConfig
