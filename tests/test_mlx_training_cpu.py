@@ -1,5 +1,6 @@
 """CPU-only checks for MLX training batch semantics."""
 
+import numpy as np
 import pytest
 
 from areno.api.backend.common import (
@@ -9,8 +10,10 @@ from areno.api.backend.common import (
     accumulation_steps,
     metric_reduction,
 )
+from areno.api.backend.mlx.provider import parameter_group
 from areno.api.backend.mlx.training import sft_target_token_count
 from areno.api.models import TrainSequence
+from areno.api.multimodal import image_token_counts_from_features, mrope_position_ids_from_image_grid
 
 
 def test_sft_target_count_matches_shifted_prompt_and_loss_masks():
@@ -52,6 +55,29 @@ def test_policy_metric_reductions_use_typed_names():
     assert metric_reduction(TrainMetric.LOGP_ABS_DIFF_MEAN) is MetricReduction.FIRST
     assert metric_reduction(str(TrainMetric.LOGP_ABS_DIFF_MEAN)) is MetricReduction.FIRST
     assert metric_reduction("policy_loss") is MetricReduction.MEAN
+
+
+def test_multimodal_projector_group_takes_precedence_over_parent_tower():
+    assert parameter_group("vision_tower.blocks.0.attn.qkv.weight") == "tower"
+    assert parameter_group("vision_tower.merger.linear_fc1.weight") == "projector"
+
+
+def test_multimodal_image_grid_helpers_accept_backend_native_arrays():
+    features = {
+        "image_grid_thw": np.array([[1, 4, 4]], dtype=np.int64),
+        "spatial_merge_size": 2,
+    }
+
+    counts = image_token_counts_from_features(features)
+    positions = mrope_position_ids_from_image_grid(
+        [1, 99, 99, 99, 99, 2],
+        image_token_id=99,
+        features=features,
+    )
+
+    assert counts == [4]
+    assert isinstance(positions, np.ndarray)
+    assert positions.shape == (3, 6)
 
 
 def test_adam8bit_lazy_state_remains_stable_after_zero_gradient_steps():

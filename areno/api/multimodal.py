@@ -6,10 +6,7 @@ import base64
 import io
 import threading
 from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    import torch
+from typing import Any
 
 from areno.api.tokenizer import apply_chat_template_with_options, normalize_token_ids
 
@@ -458,15 +455,11 @@ def image_token_counts_from_features(features: dict[str, Any] | None) -> list[in
     grid = features.get("image_grid_thw")
     if grid is None:
         return []
-    import torch
-
-    if not isinstance(grid, torch.Tensor):
-        grid = torch.as_tensor(grid)
-    grid = grid.detach().cpu().to(dtype=torch.long).reshape(-1, 3)
+    grid_rows = _array_to_numpy(grid).astype("int64", copy=False).reshape(-1, 3)
     merge = int(features.get("spatial_merge_size", features.get("merge_size", 2)) or 2)
     merge_unit = merge * merge
     counts: list[int] = []
-    for t, h, w in grid.tolist():
+    for t, h, w in grid_rows.tolist():
         patches = int(t) * int(h) * int(w)
         if patches % merge_unit:
             raise ValueError(f"image_grid_thw patches={patches} is not divisible by spatial_merge_size**2={merge_unit}")
@@ -534,7 +527,7 @@ def mrope_position_ids_from_image_grid(
     *,
     image_token_id: int | None,
     features: dict[str, Any] | None,
-) -> torch.Tensor | None:
+) -> Any | None:
     """Build Qwen3.5-VL MRoPE ids for tokens after image-token expansion.
 
     This follows the image-only fast path used by SGLang: text spans advance a
@@ -544,22 +537,20 @@ def mrope_position_ids_from_image_grid(
 
     if image_token_id is None or not features:
         return None
-    import torch
-
     grid = features.get("image_grid_thw")
     if grid is None:
         return None
-    if not isinstance(grid, torch.Tensor):
-        grid = torch.as_tensor(grid)
-    grid = grid.detach().cpu().to(dtype=torch.long).reshape(-1, 3)
+    grid_rows = _array_to_numpy(grid).astype("int64", copy=False).reshape(-1, 3)
     merge = int(features.get("spatial_merge_size", features.get("merge_size", 2)) or 2)
     image_token_id = int(image_token_id)
     token_list = [int(token) for token in tokens]
-    segments: list[torch.Tensor] = []
+    import numpy as np
+
+    segments: list[np.ndarray] = []
     st = 0
     next_pos = 0
-    for t_tensor, h_tensor, w_tensor in grid:
-        t, h, w = int(t_tensor), int(h_tensor), int(w_tensor)
+    for t, h, w in grid_rows.tolist():
+        t, h, w = int(t), int(h), int(w)
         if h % merge or w % merge:
             raise ValueError("image_grid_thw height/width must be divisible by spatial_merge_size")
         llm_t, llm_h, llm_w = t, h // merge, w // merge
@@ -570,19 +561,38 @@ def mrope_position_ids_from_image_grid(
             raise ValueError("image_grid_thw count does not match expanded image tokens") from exc
         text_len = start - st
         if text_len > 0:
-            segments.append(torch.arange(text_len, dtype=torch.long).view(1, -1).expand(3, -1) + next_pos)
+            segments.append(np.broadcast_to(np.arange(text_len, dtype=np.int64), (3, text_len)) + next_pos)
             next_pos += text_len
         end = start + count
-        t_index = torch.arange(llm_t, dtype=torch.long).view(-1, 1).expand(llm_t, llm_h * llm_w).reshape(-1)
-        h_index = torch.arange(llm_h, dtype=torch.long).view(1, -1, 1).expand(llm_t, llm_h, llm_w).reshape(-1)
-        w_index = torch.arange(llm_w, dtype=torch.long).view(1, 1, -1).expand(llm_t, llm_h, llm_w).reshape(-1)
-        segments.append(torch.stack([t_index, h_index, w_index]) + next_pos)
+        t_index = np.broadcast_to(np.arange(llm_t, dtype=np.int64)[:, None], (llm_t, llm_h * llm_w)).reshape(-1)
+        h_index = np.broadcast_to(np.arange(llm_h, dtype=np.int64)[None, :, None], (llm_t, llm_h, llm_w)).reshape(-1)
+        w_index = np.broadcast_to(np.arange(llm_w, dtype=np.int64)[None, None, :], (llm_t, llm_h, llm_w)).reshape(-1)
+        segments.append(np.stack([t_index, h_index, w_index]) + next_pos)
         next_pos += max(llm_t, llm_h, llm_w)
         st = end
     if st < len(token_list):
         text_len = len(token_list) - st
-        segments.append(torch.arange(text_len, dtype=torch.long).view(1, -1).expand(3, -1) + next_pos)
-    return torch.cat(segments, dim=1) if segments else None
+        segments.append(np.broadcast_to(np.arange(text_len, dtype=np.int64), (3, text_len)) + next_pos)
+    if not segments:
+        return None
+    positions = np.concatenate(segments, axis=1)
+    new_tensor = getattr(grid, "new_tensor", None)
+    return new_tensor(positions) if callable(new_tensor) else positions
+
+
+def _array_to_numpy(value: Any):
+    import numpy as np
+
+    detach = getattr(value, "detach", None)
+    if callable(detach):
+        value = detach()
+    cpu = getattr(value, "cpu", None)
+    if callable(cpu):
+        value = cpu()
+    to_numpy = getattr(value, "numpy", None)
+    if callable(to_numpy):
+        value = to_numpy()
+    return np.asarray(value)
 
 
 def _find_image_span(tokens: list[int], image_token_id: int, start: int, count: int) -> int:

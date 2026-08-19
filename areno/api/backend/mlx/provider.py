@@ -370,10 +370,10 @@ def parameter_group(path: str) -> str:
     """Classify one flattened MLX parameter/module path."""
 
     parts = set(path.lower().split("."))
-    if parts & _TOWER_PARTS:
-        return "tower"
     if parts & _PROJECTOR_PARTS:
         return "projector"
+    if parts & _TOWER_PARTS:
+        return "tower"
     return "model"
 
 
