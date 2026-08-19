@@ -128,6 +128,7 @@ class MlxBackend(Backend):
             self._rollout_scheduler = ContinuousBatchScheduler(
                 self.provider,
                 GenerationConfig(
+                    max_running_prompts=self.config.max_running_prompts,
                     completion_batch_size=self.config.completion_batch_size,
                     prefill_batch_size=self.config.prefill_batch_size,
                     prefill_step_size=self.config.prefill_step_size,

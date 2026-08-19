@@ -7,6 +7,7 @@ import importlib.metadata
 import logging
 import queue
 import time
+from collections import deque
 from concurrent.futures import Future
 from dataclasses import dataclass, field
 from threading import Event, Thread
@@ -22,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass(slots=True)
 class GenerationConfig:
+    max_running_prompts: int
     completion_batch_size: int
     prefill_batch_size: int
     prefill_step_size: int
@@ -40,6 +42,9 @@ class _Request:
     tokens: dict[tuple[object, int], list[int]] = field(default_factory=dict)
     logprobs: dict[tuple[object, int], list[float]] = field(default_factory=dict)
     finished: set[tuple[object, int]] = field(default_factory=set)
+    expanded_prompts: list[list[int]] = field(default_factory=list)
+    expanded_features: list[dict | None] = field(default_factory=list)
+    next_insert: int = 0
 
 
 @dataclass(slots=True)
@@ -182,6 +187,7 @@ class ContinuousBatchScheduler:
             self._generators[None] = _TextBatchGenerator(provider, config)
         self._commands: queue.Queue[_Request | _DropState | None] = queue.Queue()
         self._requests_by_handle: dict[tuple[object, int], _Request] = {}
+        self._pending_requests: deque[_Request] = deque()
         self._closed = False
         self._failure: BaseException | None = None
         self._decode_progress_next_time = 0.0
@@ -252,19 +258,21 @@ class ContinuousBatchScheduler:
         closing = False
         try:
             while True:
-                if not self._requests_by_handle:
+                if not self._requests_by_handle and not self._pending_requests:
                     command = self._commands.get()
                     if command is None:
                         break
                     self._process(command)
                 closing = self._drain_commands() or closing
+                self._admit_pending()
                 for key, generator in tuple(self._generators.items()):
                     responses = generator.next()
                     token_delta = sum(response.finish_reason != "stop" for response in responses)
                     for response in responses:
                         self._record_response(key, generator, response)
                     self._record_decode_progress(token_delta)
-                if closing and not self._requests_by_handle:
+                self._admit_pending()
+                if closing and not self._requests_by_handle and not self._pending_requests:
                     break
         except BaseException as exc:
             self._failure = exc
@@ -306,7 +314,7 @@ class ContinuousBatchScheduler:
             self._insert_or_fail(command)
 
     def _drop_state(self, command: _DropState) -> None:
-        if self._requests_by_handle:
+        if self._requests_by_handle or self._pending_requests:
             raise RuntimeError("cannot drop MLX rollout state while requests are active")
         import mlx.core as mx
 
@@ -324,27 +332,44 @@ class ContinuousBatchScheduler:
 
     def _insert_or_fail(self, request: _Request) -> None:
         try:
-            self._insert(request)
+            request.expanded_prompts = expand_prompts(request.prompts, request.n_samples)
+            features = expand_prompt_features(request.features, len(request.prompts), request.n_samples)
+            request.expanded_features = features if features is not None else [None] * len(request.expanded_prompts)
+            self._pending_requests.append(request)
+            self._admit_pending()
         except BaseException as exc:
             if not request.future.done():
                 request.future.set_exception(exc)
             raise
 
-    def _insert(self, request: _Request) -> None:
-        expanded = expand_prompts(request.prompts, request.n_samples)
-        features = expand_prompt_features(request.features, len(request.prompts), request.n_samples)
-        if features is None:
-            features = [None] * len(expanded)
+    def _admit_pending(self) -> None:
+        capacity = max(int(self._config.max_running_prompts), 1) - len(self._requests_by_handle)
+        while capacity > 0 and self._pending_requests:
+            request = self._pending_requests.popleft()
+            end = min(request.next_insert + capacity, len(request.expanded_prompts))
+            self._insert(request, request.next_insert, end)
+            admitted = end - request.next_insert
+            request.next_insert = end
+            capacity -= admitted
+            if request.next_insert < len(request.expanded_prompts):
+                self._pending_requests.append(request)
+
+    def _insert(self, request: _Request, start: int, end: int) -> None:
         key: object = _sampling_key(request.sampling) if self._provider.is_multimodal else None
         generator = self._generators.get(key)
         if generator is None:
             generator = _VlmBatchGenerator(self._provider, self._config, request.sampling)
             self._generators[key] = generator
-        uids = generator.insert(expanded, features, request.sampling)
-        request.handles = [(key, uid) for uid in uids]
-        request.tokens = {handle: [] for handle in request.handles}
-        request.logprobs = {handle: [] for handle in request.handles}
-        for handle in request.handles:
+        uids = generator.insert(
+            request.expanded_prompts[start:end],
+            request.expanded_features[start:end],
+            request.sampling,
+        )
+        handles = [(key, uid) for uid in uids]
+        request.handles.extend(handles)
+        request.tokens.update((handle, []) for handle in handles)
+        request.logprobs.update((handle, []) for handle in handles)
+        for handle in handles:
             self._requests_by_handle[handle] = request
 
     def _record_response(self, key: object, generator: Any, response: Any) -> None:
@@ -357,7 +382,7 @@ class ContinuousBatchScheduler:
             return
         request.finished.add(handle)
         self._requests_by_handle.pop(handle, None)
-        if len(request.finished) == len(request.handles):
+        if len(request.finished) == len(request.expanded_prompts):
             request.future.set_result(_request_result(request))
 
     def _record_decode_progress(self, token_delta: int) -> None:
@@ -389,6 +414,8 @@ class ContinuousBatchScheduler:
 
     def _fail_all(self, exc: BaseException) -> None:
         requests = {id(request): request for request in self._requests_by_handle.values()}
+        requests.update((id(request), request) for request in self._pending_requests)
+        self._pending_requests.clear()
         while True:
             try:
                 command = self._commands.get_nowait()

@@ -1,6 +1,8 @@
 """CPU-only checks for MLX training batch semantics."""
 
 import logging
+from collections import deque
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -12,7 +14,7 @@ from areno.api.backend.common import (
     accumulation_steps,
     metric_reduction,
 )
-from areno.api.backend.mlx.generation import ContinuousBatchScheduler, GenerationConfig
+from areno.api.backend.mlx.generation import ContinuousBatchScheduler, GenerationConfig, _Request
 from areno.api.backend.mlx.provider import parameter_group
 from areno.api.backend.mlx.training import sft_target_token_count
 from areno.api.models import TrainSequence
@@ -86,6 +88,7 @@ def test_multimodal_image_grid_helpers_accept_backend_native_arrays():
 def test_mlx_decode_progress_matches_cuda_log_shape(monkeypatch, caplog):
     scheduler = object.__new__(ContinuousBatchScheduler)
     scheduler._config = GenerationConfig(
+        max_running_prompts=2,
         completion_batch_size=2,
         prefill_batch_size=2,
         prefill_step_size=128,
@@ -105,6 +108,55 @@ def test_mlx_decode_progress_matches_cuda_log_shape(monkeypatch, caplog):
         scheduler._record_decode_progress(20)
 
     assert caplog.messages == ["rollout decode progress: dp=0/1 active=2 cuda_graph=False tokens_per_second=2.0"]
+
+
+def test_mlx_scheduler_admission_respects_max_running_prompts():
+    class FakeGenerator:
+        def __init__(self):
+            self.next_uid = 0
+
+        def insert(self, prompts, features, sampling):
+            del features, sampling
+            uids = list(range(self.next_uid, self.next_uid + len(prompts)))
+            self.next_uid += len(prompts)
+            return uids
+
+    scheduler = object.__new__(ContinuousBatchScheduler)
+    scheduler._config = GenerationConfig(
+        max_running_prompts=2,
+        completion_batch_size=8,
+        prefill_batch_size=8,
+        prefill_step_size=128,
+        max_kv_size=None,
+        decode_progress_interval_s=0.0,
+    )
+    scheduler._provider = SimpleNamespace(is_multimodal=False)
+    generator = FakeGenerator()
+    scheduler._generators = {None: generator}
+    scheduler._requests_by_handle = {}
+    scheduler._pending_requests = deque()
+    sampling = SimpleNamespace()
+    request = _Request(
+        prompts=[[1], [2], [3]], n_samples=1, sampling=sampling, features=None
+    )
+
+    scheduler._insert_or_fail(request)
+
+    assert len(scheduler._requests_by_handle) == 2
+    assert request.next_insert == 2
+    first_handles = list(request.handles)
+    for handle in first_handles:
+        scheduler._record_response(handle[0], generator, SimpleNamespace(uid=handle[1], finish_reason="stop"))
+    scheduler._admit_pending()
+
+    assert len(scheduler._requests_by_handle) == 1
+    assert request.next_insert == 3
+    final_handle = request.handles[-1]
+    scheduler._record_response(
+        final_handle[0], generator, SimpleNamespace(uid=final_handle[1], finish_reason="stop")
+    )
+    assert request.future.done()
+    assert len(request.future.result()) == 3
 
 
 def test_adam8bit_lazy_state_remains_stable_after_zero_gradient_steps():
