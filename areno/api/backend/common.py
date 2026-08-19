@@ -17,12 +17,18 @@ class TrainMetric(str, Enum):
     LOGP_DIFF_MEAN = "logp_diff_mean"
     LOGP_ABS_DIFF_MEAN = "logp_abs_diff_mean"
 
+    def __str__(self) -> str:
+        return self.value
+
 
 class MetricReduction(str, Enum):
     """Supported reductions for microbatch metrics."""
 
     FIRST = "first"
     MEAN = "mean"
+
+    def __str__(self) -> str:
+        return self.value
 
 
 _FIRST_MICROBATCH_METRICS = frozenset(TrainMetric)

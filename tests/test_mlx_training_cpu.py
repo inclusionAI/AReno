@@ -47,7 +47,10 @@ def test_accumulation_windows_match_cuda_mini_batch_semantics():
 
 
 def test_policy_metric_reductions_use_typed_names():
+    assert str(TrainMetric.LOGP_ABS_DIFF_MEAN) == "logp_abs_diff_mean"
+    assert str(MetricReduction.FIRST) == "first"
     assert metric_reduction(TrainMetric.LOGP_ABS_DIFF_MEAN) is MetricReduction.FIRST
+    assert metric_reduction(str(TrainMetric.LOGP_ABS_DIFF_MEAN)) is MetricReduction.FIRST
     assert metric_reduction("policy_loss") is MetricReduction.MEAN
 
 
