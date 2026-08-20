@@ -12,6 +12,7 @@ import mmap
 import os
 import tempfile
 from collections.abc import Iterable
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -128,6 +129,9 @@ class AdamWFP32Master:
         self._collective_arenas: dict[tuple[torch.device, torch.dtype, str], torch.Tensor] = {}
         self._disk_offload_tmp: tempfile.TemporaryDirectory | None = None
         self._mmap_groups: dict[tuple[int, ...], _MmapGroup] = {}
+        self._disk_prefetch_executor: ThreadPoolExecutor | None = None
+        self._disk_prefetch_futures: dict[int, Future[dict[str, torch.Tensor]]] = {}
+        self._disk_prefetch_in_use: dict[int, tuple[dict[str, torch.Tensor], torch.cuda.Event | None]] = {}
         self._active_offload_mode = "none"
         self._disk_offload_root: str | None = None
         self._active_offload_batch_size = 32
@@ -150,10 +154,16 @@ class AdamWFP32Master:
                 )
                 if has_grad:
                     self._ensure_bucket_state(bucket)
+                    if self._active_offload_mode == "disk":
+                        self._schedule_disk_prefetch(index + 1)
                     self._step_bucket(bucket)
                     group_changed = True
                     if self._active_offload_mode == "disk":
                         self._stage_bucket_on_cpu(bucket)
+                        self._release_disk_prefetch(index)
+                elif self._active_offload_mode == "disk":
+                    self._discard_disk_prefetch(index)
+                    self._schedule_disk_prefetch(index + 1)
             if self._active_offload_mode == "disk" and group_changed:
                 self._offload_bucket_group_to_disk(indices)
         return None
@@ -234,6 +244,12 @@ class AdamWFP32Master:
         self._active_offload_mode = mode
         self._disk_offload_root = directory if mode == "disk" else None
         self._active_offload_batch_size = batch_size
+
+    def prefetch_state(self) -> None:
+        """Begin bounded disk page-in before forward/backward reaches the optimizer step."""
+
+        if self._active_offload_mode == "disk":
+            self._schedule_disk_prefetch(0)
 
     @torch.no_grad()
     def onload_state(self, device: torch.device) -> None:
@@ -816,13 +832,98 @@ class AdamWFP32Master:
         assert bucket.offload_file is not None
         assert bucket.offload_index is not None
         assert bucket.offload_group is not None
-        state = bucket.offload_group.tensors[bucket.offload_index]
-        bucket.master_storage = BF16MasterStorage(
-            low_bits=_mmap_tensor_to(state["low_bits"], device),
-            round_up_bits=_mmap_tensor_to(state["round_up_bits"], device),
+        state, prefetched = self._take_disk_prefetch(
+            bucket.offload_index,
+            bucket.offload_group.tensors[bucket.offload_index],
         )
-        bucket.exp_avg = _mmap_tensor_to(state["exp_avg"], device)
-        bucket.exp_avg_sq = _mmap_tensor_to(state["exp_avg_sq"], device)
+        bucket.master_storage = BF16MasterStorage(
+            low_bits=_host_tensor_to(state["low_bits"], device, prefetched=prefetched),
+            round_up_bits=_host_tensor_to(state["round_up_bits"], device, prefetched=prefetched),
+        )
+        bucket.exp_avg = _host_tensor_to(state["exp_avg"], device, prefetched=prefetched)
+        bucket.exp_avg_sq = _host_tensor_to(state["exp_avg_sq"], device, prefetched=prefetched)
+        if prefetched and device.type == "cuda":
+            self._retain_disk_prefetch(bucket.offload_index, state, device)
+
+    def _disk_mmap_group_for_index(self, index: int) -> _MmapGroup | None:
+        """Return the mapped FP32-master group for an initialized bucket."""
+
+        bucket = self.buckets[index]
+        return bucket.offload_group if bucket.offload_file is not None else None
+
+    def _schedule_disk_prefetch(self, start_index: int) -> None:
+        """Read at most one upcoming mmap bucket on a background thread."""
+
+        if self._active_offload_mode != "disk" or self._disk_prefetch_futures:
+            return
+        for index in range(start_index, len(self.buckets)):
+            group = self._disk_mmap_group_for_index(index)
+            if group is None or index in self._disk_prefetch_in_use:
+                continue
+            if self._disk_prefetch_executor is None:
+                self._disk_prefetch_executor = ThreadPoolExecutor(
+                    max_workers=1,
+                    thread_name_prefix=f"areno-optim-prefetch-dp{self.dp_rank}",
+                )
+            self._disk_prefetch_futures[index] = self._disk_prefetch_executor.submit(
+                _prefetch_mmap_payload,
+                group.tensors[index],
+                torch.cuda.is_available(),
+            )
+            return
+
+    def _take_disk_prefetch(
+        self,
+        index: int,
+        fallback: dict[str, torch.Tensor],
+    ) -> tuple[dict[str, torch.Tensor], bool]:
+        """Consume a completed/in-flight lookahead payload, or use mmap directly."""
+
+        future = self._disk_prefetch_futures.pop(index, None)
+        if future is None:
+            return fallback, False
+        return future.result(), True
+
+    def _discard_disk_prefetch(self, index: int) -> None:
+        """Drop lookahead for an unused bucket without blocking the training thread."""
+
+        future = self._disk_prefetch_futures.pop(index, None)
+        if future is None or future.cancel():
+            return
+        future.add_done_callback(_discard_prefetch_result)
+
+    def _retain_disk_prefetch(
+        self,
+        index: int,
+        payload: dict[str, torch.Tensor],
+        device: torch.device,
+    ) -> None:
+        """Keep pinned sources alive until their queued H2D copies complete."""
+
+        event = torch.cuda.Event()
+        event.record(torch.cuda.current_stream(device))
+        self._disk_prefetch_in_use[index] = (payload, event)
+
+    def _release_disk_prefetch(self, index: int) -> None:
+        """Release one prefetch buffer after the bucket update has synchronized."""
+
+        retained = self._disk_prefetch_in_use.pop(index, None)
+        if retained is not None and retained[1] is not None:
+            retained[1].synchronize()
+
+    def _shutdown_disk_prefetch(self) -> None:
+        """Finish mmap readers before their mappings are closed."""
+
+        for future in self._disk_prefetch_futures.values():
+            future.cancel()
+        if self._disk_prefetch_executor is not None:
+            self._disk_prefetch_executor.shutdown(wait=True, cancel_futures=True)
+            self._disk_prefetch_executor = None
+        self._disk_prefetch_futures.clear()
+        for _payload, event in self._disk_prefetch_in_use.values():
+            if event is not None:
+                event.synchronize()
+        self._disk_prefetch_in_use.clear()
 
     def _bucket_cpu_payload(self, index: int, bucket: _MasterBucket) -> dict:
         """Snapshot one bucket on CPU without changing its residency."""
@@ -880,6 +981,7 @@ class AdamWFP32Master:
     def _cleanup_disk_offload(self) -> None:
         """Remove only this optimizer's private temporary directory."""
 
+        self._shutdown_disk_prefetch()
         for group in self._mmap_groups.values():
             group.close()
         self._mmap_groups.clear()
@@ -1032,12 +1134,45 @@ def _optional_cpu_clone(value: torch.Tensor | None) -> torch.Tensor | None:
     return None if value is None else value.detach().to(device="cpu").clone()
 
 
-def _mmap_tensor_to(value: torch.Tensor, device: torch.device) -> torch.Tensor:
-    """Detach a tensor from mmap storage while copying it onto ``device``."""
+def _host_tensor_to(value: torch.Tensor, device: torch.device, *, prefetched: bool) -> torch.Tensor:
+    """Copy host state while preserving async lifetime for prefetched sources."""
 
     if device.type == "cpu":
         return value.clone()
-    return value.to(device=device)
+    return value.to(device=device, non_blocking=prefetched and value.is_pinned())
+
+
+@torch.no_grad()
+def _prefetch_mmap_payload(
+    payload: dict[str, torch.Tensor],
+    pin_memory: bool,
+) -> dict[str, torch.Tensor]:
+    """Fault one mmap bucket in off-thread and optionally stage it in pinned RAM."""
+
+    prefetched: dict[str, torch.Tensor] = {}
+    for name, tensor in payload.items():
+        if not pin_memory:
+            prefetched[name] = tensor.clone()
+            continue
+        try:
+            destination = torch.empty_like(tensor, device="cpu", pin_memory=True)
+        except RuntimeError:
+            destination = torch.empty_like(tensor, device="cpu")
+        destination.copy_(tensor)
+        prefetched[name] = destination
+    return prefetched
+
+
+def _discard_prefetch_result(future: Future[dict[str, torch.Tensor]]) -> None:
+    """Retrieve a skipped prefetch result so worker exceptions are consumed."""
+
+    if future.cancelled():
+        return
+    try:
+        future.result()
+    except Exception:
+        # The bucket had no gradient and its state is not consumed this step.
+        pass
 
 
 def _align_up(value: int, alignment: int) -> int:

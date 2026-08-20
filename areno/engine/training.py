@@ -59,6 +59,12 @@ class TrainingManager:
                 directory=offload_directory,
                 batch_size=offload_batch_size,
             )
+            if offload_mode == "disk":
+                prefetch_state = getattr(worker.optimizer, "prefetch_state", None)
+                if callable(prefetch_state):
+                    # Fault only the first bucket in on a background thread;
+                    # subsequent buckets use one-ahead prefetch during step().
+                    prefetch_state()
         worker.optimizer.zero_grad(set_to_none=True)
         results = []
         try:

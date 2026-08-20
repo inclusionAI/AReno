@@ -11,8 +11,8 @@ import torch.distributed as dist
 from areno.engine.optim.adamw_fp32_master import (
     _DEFAULT_BUCKET_NUMEL,
     AdamWFP32Master,
+    _host_tensor_to,
     _MasterBucket,
-    _mmap_tensor_to,
     _MmapGroup,
     _param_grad,
     _ParamRef,
@@ -82,10 +82,16 @@ class AdamW8bit(AdamWFP32Master):
                 )
                 if has_grad:
                     self._ensure_bucket_state(bucket, state)
+                    if self._active_offload_mode == "disk":
+                        self._schedule_disk_prefetch(index + 1)
                     self._step_bucket_8bit(bucket, state)
                     group_changed = True
                     if self._active_offload_mode == "disk":
                         self._stage_8bit_state_on_cpu(state)
+                        self._release_disk_prefetch(index)
+                elif self._active_offload_mode == "disk":
+                    self._discard_disk_prefetch(index)
+                    self._schedule_disk_prefetch(index + 1)
             if self._active_offload_mode == "disk" and group_changed:
                 self._offload_8bit_group_to_disk(indices)
         return None
@@ -253,11 +259,22 @@ class AdamW8bit(AdamWFP32Master):
         assert state.offload_file is not None
         assert state.offload_index is not None
         assert state.offload_group is not None
-        saved = state.offload_group.tensors[state.offload_index]
-        state.exp_avg_q = _mmap_tensor_to(saved["exp_avg_q"], device)
-        state.exp_avg_scale = _mmap_tensor_to(saved["exp_avg_scale"], device)
-        state.exp_avg_sq_q = _mmap_tensor_to(saved["exp_avg_sq_q"], device)
-        state.exp_avg_sq_scale = _mmap_tensor_to(saved["exp_avg_sq_scale"], device)
+        saved, prefetched = self._take_disk_prefetch(
+            state.offload_index,
+            state.offload_group.tensors[state.offload_index],
+        )
+        state.exp_avg_q = _host_tensor_to(saved["exp_avg_q"], device, prefetched=prefetched)
+        state.exp_avg_scale = _host_tensor_to(saved["exp_avg_scale"], device, prefetched=prefetched)
+        state.exp_avg_sq_q = _host_tensor_to(saved["exp_avg_sq_q"], device, prefetched=prefetched)
+        state.exp_avg_sq_scale = _host_tensor_to(saved["exp_avg_sq_scale"], device, prefetched=prefetched)
+        if prefetched and device.type == "cuda":
+            self._retain_disk_prefetch(state.offload_index, saved, device)
+
+    def _disk_mmap_group_for_index(self, index: int) -> _MmapGroup | None:
+        """Return the mapped Adam8bit group for an initialized bucket."""
+
+        state = self._states[index]
+        return state.offload_group if state.offload_file is not None else None
 
     def _state_mmap_specs(self, indices: list[int]) -> dict[int, dict[str, tuple[torch.dtype, tuple[int, ...]]]]:
         """Return the fixed raw-mmap layout for quantized Adam state."""

@@ -191,7 +191,12 @@ def test_bf16_autograd_accumulation_does_not_create_fp32_gradient_copy() -> None
 
 @pytest.mark.parametrize(
     ("keep_rollout_state", "optimizer_state_offload", "expected_offloads"),
-    [(True, "none", []), (False, "none", [("cpu", None)]), (True, "cpu", [("cpu", None)])],
+    [
+        (True, "none", []),
+        (False, "none", [("cpu", None)]),
+        (True, "cpu", [("cpu", None)]),
+        (True, "disk", [("disk", "/tmp/areno-test-offload")]),
+    ],
 )
 def test_training_manager_offloads_optimizer_state_when_requested(
     keep_rollout_state: bool,
@@ -209,6 +214,9 @@ def test_training_manager_offloads_optimizer_state_when_requested(
             assert set_to_none
             calls["events"].append(("zero_grad",))
 
+        def prefetch_state(self) -> None:
+            calls["events"].append(("prefetch",))
+
         def offload_state(self, *, mode: str, directory: str | None, batch_size: int) -> None:
             assert batch_size == 32
             calls["offload"].append((mode, directory))
@@ -221,7 +229,7 @@ def test_training_manager_offloads_optimizer_state_when_requested(
             runtime=SimpleNamespace(
                 keep_rollout_state=keep_rollout_state,
                 optimizer_state_offload=optimizer_state_offload,
-                optimizer_state_offload_dir=None,
+                optimizer_state_offload_dir=("/tmp/areno-test-offload" if optimizer_state_offload == "disk" else None),
                 optimizer_state_offload_batch_size=32,
             )
         ),
@@ -240,6 +248,8 @@ def test_training_manager_offloads_optimizer_state_when_requested(
     expected_events = [("prepare",)]
     if expected_offloads:
         expected_events.append(("configure", expected_offloads[0][0], expected_offloads[0][1]))
+    if optimizer_state_offload == "disk":
+        expected_events.append(("prefetch",))
     expected_events.append(("zero_grad",))
     assert calls == {"events": expected_events, "offload": expected_offloads}
 
@@ -275,6 +285,8 @@ def test_fp32_master_disk_offload_is_lazy_and_preserves_next_update(tmp_path) ->
         torch.testing.assert_close(actual["exp_avg_sq"], expected["exp_avg_sq"], rtol=0.0, atol=0.0)
     assert [bucket.offload_file for bucket in candidate.buckets] == offload_files
 
+    candidate.prefetch_state()
+    assert len(candidate._disk_prefetch_futures) == 1
     second_gradient = torch.linspace(0.25, -0.9, 29).to(torch.bfloat16)
     candidate_param.grad = second_gradient.clone()
     reference_param.grad = second_gradient.clone()
@@ -287,6 +299,8 @@ def test_fp32_master_disk_offload_is_lazy_and_preserves_next_update(tmp_path) ->
     assert {path: Path(path).stat().st_ino for path in set(offload_files)} == offload_inodes
     assert all(bucket.master_storage is None for bucket in candidate.buckets)
     assert all(bucket.exp_avg is None and bucket.exp_avg_sq is None for bucket in candidate.buckets)
+    assert not candidate._disk_prefetch_futures
+    assert not candidate._disk_prefetch_in_use
     candidate.onload_state(torch.device("cpu"))
     assert all(bucket.offload_file is None for bucket in candidate.buckets)
     assert all(bucket.master_storage is not None for bucket in candidate.buckets)
@@ -318,6 +332,8 @@ def test_adam8bit_disk_offload_preserves_quantized_update(tmp_path) -> None:
             offload_files = [state.offload_file for state in candidate._states]
             offload_inodes = {path: Path(path).stat().st_ino for path in set(offload_files)}
             assert all(state.exp_avg_q is None for state in candidate._states)
+            candidate.prefetch_state()
+            assert len(candidate._disk_prefetch_futures) == 1
 
     torch.testing.assert_close(candidate_param, reference_param, rtol=0.0, atol=0.0)
     candidate_state = candidate.state_dict()
@@ -327,6 +343,8 @@ def test_adam8bit_disk_offload_preserves_quantized_update(tmp_path) -> None:
             torch.testing.assert_close(actual[key], expected[key], rtol=0.0, atol=0.0)
     assert [state.offload_file for state in candidate._states] == offload_files
     assert {path: Path(path).stat().st_ino for path in set(offload_files)} == offload_inodes
+    assert not candidate._disk_prefetch_futures
+    assert not candidate._disk_prefetch_in_use
     candidate.onload_state(torch.device("cpu"))
     assert all(state.offload_file is None for state in candidate._states)
     assert all(state.exp_avg_q is not None for state in candidate._states)
