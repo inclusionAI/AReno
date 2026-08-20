@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from areno.engine.optim import AdamWFP32Master
+from areno.engine.optim import AdamW8bit, AdamWFP32Master
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 
@@ -53,3 +53,42 @@ def test_fused_fp32_master_handles_multiple_refs_and_partial_bytes() -> None:
     state = optimizer.state_dict()
     assert state["master_params"][0].numel() == 17
     assert torch.isfinite(state["master_params"][0]).all()
+
+
+@pytest.mark.parametrize("optimizer_cls", [AdamWFP32Master, AdamW8bit])
+def test_disk_offload_prefetch_uses_pinned_double_buffer_and_preserves_updates(tmp_path, optimizer_cls) -> None:
+    device = torch.device("cuda", 0)
+    initial = [torch.linspace(-1.0 + index, 1.0 + index, 1024, device=device).to(torch.bfloat16) for index in range(3)]
+    candidate_params = [torch.nn.Parameter(value.clone()) for value in initial]
+    reference_params = [torch.nn.Parameter(value.clone()) for value in initial]
+    kwargs = {
+        "lr": 4.0e-4,
+        "betas": (0.9, 0.99),
+        "weight_decay": 0.02,
+        "bucket_numel": 1024,
+    }
+    candidate = optimizer_cls(candidate_params, **kwargs)
+    reference = optimizer_cls(reference_params, **kwargs)
+    candidate.configure_state_offload(mode="disk", directory=str(tmp_path), batch_size=2)
+
+    for step in range(2):
+        if step == 1:
+            candidate.prefetch_state()
+            assert len(candidate._disk_prefetch_futures) == 2
+            prefetched = [future.result() for future in candidate._disk_prefetch_futures.values()]
+            assert all(tensor.is_pinned() for payload in prefetched for tensor in payload.values())
+        for index, (candidate_param, reference_param) in enumerate(
+            zip(candidate_params, reference_params, strict=True)
+        ):
+            gradient = torch.linspace(-0.5 + index, 0.75 - index, 1024, device=device).to(torch.bfloat16)
+            candidate_param.grad = gradient
+            reference_param.grad = gradient.clone()
+        candidate.step()
+        reference.step()
+
+    for candidate_param, reference_param in zip(candidate_params, reference_params, strict=True):
+        torch.testing.assert_close(candidate_param, reference_param, rtol=0.0, atol=0.0)
+    assert not candidate._disk_prefetch_futures
+    assert not candidate._disk_prefetch_in_use
+    candidate.onload_state(device)
+    assert not list(tmp_path.rglob("*.mmap"))
