@@ -17,6 +17,16 @@ from areno.engine.runtime.train_step import _grad_norms_from_shards
 from areno.engine.training import TrainingManager
 
 
+@pytest.mark.parametrize("optimizer_cls", [AdamWFP32Master, AdamW8bit])
+def test_optimizer_state_offload_batch_size_defaults_to_one(tmp_path, optimizer_cls) -> None:
+    parameter = torch.nn.Parameter(torch.ones(4, dtype=torch.bfloat16))
+    optimizer = optimizer_cls([parameter])
+
+    assert optimizer._active_offload_batch_size == 1
+    optimizer.configure_state_offload(mode="disk", directory=str(tmp_path))
+    assert optimizer._active_offload_batch_size == 1
+
+
 def _flatten_master_state(optimizer: AdamWFP32Master) -> torch.Tensor:
     return torch.cat([value for value in optimizer.state_dict()["master_params"] if value is not None])
 

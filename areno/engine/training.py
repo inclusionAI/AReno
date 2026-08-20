@@ -46,7 +46,7 @@ class TrainingManager:
             # Preserve --drop-rollout-state's historical CPU optimizer offload.
             offload_mode = "cpu"
         offload_directory = getattr(worker.config.runtime, "optimizer_state_offload_dir", None)
-        offload_batch_size = getattr(worker.config.runtime, "optimizer_state_offload_batch_size", 32)
+        offload_batch_size = getattr(worker.config.runtime, "optimizer_state_offload_batch_size", 1)
         if not worker._train_state_ready:
             # onload_state() clears residency policy, so prepare the actor
             # before configuring first-step disk streaming.

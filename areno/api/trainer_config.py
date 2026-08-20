@@ -67,7 +67,7 @@ class TrainerConfig:
     keep_rollout_state: bool = True
     optimizer_state_offload: str | bool = "none"
     optimizer_state_offload_dir: str | None = None
-    optimizer_state_offload_batch_size: int = 32
+    optimizer_state_offload_batch_size: int = 1
     eager_decode: bool = False
     attn_backend: str = "flash"
     metrics_log_dir: str | None = DEFAULT_METRICS_LOG_DIR

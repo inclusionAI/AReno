@@ -115,10 +115,10 @@ class AdamW8bit(AdamWFP32Master):
         self._cleanup_disk_offload()
         self._active_offload_mode = "none"
         self._disk_offload_root = None
-        self._active_offload_batch_size = 32
+        self._active_offload_batch_size = 1
 
     @torch.no_grad()
-    def offload_state(self, mode: str = "cpu", directory: str | None = None, batch_size: int = 32) -> None:
+    def offload_state(self, mode: str = "cpu", directory: str | None = None, batch_size: int = 1) -> None:
         """Move quantized state to CPU or bucket-stream it to disk."""
 
         self.configure_state_offload(mode=mode, directory=directory, batch_size=batch_size)
@@ -162,7 +162,7 @@ class AdamW8bit(AdamWFP32Master):
             state.offload_group = None
         self._active_offload_mode = "none"
         self._disk_offload_root = None
-        self._active_offload_batch_size = 32
+        self._active_offload_batch_size = 1
         self._cleanup_disk_offload()
 
     def state_dict(self) -> dict:
@@ -197,7 +197,7 @@ class AdamW8bit(AdamWFP32Master):
         self._cleanup_disk_offload()
         self._active_offload_mode = "none"
         self._disk_offload_root = None
-        self._active_offload_batch_size = 32
+        self._active_offload_batch_size = 1
         for state in self._states:
             state.offload_file = None
             state.offload_index = None

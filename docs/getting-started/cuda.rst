@@ -108,7 +108,7 @@ The main CUDA controls are:
    lazily copies buckets back for updates. Also pass
    ``--optimizer-state-offload-dir /path/to/local-nvme``. Disk offload is
    runtime scratch storage rather than a checkpoint. The default
-   ``--optimizer-state-offload-batch-size 32`` groups mmap files and flushes;
+   ``--optimizer-state-offload-batch-size 1`` groups mmap files and flushes;
    reduce it to lower CPU staging memory or increase it to reduce I/O calls.
 
 ``--attn-backend flash``

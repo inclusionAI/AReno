@@ -138,7 +138,7 @@ class AdamWFP32Master:
         self._disk_write_futures: dict[tuple[int, ...], Future[None]] = {}
         self._active_offload_mode = "none"
         self._disk_offload_root: str | None = None
-        self._active_offload_batch_size = 32
+        self._active_offload_batch_size = 1
 
     @torch.no_grad()
     def step(self, closure=None):
@@ -208,10 +208,10 @@ class AdamWFP32Master:
         self._cleanup_disk_offload()
         self._active_offload_mode = "none"
         self._disk_offload_root = None
-        self._active_offload_batch_size = 32
+        self._active_offload_batch_size = 1
 
     @torch.no_grad()
-    def offload_state(self, mode: str = "cpu", directory: str | None = None, batch_size: int = 32) -> None:
+    def offload_state(self, mode: str = "cpu", directory: str | None = None, batch_size: int = 1) -> None:
         """Move state to CPU or bucket-stream it into a private disk directory."""
 
         self.configure_state_offload(mode=mode, directory=directory, batch_size=batch_size)
@@ -236,7 +236,7 @@ class AdamWFP32Master:
         if mode == "cpu":
             self._cleanup_disk_offload()
 
-    def configure_state_offload(self, mode: str, directory: str | None = None, batch_size: int = 32) -> None:
+    def configure_state_offload(self, mode: str, directory: str | None = None, batch_size: int = 1) -> None:
         """Set state residency policy before an optimizer step without moving tensors."""
 
         if mode not in {"cpu", "disk"}:
@@ -273,7 +273,7 @@ class AdamWFP32Master:
             bucket.offload_group = None
         self._active_offload_mode = "none"
         self._disk_offload_root = None
-        self._active_offload_batch_size = 32
+        self._active_offload_batch_size = 1
         self._cleanup_disk_offload()
 
     def state_dict(self) -> dict:

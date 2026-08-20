@@ -349,7 +349,7 @@ in its description; flags for other algorithms are ignored.
 
 ``--optimizer-state-offload-batch-size INTEGER``
    Number of optimizer buckets assigned to each persistent mmap and flushed
-   together. Default: ``32``. A smaller value bounds CPU staging memory more
+   together. Default: ``1``. A smaller value bounds CPU staging memory more
    tightly; a larger value creates fewer files and flush calls. This setting
    is used only by disk offload.
 

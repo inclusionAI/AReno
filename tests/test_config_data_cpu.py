@@ -459,7 +459,9 @@ class ConfigAndDataTest(unittest.TestCase):
         cfg = TrainerConfig(algo="sft", ckpt="unused", dataset_path="unused")
 
         self.assertTrue(cfg.keep_rollout_state)
+        self.assertEqual(cfg.optimizer_state_offload_batch_size, 1)
         self.assertTrue(cfg.cuda_config().runtime["keep_rollout_state"])
+        self.assertEqual(cfg.cuda_config().runtime["optimizer_state_offload_batch_size"], 1)
         self.assertTrue(cfg.mlx_config().keep_rollout_state)
 
     def test_train_cli_drop_rollout_state_inverts_runtime_flag(self):
@@ -862,7 +864,7 @@ def _train_args(**overrides):
         drop_rollout_state=False,
         optimizer_state_offload="none",
         optimizer_state_offload_dir=None,
-        optimizer_state_offload_batch_size=32,
+        optimizer_state_offload_batch_size=1,
         eager_decode=False,
         attn_backend="flash",
         disable_thinking=False,
