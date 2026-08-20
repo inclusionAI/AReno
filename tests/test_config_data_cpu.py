@@ -862,7 +862,7 @@ def _train_args(**overrides):
         drop_rollout_state=False,
         optimizer_state_offload="none",
         optimizer_state_offload_dir=None,
-        optimizer_state_offload_batch_size=8,
+        optimizer_state_offload_batch_size=32,
         eager_decode=False,
         attn_backend="flash",
         disable_thinking=False,

@@ -39,6 +39,26 @@ class TrainingManager:
             raise TypeError("TRAIN payload must contain a list data_packs_by_dp")
         accumulation_steps = payload.gradient_accumulation_steps
         accumulation_steps = len(packs) if accumulation_steps is None else max(int(accumulation_steps), 1)
+        offload_mode = getattr(worker.config.runtime, "optimizer_state_offload", "none")
+        if isinstance(offload_mode, bool):
+            offload_mode = "cpu" if offload_mode else "none"
+        if offload_mode == "none" and not worker.config.runtime.keep_rollout_state:
+            # Preserve --drop-rollout-state's historical CPU optimizer offload.
+            offload_mode = "cpu"
+        offload_directory = getattr(worker.config.runtime, "optimizer_state_offload_dir", None)
+        offload_batch_size = getattr(worker.config.runtime, "optimizer_state_offload_batch_size", 32)
+        if not worker._train_state_ready:
+            # onload_state() clears residency policy, so prepare the actor
+            # before configuring first-step disk streaming.
+            worker._prepare_for_train()
+        if offload_mode != "none":
+            # Disk streaming must be active before the first optimizer step;
+            # otherwise step zero materializes every bucket on the GPU first.
+            worker.optimizer.configure_state_offload(
+                mode=offload_mode,
+                directory=offload_directory,
+                batch_size=offload_batch_size,
+            )
         worker.optimizer.zero_grad(set_to_none=True)
         results = []
         try:
@@ -55,17 +75,11 @@ class TrainingManager:
                 )
             return results
         finally:
-            offload_mode = getattr(worker.config.runtime, "optimizer_state_offload", "none")
-            if isinstance(offload_mode, bool):
-                offload_mode = "cpu" if offload_mode else "none"
-            if offload_mode == "none" and not worker.config.runtime.keep_rollout_state:
-                # Preserve --drop-rollout-state's historical CPU optimizer offload.
-                offload_mode = "cpu"
             if offload_mode != "none":
                 worker.optimizer.offload_state(
                     mode=offload_mode,
-                    directory=getattr(worker.config.runtime, "optimizer_state_offload_dir", None),
-                    batch_size=getattr(worker.config.runtime, "optimizer_state_offload_batch_size", 8),
+                    directory=offload_directory,
+                    batch_size=offload_batch_size,
                 )
                 if worker.device.type == "cuda":
                     torch.cuda.empty_cache()

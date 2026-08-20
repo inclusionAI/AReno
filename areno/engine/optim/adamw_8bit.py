@@ -103,21 +103,13 @@ class AdamW8bit(AdamWFP32Master):
         self._cleanup_disk_offload()
         self._active_offload_mode = "none"
         self._disk_offload_root = None
-        self._active_offload_batch_size = 8
+        self._active_offload_batch_size = 32
 
     @torch.no_grad()
-    def offload_state(self, mode: str = "cpu", directory: str | None = None, batch_size: int = 8) -> None:
+    def offload_state(self, mode: str = "cpu", directory: str | None = None, batch_size: int = 32) -> None:
         """Move quantized state to CPU or bucket-stream it to disk."""
 
-        if mode not in {"cpu", "disk"}:
-            raise ValueError("optimizer offload mode must be one of: cpu, disk")
-        if mode == "disk" and not directory:
-            raise ValueError("directory is required for disk optimizer offload")
-        if batch_size < 1:
-            raise ValueError("optimizer offload batch_size must be positive")
-        self._active_offload_mode = mode
-        self._disk_offload_root = directory if mode == "disk" else None
-        self._active_offload_batch_size = batch_size
+        self.configure_state_offload(mode=mode, directory=directory, batch_size=batch_size)
 
         for indices in self._bucket_groups():
             if mode == "disk" and all(
@@ -155,7 +147,7 @@ class AdamW8bit(AdamWFP32Master):
                 state.exp_avg_sq_scale = state.exp_avg_sq_scale.to(device=device)
         self._active_offload_mode = "none"
         self._disk_offload_root = None
-        self._active_offload_batch_size = 8
+        self._active_offload_batch_size = 32
         self._cleanup_disk_offload()
 
     def state_dict(self) -> dict:
@@ -191,7 +183,7 @@ class AdamW8bit(AdamWFP32Master):
         self._cleanup_disk_offload()
         self._active_offload_mode = "none"
         self._disk_offload_root = None
-        self._active_offload_batch_size = 8
+        self._active_offload_batch_size = 32
         for state in self._states:
             state.offload_file = None
         saved_states = state_dict.get("state", [])

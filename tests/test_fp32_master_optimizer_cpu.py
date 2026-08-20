@@ -198,34 +198,50 @@ def test_training_manager_offloads_optimizer_state_when_requested(
     optimizer_state_offload: str,
     expected_offloads: list[tuple[str, str | None]],
 ) -> None:
-    calls = {"zero_grad": 0, "offload": []}
+    calls = {"events": [], "offload": []}
 
     class _Optimizer:
+        def configure_state_offload(self, *, mode: str, directory: str | None, batch_size: int) -> None:
+            assert batch_size == 32
+            calls["events"].append(("configure", mode, directory))
+
         def zero_grad(self, *, set_to_none: bool) -> None:
             assert set_to_none
-            calls["zero_grad"] += 1
+            calls["events"].append(("zero_grad",))
 
         def offload_state(self, *, mode: str, directory: str | None, batch_size: int) -> None:
-            assert batch_size == 8
+            assert batch_size == 32
             calls["offload"].append((mode, directory))
 
     worker = SimpleNamespace(
         optimizer=_Optimizer(),
         device=torch.device("cpu"),
+        _train_state_ready=False,
         config=SimpleNamespace(
             runtime=SimpleNamespace(
                 keep_rollout_state=keep_rollout_state,
                 optimizer_state_offload=optimizer_state_offload,
                 optimizer_state_offload_dir=None,
+                optimizer_state_offload_batch_size=32,
             )
         ),
     )
+
+    def _prepare_for_train() -> None:
+        calls["events"].append(("prepare",))
+        worker._train_state_ready = True
+
+    worker._prepare_for_train = _prepare_for_train
     manager = TrainingManager(worker)
     manager._train_step = lambda *_args, **_kwargs: {"ok": True}
     payload = SimpleNamespace(data_packs_by_dp=[[{}]], gradient_accumulation_steps=1)
 
     assert manager.train(payload) == [{"ok": True}]
-    assert calls == {"zero_grad": 1, "offload": expected_offloads}
+    expected_events = [("prepare",)]
+    if expected_offloads:
+        expected_events.append(("configure", expected_offloads[0][0], expected_offloads[0][1]))
+    expected_events.append(("zero_grad",))
+    assert calls == {"events": expected_events, "offload": expected_offloads}
 
 
 def test_fp32_master_disk_offload_is_lazy_and_preserves_next_update(tmp_path) -> None:
@@ -235,6 +251,7 @@ def test_fp32_master_disk_offload_is_lazy_and_preserves_next_update(tmp_path) ->
     kwargs = {"lr": 7.0e-4, "betas": (0.9, 0.97), "weight_decay": 0.01, "bucket_numel": 8}
     candidate = AdamWFP32Master([candidate_param], **kwargs)
     reference = AdamWFP32Master([reference_param], **kwargs)
+    candidate.configure_state_offload(mode="disk", directory=str(tmp_path), batch_size=2)
 
     first_gradient = torch.linspace(-0.75, 0.5, 29).to(torch.bfloat16)
     candidate_param.grad = first_gradient.clone()
@@ -242,8 +259,6 @@ def test_fp32_master_disk_offload_is_lazy_and_preserves_next_update(tmp_path) ->
     candidate.step()
     reference.step()
     expected_state = copy.deepcopy(reference.state_dict())
-
-    candidate.offload_state(mode="disk", directory=str(tmp_path), batch_size=2)
 
     offload_files = [bucket.offload_file for bucket in candidate.buckets]
     assert all(path is not None and Path(path).is_file() for path in offload_files)
@@ -278,6 +293,7 @@ def test_adam8bit_disk_offload_preserves_quantized_update(tmp_path) -> None:
     kwargs = {"lr": 4.0e-4, "betas": (0.9, 0.99), "weight_decay": 0.02, "bucket_numel": 9}
     candidate = AdamW8bit([candidate_param], **kwargs)
     reference = AdamW8bit([reference_param], **kwargs)
+    candidate.configure_state_offload(mode="disk", directory=str(tmp_path), batch_size=2)
     for index, gradient in enumerate(
         (
             torch.linspace(-0.4, 0.7, 31),
@@ -289,7 +305,6 @@ def test_adam8bit_disk_offload_preserves_quantized_update(tmp_path) -> None:
         candidate.step()
         reference.step()
         if index == 0:
-            candidate.offload_state(mode="disk", directory=str(tmp_path), batch_size=2)
             assert all(state.offload_file is not None for state in candidate._states)
             assert len({state.offload_file for state in candidate._states}) == (len(candidate._states) + 1) // 2
             assert all(state.exp_avg_q is None for state in candidate._states)

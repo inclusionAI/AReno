@@ -231,7 +231,7 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
     args.policy_sync_bucket_mb = getattr(args, "policy_sync_bucket_mb", 64)
     args.optimizer_state_offload = getattr(args, "optimizer_state_offload", "none")
     args.optimizer_state_offload_dir = getattr(args, "optimizer_state_offload_dir", None)
-    args.optimizer_state_offload_batch_size = getattr(args, "optimizer_state_offload_batch_size", 8)
+    args.optimizer_state_offload_batch_size = getattr(args, "optimizer_state_offload_batch_size", 32)
     args.unfreeze_multimodal_tower = getattr(args, "unfreeze_multimodal_tower", False)
     args.unfreeze_multimodal_projector = getattr(args, "unfreeze_multimodal_projector", False)
     args.multimodal_tower_lr = getattr(args, "multimodal_tower_lr", None)
@@ -1657,7 +1657,7 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
 @click.option(
     "--optimizer-state-offload-batch-size",
     type=click.IntRange(min=1),
-    default=8,
+    default=32,
     show_default=True,
     help="Number of optimizer buckets grouped into each disk load/save operation.",
 )
