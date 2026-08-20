@@ -245,7 +245,7 @@ class AdamW8bit(AdamWFP32Master):
         from pathlib import Path
 
         path = Path(state.offload_file)
-        payload = torch.load(path, map_location="cpu", weights_only=True)
+        payload = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
         for index, saved in zip(payload["indices"], payload["states"], strict=True):
             target = self._states[int(index)]
             target.exp_avg_q = saved["exp_avg_q"].to(device=device)
@@ -306,7 +306,7 @@ class AdamW8bit(AdamWFP32Master):
         if state.offload_file is not None:
             cached = disk_cache.get(state.offload_file)
             if cached is None:
-                group = torch.load(state.offload_file, map_location="cpu", weights_only=True)
+                group = torch.load(state.offload_file, map_location="cpu", weights_only=True, mmap=True)
                 cached = {
                     int(bucket_index): payload
                     for bucket_index, payload in zip(group["indices"], group["states"], strict=True)

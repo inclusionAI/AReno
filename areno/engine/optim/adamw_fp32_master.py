@@ -740,7 +740,7 @@ class AdamWFP32Master:
 
         assert bucket.offload_file is not None
         path = Path(bucket.offload_file)
-        payload = torch.load(path, map_location="cpu", weights_only=True)
+        payload = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
         for index, state in zip(payload["indices"], payload["states"], strict=True):
             target = self.buckets[int(index)]
             target.master_storage = BF16MasterStorage(
@@ -758,7 +758,7 @@ class AdamWFP32Master:
         if bucket.offload_file is not None:
             cached = disk_cache.get(bucket.offload_file)
             if cached is None:
-                group = torch.load(bucket.offload_file, map_location="cpu", weights_only=True)
+                group = torch.load(bucket.offload_file, map_location="cpu", weights_only=True, mmap=True)
                 cached = {
                     int(bucket_index): state
                     for bucket_index, state in zip(group["indices"], group["states"], strict=True)
