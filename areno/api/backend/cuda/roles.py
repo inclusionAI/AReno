@@ -132,21 +132,6 @@ def _zero_init_value_head(value_head: torch.nn.Module | None) -> None:
         param.zero_()
 
 
-def accumulate_role_main_gradients(role: WorkerRole) -> None:
-    """Fold `param.grad` into `param.main_grad` (FP32) for a role's params."""
-
-    for param in role.parameters():
-        if param.grad is None:
-            continue
-        grad = param.grad.detach()
-        main_grad = getattr(param, "main_grad", None)
-        if isinstance(main_grad, torch.Tensor):
-            main_grad.add_(grad.to(dtype=main_grad.dtype))
-        else:
-            param.main_grad = grad.to(dtype=torch.float32)
-        param.grad = None
-
-
 class WorkerRole:
     """A swap-in non-actor model (reference / critic / reward) on this rank."""
 
@@ -524,7 +509,7 @@ class RoleManager:
         loss_clipped = (clipped - target).pow(2)
         loss = value_loss_coef * 0.5 * torch.maximum(loss_unclipped[valid], loss_clipped[valid]).mean()
         (loss / max(group_size, 1)).backward()
-        accumulate_role_main_gradients(role)
+        self.worker._sync_role_grads(role)
         stats.add(loss, loss_unclipped, loss_clipped, values, target, baseline, valid)
         if allow_step:
             self._maybe_step_role(role)
@@ -532,9 +517,8 @@ class RoleManager:
     def _maybe_step_role(self, role: WorkerRole) -> None:
         """Sync role gradients and step if this accumulation window has grads."""
 
-        has_grad = any(param_grad(param) is not None for param in role.parameters())
+        has_grad = role.optimizer.has_gradients() or any(param_grad(param) is not None for param in role.parameters())
         if has_grad:
-            self.worker._sync_role_grads(role)
             role.optimizer.step()
         role.optimizer.zero_grad(set_to_none=True)
 

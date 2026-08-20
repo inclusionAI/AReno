@@ -68,9 +68,7 @@ class AdamW8bit(AdamWFP32Master):
             with torch.enable_grad():
                 closure()
         for bucket, state in zip(self.buckets, self._states, strict=True):
-            has_grad = False
-            for ref in bucket.refs:
-                has_grad = has_grad or _param_grad(ref.model_param) is not None
+            has_grad = bucket.grad_shard is not None or any(_param_grad(ref.model_param) is not None for ref in bucket.refs)
             if has_grad:
                 self._ensure_bucket_state(bucket, state)
                 self._step_bucket_8bit(bucket, state)
@@ -85,6 +83,10 @@ class AdamW8bit(AdamWFP32Master):
             state.exp_avg_scale = None
             state.exp_avg_sq_q = None
             state.exp_avg_sq_scale = None
+        for bucket in self.buckets:
+            bucket.grad_shard = None
+            bucket.grad_param_ids = frozenset()
+        self._collective_arenas.clear()
 
     @torch.no_grad()
     def offload_state(self) -> None:
@@ -99,6 +101,10 @@ class AdamW8bit(AdamWFP32Master):
                 state.exp_avg_sq_q = state.exp_avg_sq_q.to(device="cpu")
             if state.exp_avg_sq_scale is not None:
                 state.exp_avg_sq_scale = state.exp_avg_sq_scale.to(device="cpu")
+        for bucket in self.buckets:
+            bucket.grad_shard = None
+            bucket.grad_param_ids = frozenset()
+        self._collective_arenas.clear()
 
     @torch.no_grad()
     def onload_state(self, device: torch.device) -> None:
@@ -210,16 +216,15 @@ class AdamW8bit(AdamWFP32Master):
         exp_avg_sq = _dequantize_positive(state.exp_avg_sq_q, state.exp_avg_sq_scale)
         updated_refs: list[_ParamRef] = []
         for ref in bucket.refs:
-            grad = _param_grad(ref.model_param)
+            grad = self._gradient_for_ref(bucket, ref)
             if grad is None:
                 continue
-            flat_grad = grad.detach().reshape(-1).narrow(0, ref.param_start, ref.numel)
             effective_lr = float(getattr(ref.model_param, "_areno_lr", self.lr))
             step_size = effective_lr / bias_correction1
             self._step_param_ref_8bit(
                 bucket,
                 ref,
-                flat_grad,
+                grad,
                 exp_avg,
                 exp_avg_sq,
                 beta1,
@@ -237,6 +242,8 @@ class AdamW8bit(AdamWFP32Master):
         state.exp_avg_sq_q, state.exp_avg_sq_scale = _quantize_positive(exp_avg_sq)
         if updated_refs:
             self._all_gather_bucket(bucket, updated_refs)
+        bucket.grad_shard = None
+        bucket.grad_param_ids = frozenset()
 
     @torch.no_grad()
     def _step_param_ref_8bit(
@@ -256,7 +263,10 @@ class AdamW8bit(AdamWFP32Master):
 
         if ref.shard_numel == 0:
             return
-        grad_shard = grad.narrow(0, ref.shard_start, ref.shard_numel).to(dtype=torch.float32)
+        if bucket.grad_shard is not None:
+            grad_shard = grad.to(dtype=torch.float32)
+        else:
+            grad_shard = grad.narrow(0, ref.shard_start, ref.shard_numel).to(dtype=torch.float32)
         model_chunk = ref.model_param.detach().reshape(-1).narrow(0, ref.param_start, ref.numel)
         model_shard = model_chunk.narrow(0, ref.shard_start, ref.shard_numel)
         weight = model_shard.to(dtype=torch.float32)

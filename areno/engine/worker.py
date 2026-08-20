@@ -546,17 +546,11 @@ class ArenoWorker:
     def _sync_role_grads(self, role: WorkerRole) -> None:
         """Sync a role's gradients across DP and TP groups.
 
-        DP: average. TP-replicated value-head params (`role_tp_average=True`)
-        get averaged across the whole world; TP-sharded params marked with
-        `tp_grad_allreduce` get summed.
+        DP gradients are reduce-scattered into optimizer-owned FP32 shards.
+        TP-replicated value-head params (`role_tp_average=True`) get averaged
+        across TP; TP-sharded params marked with `tp_grad_allreduce` get summed.
         """
         ctx = get_tp_context()
-        if ctx.dp_size > 1:
-            for param in role.parameters():
-                grad = param_grad(param)
-                if grad is not None:
-                    dist.all_reduce(grad, op=dist.ReduceOp.SUM, group=ctx.dp_group)
-                    grad.div_(ctx.dp_size)
         if ctx.world_size > 1:
             for param in role.parameters():
                 grad = param_grad(param)
@@ -567,6 +561,7 @@ class ArenoWorker:
                     grad.div_(ctx.world_size)
                 elif bool(getattr(param, "tp_grad_allreduce", False)):
                     dist.all_reduce(grad, op=dist.ReduceOp.SUM, group=ctx.group)
+        role.optimizer.reduce_scatter_gradients()
 
     def save_checkpoint(self, payload: SaveCheckpointPayload) -> dict | None:
         """Persist the actor's weights to disk (rank 0 returns the resolved path)."""

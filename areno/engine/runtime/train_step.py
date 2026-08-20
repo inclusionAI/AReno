@@ -348,6 +348,36 @@ def _clip_grad_norm(parameters, grad_norm: float, max_norm: float) -> None:
         grad.mul_(coef)
 
 
+def _grad_norms_from_shards(gradient_shards, groups=()) -> dict[str, float]:
+    """Compute TP+DP global norms from unique optimizer-owned DP shards."""
+
+    names = ("global", *groups)
+    group_indexes = {name: index for index, name in enumerate(names[1:], start=1)}
+    ctx = get_tp_context()
+    totals = None
+    for param, grad in gradient_shards:
+        is_tp_parallel = bool(getattr(param, "tensor_model_parallel", False))
+        if not is_tp_parallel and ctx.rank != 0:
+            continue
+        norm = torch.linalg.vector_norm(grad.detach(), ord=2, dtype=torch.float32)
+        if totals is None:
+            totals = torch.zeros(len(names), device=grad.device, dtype=torch.float32)
+        squared = norm.square()
+        totals[0].add_(squared)
+        group = getattr(param, "_areno_lr_group", None)
+        if group in group_indexes:
+            totals[group_indexes[group]].add_(squared)
+    if totals is None:
+        return dict.fromkeys(names, 0.0)
+    # DP ranks own disjoint slices of every gradient; TP ranks own disjoint
+    # model parameters except for replicated tensors counted only on TP rank 0.
+    if ctx.dp_size > 1:
+        dist.all_reduce(totals, op=dist.ReduceOp.SUM, group=ctx.dp_group)
+    if ctx.world_size > 1:
+        dist.all_reduce(totals, op=dist.ReduceOp.SUM, group=ctx.group)
+    return dict(zip(names, totals.sqrt().cpu().tolist(), strict=True))
+
+
 def _grads_for_norm(parameters):
     """Yield params whose grads should contribute to the global TP grad norm.
 
