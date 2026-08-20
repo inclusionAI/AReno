@@ -111,7 +111,9 @@ class AdamWFP32Master:
         for bucket in self.buckets:
             # A bucket is updated only if at least one of its refs has a grad;
             # this avoids materializing master state for unused parameters.
-            has_grad = bucket.grad_shard is not None or any(_param_grad(ref.model_param) is not None for ref in bucket.refs)
+            has_grad = bucket.grad_shard is not None or any(
+                _param_grad(ref.model_param) is not None for ref in bucket.refs
+            )
             if has_grad:
                 self._ensure_bucket_state(bucket)
                 self._step_bucket(bucket)
@@ -390,9 +392,7 @@ class AdamWFP32Master:
                         .narrow(0, ref.param_start + ref.shard_start, ref.shard_numel)
                     )
                     grad_shard = (
-                        grad
-                        if bucket.grad_shard is not None
-                        else grad.narrow(0, ref.shard_start, ref.shard_numel)
+                        grad if bucket.grad_shard is not None else grad.narrow(0, ref.shard_start, ref.shard_numel)
                     ).contiguous()
                     effective_lr = float(getattr(ref.model_param, "_areno_lr", self.lr))
                     areno_adamw_fp32_master_step(

@@ -68,7 +68,9 @@ class AdamW8bit(AdamWFP32Master):
             with torch.enable_grad():
                 closure()
         for bucket, state in zip(self.buckets, self._states, strict=True):
-            has_grad = bucket.grad_shard is not None or any(_param_grad(ref.model_param) is not None for ref in bucket.refs)
+            has_grad = bucket.grad_shard is not None or any(
+                _param_grad(ref.model_param) is not None for ref in bucket.refs
+            )
             if has_grad:
                 self._ensure_bucket_state(bucket, state)
                 self._step_bucket_8bit(bucket, state)

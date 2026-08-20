@@ -214,7 +214,9 @@ def test_real_gloo_dp_reduce_scatter_matches_averaged_reference() -> None:
     spawn = mp.get_context("spawn")
     output_queue = spawn.Queue()
     port = _free_port()
-    processes = [spawn.Process(target=_gloo_sharded_optimizer_worker, args=(rank, port, output_queue)) for rank in range(2)]
+    processes = [
+        spawn.Process(target=_gloo_sharded_optimizer_worker, args=(rank, port, output_queue)) for rank in range(2)
+    ]
     for process in processes:
         process.start()
     results = dict((item[0], item[1:]) for item in (output_queue.get(timeout=30) for _ in processes))
