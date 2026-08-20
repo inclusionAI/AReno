@@ -8,11 +8,13 @@ back into the BF16 model parameters so forward/backward sees fresh weights.
 
 from __future__ import annotations
 
+import mmap
 import os
 import tempfile
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -48,6 +50,24 @@ class _ParamRef:
 
 
 @dataclass(slots=True)
+class _MmapGroup:
+    """One persistent writable raw mmap backing a group of optimizer buckets."""
+
+    path: Path
+    handle: Any
+    mapping: mmap.mmap
+    tensors: dict[int, dict[str, torch.Tensor]]
+
+    def flush(self) -> None:
+        self.mapping.flush()
+
+    def close(self) -> None:
+        self.tensors.clear()
+        self.mapping.close()
+        self.handle.close()
+
+
+@dataclass(slots=True)
 class _MasterBucket:
     """One flat FP32 bucket holding many parameter chunks and their Adam state."""
 
@@ -65,6 +85,8 @@ class _MasterBucket:
     grad_shard: torch.Tensor | None = None
     grad_param_ids: frozenset[int] = frozenset()
     offload_file: str | None = None
+    offload_index: int | None = None
+    offload_group: _MmapGroup | None = None
 
 
 class AdamWFP32Master:
@@ -105,6 +127,7 @@ class AdamWFP32Master:
         # only the compact reduced gradient shard remains attached to a bucket.
         self._collective_arenas: dict[tuple[torch.device, torch.dtype, str], torch.Tensor] = {}
         self._disk_offload_tmp: tempfile.TemporaryDirectory | None = None
+        self._mmap_groups: dict[tuple[int, ...], _MmapGroup] = {}
         self._active_offload_mode = "none"
         self._disk_offload_root: str | None = None
         self._active_offload_batch_size = 32
@@ -165,6 +188,8 @@ class AdamWFP32Master:
             bucket.grad_param_ids = frozenset()
             bucket.step = 0
             bucket.offload_file = None
+            bucket.offload_index = None
+            bucket.offload_group = None
         self._collective_arenas.clear()
         self._cleanup_disk_offload()
         self._active_offload_mode = "none"
@@ -223,6 +248,9 @@ class AdamWFP32Master:
                 bucket.exp_avg = bucket.exp_avg.to(device=device)
             if bucket.exp_avg_sq is not None and bucket.exp_avg_sq.device != device:
                 bucket.exp_avg_sq = bucket.exp_avg_sq.to(device=device)
+            bucket.offload_file = None
+            bucket.offload_index = None
+            bucket.offload_group = None
         self._active_offload_mode = "none"
         self._disk_offload_root = None
         self._active_offload_batch_size = 32
@@ -231,8 +259,7 @@ class AdamWFP32Master:
     def state_dict(self) -> dict:
         """Return the optimizer state laid out per-bucket; each rank saves its shard."""
 
-        disk_cache: dict[str, dict[int, dict]] = {}
-        payloads = [self._bucket_cpu_payload(index, bucket, disk_cache) for index, bucket in enumerate(self.buckets)]
+        payloads = [self._bucket_cpu_payload(index, bucket) for index, bucket in enumerate(self.buckets)]
 
         return {
             "lr": self.lr,
@@ -335,6 +362,8 @@ class AdamWFP32Master:
         self._disk_offload_root = None
         for bucket in self.buckets:
             bucket.offload_file = None
+            bucket.offload_index = None
+            bucket.offload_group = None
         self._load_master_params(state_dict.get("master_params", []))
         saved_states = state_dict.get("state", [])
         for saved, bucket in zip(saved_states[: len(self.buckets)], self.buckets, strict=False):
@@ -678,22 +707,68 @@ class AdamWFP32Master:
             )
         return Path(self._disk_offload_tmp.name)
 
-    def _write_disk_payloads(self, indices: list[int], payloads: list[dict], root: str) -> str:
-        """Atomically persist a group of CPU bucket payloads and return its path."""
+    def _get_or_create_mmap_group(
+        self,
+        indices: list[int],
+        specs: dict[int, dict[str, tuple[torch.dtype, tuple[int, ...]]]],
+    ) -> _MmapGroup:
+        """Create fixed tensor views into one persistent writable raw mmap."""
 
-        directory = self._disk_offload_directory(root)
-        path = directory / f"buckets-{indices[0]:06d}-{indices[-1]:06d}.pt"
-        temporary = directory / f".{path.name}.tmp"
-        cpu_payload = {
-            "indices": indices,
-            "states": [_tree_to_cpu(payload) for payload in payloads],
-        }
+        key = tuple(indices)
+        existing = self._mmap_groups.get(key)
+        if existing is not None:
+            return existing
+        if self._disk_offload_root is None:
+            raise RuntimeError("disk optimizer offload is active without a usable directory")
+
+        offsets: dict[int, dict[str, tuple[int, torch.dtype, tuple[int, ...], int]]] = {}
+        cursor = 0
+        for index in indices:
+            offsets[index] = {}
+            for name, (dtype, shape) in specs[index].items():
+                cursor = _align_up(cursor, 64)
+                numel = _shape_numel(shape)
+                offsets[index][name] = (cursor, dtype, shape, numel)
+                cursor += numel * torch.empty((), dtype=dtype).element_size()
+        file_size = max(_align_up(cursor, mmap.PAGESIZE), mmap.PAGESIZE)
+        directory = self._disk_offload_directory(self._disk_offload_root)
+        path = directory / f"buckets-{indices[0]:06d}-{indices[-1]:06d}.mmap"
+        handle = path.open("w+b")
+        mapping: mmap.mmap | None = None
         try:
-            torch.save(cpu_payload, temporary)
-            os.replace(temporary, path)
-        finally:
-            temporary.unlink(missing_ok=True)
-        return str(path)
+            handle.truncate(file_size)
+            mapping = mmap.mmap(handle.fileno(), file_size, access=mmap.ACCESS_WRITE)
+            tensors: dict[int, dict[str, torch.Tensor]] = {}
+            for index in indices:
+                tensors[index] = {}
+                for name, (offset, dtype, shape, numel) in offsets[index].items():
+                    if numel == 0:
+                        tensor = torch.empty(shape, dtype=dtype)
+                    else:
+                        tensor = torch.frombuffer(mapping, dtype=dtype, count=numel, offset=offset).reshape(shape)
+                    tensors[index][name] = tensor
+            group = _MmapGroup(path=path, handle=handle, mapping=mapping, tensors=tensors)
+        except BaseException:
+            if mapping is not None:
+                mapping.close()
+            handle.close()
+            path.unlink(missing_ok=True)
+            raise
+        self._mmap_groups[key] = group
+        return group
+
+    def _master_mmap_specs(self, indices: list[int]) -> dict[int, dict[str, tuple[torch.dtype, tuple[int, ...]]]]:
+        """Return the fixed raw-mmap layout for compact FP32-master state."""
+
+        return {
+            index: {
+                "low_bits": (torch.uint16, (self.buckets[index].shard_numel,)),
+                "round_up_bits": (torch.uint8, ((self.buckets[index].shard_numel + 7) // 8,)),
+                "exp_avg": (torch.float32, (self.buckets[index].shard_numel,)),
+                "exp_avg_sq": (torch.float32, (self.buckets[index].shard_numel,)),
+            }
+            for index in indices
+        }
 
     def _offload_bucket_group_to_disk(self, indices: list[int]) -> None:
         """Persist a bounded group of staged buckets in one serialization call."""
@@ -703,23 +778,24 @@ class AdamWFP32Master:
         present_indices = [index for index in indices if self.buckets[index].master_storage is not None]
         if not present_indices:
             return
-        payloads = []
+        group = self._get_or_create_mmap_group(indices, self._master_mmap_specs(indices))
         for index in present_indices:
             bucket = self.buckets[index]
             assert bucket.master_storage is not None
-            payloads.append(
-                {
-                    "low_bits": bucket.master_storage.low_bits,
-                    "round_up_bits": bucket.master_storage.round_up_bits,
-                    "exp_avg": bucket.exp_avg,
-                    "exp_avg_sq": bucket.exp_avg_sq,
-                }
-            )
-        path = self._write_disk_payloads(present_indices, payloads, self._disk_offload_root)
+            assert bucket.exp_avg is not None
+            assert bucket.exp_avg_sq is not None
+            target = group.tensors[index]
+            target["low_bits"].copy_(bucket.master_storage.low_bits)
+            target["round_up_bits"].copy_(bucket.master_storage.round_up_bits)
+            target["exp_avg"].copy_(bucket.exp_avg)
+            target["exp_avg_sq"].copy_(bucket.exp_avg_sq)
+        group.flush()
         for index in present_indices:
             bucket = self.buckets[index]
             bucket.master = None
-            bucket.offload_file = path
+            bucket.offload_file = str(group.path)
+            bucket.offload_index = index
+            bucket.offload_group = group
             bucket.master_storage = None
             bucket.exp_avg = None
             bucket.exp_avg_sq = None
@@ -736,40 +812,31 @@ class AdamWFP32Master:
             bucket.exp_avg_sq = bucket.exp_avg_sq.to(device="cpu")
 
     def _load_bucket_offload(self, bucket: _MasterBucket, device: torch.device) -> None:
-        """Load one disk group and invalidate its now-stale shared file."""
+        """Copy one bucket from its persistent raw mmap onto ``device``."""
 
         assert bucket.offload_file is not None
-        path = Path(bucket.offload_file)
-        payload = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
-        for index, state in zip(payload["indices"], payload["states"], strict=True):
-            target = self.buckets[int(index)]
-            target.master_storage = BF16MasterStorage(
-                low_bits=state["low_bits"].to(device=device),
-                round_up_bits=state["round_up_bits"].to(device=device),
-            )
-            target.exp_avg = _optional_tensor_to(state.get("exp_avg"), device)
-            target.exp_avg_sq = _optional_tensor_to(state.get("exp_avg_sq"), device)
-            target.offload_file = None
-        path.unlink(missing_ok=True)
+        assert bucket.offload_index is not None
+        assert bucket.offload_group is not None
+        state = bucket.offload_group.tensors[bucket.offload_index]
+        bucket.master_storage = BF16MasterStorage(
+            low_bits=_mmap_tensor_to(state["low_bits"], device),
+            round_up_bits=_mmap_tensor_to(state["round_up_bits"], device),
+        )
+        bucket.exp_avg = _mmap_tensor_to(state["exp_avg"], device)
+        bucket.exp_avg_sq = _mmap_tensor_to(state["exp_avg_sq"], device)
 
-    def _bucket_cpu_payload(self, index: int, bucket: _MasterBucket, disk_cache: dict[str, dict[int, dict]]) -> dict:
+    def _bucket_cpu_payload(self, index: int, bucket: _MasterBucket) -> dict:
         """Snapshot one bucket on CPU without changing its residency."""
 
         if bucket.offload_file is not None:
-            cached = disk_cache.get(bucket.offload_file)
-            if cached is None:
-                group = torch.load(bucket.offload_file, map_location="cpu", weights_only=True, mmap=True)
-                cached = {
-                    int(bucket_index): state
-                    for bucket_index, state in zip(group["indices"], group["states"], strict=True)
-                }
-                disk_cache[bucket.offload_file] = cached
-            payload = cached[index]
-            storage = BF16MasterStorage(payload["low_bits"], payload["round_up_bits"])
+            assert bucket.offload_index == index
+            assert bucket.offload_group is not None
+            payload = bucket.offload_group.tensors[index]
+            storage = BF16MasterStorage(payload["low_bits"].clone(), payload["round_up_bits"].clone())
             return {
                 "master_storage": storage,
-                "exp_avg": _optional_cpu_clone(payload.get("exp_avg")),
-                "exp_avg_sq": _optional_cpu_clone(payload.get("exp_avg_sq")),
+                "exp_avg": payload["exp_avg"].clone(),
+                "exp_avg_sq": payload["exp_avg_sq"].clone(),
             }
         storage = bucket.master_storage
         if storage is None:
@@ -814,6 +881,9 @@ class AdamWFP32Master:
     def _cleanup_disk_offload(self) -> None:
         """Remove only this optimizer's private temporary directory."""
 
+        for group in self._mmap_groups.values():
+            group.close()
+        self._mmap_groups.clear()
         if self._disk_offload_tmp is not None:
             self._disk_offload_tmp.cleanup()
             self._disk_offload_tmp = None
@@ -963,13 +1033,24 @@ def _optional_cpu_clone(value: torch.Tensor | None) -> torch.Tensor | None:
     return None if value is None else value.detach().to(device="cpu").clone()
 
 
-def _tree_to_cpu(value):
-    """Copy tensors in a small optimizer-state container to CPU."""
+def _mmap_tensor_to(value: torch.Tensor, device: torch.device) -> torch.Tensor:
+    """Detach a tensor from mmap storage while copying it onto ``device``."""
 
-    if isinstance(value, torch.Tensor):
-        return value.detach().to(device="cpu")
-    if isinstance(value, dict):
-        return {key: _tree_to_cpu(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_tree_to_cpu(item) for item in value]
-    return value
+    if device.type == "cpu":
+        return value.clone()
+    return value.to(device=device)
+
+
+def _align_up(value: int, alignment: int) -> int:
+    """Round ``value`` up to a positive byte alignment."""
+
+    return ((value + alignment - 1) // alignment) * alignment
+
+
+def _shape_numel(shape: tuple[int, ...]) -> int:
+    """Return the number of elements in a tensor shape, including scalars."""
+
+    result = 1
+    for dimension in shape:
+        result *= dimension
+    return result

@@ -12,6 +12,8 @@ from areno.engine.optim.adamw_fp32_master import (
     _DEFAULT_BUCKET_NUMEL,
     AdamWFP32Master,
     _MasterBucket,
+    _mmap_tensor_to,
+    _MmapGroup,
     _param_grad,
     _ParamRef,
 )
@@ -27,6 +29,8 @@ class _Adam8bitBucketState:
     exp_avg_sq_q: torch.Tensor | None = None
     exp_avg_sq_scale: torch.Tensor | None = None
     offload_file: str | None = None
+    offload_index: int | None = None
+    offload_group: _MmapGroup | None = None
 
 
 class AdamW8bit(AdamWFP32Master):
@@ -96,6 +100,8 @@ class AdamW8bit(AdamWFP32Master):
             state.exp_avg_sq_q = None
             state.exp_avg_sq_scale = None
             state.offload_file = None
+            state.offload_index = None
+            state.offload_group = None
         for bucket in self.buckets:
             bucket.grad_shard = None
             bucket.grad_param_ids = frozenset()
@@ -145,6 +151,9 @@ class AdamW8bit(AdamWFP32Master):
                 state.exp_avg_sq_q = state.exp_avg_sq_q.to(device=device)
             if state.exp_avg_sq_scale is not None and state.exp_avg_sq_scale.device != device:
                 state.exp_avg_sq_scale = state.exp_avg_sq_scale.to(device=device)
+            state.offload_file = None
+            state.offload_index = None
+            state.offload_group = None
         self._active_offload_mode = "none"
         self._disk_offload_root = None
         self._active_offload_batch_size = 32
@@ -153,8 +162,7 @@ class AdamW8bit(AdamWFP32Master):
     def state_dict(self) -> dict:
         """Return per-rank quantized optimizer state."""
 
-        disk_cache: dict[str, dict[int, dict]] = {}
-        payloads = [self._state_cpu_payload(index, state, disk_cache) for index, state in enumerate(self._states)]
+        payloads = [self._state_cpu_payload(index, state) for index, state in enumerate(self._states)]
 
         return {
             "lr": self.lr,
@@ -186,6 +194,8 @@ class AdamW8bit(AdamWFP32Master):
         self._active_offload_batch_size = 32
         for state in self._states:
             state.offload_file = None
+            state.offload_index = None
+            state.offload_group = None
         saved_states = state_dict.get("state", [])
         for saved, bucket, state in zip(saved_states[: len(self.buckets)], self.buckets, self._states, strict=False):
             if saved is None:
@@ -239,21 +249,29 @@ class AdamW8bit(AdamWFP32Master):
             state.exp_avg_sq_scale = torch.ones((), device=device, dtype=torch.float32)
 
     def _load_state_offload(self, state: _Adam8bitBucketState, device: torch.device) -> None:
-        """Load one quantized-state disk group and invalidate its shared file."""
+        """Copy one quantized bucket from its persistent raw mmap."""
 
         assert state.offload_file is not None
-        from pathlib import Path
+        assert state.offload_index is not None
+        assert state.offload_group is not None
+        saved = state.offload_group.tensors[state.offload_index]
+        state.exp_avg_q = _mmap_tensor_to(saved["exp_avg_q"], device)
+        state.exp_avg_scale = _mmap_tensor_to(saved["exp_avg_scale"], device)
+        state.exp_avg_sq_q = _mmap_tensor_to(saved["exp_avg_sq_q"], device)
+        state.exp_avg_sq_scale = _mmap_tensor_to(saved["exp_avg_sq_scale"], device)
 
-        path = Path(state.offload_file)
-        payload = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
-        for index, saved in zip(payload["indices"], payload["states"], strict=True):
-            target = self._states[int(index)]
-            target.exp_avg_q = saved["exp_avg_q"].to(device=device)
-            target.exp_avg_scale = saved["exp_avg_scale"].to(device=device)
-            target.exp_avg_sq_q = saved["exp_avg_sq_q"].to(device=device)
-            target.exp_avg_sq_scale = saved["exp_avg_sq_scale"].to(device=device)
-            target.offload_file = None
-        path.unlink(missing_ok=True)
+    def _state_mmap_specs(self, indices: list[int]) -> dict[int, dict[str, tuple[torch.dtype, tuple[int, ...]]]]:
+        """Return the fixed raw-mmap layout for quantized Adam state."""
+
+        return {
+            index: {
+                "exp_avg_q": (torch.uint8, (self.buckets[index].shard_numel,)),
+                "exp_avg_scale": (torch.float32, ()),
+                "exp_avg_sq_q": (torch.uint8, (self.buckets[index].shard_numel,)),
+                "exp_avg_sq_scale": (torch.float32, ()),
+            }
+            for index in indices
+        }
 
     def _offload_8bit_group_to_disk(self, indices: list[int]) -> None:
         """Persist a bounded group of quantized states in one serialization call."""
@@ -263,21 +281,24 @@ class AdamW8bit(AdamWFP32Master):
         present_indices = [index for index in indices if self._states[index].exp_avg_q is not None]
         if not present_indices:
             return
-        payloads = []
+        group = self._get_or_create_mmap_group(indices, self._state_mmap_specs(indices))
         for index in present_indices:
             state = self._states[index]
-            payloads.append(
-                {
-                    "exp_avg_q": state.exp_avg_q,
-                    "exp_avg_scale": state.exp_avg_scale,
-                    "exp_avg_sq_q": state.exp_avg_sq_q,
-                    "exp_avg_sq_scale": state.exp_avg_sq_scale,
-                }
-            )
-        path = self._write_disk_payloads(present_indices, payloads, self._disk_offload_root)
+            assert state.exp_avg_q is not None
+            assert state.exp_avg_scale is not None
+            assert state.exp_avg_sq_q is not None
+            assert state.exp_avg_sq_scale is not None
+            target = group.tensors[index]
+            target["exp_avg_q"].copy_(state.exp_avg_q)
+            target["exp_avg_scale"].copy_(state.exp_avg_scale)
+            target["exp_avg_sq_q"].copy_(state.exp_avg_sq_q)
+            target["exp_avg_sq_scale"].copy_(state.exp_avg_sq_scale)
+        group.flush()
         for index in present_indices:
             state = self._states[index]
-            state.offload_file = path
+            state.offload_file = str(group.path)
+            state.offload_index = index
+            state.offload_group = group
             state.exp_avg_q = None
             state.exp_avg_scale = None
             state.exp_avg_sq_q = None
@@ -299,20 +320,14 @@ class AdamW8bit(AdamWFP32Master):
         self,
         index: int,
         state: _Adam8bitBucketState,
-        disk_cache: dict[str, dict[int, dict]],
     ) -> dict:
         """Snapshot one quantized bucket on CPU without changing residency."""
 
         if state.offload_file is not None:
-            cached = disk_cache.get(state.offload_file)
-            if cached is None:
-                group = torch.load(state.offload_file, map_location="cpu", weights_only=True, mmap=True)
-                cached = {
-                    int(bucket_index): payload
-                    for bucket_index, payload in zip(group["indices"], group["states"], strict=True)
-                }
-                disk_cache[state.offload_file] = cached
-            return cached[index]
+            assert state.offload_index == index
+            assert state.offload_group is not None
+            saved = state.offload_group.tensors[index]
+            return {name: tensor.clone() for name, tensor in saved.items()}
         return {
             "exp_avg_q": _cpu_clone(state.exp_avg_q),
             "exp_avg_scale": _cpu_clone(state.exp_avg_scale),

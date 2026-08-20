@@ -263,6 +263,8 @@ def test_fp32_master_disk_offload_is_lazy_and_preserves_next_update(tmp_path) ->
     offload_files = [bucket.offload_file for bucket in candidate.buckets]
     assert all(path is not None and Path(path).is_file() for path in offload_files)
     assert len(set(offload_files)) == (len(candidate.buckets) + 1) // 2
+    assert all(Path(path).suffix == ".mmap" for path in set(offload_files))
+    offload_inodes = {path: Path(path).stat().st_ino for path in set(offload_files)}
     assert all(bucket.master_storage is None for bucket in candidate.buckets)
     assert all(bucket.exp_avg is None and bucket.exp_avg_sq is None for bucket in candidate.buckets)
     disk_state = candidate.state_dict()
@@ -281,9 +283,14 @@ def test_fp32_master_disk_offload_is_lazy_and_preserves_next_update(tmp_path) ->
 
     torch.testing.assert_close(candidate_param, reference_param, rtol=0.0, atol=0.0)
     torch.testing.assert_close(_flatten_master_state(candidate), _flatten_master_state(reference), rtol=0.0, atol=0.0)
-    assert all(bucket.offload_file is not None for bucket in candidate.buckets)
+    assert [bucket.offload_file for bucket in candidate.buckets] == offload_files
+    assert {path: Path(path).stat().st_ino for path in set(offload_files)} == offload_inodes
     assert all(bucket.master_storage is None for bucket in candidate.buckets)
     assert all(bucket.exp_avg is None and bucket.exp_avg_sq is None for bucket in candidate.buckets)
+    candidate.onload_state(torch.device("cpu"))
+    assert all(bucket.offload_file is None for bucket in candidate.buckets)
+    assert all(bucket.master_storage is not None for bucket in candidate.buckets)
+    assert not list(tmp_path.rglob("*.mmap"))
 
 
 def test_adam8bit_disk_offload_preserves_quantized_update(tmp_path) -> None:
@@ -307,6 +314,9 @@ def test_adam8bit_disk_offload_preserves_quantized_update(tmp_path) -> None:
         if index == 0:
             assert all(state.offload_file is not None for state in candidate._states)
             assert len({state.offload_file for state in candidate._states}) == (len(candidate._states) + 1) // 2
+            assert all(Path(path).suffix == ".mmap" for path in {state.offload_file for state in candidate._states})
+            offload_files = [state.offload_file for state in candidate._states]
+            offload_inodes = {path: Path(path).stat().st_ino for path in set(offload_files)}
             assert all(state.exp_avg_q is None for state in candidate._states)
 
     torch.testing.assert_close(candidate_param, reference_param, rtol=0.0, atol=0.0)
@@ -315,6 +325,12 @@ def test_adam8bit_disk_offload_preserves_quantized_update(tmp_path) -> None:
     for actual, expected in zip(candidate_state["state"], reference_state["state"], strict=True):
         for key in ("exp_avg_q", "exp_avg_scale", "exp_avg_sq_q", "exp_avg_sq_scale"):
             torch.testing.assert_close(actual[key], expected[key], rtol=0.0, atol=0.0)
+    assert [state.offload_file for state in candidate._states] == offload_files
+    assert {path: Path(path).stat().st_ino for path in set(offload_files)} == offload_inodes
+    candidate.onload_state(torch.device("cpu"))
+    assert all(state.offload_file is None for state in candidate._states)
+    assert all(state.exp_avg_q is not None for state in candidate._states)
+    assert not list(tmp_path.rglob("*.mmap"))
 
 
 def test_two_microbatches_match_one_fp32_accumulated_optimizer_update() -> None:
