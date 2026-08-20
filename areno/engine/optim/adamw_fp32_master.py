@@ -678,8 +678,7 @@ class AdamWFP32Master:
         """Materialize or onload compact master metadata and FP32 moments."""
         device = bucket.refs[0].model_param.device
         if bucket.offload_file is not None:
-            load_device = torch.device("cpu") if self._active_offload_mode == "disk" else device
-            self._load_bucket_offload(bucket, load_device)
+            self._load_bucket_offload(bucket, device)
         # Lazy onload: if state was offloaded to CPU, move it back to GPU.
         if bucket.master_storage is not None and bucket.master_storage.low_bits.device != device:
             bucket.master_storage = bucket.master_storage.to(device)

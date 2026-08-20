@@ -231,8 +231,7 @@ class AdamW8bit(AdamWFP32Master):
 
         device = bucket.refs[0].model_param.device
         if state.offload_file is not None:
-            load_device = torch.device("cpu") if self._active_offload_mode == "disk" else device
-            self._load_state_offload(state, load_device)
+            self._load_state_offload(state, device)
         if state.exp_avg_q is not None and state.exp_avg_q.device != device:
             state.exp_avg_q = state.exp_avg_q.to(device=device)
         if state.exp_avg_scale is not None and state.exp_avg_scale.device != device:
