@@ -55,7 +55,9 @@ class TrainingManager:
                 )
             return results
         finally:
-            if not worker.config.runtime.keep_rollout_state:
+            if getattr(worker.config.runtime, "optimizer_state_offload", False) or not (
+                worker.config.runtime.keep_rollout_state
+            ):
                 worker.optimizer.offload_state()
                 if worker.device.type == "cuda":
                     torch.cuda.empty_cache()

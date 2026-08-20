@@ -65,6 +65,7 @@ class TrainerConfig:
     multimodal_projector_lr_decay_style: str | None = None
     activation_checkpointing: bool = True
     keep_rollout_state: bool = True
+    optimizer_state_offload: bool = False
     eager_decode: bool = False
     attn_backend: str = "flash"
     metrics_log_dir: str | None = DEFAULT_METRICS_LOG_DIR
@@ -86,6 +87,8 @@ class TrainerConfig:
             raise ValueError("attn_backend must be one of: flash, native")
         if self.model_hub not in {"hf", "modelscope"}:
             raise ValueError("model_hub must be one of: hf, modelscope")
+        if self.optimizer_state_offload and self.backend != "cuda":
+            raise ValueError("optimizer_state_offload is only supported by the CUDA backend")
         self._validate_multimodal_optimizer_group(
             "tower",
             self.unfreeze_multimodal_tower,
@@ -189,6 +192,7 @@ class TrainerConfig:
             runtime={
                 "activation_checkpointing": self.activation_checkpointing,
                 "keep_rollout_state": self.keep_rollout_state,
+                "optimizer_state_offload": self.optimizer_state_offload,
                 "eager_decode": self.eager_decode,
                 "attn_backend": self.attn_backend,
             },
@@ -232,6 +236,7 @@ class RolloutTrainerConfig(TrainerConfig):
             runtime={
                 "activation_checkpointing": self.activation_checkpointing,
                 "keep_rollout_state": self.keep_rollout_state,
+                "optimizer_state_offload": self.optimizer_state_offload,
                 "eager_decode": self.eager_decode,
                 "attn_backend": self.attn_backend,
             },

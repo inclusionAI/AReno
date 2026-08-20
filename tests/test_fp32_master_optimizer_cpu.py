@@ -12,6 +12,7 @@ import torch.distributed as dist
 
 from areno.engine.optim import AdamWFP32Master
 from areno.engine.runtime.train_step import _grad_norms_from_shards
+from areno.engine.training import TrainingManager
 
 
 def _flatten_master_state(optimizer: AdamWFP32Master) -> torch.Tensor:
@@ -185,6 +186,43 @@ def test_bf16_autograd_accumulation_does_not_create_fp32_gradient_copy() -> None
     assert parameter.grad is not None
     assert parameter.grad.dtype == torch.bfloat16
     assert getattr(parameter, "main_grad", None) is None
+
+
+@pytest.mark.parametrize(
+    ("keep_rollout_state", "optimizer_state_offload", "expected_offloads"),
+    [(True, False, 0), (False, False, 1), (True, True, 1)],
+)
+def test_training_manager_offloads_optimizer_state_when_requested(
+    keep_rollout_state: bool,
+    optimizer_state_offload: bool,
+    expected_offloads: int,
+) -> None:
+    calls = {"zero_grad": 0, "offload": 0}
+
+    class _Optimizer:
+        def zero_grad(self, *, set_to_none: bool) -> None:
+            assert set_to_none
+            calls["zero_grad"] += 1
+
+        def offload_state(self) -> None:
+            calls["offload"] += 1
+
+    worker = SimpleNamespace(
+        optimizer=_Optimizer(),
+        device=torch.device("cpu"),
+        config=SimpleNamespace(
+            runtime=SimpleNamespace(
+                keep_rollout_state=keep_rollout_state,
+                optimizer_state_offload=optimizer_state_offload,
+            )
+        ),
+    )
+    manager = TrainingManager(worker)
+    manager._train_step = lambda *_args, **_kwargs: {"ok": True}
+    payload = SimpleNamespace(data_packs_by_dp=[[{}]], gradient_accumulation_steps=1)
+
+    assert manager.train(payload) == [{"ok": True}]
+    assert calls == {"zero_grad": 1, "offload": expected_offloads}
 
 
 def test_two_microbatches_match_one_fp32_accumulated_optimizer_update() -> None:

@@ -471,6 +471,27 @@ class ConfigAndDataTest(unittest.TestCase):
         self.assertFalse(cfg.keep_rollout_state)
         self.assertFalse(cfg.mlx_config().keep_rollout_state)
 
+    def test_train_cli_optimizer_state_offload_reaches_cuda_runtime(self):
+        """SFT can offload optimizer state without changing rollout-state retention."""
+        args = _train_args(algo="sft", optimizer_state_offload=True)
+
+        cfg = train_cli._trainer_config_from_args(args)
+
+        self.assertTrue(cfg.keep_rollout_state)
+        self.assertTrue(cfg.optimizer_state_offload)
+        self.assertTrue(cfg.cuda_config().runtime["optimizer_state_offload"])
+
+    def test_optimizer_state_offload_rejects_mlx_backend(self):
+        """MLX must not silently accept a CUDA optimizer-state offload knob."""
+        with self.assertRaisesRegex(ValueError, "only supported by the CUDA backend"):
+            TrainerConfig(
+                algo="sft",
+                backend="mlx",
+                ckpt="unused",
+                dataset_path="unused",
+                optimizer_state_offload=True,
+            )
+
     def test_train_cli_attn_backend_reaches_backend_runtime_config(self):
         """The train CLI attention backend flag should pass through SDK config."""
         args = _train_args(algo="sft", attn_backend="native")
@@ -806,6 +827,7 @@ def _train_args(**overrides):
         grad_clip_norm=1.0,
         activation_checkpointing=True,
         drop_rollout_state=False,
+        optimizer_state_offload=False,
         eager_decode=False,
         attn_backend="flash",
         disable_thinking=False,
