@@ -2,7 +2,9 @@ Quickstart
 ==========
 
 Use these commands after installation to validate the main AReno paths. Full
-training and agentic rollout require a CUDA-capable NVIDIA GPU.
+training and agentic rollout require either a CUDA-capable NVIDIA GPU on Linux
+or Apple Silicon with MLX. The CLI selects the native backend automatically.
+Use :doc:`backends` for the shared contract and platform-specific setup.
 
 Training smoke test
 -------------------
@@ -41,6 +43,10 @@ math example is the fastest way to see that path end to end.
 
 Read :doc:`/concepts/training-loop` for the mental model and
 :doc:`/cookbook/math-rlvr` for the runnable recipe shape.
+
+On Apple Silicon, use a checkpoint supported by ``mlx-lm`` and add
+``--world-size 1 --tp-size 1 --mini-bs 1`` for the first run. See
+:doc:`mlx` for memory controls and MLX-specific checkpoint behavior.
 
 Agentic rollout path
 --------------------

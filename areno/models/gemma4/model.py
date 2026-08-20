@@ -44,6 +44,7 @@ from areno.engine.checkpoints.common import (
     load_checkpoint_weights,
     save_checkpoint_weights,
 )
+from areno.engine.checkpoints.io import SafetensorsIndex, rank0_tensor
 from areno.engine.config import ModelConfig, _parse_dtype
 from areno.engine.layers.attention_backend.infer import FlashAttnInferBackend, build_infer_attention_backend
 from areno.engine.layers.attention_backend.train import build_train_attention_backend
@@ -63,6 +64,7 @@ from areno.engine.runtime.metadata import InferMeta, TrainMeta
 from areno.engine.runtime.recompute import checkpoint_layer
 from areno.models.base import CausalLMOutput, ModelAdapter
 from areno.models.gemma4.checkpoint import checkpoint_spec
+from areno.models.gemma4_utils import text_embedding_ids
 
 
 class Gemma4RMSNorm(nn.Module):
@@ -386,7 +388,10 @@ class Gemma4Attention(nn.Module):
             theta,
             partial,
         )
-        self.train_backend = build_train_attention_backend(self.attn_backend)
+        self.train_backend = build_train_attention_backend(
+            self.attn_backend,
+            native_train_matches_rollout=True,
+        )
         self.infer_backend: FlashAttnInferBackend | None = None
         # KV cache slots are lazily bound; numel==0 means "not yet allocated".
         self.k_cache = torch.tensor([])
@@ -651,6 +656,164 @@ class Gemma4ForCausalLM(nn.Module):
         # Gemma scales embeddings by sqrt(hidden_size) before the first layer.
         self.embed_scale = math.sqrt(config.hidden_size)
         self.final_logit_softcapping = config.final_logit_softcapping
+        self.vision_tower = None
+        self.audio_tower = None
+        self.embed_vision = None
+        self.embed_audio = None
+        self._train_multimodal_tower = False
+        self._train_multimodal_projector = False
+        self._build_multimodal_towers()
+
+    def _build_multimodal_towers(self) -> None:
+        if self.config.vision_config is None and self.config.audio_config is None:
+            return
+        if self.config.hf_text_config is None:
+            raise ValueError("Gemma4 multimodal checkpoints require the original text_config")
+        unified = str((self.config.vision_config or self.config.audio_config or {}).get("model_type", "")).startswith(
+            "gemma4_unified_"
+        )
+        if unified:
+            try:
+                from transformers.models.gemma4_unified.configuration_gemma4_unified import (
+                    Gemma4UnifiedAudioConfig,
+                    Gemma4UnifiedTextConfig,
+                    Gemma4UnifiedVisionConfig,
+                )
+                from transformers.models.gemma4_unified.modeling_gemma4_unified import (
+                    Gemma4UnifiedMultimodalEmbedder,
+                    Gemma4UnifiedVisionEmbedder,
+                )
+            except (ImportError, ModuleNotFoundError) as exc:
+                raise RuntimeError("Gemma4 Unified multimodal support requires transformers>=5.15") from exc
+            text_config = Gemma4UnifiedTextConfig(**self.config.hf_text_config)
+            if self.config.vision_config is not None:
+                vision_config = Gemma4UnifiedVisionConfig(**self.config.vision_config)
+                self.vision_tower = Gemma4UnifiedVisionEmbedder(vision_config, text_config).to(dtype=self.config.dtype)
+            if self.config.audio_config is not None:
+                audio_config = Gemma4UnifiedAudioConfig(**self.config.audio_config)
+                self.embed_audio = Gemma4UnifiedMultimodalEmbedder(audio_config, text_config).to(
+                    dtype=self.config.dtype
+                )
+        else:
+            self._build_e2b_multimodal_towers()
+        for module in (self.vision_tower, self.audio_tower, self.embed_vision, self.embed_audio):
+            if module is not None:
+                module.requires_grad_(False)
+        self._apply_multimodal_module_modes()
+
+    def configure_multimodal_training(
+        self,
+        *,
+        unfreeze_tower: bool,
+        unfreeze_projector: bool,
+        tower_lr: float | None,
+        projector_lr: float | None,
+        base_lr: float,
+        trainable: bool = True,
+    ) -> None:
+        """Configure media encoder/projector trainability and optimizer LR groups."""
+
+        tower_params, projector_params = self._multimodal_parameter_groups()
+        if unfreeze_tower and not tower_params:
+            raise ValueError("Gemma4 checkpoint has no multimodal tower parameters to unfreeze")
+        if unfreeze_projector and not projector_params:
+            raise ValueError("Gemma4 checkpoint has no multimodal projector parameters to unfreeze")
+        self._configure_multimodal_parameters(
+            tower_params, "tower", unfreeze_tower, tower_lr, base_lr, trainable=trainable
+        )
+        self._configure_multimodal_parameters(
+            projector_params,
+            "projector",
+            unfreeze_projector,
+            projector_lr,
+            base_lr,
+            trainable=trainable,
+        )
+        self._train_multimodal_tower = unfreeze_tower and trainable
+        self._train_multimodal_projector = unfreeze_projector and trainable
+        self.train(self.training)
+
+    def _multimodal_parameter_groups(self) -> tuple[list[nn.Parameter], list[nn.Parameter]]:
+        projector_modules = [module for module in (self.embed_vision, self.embed_audio) if module is not None]
+        nested_projector = getattr(self.vision_tower, "multimodal_embedder", None)
+        if nested_projector is not None:
+            projector_modules.append(nested_projector)
+        projector_params = list(
+            {id(param): param for module in projector_modules for param in module.parameters()}.values()
+        )
+        projector_ids = {id(param) for param in projector_params}
+        tower_params = [
+            param
+            for module in (self.vision_tower, self.audio_tower)
+            if module is not None
+            for param in module.parameters()
+            if id(param) not in projector_ids
+        ]
+        return tower_params, projector_params
+
+    @staticmethod
+    def _configure_multimodal_parameters(
+        params: list[nn.Parameter],
+        group: str,
+        unfreeze: bool,
+        configured_lr: float | None,
+        base_lr: float,
+        *,
+        trainable: bool,
+    ) -> None:
+        for param in params:
+            param.requires_grad_(unfreeze and trainable)
+            param._areno_policy_sync = unfreeze
+            if unfreeze and trainable:
+                param._areno_lr_group = group
+                param._areno_lr = base_lr if configured_lr is None else configured_lr
+            else:
+                for attribute in ("_areno_lr_group", "_areno_lr"):
+                    if hasattr(param, attribute):
+                        delattr(param, attribute)
+
+    def _apply_multimodal_module_modes(self) -> None:
+        tower_modules = tuple(module for module in (self.vision_tower, self.audio_tower) if module is not None)
+        projector_modules = [module for module in (self.embed_vision, self.embed_audio) if module is not None]
+        nested_projector = getattr(self.vision_tower, "multimodal_embedder", None)
+        if nested_projector is not None:
+            projector_modules.append(nested_projector)
+        for module in tower_modules:
+            module.train(self.training and self._train_multimodal_tower)
+        # Apply projector mode last because Unified nests its vision projector in the tower.
+        for module in projector_modules:
+            module.train(self.training and self._train_multimodal_projector)
+
+    def train(self, mode: bool = True):
+        """Train the language model while keeping frozen media encoders deterministic."""
+
+        super().train(mode)
+        self._apply_multimodal_module_modes()
+        return self
+
+    def _build_e2b_multimodal_towers(self) -> None:
+        try:
+            from transformers.models.gemma4.configuration_gemma4 import (
+                Gemma4AudioConfig,
+                Gemma4TextConfig,
+                Gemma4VisionConfig,
+            )
+            from transformers.models.gemma4.modeling_gemma4 import (
+                Gemma4AudioModel,
+                Gemma4MultimodalEmbedder,
+                Gemma4VisionModel,
+            )
+        except (ImportError, ModuleNotFoundError) as exc:
+            raise RuntimeError("Gemma4 multimodal support requires transformers>=5.15") from exc
+        text_config = Gemma4TextConfig(**self.config.hf_text_config)
+        if self.config.vision_config is not None:
+            vision_config = Gemma4VisionConfig(**self.config.vision_config)
+            self.vision_tower = Gemma4VisionModel(vision_config).to(dtype=self.config.dtype)
+            self.embed_vision = Gemma4MultimodalEmbedder(vision_config, text_config).to(dtype=self.config.dtype)
+        if self.config.audio_config is not None:
+            audio_config = Gemma4AudioConfig(**self.config.audio_config)
+            self.audio_tower = Gemma4AudioModel(audio_config).to(dtype=self.config.dtype)
+            self.embed_audio = Gemma4MultimodalEmbedder(audio_config, text_config).to(dtype=self.config.dtype)
 
     def forward(
         self,
@@ -658,13 +821,17 @@ class Gemma4ForCausalLM(nn.Module):
         position_ids: torch.Tensor | None = None,
         train_meta: TrainMeta | None = None,
         infer_meta: InferMeta | None = None,
+        features: dict[str, Any] | list[dict[str, Any] | None] | None = None,
+        defer_lm_head: bool = False,
     ) -> CausalLMOutput:
         if position_ids is None:
             position_ids = torch.arange(input_ids.shape[1], device=input_ids.device).unsqueeze(0).expand_as(input_ids)
-        hidden_states = self.embed_tokens(input_ids) * self.embed_scale
+        embedding_ids = self._text_embedding_ids(input_ids)
+        hidden_states = self.embed_tokens(embedding_ids) * self.embed_scale
+        hidden_states = self._apply_multimodal_features(hidden_states, input_ids, features)
         # Build per-layer PLE inputs (or None when PLE disabled). Wrapped in a
         # dynamo-disabled helper because the gather/reshape is data-dependent.
-        per_layer_inputs = _gemma4_per_layer_inputs_no_compile(self, hidden_states, input_ids)
+        per_layer_inputs = _gemma4_per_layer_inputs_no_compile(self, hidden_states, embedding_ids)
         use_sequence_parallel = bool(train_meta is not None and train_meta.sequence_parallel)
         if use_sequence_parallel:
             hidden_states = scatter_to_sequence_parallel_region(hidden_states)
@@ -700,12 +867,180 @@ class Gemma4ForCausalLM(nn.Module):
                 if kv_for_share is not None:
                     shared_kv_by_layer[layer_idx] = kv_for_share
             hidden_states = self.norm(hidden_states)
-            logits_shard = self.lm_head(hidden_states)
-            if self.final_logit_softcapping:
+            logits_shard = None if defer_lm_head else self.lm_head(hidden_states)
+            if logits_shard is not None and self.final_logit_softcapping:
                 # Gemma uses tanh-based logit softcap to limit extreme values.
                 cap = float(self.final_logit_softcapping)
                 logits_shard = cap * torch.tanh(logits_shard / cap)
         return CausalLMOutput(logits_shard=logits_shard, hidden_states=hidden_states)
+
+    def _text_embedding_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return text_embedding_ids(
+            input_ids,
+            modality_token_ids=(
+                self.config.image_token_id,
+                self.config.video_token_id,
+                self.config.audio_token_id,
+            ),
+            pad_token_id=self.config.pad_token_id,
+        )
+
+    @torch._dynamo.disable
+    def _apply_multimodal_features(
+        self,
+        hidden_states: torch.Tensor,
+        input_ids: torch.Tensor,
+        features: dict[str, Any] | list[dict[str, Any] | None] | None,
+    ) -> torch.Tensor:
+        if features is None:
+            return hidden_states
+        output = hidden_states.clone()
+        if isinstance(features, dict) and int(input_ids.shape[0]) == 1:
+            feature_rows = features.get("multimodal_feature_rows") or features.get("image_feature_rows")
+            rows = list(feature_rows) if feature_rows is not None else [features]
+            self._scatter_packed_multimodal_rows(output[0], input_ids[0], rows)
+            return output
+        rows = _gemma4_features_by_row(features, int(input_ids.shape[0]))
+        for row_idx, row in enumerate(rows):
+            if row is not None:
+                self._scatter_multimodal_row(output[row_idx], input_ids[row_idx], row)
+        return output
+
+    def _scatter_packed_multimodal_rows(
+        self,
+        hidden_row: torch.Tensor,
+        input_row: torch.Tensor,
+        rows: list[dict[str, Any] | None],
+    ) -> None:
+        projection_cache: dict[tuple[Any, ...], torch.Tensor] = {}
+        for modality, token_id in self._modality_token_ids().items():
+            mask = input_row == token_id
+            expected = int(mask.sum().item())
+            if expected == 0:
+                continue
+            pieces = []
+            for row in rows:
+                if row is None:
+                    continue
+                cache_key = self._modality_projection_cache_key(row, modality)
+                piece = projection_cache.get(cache_key) if cache_key is not None else None
+                if piece is None:
+                    piece = self._project_modality(row, modality, hidden_row.device, hidden_row.dtype)
+                    if cache_key is not None and piece is not None:
+                        projection_cache[cache_key] = piece
+                if piece is not None:
+                    pieces.append(piece)
+            embeds = torch.cat(pieces, dim=0) if pieces else None
+            _gemma4_check_feature_count(modality, expected, embeds)
+            hidden_row[mask] = embeds
+
+    @staticmethod
+    def _modality_projection_cache_key(features: dict[str, Any], modality: str) -> tuple[Any, ...] | None:
+        keys = {
+            "image": ("pixel_values", "image_position_ids"),
+            "video": ("pixel_values_videos", "video_position_ids"),
+            "audio": ("input_features", "input_features_mask"),
+        }[modality]
+        values = tuple(features.get(key) for key in keys)
+        value = values[0]
+        if value is None:
+            return None
+        offsets = dict(features.get("modality_token_offsets") or {})
+        counts = dict(features.get("modality_token_counts") or {})
+        offset = int(offsets.get(modality, features.get("multimodal_token_offset", 0)) or 0)
+        count = counts.get(modality, features.get("multimodal_token_count"))
+        return modality, offset, count, *(id(item) for item in values)
+
+    def _scatter_multimodal_row(
+        self,
+        hidden_row: torch.Tensor,
+        input_row: torch.Tensor,
+        features: dict[str, Any],
+    ) -> None:
+        for modality, token_id in self._modality_token_ids().items():
+            mask = input_row == token_id
+            expected = int(mask.sum().item())
+            if expected == 0:
+                continue
+            embeds = self._project_modality(features, modality, hidden_row.device, hidden_row.dtype)
+            _gemma4_check_feature_count(modality, expected, embeds)
+            hidden_row[mask] = embeds
+
+    def _modality_token_ids(self) -> dict[str, int]:
+        return {
+            modality: int(token_id)
+            for modality, token_id in (
+                ("image", self.config.image_token_id),
+                ("video", self.config.video_token_id),
+                ("audio", self.config.audio_token_id),
+            )
+            if token_id is not None
+        }
+
+    def _project_modality(
+        self,
+        features: dict[str, Any],
+        modality: str,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor | None:
+        unified = str((self.config.vision_config or self.config.audio_config or {}).get("model_type", "")).startswith(
+            "gemma4_unified_"
+        )
+        if modality == "image":
+            pixel_values = _gemma4_tensor(features, "pixel_values", device, dtype)
+            positions = _gemma4_tensor(features, "image_position_ids", device, torch.long)
+            if pixel_values is None or positions is None or self.vision_tower is None:
+                return None
+            if unified:
+                embeds = self.vision_tower(pixel_values, positions)
+                embeds = embeds[~(positions == -1).all(dim=-1)]
+            else:
+                if self.embed_vision is None:
+                    return None
+                outputs = self.vision_tower(pixel_values=pixel_values, pixel_position_ids=positions, return_dict=True)
+                embeds = self.embed_vision(outputs.last_hidden_state)
+        elif modality == "video":
+            pixel_values = _gemma4_tensor(features, "pixel_values_videos", device, dtype)
+            positions = _gemma4_tensor(features, "video_position_ids", device, torch.long)
+            if pixel_values is None or positions is None or self.vision_tower is None:
+                return None
+            flat_pixels = pixel_values.flatten(0, 1)
+            flat_positions = positions.flatten(0, 1)
+            if unified:
+                embeds = self.vision_tower(flat_pixels, flat_positions)
+                embeds = embeds[~(flat_positions == -1).all(dim=-1)]
+            else:
+                if self.embed_vision is None:
+                    return None
+                outputs = self.vision_tower(
+                    pixel_values=flat_pixels,
+                    pixel_position_ids=flat_positions,
+                    return_dict=True,
+                )
+                embeds = self.embed_vision(outputs.last_hidden_state)
+        else:
+            input_features = _gemma4_tensor(features, "input_features", device, dtype)
+            feature_mask = _gemma4_tensor(features, "input_features_mask", device, torch.bool)
+            if input_features is None or feature_mask is None or self.embed_audio is None:
+                return None
+            if unified:
+                embeds = self.embed_audio(input_features)
+                embeds = embeds[feature_mask.to(device=embeds.device, dtype=torch.bool)]
+            else:
+                if self.audio_tower is None:
+                    return None
+                outputs = self.audio_tower(input_features, feature_mask, return_dict=True)
+                embeds = self.embed_audio(outputs.last_hidden_state)
+                output_mask = getattr(outputs, "attention_mask", None)
+                if output_mask is not None:
+                    embeds = embeds[output_mask.to(device=embeds.device, dtype=torch.bool)]
+        embeds = embeds.reshape(-1, self.config.hidden_size).to(device=device, dtype=dtype)
+        offsets = dict(features.get("modality_token_offsets") or {})
+        counts = dict(features.get("modality_token_counts") or {})
+        offset = int(offsets.get(modality, features.get("multimodal_token_offset", 0)) or 0)
+        count = counts.get(modality, features.get("multimodal_token_count"))
+        return embeds[offset : offset + int(count)] if count is not None else embeds[offset:]
 
     @torch._dynamo.disable
     def get_per_layer_inputs(self, input_ids: torch.Tensor) -> torch.Tensor | None:
@@ -862,6 +1197,138 @@ class Gemma4ForCausalLM(nn.Module):
             attention.infer_backend = None
 
 
+def _gemma4_features_by_row(
+    features: dict[str, Any] | list[dict[str, Any] | None], batch: int
+) -> list[dict[str, Any] | None]:
+    if isinstance(features, list):
+        if len(features) != batch:
+            raise ValueError(f"multimodal feature batch mismatch: got {len(features)} rows for batch {batch}")
+        return features
+    if not isinstance(features, dict):
+        raise TypeError("multimodal features must be a dict or batch-aligned list")
+    if batch == 1:
+        return [features]
+    rows: list[dict[str, Any]] = []
+    for row_idx in range(batch):
+        row = {}
+        for key, value in features.items():
+            if isinstance(value, torch.Tensor) and value.ndim > 0 and int(value.shape[0]) == batch:
+                row[key] = value[row_idx : row_idx + 1]
+            elif isinstance(value, list) and len(value) == batch:
+                row[key] = value[row_idx]
+            else:
+                row[key] = value
+        rows.append(row)
+    return rows
+
+
+def _gemma4_tensor(features: dict[str, Any], key: str, device: torch.device, dtype: torch.dtype) -> torch.Tensor | None:
+    value = features.get(key)
+    if value is None:
+        return None
+    tensor = value if isinstance(value, torch.Tensor) else torch.as_tensor(value)
+    return tensor.to(device=device, dtype=dtype)
+
+
+def _gemma4_check_feature_count(modality: str, expected: int, embeds: torch.Tensor | None) -> None:
+    actual = 0 if embeds is None else int(embeds.shape[0])
+    if embeds is None or actual != expected:
+        raise ValueError(f"Gemma4 {modality} token/feature count mismatch: tokens={expected} features={actual}")
+
+
+@torch.no_grad()
+def _load_gemma4_multimodal_weights(model: Gemma4ForCausalLM, model_path: str | Path) -> None:
+    unified = str((model.config.vision_config or model.config.audio_config or {}).get("model_type", "")).startswith(
+        "gemma4_unified_"
+    )
+    if unified:
+        modules = (
+            ("model.vision_embedder", model.vision_tower, {"multimodal_embedder.": "model.embed_vision."}),
+            ("model.embed_audio", model.embed_audio, None),
+        )
+    else:
+        modules = tuple(
+            (prefix, module, None)
+            for prefix, module in (
+                ("model.vision_tower", model.vision_tower),
+                ("model.audio_tower", model.audio_tower),
+                ("model.embed_vision", model.embed_vision),
+                ("model.embed_audio", model.embed_audio),
+            )
+        )
+    if not any(module is not None for _, module, _ in modules):
+        return
+    index = SafetensorsIndex(model_path)
+    try:
+        for prefix, module, aliases in modules:
+            if module is None:
+                continue
+            _load_frozen_module_weights(module, prefix, index, aliases=aliases)
+    finally:
+        index.close()
+
+
+def _save_gemma4_multimodal_weights(model: Gemma4ForCausalLM, tensors, *, trainable_only: bool = False) -> None:
+    """Add live E2B or Unified media parameters to checkpoint and policy layouts."""
+
+    unified = str((model.config.vision_config or model.config.audio_config or {}).get("model_type", "")).startswith(
+        "gemma4_unified_"
+    )
+    modules = (
+        (
+            "model.vision_embedder" if unified else "model.vision_tower",
+            model.vision_tower,
+            {"multimodal_embedder.": "model.embed_vision."} if unified else None,
+        ),
+        ("model.audio_tower", model.audio_tower, None),
+        ("model.embed_vision", model.embed_vision, None),
+        ("model.embed_audio", model.embed_audio, None),
+    )
+    for prefix, module, aliases in modules:
+        if module is None:
+            continue
+        state = dict(module.named_parameters()) if trainable_only else module.state_dict()
+        for name, tensor in state.items():
+            if trainable_only and not getattr(tensor, "_areno_policy_sync", False):
+                continue
+            key = f"{prefix}.{name}"
+            for local_prefix, checkpoint_prefix in (aliases or {}).items():
+                if name.startswith(local_prefix):
+                    key = checkpoint_prefix + name.removeprefix(local_prefix)
+                    break
+            tensors[key] = rank0_tensor(tensor)
+
+
+def _load_frozen_module_weights(
+    module: nn.Module,
+    prefix: str,
+    index: SafetensorsIndex,
+    *,
+    aliases: dict[str, str] | None = None,
+) -> None:
+    state = module.state_dict()
+    missing = []
+    for name, target in state.items():
+        key = f"{prefix}.{name}"
+        for local_prefix, checkpoint_prefix in (aliases or {}).items():
+            if name.startswith(local_prefix):
+                key = checkpoint_prefix + name.removeprefix(local_prefix)
+                break
+        if key not in index.weight_map:
+            missing.append(key)
+            continue
+        source = index.get_tensor(key)
+        if source.shape != target.shape:
+            raise ValueError(
+                f"Gemma4 multimodal weight shape mismatch for {key}: checkpoint={tuple(source.shape)} "
+                f"model={tuple(target.shape)}"
+            )
+        target.copy_(source.to(device=target.device, dtype=target.dtype))
+    if missing:
+        preview = ", ".join(missing[:3])
+        raise KeyError(f"Gemma4 checkpoint is missing {len(missing)} {prefix} weights, including {preview}")
+
+
 class Gemma4Adapter(ModelAdapter):
     """Adapter glue for both Gemma4 LM and Gemma4 multimodal trunks."""
 
@@ -905,6 +1372,7 @@ class Gemma4Adapter(ModelAdapter):
             model_type=self.name,
             checkpoint_prefix=checkpoint_prefix,
             vocab_size=int(cfg["vocab_size"]),
+            pad_token_id=int(cfg.get("pad_token_id", hf_config.get("pad_token_id", 0)) or 0),
             hidden_size=int(cfg["hidden_size"]),
             intermediate_size=int(cfg["intermediate_size"]),
             num_hidden_layers=int(cfg["num_hidden_layers"]),
@@ -947,6 +1415,12 @@ class Gemma4Adapter(ModelAdapter):
             # head-norm); the actual scale is enforced by the attention backend.
             attention_softmax_scale=1.0,
             final_logit_softcapping=cfg.get("final_logit_softcapping"),
+            vision_config=hf_config.get("vision_config"),
+            audio_config=hf_config.get("audio_config"),
+            hf_text_config=dict(cfg),
+            image_token_id=hf_config.get("image_token_id"),
+            video_token_id=hf_config.get("video_token_id"),
+            audio_token_id=hf_config.get("audio_token_id"),
         )
 
     def build(self, config: ModelConfig) -> nn.Module:
@@ -959,15 +1433,26 @@ class Gemma4Adapter(ModelAdapter):
             raise TypeError(f"Gemma4Adapter cannot load weights into {type(model)!r}")
         # The runtime prefix selects between LM-only and multimodal layouts.
         load_checkpoint_weights(model, model_path, checkpoint_spec(model.config.checkpoint_prefix))
+        _load_gemma4_multimodal_weights(model, model_path)
 
     @torch.no_grad()
     def save_weights(self, model: nn.Module, output_path: str | Path, source_path: str | Path | None) -> str | None:
         if not isinstance(model, Gemma4ForCausalLM):
             raise TypeError(f"Gemma4Adapter cannot save weights from {type(model)!r}")
-        return save_checkpoint_weights(model, output_path, source_path, checkpoint_spec(model.config.checkpoint_prefix))
+        return save_checkpoint_weights(
+            model,
+            output_path,
+            source_path,
+            checkpoint_spec(model.config.checkpoint_prefix),
+            extra_tensors_fn=lambda tensors: _save_gemma4_multimodal_weights(model, tensors, trainable_only=True),
+        )
 
     def build_policy_plan(self, model: nn.Module):
-        return build_checkpoint_policy_plan(model, checkpoint_spec(model.config.checkpoint_prefix))
+        return build_checkpoint_policy_plan(
+            model,
+            checkpoint_spec(model.config.checkpoint_prefix),
+            extra_tensors_fn=lambda tensors: _save_gemma4_multimodal_weights(model, tensors, trainable_only=True),
+        )
 
 
 def _layer_type(config: ModelConfig, layer_idx: int) -> str:

@@ -196,6 +196,31 @@ def test_serve_text_response_preserves_decoded_content():
     assert choice.message["content"] == "plan the answer</think>\n\nFinal answer"
 
 
+def test_serve_usage_counts_prompt_tokens_once_for_multiple_completions():
+    tokenizer = _TokenTokenizer({1: "a", 2: "b", 3: "c"})
+    request = serve_mod.ChatCompletionRequest(
+        model="areno",
+        messages=[serve_mod.ChatMessage(role="user", content="hi")],
+        n=2,
+    )
+    prompt = [10, 11]
+
+    response = serve_mod._build_response_from(
+        tokenizer,
+        "model",
+        QwenToolCallParser(),
+        request,
+        prompt,
+        [[1, 2], [2, 3]],
+        ["stop", "stop"],
+    )
+
+    assert len(response.choices) == 2
+    assert response.usage.prompt_tokens == len(prompt)
+    assert response.usage.completion_tokens == 4
+    assert response.usage.total_tokens == len(prompt) + 4
+
+
 def test_serve_tool_call_response_does_not_attach_reasoning_content():
     tokenizer = _TokenTokenizer(
         {

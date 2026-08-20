@@ -4,8 +4,7 @@ import unittest
 
 import torch
 
-from areno.api.loss_fns.dpo import dpo_loss_fn
-from areno.api.loss_fns.sft import sft_loss_fn
+from areno.api.backend.cuda.losses import dpo_loss_fn, sft_loss_fn
 
 
 class SftLossTest(unittest.TestCase):
@@ -105,10 +104,10 @@ class SftLossTest(unittest.TestCase):
 
     def test_sft_backend_annotations_group_target_tokens(self):
         """Backend SFT annotations describe one optimizer-step accumulation group."""
-        from areno.api.backend.areno.backend import _annotate_sft_token_mean_packs
+        from areno.api.backend.cuda.training import annotate_sft_token_mean_packs
 
         packs = [{}, {}]
-        _annotate_sft_token_mean_packs(packs, [1, 3], gradient_accumulation_steps=None)
+        annotate_sft_token_mean_packs(packs, [1, 3], gradient_accumulation_steps=None)
 
         self.assertEqual(packs[0]["_sft_total_target_tokens"], 4)
         self.assertEqual(packs[1]["_sft_total_target_tokens"], 4)

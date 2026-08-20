@@ -1537,7 +1537,11 @@ class Qwen35VLAdapter(Qwen35Adapter):
             or any(
                 "Qwen3_5" in arch and ("VL" in arch or "Vision" in arch) and "Moe" not in arch for arch in architectures
             )
-            or (has_vision_config and text_model_type in {"qwen3_5", "qwen3_5_text"})
+            or (
+                has_vision_config
+                and model_type in {"qwen3_5", "qwen3_5_vl", "qwen3_5_vision"}
+                and text_model_type in {"qwen3_5", "qwen3_5_text"}
+            )
         )
 
     def config_from_hf(self, hf_config: dict[str, Any]) -> ModelConfig:

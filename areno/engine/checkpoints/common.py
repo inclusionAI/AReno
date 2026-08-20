@@ -398,7 +398,11 @@ def load_checkpoint_weights(model: nn.Module, model_path: str, spec: CheckpointS
 
 @torch.no_grad()
 def save_checkpoint_weights(
-    model: nn.Module, output_path: str, source_path: str | None, spec: CheckpointSpec
+    model: nn.Module,
+    output_path: str,
+    source_path: str | None,
+    spec: CheckpointSpec,
+    extra_tensors_fn: Callable[[CheckpointTensorStore], None] | None = None,
 ) -> str | None:
     """Save a tensor-parallel model as a HF sharded safetensors checkpoint."""
 
@@ -421,6 +425,10 @@ def save_checkpoint_weights(
                 save_column_tensors(tensors, delayed_column_tensors)
             writer.write(tensors, f"layer-{layer_idx:05d}")
             tensors.clear()
+        if extra_tensors_fn is not None:
+            extra_tensors_fn(tensors)
+            writer.write(tensors, "extra-tensors")
+            tensors.clear()
     saved_path = writer.finish()
     if saved_path is not None and source_path is not None:
         copy_source_passthrough_weights(
@@ -429,7 +437,11 @@ def save_checkpoint_weights(
     return saved_path
 
 
-def build_checkpoint_policy_plan(model: nn.Module, spec: CheckpointSpec) -> PolicyTensorStore:
+def build_checkpoint_policy_plan(
+    model: nn.Module,
+    spec: CheckpointSpec,
+    extra_tensors_fn: Callable[[PolicyTensorStore], None] | None = None,
+) -> PolicyTensorStore:
     """Build the canonical checkpoint layout while retaining live GPU views."""
 
     tensors = PolicyTensorStore()
@@ -439,6 +451,8 @@ def build_checkpoint_policy_plan(model: nn.Module, spec: CheckpointSpec) -> Poli
         save_layer_specs(tensors, model, spec.layer, context=delayed_column_tensors)
         if delayed_column_tensors:
             save_column_tensors(tensors, delayed_column_tensors)
+        if extra_tensors_fn is not None:
+            extra_tensors_fn(tensors)
     return tensors
 
 
