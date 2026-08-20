@@ -90,6 +90,7 @@ class _MasterBucket:
     offload_file: str | None = None
     offload_index: int | None = None
     offload_group: _MmapGroup | None = None
+    offload_ready_events: tuple[torch.cuda.Event, ...] = ()
 
 
 class AdamWFP32Master:
@@ -204,6 +205,7 @@ class AdamWFP32Master:
             bucket.offload_file = None
             bucket.offload_index = None
             bucket.offload_group = None
+            bucket.offload_ready_events = ()
         self._collective_arenas.clear()
         self._cleanup_disk_offload()
         self._active_offload_mode = "none"
@@ -271,6 +273,7 @@ class AdamWFP32Master:
             bucket.offload_file = None
             bucket.offload_index = None
             bucket.offload_group = None
+            bucket.offload_ready_events = ()
         self._active_offload_mode = "none"
         self._disk_offload_root = None
         self._active_offload_batch_size = 1
@@ -384,6 +387,7 @@ class AdamWFP32Master:
             bucket.offload_file = None
             bucket.offload_index = None
             bucket.offload_group = None
+            bucket.offload_ready_events = ()
         self._load_master_params(state_dict.get("master_params", []))
         saved_states = state_dict.get("state", [])
         for saved, bucket in zip(saved_states[: len(self.buckets)], self.buckets, strict=False):
@@ -799,6 +803,7 @@ class AdamWFP32Master:
             return
         group = self._get_or_create_mmap_group(indices, self._master_mmap_specs(indices))
         payloads: dict[int, dict[str, torch.Tensor]] = {}
+        ready_events: list[torch.cuda.Event] = []
         for index in present_indices:
             bucket = self.buckets[index]
             assert bucket.master_storage is not None
@@ -810,7 +815,8 @@ class AdamWFP32Master:
                 "exp_avg": bucket.exp_avg,
                 "exp_avg_sq": bucket.exp_avg_sq,
             }
-        self._submit_disk_group_write(indices, group, payloads)
+            ready_events.extend(bucket.offload_ready_events)
+        self._submit_disk_group_write(indices, group, payloads, tuple(ready_events))
         for index in present_indices:
             bucket = self.buckets[index]
             bucket.master = None
@@ -820,17 +826,53 @@ class AdamWFP32Master:
             bucket.master_storage = None
             bucket.exp_avg = None
             bucket.exp_avg_sq = None
+            bucket.offload_ready_events = ()
 
     def _stage_bucket_on_cpu(self, bucket: _MasterBucket) -> None:
         """Move one bucket to CPU so only a bounded group is resident before saving."""
 
         bucket.master = None
+        payload: dict[str, torch.Tensor] = {}
         if bucket.master_storage is not None:
-            bucket.master_storage = bucket.master_storage.to("cpu")
+            payload["low_bits"] = bucket.master_storage.low_bits
+            payload["round_up_bits"] = bucket.master_storage.round_up_bits
         if bucket.exp_avg is not None:
-            bucket.exp_avg = bucket.exp_avg.to(device="cpu")
+            payload["exp_avg"] = bucket.exp_avg
         if bucket.exp_avg_sq is not None:
-            bucket.exp_avg_sq = bucket.exp_avg_sq.to(device="cpu")
+            payload["exp_avg_sq"] = bucket.exp_avg_sq
+        staged, ready_events = self._stage_payload_on_cpu(payload)
+        if bucket.master_storage is not None:
+            bucket.master_storage = BF16MasterStorage(
+                low_bits=staged["low_bits"],
+                round_up_bits=staged["round_up_bits"],
+            )
+        bucket.exp_avg = staged.get("exp_avg")
+        bucket.exp_avg_sq = staged.get("exp_avg_sq")
+        bucket.offload_ready_events = ready_events
+
+    def _stage_payload_on_cpu(
+        self,
+        payload: dict[str, torch.Tensor],
+    ) -> tuple[dict[str, torch.Tensor], tuple[torch.cuda.Event, ...]]:
+        """Queue disk-bound CUDA tensors into pinned host buffers without synchronizing."""
+
+        async_disk = self._active_offload_mode == "disk"
+        staged: dict[str, torch.Tensor] = {}
+        cuda_devices: set[torch.device] = set()
+        for name, tensor in payload.items():
+            if async_disk and tensor.device.type == "cuda":
+                destination = torch.empty_like(tensor, device="cpu", pin_memory=True)
+                destination.copy_(tensor, non_blocking=True)
+                staged[name] = destination
+                cuda_devices.add(tensor.device)
+            else:
+                staged[name] = tensor.to(device="cpu")
+        ready_events: list[torch.cuda.Event] = []
+        for device in cuda_devices:
+            event = torch.cuda.Event()
+            event.record(torch.cuda.current_stream(device))
+            ready_events.append(event)
+        return staged, tuple(ready_events)
 
     def _load_bucket_offload(self, bucket: _MasterBucket, device: torch.device) -> None:
         """Copy one bucket from its persistent raw mmap onto ``device``."""
@@ -945,6 +987,7 @@ class AdamWFP32Master:
         indices: list[int],
         group: _MmapGroup,
         payloads: dict[int, dict[str, torch.Tensor]],
+        ready_events: tuple[torch.cuda.Event, ...] = (),
     ) -> None:
         """Queue one group write while bounding retained CPU state to one group."""
 
@@ -965,6 +1008,7 @@ class AdamWFP32Master:
             _write_mmap_payloads,
             group,
             payloads,
+            ready_events,
         )
 
     def _wait_disk_group_write(self, group: _MmapGroup) -> None:
@@ -1240,9 +1284,12 @@ def _prefetch_mmap_payload_after_write(
 def _write_mmap_payloads(
     group: _MmapGroup,
     payloads: dict[int, dict[str, torch.Tensor]],
+    ready_events: tuple[torch.cuda.Event, ...] = (),
 ) -> None:
     """Write one staged optimizer group in the background and flush once."""
 
+    for event in ready_events:
+        event.synchronize()
     for index, payload in payloads.items():
         target = group.tensors[index]
         for name, tensor in payload.items():

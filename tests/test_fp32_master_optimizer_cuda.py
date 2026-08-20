@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import pytest
 import torch
 
@@ -57,6 +59,8 @@ def test_fused_fp32_master_handles_multiple_refs_and_partial_bytes() -> None:
 
 @pytest.mark.parametrize("optimizer_cls", [AdamWFP32Master, AdamW8bit])
 def test_disk_offload_prefetch_uses_pinned_double_buffer_and_preserves_updates(tmp_path, optimizer_cls) -> None:
+    from areno.engine.optim.adamw_fp32_master import _write_mmap_payloads
+
     device = torch.device("cuda", 0)
     initial = [torch.linspace(-1.0 + index, 1.0 + index, 1024, device=device).to(torch.bfloat16) for index in range(3)]
     candidate_params = [torch.nn.Parameter(value.clone()) for value in initial]
@@ -70,6 +74,11 @@ def test_disk_offload_prefetch_uses_pinned_double_buffer_and_preserves_updates(t
     candidate = optimizer_cls(candidate_params, **kwargs)
     reference = optimizer_cls(reference_params, **kwargs)
     candidate.configure_state_offload(mode="disk", directory=str(tmp_path), batch_size=2)
+    staged_writes = []
+
+    def inspect_write(group, payloads, ready_events=()) -> None:
+        staged_writes.append((payloads, ready_events))
+        _write_mmap_payloads(group, payloads, ready_events)
 
     for step in range(2):
         if step == 1:
@@ -83,9 +92,19 @@ def test_disk_offload_prefetch_uses_pinned_double_buffer_and_preserves_updates(t
             gradient = torch.linspace(-0.5 + index, 0.75 - index, 1024, device=device).to(torch.bfloat16)
             candidate_param.grad = gradient
             reference_param.grad = gradient.clone()
-        candidate.step()
+        with patch("areno.engine.optim.adamw_fp32_master._write_mmap_payloads", inspect_write):
+            candidate.step()
+            candidate._shutdown_disk_writes()
         reference.step()
 
+    assert staged_writes
+    assert all(ready_events for _payloads, ready_events in staged_writes)
+    assert all(
+        tensor.is_pinned()
+        for payloads, _ready_events in staged_writes
+        for payload in payloads.values()
+        for tensor in payload.values()
+    )
     for candidate_param, reference_param in zip(candidate_params, reference_params, strict=True):
         torch.testing.assert_close(candidate_param, reference_param, rtol=0.0, atol=0.0)
     assert not candidate._disk_prefetch_futures

@@ -420,6 +420,37 @@ def test_disk_save_returns_before_background_mmap_flush(tmp_path) -> None:
     assert not list(tmp_path.rglob("*.mmap"))
 
 
+def test_disk_writer_waits_for_staged_payload_event(tmp_path) -> None:
+    class _ReadyEvent:
+        def __init__(self) -> None:
+            self.synchronized = threading.Event()
+
+        def synchronize(self) -> None:
+            self.synchronized.set()
+
+    ready_event = _ReadyEvent()
+    parameter = torch.nn.Parameter(torch.linspace(-1.0, 1.0, 16).to(torch.bfloat16))
+    optimizer = AdamWFP32Master(
+        [parameter],
+        lr=1.0e-3,
+        betas=(0.9, 0.99),
+        weight_decay=0.0,
+        bucket_numel=32,
+    )
+    optimizer.configure_state_offload(mode="disk", directory=str(tmp_path))
+
+    def stage_with_event(payload):
+        return {name: tensor.to(device="cpu") for name, tensor in payload.items()}, (ready_event,)
+
+    parameter.grad = torch.ones_like(parameter)
+    with patch.object(optimizer, "_stage_payload_on_cpu", side_effect=stage_with_event):
+        optimizer.step()
+        optimizer._shutdown_disk_writes()
+
+    assert ready_event.synchronized.is_set()
+    optimizer.onload_state(torch.device("cpu"))
+
+
 def test_two_microbatches_match_one_fp32_accumulated_optimizer_update() -> None:
     initial = torch.linspace(-1.0, 1.0, 23).to(torch.bfloat16)
     candidate_param = torch.nn.Parameter(initial.clone())

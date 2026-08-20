@@ -31,6 +31,7 @@ class _Adam8bitBucketState:
     offload_file: str | None = None
     offload_index: int | None = None
     offload_group: _MmapGroup | None = None
+    offload_ready_events: tuple[torch.cuda.Event, ...] = ()
 
 
 class AdamW8bit(AdamWFP32Master):
@@ -108,6 +109,7 @@ class AdamW8bit(AdamWFP32Master):
             state.offload_file = None
             state.offload_index = None
             state.offload_group = None
+            state.offload_ready_events = ()
         for bucket in self.buckets:
             bucket.grad_shard = None
             bucket.grad_param_ids = frozenset()
@@ -160,6 +162,7 @@ class AdamW8bit(AdamWFP32Master):
             state.offload_file = None
             state.offload_index = None
             state.offload_group = None
+            state.offload_ready_events = ()
         self._active_offload_mode = "none"
         self._disk_offload_root = None
         self._active_offload_batch_size = 1
@@ -202,6 +205,7 @@ class AdamW8bit(AdamWFP32Master):
             state.offload_file = None
             state.offload_index = None
             state.offload_group = None
+            state.offload_ready_events = ()
         saved_states = state_dict.get("state", [])
         for saved, bucket, state in zip(saved_states[: len(self.buckets)], self.buckets, self._states, strict=False):
             if saved is None:
@@ -300,6 +304,7 @@ class AdamW8bit(AdamWFP32Master):
             return
         group = self._get_or_create_mmap_group(indices, self._state_mmap_specs(indices))
         payloads: dict[int, dict[str, torch.Tensor]] = {}
+        ready_events: list[torch.cuda.Event] = []
         for index in present_indices:
             state = self._states[index]
             assert state.exp_avg_q is not None
@@ -312,7 +317,8 @@ class AdamW8bit(AdamWFP32Master):
                 "exp_avg_sq_q": state.exp_avg_sq_q,
                 "exp_avg_sq_scale": state.exp_avg_sq_scale,
             }
-        self._submit_disk_group_write(indices, group, payloads)
+            ready_events.extend(state.offload_ready_events)
+        self._submit_disk_group_write(indices, group, payloads, tuple(ready_events))
         for index in present_indices:
             state = self._states[index]
             state.offload_file = str(group.path)
@@ -322,18 +328,26 @@ class AdamW8bit(AdamWFP32Master):
             state.exp_avg_scale = None
             state.exp_avg_sq_q = None
             state.exp_avg_sq_scale = None
+            state.offload_ready_events = ()
 
     def _stage_8bit_state_on_cpu(self, state: _Adam8bitBucketState) -> None:
         """Move one quantized bucket to CPU before its group is serialized."""
 
-        if state.exp_avg_q is not None:
-            state.exp_avg_q = state.exp_avg_q.to(device="cpu")
-        if state.exp_avg_scale is not None:
-            state.exp_avg_scale = state.exp_avg_scale.to(device="cpu")
-        if state.exp_avg_sq_q is not None:
-            state.exp_avg_sq_q = state.exp_avg_sq_q.to(device="cpu")
-        if state.exp_avg_sq_scale is not None:
-            state.exp_avg_sq_scale = state.exp_avg_sq_scale.to(device="cpu")
+        payload = {
+            name: tensor
+            for name, tensor in {
+                "exp_avg_q": state.exp_avg_q,
+                "exp_avg_scale": state.exp_avg_scale,
+                "exp_avg_sq_q": state.exp_avg_sq_q,
+                "exp_avg_sq_scale": state.exp_avg_sq_scale,
+            }.items()
+            if tensor is not None
+        }
+        staged, state.offload_ready_events = self._stage_payload_on_cpu(payload)
+        state.exp_avg_q = staged.get("exp_avg_q")
+        state.exp_avg_scale = staged.get("exp_avg_scale")
+        state.exp_avg_sq_q = staged.get("exp_avg_sq_q")
+        state.exp_avg_sq_scale = staged.get("exp_avg_sq_scale")
 
     def _state_cpu_payload(
         self,
