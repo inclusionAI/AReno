@@ -364,7 +364,15 @@ def _slice_prompt_image_features(
                 "image_token_count": local_count,
             }
         )
-        for key in ("pixel_values", "image_grid_thw", "target_sizes", "num_patches_per_image", "downsample_mode", "processor_expanded_image_tokens", "image_token_id"):
+        for key in (
+            "pixel_values",
+            "image_grid_thw",
+            "target_sizes",
+            "num_patches_per_image",
+            "downsample_mode",
+            "processor_expanded_image_tokens",
+            "image_token_id",
+        ):
             if features.get(key) is not None:
                 payload_features[key] = features[key]
         return local_mask, payload_features
