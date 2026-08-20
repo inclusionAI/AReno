@@ -81,6 +81,7 @@ from areno.engine.layers.rotary import PartialRotaryEmbedding
 from areno.engine.layers.vocab import VocabParallelEmbedding, VocabParallelLMHead
 from areno.engine.parallel.collectives import (
     all_reduce,
+    copy_to_tensor_parallel_region,
     gather_from_sequence_parallel_region,
     is_sequence_parallel_active,
     reduce_scatter_to_sequence_parallel_region,
@@ -684,7 +685,12 @@ class BailingSoftmaxAttention(nn.Module):
             # low-rank bottleneck (``kv_a_proj_with_mqa``) plus a per-head
             # decompression (``kv_b_proj``). The ``kv_a`` output also carries
             # the rope channels in its tail (``qk_rope_head_dim`` cols).
-            self.q_proj = ColumnParallelLinear(config.hidden_size, self.num_heads * self.head_dim, bias=False)
+            self.q_proj = ColumnParallelLinear(
+                config.hidden_size,
+                self.num_heads * self.head_dim,
+                bias=False,
+                input_grad_allreduce=False,
+            )
             self.kv_a_proj_with_mqa = nn.Linear(
                 config.hidden_size, self.kv_lora_rank + self.qk_rope_head_dim, bias=False
             )
@@ -693,7 +699,10 @@ class BailingSoftmaxAttention(nn.Module):
             )
             self.kv_a_layernorm = RMSNorm(self.kv_lora_rank, config.rms_norm_eps)
             self.kv_b_proj = ColumnParallelLinear(
-                config.kv_lora_rank, self.num_heads * (self.qk_nope_head_dim + self.v_head_dim), bias=False
+                config.kv_lora_rank,
+                self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
+                bias=False,
+                input_grad_allreduce=False,
             )
             self.query_layernorm = None
             self.key_layernorm = None
@@ -762,9 +771,10 @@ class BailingSoftmaxAttention(nn.Module):
             and self.kv_a_layernorm is not None
             and self.kv_b_proj is not None
         )
-        q = self.q_proj(hidden_states).view(bsz, seqlen, self.local_heads, self.head_dim)
+        mla_input = hidden_states if is_sequence_parallel_active() else copy_to_tensor_parallel_region(hidden_states)
+        q = self.q_proj(mla_input).view(bsz, seqlen, self.local_heads, self.head_dim)
         q_nope, q_rope = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
-        kv_a = self.kv_a_proj_with_mqa(hidden_states)
+        kv_a = self.kv_a_proj_with_mqa(mla_input)
         compressed_kv, k_rope = kv_a.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
         kv = self.kv_b_proj(self.kv_a_layernorm(compressed_kv)).view(
             bsz, seqlen, self.local_heads, self.qk_nope_head_dim + self.v_head_dim

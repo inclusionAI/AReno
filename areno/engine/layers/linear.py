@@ -76,7 +76,15 @@ class ColumnParallelLinear(nn.Module):
     ``gather_output`` requests an all-gather to materialize the full output.
     """
 
-    def __init__(self, in_features: int, out_features: int, bias: bool = False, gather_output: bool = False):
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        bias: bool = False,
+        gather_output: bool = False,
+        *,
+        input_grad_allreduce: bool = True,
+    ):
         super().__init__()
         ctx = get_tp_context()
         start, end = _shard_range(out_features, ctx.rank, ctx.world_size)
@@ -84,6 +92,7 @@ class ColumnParallelLinear(nn.Module):
         self.out_features = out_features
         self.local_out_features = end - start
         self.gather_output = gather_output
+        self.input_grad_allreduce = input_grad_allreduce
         self.weight = nn.Parameter(torch.empty(self.local_out_features, in_features))
         self.bias = nn.Parameter(torch.empty(self.local_out_features)) if bias else None
         mark_tensor_parallel_parameter(self.weight, True, sequence_parallel=True)
@@ -100,12 +109,12 @@ class ColumnParallelLinear(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # In sequence-parallel mode the activation is sharded along the
         # sequence dim, so we all-gather it back to the full sequence before
-        # the matmul; otherwise we just copy through the TP region.
-        x = (
-            gather_from_sequence_parallel_region(x)
-            if is_sequence_parallel_active()
-            else copy_to_tensor_parallel_region(x)
-        )
+        # the matmul. A replicated-to-column chain can move the non-SP input
+        # gradient all-reduce before its replicated projection.
+        if is_sequence_parallel_active():
+            x = gather_from_sequence_parallel_region(x)
+        elif self.input_grad_allreduce:
+            x = copy_to_tensor_parallel_region(x)
         out = _areno_linear_forward(x, self.weight, self.bias)
         if self.gather_output:
             # Concatenate column-shards along the last dim to recover the
