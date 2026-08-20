@@ -20,7 +20,12 @@ from areno.engine.training import TrainingManager
 @pytest.mark.parametrize("optimizer_cls", [AdamWFP32Master, AdamW8bit])
 def test_optimizer_state_offload_batch_size_defaults_to_one(tmp_path, optimizer_cls) -> None:
     parameter = torch.nn.Parameter(torch.ones(4, dtype=torch.bfloat16))
-    optimizer = optimizer_cls([parameter])
+    optimizer = optimizer_cls(
+        [parameter],
+        lr=1.0e-3,
+        betas=(0.9, 0.99),
+        weight_decay=0.0,
+    )
 
     assert optimizer._active_offload_batch_size == 1
     optimizer.configure_state_offload(mode="disk", directory=str(tmp_path))
