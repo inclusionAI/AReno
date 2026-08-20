@@ -259,6 +259,7 @@ class AdamW8bit(AdamWFP32Master):
         assert state.offload_file is not None
         assert state.offload_index is not None
         assert state.offload_group is not None
+        self._wait_disk_group_write(state.offload_group)
         saved, prefetched = self._take_disk_prefetch(
             state.offload_index,
             state.offload_group.tensors[state.offload_index],
@@ -298,18 +299,20 @@ class AdamW8bit(AdamWFP32Master):
         if not present_indices:
             return
         group = self._get_or_create_mmap_group(indices, self._state_mmap_specs(indices))
+        payloads: dict[int, dict[str, torch.Tensor]] = {}
         for index in present_indices:
             state = self._states[index]
             assert state.exp_avg_q is not None
             assert state.exp_avg_scale is not None
             assert state.exp_avg_sq_q is not None
             assert state.exp_avg_sq_scale is not None
-            target = group.tensors[index]
-            target["exp_avg_q"].copy_(state.exp_avg_q)
-            target["exp_avg_scale"].copy_(state.exp_avg_scale)
-            target["exp_avg_sq_q"].copy_(state.exp_avg_sq_q)
-            target["exp_avg_sq_scale"].copy_(state.exp_avg_sq_scale)
-        group.flush()
+            payloads[index] = {
+                "exp_avg_q": state.exp_avg_q,
+                "exp_avg_scale": state.exp_avg_scale,
+                "exp_avg_sq_q": state.exp_avg_sq_q,
+                "exp_avg_sq_scale": state.exp_avg_sq_scale,
+            }
+        self._submit_disk_group_write(indices, group, payloads)
         for index in present_indices:
             state = self._states[index]
             state.offload_file = str(group.path)
@@ -342,6 +345,7 @@ class AdamW8bit(AdamWFP32Master):
         if state.offload_file is not None:
             assert state.offload_index == index
             assert state.offload_group is not None
+            self._wait_disk_group_write(state.offload_group)
             saved = state.offload_group.tensors[index]
             return {name: tensor.clone() for name, tensor in saved.items()}
         return {

@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import multiprocessing as mp
 import socket
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -372,6 +373,40 @@ def test_disk_prefetch_window_is_bounded_and_pending_reads_clean_up(tmp_path) ->
 
     assert not optimizer._disk_prefetch_futures
     assert not optimizer._disk_prefetch_in_use
+    assert not list(tmp_path.rglob("*.mmap"))
+
+
+def test_disk_save_returns_before_background_mmap_flush(tmp_path) -> None:
+    from areno.engine.optim.adamw_fp32_master import _write_mmap_payloads
+
+    write_started = threading.Event()
+    allow_write = threading.Event()
+
+    def delayed_write(*args, **kwargs) -> None:
+        write_started.set()
+        assert allow_write.wait(timeout=5.0)
+        _write_mmap_payloads(*args, **kwargs)
+
+    parameter = torch.nn.Parameter(torch.linspace(-1.0, 1.0, 16).to(torch.bfloat16))
+    optimizer = AdamWFP32Master(
+        [parameter],
+        lr=1.0e-3,
+        betas=(0.9, 0.99),
+        weight_decay=0.0,
+        bucket_numel=32,
+    )
+    optimizer.configure_state_offload(mode="disk", directory=str(tmp_path), batch_size=2)
+    parameter.grad = torch.ones_like(parameter)
+    with patch("areno.engine.optim.adamw_fp32_master._write_mmap_payloads", delayed_write):
+        optimizer.step()
+        assert write_started.wait(timeout=2.0)
+        assert len(optimizer._disk_write_futures) == 1
+        assert not next(iter(optimizer._disk_write_futures.values())).done()
+        allow_write.set()
+        optimizer.onload_state(torch.device("cpu"))
+
+    assert not optimizer._disk_write_futures
+    assert optimizer.buckets[0].exp_avg is not None
     assert not list(tmp_path.rglob("*.mmap"))
 
 

@@ -134,6 +134,8 @@ class AdamWFP32Master:
         self._disk_prefetch_executor: ThreadPoolExecutor | None = None
         self._disk_prefetch_futures: dict[int, Future[dict[str, torch.Tensor]]] = {}
         self._disk_prefetch_in_use: dict[int, tuple[dict[str, torch.Tensor], torch.cuda.Event | None]] = {}
+        self._disk_write_executor: ThreadPoolExecutor | None = None
+        self._disk_write_futures: dict[tuple[int, ...], Future[None]] = {}
         self._active_offload_mode = "none"
         self._disk_offload_root: str | None = None
         self._active_offload_batch_size = 32
@@ -796,17 +798,19 @@ class AdamWFP32Master:
         if not present_indices:
             return
         group = self._get_or_create_mmap_group(indices, self._master_mmap_specs(indices))
+        payloads: dict[int, dict[str, torch.Tensor]] = {}
         for index in present_indices:
             bucket = self.buckets[index]
             assert bucket.master_storage is not None
             assert bucket.exp_avg is not None
             assert bucket.exp_avg_sq is not None
-            target = group.tensors[index]
-            target["low_bits"].copy_(bucket.master_storage.low_bits)
-            target["round_up_bits"].copy_(bucket.master_storage.round_up_bits)
-            target["exp_avg"].copy_(bucket.exp_avg)
-            target["exp_avg_sq"].copy_(bucket.exp_avg_sq)
-        group.flush()
+            payloads[index] = {
+                "low_bits": bucket.master_storage.low_bits,
+                "round_up_bits": bucket.master_storage.round_up_bits,
+                "exp_avg": bucket.exp_avg,
+                "exp_avg_sq": bucket.exp_avg_sq,
+            }
+        self._submit_disk_group_write(indices, group, payloads)
         for index in present_indices:
             bucket = self.buckets[index]
             bucket.master = None
@@ -834,6 +838,7 @@ class AdamWFP32Master:
         assert bucket.offload_file is not None
         assert bucket.offload_index is not None
         assert bucket.offload_group is not None
+        self._wait_disk_group_write(bucket.offload_group)
         state, prefetched = self._take_disk_prefetch(
             bucket.offload_index,
             bucket.offload_group.tensors[bucket.offload_index],
@@ -871,9 +876,10 @@ class AdamWFP32Master:
                         thread_name_prefix=f"areno-optim-prefetch-dp{self.dp_rank}",
                     )
                 self._disk_prefetch_futures[index] = self._disk_prefetch_executor.submit(
-                    _prefetch_mmap_payload,
+                    _prefetch_mmap_payload_after_write,
                     group.tensors[index],
                     torch.cuda.is_available(),
+                    self._disk_write_futures.get(tuple(group.tensors)),
                 )
                 next_index = index + 1
                 scheduled = True
@@ -934,12 +940,57 @@ class AdamWFP32Master:
                 event.synchronize()
         self._disk_prefetch_in_use.clear()
 
+    def _submit_disk_group_write(
+        self,
+        indices: list[int],
+        group: _MmapGroup,
+        payloads: dict[int, dict[str, torch.Tensor]],
+    ) -> None:
+        """Queue one group write while bounding retained CPU state to one group."""
+
+        key = tuple(indices)
+        previous = self._disk_write_futures.pop(key, None)
+        if previous is not None:
+            previous.result()
+        while self._disk_write_futures:
+            _oldest_key, oldest = next(iter(self._disk_write_futures.items()))
+            oldest.result()
+            self._disk_write_futures.pop(_oldest_key)
+        if self._disk_write_executor is None:
+            self._disk_write_executor = ThreadPoolExecutor(
+                max_workers=1,
+                thread_name_prefix=f"areno-optim-write-dp{self.dp_rank}",
+            )
+        self._disk_write_futures[key] = self._disk_write_executor.submit(
+            _write_mmap_payloads,
+            group,
+            payloads,
+        )
+
+    def _wait_disk_group_write(self, group: _MmapGroup) -> None:
+        """Ensure the latest async write is visible before a direct mmap read."""
+
+        future = self._disk_write_futures.get(tuple(group.tensors))
+        if future is not None:
+            future.result()
+
+    def _shutdown_disk_writes(self) -> None:
+        """Finish pending mmap writes before checkpoint reads or mapping cleanup."""
+
+        if self._disk_write_executor is not None:
+            self._disk_write_executor.shutdown(wait=True, cancel_futures=False)
+            self._disk_write_executor = None
+        for future in self._disk_write_futures.values():
+            future.result()
+        self._disk_write_futures.clear()
+
     def _bucket_cpu_payload(self, index: int, bucket: _MasterBucket) -> dict:
         """Snapshot one bucket on CPU without changing its residency."""
 
         if bucket.offload_file is not None:
             assert bucket.offload_index == index
             assert bucket.offload_group is not None
+            self._wait_disk_group_write(bucket.offload_group)
             payload = bucket.offload_group.tensors[index]
             storage = BF16MasterStorage(payload["low_bits"].clone(), payload["round_up_bits"].clone())
             return {
@@ -990,6 +1041,7 @@ class AdamWFP32Master:
     def _cleanup_disk_offload(self) -> None:
         """Remove only this optimizer's private temporary directory."""
 
+        self._shutdown_disk_writes()
         self._shutdown_disk_prefetch()
         for group in self._mmap_groups.values():
             group.close()
@@ -1170,6 +1222,32 @@ def _prefetch_mmap_payload(
         destination.copy_(tensor)
         prefetched[name] = destination
     return prefetched
+
+
+def _prefetch_mmap_payload_after_write(
+    payload: dict[str, torch.Tensor],
+    pin_memory: bool,
+    write_future: Future[None] | None,
+) -> dict[str, torch.Tensor]:
+    """Wait for the producer, then fault one mmap bucket into a host buffer."""
+
+    if write_future is not None:
+        write_future.result()
+    return _prefetch_mmap_payload(payload, pin_memory)
+
+
+@torch.no_grad()
+def _write_mmap_payloads(
+    group: _MmapGroup,
+    payloads: dict[int, dict[str, torch.Tensor]],
+) -> None:
+    """Write one staged optimizer group in the background and flush once."""
+
+    for index, payload in payloads.items():
+        target = group.tensors[index]
+        for name, tensor in payload.items():
+            target[name].copy_(tensor)
+    group.flush()
 
 
 def _discard_prefetch_result(future: Future[dict[str, torch.Tensor]]) -> None:
