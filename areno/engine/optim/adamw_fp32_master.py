@@ -107,6 +107,7 @@ class AdamWFP32Master:
         self._disk_offload_tmp: tempfile.TemporaryDirectory | None = None
         self._active_offload_mode = "none"
         self._disk_offload_root: str | None = None
+        self._active_offload_batch_size = 8
 
     @torch.no_grad()
     def step(self, closure=None):
@@ -115,17 +116,23 @@ class AdamWFP32Master:
         if closure is not None:
             with torch.enable_grad():
                 closure()
-        for index, bucket in enumerate(self.buckets):
-            # A bucket is updated only if at least one of its refs has a grad;
-            # this avoids materializing master state for unused parameters.
-            has_grad = bucket.grad_shard is not None or any(
-                _param_grad(ref.model_param) is not None for ref in bucket.refs
-            )
-            if has_grad:
-                self._ensure_bucket_state(bucket)
-                self._step_bucket(bucket)
-                if self._active_offload_mode == "disk":
-                    self._offload_bucket_to_disk(index, bucket)
+        for indices in self._bucket_groups():
+            group_changed = False
+            for index in indices:
+                bucket = self.buckets[index]
+                # A bucket is updated only if at least one of its refs has a grad;
+                # this avoids materializing master state for unused parameters.
+                has_grad = bucket.grad_shard is not None or any(
+                    _param_grad(ref.model_param) is not None for ref in bucket.refs
+                )
+                if has_grad:
+                    self._ensure_bucket_state(bucket)
+                    self._step_bucket(bucket)
+                    group_changed = True
+                    if self._active_offload_mode == "disk":
+                        self._stage_bucket_on_cpu(bucket)
+            if self._active_offload_mode == "disk" and group_changed:
+                self._offload_bucket_group_to_disk(indices)
         return None
 
     def zero_grad(self, set_to_none: bool = True) -> None:
@@ -162,47 +169,38 @@ class AdamWFP32Master:
         self._cleanup_disk_offload()
         self._active_offload_mode = "none"
         self._disk_offload_root = None
+        self._active_offload_batch_size = 8
 
     @torch.no_grad()
-    def offload_state(self, mode: str = "cpu", directory: str | None = None) -> None:
+    def offload_state(self, mode: str = "cpu", directory: str | None = None, batch_size: int = 8) -> None:
         """Move state to CPU or bucket-stream it into a private disk directory."""
 
         if mode not in {"cpu", "disk"}:
             raise ValueError("optimizer offload mode must be one of: cpu, disk")
         if mode == "disk" and not directory:
             raise ValueError("directory is required for disk optimizer offload")
+        if batch_size < 1:
+            raise ValueError("optimizer offload batch_size must be positive")
         self._active_offload_mode = mode
         self._disk_offload_root = directory if mode == "disk" else None
+        self._active_offload_batch_size = batch_size
 
-        for index, bucket in enumerate(self.buckets):
-            # A BF16 bucket must not retain its transient FP32 work buffer.
-            bucket.master = None
-            if bucket.offload_file is not None:
-                if mode == "disk":
-                    continue
-                self._load_bucket_offload(bucket, torch.device("cpu"))
-            if bucket.master_storage is not None:
-                bucket.master_storage = bucket.master_storage.to("cpu")
-            if bucket.exp_avg is not None:
-                bucket.exp_avg = bucket.exp_avg.to(device="cpu")
-            if bucket.exp_avg_sq is not None:
-                bucket.exp_avg_sq = bucket.exp_avg_sq.to(device="cpu")
-            if mode == "disk" and bucket.master_storage is not None:
-                bucket.offload_file = self._write_disk_payload(
-                    index,
-                    {
-                        "low_bits": bucket.master_storage.low_bits,
-                        "round_up_bits": bucket.master_storage.round_up_bits,
-                        "exp_avg": bucket.exp_avg,
-                        "exp_avg_sq": bucket.exp_avg_sq,
-                    },
-                    directory,
-                )
-                bucket.master_storage = None
-                bucket.exp_avg = None
-                bucket.exp_avg_sq = None
-            bucket.grad_shard = None
-            bucket.grad_param_ids = frozenset()
+        for indices in self._bucket_groups():
+            if mode == "disk" and all(
+                self.buckets[index].offload_file is not None for index in indices if self.buckets[index].step > 0
+            ):
+                continue
+            for index in indices:
+                bucket = self.buckets[index]
+                # A BF16 bucket must not retain its transient FP32 work buffer.
+                bucket.master = None
+                if bucket.offload_file is not None:
+                    self._load_bucket_offload(bucket, torch.device("cpu"))
+                self._stage_bucket_on_cpu(bucket)
+                bucket.grad_shard = None
+                bucket.grad_param_ids = frozenset()
+            if mode == "disk":
+                self._offload_bucket_group_to_disk(indices)
         self._collective_arenas.clear()
         if mode == "cpu":
             self._cleanup_disk_offload()
@@ -222,12 +220,14 @@ class AdamWFP32Master:
                 bucket.exp_avg_sq = bucket.exp_avg_sq.to(device=device)
         self._active_offload_mode = "none"
         self._disk_offload_root = None
+        self._active_offload_batch_size = 8
         self._cleanup_disk_offload()
 
     def state_dict(self) -> dict:
         """Return the optimizer state laid out per-bucket; each rank saves its shard."""
 
-        payloads = [self._bucket_cpu_payload(bucket) for bucket in self.buckets]
+        disk_cache: dict[str, dict[int, dict]] = {}
+        payloads = [self._bucket_cpu_payload(index, bucket, disk_cache) for index, bucket in enumerate(self.buckets)]
 
         return {
             "lr": self.lr,
@@ -644,7 +644,8 @@ class AdamWFP32Master:
         """Materialize or onload compact master metadata and FP32 moments."""
         device = bucket.refs[0].model_param.device
         if bucket.offload_file is not None:
-            self._load_bucket_offload(bucket, device)
+            load_device = torch.device("cpu") if self._active_offload_mode == "disk" else device
+            self._load_bucket_offload(bucket, load_device)
         # Lazy onload: if state was offloaded to CPU, move it back to GPU.
         if bucket.master_storage is not None and bucket.master_storage.low_bits.device != device:
             bucket.master_storage = bucket.master_storage.to(device)
@@ -672,15 +673,15 @@ class AdamWFP32Master:
             )
         return Path(self._disk_offload_tmp.name)
 
-    def _write_disk_payload(self, index: int, payload: dict, root: str) -> str:
-        """Atomically persist one CPU bucket payload and return its path."""
+    def _write_disk_payloads(self, indices: list[int], payloads: list[dict], root: str) -> str:
+        """Atomically persist a group of CPU bucket payloads and return its path."""
 
         directory = self._disk_offload_directory(root)
-        path = directory / f"bucket-{index:06d}.pt"
+        path = directory / f"buckets-{indices[0]:06d}-{indices[-1]:06d}.pt"
         temporary = directory / f".{path.name}.tmp"
         cpu_payload = {
-            key: value.detach().to(device="cpu") if isinstance(value, torch.Tensor) else value
-            for key, value in payload.items()
+            "indices": indices,
+            "states": [_tree_to_cpu(payload) for payload in payloads],
         }
         try:
             torch.save(cpu_payload, temporary)
@@ -689,46 +690,76 @@ class AdamWFP32Master:
             temporary.unlink(missing_ok=True)
         return str(path)
 
-    def _offload_bucket_to_disk(self, index: int, bucket: _MasterBucket) -> None:
-        """Persist one just-updated bucket so later buckets do not accumulate in memory."""
+    def _offload_bucket_group_to_disk(self, indices: list[int]) -> None:
+        """Persist a bounded group of staged buckets in one serialization call."""
 
-        if self._disk_offload_root is None or bucket.master_storage is None:
-            raise RuntimeError("disk optimizer offload is active without a usable directory or bucket state")
+        if self._disk_offload_root is None:
+            raise RuntimeError("disk optimizer offload is active without a usable directory")
+        present_indices = [index for index in indices if self.buckets[index].master_storage is not None]
+        if not present_indices:
+            return
+        payloads = []
+        for index in present_indices:
+            bucket = self.buckets[index]
+            assert bucket.master_storage is not None
+            payloads.append(
+                {
+                    "low_bits": bucket.master_storage.low_bits,
+                    "round_up_bits": bucket.master_storage.round_up_bits,
+                    "exp_avg": bucket.exp_avg,
+                    "exp_avg_sq": bucket.exp_avg_sq,
+                }
+            )
+        path = self._write_disk_payloads(present_indices, payloads, self._disk_offload_root)
+        for index in present_indices:
+            bucket = self.buckets[index]
+            bucket.master = None
+            bucket.offload_file = path
+            bucket.master_storage = None
+            bucket.exp_avg = None
+            bucket.exp_avg_sq = None
+
+    def _stage_bucket_on_cpu(self, bucket: _MasterBucket) -> None:
+        """Move one bucket to CPU so only a bounded group is resident before saving."""
+
         bucket.master = None
-        bucket.offload_file = self._write_disk_payload(
-            index,
-            {
-                "low_bits": bucket.master_storage.low_bits,
-                "round_up_bits": bucket.master_storage.round_up_bits,
-                "exp_avg": bucket.exp_avg,
-                "exp_avg_sq": bucket.exp_avg_sq,
-            },
-            self._disk_offload_root,
-        )
-        bucket.master_storage = None
-        bucket.exp_avg = None
-        bucket.exp_avg_sq = None
+        if bucket.master_storage is not None:
+            bucket.master_storage = bucket.master_storage.to("cpu")
+        if bucket.exp_avg is not None:
+            bucket.exp_avg = bucket.exp_avg.to(device="cpu")
+        if bucket.exp_avg_sq is not None:
+            bucket.exp_avg_sq = bucket.exp_avg_sq.to(device="cpu")
 
     def _load_bucket_offload(self, bucket: _MasterBucket, device: torch.device) -> None:
-        """Load one disk-resident bucket and invalidate its now-stale file."""
+        """Load one disk group and invalidate its now-stale shared file."""
 
         assert bucket.offload_file is not None
         path = Path(bucket.offload_file)
         payload = torch.load(path, map_location="cpu", weights_only=True)
-        bucket.master_storage = BF16MasterStorage(
-            low_bits=payload["low_bits"].to(device=device),
-            round_up_bits=payload["round_up_bits"].to(device=device),
-        )
-        bucket.exp_avg = _optional_tensor_to(payload.get("exp_avg"), device)
-        bucket.exp_avg_sq = _optional_tensor_to(payload.get("exp_avg_sq"), device)
+        for index, state in zip(payload["indices"], payload["states"], strict=True):
+            target = self.buckets[int(index)]
+            target.master_storage = BF16MasterStorage(
+                low_bits=state["low_bits"].to(device=device),
+                round_up_bits=state["round_up_bits"].to(device=device),
+            )
+            target.exp_avg = _optional_tensor_to(state.get("exp_avg"), device)
+            target.exp_avg_sq = _optional_tensor_to(state.get("exp_avg_sq"), device)
+            target.offload_file = None
         path.unlink(missing_ok=True)
-        bucket.offload_file = None
 
-    def _bucket_cpu_payload(self, bucket: _MasterBucket) -> dict:
+    def _bucket_cpu_payload(self, index: int, bucket: _MasterBucket, disk_cache: dict[str, dict[int, dict]]) -> dict:
         """Snapshot one bucket on CPU without changing its residency."""
 
         if bucket.offload_file is not None:
-            payload = torch.load(bucket.offload_file, map_location="cpu", weights_only=True)
+            cached = disk_cache.get(bucket.offload_file)
+            if cached is None:
+                group = torch.load(bucket.offload_file, map_location="cpu", weights_only=True)
+                cached = {
+                    int(bucket_index): state
+                    for bucket_index, state in zip(group["indices"], group["states"], strict=True)
+                }
+                disk_cache[bucket.offload_file] = cached
+            payload = cached[index]
             storage = BF16MasterStorage(payload["low_bits"], payload["round_up_bits"])
             return {
                 "master_storage": storage,
@@ -745,6 +776,12 @@ class AdamWFP32Master:
             "exp_avg": _optional_cpu_clone(bucket.exp_avg),
             "exp_avg_sq": _optional_cpu_clone(bucket.exp_avg_sq),
         }
+
+    def _bucket_groups(self) -> list[list[int]]:
+        """Return deterministic contiguous groups for batched disk I/O."""
+
+        size = self._active_offload_batch_size if self._active_offload_mode == "disk" else 1
+        return [list(range(start, min(start + size, len(self.buckets)))) for start in range(0, len(self.buckets), size)]
 
     @torch.no_grad()
     def _materialize_master_cpu(self, bucket: _MasterBucket, storage: BF16MasterStorage) -> torch.Tensor:
@@ -919,3 +956,15 @@ def _optional_cpu_clone(value: torch.Tensor | None) -> torch.Tensor | None:
     """Return an independent CPU snapshot of an optional tensor."""
 
     return None if value is None else value.detach().to(device="cpu").clone()
+
+
+def _tree_to_cpu(value):
+    """Copy tensors in a small optimizer-state container to CPU."""
+
+    if isinstance(value, torch.Tensor):
+        return value.detach().to(device="cpu")
+    if isinstance(value, dict):
+        return {key: _tree_to_cpu(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_tree_to_cpu(item) for item in value]
+    return value

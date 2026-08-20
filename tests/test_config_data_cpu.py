@@ -497,12 +497,22 @@ class ConfigAndDataTest(unittest.TestCase):
             dataset_path="unused",
             optimizer_state_offload="disk",
             optimizer_state_offload_dir="/mnt/nvme/areno-offload",
+            optimizer_state_offload_batch_size=16,
         )
         self.assertEqual(cfg.cuda_config().runtime["optimizer_state_offload"], "disk")
         self.assertEqual(
             cfg.cuda_config().runtime["optimizer_state_offload_dir"],
             "/mnt/nvme/areno-offload",
         )
+        self.assertEqual(cfg.cuda_config().runtime["optimizer_state_offload_batch_size"], 16)
+
+        with self.assertRaisesRegex(ValueError, "optimizer_state_offload_batch_size must be positive"):
+            TrainerConfig(
+                algo="sft",
+                ckpt="unused",
+                dataset_path="unused",
+                optimizer_state_offload_batch_size=0,
+            )
 
     def test_optimizer_state_offload_rejects_mlx_backend(self):
         """MLX must not silently accept a CUDA optimizer-state offload knob."""
@@ -852,6 +862,7 @@ def _train_args(**overrides):
         drop_rollout_state=False,
         optimizer_state_offload="none",
         optimizer_state_offload_dir=None,
+        optimizer_state_offload_batch_size=8,
         eager_decode=False,
         attn_backend="flash",
         disable_thinking=False,

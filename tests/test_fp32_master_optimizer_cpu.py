@@ -205,7 +205,8 @@ def test_training_manager_offloads_optimizer_state_when_requested(
             assert set_to_none
             calls["zero_grad"] += 1
 
-        def offload_state(self, *, mode: str, directory: str | None) -> None:
+        def offload_state(self, *, mode: str, directory: str | None, batch_size: int) -> None:
+            assert batch_size == 8
             calls["offload"].append((mode, directory))
 
     worker = SimpleNamespace(
@@ -242,10 +243,11 @@ def test_fp32_master_disk_offload_is_lazy_and_preserves_next_update(tmp_path) ->
     reference.step()
     expected_state = copy.deepcopy(reference.state_dict())
 
-    candidate.offload_state(mode="disk", directory=str(tmp_path))
+    candidate.offload_state(mode="disk", directory=str(tmp_path), batch_size=2)
 
     offload_files = [bucket.offload_file for bucket in candidate.buckets]
     assert all(path is not None and Path(path).is_file() for path in offload_files)
+    assert len(set(offload_files)) == (len(candidate.buckets) + 1) // 2
     assert all(bucket.master_storage is None for bucket in candidate.buckets)
     assert all(bucket.exp_avg is None and bucket.exp_avg_sq is None for bucket in candidate.buckets)
     disk_state = candidate.state_dict()
@@ -287,8 +289,9 @@ def test_adam8bit_disk_offload_preserves_quantized_update(tmp_path) -> None:
         candidate.step()
         reference.step()
         if index == 0:
-            candidate.offload_state(mode="disk", directory=str(tmp_path))
+            candidate.offload_state(mode="disk", directory=str(tmp_path), batch_size=2)
             assert all(state.offload_file is not None for state in candidate._states)
+            assert len({state.offload_file for state in candidate._states}) == (len(candidate._states) + 1) // 2
             assert all(state.exp_avg_q is None for state in candidate._states)
 
     torch.testing.assert_close(candidate_param, reference_param, rtol=0.0, atol=0.0)

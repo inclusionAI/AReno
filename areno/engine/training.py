@@ -65,6 +65,7 @@ class TrainingManager:
                 worker.optimizer.offload_state(
                     mode=offload_mode,
                     directory=getattr(worker.config.runtime, "optimizer_state_offload_dir", None),
+                    batch_size=getattr(worker.config.runtime, "optimizer_state_offload_batch_size", 8),
                 )
                 if worker.device.type == "cuda":
                     torch.cuda.empty_cache()

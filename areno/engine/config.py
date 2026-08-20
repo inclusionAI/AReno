@@ -60,6 +60,7 @@ class RuntimeConfig:
     keep_rollout_state: bool = True
     optimizer_state_offload: Literal["none", "cpu", "disk"] | bool = "none"
     optimizer_state_offload_dir: str | None = None
+    optimizer_state_offload_batch_size: int = 8
     eager_decode: bool = False
     decode_graph_buckets: list[int] = field(
         default_factory=lambda: [1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 56, 64, 96, 128, 192, 256]
@@ -74,6 +75,8 @@ class RuntimeConfig:
             raise ValueError("runtime.optimizer_state_offload must be one of: none, cpu, disk")
         if self.optimizer_state_offload == "disk" and not self.optimizer_state_offload_dir:
             raise ValueError("runtime.optimizer_state_offload_dir is required for disk offload")
+        if self.optimizer_state_offload_batch_size < 1:
+            raise ValueError("runtime.optimizer_state_offload_batch_size must be positive")
 
     def resolve_attn_backend(self, *, model: ModelConfig, devices: list[int]) -> None:
         """Switch flash-attn unsupported hardware or model shapes to native attention."""

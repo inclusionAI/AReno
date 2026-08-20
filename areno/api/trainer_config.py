@@ -67,6 +67,7 @@ class TrainerConfig:
     keep_rollout_state: bool = True
     optimizer_state_offload: str | bool = "none"
     optimizer_state_offload_dir: str | None = None
+    optimizer_state_offload_batch_size: int = 8
     eager_decode: bool = False
     attn_backend: str = "flash"
     metrics_log_dir: str | None = DEFAULT_METRICS_LOG_DIR
@@ -94,6 +95,8 @@ class TrainerConfig:
             raise ValueError("optimizer_state_offload must be one of: none, cpu, disk")
         if self.optimizer_state_offload == "disk" and not self.optimizer_state_offload_dir:
             raise ValueError("optimizer_state_offload_dir is required for disk offload")
+        if self.optimizer_state_offload_batch_size < 1:
+            raise ValueError("optimizer_state_offload_batch_size must be positive")
         if self.optimizer_state_offload != "none" and self.backend != "cuda":
             raise ValueError("optimizer_state_offload is only supported by the CUDA backend")
         self._validate_multimodal_optimizer_group(
@@ -201,6 +204,7 @@ class TrainerConfig:
                 "keep_rollout_state": self.keep_rollout_state,
                 "optimizer_state_offload": self.optimizer_state_offload,
                 "optimizer_state_offload_dir": self.optimizer_state_offload_dir,
+                "optimizer_state_offload_batch_size": self.optimizer_state_offload_batch_size,
                 "eager_decode": self.eager_decode,
                 "attn_backend": self.attn_backend,
             },
@@ -246,6 +250,7 @@ class RolloutTrainerConfig(TrainerConfig):
                 "keep_rollout_state": self.keep_rollout_state,
                 "optimizer_state_offload": self.optimizer_state_offload,
                 "optimizer_state_offload_dir": self.optimizer_state_offload_dir,
+                "optimizer_state_offload_batch_size": self.optimizer_state_offload_batch_size,
                 "eager_decode": self.eager_decode,
                 "attn_backend": self.attn_backend,
             },
