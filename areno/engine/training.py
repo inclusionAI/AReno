@@ -62,8 +62,8 @@ class TrainingManager:
             if offload_mode == "disk":
                 prefetch_state = getattr(worker.optimizer, "prefetch_state", None)
                 if callable(prefetch_state):
-                    # Fault only the first bucket in on a background thread;
-                    # subsequent buckets use one-ahead prefetch during step().
+                    # Prime a two-bucket window while forward/backward runs;
+                    # step() keeps that bounded lookahead moving.
                     prefetch_state()
         worker.optimizer.zero_grad(set_to_none=True)
         results = []

@@ -30,6 +30,8 @@ from areno.engine.optim.master_storage import (
 _DEFAULT_BUCKET_NUMEL = 16 * 1024 * 1024
 # Per-parameter chunk size used to keep large tensors from monopolizing a bucket.
 _DEFAULT_UPDATE_CHUNK_NUMEL = 4 * 1024 * 1024
+# Bound disk lookahead to current/next host buffers rather than a full mmap group.
+_DISK_PREFETCH_DEPTH = 2
 
 
 @dataclass(slots=True)
@@ -852,25 +854,32 @@ class AdamWFP32Master:
         return bucket.offload_group if bucket.offload_file is not None else None
 
     def _schedule_disk_prefetch(self, start_index: int) -> None:
-        """Read at most one upcoming mmap bucket on a background thread."""
+        """Keep a two-bucket mmap read window queued on one background thread."""
 
-        if self._active_offload_mode != "disk" or self._disk_prefetch_futures:
+        if self._active_offload_mode != "disk":
             return
-        for index in range(start_index, len(self.buckets)):
-            group = self._disk_mmap_group_for_index(index)
-            if group is None or index in self._disk_prefetch_in_use:
-                continue
-            if self._disk_prefetch_executor is None:
-                self._disk_prefetch_executor = ThreadPoolExecutor(
-                    max_workers=1,
-                    thread_name_prefix=f"areno-optim-prefetch-dp{self.dp_rank}",
+        next_index = start_index
+        while len(self._disk_prefetch_futures) < _DISK_PREFETCH_DEPTH:
+            scheduled = False
+            for index in range(next_index, len(self.buckets)):
+                group = self._disk_mmap_group_for_index(index)
+                if group is None or index in self._disk_prefetch_futures or index in self._disk_prefetch_in_use:
+                    continue
+                if self._disk_prefetch_executor is None:
+                    self._disk_prefetch_executor = ThreadPoolExecutor(
+                        max_workers=1,
+                        thread_name_prefix=f"areno-optim-prefetch-dp{self.dp_rank}",
+                    )
+                self._disk_prefetch_futures[index] = self._disk_prefetch_executor.submit(
+                    _prefetch_mmap_payload,
+                    group.tensors[index],
+                    torch.cuda.is_available(),
                 )
-            self._disk_prefetch_futures[index] = self._disk_prefetch_executor.submit(
-                _prefetch_mmap_payload,
-                group.tensors[index],
-                torch.cuda.is_available(),
-            )
-            return
+                next_index = index + 1
+                scheduled = True
+                break
+            if not scheduled:
+                return
 
     def _take_disk_prefetch(
         self,

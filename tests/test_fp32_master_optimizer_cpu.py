@@ -286,7 +286,7 @@ def test_fp32_master_disk_offload_is_lazy_and_preserves_next_update(tmp_path) ->
     assert [bucket.offload_file for bucket in candidate.buckets] == offload_files
 
     candidate.prefetch_state()
-    assert len(candidate._disk_prefetch_futures) == 1
+    assert len(candidate._disk_prefetch_futures) == min(2, len(candidate.buckets))
     second_gradient = torch.linspace(0.25, -0.9, 29).to(torch.bfloat16)
     candidate_param.grad = second_gradient.clone()
     reference_param.grad = second_gradient.clone()
@@ -333,7 +333,7 @@ def test_adam8bit_disk_offload_preserves_quantized_update(tmp_path) -> None:
             offload_inodes = {path: Path(path).stat().st_ino for path in set(offload_files)}
             assert all(state.exp_avg_q is None for state in candidate._states)
             candidate.prefetch_state()
-            assert len(candidate._disk_prefetch_futures) == 1
+            assert len(candidate._disk_prefetch_futures) == min(2, len(candidate.buckets))
 
     torch.testing.assert_close(candidate_param, reference_param, rtol=0.0, atol=0.0)
     candidate_state = candidate.state_dict()
@@ -348,6 +348,30 @@ def test_adam8bit_disk_offload_preserves_quantized_update(tmp_path) -> None:
     candidate.onload_state(torch.device("cpu"))
     assert all(state.offload_file is None for state in candidate._states)
     assert all(state.exp_avg_q is not None for state in candidate._states)
+    assert not list(tmp_path.rglob("*.mmap"))
+
+
+def test_disk_prefetch_window_is_bounded_and_pending_reads_clean_up(tmp_path) -> None:
+    parameters = [torch.nn.Parameter(torch.full((4,), float(index), dtype=torch.bfloat16)) for index in range(3)]
+    optimizer = AdamWFP32Master(
+        parameters,
+        lr=1.0e-3,
+        betas=(0.9, 0.99),
+        weight_decay=0.0,
+        bucket_numel=4,
+    )
+    assert len(optimizer.buckets) == 3
+    optimizer.configure_state_offload(mode="disk", directory=str(tmp_path), batch_size=2)
+    for parameter in parameters:
+        parameter.grad = torch.ones_like(parameter)
+    optimizer.step()
+
+    optimizer.prefetch_state()
+    assert len(optimizer._disk_prefetch_futures) == 2
+    optimizer.clear_state()
+
+    assert not optimizer._disk_prefetch_futures
+    assert not optimizer._disk_prefetch_in_use
     assert not list(tmp_path.rglob("*.mmap"))
 
 
