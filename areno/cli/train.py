@@ -1647,7 +1647,7 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     type=click.Choice(["none", "cpu", "disk"]),
     default="none",
     show_default=True,
-    help="Offload optimizer state between CUDA train calls. Disk mode lazily reloads bounded bucket groups.",
+    help="CUDA optimizer-state residency: device, CPU, or persistent raw mmap on local disk.",
 )
 @click.option(
     "--optimizer-state-offload-dir",
@@ -1659,7 +1659,7 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     type=click.IntRange(min=1),
     default=32,
     show_default=True,
-    help="Number of optimizer buckets grouped into each disk load/save operation.",
+    help="Number of optimizer buckets per persistent disk mmap and flush group.",
 )
 @click.option("--eager-decode", is_flag=True, help="Disable decode CUDA graph and run rollout decode eagerly.")
 @click.option(
