@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import multiprocessing as mp
 import socket
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -10,7 +11,7 @@ import pytest
 import torch
 import torch.distributed as dist
 
-from areno.engine.optim import AdamWFP32Master
+from areno.engine.optim import AdamW8bit, AdamWFP32Master
 from areno.engine.runtime.train_step import _grad_norms_from_shards
 from areno.engine.training import TrainingManager
 
@@ -190,22 +191,22 @@ def test_bf16_autograd_accumulation_does_not_create_fp32_gradient_copy() -> None
 
 @pytest.mark.parametrize(
     ("keep_rollout_state", "optimizer_state_offload", "expected_offloads"),
-    [(True, False, 0), (False, False, 1), (True, True, 1)],
+    [(True, "none", []), (False, "none", [("cpu", None)]), (True, "cpu", [("cpu", None)])],
 )
 def test_training_manager_offloads_optimizer_state_when_requested(
     keep_rollout_state: bool,
-    optimizer_state_offload: bool,
-    expected_offloads: int,
+    optimizer_state_offload: str,
+    expected_offloads: list[tuple[str, str | None]],
 ) -> None:
-    calls = {"zero_grad": 0, "offload": 0}
+    calls = {"zero_grad": 0, "offload": []}
 
     class _Optimizer:
         def zero_grad(self, *, set_to_none: bool) -> None:
             assert set_to_none
             calls["zero_grad"] += 1
 
-        def offload_state(self) -> None:
-            calls["offload"] += 1
+        def offload_state(self, *, mode: str, directory: str | None) -> None:
+            calls["offload"].append((mode, directory))
 
     worker = SimpleNamespace(
         optimizer=_Optimizer(),
@@ -214,6 +215,7 @@ def test_training_manager_offloads_optimizer_state_when_requested(
             runtime=SimpleNamespace(
                 keep_rollout_state=keep_rollout_state,
                 optimizer_state_offload=optimizer_state_offload,
+                optimizer_state_offload_dir=None,
             )
         ),
     )
@@ -223,6 +225,78 @@ def test_training_manager_offloads_optimizer_state_when_requested(
 
     assert manager.train(payload) == [{"ok": True}]
     assert calls == {"zero_grad": 1, "offload": expected_offloads}
+
+
+def test_fp32_master_disk_offload_is_lazy_and_preserves_next_update(tmp_path) -> None:
+    initial = torch.linspace(-1.0, 1.0, 29).to(torch.bfloat16)
+    candidate_param = torch.nn.Parameter(initial.clone())
+    reference_param = torch.nn.Parameter(initial.clone())
+    kwargs = {"lr": 7.0e-4, "betas": (0.9, 0.97), "weight_decay": 0.01, "bucket_numel": 8}
+    candidate = AdamWFP32Master([candidate_param], **kwargs)
+    reference = AdamWFP32Master([reference_param], **kwargs)
+
+    first_gradient = torch.linspace(-0.75, 0.5, 29).to(torch.bfloat16)
+    candidate_param.grad = first_gradient.clone()
+    reference_param.grad = first_gradient.clone()
+    candidate.step()
+    reference.step()
+    expected_state = copy.deepcopy(reference.state_dict())
+
+    candidate.offload_state(mode="disk", directory=str(tmp_path))
+
+    offload_files = [bucket.offload_file for bucket in candidate.buckets]
+    assert all(path is not None and Path(path).is_file() for path in offload_files)
+    assert all(bucket.master_storage is None for bucket in candidate.buckets)
+    assert all(bucket.exp_avg is None and bucket.exp_avg_sq is None for bucket in candidate.buckets)
+    disk_state = candidate.state_dict()
+    for actual, expected in zip(disk_state["master_params"], expected_state["master_params"], strict=True):
+        torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
+    for actual, expected in zip(disk_state["state"], expected_state["state"], strict=True):
+        torch.testing.assert_close(actual["exp_avg"], expected["exp_avg"], rtol=0.0, atol=0.0)
+        torch.testing.assert_close(actual["exp_avg_sq"], expected["exp_avg_sq"], rtol=0.0, atol=0.0)
+    assert [bucket.offload_file for bucket in candidate.buckets] == offload_files
+
+    second_gradient = torch.linspace(0.25, -0.9, 29).to(torch.bfloat16)
+    candidate_param.grad = second_gradient.clone()
+    reference_param.grad = second_gradient.clone()
+    candidate.step()
+    reference.step()
+
+    torch.testing.assert_close(candidate_param, reference_param, rtol=0.0, atol=0.0)
+    torch.testing.assert_close(_flatten_master_state(candidate), _flatten_master_state(reference), rtol=0.0, atol=0.0)
+    assert all(bucket.offload_file is not None for bucket in candidate.buckets)
+    assert all(bucket.master_storage is None for bucket in candidate.buckets)
+    assert all(bucket.exp_avg is None and bucket.exp_avg_sq is None for bucket in candidate.buckets)
+
+
+def test_adam8bit_disk_offload_preserves_quantized_update(tmp_path) -> None:
+    initial = torch.linspace(-0.5, 0.5, 31).to(torch.bfloat16)
+    candidate_param = torch.nn.Parameter(initial.clone())
+    reference_param = torch.nn.Parameter(initial.clone())
+    kwargs = {"lr": 4.0e-4, "betas": (0.9, 0.99), "weight_decay": 0.02, "bucket_numel": 9}
+    candidate = AdamW8bit([candidate_param], **kwargs)
+    reference = AdamW8bit([reference_param], **kwargs)
+    for index, gradient in enumerate(
+        (
+            torch.linspace(-0.4, 0.7, 31),
+            torch.linspace(0.8, -0.2, 31),
+        )
+    ):
+        candidate_param.grad = gradient.to(torch.bfloat16)
+        reference_param.grad = gradient.to(torch.bfloat16)
+        candidate.step()
+        reference.step()
+        if index == 0:
+            candidate.offload_state(mode="disk", directory=str(tmp_path))
+            assert all(state.offload_file is not None for state in candidate._states)
+            assert all(state.exp_avg_q is None for state in candidate._states)
+
+    torch.testing.assert_close(candidate_param, reference_param, rtol=0.0, atol=0.0)
+    candidate_state = candidate.state_dict()
+    reference_state = reference.state_dict()
+    for actual, expected in zip(candidate_state["state"], reference_state["state"], strict=True):
+        for key in ("exp_avg_q", "exp_avg_scale", "exp_avg_sq_q", "exp_avg_sq_scale"):
+            torch.testing.assert_close(actual[key], expected[key], rtol=0.0, atol=0.0)
 
 
 def test_two_microbatches_match_one_fp32_accumulated_optimizer_update() -> None:

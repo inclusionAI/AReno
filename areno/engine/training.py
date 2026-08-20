@@ -55,10 +55,17 @@ class TrainingManager:
                 )
             return results
         finally:
-            if getattr(worker.config.runtime, "optimizer_state_offload", False) or not (
-                worker.config.runtime.keep_rollout_state
-            ):
-                worker.optimizer.offload_state()
+            offload_mode = getattr(worker.config.runtime, "optimizer_state_offload", "none")
+            if isinstance(offload_mode, bool):
+                offload_mode = "cpu" if offload_mode else "none"
+            if offload_mode == "none" and not worker.config.runtime.keep_rollout_state:
+                # Preserve --drop-rollout-state's historical CPU optimizer offload.
+                offload_mode = "cpu"
+            if offload_mode != "none":
+                worker.optimizer.offload_state(
+                    mode=offload_mode,
+                    directory=getattr(worker.config.runtime, "optimizer_state_offload_dir", None),
+                )
                 if worker.device.type == "cuda":
                     torch.cuda.empty_cache()
 

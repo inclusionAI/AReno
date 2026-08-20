@@ -26,6 +26,7 @@ class _Adam8bitBucketState:
     exp_avg_scale: torch.Tensor | None = None
     exp_avg_sq_q: torch.Tensor | None = None
     exp_avg_sq_scale: torch.Tensor | None = None
+    offload_file: str | None = None
 
 
 class AdamW8bit(AdamWFP32Master):
@@ -67,13 +68,15 @@ class AdamW8bit(AdamWFP32Master):
         if closure is not None:
             with torch.enable_grad():
                 closure()
-        for bucket, state in zip(self.buckets, self._states, strict=True):
+        for index, (bucket, state) in enumerate(zip(self.buckets, self._states, strict=True)):
             has_grad = bucket.grad_shard is not None or any(
                 _param_grad(ref.model_param) is not None for ref in bucket.refs
             )
             if has_grad:
                 self._ensure_bucket_state(bucket, state)
                 self._step_bucket_8bit(bucket, state)
+                if self._active_offload_mode == "disk":
+                    self._offload_8bit_state_to_disk(index, state)
         return None
 
     def clear_state(self) -> None:
@@ -85,16 +88,31 @@ class AdamW8bit(AdamWFP32Master):
             state.exp_avg_scale = None
             state.exp_avg_sq_q = None
             state.exp_avg_sq_scale = None
+            state.offload_file = None
         for bucket in self.buckets:
             bucket.grad_shard = None
             bucket.grad_param_ids = frozenset()
         self._collective_arenas.clear()
+        self._cleanup_disk_offload()
+        self._active_offload_mode = "none"
+        self._disk_offload_root = None
 
     @torch.no_grad()
-    def offload_state(self) -> None:
-        """Move quantized optimizer state to CPU between train phases."""
+    def offload_state(self, mode: str = "cpu", directory: str | None = None) -> None:
+        """Move quantized state to CPU or bucket-stream it to disk."""
 
-        for state in self._states:
+        if mode not in {"cpu", "disk"}:
+            raise ValueError("optimizer offload mode must be one of: cpu, disk")
+        if mode == "disk" and not directory:
+            raise ValueError("directory is required for disk optimizer offload")
+        self._active_offload_mode = mode
+        self._disk_offload_root = directory if mode == "disk" else None
+
+        for index, state in enumerate(self._states):
+            if state.offload_file is not None:
+                if mode == "disk":
+                    continue
+                self._load_state_offload(state, torch.device("cpu"))
             if state.exp_avg_q is not None:
                 state.exp_avg_q = state.exp_avg_q.to(device="cpu")
             if state.exp_avg_scale is not None:
@@ -103,16 +121,35 @@ class AdamW8bit(AdamWFP32Master):
                 state.exp_avg_sq_q = state.exp_avg_sq_q.to(device="cpu")
             if state.exp_avg_sq_scale is not None:
                 state.exp_avg_sq_scale = state.exp_avg_sq_scale.to(device="cpu")
+            if mode == "disk" and state.exp_avg_q is not None:
+                state.offload_file = self._write_disk_payload(
+                    index,
+                    {
+                        "exp_avg_q": state.exp_avg_q,
+                        "exp_avg_scale": state.exp_avg_scale,
+                        "exp_avg_sq_q": state.exp_avg_sq_q,
+                        "exp_avg_sq_scale": state.exp_avg_sq_scale,
+                    },
+                    directory,
+                )
+                state.exp_avg_q = None
+                state.exp_avg_scale = None
+                state.exp_avg_sq_q = None
+                state.exp_avg_sq_scale = None
         for bucket in self.buckets:
             bucket.grad_shard = None
             bucket.grad_param_ids = frozenset()
         self._collective_arenas.clear()
+        if mode == "cpu":
+            self._cleanup_disk_offload()
 
     @torch.no_grad()
     def onload_state(self, device: torch.device) -> None:
         """Move quantized optimizer state back to the training device."""
 
         for state in self._states:
+            if state.offload_file is not None:
+                self._load_state_offload(state, device)
             if state.exp_avg_q is not None and state.exp_avg_q.device != device:
                 state.exp_avg_q = state.exp_avg_q.to(device=device)
             if state.exp_avg_scale is not None and state.exp_avg_scale.device != device:
@@ -121,9 +158,14 @@ class AdamW8bit(AdamWFP32Master):
                 state.exp_avg_sq_q = state.exp_avg_sq_q.to(device=device)
             if state.exp_avg_sq_scale is not None and state.exp_avg_sq_scale.device != device:
                 state.exp_avg_sq_scale = state.exp_avg_sq_scale.to(device=device)
+        self._active_offload_mode = "none"
+        self._disk_offload_root = None
+        self._cleanup_disk_offload()
 
     def state_dict(self) -> dict:
         """Return per-rank quantized optimizer state."""
+
+        payloads = [self._state_cpu_payload(state) for state in self._states]
 
         return {
             "lr": self.lr,
@@ -136,14 +178,12 @@ class AdamW8bit(AdamWFP32Master):
             "state": [
                 {
                     "step": state.step,
-                    "exp_avg_q": state.exp_avg_q.detach().clone() if state.exp_avg_q is not None else None,
-                    "exp_avg_scale": state.exp_avg_scale.detach().clone() if state.exp_avg_scale is not None else None,
-                    "exp_avg_sq_q": state.exp_avg_sq_q.detach().clone() if state.exp_avg_sq_q is not None else None,
-                    "exp_avg_sq_scale": state.exp_avg_sq_scale.detach().clone()
-                    if state.exp_avg_sq_scale is not None
-                    else None,
+                    "exp_avg_q": payload["exp_avg_q"],
+                    "exp_avg_scale": payload["exp_avg_scale"],
+                    "exp_avg_sq_q": payload["exp_avg_sq_q"],
+                    "exp_avg_sq_scale": payload["exp_avg_sq_scale"],
                 }
-                for state in self._states
+                for state, payload in zip(self._states, payloads, strict=True)
             ],
         }
 
@@ -151,6 +191,11 @@ class AdamW8bit(AdamWFP32Master):
     def load_state_dict(self, state_dict: dict) -> None:
         """Restore quantized optimizer state from this rank's checkpoint."""
 
+        self._cleanup_disk_offload()
+        self._active_offload_mode = "none"
+        self._disk_offload_root = None
+        for state in self._states:
+            state.offload_file = None
         saved_states = state_dict.get("state", [])
         for saved, bucket, state in zip(saved_states[: len(self.buckets)], self.buckets, self._states, strict=False):
             if saved is None:
@@ -185,6 +230,8 @@ class AdamW8bit(AdamWFP32Master):
         """Materialize or onload quantized moments for one bucket."""
 
         device = bucket.refs[0].model_param.device
+        if state.offload_file is not None:
+            self._load_state_offload(state, device)
         if state.exp_avg_q is not None and state.exp_avg_q.device != device:
             state.exp_avg_q = state.exp_avg_q.to(device=device)
         if state.exp_avg_scale is not None and state.exp_avg_scale.device != device:
@@ -199,6 +246,53 @@ class AdamW8bit(AdamWFP32Master):
         if state.exp_avg_sq_q is None:
             state.exp_avg_sq_q = torch.zeros(bucket.shard_numel, device=device, dtype=torch.uint8)
             state.exp_avg_sq_scale = torch.ones((), device=device, dtype=torch.float32)
+
+    def _load_state_offload(self, state: _Adam8bitBucketState, device: torch.device) -> None:
+        """Load one quantized bucket and invalidate the stale disk copy."""
+
+        assert state.offload_file is not None
+        from pathlib import Path
+
+        path = Path(state.offload_file)
+        payload = torch.load(path, map_location="cpu", weights_only=True)
+        state.exp_avg_q = payload["exp_avg_q"].to(device=device)
+        state.exp_avg_scale = payload["exp_avg_scale"].to(device=device)
+        state.exp_avg_sq_q = payload["exp_avg_sq_q"].to(device=device)
+        state.exp_avg_sq_scale = payload["exp_avg_sq_scale"].to(device=device)
+        path.unlink(missing_ok=True)
+        state.offload_file = None
+
+    def _offload_8bit_state_to_disk(self, index: int, state: _Adam8bitBucketState) -> None:
+        """Persist one just-updated quantized bucket and release its tensors."""
+
+        if self._disk_offload_root is None or state.exp_avg_q is None:
+            raise RuntimeError("disk optimizer offload is active without a usable directory or bucket state")
+        state.offload_file = self._write_disk_payload(
+            index,
+            {
+                "exp_avg_q": state.exp_avg_q,
+                "exp_avg_scale": state.exp_avg_scale,
+                "exp_avg_sq_q": state.exp_avg_sq_q,
+                "exp_avg_sq_scale": state.exp_avg_sq_scale,
+            },
+            self._disk_offload_root,
+        )
+        state.exp_avg_q = None
+        state.exp_avg_scale = None
+        state.exp_avg_sq_q = None
+        state.exp_avg_sq_scale = None
+
+    def _state_cpu_payload(self, state: _Adam8bitBucketState) -> dict:
+        """Snapshot one quantized bucket on CPU without changing residency."""
+
+        if state.offload_file is not None:
+            return torch.load(state.offload_file, map_location="cpu", weights_only=True)
+        return {
+            "exp_avg_q": _cpu_clone(state.exp_avg_q),
+            "exp_avg_scale": _cpu_clone(state.exp_avg_scale),
+            "exp_avg_sq_q": _cpu_clone(state.exp_avg_sq_q),
+            "exp_avg_sq_scale": _cpu_clone(state.exp_avg_sq_scale),
+        }
 
     @torch.no_grad()
     def _step_bucket_8bit(self, bucket: _MasterBucket, state: _Adam8bitBucketState) -> None:
@@ -313,3 +407,9 @@ def _dequantize_positive(quantized: torch.Tensor, scale: torch.Tensor) -> torch.
     """Dequantize non-negative uint8 moments back to FP32."""
 
     return quantized.to(dtype=torch.float32).mul_(scale)
+
+
+def _cpu_clone(value: torch.Tensor | None) -> torch.Tensor | None:
+    """Return an independent CPU copy of an optional quantized-state tensor."""
+
+    return None if value is None else value.detach().to(device="cpu").clone()

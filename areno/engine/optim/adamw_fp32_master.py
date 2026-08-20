@@ -8,8 +8,11 @@ back into the BF16 model parameters so forward/backward sees fresh weights.
 
 from __future__ import annotations
 
+import os
+import tempfile
 from collections.abc import Iterable
 from dataclasses import dataclass
+from pathlib import Path
 
 import torch
 import torch.distributed as dist
@@ -61,6 +64,7 @@ class _MasterBucket:
     exp_avg_sq: torch.Tensor | None = None
     grad_shard: torch.Tensor | None = None
     grad_param_ids: frozenset[int] = frozenset()
+    offload_file: str | None = None
 
 
 class AdamWFP32Master:
@@ -100,6 +104,9 @@ class AdamWFP32Master:
         # One input/output arena per dtype is reused by every DP collective;
         # only the compact reduced gradient shard remains attached to a bucket.
         self._collective_arenas: dict[tuple[torch.device, torch.dtype, str], torch.Tensor] = {}
+        self._disk_offload_tmp: tempfile.TemporaryDirectory | None = None
+        self._active_offload_mode = "none"
+        self._disk_offload_root: str | None = None
 
     @torch.no_grad()
     def step(self, closure=None):
@@ -108,7 +115,7 @@ class AdamWFP32Master:
         if closure is not None:
             with torch.enable_grad():
                 closure()
-        for bucket in self.buckets:
+        for index, bucket in enumerate(self.buckets):
             # A bucket is updated only if at least one of its refs has a grad;
             # this avoids materializing master state for unused parameters.
             has_grad = bucket.grad_shard is not None or any(
@@ -117,6 +124,8 @@ class AdamWFP32Master:
             if has_grad:
                 self._ensure_bucket_state(bucket)
                 self._step_bucket(bucket)
+                if self._active_offload_mode == "disk":
+                    self._offload_bucket_to_disk(index, bucket)
         return None
 
     def zero_grad(self, set_to_none: bool = True) -> None:
@@ -148,39 +157,77 @@ class AdamWFP32Master:
             bucket.grad_shard = None
             bucket.grad_param_ids = frozenset()
             bucket.step = 0
+            bucket.offload_file = None
         self._collective_arenas.clear()
+        self._cleanup_disk_offload()
+        self._active_offload_mode = "none"
+        self._disk_offload_root = None
 
     @torch.no_grad()
-    def offload_state(self) -> None:
-        """Move per-bucket FP32 state to CPU to free GPU memory between steps."""
+    def offload_state(self, mode: str = "cpu", directory: str | None = None) -> None:
+        """Move state to CPU or bucket-stream it into a private disk directory."""
 
-        for bucket in self.buckets:
+        if mode not in {"cpu", "disk"}:
+            raise ValueError("optimizer offload mode must be one of: cpu, disk")
+        if mode == "disk" and not directory:
+            raise ValueError("directory is required for disk optimizer offload")
+        self._active_offload_mode = mode
+        self._disk_offload_root = directory if mode == "disk" else None
+
+        for index, bucket in enumerate(self.buckets):
             # A BF16 bucket must not retain its transient FP32 work buffer.
             bucket.master = None
+            if bucket.offload_file is not None:
+                if mode == "disk":
+                    continue
+                self._load_bucket_offload(bucket, torch.device("cpu"))
             if bucket.master_storage is not None:
                 bucket.master_storage = bucket.master_storage.to("cpu")
             if bucket.exp_avg is not None:
                 bucket.exp_avg = bucket.exp_avg.to(device="cpu")
             if bucket.exp_avg_sq is not None:
                 bucket.exp_avg_sq = bucket.exp_avg_sq.to(device="cpu")
+            if mode == "disk" and bucket.master_storage is not None:
+                bucket.offload_file = self._write_disk_payload(
+                    index,
+                    {
+                        "low_bits": bucket.master_storage.low_bits,
+                        "round_up_bits": bucket.master_storage.round_up_bits,
+                        "exp_avg": bucket.exp_avg,
+                        "exp_avg_sq": bucket.exp_avg_sq,
+                    },
+                    directory,
+                )
+                bucket.master_storage = None
+                bucket.exp_avg = None
+                bucket.exp_avg_sq = None
             bucket.grad_shard = None
             bucket.grad_param_ids = frozenset()
         self._collective_arenas.clear()
+        if mode == "cpu":
+            self._cleanup_disk_offload()
 
     @torch.no_grad()
     def onload_state(self, device: torch.device) -> None:
         """Move offloaded state back onto the given device."""
 
         for bucket in self.buckets:
+            if bucket.offload_file is not None:
+                self._load_bucket_offload(bucket, device)
             if bucket.master_storage is not None and bucket.master_storage.low_bits.device != device:
                 bucket.master_storage = bucket.master_storage.to(device)
             if bucket.exp_avg is not None and bucket.exp_avg.device != device:
                 bucket.exp_avg = bucket.exp_avg.to(device=device)
             if bucket.exp_avg_sq is not None and bucket.exp_avg_sq.device != device:
                 bucket.exp_avg_sq = bucket.exp_avg_sq.to(device=device)
+        self._active_offload_mode = "none"
+        self._disk_offload_root = None
+        self._cleanup_disk_offload()
 
     def state_dict(self) -> dict:
         """Return the optimizer state laid out per-bucket; each rank saves its shard."""
+
+        payloads = [self._bucket_cpu_payload(bucket) for bucket in self.buckets]
 
         return {
             "lr": self.lr,
@@ -192,14 +239,17 @@ class AdamWFP32Master:
             # One flat tensor per bucket holding this rank's master shard.
             # Keep the checkpoint contract canonical: callers see one FP32
             # master shard per bucket even though runtime storage is compact.
-            "master_params": [self._materialize_master(bucket).detach().clone() for bucket in self.buckets],
+            "master_params": [
+                self._materialize_master_cpu(bucket, payload["master_storage"])
+                for bucket, payload in zip(self.buckets, payloads, strict=True)
+            ],
             "state": [
                 {
-                    "exp_avg": bucket.exp_avg.detach().clone() if bucket.exp_avg is not None else None,
-                    "exp_avg_sq": bucket.exp_avg_sq.detach().clone() if bucket.exp_avg_sq is not None else None,
+                    "exp_avg": payload["exp_avg"],
+                    "exp_avg_sq": payload["exp_avg_sq"],
                     "step": bucket.step,
                 }
-                for bucket in self.buckets
+                for bucket, payload in zip(self.buckets, payloads, strict=True)
             ],
         }
 
@@ -275,6 +325,11 @@ class AdamWFP32Master:
     def load_state_dict(self, state_dict: dict) -> None:
         """Restore optimizer state. Supports flat tensors and legacy per-ref lists."""
 
+        self._cleanup_disk_offload()
+        self._active_offload_mode = "none"
+        self._disk_offload_root = None
+        for bucket in self.buckets:
+            bucket.offload_file = None
         self._load_master_params(state_dict.get("master_params", []))
         saved_states = state_dict.get("state", [])
         for saved, bucket in zip(saved_states[: len(self.buckets)], self.buckets, strict=False):
@@ -588,6 +643,8 @@ class AdamWFP32Master:
     def _ensure_bucket_state(self, bucket: _MasterBucket) -> None:
         """Materialize or onload compact master metadata and FP32 moments."""
         device = bucket.refs[0].model_param.device
+        if bucket.offload_file is not None:
+            self._load_bucket_offload(bucket, device)
         # Lazy onload: if state was offloaded to CPU, move it back to GPU.
         if bucket.master_storage is not None and bucket.master_storage.low_bits.device != device:
             bucket.master_storage = bucket.master_storage.to(device)
@@ -602,6 +659,122 @@ class AdamWFP32Master:
             bucket.exp_avg = torch.zeros(bucket.shard_numel, device=device, dtype=torch.float32)
         if bucket.exp_avg_sq is None:
             bucket.exp_avg_sq = torch.zeros(bucket.shard_numel, device=device, dtype=torch.float32)
+
+    def _disk_offload_directory(self, root: str) -> Path:
+        """Create one process-private directory below the explicitly selected root."""
+
+        if self._disk_offload_tmp is None:
+            base = Path(root).expanduser()
+            base.mkdir(parents=True, exist_ok=True)
+            self._disk_offload_tmp = tempfile.TemporaryDirectory(
+                prefix=f"areno-optimizer-dp{self.dp_rank}-p{os.getpid()}-",
+                dir=base,
+            )
+        return Path(self._disk_offload_tmp.name)
+
+    def _write_disk_payload(self, index: int, payload: dict, root: str) -> str:
+        """Atomically persist one CPU bucket payload and return its path."""
+
+        directory = self._disk_offload_directory(root)
+        path = directory / f"bucket-{index:06d}.pt"
+        temporary = directory / f".{path.name}.tmp"
+        cpu_payload = {
+            key: value.detach().to(device="cpu") if isinstance(value, torch.Tensor) else value
+            for key, value in payload.items()
+        }
+        try:
+            torch.save(cpu_payload, temporary)
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return str(path)
+
+    def _offload_bucket_to_disk(self, index: int, bucket: _MasterBucket) -> None:
+        """Persist one just-updated bucket so later buckets do not accumulate in memory."""
+
+        if self._disk_offload_root is None or bucket.master_storage is None:
+            raise RuntimeError("disk optimizer offload is active without a usable directory or bucket state")
+        bucket.master = None
+        bucket.offload_file = self._write_disk_payload(
+            index,
+            {
+                "low_bits": bucket.master_storage.low_bits,
+                "round_up_bits": bucket.master_storage.round_up_bits,
+                "exp_avg": bucket.exp_avg,
+                "exp_avg_sq": bucket.exp_avg_sq,
+            },
+            self._disk_offload_root,
+        )
+        bucket.master_storage = None
+        bucket.exp_avg = None
+        bucket.exp_avg_sq = None
+
+    def _load_bucket_offload(self, bucket: _MasterBucket, device: torch.device) -> None:
+        """Load one disk-resident bucket and invalidate its now-stale file."""
+
+        assert bucket.offload_file is not None
+        path = Path(bucket.offload_file)
+        payload = torch.load(path, map_location="cpu", weights_only=True)
+        bucket.master_storage = BF16MasterStorage(
+            low_bits=payload["low_bits"].to(device=device),
+            round_up_bits=payload["round_up_bits"].to(device=device),
+        )
+        bucket.exp_avg = _optional_tensor_to(payload.get("exp_avg"), device)
+        bucket.exp_avg_sq = _optional_tensor_to(payload.get("exp_avg_sq"), device)
+        path.unlink(missing_ok=True)
+        bucket.offload_file = None
+
+    def _bucket_cpu_payload(self, bucket: _MasterBucket) -> dict:
+        """Snapshot one bucket on CPU without changing its residency."""
+
+        if bucket.offload_file is not None:
+            payload = torch.load(bucket.offload_file, map_location="cpu", weights_only=True)
+            storage = BF16MasterStorage(payload["low_bits"], payload["round_up_bits"])
+            return {
+                "master_storage": storage,
+                "exp_avg": _optional_cpu_clone(payload.get("exp_avg")),
+                "exp_avg_sq": _optional_cpu_clone(payload.get("exp_avg_sq")),
+            }
+        storage = bucket.master_storage
+        if storage is None:
+            storage = BF16MasterStorage.zeros(bucket.shard_numel, device="cpu")
+        elif storage.low_bits.device.type != "cpu":
+            storage = storage.to("cpu")
+        return {
+            "master_storage": storage,
+            "exp_avg": _optional_cpu_clone(bucket.exp_avg),
+            "exp_avg_sq": _optional_cpu_clone(bucket.exp_avg_sq),
+        }
+
+    @torch.no_grad()
+    def _materialize_master_cpu(self, bucket: _MasterBucket, storage: BF16MasterStorage) -> torch.Tensor:
+        """Reconstruct one logical master shard on CPU for serialization."""
+
+        master = torch.empty(bucket.shard_numel, device="cpu", dtype=torch.float32)
+        for ref in bucket.refs:
+            if ref.shard_numel == 0:
+                continue
+            model_shard = (
+                ref.model_param.detach()
+                .reshape(-1)
+                .narrow(0, ref.param_start + ref.shard_start, ref.shard_numel)
+                .to(device="cpu")
+            )
+            destination = master.narrow(0, ref.shard_bucket_start, ref.shard_numel)
+            if model_shard.dtype == torch.bfloat16:
+                destination.copy_(decode_fp32_master_slice(model_shard, storage, ref.shard_bucket_start))
+            elif model_shard.dtype == torch.float32:
+                destination.copy_(model_shard)
+            else:
+                raise TypeError(f"AdamWFP32Master supports bfloat16 or float32 parameters, got {model_shard.dtype}")
+        return master
+
+    def _cleanup_disk_offload(self) -> None:
+        """Remove only this optimizer's private temporary directory."""
+
+        if self._disk_offload_tmp is not None:
+            self._disk_offload_tmp.cleanup()
+            self._disk_offload_tmp = None
 
     @torch.no_grad()
     def _copy_bucket_to_model(self, bucket: _MasterBucket) -> None:
@@ -734,3 +907,15 @@ def _param_grad(param: torch.nn.Parameter) -> torch.Tensor | None:
     if isinstance(main_grad, torch.Tensor):
         return main_grad
     return param.grad
+
+
+def _optional_tensor_to(value: torch.Tensor | None, device: torch.device) -> torch.Tensor | None:
+    """Move an optional tensor to a device without changing its dtype."""
+
+    return None if value is None else value.to(device=device)
+
+
+def _optional_cpu_clone(value: torch.Tensor | None) -> torch.Tensor | None:
+    """Return an independent CPU snapshot of an optional tensor."""
+
+    return None if value is None else value.detach().to(device="cpu").clone()

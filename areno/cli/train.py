@@ -139,6 +139,7 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "adam_beta2",
             "adam_8bit",
             "optimizer_state_offload",
+            "optimizer_state_offload_dir",
             "unfreeze_multimodal_tower",
             "unfreeze_multimodal_projector",
             "multimodal_tower_lr",
@@ -227,7 +228,8 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
     args.rollout_tp_size = getattr(args, "rollout_tp_size", None)
     args.rollout_devices = getattr(args, "rollout_devices", None)
     args.policy_sync_bucket_mb = getattr(args, "policy_sync_bucket_mb", 64)
-    args.optimizer_state_offload = getattr(args, "optimizer_state_offload", False)
+    args.optimizer_state_offload = getattr(args, "optimizer_state_offload", "none")
+    args.optimizer_state_offload_dir = getattr(args, "optimizer_state_offload_dir", None)
     args.unfreeze_multimodal_tower = getattr(args, "unfreeze_multimodal_tower", False)
     args.unfreeze_multimodal_projector = getattr(args, "unfreeze_multimodal_projector", False)
     args.multimodal_tower_lr = getattr(args, "multimodal_tower_lr", None)
@@ -501,7 +503,8 @@ def _format_training_config_summary(
                         f"weight_decay={config.weight_decay}, adam_8bit={_format_bool(config.adam_8bit)}"
                     ),
                 ),
-                ("optimizer_state_offload", _format_bool(config.optimizer_state_offload)),
+                ("optimizer_state_offload", str(config.optimizer_state_offload)),
+                ("optimizer_state_offload_dir", _format_optional(config.optimizer_state_offload_dir)),
                 ("grad_clip_norm", str(config.grad_clip_norm)),
             ],
         ),
@@ -837,6 +840,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             activation_checkpointing=args.activation_checkpointing,
             keep_rollout_state=not args.drop_rollout_state,
             optimizer_state_offload=args.optimizer_state_offload,
+            optimizer_state_offload_dir=args.optimizer_state_offload_dir,
             eager_decode=args.eager_decode,
             attn_backend=args.attn_backend,
             metrics_log_dir=args.metrics_log_dir,
@@ -891,6 +895,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             activation_checkpointing=args.activation_checkpointing,
             keep_rollout_state=not args.drop_rollout_state,
             optimizer_state_offload=args.optimizer_state_offload,
+            optimizer_state_offload_dir=args.optimizer_state_offload_dir,
             eager_decode=args.eager_decode,
             attn_backend=args.attn_backend,
             metrics_log_dir=args.metrics_log_dir,
@@ -953,6 +958,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             activation_checkpointing=args.activation_checkpointing,
             keep_rollout_state=not args.drop_rollout_state,
             optimizer_state_offload=args.optimizer_state_offload,
+            optimizer_state_offload_dir=args.optimizer_state_offload_dir,
             eager_decode=args.eager_decode,
             attn_backend=args.attn_backend,
             gspo_clip_eps=args.gspo_clip_eps,
@@ -1016,6 +1022,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
         activation_checkpointing=args.activation_checkpointing,
         keep_rollout_state=not args.drop_rollout_state,
         optimizer_state_offload=args.optimizer_state_offload,
+        optimizer_state_offload_dir=args.optimizer_state_offload_dir,
         eager_decode=args.eager_decode,
         attn_backend=args.attn_backend,
         gspo_clip_eps=args.gspo_clip_eps,
@@ -1136,6 +1143,7 @@ def _training_config_settings(config: TrainerConfig) -> dict:
                 "activation_checkpointing",
                 "keep_rollout_state",
                 "optimizer_state_offload",
+                "optimizer_state_offload_dir",
                 "chat_template_enable_thinking",
             ],
         ),
@@ -1628,8 +1636,15 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
 )
 @click.option(
     "--optimizer-state-offload",
-    is_flag=True,
-    help="Offload optimizer state to CPU between CUDA train calls to reduce steady-state HBM usage.",
+    type=click.Choice(["none", "cpu", "disk"]),
+    default="none",
+    show_default=True,
+    help="Offload optimizer state between CUDA train calls. Disk mode lazily reloads one bucket at a time.",
+)
+@click.option(
+    "--optimizer-state-offload-dir",
+    type=click.Path(file_okay=False, path_type=str),
+    help="Local NVMe directory used by --optimizer-state-offload disk (required for disk mode).",
 )
 @click.option("--eager-decode", is_flag=True, help="Disable decode CUDA graph and run rollout decode eagerly.")
 @click.option(

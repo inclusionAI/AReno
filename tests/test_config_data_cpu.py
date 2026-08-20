@@ -473,13 +473,36 @@ class ConfigAndDataTest(unittest.TestCase):
 
     def test_train_cli_optimizer_state_offload_reaches_cuda_runtime(self):
         """SFT can offload optimizer state without changing rollout-state retention."""
-        args = _train_args(algo="sft", optimizer_state_offload=True)
+        args = _train_args(algo="sft", optimizer_state_offload="cpu")
 
         cfg = train_cli._trainer_config_from_args(args)
 
         self.assertTrue(cfg.keep_rollout_state)
-        self.assertTrue(cfg.optimizer_state_offload)
-        self.assertTrue(cfg.cuda_config().runtime["optimizer_state_offload"])
+        self.assertEqual(cfg.optimizer_state_offload, "cpu")
+        self.assertEqual(cfg.cuda_config().runtime["optimizer_state_offload"], "cpu")
+
+    def test_disk_optimizer_state_offload_requires_and_propagates_directory(self):
+        """Disk mode must never silently spill into the process cwd or system tmp."""
+        with self.assertRaisesRegex(ValueError, "optimizer_state_offload_dir is required"):
+            TrainerConfig(
+                algo="sft",
+                ckpt="unused",
+                dataset_path="unused",
+                optimizer_state_offload="disk",
+            )
+
+        cfg = TrainerConfig(
+            algo="sft",
+            ckpt="unused",
+            dataset_path="unused",
+            optimizer_state_offload="disk",
+            optimizer_state_offload_dir="/mnt/nvme/areno-offload",
+        )
+        self.assertEqual(cfg.cuda_config().runtime["optimizer_state_offload"], "disk")
+        self.assertEqual(
+            cfg.cuda_config().runtime["optimizer_state_offload_dir"],
+            "/mnt/nvme/areno-offload",
+        )
 
     def test_optimizer_state_offload_rejects_mlx_backend(self):
         """MLX must not silently accept a CUDA optimizer-state offload knob."""
@@ -489,7 +512,7 @@ class ConfigAndDataTest(unittest.TestCase):
                 backend="mlx",
                 ckpt="unused",
                 dataset_path="unused",
-                optimizer_state_offload=True,
+                optimizer_state_offload="cpu",
             )
 
     def test_train_cli_attn_backend_reaches_backend_runtime_config(self):
@@ -827,7 +850,8 @@ def _train_args(**overrides):
         grad_clip_norm=1.0,
         activation_checkpointing=True,
         drop_rollout_state=False,
-        optimizer_state_offload=False,
+        optimizer_state_offload="none",
+        optimizer_state_offload_dir=None,
         eager_decode=False,
         attn_backend="flash",
         disable_thinking=False,
