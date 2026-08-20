@@ -996,7 +996,10 @@ def _normalize_stop(stop: str | list[str] | None) -> list[str]:
     "--lora-target-modules",
     default="q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj",
     show_default=True,
-    help="Comma-separated native projection targets.",
+    help=(
+        "Comma-separated native projection targets (selected Bailing V3 KDA q/k/v/f/g projections "
+        "use independent canonical adapters)."
+    ),
 )
 @click.option("--lora-adapter-path", default=None, help="Standard PEFT adapter to serve.")
 def serve_command(

@@ -1642,7 +1642,10 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     "--lora-target-modules",
     default="q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj",
     show_default=True,
-    help="Comma-separated native projection targets (MoE MLP targets apply to each routed expert).",
+    help=(
+        "Comma-separated native projection targets (MoE MLP targets apply to each routed expert; "
+        "selected Bailing V3 KDA q/k/v/f/g projections use independent canonical adapters)."
+    ),
 )
 @click.option("--lora-adapter-path", default=None, help="Standard PEFT adapter used to initialize native LoRA.")
 @click.option(

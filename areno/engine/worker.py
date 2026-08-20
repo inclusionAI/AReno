@@ -664,9 +664,10 @@ class ArenoWorker:
         path = export_peft_adapter(
             self.adapter_registry,
             payload.path,
-            base_model_name_or_path=self.config.model_path,
+            base_model_name_or_path=(self.config.base_model_name_or_path or self.config.model_path),
         )
         return {"path": path} if path is not None else None
+
 
 def _rollout_payloads_compatible(first: RolloutPayload, other: RolloutPayload) -> bool:
     """Return whether two rollout payloads can share one InferenceBatchState."""

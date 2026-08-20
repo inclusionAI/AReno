@@ -447,9 +447,17 @@ class BailingGroupedExperts(nn.Module):
             self.local_num_experts,
         )
         if x.shape[0] == 0:
-            # No tokens routed to this rank — still need to all_reduce to keep
-            # collective sync with peers.
-            return all_reduce(flat.new_zeros(flat.shape))
+            # Every TP/DP replica must produce gradients for the same parameter
+            # set even when this rank owns no active routes.
+            zero = (
+                self.linear_fc1.weight.reshape(-1)[0] * 0
+                + self.linear_fc2.weight.reshape(-1)[0] * 0
+                + topk_weight.sum().to(dtype=self.linear_fc1.weight.dtype) * 0
+            )
+            if self.has_active_lora():
+                for slot in self.lora_slots.values():
+                    zero = zero + slot.lora_A.reshape(-1)[0] * 0 + slot.lora_B.reshape(-1)[0] * 0
+            return all_reduce(flat.new_zeros(flat.shape) + zero)
         hidden, _ = _grouped_linear_forward(self.linear_fc1, x.contiguous(), tokens_per_expert)
         if self.has_active_lora():
             gate, up = hidden.chunk(2, dim=-1)

@@ -22,6 +22,21 @@ def load_peft_adapter(registry: AdapterRegistry, path: str | Path) -> None:
     input_path = Path(path)
     tensors = load_file(input_path / "adapter_model.safetensors", device="cpu")
     ctx = get_tp_context()
+    expected_shapes = _expected_peft_shapes(registry, ctx.world_size)
+    actual_keys = set(tensors)
+    expected_keys = set(expected_shapes)
+    if actual_keys != expected_keys:
+        missing = sorted(expected_keys - actual_keys)
+        unexpected = sorted(actual_keys - expected_keys)
+        raise ValueError(
+            "PEFT adapter tensor keys do not match the native LoRA registry: "
+            f"missing={missing[:3]}, unexpected={unexpected[:3]}"
+        )
+    for key, expected_shape in expected_shapes.items():
+        actual_shape = tuple(tensors[key].shape)
+        if actual_shape != expected_shape:
+            raise ValueError(f"PEFT adapter tensor {key!r} has shape {actual_shape}, expected {expected_shape}")
+
     for logical_name, slot in registry.slots.items():
         if isinstance(slot, RoutedExpertLoraSlot):
             for local_expert_id in range(slot.local_num_experts):
@@ -142,3 +157,19 @@ def _gather_replicated_column(slot: LoraSlot, gathered: list[torch.Tensor], worl
 
 def _key(logical_name: str, component: str) -> str:
     return f"{_PREFIX}{logical_name}.lora_{component}.weight"
+
+
+def _expected_peft_shapes(registry: AdapterRegistry, tp_size: int) -> dict[str, tuple[int, ...]]:
+    """Return the one canonical PEFT tensor contract represented by a registry."""
+
+    shapes: dict[str, tuple[int, ...]] = {}
+    for logical_name, slot in registry.slots.items():
+        if isinstance(slot, RoutedExpertLoraSlot):
+            for expert_id in range(slot.local_num_experts * tp_size):
+                expert_name = logical_name.format(expert=expert_id)
+                shapes[_key(expert_name, "A")] = (slot.rank, slot.in_features)
+                shapes[_key(expert_name, "B")] = (slot.out_features, slot.rank)
+            continue
+        shapes[_key(logical_name, "A")] = (slot.rank, slot.global_in_features)
+        shapes[_key(logical_name, "B")] = (slot.global_out_features, slot.rank)
+    return shapes

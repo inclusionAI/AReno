@@ -20,6 +20,8 @@ BAILING_V3_TARGETS = (
     "q_proj",
     "k_proj",
     "v_proj",
+    "f_proj",
+    "g_proj",
     "o_proj",
     "q_a_proj",
     "q_b_proj",
@@ -81,7 +83,18 @@ def _read_adapter_config(path: str) -> dict:
         unsupported.append("bias")
     if bool(adapter_config.get("fan_in_fan_out", False)):
         unsupported.append("fan_in_fan_out")
-    for option in ("use_rslora", "use_dora", "rank_pattern", "alpha_pattern", "modules_to_save"):
+    for option in (
+        "use_rslora",
+        "use_dora",
+        "rank_pattern",
+        "alpha_pattern",
+        "modules_to_save",
+        "alora_invocation_tokens",
+        "layer_replication",
+        "trainable_token_indices",
+        "target_parameters",
+        "use_qalora",
+    ):
         if adapter_config.get(option):
             unsupported.append(option)
     if unsupported:

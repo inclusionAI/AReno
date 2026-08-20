@@ -285,6 +285,7 @@ class EngineConfig:
     lora: LoraConfig | None = None
     lora_seed: int = 0
     reference_mode: Literal["independent", "reuse_actor_base"] = "independent"
+    base_model_name_or_path: str | None = None
 
     def __post_init__(self) -> None:
         """Infer DP/devices and validate the distributed layout."""
@@ -296,6 +297,12 @@ class EngineConfig:
             raise ValueError("reference_mode must be one of: independent, reuse_actor_base")
         if self.reference_mode == "reuse_actor_base" and self.lora is None:
             raise ValueError("reference_mode='reuse_actor_base' requires native LoRA")
+        if (
+            self.lora is not None
+            and self.model.model_type == "bailing_moe_v3"
+            and self.model.moe_router_bias_update_rate != 0.0
+        ):
+            raise ValueError("native LoRA requires moe_router_bias_update_rate=0 to keep the base policy frozen")
         if self.devices is None:
             if torch.cuda.is_available():
                 device_count = torch.cuda.device_count()

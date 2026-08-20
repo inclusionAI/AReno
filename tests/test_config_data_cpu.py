@@ -218,6 +218,22 @@ class ConfigAndDataTest(unittest.TestCase):
             lora=LoraConfig(),
         )
 
+    def test_engine_config_rejects_router_bias_updates_only_for_lora(self):
+        """LoRA keeps router bias in the frozen base while fullweight may update it."""
+        model = ModelConfig(
+            model_type="bailing_moe_v3",
+            num_attention_heads=4,
+            num_key_value_heads=4,
+            intermediate_size=16,
+            vocab_size=32,
+            moe_router_bias_update_rate=1e-3,
+        )
+
+        with self.assertRaisesRegex(ValueError, "moe_router_bias_update_rate=0"):
+            EngineConfig(model=model, tp_size=1, devices=[0], lora=LoraConfig())
+
+        EngineConfig(model=model, tp_size=1, devices=[0])
+
     def test_reference_view_requires_lora_at_engine_boundary(self):
         """The actor base can be reused only when the actor owns a native adapter."""
         model = ModelConfig(num_attention_heads=4, num_key_value_heads=4, intermediate_size=16, vocab_size=32)

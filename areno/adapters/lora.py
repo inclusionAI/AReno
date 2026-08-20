@@ -333,7 +333,7 @@ def _initialize_bailing_v3_lora(
         attention = layer.attention
         attention_prefix = f"{prefix}.attention"
         if hasattr(attention, "q_conv1d_weight"):
-            for component in ("q_proj", "k_proj", "v_proj"):
+            for component in ("q_proj", "k_proj", "v_proj", "f_proj", "g_proj"):
                 if component in requested:
                     matched.add(component)
                     _install_column_slot(

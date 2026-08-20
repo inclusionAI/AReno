@@ -233,6 +233,7 @@ class ArenoEngine:
         cfg = EngineConfig(
             model=model_config,
             model_path=model_path,
+            base_model_name_or_path=model,
             train_loss_fn=loss_fn,
             tp_size=tp_size,
             sequence_parallel=sequence_parallel,
