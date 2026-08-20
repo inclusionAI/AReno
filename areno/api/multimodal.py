@@ -4,18 +4,35 @@ from __future__ import annotations
 
 import base64
 import io
-from collections.abc import Sequence
+import threading
+from collections.abc import Mapping, Sequence
 from typing import Any
-
-import torch
 
 from areno.api.tokenizer import apply_chat_template_with_options, normalize_token_ids
 
+_MODALITIES = ("image", "video", "audio")
+_VIDEO_FPS_PATCH_LOCK = threading.Lock()
+_VIDEO_FPS_PATCHED = False
+
+
+def record_has_multimodal(record: dict[str, Any]) -> bool:
+    """Return true when a loader row contains raw image, video, or audio input."""
+
+    if any(
+        record.get(f"{modality}_base64") is not None or record.get(f"{modality}s_base64") is not None
+        for modality in _MODALITIES
+    ):
+        return True
+    messages = record.get("messages")
+    if not isinstance(messages, list):
+        return False
+    return any(_content_has_multimodal(message.get("content")) for message in messages if isinstance(message, dict))
+
 
 def record_has_image(record: dict[str, Any]) -> bool:
-    """Return true when a loader row contains raw image input."""
+    """Backward-compatible alias for loaders that previously checked image rows."""
 
-    return record.get("image_base64") is not None or record.get("images_base64") is not None
+    return record_has_multimodal(record)
 
 
 def encode_multimodal_prompt(
@@ -34,7 +51,15 @@ def encode_multimodal_prompt(
     """
 
     if processor is None:
-        raise ValueError("image_base64 rows require a checkpoint processor")
+        raise ValueError("multimodal rows require a checkpoint processor")
+    if _record_requires_native_multimodal(record):
+        messages = record.get("messages")
+        if not isinstance(messages, list):
+            prompt = str(record.get(prompt_key, ""))
+            content = _record_multimodal_parts(record)
+            content.append({"type": "text", "text": prompt})
+            messages = [{"role": "user", "content": content}]
+        return encode_processor_messages(processor, messages, tools=record.get("tools"))
     images = _load_record_images(record)
     if isinstance(record.get("messages"), list):
         messages = _normalize_image_messages(record["messages"])
@@ -73,6 +98,190 @@ def encode_multimodal_prompt(
         if mrope_position_ids is not None:
             features["mrope_position_ids"] = mrope_position_ids
     return tokens, features or None
+
+
+def encode_processor_messages(
+    processor: Any,
+    messages: list[dict[str, Any]],
+    *,
+    tools: Any = None,
+) -> tuple[list[int], dict[str, Any] | None]:
+    """Use a native multimodal processor to load media and expand soft-token slots."""
+
+    normalized = _normalize_multimodal_messages(messages)
+    kwargs: dict[str, Any] = {
+        "tokenize": True,
+        "add_generation_prompt": True,
+        "return_dict": True,
+        "return_tensors": getattr(processor, "_areno_return_tensors", "pt"),
+    }
+    if tools:
+        kwargs["tools"] = tools
+    _ensure_gemma4_torchvision_video_fps(processor)
+    encoded = apply_chat_template_with_options(processor, normalized, **kwargs)
+    if not isinstance(encoded, Mapping) or encoded.get("input_ids") is None:
+        raise ValueError("multimodal processor did not return input_ids")
+    input_ids = encoded["input_ids"]
+    tokens = normalize_token_ids(input_ids[0].tolist())
+    features = {
+        key: value for key, value in encoded.items() if key not in {"input_ids", "attention_mask", "token_type_ids"}
+    }
+    token_ids = modality_token_ids(processor)
+    if token_ids:
+        features["modality_token_ids"] = token_ids
+        if token_ids.get("image") is not None:
+            features["image_token_id"] = token_ids["image"]
+    return tokens, features or None
+
+
+def _ensure_gemma4_torchvision_video_fps(processor: Any) -> None:
+    """Backfill FPS metadata omitted by torchvision for some browser videos."""
+
+    global _VIDEO_FPS_PATCHED
+    identity = f"{type(processor).__module__}.{type(processor).__name__}".lower()
+    if "gemma4" not in identity or _VIDEO_FPS_PATCHED:
+        return
+    with _VIDEO_FPS_PATCH_LOCK:
+        if _VIDEO_FPS_PATCHED:
+            return
+        try:
+            from transformers import video_utils
+        except (ImportError, AttributeError):
+            return
+        torchvision_io = getattr(video_utils, "torchvision_io", None)
+        original = getattr(torchvision_io, "read_video", None)
+        if original is None or getattr(original, "_areno_video_fps_fallback", False):
+            _VIDEO_FPS_PATCHED = original is not None
+            return
+
+        def read_video_with_fps(video_path, *args, **kwargs):
+            video, audio, info = original(video_path, *args, **kwargs)
+            info = dict(info or {})
+            if not info.get("video_fps"):
+                info["video_fps"] = _read_torchvision_fps(torchvision_io, video_path)
+            return video, audio, info
+
+        read_video_with_fps._areno_video_fps_fallback = True
+        torchvision_io.read_video = read_video_with_fps
+        _VIDEO_FPS_PATCHED = True
+
+
+def _read_torchvision_fps(torchvision_io: Any, video_path: Any) -> float:
+    try:
+        _, fps = torchvision_io.read_video_timestamps(video_path, pts_unit="sec")
+        if fps is not None and float(fps) > 0:
+            return float(fps)
+    except Exception:  # noqa: BLE001
+        pass
+    return 30.0
+
+
+def modality_token_ids(processor: Any) -> dict[str, int]:
+    """Return the soft-token id for each modality exposed by a processor."""
+
+    result: dict[str, int] = {}
+    for modality in _MODALITIES:
+        value = getattr(processor, f"{modality}_token_id", None)
+        if isinstance(value, int) and value >= 0:
+            result[modality] = int(value)
+    return result
+
+
+def _record_requires_native_multimodal(record: dict[str, Any]) -> bool:
+    if any(record.get(key) is not None for key in ("audio_base64", "audios_base64", "video_base64", "videos_base64")):
+        return True
+    messages = record.get("messages")
+    return isinstance(messages, list) and any(
+        _content_has_audio_or_video(message.get("content")) for message in messages if isinstance(message, dict)
+    )
+
+
+def _record_multimodal_parts(record: dict[str, Any]) -> list[dict[str, str]]:
+    parts: list[dict[str, str]] = []
+    mime_defaults = {"image": "image/png", "audio": "audio/wav", "video": "video/mp4"}
+    for modality in _MODALITIES:
+        values = record.get(f"{modality}s_base64")
+        if values is None:
+            values = record.get(f"{modality}_base64")
+        if values is None:
+            continue
+        if isinstance(values, str):
+            values = [values]
+        for value in values:
+            ref = str(value)
+            if not ref.startswith("data:"):
+                ref = f"data:{mime_defaults[modality]};base64,{ref}"
+            parts.append({"type": modality, "url": ref})
+    return parts
+
+
+def _normalize_multimodal_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized = []
+    for message in messages:
+        item = dict(message)
+        content = item.get("content")
+        if isinstance(content, list):
+            item["content"] = [_normalize_multimodal_content_part(part) for part in content]
+        normalized.append(item)
+    return normalized
+
+
+def _normalize_multimodal_content_part(part: Any) -> Any:
+    if not isinstance(part, dict):
+        return part
+    kind = str(part.get("type", ""))
+    if kind == "input_audio":
+        value = part.get("input_audio")
+        if not isinstance(value, dict) or not value.get("data"):
+            raise ValueError("input_audio content must include base64 data")
+        fmt = str(value.get("format") or "wav").lower()
+        mime = {"wav": "audio/wav", "mp3": "audio/mpeg"}.get(fmt, f"audio/{fmt}")
+        ref = str(value["data"])
+        if not ref.startswith("data:"):
+            ref = f"data:{mime};base64,{ref}"
+        return {"type": "audio", "url": ref}
+    if kind in _MODALITIES and part.get("url") is None and part.get(kind) is not None:
+        normalized = dict(part)
+        normalized["url"] = normalized.pop(kind)
+        return normalized
+    if not kind.endswith("_url"):
+        return part
+    modality = kind.removesuffix("_url")
+    if modality not in _MODALITIES:
+        return part
+    value = part.get(kind)
+    ref = value.get("url") if isinstance(value, dict) else value
+    if not isinstance(ref, str) or not ref:
+        raise ValueError(f"{kind} content must include a url")
+    normalized = dict(part)
+    normalized.pop(kind, None)
+    normalized["type"] = modality
+    normalized["url"] = ref
+    return normalized
+
+
+def _content_has_multimodal(content: Any) -> bool:
+    if not isinstance(content, list):
+        return False
+    for part in content:
+        if not isinstance(part, dict):
+            continue
+        kind = str(part.get("type", ""))
+        if kind == "input_audio" or kind.removesuffix("_url") in _MODALITIES:
+            return True
+    return False
+
+
+def _content_has_audio_or_video(content: Any) -> bool:
+    if not isinstance(content, list):
+        return False
+    for part in content:
+        if not isinstance(part, dict):
+            continue
+        kind = str(part.get("type", ""))
+        if kind == "input_audio" or kind.removesuffix("_url") in {"audio", "video"}:
+            return True
+    return False
 
 
 def _load_record_images(record: dict[str, Any]) -> list[Any]:
@@ -179,14 +388,15 @@ def _messages_fallback_text(messages: list[dict[str, Any]]) -> str:
 
 
 def _encode_text_and_images(tokenizer: Any, processor: Any, text: str, images: list[Any]) -> dict[str, Any]:
+    return_tensors = getattr(processor, "_areno_return_tensors", "pt")
     try:
-        return dict(processor(text=[text], images=images, return_tensors="pt"))
+        return dict(processor(text=[text], images=images, return_tensors=return_tensors))
     except TypeError as exc:
         if "images" not in str(exc):
             raise
     image_processor = _image_processor_from_processor(processor)
-    text_encoded = tokenizer([text], return_tensors="pt")
-    image_encoded = image_processor(images=images, return_tensors="pt")
+    text_encoded = tokenizer([text], return_tensors=return_tensors)
+    image_encoded = image_processor(images=images, return_tensors=return_tensors)
     encoded = dict(image_encoded)
     encoded["input_ids"] = text_encoded["input_ids"]
     if text_encoded.get("attention_mask") is not None:
@@ -245,13 +455,11 @@ def image_token_counts_from_features(features: dict[str, Any] | None) -> list[in
     grid = features.get("image_grid_thw")
     if grid is None:
         return []
-    if not isinstance(grid, torch.Tensor):
-        grid = torch.as_tensor(grid)
-    grid = grid.detach().cpu().to(dtype=torch.long).reshape(-1, 3)
+    grid_rows = _array_to_numpy(grid).astype("int64", copy=False).reshape(-1, 3)
     merge = int(features.get("spatial_merge_size", features.get("merge_size", 2)) or 2)
     merge_unit = merge * merge
     counts: list[int] = []
-    for t, h, w in grid.tolist():
+    for t, h, w in grid_rows.tolist():
         patches = int(t) * int(h) * int(w)
         if patches % merge_unit:
             raise ValueError(f"image_grid_thw patches={patches} is not divisible by spatial_merge_size**2={merge_unit}")
@@ -319,7 +527,7 @@ def mrope_position_ids_from_image_grid(
     *,
     image_token_id: int | None,
     features: dict[str, Any] | None,
-) -> torch.Tensor | None:
+) -> Any | None:
     """Build Qwen3.5-VL MRoPE ids for tokens after image-token expansion.
 
     This follows the image-only fast path used by SGLang: text spans advance a
@@ -332,17 +540,17 @@ def mrope_position_ids_from_image_grid(
     grid = features.get("image_grid_thw")
     if grid is None:
         return None
-    if not isinstance(grid, torch.Tensor):
-        grid = torch.as_tensor(grid)
-    grid = grid.detach().cpu().to(dtype=torch.long).reshape(-1, 3)
+    grid_rows = _array_to_numpy(grid).astype("int64", copy=False).reshape(-1, 3)
     merge = int(features.get("spatial_merge_size", features.get("merge_size", 2)) or 2)
     image_token_id = int(image_token_id)
     token_list = [int(token) for token in tokens]
-    segments: list[torch.Tensor] = []
+    import numpy as np
+
+    segments: list[np.ndarray] = []
     st = 0
     next_pos = 0
-    for t_tensor, h_tensor, w_tensor in grid:
-        t, h, w = int(t_tensor), int(h_tensor), int(w_tensor)
+    for t, h, w in grid_rows.tolist():
+        t, h, w = int(t), int(h), int(w)
         if h % merge or w % merge:
             raise ValueError("image_grid_thw height/width must be divisible by spatial_merge_size")
         llm_t, llm_h, llm_w = t, h // merge, w // merge
@@ -353,19 +561,38 @@ def mrope_position_ids_from_image_grid(
             raise ValueError("image_grid_thw count does not match expanded image tokens") from exc
         text_len = start - st
         if text_len > 0:
-            segments.append(torch.arange(text_len, dtype=torch.long).view(1, -1).expand(3, -1) + next_pos)
+            segments.append(np.broadcast_to(np.arange(text_len, dtype=np.int64), (3, text_len)) + next_pos)
             next_pos += text_len
         end = start + count
-        t_index = torch.arange(llm_t, dtype=torch.long).view(-1, 1).expand(llm_t, llm_h * llm_w).reshape(-1)
-        h_index = torch.arange(llm_h, dtype=torch.long).view(1, -1, 1).expand(llm_t, llm_h, llm_w).reshape(-1)
-        w_index = torch.arange(llm_w, dtype=torch.long).view(1, 1, -1).expand(llm_t, llm_h, llm_w).reshape(-1)
-        segments.append(torch.stack([t_index, h_index, w_index]) + next_pos)
+        t_index = np.broadcast_to(np.arange(llm_t, dtype=np.int64)[:, None], (llm_t, llm_h * llm_w)).reshape(-1)
+        h_index = np.broadcast_to(np.arange(llm_h, dtype=np.int64)[None, :, None], (llm_t, llm_h, llm_w)).reshape(-1)
+        w_index = np.broadcast_to(np.arange(llm_w, dtype=np.int64)[None, None, :], (llm_t, llm_h, llm_w)).reshape(-1)
+        segments.append(np.stack([t_index, h_index, w_index]) + next_pos)
         next_pos += max(llm_t, llm_h, llm_w)
         st = end
     if st < len(token_list):
         text_len = len(token_list) - st
-        segments.append(torch.arange(text_len, dtype=torch.long).view(1, -1).expand(3, -1) + next_pos)
-    return torch.cat(segments, dim=1) if segments else None
+        segments.append(np.broadcast_to(np.arange(text_len, dtype=np.int64), (3, text_len)) + next_pos)
+    if not segments:
+        return None
+    positions = np.concatenate(segments, axis=1)
+    new_tensor = getattr(grid, "new_tensor", None)
+    return new_tensor(positions) if callable(new_tensor) else positions
+
+
+def _array_to_numpy(value: Any):
+    import numpy as np
+
+    detach = getattr(value, "detach", None)
+    if callable(detach):
+        value = detach()
+    cpu = getattr(value, "cpu", None)
+    if callable(cpu):
+        value = cpu()
+    to_numpy = getattr(value, "numpy", None)
+    if callable(to_numpy):
+        value = to_numpy()
+    return np.asarray(value)
 
 
 def _find_image_span(tokens: list[int], image_token_id: int, start: int, count: int) -> int:

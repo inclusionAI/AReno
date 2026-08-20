@@ -245,7 +245,6 @@ class AdamWFP32Master:
         # Standard Adam bias-corrected step size.
         bias_correction1 = 1.0 - beta1**bucket.step
         bias_correction2 = 1.0 - beta2**bucket.step
-        step_size = self.lr / bias_correction1
         bias_correction2_sqrt = bias_correction2**0.5
         updated_refs: list[_ParamRef] = []
         for ref in bucket.refs:
@@ -254,7 +253,9 @@ class AdamWFP32Master:
                 continue
             # Slice out just the rows belonging to this ref's chunk.
             flat_grad = grad.detach().reshape(-1).narrow(0, ref.param_start, ref.numel)
-            self._step_param_ref(bucket, ref, flat_grad, beta1, beta2, step_size, bias_correction2_sqrt)
+            effective_lr = float(getattr(ref.model_param, "_areno_lr", self.lr))
+            step_size = effective_lr / bias_correction1
+            self._step_param_ref(bucket, ref, flat_grad, beta1, beta2, effective_lr, step_size, bias_correction2_sqrt)
             updated_refs.append(ref)
             # Once the final chunk of a parameter has consumed its grad, drop
             # the grad reference so the autograd graph can be freed.
@@ -274,6 +275,7 @@ class AdamWFP32Master:
         grad: torch.Tensor,
         beta1: float,
         beta2: float,
+        effective_lr: float,
         step_size: float,
         bias_correction2_sqrt: float,
     ) -> None:
@@ -293,7 +295,7 @@ class AdamWFP32Master:
 
             # Decoupled (AdamW) weight decay: shrink master before momentum.
             if self.weight_decay != 0.0:
-                master.mul_(1.0 - self.lr * self.weight_decay)
+                master.mul_(1.0 - effective_lr * self.weight_decay)
             # Standard Adam moment updates.
             exp_avg.mul_(beta1).add_(grad_shard, alpha=1.0 - beta1)
             exp_avg_sq.mul_(beta2).addcmul_(grad_shard, grad_shard, value=1.0 - beta2)

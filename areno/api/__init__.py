@@ -15,10 +15,19 @@ from areno.api.agentic import (
     LossMaskPolicy,
     RolloutSession,
 )
-from areno.api.algorithms import AlgorithmSpec, get_algorithm, list_algorithms, register_algorithm
-from areno.api.config import ArenoConfig
+from areno.api.algorithms import (
+    AlgorithmSpec,
+    dpo_loss_fn,
+    get_algorithm,
+    grpo_loss_fn,
+    gspo_loss_fn,
+    list_algorithms,
+    ppo_loss_fn,
+    register_algorithm,
+    sft_loss_fn,
+)
+from areno.api.config import CudaConfig, MlxConfig, default_backend_type
 from areno.api.data import PromptBatch, PromptItem
-from areno.api.loss_fns import dpo_loss_fn, grpo_loss_fn, gspo_loss_fn, ppo_loss_fn, sft_loss_fn
 from areno.api.models import (
     BackendType,
     RolloutResult,
@@ -29,15 +38,17 @@ from areno.api.models import (
 from areno.api.rewards import RewardEvent, RewardRecord
 from areno.api.trainer import Trainer
 
-# Friendly aliases mirroring the BackendType enum members; `DefaultBackend`
-# documents the fallback used when callers do not pass `backend_type=`.
-Areno = BackendType.Areno
-DefaultBackend = BackendType.Areno
+# Friendly aliases mirroring the BackendType enum members. The default is
+# selected from the host platform without importing either backend.
+CUDA = BackendType.CUDA
+MLX = BackendType.MLX
+DefaultBackend = default_backend_type()
 
 __all__ = [
     "Trainer",
     "AlgorithmSpec",
-    "ArenoConfig",
+    "CudaConfig",
+    "MlxConfig",
     "PromptBatch",
     "PromptItem",
     "AgentBatch",
@@ -53,7 +64,8 @@ __all__ = [
     "RolloutResult",
     "RolloutSequence",
     "TrainSequence",
-    "Areno",
+    "CUDA",
+    "MLX",
     "DefaultBackend",
     "get_algorithm",
     "list_algorithms",

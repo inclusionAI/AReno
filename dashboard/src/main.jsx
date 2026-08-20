@@ -9,8 +9,11 @@ import {
   Box,
   CircleStop,
   Cpu,
+  Database,
   FileText,
+  Film,
   History,
+  Image as ImageIcon,
   LayoutDashboard,
   Languages,
   Layers,
@@ -25,11 +28,19 @@ import {
   Sun,
   TerminalSquare,
   Timer,
+  Volume2,
   Wrench,
 } from "lucide-react";
 import "./styles.css";
 
-const API_BASE = new URL(".", window.location.href).pathname;
+function dashboardBasePath() {
+  const moduleScript = document.querySelector('script[type="module"][src]');
+  if (moduleScript?.src) return new URL("../", moduleScript.src).pathname;
+  const pathname = window.location.pathname;
+  return pathname.endsWith("/") ? pathname : `${pathname}/`;
+}
+
+const API_BASE = dashboardBasePath();
 const UI_LANGUAGE_STORAGE_KEY = "areno-dashboard-language";
 const ZH_UI = {
   "Overview": "概览",
@@ -272,6 +283,16 @@ const defaultTrainConfig = {
   adam_beta1: 0.9,
   adam_beta2: 0.999,
   adam_8bit: false,
+  unfreeze_multimodal_tower: false,
+  unfreeze_multimodal_projector: false,
+  multimodal_tower_lr: "",
+  multimodal_tower_min_lr: "",
+  multimodal_tower_lr_decay_steps: "",
+  multimodal_tower_lr_decay_style: "",
+  multimodal_projector_lr: "",
+  multimodal_projector_min_lr: "",
+  multimodal_projector_lr_decay_steps: "",
+  multimodal_projector_lr_decay_style: "",
   weight_decay: 1.0e-2,
   grad_clip_norm: 1,
   gspo_clip_eps: 3.0e-4,
@@ -1212,7 +1233,7 @@ function OverviewRewardLossChart({ job }) {
         const nextNames = Object.fromEntries(metricKinds.map((kind) => [kind, selectOverviewMetric(metricNames, kind)]));
         const metricData = await Promise.all(metricKinds.map((kind) => (
           nextNames[kind]
-            ? api(`/api/jobs/${job.id}/metric?name=${encodeURIComponent(nextNames[kind])}&limit=240`)
+            ? api(`/api/jobs/${job.id}/metric?name=${encodeURIComponent(nextNames[kind])}`)
             : Promise.resolve({ points: [] })
         )));
         if (cancelled) return;
@@ -1290,19 +1311,14 @@ function overviewMetricLabel(kind) {
 function normalizeMetricPoints(points = []) {
   return points
     .filter((point) => Number.isFinite(Number(point.value)))
-    .map((point) => ({ step: Number(point.step || 0), value: Number(point.value), time: point.time }))
-    .slice(-240);
+    .map((point) => ({ step: Number(point.step || 0), value: Number(point.value), time: point.time }));
 }
 
 function buildOverviewMetricPlot(points) {
   if (!points.length) return { points: "", coords: [], stepMin: 0, stepMax: 0, minLabel: "n/a", maxLabel: "n/a" };
-  const values = points.map((point) => point.value);
-  const steps = points.map((point) => point.step);
-  const min = Math.min(...values);
-  const max = Math.max(...values);
+  const { min, max } = numericExtent(points, (point) => point.value);
   const flat = max === min;
-  const stepMin = Math.min(...steps);
-  const stepMax = Math.max(...steps);
+  const { min: stepMin, max: stepMax } = numericExtent(points, (point) => point.step);
   const valueSpan = Math.max(max - min, 1e-9);
   const stepSpan = Math.max(stepMax - stepMin, 1);
   const coords = points.map((point) => {
@@ -1418,7 +1434,7 @@ function JobsSelectedDetail({ job, env, onStop }) {
         </section>
         <section className="panel rolloutSamplePanel">
           <div className="panelHeader"><div><h2>Rollout Sample</h2><p>Inspect prompt and completion pairs by step and sample.</p></div></div>
-          <SampleView samples={job.samples || []} hideTitle />
+          <SampleView samples={job.samples || []} jobId={job.id} hideTitle />
         </section>
       </div>
     </div>
@@ -1440,7 +1456,7 @@ function JobFullDetailPage({ job, refreshNonce, onBack, onStop }) {
       </section>
       <section className="panel jobDetailSection">
         <div className="panelHeader"><div><h2>Rollout Sample</h2><p>Prompt and completion output captured during rollout.</p></div></div>
-        <SampleView samples={job.samples || []} hideTitle />
+        <SampleView samples={job.samples || []} jobId={job.id} hideTitle />
       </section>
       <div className="jobDetailDataGrid">
         <ConfigView config={job.config} launch={job.launch} />
@@ -2170,7 +2186,7 @@ function MetricChart({ jobId, metricsDir, refreshNonce }) {
       return undefined;
     }
     setMetricLoading(true);
-    api(`/api/jobs/${jobId}/metric?name=${encodeURIComponent(effectiveName)}&limit=500`)
+    api(`/api/jobs/${jobId}/metric?name=${encodeURIComponent(effectiveName)}`)
       .then((data) => {
         if (cancelled) return;
         setPoints((data.points || []).filter((point) => Number.isFinite(Number(point.value))).map((point) => ({
@@ -2190,9 +2206,11 @@ function MetricChart({ jobId, metricsDir, refreshNonce }) {
     };
   }, [jobId, effectiveName, refreshNonce, pollTick]);
   const activeName = effectiveName;
-  const visiblePoints = points.slice(-240);
+  const visiblePoints = points;
   const smoothed = smoothTensorboard(visiblePoints, smooth);
-  const plot = buildMetricPlot(visiblePoints, smoothed);
+  const smoothingEnabled = smooth > 0;
+  const displayedPoints = smoothingEnabled ? smoothed : visiblePoints;
+  const plot = buildMetricPlot(displayedPoints);
   return (
     <div className="chart">
       <div className="chartHeader">
@@ -2215,16 +2233,15 @@ function MetricChart({ jobId, metricsDir, refreshNonce }) {
             <g className="plotGrid">
               {[0, 1, 2, 3].map((item) => <line key={item} x1="0" x2="720" y1={30 + item * 42} y2={30 + item * 42} />)}
             </g>
-            <polyline className="rawLine" points={plot.raw} />
-            <polyline className="smoothLine" points={plot.smooth} />
-            {visiblePoints.map((point, index) => (
+            <polyline className={smoothingEnabled ? "smoothLine" : "rawLine"} points={plot.line} />
+            {!smoothingEnabled && displayedPoints.map((point, index) => (
               <g key={`${point.step}-${index}`}>
-                <circle className="metricDataPoint" cx={plot.coords[index]?.x || 0} cy={plot.coords[index]?.y || 0} r={metricPointRadius(visiblePoints.length)} />
+                <circle className="metricDataPoint" cx={plot.coords[index]?.x || 0} cy={plot.coords[index]?.y || 0} r={metricPointRadius(displayedPoints.length)} />
                 <circle className="metricHoverTarget" cx={plot.coords[index]?.x || 0} cy={plot.coords[index]?.y || 0} r="5" onMouseEnter={() => setHoveredPoint({ point, coord: plot.coords[index] })} onMouseLeave={() => setHoveredPoint(null)} />
               </g>
             ))}
           </svg>
-          {hoveredPoint && <MetricPointTooltip name={activeName} point={hoveredPoint.point} coord={hoveredPoint.coord} width={720} height={180} />}
+          {!smoothingEnabled && hoveredPoint && <MetricPointTooltip name={activeName} point={hoveredPoint.point} coord={hoveredPoint.coord} width={720} height={180} />}
         </div>
       )}
       <div className="plotFooter">
@@ -2245,29 +2262,36 @@ function smoothTensorboard(points, smooth) {
   });
 }
 
-function buildMetricPlot(rawPoints, smoothPoints) {
-  if (!rawPoints.length) return { raw: "", smooth: "", coords: [], minLabel: "n/a", maxLabel: "n/a" };
-  const allValues = [...rawPoints, ...smoothPoints].map((point) => point.value);
-  const min = Math.min(...allValues);
-  const max = Math.max(...allValues);
+function buildMetricPlot(points) {
+  if (!points.length) return { line: "", coords: [], minLabel: "n/a", maxLabel: "n/a" };
+  const { min, max } = numericExtent(points, (point) => point.value);
   const flat = max === min;
   const span = Math.max(max - min, 1e-9);
-  const stepMin = rawPoints[0].step;
-  const stepMax = rawPoints[rawPoints.length - 1].step;
+  const stepMin = points[0].step;
+  const stepMax = points[points.length - 1].step;
   const stepSpan = Math.max(stepMax - stepMin, 1);
   const coord = (point) => ({
     x: ((point.step - stepMin) / stepSpan) * 700 + 10,
     y: flat ? 95 : 168 - ((point.value - min) / span) * 146,
   });
-  const rawCoords = rawPoints.map(coord);
-  const smoothCoords = smoothPoints.map(coord);
+  const coords = points.map(coord);
   return {
-    raw: rawCoords.map((point) => `${point.x.toFixed(1)},${point.y.toFixed(1)}`).join(" "),
-    smooth: smoothCoords.map((point) => `${point.x.toFixed(1)},${point.y.toFixed(1)}`).join(" "),
-    coords: rawCoords,
+    line: coords.map((point) => `${point.x.toFixed(1)},${point.y.toFixed(1)}`).join(" "),
+    coords,
     minLabel: compactNumber(min),
     maxLabel: compactNumber(max),
   };
+}
+
+function numericExtent(values, accessor) {
+  let min = Infinity;
+  let max = -Infinity;
+  for (const value of values) {
+    const numeric = Number(accessor(value));
+    if (numeric < min) min = numeric;
+    if (numeric > max) max = numeric;
+  }
+  return { min, max };
 }
 
 function compactNumber(value) {
@@ -2389,7 +2413,110 @@ function normalizeDisplayName(name) {
     .trim();
 }
 
-function SampleView({ samples, hideTitle = false }) {
+function sampleOutput(sample) {
+  for (const value of [sample.completion, sample.rendered_completion, sample.final_answer]) {
+    if (typeof value === "string" && value.trim()) return value;
+  }
+  if (Array.isArray(sample.tool_calls) && sample.tool_calls.length) {
+    return JSON.stringify(sample.tool_calls, null, 2);
+  }
+  return "No assistant output was captured.";
+}
+
+function samplePromptMessages(sample) {
+  if (Array.isArray(sample.prompt_messages)) return sample.prompt_messages;
+  if (!Array.isArray(sample.messages)) return [];
+  const messages = [...sample.messages];
+  if (messages.at(-1)?.role === "assistant") messages.pop();
+  return messages;
+}
+
+function messageMediaPart(part) {
+  if (!part || typeof part !== "object") return null;
+  const rawType = String(part.type || "");
+  if (rawType === "input_audio") {
+    const input = part.input_audio;
+    if (!input?.data || String(input.data).includes("<truncated>")) return null;
+    const format = String(input.format || "wav").toLowerCase();
+    const mime = format === "mp3" ? "audio/mpeg" : `audio/${format}`;
+    const source = String(input.data).startsWith("data:") ? input.data : `data:${mime};base64,${input.data}`;
+    return { type: "audio", source };
+  }
+  const type = rawType.replace(/_url$/, "");
+  if (!["image", "audio", "video"].includes(type)) return null;
+  let source = part[rawType] ?? part[type] ?? part.url;
+  if (source && typeof source === "object") source = source.url;
+  return typeof source === "string" && source ? { type, source } : null;
+}
+
+function sampleMedia(sample) {
+  const items = [];
+  const add = (item) => {
+    if (item && !items.some((existing) => existing.type === item.type && existing.source === item.source)) items.push(item);
+  };
+  for (const message of samplePromptMessages(sample)) {
+    if (!Array.isArray(message?.content)) continue;
+    for (const part of message.content) add(messageMediaPart(part));
+  }
+  const walkRecord = (value, key = "") => {
+    if (Array.isArray(value)) {
+      value.forEach((item) => walkRecord(item, key));
+      return;
+    }
+    if (value && typeof value === "object") {
+      Object.entries(value).forEach(([itemKey, item]) => walkRecord(item, itemKey));
+      return;
+    }
+    if (typeof value !== "string") return;
+    const normalized = key.toLowerCase();
+    const type = ["video", "audio", "image"].find((kind) => normalized.includes(kind));
+    const directMediaKey = ["video", "videos", "audio", "audios", "image", "images"].includes(normalized);
+    if (type && (directMediaKey || ["path", "url", "file"].some((marker) => normalized.includes(marker)))) {
+      add({ type, source: value });
+    }
+  };
+  walkRecord(sample.source_record);
+  return items;
+}
+
+function sampleMediaUrl(jobId, source) {
+  if (/^(data:|blob:|https?:)/.test(source)) return source;
+  return `${API_BASE}api/jobs/${encodeURIComponent(jobId)}/media?path=${encodeURIComponent(source)}`;
+}
+
+function SampleMedia({ jobId, media }) {
+  if (!jobId || !media.length) return null;
+  const hasVideo = media.some((item) => item.type === "video");
+  const hasAudio = media.some((item) => item.type === "audio");
+  const label = hasVideo && hasAudio ? "Video + audio" : hasVideo ? "Video" : hasAudio ? "Audio" : "Image";
+  return (
+    <section className="sampleMediaSection">
+      <div className="sampleSectionLabel">
+        {hasVideo ? <Film size={14} /> : hasAudio ? <Volume2 size={14} /> : <ImageIcon size={14} />}
+        {label}
+      </div>
+      <div className={classNames("sampleMediaGrid", media.length === 1 && "single")}>
+        {media.map((item, index) => {
+          const source = sampleMediaUrl(jobId, item.source);
+          if (item.type === "video") return <video key={`${item.type}-${item.source}`} src={source} controls preload="metadata" />;
+          if (item.type === "audio") return <audio key={`${item.type}-${item.source}`} src={source} controls preload="metadata" />;
+          return <img key={`${item.type}-${item.source}`} src={source} alt={`Sample media ${index + 1}`} loading="lazy" />;
+        })}
+      </div>
+    </section>
+  );
+}
+
+function JsonSampleSection({ icon, label, value, emptyText }) {
+  return (
+    <section className="sampleDetailSection">
+      <div className="sampleSectionLabel">{icon}{label}</div>
+      <pre>{value == null ? emptyText : JSON.stringify(value, null, 2)}</pre>
+    </section>
+  );
+}
+
+function SampleView({ samples, jobId, hideTitle = false }) {
   const orderedSamples = useMemo(
     () =>
       [...(samples || [])].sort(
@@ -2426,6 +2553,8 @@ function SampleView({ samples, hideTitle = false }) {
   const activeOption =
     sampleOptions.find((option) => option.key === selectedSampleKey) || sampleOptions[sampleOptions.length - 1] || null;
   const sample = activeOption?.sample || null;
+  const media = useMemo(() => (sample ? sampleMedia(sample) : []), [sample]);
+  const promptMessages = sample ? samplePromptMessages(sample) : [];
   return (
     <div className="sampleCard">
       {!hideTitle && <div className="codeTitle sampleTitle">
@@ -2442,14 +2571,31 @@ function SampleView({ samples, hideTitle = false }) {
         )}
       </div>}
       {sample ? (
-        <div className="sampleGrid">
-          <div>
-            <span>Prompt</span>
-            <p>{sample.prompt || "n/a"}</p>
+        <div className="sampleContent">
+          <SampleMedia jobId={jobId} media={media} />
+          <div className="sampleGrid">
+            <div>
+              <span>Prompt</span>
+              <p>{sample.prompt || "No prompt text was captured."}</p>
+            </div>
+            <div>
+              <span>Output</span>
+              <p>{sampleOutput(sample)}</p>
+            </div>
           </div>
-          <div>
-            <span>Completion</span>
-            <p>{sample.completion || "n/a"}</p>
+          <div className="sampleDetailGrid">
+            <JsonSampleSection
+              icon={<FileText size={14} />}
+              label="Full prompt"
+              value={promptMessages.length ? promptMessages : null}
+              emptyText="No structured prompt messages were captured."
+            />
+            <JsonSampleSection
+              icon={<Database size={14} />}
+              label="Data record"
+              value={sample.source_record}
+              emptyText="No source dataset record was captured."
+            />
           </div>
         </div>
       ) : (
@@ -2772,6 +2918,16 @@ function trainLauncherSections(algo) {
         field("weight_decay", "Weight decay", true),
         field("grad_clip_norm", "Grad clip", true),
         checkField("adam_8bit", "8-bit Adam"),
+        checkField("unfreeze_multimodal_tower", "Train media tower"),
+        field("multimodal_tower_lr", "Tower LR", true),
+        field("multimodal_tower_min_lr", "Tower min LR", true),
+        field("multimodal_tower_lr_decay_steps", "Tower decay", true),
+        selectField("multimodal_tower_lr_decay_style", "Tower schedule", ["", "constant", "linear", "cosine"]),
+        checkField("unfreeze_multimodal_projector", "Train media projector"),
+        field("multimodal_projector_lr", "Projector LR", true),
+        field("multimodal_projector_min_lr", "Projector min LR", true),
+        field("multimodal_projector_lr_decay_steps", "Projector decay", true),
+        selectField("multimodal_projector_lr_decay_style", "Projector schedule", ["", "constant", "linear", "cosine"]),
       ],
     },
   ];

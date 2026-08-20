@@ -37,6 +37,16 @@ class OptimizerConfig:
     grad_clip_norm: float | None = None
     adam_8bit: bool = False
     fp32_master_bucket_numel: int = 16 * 1024 * 1024
+    unfreeze_multimodal_tower: bool = False
+    unfreeze_multimodal_projector: bool = False
+    multimodal_tower_lr: float | None = None
+    multimodal_tower_min_lr: float | None = None
+    multimodal_tower_lr_decay_steps: int | None = None
+    multimodal_tower_lr_decay_style: Literal["constant", "linear", "cosine"] | None = None
+    multimodal_projector_lr: float | None = None
+    multimodal_projector_min_lr: float | None = None
+    multimodal_projector_lr_decay_steps: int | None = None
+    multimodal_projector_lr_decay_style: Literal["constant", "linear", "cosine"] | None = None
 
 
 @dataclass(slots=True)
@@ -107,6 +117,7 @@ class ModelConfig:
     checkpoint_prefix: str = "model"
     checkpoint_lm_head_key: str = "lm_head.weight"
     vocab_size: int = 151936
+    pad_token_id: int = 0
     hidden_size: int = 1024
     intermediate_size: int = 3072
     num_hidden_layers: int = 28
@@ -148,7 +159,11 @@ class ModelConfig:
     num_shared_experts: int | None = None
     shared_expert_intermediate_size: int = 0
     vision_config: dict[str, Any] | None = None
+    audio_config: dict[str, Any] | None = None
+    hf_text_config: dict[str, Any] | None = None
     image_token_id: int | None = None
+    video_token_id: int | None = None
+    audio_token_id: int | None = None
     vision_start_token_id: int | None = None
     vision_end_token_id: int | None = None
     moe_router_enable_expert_bias: bool = True

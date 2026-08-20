@@ -23,7 +23,7 @@ def test_public_api_imports_do_not_load_engine_heavy_modules():
             importlib.import_module(module_name)
 
         heavy_modules = [
-            "areno.api.backend.areno",
+            "areno.api.backend.cuda",
             "areno.engine.api",
             "areno.engine.inference",
             "areno.engine.worker",

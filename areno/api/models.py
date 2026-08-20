@@ -18,7 +18,8 @@ from pydantic import BaseModel, Field
 class BackendType(Enum):
     """Available execution backends for an `Trainer`."""
 
-    Areno = "Areno"
+    CUDA = "CUDA"
+    MLX = "MLX"
 
 
 class SamplingParams(BaseModel):
@@ -42,6 +43,7 @@ class SamplingParams(BaseModel):
     stop: list[str] | None = Field(default=None)
     stop_token_ids: list[int] | None = Field(default=None)
     ignore_eos: bool = Field(default=False)
+    seed: int | None = Field(default=None)
     skip_special_tokens: bool = Field(default=True)
     max_prompt_len: int | None = Field(default=None)
 

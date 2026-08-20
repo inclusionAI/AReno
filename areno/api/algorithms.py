@@ -6,9 +6,9 @@ import importlib
 import pkgutil
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 from typing import Protocol
 
-from areno.api.loss_fns import dpo_loss_fn, grpo_loss_fn, gspo_loss_fn, ppo_loss_fn, sft_loss_fn
 from areno.api.trainer_config import TrainerConfig
 
 
@@ -20,6 +20,14 @@ class TrainerFactory(Protocol):
 
 
 LossFnFactory = Callable[[TrainerConfig, Callable], Callable]
+
+
+@dataclass(frozen=True, slots=True)
+class BackendLossSpec:
+    """Framework-neutral identity and bound parameters for a registered loss."""
+
+    name: str
+    kwargs: dict[str, object]
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,6 +58,63 @@ class AlgorithmSpec:
 
 _ALGORITHMS: dict[str, AlgorithmSpec] = {}
 _EXPERIMENTAL_LOADED = False
+
+
+def sft_loss_fn(data_pack, logprobs):
+    """Run the built-in SFT objective on the selected tensor runtime."""
+
+    from areno.api.backend.cuda.losses import sft_loss_fn as cuda_loss
+
+    return cuda_loss(data_pack, logprobs)
+
+
+def dpo_loss_fn(data_pack, logprobs, *, beta: float = 0.1, label_smoothing: float = 0.0):
+    """Run the built-in DPO objective on the selected tensor runtime."""
+
+    from areno.api.backend.cuda.losses import dpo_loss_fn as cuda_loss
+
+    return cuda_loss(data_pack, logprobs, beta=beta, label_smoothing=label_smoothing)
+
+
+def grpo_loss_fn(data_pack, logprobs, *, clip_eps: float = 0.2):
+    """Run the built-in GRPO objective on the selected tensor runtime."""
+
+    from areno.api.backend.cuda.losses import grpo_loss_fn as cuda_loss
+
+    return cuda_loss(data_pack, logprobs, clip_eps=clip_eps)
+
+
+def gspo_loss_fn(data_pack, logprobs, *, clip_eps: float = 3e-4):
+    """Run the built-in GSPO objective on the selected tensor runtime."""
+
+    from areno.api.backend.cuda.losses import gspo_loss_fn as cuda_loss
+
+    return cuda_loss(data_pack, logprobs, clip_eps=clip_eps)
+
+
+def ppo_loss_fn(
+    data_pack,
+    logprobs,
+    *,
+    clip_eps: float = 0.2,
+    clip_ratio_c: float = 3.0,
+    use_kl_loss: bool = False,
+    kl_loss_coef: float = 0.001,
+    kl_loss_type: str = "low_var_kl",
+):
+    """Run the built-in PPO actor objective on the selected tensor runtime."""
+
+    from areno.api.backend.cuda.losses import ppo_loss_fn as cuda_loss
+
+    return cuda_loss(
+        data_pack,
+        logprobs,
+        clip_eps=clip_eps,
+        clip_ratio_c=clip_ratio_c,
+        use_kl_loss=use_kl_loss,
+        kl_loss_coef=kl_loss_coef,
+        kl_loss_type=kl_loss_type,
+    )
 
 
 def register_algorithm(spec: AlgorithmSpec, *, replace: bool = False) -> None:
@@ -94,6 +159,23 @@ def list_algorithms(*, include_experimental: bool = True) -> dict[str, Algorithm
     if include_experimental:
         load_experimental_algorithms()
     return dict(_ALGORITHMS)
+
+
+def describe_loss_fn(loss_fn: Callable) -> BackendLossSpec:
+    """Resolve a possibly nested partial to its registered algorithm loss."""
+
+    kwargs: dict[str, object] = {}
+    base = loss_fn
+    while isinstance(base, partial):
+        if base.args:
+            raise ValueError("backend loss partials may only bind keyword arguments")
+        kwargs = {**(base.keywords or {}), **kwargs}
+        base = base.func
+    for spec in list_algorithms().values():
+        if spec.default_loss_fn is base:
+            return BackendLossSpec(spec.name, kwargs)
+    name = getattr(base, "__qualname__", getattr(base, "__name__", type(base).__name__))
+    raise ValueError(f"loss {name!r} has no backend-neutral algorithm registration")
 
 
 def load_experimental_algorithms() -> None:
@@ -201,8 +283,15 @@ _register_builtin_algorithms()
 
 __all__ = [
     "AlgorithmSpec",
+    "BackendLossSpec",
+    "describe_loss_fn",
     "get_algorithm",
     "list_algorithms",
     "load_experimental_algorithms",
     "register_algorithm",
+    "dpo_loss_fn",
+    "grpo_loss_fn",
+    "gspo_loss_fn",
+    "ppo_loss_fn",
+    "sft_loss_fn",
 ]

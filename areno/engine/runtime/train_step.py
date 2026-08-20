@@ -6,7 +6,7 @@ reduces the train forward FLOPs to just the valid tokens while keeping every
 per-action signal (advantage, rollout logprob, ref logprob, value, return)
 indexed in lock-step with the per-action axis used by `packed_next_token_logprobs`.
 
-`_grad_norm`, `_clip_grad_norm`, and `_grad_zero_metrics` are TP-aware: they
+`_grad_norm` and `_clip_grad_norm` are TP-aware: they
 combine local contributions across the TP group and ignore parameters whose
 gradients are replicated across ranks (so each parameter contributes exactly
 once to the global norm).
@@ -283,16 +283,51 @@ def _row_mrope_positions(row: dict, length: int, device: torch.device) -> torch.
 
 def _grad_norm(parameters) -> float:
     """Compute global L2 grad norm across tensor-parallel ranks."""
-    total = _grad_square_sum(_grads_for_norm(parameters))
-    if total is None:
-        return 0.0
+    return _grad_norms(parameters)["global"]
+
+
+def _grad_norms(parameters, groups=()) -> dict[str, float]:
+    """Compute global and selected parameter-group L2 norms in one pass."""
+
+    names = ("global", *groups)
+    totals = None
+    group_indexes = {name: index for index, name in enumerate(names[1:], start=1)}
+    buckets = {}
+    for param in _grads_for_norm(parameters):
+        grad = _param_grad(param)
+        if grad is None:
+            continue
+        key = (grad.device, grad.dtype)
+        bucket = buckets.setdefault(key, ([], []))
+        bucket[0].append(param)
+        bucket[1].append(grad.detach())
+
+    for params, grads in buckets.values():
+        # foreach_norm batches kernel launches and only materializes one scalar
+        # per parameter instead of a squared tensor as large as every gradient.
+        if grads[0].dtype in {torch.float32, torch.float64}:
+            norms = torch._foreach_norm(grads, 2)
+        else:
+            norms = [torch.linalg.vector_norm(grad, ord=2, dtype=torch.float32) for grad in grads]
+        squared_norms = torch.stack(norms).float().square()
+        if totals is None:
+            totals = torch.zeros(len(names), device=squared_norms.device, dtype=torch.float32)
+        totals[0].add_(squared_norms.sum())
+        for group, group_index in group_indexes.items():
+            indexes = [index for index, param in enumerate(params) if getattr(param, "_areno_lr_group", None) == group]
+            if indexes:
+                totals[group_index].add_(squared_norms[indexes].sum())
+
+    if totals is None:
+        return dict.fromkeys(names, 0.0)
     ctx = get_tp_context()
     # Summing only TP-sharded contributions (`_grads_for_norm`) and then
     # all-reducing across TP gives the same value every rank would compute on
     # the unsharded model, without double-counting replicated parameters.
     if ctx.world_size > 1:
-        dist.all_reduce(total, op=dist.ReduceOp.SUM, group=ctx.group)
-    return float(total.sqrt().cpu())
+        dist.all_reduce(totals, op=dist.ReduceOp.SUM, group=ctx.group)
+    values = totals.sqrt().cpu().tolist()
+    return dict(zip(names, values, strict=True))
 
 
 def _clip_grad_norm(parameters, grad_norm: float, max_norm: float) -> None:
@@ -311,52 +346,6 @@ def _clip_grad_norm(parameters, grad_norm: float, max_norm: float) -> None:
         if coef is None:
             coef = torch.tensor(clip_coef, device=grad.device, dtype=grad.dtype)
         grad.mul_(coef)
-
-
-def _grad_zero_metrics(parameters) -> dict[str, float] | None:
-    """Report what fraction of gradient elements collapsed to zero."""
-
-    total = None
-    nonzero = None
-    for param in _grads_for_norm(parameters):
-        grad = _param_grad(param)
-        if grad is None:
-            continue
-        grad = grad.detach()
-        value_total = torch.tensor(grad.numel(), device=grad.device, dtype=torch.float64)
-        value_nonzero = torch.count_nonzero(grad).to(device=grad.device, dtype=torch.float64)
-        total = value_total if total is None else total + value_total
-        nonzero = value_nonzero if nonzero is None else nonzero + value_nonzero
-    if total is None or nonzero is None:
-        return None
-    ctx = get_tp_context()
-    if ctx.world_size > 1:
-        dist.all_reduce(total, op=dist.ReduceOp.SUM, group=ctx.group)
-        dist.all_reduce(nonzero, op=dist.ReduceOp.SUM, group=ctx.group)
-    total_float = float(total.cpu())
-    nonzero_float = float(nonzero.cpu())
-    zero_float = total_float - nonzero_float
-    return {
-        "grad_zero_count": zero_float,
-        "grad_nonzero_count": nonzero_float,
-        "grad_total_count": total_float,
-        "grad_zero_ratio": zero_float / max(total_float, 1.0),
-        "grad_nonzero_ratio": nonzero_float / max(total_float, 1.0),
-    }
-
-
-def _grad_square_sum(parameters) -> torch.Tensor | None:
-    """Local sum of squared gradient elements; returns None when no grads."""
-
-    total = None
-    for param in parameters:
-        grad = _param_grad(param)
-        if grad is None:
-            continue
-        grad = grad.detach().float()
-        value = grad.pow(2).sum()
-        total = value if total is None else total + value
-    return total
 
 
 def _grads_for_norm(parameters):

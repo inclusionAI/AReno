@@ -30,7 +30,9 @@ from areno.engine.layers.attention_backend.common import (
     require_flash_attention_supported,
 )
 from areno.engine.layers.attention_backend.infer import FlashAttnInferBackend, _native_prefill
+from areno.engine.layers.attention_backend.train import _native_train_areno
 from areno.engine.runtime.metadata import InferMeta
+from areno.engine.training import _actor_train_model
 
 
 class ConfigAndDataTest(unittest.TestCase):
@@ -62,6 +64,65 @@ class ConfigAndDataTest(unittest.TestCase):
         )
 
         cfg.validate_tp(4)
+
+    def test_gemma4_training_unwraps_compiled_model_without_disabling_rollout(self):
+        eager_model = object()
+        compiled_model = SimpleNamespace(_orig_mod=eager_model)
+        worker = SimpleNamespace(
+            model=compiled_model,
+            config=SimpleNamespace(model=SimpleNamespace(model_type="gemma4")),
+        )
+
+        self.assertIs(_actor_train_model(worker), eager_model)
+        self.assertIs(worker.model, compiled_model)
+
+    def test_non_gemma_training_keeps_compiled_model(self):
+        compiled_model = SimpleNamespace(_orig_mod=object())
+        worker = SimpleNamespace(
+            model=compiled_model,
+            config=SimpleNamespace(model=SimpleNamespace(model_type="qwen3")),
+        )
+
+        self.assertIs(_actor_train_model(worker), compiled_model)
+
+    def test_native_train_areno_uses_packed_sequence_boundaries(self):
+        q = torch.randn(1, 5, 2, 4)
+        k = torch.randn(1, 5, 1, 4)
+        v = torch.randn(1, 5, 1, 4)
+        cu_seqlens = torch.tensor([0, 2, 5], dtype=torch.int32)
+        captured = {}
+
+        def fake_attention(q_flat, k_flat, v_flat, cu, *, window_left, softmax_scale):
+            captured.update(
+                q_shape=tuple(q_flat.shape),
+                k_shape=tuple(k_flat.shape),
+                v_shape=tuple(v_flat.shape),
+                cu=cu.tolist(),
+                window_left=window_left,
+                softmax_scale=softmax_scale,
+            )
+            return torch.zeros_like(q_flat)
+
+        meta = SimpleNamespace(cu_seqlens=cu_seqlens)
+        with patch("areno.engine.layers.attention_backend.train.areno_varlen_causal_attention", fake_attention):
+            out = _native_train_areno(q, k, v, meta, (31, 0), 1.0)
+
+        self.assertEqual(tuple(out.shape), tuple(q.shape))
+        self.assertEqual(captured["q_shape"], (5, 2, 4))
+        self.assertEqual(captured["k_shape"], (5, 1, 4))
+        self.assertEqual(captured["v_shape"], (5, 1, 4))
+        self.assertEqual(captured["cu"], [0, 2, 5])
+        self.assertEqual(captured["window_left"], 31)
+        self.assertEqual(captured["softmax_scale"], 1.0)
+
+    def test_native_train_rollout_matching_is_opt_in(self):
+        from areno.engine.layers.attention_backend.train import build_train_attention_backend
+
+        default_backend = build_train_attention_backend("native")
+        matching_backend = build_train_attention_backend("native", native_train_matches_rollout=True)
+
+        self.assertFalse(default_backend.native_train_matches_rollout)
+        self.assertTrue(matching_backend.native_train_matches_rollout)
 
     def test_model_config_allows_replicated_kv_for_qwen35_vl_moe(self):
         """Qwen3.5-VL-MoE uses replicated KV heads when TP is a multiple of KV heads."""
@@ -398,7 +459,8 @@ class ConfigAndDataTest(unittest.TestCase):
         cfg = TrainerConfig(algo="sft", ckpt="unused", dataset_path="unused")
 
         self.assertTrue(cfg.keep_rollout_state)
-        self.assertTrue(cfg.areno_config().runtime["keep_rollout_state"])
+        self.assertTrue(cfg.cuda_config().runtime["keep_rollout_state"])
+        self.assertTrue(cfg.mlx_config().keep_rollout_state)
 
     def test_train_cli_drop_rollout_state_inverts_runtime_flag(self):
         """The public CLI exposes the memory-saving inverse of keep_rollout_state."""
@@ -407,6 +469,7 @@ class ConfigAndDataTest(unittest.TestCase):
         cfg = train_cli._trainer_config_from_args(args)
 
         self.assertFalse(cfg.keep_rollout_state)
+        self.assertFalse(cfg.mlx_config().keep_rollout_state)
 
     def test_train_cli_attn_backend_reaches_backend_runtime_config(self):
         """The train CLI attention backend flag should pass through SDK config."""
@@ -415,7 +478,7 @@ class ConfigAndDataTest(unittest.TestCase):
         cfg = train_cli._trainer_config_from_args(args)
 
         self.assertEqual(cfg.attn_backend, "native")
-        self.assertEqual(cfg.areno_config().runtime["attn_backend"], "native")
+        self.assertEqual(cfg.cuda_config().runtime["attn_backend"], "native")
 
     def test_to_device_and_to_cpu_walk_nested_containers(self):
         """Device helpers should preserve nested container structure."""
@@ -710,6 +773,7 @@ class ConfigAndDataTest(unittest.TestCase):
 def _train_args(**overrides):
     defaults = dict(
         algo="sft",
+        backend="cuda",
         ckpt="unused",
         dataset_path="unused",
         dataset_loader_fn=None,

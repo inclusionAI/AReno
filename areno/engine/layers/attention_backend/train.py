@@ -27,6 +27,7 @@ import torch.nn.functional as F
 from torch import nn
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
+from areno.accel.attention import areno_varlen_causal_attention
 from areno.engine.layers.attention_backend.common import (
     AttnBackend,
     build_attention_call,
@@ -58,9 +59,10 @@ class TrainAttentionBackend(nn.Module, ABC):
 class FlashAttnTrainAttentionBackend(TrainAttentionBackend):
     """FlashAttention backend shared by padded and varlen packed training."""
 
-    def __init__(self, attn_backend: AttnBackend = "flash"):
+    def __init__(self, attn_backend: AttnBackend = "flash", *, native_train_matches_rollout: bool = False):
         super().__init__()
         self.attn_backend = attn_backend
+        self.native_train_matches_rollout = native_train_matches_rollout
 
     def forward(
         self,
@@ -73,7 +75,8 @@ class FlashAttnTrainAttentionBackend(TrainAttentionBackend):
     ) -> torch.Tensor:
         call = build_attention_call(q, k, v, window_size, softmax_scale)
         if use_native_attention(self.attn_backend):
-            out = _native_train(call.q, call.k, call.v, meta, call.window_size, call.softmax_scale)
+            native_fn = _native_train_areno if self.native_train_matches_rollout and q.is_cuda else _native_train
+            out = native_fn(call.q, call.k, call.v, meta, call.window_size, call.softmax_scale)
             return call.trim_value_dim(out)
         require_flash_attention_supported(call, mode="training attention")
         if meta is not None and meta.cu_seqlens is not None:
@@ -117,10 +120,15 @@ class FlashAttnTrainAttentionBackend(TrainAttentionBackend):
         return call.trim_value_dim(out)
 
 
-def build_train_attention_backend(attn_backend: AttnBackend = "flash") -> TrainAttentionBackend:
+def build_train_attention_backend(
+    attn_backend: AttnBackend = "flash", *, native_train_matches_rollout: bool = False
+) -> TrainAttentionBackend:
     """Build the default FlashAttention training backend."""
 
-    return FlashAttnTrainAttentionBackend(attn_backend=attn_backend)
+    return FlashAttnTrainAttentionBackend(
+        attn_backend=attn_backend,
+        native_train_matches_rollout=native_train_matches_rollout,
+    )
 
 
 @torch._dynamo.disable
@@ -171,6 +179,46 @@ def _native_train(
     k = expand_kv_heads(k, q.shape[-2])
     v = expand_kv_heads(v, q.shape[-2])
     return _sdpa_math_padded(q, k, v, window_size, softmax_scale)
+
+
+def _native_train_areno(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    meta: TrainMeta | None,
+    window_size: tuple[int, int],
+    softmax_scale: float | None,
+) -> torch.Tensor:
+    """Run native CUDA training with the same varlen kernel as rollout prefill."""
+
+    batch, seqlen = q.shape[:2]
+    if meta is not None and meta.cu_seqlens is not None:
+        cu_seqlens = meta.cu_seqlens.to(device=q.device, dtype=torch.int32).contiguous()
+    else:
+        cu_seqlens = torch.arange(
+            0,
+            (batch + 1) * seqlen,
+            seqlen,
+            device=q.device,
+            dtype=torch.int32,
+        )
+    out = areno_varlen_causal_attention(
+        q.reshape(-1, q.shape[-2], q.shape[-1]).contiguous(),
+        k.reshape(-1, k.shape[-2], k.shape[-1]).contiguous(),
+        v.reshape(-1, v.shape[-2], v.shape[-1]).contiguous(),
+        cu_seqlens,
+        window_left=_native_window_left(window_size),
+        softmax_scale=softmax_scale,
+    )
+    return out.view_as(q)
+
+
+def _native_window_left(window_size: tuple[int, int]) -> int | None:
+    if window_size == (-1, -1):
+        return None
+    if window_size[1] != 0:
+        raise ValueError("native attention backend only supports causal right window 0")
+    return int(window_size[0])
 
 
 @contextmanager

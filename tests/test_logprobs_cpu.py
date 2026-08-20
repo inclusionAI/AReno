@@ -122,6 +122,59 @@ class LogprobTest(unittest.TestCase):
         self.assertTrue(exp_widths)
         self.assertLessEqual(max(exp_widths), 2)
 
+    def test_training_selected_logprobs_chunks_vocab_exp(self):
+        """Training should recompute softmax without full-vocab FP32 probabilities."""
+        logits = torch.randn(2, 9000, requires_grad=True)
+        labels = torch.tensor([1, 8999])
+        expected = torch.log_softmax(logits, dim=-1).gather(-1, labels[:, None]).squeeze(-1)
+        exp_widths = []
+        real_exp = torch.exp
+
+        def tracked_exp(value):
+            exp_widths.append(value.shape[-1])
+            return real_exp(value)
+
+        with PatchedContext(logprob_ops, get_tp_context=single_tp_context):
+            with patch.object(logprob_ops.torch, "exp", side_effect=tracked_exp):
+                actual = logprob_ops.vocab_parallel_selected_logprobs(logits, labels)
+                actual.sum().backward()
+
+        self.assertTrue(torch.allclose(actual, expected, atol=1e-5))
+        self.assertTrue(exp_widths)
+        self.assertLessEqual(max(exp_widths), 8192)
+
+    def test_checkpointed_lm_head_logprobs_match_full_projection_gradients(self):
+        """Checkpointed packed scoring should preserve LM-head and hidden gradients."""
+        hidden = torch.randn(1, 6, 4, requires_grad=True)
+        head = torch.nn.Linear(4, 7, bias=False)
+        tokens = torch.tensor([[0, 1, 2, 3, 4, 5]])
+        cu_seqlens = torch.tensor([0, 3, 6])
+        ref_hidden = hidden.detach().clone().requires_grad_(True)
+        ref_head = torch.nn.Linear(4, 7, bias=False)
+        ref_head.load_state_dict(head.state_dict())
+        positions = torch.tensor([0, 1, 3, 4])
+        labels = torch.tensor([1, 2, 4, 5])
+        softcap = 2.0
+        ref_logits = ref_head(ref_hidden.reshape(-1, 4)[positions])
+        ref_logits = softcap * torch.tanh(ref_logits / softcap)
+        expected = torch.log_softmax(ref_logits, dim=-1).gather(-1, labels[:, None]).squeeze(-1)
+        expected.sum().backward()
+
+        with PatchedContext(logprob_ops, get_tp_context=single_tp_context):
+            actual = logprob_ops.packed_next_token_logprobs_from_hidden(
+                hidden,
+                tokens,
+                cu_seqlens,
+                head,
+                logit_softcap=softcap,
+                chunk_size=2,
+            )
+        actual.sum().backward()
+
+        self.assertTrue(torch.allclose(actual, expected, atol=1e-6))
+        self.assertTrue(torch.allclose(hidden.grad, ref_hidden.grad, atol=1e-6))
+        self.assertTrue(torch.allclose(head.weight.grad, ref_head.weight.grad, atol=1e-6))
+
 
 if __name__ == "__main__":
     unittest.main()

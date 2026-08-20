@@ -20,11 +20,12 @@ import queue
 import torch
 import torch.distributed as dist
 
+from areno.api.backend.cuda.roles import RoleManager, WorkerRole
 from areno.engine.config import EngineConfig
 from areno.engine.data import RolloutOutput
 from areno.engine.data.sampling import _truncate_generated
 from areno.engine.inference import InferCacheSpec, InferenceManager
-from areno.engine.modeling import build_model_on_device, build_optimizer, param_grad
+from areno.engine.modeling import build_model_on_device, build_optimizer, configure_multimodal_training, param_grad
 from areno.engine.parallel.context import get_tp_context
 from areno.engine.policy_sync import policy_plan_metadata, transfer_policy_weights
 from areno.engine.protocol import (
@@ -36,7 +37,6 @@ from areno.engine.protocol import (
     SaveCheckpointPayload,
     WorkerResult,
 )
-from areno.engine.roles import RoleManager, WorkerRole
 from areno.engine.runtime.common import pad_rollout_rows
 from areno.engine.runtime.decode_graph import DecodeGraph
 from areno.engine.runtime.rollout import _empty_rollout
@@ -62,6 +62,7 @@ class ArenoWorker:
         self.model = build_model_on_device(config, self.device)
         if config.model_path is not None and not config.dummy_load:
             load_model_weights(self.model, config.model, config.model_path)
+        configure_multimodal_training(self.model, config.optimizer, trainable=config.role == "train")
         if config.runtime.compile_model:
             self.model = torch.compile(self.model)
         opt = config.optimizer
@@ -72,6 +73,36 @@ class ArenoWorker:
         self.lr_decay_steps = opt.lr_decay_steps
         self.lr_warmup_steps = opt.lr_warmup_steps
         self.lr_decay_style = opt.lr_decay_style
+        self.multimodal_lr_schedules = {
+            "tower": {
+                "lr": opt.lr if opt.multimodal_tower_lr is None else opt.multimodal_tower_lr,
+                "min_lr": opt.min_lr if opt.multimodal_tower_min_lr is None else opt.multimodal_tower_min_lr,
+                "decay_steps": (
+                    opt.lr_decay_steps
+                    if opt.multimodal_tower_lr_decay_steps is None
+                    else opt.multimodal_tower_lr_decay_steps
+                ),
+                "decay_style": (
+                    opt.lr_decay_style
+                    if opt.multimodal_tower_lr_decay_style is None
+                    else opt.multimodal_tower_lr_decay_style
+                ),
+            },
+            "projector": {
+                "lr": opt.lr if opt.multimodal_projector_lr is None else opt.multimodal_projector_lr,
+                "min_lr": opt.min_lr if opt.multimodal_projector_min_lr is None else opt.multimodal_projector_min_lr,
+                "decay_steps": (
+                    opt.lr_decay_steps
+                    if opt.multimodal_projector_lr_decay_steps is None
+                    else opt.multimodal_projector_lr_decay_steps
+                ),
+                "decay_style": (
+                    opt.lr_decay_style
+                    if opt.multimodal_projector_lr_decay_style is None
+                    else opt.multimodal_projector_lr_decay_style
+                ),
+            },
+        }
         self._global_step = 0
         # Paged-KV state: refreshed when the rollout spec changes.
         self._infer_batch_size = 0  # max concurrent sequences supported
@@ -434,6 +465,15 @@ class ArenoWorker:
         if self.optimizer is not None:
             self.optimizer.onload_state(self.device)
         self._actor_on_device = True
+
+    def _prepare_actor_for_inference(self) -> None:
+        """Materialize actor inference weights without retaining source expert tiles."""
+
+        self._prepare_actor_onloaded()
+        self.model.onload_train_weights(self.device)
+        self.model.prepare_infer_weights()
+        self.model.offload_train_weights()
+        self._train_state_ready = False
 
     def _prepare_actor_offloaded(self) -> None:
         """Push the actor to CPU and drop all HBM state, including decode graphs.

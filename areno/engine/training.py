@@ -8,14 +8,17 @@ import torch
 import torch.distributed as dist
 
 from areno.engine.data import to_device
-from areno.engine.modeling import param_grad
+from areno.engine.modeling import param_grad, unwrap_model
 from areno.engine.parallel.context import get_tp_context
 from areno.engine.protocol import TrainPayload
-from areno.engine.runtime.logprobs import next_token_logprobs, packed_next_token_logprobs
+from areno.engine.runtime.logprobs import (
+    next_token_logprobs,
+    packed_next_token_logprobs,
+    packed_next_token_logprobs_from_hidden,
+)
 from areno.engine.runtime.train_step import (
     _clip_grad_norm,
-    _grad_norm,
-    _grad_zero_metrics,
+    _grad_norms,
     _merge_metrics,
     _pack_train_data,
     _train_meta,
@@ -65,7 +68,8 @@ class TrainingManager:
         ctx = get_tp_context()
         if not worker._train_state_ready:
             worker._prepare_for_train()
-        worker.model.train()
+        train_model = _actor_train_model(worker)
+        train_model.train()
         data_pack_obj = data_pack_shards[ctx.dp_rank]
         data_pack = _pack_train_data(data_pack_obj)
         pack_loss_fn = data_pack.get("_loss_fn")
@@ -85,9 +89,23 @@ class TrainingManager:
         }
         if data_pack.get("features") is not None:
             model_kwargs["features"] = data_pack["features"]
-        out = worker.model(**model_kwargs)
+        defer_lm_head = (
+            worker.config.model.model_type == "gemma4" and ctx.world_size == 1 and "train_cu_seqlens" in data_pack
+        )
+        if defer_lm_head:
+            model_kwargs["defer_lm_head"] = True
+        out = train_model(**model_kwargs)
         if "train_cu_seqlens" in data_pack:
-            logprobs = packed_next_token_logprobs(out.logits_shard, tokens, data_pack["train_cu_seqlens"])
+            if defer_lm_head:
+                logprobs = packed_next_token_logprobs_from_hidden(
+                    out.hidden_states,
+                    tokens,
+                    data_pack["train_cu_seqlens"],
+                    train_model.lm_head,
+                    logit_softcap=getattr(train_model, "final_logit_softcapping", None),
+                )
+            else:
+                logprobs = packed_next_token_logprobs(out.logits_shard, tokens, data_pack["train_cu_seqlens"])
         else:
             logprobs = next_token_logprobs(out.logits_shard, tokens)
         loss_out = worker.loss_fn(data_pack, logprobs)
@@ -102,17 +120,29 @@ class TrainingManager:
         self._accumulate_main_gradients()
         stepped = allow_step
         grad_norm = None
-        grad_zero_metrics = None
+        multimodal_grad_metrics = None
+        clipped_grad_norm = None
         if stepped:
             self._sync_data_parallel_gradients()
             self._sync_tensor_parallel_replicated_gradients()
             self._finalize_router_expert_bias()
-            grad_norm = _grad_norm(worker.model.parameters())
-            grad_zero_metrics = _grad_zero_metrics(worker.model.parameters())
+            multimodal_groups = tuple(
+                group
+                for group in worker.multimodal_lr_schedules
+                if any(getattr(param, "_areno_lr_group", None) == group for param in worker.model.parameters())
+            )
+            grad_norms = _grad_norms(worker.model.parameters(), multimodal_groups)
+            grad_norm = grad_norms.pop("global")
+            multimodal_grad_metrics = (
+                {f"{group}_grad_norm": grad_norms[group] for group in multimodal_groups} if multimodal_groups else None
+            )
+            clipped_grad_norm = grad_norm
             if worker.grad_clip_norm is not None:
                 _clip_grad_norm(worker.model.parameters(), grad_norm, worker.grad_clip_norm)
+                clipped_grad_norm = min(grad_norm, float(worker.grad_clip_norm))
             current_lr = self._lr_for_step(worker._global_step + 1)
             worker.optimizer.lr = current_lr
+            multimodal_lrs = self._set_multimodal_lrs(worker._global_step + 1)
             worker.optimizer.step()
             worker.optimizer.zero_grad(set_to_none=True)
             worker._global_step += 1
@@ -120,6 +150,7 @@ class TrainingManager:
                 torch.cuda.empty_cache()
         else:
             current_lr = worker.optimizer.lr
+            multimodal_lrs = self._current_multimodal_lrs()
         if ctx.is_rank0:
             if auto_tune_probe and worker.device.type == "cuda":
                 torch.cuda.synchronize(worker.device)
@@ -136,8 +167,10 @@ class TrainingManager:
                     metrics,
                     None,
                     {"lr": current_lr},
+                    multimodal_lrs,
                     {"grad_norm": grad_norm} if grad_norm is not None else None,
-                    grad_zero_metrics,
+                    multimodal_grad_metrics,
+                    {"clipped_grad_norm": clipped_grad_norm} if clipped_grad_norm is not None else None,
                 ),
             }
         return None
@@ -146,20 +179,60 @@ class TrainingManager:
         """Compute the actor learning rate for a given optimizer step."""
 
         worker = self.worker
-        if worker.lr_warmup_steps > 0 and step <= worker.lr_warmup_steps:
-            return worker.base_lr * step / worker.lr_warmup_steps
-        if worker.lr_decay_style == "constant" or worker.lr_decay_steps <= 0:
-            return worker.base_lr
-        decay_step = step - worker.lr_warmup_steps
-        decay_steps = max(worker.lr_decay_steps - worker.lr_warmup_steps, 1)
+        return self._scheduled_lr(
+            step,
+            base_lr=worker.base_lr,
+            min_lr=worker.min_lr,
+            decay_steps=worker.lr_decay_steps,
+            decay_style=worker.lr_decay_style,
+            warmup_steps=worker.lr_warmup_steps,
+        )
+
+    @staticmethod
+    def _scheduled_lr(
+        step: int, *, base_lr: float, min_lr: float, decay_steps: int, decay_style: str, warmup_steps: int = 0
+    ) -> float:
+        if warmup_steps > 0 and step <= warmup_steps:
+            return base_lr * step / warmup_steps
+        if decay_style == "constant" or decay_steps <= 0:
+            return base_lr
+        decay_step = step - warmup_steps
+        decay_steps = max(decay_steps - warmup_steps, 1)
         progress = min(max(decay_step / decay_steps, 0.0), 1.0)
-        if worker.lr_decay_style == "linear":
+        if decay_style == "linear":
             coeff = 1.0 - progress
-        elif worker.lr_decay_style == "cosine":
+        elif decay_style == "cosine":
             coeff = 0.5 * (1.0 + math.cos(math.pi * progress))
         else:
-            raise ValueError(f"unsupported lr_decay_style: {worker.lr_decay_style}")
-        return worker.min_lr + coeff * (worker.base_lr - worker.min_lr)
+            raise ValueError(f"unsupported lr_decay_style: {decay_style}")
+        return min_lr + coeff * (base_lr - min_lr)
+
+    def _set_multimodal_lrs(self, step: int) -> dict[str, float]:
+        values = {}
+        for group, schedule in self.worker.multimodal_lr_schedules.items():
+            lr = self._scheduled_lr(
+                step,
+                base_lr=schedule["lr"],
+                min_lr=schedule["min_lr"],
+                decay_steps=schedule["decay_steps"],
+                decay_style=schedule["decay_style"],
+            )
+            found = False
+            for param in self.worker.optimizer.model_params:
+                if getattr(param, "_areno_lr_group", None) == group:
+                    param._areno_lr = lr
+                    found = True
+            if found:
+                values[f"{group}_lr"] = lr
+        return values
+
+    def _current_multimodal_lrs(self) -> dict[str, float]:
+        values = {}
+        for param in self.worker.optimizer.model_params:
+            group = getattr(param, "_areno_lr_group", None)
+            if group is not None:
+                values[f"{group}_lr"] = float(getattr(param, "_areno_lr", self.worker.optimizer.lr))
+        return values
 
     def _sync_data_parallel_gradients(self) -> None:
         """Average actor gradients across data-parallel replicas."""
@@ -207,3 +280,11 @@ class TrainingManager:
 
         ctx = get_tp_context()
         self.worker.model.finalize_router_expert_bias(ctx.group, ctx.dp_group)
+
+
+def _actor_train_model(worker):
+    """Use eager Gemma4 backward while preserving compiled rollout forward."""
+
+    if worker.config.model.model_type == "gemma4":
+        return unwrap_model(worker.model)
+    return worker.model

@@ -19,11 +19,44 @@ import logging
 import os
 import time
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
 from areno.api.dashboard import record_dashboard_state
 from areno.api.tokenizer import configure_chat_template_enable_thinking
+
+
+def _dashboard_safe_value(value: Any, *, key: str = "", depth: int = 0) -> Any:
+    """Convert a dataset value into bounded JSON data for rollout samples."""
+
+    if value is None or isinstance(value, bool | int | float):
+        return value
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, str):
+        if "base64" in key.lower() and len(value) > 256:
+            return f"<base64 data: {len(value)} characters>"
+        return value if len(value) <= 20_000 else value[:20_000] + "... <truncated>"
+    if depth >= 8:
+        return f"<{type(value).__name__}>"
+    if isinstance(value, dict):
+        return {
+            str(item_key): _dashboard_safe_value(item_value, key=str(item_key), depth=depth + 1)
+            for item_key, item_value in value.items()
+        }
+    if isinstance(value, list | tuple):
+        items = list(value)
+        converted = [_dashboard_safe_value(item, key=key, depth=depth + 1) for item in items[:200]]
+        if len(items) > 200:
+            converted.append(f"<{len(items) - 200} more items>")
+        return converted
+    shape = getattr(value, "shape", None)
+    dtype = getattr(value, "dtype", None)
+    if shape is not None:
+        return {"type": type(value).__name__, "shape": list(shape), "dtype": str(dtype)}
+    rendered = str(value)
+    return rendered if len(rendered) <= 2_000 else rendered[:2_000] + "... <truncated>"
 
 
 class PolicyOnlyTrainer:
@@ -262,7 +295,7 @@ class PolicyOnlyTrainer:
                     len(samples),
                 )
             reward_records = [ctx.reward_record(sample) for sample in samples]
-            rewards = [float(self.reward_fn(record)) for record in reward_records]
+            rewards = self._score_reward_records(reward_records)
             rows = ctx._train_rows_from_samples(samples)
             tool_call_count = sum(len(record.tool_calls) for record in reward_records)
             tool_result_count = sum(len(record.tool_results) for record in reward_records)
@@ -412,7 +445,7 @@ class PolicyOnlyTrainer:
 
         if isinstance(trajectories, AgentTrajectory):
             return len(trajectories.invalid_items)
-        if isinstance(trajectories, (list, tuple)):
+        if isinstance(trajectories, list | tuple):
             return sum(
                 len(trajectory.invalid_items) for trajectory in trajectories if isinstance(trajectory, AgentTrajectory)
             )
@@ -509,6 +542,7 @@ class PolicyOnlyTrainer:
                         "prompt": item.prompt,
                         "decoded_prompt": tokenizer.decode(item.input_tokens),
                         "completion": tokenizer.decode(seq.resp_tokens),
+                        "source_record": _dashboard_safe_value(item.record),
                         "prompt_tokens": item.input_tokens[:64],
                         "response_tokens": seq.resp_tokens[:64],
                     }
@@ -529,6 +563,11 @@ class PolicyOnlyTrainer:
             loss_mask = agent_batch.loss_masks[logged]
             token_row = agent_batch.token_rows[logged]
             first_loss_idx = next((idx for idx, enabled in enumerate(loss_mask) if enabled), -1)
+            prompt_messages = (
+                record.messages[:-1]
+                if record.messages and record.messages[-1].get("role") == "assistant"
+                else record.messages
+            )
             self._emit_completion_sample(
                 {
                     "kind": "agentic",
@@ -537,10 +576,14 @@ class PolicyOnlyTrainer:
                     "prompt_idx": prompt_idx,
                     "sample_idx": sample_idx,
                     "prompt": record.prompt,
-                    "messages": record.messages,
+                    "prompt_messages": _dashboard_safe_value(prompt_messages),
+                    "messages": _dashboard_safe_value(record.messages),
+                    "source_record": _dashboard_safe_value(record.source_record),
+                    "completion": record.completion,
+                    "rendered_completion": record.rendered_completion,
                     "final_answer": record.final_answer,
-                    "tool_calls": record.tool_calls,
-                    "tool_results": record.tool_results[:4],
+                    "tool_calls": _dashboard_safe_value(record.tool_calls),
+                    "tool_results": _dashboard_safe_value(record.tool_results[:4]),
                     "loss_mask_true": sum(1 for enabled in loss_mask if enabled),
                     "loss_mask_total": len(loss_mask),
                     "first_loss_idx": first_loss_idx,
@@ -578,23 +621,20 @@ class PolicyOnlyTrainer:
         for item_idx, (item, result) in enumerate(zip(prompt_batch.items, rollout_results, strict=True)):
             prefix_len = len(item.input_tokens)
             completions = [tokenizer.decode(seq.resp_tokens) for seq in result.sequences]
-            rewards = [
-                float(
-                    self.reward_fn(
-                        make_reward_record(
-                            prompt=item.prompt,
-                            completion=completion,
-                            source_record=item.record,
-                            answer=item.solutions,
-                            tokens=item.input_tokens + seq.resp_tokens,
-                            logprobs=[0.0] * prefix_len + seq.resp_logprobs,
-                            loss_mask=[False] * prefix_len + [True] * len(seq.resp_tokens),
-                            metadata={"prompt_index": item_idx, "sample_index": sample_idx},
-                        )
-                    )
+            reward_records = [
+                make_reward_record(
+                    prompt=item.prompt,
+                    completion=completion,
+                    source_record=item.record,
+                    answer=item.solutions,
+                    tokens=item.input_tokens + seq.resp_tokens,
+                    logprobs=[0.0] * prefix_len + seq.resp_logprobs,
+                    loss_mask=[False] * prefix_len + [True] * len(seq.resp_tokens),
+                    metadata={"prompt_index": item_idx, "sample_index": sample_idx},
                 )
                 for sample_idx, (completion, seq) in enumerate(zip(completions, result.sequences, strict=True))
             ]
+            rewards = self._score_reward_records(reward_records)
             rewards_all += rewards
             # Group-relative advantage: A_i = (r_i - mean(r))/std(r); shared by
             # every response token of sample i.
@@ -617,6 +657,11 @@ class PolicyOnlyTrainer:
                     )
                 )
         return train_batch, rewards_all, rollout_logprobs
+
+    def _score_reward_records(self, records):
+        from areno.api.rewards import score_reward_records
+
+        return score_reward_records(self.reward_fn, records)
 
     def _maybe_save(self, epoch: int, step: int) -> None:
         # Checkpoint cadence is "save_interval" steps; `step + 1` mirrors the

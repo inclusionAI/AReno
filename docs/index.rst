@@ -15,6 +15,7 @@ AReno documentation
 
    Welcome <getting-started/welcome>
    getting-started/installation
+   Backends <getting-started/backends>
    getting-started/quickstart
 
 .. toctree::
@@ -26,6 +27,7 @@ AReno documentation
    Backend Topology <concepts/backend-topology>
    Chat Templates <concepts/chat-templates>
    Dataset Formats <concepts/dataset-formats>
+   Multimodal Inputs <concepts/multimodal-inputs>
    Reward Functions <concepts/reward-functions>
 
 .. toctree::

@@ -27,7 +27,7 @@ def should_checkpoint_layer(train_meta: TrainMeta | None, infer_meta: InferMeta 
         torch.is_grad_enabled()
         and infer_meta is None
         and train_meta is not None
-        and train_meta.activation_checkpointing
+        and getattr(train_meta, "activation_checkpointing", False)
     )
 
 
