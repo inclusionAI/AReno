@@ -7,6 +7,7 @@ import argparse
 import datetime as dt
 import json
 import math
+import mimetypes
 import os
 import re
 import shlex
@@ -338,14 +339,14 @@ class DashboardState:
         by_step: dict[int, dict[str, float]] = {}
         for accumulator_path in tensorboard_event_sources(path, job_pid(job)):
             try:
-                accumulator = EventAccumulator(str(accumulator_path), size_guidance={"scalars": 10000})
+                accumulator = EventAccumulator(str(accumulator_path), size_guidance={"scalars": 0})
                 accumulator.Reload()
                 tags = accumulator.Tags().get("scalars", [])
             except Exception:
                 continue
             for tag in tags:
                 try:
-                    events = accumulator.Scalars(tag)[-500:]
+                    events = accumulator.Scalars(tag)
                 except Exception:
                     continue
                 for event in events:
@@ -494,6 +495,30 @@ class DashboardState:
                 self._save_state()
             return job
 
+    def resolve_sample_media(self, job_id: str, reference: str) -> Path | None:
+        """Resolve a local media reference already exposed by a captured sample."""
+
+        job = self.get_job(job_id)
+        if job is None or reference not in sample_media_references(job.samples):
+            return None
+        parsed = urllib.parse.urlparse(reference)
+        if parsed.scheme == "file":
+            candidate = Path(urllib.request.url2pathname(parsed.path)).expanduser()
+        elif parsed.scheme:
+            return None
+        else:
+            candidate = Path(reference).expanduser()
+        roots = [Path(job.cwd).expanduser() if job.cwd else ROOT, ROOT]
+        candidates = [candidate] if candidate.is_absolute() else [root / candidate for root in roots]
+        for item in candidates:
+            try:
+                resolved = item.resolve()
+            except OSError:
+                continue
+            if resolved.is_file():
+                return resolved
+        return None
+
     def metric_summaries(self, job_id: str | None) -> list[dict[str, Any]]:
         job = self.get_job(job_id)
         if job is None:
@@ -515,7 +540,7 @@ class DashboardState:
                 current["latest_value"] = value
         return sorted(grouped.values(), key=lambda item: item["name"])
 
-    def metric_series(self, job_id: str | None, metric_name: str, *, limit: int = 500) -> list[dict[str, Any]]:
+    def metric_series(self, job_id: str | None, metric_name: str, *, limit: int | None = None) -> list[dict[str, Any]]:
         job = self.get_job(job_id)
         if job is None or not metric_name:
             return []
@@ -530,7 +555,9 @@ class DashboardState:
             if point.get("name") == metric_name and number_like(point.get("value"))
         ]
         points.sort(key=lambda point: int(point.get("step") or 0))
-        return points[-max(1, min(limit, 5000)) :]
+        if limit is None:
+            return points
+        return points[-max(1, limit) :]
 
     def scan_registered_jobs(self) -> None:
         registry_jobs = registered_job_items()
@@ -646,6 +673,14 @@ def build_train_command(config: dict[str, Any]) -> list[str]:
         "--lr-decay-style": config.get("lr_decay_style"),
         "--adam-beta1": config.get("adam_beta1"),
         "--adam-beta2": config.get("adam_beta2"),
+        "--mm-tower-lr": config.get("multimodal_tower_lr"),
+        "--mm-tower-min-lr": config.get("multimodal_tower_min_lr"),
+        "--mm-tower-lr-steps": config.get("multimodal_tower_lr_decay_steps"),
+        "--mm-tower-lr-style": config.get("multimodal_tower_lr_decay_style"),
+        "--mm-projector-lr": config.get("multimodal_projector_lr"),
+        "--mm-projector-min-lr": config.get("multimodal_projector_min_lr"),
+        "--mm-projector-lr-steps": config.get("multimodal_projector_lr_decay_steps"),
+        "--mm-projector-lr-style": config.get("multimodal_projector_lr_decay_style"),
         "--weight-decay": config.get("weight_decay"),
         "--grad-clip-norm": config.get("grad_clip_norm"),
         "--attn-backend": config.get("attn_backend"),
@@ -676,6 +711,8 @@ def build_train_command(config: dict[str, Any]) -> list[str]:
         "--tune-params": config.get("tune_params"),
         "--greedy": config.get("greedy"),
         "--adam-8bit": config.get("adam_8bit"),
+        "--unfreeze-mm-tower": config.get("unfreeze_multimodal_tower"),
+        "--unfreeze-mm-projector": config.get("unfreeze_multimodal_projector"),
         "--drop-rollout-state": config.get("drop_rollout_state"),
         "--eager-decode": config.get("eager_decode"),
         "--disable-thinking": config.get("disable_thinking"),
@@ -842,6 +879,64 @@ def rollout_sample_sources(path: Path, pid: int | None) -> list[Path]:
         return [file for file in candidates if file.exists()]
     legacy = path / "rollout_samples.jsonl"
     return [legacy] if legacy.exists() else sorted(path.glob("rollout_samples.*.jsonl"))
+
+
+def sample_media_references(samples: list[dict[str, Any]]) -> set[str]:
+    """Collect local media references from structured messages and source records."""
+
+    references: set[str] = set()
+    for sample in samples:
+        messages = sample.get("prompt_messages") or sample.get("messages") or []
+        if isinstance(messages, list):
+            for message in messages:
+                if not isinstance(message, dict) or not isinstance(message.get("content"), list):
+                    continue
+                for part in message["content"]:
+                    media_type, reference = _message_media_reference(part)
+                    if media_type and _is_local_media_reference(reference):
+                        references.add(reference)
+        _record_media_references(sample.get("source_record"), references)
+    return references
+
+
+def _message_media_reference(part: Any) -> tuple[str | None, str]:
+    if not isinstance(part, dict):
+        return None, ""
+    part_type = str(part.get("type") or "")
+    media_type = part_type.removesuffix("_url")
+    if media_type not in {"image", "audio", "video"}:
+        return None, ""
+    value = part.get(part_type)
+    if value is None:
+        value = part.get(media_type, part.get("url"))
+    if isinstance(value, dict):
+        value = value.get("url")
+    return media_type, str(value or "")
+
+
+def _record_media_references(value: Any, references: set[str], *, key: str = "") -> None:
+    if isinstance(value, dict):
+        for item_key, item_value in value.items():
+            _record_media_references(item_value, references, key=str(item_key))
+        return
+    if isinstance(value, list):
+        for item in value:
+            _record_media_references(item, references, key=key)
+        return
+    normalized_key = key.lower()
+    if not isinstance(value, str) or not any(kind in normalized_key for kind in ("image", "audio", "video")):
+        return
+    media_key = normalized_key.rstrip("s") in {"image", "audio", "video"}
+    if (media_key or any(marker in normalized_key for marker in ("path", "url", "file"))) and _is_local_media_reference(
+        value
+    ):
+        references.add(value)
+
+
+def _is_local_media_reference(reference: str) -> bool:
+    if not reference or reference.startswith(("data:", "blob:")):
+        return False
+    return urllib.parse.urlparse(reference).scheme in {"", "file"}
 
 
 def dashboard_state_source(path: Path, pid: int | None) -> Path | None:
@@ -2034,8 +2129,18 @@ class Handler(BaseHTTPRequestHandler):
                 job_id = path.split("/")[-2]
                 query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
                 metric_name = query.get("name", [""])[0]
-                limit = int(query.get("limit", ["500"])[0] or 500)
+                raw_limit = query.get("limit", [None])[0]
+                limit = int(raw_limit) if raw_limit else None
                 self.json({"metric": metric_name, "points": STATE.metric_series(job_id, metric_name, limit=limit)})
+            elif path.startswith("/api/jobs/") and path.endswith("/media"):
+                job_id = path.split("/")[-2]
+                query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+                reference = query.get("path", [""])[0]
+                target = STATE.resolve_sample_media(job_id, reference)
+                if target is None:
+                    self.error("sample media not found", HTTPStatus.NOT_FOUND)
+                else:
+                    self.media(target)
             elif path.startswith("/api/jobs/"):
                 job = STATE.get_job(path.split("/")[-1])
                 if not job:
@@ -2157,6 +2262,53 @@ class Handler(BaseHTTPRequestHandler):
 
     def error(self, message: str, status: HTTPStatus = HTTPStatus.BAD_REQUEST) -> None:
         self.json({"error": message}, status)
+
+    def media(self, target: Path) -> None:
+        size = target.stat().st_size
+        start = 0
+        end = max(size - 1, 0)
+        status = HTTPStatus.OK
+        range_header = self.headers.get("Range")
+        if range_header:
+            match = re.fullmatch(r"bytes=(\d*)-(\d*)", range_header.strip())
+            if not match:
+                self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
+                self.send_header("Content-Range", f"bytes */{size}")
+                self.end_headers()
+                return
+            first, last = match.groups()
+            if first:
+                start = int(first)
+                end = min(int(last), size - 1) if last else size - 1
+            elif last:
+                suffix = min(int(last), size)
+                start = size - suffix
+                end = size - 1
+            if start > end or start >= size:
+                self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
+                self.send_header("Content-Range", f"bytes */{size}")
+                self.end_headers()
+                return
+            status = HTTPStatus.PARTIAL_CONTENT
+        length = max(end - start + 1, 0)
+        content_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Content-Length", str(length))
+        if status == HTTPStatus.PARTIAL_CONTENT:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        self.send_header("Cache-Control", "private, max-age=60")
+        self.end_headers()
+        with target.open("rb") as handle:
+            handle.seek(start)
+            remaining = length
+            while remaining > 0:
+                chunk = handle.read(min(remaining, 1024 * 1024))
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                remaining -= len(chunk)
 
     def static(self, path: str) -> None:
         if "/assets/" in path:

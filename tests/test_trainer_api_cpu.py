@@ -18,6 +18,7 @@ def _encode_from_record_prompt(_tokenizer, prompt: str) -> list[int]:
     tokens_by_prompt = {
         "short": [1, 2],
         "long": [1, 2, 3, 4, 5],
+        "longer": [1, 2, 3, 4, 5, 6],
         "next": [3],
         "a": [10],
         "b": [11],
@@ -89,16 +90,18 @@ class TrainerPromptBatchTest(unittest.TestCase):
         self.assertEqual([batch.scanned for batch in batches], [2, 1])
         self.assertEqual([batch.skipped_long for batch in batches], [0, 0])
 
-    def test_load_prompt_batches_stops_when_only_long_prompts_remain(self):
-        """A tail containing only skipped rows should not emit an empty batch."""
+    def test_load_prompt_batches_errors_when_all_prompts_are_too_long(self):
+        """An all-overlong dataset should fail explicitly instead of training zero steps."""
         trainer = Trainer(world_size=1, model_path="unused")
         trainer._tokenizer = object()
-        dataset = [{"prompt": "long"}]
+        dataset = [{"prompt": "long"}, {"prompt": "longer"}]
 
         with PatchedContext(trainer_mod, encode_generation_prompt=_encode_from_record_prompt):
-            batches = list(trainer.load_prompt_batches(dataset, batch_size=1, max_prompt_tokens=3))
-
-        self.assertEqual(batches, [])
+            with self.assertRaisesRegex(
+                ValueError,
+                r"all 2 dataset prompts exceed --max-prompt-tokens=3 \(shortest=5, longest=6\)",
+            ):
+                list(trainer.load_prompt_batches(dataset, batch_size=1, max_prompt_tokens=3))
 
     def test_load_prompt_batches_requires_prompt_field(self):
         """Online RL datasets should expose canonical prompt rows."""

@@ -8,7 +8,7 @@ AReno documentation
    <div class="areno-hero">
      <div class="areno-hero-copy">
        <p class="areno-eyebrow">Local post-training and serving</p>
-       <h1>Train and serve local LLMs with one CUDA-native loop.</h1>
+       <h1>Train and serve local LLMs with one native loop.</h1>
        <p class="areno-lede">AReno keeps rollout, reward scoring, inference, optimizer steps, and checkpoint I/O in one compact engine for SFT, DPO, GSPO, GRPO, PPO, and agentic RL workflows.</p>
        <div class="areno-hero-actions" aria-label="Primary documentation links">
         <a class="areno-button areno-button-primary" href="installation.html">Get started</a>
@@ -25,22 +25,25 @@ Start
    <div class="areno-command-grid">
      <div class="areno-command-card">
        <p class="areno-card-kicker">Install</p>
-       <h3>Run one installer.</h3>
-      <pre><code>bash scripts/install.sh</code></pre>
-       <p>AReno prepares the environment, builds the CUDA runtime, verifies the result, and explains the next action if a step fails.</p>
+       <h3>Install the native runtime.</h3>
+      <pre><code># Linux / CUDA
+   bash scripts/install.sh
+   # Apple Silicon / MLX
+   python -m pip install -e .</code></pre>
+       <p>Use the CUDA installer on Linux or the native MLX pip path on Apple Silicon.</p>
      </div>
      <div class="areno-command-card">
        <p class="areno-card-kicker">Check</p>
        <h3>Verify the local runtime before training.</h3>
       <pre><code>areno check
    areno env --json</code></pre>
-       <p><code>areno check</code> reports common CUDA, PyTorch, extension, and platform setup issues with next steps.</p>
+       <p>Confirm CUDA readiness on Linux or the selected MLX backend on Apple Silicon before loading a checkpoint.</p>
      </div>
    </div>
 
-The installer selects the attention setup automatically: it prepares
-FlashAttention for supported GPUs and leaves older GPUs on AReno's native
-compatibility backend.
+AReno selects CUDA on Linux and MLX on Apple Silicon. The CUDA installer also
+selects the attention setup, preparing FlashAttention for supported GPUs and
+leaving older GPUs on AReno's native compatibility backend.
 
 Core workflows
 --------------
@@ -97,9 +100,10 @@ Core workflows
      </div>
    </div>
 
-Training and serving require a CUDA-capable NVIDIA GPU. CPU-only machines can
-run docs, packaging checks, and lightweight CPU tests, but cannot run the AReno
-training or serving engine.
+Training and serving require a CUDA-capable NVIDIA GPU on Linux or Apple
+Silicon with MLX. Other CPU-only machines can run docs, packaging checks, and
+lightweight tests, but cannot run an AReno training or serving backend. See
+:doc:`mlx <mlx>` for the Apple Silicon path.
 
 Agentic rollout
 ---------------
@@ -154,8 +158,8 @@ What AReno owns
 .. raw:: html
 
    <div class="areno-layer-list">
-     <div><span>Kernels</span><p>Fused CUDA paths in <code>areno_accel</code> for runtime hot paths.</p></div>
-     <div><span>Engine</span><p>Tensor-parallel workers, KV/cache layout, CUDA graph support, rollout state, scoring, optimizer steps, and checkpoint I/O.</p></div>
+     <div><span>Kernels</span><p>Fused <code>areno_accel</code> CUDA paths on Linux and native MLX execution on Apple Silicon.</p></div>
+     <div><span>Engine</span><p>Backend-native KV/cache layout, rollout state, scoring, optimizer steps, continuous batching, and checkpoint I/O.</p></div>
      <div><span>Algorithms</span><p>SFT, DPO, GSPO, GRPO, PPO, and agentic rollouts implemented inside the project rather than delegated to a separate trainer framework.</p></div>
-     <div><span>Checkpoints</span><p>Hugging Face-compatible load/save adapters for supported model families.</p></div>
+     <div><span>Checkpoints</span><p>Hugging Face-oriented CUDA checkpoints and native MLX checkpoints with tokenizer and processor assets.</p></div>
    </div>

@@ -9,6 +9,7 @@ from areno.dashboard.server import (
     Job,
     agent_language_instruction,
     repair_action_for_check,
+    sample_media_references,
     start_runtime_repair,
 )
 
@@ -73,6 +74,17 @@ def test_metric_updates_latest_job_perf_signal():
     assert job.step == 2
 
 
+def test_metric_series_returns_all_points_unless_limit_is_explicit():
+    job = Job(kind="train", name="full metric", command=[], config={}, metrics_dir=None)
+    state = DashboardState()
+    state.jobs = {job.id: job}
+    for step in range(6001):
+        state._add_metric(job, "train/loss", float(step), step)
+
+    assert len(state.metric_series(job.id, "train/loss")) == 6001
+    assert [point["step"] for point in state.metric_series(job.id, "train/loss", limit=2)] == [5999, 6000]
+
+
 def test_agent_language_instruction_follows_dashboard_language():
     assert "Simplified Chinese" in agent_language_instruction({"language": "zh"})
     assert "commands" in agent_language_instruction({"language": "zh"})
@@ -126,3 +138,39 @@ def test_runtime_repair_rejects_untrusted_command():
 
     with pytest.raises(ValueError, match="not allowed"):
         start_runtime_repair(action)
+
+
+def test_sample_media_references_cover_messages_and_source_record(tmp_path: Path):
+    video = tmp_path / "clip.mp4"
+    audio = tmp_path / "clip.wav"
+    image = tmp_path / "frame.png"
+    samples = [
+        {
+            "prompt_messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "video_url", "video_url": {"url": str(video)}},
+                        {"type": "audio", "url": str(audio)},
+                    ],
+                }
+            ],
+            "source_record": {"image_path": str(image)},
+        }
+    ]
+
+    assert sample_media_references(samples) == {str(video), str(audio), str(image)}
+
+
+def test_dashboard_only_resolves_media_referenced_by_sample(tmp_path: Path):
+    allowed = tmp_path / "clip.mp4"
+    blocked = tmp_path / "secret.mp4"
+    allowed.write_bytes(b"video")
+    blocked.write_bytes(b"secret")
+    job = Job(kind="train", name="media", command=[], config={}, metrics_dir=None, cwd=str(tmp_path))
+    job.samples = [{"source_record": {"video_path": str(allowed)}}]
+    state = DashboardState()
+
+    with patch.object(state, "get_job", return_value=job):
+        assert state.resolve_sample_media(job.id, str(allowed)) == allowed
+        assert state.resolve_sample_media(job.id, str(blocked)) is None

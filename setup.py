@@ -5,6 +5,7 @@ import platform
 import shutil
 import sys
 import warnings
+from importlib.util import find_spec
 
 from setuptools import setup
 
@@ -19,8 +20,10 @@ def _metadata_only_command() -> bool:
 def _cuda_extensions():
     if _metadata_only_command():
         return [], {}
-    mode = os.environ.get("ARENO_BUILD_EXT", "1").lower()
+    mode = os.environ.get("ARENO_BUILD_EXT", "auto").lower()
     if mode in {"0", "false", "no", "off"}:
+        return [], {}
+    if mode == "auto" and (platform.system() != "Linux" or find_spec("torch") is None):
         return [], {}
     _check_supported_build_platform()
     torch = _require_torch()

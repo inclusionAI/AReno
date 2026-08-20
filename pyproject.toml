@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "areno"
-version = "0.0.6"
+version = "0.0.7"
 description = "An easy-to-use, fast toolkit to scale up RL post-training on a single node."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -37,10 +37,13 @@ classifiers = [
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
-  "torch>=2.6",
-  "flash-linear-attention>=0.2",
+  "torch>=2.6; platform_system == 'Linux'",
+  "flash-linear-attention==0.5.2; platform_system == 'Linux'",
+  "mlx>=0.32.0; platform_system == 'Darwin' and platform_machine == 'arm64'",
+  "mlx-lm>=0.31.3; platform_system == 'Darwin' and platform_machine == 'arm64'",
+  "mlx-vlm>=0.6.14; platform_system == 'Darwin' and platform_machine == 'arm64'",
   "safetensors>=0.4",
-  "transformers>=4.56",
+  "transformers>=5.15,<6",
   "huggingface-hub>=0.25",
   "modelscope>=1.20",
   "addict>=2.4",
@@ -51,11 +54,16 @@ dependencies = [
   "prompt-toolkit>=3.0",
   "rich>=13",
   "tensorboard",
+  "tensorboardX>=2.6; platform_system == 'Darwin' and platform_machine == 'arm64'",
   "pydantic>=2",
   "fastapi>=0.110",
   "click>=8.1",
   "tqdm>=4.66",
   "uvicorn>=0.27",
+  "av>=12; platform_system == 'Linux'",
+  "librosa>=0.11; platform_system == 'Linux'",
+  "soundfile>=0.13; platform_system == 'Linux'",
+  "torchvision>=0.21; platform_system == 'Linux'",
 ]
 
 [project.optional-dependencies]

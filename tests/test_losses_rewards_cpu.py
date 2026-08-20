@@ -5,8 +5,7 @@ import unittest
 import torch
 
 from areno.api.advantages import _compute_gae_python
-from areno.api.loss_fns.grpo import grpo_loss_fn
-from areno.api.loss_fns.ppo import _kl_penalty, ppo_loss_fn
+from areno.api.backend.cuda.losses import _kl_penalty, grpo_loss_fn, ppo_loss_fn
 from areno.api.rewards import compute_group_advantages
 
 

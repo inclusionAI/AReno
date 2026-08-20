@@ -34,6 +34,7 @@ from areno.engine.parallel.context import get_tp_context
 _ASYNC_CPU_COPY_MAX_BYTES = 2 * 1024**3
 _PENDING_CPU_COPY_BUCKETS: list[tuple[torch.cuda.Stream, int, torch.Tensor]] = []
 _POLICY_PLAN_ACTIVE: ContextVar[bool] = ContextVar("areno_policy_plan_active", default=False)
+_PAGEABLE_CHECKPOINT_STAGING: ContextVar[bool] = ContextVar("areno_pageable_checkpoint_staging", default=False)
 
 try:
     from tqdm.auto import tqdm
@@ -845,6 +846,8 @@ def _tensor_to_cpu(tensor: torch.Tensor) -> torch.Tensor:
 
     if not tensor.is_cuda:
         return tensor.cpu()
+    if _PAGEABLE_CHECKPOINT_STAGING.get():
+        return tensor.detach().to(device="cpu", non_blocking=False)
     source = tensor.detach()
     output = torch.empty(tuple(tensor.shape), dtype=tensor.dtype, device="cpu", pin_memory=True)
     copy_bytes = tensor.numel() * tensor.element_size()
@@ -860,6 +863,17 @@ def _tensor_to_cpu(tensor: torch.Tensor) -> torch.Tensor:
     source.record_stream(stream)
     _PENDING_CPU_COPY_BUCKETS.append((stream, copy_bytes, source))
     return output
+
+
+@contextmanager
+def pageable_checkpoint_staging():
+    """Use bounded, pageable D2H buffers while incrementally writing a checkpoint."""
+
+    token = _PAGEABLE_CHECKPOINT_STAGING.set(True)
+    try:
+        yield
+    finally:
+        _PAGEABLE_CHECKPOINT_STAGING.reset(token)
 
 
 def _sync_pending_cpu_copies(max_pending_bytes: int = 0) -> None:
@@ -967,6 +981,93 @@ def write_hf_safetensors_checkpoint(
         )
         f.write("\n")
     return str(path)
+
+
+class IncrementalHFSafetensorsWriter:
+    """Write independently disposable safetensors groups and one HF index."""
+
+    def __init__(self, output_path: str | Path, source_path: str | Path | None):
+        self.ctx = get_tp_context()
+        self.path = Path(output_path)
+        self.local_total_size = 0
+        self.local_weight_map: dict[str, str] = {}
+        self.group_index = 0
+        if self.ctx.dp_rank != 0:
+            return
+        self.path.mkdir(parents=True, exist_ok=True)
+        if self.ctx.rank == 0 and source_path is not None:
+            _copy_hf_assets(Path(source_path), self.path)
+
+    def write(self, tensors: dict[str, torch.Tensor | None], label: str) -> None:
+        """Write one bounded tensor group and release its file cache afterwards."""
+
+        if self.ctx.dp_rank != 0:
+            return
+        _sync_pending_cpu_copies()
+        final_tensors = {key: tensor for key, tensor in tensors.items() if tensor is not None}
+        if not final_tensors:
+            return
+        self.group_index += 1
+        safe_label = "".join(char if char.isalnum() else "-" for char in label).strip("-") or "group"
+        filename = f"model-rank{self.ctx.rank:05d}-{self.group_index:05d}-{safe_label}.safetensors"
+        file_path = self.path / filename
+        save_file(final_tensors, file_path, metadata={"format": "pt"})
+        _flush_and_evict_file(file_path)
+        self.local_total_size += sum(tensor.numel() * tensor.element_size() for tensor in final_tensors.values())
+        self.local_weight_map.update({key: filename for key in final_tensors})
+
+    def finish(self) -> str | None:
+        """Collect rank-local manifests and emit the unified HF index."""
+
+        if self.ctx.dp_rank != 0:
+            return None
+        local_metadata = {"total_size": self.local_total_size, "weight_map": self.local_weight_map}
+        if self.ctx.world_size == 1:
+            all_metadata = [local_metadata]
+        else:
+            all_metadata = [None for _ in range(self.ctx.world_size)]
+            dist.all_gather_object(all_metadata, local_metadata, group=self.ctx.group)
+        if self.ctx.rank != 0:
+            return None
+        weight_map: dict[str, str] = {}
+        total_size = 0
+        for metadata in all_metadata:
+            total_size += int(metadata["total_size"])
+            weight_map.update(metadata["weight_map"])
+        index_path = self.path / "model.safetensors.index.json"
+        index_path.write_text(
+            json.dumps(
+                {
+                    "metadata": {
+                        "total_size": total_size,
+                        "areno_checkpoint_writer": "distributed_tp_incremental",
+                    },
+                    "weight_map": weight_map,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return str(self.path)
+
+
+def _flush_and_evict_file(path: Path) -> None:
+    """Flush a completed shard and ask Linux to discard its cached pages."""
+
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        try:
+            os.fsync(fd)
+            if hasattr(os, "posix_fadvise") and hasattr(os, "POSIX_FADV_DONTNEED"):
+                os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+        except OSError:
+            # Some network/overlay filesystems reject advisory cache control.
+            # The checkpoint is already complete, so this must remain best-effort.
+            pass
+    finally:
+        os.close(fd)
 
 
 def _copy_hf_assets(source: Path, target: Path) -> None:

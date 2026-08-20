@@ -204,7 +204,6 @@ class AdamW8bit(AdamWFP32Master):
         state.step += 1
         bias_correction1 = 1.0 - beta1**state.step
         bias_correction2 = 1.0 - beta2**state.step
-        step_size = self.lr / bias_correction1
         bias_correction2_sqrt = bias_correction2**0.5
 
         exp_avg = _dequantize_symmetric(state.exp_avg_q, state.exp_avg_scale)
@@ -215,8 +214,19 @@ class AdamW8bit(AdamWFP32Master):
             if grad is None:
                 continue
             flat_grad = grad.detach().reshape(-1).narrow(0, ref.param_start, ref.numel)
+            effective_lr = float(getattr(ref.model_param, "_areno_lr", self.lr))
+            step_size = effective_lr / bias_correction1
             self._step_param_ref_8bit(
-                bucket, ref, flat_grad, exp_avg, exp_avg_sq, beta1, beta2, step_size, bias_correction2_sqrt
+                bucket,
+                ref,
+                flat_grad,
+                exp_avg,
+                exp_avg_sq,
+                beta1,
+                beta2,
+                effective_lr,
+                step_size,
+                bias_correction2_sqrt,
             )
             updated_refs.append(ref)
             if ref.param_start + ref.numel == ref.model_param.numel():
@@ -238,6 +248,7 @@ class AdamW8bit(AdamWFP32Master):
         exp_avg_sq: torch.Tensor,
         beta1: float,
         beta2: float,
+        effective_lr: float,
         step_size: float,
         bias_correction2_sqrt: float,
     ) -> None:
@@ -250,7 +261,7 @@ class AdamW8bit(AdamWFP32Master):
         model_shard = model_chunk.narrow(0, ref.shard_start, ref.shard_numel)
         weight = model_shard.to(dtype=torch.float32)
         if self.weight_decay != 0.0:
-            weight.mul_(1.0 - self.lr * self.weight_decay)
+            weight.mul_(1.0 - effective_lr * self.weight_decay)
         moment = exp_avg.narrow(0, ref.shard_bucket_start, ref.shard_numel)
         variance = exp_avg_sq.narrow(0, ref.shard_bucket_start, ref.shard_numel)
         moment.mul_(beta1).add_(grad_shard, alpha=1.0 - beta1)
