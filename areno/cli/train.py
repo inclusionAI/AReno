@@ -1647,7 +1647,7 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     type=click.Choice(["none", "cpu", "disk"]),
     default="none",
     show_default=True,
-    help="Offload optimizer state between CUDA train calls. Disk mode lazily reloads one bucket at a time.",
+    help="Offload optimizer state between CUDA train calls. Disk mode lazily reloads bounded bucket groups.",
 )
 @click.option(
     "--optimizer-state-offload-dir",
