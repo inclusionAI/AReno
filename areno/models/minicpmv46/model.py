@@ -837,11 +837,12 @@ class MiniCPMV46ForCausalLM(nn.Module):
         if position_ids is None:
             position_ids = torch.arange(input_ids.shape[1], device=input_ids.device).unsqueeze(0).expand_as(input_ids)
         hidden_states = self.embed_tokens(input_ids)
-        hidden_states = self._apply_multimodal_features(
-            hidden_states,
-            input_ids,
-            self._project_pixel_values(features, input_ids.device, int(input_ids.shape[0])),
-        )
+        if features is not None:
+            hidden_states = self._apply_multimodal_features(
+                hidden_states,
+                input_ids,
+                self._project_pixel_values(features, input_ids.device, int(input_ids.shape[0])),
+            )
         use_sequence_parallel = bool(train_meta is not None and train_meta.sequence_parallel)
         if use_sequence_parallel:
             # Split sequence dim across TP ranks before entering the SP region.

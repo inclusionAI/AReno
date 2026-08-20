@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from types import MethodType
+
 import pytest
 import torch
+from torch import nn
 
 from areno.api.multimodal import encode_multimodal_prompt, image_token_counts_from_features
 from areno.engine.data.rollout_state import InferenceBatchState, _slice_prompt_image_features, payload_to_infer_meta
@@ -83,6 +86,29 @@ def test_minicpmv46_projects_target_sizes_to_visual_embeddings():
     projected = model._project_pixel_values(features, torch.device("cpu"), batch=1)
 
     assert projected["image_embeds"].shape == (4, 32)
+
+
+def test_minicpmv46_decode_skips_multimodal_helpers_without_features(monkeypatch):
+    pytest.importorskip("triton")
+    from areno.models.minicpmv46.model import MiniCPMV46ForCausalLM
+
+    model = MiniCPMV46ForCausalLM.__new__(MiniCPMV46ForCausalLM)
+    nn.Module.__init__(model)
+    model.embed_tokens = nn.Embedding(16, 4)
+    model.layers = nn.ModuleList()
+    model.norm = nn.Identity()
+    model.lm_head = nn.Identity()
+
+    def unexpected_helper(self, *args):
+        del self, args
+        raise AssertionError("multimodal helpers must be skipped for features=None")
+
+    monkeypatch.setattr(model, "_project_pixel_values", MethodType(unexpected_helper, model))
+    monkeypatch.setattr(model, "_apply_multimodal_features", MethodType(unexpected_helper, model))
+
+    output = model(torch.tensor([[1, 2]], dtype=torch.long), features=None)
+
+    assert output.logits_shard.shape == (1, 2, 4)
 
 
 def test_minicpmv46_vision_checkpoint_keys_cover_tower_and_merger():
