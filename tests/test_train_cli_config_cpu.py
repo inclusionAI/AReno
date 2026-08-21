@@ -951,6 +951,7 @@ def _options(**overrides):
         gamma=1.0,
         lam=0.95,
         critic_warmup_steps=20,
+        degenerate_policy="skip",
     )
     defaults.update(overrides)
     if defaults["algo"] == "sft" and "dataset_loader_fn" not in overrides:

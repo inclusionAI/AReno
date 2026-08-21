@@ -87,7 +87,7 @@ class TrainerConfig:
             raise ValueError("attn_backend must be one of: flash, native")
         if self.model_hub not in {"hf", "modelscope"}:
             raise ValueError("model_hub must be one of: hf, modelscope")
-self._validate_multimodal_optimizer_group(
+        self._validate_multimodal_optimizer_group(
             "tower",
             self.unfreeze_multimodal_tower,
             self.multimodal_tower_lr,
@@ -150,7 +150,7 @@ self._validate_multimodal_optimizer_group(
             "multimodal_projector_lr_decay_style": self.multimodal_projector_lr_decay_style,
         }
 
-def degenerate_filter_config(self):
+    def degenerate_filter_config(self):
         """Build the :class:`DegenerateFilterConfig` for this trainer config."""
 
         from areno.api.data import DegenerateFilterConfig, DegeneratePolicy

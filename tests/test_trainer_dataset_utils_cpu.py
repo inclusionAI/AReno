@@ -54,6 +54,8 @@ class FakeSFTBackend:
 def _sft_config(**overrides):
     """Return the minimal config shape SFTTrainer reads in CPU tests."""
 
+    from areno.api.data import DegenerateFilterConfig
+
     defaults = {
         "batch_size": 2,
         "epochs": 1,
@@ -65,7 +67,9 @@ def _sft_config(**overrides):
         "save_path": None,
     }
     defaults.update(overrides)
-    return SimpleNamespace(**defaults)
+    ns = SimpleNamespace(**defaults)
+    ns.degenerate_filter_config = lambda: DegenerateFilterConfig()
+    return ns
 
 
 class TrainerDatasetUtilityTest(unittest.TestCase):
