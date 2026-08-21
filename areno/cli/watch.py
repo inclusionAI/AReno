@@ -13,7 +13,6 @@ from pathlib import Path
 
 import click
 
-
 # =============================================================================
 # Configuration
 # =============================================================================
@@ -201,7 +200,7 @@ def read_status(status_file: Path) -> RunStatus | None:
 
     try:
         content = json.loads(status_file.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, IOError):
+    except (OSError, json.JSONDecodeError):
         return None
 
     return RunStatus(
@@ -328,14 +327,8 @@ def render_tty(status: RunStatus, eta: int | None, elapsed: float) -> str:
         bar = "█" * filled + "░" * (bar_width - filled)
         progress = f"Step: {status.step}/{status.total_steps}  {bar}  {percent * 100:.1f}%"
 
-    # Metrics
-    loss_str = f"Loss: {status.loss:.4f}" if status.loss is not None else "Loss: N/A"
-    reward_str = f"Reward: {status.reward_mean:.4f}" if status.reward_mean is not None else "Reward: N/A"
+    # Metrics (colorized variants are assembled inline below)
     throughput_str = f"Throughput: {status.throughput} tok/s" if status.throughput is not None else "Throughput: N/A"
-
-    # Stage and ETA
-    stage_str = f"Stage: {status.stage}"
-    eta_str = f"ETA: {format_eta(eta)}"
 
     # Time since last update
     time_ago = ""
@@ -357,7 +350,11 @@ def render_tty(status: RunStatus, eta: int | None, elapsed: float) -> str:
 
     # Colorize metrics
     loss_str_colored = f"{cyan('Loss:')} {status.loss:.4f}" if status.loss is not None else f"{cyan('Loss:')} N/A"
-    reward_str_colored = f"{magenta('Reward:')} {status.reward_mean:.4f}" if status.reward_mean is not None else f"{magenta('Reward:')} N/A"
+    reward_str_colored = (
+        f"{magenta('Reward:')} {status.reward_mean:.4f}"
+        if status.reward_mean is not None
+        else f"{magenta('Reward:')} N/A"
+    )
     metrics_line = f"║  {loss_str_colored}    {reward_str_colored}"
     lines.append(metrics_line + " " * (width - len(metrics_line) - 4) + "║")
 
@@ -549,7 +546,7 @@ def run_watch(config: WatchConfig) -> None:
     if not config.quiet:
         click.echo(f"Watching run: {run_id}")
         click.echo(f"Status file: {status_file}")
-        click.echo(f"Press Ctrl+C to stop watching (training will continue)...")
+        click.echo("Press Ctrl+C to stop watching (training will continue)...")
         click.echo("")
 
     # Main loop
@@ -799,7 +796,7 @@ def list_all_runs() -> list[dict]:
                 run_info["step"] = content.get("step")
                 run_info["stage"] = content.get("stage")
                 run_info["last_updated"] = content.get("updated_at")
-            except (json.JSONDecodeError, IOError):
+            except (OSError, json.JSONDecodeError):
                 pass
 
         # Get directory modification time if no status file

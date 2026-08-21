@@ -7,13 +7,11 @@ and documentation purposes. It mocks the status data flow that the actual
 """
 
 import json
-import time
 import signal
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional
-
 
 # =============================================================================
 # Data Model
@@ -23,9 +21,10 @@ from typing import Optional
 @dataclass
 class RunStatus:
     """Parsed status from dashboard state file.
-    
+
     Mirrors the RunStatus dataclass in areno/cli/watch.py for demo purposes.
     """
+
     pid: int
     stage: str
     status: str
@@ -48,10 +47,20 @@ class Colors:
     YELLOW = "\033[33m"
 
 
-def green(text): return f"{Colors.GREEN}{text}{Colors.RESET}"
-def cyan(text): return f"{Colors.CYAN}{text}{Colors.RESET}"
-def magenta(text): return f"{Colors.MAGENTA}{text}{Colors.RESET}"
-def bold(text): return f"{Colors.BOLD}{text}{Colors.RESET}"
+def green(text):
+    return f"{Colors.GREEN}{text}{Colors.RESET}"
+
+
+def cyan(text):
+    return f"{Colors.CYAN}{text}{Colors.RESET}"
+
+
+def magenta(text):
+    return f"{Colors.MAGENTA}{text}{Colors.RESET}"
+
+
+def bold(text):
+    return f"{Colors.BOLD}{text}{Colors.RESET}"
 
 
 # =============================================================================
@@ -77,7 +86,7 @@ def format_eta(seconds):
 
 def calculate_eta(current_step, total_steps, start_time, current_time):
     """Estimate remaining time based on current progress.
-    
+
     Uses simple linear projection: (remaining_steps / steps_per_second).
     Returns None if insufficient data for estimation.
     """
@@ -95,7 +104,7 @@ def calculate_eta(current_step, total_steps, start_time, current_time):
     return int(remaining_steps / rate)
 
 
-def render_tty(status: RunStatus, eta: Optional[int], elapsed: float) -> str:
+def render_tty(status: RunStatus, eta: int | None, elapsed: float) -> str:
     width = 60
     progress = ""
     if status.step is not None and status.total_steps is not None:
@@ -119,12 +128,16 @@ def render_tty(status: RunStatus, eta: Optional[int], elapsed: float) -> str:
     lines.append(f"║  {loss_str}    {reward_str}" + " " * (width - len(f"{loss_str}    {reward_str}") - 4) + "║")
     if throughput_str:
         lines.append(f"║  {throughput_str}" + " " * (width - len(throughput_str) - 4) + "║")
-    lines.append(f"║  {cyan('Stage:')} {status.stage}    {bold('ETA:')} {format_eta(eta)}" + " " * (width - len(f"Stage: {status.stage}    ETA: {format_eta(eta)}") - 4) + "║")
+    lines.append(
+        f"║  {cyan('Stage:')} {status.stage}    {bold('ETA:')} {format_eta(eta)}"
+        + " " * (width - len(f"Stage: {status.stage}    ETA: {format_eta(eta)}") - 4)
+        + "║"
+    )
     lines.append("╚" + "═" * (width - 2) + "╝")
     return "\n".join(lines)
 
 
-def render_json(status: RunStatus, eta: Optional[int]) -> str:
+def render_json(status: RunStatus, eta: int | None) -> str:
     data = {
         "step": status.step,
         "total_steps": status.total_steps,
@@ -138,7 +151,7 @@ def render_json(status: RunStatus, eta: Optional[int]) -> str:
     return json.dumps(data, ensure_ascii=False)
 
 
-def render_line(status: RunStatus, eta: Optional[int]) -> str:
+def render_line(status: RunStatus, eta: int | None) -> str:
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     parts = [f"[{timestamp}]"]
     if status.step:
@@ -176,10 +189,11 @@ mock_status = RunStatus(
 
 class GracefulExit:
     """Handles SIGINT/SIGTERM for graceful shutdown.
-    
+
     Unlike the actual watch command which reads from files,
     this demo version just mocks the signal handling behavior.
     """
+
     def __init__(self):
         self.exit_requested = False
 

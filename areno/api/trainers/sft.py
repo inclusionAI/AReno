@@ -65,7 +65,7 @@ class SFTTrainer:
             ):
                 if not train_batch:
                     continue
-                
+
                 train_start = time.perf_counter()
                 # The backend computes next-token logprobs for the supplied
                 # labels; `sft_loss_fn` selects only response/target positions
@@ -89,7 +89,9 @@ class SFTTrainer:
                         extra_train["total_steps"] = self.config.max_steps
 
                 self.logger.info("epoch=%d step=%d role=policy stage=train_end rows=%d", epoch, step, len(train_batch))
-                record_dashboard_state(self.areno, stage="train_end", epoch=epoch, step=step, role="policy", extra=extra_train)
+                record_dashboard_state(
+                    self.areno, stage="train_end", epoch=epoch, step=step, role="policy", extra=extra_train
+                )
                 self.logger.info("epoch=%d step=%d train_stats=%s", epoch, step, result)
                 self._maybe_save(epoch, step)
                 step += 1

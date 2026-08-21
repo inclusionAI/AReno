@@ -8,7 +8,6 @@ import json
 import os
 import re
 import signal
-import tempfile
 import time
 from pathlib import Path
 from unittest.mock import patch
@@ -16,24 +15,23 @@ from unittest.mock import patch
 import pytest
 
 from areno.cli.watch import (
-    DEFAULT_INTERVAL,
     ARENO_RUNTIME_DIR,
+    DEFAULT_INTERVAL,
     RUNS_DIR,
-    WatchConfig,
+    GracefulExit,
     RunStatus,
+    WatchConfig,
+    calculate_eta,
+    check_training_active,
     find_latest_run_id,
     find_status_file,
-    read_status,
-    is_process_running,
-    check_training_active,
-    calculate_eta,
     format_eta,
-    render_tty,
-    render_line,
+    is_process_running,
+    read_status,
     render_json,
-    GracefulExit,
+    render_line,
+    render_tty,
 )
-
 
 # =============================================================================
 # Fixtures
@@ -409,8 +407,7 @@ def test_render_tty_basic():
     result = render_tty(status, eta=60, elapsed=10)
 
     # Strip ANSI codes for basic content checking
-    import re
-    plain_result = re.sub(r'\x1b\[[0-9;]*m', '', result)
+    plain_result = re.sub(r"\x1b\[[0-9;]*m", "", result)
 
     assert "AReno Watch" in plain_result
     assert "Step: 150/1000" in plain_result
