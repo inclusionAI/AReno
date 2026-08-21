@@ -94,6 +94,14 @@ from areno.models.bailing.checkpoint import CHECKPOINT_SPEC
 from areno.models.base import CausalLMOutput, ModelAdapter
 
 
+def _recurrent_cache_slots(infer_meta: InferMeta) -> torch.Tensor:
+    if infer_meta.recurrent_slots is not None:
+        return infer_meta.recurrent_slots.long()
+    if infer_meta.block_table is None:
+        raise RuntimeError("Bailing linear attention inference requires recurrent_slots or block_table")
+    return infer_meta.block_table[:, 0].long()
+
+
 class BailingDenseMLP(nn.Module):
     """Plain SwiGLU MLP used for shared experts and for the first
     ``first_k_dense_replace`` decoder layers (before MoE kicks in)."""
@@ -952,8 +960,7 @@ class BailingLinearAttention(nn.Module):
             raise RuntimeError("linear attention inference requires block_table")
         if self.state_cache.numel() == 0:
             raise RuntimeError("linear attention inference requires recurrent state cache")
-        # Each request maps to one state-cache slot (first column of its block table).
-        slots = infer_meta.block_table[:, 0].long()
+        slots = _recurrent_cache_slots(infer_meta)
         if infer_meta.mode == "decode":
             return self._forward_decode(q, k, v, slots)
         if infer_meta.mode == "prefill":

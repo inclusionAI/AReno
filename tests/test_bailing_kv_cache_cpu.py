@@ -69,3 +69,31 @@ def test_bailing_v3_kda_attention_respects_explicit_num_slots(monkeypatch: pytes
 
     assert tuple(attention.state_cache.shape) == (7, 2, 4, 6)
     assert tuple(attention.conv_state.shape) == (7, 3, 8, 2)
+
+
+def test_bailing_linear_attention_uses_recurrent_slots_instead_of_kv_blocks() -> None:
+    pytest.importorskip("triton")
+    from areno.engine.runtime.metadata import InferMeta
+    from areno.models.bailing.model import _recurrent_cache_slots
+
+    meta = InferMeta(
+        mode="decode",
+        block_table=torch.tensor([[23], [17]]),
+        recurrent_slots=torch.tensor([1, 0]),
+    )
+
+    assert _recurrent_cache_slots(meta).tolist() == [1, 0]
+
+
+def test_bailing_v3_recurrent_attention_uses_recurrent_slots_instead_of_kv_blocks() -> None:
+    pytest.importorskip("triton")
+    from areno.engine.runtime.metadata import InferMeta
+    from areno.models.bailing_v3.model import _recurrent_cache_slots
+
+    meta = InferMeta(
+        mode="decode",
+        block_table=torch.tensor([[95], [38]]),
+        recurrent_slots=torch.tensor([0, 1]),
+    )
+
+    assert _recurrent_cache_slots(meta).tolist() == [0, 1]
