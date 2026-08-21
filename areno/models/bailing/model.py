@@ -1133,17 +1133,16 @@ class BailingMoeLinearV2ForCausalLM(nn.Module):
         ``kv_caches`` lists KV pairs *only* for softmax layers (in order of
         appearance); linear layers get a fresh zero state of shape
         ``[num_slots, heads, head_dim, head_dim]`` sized from the first KV
-        cache.
+        cache when ``num_slots`` is not provided explicitly.
         """
-        del num_slots
+        device = kv_caches[0][0].device if kv_caches else next(self.parameters()).device
+        num_slots = int(num_slots) if num_slots is not None else (int(kv_caches[0][0].shape[0]) if kv_caches else 1)
         softmax_idx = 0
         for layer in self.layers:
             if isinstance(layer.attention, BailingSoftmaxAttention):
                 layer.attention.set_kv_cache(*kv_caches[softmax_idx])
                 softmax_idx += 1
             elif isinstance(layer.attention, BailingLinearAttention):
-                num_slots = kv_caches[0][0].shape[0] if kv_caches else 1
-                device = kv_caches[0][0].device if kv_caches else next(self.parameters()).device
                 state = torch.zeros(
                     num_slots,
                     layer.attention.local_heads,
