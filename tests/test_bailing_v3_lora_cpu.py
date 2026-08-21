@@ -130,10 +130,7 @@ def test_bailing_v3_full_profile_attaches_native_slots(monkeypatch) -> None:
     registry = initialize_lora(model, LoraConfig(rank=4, alpha=4, target_modules=profile), seed=42)
 
     assert set(profile) <= set(BAILING_V3_TARGETS)
-    kda_names = {
-        f"layers.0.attention.{component}"
-        for component in ("q_proj", "k_proj", "v_proj", "f_proj", "g_proj")
-    }
+    kda_names = {f"layers.0.attention.{component}" for component in ("q_proj", "k_proj", "v_proj", "f_proj", "g_proj")}
     assert kda_names <= registry.slots.keys()
     assert len({id(registry.slots[name]) for name in kda_names}) == len(kda_names)
     assert "layers.0.attention.b_proj" not in registry.slots
