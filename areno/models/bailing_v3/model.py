@@ -1575,7 +1575,7 @@ class BailingMoeV3ForCausalLM(nn.Module):
     @torch.no_grad()
     def offload_train_weights(self) -> None:
         for layer in self.layers:
-            if isinstance(layer.mlp, BailingSparseMoeBlock) and not layer.mlp.experts.has_lora():
+            if isinstance(layer.mlp, BailingSparseMoeBlock):
                 layer.mlp.experts.offload_to_cpu()
 
     @torch.no_grad()
