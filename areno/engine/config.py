@@ -122,11 +122,11 @@ class RuntimeConfig:
         self.compile_model = False
 
     def resolve_eager_decode(self, *, model: ModelConfig, lora: LoraConfig | None) -> None:
-        """Use eager decode when routed-expert adapters need grouped execution."""
+        """Use eager decode when routed-expert adapters lack a fused rollout path."""
 
         if self.eager_decode or lora is None:
             return
-        if model.model_type in {"qwen3_moe", "bailing_moe_v3"} and {
+        if model.model_type == "qwen3_moe" and {
             "gate_proj",
             "up_proj",
             "down_proj",

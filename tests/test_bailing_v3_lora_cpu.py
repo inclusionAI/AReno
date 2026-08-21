@@ -7,7 +7,8 @@ import torch
 from torch import nn
 
 from areno.adapters.config import BAILING_V3_TARGETS, LoraConfig
-from areno.adapters.lora import initialize_lora
+from areno.adapters.lora import AdapterRegistry, RoutedExpertLoraSlot, _AdapterRuntimeState, initialize_lora
+from areno.engine.config import ModelConfig, RuntimeConfig
 from areno.engine.layers import linear
 from areno.engine.layers.linear import ColumnParallelLinear, RowParallelLinear
 
@@ -192,3 +193,65 @@ def test_bailing_v3_empty_route_keeps_expert_router_and_lora_gradients(monkeypat
     )
     assert all(parameter.grad is not None for parameter in parameters)
     assert all(torch.count_nonzero(parameter.grad) == 0 for parameter in parameters)
+
+
+def test_bailing_v3_expert_lora_merges_only_into_derived_infer_weights() -> None:
+    from areno.models.bailing_v3 import model as bailing_model
+
+    experts = bailing_model.BailingGroupedExperts.__new__(bailing_model.BailingGroupedExperts)
+    nn.Module.__init__(experts)
+    experts.local_num_experts = 2
+    experts.local_expert_start = 0
+    experts.linear_fc1 = SimpleNamespace(weight=nn.Parameter(torch.arange(48, dtype=torch.float32).view(2, 8, 3)))
+    experts.linear_fc2 = SimpleNamespace(weight=nn.Parameter(torch.arange(24, dtype=torch.float32).view(2, 3, 4)))
+    runtime_state = _AdapterRuntimeState()
+    slots = nn.ModuleDict()
+    for component, in_features, out_features, base_weight in (
+        ("gate_proj", 3, 4, experts.linear_fc1.weight),
+        ("up_proj", 3, 4, experts.linear_fc1.weight),
+        ("down_proj", 4, 3, experts.linear_fc2.weight),
+    ):
+        slot = RoutedExpertLoraSlot(
+            logical_name=f"layers.0.mlp.experts.{{expert}}.{component}",
+            base_weight=base_weight,
+            local_num_experts=2,
+            local_expert_start=0,
+            in_features=in_features,
+            out_features=out_features,
+            config=LoraConfig(rank=2, alpha=1, target_modules=(component,)),
+            seed=42,
+            runtime_state=runtime_state,
+        )
+        slot.lora_A.data.fill_(0.5)
+        slot.lora_B.data.fill_(0.25)
+        slots[component] = slot
+    experts.lora_slots = slots
+    base_fc1 = experts.linear_fc1.weight.detach().clone()
+    base_fc2 = experts.linear_fc2.weight.detach().clone()
+
+    gate, up, down = experts.inference_weights()
+
+    expected_delta = 0.125
+    torch.testing.assert_close(gate, base_fc1[:, :4] + expected_delta)
+    torch.testing.assert_close(up, base_fc1[:, 4:] + expected_delta)
+    torch.testing.assert_close(down, base_fc2 + expected_delta)
+    torch.testing.assert_close(experts.linear_fc1.weight, base_fc1)
+    torch.testing.assert_close(experts.linear_fc2.weight, base_fc2)
+    registry = AdapterRegistry(dict(slots.items()), LoraConfig(), runtime_state)
+    with registry.base_only():
+        base_gate, base_up, base_down = experts.inference_weights()
+    torch.testing.assert_close(base_gate, base_fc1[:, :4])
+    torch.testing.assert_close(base_up, base_fc1[:, 4:])
+    torch.testing.assert_close(base_down, base_fc2)
+
+
+def test_bailing_v3_routed_lora_keeps_cuda_graph_decode_enabled() -> None:
+    lora = LoraConfig(target_modules=("gate_proj", "up_proj", "down_proj"))
+    bailing_runtime = RuntimeConfig()
+    bailing_runtime.resolve_eager_decode(model=ModelConfig(model_type="bailing_moe_v3"), lora=lora)
+    assert not bailing_runtime.eager_decode
+
+    qwen_runtime = RuntimeConfig()
+    with pytest.warns(RuntimeWarning, match="routed-expert LoRA"):
+        qwen_runtime.resolve_eager_decode(model=ModelConfig(model_type="qwen3_moe"), lora=lora)
+    assert qwen_runtime.eager_decode

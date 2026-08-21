@@ -289,7 +289,7 @@ class BailingSparseMoeBlock(nn.Module):
         with sequence_parallel_region(False):
             topk_idx, topk_weight, _ = self.gate(hidden_states, num_padding_tokens)
             flat = expert_input.view(-1, hidden)
-            if self.training or self.experts.has_lora():
+            if self.training or not self._infer_weights_ready:
                 # Permute/unpermute path is autograd-friendly.
                 out = self.experts(flat, topk_idx, topk_weight).view(bsz, seqlen, hidden)
             else:
@@ -311,21 +311,15 @@ class BailingSparseMoeBlock(nn.Module):
         down projection. Buffers are reused across calls if the shape/device
         already match to avoid reallocating on every weight refresh.
         """
-        if self.experts.has_lora():
-            self.clear_infer_weights()
-            return
-        gate_weights, up_weights, down_weights = self.experts.expert_weights()
+        gate_weights, up_weights, down_weights = self.experts.inference_weights()
         self._infer_gate_weight = self._updated_infer_weight(
-            self._infer_gate_weight,
-            torch.stack(gate_weights, dim=0).to(dtype=self.config.dtype).contiguous(),
+            self._infer_gate_weight, gate_weights.to(dtype=self.config.dtype).contiguous()
         )
         self._infer_up_weight = self._updated_infer_weight(
-            self._infer_up_weight,
-            torch.stack(up_weights, dim=0).to(dtype=self.config.dtype).contiguous(),
+            self._infer_up_weight, up_weights.to(dtype=self.config.dtype).contiguous()
         )
         self._infer_down_weight = self._updated_infer_weight(
-            self._infer_down_weight,
-            torch.stack(down_weights, dim=0).to(dtype=self.config.dtype).contiguous(),
+            self._infer_down_weight, down_weights.to(dtype=self.config.dtype).contiguous()
         )
         # w1 = [gate || up] along the intermediate dim so SiLU(gate) * up can
         # be folded into a single fused kernel call.
@@ -519,6 +513,25 @@ class BailingGroupedExperts(nn.Module):
             up_weights.append(up)
             down_weights.append(_grouped_weight(self.linear_fc2, expert_id).detach())
         return gate_weights, up_weights, down_weights
+
+    @torch.no_grad()
+    def inference_weights(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Build derived fused-rollout weights without modifying the frozen base."""
+
+        gate_weights, up_weights, down_weights = self.expert_weights()
+        merged = {
+            "gate_proj": torch.stack(gate_weights, dim=0),
+            "up_proj": torch.stack(up_weights, dim=0),
+            "down_proj": torch.stack(down_weights, dim=0),
+        }
+        if self.has_active_lora():
+            for component, weight in merged.items():
+                if component not in self.lora_slots:
+                    continue
+                slot = self.lora_slots[component]
+                delta = torch.bmm(slot.lora_B, slot.lora_A)
+                weight.add_(delta.mul_(slot.scale))
+        return merged["gate_proj"], merged["up_proj"], merged["down_proj"]
 
     @torch.no_grad()
     def full_expert_weights(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
