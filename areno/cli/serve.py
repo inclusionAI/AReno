@@ -206,6 +206,7 @@ class _CudaServeRuntime:
         eager_decode: bool,
         attn_backend: str,
         lora: LoraConfig | None,
+        base_model_name_or_path: str | None,
     ) -> None:
         from areno.engine.config import RuntimeConfig
 
@@ -221,6 +222,7 @@ class _CudaServeRuntime:
             runtime_config=RuntimeConfig(eager_decode=bool(eager_decode), attn_backend=attn_backend),
             loss_fn=_serve_loss_fn,
             lora_config=lora,
+            base_model_name_or_path=base_model_name_or_path,
         )
         self.max_model_len = int(self._engine.config.model.max_position_embeddings)
 
@@ -310,6 +312,7 @@ def _create_serve_runtime(
     eager_decode: bool,
     attn_backend: str,
     lora: LoraConfig | None,
+    base_model_name_or_path: str | None,
 ) -> _CudaServeRuntime | _MlxServeRuntime:
     if backend_type == MLX:
         if lora is not None:
@@ -329,6 +332,7 @@ def _create_serve_runtime(
         eager_decode=eager_decode,
         attn_backend=attn_backend,
         lora=lora,
+        base_model_name_or_path=base_model_name_or_path,
     )
 
 
@@ -344,6 +348,7 @@ def create_app(
     attn_backend: Literal["flash", "native"] = "flash",
     chat_template_enable_thinking: bool | None = None,
     lora: LoraConfig | None = None,
+    base_model_name_or_path: str | None = None,
 ) -> FastAPI:
     """Construct the FastAPI app: load tokenizer/engine, install routes and lifecycle hooks."""
     if world_size < 1:
@@ -374,6 +379,7 @@ def create_app(
         eager_decode=eager_decode,
         attn_backend=attn_backend,
         lora=lora,
+        base_model_name_or_path=base_model_name_or_path,
     )
     if backend_type == MLX:
         tokenizer = engine.tokenizer
@@ -1024,6 +1030,7 @@ def serve_command(
     """Click entry point: build the app and hand it to uvicorn."""
     import uvicorn
 
+    base_model_name_or_path = model_path
     model_path = resolve_model_ref(model_path, model_hub=model_hub)
     lora = None
     if lora_rank is not None or lora_adapter_path is not None:
@@ -1064,6 +1071,7 @@ def serve_command(
         attn_backend=attn_backend,
         chat_template_enable_thinking=False if disable_thinking else None,
         lora=lora,
+        base_model_name_or_path=base_model_name_or_path,
     )
     uvicorn.run(app, host=host, port=port)
 

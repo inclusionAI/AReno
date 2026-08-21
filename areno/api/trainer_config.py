@@ -11,7 +11,7 @@ critic warmup window.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 from areno.adapters.config import LoraConfig
@@ -30,6 +30,7 @@ class TrainerConfig:
     ckpt: str
     dataset_path: str
     backend: str | None = None
+    base_model_name_or_path: str | None = field(default=None, kw_only=True)
     model_hub: str = "modelscope"
     dataset_loader_fn: str | None = None
     save_path: str | None = None
@@ -203,6 +204,7 @@ class TrainerConfig:
         from areno.api.config import CudaConfig
 
         return CudaConfig(
+            base_model_name_or_path=self.base_model_name_or_path,
             tp_size=self.tp_size,
             sequence_parallel=self.sequence_parallel,
             devices=self.train_devices,
@@ -248,6 +250,7 @@ class RolloutTrainerConfig(TrainerConfig):
         from areno.api.config import CudaConfig
 
         return CudaConfig(
+            base_model_name_or_path=self.base_model_name_or_path,
             tp_size=self.tp_size,
             sequence_parallel=self.sequence_parallel,
             devices=self.train_devices,

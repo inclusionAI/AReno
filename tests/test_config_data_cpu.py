@@ -33,6 +33,7 @@ from areno.engine.layers.attention_backend.common import (
 )
 from areno.engine.layers.attention_backend.infer import FlashAttnInferBackend, _native_prefill
 from areno.engine.layers.attention_backend.train import _native_train, _native_train_areno
+from areno.engine.runtime import train_step as train_step_runtime
 from areno.engine.runtime.metadata import InferMeta, TrainMeta
 from areno.engine.training import _actor_train_model
 
@@ -233,6 +234,28 @@ class ConfigAndDataTest(unittest.TestCase):
             EngineConfig(model=model, tp_size=1, devices=[0], lora=LoraConfig())
 
         EngineConfig(model=model, tp_size=1, devices=[0])
+
+    def test_replicated_output_ranges_have_one_grad_norm_owner(self):
+        """Replicated B ranges contribute once while true TP shards contribute everywhere."""
+
+        def owners(output_range):
+            selected = []
+            for rank in range(4):
+                parameter = torch.nn.Parameter(torch.ones(2, 2))
+                parameter.grad = torch.ones_like(parameter)
+                parameter.tensor_model_parallel = True
+                if output_range is not None:
+                    parameter.tp_replicated_output_range = output_range
+                ctx = SimpleNamespace(rank=rank, world_size=4)
+                with patch.object(train_step_runtime, "get_tp_context", return_value=ctx):
+                    if list(train_step_runtime._grads_for_norm((parameter,))):
+                        selected.append(rank)
+            return selected
+
+        self.assertEqual(owners((0, 4, 4)), [0])
+        self.assertEqual(owners((0, 2, 4)), [0])
+        self.assertEqual(owners((2, 4, 4)), [2])
+        self.assertEqual(owners(None), [0, 1, 2, 3])
 
     def test_reference_view_requires_lora_at_engine_boundary(self):
         """The actor base can be reused only when the actor owns a native adapter."""

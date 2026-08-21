@@ -213,6 +213,7 @@ class ArenoEngine:
         policy_sync_bucket_mb: int = 64,
         lora_config: LoraConfig | None = None,
         reference_mode: str = "independent",
+        base_model_name_or_path: str | None = None,
     ) -> ArenoEngine:
         """Build an engine by reading model config from a checkpoint path.
 
@@ -233,7 +234,7 @@ class ArenoEngine:
         cfg = EngineConfig(
             model=model_config,
             model_path=model_path,
-            base_model_name_or_path=model,
+            base_model_name_or_path=(model if base_model_name_or_path is None else base_model_name_or_path),
             train_loss_fn=loss_fn,
             tp_size=tp_size,
             sequence_parallel=sequence_parallel,

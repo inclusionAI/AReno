@@ -413,17 +413,29 @@ def _grads_for_norm(parameters):
     """Yield params whose grads should contribute to the global TP grad norm.
 
     TP-sharded params contribute on every rank (they are different slices).
-    Replicated params only contribute on rank 0 so the TP all-reduce does not
-    double-count them.
+    Replicated params contribute from one owner per unique output shard so the
+    TP all-reduce does not double-count replicas.
     """
 
     ctx = get_tp_context()
     for param in parameters:
         if _param_grad(param) is None:
             continue
-        is_tp_parallel = bool(getattr(param, "tensor_model_parallel", False))
-        if is_tp_parallel or ctx.rank == 0:
+        if _is_tp_norm_owner(param, ctx):
             yield param
+
+
+def _is_tp_norm_owner(param: torch.nn.Parameter, ctx) -> bool:
+    """Select one owner for replicated output ranges and every true TP shard."""
+
+    output_range = getattr(param, "tp_replicated_output_range", None)
+    if output_range is not None:
+        start, end, global_size = output_range
+        local_size = end - start
+        unique_shards = global_size // local_size
+        ranks_per_shard = ctx.world_size // unique_shards
+        return ctx.rank == (start // local_size) * ranks_per_shard
+    return bool(getattr(param, "tensor_model_parallel", False)) or ctx.rank == 0
 
 
 def _param_grad(param: torch.nn.Parameter) -> torch.Tensor | None:

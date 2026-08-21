@@ -170,6 +170,7 @@ class CudaBackend(Backend):
                 policy_sync_bucket_mb=cfg.policy_sync_bucket_mb,
                 lora_config=cfg.lora,
                 reference_mode=cfg.reference_mode,
+                base_model_name_or_path=cfg.base_model_name_or_path,
             )
             return
         self._policy_sync_bucket_bytes = cfg.policy_sync_bucket_mb * 1024 * 1024
@@ -225,6 +226,7 @@ class CudaBackend(Backend):
             role="train",
             lora_config=cfg.lora,
             reference_mode=cfg.reference_mode,
+            base_model_name_or_path=cfg.base_model_name_or_path,
             cluster_kwargs={"world_spec": world_spec, "partition": train_partition},
             **common,
         )
@@ -239,6 +241,7 @@ class CudaBackend(Backend):
             loss_fn=None,
             role="rollout",
             lora_config=cfg.lora,
+            base_model_name_or_path=cfg.base_model_name_or_path,
             policy_sync_bucket_mb=cfg.policy_sync_bucket_mb,
             start=False,
             cluster_kwargs={"world_spec": world_spec, "partition": rollout_partition},

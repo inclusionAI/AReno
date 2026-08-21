@@ -35,10 +35,12 @@ def test_create_app_passes_eager_decode_runtime_config(monkeypatch):
         decode_progress_interval_s=0.0,
         eager_decode=True,
         attn_backend="native",
+        base_model_name_or_path="org/base",
     )
 
     assert captured["runtime_config"].eager_decode is True
     assert captured["runtime_config"].attn_backend == "native"
+    assert captured["base_model_name_or_path"] == "org/base"
 
 
 def test_create_app_can_disable_chat_template_thinking(monkeypatch):

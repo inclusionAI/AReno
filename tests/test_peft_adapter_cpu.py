@@ -158,11 +158,12 @@ def test_export_preserves_model_reference_before_resolution(tmp_path, monkeypatc
 
     monkeypatch.setattr(engine_api.ArenoEngine, "__init__", fake_init)
     engine = engine_api.ArenoEngine.from_pretrained(
-        "example/base",
+        resolved_path,
         devices=[0],
         start=False,
         loss_fn=lambda _pack, logprobs: logprobs.sum(),
         runtime_config=RuntimeConfig(attn_backend="native", compile_model=False),
+        base_model_name_or_path="example/base",
     )
 
     assert engine.config.model_path == resolved_path

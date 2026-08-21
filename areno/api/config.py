@@ -21,9 +21,14 @@ class CudaConfig:
     The `optimizer` and `runtime` dicts are passed verbatim to the engine's
     `OptimizerConfig`/`RuntimeConfig` so any new tuning knob can be added
     without changing this file.
+
+    `base_model_name_or_path` keeps the caller-facing model reference for
+    portable PEFT metadata when `model_path` has already resolved to a local
+    cache path.
     """
 
     model_path: str | None = None
+    base_model_name_or_path: str | None = field(default=None, kw_only=True)
     tp_size: int = 1
     sequence_parallel: bool | None = None
     dp_size: int | None = None
