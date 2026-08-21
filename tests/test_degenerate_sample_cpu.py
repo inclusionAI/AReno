@@ -169,9 +169,7 @@ class ApplyDegeneratePolicyTest(unittest.TestCase):
 
     def test_policy_error_raises(self):
         """ERROR policy on a degenerate sample should raise ValueError."""
-        report = SampleQualityReport.degenerate(
-            DegenerateReason.WHITESPACE_ONLY, "pre_tokenization", "test detail"
-        )
+        report = SampleQualityReport.degenerate(DegenerateReason.WHITESPACE_ONLY, "pre_tokenization", "test detail")
         config = DegenerateFilterConfig(policy=DegeneratePolicy.ERROR)
         with self.assertRaisesRegex(ValueError, "degenerate sample detected.*test detail"):
             apply_degenerate_policy(report, config)

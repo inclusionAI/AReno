@@ -234,17 +234,23 @@ def _record_to_train_pair(
                 return None
 
         chosen_tokens, chosen_mask = response_to_tokens_and_mask(prompt_ids, str(chosen), tokenizer, eos_token_id)
-        rejected_tokens, rejected_mask = response_to_tokens_and_mask(
-            prompt_ids, str(rejected), tokenizer, eos_token_id
-        )
+        rejected_tokens, rejected_mask = response_to_tokens_and_mask(prompt_ids, str(rejected), tokenizer, eos_token_id)
 
     chosen_seq = _make_sequence(
-        chosen_tokens, chosen_mask, eos_token_id, max_seq_len,
-        degenerate_config=degenerate_config, degenerate_reasons=degenerate_reasons,
+        chosen_tokens,
+        chosen_mask,
+        eos_token_id,
+        max_seq_len,
+        degenerate_config=degenerate_config,
+        degenerate_reasons=degenerate_reasons,
     )
     rejected_seq = _make_sequence(
-        rejected_tokens, rejected_mask, eos_token_id, max_seq_len,
-        degenerate_config=degenerate_config, degenerate_reasons=degenerate_reasons,
+        rejected_tokens,
+        rejected_mask,
+        eos_token_id,
+        max_seq_len,
+        degenerate_config=degenerate_config,
+        degenerate_reasons=degenerate_reasons,
     )
     if chosen_seq is None or rejected_seq is None:
         return None

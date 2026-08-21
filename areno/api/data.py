@@ -16,7 +16,6 @@ import enum
 from dataclasses import dataclass, field
 from typing import Any
 
-
 # ---------------------------------------------------------------------------
 # Degenerate sample detection
 # ---------------------------------------------------------------------------
@@ -65,13 +64,13 @@ class SampleQualityReport:
     detail: str
 
     @classmethod
-    def ok(cls) -> "SampleQualityReport":
+    def ok(cls) -> SampleQualityReport:
         """Construct a non-degenerate report."""
 
         return cls(is_degenerate=False, reason=None, stage="", detail="")
 
     @classmethod
-    def degenerate(cls, reason: DegenerateReason, stage: str, detail: str) -> "SampleQualityReport":
+    def degenerate(cls, reason: DegenerateReason, stage: str, detail: str) -> SampleQualityReport:
         """Construct a degenerate report."""
 
         return cls(is_degenerate=True, reason=reason, stage=stage, detail=detail)
@@ -86,9 +85,7 @@ def check_prompt_text(prompt: str) -> SampleQualityReport:
     """Check a raw prompt string before tokenization."""
 
     if not prompt:
-        return SampleQualityReport.degenerate(
-            DegenerateReason.EMPTY, "pre_tokenization", "prompt is an empty string"
-        )
+        return SampleQualityReport.degenerate(DegenerateReason.EMPTY, "pre_tokenization", "prompt is an empty string")
     if not prompt.strip():
         return SampleQualityReport.degenerate(
             DegenerateReason.WHITESPACE_ONLY, "pre_tokenization", "prompt contains only whitespace"
@@ -100,9 +97,7 @@ def check_response_text(response: str) -> SampleQualityReport:
     """Check a raw response string before tokenization."""
 
     if not response:
-        return SampleQualityReport.degenerate(
-            DegenerateReason.EMPTY, "pre_tokenization", "response is an empty string"
-        )
+        return SampleQualityReport.degenerate(DegenerateReason.EMPTY, "pre_tokenization", "response is an empty string")
     if not response.strip():
         return SampleQualityReport.degenerate(
             DegenerateReason.WHITESPACE_ONLY, "pre_tokenization", "response contains only whitespace"
