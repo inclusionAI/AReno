@@ -943,6 +943,17 @@ class ConfigAndDataTest(unittest.TestCase):
         self.assertEqual(sft_cfg.algo, "sft")
         self.assertEqual(dpo_cfg.algo, "dpo")
 
+    def test_train_cli_accepts_stable_base_reference_for_adapter_metadata(self):
+        config = train_cli._trainer_config_from_options(
+            **_train_options(
+                ckpt="/pcache/local/base",
+                base_model_name_or_path="aistudio://project/base",
+            )
+        )
+
+        self.assertEqual(config.base_model_name_or_path, "aistudio://project/base")
+        self.assertEqual(config.areno_config().base_model_name_or_path, "aistudio://project/base")
+
     def test_train_cli_preflight_rejects_agent_file_without_callable_run_agent(self):
         """Agent hooks should fail before rollout/backend-heavy work."""
         with tempfile.TemporaryDirectory() as tmp:

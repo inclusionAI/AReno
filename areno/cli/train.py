@@ -82,6 +82,7 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         (
             "algo",
             "ckpt",
+            "base_model_name_or_path",
             "dataset_path",
             "model_hub",
             "dataset_loader_fn",
@@ -232,6 +233,7 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
     args.max_steps = getattr(args, "max_steps", None)
     args.score_micro_bs = getattr(args, "score_micro_bs", 8)
     args.model_hub = getattr(args, "model_hub", "modelscope")
+    args.base_model_name_or_path = getattr(args, "base_model_name_or_path", None)
     args.train_devices = getattr(args, "train_devices", None)
     args.sequence_parallel = getattr(args, "sequence_parallel", None)
     args.rollout_tp_size = getattr(args, "rollout_tp_size", None)
@@ -828,6 +830,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
     args.backend = getattr(args, "backend", None)
     args.score_micro_bs = getattr(args, "score_micro_bs", 8)
     args.model_hub = getattr(args, "model_hub", "modelscope")
+    args.base_model_name_or_path = getattr(args, "base_model_name_or_path", None)
     args.train_devices = getattr(args, "train_devices", None)
     args.sequence_parallel = getattr(args, "sequence_parallel", None)
     args.rollout_tp_size = getattr(args, "rollout_tp_size", None)
@@ -853,6 +856,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             ckpt=args.ckpt,
             dataset_path=args.dataset_path,
             backend=args.backend,
+            base_model_name_or_path=args.base_model_name_or_path,
             model_hub=args.model_hub,
             dataset_loader_fn=args.dataset_loader_fn,
             save_path=args.save_path,
@@ -912,6 +916,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             ckpt=args.ckpt,
             dataset_path=args.dataset_path,
             backend=args.backend,
+            base_model_name_or_path=args.base_model_name_or_path,
             model_hub=args.model_hub,
             dataset_loader_fn=args.dataset_loader_fn,
             save_path=args.save_path,
@@ -969,6 +974,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             ckpt=args.ckpt,
             dataset_path=args.dataset_path,
             backend=args.backend,
+            base_model_name_or_path=args.base_model_name_or_path,
             model_hub=args.model_hub,
             dataset_loader_fn=args.dataset_loader_fn,
             reward_fn_path=args.reward_fn_path,
@@ -1037,6 +1043,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
         ckpt=args.ckpt,
         dataset_path=args.dataset_path,
         backend=args.backend,
+        base_model_name_or_path=args.base_model_name_or_path,
         model_hub=args.model_hub,
         dataset_loader_fn=args.dataset_loader_fn,
         reward_fn_path=args.reward_fn_path,
@@ -1498,6 +1505,11 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
 )
 @click.option("--algo", type=str, default="gspo", show_default=True, help="Training algorithm registered in areno.api.")
 @click.option("--ckpt", default=None, help="Actor model/tokenizer checkpoint path or remote model repo ID.")
+@click.option(
+    "--base-model-name-or-path",
+    default=None,
+    help="Stable base model reference written to PEFT adapter metadata; defaults to the original --ckpt value.",
+)
 @click.option(
     "--dataset-path", default=None, help="Training dataset path, HF save_to_disk directory, or remote dataset ref."
 )

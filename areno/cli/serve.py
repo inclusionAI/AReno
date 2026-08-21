@@ -963,6 +963,11 @@ def _normalize_stop(stop: str | list[str] | None) -> list[str]:
     show_default=True,
     help="Remote hub for non-local model refs. Use 'modelscope' for ModelScope or 'hf' for Hugging Face.",
 )
+@click.option(
+    "--base-model-name-or-path",
+    default=None,
+    help="Stable base model reference associated with the PEFT adapter; defaults to the original model path.",
+)
 @click.option("--tp-size", type=int, default=1, show_default=True, help="Tensor parallel size.")
 @click.option("--world-size", type=int, default=1, show_default=True, help="Total number of local worker ranks.")
 @click.option("--host", default="0.0.0.0", show_default=True, help="HTTP bind host.")
@@ -1011,6 +1016,7 @@ def _normalize_stop(stop: str | list[str] | None) -> list[str]:
 def serve_command(
     model_path: str,
     model_hub: Literal["hf", "modelscope"],
+    base_model_name_or_path: str | None,
     tp_size: int,
     world_size: int,
     host: str,
@@ -1030,7 +1036,8 @@ def serve_command(
     """Click entry point: build the app and hand it to uvicorn."""
     import uvicorn
 
-    base_model_name_or_path = model_path
+    if base_model_name_or_path is None:
+        base_model_name_or_path = model_path
     model_path = resolve_model_ref(model_path, model_hub=model_hub)
     lora = None
     if lora_rank is not None or lora_adapter_path is not None:
