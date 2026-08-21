@@ -12,9 +12,13 @@ def rollout_options(ctx: Context, sampling_params: SamplingParams):
 
     eos_token_ids = () if sampling_params.ignore_eos else ctx.eos_token_ids
     stop_token_ids = tuple(sampling_params.stop_token_ids or ())
+    # Protocol markers are often registered as special tokens.  Gemma 4 uses
+    # <|tool_call> / <tool_call|> and Qwen-family templates may likewise rely
+    # on special tokens in generated structured output, so suppressing every
+    # tokenizer special id makes valid tool calls impossible.  EOS is handled
+    # separately by the inference manager; only tokens that are never valid
+    # generated content belong in this explicit mask.
     suppress_candidates = set(explicit_suppress_token_ids(ctx.tokenizer))
-    if not sampling_params.ignore_eos:
-        suppress_candidates.update(int(token_id) for token_id in getattr(ctx.tokenizer, "all_special_ids", ()) or ())
     suppress_token_ids = tuple(
         sorted(token_id for token_id in suppress_candidates if token_id not in {*eos_token_ids, *stop_token_ids})
     )
@@ -37,7 +41,7 @@ def rollout_options(ctx: Context, sampling_params: SamplingParams):
             top_k=max(0, sampling_params.top_k),
             stop_token_ids=stop_token_ids,
             suppress_token_ids=suppress_token_ids,
-            suppress_special_tokens=not sampling_params.ignore_eos,
+            suppress_special_tokens=False,
         ),
     }
 
