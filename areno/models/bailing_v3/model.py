@@ -1446,23 +1446,25 @@ class BailingMoeV3ForCausalLM(nn.Module):
                 logits_input = hidden_states.float()
             return CausalLMOutput(logits_shard=self.lm_head(logits_input), hidden_states=hidden_states)
 
-    def set_kv_caches(self, kv_caches: list[tuple[torch.Tensor, torch.Tensor]]) -> None:
+    def set_kv_caches(
+        self, kv_caches: list[tuple[torch.Tensor, torch.Tensor]], *, num_slots: int | None = None
+    ) -> None:
         """Bind per-softmax-layer KV caches and pre-allocate per-linear-layer
         recurrent state cache.
 
         ``kv_caches`` lists KV pairs *only* for softmax layers (in order of
         appearance); linear layers get a fresh zero state of shape
         ``[num_slots, heads, head_dim, head_dim]`` sized from the first KV
-        cache.
+        cache when ``num_slots`` is not provided explicitly.
         """
+        device = kv_caches[0][0].device if kv_caches else next(self.parameters()).device
+        num_slots = int(num_slots) if num_slots is not None else (int(kv_caches[0][0].shape[0]) if kv_caches else 1)
         softmax_idx = 0
         for layer in self.layers:
             if isinstance(layer.attention, BailingSoftmaxAttention):
                 layer.attention.set_kv_cache(*kv_caches[softmax_idx])
                 softmax_idx += 1
             elif isinstance(layer.attention, BailingKDAAttention):
-                num_slots = kv_caches[0][0].shape[0] if kv_caches else 1
-                device = kv_caches[0][0].device if kv_caches else next(self.parameters()).device
                 state = torch.zeros(
                     num_slots,
                     layer.attention.local_heads,
