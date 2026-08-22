@@ -44,6 +44,7 @@ import torch
 import torch.distributed as dist
 from fla.ops.lightning_attn import chunk_lightning_attn
 from torch import nn
+from torch.nn import functional as F
 
 from areno.accel import (
     areno_grouped_linear,
@@ -1215,6 +1216,55 @@ class BailingKDAAttention(nn.Module):
         self.eps = config.rms_norm_eps
         self.state_cache = torch.tensor([])
         self.conv_cache = torch.tensor([])
+        self.register_buffer("_infer_lora_A", torch.empty(0), persistent=False)
+        self._infer_lora_rank = 0
+
+    @torch.no_grad()
+    def prepare_lora_infer_weights(self) -> None:
+        """Pack the five KDA LoRA A projections for single-adapter inference."""
+
+        projections = (self.q_proj, self.k_proj, self.v_proj, self.f_proj, self.g_proj)
+        slots = tuple(projection.lora_slot for projection in projections)
+        if any(slot is None or not slot.enabled for slot in slots):
+            self._infer_lora_A = self._infer_lora_A.new_empty(0)
+            self._infer_lora_rank = 0
+            return
+        value = torch.cat(tuple(slot.lora_A for slot in slots), dim=0).contiguous()
+        if (
+            self._infer_lora_A.shape == value.shape
+            and self._infer_lora_A.device == value.device
+            and self._infer_lora_A.dtype == value.dtype
+        ):
+            self._infer_lora_A.copy_(value)
+        else:
+            self._infer_lora_A = value
+        self._infer_lora_rank = slots[0].rank
+
+    @torch.no_grad()
+    def clear_lora_infer_weights(self) -> None:
+        self._infer_lora_A = self._infer_lora_A.new_empty(0)
+        self._infer_lora_rank = 0
+
+    def _project_qkvfg(
+        self, hidden_states: torch.Tensor, infer_meta: InferMeta | None
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        projections = (self.q_proj, self.k_proj, self.v_proj, self.f_proj, self.g_proj)
+        slots = tuple(projection.lora_slot for projection in projections)
+        use_packed_lora = (
+            infer_meta is not None
+            and self._infer_lora_A.numel() > 0
+            and all(slot is not None and slot.enabled for slot in slots)
+        )
+        if not use_packed_lora:
+            return tuple(projection(hidden_states) for projection in projections)
+
+        packed_hidden = F.linear(hidden_states, self._infer_lora_A)
+        lora_inputs = packed_hidden.split(self._infer_lora_rank, dim=-1)
+        return tuple(
+            areno_linear(hidden_states, projection.weight, projection.bias)
+            + F.linear(lora_input, slot.lora_B) * slot.scale
+            for projection, slot, lora_input in zip(projections, slots, lora_inputs, strict=True)
+        )
 
     @torch._dynamo.disable
     def forward(
@@ -1226,15 +1276,16 @@ class BailingKDAAttention(nn.Module):
     ) -> torch.Tensor:
         del position_ids
         hidden_states = hidden_states.to(dtype=self.q_proj.weight.dtype)
-        q = self._causal_conv(self.q_proj(hidden_states), self.q_conv1d_weight, 0, train_meta, infer_meta)
-        k = self._causal_conv(self.k_proj(hidden_states), self.k_conv1d_weight, 1, train_meta, infer_meta)
-        v = self._causal_conv(self.v_proj(hidden_states), self.v_conv1d_weight, 2, train_meta, infer_meta)
+        q, k, v, f, gate = self._project_qkvfg(hidden_states, infer_meta)
         batch, seqlen = q.shape[:2]
+        q = self._causal_conv(q, self.q_conv1d_weight, 0, train_meta, infer_meta)
+        k = self._causal_conv(k, self.k_conv1d_weight, 1, train_meta, infer_meta)
+        v = self._causal_conv(v, self.v_conv1d_weight, 2, train_meta, infer_meta)
         q = q.to(dtype=hidden_states.dtype)
         k = k.to(dtype=hidden_states.dtype)
         v = v.to(dtype=hidden_states.dtype)
-        f = self.f_proj(hidden_states).view(batch, seqlen, self.local_heads, self.head_dim)
-        gate = self.g_proj(hidden_states).view(batch, seqlen, self.local_heads, self.head_dim)
+        f = f.view(batch, seqlen, self.local_heads, self.head_dim)
+        gate = gate.view(batch, seqlen, self.local_heads, self.head_dim)
         beta = self.b_proj(hidden_states).view(batch, seqlen, self.local_heads)
         q = q.view(batch, seqlen, self.local_heads, self.head_dim)
         k = k.view(batch, seqlen, self.local_heads, self.head_dim)
@@ -1560,15 +1611,19 @@ class BailingMoeV3ForCausalLM(nn.Module):
 
     @torch.no_grad()
     def prepare_infer_weights(self) -> None:
-        """Stack per-expert weights for fused-MoE inference on every MoE block."""
+        """Prepare KDA LoRA and fused-MoE inference views."""
         for layer in self.layers:
+            if isinstance(layer.attention, BailingKDAAttention):
+                layer.attention.prepare_lora_infer_weights()
             if isinstance(layer.mlp, BailingSparseMoeBlock):
                 layer.mlp.prepare_infer_weights()
 
     @torch.no_grad()
     def clear_infer_weights(self) -> None:
-        """Drop fused-MoE inference tiles to reclaim memory before training."""
+        """Drop KDA LoRA and fused-MoE inference views before training."""
         for layer in self.layers:
+            if isinstance(layer.attention, BailingKDAAttention):
+                layer.attention.clear_lora_infer_weights()
             if isinstance(layer.mlp, BailingSparseMoeBlock):
                 layer.mlp.clear_infer_weights()
 

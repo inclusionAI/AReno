@@ -255,3 +255,38 @@ def test_bailing_v3_routed_lora_keeps_cuda_graph_decode_enabled() -> None:
     with pytest.warns(RuntimeWarning, match="routed-expert LoRA"):
         qwen_runtime.resolve_eager_decode(model=ModelConfig(model_type="qwen3_moe"), lora=lora)
     assert qwen_runtime.eager_decode
+
+
+def test_bailing_v3_kda_packed_a_matches_canonical_slots(monkeypatch) -> None:
+    from areno.models.bailing_v3 import model as bailing_model
+
+    monkeypatch.setattr(linear, "get_tp_context", _single_tp)
+    monkeypatch.setattr("areno.adapters.lora.get_tp_context", _single_tp)
+    model = _BailingModel()
+    registry = initialize_lora(
+        model,
+        LoraConfig(rank=4, alpha=4, target_modules=("q_proj", "k_proj", "v_proj", "f_proj", "g_proj")),
+        seed=42,
+    )
+    attention = model.layers[0].attention
+    attention.register_buffer("_infer_lora_A", torch.empty(0), persistent=False)
+    attention._infer_lora_rank = 0
+    for slot in registry.slots.values():
+        slot.lora_B.data.normal_()
+    hidden_states = torch.randn(2, 3, 8)
+    components = ("q_proj", "k_proj", "v_proj", "f_proj", "g_proj")
+    expected = tuple(
+        getattr(attention, component)(hidden_states) for component in components
+    )
+
+    bailing_model.BailingKDAAttention.prepare_lora_infer_weights(attention)
+    actual = bailing_model.BailingKDAAttention._project_qkvfg(attention, hidden_states, SimpleNamespace())
+
+    assert attention._infer_lora_A.shape == (20, 8)
+    for packed, canonical in zip(actual, expected, strict=True):
+        torch.testing.assert_close(packed, canonical)
+    with registry.base_only():
+        base = bailing_model.BailingKDAAttention._project_qkvfg(attention, hidden_states, SimpleNamespace())
+    for component, output in zip(components, base, strict=True):
+        projection = getattr(attention, component)
+        torch.testing.assert_close(output, torch.nn.functional.linear(hidden_states, projection.weight))
