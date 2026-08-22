@@ -124,6 +124,7 @@ class ArenoWorker:
         # rollout-only state resident for the whole explicit session and apply
         # drop-rollout-state once at ROLLOUT_SESSION_END, not after every turn.
         self._rollout_session_active = False
+        self._rollout_session_infer_weights_ready = False
         self._current_request_ids: list[int | None] = []
         self._policy_sync_plan = None
         self._policy_sync_metadata = None
@@ -427,6 +428,7 @@ class ArenoWorker:
         del payload
         self._prepare_actor_onloaded()
         self._rollout_session_active = True
+        self._rollout_session_infer_weights_ready = False
 
     def rollout_session_sync(self, payload: None) -> None:
         """Synchronize TP ranks before agentic request-driven rollout starts."""
@@ -457,11 +459,21 @@ class ArenoWorker:
                 self._prepare_for_train()
         finally:
             self._rollout_session_active = False
+            self._rollout_session_infer_weights_ready = False
 
     def _should_drop_rollout_hbm_after_infer(self) -> bool:
         """Return whether one inference call owns the rollout-state teardown."""
 
         return not self.config.runtime.keep_rollout_state and not self._rollout_session_active
+
+    def _can_reuse_rollout_session_infer_weights(self) -> bool:
+        """Return whether actor inference weights are unchanged within this session."""
+
+        return self._rollout_session_active and self._rollout_session_infer_weights_ready
+
+    def _mark_rollout_session_infer_weights_ready(self) -> None:
+        if self._rollout_session_active:
+            self._rollout_session_infer_weights_ready = True
 
     def _prepare_for_train(self) -> None:
         """Ensure the actor is on-device and train weights are loaded."""
