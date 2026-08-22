@@ -63,6 +63,33 @@ class _FakeInferenceManager(InferenceManager):
         return next_tokens + 1, torch.zeros_like(next_tokens, dtype=torch.float32) - float(sample_step)
 
 
+def test_drop_rollout_state_is_deferred_until_agentic_session_end():
+    worker = object.__new__(worker_mod.ArenoWorker)
+    worker.config = SimpleNamespace(
+        role="rollout",
+        runtime=SimpleNamespace(keep_rollout_state=False),
+    )
+    worker._rollout_session_active = False
+    events = []
+    worker._prepare_actor_onloaded = lambda: events.append("prepare")
+    worker._drop_rollout_hbm = lambda: events.append("drop")
+
+    worker.rollout_session_begin(None)
+    assert worker._rollout_session_active
+    assert events == ["prepare"]
+
+    # InferenceManager's per-call finally guard must retain state between
+    # agentic turns while the explicit rollout session is active.
+    assert not worker._should_drop_rollout_hbm_after_infer()
+    assert events == ["prepare"]
+
+    worker.rollout_session_end(None)
+    assert not worker._rollout_session_active
+    assert events == ["prepare", "drop"]
+
+    assert worker._should_drop_rollout_hbm_after_infer()
+
+
 def test_no_sync_rollout_continues_pending_prompts_beyond_running_slots():
     """A single rollout call should drain pending rows while respecting slot limits."""
 

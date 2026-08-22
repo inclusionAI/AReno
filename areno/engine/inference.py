@@ -260,7 +260,9 @@ class InferenceManager:
         finally:
             if was_training:
                 self.model.train()
-            if not self.config.runtime.keep_rollout_state:
+            should_drop = getattr(self.worker, "_should_drop_rollout_hbm_after_infer", None)
+            drop_after_infer = should_drop() if callable(should_drop) else not self.config.runtime.keep_rollout_state
+            if drop_after_infer:
                 self._drop_rollout_hbm()
 
     @torch.inference_mode()

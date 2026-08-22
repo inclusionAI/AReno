@@ -120,6 +120,10 @@ class ArenoWorker:
         self._infer_cache_spec: tuple[int, int, int, int, int] | None = None
         self._train_state_ready = False
         self._actor_on_device = True
+        # Agentic rollouts issue one inference request per tool-call turn. Keep
+        # rollout-only state resident for the whole explicit session and apply
+        # drop-rollout-state once at ROLLOUT_SESSION_END, not after every turn.
+        self._rollout_session_active = False
         self._current_request_ids: list[int | None] = []
         self._policy_sync_plan = None
         self._policy_sync_metadata = None
@@ -422,6 +426,7 @@ class ArenoWorker:
 
         del payload
         self._prepare_actor_onloaded()
+        self._rollout_session_active = True
 
     def rollout_session_sync(self, payload: None) -> None:
         """Synchronize TP ranks before agentic request-driven rollout starts."""
@@ -445,10 +450,18 @@ class ArenoWorker:
         """Finalize rollout state before scoring or training starts."""
 
         del payload
-        if not self.config.runtime.keep_rollout_state:
-            self._drop_rollout_hbm()
-        if self.config.role == "train":
-            self._prepare_for_train()
+        try:
+            if not self.config.runtime.keep_rollout_state:
+                self._drop_rollout_hbm()
+            if self.config.role == "train":
+                self._prepare_for_train()
+        finally:
+            self._rollout_session_active = False
+
+    def _should_drop_rollout_hbm_after_infer(self) -> bool:
+        """Return whether one inference call owns the rollout-state teardown."""
+
+        return not self.config.runtime.keep_rollout_state and not self._rollout_session_active
 
     def _prepare_for_train(self) -> None:
         """Ensure the actor is on-device and train weights are loaded."""
