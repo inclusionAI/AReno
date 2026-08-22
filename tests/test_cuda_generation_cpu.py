@@ -48,3 +48,16 @@ def test_cuda_rollout_keeps_stop_tokens_sampleable_until_stop_detection():
 
     assert native.stop_token_ids == (49,)
     assert 49 not in native.suppress_token_ids
+
+
+def test_cuda_rollout_reserves_full_agentic_context_capacity():
+    ctx = SimpleNamespace(
+        tokenizer=_StructuredOutputTokenizer(),
+        eos_token_ids=(106,),
+        custom_config=CudaConfig(),
+    )
+    params = SamplingParams(max_new_tokens=256, max_prompt_len=2048, max_context_len=5000)
+
+    options = rollout_options(ctx, params)
+
+    assert options["max_prompt_len"] == 4744

@@ -101,6 +101,11 @@ def test_infer_cache_reuse_skips_weight_conversion_within_agentic_session():
     model = SimpleNamespace(
         onload_kv_caches=lambda device: calls.append(("onload_kv", device.type)),
         reset_kv_caches=lambda: calls.append(("reset_kv",)),
+        allocate_kv_caches=lambda blocks, block_size, device: calls.append(
+            ("allocate_kv", blocks, block_size, device.type)
+        )
+        or [],
+        set_kv_caches=lambda caches, num_slots: calls.append(("set_kv", len(caches), num_slots)),
         onload_train_weights=lambda device: calls.append(("onload_weights", device.type)),
         prepare_infer_weights=lambda: calls.append(("prepare_weights",)),
         offload_train_weights=lambda: calls.append(("offload_weights",)),
@@ -114,6 +119,9 @@ def test_infer_cache_reuse_skips_weight_conversion_within_agentic_session():
         _max_cache_len=16,
         _max_blocks_per_seq=4,
         _train_state_ready=False,
+        _decode_graphs={},
+        _decode_graph_skipped_buckets=set(),
+        _decode_graph_init_attempted=False,
         _prepare_actor_onloaded=lambda: calls.append(("prepare_actor",)),
         _can_reuse_rollout_session_infer_weights=lambda: True,
         _mark_rollout_session_infer_weights_ready=lambda: calls.append(("mark_ready",)),
@@ -125,6 +133,17 @@ def test_infer_cache_reuse_skips_weight_conversion_within_agentic_session():
     )
 
     assert calls == [("prepare_actor",), ("onload_kv", "cpu"), ("reset_kv",)]
+
+    calls.clear()
+    manager._init_infer_cache(
+        InferCacheSpec(max_running_seqs=4, num_blocks=12, block_size=4, max_cache_len=20, max_blocks_per_seq=5)
+    )
+
+    assert calls == [
+        ("prepare_actor",),
+        ("allocate_kv", 13, 4, "cpu"),
+        ("set_kv", 0, 4),
+    ]
 
 
 def test_no_sync_rollout_continues_pending_prompts_beyond_running_slots():

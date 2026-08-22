@@ -141,6 +141,8 @@ class InferenceManager:
         max_cache_len = int(spec.max_cache_len)
         max_blocks_per_seq = int(spec.max_blocks_per_seq)
         self._prepare_actor_onloaded()
+        can_reuse_weights = getattr(self.worker, "_can_reuse_rollout_session_infer_weights", None)
+        reuse_session_weights = can_reuse_weights() if callable(can_reuse_weights) else False
         if self._infer_cache_spec is not None:
             # Reuse path: the existing cache is large enough along every
             # dimension. We must match block_size exactly (it's baked into
@@ -156,8 +158,7 @@ class InferenceManager:
                 if onload_kv is not None:
                     onload_kv(self.device)
                 self.model.reset_kv_caches()
-                can_reuse_weights = getattr(self.worker, "_can_reuse_rollout_session_infer_weights", None)
-                if not (can_reuse_weights() if callable(can_reuse_weights) else False):
+                if not reuse_session_weights:
                     self.model.onload_train_weights(self.device)
                     self.model.prepare_infer_weights()
                     self._train_state_ready = False
@@ -195,12 +196,13 @@ class InferenceManager:
         self._train_state_ready = False
         # Materialise infer weights from train weights (e.g. dequantize / fuse),
         # then drop the train copies for the rollout's duration.
-        self.model.onload_train_weights(self.device)
-        self.model.prepare_infer_weights()
-        self.model.offload_train_weights()
-        mark_ready = getattr(self.worker, "_mark_rollout_session_infer_weights_ready", None)
-        if callable(mark_ready):
-            mark_ready()
+        if not reuse_session_weights:
+            self.model.onload_train_weights(self.device)
+            self.model.prepare_infer_weights()
+            self.model.offload_train_weights()
+            mark_ready = getattr(self.worker, "_mark_rollout_session_infer_weights_ready", None)
+            if callable(mark_ready):
+                mark_ready()
         if self.device.type == "cuda":
             self._init_decode_graphs()
 
