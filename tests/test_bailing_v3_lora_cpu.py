@@ -262,6 +262,7 @@ def test_bailing_v3_kda_packed_a_matches_canonical_slots(monkeypatch) -> None:
 
     monkeypatch.setattr(linear, "get_tp_context", _single_tp)
     monkeypatch.setattr("areno.adapters.lora.get_tp_context", _single_tp)
+    monkeypatch.setattr(bailing_model, "areno_linear", torch.nn.functional.linear)
     model = _BailingModel()
     registry = initialize_lora(
         model,
