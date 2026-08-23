@@ -547,21 +547,26 @@ class Qwen35MoeMLP(nn.Module):
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        moe_sequence_parallel = is_sequence_parallel_active()
+        if moe_sequence_parallel:
+            hidden_states = gather_from_sequence_parallel_region(hidden_states)
         batch, seqlen, hidden = hidden_states.shape
         flat = hidden_states.reshape(-1, hidden)
-        logits = _areno_linear_no_compile(flat.to(dtype=self.gate.dtype), self.gate)
-        log_once("qwen35_moe_topk_softmax", "using ARENO fused topk_softmax router for Qwen3.5-MoE")
-        topk_idx, topk_weight = _areno_topk_softmax_no_compile(logits, self.top_k, self.norm_topk_prob)
-        if self.training:
-            out = self.experts(flat, topk_idx.to(torch.long), topk_weight)
-        else:
-            out = self._forward_fused_moe(flat, topk_idx, topk_weight)
-        if self.shared_expert is not None:
-            shared = self.shared_expert(hidden_states)
-            if self.shared_expert_gate is not None:
-                shared = shared * torch.sigmoid(F.linear(hidden_states, self.shared_expert_gate.unsqueeze(0)))
-            out = out + shared.reshape(-1, hidden)
-        return out.view(batch, seqlen, hidden)
+        with sequence_parallel_region(False):
+            logits = _areno_linear_no_compile(flat.to(dtype=self.gate.dtype), self.gate)
+            log_once("qwen35_moe_topk_softmax", "using ARENO fused topk_softmax router for Qwen3.5-MoE")
+            topk_idx, topk_weight = _areno_topk_softmax_no_compile(logits, self.top_k, self.norm_topk_prob)
+            if self.training:
+                out = self.experts(flat, topk_idx.to(torch.long), topk_weight)
+            else:
+                out = self._forward_fused_moe(flat, topk_idx, topk_weight)
+            if self.shared_expert is not None:
+                shared = self.shared_expert(hidden_states)
+                if self.shared_expert_gate is not None:
+                    shared = shared * torch.sigmoid(F.linear(hidden_states, self.shared_expert_gate.unsqueeze(0)))
+                out = out + shared.reshape(-1, hidden)
+        out = out.view(batch, seqlen, hidden)
+        return scatter_to_sequence_parallel_region(out) if moe_sequence_parallel else out
 
     @torch.no_grad()
     def prepare_infer_weights(self) -> None:

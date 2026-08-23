@@ -84,7 +84,6 @@ from areno.engine.parallel.collectives import (
     copy_to_tensor_parallel_region,
     gather_from_sequence_parallel_region,
     is_sequence_parallel_active,
-    reduce_scatter_to_sequence_parallel_region,
     scatter_to_sequence_parallel_region,
     sequence_parallel_region,
 )
@@ -279,13 +278,13 @@ class BailingSparseMoeBlock(nn.Module):
                 out = self.experts(flat, topk_idx, topk_weight).view(bsz, seqlen, hidden)
                 if self.shared_experts is not None:
                     out = out + self.shared_experts(identity)
-                return reduce_scatter_to_sequence_parallel_region(out) if moe_sequence_parallel else out
+                return scatter_to_sequence_parallel_region(out) if moe_sequence_parallel else out
             # Inference: fused-MoE kernel over the stacked w1/w2 weights.
             out = self._forward_fused_moe(flat, topk_idx, topk_weight)
         out = out.view(bsz, seqlen, hidden)
         if self.shared_experts is not None:
             out = out + self.shared_experts(identity)
-        return reduce_scatter_to_sequence_parallel_region(out) if moe_sequence_parallel else out
+        return scatter_to_sequence_parallel_region(out) if moe_sequence_parallel else out
 
     @torch.no_grad()
     def prepare_infer_weights(self) -> None:

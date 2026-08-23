@@ -41,7 +41,13 @@ from areno.engine.layers.linear import mark_tensor_parallel_parameter
 from areno.engine.layers.mlp import GatedMLP
 from areno.engine.layers.norm import RMSNorm
 from areno.engine.layers.vocab import VocabParallelEmbedding, VocabParallelLMHead
-from areno.engine.parallel.collectives import all_reduce, scatter_to_sequence_parallel_region, sequence_parallel_region
+from areno.engine.parallel.collectives import (
+    all_reduce,
+    gather_from_sequence_parallel_region,
+    is_sequence_parallel_active,
+    scatter_to_sequence_parallel_region,
+    sequence_parallel_region,
+)
 from areno.engine.parallel.context import get_tp_context
 from areno.engine.runtime.metadata import InferMeta, TrainMeta
 from areno.engine.runtime.recompute import checkpoint_layer, checkpoint_routed_moe_layer
@@ -184,10 +190,13 @@ class Qwen3MoeMLP(nn.Module):
     def route(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute routing once so activation recompute can reuse the decision."""
 
-        flat = hidden_states.reshape(-1, hidden_states.shape[-1])
-        logits = _areno_linear_no_compile(flat.to(dtype=self.gate.dtype), self.gate)
-        log_once("qwen3_moe_topk_softmax", "using ARENO fused topk_softmax router for Qwen3-MoE")
-        return _areno_topk_softmax_no_compile(logits, self.top_k, self.norm_topk_prob)
+        if is_sequence_parallel_active():
+            hidden_states = gather_from_sequence_parallel_region(hidden_states)
+        with sequence_parallel_region(False):
+            flat = hidden_states.reshape(-1, hidden_states.shape[-1])
+            logits = _areno_linear_no_compile(flat.to(dtype=self.gate.dtype), self.gate)
+            log_once("qwen3_moe_topk_softmax", "using ARENO fused topk_softmax router for Qwen3-MoE")
+            return _areno_topk_softmax_no_compile(logits, self.top_k, self.norm_topk_prob)
 
     def forward_with_routes(
         self,
@@ -197,13 +206,18 @@ class Qwen3MoeMLP(nn.Module):
     ) -> torch.Tensor:
         """Run experts with a fixed routing decision."""
 
+        moe_sequence_parallel = is_sequence_parallel_active()
+        if moe_sequence_parallel:
+            hidden_states = gather_from_sequence_parallel_region(hidden_states)
         batch, seqlen, hidden = hidden_states.shape
         flat = hidden_states.reshape(-1, hidden)
-        if self.training:
-            out = self.experts(flat, topk_idx.to(torch.long), topk_weight)
-        else:
-            out = self._forward_fused_moe(flat, topk_idx, topk_weight)
-        return out.view(batch, seqlen, hidden)
+        with sequence_parallel_region(False):
+            if self.training:
+                out = self.experts(flat, topk_idx.to(torch.long), topk_weight)
+            else:
+                out = self._forward_fused_moe(flat, topk_idx, topk_weight)
+        out = out.view(batch, seqlen, hidden)
+        return scatter_to_sequence_parallel_region(out) if moe_sequence_parallel else out
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         topk_idx, topk_weight = self.route(hidden_states)
