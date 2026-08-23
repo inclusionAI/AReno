@@ -278,9 +278,9 @@ class BailingSparseMoeBlock(nn.Module):
         # In SP mode we need the full (un-scattered) hidden states for routing
         # since the router weight isn't sharded along the sequence dim.
         moe_sequence_parallel = is_sequence_parallel_active()
+        sequence_parallel_hidden_states = hidden_states
         if moe_sequence_parallel:
             hidden_states = gather_from_sequence_parallel_region(hidden_states)
-        identity = hidden_states
         bsz, seqlen, hidden = hidden_states.shape
         expert_input = hidden_states.to(dtype=self.experts.linear_fc1.weight.dtype)
         with sequence_parallel_region(False):
@@ -289,15 +289,15 @@ class BailingSparseMoeBlock(nn.Module):
             if self.training:
                 # Permute/unpermute path is autograd-friendly.
                 out = self.experts(flat, topk_idx, topk_weight).view(bsz, seqlen, hidden)
-                if self.shared_experts is not None:
-                    out = out + self.shared_experts(identity)
-                return scatter_to_sequence_parallel_region(out) if moe_sequence_parallel else out
-            # Inference: fused-MoE kernel over the stacked w1/w2 weights.
-            out = self._forward_fused_moe(flat, topk_idx, topk_weight)
-        out = out.view(bsz, seqlen, hidden)
+            else:
+                # Inference: fused-MoE kernel over the stacked w1/w2 weights.
+                out = self._forward_fused_moe(flat, topk_idx, topk_weight).view(bsz, seqlen, hidden)
+        if moe_sequence_parallel:
+            out = scatter_to_sequence_parallel_region(out)
         if self.shared_experts is not None:
-            out = out + self.shared_experts(identity)
-        return scatter_to_sequence_parallel_region(out) if moe_sequence_parallel else out
+            shared_input = sequence_parallel_hidden_states if moe_sequence_parallel else hidden_states
+            out = out + self.shared_experts(shared_input)
+        return out
 
     @torch.no_grad()
     def prepare_infer_weights(self) -> None:

@@ -71,13 +71,18 @@ def test_qwen35_moe_gathers_once_and_scatters_complete_output(monkeypatch):
             torch.ones((logits.shape[0], top_k)),
         ),
     )
+
+    def shared_expert(states):
+        calls.append(("shared", states.shape[1]))
+        return states * 3
+
     mlp = SimpleNamespace(
         gate=torch.zeros((2, 2)),
         top_k=1,
         norm_topk_prob=True,
         training=True,
         experts=lambda flat, indices, weights: flat * 2,
-        shared_expert=None,
+        shared_expert=shared_expert,
         shared_expert_gate=None,
     )
     hidden = torch.ones((1, 2, 2))
@@ -85,7 +90,8 @@ def test_qwen35_moe_gathers_once_and_scatters_complete_output(monkeypatch):
     output = qwen3_5.Qwen35MoeMLP.forward(mlp, hidden)
 
     assert output.shape == hidden.shape
-    assert calls == ["gather", ("region", False), "scatter"]
+    assert calls == ["gather", ("region", False), "scatter", ("shared", 2)]
+    torch.testing.assert_close(output, torch.full_like(output, 5))
 
 
 def test_bailing_moe_scatters_already_reduced_expert_output(monkeypatch):
@@ -98,6 +104,11 @@ def test_bailing_moe_scatters_already_reduced_expert_output(monkeypatch):
     for module in (bailing, bailing_v3):
         calls = []
         _install_sequence_collectives(monkeypatch, module, calls)
+
+        def shared_experts(states):
+            calls.append(("shared", states.shape[1]))
+            return states * 3
+
         block = SimpleNamespace(
             training=True,
             gate=lambda hidden: (
@@ -106,10 +117,11 @@ def test_bailing_moe_scatters_already_reduced_expert_output(monkeypatch):
                 None,
             ),
             experts=Experts(),
-            shared_experts=None,
+            shared_experts=shared_experts,
         )
 
         output = module.BailingSparseMoeBlock.forward(block, torch.ones((1, 2, 2)))
 
         assert output.shape == (1, 2, 2)
-        assert calls == ["gather", ("region", False), "scatter"]
+        assert calls == ["gather", ("region", False), "scatter", ("shared", 2)]
+        torch.testing.assert_close(output.float(), torch.full_like(output.float(), 5))

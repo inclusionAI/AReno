@@ -548,6 +548,7 @@ class Qwen35MoeMLP(nn.Module):
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         moe_sequence_parallel = is_sequence_parallel_active()
+        sequence_parallel_hidden_states = hidden_states
         if moe_sequence_parallel:
             hidden_states = gather_from_sequence_parallel_region(hidden_states)
         batch, seqlen, hidden = hidden_states.shape
@@ -560,13 +561,16 @@ class Qwen35MoeMLP(nn.Module):
                 out = self.experts(flat, topk_idx.to(torch.long), topk_weight)
             else:
                 out = self._forward_fused_moe(flat, topk_idx, topk_weight)
-            if self.shared_expert is not None:
-                shared = self.shared_expert(hidden_states)
-                if self.shared_expert_gate is not None:
-                    shared = shared * torch.sigmoid(F.linear(hidden_states, self.shared_expert_gate.unsqueeze(0)))
-                out = out + shared.reshape(-1, hidden)
         out = out.view(batch, seqlen, hidden)
-        return scatter_to_sequence_parallel_region(out) if moe_sequence_parallel else out
+        if moe_sequence_parallel:
+            out = scatter_to_sequence_parallel_region(out)
+        if self.shared_expert is not None:
+            shared_input = sequence_parallel_hidden_states if moe_sequence_parallel else hidden_states
+            shared = self.shared_expert(shared_input)
+            if self.shared_expert_gate is not None:
+                shared = shared * torch.sigmoid(F.linear(shared_input, self.shared_expert_gate.unsqueeze(0)))
+            out = out + shared
+        return out
 
     @torch.no_grad()
     def prepare_infer_weights(self) -> None:
