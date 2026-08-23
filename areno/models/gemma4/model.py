@@ -58,7 +58,13 @@ from areno.engine.layers.linear import (
 from areno.engine.layers.norm import RMSNorm
 from areno.engine.layers.rotary import Gemma4RotaryEmbedding
 from areno.engine.layers.vocab import VocabParallelEmbedding, VocabParallelLMHead
-from areno.engine.parallel.collectives import all_reduce, scatter_to_sequence_parallel_region, sequence_parallel_region
+from areno.engine.parallel.collectives import (
+    all_reduce,
+    gather_from_sequence_parallel_region,
+    is_sequence_parallel_active,
+    scatter_to_sequence_parallel_region,
+    sequence_parallel_region,
+)
 from areno.engine.parallel.context import get_tp_context
 from areno.engine.runtime.metadata import InferMeta, TrainMeta
 from areno.engine.runtime.recompute import checkpoint_layer
@@ -1590,14 +1596,28 @@ def _gemma4_moe_feedforward_no_compile(
     )
     router_logits = layer.router(residual)
     topk_idx, topk_weight = layer.moe.route(router_logits)
-    moe_hidden = checkpoint_layer(
-        layer.moe.forward_with_routes,
-        layer.pre_feedforward_layernorm_2(residual),
-        topk_idx,
-        topk_weight,
-        train_meta=train_meta,
-        infer_meta=infer_meta,
-    )
+    moe_input = layer.pre_feedforward_layernorm_2(residual)
+    moe_sequence_parallel = is_sequence_parallel_active()
+    if moe_sequence_parallel:
+        batch, local_seqlen, _ = residual.shape
+        moe_input = gather_from_sequence_parallel_region(moe_input)
+        topk_idx = gather_from_sequence_parallel_region(topk_idx.view(batch, local_seqlen, -1)).reshape(
+            -1, topk_idx.shape[-1]
+        )
+        topk_weight = gather_from_sequence_parallel_region(topk_weight.view(batch, local_seqlen, -1)).reshape(
+            -1, topk_weight.shape[-1]
+        )
+    with sequence_parallel_region(False):
+        moe_hidden = checkpoint_layer(
+            layer.moe.forward_with_routes,
+            moe_input,
+            topk_idx,
+            topk_weight,
+            train_meta=train_meta,
+            infer_meta=infer_meta,
+        )
+    if moe_sequence_parallel:
+        moe_hidden = scatter_to_sequence_parallel_region(moe_hidden)
     return layer.post_feedforward_layernorm_1(dense_hidden) + layer.post_feedforward_layernorm_2(moe_hidden)
 
 

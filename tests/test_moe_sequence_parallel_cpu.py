@@ -5,6 +5,7 @@ import torch
 
 import areno.models.bailing.model as bailing
 import areno.models.bailing_v3.model as bailing_v3
+import areno.models.gemma4.model as gemma4
 import areno.models.qwen3.model as qwen3
 import areno.models.qwen3_5.model as qwen3_5
 
@@ -125,3 +126,47 @@ def test_bailing_moe_scatters_already_reduced_expert_output(monkeypatch):
         assert output.shape == (1, 2, 2)
         assert calls == ["gather", ("region", False), "scatter", ("shared", 2)]
         torch.testing.assert_close(output.float(), torch.full_like(output.float(), 5))
+
+
+def test_gemma4_moe_routes_local_shard_then_gathers_expert_inputs(monkeypatch):
+    calls = []
+    _install_sequence_collectives(monkeypatch, gemma4, calls)
+    monkeypatch.setattr(
+        gemma4,
+        "checkpoint_layer",
+        lambda function, *args, train_meta=None, infer_meta=None: function(*args),
+    )
+
+    class Moe:
+        def route(self, logits):
+            calls.append(("route", logits.shape[1]))
+            count = logits.shape[0] * logits.shape[1]
+            return torch.zeros((count, 1), dtype=torch.long), torch.ones((count, 1))
+
+        def forward_with_routes(self, states, indices, weights):
+            calls.append(("experts", states.shape[1], indices.shape[0], weights.shape[0]))
+            return states * 2
+
+    layer = SimpleNamespace(
+        mlp=lambda states: states * 3,
+        router=lambda states: states,
+        moe=Moe(),
+        pre_feedforward_layernorm_2=lambda states: states,
+        post_feedforward_layernorm_1=lambda states: states,
+        post_feedforward_layernorm_2=lambda states: states,
+    )
+    hidden = torch.ones((1, 2, 2))
+
+    output = gemma4._gemma4_moe_feedforward_no_compile(layer, hidden, hidden, None, None)
+
+    assert output.shape == hidden.shape
+    assert calls == [
+        ("route", 2),
+        "gather",
+        "gather",
+        "gather",
+        ("region", False),
+        ("experts", 4, 4, 4),
+        "scatter",
+    ]
+    torch.testing.assert_close(output, torch.full_like(output, 5))
