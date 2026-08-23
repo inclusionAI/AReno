@@ -445,13 +445,17 @@ class Qwen35GatedDeltaNet(nn.Module):
             return out.reshape(decode_shape[:-2] + (self.local_value_heads, self.head_v_dim))
         if cu is None:
             raise RuntimeError("Qwen3.5 GDN inference requires cu_seqlens")
-        log_once("qwen35_gdn_fla_infer", "using FLA recurrent gated-delta inference kernel")
+        log_once("qwen35_gdn_fla_prefill", "using FLA chunk gated-delta prefill kernel")
         g = -self.A_log.float().exp().view(1, 1, -1) * _areno_softplus_no_compile(
             a.float() + self.dt_bias.float().view(1, 1, -1)
         )
         beta = _areno_sigmoid_no_compile(b)
         initial_state = self.state_cache.index_select(0, slots).to(device=q.device)
-        out, state = _fla_fused_recurrent_gated_delta_rule_no_compile(
+        # Match the packed training kernel during prefill.  Besides producing
+        # the prompt logits, chunk GDN returns the recurrent state needed by
+        # the single-token decode kernel, so this does not require rescoring
+        # rollout tokens or a token-at-a-time prompt scan.
+        out, state = _fla_chunk_gated_delta_rule_no_compile(
             q=q,
             k=k,
             v=v,

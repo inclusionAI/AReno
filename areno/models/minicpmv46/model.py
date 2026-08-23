@@ -721,16 +721,18 @@ class MiniCPMGatedDeltaNet(nn.Module):
         if cu is None:
             raise RuntimeError("MiniCPM GDN inference requires cu_seqlens")
         _require_fla_gdn()
-        log_once("minicpm_gdn_fla_infer", "using FLA recurrent gated-delta inference kernel")
+        log_once("minicpm_gdn_fla_prefill", "using FLA chunk gated-delta prefill kernel")
         # Prefill: compute decay/beta in Python (the kernel takes them
-        # pre-computed), seed the recurrent kernel with the saved state, and
-        # write the final state back into the cache.
+        # pre-computed), seed the chunk kernel with the saved state, and write
+        # the final state back into the cache.
         g = -self.A_log.float().exp().view(1, 1, -1) * _areno_softplus_no_compile(
             a.float() + self.dt_bias.float().view(1, 1, -1)
         )
         beta = _areno_sigmoid_no_compile(b)
         initial_state = self.state_cache.index_select(0, slots).to(device=q.device)
-        out, state = _fla_fused_recurrent_gated_delta_rule_no_compile(
+        # Use the same chunk kernel as packed training for prompt processing,
+        # then carry its final state into the fast recurrent decode path.
+        out, state = _fla_chunk_gated_delta_rule_no_compile(
             q=q,
             k=k,
             v=v,
