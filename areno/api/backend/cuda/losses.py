@@ -1,10 +1,4 @@
-"""Native Torch losses and response-layout helpers for the CUDA backend.
-
-The trainer can feed either packed variable-length tensors or padded
-rectangular tensors. Loss functions should operate on the same semantic
-fields in both cases: response mask, old logprobs, advantages, reference
-logprobs, and optional sequence ids for per-sequence reductions.
-"""
+"""Native Torch losses for canonical packed CUDA training batches."""
 
 from __future__ import annotations
 
@@ -19,9 +13,8 @@ if TYPE_CHECKING:
 
 @dataclass(slots=True)
 class ResponseLayout:
-    """Normalized view over packed and padded response-token tensors."""
+    """Response-token tensors from a canonical packed training batch."""
 
-    packed: bool
     response_mask: torch.Tensor
     valid_count: torch.Tensor
     response_len: torch.Tensor
@@ -41,56 +34,8 @@ def response_layout(
     need_ref_logprobs: bool = False,
     need_sequences: bool = False,
 ) -> ResponseLayout:
-    """Return a common response-token view for packed or padded batches."""
+    """Return the response-token view from a canonical packed batch."""
 
-    if "packed_response_mask" in data_pack:
-        return _packed_response_layout(
-            data_pack,
-            logprobs,
-            need_old_logprobs=need_old_logprobs,
-            need_advantages=need_advantages,
-            need_ref_logprobs=need_ref_logprobs,
-            need_sequences=need_sequences,
-        )
-    return _padded_response_layout(
-        data_pack,
-        logprobs,
-        need_old_logprobs=need_old_logprobs,
-        need_advantages=need_advantages,
-        need_ref_logprobs=need_ref_logprobs,
-    )
-
-
-def sequence_sum(values: torch.Tensor, layout: ResponseLayout) -> torch.Tensor:
-    """Sum response-token values into one scalar per sequence."""
-
-    import torch
-
-    masked = values * layout.response_mask.to(dtype=values.dtype)
-    if not layout.packed:
-        return masked.sum(dim=-1)
-    if layout.seq_ids is None or layout.num_sequences is None:
-        raise ValueError("packed sequence_sum requires seq_ids and num_sequences")
-    out = torch.zeros(layout.num_sequences, device=values.device, dtype=values.dtype)
-    out.scatter_add_(0, layout.seq_ids, masked)
-    return out
-
-
-def masked_mean(values: torch.Tensor, layout: ResponseLayout) -> torch.Tensor:
-    """Average values over response tokens only."""
-
-    return (values * layout.response_mask.to(dtype=values.dtype)).sum() / layout.valid_count.to(dtype=values.dtype)
-
-
-def _packed_response_layout(
-    data_pack: dict,
-    logprobs: torch.Tensor,
-    *,
-    need_old_logprobs: bool,
-    need_advantages: bool,
-    need_ref_logprobs: bool,
-    need_sequences: bool,
-) -> ResponseLayout:
     import torch
 
     device = logprobs.device
@@ -108,20 +53,15 @@ def _packed_response_layout(
     else:
         response_len = valid_count
 
-    old_logprobs = None
-    if need_old_logprobs:
-        old_logprobs = data_pack["packed_logprobs"].to(device=device, dtype=torch.float32)
-
-    advantages = None
-    if need_advantages:
-        advantages = data_pack["packed_advantages"].to(device=device, dtype=torch.float32)
-
-    ref_logprobs = None
-    if need_ref_logprobs and "packed_ref_logprobs" in data_pack:
-        ref_logprobs = data_pack["packed_ref_logprobs"].to(device=device, dtype=torch.float32)
+    old_logprobs = data_pack["packed_logprobs"].to(device=device, dtype=torch.float32) if need_old_logprobs else None
+    advantages = data_pack["packed_advantages"].to(device=device, dtype=torch.float32) if need_advantages else None
+    ref_logprobs = (
+        data_pack["packed_ref_logprobs"].to(device=device, dtype=torch.float32)
+        if need_ref_logprobs and "packed_ref_logprobs" in data_pack
+        else None
+    )
 
     return ResponseLayout(
-        packed=True,
         response_mask=response_mask,
         valid_count=valid_count,
         response_len=response_len,
@@ -133,61 +73,31 @@ def _packed_response_layout(
     )
 
 
-def _padded_response_layout(
-    data_pack: dict,
-    logprobs: torch.Tensor,
-    *,
-    need_old_logprobs: bool,
-    need_advantages: bool,
-    need_ref_logprobs: bool,
-) -> ResponseLayout:
+def sequence_sum(values: torch.Tensor, layout: ResponseLayout) -> torch.Tensor:
+    """Sum response-token values into one scalar per sequence."""
+
     import torch
 
-    device = logprobs.device
-    response_mask = (~data_pack["prompt_mask"][:, 1:]).to(device=device, dtype=torch.float32)
-    if "loss_mask" in data_pack:
-        response_mask = response_mask * data_pack["loss_mask"][:, 1:].to(device=device, dtype=torch.float32)
-    valid_count = response_mask.sum().clamp(min=1)
-    response_len = response_mask.sum(dim=-1).clamp(min=1)
+    masked = values * layout.response_mask.to(dtype=values.dtype)
+    if layout.seq_ids is None or layout.num_sequences is None:
+        raise ValueError("packed sequence_sum requires seq_ids and num_sequences")
+    out = torch.zeros(layout.num_sequences, device=values.device, dtype=values.dtype)
+    out.scatter_add_(0, layout.seq_ids, masked)
+    return out
 
-    old_logprobs = None
-    if need_old_logprobs:
-        old_logprobs = data_pack["logprobs"][:, 1:].to(device=device, dtype=torch.float32)
 
-    advantages = None
-    if need_advantages:
-        advantages = data_pack["advantages"][:, 1:].to(device=device, dtype=torch.float32)
+def masked_mean(values: torch.Tensor, layout: ResponseLayout) -> torch.Tensor:
+    """Average values over response tokens only."""
 
-    ref_logprobs = None
-    if need_ref_logprobs and "ref_logprobs" in data_pack:
-        ref_logprobs = data_pack["ref_logprobs"][:, 1:].to(device=device, dtype=torch.float32)
-
-    return ResponseLayout(
-        packed=False,
-        response_mask=response_mask,
-        valid_count=valid_count,
-        response_len=response_len,
-        old_logprobs=old_logprobs,
-        advantages=advantages,
-        ref_logprobs=ref_logprobs,
-    )
+    return (values * layout.response_mask.to(dtype=values.dtype)).sum() / layout.valid_count.to(dtype=values.dtype)
 
 
 def sft_loss_fn(data_pack, logprobs):
     """Negative log-likelihood on non-prompt target tokens."""
 
-    if "packed_response_mask" in data_pack:
-        response_mask = data_pack["packed_response_mask"].to(device=logprobs.device).bool()
-        valid_count = response_mask.sum().clamp_min(1)
-        logprob_sum = logprobs[response_mask].sum()
-    else:
-        response_mask = (~data_pack["prompt_mask"][:, 1:]).to(device=logprobs.device, dtype=logprobs.dtype)
-        if "loss_mask" in data_pack:
-            response_mask = response_mask * data_pack["loss_mask"][:, 1:].to(
-                device=logprobs.device, dtype=logprobs.dtype
-            )
-        valid_count = response_mask.sum().clamp_min(1.0)
-        logprob_sum = (logprobs * response_mask).sum()
+    response_mask = data_pack["packed_response_mask"].to(device=logprobs.device).bool()
+    valid_count = response_mask.sum().clamp_min(1)
+    logprob_sum = logprobs[response_mask].sum()
     loss = _sft_token_mean_loss(data_pack, logprob_sum, valid_count, logprobs)
     return loss, {
         "sft_loss": loss.detach(),
@@ -211,7 +121,7 @@ def dpo_loss_fn(data_pack, logprobs, *, beta: float = 0.1, label_smoothing: floa
     """Pairwise Direct Preference Optimization loss."""
 
     layout = response_layout(data_pack, logprobs, need_ref_logprobs=True, need_sequences=True)
-    num_sequences = int(layout.num_sequences) if layout.packed else int(logprobs.shape[0])
+    num_sequences = int(layout.num_sequences)
     if num_sequences % 2 != 0:
         raise ValueError("DPO requires an even number of sequences per microbatch")
     ref_logprobs = layout.ref_logprobs.to(dtype=logprobs.dtype)
