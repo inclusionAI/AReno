@@ -55,6 +55,112 @@ def test_worker_role_onload_for_inference_prepares_derived_weights():
     ]
 
 
+def test_worker_role_preserves_disk_optimizer_residency_across_swap():
+    calls = []
+
+    class Model:
+        def to(self, device):
+            calls.append(("model_to", device))
+
+        def onload_train_weights(self, device):
+            calls.append(("weights_onload", device))
+
+        def clear_infer_weights(self):
+            calls.append(("clear_infer",))
+
+        def clear_kv_caches(self):
+            calls.append(("clear_kv",))
+
+        def offload_train_weights(self):
+            calls.append(("weights_offload",))
+
+    class Optimizer:
+        def configure_state_offload(self, *, mode, directory, batch_size):
+            calls.append(("configure", mode, directory, batch_size))
+
+        def prefetch_state(self):
+            calls.append(("prefetch",))
+
+        def onload_state(self, device):
+            calls.append(("optimizer_onload", device))
+
+        def offload_state(self, *, mode, directory, batch_size):
+            calls.append(("optimizer_offload", mode, directory, batch_size))
+
+    device = torch.device("cpu")
+    role = WorkerRole(
+        "model",
+        Model(),
+        Optimizer(),
+        value_head=None,
+        optimizer_offload_mode="disk",
+        optimizer_offload_dir="/tmp/optimizer",
+        optimizer_offload_batch_size=2,
+    )
+
+    role.onload(device)
+    role.offload()
+
+    assert ("optimizer_onload", device) not in calls
+    assert ("configure", "disk", "/tmp/optimizer", 2) in calls
+    assert ("prefetch",) in calls
+    assert ("optimizer_offload", "disk", "/tmp/optimizer", 2) in calls
+
+
+def test_actor_preserves_disk_optimizer_residency_across_role_swap():
+    calls = []
+
+    class Model:
+        def to(self, device):
+            calls.append(("model_to", device))
+
+        def onload_train_weights(self, device):
+            calls.append(("weights_onload", device))
+
+        def clear_infer_weights(self):
+            calls.append(("clear_infer",))
+
+        def clear_kv_caches(self):
+            calls.append(("clear_kv",))
+
+        def offload_train_weights(self):
+            calls.append(("weights_offload",))
+
+    class Optimizer:
+        def configure_state_offload(self, *, mode, directory, batch_size):
+            calls.append(("configure", mode, directory, batch_size))
+
+        def onload_state(self, device):
+            calls.append(("optimizer_onload", device))
+
+        def offload_state(self, *, mode, directory, batch_size):
+            calls.append(("optimizer_offload", mode, directory, batch_size))
+
+    device = torch.device("cpu")
+    runtime = SimpleNamespace(
+        optimizer_state_offload="disk",
+        optimizer_state_offload_dir="/tmp/optimizer",
+        optimizer_state_offload_batch_size=2,
+    )
+    worker = SimpleNamespace(
+        model=Model(),
+        optimizer=Optimizer(),
+        device=device,
+        config=SimpleNamespace(runtime=runtime),
+        _actor_on_device=False,
+        _train_state_ready=True,
+    )
+    worker._optimizer_offload_options = lambda: ArenoWorker._optimizer_offload_options(worker)
+    worker._release_decode_graphs = lambda: calls.append(("release_decode_graphs",))
+
+    ArenoWorker._prepare_actor_onloaded(worker)
+    ArenoWorker._prepare_actor_offloaded(worker)
+
+    assert ("optimizer_onload", device) not in calls
+    assert ("configure", "disk", "/tmp/optimizer", 2) in calls
+    assert ("optimizer_offload", "disk", "/tmp/optimizer", 2) in calls
+
+
 def test_actor_logprob_scoring_prepares_inference_weights():
     class Model:
         def eval(self):

@@ -463,7 +463,17 @@ class ArenoWorker:
         self.model.to(self.device)
         self.model.onload_train_weights(self.device)
         if self.optimizer is not None:
-            self.optimizer.onload_state(self.device)
+            mode, directory, batch_size = self._optimizer_offload_options()
+            if mode == "disk":
+                # Keep mmap-backed state out of HBM. The optimizer step loads
+                # only its current bucket after TrainingManager starts prefetch.
+                self.optimizer.configure_state_offload(
+                    mode=mode,
+                    directory=directory,
+                    batch_size=batch_size,
+                )
+            else:
+                self.optimizer.onload_state(self.device)
         self._actor_on_device = True
 
     def _prepare_actor_for_inference(self) -> None:
@@ -490,11 +500,27 @@ class ArenoWorker:
         self.model.offload_train_weights()
         self.model.to("cpu")
         if self.optimizer is not None:
-            self.optimizer.offload_state()
+            mode, directory, batch_size = self._optimizer_offload_options()
+            # Swapping in an auxiliary role always evicts actor optimizer HBM.
+            # An explicit disk policy must retain its persistent mmap files;
+            # otherwise preserve the historical CPU offload behavior.
+            if mode == "none":
+                mode = "cpu"
+            self.optimizer.offload_state(mode=mode, directory=directory, batch_size=batch_size)
         self._train_state_ready = False
         self._actor_on_device = False
         if self.device.type == "cuda":
             torch.cuda.empty_cache()
+
+    def _optimizer_offload_options(self) -> tuple[str, str | None, int]:
+        """Return the configured actor optimizer residency policy."""
+
+        mode = getattr(self.config.runtime, "optimizer_state_offload", "none")
+        if isinstance(mode, bool):
+            mode = "cpu" if mode else "none"
+        directory = getattr(self.config.runtime, "optimizer_state_offload_dir", None)
+        batch_size = int(getattr(self.config.runtime, "optimizer_state_offload_batch_size", 1))
+        return str(mode), directory, batch_size
 
     def _release_decode_graphs(self) -> None:
         """Drop captured decode CUDA graphs and release their cached memory."""

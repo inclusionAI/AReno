@@ -314,7 +314,10 @@ class AdamWFP32Master:
 
         for bucket in self.buckets:
             device = bucket.refs[0].model_param.device
-            dtype = bucket.refs[0].model_param.dtype
+            # Preserve the historical FP32-main-grad reduction contract. The
+            # model gradient may be BF16, but casting only after the collective
+            # would permanently round the cross-rank sum in BF16.
+            dtype = torch.float32
             shard_size = self._max_shard_numel(bucket.numel)
             padded_numel = shard_size * self.dp_size
             send = self._arena(device, dtype, "grad_reduce_input", padded_numel)
@@ -1148,6 +1151,13 @@ class AdamWFP32Master:
             bucket.master = master
             self._commit_master(bucket)
             bucket.master = None
+        if master_params:
+            # Every checkpoint contains only this DP rank's master shards.
+            # Rebuild the replicated model weights before returning so
+            # optimizer-only restore is correct even when no matching model
+            # checkpoint was loaded first.
+            for bucket in self.buckets:
+                self._all_gather_bucket(bucket)
 
     @torch.no_grad()
     def _materialize_master(self, bucket: _MasterBucket) -> torch.Tensor:

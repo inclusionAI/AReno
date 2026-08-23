@@ -62,12 +62,28 @@ def _gloo_sharded_optimizer_worker(rank: int, port: int, output_queue) -> None:
             dp_size=2,
             dp_group=dist.group.WORLD,
         )
-        parameter.grad = (torch.linspace(-0.5, 0.5, 17) + rank * 0.25).to(torch.bfloat16)
+        gradient = (torch.linspace(-0.5, 0.5, 17) + rank * 0.25).to(torch.bfloat16)
+        # This pair has an exactly representable FP32 mean that differs from a
+        # BF16-rounded cross-rank sum, so the test detects collective dtype.
+        gradient[0] = 2.53125 if rank == 0 else 2.203125
+        parameter.grad = gradient
         optimizer.reduce_scatter_gradients()
         grad_dtype = optimizer.buckets[0].grad_shard.dtype
         shard_numel = optimizer.buckets[0].grad_shard.numel()
         optimizer.step()
         state = optimizer.state_dict()
+        restored_param = torch.nn.Parameter(torch.full_like(parameter, 10.0 + rank))
+        restored = AdamWFP32Master(
+            [restored_param],
+            lr=4.0e-4,
+            betas=(0.9, 0.98),
+            weight_decay=0.02,
+            bucket_numel=32,
+            dp_rank=rank,
+            dp_size=2,
+            dp_group=dist.group.WORLD,
+        )
+        restored.load_state_dict(state)
         output_queue.put(
             (
                 rank,
@@ -75,6 +91,7 @@ def _gloo_sharded_optimizer_worker(rank: int, port: int, output_queue) -> None:
                 state["master_params"][0].tolist(),
                 grad_dtype == torch.float32,
                 shard_numel,
+                restored_param.detach().float().tolist(),
             )
         )
     finally:
@@ -504,12 +521,15 @@ def test_real_gloo_dp_reduce_scatter_matches_averaged_reference() -> None:
     )
     rank0_grad = torch.linspace(-0.5, 0.5, 17).to(torch.bfloat16)
     rank1_grad = (torch.linspace(-0.5, 0.5, 17) + 0.25).to(torch.bfloat16)
-    reference_param.grad = ((rank0_grad + rank1_grad) / 2).float()
+    rank0_grad[0] = 2.53125
+    rank1_grad[0] = 2.203125
+    reference_param.grad = (rank0_grad.float() + rank1_grad.float()) / 2
     reference.step()
 
-    rank0_model, rank0_master, rank0_is_fp32, rank0_shard_numel = results[0]
-    rank1_model, rank1_master, rank1_is_fp32, rank1_shard_numel = results[1]
+    rank0_model, rank0_master, rank0_is_fp32, rank0_shard_numel, rank0_restored = results[0]
+    rank1_model, rank1_master, rank1_is_fp32, rank1_shard_numel, rank1_restored = results[1]
     assert rank0_model == rank1_model
+    assert rank0_restored == rank1_restored == rank0_model
     torch.testing.assert_close(torch.tensor(rank0_model), reference_param.detach().to(torch.bfloat16).float())
     joined_master = torch.tensor(rank0_master + rank1_master)
     torch.testing.assert_close(joined_master, reference_param, rtol=2e-6, atol=2e-7)
