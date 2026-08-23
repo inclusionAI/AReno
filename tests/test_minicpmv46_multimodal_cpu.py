@@ -88,6 +88,102 @@ def test_minicpmv46_projects_target_sizes_to_visual_embeddings():
     assert projected["image_embeds"].shape == (4, 32)
 
 
+def test_minicpmv46_multimodal_modules_are_frozen_by_default():
+    pytest.importorskip("triton")
+    from areno.models.minicpmv46.model import MiniCPMV46Adapter
+
+    adapter = MiniCPMV46Adapter()
+    model = adapter.build(adapter.config_from_hf(_config()))
+    model.train()
+
+    assert not any(parameter.requires_grad for parameter in model.vision_tower.parameters())
+    assert not any(parameter.requires_grad for parameter in model.merger.parameters())
+    assert not model.vision_tower.training
+    assert not model.merger.training
+
+
+def test_minicpmv46_configures_independent_multimodal_groups():
+    pytest.importorskip("triton")
+    from areno.models.minicpmv46.model import MiniCPMV46Adapter
+
+    adapter = MiniCPMV46Adapter()
+    model = adapter.build(adapter.config_from_hf(_config()))
+    model.configure_multimodal_training(
+        unfreeze_tower=True,
+        unfreeze_projector=False,
+        tower_lr=2e-5,
+        projector_lr=None,
+        base_lr=1e-6,
+    )
+
+    assert all(parameter.requires_grad for parameter in model.vision_tower.parameters())
+    assert all(parameter._areno_lr_group == "tower" for parameter in model.vision_tower.parameters())
+    assert all(parameter._areno_lr == 2e-5 for parameter in model.vision_tower.parameters())
+    assert not any(parameter.requires_grad for parameter in model.merger.parameters())
+    assert model.vision_tower.training
+    assert not model.merger.training
+
+
+def test_minicpmv46_rollout_marks_unfrozen_media_for_policy_sync():
+    pytest.importorskip("triton")
+    from areno.models.minicpmv46.checkpoint import build_minicpmv46_policy_plan
+    from areno.models.minicpmv46.model import MiniCPMV46Adapter
+
+    adapter = MiniCPMV46Adapter()
+    model = adapter.build(adapter.config_from_hf(_config()))
+    model.configure_multimodal_training(
+        unfreeze_tower=False,
+        unfreeze_projector=True,
+        tower_lr=None,
+        projector_lr=3e-5,
+        base_lr=1e-6,
+        trainable=False,
+    )
+    plan = build_minicpmv46_policy_plan(model)
+
+    assert not any(key.startswith("model.vision_tower.") for key in plan)
+    assert any(key.startswith("model.merger.") for key in plan)
+    assert not any(parameter.requires_grad for parameter in model.merger.parameters())
+
+
+@pytest.mark.parametrize(
+    "unfreeze_tower,unfreeze_projector,expected_group",
+    [(True, False, "tower"), (False, True, "projector")],
+)
+def test_minicpmv46_backward_updates_only_requested_media_group(
+    unfreeze_tower: bool,
+    unfreeze_projector: bool,
+    expected_group: str,
+):
+    pytest.importorskip("triton")
+    from areno.models.minicpmv46.model import MiniCPMV46Adapter
+
+    adapter = MiniCPMV46Adapter()
+    model = adapter.build(adapter.config_from_hf(_config())).float()
+    model.configure_multimodal_training(
+        unfreeze_tower=unfreeze_tower,
+        unfreeze_projector=unfreeze_projector,
+        tower_lr=2e-5,
+        projector_lr=3e-5,
+        base_lr=1e-6,
+    )
+    features = {
+        "pixel_values": torch.randn(1, 3, 2, 32),
+        "target_sizes": torch.tensor([[4, 4]], dtype=torch.int32),
+        "image_token_id": 99,
+    }
+
+    image_embeds = model._project_pixel_feature(features, torch.device("cpu"))
+    image_embeds.square().mean().backward()
+
+    tower_grads = [parameter.grad for parameter in model.vision_tower.parameters()]
+    projector_grads = [parameter.grad for parameter in model.merger.parameters()]
+    expected_grads = tower_grads if expected_group == "tower" else projector_grads
+    frozen_grads = projector_grads if expected_group == "tower" else tower_grads
+    assert any(gradient is not None and torch.count_nonzero(gradient) for gradient in expected_grads)
+    assert all(gradient is None for gradient in frozen_grads)
+
+
 def test_minicpmv46_decode_skips_multimodal_helpers_without_features(monkeypatch):
     pytest.importorskip("triton")
     from areno.models.minicpmv46.model import MiniCPMV46ForCausalLM
@@ -136,6 +232,21 @@ def test_minicpmv46_vision_checkpoint_keys_cover_tower_and_merger():
         torch.equal(parameter, torch.full_like(parameter, 0.25)) for parameter in model.vision_tower.parameters()
     )
     assert all(torch.equal(parameter, torch.full_like(parameter, 0.25)) for parameter in model.merger.parameters())
+
+
+def test_minicpmv46_full_checkpoint_keeps_frozen_media_weights():
+    pytest.importorskip("triton")
+    from areno.models.minicpmv46.checkpoint import _save_vision_weights
+    from areno.models.minicpmv46.model import MiniCPMV46Adapter
+
+    adapter = MiniCPMV46Adapter()
+    model = adapter.build(adapter.config_from_hf(_config())).float()
+    tensors = {}
+
+    _save_vision_weights(tensors, model)
+
+    assert any(key.startswith("model.vision_tower.") for key in tensors)
+    assert any(key.startswith("model.merger.") for key in tensors)
 
 
 def test_minicpmv46_gdn_uses_configured_key_and_value_heads():
