@@ -142,7 +142,7 @@ def test_infer_cache_reuse_skips_weight_conversion_within_agentic_session():
     assert calls == [
         ("prepare_actor",),
         ("allocate_kv", 13, 4, "cpu"),
-        ("set_kv", 0, 4),
+        ("set_kv", 0, 5),
     ]
 
 

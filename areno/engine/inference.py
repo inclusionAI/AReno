@@ -175,6 +175,11 @@ class InferenceManager:
             self._decode_graph_skipped_buckets.clear()
             self._decode_graph_init_attempted = False
         self._infer_batch_size = max_running_seqs
+        # Recurrent models need their own scratch slot for CUDA-graph warmup,
+        # capture, and padded replay rows.  Real requests exclusively own
+        # slots [0, max_running_seqs); the extra slot must never be admitted
+        # by InferenceBatchState.
+        self._scratch_recurrent_slot = max_running_seqs
         # Allocate one extra block past `num_blocks` to use as a fixed scratch
         # block for padded rows during graph-shape decode (see _init_decode_graphs).
         self._infer_cache_blocks = num_blocks + 1
@@ -192,7 +197,7 @@ class InferenceManager:
             self._max_blocks_per_seq,
         )
         caches = self.model.allocate_kv_caches(self._infer_cache_blocks, block_size, self.device)
-        self.model.set_kv_caches(caches, num_slots=max_running_seqs)
+        self.model.set_kv_caches(caches, num_slots=max_running_seqs + 1)
         self._train_state_ready = False
         # Materialise infer weights from train weights (e.g. dequantize / fuse),
         # then drop the train copies for the rollout's duration.
@@ -1077,6 +1082,7 @@ class InferenceManager:
                 bucket,
                 self._max_blocks_per_seq,
                 self._scratch_block,
+                self._scratch_recurrent_slot,
                 self.device,
             )
             # Warmup: run a few eager forwards at this bucket size to (a) trim

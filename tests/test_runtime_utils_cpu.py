@@ -18,7 +18,7 @@ from areno.engine.runtime.common import (
     split_data_pack_by_dp,
     split_list_by_dp,
 )
-from areno.engine.runtime.decode_graph import bucket_for, ceil_div
+from areno.engine.runtime.decode_graph import DecodeGraph, bucket_for, ceil_div
 from areno.engine.runtime.rollout import _empty_rollout, _merge_dp_rollouts_in_input_order, _merge_rollouts
 from areno.engine.runtime.train_step import _grad_norms
 
@@ -149,6 +149,31 @@ class DecodeGraphUtilityTest(unittest.TestCase):
         """Ceil division is used for block counts and should round up."""
         self.assertEqual(ceil_div(9, 4), 3)
         self.assertEqual(ceil_div(8, 4), 2)
+
+    def test_recurrent_padding_uses_dedicated_scratch_slot(self):
+        """Graph capture and padded rows must not mutate a live request slot."""
+
+        fake_graph = SimpleNamespace(replay=lambda: None)
+        with patch("torch.cuda.CUDAGraph", return_value=fake_graph):
+            graph = DecodeGraph(
+                SimpleNamespace(),
+                bucket=4,
+                max_blocks_per_seq=2,
+                scratch_block=9,
+                scratch_recurrent_slot=4,
+                device=torch.device("cpu"),
+            )
+        graph.logits_shard = torch.zeros(1, 4, 1)
+
+        graph.replay_tensors(
+            input_ids=torch.tensor([11, 12]),
+            position_ids=torch.tensor([3, 7]),
+            cache_seqlens=torch.tensor([3, 7], dtype=torch.int32),
+            block_table=torch.tensor([[1, 2], [3, 4]], dtype=torch.int32),
+            recurrent_slots=torch.tensor([0, 2]),
+        )
+
+        self.assertEqual(graph.recurrent_slots.tolist(), [0, 2, 4, 4])
 
 
 class RolloutMergeTest(unittest.TestCase):
