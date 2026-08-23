@@ -746,10 +746,10 @@ def test_eos_token_id_accepts_sequence_values() -> None:
 
 def test_dummy_policy_loss_aligns_next_token_logprobs_with_response_advantages() -> None:
     pack = {
-        "prompt_mask": torch.tensor([[True, True, False, False]]),
-        "advantages": torch.tensor([[0.0, 0.0, 1.0, 1.0]]),
+        "packed_response_mask": torch.tensor([False, True, True]),
+        "packed_advantages": torch.tensor([0.0, 1.0, 1.0]),
     }
-    logprobs = torch.tensor([[0.1, 0.2, 0.3]], requires_grad=True)
+    logprobs = torch.tensor([0.1, 0.2, 0.3], requires_grad=True)
 
     loss, stats = _dummy_policy_loss(pack, logprobs)
 
