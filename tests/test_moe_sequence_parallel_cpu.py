@@ -1,13 +1,8 @@
 from contextlib import contextmanager
 from types import SimpleNamespace
 
+import pytest
 import torch
-
-import areno.models.bailing.model as bailing
-import areno.models.bailing_v3.model as bailing_v3
-import areno.models.gemma4.model as gemma4
-import areno.models.qwen3.model as qwen3
-import areno.models.qwen3_5.model as qwen3_5
 
 
 @contextmanager
@@ -32,6 +27,9 @@ def _install_sequence_collectives(monkeypatch, module, calls):
 
 
 def test_qwen3_moe_gathers_before_routing_and_scatters_complete_expert_output(monkeypatch):
+    pytest.importorskip("triton")
+    import areno.models.qwen3.model as qwen3
+
     calls = []
     _install_sequence_collectives(monkeypatch, qwen3, calls)
     monkeypatch.setattr(qwen3, "_areno_linear_no_compile", lambda x, weight: x)
@@ -61,6 +59,9 @@ def test_qwen3_moe_gathers_before_routing_and_scatters_complete_expert_output(mo
 
 
 def test_qwen35_moe_gathers_once_and_scatters_complete_output(monkeypatch):
+    pytest.importorskip("triton")
+    import areno.models.qwen3_5.model as qwen3_5
+
     calls = []
     _install_sequence_collectives(monkeypatch, qwen3_5, calls)
     monkeypatch.setattr(qwen3_5, "_areno_linear_no_compile", lambda x, weight: x)
@@ -96,6 +97,10 @@ def test_qwen35_moe_gathers_once_and_scatters_complete_output(monkeypatch):
 
 
 def test_bailing_moe_scatters_already_reduced_expert_output(monkeypatch):
+    pytest.importorskip("triton")
+    import areno.models.bailing.model as bailing
+    import areno.models.bailing_v3.model as bailing_v3
+
     class Experts:
         linear_fc1 = SimpleNamespace(weight=torch.zeros(1, dtype=torch.bfloat16))
 
@@ -129,6 +134,9 @@ def test_bailing_moe_scatters_already_reduced_expert_output(monkeypatch):
 
 
 def test_gemma4_moe_routes_local_shard_then_gathers_expert_inputs(monkeypatch):
+    pytest.importorskip("triton")
+    import areno.models.gemma4.model as gemma4
+
     calls = []
     _install_sequence_collectives(monkeypatch, gemma4, calls)
     monkeypatch.setattr(
