@@ -75,6 +75,7 @@ class DecodeGraph:
         bucket: int,
         max_blocks_per_seq: int,
         scratch_block: int,
+        scratch_recurrent_slot: int,
         device: torch.device,
     ):
         """Allocate static input buffers and the `InferMeta` baked into capture."""
@@ -82,6 +83,7 @@ class DecodeGraph:
         self.model = model
         self.bucket = bucket
         self.scratch_block = scratch_block
+        self.scratch_recurrent_slot = scratch_recurrent_slot
         self.device = device
         # Stable input pointers. The captured CUDA graph remembers these as
         # source/destination addresses, so replay must write through the same
@@ -89,7 +91,12 @@ class DecodeGraph:
         self.input_ids = torch.zeros((1, bucket), device=device, dtype=torch.long)
         self.position_ids = torch.zeros((1, bucket), device=device, dtype=torch.long)
         self.cache_seqlens = torch.zeros(bucket, device=device, dtype=torch.int32)
-        self.recurrent_slots = torch.arange(bucket, device=device, dtype=torch.long)
+        # Graph warmup/capture executes the model before any request is
+        # admitted. Point every dummy row at the dedicated scratch recurrent
+        # slot so it cannot seed live request state with synthetic tokens.
+        self.recurrent_slots = torch.full(
+            (bucket,), scratch_recurrent_slot, device=device, dtype=torch.long
+        )
         # Padding columns point to `scratch_block`, a dedicated block that the
         # scheduler never assigns to a real sequence. This keeps the attention
         # kernel safe when actual batch size < bucket.
@@ -176,7 +183,7 @@ class DecodeGraph:
             self.position_ids[0, actual : self.bucket].fill_(0)
             self.block_table[actual : self.bucket].fill_(self.scratch_block)
             self.cache_seqlens[actual : self.bucket].fill_(0)
-            self.recurrent_slots[actual : self.bucket].fill_(0)
+            self.recurrent_slots[actual : self.bucket].fill_(self.scratch_recurrent_slot)
 
         self.graph.replay()
         assert self.logits_shard is not None
