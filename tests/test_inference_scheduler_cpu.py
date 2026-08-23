@@ -101,10 +101,9 @@ def test_infer_cache_reuse_skips_weight_conversion_within_agentic_session():
     model = SimpleNamespace(
         onload_kv_caches=lambda device: calls.append(("onload_kv", device.type)),
         reset_kv_caches=lambda: calls.append(("reset_kv",)),
-        allocate_kv_caches=lambda blocks, block_size, device: calls.append(
-            ("allocate_kv", blocks, block_size, device.type)
-        )
-        or [],
+        allocate_kv_caches=lambda blocks, block_size, device: (
+            calls.append(("allocate_kv", blocks, block_size, device.type)) or []
+        ),
         set_kv_caches=lambda caches, num_slots: calls.append(("set_kv", len(caches), num_slots)),
         onload_train_weights=lambda device: calls.append(("onload_weights", device.type)),
         prepare_infer_weights=lambda: calls.append(("prepare_weights",)),
