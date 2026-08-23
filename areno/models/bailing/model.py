@@ -737,8 +737,8 @@ class BailingSoftmaxAttention(nn.Module):
         train_meta: TrainMeta | None,
         infer_meta: InferMeta | None,
     ) -> torch.Tensor:
-        bsz, seqlen, _ = hidden_states.shape
         q, k, v = self._project(hidden_states, position_ids)
+        bsz, seqlen = q.shape[:2]
         if infer_meta is not None:
             # Lazily build the inference backend so weight-only training paths
             # don't pay the cost.
@@ -752,14 +752,13 @@ class BailingSoftmaxAttention(nn.Module):
     def _project(
         self, hidden_states: torch.Tensor, position_ids: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        bsz, seqlen, _ = hidden_states.shape
         if self.kv_lora_rank is None:
             # Standard GQA path: split fused QKV, optional per-head norm, rope
             # on the trailing qk_rope_head_dim channels only.
             assert self.query_key_value is not None
-            qkv = self.query_key_value(hidden_states).view(
-                bsz, seqlen, self.local_heads + 2 * self.local_kv_heads, self.head_dim
-            )
+            qkv = self.query_key_value(hidden_states)
+            bsz, seqlen = qkv.shape[:2]
+            qkv = qkv.view(bsz, seqlen, self.local_heads + 2 * self.local_kv_heads, self.head_dim)
             q, k, v = qkv.split([self.local_heads, self.local_kv_heads, self.local_kv_heads], dim=-2)
             if self.query_layernorm is not None:
                 q = self.query_layernorm(q)
@@ -780,10 +779,14 @@ class BailingSoftmaxAttention(nn.Module):
             and self.kv_b_proj is not None
         )
         mla_input = hidden_states if is_sequence_parallel_active() else copy_to_tensor_parallel_region(hidden_states)
-        q = self.q_proj(mla_input).view(bsz, seqlen, self.local_heads, self.head_dim)
+        q = self.q_proj(mla_input)
+        bsz, seqlen = q.shape[:2]
+        q = q.view(bsz, seqlen, self.local_heads, self.head_dim)
         q_nope, q_rope = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
         kv_a = self.kv_a_proj_with_mqa(mla_input)
         compressed_kv, k_rope = kv_a.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+        if is_sequence_parallel_active():
+            k_rope = gather_from_sequence_parallel_region(k_rope)
         kv = self.kv_b_proj(self.kv_a_layernorm(compressed_kv)).view(
             bsz, seqlen, self.local_heads, self.qk_nope_head_dim + self.v_head_dim
         )
@@ -894,8 +897,8 @@ class BailingLinearAttention(nn.Module):
         train_meta: TrainMeta | None,
         infer_meta: InferMeta | None,
     ) -> torch.Tensor:
-        bsz, seqlen, _ = hidden_states.shape
         qkv = self.query_key_value(hidden_states)
+        bsz, seqlen = qkv.shape[:2]
         if self.linear_silu:
             qkv = _areno_silu_no_compile(qkv)
         qkv = qkv.view(bsz, seqlen, 3 * self.local_heads, self.head_dim)

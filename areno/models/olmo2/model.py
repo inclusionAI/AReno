@@ -73,10 +73,11 @@ class Olmo2SelfAttention(CausalSelfAttention):
         train_meta: TrainMeta | None = None,
         infer_meta: InferMeta | None = None,
     ) -> torch.Tensor:
-        batch, seqlen, _ = hidden_states.shape
         q_size = self.local_heads * self.head_dim
         kv_size = self.local_kv_heads * self.head_dim
-        q, k, v = self.qkv_proj(hidden_states).split((q_size, kv_size, kv_size), dim=-1)
+        qkv = self.qkv_proj(hidden_states)
+        batch, seqlen, _ = qkv.shape
+        q, k, v = qkv.split((q_size, kv_size, kv_size), dim=-1)
         q = self.q_norm(q).view(batch, seqlen, self.local_heads, self.head_dim)
         k = self.k_norm(k).view(batch, seqlen, self.local_kv_heads, self.head_dim)
         v = v.view(batch, seqlen, self.local_kv_heads, self.head_dim)

@@ -428,13 +428,14 @@ class MiniCPMFullAttention(nn.Module):
         train_meta: TrainMeta | None,
         infer_meta: InferMeta | None,
     ) -> torch.Tensor:
-        batch, seqlen, _ = hidden_states.shape
         q_size = self.local_heads * self.head_dim
         kv_size = self.local_kv_heads * self.head_dim
         # Single fused projection, split into the four parts; ``gate`` stays
         # flat (no head split) so it can multiply the attention output as a
         # per-channel scalar after the sigmoid.
-        q, gate, k, v = self.qkv_proj(hidden_states).split((q_size, q_size, kv_size, kv_size), dim=-1)
+        qkv = self.qkv_proj(hidden_states)
+        batch, seqlen, _ = qkv.shape
+        q, gate, k, v = qkv.split((q_size, q_size, kv_size, kv_size), dim=-1)
         q = q.view(batch, seqlen, self.local_heads, self.head_dim)
         gate = gate.view(batch, seqlen, self.local_heads * self.head_dim)
         k = k.view(batch, seqlen, self.local_kv_heads, self.head_dim)
@@ -847,7 +848,6 @@ class MiniCPMV46ForCausalLM(nn.Module):
         if use_sequence_parallel:
             # Split sequence dim across TP ranks before entering the SP region.
             hidden_states = scatter_to_sequence_parallel_region(hidden_states)
-            position_ids = scatter_to_sequence_parallel_region(position_ids)
         with sequence_parallel_region(use_sequence_parallel):
             for layer in self.layers:
                 hidden_states = checkpoint_layer(

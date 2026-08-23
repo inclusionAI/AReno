@@ -10,8 +10,8 @@ from areno.engine.worker import ArenoWorker
 
 def test_score_logprobs_omits_empty_feature_rows_for_text_model():
     class TextModel:
-        def __call__(self, *, input_ids, train_meta):
-            del train_meta
+        def __call__(self, *, input_ids, position_ids, train_meta):
+            del position_ids, train_meta
             return SimpleNamespace(logits_shard=torch.zeros((*input_ids.shape, 8)))
 
     manager = RoleManager(SimpleNamespace(device=torch.device("cpu")))
@@ -22,7 +22,7 @@ def test_score_logprobs_omits_empty_feature_rows_for_text_model():
         pad_token_id=0,
     )
 
-    with patch("areno.api.backend.cuda.roles.next_token_logprobs", return_value=torch.zeros((1, 2))):
+    with patch("areno.api.backend.cuda.roles.packed_next_token_logprobs", return_value=torch.zeros(2)):
         rows = manager._score_logprob_rows(TextModel(), [[1, 2, 3]], payload, features=[None])
 
     assert rows == [[0.0, 0.0, 0.0]]

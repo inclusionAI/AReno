@@ -405,10 +405,10 @@ class Gemma4Attention(nn.Module):
         train_meta: TrainMeta | None = None,
         infer_meta: InferMeta | None = None,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor] | None]:
-        batch, seqlen, _ = hidden_states.shape
         q_size = self.local_heads * self.head_dim
         kv_size = self.local_kv_heads * self.head_dim
         qkv = self.qkv_proj(hidden_states)
+        batch, seqlen, _ = qkv.shape
         q, k, v = qkv.split((q_size, kv_size, kv_size), dim=-1)
         # Q/K/V norms operate in [B, S, H, D] layout.
         q = self.q_norm(q.view(batch, seqlen, self.local_heads, self.head_dim))
@@ -835,7 +835,6 @@ class Gemma4ForCausalLM(nn.Module):
         use_sequence_parallel = bool(train_meta is not None and train_meta.sequence_parallel)
         if use_sequence_parallel:
             hidden_states = scatter_to_sequence_parallel_region(hidden_states)
-            position_ids = scatter_to_sequence_parallel_region(position_ids)
             if per_layer_inputs is not None:
                 per_layer_inputs = scatter_to_sequence_parallel_region(per_layer_inputs)
         with sequence_parallel_region(use_sequence_parallel):

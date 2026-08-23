@@ -30,8 +30,8 @@ from areno.engine.layers.attention_backend.common import (
     require_flash_attention_supported,
 )
 from areno.engine.layers.attention_backend.infer import FlashAttnInferBackend, _native_prefill
-from areno.engine.layers.attention_backend.train import _native_train_areno
-from areno.engine.runtime.metadata import InferMeta
+from areno.engine.layers.attention_backend.train import _native_train, _native_train_areno
+from areno.engine.runtime.metadata import InferMeta, TrainMeta
 from areno.engine.training import _actor_train_model
 
 
@@ -114,6 +114,19 @@ class ConfigAndDataTest(unittest.TestCase):
         self.assertEqual(captured["cu"], [0, 2, 5])
         self.assertEqual(captured["window_left"], 31)
         self.assertEqual(captured["softmax_scale"], 1.0)
+
+    def test_native_sdpa_supports_packed_sequence_parallel_metadata(self):
+        q = torch.randn(1, 8, 2, 4)
+        k = torch.randn(1, 8, 1, 4)
+        v = torch.randn(1, 8, 1, 4)
+        cu_seqlens = torch.tensor([0, 3, 7, 8], dtype=torch.int32)
+        non_sp = TrainMeta(cu_seqlens=cu_seqlens, max_seqlen=4, packed=True, sequence_parallel=False)
+        sp = TrainMeta(cu_seqlens=cu_seqlens, max_seqlen=4, packed=True, sequence_parallel=True)
+
+        expected = _native_train(q, k, v, non_sp, (-1, -1), None)
+        actual = _native_train(q, k, v, sp, (-1, -1), None)
+
+        torch.testing.assert_close(actual, expected)
 
     def test_native_train_rollout_matching_is_opt_in(self):
         from areno.engine.layers.attention_backend.train import build_train_attention_backend

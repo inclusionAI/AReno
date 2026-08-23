@@ -12,7 +12,6 @@ from areno.engine.modeling import param_grad, unwrap_model
 from areno.engine.parallel.context import get_tp_context
 from areno.engine.protocol import TrainPayload
 from areno.engine.runtime.logprobs import (
-    next_token_logprobs,
     packed_next_token_logprobs,
     packed_next_token_logprobs_from_hidden,
 )
@@ -70,15 +69,14 @@ class TrainingManager:
             worker._prepare_for_train()
         train_model = _actor_train_model(worker)
         train_model.train()
-        data_pack_obj = data_pack_shards[ctx.dp_rank]
-        data_pack = _pack_train_data(data_pack_obj)
+        data_pack = dict(data_pack_shards[ctx.dp_rank])
+        data_pack = _pack_train_data(data_pack)
         pack_loss_fn = data_pack.get("_loss_fn")
         auto_tune_probe = callable(pack_loss_fn) and getattr(pack_loss_fn, "__name__", "") == "_dummy_policy_loss"
         if auto_tune_probe and worker.device.type == "cuda":
             torch.cuda.synchronize(worker.device)
             torch.cuda.reset_peak_memory_stats(worker.device)
         data_pack = to_device(data_pack, worker.device)
-        data_pack["_sequence_parallel_enabled"] = worker.config.model.sequence_parallel
         data_pack["_activation_checkpointing_enabled"] = worker.config.runtime.activation_checkpointing
         tokens = data_pack["input_ids"].long()
         position_ids = data_pack.get("position_ids")
@@ -95,19 +93,16 @@ class TrainingManager:
         if defer_lm_head:
             model_kwargs["defer_lm_head"] = True
         out = train_model(**model_kwargs)
-        if "train_cu_seqlens" in data_pack:
-            if defer_lm_head:
-                logprobs = packed_next_token_logprobs_from_hidden(
-                    out.hidden_states,
-                    tokens,
-                    data_pack["train_cu_seqlens"],
-                    train_model.lm_head,
-                    logit_softcap=getattr(train_model, "final_logit_softcapping", None),
-                )
-            else:
-                logprobs = packed_next_token_logprobs(out.logits_shard, tokens, data_pack["train_cu_seqlens"])
+        if defer_lm_head:
+            logprobs = packed_next_token_logprobs_from_hidden(
+                out.hidden_states,
+                tokens,
+                data_pack["train_cu_seqlens"],
+                train_model.lm_head,
+                logit_softcap=getattr(train_model, "final_logit_softcapping", None),
+            )
         else:
-            logprobs = next_token_logprobs(out.logits_shard, tokens)
+            logprobs = packed_next_token_logprobs(out.logits_shard, tokens, data_pack["train_cu_seqlens"])
         loss_out = worker.loss_fn(data_pack, logprobs)
         metrics = None
         if isinstance(loss_out, tuple):
