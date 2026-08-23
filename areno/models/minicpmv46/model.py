@@ -54,7 +54,6 @@ from areno.models._shared.dynamo_wrappers import (
     _areno_sigmoid_no_compile,
     _areno_softplus_no_compile,
     _fla_causal_conv1d_no_compile,
-    _fla_chunk_gated_delta_rule_no_compile,
     _fla_fused_recurrent_gated_delta_rule_no_compile,
     _require_fla_gdn,
 )
@@ -659,15 +658,16 @@ class MiniCPMGatedDeltaNet(nn.Module):
             cu = train_meta.cu_seqlens.to(device=q.device, dtype=torch.long)
         _require_fla_gdn()
         if cu is not None and q.shape[0] != 1:
-            raise ValueError("FLA chunk gated-delta expects flattened packed input with batch size 1")
-        log_once("minicpm_gdn_fla_chunk", "using FLA chunk gated-delta training kernel")
-        out, _ = _fla_chunk_gated_delta_rule_no_compile(
-            q,
-            k,
-            v,
+            raise ValueError("FLA recurrent gated-delta expects flattened packed input with batch size 1")
+        log_once("minicpm_gdn_fla_recurrent_train", "using FLA recurrent gated-delta training kernel")
+        out, _ = _fla_fused_recurrent_gated_delta_rule_no_compile(
+            q=q,
+            k=k,
+            v=v,
             g=g,
             beta=beta,
             scale=self.scale,
+            output_final_state=False,
             cu_seqlens=cu,
             use_qk_l2norm_in_kernel=True,
         )
