@@ -438,6 +438,11 @@ class ConfigAndDataTest(unittest.TestCase):
             build_train_attention_backend("native")
             build_infer_attention_backend("native")
 
+    def test_attention_backend_can_force_decode_num_splits(self):
+        backend = FlashAttnInferBackend("flash", decode_num_splits=1)
+
+        self.assertEqual(backend.decode_num_splits, 1)
+
     def test_rollout_config_defaults_max_running_prompts_to_flat_batch(self):
         """Rollout concurrency defaults to batch_size * n_samples, not per-DP."""
         cfg = RolloutTrainerConfig(

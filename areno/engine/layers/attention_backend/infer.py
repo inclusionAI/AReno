@@ -41,11 +41,12 @@ class FlashAttnInferBackend(nn.Module):
     fused KV-cache attention path.
     """
 
-    def __init__(self, attn_backend: AttnBackend = "flash"):
+    def __init__(self, attn_backend: AttnBackend = "flash", *, decode_num_splits: int | None = None):
         """Bind flash-attn entrypoints once for the module instance."""
 
         super().__init__()
         self.attn_backend = attn_backend
+        self.decode_num_splits = decode_num_splits
 
     def forward(
         self,
@@ -109,7 +110,11 @@ class FlashAttnInferBackend(nn.Module):
             # fully outside the window and some flash-attn builds produce NaNs
             # when combining those masked splits. Keep local decode on the
             # single-split kvcache kernel; full attention can keep the heuristic.
-            num_splits = 1 if call.window_size != (-1, -1) else 0
+            num_splits = (
+                self.decode_num_splits
+                if self.decode_num_splits is not None
+                else (1 if call.window_size != (-1, -1) else 0)
+            )
             if use_native_attention(self.attn_backend):
                 if not update_cache:
                     raise ValueError("native decode requires update_cache=True")
@@ -154,10 +159,12 @@ class FlashAttnInferBackend(nn.Module):
         raise ValueError(f"unsupported inference mode: {meta.mode}")
 
 
-def build_infer_attention_backend(attn_backend: AttnBackend = "flash") -> FlashAttnInferBackend:
+def build_infer_attention_backend(
+    attn_backend: AttnBackend = "flash", *, decode_num_splits: int | None = None
+) -> FlashAttnInferBackend:
     """Build the default inference attention backend."""
 
-    return FlashAttnInferBackend(attn_backend=attn_backend)
+    return FlashAttnInferBackend(attn_backend=attn_backend, decode_num_splits=decode_num_splits)
 
 
 @torch._dynamo.disable

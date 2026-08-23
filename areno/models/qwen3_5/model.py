@@ -116,6 +116,7 @@ class Qwen35FullAttention(nn.Module):
                 "Qwen3.5 full attention requires num_key_value_heads to divide TP or TP to divide into replicated KV groups"
             )
         self.local_kv_heads = self.qkv_proj.local_out_features[1] // self.head_dim
+        self.replicated_kv = self.num_kv_heads < ctx.world_size
         self.o_proj = RowParallelLinear(self.num_heads * self.head_dim, config.hidden_size, bias=False)
         self.q_norm = RMSNorm(config.head_dim, config.rms_norm_eps)
         self.k_norm = RMSNorm(config.head_dim, config.rms_norm_eps)
@@ -178,7 +179,12 @@ class Qwen35FullAttention(nn.Module):
         if self.k_cache.numel() == 0 or self.v_cache.numel() == 0:
             raise RuntimeError("Qwen3.5 full attention inference requires KV cache")
         if self.infer_backend is None:
-            self.infer_backend = build_infer_attention_backend(self.attn_backend)
+            # The automatic split-KV decode heuristic accumulates substantial
+            # rollout/train drift for the two-Q-head replicated-KV layout.
+            self.infer_backend = build_infer_attention_backend(
+                self.attn_backend,
+                decode_num_splits=1 if self.replicated_kv else None,
+            )
         return self.infer_backend(q, k, v, self.k_cache, self.v_cache, infer_meta)
 
     def set_kv_cache(self, k_cache: torch.Tensor, v_cache: torch.Tensor) -> None:
