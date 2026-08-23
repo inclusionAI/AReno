@@ -10,7 +10,7 @@ import areno.engine.worker as worker_mod
 from areno.engine.api import ArenoEngine, _chunk_prompts_for_prefill_budget, _merge_async_dp_rollouts
 from areno.engine.data import SamplingParams
 from areno.engine.data.rollout_state import InferenceBatchState
-from areno.engine.inference import InferenceManager
+from areno.engine.inference import InferCacheSpec, InferenceManager
 from areno.engine.protocol import Command, Op, RolloutPayload
 from areno.engine.runtime.rollout import _build_rollout_from_rows
 from tests.helpers import PatchedContext
@@ -61,6 +61,89 @@ class _FakeInferenceManager(InferenceManager):
         )
         self.ops.append(("decode", int(next_tokens.numel())))
         return next_tokens + 1, torch.zeros_like(next_tokens, dtype=torch.float32) - float(sample_step)
+
+
+def test_drop_rollout_state_is_deferred_until_agentic_session_end():
+    worker = object.__new__(worker_mod.ArenoWorker)
+    worker.config = SimpleNamespace(
+        role="rollout",
+        runtime=SimpleNamespace(keep_rollout_state=False),
+    )
+    worker._rollout_session_active = False
+    worker._rollout_session_infer_weights_ready = False
+    events = []
+    worker._prepare_actor_onloaded = lambda: events.append("prepare")
+    worker._drop_rollout_hbm = lambda: events.append("drop")
+
+    worker.rollout_session_begin(None)
+    assert worker._rollout_session_active
+    assert not worker._can_reuse_rollout_session_infer_weights()
+    assert events == ["prepare"]
+
+    worker._mark_rollout_session_infer_weights_ready()
+    assert worker._can_reuse_rollout_session_infer_weights()
+
+    # InferenceManager's per-call finally guard must retain state between
+    # agentic turns while the explicit rollout session is active.
+    assert not worker._should_drop_rollout_hbm_after_infer()
+    assert events == ["prepare"]
+
+    worker.rollout_session_end(None)
+    assert not worker._rollout_session_active
+    assert not worker._can_reuse_rollout_session_infer_weights()
+    assert events == ["prepare", "drop"]
+
+    assert worker._should_drop_rollout_hbm_after_infer()
+
+
+def test_infer_cache_reuse_skips_weight_conversion_within_agentic_session():
+    calls = []
+    model = SimpleNamespace(
+        onload_kv_caches=lambda device: calls.append(("onload_kv", device.type)),
+        reset_kv_caches=lambda: calls.append(("reset_kv",)),
+        allocate_kv_caches=lambda blocks, block_size, device: calls.append(
+            ("allocate_kv", blocks, block_size, device.type)
+        )
+        or [],
+        set_kv_caches=lambda caches, num_slots: calls.append(("set_kv", len(caches), num_slots)),
+        onload_train_weights=lambda device: calls.append(("onload_weights", device.type)),
+        prepare_infer_weights=lambda: calls.append(("prepare_weights",)),
+        offload_train_weights=lambda: calls.append(("offload_weights",)),
+    )
+    worker = SimpleNamespace(
+        device=torch.device("cpu"),
+        model=model,
+        _infer_cache_spec=(4, 8, 4, 16, 4),
+        _infer_batch_size=4,
+        _infer_cache_blocks=9,
+        _max_cache_len=16,
+        _max_blocks_per_seq=4,
+        _train_state_ready=False,
+        _decode_graphs={},
+        _decode_graph_skipped_buckets=set(),
+        _decode_graph_init_attempted=False,
+        _prepare_actor_onloaded=lambda: calls.append(("prepare_actor",)),
+        _can_reuse_rollout_session_infer_weights=lambda: True,
+        _mark_rollout_session_infer_weights_ready=lambda: calls.append(("mark_ready",)),
+    )
+    manager = InferenceManager(worker)
+
+    manager._init_infer_cache(
+        InferCacheSpec(max_running_seqs=4, num_blocks=8, block_size=4, max_cache_len=16, max_blocks_per_seq=4)
+    )
+
+    assert calls == [("prepare_actor",), ("onload_kv", "cpu"), ("reset_kv",)]
+
+    calls.clear()
+    manager._init_infer_cache(
+        InferCacheSpec(max_running_seqs=4, num_blocks=12, block_size=4, max_cache_len=20, max_blocks_per_seq=5)
+    )
+
+    assert calls == [
+        ("prepare_actor",),
+        ("allocate_kv", 13, 4, "cpu"),
+        ("set_kv", 0, 4),
+    ]
 
 
 def test_no_sync_rollout_continues_pending_prompts_beyond_running_slots():

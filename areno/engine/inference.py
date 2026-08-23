@@ -141,6 +141,8 @@ class InferenceManager:
         max_cache_len = int(spec.max_cache_len)
         max_blocks_per_seq = int(spec.max_blocks_per_seq)
         self._prepare_actor_onloaded()
+        can_reuse_weights = getattr(self.worker, "_can_reuse_rollout_session_infer_weights", None)
+        reuse_session_weights = can_reuse_weights() if callable(can_reuse_weights) else False
         if self._infer_cache_spec is not None:
             # Reuse path: the existing cache is large enough along every
             # dimension. We must match block_size exactly (it's baked into
@@ -156,10 +158,14 @@ class InferenceManager:
                 if onload_kv is not None:
                     onload_kv(self.device)
                 self.model.reset_kv_caches()
-                self.model.onload_train_weights(self.device)
-                self.model.prepare_infer_weights()
-                self._train_state_ready = False
-                self.model.offload_train_weights()
+                if not reuse_session_weights:
+                    self.model.onload_train_weights(self.device)
+                    self.model.prepare_infer_weights()
+                    self._train_state_ready = False
+                    self.model.offload_train_weights()
+                    mark_ready = getattr(self.worker, "_mark_rollout_session_infer_weights_ready", None)
+                    if callable(mark_ready):
+                        mark_ready()
                 if self.device.type == "cuda":
                     self._init_decode_graphs()
                 return
@@ -190,9 +196,13 @@ class InferenceManager:
         self._train_state_ready = False
         # Materialise infer weights from train weights (e.g. dequantize / fuse),
         # then drop the train copies for the rollout's duration.
-        self.model.onload_train_weights(self.device)
-        self.model.prepare_infer_weights()
-        self.model.offload_train_weights()
+        if not reuse_session_weights:
+            self.model.onload_train_weights(self.device)
+            self.model.prepare_infer_weights()
+            self.model.offload_train_weights()
+            mark_ready = getattr(self.worker, "_mark_rollout_session_infer_weights_ready", None)
+            if callable(mark_ready):
+                mark_ready()
         if self.device.type == "cuda":
             self._init_decode_graphs()
 
@@ -260,7 +270,9 @@ class InferenceManager:
         finally:
             if was_training:
                 self.model.train()
-            if not self.config.runtime.keep_rollout_state:
+            should_drop = getattr(self.worker, "_should_drop_rollout_hbm_after_infer", None)
+            drop_after_infer = should_drop() if callable(should_drop) else not self.config.runtime.keep_rollout_state
+            if drop_after_infer:
                 self._drop_rollout_hbm()
 
     @torch.inference_mode()
