@@ -28,7 +28,7 @@ def test_fused_fp32_master_adamw_matches_torch_reference() -> None:
         reference.step()
 
         master = torch.cat(candidate.state_dict()["master_params"])
-        torch.testing.assert_close(master, reference_param, rtol=3e-6, atol=3e-7)
+        torch.testing.assert_close(master, reference_param.detach().cpu(), rtol=3e-6, atol=3e-7)
         assert torch.equal(candidate_param, reference_param.detach().to(torch.bfloat16))
         assert torch.isfinite(master).all()
         assert all(bucket.master is None for bucket in candidate.buckets)
