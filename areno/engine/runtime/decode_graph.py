@@ -94,9 +94,7 @@ class DecodeGraph:
         # Graph warmup/capture executes the model before any request is
         # admitted. Point every dummy row at the dedicated scratch recurrent
         # slot so it cannot seed live request state with synthetic tokens.
-        self.recurrent_slots = torch.full(
-            (bucket,), scratch_recurrent_slot, device=device, dtype=torch.long
-        )
+        self.recurrent_slots = torch.full((bucket,), scratch_recurrent_slot, device=device, dtype=torch.long)
         # Padding columns point to `scratch_block`, a dedicated block that the
         # scheduler never assigns to a real sequence. This keeps the attention
         # kernel safe when actual batch size < bucket.
