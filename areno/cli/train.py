@@ -792,6 +792,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
     args.score_micro_bs = getattr(args, "score_micro_bs", 8)
     args.model_hub = getattr(args, "model_hub", "modelscope")
     args.train_devices = getattr(args, "train_devices", None)
+    args.sequence_parallel = getattr(args, "sequence_parallel", None)
     args.rollout_tp_size = getattr(args, "rollout_tp_size", None)
     args.rollout_devices = getattr(args, "rollout_devices", None)
     args.policy_sync_bucket_mb = getattr(args, "policy_sync_bucket_mb", 64)
