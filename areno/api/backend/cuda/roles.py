@@ -155,7 +155,7 @@ class WorkerRole:
         model: torch.nn.Module,
         optimizer: AdamW8bit | AdamWFP32Master | None,
         value_head: torch.nn.Module | None,
-        sequence_parallel: bool,
+        sequence_parallel: bool = False,
         *,
         optimizer_offload_mode: str = "cpu",
         optimizer_offload_dir: str | None = None,
