@@ -30,6 +30,19 @@ _REWARD_HEAD_WEIGHT_KEYS = (
 )
 
 
+class _ScaleGradient(torch.autograd.Function):
+    """Keep forward values unchanged while scaling the input gradient."""
+
+    @staticmethod
+    def forward(ctx, x: torch.Tensor, scale: float) -> torch.Tensor:
+        ctx.scale = scale
+        return x
+
+    @staticmethod
+    def backward(ctx, grad: torch.Tensor):
+        return grad * ctx.scale, None
+
+
 def _reward_head_bias_key(weight_key: str) -> str:
     """Map a `*.weight` head key to its matching `*.bias` key."""
 
@@ -692,7 +705,14 @@ def _gather_packed_hidden(hidden_states: torch.Tensor, train_meta) -> torch.Tens
     """Materialize the full packed token axis for replicated scalar heads."""
 
     if train_meta.sequence_parallel:
-        return gather_from_sequence_parallel_region(hidden_states)
+        hidden_states = gather_from_sequence_parallel_region(hidden_states)
+        # Every TP rank applies the same replicated scalar head and therefore
+        # contributes the same full-sequence hidden gradient. The gather's
+        # backward reduce-scatter sums those copies, so average only the
+        # gradient crossing back into the TP backbone. Value-head parameter
+        # gradients remain unscaled and are averaged by `_sync_role_grads`.
+        world_size = get_tp_context().world_size
+        return _ScaleGradient.apply(hidden_states, 1.0 / world_size)
     return hidden_states
 
 
