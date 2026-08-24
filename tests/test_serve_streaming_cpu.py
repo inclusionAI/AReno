@@ -74,6 +74,25 @@ def _tool_call_response() -> ChatCompletionResponse:
 # -- Mock infrastructure ------------------------------------------------------
 
 
+def _make_stream_generator(response_ids: list[list[int]]):
+    """Return an async callable that yields ``_ServeStreamStep`` objects.
+
+    Each invocation creates a fresh async generator that replays the given token
+    sequences for prompt index 0, appending ``"stop"`` as the finish reason for
+    the last token of each sequence.
+    """
+
+    from areno.cli.serve import _ServeStreamStep
+
+    async def _generate(*args, **kwargs):
+        for ids in response_ids:
+            for j, token_id in enumerate(ids):
+                is_last = j == len(ids) - 1
+                yield _ServeStreamStep(0, token_id, "stop" if is_last else None)
+
+    return _generate
+
+
 @contextmanager
 def _mock_serve(response: ChatCompletionResponse, *, response_ids: list[list[int]] | None = None):
     """Mock serve-module internals so streaming requests resolve with *response*.
@@ -96,10 +115,14 @@ def _mock_serve(response: ChatCompletionResponse, *, response_ids: list[list[int
                 finish_reason=[response.choices[0].finish_reason for _ in response_ids],
             )
         )
+        # Also wire up generate_rollout_stream_async so the true-streaming
+        # path (n=1, no tools) can be exercised with the same token data.
+        mock_engine.generate_rollout_stream_async = _make_stream_generator(response_ids)
     else:
         mock_engine.generate_rollout_async = AsyncMock(
             return_value=_ServeRollout(response_ids=[[1]], finish_reason=["stop"])
         )
+        mock_engine.generate_rollout_stream_async = _make_stream_generator([[1]])
     # Store the raw engine so non-streaming _run_request_rollout can reach it.
     mock_engine._engine = mock_engine
 
@@ -294,7 +317,11 @@ class TestStreamingEndpoint:
                 app = _build_streaming_app()
                 events = _collect_sse_events(
                     app,
-                    {"messages": [{"role": "user", "content": "Hi"}], "stream": True},
+                    {
+                        "messages": [{"role": "user", "content": "Hi"}],
+                        "stream": True,
+                        "tools": [{"type": "function", "function": {"name": "get_weather"}}],
+                    },
                 )
 
         data_events = _without_sentinel(events)
@@ -330,7 +357,7 @@ class TestStreamingEndpoint:
             app = _build_streaming_app()
             events = _collect_sse_events(
                 app,
-                {"messages": [{"role": "user", "content": "Hi"}], "stream": True},
+                {"messages": [{"role": "user", "content": "Hi"}], "stream": True, "n": 2},
             )
 
         data_events = _without_sentinel(events)

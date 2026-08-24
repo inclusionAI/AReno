@@ -17,7 +17,7 @@ import uuid
 import warnings
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 from urllib.parse import urlparse
 
 import click
@@ -177,6 +177,50 @@ class PendingRequest:
     cancelled: bool = False
 
 
+class _ServeStreamStep:
+    """Backend-agnostic streaming token step.
+
+    Both :class:`_CudaServeRuntime` and :class:`_MlxServeRuntime` yield
+    these objects from ``generate_rollout_stream_async``, giving the serve
+    layer a single attribute-based interface regardless of backend.
+    """
+
+    __slots__ = ("prompt_idx", "token_id", "finish_reason")
+
+    def __init__(self, prompt_idx: int, token_id: int, finish_reason: str | None = None) -> None:
+        self.prompt_idx = prompt_idx
+        self.token_id = token_id
+        self.finish_reason = finish_reason
+
+
+class _ServeRuntime(Protocol):
+    """Protocol satisfied by ``_CudaServeRuntime`` and ``_MlxServeRuntime``."""
+
+    max_model_len: int
+
+    async def begin_rollout_session_async(self) -> None: ...
+    async def end_rollout_session_async(self) -> None: ...
+    def close(self) -> None: ...
+    async def generate_rollout_async(
+        self,
+        prompts,
+        *,
+        max_new_tokens: int,
+        sampling_params: SamplingParams,
+        prompt_features=None,
+        **kwargs,
+    ) -> _ServeRollout: ...
+    async def generate_rollout_stream_async(
+        self,
+        prompts,
+        *,
+        max_new_tokens: int,
+        sampling_params: SamplingParams,
+        prompt_features=None,
+        **kwargs,
+    ) -> AsyncGenerator[_ServeStreamStep, None]: ...
+
+
 @dataclass(slots=True)
 class ServeState:
     """Process-wide serving state held on `app.state.areno_serve`.
@@ -187,7 +231,7 @@ class ServeState:
     model_path: str
     tokenizer: Any
     processor: Any
-    engine: Any
+    engine: _CudaServeRuntime | _MlxServeRuntime
     max_running_prompts: int
     default_max_tokens: int
     max_model_len: int
@@ -263,6 +307,46 @@ class _CudaServeRuntime:
         )
         return await self._engine.generate_rollout_async(prompts, sampling_params=cuda_sampling, **kwargs)
 
+    async def generate_rollout_stream_async(
+        self,
+        prompts,
+        *,
+        max_new_tokens: int,
+        sampling_params: SamplingParams,
+        prompt_features=None,
+        **kwargs,
+    ) -> AsyncGenerator[_ServeStreamStep, None]:
+        """Stream tokens from the CUDA engine via multiprocessing.Pipe.
+
+        Translates :class:`areno.api.SamplingParams` into the engine-native
+        :class:`areno.engine.data.SamplingParams`, then delegates to the
+        underlying ``ArenoEngine.generate_rollout_stream_async``.  Each
+        yielded :class:`StreamTokenStep` is adapted into a
+        :class:`_ServeStreamStep` so the serve layer sees a uniform type.
+        """
+        from areno.engine.data import SamplingParams as CudaSamplingParams
+
+        cuda_sampling = CudaSamplingParams(
+            temperature=0.0 if sampling_params.greedy else sampling_params.temperature,
+            top_p=sampling_params.top_p,
+            top_k=max(sampling_params.top_k, 0),
+            seed=getattr(sampling_params, "seed", None),
+            stop_token_ids=tuple(sampling_params.stop_token_ids or ()),
+        )
+        stream = self._engine.generate_rollout_stream_async(
+            prompts,
+            max_new_tokens=max_new_tokens,
+            sampling_params=cuda_sampling,
+            prompt_features=prompt_features,
+            **kwargs,
+        )
+        try:
+            async for step in stream:
+                yield _ServeStreamStep(step.prompt_idx, step.token_id, step.finish_reason)
+        finally:
+            with contextlib.suppress(Exception):
+                await stream.aclose()
+
 
 class _MlxServeRuntime:
     """Serve adapter over the same public Trainer lifecycle used by training."""
@@ -315,6 +399,50 @@ class _MlxServeRuntime:
         response_ids = [sequence.resp_tokens for sequence in sequences]
         finish_reason = ["length" if len(tokens) >= max_new_tokens else "stop" for tokens in response_ids]
         return _ServeRollout(response_ids=response_ids, finish_reason=finish_reason)
+
+    async def generate_rollout_stream_async(
+        self,
+        prompts,
+        *,
+        max_new_tokens: int,
+        sampling_params: SamplingParams,
+        prompt_features=None,
+        **kwargs,
+    ) -> AsyncGenerator[_ServeStreamStep, None]:
+        """Stream tokens incrementally from the MLX continuous-batch scheduler.
+
+        Yields :class:`_ServeStreamStep` objects as the decode thread
+        produces tokens.  The generator stops when all sequences complete
+        or the scheduler fails.
+        """
+        del kwargs
+        import queue as _queue
+
+        params = sampling_params.model_copy(update={"max_new_tokens": int(max_new_tokens)})
+        scheduler = self._trainer._backend._rollout_scheduler
+        stream_queue = scheduler.submit_stream(
+            prompts,
+            n_samples=1,
+            sampling_params=params,
+            prompt_features=prompt_features,
+        )
+        loop = asyncio.get_running_loop()
+        try:
+            while True:
+                item = await loop.run_in_executor(None, stream_queue.get)
+                if item is None:
+                    break
+                if isinstance(item, BaseException):
+                    raise item
+                prompt_idx, token_id, finish_reason = item
+                yield _ServeStreamStep(prompt_idx, token_id, finish_reason)
+        except BaseException:
+            try:
+                while True:
+                    stream_queue.get_nowait()
+            except _queue.Empty:
+                pass
+            raise
 
 
 def _create_serve_runtime(
@@ -483,15 +611,11 @@ def create_app(
             raise HTTPException(status_code=503, detail="server is shutting down")
 
         if request.stream:
-            # Streaming: either CUDA true-streaming (pipe) or MLX synthetic SSE.
-            # No background task — cancellation is handled inline in each path.
-            stream_handler = (
-                _stream_chat_completions_cuda
-                if isinstance(state.engine, _CudaServeRuntime)
-                else _stream_chat_completions
-            )
+            # Streaming: true per-token (pipe on CUDA, queue on MLX) for
+            # single-choice no-tool requests; synthetic SSE fallback otherwise.
+            # No background task — cancellation is handled inline.
             return StreamingResponse(
-                stream_handler(state, raw_request, pending),
+                _stream_chat_completions(state, raw_request, pending),
                 media_type="text/event-stream",
                 headers={
                     "Cache-Control": "no-cache",
@@ -642,43 +766,38 @@ def _build_cancelled_response(state: ServeState, item: PendingRequest) -> ChatCo
     return _build_response(state, item.request, item.prompt, response_ids, finish_reasons)
 
 
-async def _stream_chat_completions_cuda(
+async def _stream_chat_completions(
     state: ServeState, raw_request: Request, pending: PendingRequest
 ) -> AsyncGenerator[str, None]:
-    """True SSE streaming for the CUDA engine path.
+    """SSE streaming for the /v1/chat/completions endpoint.
 
-    Calls ``ArenoEngine.generate_rollout_stream_async``, which pushes
-    :class:`StreamTokenStep` objects through a ``multiprocessing.Pipe`` from
-    the worker decode loop.  Tokens are decoded one-by-one and emitted as SSE
-    chunks as soon as they arrive — no synthetic prefix-decode pass needed.
-
-    Multi-choice (``n > 1``) and tool-call requests fall back to the synthetic
-    SSE path via ``_await_pending_response``.
+    Single-choice requests without tools use true per-token streaming
+    through the backend engine (``mp.Pipe`` on CUDA, ``queue.Queue`` on
+    MLX).  Multi-choice (``n > 1``) and tool-call requests fall back to
+    synthetic SSE via incremental prefix-decoding on the full response.
     """
     request = pending.request
-    n_choices = int(request.n)
     key = pending.key
+    n_choices = int(request.n)
     tokenizer = state.tokenizer
 
-    # Cancel handling: poll the underlying HTTP request directly in the
-    # stream loop so a client disconnect stops SSE emission promptly.
     cancel_event = asyncio.Event()
 
-    async def _watch_disconnect_for_stream() -> None:
+    async def _watch_disconnect() -> None:
         while not cancel_event.is_set():
             if await raw_request.is_disconnected():
                 cancel_event.set()
                 return
             await asyncio.sleep(0.1)
 
-    disconnect_task = asyncio.create_task(_watch_disconnect_for_stream())
+    disconnect_task = asyncio.create_task(_watch_disconnect())
 
-    # Multi-choice and tool-call requests still use the synthetic SSE path.
+    # -- Fallback: n > 1 or has tools → synthetic SSE -------------------------
     if n_choices != 1 or request.tools:
         prompts = [pending.prompt for _ in range(n_choices)]
         prompt_features = [pending.prompt_features for _ in prompts] if pending.prompt_features is not None else None
-        if not cancel_event.is_set():
-            try:
+        try:
+            if not cancel_event.is_set():
                 rollout = await state.engine.generate_rollout_async(
                     prompts,
                     max_new_tokens=key.max_new_tokens,
@@ -695,26 +814,23 @@ async def _stream_chat_completions_cuda(
                     prompt_features=prompt_features,
                     decode_progress_interval_s=0.0,
                 )
-            except BaseException:
-                disconnect_task.cancel()
-                raise
+            if cancel_event.is_set():
+                return
             response = _build_response(state, request, pending.prompt, rollout.response_ids, rollout.finish_reason)
             async for chunk in _build_sse_chunks(response, rollout.response_ids, state.tokenizer):
                 yield chunk
-        disconnect_task.cancel()
+        finally:
+            disconnect_task.cancel()
         return
 
-    engine = state.engine._engine
+    # -- True streaming: n=1, no tools -----------------------------------------
     prompts = [pending.prompt]
     prompt_features = [pending.prompt_features] if pending.prompt_features is not None else None
 
     try:
-        stream = engine.generate_rollout_stream_async(
+        stream = state.engine.generate_rollout_stream_async(
             prompts,
             max_new_tokens=key.max_new_tokens,
-            max_running_prompts=max(state.max_running_prompts, len(prompts)),
-            max_prompt_len=max(state.max_model_len - key.max_new_tokens, len(pending.prompt)),
-            eos_token_id=key.eos_token_id,
             sampling_params=SamplingParams(
                 temperature=key.temperature,
                 top_p=key.top_p,
@@ -723,6 +839,10 @@ async def _stream_chat_completions_cuda(
                 stop_token_ids=key.stop_token_ids,
             ),
             prompt_features=prompt_features,
+            # CUDA-only parameters — absorbed by **kwargs on MLX adapters.
+            max_running_prompts=max(state.max_running_prompts, len(prompts)),
+            max_prompt_len=max(state.max_model_len - key.max_new_tokens, len(pending.prompt)),
+            eos_token_id=key.eos_token_id,
             decode_progress_interval_s=0.0,
         )
     except BaseException:
@@ -744,16 +864,12 @@ async def _stream_chat_completions_cuda(
             "created": created,
             "model": model,
             "choices": [
-                {
-                    "index": 0,
-                    "delta": {"role": "assistant", "content": ""},
-                    "finish_reason": None,
-                }
+                {"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": None}
             ],
         }
     )
 
-    # Content chunks — one per token as they arrive from the worker.
+    # Content chunks — one per token as they arrive from the backend.
     collected: list[int] = []
     prev_text = ""
     finish_reason: str | None = None
@@ -776,19 +892,12 @@ async def _stream_chat_completions_cuda(
                         "created": created,
                         "model": model,
                         "choices": [
-                            {
-                                "index": 0,
-                                "delta": {"content": delta},
-                                "finish_reason": None,
-                            }
+                            {"index": 0, "delta": {"content": delta}, "finish_reason": None}
                         ],
                     }
                 )
     finally:
         disconnect_task.cancel()
-        # Clean up the stream generator (closes the underlying pipe).
-        with contextlib.suppress(Exception):
-            await stream.aclose()
 
     finish_reason = finish_reason or "stop"
     yield _emit(
@@ -798,11 +907,7 @@ async def _stream_chat_completions_cuda(
             "created": created,
             "model": model,
             "choices": [
-                {
-                    "index": 0,
-                    "delta": {},
-                    "finish_reason": finish_reason,
-                }
+                {"index": 0, "delta": {}, "finish_reason": finish_reason}
             ],
             "usage": {
                 "prompt_tokens": len(pending.prompt),
@@ -812,58 +917,6 @@ async def _stream_chat_completions_cuda(
         }
     )
     yield "data: [DONE]\n\n"
-
-
-async def _stream_chat_completions(
-    state: ServeState, raw_request: Request, pending: PendingRequest
-) -> AsyncGenerator[str, None]:
-    """Synthetic SSE streaming for the MLX path.
-
-    Calls the engine directly (no background task), decodes the full token list
-    via incremental prefix-decoding, and emits OpenAI-compatible SSE chunks.
-    Disconnect is handled inline so a dropped client stops emission promptly.
-    """
-    request = pending.request
-    key = pending.key
-    n_choices = int(request.n)
-    prompts = [pending.prompt for _ in range(n_choices)]
-    prompt_features = [pending.prompt_features for _ in prompts] if pending.prompt_features is not None else None
-
-    cancel_event = asyncio.Event()
-
-    async def _watch_disconnect_for_mlx() -> None:
-        while not cancel_event.is_set():
-            if await raw_request.is_disconnected():
-                cancel_event.set()
-                return
-            await asyncio.sleep(0.1)
-
-    disconnect_task = asyncio.create_task(_watch_disconnect_for_mlx())
-    try:
-        if not cancel_event.is_set():
-            rollout = await state.engine.generate_rollout_async(
-                prompts,
-                max_new_tokens=key.max_new_tokens,
-                max_running_prompts=max(state.max_running_prompts, len(prompts)),
-                max_prompt_len=max(state.max_model_len - key.max_new_tokens, len(pending.prompt)),
-                eos_token_id=key.eos_token_id,
-                sampling_params=SamplingParams(
-                    temperature=key.temperature,
-                    top_p=key.top_p,
-                    top_k=key.top_k,
-                    seed=key.seed,
-                    stop_token_ids=key.stop_token_ids,
-                ),
-                prompt_features=prompt_features,
-                decode_progress_interval_s=0.0,
-            )
-        if cancel_event.is_set():
-            return
-        response = _build_response(state, request, pending.prompt, rollout.response_ids, rollout.finish_reason)
-        async for chunk in _build_sse_chunks(response, rollout.response_ids, state.tokenizer):
-            yield chunk
-    finally:
-        disconnect_task.cancel()
 
 
 def _build_response(
