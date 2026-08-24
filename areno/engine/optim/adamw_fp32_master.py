@@ -446,7 +446,6 @@ class AdamWFP32Master:
         bias_correction1 = 1.0 - beta1**bucket.step
         bias_correction2 = 1.0 - beta2**bucket.step
         bias_correction2_sqrt = bias_correction2**0.5
-        updated_refs: list[_ParamRef] = []
         try:
             for ref in bucket.refs:
                 grad = self._gradient_for_ref(bucket, ref)
@@ -464,17 +463,18 @@ class AdamWFP32Master:
                     step_size,
                     bias_correction2_sqrt,
                 )
-                updated_refs.append(ref)
                 # Once the final chunk of a parameter has consumed its grad,
                 # release the autograd buffer immediately.
                 if ref.param_start + ref.numel == ref.model_param.numel():
                     ref.model_param.grad = None
                     if isinstance(getattr(ref.model_param, "main_grad", None), torch.Tensor):
                         ref.model_param.main_grad = None
-            if updated_refs:
-                self._commit_master(bucket)
-                # Re-gather the updated BF16 shards back into every DP rank.
-                self._all_gather_bucket(bucket, updated_refs)
+            self._commit_master(bucket)
+            # Every rank that stepped this bucket must enter the same
+            # collective, including ranks whose equal-sized DP shard contains
+            # no real values. Gather the complete bucket rather than the
+            # rank-local set of refs so every model replica is refreshed.
+            self._all_gather_bucket(bucket)
         finally:
             # The FP32 master is a step-local bucket buffer, not persistent
             # optimizer state.
@@ -495,7 +495,6 @@ class AdamWFP32Master:
         bucket.step += 1
         bias_correction1 = 1.0 - beta1**bucket.step
         bias_correction2_sqrt = (1.0 - beta2**bucket.step) ** 0.5
-        updated_refs: list[_ParamRef] = []
         try:
             for ref in bucket.refs:
                 grad = self._gradient_for_ref(bucket, ref)
@@ -527,13 +526,14 @@ class AdamWFP32Master:
                         step_size=effective_lr / bias_correction1,
                         bias_correction2_sqrt=bias_correction2_sqrt,
                     )
-                updated_refs.append(ref)
                 if ref.param_start + ref.numel == ref.model_param.numel():
                     ref.model_param.grad = None
                     if isinstance(getattr(ref.model_param, "main_grad", None), torch.Tensor):
                         ref.model_param.main_grad = None
-            if updated_refs:
-                self._all_gather_bucket(bucket, updated_refs)
+            # `_step_bucket_cuda` is called only for an active bucket. Some DP
+            # ranks may nevertheless own a zero-length shard, so collective
+            # participation cannot depend on their local updated refs.
+            self._all_gather_bucket(bucket)
         finally:
             bucket.grad_shard = None
             bucket.grad_param_ids = frozenset()
@@ -579,11 +579,11 @@ class AdamWFP32Master:
             model_shard.copy_(master)
 
     @torch.no_grad()
-    def _all_gather_bucket(self, bucket: _MasterBucket, refs: list[_ParamRef] | None = None) -> None:
+    def _all_gather_bucket(self, bucket: _MasterBucket) -> None:
         """Gather updated DP shards and copy the full bucket back to BF16 params."""
         if self.dp_size == 1:
             return
-        refs = bucket.refs if refs is None else refs
+        refs = bucket.refs
         if not refs:
             return
         device = refs[0].model_param.device

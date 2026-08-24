@@ -385,7 +385,6 @@ class AdamW8bit(AdamWFP32Master):
 
         exp_avg = _dequantize_symmetric(state.exp_avg_q, state.exp_avg_scale)
         exp_avg_sq = _dequantize_positive(state.exp_avg_sq_q, state.exp_avg_sq_scale)
-        updated_refs: list[_ParamRef] = []
         for ref in bucket.refs:
             grad = self._gradient_for_ref(bucket, ref)
             if grad is None:
@@ -404,15 +403,16 @@ class AdamW8bit(AdamWFP32Master):
                 step_size,
                 bias_correction2_sqrt,
             )
-            updated_refs.append(ref)
             if ref.param_start + ref.numel == ref.model_param.numel():
                 ref.model_param.grad = None
                 if isinstance(getattr(ref.model_param, "main_grad", None), torch.Tensor):
                     ref.model_param.main_grad = None
         state.exp_avg_q, state.exp_avg_scale = _quantize_symmetric(exp_avg)
         state.exp_avg_sq_q, state.exp_avg_sq_scale = _quantize_positive(exp_avg_sq)
-        if updated_refs:
-            self._all_gather_bucket(bucket, updated_refs)
+        # Collective order is bucket-global, not rank-local. A rank can own
+        # no values from a small DP bucket and must still join the gather that
+        # refreshes every replicated model parameter.
+        self._all_gather_bucket(bucket)
         bucket.grad_shard = None
         bucket.grad_param_ids = frozenset()
 

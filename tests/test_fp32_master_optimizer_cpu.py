@@ -98,6 +98,35 @@ def _gloo_sharded_optimizer_worker(rank: int, port: int, output_queue) -> None:
         dist.destroy_process_group()
 
 
+def _gloo_zero_length_optimizer_shard_worker(rank: int, port: int, optimizer_name: str, output_queue) -> None:
+    dist.init_process_group(
+        backend="gloo",
+        init_method=f"tcp://127.0.0.1:{port}",
+        rank=rank,
+        world_size=2,
+    )
+    try:
+        parameter = torch.nn.Parameter(torch.tensor([1.0], dtype=torch.bfloat16))
+        optimizer_cls = {"fp32": AdamWFP32Master, "8bit": AdamW8bit}[optimizer_name]
+        optimizer = optimizer_cls(
+            [parameter],
+            lr=1.0e-2,
+            betas=(0.0, 0.0),
+            weight_decay=0.0,
+            bucket_numel=1,
+            dp_rank=rank,
+            dp_size=2,
+            dp_group=dist.group.WORLD,
+        )
+        parameter.grad = torch.tensor([1.0 + rank], dtype=torch.bfloat16)
+        optimizer.reduce_scatter_gradients()
+        shard_numel = optimizer.buckets[0].shard_numel
+        optimizer.step()
+        output_queue.put((rank, shard_numel, parameter.detach().float().tolist()))
+    finally:
+        dist.destroy_process_group()
+
+
 def test_fp32_master_adamw_matches_torch_reference_across_buckets() -> None:
     initial = torch.linspace(-1.5, 1.5, 37, dtype=torch.float32).to(torch.bfloat16)
     candidate_param = torch.nn.Parameter(initial.clone())
@@ -535,3 +564,31 @@ def test_real_gloo_dp_reduce_scatter_matches_averaged_reference() -> None:
     torch.testing.assert_close(joined_master, reference_param, rtol=2e-6, atol=2e-7)
     assert rank0_is_fp32 and rank1_is_fp32
     assert (rank0_shard_numel, rank1_shard_numel) == (9, 8)
+
+
+@pytest.mark.parametrize("optimizer_name", ["fp32", "8bit"])
+def test_real_gloo_dp_zero_length_shard_joins_parameter_gather(optimizer_name: str) -> None:
+    spawn = mp.get_context("spawn")
+    output_queue = spawn.Queue()
+    port = _free_port()
+    processes = [
+        spawn.Process(
+            target=_gloo_zero_length_optimizer_shard_worker,
+            args=(rank, port, optimizer_name, output_queue),
+        )
+        for rank in range(2)
+    ]
+    for process in processes:
+        process.start()
+    try:
+        results = dict((item[0], item[1:]) for item in (output_queue.get(timeout=20) for _ in processes))
+    finally:
+        for process in processes:
+            process.join(timeout=5)
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=5)
+    assert all(process.exitcode == 0 for process in processes)
+    assert results[0][0] == 1
+    assert results[1][0] == 0
+    assert results[0][1] == results[1][1]
