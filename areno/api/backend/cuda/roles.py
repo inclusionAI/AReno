@@ -611,10 +611,7 @@ class RoleManager:
         loss_clipped = (clipped - target).pow(2)
         loss = value_loss_coef * 0.5 * torch.maximum(loss_unclipped[valid], loss_clipped[valid]).mean()
         (loss / max(group_size, 1)).backward()
-        if role.optimizer_offload_mode == "disk":
-            self.worker._sync_role_grads(role, stream_gradient_shards=True)
-        else:
-            accumulate_role_main_gradients(role)
+        accumulate_role_main_gradients(role)
         stats.add(loss, loss_unclipped, loss_clipped, values, target, baseline, valid)
         if allow_step:
             self._maybe_step_role(role)
@@ -624,8 +621,7 @@ class RoleManager:
 
         has_grad = role.optimizer.has_gradients() or any(param_grad(param) is not None for param in role.parameters())
         if has_grad:
-            if role.optimizer_offload_mode != "disk":
-                self.worker._sync_role_grads(role, stream_gradient_shards=False)
+            self.worker._sync_role_grads(role)
             role.optimizer.step()
         role.optimizer.zero_grad(set_to_none=True)
 

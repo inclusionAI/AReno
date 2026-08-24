@@ -231,18 +231,16 @@ def test_resident_role_gradient_accumulation_stays_fp32():
     torch.testing.assert_close(parameter.main_grad, torch.tensor([[1.0, -0.25]]))
 
 
-def test_role_gradient_sharding_is_only_used_for_disk_streaming():
+def test_role_gradient_sync_keeps_full_gradient_path():
     calls = []
     optimizer = SimpleNamespace(reduce_scatter_gradients=lambda: calls.append("reduce_scatter"))
     role = WorkerRole("model", torch.nn.Linear(2, 1), optimizer=optimizer, value_head=None)
     ctx = SimpleNamespace(world_size=1, dp_size=1)
 
     with patch("areno.engine.worker.get_tp_context", return_value=ctx):
-        ArenoWorker._sync_role_grads(SimpleNamespace(), role, stream_gradient_shards=False)
-        assert calls == []
-        ArenoWorker._sync_role_grads(SimpleNamespace(), role, stream_gradient_shards=True)
+        ArenoWorker._sync_role_grads(SimpleNamespace(), role)
 
-    assert calls == ["reduce_scatter"]
+    assert calls == []
 
 
 def test_prepare_actor_for_inference_rebuilds_weights_and_invalidates_train_state():

@@ -265,7 +265,7 @@ def test_training_manager_offloads_optimizer_state_when_requested(
     optimizer_state_offload: str,
     expected_offloads: list[tuple[str, str | None]],
 ) -> None:
-    calls = {"events": [], "offload": [], "stream_gradient_shards": []}
+    calls = {"events": [], "offload": [], "train_steps": 0}
 
     class _Optimizer:
         def configure_state_offload(self, *, mode: str, directory: str | None, batch_size: int) -> None:
@@ -304,8 +304,8 @@ def test_training_manager_offloads_optimizer_state_when_requested(
     worker._prepare_for_train = _prepare_for_train
     manager = TrainingManager(worker)
 
-    def _train_step(*_args, **kwargs):
-        calls["stream_gradient_shards"].append(kwargs["stream_gradient_shards"])
+    def _train_step(*_args, **_kwargs):
+        calls["train_steps"] += 1
         return {"ok": True}
 
     manager._train_step = _train_step
@@ -321,7 +321,7 @@ def test_training_manager_offloads_optimizer_state_when_requested(
     assert calls == {
         "events": expected_events,
         "offload": expected_offloads,
-        "stream_gradient_shards": [optimizer_state_offload == "disk"],
+        "train_steps": 1,
     }
 
 
