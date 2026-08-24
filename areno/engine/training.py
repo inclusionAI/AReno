@@ -16,8 +16,7 @@ from areno.engine.runtime.logprobs import (
     packed_next_token_logprobs_from_hidden,
 )
 from areno.engine.runtime.train_step import (
-    _clip_grad_norm,
-    _grad_norms,
+    _grad_norms_from_shards,
     _merge_metrics,
     _pack_train_data,
     _train_meta,
@@ -39,6 +38,32 @@ class TrainingManager:
             raise TypeError("TRAIN payload must contain a list data_packs_by_dp")
         accumulation_steps = payload.gradient_accumulation_steps
         accumulation_steps = len(packs) if accumulation_steps is None else max(int(accumulation_steps), 1)
+        offload_mode = getattr(worker.config.runtime, "optimizer_state_offload", "none")
+        if isinstance(offload_mode, bool):
+            offload_mode = "cpu" if offload_mode else "none"
+        if offload_mode == "none" and not worker.config.runtime.keep_rollout_state:
+            # Preserve --drop-rollout-state's historical CPU optimizer offload.
+            offload_mode = "cpu"
+        offload_directory = getattr(worker.config.runtime, "optimizer_state_offload_dir", None)
+        offload_batch_size = getattr(worker.config.runtime, "optimizer_state_offload_batch_size", 1)
+        if not worker._train_state_ready:
+            # onload_state() clears residency policy, so prepare the actor
+            # before configuring first-step disk streaming.
+            worker._prepare_for_train()
+        if offload_mode != "none":
+            # Disk streaming must be active before the first optimizer step;
+            # otherwise step zero materializes every bucket on the GPU first.
+            worker.optimizer.configure_state_offload(
+                mode=offload_mode,
+                directory=offload_directory,
+                batch_size=offload_batch_size,
+            )
+            if offload_mode == "disk":
+                prefetch_state = getattr(worker.optimizer, "prefetch_state", None)
+                if callable(prefetch_state):
+                    # Prime a two-bucket window while forward/backward runs;
+                    # step() keeps that bounded lookahead moving.
+                    prefetch_state()
         worker.optimizer.zero_grad(set_to_none=True)
         results = []
         try:
@@ -55,8 +80,12 @@ class TrainingManager:
                 )
             return results
         finally:
-            if not worker.config.runtime.keep_rollout_state:
-                worker.optimizer.offload_state()
+            if offload_mode != "none":
+                worker.optimizer.offload_state(
+                    mode=offload_mode,
+                    directory=offload_directory,
+                    batch_size=offload_batch_size,
+                )
                 if worker.device.type == "cuda":
                     torch.cuda.empty_cache()
 
@@ -116,28 +145,32 @@ class TrainingManager:
         if not isinstance(loss, torch.Tensor):
             raise TypeError("train_loss_fn must return a torch.Tensor")
         (loss / max(grad_scale, 1)).backward()
-        self._accumulate_main_gradients()
+        # Consume every microbatch immediately: TP-replicated grads are
+        # finalized, then DP reduce-scatter writes only this rank's FP32
+        # accumulation shard and releases the full autograd gradients.
+        self._sync_tensor_parallel_replicated_gradients()
+        worker.optimizer.reduce_scatter_gradients()
         stepped = allow_step
         grad_norm = None
         multimodal_grad_metrics = None
         clipped_grad_norm = None
         if stepped:
-            self._sync_data_parallel_gradients()
-            self._sync_tensor_parallel_replicated_gradients()
             self._finalize_router_expert_bias()
             multimodal_groups = tuple(
                 group
                 for group in worker.multimodal_lr_schedules
                 if any(getattr(param, "_areno_lr_group", None) == group for param in worker.model.parameters())
             )
-            grad_norms = _grad_norms(worker.model.parameters(), multimodal_groups)
+            grad_norms = _grad_norms_from_shards(worker.optimizer.grad_shards(), multimodal_groups)
             grad_norm = grad_norms.pop("global")
             multimodal_grad_metrics = (
                 {f"{group}_grad_norm": grad_norms[group] for group in multimodal_groups} if multimodal_groups else None
             )
             clipped_grad_norm = grad_norm
             if worker.grad_clip_norm is not None:
-                _clip_grad_norm(worker.model.parameters(), grad_norm, worker.grad_clip_norm)
+                clip_coef = float(worker.grad_clip_norm) / (grad_norm + 1e-6) if grad_norm > 0.0 else 1.0
+                if clip_coef < 1.0:
+                    worker.optimizer.scale_gradients(clip_coef)
                 clipped_grad_norm = min(grad_norm, float(worker.grad_clip_norm))
             current_lr = self._lr_for_step(worker._global_step + 1)
             worker.optimizer.lr = current_lr
@@ -233,20 +266,6 @@ class TrainingManager:
                 values[f"{group}_lr"] = float(getattr(param, "_areno_lr", self.worker.optimizer.lr))
         return values
 
-    def _sync_data_parallel_gradients(self) -> None:
-        """Average actor gradients across data-parallel replicas."""
-
-        worker = self.worker
-        ctx = get_tp_context()
-        if ctx.dp_size == 1:
-            return
-        for param in worker.model.parameters():
-            grad = param_grad(param)
-            if grad is None:
-                continue
-            dist.all_reduce(grad, op=dist.ReduceOp.SUM, group=ctx.dp_group)
-            grad.div_(ctx.dp_size)
-
     def _sync_tensor_parallel_replicated_gradients(self) -> None:
         """Sum TP-replicated actor gradients with shard-local contributions."""
 
@@ -259,20 +278,6 @@ class TrainingManager:
             if grad is None or not bool(getattr(param, "tp_grad_allreduce", False)):
                 continue
             dist.all_reduce(grad, op=dist.ReduceOp.SUM, group=ctx.group)
-
-    def _accumulate_main_gradients(self) -> None:
-        """Move actor autograd `.grad` into the FP32 master accumulator."""
-
-        for param in self.worker.model.parameters():
-            if param.grad is None:
-                continue
-            grad = param.grad.detach()
-            main_grad = getattr(param, "main_grad", None)
-            if not isinstance(main_grad, torch.Tensor):
-                param.main_grad = grad.to(dtype=torch.float32)
-            else:
-                main_grad.add_(grad.to(dtype=main_grad.dtype))
-            param.grad = None
 
     def _finalize_router_expert_bias(self) -> None:
         """Apply MoE router/expert bias corrections after gradient sync."""

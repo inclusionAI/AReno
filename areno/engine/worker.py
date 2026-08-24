@@ -488,7 +488,17 @@ class ArenoWorker:
         self.model.to(self.device)
         self.model.onload_train_weights(self.device)
         if self.optimizer is not None:
-            self.optimizer.onload_state(self.device)
+            mode, directory, batch_size = self._optimizer_offload_options()
+            if mode == "disk":
+                # Keep mmap-backed state out of HBM. The optimizer step loads
+                # only its current bucket after TrainingManager starts prefetch.
+                self.optimizer.configure_state_offload(
+                    mode=mode,
+                    directory=directory,
+                    batch_size=batch_size,
+                )
+            else:
+                self.optimizer.onload_state(self.device)
         self._actor_on_device = True
 
     def _prepare_actor_for_inference(self) -> None:
@@ -515,11 +525,27 @@ class ArenoWorker:
         self.model.offload_train_weights()
         self.model.to("cpu")
         if self.optimizer is not None:
-            self.optimizer.offload_state()
+            mode, directory, batch_size = self._optimizer_offload_options()
+            # Swapping in an auxiliary role always evicts actor optimizer HBM.
+            # An explicit disk policy must retain its persistent mmap files;
+            # otherwise preserve the historical CPU offload behavior.
+            if mode == "none":
+                mode = "cpu"
+            self.optimizer.offload_state(mode=mode, directory=directory, batch_size=batch_size)
         self._train_state_ready = False
         self._actor_on_device = False
         if self.device.type == "cuda":
             torch.cuda.empty_cache()
+
+    def _optimizer_offload_options(self) -> tuple[str, str | None, int]:
+        """Return the configured actor optimizer residency policy."""
+
+        mode = getattr(self.config.runtime, "optimizer_state_offload", "none")
+        if isinstance(mode, bool):
+            mode = "cpu" if mode else "none"
+        directory = getattr(self.config.runtime, "optimizer_state_offload_dir", None)
+        batch_size = int(getattr(self.config.runtime, "optimizer_state_offload_batch_size", 1))
+        return str(mode), directory, batch_size
 
     def _release_decode_graphs(self) -> None:
         """Drop captured decode CUDA graphs and release their cached memory."""
@@ -571,17 +597,11 @@ class ArenoWorker:
     def _sync_role_grads(self, role: WorkerRole) -> None:
         """Sync a role's gradients across DP and TP groups.
 
-        DP: average. TP-replicated value-head params (`role_tp_average=True`)
-        get averaged across the whole world; TP-sharded params marked with
-        `tp_grad_allreduce` get summed.
+        DP gradients are reduce-scattered into optimizer-owned FP32 shards.
+        TP-replicated value-head params (`role_tp_average=True`) get averaged
+        across TP; TP-sharded params marked with `tp_grad_allreduce` get summed.
         """
         ctx = get_tp_context()
-        if ctx.dp_size > 1:
-            for param in role.parameters():
-                grad = param_grad(param)
-                if grad is not None:
-                    dist.all_reduce(grad, op=dist.ReduceOp.SUM, group=ctx.dp_group)
-                    grad.div_(ctx.dp_size)
         if ctx.world_size > 1:
             for param in role.parameters():
                 grad = param_grad(param)
@@ -592,6 +612,7 @@ class ArenoWorker:
                     grad.div_(ctx.world_size)
                 elif bool(getattr(param, "tp_grad_allreduce", False)):
                     dist.all_reduce(grad, op=dist.ReduceOp.SUM, group=ctx.group)
+        role.optimizer.reduce_scatter_gradients()
 
     def save_checkpoint(self, payload: SaveCheckpointPayload) -> dict | None:
         """Persist the actor's weights to disk (rank 0 returns the resolved path)."""

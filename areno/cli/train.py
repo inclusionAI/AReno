@@ -139,6 +139,9 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "adam_beta1",
             "adam_beta2",
             "adam_8bit",
+            "optimizer_state_offload",
+            "optimizer_state_offload_dir",
+            "optimizer_state_offload_batch_size",
             "unfreeze_multimodal_tower",
             "unfreeze_multimodal_projector",
             "multimodal_tower_lr",
@@ -228,6 +231,9 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
     args.rollout_tp_size = getattr(args, "rollout_tp_size", None)
     args.rollout_devices = getattr(args, "rollout_devices", None)
     args.policy_sync_bucket_mb = getattr(args, "policy_sync_bucket_mb", 64)
+    args.optimizer_state_offload = getattr(args, "optimizer_state_offload", "none")
+    args.optimizer_state_offload_dir = getattr(args, "optimizer_state_offload_dir", None)
+    args.optimizer_state_offload_batch_size = getattr(args, "optimizer_state_offload_batch_size", 1)
     args.unfreeze_multimodal_tower = getattr(args, "unfreeze_multimodal_tower", False)
     args.unfreeze_multimodal_projector = getattr(args, "unfreeze_multimodal_projector", False)
     args.multimodal_tower_lr = getattr(args, "multimodal_tower_lr", None)
@@ -502,6 +508,9 @@ def _format_training_config_summary(
                         f"weight_decay={config.weight_decay}, adam_8bit={_format_bool(config.adam_8bit)}"
                     ),
                 ),
+                ("optimizer_state_offload", str(config.optimizer_state_offload)),
+                ("optimizer_state_offload_dir", _format_optional(config.optimizer_state_offload_dir)),
+                ("optimizer_state_offload_batch_size", str(config.optimizer_state_offload_batch_size)),
                 ("grad_clip_norm", str(config.grad_clip_norm)),
             ],
         ),
@@ -852,6 +861,9 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             multimodal_projector_lr_decay_style=args.multimodal_projector_lr_decay_style,
             activation_checkpointing=args.activation_checkpointing,
             keep_rollout_state=not args.drop_rollout_state,
+            optimizer_state_offload=args.optimizer_state_offload,
+            optimizer_state_offload_dir=args.optimizer_state_offload_dir,
+            optimizer_state_offload_batch_size=args.optimizer_state_offload_batch_size,
             eager_decode=args.eager_decode,
             attn_backend=args.attn_backend,
             metrics_log_dir=args.metrics_log_dir,
@@ -906,6 +918,9 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             multimodal_projector_lr_decay_style=args.multimodal_projector_lr_decay_style,
             activation_checkpointing=args.activation_checkpointing,
             keep_rollout_state=not args.drop_rollout_state,
+            optimizer_state_offload=args.optimizer_state_offload,
+            optimizer_state_offload_dir=args.optimizer_state_offload_dir,
+            optimizer_state_offload_batch_size=args.optimizer_state_offload_batch_size,
             eager_decode=args.eager_decode,
             attn_backend=args.attn_backend,
             metrics_log_dir=args.metrics_log_dir,
@@ -968,6 +983,9 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             multimodal_projector_lr_decay_style=args.multimodal_projector_lr_decay_style,
             activation_checkpointing=args.activation_checkpointing,
             keep_rollout_state=not args.drop_rollout_state,
+            optimizer_state_offload=args.optimizer_state_offload,
+            optimizer_state_offload_dir=args.optimizer_state_offload_dir,
+            optimizer_state_offload_batch_size=args.optimizer_state_offload_batch_size,
             eager_decode=args.eager_decode,
             attn_backend=args.attn_backend,
             gspo_clip_eps=args.gspo_clip_eps,
@@ -1031,6 +1049,9 @@ def _trainer_config_from_args(args) -> TrainerConfig:
         multimodal_projector_lr_decay_style=args.multimodal_projector_lr_decay_style,
         activation_checkpointing=args.activation_checkpointing,
         keep_rollout_state=not args.drop_rollout_state,
+        optimizer_state_offload=args.optimizer_state_offload,
+        optimizer_state_offload_dir=args.optimizer_state_offload_dir,
+        optimizer_state_offload_batch_size=args.optimizer_state_offload_batch_size,
         eager_decode=args.eager_decode,
         attn_backend=args.attn_backend,
         gspo_clip_eps=args.gspo_clip_eps,
@@ -1151,6 +1172,9 @@ def _training_config_settings(config: TrainerConfig) -> dict:
                 "eager_decode",
                 "activation_checkpointing",
                 "keep_rollout_state",
+                "optimizer_state_offload",
+                "optimizer_state_offload_dir",
+                "optimizer_state_offload_batch_size",
                 "chat_template_enable_thinking",
             ],
         ),
@@ -1645,6 +1669,25 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     "--drop-rollout-state",
     is_flag=True,
     help="Release completed rollout KV/cache state after each step.",
+)
+@click.option(
+    "--optimizer-state-offload",
+    type=click.Choice(["none", "cpu", "disk"]),
+    default="none",
+    show_default=True,
+    help="CUDA optimizer-state residency: device, CPU, or persistent raw mmap on local disk.",
+)
+@click.option(
+    "--optimizer-state-offload-dir",
+    type=click.Path(file_okay=False, path_type=str),
+    help="Local NVMe directory used by --optimizer-state-offload disk (required for disk mode).",
+)
+@click.option(
+    "--optimizer-state-offload-batch-size",
+    type=click.IntRange(min=1),
+    default=1,
+    show_default=True,
+    help="Number of optimizer buckets per persistent disk mmap and flush group.",
 )
 @click.option("--eager-decode", is_flag=True, help="Disable decode CUDA graph and run rollout decode eagerly.")
 @click.option(

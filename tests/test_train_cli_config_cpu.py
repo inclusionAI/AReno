@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -353,9 +354,9 @@ def test_training_config_summary_shows_resolved_values_and_warning():
     assert "attn_backend  flash" in summary
     assert "max_running_prompts  12" in summary
     assert "sampling             greedy=no, temperature=0.7, top_k=20, top_p=0.9" in summary
-    assert "max_steps                    11" in summary
-    assert "score_micro_bs               8" in summary
-    assert "optimizer                    lr=2e-06, min_lr=0.0, decay=cosine/100" in summary
+    assert re.search(r"(?m)^  max_steps\s+11$", summary)
+    assert re.search(r"(?m)^  score_micro_bs\s+8$", summary)
+    assert re.search(r"(?m)^  optimizer\s+lr=2e-06, min_lr=0.0, decay=cosine/100", summary)
     assert "metrics_log_dir  /tmp/metrics" in summary
     assert "WARNING: no checkpoint output path configured (--save-path)" in summary
 

@@ -146,21 +146,6 @@ def _zero_init_value_head(value_head: torch.nn.Module | None) -> None:
         param.zero_()
 
 
-def accumulate_role_main_gradients(role: WorkerRole) -> None:
-    """Fold `param.grad` into `param.main_grad` (FP32) for a role's params."""
-
-    for param in role.parameters():
-        if param.grad is None:
-            continue
-        grad = param.grad.detach()
-        main_grad = getattr(param, "main_grad", None)
-        if isinstance(main_grad, torch.Tensor):
-            main_grad.add_(grad.to(dtype=main_grad.dtype))
-        else:
-            param.main_grad = grad.to(dtype=torch.float32)
-        param.grad = None
-
-
 class WorkerRole:
     """A swap-in non-actor model (reference / critic / reward) on this rank."""
 
@@ -171,12 +156,19 @@ class WorkerRole:
         optimizer: AdamW8bit | AdamWFP32Master | None,
         value_head: torch.nn.Module | None,
         sequence_parallel: bool,
+        *,
+        optimizer_offload_mode: str = "cpu",
+        optimizer_offload_dir: str | None = None,
+        optimizer_offload_batch_size: int = 1,
     ):
         self.path = path
         self.model = model
         self.optimizer = optimizer
         self.value_head = value_head
         self.sequence_parallel = sequence_parallel
+        self.optimizer_offload_mode = optimizer_offload_mode
+        self.optimizer_offload_dir = optimizer_offload_dir
+        self.optimizer_offload_batch_size = optimizer_offload_batch_size
 
     @classmethod
     def from_pretrained(
@@ -236,7 +228,24 @@ class WorkerRole:
         if trainable:
             ctx = get_tp_context()
             optimizer = build_optimizer(params, optimizer_config, ctx, lr=optimizer_lr)
-        return cls(path, model, optimizer, value_head, role_config.effective_sequence_parallel)
+        offload_mode = getattr(runtime_config, "optimizer_state_offload", "none")
+        if isinstance(offload_mode, bool):
+            offload_mode = "cpu" if offload_mode else "none"
+        # Auxiliary roles are always swapped out between uses. With no explicit
+        # policy, retain their historical CPU residency; explicit disk mode
+        # keeps the same mmap files across swaps.
+        if offload_mode == "none":
+            offload_mode = "cpu"
+        return cls(
+            path,
+            model,
+            optimizer,
+            value_head,
+            role_config.effective_sequence_parallel,
+            optimizer_offload_mode=str(offload_mode),
+            optimizer_offload_dir=getattr(runtime_config, "optimizer_state_offload_dir", None),
+            optimizer_offload_batch_size=int(getattr(runtime_config, "optimizer_state_offload_batch_size", 1)),
+        )
 
     def parameters(self):
         """Iterate over model params then value-head params when present."""
@@ -253,7 +262,15 @@ class WorkerRole:
         if self.value_head is not None:
             self.value_head.to(device)
         if self.optimizer is not None:
-            self.optimizer.onload_state(device)
+            if self.optimizer_offload_mode == "disk":
+                self.optimizer.configure_state_offload(
+                    mode="disk",
+                    directory=self.optimizer_offload_dir,
+                    batch_size=self.optimizer_offload_batch_size,
+                )
+                self.optimizer.prefetch_state()
+            else:
+                self.optimizer.onload_state(device)
 
     def onload_for_inference(self, device: torch.device) -> None:
         """Move this role to `device` and materialize derived inference weights."""
@@ -275,7 +292,11 @@ class WorkerRole:
         if self.value_head is not None:
             self.value_head.to("cpu")
         if self.optimizer is not None:
-            self.optimizer.offload_state()
+            self.optimizer.offload_state(
+                mode=self.optimizer_offload_mode,
+                directory=self.optimizer_offload_dir,
+                batch_size=self.optimizer_offload_batch_size,
+            )
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
@@ -575,7 +596,7 @@ class RoleManager:
         loss_clipped = (clipped - target).pow(2)
         loss = value_loss_coef * 0.5 * torch.maximum(loss_unclipped[valid], loss_clipped[valid]).mean()
         (loss / max(group_size, 1)).backward()
-        accumulate_role_main_gradients(role)
+        self.worker._sync_role_grads(role)
         stats.add(loss, loss_unclipped, loss_clipped, values, target, baseline, valid)
         if allow_step:
             self._maybe_step_role(role)
@@ -583,9 +604,8 @@ class RoleManager:
     def _maybe_step_role(self, role: WorkerRole) -> None:
         """Sync role gradients and step if this accumulation window has grads."""
 
-        has_grad = any(param_grad(param) is not None for param in role.parameters())
+        has_grad = role.optimizer.has_gradients() or any(param_grad(param) is not None for param in role.parameters())
         if has_grad:
-            self.worker._sync_role_grads(role)
             role.optimizer.step()
         role.optimizer.zero_grad(set_to_none=True)
 

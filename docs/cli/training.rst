@@ -338,6 +338,28 @@ in its description; flags for other algorithms are ignored.
    Enable decoder-layer activation recompute during training. Default:
    enabled.
 
+``--optimizer-state-offload [none|cpu|disk]``
+   Select CUDA optimizer-state residency. ``none`` keeps state on the training
+   device. ``cpu`` moves state to host memory between train calls. ``disk``
+   stages a bounded bucket group through host memory and stores the state in
+   persistent writable raw-mmap files, copying each bucket back only when the
+   next optimizer step needs it. Default: ``none``. This option is supported
+   only by the CUDA backend and applies to both FP32-master AdamW and
+   ``--adam-8bit``.
+
+``--optimizer-state-offload-dir DIRECTORY``
+   Required when ``--optimizer-state-offload disk`` is selected. Use a fast
+   local NVMe filesystem with enough free capacity for the optimizer state.
+   AReno creates a process-private subdirectory and removes it on normal
+   optimizer onload or teardown. The mmap files are runtime scratch state,
+   not restartable checkpoints; use ``--save-path`` for checkpointing.
+
+``--optimizer-state-offload-batch-size INTEGER``
+   Number of optimizer buckets assigned to each persistent mmap and flushed
+   together. Default: ``1``. A smaller value bounds CPU staging memory more
+   tightly; a larger value creates fewer files and flush calls. This setting
+   is used only by disk offload.
+
 ``--lr FLOAT``
    Policy optimizer learning rate. Default: ``1.0e-6``.
 
