@@ -129,7 +129,7 @@ def build_minicpmv46_policy_plan(model: MiniCPMV46ForCausalLM) -> PolicyTensorSt
     tensors = PolicyTensorStore()
     with policy_plan_scope():
         _save_embedding_norm_head(tensors, model)
-        _save_vision_weights(tensors, model, trainable_only=True)
+        _save_vision_weights(tensors, model)
         prefix = model.config.checkpoint_prefix
         for layer_idx, layer in enumerate(model.layers):
             _save_layer(tensors, layer, f"{prefix}.layers.{layer_idx}")
@@ -164,19 +164,15 @@ def _load_vision_weights(model: MiniCPMV46ForCausalLM, index: SafetensorsIndex) 
             parameter.copy_(index.get_tensor(key).to(device=parameter.device, dtype=parameter.dtype))
 
 
-def _save_vision_weights(
-    tensors: dict[str, torch.Tensor | None],
-    model: MiniCPMV46ForCausalLM,
-    *,
-    trainable_only: bool = False,
-) -> None:
+def _save_vision_weights(tensors: dict[str, torch.Tensor | None], model: MiniCPMV46ForCausalLM) -> None:
     """Save replicated vision/projector parameters under the HF prefixes."""
 
+    policy = isinstance(tensors, PolicyTensorStore)
     for module_name, module in (("vision_tower", model.vision_tower), ("merger", model.merger)):
         if module is None:
             continue
         for name, parameter in module.named_parameters():
-            if trainable_only and not getattr(parameter, "_areno_policy_sync", False):
+            if policy and not getattr(parameter, "_areno_policy_sync", False):
                 continue
             tensors[f"model.{module_name}.{name}"] = rank0_tensor(parameter)
 
