@@ -83,7 +83,11 @@ class TrainingManager:
         model_kwargs = {
             "input_ids": tokens,
             "position_ids": position_ids,
-            "train_meta": _train_meta(data_pack, tokens),
+            "train_meta": _train_meta(
+                data_pack,
+                tokens,
+                sequence_parallel=worker.config.effective_sequence_parallel,
+            ),
         }
         if data_pack.get("features") is not None:
             model_kwargs["features"] = data_pack["features"]

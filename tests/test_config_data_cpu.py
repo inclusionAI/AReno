@@ -180,6 +180,25 @@ class ConfigAndDataTest(unittest.TestCase):
 
         self.assertEqual(cfg.dp_size, 2)
 
+    def test_engine_config_resolves_sequence_parallel_override_before_model_config(self):
+        model = ModelConfig(
+            num_attention_heads=4,
+            num_key_value_heads=4,
+            intermediate_size=16,
+            vocab_size=32,
+            sequence_parallel=False,
+        )
+
+        inherited = EngineConfig(model=model, tp_size=2, devices=[0, 1])
+        self.assertFalse(inherited.effective_sequence_parallel)
+
+        overridden = EngineConfig(model=model, tp_size=2, devices=[0, 1], sequence_parallel=True)
+        self.assertTrue(overridden.model.sequence_parallel)
+        self.assertTrue(overridden.effective_sequence_parallel)
+
+        tp1 = EngineConfig(model=model, tp_size=1, devices=[0], sequence_parallel=True)
+        self.assertFalse(tp1.effective_sequence_parallel)
+
     def test_runtime_config_attn_backend_propagates_to_model_config(self):
         """The runtime attention backend should reach model layer construction."""
         model = ModelConfig(num_attention_heads=4, num_key_value_heads=4, intermediate_size=16, vocab_size=32)

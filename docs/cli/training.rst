@@ -98,6 +98,13 @@ Built-in algorithms: ``sft``, ``dpo``, ``gspo``, ``grpo``, ``ppo``.
 
 ``world-size`` must be divisible by ``tp-size``.
 
+``--sequence-parallel / --no-sequence-parallel``
+   Explicitly enable or disable sequence parallelism for CUDA training. When
+   neither flag is passed, AReno uses ``sequence_parallel`` from the loaded
+   checkpoint's model configuration. The CLI value takes precedence over the
+   model configuration. Sequence parallelism is inactive when ``tp-size`` is
+   ``1`` even if it is requested.
+
 ``--train-devices TEXT``
    Comma-separated logical CUDA device indices or inclusive ranges used by
    training. For example, ``0..8,11..29`` includes both endpoints. AReno

@@ -35,6 +35,7 @@ class TrainerConfig:
     epochs: int = 10
     max_steps: int | None = None
     tp_size: int = 4
+    sequence_parallel: bool | None = None
     world_size: int = 8
     train_devices: list[int] | None = None
     batch_size: int = 32
@@ -184,6 +185,7 @@ class TrainerConfig:
 
         return CudaConfig(
             tp_size=self.tp_size,
+            sequence_parallel=self.sequence_parallel,
             devices=self.train_devices,
             optimizer=self.optimizer_config(),
             runtime={
@@ -223,6 +225,7 @@ class RolloutTrainerConfig(TrainerConfig):
 
         return CudaConfig(
             tp_size=self.tp_size,
+            sequence_parallel=self.sequence_parallel,
             devices=self.train_devices,
             rollout_tp_size=self.rollout_tp_size,
             rollout_devices=self.rollout_devices,

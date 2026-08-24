@@ -45,7 +45,7 @@ def test_worker_role_onload_for_inference_prepares_derived_weights():
             calls.append(("offload_train_weights",))
 
     device = torch.device("cpu")
-    WorkerRole("model", Model(), optimizer=None, value_head=None).onload_for_inference(device)
+    WorkerRole("model", Model(), optimizer=None, value_head=None, sequence_parallel=False).onload_for_inference(device)
 
     assert calls == [
         ("to", device),

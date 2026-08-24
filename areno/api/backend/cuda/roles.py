@@ -157,11 +157,13 @@ class WorkerRole:
         model: torch.nn.Module,
         optimizer: AdamW8bit | AdamWFP32Master | None,
         value_head: torch.nn.Module | None,
+        sequence_parallel: bool,
     ):
         self.path = path
         self.model = model
         self.optimizer = optimizer
         self.value_head = value_head
+        self.sequence_parallel = sequence_parallel
 
     @classmethod
     def from_pretrained(
@@ -175,6 +177,7 @@ class WorkerRole:
         optimizer_config,
         runtime_config,
         tp_size: int,
+        sequence_parallel: bool | None,
         dp_size: int,
         devices: list[int] | None,
         optimizer_lr: float | None = None,
@@ -190,6 +193,7 @@ class WorkerRole:
             optimizer=optimizer_config,
             runtime=runtime_config,
             tp_size=tp_size,
+            sequence_parallel=sequence_parallel,
             dp_size=dp_size,
             devices=devices,
             dummy_load=False,
@@ -219,7 +223,7 @@ class WorkerRole:
         if trainable:
             ctx = get_tp_context()
             optimizer = build_optimizer(params, optimizer_config, ctx, lr=optimizer_lr)
-        return cls(path, model, optimizer, value_head)
+        return cls(path, model, optimizer, value_head, role_config.effective_sequence_parallel)
 
     def parameters(self):
         """Iterate over model params then value-head params when present."""
@@ -298,6 +302,7 @@ class RoleManager:
                 optimizer_config=worker.config.optimizer,
                 runtime_config=worker.config.runtime,
                 tp_size=worker.config.tp_size,
+                sequence_parallel=worker.config.sequence_parallel,
                 dp_size=int(worker.config.dp_size),
                 devices=worker.config.devices,
                 optimizer_lr=spec.optimizer_lr,
@@ -319,16 +324,28 @@ class RoleManager:
             worker._prepare_actor_for_inference()
             model = worker.model
             offload_role = None
+            sequence_parallel = worker.config.effective_sequence_parallel
         else:
             offload_role = self.roles[role_name]
             worker._prepare_actor_offloaded()
             offload_role.onload_for_inference(worker.device)
             model = offload_role.model
+            sequence_parallel = offload_role.sequence_parallel
         model.eval()
         try:
             token_rows = payload.token_rows_by_dp[ctx.dp_rank]
             features = payload.features_by_dp[ctx.dp_rank] if payload.features_by_dp is not None else None
-            local = [] if not token_rows else self._score_logprob_rows(model, token_rows, payload, features=features)
+            local = (
+                []
+                if not token_rows
+                else self._score_logprob_rows(
+                    model,
+                    token_rows,
+                    payload,
+                    features=features,
+                    sequence_parallel=sequence_parallel,
+                )
+            )
             return local if ctx.rank == 0 else None
         finally:
             if offload_role is not None:
@@ -341,6 +358,7 @@ class RoleManager:
         payload: ScorePayload,
         *,
         features: list[dict | None] | None = None,
+        sequence_parallel: bool,
     ) -> list[list[float]]:
         """Score token logprobs in bounded microbatches."""
 
@@ -356,7 +374,7 @@ class RoleManager:
             model_kwargs = {
                 "input_ids": tokens,
                 "position_ids": data_pack["position_ids"],
-                "train_meta": _train_meta(data_pack, tokens),
+                "train_meta": _train_meta(data_pack, tokens, sequence_parallel=sequence_parallel),
             }
             if data_pack.get("features") is not None:
                 model_kwargs["features"] = data_pack["features"]
@@ -406,7 +424,7 @@ class RoleManager:
             model_kwargs = {
                 "input_ids": tokens,
                 "position_ids": data_pack["position_ids"],
-                "train_meta": _train_meta(data_pack, tokens),
+                "train_meta": _train_meta(data_pack, tokens, sequence_parallel=role.sequence_parallel),
             }
             if data_pack.get("features") is not None:
                 model_kwargs["features"] = data_pack["features"]
@@ -461,7 +479,7 @@ class RoleManager:
             model_kwargs = {
                 "input_ids": tokens,
                 "position_ids": data_pack["position_ids"],
-                "train_meta": _train_meta(data_pack, tokens),
+                "train_meta": _train_meta(data_pack, tokens, sequence_parallel=role.sequence_parallel),
             }
             if data_pack.get("features") is not None:
                 model_kwargs["features"] = data_pack["features"]
@@ -515,7 +533,7 @@ class RoleManager:
         worker = self.worker
         data_pack = to_device(_pack_train_data(data_pack_obj), worker.device)
         tokens = data_pack["input_ids"].long()
-        train_meta = _train_meta(data_pack, tokens)
+        train_meta = _train_meta(data_pack, tokens, sequence_parallel=role.sequence_parallel)
         model_kwargs = {
             "input_ids": tokens,
             "position_ids": data_pack["position_ids"],

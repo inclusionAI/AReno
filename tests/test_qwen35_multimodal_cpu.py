@@ -224,7 +224,7 @@ def test_packed_train_adds_singleton_sequences_for_tp_alignment(monkeypatch):
     }
 
     packed = _pack_train_data(pack)
-    meta = _train_meta(packed, packed["input_ids"])
+    meta = _train_meta(packed, packed["input_ids"], sequence_parallel=True)
 
     assert packed["input_ids"].tolist() == [[1, 2, 3, 4, 5, 6, 7, 0]]
     assert packed["position_ids"].tolist() == [[0, 1, 2, 0, 1, 2, 3, 0]]
@@ -234,6 +234,19 @@ def test_packed_train_adds_singleton_sequences_for_tp_alignment(monkeypatch):
     assert packed["packed_response_mask"].numel() == 5
     assert meta.packed is True
     assert meta.sequence_parallel is True
+
+
+def test_train_meta_does_not_enable_sequence_parallel_from_tp_size(monkeypatch):
+    monkeypatch.setattr(train_step, "get_tp_context", lambda: SimpleNamespace(world_size=4))
+    packed = {
+        "train_cu_seqlens": torch.tensor([0, 4], dtype=torch.int32),
+        "train_max_seqlen": 4,
+    }
+    tokens = torch.ones(1, 4, dtype=torch.long)
+
+    meta = _train_meta(packed, tokens, sequence_parallel=False)
+
+    assert meta.sequence_parallel is False
 
 
 def test_packed_multimodal_metadata_includes_tp_alignment_tokens(monkeypatch):

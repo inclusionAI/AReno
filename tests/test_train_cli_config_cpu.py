@@ -455,6 +455,14 @@ def test_independent_rollout_topology_parses_distinct_cuda_devices() -> None:
     assert backend.uses_separate_rollout_engine()
 
 
+@pytest.mark.parametrize("value", [None, True, False])
+def test_sequence_parallel_cli_override_reaches_cuda_config(value) -> None:
+    cfg = _trainer_config_from_options(**_options(sequence_parallel=value))
+
+    assert cfg.sequence_parallel is value
+    assert cfg.cuda_config().sequence_parallel is value
+
+
 @pytest.mark.parametrize(
     ("overrides", "message"),
     [
@@ -893,6 +901,7 @@ def _options(**overrides):
         max_steps=None,
         score_micro_bs=8,
         tp_size=1,
+        sequence_parallel=None,
         world_size=1,
         batch_size=2,
         n_samples=2,

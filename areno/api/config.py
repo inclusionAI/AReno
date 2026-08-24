@@ -15,6 +15,8 @@ class CudaConfig:
 
     `tp_size`/`dp_size` describe the parallelism layout used by `ArenoEngine`
     (when `dp_size` is None the backend infers it from world size / tp size).
+    `sequence_parallel` is a tri-state checkpoint override: None preserves the
+    model adapter's value while True/False explicitly replace it.
     The `optimizer` and `runtime` dicts are passed verbatim to the engine's
     `OptimizerConfig`/`RuntimeConfig` so any new tuning knob can be added
     without changing this file.
@@ -22,6 +24,7 @@ class CudaConfig:
 
     model_path: str | None = None
     tp_size: int = 1
+    sequence_parallel: bool | None = None
     dp_size: int | None = None
     devices: list[int] | None = None
     rollout_tp_size: int | None = None

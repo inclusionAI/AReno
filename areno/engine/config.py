@@ -246,6 +246,7 @@ class EngineConfig:
     optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
     tp_size: int = 1
+    sequence_parallel: bool | None = None
     dp_size: int | None = None
     devices: list[int] | None = None
     dummy_load: bool = False
@@ -255,6 +256,8 @@ class EngineConfig:
     def __post_init__(self) -> None:
         """Infer DP/devices and validate the distributed layout."""
 
+        if self.sequence_parallel is not None:
+            self.model.sequence_parallel = bool(self.sequence_parallel)
         self.model.validate_tp(self.tp_size)
         if self.devices is None:
             if torch.cuda.is_available():
@@ -292,6 +295,12 @@ class EngineConfig:
         self.runtime.resolve_attn_backend(model=self.model, devices=self.devices)
         self.runtime.resolve_compile_model(model=self.model, devices=self.devices)
         self.model.attn_backend = self.runtime.attn_backend
+
+    @property
+    def effective_sequence_parallel(self) -> bool:
+        """Return whether training should shard activations across TP ranks."""
+
+        return bool(self.tp_size > 1 and self.model.sequence_parallel)
 
 
 def flash_attention_unsupported_model_reason(model: ModelConfig) -> str | None:

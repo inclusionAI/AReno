@@ -162,6 +162,7 @@ class CudaBackend(Backend):
             self._train_engine = ArenoEngine.from_pretrained(
                 cfg.model_path or ctx.model_path,
                 tp_size=tp_size,
+                sequence_parallel=cfg.sequence_parallel,
                 dp_size=dp_size,
                 devices=devices,
                 dummy_load=cfg.dummy_load,
@@ -210,6 +211,7 @@ class CudaBackend(Backend):
         common = {
             "dummy_load": cfg.dummy_load,
             "runtime_config": RuntimeConfig(**cfg.runtime),
+            "sequence_parallel": cfg.sequence_parallel,
             "start": False,
             "policy_sync_bucket_mb": cfg.policy_sync_bucket_mb,
         }

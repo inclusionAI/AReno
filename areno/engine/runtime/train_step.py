@@ -48,14 +48,14 @@ def _merge_metrics(*metrics_list: dict[str, Any] | None) -> dict[str, float] | N
     return out or None
 
 
-def _train_meta(data_pack: dict[str, Any], tokens: torch.Tensor) -> TrainMeta:
-    """Build metadata for the canonical packed training representation."""
+def _train_meta(data_pack: dict[str, Any], tokens: torch.Tensor, *, sequence_parallel: bool) -> TrainMeta:
+    """Build packed metadata using the resolved model/CLI SP setting."""
 
     cu_seqlens = data_pack.get("train_cu_seqlens")
     if not isinstance(cu_seqlens, torch.Tensor):
         raise ValueError("training requires canonical packed data with train_cu_seqlens")
     ctx = get_tp_context()
-    sequence_parallel = ctx.world_size > 1
+    sequence_parallel = bool(sequence_parallel and ctx.world_size > 1)
     if sequence_parallel and tokens.numel() % ctx.world_size != 0:
         raise ValueError("packed token count must be divisible by tensor-parallel size")
     return TrainMeta(
