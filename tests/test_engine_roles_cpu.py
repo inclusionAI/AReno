@@ -3,7 +3,12 @@ from unittest.mock import patch
 
 import torch
 
-from areno.api.backend.cuda.roles import RoleManager, WorkerRole, _gather_packed_hidden
+from areno.api.backend.cuda.roles import (
+    RoleManager,
+    WorkerRole,
+    _gather_packed_hidden,
+    accumulate_role_main_gradients,
+)
 from areno.engine.protocol import ScorePayload
 from areno.engine.worker import ArenoWorker
 
@@ -209,6 +214,35 @@ def test_gather_packed_hidden_averages_replicated_head_backbone_gradient():
         gathered.sum().backward()
 
     assert torch.equal(hidden.grad, torch.full_like(hidden, 0.25))
+
+
+def test_resident_role_gradient_accumulation_stays_fp32():
+    model = torch.nn.Linear(2, 1, bias=False, dtype=torch.bfloat16)
+    role = WorkerRole("model", model, optimizer=None, value_head=None)
+    parameter = model.weight
+
+    parameter.grad = torch.tensor([[0.25, -0.5]], dtype=torch.bfloat16)
+    accumulate_role_main_gradients(role)
+    parameter.grad = torch.tensor([[0.75, 0.25]], dtype=torch.bfloat16)
+    accumulate_role_main_gradients(role)
+
+    assert parameter.grad is None
+    assert parameter.main_grad.dtype == torch.float32
+    torch.testing.assert_close(parameter.main_grad, torch.tensor([[1.0, -0.25]]))
+
+
+def test_role_gradient_sharding_is_only_used_for_disk_streaming():
+    calls = []
+    optimizer = SimpleNamespace(reduce_scatter_gradients=lambda: calls.append("reduce_scatter"))
+    role = WorkerRole("model", torch.nn.Linear(2, 1), optimizer=optimizer, value_head=None)
+    ctx = SimpleNamespace(world_size=1, dp_size=1)
+
+    with patch("areno.engine.worker.get_tp_context", return_value=ctx):
+        ArenoWorker._sync_role_grads(SimpleNamespace(), role, stream_gradient_shards=False)
+        assert calls == []
+        ArenoWorker._sync_role_grads(SimpleNamespace(), role, stream_gradient_shards=True)
+
+    assert calls == ["reduce_scatter"]
 
 
 def test_prepare_actor_for_inference_rebuilds_weights_and_invalidates_train_state():

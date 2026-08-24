@@ -594,14 +594,23 @@ class ArenoWorker:
             raise RuntimeError("rollout workers cannot execute training operations")
         return self.training.train(payload)
 
-    def _sync_role_grads(self, role: WorkerRole) -> None:
+    def _sync_role_grads(self, role: WorkerRole, *, stream_gradient_shards: bool) -> None:
         """Sync a role's gradients across DP and TP groups.
 
-        DP gradients are reduce-scattered into optimizer-owned FP32 shards.
+        Disk-offloaded gradients are reduce-scattered into optimizer-owned
+        FP32 shards. Resident none/CPU gradients keep the original full-gradient
+        DP synchronization path.
         TP-replicated value-head params (`role_tp_average=True`) get averaged
         across TP; TP-sharded params marked with `tp_grad_allreduce` get summed.
         """
         ctx = get_tp_context()
+        if not stream_gradient_shards and ctx.dp_size > 1:
+            for param in role.parameters():
+                grad = param_grad(param)
+                if grad is None:
+                    continue
+                dist.all_reduce(grad, op=dist.ReduceOp.SUM, group=ctx.dp_group)
+                grad.div_(ctx.dp_size)
         if ctx.world_size > 1:
             for param in role.parameters():
                 grad = param_grad(param)
@@ -612,7 +621,8 @@ class ArenoWorker:
                     grad.div_(ctx.world_size)
                 elif bool(getattr(param, "tp_grad_allreduce", False)):
                     dist.all_reduce(grad, op=dist.ReduceOp.SUM, group=ctx.group)
-        role.optimizer.reduce_scatter_gradients()
+        if stream_gradient_shards:
+            role.optimizer.reduce_scatter_gradients()
 
     def save_checkpoint(self, payload: SaveCheckpointPayload) -> dict | None:
         """Persist the actor's weights to disk (rank 0 returns the resolved path)."""

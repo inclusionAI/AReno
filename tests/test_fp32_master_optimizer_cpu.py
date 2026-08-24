@@ -265,7 +265,7 @@ def test_training_manager_offloads_optimizer_state_when_requested(
     optimizer_state_offload: str,
     expected_offloads: list[tuple[str, str | None]],
 ) -> None:
-    calls = {"events": [], "offload": []}
+    calls = {"events": [], "offload": [], "stream_gradient_shards": []}
 
     class _Optimizer:
         def configure_state_offload(self, *, mode: str, directory: str | None, batch_size: int) -> None:
@@ -303,7 +303,12 @@ def test_training_manager_offloads_optimizer_state_when_requested(
 
     worker._prepare_for_train = _prepare_for_train
     manager = TrainingManager(worker)
-    manager._train_step = lambda *_args, **_kwargs: {"ok": True}
+
+    def _train_step(*_args, **kwargs):
+        calls["stream_gradient_shards"].append(kwargs["stream_gradient_shards"])
+        return {"ok": True}
+
+    manager._train_step = _train_step
     payload = SimpleNamespace(data_packs_by_dp=[[{}]], gradient_accumulation_steps=1)
 
     assert manager.train(payload) == [{"ok": True}]
@@ -313,7 +318,27 @@ def test_training_manager_offloads_optimizer_state_when_requested(
     if optimizer_state_offload == "disk":
         expected_events.append(("prefetch",))
     expected_events.append(("zero_grad",))
-    assert calls == {"events": expected_events, "offload": expected_offloads}
+    assert calls == {
+        "events": expected_events,
+        "offload": expected_offloads,
+        "stream_gradient_shards": [optimizer_state_offload == "disk"],
+    }
+
+
+def test_training_manager_resident_gradient_accumulation_stays_fp32() -> None:
+    parameter = torch.nn.Parameter(torch.tensor([1.0, -2.0], dtype=torch.bfloat16))
+    worker = SimpleNamespace(model=torch.nn.Module())
+    worker.model.register_parameter("weight", parameter)
+    manager = TrainingManager(worker)
+
+    parameter.grad = torch.tensor([0.25, -0.5], dtype=torch.bfloat16)
+    manager._accumulate_main_gradients()
+    parameter.grad = torch.tensor([0.75, 0.25], dtype=torch.bfloat16)
+    manager._accumulate_main_gradients()
+
+    assert parameter.grad is None
+    assert parameter.main_grad.dtype == torch.float32
+    torch.testing.assert_close(parameter.main_grad, torch.tensor([1.0, -0.25]))
 
 
 def test_fp32_master_disk_offload_is_lazy_and_preserves_next_update(tmp_path) -> None:

@@ -43,6 +43,21 @@ class _ScaleGradient(torch.autograd.Function):
         return grad * ctx.scale, None
 
 
+def accumulate_role_main_gradients(role: WorkerRole) -> None:
+    """Fold one role microbatch into resident FP32 parameter gradients."""
+
+    for param in role.parameters():
+        if param.grad is None:
+            continue
+        grad = param.grad.detach()
+        main_grad = getattr(param, "main_grad", None)
+        if isinstance(main_grad, torch.Tensor):
+            main_grad.add_(grad.to(dtype=main_grad.dtype))
+        else:
+            param.main_grad = grad.to(dtype=torch.float32)
+        param.grad = None
+
+
 def _reward_head_bias_key(weight_key: str) -> str:
     """Map a `*.weight` head key to its matching `*.bias` key."""
 
@@ -596,7 +611,10 @@ class RoleManager:
         loss_clipped = (clipped - target).pow(2)
         loss = value_loss_coef * 0.5 * torch.maximum(loss_unclipped[valid], loss_clipped[valid]).mean()
         (loss / max(group_size, 1)).backward()
-        self.worker._sync_role_grads(role)
+        if role.optimizer_offload_mode == "disk":
+            self.worker._sync_role_grads(role, stream_gradient_shards=True)
+        else:
+            accumulate_role_main_gradients(role)
         stats.add(loss, loss_unclipped, loss_clipped, values, target, baseline, valid)
         if allow_step:
             self._maybe_step_role(role)
@@ -606,6 +624,8 @@ class RoleManager:
 
         has_grad = role.optimizer.has_gradients() or any(param_grad(param) is not None for param in role.parameters())
         if has_grad:
+            if role.optimizer_offload_mode != "disk":
+                self.worker._sync_role_grads(role, stream_gradient_shards=False)
             role.optimizer.step()
         role.optimizer.zero_grad(set_to_none=True)
 
