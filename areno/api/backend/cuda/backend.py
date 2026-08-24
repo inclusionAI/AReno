@@ -230,10 +230,6 @@ class CudaBackend(Backend):
             dp_size=len(rollout_devices) // rollout_tp_size,
             devices=rollout_devices,
             dummy_load=cfg.dummy_load,
-            # Rollout has no optimizer, but it must build the same media
-            # policy-sync layout as the train engine for updated tower/projector
-            # weights to cross the role boundary.
-            optimizer_config=OptimizerConfig(**cfg.optimizer),
             runtime_config=rollout_runtime,
             loss_fn=None,
             role="rollout",
