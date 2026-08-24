@@ -117,7 +117,7 @@ def test_bailing_moe_scatters_already_reduced_expert_output(monkeypatch):
 
         block = SimpleNamespace(
             training=True,
-            gate=lambda hidden: (
+            gate=lambda hidden, num_padding_tokens=0: (
                 torch.zeros((hidden.numel() // hidden.shape[-1], 1), dtype=torch.long),
                 torch.ones((hidden.numel() // hidden.shape[-1], 1)),
                 None,
@@ -131,6 +131,27 @@ def test_bailing_moe_scatters_already_reduced_expert_output(monkeypatch):
         assert output.shape == (1, 2, 2)
         assert calls == ["gather", ("region", False), "scatter", ("shared", 2)]
         torch.testing.assert_close(output.float(), torch.full_like(output.float(), 5))
+
+
+def test_bailing_router_load_ignores_alignment_tokens(monkeypatch):
+    pytest.importorskip("triton")
+    import areno.models.bailing.model as bailing
+    import areno.models.bailing_v3.model as bailing_v3
+
+    topk_idx = torch.tensor([[0], [1], [1], [0]])
+    topk_weight = torch.ones_like(topk_idx, dtype=torch.float32)
+    for module in (bailing, bailing_v3):
+        monkeypatch.setattr(module, "_areno_linear_no_compile", lambda x, weight: x)
+        gate = SimpleNamespace(
+            weight=torch.zeros((2, 2)),
+            num_experts=2,
+            local_tokens_per_expert=torch.zeros(2),
+            _forward_grouped_topk=lambda logits: (topk_idx, topk_weight),
+        )
+
+        module.BailingGate.forward(gate, torch.ones((1, 4, 2)), num_padding_tokens=1)
+
+        torch.testing.assert_close(gate.local_tokens_per_expert, torch.tensor([1.0, 2.0]))
 
 
 def test_gemma4_moe_routes_local_shard_then_gathers_expert_inputs(monkeypatch):

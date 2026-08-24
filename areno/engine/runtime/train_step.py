@@ -64,6 +64,7 @@ def _train_meta(data_pack: dict[str, Any], tokens: torch.Tensor, *, sequence_par
         packed=True,
         sequence_parallel=sequence_parallel,
         activation_checkpointing=bool(data_pack.get("_activation_checkpointing_enabled", False)),
+        num_padding_tokens=int(data_pack.get("packed_singleton_padding", 0)),
     )
 
 

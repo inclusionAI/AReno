@@ -24,6 +24,7 @@ class TrainMeta:
     packed: bool = False
     sequence_parallel: bool = False
     activation_checkpointing: bool = False
+    num_padding_tokens: int = 0
 
 
 @dataclass(slots=True)

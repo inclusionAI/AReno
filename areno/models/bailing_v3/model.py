@@ -174,7 +174,9 @@ class BailingGate(nn.Module):
         self.register_buffer("local_expert_bias", torch.zeros(self.num_experts), persistent=False)
 
     @torch._dynamo.disable
-    def forward(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(
+        self, hidden_states: torch.Tensor, num_padding_tokens: int = 0
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         x = hidden_states.view(-1, hidden_states.shape[-1])
         # Promote to router_dtype (typically fp32) for numerical stability of
         # the sigmoid/top-k selection.
@@ -182,7 +184,8 @@ class BailingGate(nn.Module):
         topk_idx, topk_weight = self._forward_grouped_topk(logits)
         if torch.is_grad_enabled():
             # Only track load when training; eval calls keep counters cold.
-            _accumulate_tokens_per_expert(self.local_tokens_per_expert, topk_idx, self.num_experts)
+            routed_tokens = topk_idx[:-num_padding_tokens] if num_padding_tokens else topk_idx
+            _accumulate_tokens_per_expert(self.local_tokens_per_expert, routed_tokens, self.num_experts)
         return topk_idx, topk_weight.float(), logits
 
     @torch._dynamo.disable
@@ -274,7 +277,7 @@ class BailingSparseMoeBlock(nn.Module):
             routed_scaling_factor=self.config.routed_scaling_factor,
         )
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(self, hidden_states: torch.Tensor, num_padding_tokens: int = 0) -> torch.Tensor:
         # In SP mode we need the full (un-scattered) hidden states for routing
         # since the router weight isn't sharded along the sequence dim.
         moe_sequence_parallel = is_sequence_parallel_active()
@@ -284,7 +287,7 @@ class BailingSparseMoeBlock(nn.Module):
         bsz, seqlen, hidden = hidden_states.shape
         expert_input = hidden_states.to(dtype=self.experts.linear_fc1.weight.dtype)
         with sequence_parallel_region(False):
-            topk_idx, topk_weight, _ = self.gate(hidden_states)
+            topk_idx, topk_weight, _ = self.gate(hidden_states, num_padding_tokens)
             flat = expert_input.view(-1, hidden)
             if self.training:
                 # Permute/unpermute path is autograd-friendly.
@@ -1412,7 +1415,11 @@ class BailingDecoderLayer(nn.Module):
             self.input_layernorm(hidden_states), position_ids, train_meta, infer_meta
         )
         residual = hidden_states
-        return residual + self.mlp(self.post_attention_layernorm(hidden_states))
+        mlp_input = self.post_attention_layernorm(hidden_states)
+        if isinstance(self.mlp, BailingSparseMoeBlock):
+            num_padding_tokens = train_meta.num_padding_tokens if train_meta is not None else 0
+            return residual + self.mlp(mlp_input, num_padding_tokens)
+        return residual + self.mlp(mlp_input)
 
 
 class BailingMoeV3ForCausalLM(nn.Module):
