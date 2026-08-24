@@ -37,6 +37,10 @@ logger = logging.getLogger(__name__)
 
 FinishedRowsCallback = Callable[[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, str, tuple[int, ...]], None]
 RolloutRefillCallback = Callable[[InferenceBatchState], list[int]]
+# (prompt_indices, token_ids, finish_reasons) — three parallel lists.
+# finish_reasons entries are ``None`` for intermediate steps, ``"stop"``,
+# ``"length"``, or ``"cancelled"`` when the token ends the sequence.
+StreamTokenCallback = Callable[[list[int], list[int], list[str | None]], None]
 
 
 def _cancel_stop_token(stop_token_ids: list[int], eos_token_id: int | tuple[int, ...] | None) -> int:
@@ -202,6 +206,7 @@ class InferenceManager:
         payload: RolloutPayload,
         finished_callback: FinishedRowsCallback | None = None,
         refill_callback: RolloutRefillCallback | None = None,
+        stream_callback: StreamTokenCallback | None = None,
     ) -> RolloutOutput | None:
         """Top-level rollout entry: prepare cache, generate, return on rank 0.
 
@@ -253,6 +258,7 @@ class InferenceManager:
                 prompt_indices=prompt_indices,
                 finished_callback=finished_callback,
                 refill_callback=refill_callback,
+                stream_callback=stream_callback,
             )
             if ctx.is_rank0:
                 return state.to_rollout()
@@ -276,6 +282,7 @@ class InferenceManager:
         prompt_indices: list[int] | None = None,
         finished_callback: FinishedRowsCallback | None = None,
         refill_callback: RolloutRefillCallback | None = None,
+        stream_callback: StreamTokenCallback | None = None,
     ) -> None:
         """Prefill all prompts then decode up to `max_new_tokens` without DP-sync.
 
@@ -366,6 +373,7 @@ class InferenceManager:
                 stop_token_tensor,
                 finished_callback,
                 tuple(truncate_stop_token_ids),
+                stream_callback=stream_callback,
             )
             if admitted is not None:
                 (
@@ -451,6 +459,24 @@ class InferenceManager:
             cancelled = self._cancel_mask_for_active_rows(active_rows, cancel_flags, cancel_indices_tensor)
             if cancelled is not None:
                 remove |= cancelled
+            # ---- stream callback --------------------------------------------------
+            if stream_callback is not None and ctx.is_rank0:
+                prompt_ids = [prompt_indices_list[int(row)] for row in active_rows.detach().cpu().tolist()]
+                tokens_cpu = next_tokens.detach().cpu().tolist()
+                reasons: list[str | None] = [None] * active_count
+                if finished is not None:
+                    for i in range(active_count):
+                        if bool(finished[i].item()):
+                            reasons[i] = "stop"
+                for i in range(active_count):
+                    if bool(full_length[i].item()):
+                        reasons[i] = "length"
+                if cancelled is not None:
+                    for i in range(active_count):
+                        if bool(cancelled[i].item()):
+                            reasons[i] = "cancelled"
+                stream_callback(prompt_ids, tokens_cpu, reasons)
+            # -----------------------------------------------------------------------
             if bool(remove.any().item()):
                 if finished is not None and bool(finished.any().item()):
                     self._mark_rollout_finished_rows(
@@ -694,6 +720,7 @@ class InferenceManager:
         stop_token_tensor: torch.Tensor | None,
         finished_callback: FinishedRowsCallback | None,
         truncate_stop_token_ids: tuple[int, ...],
+        stream_callback: StreamTokenCallback | None = None,
     ) -> (
         tuple[
             torch.Tensor,
@@ -758,6 +785,21 @@ class InferenceManager:
             remove |= finished
         full_length = response_lens[new_rows] >= state.max_new_tokens
         remove |= full_length
+        # ---- stream callback (prefill tokens) ----------------------------------
+        ctx = get_tp_context()
+        if stream_callback is not None and ctx.is_rank0:
+            prompt_ids = [prompt_indices[int(row)] for row in new_rows.detach().cpu().tolist()]
+            tokens_cpu = new_tokens.detach().cpu().tolist()
+            reasons: list[str | None] = [None] * int(new_rows.numel())
+            if finished is not None:
+                for i in range(int(new_rows.numel())):
+                    if bool(finished[i].item()):
+                        reasons[i] = "stop"
+            for i in range(int(new_rows.numel())):
+                if bool(full_length[i].item()):
+                    reasons[i] = "length"
+            stream_callback(prompt_ids, tokens_cpu, reasons)
+        # -----------------------------------------------------------------------
         if bool(remove.any().item()):
             if finished is not None and bool(finished.any().item()):
                 self._mark_rollout_finished_rows(

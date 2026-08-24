@@ -22,7 +22,7 @@ import torch.distributed as dist
 
 from areno.api.backend.cuda.roles import RoleManager, WorkerRole
 from areno.engine.config import EngineConfig
-from areno.engine.data import RolloutOutput
+from areno.engine.data import RolloutOutput, StreamTokenStep
 from areno.engine.data.sampling import _truncate_generated
 from areno.engine.inference import InferCacheSpec, InferenceManager
 from areno.engine.modeling import build_model_on_device, build_optimizer, configure_multimodal_training, param_grad
@@ -35,6 +35,7 @@ from areno.engine.protocol import (
     RolloutCacheProbePayload,
     RolloutPayload,
     SaveCheckpointPayload,
+    StreamTokenPayload,
     WorkerResult,
 )
 from areno.engine.runtime.common import pad_rollout_rows
@@ -368,6 +369,47 @@ class ArenoWorker:
             for idx, (request_id, part) in enumerate(zip(request_ids, parts, strict=True))
             if idx not in sent
         ]
+
+    def handle_stream_rollout(self, cmd: Command) -> None:
+        """Run a streaming rollout, pushing tokens through the attached pipe.
+
+        Extracts the pipe send-end from the ``StreamTokenPayload``, wraps it in
+        a ``stream_callback``, and drives ``infer_rollout``.  The pipe is closed
+        after decode completes so the coordinator sees ``EOFError`` on the
+        recv-end.  Only TP rank-0 of each DP group writes to the pipe.
+
+        An early ack is sent via ``result_queue`` so the coordinator can start
+        reading the pipe before the decode loop finishes — this keeps
+        time-to-first-token low.
+        """
+        payload = cmd.payload
+        stream_conn = payload.stream_conn
+        rollout = payload.rollout
+        ctx = get_tp_context()
+
+        # Ack immediately so the coordinator unblocks and starts consuming the
+        # pipe while the decode loop is still running.
+        if ctx.is_rank0:
+            self._result_queue.put(
+                (self._rank, WorkerResult(ok=True, payload="ack", request_id=cmd.request_id)),
+            )
+
+        def _stream_callback(prompt_indices: list[int], token_ids: list[int], finish_reasons: list[str | None]) -> None:
+            for pi, tid, fr in zip(prompt_indices, token_ids, finish_reasons):
+                try:
+                    stream_conn.send(StreamTokenStep(prompt_idx=pi, token_id=tid, finish_reason=fr))
+                except Exception:
+                    # Pipe may be closed if the client disconnected; we still
+                    # let decode finish so the worker batch stays valid.
+                    pass
+
+        try:
+            self.inference.infer_rollout(rollout, stream_callback=_stream_callback)
+        finally:
+            try:
+                stream_conn.close()
+            except Exception:
+                pass
 
     def _next_refill_command(self) -> Command | None:
         """Fetch the next queued command consistently across TP ranks."""

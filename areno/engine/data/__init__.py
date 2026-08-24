@@ -11,7 +11,14 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from areno.engine.data.batch import RolloutOutput, SamplingParams, TrainStats, to_cpu, to_device
+    from areno.engine.data.batch import (
+        RolloutOutput,
+        SamplingParams,
+        StreamTokenStep,
+        TrainStats,
+        to_cpu,
+        to_device,
+    )
 
 
 def __getattr__(name: str):
@@ -27,4 +34,4 @@ def __getattr__(name: str):
     return value
 
 
-__all__ = ["RolloutOutput", "SamplingParams", "TrainStats", "to_cpu", "to_device"]
+__all__ = ["RolloutOutput", "SamplingParams", "StreamTokenStep", "TrainStats", "to_cpu", "to_device"]

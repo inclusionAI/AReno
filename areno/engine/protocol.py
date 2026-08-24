@@ -16,6 +16,7 @@ import queue
 import socket
 import threading
 import traceback
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from enum import Enum, auto
 from itertools import count
@@ -33,6 +34,7 @@ class Op(Enum):
 
     TRAIN = auto()
     INFER_ROLLOUT = auto()
+    INFER_ROLLOUT_STREAM = auto()
     PROBE_ROLLOUT_CACHE = auto()
     ENSURE_ROLES = auto()
     SCORE_LOGPROBS = auto()
@@ -90,6 +92,19 @@ class RolloutPayload:
     decode_progress_interval_s: float = 0.0
     cancel_flags: torch.Tensor | None = None
     cancel_indices_by_dp: list[list[int]] | None = None
+
+
+@dataclass(slots=True)
+class StreamTokenPayload:
+    """Typed payload for Op.INFER_ROLLOUT_STREAM.
+
+    Carries the rollout parameters plus the send-end of a
+    ``multiprocessing.Pipe`` that the worker uses to push incremental
+    :class:`~areno.engine.data.StreamTokenStep` objects.
+    """
+
+    rollout: RolloutPayload
+    stream_conn: Any  # multiprocessing.Connection (send end, picklable)
 
 
 @dataclass(slots=True)
@@ -539,6 +554,63 @@ class TPCluster:
                 proc.join(timeout=0)
         return dead
 
+    async def stream_call_async(
+        self,
+        payload: RolloutPayload,
+        *,
+        timeout: float | None = None,
+    ) -> AsyncGenerator[StreamTokenStep, None]:
+        """Submit a streaming rollout and yield tokens incrementally.
+
+        Creates a :class:`multiprocessing.Pipe`, sends the send-end to every
+        worker alongside the rollout command, then reads
+        :class:`~areno.engine.data.StreamTokenStep` objects from the recv-end
+        as they arrive. The generator stops when the worker closes its end
+        of the pipe.
+
+        Only TP rank-0 of each DP group writes to the pipe; other ranks
+        receive the command but do not emit.
+        """
+        from areno.engine.data.batch import StreamTokenStep as _StreamTokenStep
+
+        recv_conn, send_conn = mp.Pipe(duplex=False)
+        stream_payload = StreamTokenPayload(rollout=payload, stream_conn=send_conn)
+
+        request_id = next(self._request_ids)
+        loop = asyncio.get_running_loop()
+        ack_future: asyncio.Future = loop.create_future()
+        # Only wait for TP rank-0 of each DP group (they are the ones that
+        # actually write to the pipe).  For dp_size == 1 this is just rank 0.
+        dp_size = int(self.config.dp_size)
+        tp_size = self.config.tp_size
+        result_ranks = {dp_rank * tp_size for dp_rank in range(dp_size)}
+        self._submit_call(
+            Op.INFER_ROLLOUT_STREAM, stream_payload,
+            request_id=request_id, future=ack_future, loop=loop, result_ranks=result_ranks,
+        )
+        try:
+            await asyncio.wait_for(ack_future, timeout=timeout)
+        except BaseException:
+            with self._pending_lock:
+                self._pending_calls.pop(request_id, None)
+            recv_conn.close()
+            raise
+
+        # Read StreamTokenStep objects from the pipe in a thread so we never
+        # block the event loop on a blocking recv.
+        loop = asyncio.get_running_loop()
+        try:
+            while True:
+                step = await loop.run_in_executor(None, recv_conn.recv)
+                if isinstance(step, _StreamTokenStep):
+                    yield step
+                else:
+                    break
+        except EOFError:
+            pass
+        finally:
+            recv_conn.close()
+
     def close(self) -> None:
         """Request shutdown and terminate workers that do not exit promptly."""
 
@@ -644,6 +716,11 @@ def _worker_entry(
                 worker._current_request_ids = [cmd.request_id]
                 for request_id, payload in worker.run_rollout_command(cmd):
                     result_q.put((rank, WorkerResult(ok=True, payload=payload, request_id=request_id)))
+                worker._current_request_ids = []
+                continue
+            if cmd.op is Op.INFER_ROLLOUT_STREAM:
+                worker._current_request_ids = [cmd.request_id]
+                worker.handle_stream_rollout(cmd)
                 worker._current_request_ids = []
                 continue
             payload = worker.handle(cmd)
