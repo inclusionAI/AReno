@@ -316,13 +316,15 @@ class _CudaServeRuntime:
         prompt_features=None,
         **kwargs,
     ) -> AsyncGenerator[_ServeStreamStep, None]:
-        """Stream tokens from the CUDA engine via multiprocessing.Pipe.
+        """Stream tokens from the CUDA engine via shared IPC.
 
         Translates :class:`areno.api.SamplingParams` into the engine-native
         :class:`areno.engine.data.SamplingParams`, then delegates to the
-        underlying ``ArenoEngine.generate_rollout_stream_async``.  Each
-        yielded :class:`StreamTokenStep` is adapted into a
-        :class:`_ServeStreamStep` so the serve layer sees a uniform type.
+        underlying ``ArenoEngine.generate_rollout_stream_async``.  The
+        engine reuses the existing ``Op.INFER_ROLLOUT`` command and
+        ``result_queue`` channel — no separate pipe.  Each yielded
+        :class:`StreamTokenStep` is adapted into a :class:`_ServeStreamStep`
+        so the serve layer sees a uniform type.
         """
         from areno.engine.data import SamplingParams as CudaSamplingParams
 
@@ -611,8 +613,9 @@ def create_app(
             raise HTTPException(status_code=503, detail="server is shutting down")
 
         if request.stream:
-            # Streaming: true per-token (pipe on CUDA, queue on MLX) for
-            # single-choice no-tool requests; synthetic SSE fallback otherwise.
+            # Streaming: true per-token (shared result_queue on CUDA,
+            # queue.Queue on MLX) for single-choice no-tool requests;
+            # synthetic SSE fallback otherwise.
             # No background task — cancellation is handled inline.
             return StreamingResponse(
                 _stream_chat_completions(state, raw_request, pending),
@@ -772,9 +775,10 @@ async def _stream_chat_completions(
     """SSE streaming for the /v1/chat/completions endpoint.
 
     Single-choice requests without tools use true per-token streaming
-    through the backend engine (``mp.Pipe`` on CUDA, ``queue.Queue`` on
-    MLX).  Multi-choice (``n > 1``) and tool-call requests fall back to
-    synthetic SSE via incremental prefix-decoding on the full response.
+    through the backend engine (shared ``result_queue`` IPC on CUDA,
+    ``queue.Queue`` on MLX).  Multi-choice (``n > 1``) and tool-call
+    requests fall back to synthetic SSE via incremental prefix-decoding on
+    the full response.
     """
     request = pending.request
     key = pending.key
@@ -812,7 +816,7 @@ async def _stream_chat_completions(
                         stop_token_ids=key.stop_token_ids,
                     ),
                     prompt_features=prompt_features,
-                    decode_progress_interval_s=0.0,
+                    decode_progress_interval_s=raw_request.app.state.decode_progress_interval_s,
                 )
             if cancel_event.is_set():
                 return
@@ -843,7 +847,9 @@ async def _stream_chat_completions(
             max_running_prompts=max(state.max_running_prompts, len(prompts)),
             max_prompt_len=max(state.max_model_len - key.max_new_tokens, len(pending.prompt)),
             eos_token_id=key.eos_token_id,
-            decode_progress_interval_s=0.0,
+            # Match the non-streaming path so stream and non-stream requests
+            # can share one worker batch via continuous-batch refill.
+            decode_progress_interval_s=raw_request.app.state.decode_progress_interval_s,
         )
     except BaseException:
         disconnect_task.cancel()

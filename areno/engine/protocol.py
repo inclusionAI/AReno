@@ -34,7 +34,6 @@ class Op(Enum):
 
     TRAIN = auto()
     INFER_ROLLOUT = auto()
-    INFER_ROLLOUT_STREAM = auto()
     PROBE_ROLLOUT_CACHE = auto()
     ENSURE_ROLES = auto()
     SCORE_LOGPROBS = auto()
@@ -92,19 +91,7 @@ class RolloutPayload:
     decode_progress_interval_s: float = 0.0
     cancel_flags: torch.Tensor | None = None
     cancel_indices_by_dp: list[list[int]] | None = None
-
-
-@dataclass(slots=True)
-class StreamTokenPayload:
-    """Typed payload for Op.INFER_ROLLOUT_STREAM.
-
-    Carries the rollout parameters plus the send-end of a
-    ``multiprocessing.Pipe`` that the worker uses to push incremental
-    :class:`~areno.engine.data.StreamTokenStep` objects.
-    """
-
-    rollout: RolloutPayload
-    stream_conn: Any  # multiprocessing.Connection (send end, picklable)
+    streaming: bool = False
 
 
 @dataclass(slots=True)
@@ -218,6 +205,11 @@ class _PendingClusterCall:
     future: asyncio.Future | None = None
     loop: asyncio.AbstractEventLoop | None = None
     error: BaseException | None = None
+    # Per-request token delivery queue: the result-pump thread hands
+    # StreamTokenStep payloads to `loop.call_soon_threadsafe(...)` on this
+    # queue; the streaming async generator drains it.  `loop` above is the
+    # event loop that owns both `future` and `stream_queue`.
+    stream_queue: asyncio.Queue | None = None
 
 
 class ClusterCallHandle:
@@ -443,13 +435,76 @@ class TPCluster:
         request_id = next(self._request_ids)
         loop = asyncio.get_running_loop()
         future: asyncio.Future = loop.create_future()
-        self._submit_call(op, payload, request_id=request_id, future=future, loop=loop, result_ranks=result_ranks)
+        self._submit_call(
+            op, payload,
+            request_id=request_id, future=future, loop=loop, result_ranks=result_ranks,
+        )
         try:
             return await asyncio.wait_for(future, timeout=timeout)
         except BaseException:
             with self._pending_lock:
                 self._pending_calls.pop(request_id, None)
             raise
+
+    async def call_async_stream(
+        self,
+        op: Op,
+        payload: Any = None,
+        result_ranks: set[int] | None = None,
+        timeout: float = 0.05,
+    ) -> AsyncGenerator[Any, None]:
+        """Async streaming variant of :meth:`call_async`.
+
+        Submits one command via the shared ``_submit_call`` path and yields
+        intermediate results (``StreamTokenStep`` objects pushed by the
+        worker through the ``result_queue``) as they arrive.  The generator
+        stops when the final result resolves the underlying ``Future``;
+        a failed rank raises from the generator instead of ending the
+        stream silently.
+
+        *timeout* is the maximum interval (seconds) between polls of the
+        internal token queue; it bounds how long the caller waits between
+        tokens before checking whether the final result has arrived.
+
+        This reuses the same ``result_queue`` channel and continuous-batching
+        machinery as the non-streaming path — no separate pipe.
+        """
+
+        stream_queue: asyncio.Queue = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future = loop.create_future()
+
+        request_id = next(self._request_ids)
+        self._submit_call(
+            op, payload,
+            request_id=request_id, future=future, loop=loop,
+            result_ranks=result_ranks,
+            stream_queue=stream_queue,
+        )
+
+        try:
+            while not future.done():
+                try:
+                    step = await asyncio.wait_for(stream_queue.get(), timeout=timeout)
+                    yield step
+                except asyncio.TimeoutError:
+                    pass
+            # Drain any tokens that arrived just before the future resolved.
+            while not stream_queue.empty():
+                yield stream_queue.get_nowait()
+            # Propagate worker errors like the non-streaming path's
+            # ``await future`` would.  The successful final payload is
+            # deliberately discarded: every token was already yielded as a
+            # step carrying its finish reason.
+            future.result()
+        finally:
+            while not stream_queue.empty():
+                try:
+                    stream_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+            with self._pending_lock:
+                self._pending_calls.pop(request_id, None)
 
     def _submit_call(
         self,
@@ -460,6 +515,7 @@ class TPCluster:
         future: asyncio.Future | None = None,
         loop: asyncio.AbstractEventLoop | None = None,
         result_ranks: set[int] | None = None,
+        stream_queue: asyncio.Queue | None = None,
     ) -> _PendingClusterCall:
         if not self.started:
             self.start()
@@ -472,6 +528,7 @@ class TPCluster:
             event=threading.Event(),
             future=future,
             loop=loop,
+            stream_queue=stream_queue,
         )
         with self._pending_lock:
             self._pending_calls[request_id] = pending
@@ -500,12 +557,28 @@ class TPCluster:
             self._apply_result(request_id, rank, result, pending)
 
     def _apply_result(self, request_id: int, rank: int, result: WorkerResult, pending: _PendingClusterCall) -> None:
-        """Apply one worker result to a pending call and complete it if done."""
+        """Apply one worker result to a pending call and complete it if done.
+
+        Intermediate streaming results (``StreamTokenStep`` payloads) are
+        pushed into ``pending.stream_queue`` directly and do *not* mark the
+        rank as complete.  Final (non-stream) results follow the usual
+        collect-per-rank-then-resolve path.
+        """
 
         if not result.ok:
             self._finish_pending_call(
                 request_id, pending, RuntimeError(f"rank {rank} failed during {pending.op}:\n{result.error}")
             )
+            return
+        # Push intermediate streaming tokens into the per-request queue
+        # via call_soon_threadsafe — _apply_result runs in the result-pump
+        # thread, not the event loop. When no stream_queue is configured
+        # (non-streaming request), the token is silently dropped.
+        if _is_stream_step(result.payload):
+            if pending.stream_queue is not None and pending.loop is not None:
+                pending.loop.call_soon_threadsafe(
+                    pending.stream_queue.put_nowait, result.payload,
+                )
             return
         pending.results[rank] = result.payload
         pending.pending.discard(rank)
@@ -553,63 +626,6 @@ class TPCluster:
                 # Reap the process so its resources are released promptly.
                 proc.join(timeout=0)
         return dead
-
-    async def stream_call_async(
-        self,
-        payload: RolloutPayload,
-        *,
-        timeout: float | None = None,
-    ) -> AsyncGenerator[StreamTokenStep, None]:
-        """Submit a streaming rollout and yield tokens incrementally.
-
-        Creates a :class:`multiprocessing.Pipe`, sends the send-end to every
-        worker alongside the rollout command, then reads
-        :class:`~areno.engine.data.StreamTokenStep` objects from the recv-end
-        as they arrive. The generator stops when the worker closes its end
-        of the pipe.
-
-        Only TP rank-0 of each DP group writes to the pipe; other ranks
-        receive the command but do not emit.
-        """
-        from areno.engine.data.batch import StreamTokenStep as _StreamTokenStep
-
-        recv_conn, send_conn = mp.Pipe(duplex=False)
-        stream_payload = StreamTokenPayload(rollout=payload, stream_conn=send_conn)
-
-        request_id = next(self._request_ids)
-        loop = asyncio.get_running_loop()
-        ack_future: asyncio.Future = loop.create_future()
-        # Only wait for TP rank-0 of each DP group (they are the ones that
-        # actually write to the pipe).  For dp_size == 1 this is just rank 0.
-        dp_size = int(self.config.dp_size)
-        tp_size = self.config.tp_size
-        result_ranks = {dp_rank * tp_size for dp_rank in range(dp_size)}
-        self._submit_call(
-            Op.INFER_ROLLOUT_STREAM, stream_payload,
-            request_id=request_id, future=ack_future, loop=loop, result_ranks=result_ranks,
-        )
-        try:
-            await asyncio.wait_for(ack_future, timeout=timeout)
-        except BaseException:
-            with self._pending_lock:
-                self._pending_calls.pop(request_id, None)
-            recv_conn.close()
-            raise
-
-        # Read StreamTokenStep objects from the pipe in a thread so we never
-        # block the event loop on a blocking recv.
-        loop = asyncio.get_running_loop()
-        try:
-            while True:
-                step = await loop.run_in_executor(None, recv_conn.recv)
-                if isinstance(step, _StreamTokenStep):
-                    yield step
-                else:
-                    break
-        except EOFError:
-            pass
-        finally:
-            recv_conn.close()
 
     def close(self) -> None:
         """Request shutdown and terminate workers that do not exit promptly."""
@@ -718,11 +734,6 @@ def _worker_entry(
                     result_q.put((rank, WorkerResult(ok=True, payload=payload, request_id=request_id)))
                 worker._current_request_ids = []
                 continue
-            if cmd.op is Op.INFER_ROLLOUT_STREAM:
-                worker._current_request_ids = [cmd.request_id]
-                worker.handle_stream_rollout(cmd)
-                worker._current_request_ids = []
-                continue
             payload = worker.handle(cmd)
             result_q.put((rank, WorkerResult(ok=True, payload=payload, request_id=cmd.request_id)))
     except (KeyboardInterrupt, SystemExit):
@@ -765,6 +776,17 @@ def _set_async_exception(future: asyncio.Future, exc: BaseException) -> None:
 
     if not future.done():
         future.set_exception(exc)
+
+
+def _is_stream_step(payload: Any) -> bool:
+    """Return ``True`` when *payload* is a ``StreamTokenStep``.
+
+    Uses a duck-type check (``hasattr(payload, \"prompt_idx\") and
+    hasattr(payload, \"token_id\")``) to avoid importing ``areno.engine.data``
+    inside the result-pump thread.
+    """
+
+    return hasattr(payload, "prompt_idx") and hasattr(payload, "token_id")
 
 
 def start_partitioned_clusters(

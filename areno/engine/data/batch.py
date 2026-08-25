@@ -44,7 +44,9 @@ class StreamTokenStep:
 
     Each step carries one token for one prompt row, plus an optional
     finish reason when that token ends the sequence (``"stop"``,
-    ``"length"``, or ``"cancelled"``).
+    ``"length"``, or ``"cancelled"``).  ``prompt_idx`` indexes the prompt
+    within the submitting request's own prompt list; requests merged into
+    one worker batch are demultiplexed by ``WorkerResult.request_id``.
     """
 
     prompt_idx: int

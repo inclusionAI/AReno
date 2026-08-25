@@ -39,6 +39,7 @@ class _Request:
     features: list[dict | None] | None
     future: Future[list[RolloutResult]] = field(default_factory=Future)
     handles: list[tuple[object, int]] = field(default_factory=list)
+    handle_to_prompt_idx: dict[tuple[object, int], int] = field(default_factory=dict)
     tokens: dict[tuple[object, int], list[int]] = field(default_factory=dict)
     logprobs: dict[tuple[object, int], list[float]] = field(default_factory=dict)
     finished: set[tuple[object, int]] = field(default_factory=set)
@@ -46,7 +47,6 @@ class _Request:
     expanded_features: list[dict | None] = field(default_factory=list)
     next_insert: int = 0
     stream_queue: queue.Queue | None = None
-    _handle_to_prompt_idx: dict[tuple[object, int], int] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -406,22 +406,20 @@ class ContinuousBatchScheduler:
         for i, handle in enumerate(handles):
             self._requests_by_handle[handle] = request
             if request.stream_queue is not None:
-                request._handle_to_prompt_idx[handle] = (start + i) // request.n_samples
+                request.handle_to_prompt_idx[handle] = (start + i) // request.n_samples
 
     def _record_response(self, key: object, generator: Any, response: Any) -> None:
         handle = (key, int(response.uid))
         request = self._requests_by_handle[handle]
 
-        # Determine if a real token was generated and whether the sequence finishes now.
-        is_real_token = response.finish_reason != "stop"
         is_finished = response.finish_reason is not None
 
-        if is_real_token:
+        if response.finish_reason != "stop":
             token_id = int(response.token)
             request.tokens[handle].append(token_id)
             request.logprobs[handle].append(generator.token_logprob(response))
             if request.stream_queue is not None:
-                prompt_idx = request._handle_to_prompt_idx.get(handle, 0)
+                prompt_idx = request.handle_to_prompt_idx.get(handle, 0)
                 stream_fr: str | None = response.finish_reason if is_finished else None
                 request.stream_queue.put((prompt_idx, token_id, stream_fr))
 

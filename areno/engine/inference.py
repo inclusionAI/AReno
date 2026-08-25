@@ -37,10 +37,53 @@ logger = logging.getLogger(__name__)
 
 FinishedRowsCallback = Callable[[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, str, tuple[int, ...]], None]
 RolloutRefillCallback = Callable[[InferenceBatchState], list[int]]
-# (prompt_indices, token_ids, finish_reasons) — three parallel lists.
+# (row_ids, token_ids, finish_reasons) — three parallel lists.  Row ids are
+# positions in the rollout batch state, unique across every request merged
+# into the batch (two refilled requests may both number their own prompts
+# from zero, so prompt indices cannot be used as routing keys).
 # finish_reasons entries are ``None`` for intermediate steps, ``"stop"``,
 # ``"length"``, or ``"cancelled"`` when the token ends the sequence.
+# Implementations may expose an ``enabled`` attribute (see
+# :func:`_is_stream_enabled`); the decode loop consults it each step so
+# fully non-streaming batches never pay the token host sync.
 StreamTokenCallback = Callable[[list[int], list[int], list[str | None]], None]
+
+
+def _is_stream_enabled(stream_callback: StreamTokenCallback) -> bool:
+    """Return whether *stream_callback* currently wants per-step tokens.
+
+    The worker's router flips ``enabled`` on once any request in the merged
+    batch streams — possibly only when a refill admits one mid-decode.
+    Plain callbacks without the attribute are always enabled.
+    """
+
+    return bool(getattr(stream_callback, "enabled", True))
+
+
+def _get_stream_finish_reasons(
+    finished: torch.Tensor | None,
+    full_length: torch.Tensor,
+    cancelled: torch.Tensor | None = None,
+) -> list[str | None]:
+    """Build per-row stream finish reasons (``None`` = sequence continues).
+
+    Each mask is converted to a Python list once; per-entry ``.item()``
+    calls would sync the device once per row.
+    """
+
+    reasons: list[str | None] = [None] * int(full_length.numel())
+    if finished is not None:
+        for idx, hit in enumerate(finished.tolist()):
+            if hit:
+                reasons[idx] = "stop"
+    for idx, hit in enumerate(full_length.tolist()):
+        if hit:
+            reasons[idx] = "length"
+    if cancelled is not None:
+        for idx, hit in enumerate(cancelled.tolist()):
+            if hit:
+                reasons[idx] = "cancelled"
+    return reasons
 
 
 def _cancel_stop_token(stop_token_ids: list[int], eos_token_id: int | tuple[int, ...] | None) -> int:
@@ -460,22 +503,14 @@ class InferenceManager:
             if cancelled is not None:
                 remove |= cancelled
             # ---- stream callback --------------------------------------------------
-            if stream_callback is not None and ctx.is_rank0:
-                prompt_ids = [prompt_indices_list[int(row)] for row in active_rows.detach().cpu().tolist()]
+            if stream_callback is not None and _is_stream_enabled(stream_callback) and ctx.is_rank0:
+                rows_cpu = active_rows.detach().cpu().tolist()
                 tokens_cpu = next_tokens.detach().cpu().tolist()
-                reasons: list[str | None] = [None] * active_count
-                if finished is not None:
-                    for i in range(active_count):
-                        if bool(finished[i].item()):
-                            reasons[i] = "stop"
-                for i in range(active_count):
-                    if bool(full_length[i].item()):
-                        reasons[i] = "length"
-                if cancelled is not None:
-                    for i in range(active_count):
-                        if bool(cancelled[i].item()):
-                            reasons[i] = "cancelled"
-                stream_callback(prompt_ids, tokens_cpu, reasons)
+                stream_callback(
+                    rows_cpu,
+                    tokens_cpu,
+                    _get_stream_finish_reasons(finished, full_length, cancelled),
+                )
             # -----------------------------------------------------------------------
             if bool(remove.any().item()):
                 if finished is not None and bool(finished.any().item()):
@@ -787,18 +822,14 @@ class InferenceManager:
         remove |= full_length
         # ---- stream callback (prefill tokens) ----------------------------------
         ctx = get_tp_context()
-        if stream_callback is not None and ctx.is_rank0:
-            prompt_ids = [prompt_indices[int(row)] for row in new_rows.detach().cpu().tolist()]
+        if stream_callback is not None and ctx.is_rank0 and _is_stream_enabled(stream_callback):
+            rows_cpu = new_rows.detach().cpu().tolist()
             tokens_cpu = new_tokens.detach().cpu().tolist()
-            reasons: list[str | None] = [None] * int(new_rows.numel())
-            if finished is not None:
-                for i in range(int(new_rows.numel())):
-                    if bool(finished[i].item()):
-                        reasons[i] = "stop"
-            for i in range(int(new_rows.numel())):
-                if bool(full_length[i].item()):
-                    reasons[i] = "length"
-            stream_callback(prompt_ids, tokens_cpu, reasons)
+            stream_callback(
+                rows_cpu,
+                tokens_cpu,
+                _get_stream_finish_reasons(finished, full_length),
+            )
         # -----------------------------------------------------------------------
         if bool(remove.any().item()):
             if finished is not None and bool(finished.any().item()):

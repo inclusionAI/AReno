@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import importlib.util
+import itertools
 import sys
 import threading
 import unittest
@@ -109,6 +111,55 @@ class TPClusterResourceTest(unittest.TestCase):
         self.assertTrue(pending.event.is_set())
         self.assertEqual(pending.results[0], "dp0")
         self.assertEqual(pending.results[2], "dp1")
+
+    def test_call_async_stream_yields_steps_and_propagates_rank_errors(self):
+        """Streaming calls route intermediate steps and raise on rank failure."""
+
+        cluster = object.__new__(TPCluster)
+        cluster.config = SimpleNamespace(tp_size=1, dp_size=1)
+        cluster.started = True
+        cluster.cmd_queues = [FakeQueue()]
+        cluster._pending_lock = threading.Lock()
+        cluster._send_lock = threading.Lock()
+        cluster._pending_calls = {}
+        cluster._request_ids = itertools.count(1)
+        cluster._pump_stop = threading.Event()
+        cluster._pump_thread = None
+
+        async def scenario():
+            steps = []
+            stream = cluster.call_async_stream(Op.INFER_ROLLOUT, None, result_ranks={0}, timeout=0.01)
+            try:
+                first_step = asyncio.ensure_future(stream.__anext__())
+                await asyncio.sleep(0.05)
+                (request_id, pending), = cluster._pending_calls.items()
+
+                # Intermediate stream step: routed into the stream queue
+                # without completing the call.
+                cluster._apply_result(
+                    request_id,
+                    0,
+                    WorkerResult(ok=True, payload=SimpleNamespace(prompt_idx=2, token_id=7), request_id=request_id),
+                    pending,
+                )
+                steps.append(await first_step)
+                self.assertFalse(pending.event.is_set())
+
+                # Rank failure: the generator must raise instead of ending
+                # the stream silently.
+                second_step = asyncio.ensure_future(stream.__anext__())
+                await asyncio.sleep(0.05)
+                cluster._apply_result(request_id, 0, WorkerResult(ok=False, error="boom"), pending)
+                with self.assertRaises(RuntimeError):
+                    await second_step
+                return steps
+            finally:
+                await stream.aclose()
+
+        steps = asyncio.run(scenario())
+
+        self.assertEqual([(step.prompt_idx, step.token_id) for step in steps], [(2, 7)])
+        self.assertEqual(cluster._pending_calls, {})
 
 
 if __name__ == "__main__":

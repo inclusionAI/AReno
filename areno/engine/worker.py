@@ -16,6 +16,7 @@ to the matching public method.
 from __future__ import annotations
 
 import queue
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -35,7 +36,6 @@ from areno.engine.protocol import (
     RolloutCacheProbePayload,
     RolloutPayload,
     SaveCheckpointPayload,
-    StreamTokenPayload,
     WorkerResult,
 )
 from areno.engine.runtime.common import pad_rollout_rows
@@ -43,6 +43,64 @@ from areno.engine.runtime.decode_graph import DecodeGraph
 from areno.engine.runtime.rollout import _empty_rollout
 from areno.engine.training import TrainingManager
 from areno.models.registry import load_model_weights, save_model_weights
+
+
+class _StreamTokenRouter:
+    """Forward decode-loop tokens to per-request entries on the shared result_queue.
+
+    The router is keyed by rollout batch row id (one slot per prompt row in
+    the merged batch); row ids stay unique across refilled requests, while
+    each request numbers its own prompts from zero.  A request only receives
+    tokens when it was submitted with ``streaming=True`` — rows of
+    non-streaming requests in the same batch are skipped.
+
+    ``enabled`` starts out ``True`` only when the initial rollout request
+    streams.  Admitting a streaming request via refill flips it on so those
+    tokens are not silently dropped; the decode loop checks it each step and
+    skips the token host sync entirely while the batch has no streaming
+    request.
+    """
+
+    __slots__ = ("_rank", "_result_queue", "_row_to_request", "_request_ids", "_request_streaming", "enabled")
+
+    def __init__(self, rank: int, result_queue: Any) -> None:
+        self._rank = rank
+        self._result_queue = result_queue
+        self._row_to_request: dict[int, tuple[int, int]] = {}
+        self._request_ids: list[int | None] = []
+        self._request_streaming: list[bool] = []
+        self.enabled = False
+
+    def register(self, request_id: int | None, rows: list[int], streaming: bool) -> None:
+        """Map one request's rollout rows onto its request slot."""
+
+        request_idx = len(self._request_ids)
+        self._request_ids.append(request_id)
+        self._request_streaming.append(bool(streaming))
+        for prompt_idx, row in enumerate(rows):
+            self._row_to_request[int(row)] = (request_idx, prompt_idx)
+        self.enabled = self.enabled or bool(streaming)
+
+    def __call__(self, row_ids: list[int], token_ids: list[int], finish_reasons: list[str | None]) -> None:
+        if not self.enabled:
+            return
+        for row, token_id, finish_reason in zip(row_ids, token_ids, finish_reasons, strict=True):
+            entry = self._row_to_request.get(int(row))
+            if entry is None:
+                continue
+            request_idx, prompt_idx = entry
+            if not self._request_streaming[request_idx]:
+                continue
+            self._result_queue.put(
+                (
+                    self._rank,
+                    WorkerResult(
+                        ok=True,
+                        payload=StreamTokenStep(prompt_idx=prompt_idx, token_id=token_id, finish_reason=finish_reason),
+                        request_id=self._request_ids[request_idx],
+                    ),
+                )
+            )
 
 
 class ArenoWorker:
@@ -258,13 +316,28 @@ class ArenoWorker:
         request_ids: list[int | None],
         counts: list[int],
     ) -> list[tuple[int | None, RolloutOutput | None]]:
-        """Run one rollout and append compatible queued requests while decoding."""
+        """Run one rollout and append compatible queued requests while decoding.
+
+        A :class:`_StreamTokenRouter` is installed on the decode loop so
+        requests submitted with ``streaming=True`` — including ones admitted
+        later via refill into a non-streaming batch — receive incremental
+        :class:`StreamTokenStep` objects through the shared ``result_queue``
+        keyed by ``request_id``.  This reuses the existing IPC channel and
+        the continuous-batching machinery rather than opening a separate
+        pipe.
+        """
 
         ctx = get_tp_context()
         request_rows = _rollout_request_rows(counts)
         finished = [False] * sum(counts)
         finish_reasons = [""] * sum(counts)
         sent: set[int] = set()
+
+        # Per-request streaming: rows (batch-state slots) → request routing.
+        # Refill registers newly admitted requests below.
+        router = _StreamTokenRouter(self._rank, self._result_queue)
+        for req_idx in range(len(request_ids)):
+            router.register(request_ids[req_idx], request_rows[req_idx], bool(payload.streaming))
 
         def send_empty_requests() -> None:
             for request_idx, count in enumerate(counts):
@@ -360,56 +433,19 @@ class ArenoWorker:
                 new_prompt_indices.extend(prompt_indices)
                 finished.extend(False for _ in prompts)
                 finish_reasons.extend("" for _ in prompts)
+                # Route the admitted request's rows for streaming output.
+                router.register(new_request_ids[0], appended_rows, bool(new_payload.streaming))
             return new_prompt_indices
 
-        output = self.infer_rollout(payload, finished_callback=send_finished, refill_callback=refill_waiting)
+        output = self.infer_rollout(
+            payload, finished_callback=send_finished, refill_callback=refill_waiting, stream_callback=router,
+        )
         parts = _split_rollout_output_by_rows(output, request_rows)
         return [
             (request_id, part)
             for idx, (request_id, part) in enumerate(zip(request_ids, parts, strict=True))
             if idx not in sent
         ]
-
-    def handle_stream_rollout(self, cmd: Command) -> None:
-        """Run a streaming rollout, pushing tokens through the attached pipe.
-
-        Extracts the pipe send-end from the ``StreamTokenPayload``, wraps it in
-        a ``stream_callback``, and drives ``infer_rollout``.  The pipe is closed
-        after decode completes so the coordinator sees ``EOFError`` on the
-        recv-end.  Only TP rank-0 of each DP group writes to the pipe.
-
-        An early ack is sent via ``result_queue`` so the coordinator can start
-        reading the pipe before the decode loop finishes — this keeps
-        time-to-first-token low.
-        """
-        payload = cmd.payload
-        stream_conn = payload.stream_conn
-        rollout = payload.rollout
-        ctx = get_tp_context()
-
-        # Ack immediately so the coordinator unblocks and starts consuming the
-        # pipe while the decode loop is still running.
-        if ctx.is_rank0:
-            self._result_queue.put(
-                (self._rank, WorkerResult(ok=True, payload="ack", request_id=cmd.request_id)),
-            )
-
-        def _stream_callback(prompt_indices: list[int], token_ids: list[int], finish_reasons: list[str | None]) -> None:
-            for pi, tid, fr in zip(prompt_indices, token_ids, finish_reasons):
-                try:
-                    stream_conn.send(StreamTokenStep(prompt_idx=pi, token_id=tid, finish_reason=fr))
-                except Exception:
-                    # Pipe may be closed if the client disconnected; we still
-                    # let decode finish so the worker batch stays valid.
-                    pass
-
-        try:
-            self.inference.infer_rollout(rollout, stream_callback=_stream_callback)
-        finally:
-            try:
-                stream_conn.close()
-            except Exception:
-                pass
 
     def _next_refill_command(self) -> Command | None:
         """Fetch the next queued command consistently across TP ranks."""
