@@ -184,7 +184,7 @@ class TrainingManager:
             worker.optimizer.step()
             worker.optimizer.zero_grad(set_to_none=True)
             worker._global_step += 1
-            if worker.device.type == "cuda" and worker._global_step % 10 == 0:
+            if worker.device.type == "cuda":
                 torch.cuda.empty_cache()
         else:
             current_lr = worker.optimizer.lr
