@@ -248,6 +248,12 @@ class Phi4MMImageEmbedding(nn.Module):
 class Phi4MMExtendedEmbedding(nn.Module):
     """Checkpoint-compatible container for Phi multimodal embedding modules."""
 
-    def __init__(self, config: Phi4MMVisionConfig, language_hidden_size: int, dtype: torch.dtype):
+    def __init__(
+        self,
+        config: Phi4MMVisionConfig | None,
+        language_hidden_size: int,
+        dtype: torch.dtype,
+    ):
         super().__init__()
-        self.image_embed = Phi4MMImageEmbedding(config, language_hidden_size, dtype)
+        if config is not None:
+            self.image_embed = Phi4MMImageEmbedding(config, language_hidden_size, dtype)

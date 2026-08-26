@@ -148,51 +148,53 @@ def audit_phi4mm_checkpoint(
 
 
 def load_phi4mm_weights(model: nn.Module, model_path: str | Path) -> Phi4MMCheckpointAudit:
-    """Audit and load the supported Phi-4 language and vision tensors."""
+    """Audit and load the supported Phi-4 language and multimodal tensors."""
 
     model.config.validate_tp(get_tp_context().world_size)
-    vision_keys = _vision_checkpoint_keys(model)
-    vision_lora_keys = _vision_lora_checkpoint_keys(model)
-    audit = audit_phi4mm_checkpoint(model_path, len(model.layers), vision_keys, vision_lora_keys)
+    multimodal_keys = _multimodal_checkpoint_keys(model)
+    lora_keys = _lora_checkpoint_keys(model)
+    audit = audit_phi4mm_checkpoint(model_path, len(model.layers), multimodal_keys, lora_keys)
     load_checkpoint_weights(model, str(model_path), CHECKPOINT_SPEC)
-    if vision_keys:
-        _load_vision_weights(model, model_path, vision_keys)
-    if vision_lora_keys:
-        _load_vision_lora_weights(model, model_path)
+    if multimodal_keys:
+        _load_multimodal_weights(model, model_path, multimodal_keys)
+    if lora_keys:
+        _load_lora_weights(model, model_path)
     if model.lm_head.weight is not model.model.embed_tokens.weight:
         raise RuntimeError("Phi4MM embedding and LM head weight tying was lost during checkpoint loading")
     return audit
 
 
-def _vision_checkpoint_keys(model: nn.Module) -> set[str]:
+def _multimodal_checkpoint_keys(model: nn.Module) -> set[str]:
     extended = getattr(model.model, "embed_tokens_extend", None)
     if extended is None:
         return set()
-    return {f"model.embed_tokens_extend.{name}" for name, _ in extended.named_parameters()}
+    names = {name for name, _ in extended.named_parameters()}
+    names.update(name for name, _ in extended.named_buffers())
+    return {f"model.embed_tokens_extend.{name}" for name in names}
 
 
-def _vision_lora_checkpoint_keys(model: nn.Module) -> set[str]:
+def _lora_checkpoint_keys(model: nn.Module) -> set[str]:
     return {
         f"model.layers.{layer_idx}.{name}"
         for layer_idx, layer in enumerate(model.layers)
         for name, _ in layer.named_parameters()
-        if ".lora_A.vision.weight" in name or ".lora_B.vision.weight" in name
+        if any(f".lora_{side}.{adapter}.weight" in name for side in "AB" for adapter in ("vision", "speech"))
     }
 
 
 @torch.no_grad()
-def _load_vision_weights(model: nn.Module, model_path: str | Path, keys: set[str] | None = None) -> None:
+def _load_multimodal_weights(model: nn.Module, model_path: str | Path, keys: set[str] | None = None) -> None:
     extended = getattr(model.model, "embed_tokens_extend", None)
     if extended is None:
         return
-    expected = keys if keys is not None else _vision_checkpoint_keys(model)
+    expected = keys if keys is not None else _multimodal_checkpoint_keys(model)
     index = SafetensorsIndex(model_path)
     try:
         missing = sorted(expected - set(index.weight_map))
         if missing:
-            raise KeyError(f"missing Phi4MM vision weight {missing[0]}")
+            raise KeyError(f"missing Phi4MM multimodal weight {missing[0]}")
         index.prefetch(sorted(expected))
-        for name, parameter in extended.named_parameters():
+        for name, parameter in list(extended.named_parameters()) + list(extended.named_buffers()):
             key = f"model.embed_tokens_extend.{name}"
             source = index.get_tensor(key)
             if tuple(source.shape) != tuple(parameter.shape):
@@ -205,40 +207,45 @@ def _load_vision_weights(model: nn.Module, model_path: str | Path, keys: set[str
 
 
 @torch.no_grad()
-def _load_vision_lora_weights(model: nn.Module, model_path: str | Path) -> None:
+def _load_lora_weights(model: nn.Module, model_path: str | Path) -> None:
     context = get_tp_context()
     index = SafetensorsIndex(model_path)
     try:
         for layer_idx, layer in enumerate(model.layers):
             prefix = f"model.layers.{layer_idx}"
-            for name, module, sections in (
-                ("self_attn.qkv_proj", layer.self_attn.qkv_proj, layer.self_attn.qkv_proj.out_features),
-                ("mlp.gate_up_proj", layer.mlp.gate_up_proj, layer.mlp.gate_up_proj.out_features),
-            ):
-                lora_a = f"{prefix}.{name}.lora_A.vision.weight"
-                lora_b = f"{prefix}.{name}.lora_B.vision.weight"
-                module.lora_A["vision"].weight.copy_(index.get_tensor(lora_a).to(dtype=module.weight.dtype))
-                copy_merged_column(
-                    module.lora_B["vision"].weight,
-                    list(index.get_tensor(lora_b).split(tuple(sections), dim=0)),
-                    context.rank,
-                    context.world_size,
-                )
-            for name, module in (
-                ("self_attn.o_proj", layer.self_attn.o_proj),
-                ("mlp.down_proj", layer.mlp.down_proj),
-            ):
-                lora_a = f"{prefix}.{name}.lora_A.vision.weight"
-                lora_b = f"{prefix}.{name}.lora_B.vision.weight"
-                _copy_row(
-                    module.lora_A["vision"].weight,
-                    index.get_tensor(lora_a),
-                    context.rank,
-                    context.world_size,
-                )
-                module.lora_B["vision"].weight.copy_(
-                    index.get_tensor(lora_b).to(device=module.weight.device, dtype=module.weight.dtype)
-                )
+            for adapter in ("vision", "speech"):
+                for name, module, sections in (
+                    ("self_attn.qkv_proj", layer.self_attn.qkv_proj, layer.self_attn.qkv_proj.out_features),
+                    ("mlp.gate_up_proj", layer.mlp.gate_up_proj, layer.mlp.gate_up_proj.out_features),
+                ):
+                    if adapter not in module.lora_A:
+                        continue
+                    lora_a = f"{prefix}.{name}.lora_A.{adapter}.weight"
+                    lora_b = f"{prefix}.{name}.lora_B.{adapter}.weight"
+                    module.lora_A[adapter].weight.copy_(index.get_tensor(lora_a).to(dtype=module.weight.dtype))
+                    copy_merged_column(
+                        module.lora_B[adapter].weight,
+                        list(index.get_tensor(lora_b).split(tuple(sections), dim=0)),
+                        context.rank,
+                        context.world_size,
+                    )
+                for name, module in (
+                    ("self_attn.o_proj", layer.self_attn.o_proj),
+                    ("mlp.down_proj", layer.mlp.down_proj),
+                ):
+                    if adapter not in module.lora_A:
+                        continue
+                    lora_a = f"{prefix}.{name}.lora_A.{adapter}.weight"
+                    lora_b = f"{prefix}.{name}.lora_B.{adapter}.weight"
+                    _copy_row(
+                        module.lora_A[adapter].weight,
+                        index.get_tensor(lora_a),
+                        context.rank,
+                        context.world_size,
+                    )
+                    module.lora_B[adapter].weight.copy_(
+                        index.get_tensor(lora_b).to(device=module.weight.device, dtype=module.weight.dtype)
+                    )
     finally:
         index.close()
 
@@ -248,7 +255,7 @@ def save_phi4mm_weights(
     output_path: str | Path,
     source_path: str | Path | None,
 ) -> str | None:
-    """Save Phi-4 language and vision weights in the official HF key layout."""
+    """Save Phi-4 language and multimodal weights in the official HF key layout."""
 
     model.config.validate_tp(get_tp_context().world_size)
     return save_checkpoint_weights(
@@ -256,19 +263,21 @@ def save_phi4mm_weights(
         str(output_path),
         None if source_path is None else str(source_path),
         CHECKPOINT_SPEC,
-        extra_tensors_fn=lambda tensors: _save_vision_weights(tensors, model),
+        extra_tensors_fn=lambda tensors: _save_multimodal_weights(tensors, model),
         copy_passthrough=False,
     )
 
 
-def _save_vision_weights(tensors: CheckpointTensorStore | PolicyTensorStore, model: nn.Module) -> None:
-    """Stage replicated vision tensors and TP-aware Vision LoRA tensors."""
+def _save_multimodal_weights(tensors: CheckpointTensorStore | PolicyTensorStore, model: nn.Module) -> None:
+    """Stage replicated modality tensors and TP-aware LoRA tensors."""
 
     extended = getattr(model.model, "embed_tokens_extend", None)
     if extended is None:
         return
     for name, parameter in extended.named_parameters():
         tensors[f"model.embed_tokens_extend.{name}"] = rank0_tensor(parameter)
+    for name, buffer in extended.named_buffers():
+        tensors[f"model.embed_tokens_extend.{name}"] = rank0_tensor(buffer)
 
     for layer_idx, layer in enumerate(model.layers):
         prefix = f"model.layers.{layer_idx}"
@@ -276,21 +285,32 @@ def _save_vision_weights(tensors: CheckpointTensorStore | PolicyTensorStore, mod
             ("self_attn.qkv_proj", layer.self_attn.qkv_proj),
             ("mlp.gate_up_proj", layer.mlp.gate_up_proj),
         ):
-            if not hasattr(module, "lora_A") or "vision" not in module.lora_A:
+            if not hasattr(module, "lora_A"):
                 continue
-            tensors[f"{prefix}.{name}.lora_A.vision.weight"] = rank0_tensor(module.lora_A["vision"].weight)
-            tensors[f"{prefix}.{name}.lora_B.vision.weight"] = gather_tensor_parallel_split_column_tensor(
-                module.lora_B["vision"].weight,
-                list(module.local_out_features),
-            )
+            for adapter in module.lora_A:
+                tensors[f"{prefix}.{name}.lora_A.{adapter}.weight"] = rank0_tensor(module.lora_A[adapter].weight)
+                tensors[f"{prefix}.{name}.lora_B.{adapter}.weight"] = gather_tensor_parallel_split_column_tensor(
+                    module.lora_B[adapter].weight,
+                    list(module.local_out_features),
+                )
         for name, module in (
             ("self_attn.o_proj", layer.self_attn.o_proj),
             ("mlp.down_proj", layer.mlp.down_proj),
         ):
-            if not hasattr(module, "lora_A") or "vision" not in module.lora_A:
+            if not hasattr(module, "lora_A"):
                 continue
-            tensors[f"{prefix}.{name}.lora_A.vision.weight"] = gather_tensor_parallel_tensor(
-                module.lora_A["vision"].weight,
-                dim=1,
-            )
-            tensors[f"{prefix}.{name}.lora_B.vision.weight"] = rank0_tensor(module.lora_B["vision"].weight)
+            for adapter in module.lora_A:
+                tensors[f"{prefix}.{name}.lora_A.{adapter}.weight"] = gather_tensor_parallel_tensor(
+                    module.lora_A[adapter].weight,
+                    dim=1,
+                )
+                tensors[f"{prefix}.{name}.lora_B.{adapter}.weight"] = rank0_tensor(module.lora_B[adapter].weight)
+
+
+# Retain the PR2 private names for downstream tests and integrations that imported
+# them before audio support generalized the checkpoint path.
+_vision_checkpoint_keys = _multimodal_checkpoint_keys
+_vision_lora_checkpoint_keys = _lora_checkpoint_keys
+_load_vision_weights = _load_multimodal_weights
+_load_vision_lora_weights = _load_lora_weights
+_save_vision_weights = _save_multimodal_weights

@@ -1,4 +1,4 @@
-"""Phi-4-Multimodal language and vision adapter."""
+"""Native Phi-4-Multimodal language, vision, and audio adapter."""
 
 from __future__ import annotations
 
@@ -28,9 +28,11 @@ from areno.engine.parallel.collectives import (
 from areno.engine.runtime.metadata import InferMeta, TrainMeta
 from areno.engine.runtime.recompute import checkpoint_layer
 from areno.models.base import CausalLMOutput, ModelAdapter
+from areno.models.phi4mm.audio import Phi4MMAudioConfig, Phi4MMAudioEmbedding
 from areno.models.phi4mm.vision import Phi4MMExtendedEmbedding, Phi4MMVisionConfig
 
 _IMAGE_SPECIAL_TOKEN_ID = 200010
+_AUDIO_SPECIAL_TOKEN_ID = 200011
 
 
 def _phi4mm_vision_config(hf_config: dict[str, Any]) -> dict[str, Any] | None:
@@ -73,6 +75,48 @@ def _phi4mm_vision_config(hf_config: dict[str, Any]) -> dict[str, Any] | None:
     return config
 
 
+def _phi4mm_audio_config(hf_config: dict[str, Any]) -> dict[str, Any] | None:
+    embedding = hf_config.get("embd_layer")
+    audio_embedding = embedding.get("audio_embd_layer") if isinstance(embedding, dict) else None
+    processor = hf_config.get("audio_processor")
+    if not isinstance(audio_embedding, dict) or not isinstance(processor, dict):
+        return None
+    required_embedding = {
+        "embedding_cls": "audio",
+        "projection_cls": "mlp",
+        "compression_rate": 8,
+        "downsample_rate": 1,
+        "use_qformer": False,
+        "use_conv_downsample": False,
+    }
+    for key, expected in required_embedding.items():
+        actual = audio_embedding.get(key)
+        if actual != expected:
+            raise ValueError(f"Phi4MM audio requires embd_layer.audio_embd_layer.{key}={expected!r}, got {actual!r}")
+    if processor.get("name") != "cascades" or not isinstance(processor.get("config"), dict):
+        raise ValueError("Phi4MM audio requires the cascades processor configuration")
+    values = dict(processor["config"])
+    required = {
+        "input_layer": "nemo_conv",
+        "input_size": 80,
+        "attention_dim": 1024,
+        "attention_heads": 16,
+        "num_blocks": 24,
+        "time_reduction": 8,
+        "causal": True,
+        "activation": "swish",
+        "conv_activation": "swish",
+        "conv_glu_type": "swish",
+        "batch_norm": False,
+    }
+    for key, expected in required.items():
+        if values.get(key) != expected:
+            raise ValueError(
+                f"Phi4MM audio requires audio_processor.config.{key}={expected!r}, got {values.get(key)!r}"
+            )
+    return values
+
+
 def _features_by_row(features: dict[str, Any] | list[dict[str, Any] | None], batch: int) -> list[dict[str, Any] | None]:
     if isinstance(features, list):
         if len(features) != batch:
@@ -103,84 +147,101 @@ def _feature_tensor(
     if value is None:
         return None
     tensor = value if isinstance(value, torch.Tensor) else torch.as_tensor(value)
+    if tensor.numel() == 0:
+        return None
     return tensor.to(device=device, dtype=dtype)
 
 
-def _vision_lora_config(config: ModelConfig) -> tuple[int, float, float] | None:
-    values = (config.hf_text_config or {}).get("vision_lora")
-    if config.vision_config is None:
+def _lora_config(config: ModelConfig, adapter: str) -> tuple[int, float, float] | None:
+    values = (config.hf_text_config or {}).get(f"{adapter}_lora")
+    modality_config = config.vision_config if adapter == "vision" else config.audio_config
+    if modality_config is None:
         return None
     if not isinstance(values, dict):
-        raise ValueError("Phi4MM vision support requires a vision_lora config")
+        raise ValueError(f"Phi4MM {adapter} support requires a {adapter}_lora config")
     rank = int(values["r"])
     alpha = float(values["lora_alpha"])
     dropout = float(values.get("dp", 0.0))
     if rank <= 0 or alpha <= 0 or not 0.0 <= dropout < 1.0:
-        raise ValueError("Phi4MM vision_lora requires positive r/alpha and dp in [0, 1)")
+        raise ValueError(f"Phi4MM {adapter}_lora requires positive r/alpha and dp in [0, 1)")
     return rank, alpha / rank, dropout
 
 
 class _Phi4MMColumnLoRA(MergedColumnParallelLinear):
     def __init__(self, in_features: int, out_features: tuple[int, ...], config: ModelConfig):
         super().__init__(in_features, out_features, bias=False)
-        lora = _vision_lora_config(config)
-        self.vision_lora_scale = 0.0
-        self.vision_lora_dropout = 0.0
+        self.lora_scales: dict[str, float] = {}
+        self.lora_dropouts: dict[str, float] = {}
         self.vision_lora_mask: torch.Tensor | None = None
+        self.speech_lora_mask: torch.Tensor | None = None
         self.lora_A = nn.ModuleDict()
         self.lora_B = nn.ModuleDict()
-        if lora is not None:
-            rank, self.vision_lora_scale, self.vision_lora_dropout = lora
-            self.lora_A["vision"] = nn.Linear(in_features, rank, bias=False)
-            self.lora_B["vision"] = nn.Linear(rank, sum(self.local_out_features), bias=False)
+        for adapter in ("vision", "speech"):
+            lora = _lora_config(config, adapter)
+            if lora is None:
+                continue
+            rank, self.lora_scales[adapter], self.lora_dropouts[adapter] = lora
+            self.lora_A[adapter] = nn.Linear(in_features, rank, bias=False)
+            self.lora_B[adapter] = nn.Linear(rank, sum(self.local_out_features), bias=False)
             mark_tensor_parallel_parameter(
-                self.lora_A["vision"].weight, False, sequence_parallel=False, tp_grad_allreduce=True
+                self.lora_A[adapter].weight, False, sequence_parallel=False, tp_grad_allreduce=True
             )
-            mark_tensor_parallel_parameter(self.lora_B["vision"].weight, True, sequence_parallel=True)
+            mark_tensor_parallel_parameter(self.lora_B[adapter].weight, True, sequence_parallel=True)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         output = super().forward(x)
-        if self.vision_lora_mask is None or "vision" not in self.lora_A:
+        if all(getattr(self, f"{adapter}_lora_mask") is None for adapter in self.lora_A):
             return output
         full_input = (
             gather_from_sequence_parallel_region(x)
             if is_sequence_parallel_active()
             else copy_to_tensor_parallel_region(x)
         )
-        dropped = F.dropout(full_input, p=self.vision_lora_dropout, training=self.training)
-        delta = self.lora_B["vision"](self.lora_A["vision"](dropped)) * self.vision_lora_scale
-        return output + delta * self.vision_lora_mask.to(device=delta.device, dtype=delta.dtype).unsqueeze(-1)
+        for adapter in self.lora_A:
+            mask = getattr(self, f"{adapter}_lora_mask")
+            if mask is None:
+                continue
+            dropped = F.dropout(full_input, p=self.lora_dropouts[adapter], training=self.training)
+            delta = self.lora_B[adapter](self.lora_A[adapter](dropped)) * self.lora_scales[adapter]
+            output = output + delta * mask.to(device=delta.device, dtype=delta.dtype).unsqueeze(-1)
+        return output
 
 
 class _Phi4MMRowLoRA(RowParallelLinear):
     def __init__(self, in_features: int, out_features: int, config: ModelConfig):
         super().__init__(in_features, out_features, bias=False)
-        lora = _vision_lora_config(config)
-        self.vision_lora_scale = 0.0
-        self.vision_lora_dropout = 0.0
+        self.lora_scales: dict[str, float] = {}
+        self.lora_dropouts: dict[str, float] = {}
         self.vision_lora_mask: torch.Tensor | None = None
+        self.speech_lora_mask: torch.Tensor | None = None
         self.lora_A = nn.ModuleDict()
         self.lora_B = nn.ModuleDict()
-        if lora is not None:
-            rank, self.vision_lora_scale, self.vision_lora_dropout = lora
-            self.lora_A["vision"] = nn.Linear(self.local_in_features, rank, bias=False)
-            self.lora_B["vision"] = nn.Linear(rank, out_features, bias=False)
-            mark_tensor_parallel_parameter(self.lora_A["vision"].weight, True, sequence_parallel=True)
+        for adapter in ("vision", "speech"):
+            lora = _lora_config(config, adapter)
+            if lora is None:
+                continue
+            rank, self.lora_scales[adapter], self.lora_dropouts[adapter] = lora
+            self.lora_A[adapter] = nn.Linear(self.local_in_features, rank, bias=False)
+            self.lora_B[adapter] = nn.Linear(rank, out_features, bias=False)
+            mark_tensor_parallel_parameter(self.lora_A[adapter].weight, True, sequence_parallel=True)
             mark_tensor_parallel_parameter(
-                self.lora_B["vision"].weight, False, sequence_parallel=False, tp_grad_allreduce=True
+                self.lora_B[adapter].weight, False, sequence_parallel=False, tp_grad_allreduce=True
             )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         output = super().forward(x)
-        if self.vision_lora_mask is None or "vision" not in self.lora_A:
-            return output
-        dropped = F.dropout(x, p=self.vision_lora_dropout, training=self.training)
-        latent = all_reduce(self.lora_A["vision"](dropped))
-        delta = self.lora_B["vision"](latent) * self.vision_lora_scale
-        delta = delta * self.vision_lora_mask.to(device=delta.device, dtype=delta.dtype).unsqueeze(-1)
-        if is_sequence_parallel_active():
-            delta = scatter_to_sequence_parallel_region(delta)
-        return output + delta
+        for adapter in self.lora_A:
+            mask = getattr(self, f"{adapter}_lora_mask")
+            if mask is None:
+                continue
+            dropped = F.dropout(x, p=self.lora_dropouts[adapter], training=self.training)
+            latent = all_reduce(self.lora_A[adapter](dropped))
+            delta = self.lora_B[adapter](latent) * self.lora_scales[adapter]
+            delta = delta * mask.to(device=delta.device, dtype=delta.dtype).unsqueeze(-1)
+            if is_sequence_parallel_active():
+                delta = scatter_to_sequence_parallel_region(delta)
+            output = output + delta
+        return output
 
 
 def _require_bool(hf_config: dict[str, Any], key: str, expected: bool) -> None:
@@ -378,18 +439,17 @@ class Phi4MMDecoderLayer(nn.Module):
         self.self_attn = Phi4MMAttention(config, layer_idx)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps)
         self.mlp = GatedMLP(config)
-        if config.vision_config is not None:
+        if config.vision_config is not None or config.audio_config is not None:
             self.mlp.gate_up_proj = _Phi4MMColumnLoRA(
                 config.hidden_size, (config.intermediate_size, config.intermediate_size), config
             )
             self.mlp.down_proj = _Phi4MMRowLoRA(config.intermediate_size, config.hidden_size, config)
 
-    def set_vision_lora_mask(self, mask: torch.Tensor | None) -> None:
-        self.self_attn.qkv_proj.vision_lora_mask = mask
-        self.self_attn.o_proj.vision_lora_mask = mask
-        if hasattr(self.mlp.gate_up_proj, "vision_lora_mask"):
-            self.mlp.gate_up_proj.vision_lora_mask = mask
-            self.mlp.down_proj.vision_lora_mask = mask
+    def set_lora_masks(self, vision: torch.Tensor | None, speech: torch.Tensor | None) -> None:
+        for module in (self.self_attn.qkv_proj, self.self_attn.o_proj, self.mlp.gate_up_proj, self.mlp.down_proj):
+            if hasattr(module, "vision_lora_mask"):
+                module.vision_lora_mask = vision
+                module.speech_lora_mask = speech
 
     def forward(
         self,
@@ -407,25 +467,29 @@ class Phi4MMDecoderLayer(nn.Module):
 
 
 class Phi4MMModel(nn.Module):
-    """Phi-4 transformer body with an optional native vision embedding path."""
+    """Phi-4 transformer body with optional native vision and audio paths."""
 
     def __init__(self, config: ModelConfig):
         super().__init__()
         self.config = config
         self.embed_tokens = VocabParallelEmbedding(config.vocab_size, config.hidden_size, dtype=config.dtype)
-        self.embed_tokens_extend = (
-            Phi4MMExtendedEmbedding(
-                Phi4MMVisionConfig.from_dict(config.vision_config), config.hidden_size, config.dtype
+        self.embed_tokens_extend = None
+        if config.vision_config is not None or config.audio_config is not None:
+            vision_config = (
+                Phi4MMVisionConfig.from_dict(config.vision_config) if config.vision_config is not None else None
             )
-            if config.vision_config is not None
-            else None
-        )
+            self.embed_tokens_extend = Phi4MMExtendedEmbedding(vision_config, config.hidden_size, config.dtype)
+            if config.audio_config is not None:
+                self.embed_tokens_extend.audio_embed = Phi4MMAudioEmbedding(
+                    Phi4MMAudioConfig.from_dict(config.audio_config), config.hidden_size, config.dtype
+                )
         if self.embed_tokens_extend is not None:
             for parameter in self.embed_tokens_extend.parameters():
                 mark_tensor_parallel_parameter(parameter, False, sequence_parallel=False, tp_grad_allreduce=True)
         self.layers = nn.ModuleList([Phi4MMDecoderLayer(config, index) for index in range(config.num_hidden_layers)])
         self.norm = RMSNorm(config.hidden_size, config.rms_norm_eps)
         self.register_buffer("vision_lora_slots", torch.empty(0, dtype=torch.bool), persistent=False)
+        self.register_buffer("speech_lora_slots", torch.empty(0, dtype=torch.bool), persistent=False)
 
     def forward(
         self,
@@ -437,9 +501,9 @@ class Phi4MMModel(nn.Module):
     ) -> torch.Tensor:
         if position_ids is None:
             position_ids = torch.arange(input_ids.shape[1], device=input_ids.device).unsqueeze(0).expand_as(input_ids)
-        vision_lora_mask = self._vision_lora_mask(input_ids, features, train_meta, infer_meta)
+        vision_lora_mask, speech_lora_mask = self._lora_masks(input_ids, features, train_meta, infer_meta)
         for layer in self.layers:
-            layer.set_vision_lora_mask(vision_lora_mask)
+            layer.set_lora_masks(vision_lora_mask, speech_lora_mask)
         hidden_states = self.embed_tokens(input_ids)
         hidden_states = self._apply_multimodal_features(hidden_states, input_ids, features)
         use_sequence_parallel = bool(train_meta is not None and train_meta.sequence_parallel)
@@ -458,24 +522,40 @@ class Phi4MMModel(nn.Module):
                 )
             return self.norm(hidden_states)
 
-    def _vision_lora_mask(
+    def _lora_masks(
         self,
         input_ids: torch.Tensor,
         features: dict[str, Any] | list[dict[str, Any] | None] | None,
         train_meta: TrainMeta | None,
         infer_meta: InferMeta | None,
-    ) -> torch.Tensor | None:
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         if self.embed_tokens_extend is None:
-            return None
+            return None, None
         if infer_meta is not None and infer_meta.mode == "decode":
-            if infer_meta.recurrent_slots is None or self.vision_lora_slots.numel() == 0:
-                raise ValueError("Phi4MM vision decode requires recurrent modality slots")
-            return self.vision_lora_slots.index_select(0, infer_meta.recurrent_slots).view_as(input_ids)
+            if infer_meta.recurrent_slots is None:
+                raise ValueError("Phi4MM multimodal decode requires recurrent modality slots")
+            vision = (
+                self.vision_lora_slots.index_select(0, infer_meta.recurrent_slots).view_as(input_ids)
+                if self.vision_lora_slots.numel()
+                else None
+            )
+            speech = (
+                self.speech_lora_slots.index_select(0, infer_meta.recurrent_slots).view_as(input_ids)
+                if self.speech_lora_slots.numel()
+                else None
+            )
+            return vision, speech
         image_mask = self._image_token_mask(input_ids, features)
-        explicit_modes = None
+        audio_mask = self._audio_token_mask(input_ids, features)
+        explicit_image_modes = None
+        explicit_audio_modes = None
         if isinstance(features, dict) and features.get("image_sequence_mask") is not None:
-            explicit_modes = torch.as_tensor(
+            explicit_image_modes = torch.as_tensor(
                 features["image_sequence_mask"], device=input_ids.device, dtype=torch.bool
+            ).reshape(-1)
+        if isinstance(features, dict) and features.get("audio_sequence_mask") is not None:
+            explicit_audio_modes = torch.as_tensor(
+                features["audio_sequence_mask"], device=input_ids.device, dtype=torch.bool
             ).reshape(-1)
         sequence_offsets = None
         if infer_meta is not None and infer_meta.cu_seqlens is not None:
@@ -483,27 +563,57 @@ class Phi4MMModel(nn.Module):
         elif train_meta is not None and train_meta.cu_seqlens is not None:
             sequence_offsets = train_meta.cu_seqlens
         if sequence_offsets is None:
-            row_modes = explicit_modes if explicit_modes is not None else image_mask.any(dim=1)
-            if int(row_modes.numel()) != int(input_ids.shape[0]):
-                raise ValueError("Phi4MM image_sequence_mask must contain one value per input row")
-            mask = row_modes[:, None].expand_as(input_ids)
+            image_modes = explicit_image_modes if explicit_image_modes is not None else image_mask.any(dim=1)
+            audio_modes = explicit_audio_modes if explicit_audio_modes is not None else audio_mask.any(dim=1)
+            if int(image_modes.numel()) != int(input_ids.shape[0]) or int(audio_modes.numel()) != int(
+                input_ids.shape[0]
+            ):
+                raise ValueError("Phi4MM modality sequence masks must contain one value per input row")
+            # Official VISION_SPEECH mode uses the vision adapter and vision audio projector.
+            speech_modes = audio_modes & ~image_modes
+            return image_modes[:, None].expand_as(input_ids), speech_modes[:, None].expand_as(input_ids)
         else:
-            flat = image_mask.reshape(-1)
-            mask = torch.zeros_like(flat)
-            modes = []
+            flat_image = image_mask.reshape(-1)
+            flat_audio = audio_mask.reshape(-1)
+            vision_mask = torch.zeros_like(flat_image)
+            speech_mask = torch.zeros_like(flat_audio)
+            vision_modes = []
+            speech_modes = []
             offsets = sequence_offsets.detach().to(device="cpu", dtype=torch.long).tolist()
             sequence_count = len(offsets) - 1
-            if explicit_modes is not None and int(explicit_modes.numel()) != sequence_count:
+            if explicit_image_modes is not None and int(explicit_image_modes.numel()) != sequence_count:
                 raise ValueError("Phi4MM image_sequence_mask must contain one value per packed sequence")
+            if explicit_audio_modes is not None and int(explicit_audio_modes.numel()) != sequence_count:
+                raise ValueError("Phi4MM audio_sequence_mask must contain one value per packed sequence")
             for sequence_idx, (start, end) in enumerate(zip(offsets[:-1], offsets[1:], strict=True)):
-                mode = bool(explicit_modes[sequence_idx]) if explicit_modes is not None else bool(flat[start:end].any())
-                modes.append(mode)
-                mask[start:end] = mode
-            mask = mask.view_as(input_ids)
+                image_mode = (
+                    bool(explicit_image_modes[sequence_idx])
+                    if explicit_image_modes is not None
+                    else bool(flat_image[start:end].any())
+                )
+                audio_mode = (
+                    bool(explicit_audio_modes[sequence_idx])
+                    if explicit_audio_modes is not None
+                    else bool(flat_audio[start:end].any())
+                )
+                speech_mode = audio_mode and not image_mode
+                vision_modes.append(image_mode)
+                speech_modes.append(speech_mode)
+                vision_mask[start:end] = image_mode
+                speech_mask[start:end] = speech_mode
             if infer_meta is not None and infer_meta.recurrent_slots is not None and self.vision_lora_slots.numel() > 0:
-                mode_tensor = torch.tensor(modes, device=self.vision_lora_slots.device, dtype=torch.bool)
-                self.vision_lora_slots.index_copy_(0, infer_meta.recurrent_slots, mode_tensor)
-        return mask
+                self.vision_lora_slots.index_copy_(
+                    0,
+                    infer_meta.recurrent_slots,
+                    torch.tensor(vision_modes, device=self.vision_lora_slots.device, dtype=torch.bool),
+                )
+            if infer_meta is not None and infer_meta.recurrent_slots is not None and self.speech_lora_slots.numel() > 0:
+                self.speech_lora_slots.index_copy_(
+                    0,
+                    infer_meta.recurrent_slots,
+                    torch.tensor(speech_modes, device=self.speech_lora_slots.device, dtype=torch.bool),
+                )
+            return vision_mask.view_as(input_ids), speech_mask.view_as(input_ids)
 
     def _image_token_mask(
         self,
@@ -516,6 +626,28 @@ class Phi4MMModel(nn.Module):
             )
         return input_ids == int(self.config.image_token_id or _IMAGE_SPECIAL_TOKEN_ID)
 
+    def _vision_lora_mask(
+        self,
+        input_ids: torch.Tensor,
+        features: dict[str, Any] | list[dict[str, Any] | None] | None,
+        train_meta: TrainMeta | None,
+        infer_meta: InferMeta | None,
+    ) -> torch.Tensor | None:
+        """Backward-compatible view of the vision half of modality LoRA state."""
+
+        return self._lora_masks(input_ids, features, train_meta, infer_meta)[0]
+
+    def _audio_token_mask(
+        self,
+        input_ids: torch.Tensor,
+        features: dict[str, Any] | list[dict[str, Any] | None] | None,
+    ) -> torch.Tensor:
+        if isinstance(features, dict) and features.get("audio_token_mask") is not None:
+            return torch.as_tensor(features["audio_token_mask"], device=input_ids.device, dtype=torch.bool).view_as(
+                input_ids
+            )
+        return input_ids == int(self.config.audio_token_id or _AUDIO_SPECIAL_TOKEN_ID)
+
     @torch._dynamo.disable
     def _apply_multimodal_features(
         self,
@@ -526,29 +658,34 @@ class Phi4MMModel(nn.Module):
         if features is None:
             return hidden_states
         if self.embed_tokens_extend is None:
-            raise ValueError("Phi4MM image features require a configured vision tower")
+            raise ValueError("Phi4MM multimodal features require a configured modality tower")
         rows = _features_by_row(features, int(input_ids.shape[0]))
         output = hidden_states.clone()
         for row_idx, row in enumerate(rows):
             if row is None:
                 continue
-            image_embeds = self._project_image_feature_rows(row, hidden_states.device)
-            if image_embeds is None:
-                continue
-            mask = row.get("image_token_mask")
-            if mask is None:
-                token_id = int(row.get("image_token_id", self.config.image_token_id or _IMAGE_SPECIAL_TOKEN_ID))
-                mask = input_ids[row_idx] == token_id
-            else:
-                mask = torch.as_tensor(mask, device=input_ids.device, dtype=torch.bool).reshape(-1)
-            if mask.shape != input_ids[row_idx].shape:
-                raise ValueError("Phi4MM image_token_mask must match the input token row")
-            if int(mask.sum().item()) != int(image_embeds.shape[0]):
-                raise ValueError(
-                    "Phi4MM image token count does not match projected embeddings: "
-                    f"tokens={int(mask.sum().item())} embeds={int(image_embeds.shape[0])}"
-                )
-            output[row_idx, mask] = image_embeds.to(device=output.device, dtype=output.dtype)
+            for modality, embeds in (
+                ("image", self._project_image_feature_rows(row, hidden_states.device)),
+                ("audio", self._project_audio_feature_rows(row, hidden_states.device)),
+            ):
+                if embeds is None:
+                    continue
+                mask = None if row.get(f"{modality}_feature_rows") is not None else row.get(f"{modality}_token_mask")
+                if mask is None:
+                    default_id = self.config.image_token_id if modality == "image" else self.config.audio_token_id
+                    fallback_id = _IMAGE_SPECIAL_TOKEN_ID if modality == "image" else _AUDIO_SPECIAL_TOKEN_ID
+                    token_id = int(row.get(f"{modality}_token_id", default_id or fallback_id))
+                    mask = input_ids[row_idx] == token_id
+                else:
+                    mask = torch.as_tensor(mask, device=input_ids.device, dtype=torch.bool).reshape(-1)
+                if mask.shape != input_ids[row_idx].shape:
+                    raise ValueError(f"Phi4MM {modality}_token_mask must match the input token row")
+                if int(mask.sum().item()) != int(embeds.shape[0]):
+                    raise ValueError(
+                        f"Phi4MM {modality} token count does not match projected embeddings: "
+                        f"tokens={int(mask.sum().item())} embeds={int(embeds.shape[0])}"
+                    )
+                output[row_idx, mask] = embeds.to(device=output.device, dtype=output.dtype)
         return output
 
     def _project_image_feature_rows(self, features: dict[str, Any], device: torch.device) -> torch.Tensor | None:
@@ -570,16 +707,60 @@ class Phi4MMModel(nn.Module):
         mask = _feature_tensor(features, "image_attention_mask", device, torch.bool)
         if sizes is None or mask is None:
             raise ValueError("Phi4MM processor output requires image_sizes and image_attention_mask")
-        image_embeds = self.embed_tokens_extend.image_embed(pixels, sizes, mask)
+        image_embed = getattr(self.embed_tokens_extend, "image_embed", None)
+        if image_embed is None:
+            raise ValueError("Phi4MM image features require a configured vision tower")
+        image_embeds = image_embed(pixels, sizes, mask)
         offset = int(features.get("image_token_offset", 0) or 0)
         count = features.get("image_token_count")
         if count is not None:
             return image_embeds[offset : offset + int(count)]
         return image_embeds[offset:]
 
+    def _project_audio_feature_rows(self, features: dict[str, Any], device: torch.device) -> torch.Tensor | None:
+        rows = features.get("audio_feature_rows")
+        if rows is not None:
+            pieces = [self._project_audio_feature(dict(row), device) for row in rows if row is not None]
+            pieces = [piece for piece in pieces if piece is not None]
+            return torch.cat(pieces, dim=0) if pieces else None
+        return self._project_audio_feature(features, device)
+
+    def _project_audio_feature(self, features: dict[str, Any], device: torch.device) -> torch.Tensor | None:
+        existing = _feature_tensor(features, "audio_embeds", device, self.config.dtype)
+        if existing is not None:
+            return existing
+        inputs = _feature_tensor(features, "input_audio_embeds", device, self.config.dtype)
+        if inputs is None:
+            return None
+        audio_embed = getattr(self.embed_tokens_extend, "audio_embed", None)
+        if audio_embed is None:
+            raise ValueError("Phi4MM audio features require a configured audio tower")
+        attention_mask = _feature_tensor(features, "audio_attention_mask", device, torch.bool)
+        sizes = _feature_tensor(features, "audio_embed_sizes", device, torch.long)
+        if sizes is None:
+            raise ValueError("Phi4MM processor output requires audio_embed_sizes")
+        if inputs.ndim == 2:
+            inputs = inputs.unsqueeze(0)
+        if attention_mask is not None and attention_mask.ndim == 1:
+            attention_mask = attention_mask.unsqueeze(0)
+        input_mode = features.get("input_mode", 2)
+        if isinstance(input_mode, torch.Tensor):
+            input_mode = int(input_mode.reshape(-1)[0].item())
+        projection_mode = "vision" if int(input_mode) in (1, 3) else "speech"
+        projected = audio_embed(inputs, attention_mask, projection_mode)
+        sizes_list = sizes.reshape(-1).detach().to(device="cpu", dtype=torch.long).tolist()
+        if len(sizes_list) != int(projected.shape[0]):
+            raise ValueError("Phi4MM audio_embed_sizes must contain one entry per audio segment")
+        merged = torch.cat([projected[index, : int(size)] for index, size in enumerate(sizes_list)], dim=0)
+        offset = int(features.get("audio_token_offset", 0) or 0)
+        count = features.get("audio_token_count")
+        if count is not None:
+            return merged[offset : offset + int(count)]
+        return merged[offset:]
+
 
 class Phi4MMForCausalLM(nn.Module):
-    """Text-only Phi-4 causal LM with a truly tied vocab-parallel head."""
+    """Phi-4-Multimodal causal LM with a truly tied vocab-parallel head."""
 
     def __init__(self, config: ModelConfig):
         super().__init__()
@@ -629,11 +810,14 @@ class Phi4MMForCausalLM(nn.Module):
             layer.self_attn.set_kv_cache(k_cache, v_cache)
         slot_count = int(num_slots) if num_slots is not None else (int(kv_caches[0][0].shape[0]) if kv_caches else 0)
         self.model.vision_lora_slots = torch.zeros(slot_count, device=next(self.parameters()).device, dtype=torch.bool)
+        self.model.speech_lora_slots = torch.zeros(slot_count, device=next(self.parameters()).device, dtype=torch.bool)
 
     @torch.no_grad()
     def reset_recurrent_cache_slots(self, slots: torch.Tensor) -> None:
         if self.model.vision_lora_slots.numel() > 0:
             self.model.vision_lora_slots.index_fill_(0, slots, False)
+        if self.model.speech_lora_slots.numel() > 0:
+            self.model.speech_lora_slots.index_fill_(0, slots, False)
 
     @torch.no_grad()
     def prepare_infer_weights(self) -> None:
@@ -744,6 +928,7 @@ class Phi4MMAdapter(ModelAdapter):
         text_config["rope_scaling"] = rope_scaling
         text_config["original_max_position_embeddings"] = original_max_position_embeddings
         vision_config = _phi4mm_vision_config(hf_config)
+        audio_config = _phi4mm_audio_config(hf_config)
 
         return ModelConfig(
             model_type=self.name,
@@ -769,7 +954,9 @@ class Phi4MMAdapter(ModelAdapter):
             sequence_parallel=bool(hf_config.get("sequence_parallel", True)),
             hf_text_config=text_config,
             vision_config=vision_config,
+            audio_config=audio_config,
             image_token_id=_IMAGE_SPECIAL_TOKEN_ID if vision_config is not None else None,
+            audio_token_id=_AUDIO_SPECIAL_TOKEN_ID if audio_config is not None else None,
         )
 
     def build(self, config: ModelConfig) -> nn.Module:
