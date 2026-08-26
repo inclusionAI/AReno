@@ -362,7 +362,7 @@ class CudaBackend(Backend):
             RolloutSequence(
                 resp_tokens=tokens,
                 resp_logprobs=rollout.logprobs[index, : len(tokens)].tolist(),
-                routed_experts=(rollout.routed_experts[index].tolist() if rollout.routed_experts is not None else None),
+                routed_experts=(rollout.routed_experts[index] if rollout.routed_experts is not None else None),
             )
             for index, tokens in enumerate(rollout.response_ids)
         ]
@@ -475,7 +475,7 @@ class CudaBackend(Backend):
             RolloutSequence(
                 resp_tokens=tokens,
                 resp_logprobs=rollout.logprobs[index, : len(tokens)].tolist(),
-                routed_experts=(rollout.routed_experts[index].tolist() if rollout.routed_experts is not None else None),
+                routed_experts=(rollout.routed_experts[index] if rollout.routed_experts is not None else None),
             )
             for index, tokens in enumerate(rollout.response_ids)
         ]

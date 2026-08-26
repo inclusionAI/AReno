@@ -219,6 +219,10 @@ def _pack_train_data(data_pack: dict[str, Any]) -> dict[str, Any]:
         packed["packed_returns"] = packed_returns
     if packed_routing_replay is not None:
         packed["packed_routing_replay"] = packed_routing_replay
+        # Only the compact packed view is consumed by TrainMeta. Keeping the
+        # rectangular source would copy the same routing metadata to CUDA a
+        # second time and retain both tensors for the whole microbatch.
+        packed.pop("routing_replay", None)
     return packed
 
 

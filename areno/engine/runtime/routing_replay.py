@@ -87,10 +87,10 @@ def resolve_softmax_routes(
     replayed = _replayed_ids(state, layer_slot, logits, topk_idx)
     if replayed is not None:
         replayed_ids, replay_mask = replayed
-        scores = torch.softmax(logits.float(), dim=-1)
-        replayed_weight = scores.gather(-1, replayed_ids)
         if renormalize:
-            replayed_weight = replayed_weight / replayed_weight.sum(dim=-1, keepdim=True).clamp_min(1.0e-20)
+            replayed_weight = torch.softmax(logits.float().gather(-1, replayed_ids), dim=-1)
+        else:
+            replayed_weight = torch.softmax(logits.float(), dim=-1).gather(-1, replayed_ids)
         topk_idx = replayed_ids
         topk_weight = torch.where(replay_mask.unsqueeze(-1), replayed_weight, topk_weight)
     _capture_ids(state, layer_slot, topk_idx)
@@ -111,7 +111,7 @@ def resolve_sigmoid_routes(
     replayed = _replayed_ids(state, layer_slot, logits, topk_idx)
     if replayed is not None:
         replayed_ids, replay_mask = replayed
-        scores = torch.sigmoid(logits.float()).gather(-1, replayed_ids)
+        scores = torch.sigmoid(logits.float().gather(-1, replayed_ids))
         replayed_weight = scores / scores.sum(dim=-1, keepdim=True).clamp_min(1.0e-20)
         topk_idx = replayed_ids
         topk_weight = torch.where(replay_mask.unsqueeze(-1), replayed_weight, topk_weight)
@@ -144,11 +144,7 @@ def _replayed_ids(
         layer_replay = layer_replay.narrow(0, start, int(logits.shape[0]))
     ids = layer_replay.to(device=logits.device, dtype=torch.long)
     missing = ids < 0
-    if bool((missing.any(dim=-1) != missing.all(dim=-1)).any()):
-        raise ValueError("routing replay must mark either all or none of a token's top-k expert ids as missing")
     replay_mask = ~missing.all(dim=-1)
-    if bool((ids[replay_mask] >= logits.shape[-1]).any()):
-        raise ValueError(f"routing replay contains expert ids outside [0, {logits.shape[-1]})")
     resolved = torch.where(replay_mask.unsqueeze(-1), ids, dynamic_ids.to(dtype=torch.long))
     return resolved, replay_mask
 

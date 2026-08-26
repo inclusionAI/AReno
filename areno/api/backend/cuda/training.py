@@ -48,27 +48,28 @@ def make_train_pack(seqs: list[TrainSequence]) -> dict[str, torch.Tensor]:
     if any(routes is not None for routes in routed_experts):
         if any(routes is None for routes in routed_experts):
             raise ValueError("routing replay must be present for every sequence in a train microbatch")
-        route_shapes = {
-            (len(routes[0]), len(routes[0][0])) for routes in routed_experts if routes is not None and routes
-        }
+        route_tensors = []
+        for routes in routed_experts:
+            try:
+                route_tensor = torch.as_tensor(routes, dtype=torch.int16, device="cpu")
+            except (TypeError, ValueError) as exc:
+                raise ValueError("routing replay must be a rectangular (tokens, layers, top_k) tensor") from exc
+            if route_tensor.ndim != 3:
+                raise ValueError("routing replay must have shape (tokens, layers, top_k)")
+            if route_tensor.numel() and int(route_tensor.min().item()) < 0:
+                raise ValueError("rollout routing replay expert ids must be non-negative")
+            route_tensors.append(route_tensor)
+        route_shapes = {tuple(routes.shape[1:]) for routes in route_tensors}
         if len(route_shapes) != 1:
             raise ValueError("routing replay layer/top-k shape must match across the train microbatch")
-        if not route_shapes:
-            raise ValueError("routing replay cannot be empty")
         layers, top_k = route_shapes.pop()
-        replay = torch.full((len(seqs), max_len, layers, top_k), -1, dtype=torch.int32)
-        for row, (seq, routes) in enumerate(zip(seqs, routed_experts, strict=True)):
-            assert routes is not None
+        replay = torch.full((len(seqs), max_len, layers, top_k), -1, dtype=torch.int16)
+        for row, (seq, routes) in enumerate(zip(seqs, route_tensors, strict=True)):
             expected = max(len(seq.tokens) - 1, 0)
-            if len(routes) != expected:
-                raise ValueError(f"routing replay token count {len(routes)} must equal len(tokens)-1 ({expected})")
-            if any(
-                len(token_routes) != layers or any(len(experts) != top_k for experts in token_routes)
-                for token_routes in routes
-            ):
-                raise ValueError("every routing replay token must use the same layer/top-k shape")
-            if routes:
-                replay[row, :expected] = torch.as_tensor(routes, dtype=torch.int32)
+            if int(routes.shape[0]) != expected:
+                raise ValueError(f"routing replay token count {routes.shape[0]} must equal len(tokens)-1 ({expected})")
+            if expected:
+                replay[row, :expected].copy_(routes)
         pack["routing_replay"] = replay
     return pack
 

@@ -44,7 +44,7 @@ FinishedRowsCallback = Callable[
         torch.Tensor,
         str,
         tuple[int, ...],
-        list[list[torch.Tensor]],
+        torch.Tensor | None,
     ],
     None,
 ]
@@ -248,6 +248,8 @@ class InferenceManager:
             # Idle-DP early return: this rank received no prompts this step.
             if not prompts:
                 return _empty_rollout() if ctx.is_rank0 else None
+            if self.config.runtime.rollout_routing_replay and int(self.config.model.num_experts or 0) > 32767:
+                raise ValueError("rollout routing replay supports at most 32767 experts per MoE layer")
             max_new_tokens = int(payload.max_new_tokens)
             eos_token_id = payload.eos_token_id
             max_cache_len = int(payload.max_cache_len)
@@ -292,7 +294,7 @@ class InferenceManager:
                         response_lens,
                         finish_reason,
                         truncate_stop_token_ids,
-                        state.routed_experts,
+                        state.routing_buffer,
                     )
 
             self._generate_rollout_tokens_no_sync(
@@ -306,7 +308,7 @@ class InferenceManager:
                 finished_callback=internal_finished_callback,
                 refill_callback=refill_callback,
             )
-            if self.config.runtime.rollout_routing_replay and not any(state.routed_experts):
+            if self.config.runtime.rollout_routing_replay and not state.has_routing:
                 raise ValueError(
                     "rollout routing replay was enabled, but this model did not capture any sparse-MoE routes"
                 )
@@ -479,7 +481,7 @@ class InferenceManager:
                 sample_step=sample_step,
                 eos_token_id=eos_token_id,
             )
-            state.record_decode_routing(active_rows, self._last_routing_capture)
+            state.record_decode_routing(active_rows, cache_seqlens, self._last_routing_capture)
             sample_step += 1
             # Write the new tokens into the per-row response buffer using
             # advanced indexing: write_pos[k] is the next free slot for row k.

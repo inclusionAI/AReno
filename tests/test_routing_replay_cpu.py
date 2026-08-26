@@ -63,12 +63,13 @@ def test_train_pack_pads_last_token_with_dynamic_route_sentinel():
         prompt_mask=[True, False, False],
         logprobs=[0.0, -0.1, -0.2],
         advantages=[0.0, 1.0, 1.0],
-        routed_experts=routes,
+        routed_experts=torch.tensor(routes, dtype=torch.int16),
     )
 
     pack = make_train_pack([seq])
 
     assert tuple(pack["routing_replay"].shape) == (1, 3, 2, 2)
+    assert pack["routing_replay"].dtype == torch.int16
     assert torch.equal(pack["routing_replay"][0, :2], torch.tensor(routes))
     assert torch.equal(pack["routing_replay"][0, 2], torch.full((2, 2), -1))
 
@@ -83,7 +84,7 @@ def test_rollout_state_aligns_prefill_decode_routes_and_trims_final_token():
     state.logprobs = [[-0.1, -0.2]]
     state.finish_reason = ["length"]
     # Decode forwards token 12 before sampling token 13.
-    state.record_decode_routing(torch.tensor([0]), torch.tensor([[[2, 3]]]))
+    state.record_decode_routing(torch.tensor([0]), torch.tensor([2]), torch.tensor([[[2, 3]]]))
 
     output = state.to_rollout()
 

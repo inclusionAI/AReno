@@ -181,7 +181,7 @@ class _AgentSample:
 class _ResponseData:
     response_tokens: list[int]
     response_logprobs: list[float]
-    routed_experts: list[list[list[int]]] | None = None
+    routed_experts: Any | None = None
 
 
 @dataclass(slots=True)
@@ -779,7 +779,7 @@ class RolloutSession:
         response_tokens: list[int],
         *,
         response_logprobs: list[float] | None = None,
-        routed_experts: list[list[list[int]]] | None = None,
+        routed_experts: Any | None = None,
         content: str | None = None,
         tool_calls: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
@@ -796,7 +796,7 @@ class RolloutSession:
             tool_call_parser=self._tool_call_parser,
             parsed_tool_calls=[list(tool_calls or [])],
             response_logprobs=[list(response_logprobs or [])],
-            routed_experts=[list(routed_experts or [])],
+            routed_experts=[_routing_to_list(routed_experts)],
             include_areno_metadata=True,
             input_tokens=pending.input_tokens,
         )
@@ -805,6 +805,13 @@ class RolloutSession:
 def _multimodal_encoding_cache_key(messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> str:
     payload = json.dumps([messages, tools], sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _routing_to_list(routed_experts: Any | None) -> list[list[list[int]]]:
+    if routed_experts is None:
+        return []
+    tolist = getattr(routed_experts, "tolist", None)
+    return tolist() if callable(tolist) else list(routed_experts)
 
 
 def load_agent_run_fn(path: str) -> Callable[[RolloutSession, AgentBatch], Any]:

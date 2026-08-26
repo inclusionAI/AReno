@@ -58,7 +58,10 @@ class RolloutSequence(BaseModel):
 
     resp_tokens: list[int] = Field(default_factory=list)
     resp_logprobs: list[float] = Field(default_factory=list)
-    routed_experts: list[list[list[int]]] | None = Field(default=None)
+    # Kept as ``Any`` so CUDA rollouts can retain a compact CPU tensor instead
+    # of expanding every route id into millions of Python integers. Agentic
+    # OpenAI responses serialize the same value to nested lists at the edge.
+    routed_experts: Any | None = Field(default=None)
 
 
 class RolloutResult(BaseModel):
@@ -91,4 +94,4 @@ class TrainSequence(BaseModel):
     features: dict[str, Any] | list[dict[str, Any] | None] | None = Field(default=None)
     reward: float = Field(default=0.0)
     eos_token_id: int = Field(default=0)
-    routed_experts: list[list[list[int]]] | None = Field(default=None)
+    routed_experts: Any | None = Field(default=None)
