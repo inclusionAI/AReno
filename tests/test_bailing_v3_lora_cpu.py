@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
+import sys
+from types import ModuleType, SimpleNamespace
 
 import pytest
 import torch
@@ -107,6 +108,29 @@ def _single_tp() -> SimpleNamespace:
     return SimpleNamespace(rank=0, world_size=1, group=None)
 
 
+@pytest.fixture
+def bailing_model_module(monkeypatch: pytest.MonkeyPatch):
+    """Import the model without requiring optional FLA kernels in CPU CI."""
+
+    fla = ModuleType("fla")
+    fla.__path__ = []
+    fla_ops = ModuleType("fla.ops")
+    fla_ops.__path__ = []
+    lightning_attn = ModuleType("fla.ops.lightning_attn")
+    lightning_attn.chunk_lightning_attn = lambda *args, **kwargs: None
+    kda = ModuleType("areno.accel.kda")
+    kda.areno_kda_chunk = lambda *args, **kwargs: None
+    kda.areno_kda_recurrent_update = lambda *args, **kwargs: None
+    monkeypatch.setitem(sys.modules, "fla", fla)
+    monkeypatch.setitem(sys.modules, "fla.ops", fla_ops)
+    monkeypatch.setitem(sys.modules, "fla.ops.lightning_attn", lightning_attn)
+    monkeypatch.setitem(sys.modules, "areno.accel.kda", kda)
+
+    from areno.models.bailing_v3 import model as bailing_model
+
+    return bailing_model
+
+
 def test_bailing_v3_full_profile_attaches_native_slots(monkeypatch) -> None:
     monkeypatch.setattr(linear, "get_tp_context", _single_tp)
     monkeypatch.setattr("areno.adapters.lora.get_tp_context", _single_tp)
@@ -154,9 +178,8 @@ def test_bailing_v3_requires_non_factorized_kda(monkeypatch) -> None:
         )
 
 
-def test_bailing_v3_empty_route_keeps_expert_router_and_lora_gradients(monkeypatch) -> None:
-    from areno.models.bailing_v3 import model as bailing_model
-
+def test_bailing_v3_empty_route_keeps_expert_router_and_lora_gradients(monkeypatch, bailing_model_module) -> None:
+    bailing_model = bailing_model_module
     experts = bailing_model.BailingGroupedExperts.__new__(bailing_model.BailingGroupedExperts)
     nn.Module.__init__(experts)
     experts.linear_fc1 = nn.Linear(3, 4, bias=False)
@@ -195,9 +218,8 @@ def test_bailing_v3_empty_route_keeps_expert_router_and_lora_gradients(monkeypat
     assert all(torch.count_nonzero(parameter.grad) == 0 for parameter in parameters)
 
 
-def test_bailing_v3_expert_lora_merges_only_into_derived_infer_weights() -> None:
-    from areno.models.bailing_v3 import model as bailing_model
-
+def test_bailing_v3_expert_lora_merges_only_into_derived_infer_weights(bailing_model_module) -> None:
+    bailing_model = bailing_model_module
     experts = bailing_model.BailingGroupedExperts.__new__(bailing_model.BailingGroupedExperts)
     nn.Module.__init__(experts)
     experts.local_num_experts = 2
@@ -257,9 +279,8 @@ def test_bailing_v3_routed_lora_keeps_cuda_graph_decode_enabled() -> None:
     assert qwen_runtime.eager_decode
 
 
-def test_bailing_v3_kda_packed_a_matches_canonical_slots(monkeypatch) -> None:
-    from areno.models.bailing_v3 import model as bailing_model
-
+def test_bailing_v3_kda_packed_a_matches_canonical_slots(monkeypatch, bailing_model_module) -> None:
+    bailing_model = bailing_model_module
     monkeypatch.setattr(linear, "get_tp_context", _single_tp)
     monkeypatch.setattr("areno.adapters.lora.get_tp_context", _single_tp)
     monkeypatch.setattr(bailing_model, "areno_linear", torch.nn.functional.linear)

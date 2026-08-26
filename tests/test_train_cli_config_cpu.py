@@ -928,7 +928,9 @@ def test_train_help_places_epochs_under_basic_not_checkpointing():
 def test_train_help_remains_complete_and_groups_every_declared_option():
     ctx = train_cli.click.Context(train_cli.train_command)
     declared = {
-        param.name for param in train_cli.train_command.get_params(ctx) if param.get_help_record(ctx) is not None
+        param.name
+        for param in train_cli.train_command.get_params(ctx)
+        if param.get_help_record(ctx) is not None and not param.name.startswith("_click_")
     }
     grouped = [name for _, names in TRAIN_OPTION_GROUPS for name in names]
 
@@ -939,6 +941,8 @@ def test_train_help_remains_complete_and_groups_every_declared_option():
 
     output = _help_output()
     for param in train_cli.train_command.get_params(ctx):
+        if param.name.startswith("_click_"):
+            continue
         record = param.get_help_record(ctx)
         if record is not None:
             assert record[0].split()[0].rstrip(",") in output, f"option dropped from help: {param.name}"
