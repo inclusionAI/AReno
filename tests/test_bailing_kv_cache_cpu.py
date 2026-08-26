@@ -97,3 +97,30 @@ def test_bailing_v3_recurrent_attention_uses_recurrent_slots_instead_of_kv_block
     )
 
     assert _recurrent_cache_slots(meta).tolist() == [0, 1]
+
+
+def test_bailing_v3_clears_released_recurrent_slots(monkeypatch: pytest.MonkeyPatch) -> None:
+    pytest.importorskip("triton")
+    from areno.models.bailing_v3 import model as bailing_v3
+
+    linear_attention = _LinearAttention()
+    linear_attention.state_cache = torch.ones(3, 2, 4, 4)
+    kda_attention = _KDAAttention()
+    kda_attention.state_cache = torch.ones(3, 2, 4, 6)
+    kda_attention.conv_cache = torch.ones(3, 3, 8, 2)
+    parameter = torch.nn.Parameter(torch.zeros(1))
+    model = SimpleNamespace(
+        layers=[SimpleNamespace(attention=linear_attention), SimpleNamespace(attention=kda_attention)],
+        parameters=lambda: iter((parameter,)),
+    )
+    monkeypatch.setattr(bailing_v3, "BailingLinearAttention", _LinearAttention)
+    monkeypatch.setattr(bailing_v3, "BailingKDAAttention", _KDAAttention)
+
+    bailing_v3.BailingMoeV3ForCausalLM.reset_recurrent_cache_slots(model, torch.tensor([1]))
+
+    assert torch.count_nonzero(linear_attention.state_cache[1]) == 0
+    assert torch.count_nonzero(kda_attention.state_cache[1]) == 0
+    assert torch.count_nonzero(kda_attention.conv_cache[1]) == 0
+    assert torch.all(linear_attention.state_cache[[0, 2]] == 1)
+    assert torch.all(kda_attention.state_cache[[0, 2]] == 1)
+    assert torch.all(kda_attention.conv_cache[[0, 2]] == 1)
