@@ -1567,6 +1567,18 @@ class BailingMoeV3ForCausalLM(nn.Module):
             layer.attention.reset_kv_cache()
 
     @torch.no_grad()
+    def reset_recurrent_cache_slots(self, slots: torch.Tensor) -> None:
+        """Clear recurrent state before a released inference slot is reused."""
+
+        slots = slots.to(device=next(self.parameters()).device, dtype=torch.long)
+        for layer in self.layers:
+            attn = layer.attention
+            if isinstance(attn, (BailingLinearAttention, BailingKDAAttention)) and attn.state_cache.numel() > 0:
+                attn.state_cache.index_fill_(0, slots, 0)
+            if isinstance(attn, BailingKDAAttention) and attn.conv_cache.numel() > 0:
+                attn.conv_cache.index_fill_(0, slots, 0)
+
+    @torch.no_grad()
     def offload_kv_caches(self) -> None:
         for layer in self.layers:
             attn = layer.attention
