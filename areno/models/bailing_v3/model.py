@@ -891,9 +891,7 @@ class BailingSoftmaxAttention(nn.Module):
         bsz, seqlen = q.shape[:2]
         q = q.view(bsz, seqlen, self.local_heads, self.head_dim)
         q_nope, q_rope = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
-        kv_a = self._with_lora(
-            "kv_a_proj_with_mqa", mla_input, self.kv_a_proj_with_mqa(mla_input)
-        )
+        kv_a = self._with_lora("kv_a_proj_with_mqa", mla_input, self.kv_a_proj_with_mqa(mla_input))
         compressed_kv, k_rope = kv_a.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
         if is_sequence_parallel_active():
             k_rope = gather_from_sequence_parallel_region(k_rope)

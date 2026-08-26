@@ -12,7 +12,7 @@ import torch
 from safetensors.torch import load_file
 
 from areno.adapters import LoraConfig
-from areno.api import ArenoConfig, SamplingParams, Trainer
+from areno.api import CudaConfig, SamplingParams, Trainer
 from areno.api.algorithms import get_algorithm
 from areno.api.roles import ModelRole
 from areno.api.trainer_config import DPOTrainerConfig, PolicyTrainerConfig, PPOTrainerConfig
@@ -179,7 +179,7 @@ def test_qwen3_lora_tp2_dp2_reference_two_step(algorithm: str) -> None:
         ]
         reward_fn = None
 
-    backend_config = config.areno_config()
+    backend_config = config.cuda_config()
     backend_config.dp_size = 2
     backend_config.runtime["compile_model"] = False
     observed = _ObservedReferenceTrainer(
@@ -239,7 +239,7 @@ def test_qwen3_lora_tp2_dp2_rollout_train_peft(tmp_path: Path, model_env: str, m
     final_path = checkpoint_path / "step_000002"
     reexported_path = tmp_path / "adapter-reexported"
     lora = LoraConfig(rank=8, alpha=16.0)
-    backend_config = ArenoConfig(
+    backend_config = CudaConfig(
         tp_size=2,
         dp_size=2,
         devices=[0, 1, 2, 3],
@@ -350,7 +350,7 @@ def test_qwen3_lora_tp2_dp2_rollout_train_peft(tmp_path: Path, model_env: str, m
     imported = Trainer(
         4,
         os.fspath(model_path),
-        custom_config=ArenoConfig(
+        custom_config=CudaConfig(
             tp_size=2,
             dp_size=2,
             devices=[0, 1, 2, 3],
@@ -393,7 +393,7 @@ def test_qwen3_moe_lora_tp8_replicated_kv_roundtrip(tmp_path: Path) -> None:
     final_path = checkpoint_path / "step_000001"
     reexported_path = tmp_path / "adapter-reexported"
     lora = LoraConfig(rank=8, alpha=16.0)
-    backend_config = ArenoConfig(
+    backend_config = CudaConfig(
         tp_size=8,
         dp_size=1,
         devices=list(range(8)),
@@ -471,7 +471,7 @@ def test_qwen3_moe_lora_tp8_replicated_kv_roundtrip(tmp_path: Path) -> None:
     imported = Trainer(
         8,
         os.fspath(model_path),
-        custom_config=ArenoConfig(
+        custom_config=CudaConfig(
             tp_size=8,
             dp_size=1,
             devices=list(range(8)),
@@ -488,9 +488,7 @@ def test_qwen3_moe_lora_tp8_replicated_kv_roundtrip(tmp_path: Path) -> None:
     reexported = load_file(reexported_path / "adapter_model.safetensors")
     assert reexported.keys() == final.keys()
     assert all(torch.equal(reexported[name], final[name]) for name in final)
-    torch.testing.assert_close(
-        torch.tensor(imported_logprobs), torch.tensor(trained_logprobs), rtol=0.0, atol=1.0e-5
-    )
+    torch.testing.assert_close(torch.tensor(imported_logprobs), torch.tensor(trained_logprobs), rtol=0.0, atol=1.0e-5)
 
 
 @pytest.mark.parametrize(
@@ -544,7 +542,7 @@ def test_qwen3_lora_independent_rollout_two_step(
         metrics_log_dir=None,
         lora=lora,
     )
-    backend_config = config.areno_config()
+    backend_config = config.cuda_config()
     backend_config.dp_size = 1
     backend_config.runtime["compile_model"] = False
     inner = Trainer(2, os.fspath(model_path), custom_config=backend_config)

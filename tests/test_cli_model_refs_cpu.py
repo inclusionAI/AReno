@@ -97,7 +97,7 @@ class CliModelReferenceTest(unittest.TestCase):
 
         self.assertEqual(resolved.ckpt, "/ms/org/actor")
         self.assertEqual(resolved.base_model_name_or_path, "org/actor")
-        self.assertEqual(resolved.areno_config().base_model_name_or_path, "org/actor")
+        self.assertEqual(resolved.cuda_config().base_model_name_or_path, "org/actor")
 
 
 if __name__ == "__main__":

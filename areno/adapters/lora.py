@@ -283,9 +283,7 @@ def _initialize_qwen3_lora(
             slots[logical_name] = slot
 
         if getattr(model_config, "enable_moe_block", False):
-            matched.update(
-                _install_moe_slots(layer.mlp.experts, prefix, requested, config, seed, runtime_state, slots)
-            )
+            matched.update(_install_moe_slots(layer.mlp.experts, prefix, requested, config, seed, runtime_state, slots))
         else:
             gate_up = layer.mlp.gate_up_proj
             for component_index, component in enumerate(("gate_proj", "up_proj")):
@@ -369,18 +367,14 @@ def _initialize_bailing_v3_lora(
                 owner = getattr(attention, component, None)
                 if component in requested and owner is not None:
                     matched.add(component)
-                    slot = _replicated_slot(
-                        f"{attention_prefix}.{component}", owner, config, seed, runtime_state
-                    )
+                    slot = _replicated_slot(f"{attention_prefix}.{component}", owner, config, seed, runtime_state)
                     attention.install_lora_component(component, slot)
                     slots[slot.logical_name] = slot
             for component in ("q_b_proj", "kv_b_proj"):
                 owner = getattr(attention, component, None)
                 if component in requested and owner is not None:
                     matched.add(component)
-                    _install_column_slot(
-                        f"{attention_prefix}.{component}", owner, config, seed, runtime_state, slots
-                    )
+                    _install_column_slot(f"{attention_prefix}.{component}", owner, config, seed, runtime_state, slots)
             if "dense" in requested:
                 matched.add("dense")
                 _install_row_slot(
@@ -394,9 +388,7 @@ def _initialize_bailing_v3_lora(
 
         mlp_prefix = f"{prefix}.mlp"
         if hasattr(layer.mlp, "experts"):
-            matched.update(
-                _install_moe_slots(layer.mlp.experts, prefix, requested, config, seed, runtime_state, slots)
-            )
+            matched.update(_install_moe_slots(layer.mlp.experts, prefix, requested, config, seed, runtime_state, slots))
             if layer.mlp.shared_experts is not None:
                 matched.update(
                     _install_dense_mlp_slots(
@@ -411,9 +403,7 @@ def _initialize_bailing_v3_lora(
                 )
         else:
             matched.update(
-                _install_dense_mlp_slots(
-                    layer.mlp, mlp_prefix, requested, config, seed, runtime_state, slots
-                )
+                _install_dense_mlp_slots(layer.mlp, mlp_prefix, requested, config, seed, runtime_state, slots)
             )
     return matched
 
@@ -490,14 +480,10 @@ def _install_dense_mlp_slots(
     for component in ("gate_proj", "up_proj"):
         if component in requested:
             matched.add(component)
-            _install_column_slot(
-                f"{prefix}.{component}", getattr(mlp, component), config, seed, runtime_state, slots
-            )
+            _install_column_slot(f"{prefix}.{component}", getattr(mlp, component), config, seed, runtime_state, slots)
     if "down_proj" in requested:
         matched.add("down_proj")
-        _install_row_slot(
-            f"{prefix}.down_proj", mlp.down_proj, config, seed, runtime_state, slots
-        )
+        _install_row_slot(f"{prefix}.down_proj", mlp.down_proj, config, seed, runtime_state, slots)
     return matched
 
 

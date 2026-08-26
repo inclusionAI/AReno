@@ -20,8 +20,8 @@ import click
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from areno.api import MLX, BackendType, MlxConfig, SamplingParams, Trainer, default_backend_type
 from areno.adapters import LoraConfig
+from areno.api import MLX, BackendType, MlxConfig, SamplingParams, Trainer, default_backend_type
 from areno.api.multimodal import (
     expand_image_tokens,
     image_token_counts_from_features,

@@ -276,9 +276,7 @@ def test_bailing_v3_kda_packed_a_matches_canonical_slots(monkeypatch) -> None:
         slot.lora_B.data.normal_()
     hidden_states = torch.randn(2, 3, 8)
     components = ("q_proj", "k_proj", "v_proj", "f_proj", "g_proj")
-    expected = tuple(
-        getattr(attention, component)(hidden_states) for component in components
-    )
+    expected = tuple(getattr(attention, component)(hidden_states) for component in components)
 
     bailing_model.BailingKDAAttention.prepare_lora_infer_weights(attention)
     actual = bailing_model.BailingKDAAttention._project_qkvfg(attention, hidden_states, SimpleNamespace())

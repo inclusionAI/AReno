@@ -396,12 +396,16 @@ class RoleManager:
             try:
                 token_rows = payload.token_rows_by_dp[ctx.dp_rank]
                 features = payload.features_by_dp[ctx.dp_rank] if payload.features_by_dp is not None else None
-                local = [] if not token_rows else self._score_logprob_rows(
-                    model,
-                    token_rows,
-                    payload,
-                    features=features,
-                    sequence_parallel=sequence_parallel,
+                local = (
+                    []
+                    if not token_rows
+                    else self._score_logprob_rows(
+                        model,
+                        token_rows,
+                        payload,
+                        features=features,
+                        sequence_parallel=sequence_parallel,
+                    )
                 )
                 return local if ctx.rank == 0 else None
             finally:

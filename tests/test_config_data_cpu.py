@@ -952,7 +952,7 @@ class ConfigAndDataTest(unittest.TestCase):
         )
 
         self.assertEqual(config.base_model_name_or_path, "aistudio://project/base")
-        self.assertEqual(config.areno_config().base_model_name_or_path, "aistudio://project/base")
+        self.assertEqual(config.cuda_config().base_model_name_or_path, "aistudio://project/base")
 
     def test_train_cli_preflight_rejects_agent_file_without_callable_run_agent(self):
         """Agent hooks should fail before rollout/backend-heavy work."""
