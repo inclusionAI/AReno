@@ -71,6 +71,11 @@ def captured_routing(meta: InferMeta) -> torch.Tensor | None:
     return torch.stack(tensors, dim=1)
 
 
+# The routing state is Python-owned and its capture dictionary mutates once per
+# MoE layer. Letting Dynamo inspect it specializes a graph for every dictionary
+# state/layer slot and quickly exhausts the compile cache on deep MoE models.
+# CUDA graph capture still records the tensor operations launched here.
+@torch._dynamo.disable
 def resolve_softmax_routes(
     layer_slot: int,
     logits: torch.Tensor,
@@ -97,6 +102,7 @@ def resolve_softmax_routes(
     return topk_idx, topk_weight
 
 
+@torch._dynamo.disable
 def resolve_sigmoid_routes(
     layer_slot: int,
     logits: torch.Tensor,
