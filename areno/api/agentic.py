@@ -137,6 +137,7 @@ class AgentTrajectoryTurn:
     model: str = "policy"
     tools: list[dict[str, Any]] = field(default_factory=list)
     tool_choice: Any = None
+    filtered: bool = False
 
     def __post_init__(self) -> None:
         if self.response is None:
@@ -146,6 +147,7 @@ class AgentTrajectoryTurn:
         self.response_tokens = list(metadata["response_tokens"])
         self.response_logprobs = [float(value) for value in metadata["response_logprobs"]]
         self.routed_experts = metadata.get("routed_experts") or None
+        self.filtered = bool(metadata.get("filtered", False))
         self.parsed_tool_calls = _chat_response_message_tool_calls(self.response)
 
 
@@ -957,6 +959,10 @@ def _filtered_chat_response(*, model: str, prompt_tokens: int, max_sequence_len:
             "input_tokens": [],
             "response_tokens": [],
             "response_logprobs": [],
+            # No model forward was executed, so this response must terminate
+            # the trajectory without becoming a route-less training turn.
+            "filtered": True,
+            "filter_reason": "max_context_len",
         },
     }
 

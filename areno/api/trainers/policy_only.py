@@ -336,13 +336,31 @@ class PolicyOnlyTrainer:
                 raise RuntimeError("agent run function must return explicit trajectories")
             agent_filtered_count = self._agent_trajectory_invalid_count(trajectories)
             samples = []
+            proxy_filtered_items = set()
             for turn in self._agent_trajectory_turns(ctx, trajectories):
+                item_key = (turn.item.prompt_index, turn.item.sample_index)
+                if getattr(turn, "filtered", False):
+                    # The proxy returns a length response without running the
+                    # model when a later agent request exceeds the context
+                    # limit. Keep any earlier complete turns for this item;
+                    # there are no tokens, logprobs, or routes to append.
+                    proxy_filtered_items.add(item_key)
+                    continue
                 sample = ctx._sample_from_trajectory_turn(turn)
                 existing = self._find_agent_sample(samples, sample.item)
                 if existing is None:
                     samples.append(sample)
                 else:
                     ctx._append_sample_response(existing, sample)
+            sampled_items = {(sample.item.prompt_index, sample.item.sample_index) for sample in samples}
+            filtered_without_sample = proxy_filtered_items - sampled_items
+            agent_filtered_count += len(filtered_without_sample)
+            if proxy_filtered_items:
+                self.logger.warning(
+                    "agentic rollout stopped at proxy context limit trajectories=%d without_prior_turn=%d",
+                    len(proxy_filtered_items),
+                    len(filtered_without_sample),
+                )
             samples, filtered_count, filter_diagnostics = self._filter_overlong_agent_samples(
                 ctx, samples, sampling_params
             )

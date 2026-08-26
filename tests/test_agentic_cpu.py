@@ -832,8 +832,16 @@ def test_proxy_filters_prompt_exceeding_max_sequence_len_without_rollout():
     assert response["usage"]["max_sequence_len"] == 5
     assert response["areno"]["response_tokens"] == []
     assert response["areno"]["response_logprobs"] == []
+    assert response["areno"]["filtered"] is True
+    assert response["areno"]["filter_reason"] == "max_context_len"
     assert trainer.rollout_batches == []
     assert trainer.rollout_sync_count == 0
+
+    item = next(AgentBatch(records=[{}], prompts=["p"], input_tokens=[[1]], n_samples=1).iter_samples())
+    turn = AgentTrajectoryTurn(item=item, messages=[{"role": "user", "content": "long prompt"}], response=response)
+    assert turn.filtered is True
+    assert turn.response_tokens == []
+    assert turn.routed_experts is None
 
 
 def test_agentic_partial_with_logprobs_completes_http_request():
