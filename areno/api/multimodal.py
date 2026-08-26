@@ -430,7 +430,7 @@ def _image_processor_from_processor(processor: Any):
 
 def _image_token_id(tokenizer: Any, processor: Any) -> int | None:
     for obj in (processor, tokenizer):
-        for attr in ("image_token_id", "image_token_index"):
+        for attr in ("image_token_id", "image_token_index", "special_image_token_id"):
             value = getattr(obj, attr, None)
             if isinstance(value, int):
                 return int(value)
@@ -443,7 +443,7 @@ def _image_token_id(tokenizer: Any, processor: Any) -> int | None:
                     return int(token_id)
     convert = getattr(tokenizer, "convert_tokens_to_ids", None)
     if callable(convert):
-        for token in ("<|image_pad|>", "<|image|>", "<image>"):
+        for token in ("<|image_pad|>", "<|image|>", "<image>", "<|endoftext10|>"):
             token_id = convert(token)
             if isinstance(token_id, int) and token_id >= 0:
                 return int(token_id)
