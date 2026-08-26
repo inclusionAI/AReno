@@ -387,6 +387,7 @@ class PolicyOnlyTrainer:
                 rewards=rewards,
                 records=[sample.item.record for sample in samples],
                 reward_records=reward_records,
+                routed_experts=rows.routed_experts,
             )
 
     def _filter_overlong_agent_samples(self, ctx, samples, sampling_params):
@@ -552,7 +553,8 @@ class PolicyOnlyTrainer:
             for row_idx, advantage in zip(row_indices, compute_group_advantages(group_rewards), strict=True):
                 advantages_by_row[row_idx] = float(advantage)
         row_features = getattr(agent_batch, "features", [None] * len(agent_batch.token_rows))
-        for row_idx, (tokens, response_mask, loss_mask, logprobs, reward, features) in enumerate(
+        row_routes = getattr(agent_batch, "routed_experts", None) or [None] * len(agent_batch.token_rows)
+        for row_idx, (tokens, response_mask, loss_mask, logprobs, reward, features, routed_experts) in enumerate(
             zip(
                 agent_batch.token_rows,
                 agent_batch.response_masks,
@@ -560,6 +562,7 @@ class PolicyOnlyTrainer:
                 agent_batch.rollout_logprobs,
                 rewards_all,
                 row_features,
+                row_routes,
                 strict=True,
             )
         ):
@@ -587,6 +590,7 @@ class PolicyOnlyTrainer:
                     returns=[],
                     values=[],
                     ref_logprobs=[],
+                    routed_experts=routed_experts,
                 )
             )
         return train_batch, rewards_all, logprob_stats
@@ -763,6 +767,7 @@ class PolicyOnlyTrainer:
                     features=item.record.get("features"),
                     reward=reward,
                     eos_token_id=tokenizer.eos_token_id,
+                    routed_experts=seq.routed_experts,
                 )
             )
         return train_batch, all_rewards, logprob_stats

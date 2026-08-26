@@ -119,6 +119,7 @@ class AgentTrainBatch:
     rewards: list[float] | None
     records: list[dict[str, Any]]
     reward_records: list[RewardRecord]
+    routed_experts: list[list[list[list[int]]]] | None = None
 
 
 @dataclass(slots=True)
@@ -131,6 +132,7 @@ class AgentTrajectoryTurn:
     input_tokens: list[int] = field(default_factory=list)
     response_tokens: list[int] = field(default_factory=list)
     response_logprobs: list[float] = field(default_factory=list)
+    routed_experts: list[list[list[int]]] | None = None
     parsed_tool_calls: list[dict[str, Any]] = field(default_factory=list)
     model: str = "policy"
     tools: list[dict[str, Any]] = field(default_factory=list)
@@ -143,6 +145,7 @@ class AgentTrajectoryTurn:
         self.input_tokens = list(metadata.get("input_tokens") or [])
         self.response_tokens = list(metadata["response_tokens"])
         self.response_logprobs = [float(value) for value in metadata["response_logprobs"]]
+        self.routed_experts = metadata.get("routed_experts") or None
         self.parsed_tool_calls = _chat_response_message_tool_calls(self.response)
 
 
@@ -171,12 +174,14 @@ class _AgentSample:
     loss_mask_row: list[bool] = field(default_factory=list)
     rollout_logprobs_row: list[float] = field(default_factory=list)
     features: dict[str, Any] | None = None
+    routed_experts_row: list[list[list[int]]] | None = None
 
 
 @dataclass(slots=True)
 class _ResponseData:
     response_tokens: list[int]
     response_logprobs: list[float]
+    routed_experts: list[list[list[int]]] | None = None
 
 
 @dataclass(slots=True)
@@ -187,6 +192,7 @@ class _AgentTrainRows:
     rollout_logprobs: list[list[float]]
     features: list[dict[str, Any] | None]
     total_tokens: int
+    routed_experts: list[list[list[list[int]]]] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -403,6 +409,8 @@ class RolloutSession:
         loss_masks: list[list[bool]] = []
         rollout_logprobs: list[list[float]] = []
         features: list[dict[str, Any] | None] = []
+        routed_experts: list[list[list[list[int]]]] = []
+        route_presence: list[bool] = []
         total_tokens = 0
         for sample in samples:
             if sample.token_row:
@@ -411,6 +419,9 @@ class RolloutSession:
                 loss_masks.append(sample.loss_mask_row)
                 rollout_logprobs.append(sample.rollout_logprobs_row)
                 features.append(sample.features)
+                route_presence.append(sample.routed_experts_row is not None)
+                if sample.routed_experts_row is not None:
+                    routed_experts.append(sample.routed_experts_row)
                 total_tokens += len(sample.token_row)
                 continue
             prompt_len = len(sample.item.input_tokens)
@@ -421,7 +432,12 @@ class RolloutSession:
             loss_masks.append([False] * prompt_len + self._response_loss_mask(sample))
             rollout_logprobs.append([0.0] * prompt_len + list(sample.response_logprobs))
             features.append(sample.features)
+            route_presence.append(sample.routed_experts_row is not None)
+            if sample.routed_experts_row is not None:
+                routed_experts.append(sample.routed_experts_row)
             total_tokens += len(token_row)
+        if any(route_presence) and not all(route_presence):
+            raise ValueError("agentic routing replay must be present for every trajectory in the train batch")
         return _AgentTrainRows(
             token_rows=token_rows,
             response_masks=response_masks,
@@ -429,6 +445,7 @@ class RolloutSession:
             rollout_logprobs=rollout_logprobs,
             features=features,
             total_tokens=total_tokens,
+            routed_experts=routed_experts or None,
         )
 
     def _handler_cls(self):
@@ -539,7 +556,11 @@ class RolloutSession:
                     pending,
                     self._build_chat_response(
                         pending,
-                        _ResponseData(response_tokens=sequence.resp_tokens, response_logprobs=sequence.resp_logprobs),
+                        _ResponseData(
+                            response_tokens=sequence.resp_tokens,
+                            response_logprobs=sequence.resp_logprobs,
+                            routed_experts=sequence.routed_experts,
+                        ),
                     ),
                 )
         except BaseException as exc:
@@ -604,7 +625,11 @@ class RolloutSession:
             pending.input_tokens, pending.features = self._messages_to_tokens_and_features(pending)
         return self._sample_from_pending_chat(
             pending,
-            _ResponseData(response_tokens=list(turn.response_tokens), response_logprobs=list(turn.response_logprobs)),
+            _ResponseData(
+                response_tokens=list(turn.response_tokens),
+                response_logprobs=list(turn.response_logprobs),
+                routed_experts=turn.routed_experts,
+            ),
             tool_calls=turn.parsed_tool_calls,
         )
 
@@ -663,6 +688,7 @@ class RolloutSession:
             trace=trace,
             response_kind=response_kind,
             features=pending.features,
+            routed_experts_row=response.routed_experts,
             loss_mask_override=_tool_call_loss_mask(tokenizer, response.response_tokens) if tool_calls else None,
         )
         # The prompt tokens are the fully rendered chat context for this turn,
@@ -679,6 +705,7 @@ class RolloutSession:
             pending,
             response.response_tokens,
             response_logprobs=response.response_logprobs,
+            routed_experts=response.routed_experts,
             content=content,
             tool_calls=tool_parse.tool_calls,
         )
@@ -709,6 +736,16 @@ class RolloutSession:
             existing.response_mask_row.extend(new_sample.response_mask_row[prefix_len:])
             existing.loss_mask_row.extend(new_sample.loss_mask_row[prefix_len:])
             existing.rollout_logprobs_row.extend(new_sample.rollout_logprobs_row[prefix_len:])
+            if (new_sample.routed_experts_row is None) != (existing.routed_experts_row is None):
+                raise ValueError("agentic routing replay must be present for every trajectory turn")
+            if new_sample.routed_experts_row is not None:
+                assert existing.routed_experts_row is not None
+                route_start = len(existing.routed_experts_row)
+                if route_start != max(prefix_len - 1, 0) or route_start > len(new_sample.routed_experts_row):
+                    raise ValueError("agentic routing replay does not share the trajectory token prefix")
+                existing.routed_experts_row.extend(new_sample.routed_experts_row[route_start:])
+                if len(existing.routed_experts_row) != len(existing.token_row) - 1:
+                    raise ValueError("agentic routing replay must contain one route for every token except the final")
         elif not existing.token_row:
             existing.token_row = list(existing.item.input_tokens) + list(existing.response_tokens)
             prompt_len = len(existing.item.input_tokens)
@@ -733,6 +770,8 @@ class RolloutSession:
         sample.response_mask_row = [False] * len(prompt_tokens) + response_mask
         sample.loss_mask_row = [False] * len(prompt_tokens) + loss_mask
         sample.rollout_logprobs_row = [0.0] * len(prompt_tokens) + list(sample.response_logprobs)
+        if sample.routed_experts_row is not None and len(sample.routed_experts_row) != len(sample.token_row) - 1:
+            raise ValueError("agentic routing replay must contain one route for every token except the final token")
 
     def _build_pending_chat_response(
         self,
@@ -740,6 +779,7 @@ class RolloutSession:
         response_tokens: list[int],
         *,
         response_logprobs: list[float] | None = None,
+        routed_experts: list[list[list[int]]] | None = None,
         content: str | None = None,
         tool_calls: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
@@ -756,6 +796,7 @@ class RolloutSession:
             tool_call_parser=self._tool_call_parser,
             parsed_tool_calls=[list(tool_calls or [])],
             response_logprobs=[list(response_logprobs or [])],
+            routed_experts=[list(routed_experts or [])],
             include_areno_metadata=True,
             input_tokens=pending.input_tokens,
         )

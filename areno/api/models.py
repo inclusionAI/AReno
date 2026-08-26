@@ -58,6 +58,7 @@ class RolloutSequence(BaseModel):
 
     resp_tokens: list[int] = Field(default_factory=list)
     resp_logprobs: list[float] = Field(default_factory=list)
+    routed_experts: list[list[list[int]]] | None = Field(default=None)
 
 
 class RolloutResult(BaseModel):
@@ -90,3 +91,4 @@ class TrainSequence(BaseModel):
     features: dict[str, Any] | list[dict[str, Any] | None] | None = Field(default=None)
     reward: float = Field(default=0.0)
     eos_token_id: int = Field(default=0)
+    routed_experts: list[list[list[int]]] | None = Field(default=None)

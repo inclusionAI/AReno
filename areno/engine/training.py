@@ -15,6 +15,7 @@ from areno.engine.runtime.logprobs import (
     packed_next_token_logprobs,
     packed_next_token_logprobs_from_hidden,
 )
+from areno.engine.runtime.routing_replay import routing_replay_context
 from areno.engine.runtime.train_step import (
     _clip_grad_norm,
     _grad_norms,
@@ -116,14 +117,15 @@ class TrainingManager:
         data_pack["_activation_checkpointing_enabled"] = worker.config.runtime.activation_checkpointing
         tokens = data_pack["input_ids"].long()
         position_ids = data_pack.get("position_ids")
+        train_meta = _train_meta(
+            data_pack,
+            tokens,
+            sequence_parallel=worker.config.effective_sequence_parallel,
+        )
         model_kwargs = {
             "input_ids": tokens,
             "position_ids": position_ids,
-            "train_meta": _train_meta(
-                data_pack,
-                tokens,
-                sequence_parallel=worker.config.effective_sequence_parallel,
-            ),
+            "train_meta": train_meta,
         }
         if data_pack.get("features") is not None:
             model_kwargs["features"] = data_pack["features"]
@@ -132,7 +134,8 @@ class TrainingManager:
         )
         if defer_lm_head:
             model_kwargs["defer_lm_head"] = True
-        out = train_model(**model_kwargs)
+        with routing_replay_context(train_meta):
+            out = train_model(**model_kwargs)
         if defer_lm_head:
             logprobs = packed_next_token_logprobs_from_hidden(
                 out.hidden_states,

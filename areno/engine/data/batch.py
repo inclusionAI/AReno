@@ -52,6 +52,7 @@ class RolloutOutput:
     finish_reason: list[str]
     metrics: dict[str, float] | None = None
     adapter_version: int | None = None
+    routed_experts: list[torch.Tensor] | None = None
 
 
 def to_device(obj: Any, device: torch.device, _memo: dict[int, torch.Tensor] | None = None) -> Any:

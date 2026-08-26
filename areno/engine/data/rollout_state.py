@@ -43,6 +43,7 @@ class InferenceBatchState:
         self.prompt_features = _normalize_prompt_features(prompt_features, len(prompts))
         self.generated = [[] for _ in prompts]
         self.logprobs = [[] for _ in prompts]
+        self.routed_experts: list[list[torch.Tensor]] = [[] for _ in prompts]
         self.max_new_tokens = max_new_tokens
         self.finished = [False for _ in prompts]
         self.finish_reason = ["" for _ in prompts]
@@ -71,6 +72,7 @@ class InferenceBatchState:
         self.prompt_features.extend(_normalize_prompt_features(prompt_features, len(prompts)))
         self.generated.extend([] for _ in prompts)
         self.logprobs.extend([] for _ in prompts)
+        self.routed_experts.extend([] for _ in prompts)
         self.finished.extend(False for _ in prompts)
         self.finish_reason.extend("" for _ in prompts)
         return list(range(start, start + len(prompts)))
@@ -120,6 +122,7 @@ class InferenceBatchState:
         cache_block_offsets: list[int] = []
         recurrent_slots: list[int] = []
         active_ids: list[int] = []
+        prefill_seq_ids: list[int] = []
 
         while self._pending_seq_id < len(self.prompts):
             seq_id = self._pending_seq_id
@@ -163,10 +166,12 @@ class InferenceBatchState:
                             cache_block_offsets,
                             recurrent_slots,
                             active_ids,
+                            prefill_seq_ids,
                         )
                     )
                 blocks.append(self._free_blocks.pop(0))
             chunk = prompt[cursor : cursor + chunk_len]
+            prefill_seq_ids.append(seq_id)
             input_ids.extend(chunk)
             local_mask, local_features = _slice_prompt_image_features(
                 self.prompt_features[seq_id],
@@ -226,6 +231,7 @@ class InferenceBatchState:
             cache_block_offsets,
             recurrent_slots,
             active_ids,
+            prefill_seq_ids,
         )
 
     def _prefill_payload(
@@ -242,6 +248,7 @@ class InferenceBatchState:
         cache_block_offsets: list[int],
         recurrent_slots: list[int],
         active_ids: list[int],
+        prefill_seq_ids: list[int],
     ) -> dict:
         self._last_active_ids = active_ids
         payload = {
@@ -255,6 +262,7 @@ class InferenceBatchState:
             "cache_block_ids": torch.tensor(cache_block_ids, dtype=torch.long),
             "cache_block_offsets": torch.tensor(cache_block_offsets, dtype=torch.long),
             "recurrent_slots": torch.tensor(recurrent_slots, dtype=torch.long),
+            "prefill_seq_ids": list(prefill_seq_ids),
         }
         if any(feature_mask) or image_features or mrope_position_parts is not None:
             payload["features"] = _prefill_multimodal_features(feature_mask, image_features, mrope_position_parts)
@@ -283,12 +291,52 @@ class InferenceBatchState:
             for seq_id in seq_ids
         ]
 
+    def record_prefill_routing(self, payload: dict, routes: torch.Tensor | None) -> None:
+        """Append packed-prefill routes to their owning rollout rows."""
+
+        if routes is None:
+            return
+        cu_seqlens = payload["cu_seqlens"].tolist()
+        seq_ids = payload.get("prefill_seq_ids") or []
+        if len(seq_ids) + 1 != len(cu_seqlens):
+            raise RuntimeError("prefill routing sequence metadata is misaligned")
+        if int(routes.shape[0]) != int(cu_seqlens[-1]):
+            raise RuntimeError("prefill routing token count does not match packed prefill tokens")
+        routes = routes.detach().to(device="cpu", dtype=torch.int32)
+        for index, seq_id in enumerate(seq_ids):
+            start, end = int(cu_seqlens[index]), int(cu_seqlens[index + 1])
+            self.routed_experts[int(seq_id)].extend(routes[start:end].unbind(0))
+
+    def record_decode_routing(self, rows: torch.Tensor, routes: torch.Tensor | None) -> None:
+        """Append one decode-input route for every active rollout row."""
+
+        if routes is None:
+            return
+        if int(routes.shape[0]) < int(rows.numel()):
+            raise RuntimeError("decode routing capture has fewer rows than the active batch")
+        routes = routes[: rows.numel()].detach().to(device="cpu", dtype=torch.int32)
+        for row, token_routes in zip(rows.detach().cpu().tolist(), routes.unbind(0), strict=True):
+            self.routed_experts[int(row)].append(token_routes)
+
     def to_rollout(self) -> RolloutOutput:
         """Materialize Python rollout state into padded tensors for the API."""
         input_ids, attention_mask, response_mask, logprobs = pad_rollout_rows(
             self.prompts, self.generated, self.logprobs
         )
         reasons = [reason or "unknown" for reason in self.finish_reason]
+        routed_experts = None
+        if any(self.routed_experts):
+            routed_experts = []
+            for row, (prompt, response) in enumerate(zip(self.prompts, self.generated, strict=True)):
+                expected = max(len(prompt) + len(response) - 1, 0)
+                routes = self.routed_experts[row][:expected]
+                if len(routes) != expected:
+                    raise RuntimeError(
+                        f"rollout routing capture for row {row} has {len(routes)} tokens, expected {expected}"
+                    )
+                routed_experts.append(
+                    torch.stack(routes, dim=0).cpu() if routes else torch.empty(0, 0, 0, dtype=torch.long)
+                )
         return RolloutOutput(
             prompt_ids=self.prompts,
             response_ids=self.generated,
@@ -298,6 +346,7 @@ class InferenceBatchState:
             logprobs=logprobs,
             finish_reason=reasons,
             metrics=self.metrics,
+            routed_experts=routed_experts,
         )
 
 

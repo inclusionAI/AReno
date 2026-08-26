@@ -64,6 +64,7 @@ class RuntimeConfig:
     optimizer_state_offload_dir: str | None = None
     optimizer_state_offload_batch_size: int = 1
     eager_decode: bool = False
+    rollout_routing_replay: bool = False
     decode_graph_buckets: list[int] = field(
         default_factory=lambda: [1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 56, 64, 96, 128, 192, 256]
     )

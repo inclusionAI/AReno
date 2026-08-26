@@ -137,6 +137,13 @@ signal.
    training engine to the rollout engine. Default: ``64`` MiB.
    CUDA only. MLX does not copy policy weights to a second rollout model.
 
+``--rollout-routing-replay``
+   Enable R3 for sparse-MoE RL training. AReno records each token's expert ids
+   during rollout and reuses those ids in the policy training forward while
+   recomputing routing weights from the current router logits. This preserves
+   router gradients while removing rollout/train expert-selection drift.
+   Supported by the CUDA backend for rollout-based RL algorithms only.
+
 For example, the following uses four visible GPUs for training and two
 different visible GPUs for rollout:
 

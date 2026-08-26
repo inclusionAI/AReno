@@ -46,6 +46,7 @@ from areno.engine.parallel.collectives import (
 from areno.engine.parallel.context import get_tp_context
 from areno.engine.runtime.metadata import InferMeta, TrainMeta
 from areno.engine.runtime.recompute import checkpoint_layer
+from areno.engine.runtime.routing_replay import resolve_softmax_routes
 from areno.models._shared.dynamo_wrappers import (
     _areno_depthwise_causal_conv1d_silu_decode_no_compile,
     _areno_depthwise_causal_conv1d_silu_no_compile,
@@ -516,13 +517,14 @@ class Qwen35DecoderLayer(nn.Module):
 class Qwen35MoeMLP(nn.Module):
     """Qwen3.5-MoE router, routed experts, and dense shared expert."""
 
-    def __init__(self, config: ModelConfig):
+    def __init__(self, config: ModelConfig, routing_layer_slot: int):
         super().__init__()
         if config.num_experts is None:
             raise ValueError("qwen3_5_moe requires num_experts")
         self.num_experts = config.num_experts
         self.top_k = config.num_experts_per_tok
         self.norm_topk_prob = config.norm_topk_prob
+        self.routing_layer_slot = routing_layer_slot
         self.gate = nn.Parameter(torch.empty(self.num_experts, config.hidden_size, dtype=torch.float32))
         mark_tensor_parallel_parameter(self.gate, False, sequence_parallel=False, tp_grad_allreduce=True)
         self.experts = Qwen3MoeExperts(config)
@@ -557,6 +559,13 @@ class Qwen35MoeMLP(nn.Module):
             logits = _areno_linear_no_compile(flat.to(dtype=self.gate.dtype), self.gate)
             log_once("qwen35_moe_topk_softmax", "using ARENO fused topk_softmax router for Qwen3.5-MoE")
             topk_idx, topk_weight = _areno_topk_softmax_no_compile(logits, self.top_k, self.norm_topk_prob)
+            topk_idx, topk_weight = resolve_softmax_routes(
+                self.routing_layer_slot,
+                logits,
+                topk_idx,
+                topk_weight,
+                renormalize=self.norm_topk_prob,
+            )
             if self.training:
                 out = self.experts(flat, topk_idx.to(torch.long), topk_weight)
             else:
@@ -636,7 +645,7 @@ class Qwen35MoeDecoderLayer(Qwen35DecoderLayer):
 
     def __init__(self, config: ModelConfig, layer_idx: int):
         super().__init__(config, layer_idx)
-        self.mlp = Qwen35MoeMLP(config)
+        self.mlp = Qwen35MoeMLP(config, layer_idx)
 
     def _attention_block(
         self,

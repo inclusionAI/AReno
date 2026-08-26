@@ -14,6 +14,7 @@ import torch.distributed as dist
 
 from areno.engine.runtime.common import ceil_div as ceil_div  # noqa: F401
 from areno.engine.runtime.metadata import InferMeta
+from areno.engine.runtime.routing_replay import routing_replay_context
 
 
 def bucket_for(batch_size: int, buckets: list[int]) -> int:
@@ -77,6 +78,8 @@ class DecodeGraph:
         scratch_block: int,
         scratch_recurrent_slot: int,
         device: torch.device,
+        *,
+        capture_routing: bool = False,
     ):
         """Allocate static input buffers and the `InferMeta` baked into capture."""
 
@@ -105,6 +108,7 @@ class DecodeGraph:
             cache_seqlens=self.cache_seqlens,
             block_table=self.block_table,
             recurrent_slots=self.recurrent_slots,
+            capture_routing=capture_routing,
         )
         self.graph = torch.cuda.CUDAGraph()
         self.logits_shard: torch.Tensor | None = None
@@ -121,11 +125,12 @@ class DecodeGraph:
         stream.wait_stream(torch.cuda.current_stream(self.device))
         with torch.cuda.device(self.device), torch.cuda.stream(stream):
             for _ in range(iterations):
-                logits_shard = self.model(
-                    input_ids=self.input_ids,
-                    position_ids=self.position_ids,
-                    infer_meta=self.meta,
-                ).logits_shard
+                with routing_replay_context(self.meta):
+                    logits_shard = self.model(
+                        input_ids=self.input_ids,
+                        position_ids=self.position_ids,
+                        infer_meta=self.meta,
+                    ).logits_shard
                 del logits_shard
         torch.cuda.current_stream(self.device).wait_stream(stream)
         torch.cuda.synchronize(self.device)
@@ -139,9 +144,10 @@ class DecodeGraph:
         # and must remain alive at the same addresses for the lifetime of the
         # graph, which is exactly what `self.input_ids/...` provide.
         with torch.cuda.device(self.device), torch.cuda.graph(self.graph):
-            self.logits_shard = self.model(
-                input_ids=self.input_ids, position_ids=self.position_ids, infer_meta=self.meta
-            ).logits_shard
+            with routing_replay_context(self.meta):
+                self.logits_shard = self.model(
+                    input_ids=self.input_ids, position_ids=self.position_ids, infer_meta=self.meta
+                ).logits_shard
 
     @torch.inference_mode()
     def replay_tensors(

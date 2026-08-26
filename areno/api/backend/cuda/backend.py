@@ -359,7 +359,11 @@ class CudaBackend(Backend):
         # Repack the flat result into per-prompt groups of `n_samples`
         # completions so downstream code can iterate `for item, result`.
         sequences = [
-            RolloutSequence(resp_tokens=tokens, resp_logprobs=rollout.logprobs[index, : len(tokens)].tolist())
+            RolloutSequence(
+                resp_tokens=tokens,
+                resp_logprobs=rollout.logprobs[index, : len(tokens)].tolist(),
+                routed_experts=(rollout.routed_experts[index].tolist() if rollout.routed_experts is not None else None),
+            )
             for index, tokens in enumerate(rollout.response_ids)
         ]
         return group_rollout_sequences(
@@ -468,7 +472,11 @@ class CudaBackend(Backend):
             sampling_params=options["sampling_params"],
         )
         sequences = [
-            RolloutSequence(resp_tokens=tokens, resp_logprobs=rollout.logprobs[index, : len(tokens)].tolist())
+            RolloutSequence(
+                resp_tokens=tokens,
+                resp_logprobs=rollout.logprobs[index, : len(tokens)].tolist(),
+                routed_experts=(rollout.routed_experts[index].tolist() if rollout.routed_experts is not None else None),
+            )
             for index, tokens in enumerate(rollout.response_ids)
         ]
         return group_rollout_sequences(

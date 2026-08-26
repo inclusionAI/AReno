@@ -89,6 +89,7 @@ from areno.engine.parallel.collectives import (
 )
 from areno.engine.parallel.context import get_tp_context
 from areno.engine.runtime.metadata import InferMeta, TrainMeta
+from areno.engine.runtime.routing_replay import resolve_sigmoid_routes
 from areno.models.bailing.checkpoint import CHECKPOINT_SPEC
 from areno.models.base import CausalLMOutput, ModelAdapter
 
@@ -129,7 +130,7 @@ class BailingGate(nn.Module):
     during training the bias is updated to push load back towards balance.
     """
 
-    def __init__(self, config: ModelConfig):
+    def __init__(self, config: ModelConfig, routing_layer_slot: int):
         super().__init__()
         if config.score_function != "sigmoid":
             raise ValueError(f"BailingGate only supports sigmoid scoring, got {config.score_function!r}")
@@ -143,6 +144,7 @@ class BailingGate(nn.Module):
         self.topk_group = config.topk_group
         self.routed_scaling_factor = config.routed_scaling_factor
         self.router_dtype = config.moe_router_dtype
+        self.routing_layer_slot = routing_layer_slot
         # Router projection: hidden_size -> num_experts logits. Replicated
         # across TP ranks (sequence-parallel on the input side) so every rank
         # sees identical routing decisions and accumulates the gradient via
@@ -170,6 +172,12 @@ class BailingGate(nn.Module):
         # the sigmoid/top-k selection.
         logits = _areno_linear_no_compile(x.to(dtype=self.weight.dtype), self.weight)
         topk_idx, topk_weight = self._forward_grouped_topk(logits)
+        topk_idx, topk_weight = resolve_sigmoid_routes(
+            self.routing_layer_slot,
+            logits,
+            topk_idx,
+            topk_weight,
+        )
         if torch.is_grad_enabled():
             # Only track load when training; eval calls keep counters cold.
             routed_tokens = topk_idx[:-num_padding_tokens] if num_padding_tokens else topk_idx
@@ -233,12 +241,12 @@ class BailingSparseMoeBlock(nn.Module):
     ``areno_fused_experts`` kernel over stacked w1/w2 weight tiles.
     """
 
-    def __init__(self, config: ModelConfig):
+    def __init__(self, config: ModelConfig, routing_layer_slot: int):
         super().__init__()
         self.config = config
         self.num_experts = int(config.num_experts or 0)
         self.num_experts_per_tok = config.num_experts_per_tok
-        self.gate = BailingGate(config)
+        self.gate = BailingGate(config, routing_layer_slot)
         self.experts = BailingGroupedExperts(config)
         # Shared experts always run (no routing decision) — their intermediate
         # size scales with ``num_shared_experts``. Output is added to the
@@ -1084,7 +1092,7 @@ class BailingDecoderLayer(nn.Module):
         )
         # Dense MLP for the warmup layers, sparse MoE for the rest.
         self.mlp = (
-            BailingSparseMoeBlock(config)
+            BailingSparseMoeBlock(config, layer_idx - config.first_k_dense_replace)
             if config.num_experts is not None and layer_idx >= config.first_k_dense_replace
             else BailingDenseMLP(config, config.intermediate_size)
         )

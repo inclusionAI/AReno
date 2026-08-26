@@ -51,6 +51,7 @@ from areno.engine.parallel.collectives import (
 from areno.engine.parallel.context import get_tp_context
 from areno.engine.runtime.metadata import InferMeta, TrainMeta
 from areno.engine.runtime.recompute import checkpoint_layer, checkpoint_routed_moe_layer
+from areno.engine.runtime.routing_replay import resolve_softmax_routes
 from areno.models.base import CausalLMOutput, ModelAdapter
 from areno.models.qwen3.checkpoint import CHECKPOINT_SPEC, QWEN3_MOE_CHECKPOINT_SPEC
 
@@ -203,13 +204,14 @@ class Qwen3MoeExperts(nn.Module):
 class Qwen3MoeMLP(nn.Module):
     """Qwen3-MoE router and expert block."""
 
-    def __init__(self, config: ModelConfig):
+    def __init__(self, config: ModelConfig, routing_layer_slot: int):
         super().__init__()
         if config.num_experts is None:
             raise ValueError("qwen3_moe requires num_experts")
         self.num_experts = config.num_experts
         self.top_k = config.num_experts_per_tok
         self.norm_topk_prob = config.norm_topk_prob
+        self.routing_layer_slot = routing_layer_slot
         self.gate = nn.Parameter(torch.empty(self.num_experts, config.hidden_size, dtype=torch.float32))
         mark_tensor_parallel_parameter(self.gate, False, sequence_parallel=False, tp_grad_allreduce=True)
         self.experts = Qwen3MoeExperts(config)
@@ -233,7 +235,14 @@ class Qwen3MoeMLP(nn.Module):
             flat = hidden_states.reshape(-1, hidden_states.shape[-1])
             logits = _areno_linear_no_compile(flat.to(dtype=self.gate.dtype), self.gate)
             log_once("qwen3_moe_topk_softmax", "using ARENO fused topk_softmax router for Qwen3-MoE")
-            return _areno_topk_softmax_no_compile(logits, self.top_k, self.norm_topk_prob)
+            topk_idx, topk_weight = _areno_topk_softmax_no_compile(logits, self.top_k, self.norm_topk_prob)
+            return resolve_softmax_routes(
+                self.routing_layer_slot,
+                logits,
+                topk_idx,
+                topk_weight,
+                renormalize=self.norm_topk_prob,
+            )
 
     def forward_with_routes(
         self,
@@ -313,7 +322,7 @@ class Qwen3MoeDecoderLayer(QwenDecoderLayer):
 
     def __init__(self, config: ModelConfig, layer_idx: int):
         super().__init__(config, layer_idx)
-        self.mlp = Qwen3MoeMLP(config)
+        self.mlp = Qwen3MoeMLP(config, layer_idx)
 
     def _attention_block(
         self,

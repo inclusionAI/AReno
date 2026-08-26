@@ -65,6 +65,7 @@ def _train_meta(data_pack: dict[str, Any], tokens: torch.Tensor, *, sequence_par
         sequence_parallel=sequence_parallel,
         activation_checkpointing=bool(data_pack.get("_activation_checkpointing_enabled", False)),
         num_padding_tokens=int(data_pack.get("packed_singleton_padding", 0)),
+        routing_replay=data_pack.get("packed_routing_replay"),
     )
 
 
@@ -136,6 +137,19 @@ def _pack_train_data(data_pack: dict[str, Any]) -> dict[str, Any]:
     has_values = isinstance(values, torch.Tensor)
     has_returns = isinstance(returns, torch.Tensor)
     packed_features = _pack_multimodal_features(features, input_ids, lengths, packed_ids.device)
+    routing_replay = data_pack.get("routing_replay")
+    packed_routing_replay = None
+    if routing_replay is not None:
+        if not isinstance(routing_replay, torch.Tensor) or routing_replay.ndim != 4:
+            raise ValueError("training routing_replay must have shape (batch, seqlen, layers, top_k)")
+        if tuple(routing_replay.shape[:2]) != tuple(input_ids.shape):
+            raise ValueError("training routing_replay batch/token shape must match input_ids")
+        packed_routing_replay = torch.full(
+            (aligned_total_tokens, *routing_replay.shape[2:]),
+            -1,
+            device=input_ids.device,
+            dtype=routing_replay.dtype,
+        )
 
     token_offset = 0
     action_offset = 0
@@ -144,6 +158,8 @@ def _pack_train_data(data_pack: dict[str, Any]) -> dict[str, Any]:
         length = int(lengths[row].item())
         max_seqlen = max(max_seqlen, length)
         packed_ids[token_offset : token_offset + length] = input_ids[row, :length]
+        if packed_routing_replay is not None:
+            packed_routing_replay[token_offset : token_offset + length] = routing_replay[row, :length]
         # Position ids restart at 0 for each packed row, so rotary embeddings
         # treat the packed sequence as a concatenation of independent sequences.
         position_ids[token_offset : token_offset + length] = torch.arange(length, device=input_ids.device)
@@ -201,6 +217,8 @@ def _pack_train_data(data_pack: dict[str, Any]) -> dict[str, Any]:
         packed["packed_values"] = packed_values
     if has_returns:
         packed["packed_returns"] = packed_returns
+    if packed_routing_replay is not None:
+        packed["packed_routing_replay"] = packed_routing_replay
     return packed
 
 

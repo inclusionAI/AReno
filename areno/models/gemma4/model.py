@@ -68,6 +68,7 @@ from areno.engine.parallel.collectives import (
 from areno.engine.parallel.context import get_tp_context
 from areno.engine.runtime.metadata import InferMeta, TrainMeta
 from areno.engine.runtime.recompute import checkpoint_layer
+from areno.engine.runtime.routing_replay import resolve_softmax_routes
 from areno.models.base import CausalLMOutput, ModelAdapter
 from areno.models.gemma4.checkpoint import checkpoint_spec
 from areno.models.gemma4_utils import text_embedding_ids
@@ -241,13 +242,14 @@ class Gemma4MoeMLP(nn.Module):
     parallel; router logits are produced outside this module from the residual.
     """
 
-    def __init__(self, config: ModelConfig):
+    def __init__(self, config: ModelConfig, routing_layer_slot: int):
         super().__init__()
         if config.num_experts is None:
             raise ValueError("Gemma4 MoE requires num_experts")
         self.num_experts = config.num_experts
         self.top_k = config.num_experts_per_tok
         self.norm_topk_prob = config.norm_topk_prob
+        self.routing_layer_slot = routing_layer_slot
         self.per_expert_scale = nn.Parameter(torch.ones(self.num_experts, dtype=torch.float32))
         mark_tensor_parallel_parameter(self.per_expert_scale, False, sequence_parallel=False, tp_grad_allreduce=True)
         self.experts = Gemma4MoeExperts(config)
@@ -267,6 +269,13 @@ class Gemma4MoeMLP(nn.Module):
 
         topk_idx, topk_weight = _areno_topk_softmax_no_compile(
             router_logits.reshape(-1, self.num_experts), self.top_k, self.norm_topk_prob
+        )
+        topk_idx, topk_weight = resolve_softmax_routes(
+            self.routing_layer_slot,
+            router_logits.reshape(-1, self.num_experts),
+            topk_idx,
+            topk_weight,
+            renormalize=self.norm_topk_prob,
         )
         topk_weight = topk_weight * self.per_expert_scale[topk_idx].to(dtype=topk_weight.dtype)
         return topk_idx, topk_weight
@@ -504,7 +513,7 @@ class Gemma4DecoderLayer(nn.Module):
         )
         self.mlp = Gemma4MLP(config, use_double_wide_mlp)
         self.router = Gemma4Router(config) if config.enable_moe_block else None
-        self.moe = Gemma4MoeMLP(config) if config.enable_moe_block else None
+        self.moe = Gemma4MoeMLP(config, layer_idx) if config.enable_moe_block else None
         self.input_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps)
         self.pre_feedforward_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps)

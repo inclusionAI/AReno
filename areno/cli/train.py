@@ -106,6 +106,7 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "rollout_tp_size",
             "rollout_devices",
             "policy_sync_bucket_mb",
+            "rollout_routing_replay",
             "n_samples",
             "max_running_prompts",
             "max_prompt_tokens",
@@ -239,6 +240,7 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
     args.rollout_tp_size = getattr(args, "rollout_tp_size", None)
     args.rollout_devices = getattr(args, "rollout_devices", None)
     args.policy_sync_bucket_mb = getattr(args, "policy_sync_bucket_mb", 64)
+    args.rollout_routing_replay = getattr(args, "rollout_routing_replay", False)
     args.optimizer_state_offload = getattr(args, "optimizer_state_offload", "none")
     args.optimizer_state_offload_dir = getattr(args, "optimizer_state_offload_dir", None)
     args.optimizer_state_offload_batch_size = getattr(args, "optimizer_state_offload_batch_size", 1)
@@ -291,6 +293,10 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
     algorithm = _algorithm_for_cli(args.algo)
     if algorithm.name == "sft" and args.dataset_loader_fn is None:
         raise click.UsageError("--dataset-loader-fn is required for --algo sft")
+    if args.rollout_routing_replay and not algorithm.requires_rollout:
+        raise click.UsageError("--rollout-routing-replay is only valid for rollout-based RL algorithms")
+    if args.rollout_routing_replay and args.backend != "cuda":
+        raise click.UsageError("--rollout-routing-replay is only supported by the CUDA backend")
     tune_params = bool(getattr(args, "tune_params", False))
     mem_frac = float(getattr(args, "mem_frac", 0.9))
     tune_max_samples = int(getattr(args, "tune_max_samples", 256))
@@ -1000,6 +1006,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             rollout_tp_size=args.rollout_tp_size,
             rollout_devices=args.rollout_devices,
             policy_sync_bucket_mb=args.policy_sync_bucket_mb,
+            rollout_routing_replay=args.rollout_routing_replay,
             batch_size=args.batch_size,
             n_samples=args.n_samples,
             mini_bs=args.mini_bs,
@@ -1069,6 +1076,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
         rollout_tp_size=args.rollout_tp_size,
         rollout_devices=args.rollout_devices,
         policy_sync_bucket_mb=args.policy_sync_bucket_mb,
+        rollout_routing_replay=args.rollout_routing_replay,
         batch_size=args.batch_size,
         n_samples=args.n_samples,
         mini_bs=args.mini_bs,
@@ -1617,6 +1625,11 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     default=64,
     show_default=True,
     help="Maximum GPU buffer size used by direct NCCL policy synchronization.",
+)
+@click.option(
+    "--rollout-routing-replay",
+    is_flag=True,
+    help="Replay rollout-selected MoE expert ids during the RL training forward (R3).",
 )
 @click.option("--batch-size", type=int, default=32, show_default=True, help="Prompt/pair batch size.")
 @click.option(

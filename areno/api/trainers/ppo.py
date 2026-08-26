@@ -236,6 +236,7 @@ class PPOTrainer(PolicyOnlyTrainer):
                     features=row_features,
                     reward=float(reward),
                     eos_token_id=tokenizer.eos_token_id,
+                    routed_experts=seq.routed_experts,
                 )
             )
 
@@ -326,12 +327,25 @@ class PPOTrainer(PolicyOnlyTrainer):
         old_logprobs_all = []
         logp_diff_all = []
         row_features = token_features or [None] * len(token_rows)
-        for tokens, response_mask, loss_mask, rollout_row, features, reward, ref_logprobs, old_logprobs, values in zip(
+        row_routes = getattr(agent_batch, "routed_experts", None) or [None] * len(token_rows)
+        for (
+            tokens,
+            response_mask,
+            loss_mask,
+            rollout_row,
+            features,
+            routed_experts,
+            reward,
+            ref_logprobs,
+            old_logprobs,
+            values,
+        ) in zip(
             token_rows,
             agent_batch.response_masks,
             agent_batch.loss_masks,
             agent_batch.rollout_logprobs,
             row_features,
+            row_routes,
             rewards_all,
             ref_logprob_rows,
             old_logprob_rows,
@@ -392,6 +406,7 @@ class PPOTrainer(PolicyOnlyTrainer):
                     features=features,
                     reward=float(reward),
                     eos_token_id=tokenizer.eos_token_id,
+                    routed_experts=routed_experts,
                 )
             )
 
