@@ -626,6 +626,7 @@ class ConfigAndDataTest(unittest.TestCase):
         )
 
         self.assertEqual(cfg.resolved_max_running_prompts(), 256)
+        self.assertTrue(cfg.cuda_config().runtime["rollout_routing_replay"])
 
     def test_rollout_config_respects_explicit_max_running_prompts(self):
         """An explicit max_running_prompts value should pass through unchanged."""
@@ -649,7 +650,6 @@ class ConfigAndDataTest(unittest.TestCase):
         self.assertTrue(cfg.keep_rollout_state)
         self.assertEqual(cfg.optimizer_state_offload_batch_size, 1)
         self.assertTrue(cfg.cuda_config().runtime["keep_rollout_state"])
-        self.assertTrue(cfg.cuda_config().runtime["rollout_routing_replay"])
         self.assertEqual(cfg.cuda_config().runtime["optimizer_state_offload_batch_size"], 1)
         self.assertTrue(cfg.mlx_config().keep_rollout_state)
 

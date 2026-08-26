@@ -920,7 +920,7 @@ def test_agentic_multi_turn_routing_starts_at_shared_prefix_boundary():
     session._append_sample_response(first_sample, second_sample)
 
     assert first_sample.token_row == [1, 2, 10, 11, 99, 20]
-    assert first_sample.routed_experts_row == [*first_routes, *second_routes[1:]]
+    assert first_sample.routed_experts_row == [[[10]], [[11]], [[12]], [[21]], [[22]]]
     assert len(first_sample.routed_experts_row) == len(first_sample.token_row) - 1
 
 

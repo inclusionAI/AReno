@@ -559,7 +559,7 @@ class RolloutSession:
                         _ResponseData(
                             response_tokens=sequence.resp_tokens,
                             response_logprobs=sequence.resp_logprobs,
-                            routed_experts=sequence.routed_experts,
+                            routed_experts=getattr(sequence, "routed_experts", None),
                         ),
                     ),
                 )
