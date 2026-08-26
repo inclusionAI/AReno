@@ -99,6 +99,16 @@ class MergedColumnSpec:
 
 
 @dataclass(frozen=True, slots=True)
+class PackedSectionColumnSpec:
+    """One HF tensor whose semantic row sections are TP-sharded separately."""
+
+    key: str
+    tensor_attr: str
+    global_sizes_attr: str
+    local_sizes_attr: str
+
+
+@dataclass(frozen=True, slots=True)
 class KSharedQKVColumnSpec:
     """QKV load spec for checkpoints where later layers may share K/V."""
 
@@ -403,6 +413,8 @@ def save_checkpoint_weights(
     source_path: str | None,
     spec: CheckpointSpec,
     extra_tensors_fn: Callable[[CheckpointTensorStore], None] | None = None,
+    *,
+    copy_passthrough: bool = True,
 ) -> str | None:
     """Save a tensor-parallel model as a HF sharded safetensors checkpoint."""
 
@@ -430,7 +442,7 @@ def save_checkpoint_weights(
             writer.write(tensors, "extra-tensors")
             tensors.clear()
     saved_path = writer.finish()
-    if saved_path is not None and source_path is not None:
+    if copy_passthrough and saved_path is not None and source_path is not None:
         copy_source_passthrough_weights(
             source_path, saved_path, protected_prefix=_protected_prefix_from_top_level(spec.top_level)
         )
@@ -599,6 +611,9 @@ def load_layer_op(
     if isinstance(op, MergedColumnSpec):
         load_merged_column_spec(module, index, prefix, op, rank, world_size)
         return
+    if isinstance(op, PackedSectionColumnSpec):
+        load_packed_section_column_spec(module, index, prefix, op, rank, world_size)
+        return
     if isinstance(op, KSharedQKVColumnSpec):
         load_k_shared_qkv_column_spec(module, index, prefix, op, rank, world_size)
         return
@@ -641,6 +656,9 @@ def save_layer_op(
         return
     if isinstance(op, SplitColumnSpec):
         save_split_column_spec(tensors, module, prefix, op)
+        return
+    if isinstance(op, PackedSectionColumnSpec):
+        save_packed_section_column_spec(tensors, module, prefix, op)
         return
     if isinstance(op, RangedSplitColumnSpec):
         save_ranged_split_column_spec(tensors, module, prefix, op)
@@ -751,6 +769,47 @@ def load_merged_column_spec(
     copy_merged_column_from_index(dst, index, tensor_keys, rank, world_size)
 
 
+def load_packed_section_column_spec(
+    module: nn.Module,
+    index: SafetensorsIndex,
+    prefix: str,
+    spec: PackedSectionColumnSpec,
+    rank: int,
+    world_size: int,
+) -> None:
+    """Shard each row section of one packed HF tensor independently."""
+
+    dst = attr_path(module, spec.tensor_attr)
+    global_sizes = tuple(int(size) for size in attr_path(module, spec.global_sizes_attr))
+    local_sizes = tuple(int(size) for size in attr_path(module, spec.local_sizes_attr))
+    if len(global_sizes) != len(local_sizes):
+        raise ValueError("packed-section global and local size counts differ")
+    ranges = tuple(_shard_range(size, rank, world_size) for size in global_sizes)
+    expected_local_sizes = tuple(end - start for start, end in ranges)
+    if local_sizes != expected_local_sizes:
+        raise ValueError(f"packed-section local sizes {local_sizes} do not match TP shard sizes {expected_local_sizes}")
+    if dst.shape[0] != sum(local_sizes):
+        raise ValueError(f"packed-section destination has {dst.shape[0]} rows, expected {sum(local_sizes)}")
+
+    tensor_key = key(spec.key, prefix)
+    filename = index.weight_map.get(tensor_key)
+    if filename is None:
+        raise KeyError(f"missing HF weight {tensor_key}")
+    with safe_open(index.model_path / filename, framework="pt", device="cpu") as handle:
+        source = handle.get_slice(tensor_key)
+        source_shape = tuple(source.get_shape())
+        expected_shape = (sum(global_sizes), *dst.shape[1:])
+        if source_shape != expected_shape:
+            raise ValueError(f"checkpoint tensor {tensor_key} has shape {source_shape}, expected {expected_shape}")
+        source_offset = 0
+        destination_offset = 0
+        for global_size, local_size, (start, end) in zip(global_sizes, local_sizes, ranges, strict=True):
+            shard = source[source_offset + start : source_offset + end]
+            dst[destination_offset : destination_offset + local_size].copy_(shard.to(dtype=dst.dtype))
+            source_offset += global_size
+            destination_offset += local_size
+
+
 def load_k_shared_qkv_column_spec(
     module: nn.Module, index: SafetensorsIndex, prefix: str, spec: KSharedQKVColumnSpec, rank: int, world_size: int
 ) -> None:
@@ -808,6 +867,28 @@ def save_split_column_spec(
     gathered = gather_tensor_parallel_column_tensors(list(parts))
     for template, tensor in zip(spec.keys, gathered, strict=True):
         tensors[key(template, prefix)] = tensor
+
+
+def save_packed_section_column_spec(
+    tensors: dict[str, torch.Tensor | None],
+    module: nn.Module,
+    prefix: str,
+    spec: PackedSectionColumnSpec,
+) -> None:
+    """Gather local packed sections into their original single HF tensor."""
+
+    tensor = attr_path(module, spec.tensor_attr)
+    global_sizes = tuple(int(size) for size in attr_path(module, spec.global_sizes_attr))
+    local_sizes = [int(size) for size in attr_path(module, spec.local_sizes_attr)]
+    world_size = get_tp_context().world_size
+    if any(
+        global_size != local_size * world_size
+        for global_size, local_size in zip(global_sizes, local_sizes, strict=True)
+    ):
+        raise ValueError("packed-section sizes are incompatible with the tensor-parallel world size")
+    if tensor.shape[0] != sum(local_sizes):
+        raise ValueError(f"packed-section source has {tensor.shape[0]} rows, expected {sum(local_sizes)}")
+    tensors[key(spec.key, prefix)] = gather_tensor_parallel_split_column_tensor(tensor, local_sizes)
 
 
 def save_ranged_split_column_spec(
