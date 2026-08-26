@@ -24,11 +24,10 @@ from threading import Lock
 
 from areno.api.backend.base import Backend, BackendCapabilities, register_backend
 from areno.api.backend.common import (
-    MetricReduction,
     expand_prompt_features,
     expand_prompts,
     group_rollout_sequences,
-    metric_reduction,
+    reduce_microbatch_metrics,
 )
 from areno.api.backend.cuda.checkpoint import save_checkpoint
 from areno.api.backend.cuda.generation import rollout_options
@@ -481,7 +480,6 @@ class CudaBackend(Backend):
             self._step_e2e_start = train_start
             self._step_rollout_time_s = 0.0
         losses = []
-        metrics: dict[str, float] = {}
         # Slice the batch into `mini_bs` chunks; each chunk becomes one tensor
         # pack and the loss function is stamped onto each pack so the engine's
         # forward worker can call it without having to know about the loss API.
@@ -505,25 +503,12 @@ class CudaBackend(Backend):
         if self._separate_rollout and any(bool(stats.stepped) for stats in stats_list):
             self._train_policy_version += 1
         train_time_s = time.perf_counter() - train_start
-        # `first_policy_metrics` keeps the per-step rollout/policy diagnostics
-        # untouched (we want the value seen on the first microbatch, not the
-        # average over microbatches), while everything else gets mean-averaged.
-        first_policy_metrics: dict[str, float] = {}
-        averaged_metric_counts: dict[str, int] = {}
+        metric_rows: list[dict[str, float]] = []
         for stats in stats_list:
             losses.append(stats.loss)
             if stats.metrics:
-                for key, value in stats.metrics.items():
-                    key = str(key)
-                    value_float = float(value)
-                    if metric_reduction(key) is MetricReduction.FIRST:
-                        first_policy_metrics.setdefault(key, value_float)
-                    else:
-                        metrics[key] = metrics.get(key, 0.0) + value_float
-                        averaged_metric_counts[key] = averaged_metric_counts.get(key, 0) + 1
-        if metrics:
-            metrics = {key: value / averaged_metric_counts[key] for key, value in metrics.items()}
-        metrics.update(first_policy_metrics)
+                metric_rows.append({str(key): float(value) for key, value in stats.metrics.items()})
+        metrics = reduce_microbatch_metrics(metric_rows)
         result = {"loss": sum(losses) / max(len(losses), 1)}
         result.update(metrics)
         result.update(self._pending_policy_sync_metrics)

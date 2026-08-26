@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from areno.api.backend.common import TrainMetric
+from areno.api.backend.common import LOGP_METRIC_WEIGHT, TrainMetric
 
 if TYPE_CHECKING:
     import torch
@@ -179,6 +179,7 @@ def grpo_loss_fn(data_pack, logprobs, *, clip_eps: float = 0.2):
         else torch.zeros((), device=logprobs.device),
         "advantage_mean": masked_mean(layout.advantages, layout).detach(),
         "response_len": layout.response_len.mean().detach(),
+        LOGP_METRIC_WEIGHT: layout.valid_count.detach(),
         TrainMetric.ROLLOUT_LOGPROBS_MEAN: masked_mean(layout.old_logprobs, layout).detach(),
         TrainMetric.TRAIN_LOGPROBS_MEAN: masked_mean(logprobs.detach(), layout).detach(),
         TrainMetric.LOGP_DIFF_MEAN: masked_mean(difference, layout).detach(),
@@ -204,6 +205,7 @@ def gspo_loss_fn(data_pack, logprobs, *, clip_eps: float = 3e-4):
         TrainMetric.RATIO_STD: seq_ratio.std(unbiased=False).detach(),
         "advantage_mean": seq_advantage.mean().detach(),
         "response_len": layout.response_len.mean().detach(),
+        LOGP_METRIC_WEIGHT: layout.valid_count.detach(),
         TrainMetric.ROLLOUT_LOGPROBS_MEAN: masked_mean(layout.old_logprobs, layout).detach(),
         TrainMetric.TRAIN_LOGPROBS_MEAN: masked_mean(logprobs.detach(), layout).detach(),
         TrainMetric.LOGP_DIFF_MEAN: masked_mean(difference, layout).detach(),

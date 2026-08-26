@@ -10,10 +10,9 @@ from typing import Any
 from areno.api.algorithms import describe_loss_fn
 from areno.api.backend.base import Backend, BackendCapabilities, BackendRuntimeComponents, register_backend
 from areno.api.backend.common import (
-    MetricReduction,
     accumulation_group_size,
     accumulation_steps,
-    metric_reduction,
+    reduce_microbatch_metrics,
 )
 from areno.api.backend.mlx.checkpoint import save_checkpoint
 from areno.api.backend.mlx.generation import ContinuousBatchScheduler, GenerationConfig
@@ -223,9 +222,7 @@ class MlxBackend(Backend):
         grad_accum = None
         group_count = 0
         losses: list[float] = []
-        metric_totals: dict[str, float] = {}
-        metric_counts: dict[str, int] = {}
-        first_policy_metrics: dict[str, float] = {}
+        metric_rows: list[dict[str, float]] = []
         grad_norms: list[float] = []
         learning_rates = set_group_learning_rates(self._optimizer_groups, ctx.global_step)
         learning_rate = learning_rates["model"]
@@ -260,20 +257,12 @@ class MlxBackend(Backend):
                 mx.eval(loss, grads)
 
             losses.append(float(loss.item()))
-            for key, value in stats.items():
-                key = str(key)
-                scalar = float(value.item())
-                if metric_reduction(key) is MetricReduction.FIRST:
-                    first_policy_metrics.setdefault(key, scalar)
-                else:
-                    metric_totals[key] = metric_totals.get(key, 0.0) + scalar
-                    metric_counts[key] = metric_counts.get(key, 0) + 1
+            metric_rows.append({str(key): float(value.item()) for key, value in stats.items()})
 
         self._policy_version += 1
         self._rollout_version = -1
         mx.clear_cache()
-        result = {key: value / metric_counts[key] for key, value in metric_totals.items()}
-        result.update(first_policy_metrics)
+        result = reduce_microbatch_metrics(metric_rows)
         result.update(
             {
                 "loss": sum(losses) / len(losses),
