@@ -25,6 +25,13 @@ def _register_qwen35() -> None:
     register_adapter(Qwen35Adapter())
 
 
+def _register_phi4mm() -> None:
+    from areno.models.phi4mm import Phi4MMAdapter
+    from areno.models.registry import register_adapter
+
+    register_adapter(Phi4MMAdapter())
+
+
 def _register_bailing() -> None:
     from areno.models.bailing import BailingMoeLinearV2Adapter
     from areno.models.registry import register_adapter
@@ -71,6 +78,7 @@ _GROUPS = {
     "llama": _register_llama,
     "qwen3": _register_qwen3,
     "qwen3_5": _register_qwen35,
+    "phi4mm": _register_phi4mm,
     "bailing": _register_bailing,
     "bailing_v3": _register_bailing_v3,
     "gemma4": _register_gemma4,
