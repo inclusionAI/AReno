@@ -81,6 +81,7 @@ class DecodeGraph:
         """Allocate static input buffers and the `InferMeta` baked into capture."""
 
         self.model = model
+        self.decode_cache_length_limit = getattr(model, "decode_cache_length_limit", None)
         self.bucket = bucket
         self.scratch_block = scratch_block
         self.scratch_recurrent_slot = scratch_recurrent_slot
@@ -156,6 +157,7 @@ class DecodeGraph:
         actual = int(input_ids.numel())
         if actual > self.bucket:
             raise ValueError(f"decode payload has {actual} tokens, graph bucket is {self.bucket}")
+        _validate_decode_cache_length(cache_seqlens, actual, self.decode_cache_length_limit)
 
         # Copy the live values into the captured-stable buffers. The graph
         # was recorded against these buffer addresses so `copy_` here is what
@@ -186,3 +188,14 @@ class DecodeGraph:
         self.graph.replay()
         assert self.logits_shard is not None
         return self.logits_shard
+
+
+def _validate_decode_cache_length(
+    cache_seqlens: torch.Tensor,
+    actual: int,
+    limit: int | None,
+) -> None:
+    if limit is not None and actual and int(cache_seqlens[:actual].max().item()) >= limit:
+        raise ValueError(
+            "cached decode cannot cross the model's rotary-factor boundary; run a full long-context prefill"
+        )

@@ -32,7 +32,7 @@ class CausalSelfAttention(nn.Module):
     reduces across ranks to reassemble the full hidden state.
     """
 
-    def __init__(self, config: ModelConfig, layer_idx: int):
+    def __init__(self, config: ModelConfig, layer_idx: int, *, rotary_embedding: nn.Module | None = None):
         super().__init__()
         ctx = get_tp_context()
         self.layer_idx = layer_idx
@@ -58,7 +58,11 @@ class CausalSelfAttention(nn.Module):
         # Row-parallel output projection: input is already sharded along
         # head dimension, output is all-reduced across ranks.
         self.o_proj = RowParallelLinear(self.num_heads * self.head_dim, config.hidden_size, bias=False)
-        self.rope = RotaryEmbedding(config.head_dim, config.max_position_embeddings, config.rope_theta)
+        self.rope = (
+            rotary_embedding
+            if rotary_embedding is not None
+            else RotaryEmbedding(config.head_dim, config.max_position_embeddings, config.rope_theta)
+        )
         # Optional per-head QK normalization (used by some recent models).
         self.q_norm = RMSNorm(config.head_dim, config.rms_norm_eps) if config.qk_norm else None
         self.k_norm = RMSNorm(config.head_dim, config.rms_norm_eps) if config.qk_norm else None
@@ -93,13 +97,26 @@ class CausalSelfAttention(nn.Module):
             k = self.k_norm(k)
         # Rotary embedding is applied on the head dim using position-indexed
         # cos/sin tables; positions are broadcast across heads.
-        q, k = self.rope(q, k, position_ids)
+        q, k = self.apply_rotary(q, k, position_ids, train_meta, infer_meta)
 
         # Presence of infer_meta selects the paged KV-cache backend; otherwise
         # we run the training-mode FlashAttention (padded or varlen packed).
         if infer_meta is not None:
             return self.forward_infer(q, k, v, infer_meta)
         return self.forward_train(q, k, v, train_meta)
+
+    def apply_rotary(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        position_ids: torch.Tensor,
+        train_meta: TrainMeta | None,
+        infer_meta: InferMeta | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Apply the model's rotary embedding, with a model override hook."""
+
+        del train_meta, infer_meta
+        return self.rope(q, k, position_ids)
 
     def forward_train(
         self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, train_meta: TrainMeta | None
