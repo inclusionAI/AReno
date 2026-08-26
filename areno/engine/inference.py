@@ -1050,7 +1050,7 @@ class InferenceManager:
             logits_shard = graph.replay_tensors(input_ids, position_ids, cache_seqlens, block_table, recurrent_slots)[
                 0, :active_count
             ]
-            self._last_routing_capture = captured_routing(graph.meta)
+            self._last_routing_capture = graph.routing_capture
 
         if sampling_params.temperature == 0.0:
             next_tokens = _sample_greedy_sharded(

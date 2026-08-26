@@ -165,6 +165,8 @@ class DecodeGraphUtilityTest(unittest.TestCase):
             )
         graph.logits_shard = torch.zeros(1, 4, 1)
 
+        self.assertIsNone(graph.routing_capture)
+
         graph.replay_tensors(
             input_ids=torch.tensor([11, 12]),
             position_ids=torch.tensor([3, 7]),

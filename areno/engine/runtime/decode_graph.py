@@ -14,7 +14,7 @@ import torch.distributed as dist
 
 from areno.engine.runtime.common import ceil_div as ceil_div  # noqa: F401
 from areno.engine.runtime.metadata import InferMeta
-from areno.engine.runtime.routing_replay import routing_replay_context
+from areno.engine.runtime.routing_replay import captured_routing, routing_replay_context
 
 
 def bucket_for(batch_size: int, buckets: list[int]) -> int:
@@ -112,6 +112,7 @@ class DecodeGraph:
         )
         self.graph = torch.cuda.CUDAGraph()
         self.logits_shard: torch.Tensor | None = None
+        self.routing_capture: torch.Tensor | None = None
 
     @torch.inference_mode()
     def warmup(self, iterations: int = 3) -> int:
@@ -148,6 +149,10 @@ class DecodeGraph:
                 self.logits_shard = self.model(
                     input_ids=self.input_ids, position_ids=self.position_ids, infer_meta=self.meta
                 ).logits_shard
+            # Stack per-layer routes while capture is active. Replay then
+            # updates this fixed contiguous tensor without launching a new
+            # stack kernel or allocating an output tensor from Python.
+            self.routing_capture = captured_routing(self.meta)
 
     @torch.inference_mode()
     def replay_tensors(
