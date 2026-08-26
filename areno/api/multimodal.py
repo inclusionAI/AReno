@@ -7,6 +7,7 @@ import io
 import threading
 from collections.abc import Mapping, Sequence
 from typing import Any
+from urllib.request import urlopen
 
 import torch
 
@@ -119,6 +120,9 @@ def encode_processor_messages(
     """Use a native multimodal processor to load media and expand soft-token slots."""
 
     normalized = _normalize_multimodal_messages(messages)
+    identity = f"{type(processor).__module__}.{type(processor).__name__}".lower()
+    if "phi4mm" in identity:
+        return _encode_phi4mm_messages(processor, normalized, tools=tools)
     kwargs: dict[str, Any] = {
         "tokenize": True,
         "add_generation_prompt": True,
@@ -142,6 +146,94 @@ def encode_processor_messages(
         if token_ids.get("image") is not None:
             features["image_token_id"] = token_ids["image"]
     return tokens, features or None
+
+
+def _encode_phi4mm_messages(
+    processor: Any,
+    messages: list[dict[str, Any]],
+    *,
+    tools: Any = None,
+) -> tuple[list[int], dict[str, Any] | None]:
+    """Bridge structured API messages to the released Phi-4 processor API."""
+
+    images = []
+    audios = []
+    rendered_messages = []
+    for message in messages:
+        rendered = dict(message)
+        content = rendered.get("content")
+        if isinstance(content, list):
+            pieces = []
+            for part in content:
+                if not isinstance(part, dict):
+                    pieces.append(str(part))
+                    continue
+                kind = str(part.get("type", ""))
+                if kind == "text":
+                    pieces.append(str(part.get("text", "")))
+                elif kind == "image":
+                    images.append(_load_phi4mm_image(part.get("url")))
+                    pieces.append(f"<|image_{len(images)}|>")
+                elif kind == "audio":
+                    audios.append(_load_phi4mm_audio(part.get("url")))
+                    pieces.append(f"<|audio_{len(audios)}|>")
+                else:
+                    raise ValueError(f"Phi4MM does not support multimodal content type {kind!r}")
+            rendered["content"] = "".join(pieces)
+        rendered_messages.append(rendered)
+    template_kwargs: dict[str, Any] = {"tokenize": False, "add_generation_prompt": True}
+    if tools:
+        template_kwargs["tools"] = tools
+    prompt = apply_chat_template_with_options(processor.tokenizer, rendered_messages, **template_kwargs)
+    if prompt.endswith("<|endoftext|>"):
+        prompt = prompt.removesuffix("<|endoftext|>")
+    encoded = processor(
+        text=prompt,
+        images=images or None,
+        audios=audios or None,
+        return_tensors=getattr(processor, "_areno_return_tensors", "pt"),
+    )
+    input_ids = encoded["input_ids"]
+    tokens = normalize_token_ids(input_ids[0].tolist())
+    features = {
+        key: value for key, value in encoded.items() if key not in {"input_ids", "attention_mask", "token_type_ids"}
+    }
+    token_ids = modality_token_ids(processor)
+    features["modality_token_ids"] = token_ids
+    features["image_token_id"] = token_ids["image"]
+    features["audio_token_id"] = token_ids["audio"]
+    return tokens, features
+
+
+def _load_phi4mm_image(reference: Any) -> Any:
+    if not isinstance(reference, str) or not reference:
+        raise ValueError("Phi4MM image content requires a URL or data URI")
+    if reference.startswith("data:"):
+        return _load_base64_image(reference)
+    try:
+        from PIL import Image
+    except ImportError as exc:
+        raise ValueError("Phi4MM image input requires Pillow") from exc
+    if reference.startswith(("http://", "https://")):
+        with urlopen(reference, timeout=30) as response:  # noqa: S310
+            return Image.open(io.BytesIO(response.read())).convert("RGB")
+    return Image.open(reference).convert("RGB")
+
+
+def _load_phi4mm_audio(reference: Any) -> tuple[Any, int]:
+    if not isinstance(reference, str) or not reference:
+        raise ValueError("Phi4MM audio content requires a URL or data URI")
+    try:
+        import soundfile
+    except ImportError as exc:
+        raise ValueError("Phi4MM audio input requires soundfile") from exc
+    if reference.startswith("data:"):
+        _, _, payload = reference.partition(",")
+        return soundfile.read(io.BytesIO(base64.b64decode(payload)))
+    if reference.startswith(("http://", "https://")):
+        with urlopen(reference, timeout=30) as response:  # noqa: S310
+            return soundfile.read(io.BytesIO(response.read()))
+    return soundfile.read(reference)
 
 
 def _ensure_gemma4_torchvision_video_fps(processor: Any) -> None:
@@ -194,6 +286,17 @@ def modality_token_ids(processor: Any) -> dict[str, int]:
         value = getattr(processor, f"{modality}_token_id", None)
         if isinstance(value, int) and value >= 0:
             result[modality] = int(value)
+    tokenizer = getattr(processor, "tokenizer", None)
+    if tokenizer is not None:
+        for modality, token in (("image", "<|endoftext10|>"), ("audio", "<|endoftext11|>")):
+            if modality in result:
+                continue
+            identity = f"{type(processor).__module__}.{type(processor).__name__}".lower()
+            if "phi4mm" not in identity:
+                continue
+            token_id = tokenizer.convert_tokens_to_ids(token)
+            if isinstance(token_id, int) and token_id >= 0:
+                result[modality] = token_id
     return result
 
 

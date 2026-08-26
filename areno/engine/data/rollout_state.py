@@ -112,8 +112,10 @@ class InferenceBatchState:
         mrope_position_parts: list[torch.Tensor] = []
         has_mrope_positions = False
         feature_mask: list[bool] = []
+        audio_feature_mask: list[bool] = []
         image_features: list[dict] = []
         image_sequence_modes: list[bool] = []
+        audio_sequence_modes: list[bool] = []
         cu_seqlens = [0]
         sample_indices: list[int] = []
         block_table: list[list[int]] = []
@@ -156,8 +158,10 @@ class InferenceBatchState:
                             position_ids,
                             mrope_position_parts if has_mrope_positions else None,
                             feature_mask,
+                            audio_feature_mask,
                             image_features,
                             image_sequence_modes,
+                            audio_sequence_modes,
                             cu_seqlens,
                             sample_indices,
                             block_table,
@@ -177,7 +181,11 @@ class InferenceBatchState:
                 chunk_len,
             )
             feature_mask.extend(local_mask)
+            audio_feature_mask.extend(
+                _prompt_modality_mask(self.prompt_features[seq_id], prompt, "audio")[cursor : cursor + chunk_len]
+            )
             image_sequence_modes.append(_prompt_has_image(self.prompt_features[seq_id], prompt))
+            audio_sequence_modes.append(_prompt_has_audio(self.prompt_features[seq_id], prompt))
             if local_features is not None:
                 image_features.append(local_features)
             local_mrope_positions = _slice_prompt_mrope_positions(
@@ -221,8 +229,10 @@ class InferenceBatchState:
             position_ids,
             mrope_position_parts if has_mrope_positions else None,
             feature_mask,
+            audio_feature_mask,
             image_features,
             image_sequence_modes,
+            audio_sequence_modes,
             cu_seqlens,
             sample_indices,
             block_table,
@@ -238,8 +248,10 @@ class InferenceBatchState:
         position_ids: list[int],
         mrope_position_parts: list[torch.Tensor] | None,
         feature_mask: list[bool],
+        audio_feature_mask: list[bool],
         image_features: list[dict],
         image_sequence_modes: list[bool],
+        audio_sequence_modes: list[bool],
         cu_seqlens: list[int],
         sample_indices: list[int],
         block_table: list[list[int]],
@@ -261,12 +273,20 @@ class InferenceBatchState:
             "cache_block_offsets": torch.tensor(cache_block_offsets, dtype=torch.long),
             "recurrent_slots": torch.tensor(recurrent_slots, dtype=torch.long),
         }
-        if any(feature_mask) or image_features or any(image_sequence_modes) or mrope_position_parts is not None:
+        if (
+            any(feature_mask)
+            or image_features
+            or any(image_sequence_modes)
+            or any(audio_sequence_modes)
+            or mrope_position_parts is not None
+        ):
             payload["features"] = _prefill_multimodal_features(
                 feature_mask,
                 image_features,
                 mrope_position_parts,
                 image_sequence_modes,
+                audio_sequence_modes,
+                audio_feature_mask,
             )
         return payload
 
@@ -344,6 +364,10 @@ def _slice_prompt_image_features(
                 "target_sizes",
                 "pixel_values_videos",
                 "input_features",
+                "input_audio_embeds",
+                "audio_embeds",
+                "audio_embed_sizes",
+                "audio_attention_mask",
                 "multimodal_feature_rows",
             )
         ):
@@ -377,6 +401,11 @@ def _slice_prompt_image_features(
                 "image_token_count": local_count,
             }
         )
+        if modality_token_ids:
+            payload_features["image_token_offset"] = modality_offsets.get("image", 0)
+            payload_features["image_token_count"] = modality_counts.get("image", 0)
+            payload_features["audio_token_offset"] = modality_offsets.get("audio", 0)
+            payload_features["audio_token_count"] = modality_counts.get("audio", 0)
         for key in (
             "pixel_values",
             "input_image_embeds",
@@ -388,6 +417,11 @@ def _slice_prompt_image_features(
             "downsample_mode",
             "processor_expanded_image_tokens",
             "image_token_id",
+            "input_audio_embeds",
+            "audio_embed_sizes",
+            "audio_attention_mask",
+            "audio_token_id",
+            "input_mode",
         ):
             if features.get(key) is not None:
                 payload_features[key] = features[key]
@@ -429,10 +463,14 @@ def _prefill_multimodal_features(
     image_features: list[dict],
     mrope_position_parts: list[torch.Tensor] | None = None,
     image_sequence_modes: list[bool] | None = None,
+    audio_sequence_modes: list[bool] | None = None,
+    audio_feature_mask: list[bool] | None = None,
 ) -> dict:
     features = {}
     if image_sequence_modes is not None and any(image_sequence_modes):
         features["image_sequence_mask"] = torch.tensor(image_sequence_modes, dtype=torch.bool)
+    if audio_sequence_modes is not None and any(audio_sequence_modes):
+        features["audio_sequence_mask"] = torch.tensor(audio_sequence_modes, dtype=torch.bool)
     if mrope_position_parts is not None:
         features["mrope_position_ids"] = torch.cat(mrope_position_parts, dim=1).to(dtype=torch.long)
     if not image_features:
@@ -445,8 +483,13 @@ def _prefill_multimodal_features(
         {
             "image_token_mask": torch.tensor(feature_mask, dtype=torch.bool),
             "image_feature_rows": image_features,
+            "audio_feature_rows": image_features,
         }
     )
+    if audio_feature_mask is not None:
+        audio_mask = torch.tensor(audio_feature_mask, dtype=torch.bool)
+        features["audio_token_mask"] = audio_mask
+        features["image_token_mask"] &= ~audio_mask
     return features
 
 
@@ -485,6 +528,35 @@ def _prompt_has_image(features: dict | None, prompt: list[int]) -> bool:
     if image_token_id is None:
         image_token_id = (features.get("modality_token_ids") or {}).get("image")
     return image_token_id is not None and any(int(token) == int(image_token_id) for token in prompt)
+
+
+def _prompt_has_audio(features: dict | None, prompt: list[int]) -> bool:
+    if features is None:
+        return False
+    mask = features.get("audio_token_mask")
+    if mask is not None:
+        return bool(torch.as_tensor(mask, dtype=torch.bool).any())
+    audio_token_id = features.get("audio_token_id")
+    if audio_token_id is None:
+        audio_token_id = (features.get("modality_token_ids") or {}).get("audio")
+    return audio_token_id is not None and any(int(token) == int(audio_token_id) for token in prompt)
+
+
+def _prompt_modality_mask(features: dict | None, prompt: list[int], modality: str) -> list[bool]:
+    if features is None:
+        return [False] * len(prompt)
+    mask = features.get(f"{modality}_token_mask")
+    if mask is not None:
+        values = [bool(item) for item in torch.as_tensor(mask).reshape(-1).tolist()]
+        if len(values) != len(prompt):
+            raise ValueError(f"{modality}_token_mask length must match prompt length")
+        return values
+    token_id = features.get(f"{modality}_token_id")
+    if token_id is None:
+        token_id = (features.get("modality_token_ids") or {}).get(modality)
+    if token_id is None:
+        return [False] * len(prompt)
+    return [int(token) == int(token_id) for token in prompt]
 
 
 def payload_to_infer_meta(payload: dict, device: torch.device) -> InferMeta:
