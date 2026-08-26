@@ -315,7 +315,7 @@ class ArenoWorker:
             response_lens: torch.Tensor,
             finish_reason: str,
             truncate_stop_token_ids: tuple[int, ...],
-            routed_experts: list[list[torch.Tensor]],
+            routed_experts: list[list[torch.Tensor]] | None = None,
         ) -> None:
             for row in rows.detach().cpu().tolist():
                 row_idx = int(row)
