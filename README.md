@@ -32,6 +32,7 @@ AReno's mission is to make LLM RL **accessible** for a broad community of resear
 - 🪶 **Lightweight**: one self-contained train/serve stack that installs and loads only the native backend needed by the host—CUDA on Linux or MLX on Apple Silicon.
 - 🧰 **Agentic RL ready**: run an agent function against AReno's local OpenAI-compatible proxy, return explicit trajectories, and train from tokens, logprobs, rewards, and loss masks derived by the trainer.
 - 🎞️ **Multimodal**: use image, audio, and video content with compatible model processors through the same OpenAI-style message format in serving and agentic training.
+- 🧩 **Native LoRA**: train TP-aware adapters for Qwen3, Qwen3-MoE, and Bailing-MoE V3, save standard PEFT artifacts, and reload them for training or serving.
 - 🧩 **Extensible**: easily register new algorithms, model adapters, reward functions, and hardware backends without changing the core.
 
 ## Installation
@@ -306,6 +307,31 @@ reward function, OpenAI-compatible agent, and browser UI.
 
 For the full list of training options, run `areno train --help`.
 
+#### Native LoRA
+
+Enable CUDA-native LoRA by passing a rank. AReno freezes the base model and
+trains the selected projection adapters through the same rollout and training
+engine, including agentic RL:
+
+```bash
+areno train \
+  --ckpt Qwen/Qwen3-0.6B \
+  --dataset-path gsm8k:main \
+  --dataset-loader-fn examples/math/dataset_loader.py \
+  --reward-fn-path examples/math/math_verify_reward.py \
+  --algo gspo \
+  --lora-rank 8 \
+  --lora-alpha 16 \
+  --save-path outputs/qwen3-lora \
+  --save-interval 100
+```
+
+Saved checkpoints contain standard PEFT `adapter_config.json` and
+`adapter_model.safetensors` files. Resume training or serve an adapter by
+supplying the frozen base checkpoint together with `--lora-adapter-path`.
+See the [native LoRA guide](docs/concepts/native-lora.rst) for supported
+models and targets, agentic training, save/reload, and serving examples.
+
 ### Serving
 
 Serve a trained checkpoint as an OpenAI-compatible endpoint with continuous batching:
@@ -313,6 +339,17 @@ Serve a trained checkpoint as an OpenAI-compatible endpoint with continuous batc
 ```bash
 areno serve \
   --model-path /path/to/model \
+  --tp-size 1 \
+  --world-size 1 \
+  --port 8000
+```
+
+To serve a saved native LoRA adapter without merging it into the base model:
+
+```bash
+areno serve \
+  --model-path Qwen/Qwen3-0.6B \
+  --lora-adapter-path outputs/qwen3-lora/step_000100 \
   --tp-size 1 \
   --world-size 1 \
   --port 8000

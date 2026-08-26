@@ -28,6 +28,7 @@ AReno documentation
    Chat Templates <concepts/chat-templates>
    Dataset Formats <concepts/dataset-formats>
    Multimodal Inputs <concepts/multimodal-inputs>
+   Native LoRA <concepts/native-lora>
    Reward Functions <concepts/reward-functions>
 
 .. toctree::

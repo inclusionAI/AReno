@@ -529,6 +529,17 @@ def _format_training_config_summary(
                 ("mini_bs", str(config.mini_bs)),
                 ("score_micro_bs", str(config.score_micro_bs)),
                 ("gradient_accumulation_steps", _format_optional(config.gradient_accumulation_steps, default="auto")),
+                ("lora_rank", str(config.lora.rank) if config.lora is not None else "disabled"),
+                ("lora_alpha", str(config.lora.alpha) if config.lora is not None else "n/a"),
+                ("lora_dropout", str(config.lora.dropout) if config.lora is not None else "n/a"),
+                (
+                    "lora_target_modules",
+                    ",".join(config.lora.target_modules) if config.lora is not None else "n/a",
+                ),
+                (
+                    "lora_adapter_path",
+                    _format_optional(config.lora.adapter_path) if config.lora is not None else "n/a",
+                ),
                 (
                     "optimizer",
                     (

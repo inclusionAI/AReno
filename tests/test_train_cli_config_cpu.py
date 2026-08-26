@@ -386,6 +386,35 @@ def test_training_config_summary_can_colorize_output():
     assert "AReno training config" in summary
 
 
+def test_training_config_summary_shows_lora_parameters():
+    cfg = _trainer_config_from_options(
+        **_options(
+            lora_rank=8,
+            lora_alpha=16.0,
+            lora_target_modules="q_proj,v_proj",
+            lora_adapter_path=None,
+        )
+    )
+
+    summary = _format_training_config_summary(cfg)
+
+    assert re.search(r"(?m)^  lora_rank\s+8$", summary)
+    assert re.search(r"(?m)^  lora_alpha\s+16\.0$", summary)
+    assert re.search(r"(?m)^  lora_dropout\s+0\.0$", summary)
+    assert re.search(r"(?m)^  lora_target_modules\s+q_proj,v_proj$", summary)
+    assert re.search(r"(?m)^  lora_adapter_path\s+none$", summary)
+
+
+def test_training_config_summary_marks_lora_disabled():
+    cfg = _trainer_config_from_options(**_options(lora_rank=None, lora_adapter_path=None))
+
+    summary = _format_training_config_summary(cfg)
+
+    assert re.search(r"(?m)^  lora_rank\s+disabled$", summary)
+    assert re.search(r"(?m)^  lora_alpha\s+n/a$", summary)
+    assert re.search(r"(?m)^  lora_adapter_path\s+n/a$", summary)
+
+
 def test_dashboard_run_config_serializes_lora(tmp_path):
     cfg = _trainer_config_from_options(**_options(lora_rank=8, lora_alpha=16.0, metrics_log_dir=str(tmp_path)))
 
