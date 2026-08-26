@@ -162,7 +162,13 @@ class PPOTrainer(PolicyOnlyTrainer):
         # Even though we already have rollout logprobs, PPO needs an actor
         # forward pass at the same parameters used by the upcoming update to
         # form the "old logprobs" baseline in the importance ratio.
-        old_logprob_rows = self._score_logprobs("actor", token_rows, features=token_features)
+        token_routes = [seq.routed_experts for _, seq, _, _ in row_meta]
+        old_logprob_rows = self._score_logprobs(
+            "actor",
+            token_rows,
+            features=token_features,
+            routed_experts=token_routes if any(routes is not None for routes in token_routes) else None,
+        )
         self._last_ppo_stats["actor_old_logprob_forward_time_s"] = time.perf_counter() - actor_logprob_start
         self.logger.info("role=actor stage=old_logprob_score_end rows=%d", len(token_rows))
         self._record_ppo_state(stage="old_logprob_score_end", role="actor")
@@ -311,7 +317,8 @@ class PPOTrainer(PolicyOnlyTrainer):
         self.logger.info("role=actor stage=old_logprob_score_start rows=%d", len(token_rows))
         self._record_ppo_state(stage="old_logprob_score_start", role="actor")
         actor_logprob_start = time.perf_counter()
-        old_logprob_rows = self._score_logprobs("actor", token_rows, features=token_features)
+        row_routes = getattr(agent_batch, "routed_experts", None)
+        old_logprob_rows = self._score_logprobs("actor", token_rows, features=token_features, routed_experts=row_routes)
         self._last_ppo_stats["actor_old_logprob_forward_time_s"] = time.perf_counter() - actor_logprob_start
         self.logger.info("role=actor stage=old_logprob_score_end rows=%d", len(token_rows))
         self._record_ppo_state(stage="old_logprob_score_end", role="actor")
@@ -327,7 +334,7 @@ class PPOTrainer(PolicyOnlyTrainer):
         old_logprobs_all = []
         logp_diff_all = []
         row_features = token_features or [None] * len(token_rows)
-        row_routes = getattr(agent_batch, "routed_experts", None) or [None] * len(token_rows)
+        row_routes = row_routes or [None] * len(token_rows)
         for (
             tokens,
             response_mask,
@@ -462,12 +469,18 @@ class PPOTrainer(PolicyOnlyTrainer):
             self.areno.close()
 
     def _score_logprobs(
-        self, role: str, token_rows: list[list[int]], *, features: list[dict | None] | None = None
+        self,
+        role: str,
+        token_rows: list[list[int]],
+        *,
+        features: list[dict | None] | None = None,
+        routed_experts: list[object] | None = None,
     ) -> list[list[float]]:
         return self.areno.score_logprobs(
             role,
             token_rows,
             features=features,
+            routed_experts=routed_experts,
             microbatch_size=self.config.score_micro_bs,
         )
 

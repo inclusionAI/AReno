@@ -200,6 +200,7 @@ class Backend(ABC):
         token_rows: list[list[int]],
         *,
         features: list[dict | None] | None = None,
+        routed_experts: list[object] | None = None,
         microbatch_size: int = 8,
     ) -> list[list[float]]:
         """Score fixed token rows with a backend-owned role."""

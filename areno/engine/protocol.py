@@ -137,6 +137,7 @@ class ScorePayload:
     token_rows_by_dp: list[list[list[int]]]
     features_by_dp: list[list[dict[str, Any] | None]] | None
     pad_token_id: int
+    routing_replay_by_dp: list[list[torch.Tensor]] | None = None
     microbatch_size: int = 8
 
 

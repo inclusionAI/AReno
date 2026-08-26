@@ -330,12 +330,15 @@ class MlxBackend(Backend):
         token_rows: list[list[int]],
         *,
         features: list[dict | None] | None = None,
+        routed_experts: list[object] | None = None,
         microbatch_size: int = 8,
     ) -> list[list[float]]:
         """Score fixed token rows with the actor or a frozen reference model."""
 
         del ctx
         self._require_runtime()
+        if routed_experts is not None:
+            raise ValueError("MLX role scoring does not support MoE routing replay")
         if microbatch_size < 1:
             raise ValueError("microbatch_size must be positive")
         if role == "actor":

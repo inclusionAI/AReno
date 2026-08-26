@@ -597,6 +597,7 @@ class ArenoEngine:
         *,
         pad_token_id: int,
         features: list[dict[str, Any] | None] | None = None,
+        routed_experts: list[object] | None = None,
         microbatch_size: int = 8,
     ) -> list[list[float]]:
         """Score fixed token rows with a model role.
@@ -610,6 +611,8 @@ class ArenoEngine:
             return []
         if features is not None and len(features) != len(token_rows):
             raise ValueError("features must have the same length as token_rows")
+        if routed_experts is not None and len(routed_experts) != len(token_rows):
+            raise ValueError("routed_experts must have the same length as token_rows")
         results = self.cluster.call(
             Op.SCORE_LOGPROBS,
             ScorePayload(
@@ -617,6 +620,9 @@ class ArenoEngine:
                 token_rows_by_dp=split_list_by_dp(token_rows, int(self.config.dp_size)),
                 features_by_dp=split_list_by_dp(features, int(self.config.dp_size)) if features is not None else None,
                 pad_token_id=int(pad_token_id),
+                routing_replay_by_dp=(
+                    split_list_by_dp(routed_experts, int(self.config.dp_size)) if routed_experts is not None else None
+                ),
                 microbatch_size=int(microbatch_size),
             ),
         )

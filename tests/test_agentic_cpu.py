@@ -7,6 +7,8 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
+import torch
+
 from areno.api.agentic import AgentTrajectory as RuntimeAgentTrajectory
 from areno.api.tool_call_parser import (
     Gemma4ToolCallParser,
@@ -928,8 +930,33 @@ def test_agentic_multi_turn_routing_starts_at_shared_prefix_boundary():
     session._append_sample_response(first_sample, second_sample)
 
     assert first_sample.token_row == [1, 2, 10, 11, 99, 20]
-    assert first_sample.routed_experts_row == [[[10]], [[11]], [[12]], [[21]], [[22]]]
+    assert torch.equal(
+        first_sample.routed_experts_row,
+        torch.tensor([[[10]], [[11]], [[12]], [[21]], [[22]]], dtype=torch.int16),
+    )
     assert len(first_sample.routed_experts_row) == len(first_sample.token_row) - 1
+
+
+def test_agentic_routing_uses_compact_session_sidecar():
+    trainer = _FakeTrainer(world_size=1, tp_size=1)
+    session = RolloutSession(trainer, sampling_params=_FakeSamplingParams(), loss_mask_policy=LossMaskPolicy())
+    item = agentic.AgentItem(record={}, prompt="p", input_tokens=[1, 2], prompt_index=0, sample_index=0)
+    pending = _pending_chat(0, _FakeSamplingParams())
+    pending.item = item
+    pending.input_tokens = [1, 2]
+    routes = torch.tensor([[[10]], [[11]]], dtype=torch.int16)
+
+    response = session._build_chat_response(pending, agentic._ResponseData([3], [-0.1], routed_experts=routes))
+    turn = AgentTrajectoryTurn(item=item, messages=pending.messages, response=response)
+
+    assert "routed_experts" not in response["areno"]
+    assert turn.routed_experts is None
+    assert turn.routing_replay_id in session._routing_sidecar
+
+    sample = session._sample_from_trajectory_turn(turn)
+
+    assert torch.equal(sample.routed_experts_row, routes)
+    assert turn.routing_replay_id not in session._routing_sidecar
 
 
 def test_agentic_interleaved_trajectories_do_not_cross_items():

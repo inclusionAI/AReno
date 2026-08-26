@@ -27,6 +27,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
+import torch
+
 from areno.api.multimodal import encode_multimodal_prompt, encode_processor_messages, modality_token_ids
 from areno.api.openai_chat import (
     build_chat_completion_response,
@@ -119,7 +121,7 @@ class AgentTrainBatch:
     rewards: list[float] | None
     records: list[dict[str, Any]]
     reward_records: list[RewardRecord]
-    routed_experts: list[list[list[list[int]]]] | None = None
+    routed_experts: list[torch.Tensor] | None = None
 
 
 @dataclass(slots=True)
@@ -132,7 +134,8 @@ class AgentTrajectoryTurn:
     input_tokens: list[int] = field(default_factory=list)
     response_tokens: list[int] = field(default_factory=list)
     response_logprobs: list[float] = field(default_factory=list)
-    routed_experts: list[list[list[int]]] | None = None
+    routed_experts: torch.Tensor | None = None
+    routing_replay_id: str | None = None
     parsed_tool_calls: list[dict[str, Any]] = field(default_factory=list)
     model: str = "policy"
     tools: list[dict[str, Any]] = field(default_factory=list)
@@ -146,7 +149,8 @@ class AgentTrajectoryTurn:
         self.input_tokens = list(metadata.get("input_tokens") or [])
         self.response_tokens = list(metadata["response_tokens"])
         self.response_logprobs = [float(value) for value in metadata["response_logprobs"]]
-        self.routed_experts = metadata.get("routed_experts") or None
+        self.routed_experts = _routing_to_cpu_tensor(metadata.get("routed_experts"))
+        self.routing_replay_id = metadata.get("routing_replay_id") or None
         self.filtered = bool(metadata.get("filtered", False))
         self.parsed_tool_calls = _chat_response_message_tool_calls(self.response)
 
@@ -176,7 +180,7 @@ class _AgentSample:
     loss_mask_row: list[bool] = field(default_factory=list)
     rollout_logprobs_row: list[float] = field(default_factory=list)
     features: dict[str, Any] | None = None
-    routed_experts_row: list[list[list[int]]] | None = None
+    routed_experts_row: torch.Tensor | None = None
 
 
 @dataclass(slots=True)
@@ -194,7 +198,7 @@ class _AgentTrainRows:
     rollout_logprobs: list[list[float]]
     features: list[dict[str, Any] | None]
     total_tokens: int
-    routed_experts: list[list[list[list[int]]]] | None = None
+    routed_experts: list[torch.Tensor] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -286,6 +290,7 @@ class RolloutSession:
         self._proxy_enabled = bool(proxy)
         self._multimodal_encoding_cache: dict[str, tuple[list[int], dict[str, Any] | None]] = {}
         self._multimodal_encoding_cache_limit = max(self._max_running_prompts * 2, 32)
+        self._routing_sidecar: dict[str, torch.Tensor] = {}
 
     @property
     def max_running_prompts(self) -> int:
@@ -325,6 +330,7 @@ class RolloutSession:
             if self._thread is not None:
                 self._thread.join(timeout=2.0)
         finally:
+            self._routing_sidecar.clear()
             await self._trainer.end_rollout_session_async()
 
     @property
@@ -411,7 +417,7 @@ class RolloutSession:
         loss_masks: list[list[bool]] = []
         rollout_logprobs: list[list[float]] = []
         features: list[dict[str, Any] | None] = []
-        routed_experts: list[list[list[list[int]]]] = []
+        routed_experts: list[torch.Tensor] = []
         route_presence: list[bool] = []
         total_tokens = 0
         for sample in samples:
@@ -625,12 +631,17 @@ class RolloutSession:
                     )
         else:
             pending.input_tokens, pending.features = self._messages_to_tokens_and_features(pending)
+        routed_experts = turn.routed_experts
+        if routed_experts is None and turn.routing_replay_id is not None:
+            routed_experts = self._routing_sidecar.pop(turn.routing_replay_id, None)
+            if routed_experts is None:
+                raise ValueError("agentic routing replay sidecar is missing for trajectory turn")
         return self._sample_from_pending_chat(
             pending,
             _ResponseData(
                 response_tokens=list(turn.response_tokens),
                 response_logprobs=list(turn.response_logprobs),
-                routed_experts=turn.routed_experts,
+                routed_experts=routed_experts,
             ),
             tool_calls=turn.parsed_tool_calls,
         )
@@ -690,7 +701,7 @@ class RolloutSession:
             trace=trace,
             response_kind=response_kind,
             features=pending.features,
-            routed_experts_row=response.routed_experts,
+            routed_experts_row=_routing_to_cpu_tensor(response.routed_experts),
             loss_mask_override=_tool_call_loss_mask(tokenizer, response.response_tokens) if tool_calls else None,
         )
         # The prompt tokens are the fully rendered chat context for this turn,
@@ -749,7 +760,9 @@ class RolloutSession:
                 route_start = max(prefix_len - 1, 0)
                 if route_start > len(new_sample.routed_experts_row):
                     raise ValueError("agentic routing replay is shorter than the shared trajectory token prefix")
-                existing.routed_experts_row.extend(new_sample.routed_experts_row[route_start:])
+                existing.routed_experts_row = torch.cat(
+                    (existing.routed_experts_row, new_sample.routed_experts_row[route_start:]), dim=0
+                )
                 if len(existing.routed_experts_row) != len(existing.token_row) - 1:
                     raise ValueError("agentic routing replay must contain one route for every token except the final")
         elif not existing.token_row:
@@ -791,7 +804,7 @@ class RolloutSession:
     ) -> dict[str, Any]:
         del content
         finish_reason = "tool_calls" if tool_calls else "stop"
-        return build_chat_completion_response(
+        response = build_chat_completion_response(
             tokenizer=self._trainer.get_tokenizer(),
             model=pending.model,
             prompt_tokens=len(pending.input_tokens),
@@ -802,10 +815,15 @@ class RolloutSession:
             tool_call_parser=self._tool_call_parser,
             parsed_tool_calls=[list(tool_calls or [])],
             response_logprobs=[list(response_logprobs or [])],
-            routed_experts=[_routing_to_list(routed_experts)],
             include_areno_metadata=True,
             input_tokens=pending.input_tokens,
         )
+        response["areno"].pop("routed_experts", None)
+        if routed_experts is not None:
+            routing_replay_id = str(response["id"])
+            self._routing_sidecar[routing_replay_id] = _routing_to_cpu_tensor(routed_experts)
+            response["areno"]["routing_replay_id"] = routing_replay_id
+        return response
 
 
 def _multimodal_encoding_cache_key(messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> str:
@@ -813,11 +831,18 @@ def _multimodal_encoding_cache_key(messages: list[dict[str, Any]], tools: list[d
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def _routing_to_list(routed_experts: Any | None) -> list[list[list[int]]]:
+def _routing_to_cpu_tensor(routed_experts: Any | None) -> torch.Tensor | None:
     if routed_experts is None:
-        return []
-    tolist = getattr(routed_experts, "tolist", None)
-    return tolist() if callable(tolist) else list(routed_experts)
+        return None
+    if isinstance(routed_experts, torch.Tensor):
+        routes = routed_experts.detach().to(device="cpu", dtype=torch.int16)
+    else:
+        routes = torch.as_tensor(routed_experts, dtype=torch.int16, device="cpu")
+    if routes.numel() == 0:
+        return None
+    if routes.ndim != 3:
+        raise ValueError("agentic routing replay must have shape (tokens, layers, top_k)")
+    return routes.contiguous()
 
 
 def load_agent_run_fn(path: str) -> Callable[[RolloutSession, AgentBatch], Any]:

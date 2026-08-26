@@ -76,6 +76,20 @@ def test_train_pack_pads_last_token_with_dynamic_route_sentinel():
     assert torch.equal(pack["routing_replay"][0, 2], torch.full((2, 2), -1))
 
 
+def test_critic_train_pack_can_drop_actor_routing_replay():
+    seq = TrainSequence(
+        tokens=[10, 11],
+        prompt_mask=[True, False],
+        logprobs=[0.0, -0.1],
+        advantages=[0.0, 1.0],
+        routed_experts=torch.tensor([[[0, 1]]], dtype=torch.int16),
+    )
+
+    pack = make_train_pack([seq], include_routing_replay=False)
+
+    assert "routing_replay" not in pack
+
+
 def test_rollout_state_aligns_prefill_decode_routes_and_trims_final_token():
     state = InferenceBatchState([[10, 11]], max_new_tokens=2, max_running_seqs=1)
     payload = state.build_prefill_payload()

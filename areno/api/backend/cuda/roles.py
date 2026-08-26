@@ -6,6 +6,7 @@ from contextlib import nullcontext
 
 import torch
 
+from areno.api.backend.cuda.training import make_routing_replay
 from areno.engine.checkpoints.io import SafetensorsIndex
 from areno.engine.config import EngineConfig
 from areno.engine.data import to_device
@@ -15,6 +16,7 @@ from areno.engine.parallel.collectives import gather_from_sequence_parallel_regi
 from areno.engine.parallel.context import get_tp_context
 from areno.engine.protocol import EnsureRolesPayload, ScorePayload, TrainValuesPayload
 from areno.engine.runtime.logprobs import packed_next_token_logprobs
+from areno.engine.runtime.routing_replay import routing_replay_context
 from areno.engine.runtime.train_step import _pack_train_data, _train_meta
 from areno.models.registry import config_from_hf, load_model_weights
 
@@ -377,6 +379,8 @@ class RoleManager:
         worker = self.worker
         ctx = get_tp_context()
         role_name = payload.role
+        if role_name != "actor" and payload.routing_replay_by_dp is not None:
+            raise ValueError("routing replay is only valid for actor logprob scoring")
         actor_view = role_name == "actor" or role_name in self.actor_base_roles
         base_only = role_name in self.actor_base_roles
         view = worker.adapter_registry.base_only() if base_only else nullcontext()
@@ -396,6 +400,9 @@ class RoleManager:
             try:
                 token_rows = payload.token_rows_by_dp[ctx.dp_rank]
                 features = payload.features_by_dp[ctx.dp_rank] if payload.features_by_dp is not None else None
+                routed_experts = (
+                    payload.routing_replay_by_dp[ctx.dp_rank] if payload.routing_replay_by_dp is not None else None
+                )
                 local = (
                     []
                     if not token_rows
@@ -404,6 +411,7 @@ class RoleManager:
                         token_rows,
                         payload,
                         features=features,
+                        routed_experts=routed_experts,
                         sequence_parallel=sequence_parallel,
                     )
                 )
@@ -419,6 +427,7 @@ class RoleManager:
         payload: ScorePayload,
         *,
         features: list[dict | None] | None = None,
+        routed_experts: list[object] | None = None,
         sequence_parallel: bool,
     ) -> list[list[float]]:
         """Score token logprobs in bounded microbatches."""
@@ -428,8 +437,13 @@ class RoleManager:
         for start in range(0, len(token_rows), microbatch_size):
             rows = token_rows[start : start + microbatch_size]
             row_features = features[start : start + microbatch_size] if features is not None else None
+            row_routes = routed_experts[start : start + microbatch_size] if routed_experts is not None else None
             data_pack, lengths = _pack_score_rows(
-                rows, self.worker.device, int(payload.pad_token_id), features=row_features
+                rows,
+                self.worker.device,
+                int(payload.pad_token_id),
+                features=row_features,
+                routed_experts=row_routes,
             )
             tokens = data_pack["input_ids"]
             model_kwargs = {
@@ -439,7 +453,8 @@ class RoleManager:
             }
             if data_pack.get("features") is not None:
                 model_kwargs["features"] = data_pack["features"]
-            out = model(**model_kwargs)
+            with routing_replay_context(model_kwargs["train_meta"]):
+                out = model(**model_kwargs)
             logprobs = packed_next_token_logprobs(out.logits_shard, tokens, data_pack["train_cu_seqlens"])
             local.extend(_split_packed_action_rows(logprobs, lengths))
         return local
@@ -706,6 +721,7 @@ def _pack_score_rows(
     pad_token_id: int,
     *,
     features: list[dict | None] | None = None,
+    routed_experts: list[object] | None = None,
 ) -> tuple[dict, list[int]]:
     """Build the same canonical packed representation used by training."""
 
@@ -720,6 +736,9 @@ def _pack_score_rows(
     }
     if features is not None:
         data_pack["features"] = features
+    routing_replay = make_routing_replay(token_rows, routed_experts, width=int(tokens.shape[1]))
+    if routing_replay is not None:
+        data_pack["routing_replay"] = routing_replay.to(device=device)
     return _pack_train_data(data_pack), lengths
 
 

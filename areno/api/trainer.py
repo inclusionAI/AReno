@@ -482,17 +482,18 @@ class Trainer:
         token_rows: list[list[int]],
         *,
         features: list[dict | None] | None = None,
+        routed_experts: list[object] | None = None,
         microbatch_size: int | None = None,
     ) -> list[list[float]]:
         """Score fixed token sequences with a backend-owned model role."""
 
-        return self._backend.score_logprobs(
-            self._ctx,
-            role,
-            token_rows,
-            features=features,
-            microbatch_size=self._score_micro_bs if microbatch_size is None else int(microbatch_size),
-        )
+        kwargs = {
+            "features": features,
+            "microbatch_size": self._score_micro_bs if microbatch_size is None else int(microbatch_size),
+        }
+        if routed_experts is not None:
+            kwargs["routed_experts"] = routed_experts
+        return self._backend.score_logprobs(self._ctx, role, token_rows, **kwargs)
 
     def score_values(
         self, role: str, token_rows: list[list[int]], *, features: list[dict | None] | None = None
