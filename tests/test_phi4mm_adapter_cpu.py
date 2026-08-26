@@ -7,6 +7,8 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+pytest.importorskip("triton")
+
 import areno.models
 from areno.engine.config import ModelConfig, OptimizerConfig
 from areno.engine.layers import mlp, norm, vocab
