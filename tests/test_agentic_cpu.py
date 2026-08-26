@@ -897,6 +897,33 @@ def test_agentic_multi_turn_calls_merge_into_one_training_sample():
     assert record.source_record == {"task": "multi"}
 
 
+def test_agentic_multi_turn_routing_starts_at_shared_prefix_boundary():
+    trainer = _FakeTrainer(world_size=1, tp_size=1)
+    session = RolloutSession(trainer, sampling_params=_FakeSamplingParams(), loss_mask_policy=LossMaskPolicy())
+    item = agentic.AgentItem(record={}, prompt="p", input_tokens=[1, 2], prompt_index=0, sample_index=0)
+    first = _pending_chat(0, _FakeSamplingParams())
+    first.item = item
+    first.input_tokens = [1, 2]
+    second = _pending_chat(0, _FakeSamplingParams())
+    second.item = item
+    second.input_tokens = [1, 2, 99]
+    first_routes = [[[10]], [[11]], [[12]]]
+    second_routes = [[[20]], [[21]], [[22]]]
+
+    first_sample = session._sample_from_pending_chat(
+        first, agentic._ResponseData([10, 11], [-0.1, -0.2], routed_experts=first_routes)
+    )
+    second_sample = session._sample_from_pending_chat(
+        second, agentic._ResponseData([20], [-0.3], routed_experts=second_routes)
+    )
+
+    session._append_sample_response(first_sample, second_sample)
+
+    assert first_sample.token_row == [1, 2, 10, 11, 99, 20]
+    assert first_sample.routed_experts_row == [*first_routes, *second_routes[1:]]
+    assert len(first_sample.routed_experts_row) == len(first_sample.token_row) - 1
+
+
 def test_agentic_interleaved_trajectories_do_not_cross_items():
     """Interleaved agent turns must only merge with the matching AgentItem."""
 

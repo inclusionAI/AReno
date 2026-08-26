@@ -236,7 +236,6 @@ class RolloutTrainerConfig(TrainerConfig):
     rollout_tp_size: int | None = None
     rollout_devices: list[int] | None = None
     policy_sync_bucket_mb: int = 64
-    rollout_routing_replay: bool = False
 
     def resolved_max_running_prompts(self) -> int:
         """Return explicit or full-batch rollout concurrency."""
@@ -268,7 +267,9 @@ class RolloutTrainerConfig(TrainerConfig):
                 "optimizer_state_offload_batch_size": self.optimizer_state_offload_batch_size,
                 "eager_decode": self.eager_decode,
                 "attn_backend": self.attn_backend,
-                "rollout_routing_replay": self.rollout_routing_replay,
+                # R3 is the default CUDA path for rollout-based MoE training.
+                # EngineConfig disables it again when the checkpoint is dense.
+                "rollout_routing_replay": True,
             },
             lora=self.lora,
             reference_mode=self.reference_mode,
@@ -276,9 +277,6 @@ class RolloutTrainerConfig(TrainerConfig):
 
     def mlx_config(self):
         """Build MLX config with rollout concurrency from this trainer."""
-
-        if self.rollout_routing_replay:
-            raise ValueError("rollout routing replay is only supported by the CUDA backend")
 
         from areno.api.config import MlxConfig
 

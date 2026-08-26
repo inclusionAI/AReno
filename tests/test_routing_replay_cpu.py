@@ -4,6 +4,8 @@ import torch
 
 from areno.api.backend.cuda.training import make_train_pack
 from areno.api.models import TrainSequence
+from areno.engine.api import _merge_dp_rollouts_by_prompt_indices
+from areno.engine.data import RolloutOutput
 from areno.engine.data.rollout_state import InferenceBatchState
 from areno.engine.runtime.metadata import InferMeta, TrainMeta
 from areno.engine.runtime.routing_replay import (
@@ -90,3 +92,38 @@ def test_rollout_state_aligns_prefill_decode_routes_and_trims_final_token():
 
     assert output.routed_experts is not None
     assert output.routed_experts[0].tolist() == [[[0, 1]], [[1, 0]], [[2, 3]]]
+
+
+def test_async_dp_merge_preserves_routing_rows_in_prompt_order():
+    routes_0 = torch.tensor([[[0, 1]]], dtype=torch.int16)
+    routes_1 = torch.tensor([[[2, 3]]], dtype=torch.int16)
+    outputs = [
+        _rollout_output([10], [11], routes_0),
+        _rollout_output([20], [21], routes_1),
+    ]
+
+    merged = _merge_dp_rollouts_by_prompt_indices(
+        outputs,
+        prompt_indices_by_dp=[[1], [0]],
+        chunk_start=0,
+        total_count=2,
+    )
+
+    assert merged.prompt_ids == [[20], [10]]
+    assert merged.routed_experts is not None
+    assert torch.equal(merged.routed_experts[0], routes_1)
+    assert torch.equal(merged.routed_experts[1], routes_0)
+
+
+def _rollout_output(prompt: list[int], response: list[int], routes: torch.Tensor) -> RolloutOutput:
+    tokens = prompt + response
+    return RolloutOutput(
+        prompt_ids=[prompt],
+        response_ids=[response],
+        input_ids=torch.tensor([tokens]),
+        attention_mask=torch.ones(1, len(tokens), dtype=torch.long),
+        response_mask=torch.tensor([[False] * len(prompt) + [True] * len(response)]),
+        logprobs=torch.tensor([[-0.1]], dtype=torch.float32),
+        finish_reason=["stop"],
+        routed_experts=[routes],
+    )

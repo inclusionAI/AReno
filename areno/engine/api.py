@@ -83,7 +83,10 @@ def _merge_dp_rollouts_by_prompt_indices(
 
     if total_count == 0:
         return _merge_rollouts([])
-    rows: list[tuple[list[int], list[int], str, torch.Tensor] | None] = [None for _ in range(total_count)]
+    routed_experts = [] if any(output is not None and output.routed_experts is not None for output in outputs) else None
+    rows: list[tuple[list[int], list[int], str, torch.Tensor, torch.Tensor | None] | None] = [
+        None for _ in range(total_count)
+    ]
     for dp_rank, output in enumerate(outputs):
         if output is None:
             continue
@@ -97,11 +100,17 @@ def _merge_dp_rollouts_by_prompt_indices(
             if row_idx < 0 or row_idx >= total_count:
                 raise RuntimeError(f"DP rollout prompt index out of chunk range: original_idx={original_idx}")
             response = output.response_ids[local_idx]
+            routes = None
+            if routed_experts is not None:
+                if output.routed_experts is None:
+                    raise RuntimeError("routing replay is missing from one DP rollout shard")
+                routes = output.routed_experts[local_idx]
             rows[row_idx] = (
                 output.prompt_ids[local_idx],
                 response,
                 output.finish_reason[local_idx],
                 output.logprobs[local_idx, : len(response)].detach().cpu(),
+                routes,
             )
     if any(row is None for row in rows):
         missing = [idx for idx, row in enumerate(rows) if row is None]
@@ -114,6 +123,7 @@ def _merge_dp_rollouts_by_prompt_indices(
         [row[3] for row in materialized],
         metrics=None,
         adapter_version=_rollout_version(non_empty=[output for output in outputs if output is not None]),
+        routed_experts=[row[4] for row in materialized if row[4] is not None] if routed_experts is not None else None,
     )
 
 

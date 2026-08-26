@@ -337,6 +337,10 @@ class EngineConfig:
             raise ValueError("runtime.kv_block_size must be >= 1")
         if self.runtime.kv_block_size % 256 != 0:
             raise ValueError("runtime.kv_block_size must be a multiple of 256 for FlashAttention paged KV")
+        # CUDA rollout trainers request R3 by default. Dense checkpoints do
+        # not have router decisions to capture and retain the original path.
+        if self.runtime.rollout_routing_replay and self.model.num_experts is None:
+            self.runtime.rollout_routing_replay = False
         self.runtime.resolve_attn_backend(model=self.model, devices=self.devices)
         self.runtime.resolve_compile_model(model=self.model, devices=self.devices)
         self.runtime.resolve_eager_decode(model=self.model, lora=self.lora)

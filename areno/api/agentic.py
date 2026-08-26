@@ -740,9 +740,13 @@ class RolloutSession:
                 raise ValueError("agentic routing replay must be present for every trajectory turn")
             if new_sample.routed_experts_row is not None:
                 assert existing.routed_experts_row is not None
-                route_start = len(existing.routed_experts_row)
-                if route_start != max(prefix_len - 1, 0) or route_start > len(new_sample.routed_experts_row):
-                    raise ValueError("agentic routing replay does not share the trajectory token prefix")
+                # The route at position ``prefix_len - 1`` predicts the first
+                # token in the appended suffix.  Later chat-template renders
+                # need not contain the complete previous training row as a
+                # prefix, so slicing at the old row length misaligns routes.
+                route_start = max(prefix_len - 1, 0)
+                if route_start > len(new_sample.routed_experts_row):
+                    raise ValueError("agentic routing replay is shorter than the shared trajectory token prefix")
                 existing.routed_experts_row.extend(new_sample.routed_experts_row[route_start:])
                 if len(existing.routed_experts_row) != len(existing.token_row) - 1:
                     raise ValueError("agentic routing replay must contain one route for every token except the final")
