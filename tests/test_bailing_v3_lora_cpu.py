@@ -121,10 +121,23 @@ def bailing_model_module(monkeypatch: pytest.MonkeyPatch):
     kda = ModuleType("areno.accel.kda")
     kda.areno_kda_chunk = lambda *args, **kwargs: None
     kda.areno_kda_recurrent_update = lambda *args, **kwargs: None
+    accel_ops = ModuleType("areno.accel.ops")
+
+    class _KernelConfig:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+    accel_ops.FusedMoeConfig = _KernelConfig
+    accel_ops.SegLaMeta = _KernelConfig
+    accel_ops.areno_fused_experts = lambda *args, **kwargs: None
+    accel_ops.areno_silu_and_mul = lambda *args, **kwargs: None
+    accel_ops.log_once = lambda *args, **kwargs: None
+    accel_ops.seg_la_fwd = lambda *args, **kwargs: None
     monkeypatch.setitem(sys.modules, "fla", fla)
     monkeypatch.setitem(sys.modules, "fla.ops", fla_ops)
     monkeypatch.setitem(sys.modules, "fla.ops.lightning_attn", lightning_attn)
     monkeypatch.setitem(sys.modules, "areno.accel.kda", kda)
+    monkeypatch.setitem(sys.modules, "areno.accel.ops", accel_ops)
 
     from areno.models.bailing_v3 import model as bailing_model
 
