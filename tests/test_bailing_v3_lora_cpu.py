@@ -131,7 +131,9 @@ def bailing_model_module(monkeypatch: pytest.MonkeyPatch):
     accel_ops.SegLaMeta = _KernelConfig
     accel_ops.areno_fused_experts = lambda *args, **kwargs: None
     accel_ops.areno_silu_and_mul = lambda *args, **kwargs: None
+    accel_ops.can_use_cuda_kernel = lambda *args, **kwargs: False
     accel_ops.log_once = lambda *args, **kwargs: None
+    accel_ops.rms_norm_gate_fwd = lambda *args, **kwargs: None
     accel_ops.seg_la_fwd = lambda *args, **kwargs: None
     monkeypatch.setitem(sys.modules, "fla", fla)
     monkeypatch.setitem(sys.modules, "fla.ops", fla_ops)
