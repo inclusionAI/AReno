@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import json
 import math
+import subprocess
+import sys
 
 import pytest
 import torch
 import torch.nn.functional as F
-
-pytest.importorskip("triton")
 
 import areno.models
 from areno.engine.config import ModelConfig, OptimizerConfig
@@ -95,6 +95,18 @@ def _tiny_model_config() -> ModelConfig:
             },
         },
     )
+
+
+def test_phi4mm_import_does_not_require_triton():
+    script = """
+import sys
+sys.modules['triton'] = None
+import areno.models.phi4mm
+assert 'areno.accel.kernels.fused_moe' not in sys.modules
+assert 'areno.accel.kernels.group_rmsnorm' not in sys.modules
+assert 'areno.accel.kernels.seg_la' not in sys.modules
+"""
+    subprocess.run([sys.executable, "-c", script], check=True)
 
 
 @pytest.fixture

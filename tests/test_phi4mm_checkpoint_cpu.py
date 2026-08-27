@@ -7,8 +7,6 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
 
-pytest.importorskip("triton")
-
 from areno.engine.checkpoints.common import load_packed_section_column_spec, save_packed_section_column_spec
 from areno.engine.checkpoints.io import PolicyTensorStore, SafetensorsIndex
 from areno.engine.config import ModelConfig
