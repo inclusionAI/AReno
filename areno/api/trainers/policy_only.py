@@ -14,6 +14,7 @@ role-management hooks; this is why the helpers are designed to be small.
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
 import os
@@ -336,6 +337,7 @@ class PolicyOnlyTrainer:
                 raise RuntimeError("agent run function must return explicit trajectories")
             agent_filtered_count = self._agent_trajectory_invalid_count(trajectories)
             samples = []
+            turn_samples_by_item = {}
             proxy_filtered_items = set()
             for turn in self._agent_trajectory_turns(ctx, trajectories):
                 item_key = (turn.item.prompt_index, turn.item.sample_index)
@@ -347,9 +349,13 @@ class PolicyOnlyTrainer:
                     proxy_filtered_items.add(item_key)
                     continue
                 sample = ctx._sample_from_trajectory_turn(turn)
+                turn_samples_by_item.setdefault(item_key, []).append(sample)
                 existing = self._find_agent_sample(samples, sample.item)
                 if existing is None:
-                    samples.append(sample)
+                    # Rewarding needs one aggregate trajectory, while training
+                    # must preserve each model call's exact causal context.
+                    # Keep the aggregate independent from the per-turn row.
+                    samples.append(copy.deepcopy(sample))
                 else:
                     ctx._append_sample_response(existing, sample)
             sampled_items = {(sample.item.prompt_index, sample.item.sample_index) for sample in samples}
@@ -362,7 +368,7 @@ class PolicyOnlyTrainer:
                     len(filtered_without_sample),
                 )
             samples, filtered_count, filter_diagnostics = self._filter_overlong_agent_samples(
-                ctx, samples, sampling_params
+                ctx, samples, sampling_params, turn_samples_by_item=turn_samples_by_item
             )
             expected = len(agent_batch)
             if len(samples) + filtered_count + agent_filtered_count != expected:
@@ -384,13 +390,24 @@ class PolicyOnlyTrainer:
                 )
             reward_records = [ctx.reward_record(sample) for sample in samples]
             rewards = self._score_reward_records(reward_records)
-            rows = ctx._train_rows_from_samples(samples)
+            train_samples = []
+            row_reward_indices = []
+            for reward_index, sample in enumerate(samples):
+                item_key = (sample.item.prompt_index, sample.item.sample_index)
+                item_turns = turn_samples_by_item.get(item_key)
+                if not item_turns:
+                    raise RuntimeError("agentic trajectory has no trainable model turns")
+                train_samples.extend(item_turns)
+                row_reward_indices.extend([reward_index] * len(item_turns))
+            rows = ctx._train_rows_from_samples(train_samples)
             tool_call_count = sum(len(record.tool_calls) for record in reward_records)
             tool_result_count = sum(len(record.tool_results) for record in reward_records)
             message_count = sum(len(record.messages) for record in reward_records)
             self.logger.info(
-                "agentic train batch built samples=%d tokens=%d messages=%d tool_calls=%d tool_results=%d",
+                "agentic train batch built samples=%d train_rows=%d tokens=%d messages=%d "
+                "tool_calls=%d tool_results=%d",
                 len(samples),
+                len(train_samples),
                 rows.total_tokens,
                 message_count,
                 tool_call_count,
@@ -406,9 +423,11 @@ class PolicyOnlyTrainer:
                 records=[sample.item.record for sample in samples],
                 reward_records=reward_records,
                 routed_experts=rows.routed_experts,
+                row_reward_indices=row_reward_indices,
             )
 
-    def _filter_overlong_agent_samples(self, ctx, samples, sampling_params):
+    def _filter_overlong_agent_samples(self, ctx, samples, sampling_params, *, turn_samples_by_item=None):
+        del sampling_params
         max_context_len = self._agent_model_context_len()
         if max_context_len is None:
             return samples, 0, {}
@@ -416,8 +435,10 @@ class PolicyOnlyTrainer:
         filtered_details = []
         all_details = []
         for sample in samples:
-            rows = ctx._train_rows_from_samples([sample])
-            token_len = len(rows.token_rows[0]) if rows.token_rows else 0
+            item_key = (sample.item.prompt_index, sample.item.sample_index)
+            train_samples = (turn_samples_by_item or {}).get(item_key, [sample])
+            rows = ctx._train_rows_from_samples(train_samples)
+            token_len = max((len(row) for row in rows.token_rows), default=0)
             detail = self._agent_sample_filter_detail(sample, token_len)
             all_details.append(detail)
             if token_len <= max_context_len:
@@ -560,25 +581,33 @@ class PolicyOnlyTrainer:
             raise ValueError("agentic policy training requires a reward_fn")
         train_batch = []
         rewards_all = [float(reward) for reward in agent_batch.rewards]
+        row_reward_indices = getattr(agent_batch, "row_reward_indices", None)
+        if row_reward_indices is None:
+            row_reward_indices = list(range(len(agent_batch.token_rows)))
+        if len(row_reward_indices) != len(agent_batch.token_rows):
+            raise ValueError("agentic row_reward_indices must align with training rows")
+        if any(index < 0 or index >= len(rewards_all) for index in row_reward_indices):
+            raise ValueError("agentic row_reward_indices contains an invalid reward index")
+        if len(agent_batch.reward_records) != len(rewards_all):
+            raise ValueError("agentic rewards must align with trajectory reward records")
         logprob_stats = _LogprobStats()
         grouped: dict[int, list[int]] = {}
         for row_idx, record in enumerate(agent_batch.reward_records):
             prompt_index = int(record.metadata.get("prompt_index", row_idx))
             grouped.setdefault(prompt_index, []).append(row_idx)
-        advantages_by_row: dict[int, float] = {}
+        advantages_by_reward: dict[int, float] = {}
         for row_indices in grouped.values():
             group_rewards = [rewards_all[row_idx] for row_idx in row_indices]
             for row_idx, advantage in zip(row_indices, compute_group_advantages(group_rewards), strict=True):
-                advantages_by_row[row_idx] = float(advantage)
+                advantages_by_reward[row_idx] = float(advantage)
         row_features = getattr(agent_batch, "features", [None] * len(agent_batch.token_rows))
         row_routes = getattr(agent_batch, "routed_experts", None) or [None] * len(agent_batch.token_rows)
-        for row_idx, (tokens, response_mask, loss_mask, logprobs, reward, features, routed_experts) in enumerate(
+        for row_idx, (tokens, response_mask, loss_mask, logprobs, features, routed_experts) in enumerate(
             zip(
                 agent_batch.token_rows,
                 agent_batch.response_masks,
                 agent_batch.loss_masks,
                 agent_batch.rollout_logprobs,
-                rewards_all,
                 row_features,
                 row_routes,
                 strict=True,
@@ -587,7 +616,9 @@ class PolicyOnlyTrainer:
             if len(tokens) != len(response_mask) or len(tokens) != len(loss_mask) or len(tokens) != len(logprobs):
                 raise ValueError("agentic train batch has misaligned token/mask/logprob rows")
             prompt_len = _agentic_prompt_len(response_mask)
-            advantage = advantages_by_row.get(row_idx, 0.0)
+            reward_index = row_reward_indices[row_idx]
+            reward = rewards_all[reward_index]
+            advantage = advantages_by_reward.get(reward_index, 0.0)
             effective_loss_mask = loss_mask if any(not item for item in loss_mask[prompt_len:]) else []
             if effective_loss_mask:
                 logprob_stats.add(lp for lp, is_loss in zip(logprobs, effective_loss_mask, strict=True) if is_loss)

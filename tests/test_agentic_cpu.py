@@ -863,8 +863,8 @@ def test_agentic_partial_with_logprobs_completes_http_request():
     assert response["areno"]["response_logprobs"] == [-0.3, -0.4]
 
 
-def test_agentic_multi_turn_calls_merge_into_one_training_sample():
-    """Multiple model calls for one agent item should form one trajectory sample."""
+def test_agentic_multi_turn_calls_merge_reward_history_only():
+    """Multiple calls aggregate reward data without fabricating one token row."""
 
     trainer = _FakeTrainer(world_size=1, tp_size=1)
     session = RolloutSession(
@@ -894,10 +894,10 @@ def test_agentic_multi_turn_calls_merge_into_one_training_sample():
     rows = session._train_rows_from_samples([first_sample])
     record = session.reward_record(first_sample)
 
-    assert rows.token_rows == [[1, 2, 10, 11, 30, 31, 20]]
-    assert rows.response_masks == [[False, False, True, True, False, False, True]]
-    assert rows.loss_masks == [[False, False, True, True, False, False, True]]
-    assert rows.rollout_logprobs == [[0.0, 0.0, -0.1, -0.2, 0.0, 0.0, -0.3]]
+    assert rows.token_rows == [[1, 2, 10, 11]]
+    assert rows.response_masks == [[False, False, True, True]]
+    assert rows.loss_masks == [[False, False, True, True]]
+    assert rows.rollout_logprobs == [[0.0, 0.0, -0.1, -0.2]]
     assert record.tokens == [10, 11, 20]
     assert record.tool_results == [{"name": None, "tool_call_id": None, "content": "tool result"}]
     assert record.completion == "10 11\n20"
@@ -907,7 +907,61 @@ def test_agentic_multi_turn_calls_merge_into_one_training_sample():
     assert record.source_record == {"task": "multi"}
 
 
-def test_agentic_multi_turn_routing_starts_at_shared_prefix_boundary():
+def test_agentic_reward_aggregation_does_not_flatten_training_contexts():
+    """Reward history may aggregate turns without inventing a causal token row."""
+
+    trainer = _FakeTrainer(world_size=1, tp_size=1)
+    session = RolloutSession(trainer, sampling_params=_FakeSamplingParams(), loss_mask_policy=LossMaskPolicy())
+    item = agentic.AgentItem(record={"task": "multi"}, prompt="p", input_tokens=[1, 2], prompt_index=0, sample_index=0)
+    first = _pending_chat(0, _FakeSamplingParams())
+    first.item = item
+    first.input_tokens = [1, 2]
+    second = _pending_chat(0, _FakeSamplingParams())
+    second.item = item
+    second.input_tokens = [1, 2, 99]
+
+    aggregate = session._sample_from_pending_chat(first, agentic._ResponseData([10, 11], [-0.1, -0.2]))
+    second_sample = session._sample_from_pending_chat(second, agentic._ResponseData([20], [-0.3]))
+    session._append_sample_response(aggregate, second_sample)
+
+    assert aggregate.token_row == [1, 2, 10, 11]
+    assert aggregate.response_tokens == [10, 11, 20]
+    assert aggregate.response_logprobs == [-0.1, -0.2, -0.3]
+    assert session._train_rows_from_samples([aggregate, second_sample]).token_rows == [
+        [1, 2, 10, 11],
+        [1, 2, 99, 20],
+    ]
+
+
+def test_agentic_turn_rows_share_trajectory_advantage():
+    """Splitting turns must not count them as extra samples in group normalization."""
+
+    from areno.api.rewards import RewardRecord
+
+    batch = SimpleNamespace(
+        token_rows=[[1, 10], [1, 10, 20], [1, 30]],
+        response_masks=[[False, True], [False, False, True], [False, True]],
+        loss_masks=[[False, True], [False, False, True], [False, True]],
+        rollout_logprobs=[[0.0, -0.1], [0.0, 0.0, -0.2], [0.0, -0.3]],
+        features=[None, None, None],
+        routed_experts=None,
+        rewards=[0.0, 1.0],
+        reward_records=[
+            RewardRecord(prompt="p", completion="a", metadata={"prompt_index": 0}),
+            RewardRecord(prompt="p", completion="b", metadata={"prompt_index": 0}),
+        ],
+        row_reward_indices=[0, 0, 1],
+    )
+    policy = object.__new__(PolicyOnlyTrainer)
+
+    train_batch, rewards, _ = policy._materialize_agentic_train_batch(SimpleNamespace(eos_token_id=0), None, batch)
+
+    assert rewards == [0.0, 1.0]
+    assert [sequence.reward for sequence in train_batch] == [0.0, 0.0, 1.0]
+    assert [sequence.scalar_advantage for sequence in train_batch] == [-1.0, -1.0, 1.0]
+
+
+def test_agentic_multi_turn_routing_stays_with_exact_turn_context():
     trainer = _FakeTrainer(world_size=1, tp_size=1)
     session = RolloutSession(trainer, sampling_params=_FakeSamplingParams(), loss_mask_policy=LossMaskPolicy())
     item = agentic.AgentItem(record={}, prompt="p", input_tokens=[1, 2], prompt_index=0, sample_index=0)
@@ -929,12 +983,12 @@ def test_agentic_multi_turn_routing_starts_at_shared_prefix_boundary():
 
     session._append_sample_response(first_sample, second_sample)
 
-    assert first_sample.token_row == [1, 2, 10, 11, 99, 20]
-    assert torch.equal(
-        first_sample.routed_experts_row,
-        torch.tensor([[[10]], [[11]], [[12]], [[21]], [[22]]], dtype=torch.int16),
-    )
+    assert first_sample.token_row == [1, 2, 10, 11]
+    assert torch.equal(first_sample.routed_experts_row, torch.tensor(first_routes, dtype=torch.int16))
+    assert second_sample.token_row == [1, 2, 99, 20]
+    assert torch.equal(second_sample.routed_experts_row, torch.tensor(second_routes, dtype=torch.int16))
     assert len(first_sample.routed_experts_row) == len(first_sample.token_row) - 1
+    assert len(second_sample.routed_experts_row) == len(second_sample.token_row) - 1
 
 
 def test_agentic_routing_uses_compact_session_sidecar():

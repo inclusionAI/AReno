@@ -122,6 +122,7 @@ class AgentTrainBatch:
     records: list[dict[str, Any]]
     reward_records: list[RewardRecord]
     routed_experts: list[torch.Tensor] | None = None
+    row_reward_indices: list[int] | None = None
 
 
 @dataclass(slots=True)
@@ -345,6 +346,11 @@ class RolloutSession:
         """Return the OpenAI-compatible base URL."""
 
         return self.base_url
+
+    def get_tokenizer(self):
+        """Return the tokenizer used to encode agentic rollout requests."""
+
+        return self._trainer.get_tokenizer()
 
     def finish_requests(self) -> None:
         """Compatibility no-op for agents that mark request submission done."""
@@ -724,7 +730,7 @@ class RolloutSession:
         )
 
     def _append_sample_response(self, existing: _AgentSample, new_sample: _AgentSample) -> None:
-        """Append another model response to an existing multi-call trajectory."""
+        """Aggregate multi-call reward history without flattening train rows."""
 
         old_response_kind = existing.response_kind
         old_response_len = len(existing.response_tokens)
@@ -740,37 +746,6 @@ class RolloutSession:
         existing.response_logprobs.extend(new_sample.response_logprobs)
         existing.trace.extend(new_sample.trace)
         existing.messages = new_sample.messages
-        # Each later turn is rendered as: previous messages + new assistant.
-        # Append only the suffix so the training row becomes one trajectory
-        # instead of duplicating the shared prefix for every tool call.
-        prefix_len = _common_prefix_len(existing.token_row, new_sample.token_row)
-        if prefix_len < len(new_sample.token_row):
-            existing.token_row.extend(new_sample.token_row[prefix_len:])
-            existing.response_mask_row.extend(new_sample.response_mask_row[prefix_len:])
-            existing.loss_mask_row.extend(new_sample.loss_mask_row[prefix_len:])
-            existing.rollout_logprobs_row.extend(new_sample.rollout_logprobs_row[prefix_len:])
-            if (new_sample.routed_experts_row is None) != (existing.routed_experts_row is None):
-                raise ValueError("agentic routing replay must be present for every trajectory turn")
-            if new_sample.routed_experts_row is not None:
-                assert existing.routed_experts_row is not None
-                # The route at position ``prefix_len - 1`` predicts the first
-                # token in the appended suffix.  Later chat-template renders
-                # need not contain the complete previous training row as a
-                # prefix, so slicing at the old row length misaligns routes.
-                route_start = max(prefix_len - 1, 0)
-                if route_start > len(new_sample.routed_experts_row):
-                    raise ValueError("agentic routing replay is shorter than the shared trajectory token prefix")
-                existing.routed_experts_row = torch.cat(
-                    (existing.routed_experts_row, new_sample.routed_experts_row[route_start:]), dim=0
-                )
-                if len(existing.routed_experts_row) != len(existing.token_row) - 1:
-                    raise ValueError("agentic routing replay must contain one route for every token except the final")
-        elif not existing.token_row:
-            existing.token_row = list(existing.item.input_tokens) + list(existing.response_tokens)
-            prompt_len = len(existing.item.input_tokens)
-            existing.response_mask_row = [False] * prompt_len + [True] * len(existing.response_tokens)
-            existing.loss_mask_row = [False] * prompt_len + self._response_loss_mask(existing)
-            existing.rollout_logprobs_row = [0.0] * prompt_len + list(existing.response_logprobs)
         old_mask = existing.loss_mask_override
         if old_mask is None:
             old_mask = self._response_loss_mask_for_span(old_response_kind, old_response_len)
@@ -1136,16 +1111,6 @@ def _trace_with_tool_results(trace: list[RewardEvent], messages: list[dict[str, 
     if not inserted:
         augmented.extend(tool_result_events)
     return augmented
-
-
-def _common_prefix_len(left: list[int], right: list[int]) -> int:
-    """Return the shared token prefix length for incremental multi-turn rows."""
-
-    limit = min(len(left), len(right))
-    for idx in range(limit):
-        if left[idx] != right[idx]:
-            return idx
-    return limit
 
 
 def _chat_batch_key(params: Any) -> _ChatBatchKey:
