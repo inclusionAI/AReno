@@ -32,10 +32,25 @@ from areno.engine.runtime.decode_graph import (
 )
 from areno.engine.runtime.metadata import InferMeta
 from areno.engine.runtime.rollout import _empty_rollout
+from areno.engine.runtime.routing_replay import captured_routing, routing_replay_context
 
 logger = logging.getLogger(__name__)
 
-FinishedRowsCallback = Callable[[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, str, tuple[int, ...]], None]
+FinishedRowsCallback = Callable[
+    [
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        str,
+        tuple[int, ...],
+        torch.Tensor | None,
+    ],
+    None,
+]
+_InternalFinishedRowsCallback = Callable[
+    [torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, str, tuple[int, ...]], None
+]
 RolloutRefillCallback = Callable[[InferenceBatchState], list[int]]
 # (row_ids, token_ids, finish_reasons) — three parallel lists.  Row ids are
 # positions in the rollout batch state, unique across every request merged
@@ -158,6 +173,7 @@ class InferenceManager:
 
     def __init__(self, worker):
         object.__setattr__(self, "worker", worker)
+        self._last_routing_capture: torch.Tensor | None = None
         if not hasattr(worker, "_decode_progress_lock"):
             worker._decode_progress_lock = threading.Lock()
             worker._decode_progress_next_time = 0.0
@@ -188,6 +204,8 @@ class InferenceManager:
         max_cache_len = int(spec.max_cache_len)
         max_blocks_per_seq = int(spec.max_blocks_per_seq)
         self._prepare_actor_onloaded()
+        can_reuse_weights = getattr(self.worker, "_can_reuse_rollout_session_infer_weights", None)
+        reuse_session_weights = can_reuse_weights() if callable(can_reuse_weights) else False
         if self._infer_cache_spec is not None:
             # Reuse path: the existing cache is large enough along every
             # dimension. We must match block_size exactly (it's baked into
@@ -203,10 +221,14 @@ class InferenceManager:
                 if onload_kv is not None:
                     onload_kv(self.device)
                 self.model.reset_kv_caches()
-                self.model.onload_train_weights(self.device)
-                self.model.prepare_infer_weights()
-                self._train_state_ready = False
-                self.model.offload_train_weights()
+                if not reuse_session_weights:
+                    self.model.onload_train_weights(self.device)
+                    self.model.prepare_infer_weights()
+                    self._train_state_ready = False
+                    self.model.offload_train_weights()
+                    mark_ready = getattr(self.worker, "_mark_rollout_session_infer_weights_ready", None)
+                    if callable(mark_ready):
+                        mark_ready()
                 if self.device.type == "cuda":
                     self._init_decode_graphs()
                 return
@@ -216,6 +238,11 @@ class InferenceManager:
             self._decode_graph_skipped_buckets.clear()
             self._decode_graph_init_attempted = False
         self._infer_batch_size = max_running_seqs
+        # Recurrent models need their own scratch slot for CUDA-graph warmup,
+        # capture, and padded replay rows.  Real requests exclusively own
+        # slots [0, max_running_seqs); the extra slot must never be admitted
+        # by InferenceBatchState.
+        self._scratch_recurrent_slot = max_running_seqs
         # Allocate one extra block past `num_blocks` to use as a fixed scratch
         # block for padded rows during graph-shape decode (see _init_decode_graphs).
         self._infer_cache_blocks = num_blocks + 1
@@ -233,13 +260,17 @@ class InferenceManager:
             self._max_blocks_per_seq,
         )
         caches = self.model.allocate_kv_caches(self._infer_cache_blocks, block_size, self.device)
-        self.model.set_kv_caches(caches, num_slots=max_running_seqs)
+        self.model.set_kv_caches(caches, num_slots=max_running_seqs + 1)
         self._train_state_ready = False
         # Materialise infer weights from train weights (e.g. dequantize / fuse),
         # then drop the train copies for the rollout's duration.
-        self.model.onload_train_weights(self.device)
-        self.model.prepare_infer_weights()
-        self.model.offload_train_weights()
+        if not reuse_session_weights:
+            self.model.onload_train_weights(self.device)
+            self.model.prepare_infer_weights()
+            self.model.offload_train_weights()
+            mark_ready = getattr(self.worker, "_mark_rollout_session_infer_weights_ready", None)
+            if callable(mark_ready):
+                mark_ready()
         if self.device.type == "cuda":
             self._init_decode_graphs()
 
@@ -265,6 +296,8 @@ class InferenceManager:
             # Idle-DP early return: this rank received no prompts this step.
             if not prompts:
                 return _empty_rollout() if ctx.is_rank0 else None
+            if self.config.runtime.rollout_routing_replay and int(self.config.model.num_experts or 0) > 32767:
+                raise ValueError("rollout routing replay supports at most 32767 experts per MoE layer")
             max_new_tokens = int(payload.max_new_tokens)
             eos_token_id = payload.eos_token_id
             max_cache_len = int(payload.max_cache_len)
@@ -291,6 +324,27 @@ class InferenceManager:
             )
             sampling_params = payload.sampling_params
             cancel_indices_by_dp = payload.cancel_indices_by_dp
+            internal_finished_callback = None
+            if finished_callback is not None:
+
+                def internal_finished_callback(
+                    rows,
+                    generated,
+                    logprobs,
+                    response_lens,
+                    finish_reason,
+                    truncate_stop_token_ids,
+                ):
+                    finished_callback(
+                        rows,
+                        generated,
+                        logprobs,
+                        response_lens,
+                        finish_reason,
+                        truncate_stop_token_ids,
+                        state.routing_buffer,
+                    )
+
             self._generate_rollout_tokens_no_sync(
                 state,
                 sampling_params,
@@ -299,17 +353,23 @@ class InferenceManager:
                 cancel_flags=payload.cancel_flags,
                 cancel_indices=cancel_indices_by_dp[ctx.dp_rank] if cancel_indices_by_dp is not None else None,
                 prompt_indices=prompt_indices,
-                finished_callback=finished_callback,
+                finished_callback=internal_finished_callback,
                 refill_callback=refill_callback,
                 stream_callback=stream_callback,
             )
+            if self.config.runtime.rollout_routing_replay and not state.has_routing:
+                raise ValueError(
+                    "rollout routing replay was enabled, but this model did not capture any sparse-MoE routes"
+                )
             if ctx.is_rank0:
                 return state.to_rollout()
             return None
         finally:
             if was_training:
                 self.model.train()
-            if not self.config.runtime.keep_rollout_state:
+            should_drop = getattr(self.worker, "_should_drop_rollout_hbm_after_infer", None)
+            drop_after_infer = should_drop() if callable(should_drop) else not self.config.runtime.keep_rollout_state
+            if drop_after_infer:
                 self._drop_rollout_hbm()
 
     @torch.inference_mode()
@@ -323,7 +383,7 @@ class InferenceManager:
         cancel_flags: torch.Tensor | None = None,
         cancel_indices: list[int] | None = None,
         prompt_indices: list[int] | None = None,
-        finished_callback: FinishedRowsCallback | None = None,
+        finished_callback: _InternalFinishedRowsCallback | None = None,
         refill_callback: RolloutRefillCallback | None = None,
         stream_callback: StreamTokenCallback | None = None,
     ) -> None:
@@ -472,6 +532,7 @@ class InferenceManager:
                 sample_step=sample_step,
                 eos_token_id=eos_token_id,
             )
+            state.record_decode_routing(active_rows, cache_seqlens, self._last_routing_capture)
             sample_step += 1
             # Write the new tokens into the per-row response buffer using
             # advanced indexing: write_pos[k] is the next free slot for row k.
@@ -753,7 +814,7 @@ class InferenceManager:
         step: int,
         stop_token_ids: tuple[int, ...],
         stop_token_tensor: torch.Tensor | None,
-        finished_callback: FinishedRowsCallback | None,
+        finished_callback: _InternalFinishedRowsCallback | None,
         truncate_stop_token_ids: tuple[int, ...],
         stream_callback: StreamTokenCallback | None = None,
     ) -> (
@@ -787,6 +848,7 @@ class InferenceManager:
             new_rows = torch.tensor(state._last_active_ids, device=self.device, dtype=torch.long)
             if new_rows.numel() == 0:
                 self._run_prefill_payload(prefill)
+                state.record_prefill_routing(prefill.raw, self._last_routing_capture)
                 if active_count > 0:
                     return (
                         generated,
@@ -801,6 +863,7 @@ class InferenceManager:
                     )
                 continue
             new_tokens, new_logprobs = self._infer_next_token_tensor(prefill)
+            state.record_prefill_routing(prefill.raw, self._last_routing_capture)
             break
         generated[new_rows, 0] = new_tokens
         logprobs[new_rows, 0] = new_logprobs
@@ -924,10 +987,13 @@ class InferenceManager:
         infer_meta = payload.infer_meta
         if infer_meta is None:
             infer_meta = payload_to_infer_meta(payload.raw, self.device)
+        infer_meta.capture_routing = self.config.runtime.rollout_routing_replay
         model_kwargs = {"input_ids": input_ids, "position_ids": position_ids, "infer_meta": infer_meta}
         if payload.raw.get("features") is not None:
             model_kwargs["features"] = payload.raw["features"]
-        self.model(**model_kwargs)
+        with routing_replay_context(infer_meta):
+            self.model(**model_kwargs)
+        self._last_routing_capture = captured_routing(infer_meta)
 
     def _mark_rollout_finished_rows(
         self,
@@ -937,7 +1003,7 @@ class InferenceManager:
         response_lens: torch.Tensor,
         finish_reason: str,
         prompt_indices: list[int] | None = None,
-        finished_callback: FinishedRowsCallback | None = None,
+        finished_callback: _InternalFinishedRowsCallback | None = None,
         truncate_stop_token_ids: tuple[int, ...] = (),
     ) -> None:
         """Finish hook; final rollout output carries completed rows."""
@@ -963,10 +1029,13 @@ class InferenceManager:
         infer_meta = payload.infer_meta
         if infer_meta is None:
             infer_meta = payload_to_infer_meta(payload.raw, self.device)
+        infer_meta.capture_routing = self.config.runtime.rollout_routing_replay
         model_kwargs = {"input_ids": input_ids, "position_ids": position_ids, "infer_meta": infer_meta}
         if payload.raw.get("features") is not None:
             model_kwargs["features"] = payload.raw["features"]
-        out = self.model(**model_kwargs)
+        with routing_replay_context(infer_meta):
+            out = self.model(**model_kwargs)
+        self._last_routing_capture = captured_routing(infer_meta)
         logits_shard = out.logits_shard
         sampling_params = payload.sampling_params
         if sampling_params.temperature == 0.0:
@@ -1037,12 +1106,15 @@ class InferenceManager:
                 cache_seqlens=cache_seqlens,
                 block_table=block_table,
                 recurrent_slots=recurrent_slots,
+                capture_routing=self.config.runtime.rollout_routing_replay,
             )
-            logits_shard = self.model(
-                input_ids=input_ids[:active_count].view(1, active_count),
-                position_ids=position_ids[:active_count].view(1, active_count),
-                infer_meta=infer_meta,
-            ).logits_shard[0, :active_count]
+            with routing_replay_context(infer_meta):
+                logits_shard = self.model(
+                    input_ids=input_ids[:active_count].view(1, active_count),
+                    position_ids=position_ids[:active_count].view(1, active_count),
+                    infer_meta=infer_meta,
+                ).logits_shard[0, :active_count]
+            self._last_routing_capture = captured_routing(infer_meta)
         else:
             # Graph replay path: copies inputs into the captured input buffers
             # and replays. Only the first `active_count` rows are meaningful;
@@ -1051,6 +1123,7 @@ class InferenceManager:
             logits_shard = graph.replay_tensors(input_ids, position_ids, cache_seqlens, block_table, recurrent_slots)[
                 0, :active_count
             ]
+            self._last_routing_capture = graph.routing_capture
 
         if sampling_params.temperature == 0.0:
             next_tokens = _sample_greedy_sharded(
@@ -1138,7 +1211,9 @@ class InferenceManager:
                 bucket,
                 self._max_blocks_per_seq,
                 self._scratch_block,
+                self._scratch_recurrent_slot,
                 self.device,
+                capture_routing=self.config.runtime.rollout_routing_replay,
             )
             # Warmup: run a few eager forwards at this bucket size to (a) trim
             # compiler / allocator noise and (b) measure the working-set peak

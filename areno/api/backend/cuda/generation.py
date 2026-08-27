@@ -30,8 +30,17 @@ def rollout_options(ctx: Context, sampling_params: SamplingParams):
 
     from areno import SamplingParams as CudaSamplingParams
 
+    max_prompt_len = sampling_params.max_prompt_len
+    if sampling_params.max_context_len is not None:
+        # Agentic turns repeatedly submit a growing transcript. Reserve the
+        # full configured context on the first turn so paged KV storage and
+        # CUDA graphs do not get rebuilt every time the transcript crosses a
+        # new block boundary.
+        context_prompt_capacity = max(int(sampling_params.max_context_len) - int(sampling_params.max_new_tokens), 1)
+        max_prompt_len = max(int(max_prompt_len or 0), context_prompt_capacity)
+
     return {
-        "max_prompt_len": sampling_params.max_prompt_len,
+        "max_prompt_len": max_prompt_len,
         "eos_token_id": eos_token_ids,
         "max_running_prompts": cfg.max_running_prompts,
         "decode_progress_interval_s": cfg.decode_progress_interval_s,

@@ -29,6 +29,7 @@ def _merge_rollouts(outputs: list[RolloutOutput]) -> RolloutOutput:
             response_len = len(response)
             logprob_rows.append(output.logprobs[local_idx, :response_len])
     input_ids, attention_mask, response_mask, logprobs = pad_rollout_rows(prompt_ids, response_ids, logprob_rows)
+    routed_experts = _concat_routed_experts(outputs)
     return RolloutOutput(
         prompt_ids=prompt_ids,
         response_ids=response_ids,
@@ -38,6 +39,8 @@ def _merge_rollouts(outputs: list[RolloutOutput]) -> RolloutOutput:
         logprobs=logprobs,
         finish_reason=finish_reason,
         metrics=_merge_rollout_metrics(outputs),
+        adapter_version=_merge_adapter_version(outputs),
+        routed_experts=routed_experts,
     )
 
 
@@ -51,6 +54,7 @@ def _merge_dp_rollouts_in_input_order(outputs: list[RolloutOutput | None], total
     response_ids = []
     finish_reason = []
     logprob_rows = []
+    routed_experts = [] if any(output.routed_experts is not None for output in outputs) else None
     # The split was `prompts[rank::dp_size]`, so inverse is to map
     # original_idx -> (dp_rank = original_idx % dp_size,
     #                  local_idx = original_idx // dp_size).
@@ -67,12 +71,18 @@ def _merge_dp_rollouts_in_input_order(outputs: list[RolloutOutput | None], total
         finish_reason.append(output.finish_reason[local_idx])
         response_len = len(output.response_ids[local_idx])
         logprob_rows.append(output.logprobs[local_idx, :response_len].detach().cpu())
+        if routed_experts is not None:
+            if output.routed_experts is None:
+                raise RuntimeError("routing replay is missing from one DP rollout shard")
+            routed_experts.append(output.routed_experts[local_idx])
     return _build_rollout_from_rows(
         prompt_ids,
         response_ids,
         finish_reason,
         logprob_rows,
         metrics=_merge_rollout_metrics(outputs),
+        adapter_version=_merge_adapter_version(outputs),
+        routed_experts=routed_experts,
     )
 
 
@@ -83,6 +93,8 @@ def _build_rollout_from_rows(
     logprob_rows: list[torch.Tensor],
     *,
     metrics: dict[str, float] | None,
+    adapter_version: int | None = None,
+    routed_experts: list[torch.Tensor] | None = None,
 ) -> RolloutOutput:
     """Build padded rollout tensors from variable-length Python rows."""
     if not prompt_ids:
@@ -97,6 +109,8 @@ def _build_rollout_from_rows(
         logprobs=logprobs,
         finish_reason=finish_reason,
         metrics=metrics,
+        adapter_version=adapter_version,
+        routed_experts=routed_experts,
     )
 
 
@@ -125,3 +139,21 @@ def _merge_rollout_metrics(outputs: list[RolloutOutput]) -> dict[str, float] | N
         for key, value in output.metrics.items():
             merged[key] = merged.get(key, 0.0) + float(value)
     return merged or None
+
+
+def _merge_adapter_version(outputs: list[RolloutOutput]) -> int | None:
+    versions = {output.adapter_version for output in outputs}
+    if len(versions) != 1:
+        raise RuntimeError(f"rollout shards reported different adapter versions: {versions}")
+    return versions.pop()
+
+
+def _concat_routed_experts(outputs: list[RolloutOutput]) -> list[torch.Tensor] | None:
+    if not any(output.routed_experts is not None for output in outputs):
+        return None
+    rows = []
+    for output in outputs:
+        if output.routed_experts is None:
+            raise RuntimeError("routing replay is missing from one rollout chunk")
+        rows.extend(output.routed_experts)
+    return rows

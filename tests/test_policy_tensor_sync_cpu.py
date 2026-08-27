@@ -3,7 +3,10 @@ from __future__ import annotations
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
+from torch import nn
 
+from areno.adapters import LoraConfig
+from areno.adapters.lora import AdapterRegistry, LoraSlot, RoutedExpertLoraSlot, _AdapterRuntimeState
 from areno.engine.checkpoints.io import (
     PolicyFlatPiece,
     PolicyTensorLayout,
@@ -13,7 +16,12 @@ from areno.engine.checkpoints.io import (
     _TensorParallelGatherTask,
 )
 from areno.engine.parallel.context import TPContext, destroy_process_group, init_process_group, set_tp_context
-from areno.engine.policy_sync import PolicyTensorMeta, assign_policy_owners, transfer_policy_weights
+from areno.engine.policy_sync import (
+    PolicyTensorMeta,
+    assign_policy_owners,
+    build_adapter_policy_plan,
+    transfer_policy_weights,
+)
 from areno.engine.protocol import PolicySyncPayload, find_free_port
 
 
@@ -32,9 +40,13 @@ def _canonical(layouts: list[PolicyTensorLayout], *, chunk_size: int = 5) -> tor
     output = torch.empty(layouts[0].numel, dtype=layouts[0].dtype)
     for offset in range(0, output.numel(), chunk_size):
         chunk = torch.zeros(min(chunk_size, output.numel() - offset), dtype=output.dtype)
-        for layout in layouts:
+        for rank, layout in enumerate(layouts):
             contribution = torch.empty_like(chunk)
-            layout.read_chunk(offset, contribution)
+            layout.read_chunk(
+                offset,
+                contribution,
+                include_replicated=not layout.replicated or rank == 0,
+            )
             chunk.add_(contribution)
         output[offset : offset + chunk.numel()].copy_(chunk)
     return output.reshape(layouts[0].shape)
@@ -46,6 +58,158 @@ def _write(layouts: list[PolicyTensorLayout], canonical: torch.Tensor, *, chunk_
         chunk = flat[offset : offset + chunk_size]
         for layout in layouts:
             layout.write_chunk(offset, chunk)
+
+
+def _adapter_registry(rank: int, world_size: int) -> AdapterRegistry:
+    _set_rank(rank, world_size)
+    state = _AdapterRuntimeState()
+    config = LoraConfig(rank=2, alpha=4.0)
+    base = nn.Parameter(torch.zeros(1))
+    column = LoraSlot(
+        logical_name="column",
+        base_weight=base,
+        global_in_features=4,
+        global_out_features=6,
+        local_in_features=4,
+        local_out_features=6 // world_size,
+        row_parallel=False,
+        config=config,
+        seed=1,
+        runtime_state=state,
+    )
+    row = LoraSlot(
+        logical_name="row",
+        base_weight=base,
+        global_in_features=6,
+        global_out_features=4,
+        local_in_features=6 // world_size,
+        local_out_features=4,
+        row_parallel=True,
+        config=config,
+        seed=1,
+        runtime_state=state,
+    )
+    expert = RoutedExpertLoraSlot(
+        logical_name="experts.{expert}.proj",
+        base_weight=base,
+        local_num_experts=4 // world_size,
+        local_expert_start=rank * (4 // world_size),
+        in_features=3,
+        out_features=5,
+        config=config,
+        seed=1,
+        runtime_state=state,
+    )
+    return AdapterRegistry(
+        {"column": column, "row": row, "experts.{expert}.proj": expert},
+        config,
+        state,
+    )
+
+
+def test_adapter_plan_maps_row_column_and_expert_factors_tp2_to_tp1() -> None:
+    expected = {
+        "column.lora_A.weight": torch.arange(8, dtype=torch.float32).reshape(2, 4),
+        "column.lora_B.weight": torch.arange(12, dtype=torch.float32).reshape(6, 2),
+        "row.lora_A.weight": torch.arange(12, dtype=torch.float32).reshape(2, 6),
+        "row.lora_B.weight": torch.arange(8, dtype=torch.float32).reshape(4, 2),
+        "experts.{expert}.proj.lora_A.weight": torch.arange(24, dtype=torch.float32).reshape(4, 2, 3),
+        "experts.{expert}.proj.lora_B.weight": torch.arange(40, dtype=torch.float32).reshape(4, 5, 2),
+    }
+    train_plans = []
+    for rank in range(2):
+        registry = _adapter_registry(rank, 2)
+        registry.slots["column"].lora_A.data.copy_(expected["column.lora_A.weight"])
+        registry.slots["column"].lora_B.data.copy_(expected["column.lora_B.weight"].chunk(2, dim=0)[rank])
+        registry.slots["row"].lora_A.data.copy_(expected["row.lora_A.weight"].chunk(2, dim=1)[rank])
+        registry.slots["row"].lora_B.data.copy_(expected["row.lora_B.weight"])
+        registry.slots["experts.{expert}.proj"].lora_A.data.copy_(
+            expected["experts.{expert}.proj.lora_A.weight"].chunk(2, dim=0)[rank]
+        )
+        registry.slots["experts.{expert}.proj"].lora_B.data.copy_(
+            expected["experts.{expert}.proj.lora_B.weight"].chunk(2, dim=0)[rank]
+        )
+        train_plans.append(build_adapter_policy_plan(registry))
+
+    rollout_registry = _adapter_registry(0, 1)
+    for parameter in rollout_registry.parameters():
+        parameter.data.zero_()
+    rollout_plan = build_adapter_policy_plan(rollout_registry)
+
+    assert train_plans[0]["column.lora_A.weight"].policy_layout().replicated
+    assert train_plans[0]["row.lora_B.weight"].policy_layout().replicated
+    for key, expected_tensor in expected.items():
+        canonical = _canonical([plan[key].policy_layout() for plan in train_plans])
+        torch.testing.assert_close(canonical, expected_tensor)
+        _write([rollout_plan[key].policy_layout()], canonical)
+
+    torch.testing.assert_close(rollout_registry.slots["column"].lora_A, expected["column.lora_A.weight"])
+    torch.testing.assert_close(rollout_registry.slots["column"].lora_B, expected["column.lora_B.weight"])
+    torch.testing.assert_close(rollout_registry.slots["row"].lora_A, expected["row.lora_A.weight"])
+    torch.testing.assert_close(rollout_registry.slots["row"].lora_B, expected["row.lora_B.weight"])
+    torch.testing.assert_close(
+        rollout_registry.slots["experts.{expert}.proj"].lora_A,
+        expected["experts.{expert}.proj.lora_A.weight"],
+    )
+    torch.testing.assert_close(
+        rollout_registry.slots["experts.{expert}.proj"].lora_B,
+        expected["experts.{expert}.proj.lora_B.weight"],
+    )
+
+
+def test_adapter_plan_publishes_replicated_column_range_once() -> None:
+    config = LoraConfig(rank=2, alpha=4.0)
+    plans = []
+    for rank in range(4):
+        _set_rank(rank, 4)
+        state = _AdapterRuntimeState()
+        start = 0 if rank < 2 else 1
+        slot = LoraSlot(
+            logical_name="kv",
+            base_weight=nn.Parameter(torch.zeros(1)),
+            global_in_features=4,
+            global_out_features=2,
+            local_in_features=4,
+            local_out_features=1,
+            row_parallel=False,
+            config=config,
+            seed=1,
+            runtime_state=state,
+            output_range=(start, start + 1),
+        )
+        slot.lora_B.data.fill_(float(start + 1))
+        plans.append(build_adapter_policy_plan(AdapterRegistry({"kv": slot}, config, state)))
+
+    canonical = _canonical([plan["kv.lora_B.weight"].policy_layout() for plan in plans])
+    torch.testing.assert_close(canonical, torch.tensor([[1.0, 1.0], [2.0, 2.0]]))
+
+    rollout_slots = []
+    for rank in range(4):
+        _set_rank(rank, 4)
+        state = _AdapterRuntimeState()
+        start = 0 if rank < 2 else 1
+        slot = LoraSlot(
+            logical_name="kv",
+            base_weight=nn.Parameter(torch.zeros(1)),
+            global_in_features=4,
+            global_out_features=2,
+            local_in_features=4,
+            local_out_features=1,
+            row_parallel=False,
+            config=config,
+            seed=1,
+            runtime_state=state,
+            output_range=(start, start + 1),
+        )
+        slot.lora_B.data.zero_()
+        rollout_slots.append(slot)
+        plan = build_adapter_policy_plan(AdapterRegistry({"kv": slot}, config, state))
+        _write([plan["kv.lora_B.weight"].policy_layout()], canonical)
+
+    torch.testing.assert_close(rollout_slots[0].lora_B, rollout_slots[1].lora_B)
+    torch.testing.assert_close(rollout_slots[2].lora_B, rollout_slots[3].lora_B)
+    torch.testing.assert_close(rollout_slots[0].lora_B, torch.ones(1, 2))
+    torch.testing.assert_close(rollout_slots[2].lora_B, torch.full((1, 2), 2.0))
 
 
 def test_column_parallel_layout_reshards_tp2_to_tp1() -> None:

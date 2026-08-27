@@ -21,6 +21,8 @@ from typing import Any
 import torch
 import torch.distributed as dist
 
+from areno.adapters import initialize_lora
+from areno.adapters.peft import export_peft_adapter, load_peft_adapter
 from areno.api.backend.cuda.roles import RoleManager, WorkerRole
 from areno.engine.config import EngineConfig
 from areno.engine.data import RolloutOutput, StreamTokenStep
@@ -31,6 +33,7 @@ from areno.engine.parallel.context import get_tp_context
 from areno.engine.policy_sync import policy_plan_metadata, transfer_policy_weights
 from areno.engine.protocol import (
     Command,
+    ExportAdapterPayload,
     Op,
     PolicySyncPayload,
     RolloutCacheProbePayload,
@@ -122,10 +125,18 @@ class ArenoWorker:
         if config.model_path is not None and not config.dummy_load:
             load_model_weights(self.model, config.model, config.model_path)
         configure_multimodal_training(self.model, config.optimizer, trainable=config.role == "train")
+        self.adapter_registry = (
+            initialize_lora(self.model, config.lora, seed=config.lora_seed) if config.lora is not None else None
+        )
         if config.runtime.compile_model:
             self.model = torch.compile(self.model)
+        if self.adapter_registry is not None and config.lora.adapter_path is not None:
+            load_peft_adapter(self.adapter_registry, config.lora.adapter_path)
         opt = config.optimizer
-        self.optimizer = build_optimizer(self.model.parameters(), opt, ctx) if config.role == "train" else None
+        optimizer_parameters = (
+            self.adapter_registry.parameters() if self.adapter_registry is not None else self.model.parameters()
+        )
+        self.optimizer = build_optimizer(optimizer_parameters, opt, ctx) if config.role == "train" else None
         self.grad_clip_norm = opt.grad_clip_norm
         self.base_lr = opt.lr
         self.min_lr = opt.min_lr
@@ -179,6 +190,11 @@ class ArenoWorker:
         self._infer_cache_spec: tuple[int, int, int, int, int] | None = None
         self._train_state_ready = False
         self._actor_on_device = True
+        # Agentic rollouts issue one inference request per tool-call turn. Keep
+        # rollout-only state resident for the whole explicit session and apply
+        # drop-rollout-state once at ROLLOUT_SESSION_END, not after every turn.
+        self._rollout_session_active = False
+        self._rollout_session_infer_weights_ready = False
         self._current_request_ids: list[int | None] = []
         self._policy_sync_plan = None
         self._policy_sync_metadata = None
@@ -219,6 +235,8 @@ class ArenoWorker:
             return self.train_values(cmd.payload)
         if cmd.op is Op.SAVE_CHECKPOINT:
             return self.save_checkpoint(cmd.payload)
+        if cmd.op is Op.EXPORT_ADAPTER:
+            return self.export_adapter(cmd.payload)
         if cmd.op is Op.POLICY_SYNC_PLAN:
             return self.policy_sync_plan(cmd.payload)
         if cmd.op is Op.POLICY_SYNC_PUBLISH:
@@ -255,6 +273,8 @@ class ArenoWorker:
         self.model.offload_train_weights()
         self._train_state_ready = False
         self._loaded_policy_version = payload.version
+        if self.adapter_registry is not None:
+            self.adapter_registry.version = payload.version
         return result
 
     def _prepare_policy_receive(self) -> None:
@@ -273,11 +293,14 @@ class ArenoWorker:
 
     def infer_rollout(self, payload: dict, finished_callback=None, refill_callback=None) -> RolloutOutput | None:
         """Delegate rollout generation to `InferenceManager`."""
-        return self.inference.infer_rollout(
+        output = self.inference.infer_rollout(
             payload,
             finished_callback=finished_callback,
             refill_callback=refill_callback,
         )
+        if output is not None and self.adapter_registry is not None:
+            output.adapter_version = self.adapter_registry.version
+        return output
 
     def probe_rollout_cache(self, payload: RolloutCacheProbePayload) -> float:
         """Allocate rollout KV cache and capture decode graphs without decoding."""
@@ -348,7 +371,9 @@ class ArenoWorker:
                     (
                         self._rank,
                         WorkerResult(
-                            ok=True, payload=_empty_rollout() if ctx.is_rank0 else None, request_id=request_id
+                            ok=True,
+                            payload=self._stamp_adapter_version(_empty_rollout()) if ctx.is_rank0 else None,
+                            request_id=request_id,
                         ),
                     )
                 )
@@ -364,6 +389,7 @@ class ArenoWorker:
             response_lens: torch.Tensor,
             finish_reason: str,
             truncate_stop_token_ids: tuple[int, ...],
+            routing_buffer: torch.Tensor | None = None,
         ) -> None:
             for row in rows.detach().cpu().tolist():
                 row_idx = int(row)
@@ -383,7 +409,9 @@ class ArenoWorker:
                         finish_reasons,
                         row_ids,
                         truncate_stop_token_ids,
+                        routing_buffer,
                     )
+                    result_payload = self._stamp_adapter_version(result_payload)
                 request_id = request_ids[request_idx]
                 self._result_queue.put(
                     (self._rank, WorkerResult(ok=True, payload=result_payload, request_id=request_id))
@@ -447,6 +475,12 @@ class ArenoWorker:
             if idx not in sent
         ]
 
+    def _stamp_adapter_version(self, output: RolloutOutput) -> RolloutOutput:
+        adapter_registry = getattr(self, "adapter_registry", None)
+        if adapter_registry is not None:
+            output.adapter_version = adapter_registry.version
+        return output
+
     def _next_refill_command(self) -> Command | None:
         """Fetch the next queued command consistently across TP ranks."""
 
@@ -500,6 +534,8 @@ class ArenoWorker:
 
         del payload
         self._prepare_actor_onloaded()
+        self._rollout_session_active = True
+        self._rollout_session_infer_weights_ready = False
 
     def rollout_session_sync(self, payload: None) -> None:
         """Synchronize TP ranks before agentic request-driven rollout starts."""
@@ -523,10 +559,28 @@ class ArenoWorker:
         """Finalize rollout state before scoring or training starts."""
 
         del payload
-        if not self.config.runtime.keep_rollout_state:
-            self._drop_rollout_hbm()
-        if self.config.role == "train":
-            self._prepare_for_train()
+        try:
+            if not self.config.runtime.keep_rollout_state:
+                self._drop_rollout_hbm()
+            if self.config.role == "train":
+                self._prepare_for_train()
+        finally:
+            self._rollout_session_active = False
+            self._rollout_session_infer_weights_ready = False
+
+    def _should_drop_rollout_hbm_after_infer(self) -> bool:
+        """Return whether one inference call owns the rollout-state teardown."""
+
+        return not self.config.runtime.keep_rollout_state and not self._rollout_session_active
+
+    def _can_reuse_rollout_session_infer_weights(self) -> bool:
+        """Return whether actor inference weights are unchanged within this session."""
+
+        return self._rollout_session_active and self._rollout_session_infer_weights_ready
+
+    def _mark_rollout_session_infer_weights_ready(self) -> None:
+        if self._rollout_session_active:
+            self._rollout_session_infer_weights_ready = True
 
     def _prepare_for_train(self) -> None:
         """Ensure the actor is on-device and train weights are loaded."""
@@ -538,10 +592,21 @@ class ArenoWorker:
         """Move the actor model + optimizer state back to `device` if offloaded."""
         if self._actor_on_device:
             return
-        self.model.to(self.device)
-        self.model.onload_train_weights(self.device)
-        if self.optimizer is not None:
-            self.optimizer.onload_state(self.device)
+        with torch.inference_mode(False), torch.no_grad():
+            self.model.to(self.device)
+            self.model.onload_train_weights(self.device)
+            if self.optimizer is not None:
+                mode, directory, batch_size = self._optimizer_offload_options()
+                if mode == "disk":
+                    # Keep mmap-backed state out of HBM. The optimizer step loads
+                    # only its current bucket after TrainingManager starts prefetch.
+                    self.optimizer.configure_state_offload(
+                        mode=mode,
+                        directory=directory,
+                        batch_size=batch_size,
+                    )
+                else:
+                    self.optimizer.onload_state(self.device)
         self._actor_on_device = True
 
     def _prepare_actor_for_inference(self) -> None:
@@ -568,11 +633,27 @@ class ArenoWorker:
         self.model.offload_train_weights()
         self.model.to("cpu")
         if self.optimizer is not None:
-            self.optimizer.offload_state()
+            mode, directory, batch_size = self._optimizer_offload_options()
+            # Swapping in an auxiliary role always evicts actor optimizer HBM.
+            # An explicit disk policy must retain its persistent mmap files;
+            # otherwise preserve the historical CPU offload behavior.
+            if mode == "none":
+                mode = "cpu"
+            self.optimizer.offload_state(mode=mode, directory=directory, batch_size=batch_size)
         self._train_state_ready = False
         self._actor_on_device = False
         if self.device.type == "cuda":
             torch.cuda.empty_cache()
+
+    def _optimizer_offload_options(self) -> tuple[str, str | None, int]:
+        """Return the configured actor optimizer residency policy."""
+
+        mode = getattr(self.config.runtime, "optimizer_state_offload", "none")
+        if isinstance(mode, bool):
+            mode = "cpu" if mode else "none"
+        directory = getattr(self.config.runtime, "optimizer_state_offload_dir", None)
+        batch_size = int(getattr(self.config.runtime, "optimizer_state_offload_batch_size", 1))
+        return str(mode), directory, batch_size
 
     def _release_decode_graphs(self) -> None:
         """Drop captured decode CUDA graphs and release their cached memory."""
@@ -624,17 +705,19 @@ class ArenoWorker:
     def _sync_role_grads(self, role: WorkerRole) -> None:
         """Sync a role's gradients across DP and TP groups.
 
-        DP: average. TP-replicated value-head params (`role_tp_average=True`)
-        get averaged across the whole world; TP-sharded params marked with
-        `tp_grad_allreduce` get summed.
+        All optimizer residency modes keep the original full-gradient DP
+        synchronization path.
+        TP-replicated value-head params (`role_tp_average=True`) get averaged
+        across TP; TP-sharded params marked with `tp_grad_allreduce` get summed.
         """
         ctx = get_tp_context()
         if ctx.dp_size > 1:
             for param in role.parameters():
                 grad = param_grad(param)
-                if grad is not None:
-                    dist.all_reduce(grad, op=dist.ReduceOp.SUM, group=ctx.dp_group)
-                    grad.div_(ctx.dp_size)
+                if grad is None:
+                    continue
+                dist.all_reduce(grad, op=dist.ReduceOp.SUM, group=ctx.dp_group)
+                grad.div_(ctx.dp_size)
         if ctx.world_size > 1:
             for param in role.parameters():
                 grad = param_grad(param)
@@ -650,6 +733,19 @@ class ArenoWorker:
         """Persist the actor's weights to disk (rank 0 returns the resolved path)."""
         self._prepare_actor_onloaded()
         path = save_model_weights(self.model, self.config.model, payload.path, self.config.model_path)
+        return {"path": path} if path is not None else None
+
+    def export_adapter(self, payload: ExportAdapterPayload) -> dict | None:
+        """Write the native adapter in standard PEFT format."""
+
+        if self.adapter_registry is None:
+            raise RuntimeError("export_adapter requires native LoRA")
+        self._prepare_actor_onloaded()
+        path = export_peft_adapter(
+            self.adapter_registry,
+            payload.path,
+            base_model_name_or_path=(self.config.base_model_name_or_path or self.config.model_path),
+        )
         return {"path": path} if path is not None else None
 
 
@@ -730,6 +826,7 @@ def _build_rollout_from_tensor_row_ids(
     finish_reasons: list[str],
     row_ids: list[int],
     truncate_stop_token_ids: tuple[int, ...],
+    routing_buffer: torch.Tensor | None = None,
 ) -> RolloutOutput:
     """Build a RolloutOutput for non-contiguous completed tensor rows."""
 
@@ -747,6 +844,7 @@ def _build_rollout_from_tensor_row_ids(
         torch.tensor(row[: len(response)], dtype=torch.float32)
         for row, response in zip(logprob_rows_cpu, response_ids, strict=True)
     ]
+    routed_experts = _completed_routing_rows(prompt_ids, response_ids, row_ids, routing_buffer)
     input_ids, attention_mask, response_mask, padded_logprobs = pad_rollout_rows(prompt_ids, response_ids, logprob_rows)
     return RolloutOutput(
         prompt_ids=prompt_ids,
@@ -757,7 +855,25 @@ def _build_rollout_from_tensor_row_ids(
         logprobs=padded_logprobs,
         finish_reason=finish_reason,
         metrics=None,
+        routed_experts=routed_experts,
     )
+
+
+def _completed_routing_rows(
+    prompt_ids: list[list[int]],
+    response_ids: list[list[int]],
+    row_ids: list[int],
+    routing_buffer: torch.Tensor | None,
+) -> list[torch.Tensor] | None:
+    """Materialize completed R3 rows without delaying continuous-batch replies."""
+
+    if routing_buffer is None:
+        return None
+    expected = [max(len(prompt) + len(response) - 1, 0) for prompt, response in zip(prompt_ids, response_ids)]
+    max_expected = max(expected, default=0)
+    row_index = torch.tensor(row_ids, device=routing_buffer.device, dtype=torch.long)
+    materialized = routing_buffer.index_select(0, row_index)[:, :max_expected].cpu()
+    return [materialized[row, :count].contiguous() for row, count in enumerate(expected)]
 
 
 def _build_rollout_from_tensor_rows(
@@ -818,6 +934,8 @@ def _slice_rollout_output(output: RolloutOutput, start: int, end: int) -> Rollou
         logprobs=logprobs,
         finish_reason=finish_reason,
         metrics=output.metrics,
+        adapter_version=output.adapter_version,
+        routed_experts=output.routed_experts[start:end] if output.routed_experts is not None else None,
     )
 
 
@@ -840,4 +958,6 @@ def _slice_rollout_output_rows(output: RolloutOutput, rows: list[int]) -> Rollou
         logprobs=logprobs,
         finish_reason=finish_reason,
         metrics=output.metrics,
+        adapter_version=output.adapter_version,
+        routed_experts=[output.routed_experts[row] for row in rows] if output.routed_experts is not None else None,
     )

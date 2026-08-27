@@ -86,6 +86,7 @@ class ColumnParallelLinear(nn.Module):
         input_grad_allreduce: bool = True,
     ):
         super().__init__()
+        self.lora_slot: nn.Module | None = None
         ctx = get_tp_context()
         start, end = _shard_range(out_features, ctx.rank, ctx.world_size)
         self.in_features = in_features
@@ -98,6 +99,11 @@ class ColumnParallelLinear(nn.Module):
         mark_tensor_parallel_parameter(self.weight, True, sequence_parallel=True)
         mark_tensor_parallel_parameter(self.bias, True, sequence_parallel=True)
         self.reset_parameters()
+
+    def install_lora(self, slot: nn.Module) -> None:
+        """Attach one adapter before compilation and optimizer construction."""
+
+        self.lora_slot = slot
 
     def reset_parameters(self) -> None:
         nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
@@ -116,6 +122,8 @@ class ColumnParallelLinear(nn.Module):
         elif self.input_grad_allreduce:
             x = copy_to_tensor_parallel_region(x)
         out = _areno_linear_forward(x, self.weight, self.bias)
+        if self.lora_slot is not None and self.lora_slot.enabled:
+            out = out + self.lora_slot(x)
         if self.gather_output:
             # Concatenate column-shards along the last dim to recover the
             # full output (only used when downstream code needs it dense).
@@ -135,6 +143,8 @@ class MergedColumnParallelLinear(nn.Module):
 
     def __init__(self, in_features: int, out_features: list[int] | tuple[int, ...], bias: bool = False):
         super().__init__()
+        self.lora_slots = nn.ModuleDict()
+        self._lora_component_indices: dict[str, int] = {}
         ctx = get_tp_context()
         if not out_features:
             raise ValueError("out_features must not be empty")
@@ -152,6 +162,12 @@ class MergedColumnParallelLinear(nn.Module):
         mark_tensor_parallel_parameter(self.bias, True, sequence_parallel=True)
         self.reset_parameters()
 
+    def install_lora_component(self, component: str, component_index: int, slot: nn.Module) -> None:
+        """Attach one canonical adapter to a fused output component."""
+
+        self.lora_slots[component] = slot
+        self._lora_component_indices[component] = component_index
+
     def reset_parameters(self) -> None:
         nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
         if self.bias is not None:
@@ -165,7 +181,16 @@ class MergedColumnParallelLinear(nn.Module):
             if is_sequence_parallel_active()
             else copy_to_tensor_parallel_region(x)
         )
-        return _areno_linear_forward(x, self.weight, self.bias)
+        out = _areno_linear_forward(x, self.weight, self.bias)
+        if not self.lora_slots:
+            return out
+        parts = list(out.split(self.local_out_features, dim=-1))
+        for component, slot in self.lora_slots.items():
+            if not slot.enabled:
+                continue
+            index = self._lora_component_indices[component]
+            parts[index] = parts[index] + slot(x)
+        return torch.cat(parts, dim=-1)
 
 
 class QKVParallelLinear(MergedColumnParallelLinear):
@@ -186,6 +211,8 @@ class QKVParallelLinear(MergedColumnParallelLinear):
         bias: bool = False,
     ):
         nn.Module.__init__(self)
+        self.lora_slots = nn.ModuleDict()
+        self._lora_component_indices: dict[str, int] = {}
         self.head_dim = head_dim
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
@@ -224,6 +251,7 @@ class RowParallelLinear(nn.Module):
         self.out_features = out_features
         self.local_in_features = end - start
         self.input_is_parallel = input_is_parallel
+        self.lora_slot: nn.Module | None = None
         self.weight = nn.Parameter(torch.empty(out_features, self.local_in_features))
         # Bias lives on each rank as a replica (not TP-sharded) and is added
         # post-reduction so it is not summed `world_size` times.
@@ -231,6 +259,11 @@ class RowParallelLinear(nn.Module):
         mark_tensor_parallel_parameter(self.weight, True, sequence_parallel=True)
         mark_tensor_parallel_parameter(self.bias, False, sequence_parallel=True)
         self.reset_parameters()
+
+    def install_lora(self, slot: nn.Module) -> None:
+        """Attach the adapter before compilation and optimizer construction."""
+
+        self.lora_slot = slot
 
     def reset_parameters(self) -> None:
         nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
@@ -246,6 +279,8 @@ class RowParallelLinear(nn.Module):
             start, end = _shard_range(self.in_features, ctx.rank, ctx.world_size)
             x = x[..., start:end]
         out = _areno_linear_forward(x, self.weight, None)
+        if self.lora_slot is not None and self.lora_slot.enabled:
+            out = out + self.lora_slot(x)
         # Partial sum -> cross-rank reduction. SP mode also re-shards along
         # the sequence dim via reduce-scatter, saving activation memory.
         out = reduce_scatter_to_sequence_parallel_region(out) if is_sequence_parallel_active() else all_reduce(out)

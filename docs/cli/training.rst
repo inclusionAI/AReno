@@ -98,6 +98,13 @@ Built-in algorithms: ``sft``, ``dpo``, ``gspo``, ``grpo``, ``ppo``.
 
 ``world-size`` must be divisible by ``tp-size``.
 
+``--sequence-parallel / --no-sequence-parallel``
+   Explicitly enable or disable sequence parallelism for CUDA training. When
+   neither flag is passed, AReno uses ``sequence_parallel`` from the loaded
+   checkpoint's model configuration. The CLI value takes precedence over the
+   model configuration. Sequence parallelism is inactive when ``tp-size`` is
+   ``1`` even if it is requested.
+
 ``--train-devices TEXT``
    Comma-separated logical CUDA device indices or inclusive ranges used by
    training. For example, ``0..8,11..29`` includes both endpoints. AReno
@@ -129,6 +136,11 @@ signal.
    Maximum reusable GPU buffer used while streaming policy weights from the
    training engine to the rollout engine. Default: ``64`` MiB.
    CUDA only. MLX does not copy policy weights to a second rollout model.
+
+R3 is enabled automatically for sparse-MoE RL training on CUDA. AReno records
+each token's expert ids during rollout and reuses those ids in the policy
+training forward while recomputing routing weights from the current router
+logits. Dense models and the MLX backend retain their original paths.
 
 For example, the following uses four visible GPUs for training and two
 different visible GPUs for rollout:
@@ -330,6 +342,28 @@ in its description; flags for other algorithms are ignored.
 ``--activation-checkpointing / --no-activation-checkpointing``
    Enable decoder-layer activation recompute during training. Default:
    enabled.
+
+``--optimizer-state-offload [none|cpu|disk]``
+   Select CUDA optimizer-state residency. ``none`` keeps state on the training
+   device. ``cpu`` moves state to host memory between train calls. ``disk``
+   stages a bounded bucket group through host memory and stores the state in
+   persistent writable raw-mmap files, copying each bucket back only when the
+   next optimizer step needs it. Default: ``none``. This option is supported
+   only by the CUDA backend and applies to both FP32-master AdamW and
+   ``--adam-8bit``.
+
+``--optimizer-state-offload-dir DIRECTORY``
+   Required when ``--optimizer-state-offload disk`` is selected. Use a fast
+   local NVMe filesystem with enough free capacity for the optimizer state.
+   AReno creates a process-private subdirectory and removes it on normal
+   optimizer onload or teardown. The mmap files are runtime scratch state,
+   not restartable checkpoints; use ``--save-path`` for checkpointing.
+
+``--optimizer-state-offload-batch-size INTEGER``
+   Number of optimizer buckets assigned to each persistent mmap and flushed
+   together. Default: ``1``. A smaller value bounds CPU staging memory more
+   tightly; a larger value creates fewer files and flush calls. This setting
+   is used only by disk offload.
 
 ``--lr FLOAT``
    Policy optimizer learning rate. Default: ``1.0e-6``.

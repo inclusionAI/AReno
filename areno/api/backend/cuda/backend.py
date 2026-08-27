@@ -1,7 +1,7 @@
 """CUDA adapter from the public `Trainer` API onto `ArenoEngine`.
 
-areno runs a co-located train + rollout engine in the same process group.
-This file is the thin glue that:
+areno can run colocated or independent train and rollout engines. This file is
+the thin glue that:
 
 - starts the engine with the dataclass-validated `CudaConfig`,
 - forwards rollout requests through `generate_rollout` while translating
@@ -24,11 +24,10 @@ from threading import Lock
 
 from areno.api.backend.base import Backend, BackendCapabilities, register_backend
 from areno.api.backend.common import (
-    MetricReduction,
     expand_prompt_features,
     expand_prompts,
     group_rollout_sequences,
-    metric_reduction,
+    reduce_microbatch_metrics,
 )
 from areno.api.backend.cuda.checkpoint import save_checkpoint
 from areno.api.backend.cuda.generation import rollout_options
@@ -157,11 +156,11 @@ class CudaBackend(Backend):
             raise ValueError(f"training device count must equal world_size={world_size}")
         if cfg.rollout_tp_size is not None and cfg.rollout_devices is None:
             raise ValueError("rollout_tp_size requires rollout_devices")
-
         if not cfg.uses_separate_rollout_engine():
             self._train_engine = ArenoEngine.from_pretrained(
                 cfg.model_path or ctx.model_path,
                 tp_size=tp_size,
+                sequence_parallel=cfg.sequence_parallel,
                 dp_size=dp_size,
                 devices=devices,
                 dummy_load=cfg.dummy_load,
@@ -169,6 +168,9 @@ class CudaBackend(Backend):
                 runtime_config=RuntimeConfig(**cfg.runtime),
                 loss_fn=dispatch_loss,
                 policy_sync_bucket_mb=cfg.policy_sync_bucket_mb,
+                lora_config=cfg.lora,
+                reference_mode=cfg.reference_mode,
+                base_model_name_or_path=cfg.base_model_name_or_path,
             )
             return
         self._policy_sync_bucket_bytes = cfg.policy_sync_bucket_mb * 1024 * 1024
@@ -210,6 +212,7 @@ class CudaBackend(Backend):
         common = {
             "dummy_load": cfg.dummy_load,
             "runtime_config": RuntimeConfig(**cfg.runtime),
+            "sequence_parallel": cfg.sequence_parallel,
             "start": False,
             "policy_sync_bucket_mb": cfg.policy_sync_bucket_mb,
         }
@@ -221,6 +224,9 @@ class CudaBackend(Backend):
             optimizer_config=OptimizerConfig(**cfg.optimizer),
             loss_fn=dispatch_loss,
             role="train",
+            lora_config=cfg.lora,
+            reference_mode=cfg.reference_mode,
+            base_model_name_or_path=cfg.base_model_name_or_path,
             cluster_kwargs={"world_spec": world_spec, "partition": train_partition},
             **common,
         )
@@ -234,6 +240,8 @@ class CudaBackend(Backend):
             runtime_config=rollout_runtime,
             loss_fn=None,
             role="rollout",
+            lora_config=cfg.lora,
+            base_model_name_or_path=cfg.base_model_name_or_path,
             policy_sync_bucket_mb=cfg.policy_sync_bucket_mb,
             start=False,
             cluster_kwargs={"world_spec": world_spec, "partition": rollout_partition},
@@ -351,10 +359,19 @@ class CudaBackend(Backend):
         # Repack the flat result into per-prompt groups of `n_samples`
         # completions so downstream code can iterate `for item, result`.
         sequences = [
-            RolloutSequence(resp_tokens=tokens, resp_logprobs=rollout.logprobs[index, : len(tokens)].tolist())
+            RolloutSequence(
+                resp_tokens=tokens,
+                resp_logprobs=rollout.logprobs[index, : len(tokens)].tolist(),
+                routed_experts=(rollout.routed_experts[index] if rollout.routed_experts is not None else None),
+            )
             for index, tokens in enumerate(rollout.response_ids)
         ]
-        return group_rollout_sequences(sequences, len(prompt_tokens), n_samples)
+        return group_rollout_sequences(
+            sequences,
+            len(prompt_tokens),
+            n_samples,
+            adapter_version=rollout.adapter_version,
+        )
 
     def begin_rollout_session(self, ctx: Context) -> None:
         """Prepare colocated actor state before rollout requests are issued."""
@@ -455,10 +472,19 @@ class CudaBackend(Backend):
             sampling_params=options["sampling_params"],
         )
         sequences = [
-            RolloutSequence(resp_tokens=tokens, resp_logprobs=rollout.logprobs[index, : len(tokens)].tolist())
+            RolloutSequence(
+                resp_tokens=tokens,
+                resp_logprobs=rollout.logprobs[index, : len(tokens)].tolist(),
+                routed_experts=(rollout.routed_experts[index] if rollout.routed_experts is not None else None),
+            )
             for index, tokens in enumerate(rollout.response_ids)
         ]
-        return group_rollout_sequences(sequences, len(prompt_tokens), n_samples)
+        return group_rollout_sequences(
+            sequences,
+            len(prompt_tokens),
+            n_samples,
+            adapter_version=rollout.adapter_version,
+        )
 
     def train(
         self,
@@ -479,7 +505,6 @@ class CudaBackend(Backend):
             self._step_e2e_start = train_start
             self._step_rollout_time_s = 0.0
         losses = []
-        metrics: dict[str, float] = {}
         # Slice the batch into `mini_bs` chunks; each chunk becomes one tensor
         # pack and the loss function is stamped onto each pack so the engine's
         # forward worker can call it without having to know about the loss API.
@@ -501,28 +526,20 @@ class CudaBackend(Backend):
             )
         stats_list = engine.step(packs, gradient_accumulation_steps=gradient_accumulation_steps)
         if self._separate_rollout and any(bool(stats.stepped) for stats in stats_list):
-            self._train_policy_version += 1
+            adapter_versions = [stats.adapter_version for stats in stats_list if stats.adapter_version is not None]
+            self._train_policy_version = (
+                int(adapter_versions[-1]) if adapter_versions else self._train_policy_version + 1
+            )
         train_time_s = time.perf_counter() - train_start
-        # `first_policy_metrics` keeps the per-step rollout/policy diagnostics
-        # untouched (we want the value seen on the first microbatch, not the
-        # average over microbatches), while everything else gets mean-averaged.
-        first_policy_metrics: dict[str, float] = {}
-        averaged_metric_counts: dict[str, int] = {}
+        metric_rows: list[dict[str, float]] = []
         for stats in stats_list:
             losses.append(stats.loss)
             if stats.metrics:
-                for key, value in stats.metrics.items():
-                    key = str(key)
-                    value_float = float(value)
-                    if metric_reduction(key) is MetricReduction.FIRST:
-                        first_policy_metrics.setdefault(key, value_float)
-                    else:
-                        metrics[key] = metrics.get(key, 0.0) + value_float
-                        averaged_metric_counts[key] = averaged_metric_counts.get(key, 0) + 1
-        if metrics:
-            metrics = {key: value / averaged_metric_counts[key] for key, value in metrics.items()}
-        metrics.update(first_policy_metrics)
+                metric_rows.append({str(key): float(value) for key, value in stats.metrics.items()})
+        metrics = reduce_microbatch_metrics(metric_rows)
         result = {"loss": sum(losses) / max(len(losses), 1)}
+        if stats_list and stats_list[-1].adapter_version is not None:
+            result["adapter_version"] = stats_list[-1].adapter_version
         result.update(metrics)
         result.update(self._pending_policy_sync_metrics)
         self._pending_policy_sync_metrics = {}
@@ -544,6 +561,10 @@ class CudaBackend(Backend):
         engine = self._require_train_engine()
         return save_checkpoint(engine, path)
 
+    def export_adapter(self, ctx: Context, path: str) -> str:
+        del ctx
+        return self._require_train_engine().export_adapter(path)
+
     def ensure_roles(self, ctx: Context, roles: dict[str, ModelRole]) -> None:
         engine = self._require_train_engine()
         engine.ensure_roles(roles)
@@ -555,16 +576,20 @@ class CudaBackend(Backend):
         token_rows: list[list[int]],
         *,
         features: list[dict | None] | None = None,
+        routed_experts: list[object] | None = None,
         microbatch_size: int = 8,
     ) -> list[list[float]]:
         engine = self._require_train_engine()
         if features is not None and len(features) != len(token_rows):
             raise ValueError("features must have the same length as token_rows")
+        if routed_experts is not None and len(routed_experts) != len(token_rows):
+            raise ValueError("routed_experts must have the same length as token_rows")
         return engine.score_logprobs(
             role,
             token_rows,
             pad_token_id=pad_token_id(ctx),
             features=features,
+            routed_experts=routed_experts,
             microbatch_size=microbatch_size,
         )
 
@@ -601,7 +626,7 @@ class CudaBackend(Backend):
         # value loss path that takes (cliprange_value, value_loss_coef)).
         packs = []
         for start in range(0, len(batch_data), mini_bs):
-            packs.append(make_train_pack(batch_data[start : start + mini_bs]))
+            packs.append(make_train_pack(batch_data[start : start + mini_bs], include_routing_replay=False))
         return engine.train_values(
             role,
             packs,

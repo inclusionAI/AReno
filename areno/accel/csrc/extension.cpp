@@ -15,7 +15,10 @@ std::vector<torch::Tensor> areno_linear_backward_cuda(
     torch::Tensor grad_output,
     torch::Tensor input,
     torch::Tensor weight,
-    bool use_bias);
+    bool use_bias,
+    bool need_grad_input,
+    bool need_grad_weight,
+    bool need_grad_bias);
 torch::Tensor areno_causal_attention_forward_cuda(
     torch::Tensor q,
     torch::Tensor k,
@@ -71,12 +74,16 @@ std::vector<torch::Tensor> areno_grouped_linear_backward_cuda(
     torch::Tensor grad_output,
     torch::Tensor input,
     torch::Tensor weight,
-    std::vector<int64_t> tokens_per_expert);
+    std::vector<int64_t> tokens_per_expert,
+    bool need_grad_input,
+    bool need_grad_weight);
 std::vector<torch::Tensor> areno_grouped_linear_backward_counts_cuda(
     torch::Tensor grad_output,
     torch::Tensor input,
     torch::Tensor weight,
-    torch::Tensor tokens_per_expert);
+    torch::Tensor tokens_per_expert,
+    bool need_grad_input,
+    bool need_grad_weight);
 std::vector<torch::Tensor> areno_depthwise_causal_conv1d_silu_forward_cuda(torch::Tensor input, torch::Tensor weight);
 std::vector<torch::Tensor> areno_depthwise_causal_conv1d_silu_decode_cuda(
     torch::Tensor current,
@@ -163,8 +170,24 @@ void areno_moe_align_cuda(
     torch::Tensor num_tokens_post_pad,
     torch::Tensor cumsum_buffer,
     bool pad_sorted_token_ids);
+void areno_adamw_fp32_master_step_cuda(
+    torch::Tensor model,
+    torch::Tensor low_bits,
+    torch::Tensor round_up_bits,
+    torch::Tensor grad,
+    torch::Tensor exp_avg,
+    torch::Tensor exp_avg_sq,
+    int64_t state_offset,
+    double beta1,
+    double beta2,
+    double effective_lr,
+    double weight_decay,
+    double eps,
+    double step_size,
+    double bias_correction2_sqrt);
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("areno_adamw_fp32_master_step", &areno_adamw_fp32_master_step_cuda, "ARENO compact FP32-master AdamW step");
   m.def("areno_silu_and_mul", &areno_silu_and_mul_cuda, "ARENO SiLU and multiply");
   m.def("areno_gelu_tanh_and_mul", &areno_gelu_tanh_and_mul_cuda, "ARENO tanh GELU and multiply");
   m.def("areno_silu", &areno_silu_cuda, "ARENO SiLU");

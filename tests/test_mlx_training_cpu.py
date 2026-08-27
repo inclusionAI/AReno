@@ -9,11 +9,13 @@ import numpy as np
 import pytest
 
 from areno.api.backend.common import (
+    LOGP_METRIC_WEIGHT,
     MetricReduction,
     TrainMetric,
     accumulation_group_size,
     accumulation_steps,
     metric_reduction,
+    reduce_microbatch_metrics,
 )
 from areno.api.backend.mlx.generation import ContinuousBatchScheduler, GenerationConfig, _Request
 from areno.api.backend.mlx.provider import parameter_group
@@ -68,9 +70,37 @@ def test_accumulation_windows_match_cuda_mini_batch_semantics():
 def test_policy_metric_reductions_use_typed_names():
     assert str(TrainMetric.LOGP_ABS_DIFF_MEAN) == "logp_abs_diff_mean"
     assert str(MetricReduction.FIRST) == "first"
-    assert metric_reduction(TrainMetric.LOGP_ABS_DIFF_MEAN) is MetricReduction.FIRST
-    assert metric_reduction(str(TrainMetric.LOGP_ABS_DIFF_MEAN)) is MetricReduction.FIRST
+    assert metric_reduction(TrainMetric.LOGP_ABS_DIFF_MEAN) is MetricReduction.WEIGHTED_MEAN
+    assert metric_reduction(str(TrainMetric.LOGP_ABS_DIFF_MEAN)) is MetricReduction.WEIGHTED_MEAN
+    assert metric_reduction(TrainMetric.RATIO_MEAN) is MetricReduction.FIRST
     assert metric_reduction("policy_loss") is MetricReduction.MEAN
+
+
+def test_logprob_metrics_are_weighted_by_active_tokens_across_microbatches():
+    reduced = reduce_microbatch_metrics(
+        [
+            {
+                TrainMetric.LOGP_ABS_DIFF_MEAN: 0.1,
+                TrainMetric.TRAIN_LOGPROBS_MEAN: -0.2,
+                TrainMetric.RATIO_MEAN: 1.0,
+                "policy_loss": 2.0,
+                LOGP_METRIC_WEIGHT: 2.0,
+            },
+            {
+                TrainMetric.LOGP_ABS_DIFF_MEAN: 0.01,
+                TrainMetric.TRAIN_LOGPROBS_MEAN: -0.5,
+                TrainMetric.RATIO_MEAN: 1.1,
+                "policy_loss": 4.0,
+                LOGP_METRIC_WEIGHT: 8.0,
+            },
+        ]
+    )
+
+    assert reduced[TrainMetric.LOGP_ABS_DIFF_MEAN] == pytest.approx(0.028)
+    assert reduced[TrainMetric.TRAIN_LOGPROBS_MEAN] == pytest.approx(-0.44)
+    assert reduced[TrainMetric.RATIO_MEAN] == pytest.approx(1.0)
+    assert reduced["policy_loss"] == pytest.approx(3.0)
+    assert LOGP_METRIC_WEIGHT not in reduced
 
 
 def test_multimodal_projector_group_takes_precedence_over_parent_tower():

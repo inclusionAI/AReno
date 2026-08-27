@@ -4,6 +4,7 @@ import unittest
 
 import torch
 
+from areno.engine.parallel.collectives import is_sequence_parallel_active
 from areno.engine.runtime.metadata import InferMeta, TrainMeta
 from areno.engine.runtime.recompute import checkpoint_layer, checkpoint_routed_moe_layer, should_checkpoint_layer
 
@@ -58,6 +59,26 @@ class RecomputeTest(unittest.TestCase):
 
         self.assertEqual(out.tolist(), [2.0])
         self.assertEqual(calls["count"], 1)
+
+    def test_checkpoint_recompute_restores_sequence_parallel_context(self):
+        """Backward recompute must use the same SP layout as the forward."""
+        sequence_parallel_states = []
+
+        def layer_fn(x):
+            sequence_parallel_states.append(is_sequence_parallel_active())
+            return (x * x).sum()
+
+        x = torch.tensor([1.0, 2.0, 3.0], requires_grad=True)
+        out = checkpoint_layer(
+            layer_fn,
+            x,
+            train_meta=TrainMeta(sequence_parallel=True, activation_checkpointing=True),
+            infer_meta=None,
+        )
+        out.backward()
+
+        self.assertGreaterEqual(len(sequence_parallel_states), 2)
+        self.assertTrue(all(sequence_parallel_states))
 
     def test_routed_moe_checkpoint_reuses_one_route_and_preserves_gradients(self):
         """Dynamic routing stays outside recompute while all gradients survive."""

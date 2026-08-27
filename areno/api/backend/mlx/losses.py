@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from areno.api.backend.common import TrainMetric
+from areno.api.backend.common import LOGP_METRIC_WEIGHT, TrainMetric
 
 MlxLoss = Callable[[dict[str, Any], Any], tuple[Any, dict[str, Any]]]
 
@@ -178,6 +178,7 @@ def _policy_stats(batch, logprobs, ratio, loss):
         TrainMetric.RATIO_STD: mx.sqrt(mx.maximum(masked_mean((ratio - masked_mean(ratio)) ** 2), mx.array(0.0))),
         "advantage_mean": masked_mean(batch["advantages"]),
         "response_len": mx.maximum(mask.sum(axis=-1), mx.array(1.0)).mean(),
+        LOGP_METRIC_WEIGHT: count,
         TrainMetric.ROLLOUT_LOGPROBS_MEAN: masked_mean(old),
         TrainMetric.TRAIN_LOGPROBS_MEAN: masked_mean(mx.stop_gradient(logprobs)),
         TrainMetric.LOGP_DIFF_MEAN: masked_mean(diff),

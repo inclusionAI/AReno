@@ -26,7 +26,7 @@ from areno.api.algorithms import (
     register_algorithm,
     sft_loss_fn,
 )
-from areno.api.config import CudaConfig, MlxConfig, default_backend_type
+from areno.api.config import CudaConfig, LoraConfig, MlxConfig, default_backend_type
 from areno.api.data import PromptBatch, PromptItem
 from areno.api.models import (
     BackendType,
@@ -49,6 +49,7 @@ __all__ = [
     "AlgorithmSpec",
     "CudaConfig",
     "MlxConfig",
+    "LoraConfig",
     "PromptBatch",
     "PromptItem",
     "AgentBatch",
