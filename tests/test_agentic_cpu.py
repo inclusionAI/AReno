@@ -685,7 +685,7 @@ def test_agentic_trajectory_filter_respects_configured_max_context_len():
     assert diagnostics["top"][0]["tokens"] == 6
 
 
-def test_agentic_trajectory_filter_counts_concatenated_turns():
+def test_agentic_trajectory_filter_checks_each_exact_turn():
     trainer = _FakeTrainer(world_size=1, tp_size=1)
     session = RolloutSession(trainer, sampling_params=_FakeSamplingParams(), loss_mask_policy=LossMaskPolicy())
     item = agentic.AgentItem(record={}, prompt="p0", input_tokens=[1], prompt_index=0, sample_index=0)
@@ -700,9 +700,14 @@ def test_agentic_trajectory_filter_counts_concatenated_turns():
     policy.config = SimpleNamespace(max_context_len=4)
     policy.areno = SimpleNamespace(model_context_len=lambda: 100)
 
-    kept, filtered, diagnostics = policy._filter_overlong_agent_samples(session, [first], params)
+    kept, filtered, diagnostics = policy._filter_overlong_agent_samples(
+        session,
+        [first],
+        params,
+        turn_samples_by_item={(0, 0): [first, second]},
+    )
 
-    assert len(first.token_row) == 5
+    assert len(first.token_row) == 3
     assert kept == []
     assert filtered == 1
     assert diagnostics["top"][0]["tokens"] == 5
