@@ -347,6 +347,89 @@ def test_async_single_request_payload_uses_configured_local_capacity():
     assert cluster.payload.max_running_seqs == 16
 
 
+def test_async_rollout_submits_rows_beyond_running_capacity_as_worker_pending():
+    """One RL batch should not become serial coordinator-side chunks."""
+
+    class ClusterStub:
+        def __init__(self):
+            self.payloads = []
+
+        async def call_async(self, op, payload, **kwargs):
+            del kwargs
+            self.payloads.append(payload)
+            assert op is Op.INFER_ROLLOUT
+            prompts = payload.prompts_by_dp[0]
+            return [
+                _build_rollout_from_rows(
+                    prompts,
+                    [[prompt[0] + 10] for prompt in prompts],
+                    ["stop"] * len(prompts),
+                    [torch.tensor([-0.1], dtype=torch.float32) for _ in prompts],
+                    metrics=None,
+                )
+            ]
+
+    cluster = ClusterStub()
+    engine = object.__new__(ArenoEngine)
+    engine.cluster = cluster
+    engine.config = SimpleNamespace(tp_size=1, dp_size=1, runtime=SimpleNamespace(kv_block_size=16))
+
+    result = asyncio.run(
+        engine._generate_rollout_async_once(
+            [[1], [2], [3], [4]],
+            max_new_tokens=16,
+            max_running_prompts=2,
+            eos_token_id=None,
+            sampling_params=SamplingParams(),
+        )
+    )
+
+    assert len(cluster.payloads) == 1
+    assert cluster.payloads[0].prompts_by_dp == [[[1], [2], [3], [4]]]
+    assert cluster.payloads[0].max_running_seqs == 2
+    assert result.response_ids == [[11], [12], [13], [14]]
+
+
+def test_blocking_rollout_submits_rows_beyond_running_capacity_as_worker_pending():
+    """The blocking API should use the same bounded worker-side pending queue."""
+
+    class ClusterStub:
+        def __init__(self):
+            self.payloads = []
+
+        def call(self, op, payload):
+            self.payloads.append(payload)
+            assert op is Op.INFER_ROLLOUT
+            prompts = payload.prompts_by_dp[0]
+            return [
+                _build_rollout_from_rows(
+                    prompts,
+                    [[prompt[0] + 10] for prompt in prompts],
+                    ["stop"] * len(prompts),
+                    [torch.tensor([-0.1], dtype=torch.float32) for _ in prompts],
+                    metrics=None,
+                )
+            ]
+
+    cluster = ClusterStub()
+    engine = object.__new__(ArenoEngine)
+    engine.cluster = cluster
+    engine.config = SimpleNamespace(tp_size=1, dp_size=1, runtime=SimpleNamespace(kv_block_size=16))
+
+    result = engine.generate_rollout(
+        [[1], [2], [3], [4]],
+        max_new_tokens=16,
+        max_running_prompts=2,
+        eos_token_id=None,
+        sampling_params=SamplingParams(),
+    )
+
+    assert len(cluster.payloads) == 1
+    assert cluster.payloads[0].prompts_by_dp == [[[1], [2], [3], [4]]]
+    assert cluster.payloads[0].max_running_seqs == 2
+    assert result.response_ids == [[11], [12], [13], [14]]
+
+
 def test_async_single_prompt_requests_round_robin_across_dp_ranks():
     """Independent serve requests should not all land on DP rank 0."""
 

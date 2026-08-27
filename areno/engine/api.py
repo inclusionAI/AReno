@@ -281,9 +281,10 @@ class ArenoEngine:
         :class:`RolloutOutput` carries response token ids and finish reasons
         merged across DP ranks in the original input order.
 
-        Prompts are chunked by DP size and prefill-token budget so each worker
-        can run bounded prefill batches while decode continues to use a fixed
-        paged-KV allocation.
+        All prompts are submitted to the worker scheduler in one payload. The
+        worker keeps at most ``max_running_prompts`` rows active and admits
+        pending rows under the prefill-token and paged-KV budgets as slots are
+        released.
         """
 
         if not prompts:
@@ -305,12 +306,11 @@ class ArenoEngine:
         # Worst-case per-rank prefill = every local running slot prefilling its
         # full prompt. The public max_running_prompts value is global.
         max_prefill_tokens = local_max_running_prompts * rollout_max_prompt_len
-        chunks = _chunk_prompts_for_prefill_budget(
-            prompts,
-            max_running_prompts=max_running_prompts,
-            dp_size=dp_size,
-            max_prefill_tokens=max_prefill_tokens,
-        )
+        # InferenceBatchState already owns bounded admission and continuous
+        # refill. Keeping the whole request in one worker payload prevents the
+        # coordinator from serialising independent max-running-sized chunks and
+        # repeatedly paying their long decode tails.
+        chunks = [prompts]
         for chunk in chunks:
             # Global offset of this chunk inside the user's input list, used to
             # restore original indices when merging DP results.
@@ -326,10 +326,9 @@ class ArenoEngine:
             prompt_indices_by_dp = split_list_by_dp(
                 list(range(chunk_start, chunk_start + len(chunk))), int(self.config.dp_size)
             )
-            # Largest per-rank queue depth for the current chunk; floor of 1
-            # avoids zero-sized KV pools for trailing chunks.
-            current_local_running = max(max((len(rows) for rows in prompts_by_dp), default=0), 1)
-            local_max_running = current_local_running
+            # The payload may contain more pending rows than the KV pool can
+            # run at once. Keep allocation bounded by the configured capacity.
+            local_max_running = local_max_running_prompts
             # Honour per-prompt cache length if any prompt+max_new exceeds the
             # global ceiling computed from rollout_max_prompt_len.
             max_cache_len = max(max(len(prompt) + max_new_tokens for prompt in chunk), rollout_max_cache_len)
@@ -465,12 +464,10 @@ class ArenoEngine:
         dp_start = next(self._async_dp_cursor) % dp_size
         local_max_running_prompts = max(ceil_div(int(max_running_prompts), dp_size), 1)
         max_prefill_tokens = local_max_running_prompts * rollout_max_prompt_len
-        chunks = _chunk_prompts_for_prefill_budget(
-            prompts,
-            max_running_prompts=max_running_prompts,
-            dp_size=dp_size,
-            max_prefill_tokens=max_prefill_tokens,
-        )
+        # InferenceBatchState already owns bounded admission and continuous
+        # refill. Submit all rows together so pending prompts can enter a free
+        # slot without waiting for an earlier coordinator chunk to finish.
+        chunks = [prompts]
         for chunk in chunks:
             chunk_start = sum(len(output.prompt_ids) for output in outputs)
             prompts_by_dp = _split_list_by_dp_with_offset(chunk, dp_size, dp_start)
@@ -481,8 +478,7 @@ class ArenoEngine:
             prompt_indices_by_dp = _split_list_by_dp_with_offset(
                 list(range(chunk_start, chunk_start + len(chunk))), dp_size, dp_start
             )
-            current_local_running = max(max((len(rows) for rows in prompts_by_dp), default=0), 1)
-            capacity_local_running = local_max_running_prompts if cancel_flags is None else current_local_running
+            capacity_local_running = local_max_running_prompts
             max_cache_len = max(max(len(prompt) + max_new_tokens for prompt in chunk), rollout_max_cache_len)
             max_blocks_per_seq = ceil_div(max_cache_len, self.config.runtime.kv_block_size)
             payload = RolloutPayload(
