@@ -10,7 +10,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from areno.accel.ops import is_cuda_graph_capturing
+from areno.accel.utils import is_cuda_graph_capturing
 from areno.engine.config import ModelConfig, _parse_dtype
 from areno.engine.layers.attention import CausalSelfAttention
 from areno.engine.layers.linear import MergedColumnParallelLinear, RowParallelLinear, mark_tensor_parallel_parameter
