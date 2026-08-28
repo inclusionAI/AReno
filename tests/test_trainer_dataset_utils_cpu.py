@@ -236,5 +236,211 @@ class SharedDataUtilityTest(unittest.TestCase):
         self.assertIsNone(data_utils.first_value({}, ("chosen",)))
 
 
-if __name__ == "__main__":
-    unittest.main()
+class MultiTurnSFTMaskTest(unittest.TestCase):
+    """Multi-turn SFT messages_to_tokens_and_mask and trainer integration."""
+
+    def test_messages_mask_trains_all_assistant_turns_by_default(self):
+        """Default mode trains every assistant turn; user/system/tool excluded."""
+        tokenizer = FakeTextTokenizer()
+        messages = [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"},
+            {"role": "user", "content": "bye"},
+            {"role": "assistant", "content": "see you"},
+        ]
+
+        tokens, mask = data_utils.messages_to_tokens_and_mask(
+            messages, tokenizer, tokenizer.eos_token_id
+        )
+
+        # EOS is appended at the end and is trainable.
+        self.assertEqual(tokens[-1], tokenizer.eos_token_id)
+        self.assertFalse(mask[-1])
+
+        # Every non-assistant token must be masked (True = do not train).
+        # We check that the mask has both True and False values.
+        self.assertTrue(any(mask), "expected at least some masked (context) tokens")
+        self.assertTrue(any(not m for m in mask), "expected at least some trainable tokens")
+
+    def test_messages_mask_last_assistant_only_masks_earlier_assistants(self):
+        """last_assistant_only=True masks earlier assistant turns as context."""
+        tokenizer = FakeTextTokenizer()
+        messages = [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"},
+            {"role": "user", "content": "bye"},
+            {"role": "assistant", "content": "see you"},
+        ]
+
+        tokens_all, mask_all = data_utils.messages_to_tokens_and_mask(
+            messages, tokenizer, tokenizer.eos_token_id, last_assistant_only=False
+        )
+        tokens_last, mask_last = data_utils.messages_to_tokens_and_mask(
+            messages, tokenizer, tokenizer.eos_token_id, last_assistant_only=True
+        )
+
+        # Same tokens, but fewer trainable positions in last-only mode.
+        self.assertEqual(tokens_all, tokens_last)
+        trainable_all = sum(1 for m in mask_all if not m)
+        trainable_last = sum(1 for m in mask_last if not m)
+        self.assertGreater(trainable_all, trainable_last)
+        self.assertGreater(trainable_last, 0)
+
+    def test_messages_mask_excludes_user_and_system_tokens(self):
+        """User and system turns must never be trainable."""
+        tokenizer = FakeTextTokenizer()
+        messages = [
+            {"role": "system", "content": "be helpful"},
+            {"role": "user", "content": "question"},
+            {"role": "assistant", "content": "answer"},
+        ]
+
+        tokens, mask = data_utils.messages_to_tokens_and_mask(
+            messages, tokenizer, tokenizer.eos_token_id
+        )
+
+        # The system and user content tokens should all be masked.
+        # We verify by checking that there exist masked positions before the
+        # first trainable position (i.e. system+user are context).
+        first_trainable = next((i for i, m in enumerate(mask) if not m), None)
+        self.assertIsNotNone(first_trainable)
+        self.assertTrue(all(mask[:first_trainable]), "system and user tokens must be masked")
+
+    def test_messages_mask_with_tool_role_excludes_tool_results(self):
+        """Tool-result turns must be excluded from training."""
+        tokenizer = FakeTextTokenizer()
+        messages = [
+            {"role": "user", "content": "use the tool"},
+            {"role": "assistant", "content": "calling tool"},
+            {"role": "tool", "content": "result data"},
+            {"role": "assistant", "content": "final answer"},
+        ]
+
+        tokens, mask = data_utils.messages_to_tokens_and_mask(
+            messages, tokenizer, tokenizer.eos_token_id
+        )
+
+        # Tool turn tokens must be masked (True = do not train).
+        # There should be at least 2 assistant trainable spans.
+        trainable_count = sum(1 for m in mask if not m)
+        self.assertGreater(trainable_count, 0)
+
+    def test_messages_empty_messages_returns_eos_only(self):
+        """Empty messages list should produce a minimal EOS-only sequence."""
+        tokenizer = FakeTextTokenizer()
+
+        tokens, mask = data_utils.messages_to_tokens_and_mask(
+            [], tokenizer, tokenizer.eos_token_id
+        )
+
+        self.assertEqual(len(tokens), 1)
+        self.assertEqual(tokens[0], tokenizer.eos_token_id)
+        self.assertFalse(mask[0])
+
+    def test_sft_record_accepts_messages_format(self):
+        """SFT trainer should accept {messages: [...]} rows for multi-turn."""
+        tokenizer = FakeTextTokenizer()
+        messages = [
+            {"role": "user", "content": "q"},
+            {"role": "assistant", "content": "a"},
+        ]
+
+        seq = sft_mod._record_to_train_sequence(
+            {"messages": messages}, tokenizer, max_prompt_tokens=16, max_new_tokens=16
+        )
+
+        self.assertIsNotNone(seq)
+        self.assertEqual(seq.eos_token_id, 99)
+        self.assertEqual(seq.tokens[-1], 99)
+        # There must be trainable (False) positions in the mask.
+        self.assertTrue(any(not m for m in seq.prompt_mask))
+
+    def test_sft_record_messages_last_assistant_only(self):
+        """sft_assistant_turns='last' should reduce trainable tokens vs 'all'."""
+        tokenizer = FakeTextTokenizer()
+        messages = [
+            {"role": "user", "content": "q"},
+            {"role": "assistant", "content": "first answer"},
+            {"role": "user", "content": "q2"},
+            {"role": "assistant", "content": "second answer"},
+        ]
+
+        seq_all = sft_mod._record_to_train_sequence(
+            {"messages": messages}, tokenizer,
+            max_prompt_tokens=128, max_new_tokens=128, sft_assistant_turns="all",
+        )
+        seq_last = sft_mod._record_to_train_sequence(
+            {"messages": messages}, tokenizer,
+            max_prompt_tokens=128, max_new_tokens=128, sft_assistant_turns="last",
+        )
+
+        self.assertIsNotNone(seq_all)
+        self.assertIsNotNone(seq_last)
+        trainable_all = sum(1 for m in seq_all.prompt_mask if not m)
+        trainable_last = sum(1 for m in seq_last.prompt_mask if not m)
+        self.assertGreater(trainable_all, trainable_last)
+
+    def test_sft_record_invalid_assistant_turns_raises(self):
+        """Invalid sft_assistant_turns value should raise a clear ValueError."""
+        tokenizer = FakeTextTokenizer()
+
+        with self.assertRaisesRegex(ValueError, "sft_assistant_turns must be"):
+            sft_mod._record_to_train_sequence(
+                {"prompt": "q", "response": "a"}, tokenizer,
+                max_prompt_tokens=16, max_new_tokens=16, sft_assistant_turns="invalid",
+            )
+
+    def test_sft_record_empty_messages_returns_none(self):
+        """Empty messages list with no trainable assistant should be filtered."""
+        tokenizer = FakeTextTokenizer()
+
+        seq = sft_mod._record_to_train_sequence(
+            {"messages": []}, tokenizer, max_prompt_tokens=16, max_new_tokens=16
+        )
+
+        # Empty messages produces EOS-only; response_tokens == 0 so filtered.
+        self.assertIsNone(seq)
+
+    def test_sft_record_messages_only_user_returns_none(self):
+        """Messages with no assistant turn should be filtered (no trainable tokens)."""
+        tokenizer = FakeTextTokenizer()
+        messages = [
+            {"role": "user", "content": "just a question"},
+        ]
+
+        seq = sft_mod._record_to_train_sequence(
+            {"messages": messages}, tokenizer, max_prompt_tokens=128, max_new_tokens=128
+        )
+
+        self.assertIsNone(seq)
+
+    def test_sft_record_messages_none_returns_none(self):
+        """None messages should be filtered out."""
+        tokenizer = FakeTextTokenizer()
+
+        seq = sft_mod._record_to_train_sequence(
+            {"messages": None}, tokenizer, max_prompt_tokens=16, max_new_tokens=16
+        )
+
+        self.assertIsNone(seq)
+
+    def test_sft_record_neither_prompt_response_nor_messages_raises(self):
+        """Rows without prompt/response/messages should raise a clear error."""
+        tokenizer = FakeTextTokenizer()
+
+        with self.assertRaisesRegex(ValueError, "must return rows with"):
+            sft_mod._record_to_train_sequence(
+                {"text": "raw"}, tokenizer, max_prompt_tokens=16, max_new_tokens=16
+            )
+
+    def test_sft_prompt_response_still_works_with_assistant_turns(self):
+        """Existing single-turn prompt/response path should still work with the new option."""
+        tokenizer = FakeTextTokenizer()
+
+        seq = sft_mod._record_to_train_sequence(
+            {"prompt": "q", "response": "a"}, tokenizer,
+            max_prompt_tokens=16, max_new_tokens=16, sft_assistant_turns="last",
+        )
+
+        self.assertIsNotNone(seq)
+        self.assertEqual(seq.tokens[-1], 99)

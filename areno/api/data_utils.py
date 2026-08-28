@@ -51,6 +51,110 @@ def response_to_tokens_and_mask(
     return prompt_ids + response_ids, [True] * len(prompt_ids) + [False] * len(response_ids)
 
 
+def _try_chat_template_encoding(
+    messages: list[dict[str, Any]], tokenizer, trainable_assistant_indices: set[int]
+) -> tuple[list[int], list[bool]] | None:
+    """Attempt incremental chat-template encoding; return None if not prefix-stable.
+
+    Tries to encode the conversation turn by turn using the tokenizer's
+    ``chat_template``.  If the re-encoded prefix ever differs from what was
+    already accumulated, the tokenizer is not prefix-stable and we return
+    ``None`` so the caller can fall back to plain-text concatenation.
+    """
+
+    if not getattr(tokenizer, "chat_template", None):
+        return None
+
+    tokens: list[int] = []
+    mask: list[bool] = []
+    for i in range(len(messages)):
+        partial_ids = normalize_token_ids(
+            apply_chat_template_with_options(
+                tokenizer, messages[: i + 1], tokenize=True, add_generation_prompt=False
+            )
+        )
+        # Guard against tokenizers whose chat_template is not prefix-stable.
+        if tokens and partial_ids[: len(tokens)] != tokens:
+            import warnings
+
+            warnings.warn(
+                "tokenizer chat_template is not prefix-stable; "
+                "falling back to plain-text encoding for multi-turn SFT",
+                RuntimeWarning,
+                stacklevel=3,
+            )
+            return None
+        # Only keep tokens added by the current turn.
+        new_tokens = partial_ids[len(tokens):]
+        role = messages[i].get("role", "user")
+        is_trainable = role == "assistant" and i in trainable_assistant_indices
+        tokens.extend(new_tokens)
+        mask.extend([not is_trainable] * len(new_tokens))
+    return tokens, mask
+
+
+def messages_to_tokens_and_mask(
+    messages: list[dict[str, Any]],
+    tokenizer,
+    eos_token_id: int,
+    *,
+    last_assistant_only: bool = False,
+) -> tuple[list[int], list[bool]]:
+    """Encode multi-turn chat messages into tokens with a training mask.
+
+    The mask follows the same convention as
+    :func:`prompt_response_to_tokens_and_mask`: ``True`` means "do not train"
+    (prompt context), ``False`` means "train" (assistant response).
+
+    * user / system / tool turns are always masked out (``True``).
+    * assistant turns are trainable (``False``) unless *last_assistant_only*
+      is set, in which case only the final assistant turn is trainable and
+      earlier assistant turns are treated as context (``True``).
+
+    The function uses the tokenizer chat template when available so turn
+    markers and special tokens match the model's expected format. For base
+    tokenizers without a chat template, a plain-text fallback concatenates
+    ``role: content`` per turn.
+
+    EOS is appended after the last message if not already present, so the
+    model learns to stop.
+    """
+
+    # Determine which assistant turns are trainable.
+    assistant_indices = [
+        i for i, msg in enumerate(messages) if msg.get("role") == "assistant"
+    ]
+    if last_assistant_only and assistant_indices:
+        trainable_assistant_indices = {assistant_indices[-1]}
+    else:
+        trainable_assistant_indices = set(assistant_indices)
+
+    chat_template_tokens = _try_chat_template_encoding(
+        messages, tokenizer, trainable_assistant_indices
+    )
+    if chat_template_tokens is not None:
+        tokens, mask = chat_template_tokens
+    else:
+        # Plain-text fallback: concatenate "role: content" per turn.
+        tokens = []
+        mask = []
+        for i, msg in enumerate(messages):
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            turn_text = f"{role}: {content}"
+            turn_ids = normalize_token_ids(tokenizer.encode(turn_text, add_special_tokens=False))
+            is_trainable = role == "assistant" and i in trainable_assistant_indices
+            tokens.extend(turn_ids)
+            mask.extend([not is_trainable] * len(turn_ids))
+
+    # Append EOS if not already present so the model learns to stop.
+    if eos_token_id is not None and (not tokens or tokens[-1] != eos_token_id):
+        tokens.append(eos_token_id)
+        mask.append(False)
+
+    return tokens, mask
+
+
 def has_any(record: dict[str, Any], keys: tuple[str, ...]) -> bool:
     """Return whether a record has any string field in keys."""
 

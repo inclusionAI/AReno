@@ -240,6 +240,14 @@ and CUDA graph state; MLX retains one in-process model.
    results are environment observations rather than policy actions. Assistant
    text and assistant tool-call spans are trainable by default.
 
+``--sft-assistant-turns [all|last]``
+   SFT only. Controls which assistant turns in multi-turn chat data are
+   trainable. ``all`` (default) trains on every assistant turn. ``last``
+   trains only the final assistant turn, treating earlier assistant responses
+   as context. User, system, and tool-result tokens are always excluded from
+   training. This option has no effect on single-turn ``prompt``/``response``
+   SFT rows.
+
 Agentic trajectories can contain multiple chat-completion turns for the same
 prompt/sample pair. The agent owns the OpenAI-style message list and returns
 trajectory turns with the model response; Areno converts those turns into token
@@ -530,6 +538,38 @@ SFT instruction tuning
 
 SFT loaders must normalize raw rows to ``prompt`` and ``response`` dictionaries.
 The trainer performs tokenization and trains on the response suffix.
+
+SFT also supports multi-turn chat data. Instead of ``prompt``/``response``,
+the loader can return a ``messages`` field containing a list of
+``{"role": "user"|"assistant"|"system"|"tool", "content": "..."}`` dicts.
+The trainer tokenizes the full conversation and trains on assistant turns.
+Use ``--sft-assistant-turns last`` to train only on the final assistant
+response, which is useful for focused evaluation of end-to-end multi-turn
+behavior:
+
+.. code-block:: bash
+
+   areno train \
+     --ckpt Qwen/Qwen3-0.6B \
+     --dataset-path /path/to/multiturn.jsonl \
+     --dataset-loader-fn /path/to/multiturn_loader.py \
+     --algo sft \
+     --sft-assistant-turns last \
+     --tp-size 1 \
+     --world-size 1 \
+     --batch-size 2 \
+     --mini-bs 1
+
+A multi-turn SFT loader should produce rows like:
+
+.. code-block:: python
+
+   {"messages": [
+       {"role": "user", "content": "What is 2+2?"},
+       {"role": "assistant", "content": "4"},
+       {"role": "user", "content": "And 3+3?"},
+       {"role": "assistant", "content": "6"},
+   ]}
 
 DPO preference training
 ~~~~~~~~~~~~~~~~~~~~~~~

@@ -23,7 +23,8 @@ SFT
 ---
 
 SFT always requires ``--dataset-loader-fn``. The loader must return rows with
-``prompt`` and ``response`` keys:
+either ``prompt`` and ``response`` keys (single-turn) or a ``messages`` key
+(multi-turn chat):
 
 .. code-block:: python
 
@@ -39,6 +40,21 @@ SFT always requires ``--dataset-loader-fn``. The loader must return rows with
                }
            )
        return records
+
+For multi-turn chat data, return ``messages`` instead:
+
+.. code-block:: python
+
+   {"messages": [
+       {"role": "user", "content": "What is 2+2?"},
+       {"role": "assistant", "content": "4"},
+       {"role": "user", "content": "And 3+3?"},
+       {"role": "assistant", "content": "6"},
+   ]}
+
+The trainer trains on all assistant turns by default. Use
+``--sft-assistant-turns last`` to train only on the final assistant response.
+User, system, and tool-result tokens are always excluded.
 
 For a concrete example, use ``--dataset-path yahma/alpaca-cleaned`` with
 ``examples/sft/alpaca/dataset_loader.py``.

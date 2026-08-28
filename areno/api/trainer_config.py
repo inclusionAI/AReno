@@ -79,6 +79,7 @@ class TrainerConfig:
     agent_timeout_s: float = 300.0
     train_tool_results: bool = False
     chat_template_enable_thinking: bool | None = None
+    sft_assistant_turns: str = "all"
     lora: LoraConfig | None = None
     reference_mode: Literal["independent", "reuse_actor_base"] = "independent"
 
@@ -95,6 +96,8 @@ class TrainerConfig:
             raise ValueError("attn_backend must be one of: flash, native")
         if self.model_hub not in {"hf", "modelscope"}:
             raise ValueError("model_hub must be one of: hf, modelscope")
+        if self.sft_assistant_turns not in {"all", "last"}:
+            raise ValueError("sft_assistant_turns must be one of: all, last")
         if isinstance(self.optimizer_state_offload, bool):
             self.optimizer_state_offload = "cpu" if self.optimizer_state_offload else "none"
         if self.optimizer_state_offload not in {"none", "cpu", "disk"}:

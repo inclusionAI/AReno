@@ -23,7 +23,7 @@ from typing import Any
 
 import areno.api
 from areno.api.dashboard import record_dashboard_state
-from areno.api.data_utils import prompt_response_to_tokens_and_mask
+from areno.api.data_utils import messages_to_tokens_and_mask, prompt_response_to_tokens_and_mask
 from areno.api.multimodal import (
     encode_multimodal_prompt,
     expand_image_tokens,
@@ -72,6 +72,7 @@ class SFTTrainer:
                 processor,
                 max_prompt_tokens=self.config.max_prompt_tokens,
                 max_new_tokens=self.config.max_new_tokens,
+                sft_assistant_turns=getattr(self.config, "sft_assistant_turns", "all"),
             ):
                 if not train_batch:
                     continue
@@ -104,7 +105,7 @@ class SFTTrainer:
             self.logger.info("epoch=%d stage=epoch_end", epoch)
             record_dashboard_state(self.areno, stage="epoch_end", epoch=epoch, step=step, role="policy")
 
-    def _iter_train_batches(self, tokenizer, processor, *, max_prompt_tokens: int, max_new_tokens: int):
+    def _iter_train_batches(self, tokenizer, processor, *, max_prompt_tokens: int, max_new_tokens: int, sft_assistant_turns: str = "all"):
         # Dataset rows are converted lazily so large HF datasets do not need an
         # up-front tokenized copy. Rows that are empty, all-prompt, or exceed
         # the configured prompt or supervised-response budgets are dropped.
@@ -120,6 +121,7 @@ class SFTTrainer:
                 processor,
                 max_prompt_tokens=max_prompt_tokens,
                 max_new_tokens=max_new_tokens,
+                sft_assistant_turns=sft_assistant_turns,
             )
             if seq is None:
                 skipped += 1
@@ -152,17 +154,31 @@ class SFTTrainer:
         record_dashboard_state(self.areno, stage="save_checkpoint_end", epoch=epoch, step=step, role="policy")
 
 
-def _record_to_train_sequence(record: Any, tokenizer, processor=None, *, max_prompt_tokens: int, max_new_tokens: int):
+def _record_to_train_sequence(
+    record: Any, tokenizer, processor=None, *, max_prompt_tokens: int, max_new_tokens: int, sft_assistant_turns: str = "all"
+):
     """Normalize one loader-produced SFT row into backend training format.
 
     `prompt_mask=True` means "do not train this source token"; the backend loss
     is next-token aligned, so the loss function later uses positions after the
     prompt prefix. RL-only fields are filled with zeros to satisfy the shared
     `TrainSequence` packing contract.
+
+    Two row schemas are accepted:
+
+    * ``{"prompt": str, "response": str}`` – single-turn (original format).
+    * ``{"messages": list[dict]}`` – multi-turn chat; each dict has ``role``
+      and ``content`` keys. ``sft_assistant_turns`` controls which assistant
+      turns are trainable: ``"all"`` (default) trains every assistant turn,
+      ``"last"`` trains only the final assistant turn.
     """
 
     record = dict(record)
     eos_token_id = tokenizer.eos_token_id if tokenizer.eos_token_id is not None else 0
+    if sft_assistant_turns not in ("all", "last"):
+        raise ValueError(
+            f"sft_assistant_turns must be 'all' or 'last', got {sft_assistant_turns!r}"
+        )
     if record_has_image(record):
         if "response" not in record:
             raise ValueError("SFT image rows must contain `response`")
@@ -240,18 +256,28 @@ def _record_to_train_sequence(record: Any, tokenizer, processor=None, *, max_pro
             features=features,
             eos_token_id=int(record.get("eos_token_id", eos_token_id)),
         )
-    if "prompt" not in record or "response" not in record:
-        raise ValueError(
-            "SFT dataset loader must return rows with `prompt` and `response`; "
-            "normalize raw dataset fields in --dataset-loader-fn"
+    if "messages" in record:
+        messages = record["messages"]
+        if not isinstance(messages, list) or not messages:
+            return None
+        if not any(msg.get("role") == "assistant" for msg in messages):
+            return None
+        tokens, prompt_mask = messages_to_tokens_and_mask(
+            messages, tokenizer, eos_token_id, last_assistant_only=(sft_assistant_turns == "last")
         )
-    if record["prompt"] is None or record["response"] is None:
-        return None
-    prompt = str(record["prompt"])
-    response = str(record["response"])
-    if not response:
-        return None
-    tokens, prompt_mask = prompt_response_to_tokens_and_mask(prompt, response, tokenizer, eos_token_id)
+    elif "prompt" in record and "response" in record:
+        if record["prompt"] is None or record["response"] is None:
+            return None
+        prompt = str(record["prompt"])
+        response = str(record["response"])
+        if not response:
+            return None
+        tokens, prompt_mask = prompt_response_to_tokens_and_mask(prompt, response, tokenizer, eos_token_id)
+    else:
+        raise ValueError(
+            "SFT dataset loader must return rows with `prompt` and `response`, "
+            "or `messages`; normalize raw dataset fields in --dataset-loader-fn"
+        )
 
     if len(tokens) < 2:
         return None

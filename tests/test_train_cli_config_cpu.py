@@ -1014,6 +1014,7 @@ def _options(**overrides):
         agent_fn=None,
         agent_timeout_s=300.0,
         train_tool_results=False,
+        sft_assistant_turns="all",
         gspo_clip_eps=3.0e-4,
         grpo_clip_eps=0.2,
         ref_ckpt=None,
