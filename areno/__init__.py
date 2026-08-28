@@ -13,26 +13,27 @@ from __future__ import annotations
 
 import os
 
+from areno.engine.log import configure_default_logging
+
 # A single CUDA stream connection keeps NCCL collectives ordered with compute,
 # which is what areno's TP/DP all-reduce + all-gather patterns assume.
 os.environ.setdefault("CUDA_DEVICE_MAX_CONNECTIONS", "1")
 
-try:
-    import torch._dynamo as _dynamo
-except ModuleNotFoundError:
-    _dynamo = None
+def _configure_torch_runtime() -> None:
+    """Apply CUDA runtime defaults only when a Torch-backed API is requested."""
 
-if _dynamo is not None:
+    try:
+        import torch._dynamo as dynamo
+    except ModuleNotFoundError:
+        return
     # Train, prefill, decode, scoring and multiple shape buckets all produce
     # distinct compiled artifacts; raise the cache limits so recompilation does
     # not evict graphs that will be replayed across RL steps.
-    _dynamo.config.cache_size_limit = max(_dynamo.config.cache_size_limit, 64)
+    dynamo.config.cache_size_limit = max(dynamo.config.cache_size_limit, 64)
     try:
-        _dynamo.config.accumulated_cache_size_limit = max(_dynamo.config.accumulated_cache_size_limit, 256)
+        dynamo.config.accumulated_cache_size_limit = max(dynamo.config.accumulated_cache_size_limit, 256)
     except AttributeError:
         pass
-
-from areno.engine.log import configure_default_logging
 
 configure_default_logging()
 
@@ -41,10 +42,12 @@ def __getattr__(name: str):
     """Lazily expose engine symbols without importing kernel-heavy modules."""
 
     if name == "ArenoEngine":
+        _configure_torch_runtime()
         from areno.engine import ArenoEngine
 
         return ArenoEngine
     if name in {"EngineConfig", "ModelConfig", "OptimizerConfig", "RuntimeConfig"}:
+        _configure_torch_runtime()
         from areno.engine import config
 
         return getattr(config, name)
@@ -53,6 +56,7 @@ def __getattr__(name: str):
 
         return LoraConfig
     if name in {"RolloutOutput", "SamplingParams", "TrainStats"}:
+        _configure_torch_runtime()
         from areno.engine import data
 
         return getattr(data, name)

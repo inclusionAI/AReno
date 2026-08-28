@@ -6,43 +6,55 @@ sampling/rollout/training schemas, and the bundled loss functions without
 having to know the internal package layout.
 """
 
-from areno.api.agentic import (
-    AgentBatch,
-    AgentItem,
-    AgentTrainBatch,
-    AgentTrajectory,
-    AgentTrajectoryTurn,
-    LossMaskPolicy,
-    RolloutSession,
-)
-from areno.api.algorithms import (
-    AlgorithmSpec,
-    dpo_loss_fn,
-    get_algorithm,
-    grpo_loss_fn,
-    gspo_loss_fn,
-    list_algorithms,
-    ppo_loss_fn,
-    register_algorithm,
-    sft_loss_fn,
-)
+from importlib import import_module
+from typing import Any
+
 from areno.api.config import CudaConfig, LoraConfig, MlxConfig, default_backend_type
-from areno.api.data import PromptBatch, PromptItem
-from areno.api.models import (
-    BackendType,
-    RolloutResult,
-    RolloutSequence,
-    SamplingParams,
-    TrainSequence,
-)
-from areno.api.rewards import RewardEvent, RewardRecord
-from areno.api.trainer import Trainer
+from areno.api.models import BackendType
 
 # Friendly aliases mirroring the BackendType enum members. The default is
 # selected from the host platform without importing either backend.
 CUDA = BackendType.CUDA
 MLX = BackendType.MLX
 DefaultBackend = default_backend_type()
+
+_LAZY_EXPORTS = {
+    "AgentBatch": ("areno.api.agentic", "AgentBatch"),
+    "AgentItem": ("areno.api.agentic", "AgentItem"),
+    "AgentTrainBatch": ("areno.api.agentic", "AgentTrainBatch"),
+    "AgentTrajectory": ("areno.api.agentic", "AgentTrajectory"),
+    "AgentTrajectoryTurn": ("areno.api.agentic", "AgentTrajectoryTurn"),
+    "AlgorithmSpec": ("areno.api.algorithms", "AlgorithmSpec"),
+    "LossMaskPolicy": ("areno.api.agentic", "LossMaskPolicy"),
+    "PromptBatch": ("areno.api.data", "PromptBatch"),
+    "PromptItem": ("areno.api.data", "PromptItem"),
+    "RewardEvent": ("areno.api.rewards", "RewardEvent"),
+    "RewardRecord": ("areno.api.rewards", "RewardRecord"),
+    "RolloutResult": ("areno.api.models", "RolloutResult"),
+    "RolloutSequence": ("areno.api.models", "RolloutSequence"),
+    "RolloutSession": ("areno.api.agentic", "RolloutSession"),
+    "SamplingParams": ("areno.api.models", "SamplingParams"),
+    "Trainer": ("areno.api.trainer", "Trainer"),
+    "TrainSequence": ("areno.api.models", "TrainSequence"),
+    "dpo_loss_fn": ("areno.api.algorithms", "dpo_loss_fn"),
+    "get_algorithm": ("areno.api.algorithms", "get_algorithm"),
+    "grpo_loss_fn": ("areno.api.algorithms", "grpo_loss_fn"),
+    "gspo_loss_fn": ("areno.api.algorithms", "gspo_loss_fn"),
+    "list_algorithms": ("areno.api.algorithms", "list_algorithms"),
+    "ppo_loss_fn": ("areno.api.algorithms", "ppo_loss_fn"),
+    "register_algorithm": ("areno.api.algorithms", "register_algorithm"),
+    "sft_loss_fn": ("areno.api.algorithms", "sft_loss_fn"),
+}
+
+
+def __getattr__(name: str) -> Any:
+    target = _LAZY_EXPORTS.get(name)
+    if target is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    module_name, symbol_name = target
+    value = getattr(import_module(module_name), symbol_name)
+    globals()[name] = value
+    return value
 
 __all__ = [
     "Trainer",

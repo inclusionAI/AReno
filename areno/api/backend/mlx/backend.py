@@ -66,6 +66,10 @@ class MlxBackend(Backend):
             config = MlxConfig()
         if not isinstance(config, MlxConfig):
             raise TypeError(f"MlxBackend requires MlxConfig, got {type(config)!r}")
+        if config.lora is not None:
+            raise NotImplementedError(
+                "MLX PEFT LoRA configuration is accepted, but adapter injection is not implemented yet"
+            )
         try:
             import mlx.core as mx
         except ImportError as exc:
