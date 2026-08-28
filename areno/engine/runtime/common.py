@@ -28,16 +28,47 @@ def ceil_div(a: int, b: int) -> int:
 def pad_rows(
     rows: list[Any], *, dtype: torch.dtype, fill_value: int | float | bool = 0, width: int | None = None
 ) -> torch.Tensor:
-    """Pad variable-length 1D rows into a rectangular CPU tensor."""
+    """Pad variable-length 1D rows into a rectangular CPU tensor.
+
+    Rows are concatenated once and written with a single fancy-indexed
+    assignment instead of one ``torch.as_tensor`` conversion and strided-slice
+    copy per row, which keeps the pack path vectorized for long-CoT batches.
+    """
 
     if width is None:
         width = max((len(row) for row in rows), default=0)
     out = torch.full((len(rows), width), fill_value, dtype=dtype)
-    for row_idx, row in enumerate(rows):
-        if len(row) == 0:
-            continue
-        out[row_idx, : len(row)] = torch.as_tensor(row, dtype=dtype)
+    lengths = [len(row) for row in rows]
+    total = sum(lengths)
+    if total == 0:
+        return out
+
+    import numpy as np
+
+    np_dtype = _NUMPY_DTYPE.get(dtype)
+    if np_dtype is None:
+        # Fall back to the reference per-row path for exotic dtypes.
+        for row_idx, row in enumerate(rows):
+            if len(row) == 0:
+                continue
+            out[row_idx, : len(row)] = torch.as_tensor(row, dtype=dtype)
+        return out
+    flat = np.concatenate([np.asarray(row, dtype=np_dtype) for row in rows])
+    offsets = np.concatenate(([0], np.cumsum(np.asarray(lengths[:-1], dtype=np.int64))))
+    row_idx = np.repeat(np.arange(len(rows), dtype=np.int64), np.asarray(lengths, dtype=np.int64))
+    col_idx = np.arange(total, dtype=np.int64) - np.repeat(offsets, np.asarray(lengths, dtype=np.int64))
+    out[row_idx, col_idx] = torch.from_numpy(flat)
     return out
+
+
+_NUMPY_DTYPE = {
+    torch.bool: "bool",
+    torch.int32: "int32",
+    torch.int64: "int64",
+    torch.long: "int64",
+    torch.float32: "float32",
+    torch.float64: "float64",
+}
 
 
 def pad_rollout_rows(
@@ -115,7 +146,10 @@ def merge_train_stats(results: list[dict[str, Any]]) -> TrainStats:
     loss = sum(float(result["loss"]) for result in results) / len(results)
     stepped = all(bool(result["stepped"]) for result in results)
     metrics = merge_metric_dicts([result.get("metrics") for result in results])
-    return TrainStats(loss=loss, stepped=stepped, metrics=metrics)
+    versions = {result.get("adapter_version") for result in results}
+    if len(versions) != 1:
+        raise RuntimeError(f"DP replicas reported different adapter versions: {versions}")
+    return TrainStats(loss=loss, stepped=stepped, metrics=metrics, adapter_version=versions.pop())
 
 
 def merge_metric_dicts(metrics_list: list[dict[str, Any] | None]) -> dict[str, float] | None:

@@ -8,6 +8,7 @@ from typing import Any
 import torch
 from torch.utils.checkpoint import checkpoint
 
+from areno.engine.parallel.collectives import sequence_parallel_region
 from areno.engine.runtime.metadata import InferMeta, TrainMeta
 
 
@@ -43,8 +44,16 @@ def checkpoint_layer(
 
     if not should_checkpoint_layer(train_meta, infer_meta):
         return layer_fn(hidden_states, *args)
+
+    def recompute(states: torch.Tensor) -> Any:
+        # The backward recompute runs after the model's outer SP context has
+        # exited. Restore it so column/row-parallel layers use the same
+        # activation layout as the original forward.
+        with sequence_parallel_region(bool(train_meta.sequence_parallel)):
+            return layer_fn(states, *args)
+
     return checkpoint(
-        lambda states: layer_fn(states, *args),
+        recompute,
         hidden_states,
         use_reentrant=False,
         preserve_rng_state=True,

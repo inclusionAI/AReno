@@ -26,7 +26,7 @@ from areno.api.algorithms import (
     register_algorithm,
     sft_loss_fn,
 )
-from areno.api.config import CudaConfig, MlxConfig, default_backend_type
+from areno.api.config import CudaConfig, LoraConfig, MlxConfig, default_backend_type
 from areno.api.data import (
     DegenerateFilterConfig,
     DegeneratePolicy,
@@ -53,7 +53,7 @@ from areno.api.models import (
 from areno.api.rewards import RewardEvent, RewardRecord
 from areno.api.trainer import Trainer
 
-# Friendly aliases mirroring the BackendType enum members; the default is
+# Friendly aliases mirroring the BackendType enum members. The default is
 # selected from the host platform without importing either backend.
 CUDA = BackendType.CUDA
 MLX = BackendType.MLX
@@ -64,6 +64,7 @@ __all__ = [
     "AlgorithmSpec",
     "CudaConfig",
     "MlxConfig",
+    "LoraConfig",
     "DegenerateFilterConfig",
     "DegeneratePolicy",
     "DegenerateReason",

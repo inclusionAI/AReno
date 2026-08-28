@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
+import areno.engine.runtime.train_step as train_step
 from areno.api import TrainSequence
 from areno.api.backend.cuda.training import make_train_pack
 from areno.api.multimodal import (
@@ -15,7 +18,7 @@ from areno.api.tokenizer import configure_chat_template_enable_thinking
 from areno.api.trainers.sft import _record_to_train_sequence
 from areno.engine.data.rollout_state import _prefill_multimodal_features
 from areno.engine.layers.rotary import PartialRotaryEmbedding
-from areno.engine.runtime.train_step import _pack_train_data
+from areno.engine.runtime.train_step import _pack_train_data, _train_meta
 
 
 def _qwen35_text_config() -> dict:
@@ -163,7 +166,8 @@ def test_multimodal_prompt_passes_disable_thinking_to_processor_chat_template():
     assert processor.kwargs["enable_thinking"] is False
 
 
-def test_packed_train_collates_multimodal_features():
+def test_packed_train_collates_multimodal_features(monkeypatch):
+    monkeypatch.setattr(train_step, "get_tp_context", lambda: SimpleNamespace(world_size=1))
     first_embeds = torch.ones(1, 16)
     second_embeds = torch.ones(2, 16) * 2
     pack = {
@@ -207,6 +211,74 @@ def test_packed_train_collates_multimodal_features():
         [0, 2, 4, 0, 1, 2, 4],
         [0, 3, 4, 0, 1, 3, 4],
     ]
+
+
+def test_packed_train_adds_singleton_sequences_for_tp_alignment(monkeypatch):
+    monkeypatch.setattr(train_step, "get_tp_context", lambda: SimpleNamespace(world_size=4))
+    pack = {
+        "input_ids": torch.tensor([[1, 2, 3, 0], [4, 5, 6, 7]]),
+        "lengths": torch.tensor([3, 4], dtype=torch.int32),
+        "prompt_mask": torch.tensor([[True, True, False, True], [True, True, True, False]]),
+        "logprobs": torch.zeros(2, 4),
+        "advantages": torch.zeros(2, 4),
+    }
+
+    packed = _pack_train_data(pack)
+    meta = _train_meta(packed, packed["input_ids"], sequence_parallel=True)
+
+    assert packed["input_ids"].tolist() == [[1, 2, 3, 4, 5, 6, 7, 0]]
+    assert packed["position_ids"].tolist() == [[0, 1, 2, 0, 1, 2, 3, 0]]
+    assert packed["train_cu_seqlens"].tolist() == [0, 3, 7, 8]
+    assert packed["packed_singleton_padding"] == 1
+    assert packed["packed_num_sequences"] == 2
+    assert packed["packed_response_mask"].numel() == 5
+    assert meta.packed is True
+    assert meta.sequence_parallel is True
+
+
+def test_train_meta_does_not_enable_sequence_parallel_from_tp_size(monkeypatch):
+    monkeypatch.setattr(train_step, "get_tp_context", lambda: SimpleNamespace(world_size=4))
+    packed = {
+        "train_cu_seqlens": torch.tensor([0, 4], dtype=torch.int32),
+        "train_max_seqlen": 4,
+    }
+    tokens = torch.ones(1, 4, dtype=torch.long)
+
+    meta = _train_meta(packed, tokens, sequence_parallel=False)
+
+    assert meta.sequence_parallel is False
+
+
+def test_packed_multimodal_metadata_includes_tp_alignment_tokens(monkeypatch):
+    monkeypatch.setattr(train_step, "get_tp_context", lambda: SimpleNamespace(world_size=4))
+    feature_row = {
+        "image_token_id": 99,
+        "image_embeds": torch.ones(1, 16),
+        "mrope_position_ids": torch.tensor([[0, 1, 2], [0, 2, 3], [0, 3, 4]]),
+    }
+    pack = {
+        "input_ids": torch.tensor([[1, 99, 2, 0], [4, 5, 6, 7]]),
+        "lengths": torch.tensor([3, 4], dtype=torch.int32),
+        "prompt_mask": torch.ones(2, 4, dtype=torch.bool),
+        "logprobs": torch.zeros(2, 4),
+        "advantages": torch.zeros(2, 4),
+        "features": [feature_row, None],
+    }
+
+    packed = _pack_train_data(pack)
+    features = packed["features"]
+
+    assert packed["input_ids"].shape == (1, 8)
+    assert features["image_token_mask"].tolist() == [False, True, False, False, False, False, False, False]
+    assert features["mrope_position_ids"].shape == (3, 8)
+    assert features["mrope_position_ids"][:, -1].tolist() == [0, 0, 0]
+    assert len(features["image_feature_rows"]) == 1
+    assert features["image_feature_rows"][0] is feature_row
+
+
+def test_packed_train_rejects_noncanonical_input():
+    with pytest.raises(ValueError, match="missing required tensor fields"):
+        _pack_train_data({"input_ids": torch.ones(1, 2, dtype=torch.long)})
 
 
 def test_qwen35_vl_adapter_matches_vision_text_config():
@@ -562,9 +634,8 @@ def test_qwen35_gdn_uses_projected_sequence_length_after_sp_gather():
     assert out.shape == (2, 12, 8)
 
 
-def test_qwen35_sequence_parallel_scatters_mrope_position_sequence_axis(monkeypatch):
+def test_qwen35_sequence_parallel_keeps_full_mrope_positions(monkeypatch):
     pytest.importorskip("triton")
-    from types import SimpleNamespace
 
     import areno.models.qwen3_5.model as qwen35
 
@@ -600,8 +671,8 @@ def test_qwen35_sequence_parallel_scatters_mrope_position_sequence_axis(monkeypa
         infer_meta=None,
     )
 
-    assert layer.position_ids.shape == (3, 2, 4)
-    assert torch.equal(layer.position_ids, position_ids[:, :, :4])
+    assert layer.position_ids.shape == (3, 2, 8)
+    assert torch.equal(layer.position_ids, position_ids)
 
 
 def test_qwen35_full_attention_aligns_local_mrope_positions_to_projected_sequence(monkeypatch):

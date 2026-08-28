@@ -8,12 +8,12 @@ from areno.api.backend.cuda.losses import dpo_loss_fn, sft_loss_fn
 
 
 class SftLossTest(unittest.TestCase):
-    """SFT loss tests cover padded and packed response masking."""
+    """SFT loss tests cover canonical packed response masking."""
 
-    def test_sft_padded_loss_ignores_prompt_tokens(self):
-        """Padded SFT should train only positions after the prompt."""
-        data_pack = {"prompt_mask": torch.tensor([[True, True, False, False]])}
-        logprobs = torch.tensor([[-5.0, -0.25, -0.75]], requires_grad=True)
+    def test_sft_packed_loss_ignores_prompt_tokens(self):
+        """Packed SFT should train only response positions."""
+        data_pack = {"packed_response_mask": torch.tensor([False, True, True])}
+        logprobs = torch.tensor([-5.0, -0.25, -0.75], requires_grad=True)
 
         loss, stats = sft_loss_fn(data_pack, logprobs)
         loss.backward()
@@ -21,15 +21,12 @@ class SftLossTest(unittest.TestCase):
         self.assertAlmostEqual(float(loss.detach()), 0.5, places=6)
         self.assertEqual(float(stats["sft_target_tokens"]), 2.0)
         self.assertIsNotNone(logprobs.grad)
-        self.assertEqual(float(logprobs.grad[0, 0]), 0.0)
+        self.assertEqual(float(logprobs.grad[0]), 0.0)
 
-    def test_sft_padded_loss_honors_loss_mask(self):
-        """Padded SFT should not train response tokens masked by loss_mask."""
-        data_pack = {
-            "prompt_mask": torch.tensor([[True, False, False, False]]),
-            "loss_mask": torch.tensor([[False, True, False, True]]),
-        }
-        logprobs = torch.tensor([[-1.0, -100.0, -3.0]], requires_grad=True)
+    def test_sft_packed_loss_honors_response_mask(self):
+        """Packed SFT should not train tokens excluded by the response mask."""
+        data_pack = {"packed_response_mask": torch.tensor([True, False, True])}
+        logprobs = torch.tensor([-1.0, -100.0, -3.0], requires_grad=True)
 
         loss, stats = sft_loss_fn(data_pack, logprobs)
         loss.backward()
@@ -37,9 +34,9 @@ class SftLossTest(unittest.TestCase):
         self.assertAlmostEqual(float(loss.detach()), 2.0, places=6)
         self.assertEqual(float(stats["sft_target_tokens"]), 2.0)
         self.assertIsNotNone(logprobs.grad)
-        self.assertAlmostEqual(float(logprobs.grad[0, 0]), -0.5, places=6)
-        self.assertEqual(float(logprobs.grad[0, 1]), 0.0)
-        self.assertAlmostEqual(float(logprobs.grad[0, 2]), -0.5, places=6)
+        self.assertAlmostEqual(float(logprobs.grad[0]), -0.5, places=6)
+        self.assertEqual(float(logprobs.grad[1]), 0.0)
+        self.assertAlmostEqual(float(logprobs.grad[2]), -0.5, places=6)
 
     def test_sft_packed_loss_uses_response_mask(self):
         """Packed SFT should use the provided flattened response mask exactly."""
@@ -52,25 +49,6 @@ class SftLossTest(unittest.TestCase):
         self.assertAlmostEqual(float(loss.detach()), 0.3, places=6)
         self.assertEqual(float(stats["sft_target_tokens"]), 2.0)
         self.assertEqual(float(logprobs.grad[0]), 0.0)
-
-    def test_sft_padded_and_packed_loss_masks_agree(self):
-        """Padded loss_mask and packed_response_mask should select the same tokens."""
-        padded_pack = {
-            "prompt_mask": torch.tensor([[True, False, False, False]]),
-            "loss_mask": torch.tensor([[False, True, False, True]]),
-        }
-        packed_pack = {"packed_response_mask": torch.tensor([True, False, True])}
-        padded_logprobs = torch.tensor([[-1.0, -100.0, -3.0]])
-        packed_logprobs = torch.tensor([-1.0, -100.0, -3.0])
-
-        padded_loss, padded_stats = sft_loss_fn(padded_pack, padded_logprobs)
-        packed_loss, packed_stats = sft_loss_fn(packed_pack, packed_logprobs)
-
-        self.assertAlmostEqual(float(padded_loss), float(packed_loss), places=6)
-        self.assertEqual(float(padded_stats["sft_target_tokens"]), float(packed_stats["sft_target_tokens"]))
-        self.assertAlmostEqual(
-            float(padded_stats["sft_logprob_mean"]), float(packed_stats["sft_logprob_mean"]), places=6
-        )
 
     def test_sft_accumulation_uses_global_token_mean_when_annotated(self):
         """SFT accumulation should weight microbatches by target-token count."""
@@ -118,23 +96,15 @@ class SftLossTest(unittest.TestCase):
 class DpoLossTest(unittest.TestCase):
     """DPO tests validate pair ordering and packed sequence aggregation."""
 
-    def test_dpo_padded_loss_prefers_chosen_response(self):
-        """Chosen/rejected rows are paired by order in padded DPO batches."""
+    def test_dpo_packed_loss_prefers_chosen_response(self):
+        """Chosen/rejected packed sequences are paired by sequence order."""
         data_pack = {
-            "prompt_mask": torch.tensor(
-                [
-                    [True, False, False],
-                    [True, False, False],
-                ]
-            ),
-            "ref_logprobs": torch.tensor(
-                [
-                    [0.0, -0.2, -0.2],
-                    [0.0, -0.2, -0.2],
-                ]
-            ),
+            "packed_response_mask": torch.tensor([True, True, True, True]),
+            "packed_seq_ids": torch.tensor([0, 0, 1, 1]),
+            "packed_num_sequences": 2,
+            "packed_ref_logprobs": torch.tensor([-0.2, -0.2, -0.2, -0.2]),
         }
-        logprobs = torch.tensor([[-0.1, -0.1], [-1.0, -1.0]], requires_grad=True)
+        logprobs = torch.tensor([-0.1, -0.1, -1.0, -1.0], requires_grad=True)
 
         loss, stats = dpo_loss_fn(data_pack, logprobs, beta=1.0)
         loss.backward()

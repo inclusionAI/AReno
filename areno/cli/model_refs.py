@@ -46,6 +46,8 @@ def resolve_model_refs_for_config(config: ConfigT) -> ConfigT:
 
     cache: dict[str, str] = {}
     model_hub = str(getattr(config, "model_hub", "modelscope"))
+    if getattr(config, "base_model_name_or_path", None) is None:
+        config.base_model_name_or_path = config.ckpt
     config.ckpt = resolve_model_ref(config.ckpt, cache, model_hub=model_hub)
     algo = str(getattr(config, "algo", "")).lower()
     if algo == "dpo" and getattr(config, "ref_ckpt", None) is not None:

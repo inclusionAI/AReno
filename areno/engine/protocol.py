@@ -43,6 +43,7 @@ class Op(Enum):
     ROLLOUT_SESSION_SYNC = auto()
     ROLLOUT_SESSION_END = auto()
     SAVE_CHECKPOINT = auto()
+    EXPORT_ADAPTER = auto()
     POLICY_SYNC_PLAN = auto()
     POLICY_SYNC_PUBLISH = auto()
     POLICY_SYNC_RECEIVE = auto()
@@ -118,6 +119,7 @@ class RoleSpecPayload:
     path: str
     trainable: bool
     optimizer_lr: float | None = None
+    reference_mode: str = "independent"
 
 
 @dataclass(slots=True)
@@ -135,6 +137,7 @@ class ScorePayload:
     token_rows_by_dp: list[list[list[int]]]
     features_by_dp: list[list[dict[str, Any] | None]] | None
     pad_token_id: int
+    routing_replay_by_dp: list[list[torch.Tensor]] | None = None
     microbatch_size: int = 8
 
 
@@ -152,6 +155,13 @@ class TrainValuesPayload:
 @dataclass(slots=True)
 class SaveCheckpointPayload:
     """Typed payload for Op.SAVE_CHECKPOINT."""
+
+    path: str
+
+
+@dataclass(slots=True)
+class ExportAdapterPayload:
+    """Typed payload for Op.EXPORT_ADAPTER."""
 
     path: str
 

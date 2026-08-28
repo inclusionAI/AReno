@@ -30,6 +30,7 @@ from areno.accel.embedding import areno_vocab_embedding
 from areno.accel.linear import areno_grouped_linear, areno_linear
 from areno.accel.moe import areno_moe_permute, areno_moe_topk_permute, areno_moe_unpermute
 from areno.accel.normalization import areno_optional_scale_rmsnorm, areno_rmsnorm, areno_rmsnorm_silu_gate
+from areno.accel.optimizer import areno_adamw_fp32_master_step
 from areno.accel.router import areno_grouped_topk_router
 from areno.accel.routing import areno_moe_align
 from areno.accel.topk import areno_topk_softmax
@@ -49,6 +50,7 @@ __all__ = [
     "areno_moe_permute",
     "areno_moe_topk_permute",
     "areno_moe_unpermute",
+    "areno_adamw_fp32_master_step",
     "areno_optional_scale_rmsnorm",
     "areno_rmsnorm",
     "areno_rmsnorm_silu_gate",

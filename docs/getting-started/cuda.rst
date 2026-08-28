@@ -100,6 +100,17 @@ The main CUDA controls are:
    Recomputes supported decoder activations during backward. It is enabled by
    default.
 
+``--optimizer-state-offload cpu``
+   Moves optimizer state to host memory between train calls.
+
+``--optimizer-state-offload disk``
+   Keeps optimizer state in process-private persistent raw-mmap files and
+   lazily copies buckets back for updates. Also pass
+   ``--optimizer-state-offload-dir /path/to/local-nvme``. Disk offload is
+   runtime scratch storage rather than a checkpoint. The default
+   ``--optimizer-state-offload-batch-size 1`` groups mmap files and flushes;
+   reduce it to lower CPU staging memory or increase it to reduce I/O calls.
+
 ``--attn-backend flash``
    Uses FlashAttention when the model and GPU support it. Use ``native`` for
    compatibility diagnostics or unsupported GPUs.

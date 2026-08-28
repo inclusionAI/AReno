@@ -12,7 +12,7 @@ from areno.api.context import Context
 from areno.api.models import TrainSequence
 
 
-def make_train_pack(seqs: list[TrainSequence]) -> dict[str, torch.Tensor]:
+def make_train_pack(seqs: list[TrainSequence], *, include_routing_replay: bool = True) -> dict[str, torch.Tensor]:
     """Pack public training rows into right-padded CUDA engine tensors."""
 
     if not seqs:
@@ -44,7 +44,50 @@ def make_train_pack(seqs: list[TrainSequence]) -> dict[str, torch.Tensor]:
     features = [seq.features for seq in seqs]
     if any(feature is not None for feature in features):
         pack["features"] = features
+    if include_routing_replay:
+        routing_replay = make_routing_replay(
+            [seq.tokens for seq in seqs], [seq.routed_experts for seq in seqs], width=max_len
+        )
+        if routing_replay is not None:
+            pack["routing_replay"] = routing_replay
     return pack
+
+
+def make_routing_replay(
+    token_rows: list[list[int]], routed_experts: list[object | None] | None, *, width: int | None = None
+) -> torch.Tensor | None:
+    """Pad compact per-row rollout routes for a packed model forward."""
+
+    if routed_experts is None or not any(routes is not None for routes in routed_experts):
+        return None
+    if len(routed_experts) != len(token_rows):
+        raise ValueError("routing replay must have the same number of rows as tokens")
+    if any(routes is None for routes in routed_experts):
+        raise ValueError("routing replay must be present for every sequence in a microbatch")
+    route_tensors = []
+    for routes in routed_experts:
+        try:
+            route_tensor = torch.as_tensor(routes, dtype=torch.int16, device="cpu")
+        except (TypeError, ValueError) as exc:
+            raise ValueError("routing replay must be a rectangular (tokens, layers, top_k) tensor") from exc
+        if route_tensor.ndim != 3:
+            raise ValueError("routing replay must have shape (tokens, layers, top_k)")
+        if route_tensor.numel() and int(route_tensor.min().item()) < 0:
+            raise ValueError("rollout routing replay expert ids must be non-negative")
+        route_tensors.append(route_tensor)
+    route_shapes = {tuple(routes.shape[1:]) for routes in route_tensors}
+    if len(route_shapes) != 1:
+        raise ValueError("routing replay layer/top-k shape must match across the microbatch")
+    layers, top_k = route_shapes.pop()
+    max_len = max((len(tokens) for tokens in token_rows), default=0) if width is None else int(width)
+    replay = torch.full((len(token_rows), max_len, layers, top_k), -1, dtype=torch.int16)
+    for row, (tokens, routes) in enumerate(zip(token_rows, route_tensors, strict=True)):
+        expected = max(len(tokens) - 1, 0)
+        if int(routes.shape[0]) != expected:
+            raise ValueError(f"routing replay token count {routes.shape[0]} must equal len(tokens)-1 ({expected})")
+        if expected:
+            replay[row, :expected].copy_(routes)
+    return replay
 
 
 def is_sft_loss_fn(loss_fn: Callable) -> bool:
@@ -156,6 +199,7 @@ def _sequence_prompt_len(seq: TrainSequence) -> int:
 __all__ = [
     "annotate_sft_token_mean_packs",
     "is_sft_loss_fn",
+    "make_routing_replay",
     "make_train_pack",
     "pad_token_id",
     "sft_target_token_count",

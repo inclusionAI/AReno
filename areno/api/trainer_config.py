@@ -11,8 +11,10 @@ critic warmup window.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Literal
 
+from areno.adapters.config import LoraConfig
 from areno.api.defaults import DEFAULT_METRICS_LOG_DIR
 
 
@@ -28,6 +30,7 @@ class TrainerConfig:
     ckpt: str
     dataset_path: str
     backend: str | None = None
+    base_model_name_or_path: str | None = field(default=None, kw_only=True)
     model_hub: str = "modelscope"
     dataset_loader_fn: str | None = None
     save_path: str | None = None
@@ -35,6 +38,7 @@ class TrainerConfig:
     epochs: int = 10
     max_steps: int | None = None
     tp_size: int = 4
+    sequence_parallel: bool | None = None
     world_size: int = 8
     train_devices: list[int] | None = None
     batch_size: int = 32
@@ -65,6 +69,9 @@ class TrainerConfig:
     multimodal_projector_lr_decay_style: str | None = None
     activation_checkpointing: bool = True
     keep_rollout_state: bool = True
+    optimizer_state_offload: str | bool = "none"
+    optimizer_state_offload_dir: str | None = None
+    optimizer_state_offload_batch_size: int = 1
     eager_decode: bool = False
     attn_backend: str = "flash"
     metrics_log_dir: str | None = DEFAULT_METRICS_LOG_DIR
@@ -73,6 +80,8 @@ class TrainerConfig:
     train_tool_results: bool = False
     chat_template_enable_thinking: bool | None = None
     degenerate_policy: str = "skip"
+    lora: LoraConfig | None = None
+    reference_mode: Literal["independent", "reuse_actor_base"] = "independent"
 
     def __post_init__(self) -> None:
         if self.backend is None:
@@ -87,6 +96,16 @@ class TrainerConfig:
             raise ValueError("attn_backend must be one of: flash, native")
         if self.model_hub not in {"hf", "modelscope"}:
             raise ValueError("model_hub must be one of: hf, modelscope")
+        if isinstance(self.optimizer_state_offload, bool):
+            self.optimizer_state_offload = "cpu" if self.optimizer_state_offload else "none"
+        if self.optimizer_state_offload not in {"none", "cpu", "disk"}:
+            raise ValueError("optimizer_state_offload must be one of: none, cpu, disk")
+        if self.optimizer_state_offload == "disk" and not self.optimizer_state_offload_dir:
+            raise ValueError("optimizer_state_offload_dir is required for disk offload")
+        if self.optimizer_state_offload_batch_size < 1:
+            raise ValueError("optimizer_state_offload_batch_size must be positive")
+        if self.optimizer_state_offload != "none" and self.backend != "cuda":
+            raise ValueError("optimizer_state_offload is only supported by the CUDA backend")
         self._validate_multimodal_optimizer_group(
             "tower",
             self.unfreeze_multimodal_tower,
@@ -103,6 +122,8 @@ class TrainerConfig:
             self.multimodal_projector_lr_decay_steps,
             self.multimodal_projector_lr_decay_style,
         )
+        if self.lora is not None and self.backend != "cuda":
+            raise ValueError("native LoRA is only supported by the CUDA backend")
         if self.degenerate_policy not in {"skip", "error"}:
             raise ValueError("degenerate_policy must be one of: skip, error")
 
@@ -195,15 +216,22 @@ class TrainerConfig:
         from areno.api.config import CudaConfig
 
         return CudaConfig(
+            base_model_name_or_path=self.base_model_name_or_path,
             tp_size=self.tp_size,
+            sequence_parallel=self.sequence_parallel,
             devices=self.train_devices,
             optimizer=self.optimizer_config(),
             runtime={
                 "activation_checkpointing": self.activation_checkpointing,
                 "keep_rollout_state": self.keep_rollout_state,
+                "optimizer_state_offload": self.optimizer_state_offload,
+                "optimizer_state_offload_dir": self.optimizer_state_offload_dir,
+                "optimizer_state_offload_batch_size": self.optimizer_state_offload_batch_size,
                 "eager_decode": self.eager_decode,
                 "attn_backend": self.attn_backend,
             },
+            lora=self.lora,
+            reference_mode=self.reference_mode,
         )
 
 
@@ -234,7 +262,9 @@ class RolloutTrainerConfig(TrainerConfig):
         from areno.api.config import CudaConfig
 
         return CudaConfig(
+            base_model_name_or_path=self.base_model_name_or_path,
             tp_size=self.tp_size,
+            sequence_parallel=self.sequence_parallel,
             devices=self.train_devices,
             rollout_tp_size=self.rollout_tp_size,
             rollout_devices=self.rollout_devices,
@@ -244,9 +274,17 @@ class RolloutTrainerConfig(TrainerConfig):
             runtime={
                 "activation_checkpointing": self.activation_checkpointing,
                 "keep_rollout_state": self.keep_rollout_state,
+                "optimizer_state_offload": self.optimizer_state_offload,
+                "optimizer_state_offload_dir": self.optimizer_state_offload_dir,
+                "optimizer_state_offload_batch_size": self.optimizer_state_offload_batch_size,
                 "eager_decode": self.eager_decode,
                 "attn_backend": self.attn_backend,
+                # R3 is the default CUDA path for rollout-based MoE training.
+                # EngineConfig disables it again when the checkpoint is dense.
+                "rollout_routing_replay": True,
             },
+            lora=self.lora,
+            reference_mode=self.reference_mode,
         )
 
     def mlx_config(self):
