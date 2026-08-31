@@ -274,7 +274,6 @@ const defaultTrainConfig = {
   top_k: -1,
   top_p: 1,
   greedy: false,
-  agent_timeout_s: 300,
   train_tool_results: false,
   lr: 1.0e-6,
   min_lr: 1.0e-7,
@@ -2901,7 +2900,13 @@ function trainLauncherSections(algo) {
       fields: [
         field("max_prompt_tokens", "Prompt tokens", true),
         field("max_new_tokens", "New tokens", true),
-        ...(isAgentic ? [field("max_context_len", "Context", true), field("agent_fn", "Agent fn"), field("agent_timeout_s", "Agent timeout", true), checkField("train_tool_results", "Train tool results")] : []),
+        ...(isAgentic
+          ? [
+              field("max_context_len", "Context", true),
+              field("agent_fn", "Agent fn"),
+              checkField("train_tool_results", "Train tool results"),
+            ]
+          : []),
         ...(isRollout ? [field("temperature", "Temp", true), field("top_k", "Top K", true), field("top_p", "Top P", true), checkField("greedy", "Greedy")] : []),
       ],
     },

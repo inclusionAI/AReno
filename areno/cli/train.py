@@ -120,7 +120,6 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "attn_backend",
             "disable_thinking",
             "agent_fn",
-            "agent_timeout_s",
             "train_tool_results",
             "reward_fn_path",
             "reward_ckpt",
@@ -350,8 +349,6 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
         raise click.UsageError("--max-context-len must be positive")
     if algorithm.requires_rollout and args.max_running_prompts is not None and args.max_running_prompts <= 0:
         raise click.UsageError("--max-running-prompts must be positive")
-    if args.agent_timeout_s <= 0:
-        raise click.UsageError("--agent-timeout-s must be positive")
     _require_positive_float(args.lr, "--lr")
     if args.multimodal_tower_lr is not None:
         _require_positive_float(args.multimodal_tower_lr, "--mm-tower-lr")
@@ -913,7 +910,6 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             attn_backend=args.attn_backend,
             metrics_log_dir=args.metrics_log_dir,
             agent_fn=args.agent_fn,
-            agent_timeout_s=args.agent_timeout_s,
             train_tool_results=args.train_tool_results,
             chat_template_enable_thinking=chat_template_enable_thinking,
             ref_ckpt=args.ref_ckpt,
@@ -973,7 +969,6 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             attn_backend=args.attn_backend,
             metrics_log_dir=args.metrics_log_dir,
             agent_fn=args.agent_fn,
-            agent_timeout_s=args.agent_timeout_s,
             train_tool_results=args.train_tool_results,
             chat_template_enable_thinking=chat_template_enable_thinking,
             lora=lora,
@@ -1043,7 +1038,6 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             grpo_clip_eps=args.grpo_clip_eps,
             metrics_log_dir=args.metrics_log_dir,
             agent_fn=args.agent_fn,
-            agent_timeout_s=args.agent_timeout_s,
             train_tool_results=args.train_tool_results,
             chat_template_enable_thinking=chat_template_enable_thinking,
             lora=lora,
@@ -1126,7 +1120,6 @@ def _trainer_config_from_args(args) -> TrainerConfig:
         lam=args.lam,
         critic_warmup_steps=args.critic_warmup_steps,
         agent_fn=args.agent_fn,
-        agent_timeout_s=args.agent_timeout_s,
         train_tool_results=args.train_tool_results,
         chat_template_enable_thinking=chat_template_enable_thinking,
         lora=lora,
@@ -1252,7 +1245,6 @@ def _training_config_settings(config: TrainerConfig) -> dict:
                 "top_k",
                 "top_p",
                 "agent_fn",
-                "agent_timeout_s",
                 "train_tool_results",
                 "reward_fn_path",
                 "reward_ckpt",
@@ -1788,9 +1780,6 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     help="Pass enable_thinking=False to tokenizer chat templates when supported.",
 )
 @click.option("--agent-fn", default=None, help="Python file defining async run_agent(ctx, batch) for agentic rollout.")
-@click.option(
-    "--agent-timeout-s", type=float, default=300.0, show_default=True, help="Agentic rollout proxy request timeout."
-)
 @click.option("--train-tool-results", is_flag=True, help="Include tool-result spans in agentic policy loss.")
 @click.option(
     "--gspo-clip-eps", type=float, default=3.0e-4, show_default=True, help="GSPO sequence-ratio clipping epsilon."

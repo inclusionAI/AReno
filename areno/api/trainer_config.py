@@ -76,7 +76,6 @@ class TrainerConfig:
     attn_backend: str = "flash"
     metrics_log_dir: str | None = DEFAULT_METRICS_LOG_DIR
     agent_fn: str | None = None
-    agent_timeout_s: float = 300.0
     train_tool_results: bool = False
     chat_template_enable_thinking: bool | None = None
     lora: LoraConfig | None = None
