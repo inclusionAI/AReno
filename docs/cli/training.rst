@@ -231,10 +231,6 @@ and CUDA graph state; MLX retains one in-process model.
    iterable of either. Each turn must carry its ``AgentItem``, message list,
    and OpenAI response.
 
-``--agent-timeout-s FLOAT``
-   Timeout for agentic proxy requests and the agent function. Default:
-   ``300.0``.
-
 ``--train-tool-results``
    Include tool-result spans in policy loss. Disabled by default because tool
    results are environment observations rather than policy actions. Assistant

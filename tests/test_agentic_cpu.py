@@ -775,6 +775,25 @@ def test_proxy_client_cancellation_does_not_cancel_queued_rollout():
     assert trainer.rollout_batches == [([[2]], 1)]
 
 
+def test_rollout_proxy_does_not_impose_request_timeout():
+    trainer = _FakeTrainer(world_size=1, tp_size=1)
+    trainer.rollout_delay_s = 0.05
+    session = RolloutSession(
+        trainer,
+        sampling_params=_FakeSamplingParams(),
+        loss_mask_policy=LossMaskPolicy(),
+        max_running_prompts=1,
+    )
+
+    async def run():
+        session._loop = asyncio.get_running_loop()
+        return await session._complete_chat({"model": "policy", "messages": [{"role": "user", "content": "slow"}]})
+
+    response = asyncio.run(run())
+
+    assert response["choices"][0]["message"]["content"] == "100"
+
+
 def test_rollout_session_context_owns_backend_lifecycle():
     trainer = _FakeTrainer(world_size=1, tp_size=1)
 

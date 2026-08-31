@@ -684,7 +684,6 @@ def build_train_command(config: dict[str, Any]) -> list[str]:
         "--weight-decay": config.get("weight_decay"),
         "--grad-clip-norm": config.get("grad_clip_norm"),
         "--attn-backend": config.get("attn_backend"),
-        "--agent-timeout-s": config.get("agent_timeout_s"),
         "--gspo-clip-eps": config.get("gspo_clip_eps"),
         "--grpo-clip-eps": config.get("grpo_clip_eps"),
         "--dpo-beta": config.get("dpo_beta"),

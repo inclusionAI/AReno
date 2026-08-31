@@ -398,7 +398,6 @@ class Trainer:
         sampling_params: SamplingParams,
         loss_mask_policy: LossMaskPolicy | None = None,
         max_running_prompts: int | None = None,
-        timeout_s: float = 300.0,
         proxy: bool = True,
     ) -> RolloutSession:
         """Create an async rollout session, optionally with an OpenAI-compatible proxy."""
@@ -408,7 +407,6 @@ class Trainer:
             sampling_params=sampling_params,
             loss_mask_policy=loss_mask_policy,
             max_running_prompts=max_running_prompts,
-            timeout_s=timeout_s,
             proxy=proxy,
         )
 
