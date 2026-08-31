@@ -52,6 +52,53 @@ _InternalFinishedRowsCallback = Callable[
     [torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, str, tuple[int, ...]], None
 ]
 RolloutRefillCallback = Callable[[InferenceBatchState], list[int]]
+# (row_ids, token_ids, finish_reasons) — three parallel lists.  Row ids are
+# positions in the rollout batch state, unique across every request merged
+# into the batch (two refilled requests may both number their own prompts
+# from zero, so prompt indices cannot be used as routing keys).
+# finish_reasons entries are ``None`` for intermediate steps, ``"stop"``,
+# ``"length"``, or ``"cancelled"`` when the token ends the sequence.
+# Implementations may expose an ``enabled`` attribute (see
+# :func:`_is_stream_enabled`); the decode loop consults it each step so
+# fully non-streaming batches never pay the token host sync.
+StreamTokenCallback = Callable[[list[int], list[int], list[str | None]], None]
+
+
+def _is_stream_enabled(stream_callback: StreamTokenCallback) -> bool:
+    """Return whether *stream_callback* currently wants per-step tokens.
+
+    The worker's router flips ``enabled`` on once any request in the merged
+    batch streams — possibly only when a refill admits one mid-decode.
+    Plain callbacks without the attribute are always enabled.
+    """
+
+    return bool(getattr(stream_callback, "enabled", True))
+
+
+def _get_stream_finish_reasons(
+    finished: torch.Tensor | None,
+    full_length: torch.Tensor,
+    cancelled: torch.Tensor | None = None,
+) -> list[str | None]:
+    """Build per-row stream finish reasons (``None`` = sequence continues).
+
+    Each mask is converted to a Python list once; per-entry ``.item()``
+    calls would sync the device once per row.
+    """
+
+    reasons: list[str | None] = [None] * int(full_length.numel())
+    if finished is not None:
+        for idx, hit in enumerate(finished.tolist()):
+            if hit:
+                reasons[idx] = "stop"
+    for idx, hit in enumerate(full_length.tolist()):
+        if hit:
+            reasons[idx] = "length"
+    if cancelled is not None:
+        for idx, hit in enumerate(cancelled.tolist()):
+            if hit:
+                reasons[idx] = "cancelled"
+    return reasons
 
 
 def _cancel_stop_token(stop_token_ids: list[int], eos_token_id: int | tuple[int, ...] | None) -> int:
@@ -233,6 +280,7 @@ class InferenceManager:
         payload: RolloutPayload,
         finished_callback: FinishedRowsCallback | None = None,
         refill_callback: RolloutRefillCallback | None = None,
+        stream_callback: StreamTokenCallback | None = None,
     ) -> RolloutOutput | None:
         """Top-level rollout entry: prepare cache, generate, return on rank 0.
 
@@ -307,6 +355,7 @@ class InferenceManager:
                 prompt_indices=prompt_indices,
                 finished_callback=internal_finished_callback,
                 refill_callback=refill_callback,
+                stream_callback=stream_callback,
             )
             if self.config.runtime.rollout_routing_replay and not state.has_routing:
                 raise ValueError(
@@ -336,6 +385,7 @@ class InferenceManager:
         prompt_indices: list[int] | None = None,
         finished_callback: _InternalFinishedRowsCallback | None = None,
         refill_callback: RolloutRefillCallback | None = None,
+        stream_callback: StreamTokenCallback | None = None,
     ) -> None:
         """Prefill all prompts then decode up to `max_new_tokens` without DP-sync.
 
@@ -426,6 +476,7 @@ class InferenceManager:
                 stop_token_tensor,
                 finished_callback,
                 tuple(truncate_stop_token_ids),
+                stream_callback=stream_callback,
             )
             if admitted is not None:
                 (
@@ -512,6 +563,16 @@ class InferenceManager:
             cancelled = self._cancel_mask_for_active_rows(active_rows, cancel_flags, cancel_indices_tensor)
             if cancelled is not None:
                 remove |= cancelled
+            # ---- stream callback --------------------------------------------------
+            if stream_callback is not None and _is_stream_enabled(stream_callback) and ctx.is_rank0:
+                rows_cpu = active_rows.detach().cpu().tolist()
+                tokens_cpu = next_tokens.detach().cpu().tolist()
+                stream_callback(
+                    rows_cpu,
+                    tokens_cpu,
+                    _get_stream_finish_reasons(finished, full_length, cancelled),
+                )
+            # -----------------------------------------------------------------------
             if bool(remove.any().item()):
                 if finished is not None and bool(finished.any().item()):
                     self._mark_rollout_finished_rows(
@@ -755,6 +816,7 @@ class InferenceManager:
         stop_token_tensor: torch.Tensor | None,
         finished_callback: _InternalFinishedRowsCallback | None,
         truncate_stop_token_ids: tuple[int, ...],
+        stream_callback: StreamTokenCallback | None = None,
     ) -> (
         tuple[
             torch.Tensor,
@@ -821,6 +883,17 @@ class InferenceManager:
             remove |= finished
         full_length = response_lens[new_rows] >= state.max_new_tokens
         remove |= full_length
+        # ---- stream callback (prefill tokens) ----------------------------------
+        ctx = get_tp_context()
+        if stream_callback is not None and ctx.is_rank0 and _is_stream_enabled(stream_callback):
+            rows_cpu = new_rows.detach().cpu().tolist()
+            tokens_cpu = new_tokens.detach().cpu().tolist()
+            stream_callback(
+                rows_cpu,
+                tokens_cpu,
+                _get_stream_finish_reasons(finished, full_length),
+            )
+        # -----------------------------------------------------------------------
         if bool(remove.any().item()):
             if finished is not None and bool(finished.any().item()):
                 self._mark_rollout_finished_rows(

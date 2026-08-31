@@ -20,7 +20,7 @@ High-level responsibilities:
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import AsyncGenerator, Callable
 from itertools import count
 from typing import Any
 
@@ -29,7 +29,7 @@ import torch
 from areno.adapters.config import LoraConfig
 from areno.engine.checkpoints.io import resolve_model_path
 from areno.engine.config import EngineConfig, OptimizerConfig, RuntimeConfig
-from areno.engine.data import RolloutOutput, SamplingParams, TrainStats, to_cpu
+from areno.engine.data import RolloutOutput, SamplingParams, StreamTokenStep, TrainStats, to_cpu
 from areno.engine.modeling import canonical_model_path
 from areno.engine.protocol import (
     EnsureRolesPayload,
@@ -431,6 +431,91 @@ class ArenoEngine:
             decode_progress_interval_s=decode_progress_interval_s,
             cancel_flags=cancel_flags,
         )
+
+    async def generate_rollout_stream_async(
+        self,
+        prompts: list[list[int]],
+        *,
+        max_new_tokens: int,
+        max_running_prompts: int,
+        max_prompt_len: int | None = None,
+        eos_token_id: int | None = None,
+        sampling_params: SamplingParams | None = None,
+        prompt_features: list[dict[str, Any] | None] | None = None,
+        decode_progress_interval_s: float = 0.0,
+        cancel_flags: torch.Tensor | None = None,
+    ) -> AsyncGenerator[StreamTokenStep, None]:
+        """Streaming rollout: yield tokens incrementally via shared IPC.
+
+        Uses the same ``Op.INFER_ROLLOUT`` command and ``result_queue``
+        channel as the non-streaming path — no separate pipe.  Delegates to
+        ``TPCluster.call_async_stream`` which manages the ``asyncio.Queue``
+        and result-pump routing internally.
+
+        Batching capacity is reserved from *max_running_prompts* (mirroring
+        ``_generate_rollout_async_once``) so waiting requests can join this
+        decode loop via continuous-batch refill; sizing the batch to the
+        current call alone would cap it at that call's rows.
+
+        Only single-chunk prompts are supported (no prefill-budget splitting).
+        """
+
+        if not prompts:
+            raise ValueError("prompts must be non-empty")
+        if prompt_features is not None and len(prompt_features) != len(prompts):
+            raise ValueError("prompt_features must have the same length as prompts")
+        if max_running_prompts < 1:
+            raise ValueError("max_running_prompts must be >= 1")
+        sampling_params = sampling_params or SamplingParams()
+        rollout_max_prompt_len = (
+            int(max_prompt_len) if max_prompt_len is not None else max(len(prompt) for prompt in prompts)
+        )
+        rollout_max_cache_len = rollout_max_prompt_len + max_new_tokens
+        dp_size = int(self.config.dp_size)
+        prompts_by_dp = split_list_by_dp(prompts, dp_size)
+        prompt_features_by_dp = None
+        if prompt_features is not None:
+            prompt_features_by_dp = split_list_by_dp(prompt_features, dp_size)
+        prompt_indices_by_dp = split_list_by_dp(
+            list(range(len(prompts))), dp_size
+        )
+        local_running = max(max((len(rows) for rows in prompts_by_dp), default=0), 1)
+        # Reserve refill capacity up-front so the worker can admit waiting
+        # requests into this decode loop; `local_running` alone would cap the
+        # batch at this call's rows and serialize concurrent streaming calls.
+        local_max_running = max(ceil_div(int(max_running_prompts), dp_size), 1)
+        capacity_running = local_max_running if cancel_flags is None else local_running
+        cache_len = max(max(len(prompt) + max_new_tokens for prompt in prompts), rollout_max_cache_len)
+        max_blocks_per_seq = ceil_div(cache_len, self.config.runtime.kv_block_size)
+        payload = RolloutPayload(
+            prompts_by_dp=prompts_by_dp,
+            prompt_indices_by_dp=prompt_indices_by_dp,
+            prompt_features_by_dp=prompt_features_by_dp,
+            max_new_tokens=max_new_tokens,
+            eos_token_id=eos_token_id,
+            sampling_params=sampling_params,
+            max_running_seqs=capacity_running,
+            max_cache_len=cache_len,
+            max_blocks_per_seq=max_blocks_per_seq,
+            max_prefill_tokens=local_max_running * rollout_max_prompt_len,
+            num_blocks=capacity_running * max_blocks_per_seq,
+            block_size=self.config.runtime.kv_block_size,
+            decode_progress_interval_s=decode_progress_interval_s,
+            cancel_flags=cancel_flags,
+            cancel_indices_by_dp=split_list_by_dp(
+                list(range(len(prompts))), dp_size
+            )
+            if cancel_flags is not None
+            else None,
+            streaming=True,
+        )
+
+        tp_size = self.config.tp_size
+        result_ranks = {dp_rank * tp_size for dp_rank in range(dp_size)}
+        async for step in self.cluster.call_async_stream(
+            Op.INFER_ROLLOUT, payload, result_ranks=result_ranks,
+        ):
+            yield step
 
     async def _generate_rollout_async_once(
         self,

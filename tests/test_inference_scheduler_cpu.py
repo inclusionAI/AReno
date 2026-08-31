@@ -8,7 +8,7 @@ import torch
 import areno.engine.inference as inference_mod
 import areno.engine.worker as worker_mod
 from areno.engine.api import ArenoEngine, _chunk_prompts_for_prefill_budget, _merge_async_dp_rollouts
-from areno.engine.data import SamplingParams
+from areno.engine.data import SamplingParams, StreamTokenStep
 from areno.engine.data.rollout_state import InferenceBatchState
 from areno.engine.inference import InferCacheSpec, InferenceManager
 from areno.engine.protocol import Command, Op, RolloutPayload
@@ -347,6 +347,52 @@ def test_async_single_request_payload_uses_configured_local_capacity():
     assert cluster.payload.max_running_seqs == 16
 
 
+def test_stream_rollout_reserves_refill_capacity_from_max_running_prompts():
+    """Streaming payloads must size the worker batch for continuous refill.
+
+    Sizing ``max_running_seqs`` to the current call's rows alone would cap the
+    batch at one row and serialize concurrent streaming requests.
+    """
+
+    class ClusterStub:
+        def __init__(self):
+            self.payload = None
+
+        async def call_async_stream(self, op, payload, **kwargs):
+            del kwargs
+            assert op is Op.INFER_ROLLOUT
+            self.payload = payload
+            yield StreamTokenStep(prompt_idx=0, token_id=5)
+
+    cluster = ClusterStub()
+    engine = object.__new__(ArenoEngine)
+    engine.cluster = cluster
+    engine.config = SimpleNamespace(tp_size=1, dp_size=2, runtime=SimpleNamespace(kv_block_size=16))
+
+    async def run():
+        return [
+            step
+            async for step in engine.generate_rollout_stream_async(
+                [[1]],
+                max_new_tokens=16,
+                max_running_prompts=32,
+                max_prompt_len=32,
+                eos_token_id=None,
+                sampling_params=SamplingParams(),
+            )
+        ]
+
+    steps = asyncio.run(run())
+
+    assert [step.token_id for step in steps] == [5]
+    # 32 max_running_prompts / 2 dp ranks = 16 rows of reserved capacity,
+    # while the call itself only carries a single prompt.
+    assert cluster.payload.streaming is True
+    assert cluster.payload.max_running_seqs == 16
+    assert cluster.payload.num_blocks == 16 * cluster.payload.max_blocks_per_seq
+    assert cluster.payload.max_prefill_tokens == 16 * 32
+
+
 def test_async_single_prompt_requests_round_robin_across_dp_ranks():
     """Independent serve requests should not all land on DP rank 0."""
 
@@ -539,7 +585,7 @@ def test_worker_continuous_rollout_refills_from_waiting_request_and_returns_fini
             self.prompts.extend(prompts)
             return list(range(start, start + len(prompts)))
 
-    def infer_rollout(payload, finished_callback=None, refill_callback=None):
+    def infer_rollout(payload, finished_callback=None, refill_callback=None, stream_callback=None):
         assert refill_callback is not None
         refill_callback(AliasedState(payload.prompts_by_dp[0]))
         finished_callback(torch.tensor([0]), generated, logprobs, response_lens, "stop", ())
@@ -565,6 +611,76 @@ def test_worker_continuous_rollout_refills_from_waiting_request_and_returns_fini
     assert [item[1].request_id for item in worker._result_queue.items] == [1]
     assert [request_id for request_id, _ in remaining] == [2]
     assert worker._result_queue.items[0][1].payload.response_ids == [[10, 11]]
+    assert remaining[0][1].response_ids == [[20, 21]]
+
+
+def test_worker_routes_stream_tokens_when_streaming_request_refills_into_non_streaming_batch():
+    """A streaming request admitted via refill must still receive its tokens.
+
+    The initial batch is non-streaming, so the router starts disabled;
+    admitting the second, streaming request mid-decode must flip it on.
+    Only the streaming request's rows are forwarded — the non-streaming
+    request's token is filtered out instead of being routed by row id.
+    """
+
+    first = _rollout_command(1, [[1]], target=2)
+    second = _rollout_command(2, [[2]], target=2)
+    second.payload.streaming = True
+    generated = torch.tensor([[10, 11], [20, 21]], dtype=torch.long)
+    logprobs = torch.tensor([[-0.1, -0.2], [-0.3, -0.4]], dtype=torch.float32)
+    response_lens = torch.tensor([2, 2], dtype=torch.long)
+    worker = object.__new__(worker_mod.ArenoWorker)
+    worker._rank = 0
+    worker._result_queue = _ResultQueueDouble()
+    worker._current_request_ids = [1]
+    ctx = SimpleNamespace(dp_rank=0, is_rank0=True, world_size=1, device=torch.device("cpu"))
+
+    class AliasedState:
+        def __init__(self, prompts):
+            self.prompts = prompts
+
+        def append_prompts(self, prompts, prompt_features=None):
+            del prompt_features
+            start = len(self.prompts)
+            self.prompts.extend(prompts)
+            return list(range(start, start + len(prompts)))
+
+    def infer_rollout(payload, finished_callback=None, refill_callback=None, stream_callback=None):
+        assert stream_callback is not None
+        assert stream_callback.enabled is False  # batch starts non-streaming
+        refill_callback(AliasedState(payload.prompts_by_dp[0]))
+        assert stream_callback.enabled is True  # refill admitted a streaming request
+        # Row 0 belongs to request 1 (non-streaming), row 1 to request 2.
+        stream_callback([0, 1], [101, 201], [None, None])
+        finished_callback(torch.tensor([0]), generated, logprobs, response_lens, "stop", ())
+        return worker_mod._build_rollout_from_tensor_rows(
+            payload.prompts_by_dp[0],
+            generated,
+            logprobs,
+            response_lens,
+            ["stop", "length"],
+            0,
+            len(payload.prompts_by_dp[0]),
+            (),
+        )
+
+    worker.infer_rollout = infer_rollout
+    worker._cmd_queue = _QueueDouble([second])
+    worker._deferred_commands = []
+
+    with PatchedContext(worker_mod, get_tp_context=lambda: ctx):
+        remaining = worker.run_rollout_command(first)
+
+    items = worker._result_queue.items
+    stream_items = [item for item in items if isinstance(item[1].payload, StreamTokenStep)]
+    finished_items = [item for item in items if not isinstance(item[1].payload, StreamTokenStep)]
+
+    assert [item[1].request_id for item in stream_items] == [2]
+    step = stream_items[0][1].payload
+    assert (step.prompt_idx, step.token_id, step.finish_reason) == (0, 201, None)
+    assert [item[1].request_id for item in finished_items] == [1]
+    assert finished_items[0][1].payload.response_ids == [[10, 11]]
+    assert [request_id for request_id, _ in remaining] == [2]
     assert remaining[0][1].response_ids == [[20, 21]]
 
 
@@ -595,7 +711,7 @@ def test_worker_refill_does_not_double_append_aliased_payload_prompts():
             self.prompts.extend(prompts)
             return list(range(start, start + len(prompts)))
 
-    def infer_rollout(payload, finished_callback=None, refill_callback=None):
+    def infer_rollout(payload, finished_callback=None, refill_callback=None, stream_callback=None):
         assert refill_callback is not None
         refill_callback(AliasedState(payload.prompts_by_dp[0]))
         assert payload.prompts_by_dp[0] == [[1], [2], [3]]
@@ -633,7 +749,7 @@ def test_worker_sends_empty_ack_for_requests_without_local_dp_rows():
     worker._current_request_ids = [1]
     ctx = SimpleNamespace(dp_rank=1, is_rank0=True)
 
-    def infer_rollout(payload, finished_callback=None, refill_callback=None):
+    def infer_rollout(payload, finished_callback=None, refill_callback=None, stream_callback=None):
         del payload, finished_callback, refill_callback
         return worker_mod._empty_rollout()
 

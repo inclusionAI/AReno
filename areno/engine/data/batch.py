@@ -40,6 +40,22 @@ class SamplingParams:
 
 
 @dataclass(slots=True)
+class StreamTokenStep:
+    """Incremental token data pushed during a streaming rollout.
+
+    Each step carries one token for one prompt row, plus an optional
+    finish reason when that token ends the sequence (``"stop"``,
+    ``"length"``, or ``"cancelled"``).  ``prompt_idx`` indexes the prompt
+    within the submitting request's own prompt list; requests merged into
+    one worker batch are demultiplexed by ``WorkerResult.request_id``.
+    """
+
+    prompt_idx: int
+    token_id: int
+    finish_reason: str | None = None
+
+
+@dataclass(slots=True)
 class RolloutOutput:
     """Padded rollout tensors plus per-sequence Python token lists."""
 
