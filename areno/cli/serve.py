@@ -172,6 +172,8 @@ class ServeState:
     default_max_tokens: int
     max_model_len: int
     tool_call_parser: ToolCallParser
+    stop_token_ids: tuple[int, ...]
+    eos_token_id: int | None
     active_tasks: set[asyncio.Task] = field(default_factory=set)
     closing: bool = False
     rollout_session_started: bool = False
@@ -390,6 +392,7 @@ def create_app(
         processor = engine.processor
         configure_chat_template_enable_thinking(tokenizer, chat_template_enable_thinking)
         configure_chat_template_enable_thinking(processor, chat_template_enable_thinking)
+    generation_eos_token_ids = _generation_eos_token_ids(model_path, tokenizer)
     state = ServeState(
         model_path=model_path,
         tokenizer=tokenizer,
@@ -399,6 +402,8 @@ def create_app(
         default_max_tokens=default_max_tokens,
         max_model_len=int(engine.max_model_len),
         tool_call_parser=get_tool_call_parser(infer_tool_call_parser_name(parser_trainer)),
+        stop_token_ids=generation_eos_token_ids,
+        eos_token_id=generation_eos_token_ids[0] if generation_eos_token_ids else None,
     )
     app = FastAPI(title="areno OpenAI-compatible server")
     app.state.areno_serve = state
@@ -469,8 +474,8 @@ def create_app(
             top_p=float(request.top_p),
             top_k=int(request.top_k),
             seed=request.seed,
-            stop_token_ids=_stop_token_ids(state.tokenizer),
-            eos_token_id=_first_eos_token_id(state.tokenizer),
+            stop_token_ids=state.stop_token_ids,
+            eos_token_id=state.eos_token_id,
         )
         pending = PendingRequest(
             request=request,
@@ -925,24 +930,24 @@ def _image_token_id(tokenizer: Any, processor: Any) -> int | None:
     return None
 
 
-def _first_eos_token_id(tokenizer: Any) -> int | None:
-    """Return the first eos id when the tokenizer reports one (handles list/int forms)."""
-    eos = getattr(tokenizer, "eos_token_id", None)
-    if isinstance(eos, int):
-        return eos
-    if isinstance(eos, list | tuple) and eos:
-        return int(eos[0])
-    return None
+def _generation_eos_token_ids(model_path: str, tokenizer: Any) -> tuple[int, ...]:
+    """Use the checkpoint generation config's complete EOS set when available."""
 
+    tokenizer_eos = getattr(tokenizer, "eos_token_id", None)
+    fallback = (int(tokenizer_eos),) if isinstance(tokenizer_eos, int) else tuple(tokenizer_eos or ())
+    try:
+        from transformers import GenerationConfig
 
-def _stop_token_ids(tokenizer: Any) -> tuple[int, ...]:
-    """Return the tokenizer's eos id(s) as a tuple of ints for use in `BatchKey`."""
-    eos = getattr(tokenizer, "eos_token_id", None)
-    if isinstance(eos, int):
-        return (eos,)
-    if isinstance(eos, list | tuple):
-        return tuple(int(value) for value in eos)
-    return ()
+        configured = GenerationConfig.from_pretrained(model_path).eos_token_id
+    except (OSError, ValueError):
+        configured = None
+    if isinstance(configured, int):
+        configured = (configured,)
+    if isinstance(configured, list | tuple):
+        # Preserve checkpoint order: the first value is also passed to samplers
+        # that accept only one EOS id.  Dict deduplication is deterministic.
+        return tuple(dict.fromkeys(int(value) for value in tuple(configured) + fallback))
+    return tuple(int(value) for value in fallback)
 
 
 def _normalize_stop(stop: str | list[str] | None) -> list[str]:
