@@ -14,7 +14,6 @@ from typing import Any
 import torch
 from torch import nn
 
-from areno.accel.utils import is_cuda_graph_capturing
 from areno.engine.config import ModelConfig, _parse_dtype
 from areno.engine.layers.attention import CausalSelfAttention
 from areno.engine.layers.mlp import GatedMLP
@@ -106,17 +105,30 @@ class Phi4MMLongRoPEScaledRotaryEmbedding(nn.Module):
         x: torch.Tensor,
         position_ids: torch.Tensor,
         sequence_length: int | None = None,
+        use_long_factor: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if sequence_length is None:
-            sequence_length = int(torch.max(position_ids).item()) + 1
-        inv_freq = (
-            self.long_inv_freq if sequence_length > self.original_max_position_embeddings else self.short_inv_freq
-        )
-        expanded_inv_freq = inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1)
-        expanded_positions = position_ids[:, None, :].float()
+        if use_long_factor is not None:
+            if use_long_factor.shape != position_ids.shape:
+                raise ValueError("Phi4MM LongRoPE factor mask must match position_ids")
+            # Decode batches can contain both a short-cache row and a row
+            # rebuilt with long factors.  Keep that selection as tensor math:
+            # materialising cache_seqlens with .item() breaks torch.compile
+            # and prevents the decode CUDA graph from being captured/replayed.
+            positions = position_ids.float().unsqueeze(-1)
+            short_freqs = positions * self.short_inv_freq.float()
+            long_freqs = positions * self.long_inv_freq.float()
+            freqs = torch.where(use_long_factor.unsqueeze(-1), long_freqs, short_freqs)
+        else:
+            if sequence_length is None:
+                sequence_length = int(torch.max(position_ids).item()) + 1
+            inv_freq = (
+                self.long_inv_freq if sequence_length > self.original_max_position_embeddings else self.short_inv_freq
+            )
+            expanded_inv_freq = inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1)
+            expanded_positions = position_ids[:, None, :].float()
+            freqs = (expanded_inv_freq @ expanded_positions).transpose(1, 2)
         device_type = x.device.type if x.device.type != "mps" else "cpu"
         with torch.autocast(device_type=device_type, enabled=False):
-            freqs = (expanded_inv_freq @ expanded_positions).transpose(1, 2)
             embedding = torch.cat((freqs, freqs), dim=-1)
             cos = embedding.cos() * self.scaling_factor
             sin = embedding.sin() * self.scaling_factor
@@ -128,8 +140,9 @@ class Phi4MMLongRoPEScaledRotaryEmbedding(nn.Module):
         k: torch.Tensor,
         position_ids: torch.Tensor,
         sequence_length: int | None = None,
+        use_long_factor: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        cos, sin = self.cos_sin(q, position_ids, sequence_length)
+        cos, sin = self.cos_sin(q, position_ids, sequence_length, use_long_factor)
         cos = cos.unsqueeze(2)
         sin = sin.unsqueeze(2)
         q_rot, q_pass = q[..., : self.dim], q[..., self.dim :]
@@ -188,17 +201,25 @@ class Phi4MMAttention(CausalSelfAttention):
         train_meta: TrainMeta | None,
         infer_meta: InferMeta | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if infer_meta is not None and infer_meta.mode == "decode" and is_cuda_graph_capturing(q):
-            # DecodeGraph validates its dynamic cache lengths before replay.
-            # Capture itself always records the supported short-factor path.
-            sequence_length = self.rope.original_max_position_embeddings
-        else:
-            sequence_length = _phi4mm_longrope_sequence_length(
+        if infer_meta is not None and infer_meta.mode == "decode":
+            # A row that was re-prefilled across the boundary has its next
+            # position strictly above it; rows not rebuilt are still short.
+            # This tensor-only selection is essential for a captured graph:
+            # cache_seqlens.max().item() would force a Dynamo graph break.
+            # The scheduler requests a re-prefill at the equality boundary,
+            # so no short-factor KV cache is ever paired with a long query.
+            return self.rope(
+                q,
+                k,
                 position_ids,
-                train_meta,
-                infer_meta,
-                self.rope.original_max_position_embeddings,
+                use_long_factor=position_ids.ge(self.rope.original_max_position_embeddings),
             )
+        sequence_length = _phi4mm_longrope_sequence_length(
+            position_ids,
+            train_meta,
+            infer_meta,
+            self.rope.original_max_position_embeddings,
+        )
         return self.rope(q, k, position_ids, sequence_length)
 
 

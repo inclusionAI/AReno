@@ -418,6 +418,50 @@ def test_phi4mm_longrope_requires_runtime_reprefill_for_cached_boundary_crossing
         _phi4mm_longrope_sequence_length(torch.tensor([[32]]), None, crossing_boundary, 32)
 
 
+def test_phi4mm_decode_longrope_factor_selection_is_fullgraph_compatible():
+    attention = Phi4MMAdapter().build(_tiny_model_config()).model.layers[0].self_attn
+    q = torch.randn(1, 2, attention.local_heads, attention.head_dim)
+    k = torch.randn(1, 2, attention.local_kv_heads, attention.head_dim)
+    # One short-cache row and one row rebuilt with long factors.  The runtime
+    # re-prefills at equality (32), so position 33 is a valid long-cache row.
+    positions = torch.tensor([[31, 33]])
+    infer_meta = InferMeta(mode="decode", cache_seqlens=torch.tensor([31, 33], dtype=torch.int32))
+
+    compiled_apply_rotary = torch.compile(attention.apply_rotary, backend="eager", fullgraph=True)
+    actual_q, actual_k = compiled_apply_rotary(q, k, positions, None, infer_meta)
+    short_q, short_k = attention.rope(q[:, :1], k[:, :1], positions[:, :1], sequence_length=32)
+    long_q, long_k = attention.rope(q[:, 1:], k[:, 1:], positions[:, 1:], sequence_length=34)
+
+    torch.testing.assert_close(actual_q, torch.cat((short_q, long_q), dim=1))
+    torch.testing.assert_close(actual_k, torch.cat((short_k, long_k), dim=1))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA graph regression test requires CUDA")
+def test_phi4mm_decode_longrope_factor_selection_captures_cuda_graph():
+    attention = Phi4MMAdapter().build(_tiny_model_config()).model.layers[0].self_attn.cuda().eval()
+    q = torch.randn(1, 2, attention.local_heads, attention.head_dim, device="cuda")
+    k = torch.randn(1, 2, attention.local_kv_heads, attention.head_dim, device="cuda")
+    positions = torch.tensor([[31, 33]], device="cuda")
+    infer_meta = InferMeta(mode="decode", cache_seqlens=torch.tensor([31, 33], device="cuda", dtype=torch.int32))
+
+    warmup_stream = torch.cuda.Stream()
+    warmup_stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(warmup_stream):
+        for _ in range(3):
+            attention.apply_rotary(q, k, positions, None, infer_meta)
+    torch.cuda.current_stream().wait_stream(warmup_stream)
+    torch.cuda.synchronize()
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured_q, captured_k = attention.apply_rotary(q, k, positions, None, infer_meta)
+    graph.replay()
+    torch.cuda.synchronize()
+
+    assert captured_q.shape == q.shape
+    assert captured_k.shape == k.shape
+
+
 def test_phi4mm_longrope_reprefill_matches_full_long_factor_recompute():
     rope = Phi4MMLongRoPEScaledRotaryEmbedding(_tiny_model_config())
     q = torch.randn(1, 33, 2, 8)
