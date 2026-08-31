@@ -177,7 +177,6 @@ class CudaBackend(Backend):
         from areno.engine.protocol import (
             ClusterPartition,
             DistributedWorldSpec,
-            find_free_port,
             start_partitioned_clusters,
         )
 
@@ -203,7 +202,9 @@ class CudaBackend(Backend):
         )
         world_spec = DistributedWorldSpec(
             master_addr="127.0.0.1",
-            master_port=find_free_port(),
+            # Placeholder: start_partitioned_clusters creates a coordinator-held
+            # TCPStore with port=0 and fills in the resolved port before spawn.
+            master_port=0,
             global_world_size=world_size + len(rollout_devices),
             train=train_partition,
             rollout=rollout_partition,

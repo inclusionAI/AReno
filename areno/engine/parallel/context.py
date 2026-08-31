@@ -113,9 +113,13 @@ def init_process_group(
 
     resolved_global_rank = rank if global_rank is None else global_rank
     resolved_global_world_size = world_size if global_world_size is None else global_world_size
+    # The coordinator holds the server-side rendezvous store on `master_port`
+    # (created with port=0 in protocol.py), so every worker joins as a TCPStore
+    # client instead of racing to bind the port itself (#517).
+    store = dist.TCPStore(master_addr, master_port, world_size=resolved_global_world_size, is_master=False)
     dist.init_process_group(
         backend=backend,
-        init_method=f"tcp://{master_addr}:{master_port}",
+        store=store,
         rank=resolved_global_rank,
         world_size=resolved_global_world_size,
     )
