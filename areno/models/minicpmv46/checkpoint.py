@@ -167,10 +167,13 @@ def _load_vision_weights(model: MiniCPMV46ForCausalLM, index: SafetensorsIndex) 
 def _save_vision_weights(tensors: dict[str, torch.Tensor | None], model: MiniCPMV46ForCausalLM) -> None:
     """Save replicated vision/projector parameters under the HF prefixes."""
 
+    policy = isinstance(tensors, PolicyTensorStore)
     for module_name, module in (("vision_tower", model.vision_tower), ("merger", model.merger)):
         if module is None:
             continue
         for name, parameter in module.named_parameters():
+            if policy and not getattr(parameter, "_areno_policy_sync", False):
+                continue
             tensors[f"model.{module_name}.{name}"] = rank0_tensor(parameter)
 
 

@@ -138,7 +138,6 @@ class CudaBackend(Backend):
             cfg = CudaConfig()
         if not isinstance(cfg, CudaConfig):
             raise TypeError(f"CudaBackend requires CudaConfig, got {type(cfg)!r}")
-
         # Derive the DP/TP layout: world = dp * tp must hold exactly. When the
         # caller omits `dp_size` we infer it from `world_size / tp_size`.
         world_size = int(ctx.world_size)
