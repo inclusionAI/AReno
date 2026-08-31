@@ -12,18 +12,18 @@ directly from Python.
 
    ``Trainer`` initializes tokenizer and backend workers, generates rollout
    batches, runs policy training steps, manages PPO/DPO auxiliary roles, scores
-   logprobs/values/rewards, and saves Hugging Face-compatible checkpoints.
+   logprobs/values/rewards, and saves backend-native checkpoints.
 
    It provides methods to:
 
-   * create a local tensor-parallel Areno backend
+   * create a native CUDA or MLX backend
    * load prompt batches from dataset-like objects
    * generate text rollouts from string prompts or token ids
    * run agentic rollouts through a local OpenAI-compatible proxy
    * train policy batches with caller-provided loss functions
    * prepare reference, reward, and critic roles for PPO/DPO workflows
    * score logprobs, values, and rewards through backend-owned roles
-   * save Hugging Face-compatible checkpoints
+   * save backend-native checkpoints
 
    Direct rollout calls must run inside ``async with
    trainer.rollout_session(...)``. The session is the lifecycle boundary for
@@ -34,24 +34,19 @@ directly from Python.
    .. code-block:: python
 
       import asyncio
-      import areno
       from areno import Trainer
+      from areno.api import SamplingParams
 
       async def main():
           # Near-instant: constructs the Python wrapper only.
-          trainer = Trainer(
-              world_size=1,
-              model_path="Qwen/Qwen3.5-4B",
-              backend_type=areno.Areno,
-              custom_config=areno.ArenoConfig(tp_size=1),
-          )
+          trainer = Trainer(world_size=1, model_path="Qwen/Qwen3.5-4B")
 
           # Takes a moment: loads tokenizer, starts workers, loads checkpoint.
           trainer.init()
 
           # Rollout calls must run inside an explicit rollout session. The
           # session owns actor onload/offload and rollout-state cleanup.
-          sampling = areno.SamplingParams(max_new_tokens=128)
+          sampling = SamplingParams(max_new_tokens=128)
           async with trainer.rollout_session(sampling_params=sampling, proxy=False):
               rollout = trainer.rollout_batch(["Solve 12 * 13."], n_samples=1, sampling_params=sampling)
 
@@ -72,22 +67,24 @@ directly from Python.
 
    .. code-block:: python
 
-      import areno
       from areno import Trainer
+      from areno.api import CUDA, CudaConfig
 
       trainer = Trainer(
           world_size=1,
           model_path="Qwen/Qwen3.5-4B",
-          backend_type=areno.Areno,
-          custom_config=areno.ArenoConfig(tp_size=1),
+          backend_type=CUDA,
+          custom_config=CudaConfig(tp_size=1),
       )
       trainer.init()
 
    :param int world_size: Total number of devices or local worker ranks.
    :param str model_path: Local checkpoint path or Hugging Face repo ID.
-   :param backend_type: Backend selector. Defaults to Areno when omitted.
+   :param backend_type: Optional backend selector. When omitted, Linux selects
+      CUDA and native Apple Silicon selects MLX. No cross-platform fallback is
+      attempted.
    :param custom_config: Backend-specific configuration, such as
-      ``areno.ArenoConfig(tp_size=1)``.
+      ``CudaConfig(tp_size=1)`` from ``areno.api``.
    :param str | None metrics_log_dir: Optional TensorBoard metrics directory.
 
    .. py:method:: init()
@@ -161,7 +158,7 @@ directly from Python.
 
       .. code-block:: python
 
-         from areno import SamplingParams
+         from areno.api import SamplingParams
 
          sampling = SamplingParams(max_new_tokens=128, temperature=1.0)
          async with trainer.rollout_session(sampling_params=sampling, proxy=False):
@@ -245,12 +242,12 @@ directly from Python.
       :returns: ``dict[str, float]`` with scalar training metrics.
 
       ``loss_fn`` receives the backend data pack and current logprobs. Built-in
-      loss functions live under ``areno.loss_fns``.
+      loss functions are exported by ``areno.api``.
 
       .. code-block:: python
 
          from functools import partial
-         from areno.loss_fns import gspo_loss_fn
+         from areno.api import gspo_loss_fn
 
          stats = trainer.train(batch, partial(gspo_loss_fn, clip_eps=3.0e-4), mini_bs=4)
 
@@ -326,7 +323,10 @@ directly from Python.
 
    .. py:method:: save_checkpoint(path)
 
-      Save a Hugging Face-compatible checkpoint when supported by the backend.
+      Save a checkpoint in the selected backend's native format. CUDA writes
+      its Hugging Face-oriented layout; MLX writes MLX safetensors plus model,
+      tokenizer/processor, and ``areno_mlx_state.json`` metadata. The MLX
+      checkpoint does not currently include optimizer or scheduler state.
 
       :param str path: Output directory.
       :returns: saved checkpoint path as ``str``.
@@ -344,7 +344,7 @@ directly from Python.
 Data classes
 ------------
 
-.. py:class:: areno.SamplingParams(greedy=False, top_p=1.0, top_k=-1, max_new_tokens=16, max_context_len=None, temperature=1.0, stop=None, stop_token_ids=None, ignore_eos=False, skip_special_tokens=True, max_prompt_len=None)
+.. py:class:: areno.api.SamplingParams(greedy=False, top_p=1.0, top_k=-1, max_new_tokens=16, max_context_len=None, temperature=1.0, stop=None, stop_token_ids=None, ignore_eos=False, skip_special_tokens=True, max_prompt_len=None)
 
    Generation controls used by rollout APIs.
 
@@ -363,7 +363,7 @@ Data classes
    :param bool skip_special_tokens: Decode helper preference for completions.
    :param int | None max_prompt_len: Optional prompt length cap.
 
-.. py:class:: areno.TrainSequence(prompt_mask=None, tokens=None, logprobs=None, advantages=None, returns=None, values=None, ref_logprobs=None, reward=0.0, eos_token_id=0)
+.. py:class:: areno.api.TrainSequence(prompt_mask=None, tokens=None, logprobs=None, advantages=None, returns=None, values=None, ref_logprobs=None, reward=0.0, eos_token_id=0)
 
    One rollout sequence converted into a policy-gradient training sample.
 
@@ -387,7 +387,7 @@ Data classes
    :param bool trainable: Whether the role has an optimizer.
    :param float | None optimizer_lr: Optimizer LR for trainable roles.
 
-.. py:class:: areno.ArenoConfig(model_path=None, tp_size=1, dp_size=None, devices=None, dummy_load=False, optimizer=None, runtime=None, max_running_prompts=64, decode_progress_interval_s=10.0)
+.. py:class:: areno.api.CudaConfig(model_path=None, tp_size=1, dp_size=None, devices=None, dummy_load=False, optimizer=None, runtime=None, max_running_prompts=64, decode_progress_interval_s=10.0)
 
    Backend configuration for the local Areno engine.
 
@@ -461,9 +461,8 @@ One GSPO-style rollout/train step
 
    from datasets import load_dataset
 
-   import areno
-   from areno import SamplingParams, TrainSequence, Trainer
-   from areno.loss_fns import gspo_loss_fn
+   from areno import Trainer
+   from areno.api import CUDA, CudaConfig, SamplingParams, TrainSequence, gspo_loss_fn
 
 
    def normalize_rewards(rewards):
@@ -477,8 +476,8 @@ One GSPO-style rollout/train step
        trainer = Trainer(
            world_size=1,
            model_path="Qwen/Qwen3.5-4B",
-           backend_type=areno.Areno,
-           custom_config=areno.ArenoConfig(tp_size=1),
+           backend_type=CUDA,
+           custom_config=CudaConfig(tp_size=1),
        )
        trainer.init()
 
@@ -532,8 +531,8 @@ token, logprob, reward, and loss-mask rows used by regular rollouts.
 
    import asyncio
 
-   import areno
-   from areno import SamplingParams, Trainer
+   from areno import Trainer
+   from areno.api import CUDA, CudaConfig, SamplingParams
    from areno.api.agentic import AgentBatch, AgentTrajectory, AgentTrajectoryTurn
    from openai import AsyncOpenAI
 
@@ -605,8 +604,8 @@ token, logprob, reward, and loss-mask rows used by regular rollouts.
    trainer = Trainer(
        world_size=1,
        model_path="Qwen/Qwen3-0.6B",
-       backend_type=areno.Areno,
-       custom_config=areno.ArenoConfig(tp_size=1),
+       backend_type=CUDA,
+       custom_config=CudaConfig(tp_size=1),
    )
    trainer.init()
 

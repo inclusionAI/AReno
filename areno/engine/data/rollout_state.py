@@ -43,6 +43,8 @@ class InferenceBatchState:
         self.prompt_features = _normalize_prompt_features(prompt_features, len(prompts))
         self.generated = [[] for _ in prompts]
         self.logprobs = [[] for _ in prompts]
+        self._routing_buffer: torch.Tensor | None = None
+        self._routing_capacity = 0
         self.max_new_tokens = max_new_tokens
         self.finished = [False for _ in prompts]
         self.finish_reason = ["" for _ in prompts]
@@ -56,6 +58,8 @@ class InferenceBatchState:
         self._pending_seq_id = 0
         self._free_blocks = list(range(self.num_cache_blocks))
         self._seq_to_blocks: dict[int, list[int]] = {}
+        self._free_recurrent_slots = list(range(self.max_running_seqs))
+        self._seq_to_recurrent_slot: dict[int, int] = {}
         self._prefill_cursor_by_seq: dict[int, int] = {}
         self._last_active_ids: list[int] = []
 
@@ -116,7 +120,9 @@ class InferenceBatchState:
         block_table: list[list[int]] = []
         cache_block_ids: list[int] = []
         cache_block_offsets: list[int] = []
+        recurrent_slots: list[int] = []
         active_ids: list[int] = []
+        prefill_seq_ids: list[int] = []
 
         while self._pending_seq_id < len(self.prompts):
             seq_id = self._pending_seq_id
@@ -136,6 +142,9 @@ class InferenceBatchState:
             if blocks is None:
                 blocks = []
                 self._seq_to_blocks[seq_id] = blocks
+                if not self._free_recurrent_slots:
+                    raise RuntimeError("recurrent state slots exhausted during prefill")
+                self._seq_to_recurrent_slot[seq_id] = self._free_recurrent_slots.pop(0)
             required_blocks = ceil_div(cursor + chunk_len, self.kv_block_size)
             while len(blocks) < required_blocks:
                 if not self._free_blocks:
@@ -155,11 +164,14 @@ class InferenceBatchState:
                             block_table,
                             cache_block_ids,
                             cache_block_offsets,
+                            recurrent_slots,
                             active_ids,
+                            prefill_seq_ids,
                         )
                     )
                 blocks.append(self._free_blocks.pop(0))
             chunk = prompt[cursor : cursor + chunk_len]
+            prefill_seq_ids.append(seq_id)
             input_ids.extend(chunk)
             local_mask, local_features = _slice_prompt_image_features(
                 self.prompt_features[seq_id],
@@ -192,6 +204,7 @@ class InferenceBatchState:
             # Pad the per-sequence block table to a uniform width so the model
             # can treat the entire batch as one rectangular tensor.
             block_table.append(_pad_blocks(blocks, self.max_blocks_per_seq))
+            recurrent_slots.append(self._seq_to_recurrent_slot[seq_id])
             cursor += chunk_len
             if cursor >= len(prompt):
                 sample_indices.append(len(input_ids) - 1)
@@ -216,7 +229,9 @@ class InferenceBatchState:
             block_table,
             cache_block_ids,
             cache_block_offsets,
+            recurrent_slots,
             active_ids,
+            prefill_seq_ids,
         )
 
     def _prefill_payload(
@@ -231,7 +246,9 @@ class InferenceBatchState:
         block_table: list[list[int]],
         cache_block_ids: list[int],
         cache_block_offsets: list[int],
+        recurrent_slots: list[int],
         active_ids: list[int],
+        prefill_seq_ids: list[int],
     ) -> dict:
         self._last_active_ids = active_ids
         payload = {
@@ -244,6 +261,8 @@ class InferenceBatchState:
             "block_table": torch.tensor(block_table, dtype=torch.int32),
             "cache_block_ids": torch.tensor(cache_block_ids, dtype=torch.long),
             "cache_block_offsets": torch.tensor(cache_block_offsets, dtype=torch.long),
+            "recurrent_slots": torch.tensor(recurrent_slots, dtype=torch.long),
+            "prefill_seq_ids": list(prefill_seq_ids),
         }
         if any(feature_mask) or image_features or mrope_position_parts is not None:
             payload["features"] = _prefill_multimodal_features(feature_mask, image_features, mrope_position_parts)
@@ -272,12 +291,93 @@ class InferenceBatchState:
             for seq_id in seq_ids
         ]
 
+    def record_prefill_routing(self, payload: dict, routes: torch.Tensor | None) -> None:
+        """Record packed-prefill routes without synchronizing them to CPU."""
+
+        if routes is None:
+            return
+        routing_buffer = self._ensure_routing_buffer(routes)
+        cu_seqlens = payload["cu_seqlens"].tolist()
+        seq_ids = payload.get("prefill_seq_ids") or []
+        if len(seq_ids) + 1 != len(cu_seqlens):
+            raise RuntimeError("prefill routing sequence metadata is misaligned")
+        if int(routes.shape[0]) != int(cu_seqlens[-1]):
+            raise RuntimeError("prefill routing token count does not match packed prefill tokens")
+        for index, seq_id in enumerate(seq_ids):
+            start, end = int(cu_seqlens[index]), int(cu_seqlens[index + 1])
+            token_start = int(payload["position_ids"][start].item())
+            routing_buffer[int(seq_id), token_start : token_start + end - start].copy_(
+                routes[start:end].detach().to(dtype=torch.int16)
+            )
+
+    def record_decode_routing(
+        self,
+        rows: torch.Tensor,
+        positions: torch.Tensor,
+        routes: torch.Tensor | None,
+    ) -> None:
+        """Record one decode-input route per active row entirely on device."""
+
+        if routes is None:
+            return
+        routing_buffer = self._ensure_routing_buffer(routes)
+        if int(routes.shape[0]) < int(rows.numel()):
+            raise RuntimeError("decode routing capture has fewer rows than the active batch")
+        if positions.numel() != rows.numel():
+            raise RuntimeError("decode routing positions do not match the active batch")
+        routing_buffer[rows, positions.to(dtype=torch.long)] = routes[: rows.numel()].detach().to(dtype=torch.int16)
+
+    @property
+    def routing_buffer(self) -> torch.Tensor | None:
+        """Dense device-side R3 buffer used by final and continuous outputs."""
+
+        return self._routing_buffer
+
+    @property
+    def has_routing(self) -> bool:
+        return self._routing_buffer is not None
+
+    def _ensure_routing_buffer(self, routes: torch.Tensor) -> torch.Tensor:
+        if routes.ndim != 3:
+            raise RuntimeError("captured routing must have shape (tokens, layers, top_k)")
+        route_shape = tuple(routes.shape[1:])
+        if self._routing_buffer is not None and tuple(self._routing_buffer.shape[2:]) != route_shape:
+            raise RuntimeError("captured routing layer/top-k shape changed during rollout")
+        required_rows = len(self.prompts)
+        if self._routing_buffer is None:
+            capacity = max(required_rows, 1)
+            self._routing_buffer = torch.empty(
+                (capacity, self.max_cache_len, *route_shape),
+                device=routes.device,
+                dtype=torch.int16,
+            )
+            self._routing_capacity = capacity
+        elif required_rows > self._routing_capacity:
+            capacity = max(required_rows, self._routing_capacity * 2)
+            expanded = torch.empty(
+                (capacity, self.max_cache_len, *route_shape),
+                device=self._routing_buffer.device,
+                dtype=self._routing_buffer.dtype,
+            )
+            expanded[: self._routing_capacity].copy_(self._routing_buffer)
+            self._routing_buffer = expanded
+            self._routing_capacity = capacity
+        return self._routing_buffer
+
     def to_rollout(self) -> RolloutOutput:
         """Materialize Python rollout state into padded tensors for the API."""
         input_ids, attention_mask, response_mask, logprobs = pad_rollout_rows(
             self.prompts, self.generated, self.logprobs
         )
         reasons = [reason or "unknown" for reason in self.finish_reason]
+        routed_experts = None
+        if self._routing_buffer is not None:
+            expected = [
+                max(len(prompt) + len(response) - 1, 0) for prompt, response in zip(self.prompts, self.generated)
+            ]
+            max_expected = max(expected, default=0)
+            materialized = self._routing_buffer[: len(self.prompts), :max_expected].cpu()
+            routed_experts = [materialized[row, :count].contiguous() for row, count in enumerate(expected)]
         return RolloutOutput(
             prompt_ids=self.prompts,
             response_ids=self.generated,
@@ -287,6 +387,7 @@ class InferenceBatchState:
             logprobs=logprobs,
             finish_reason=reasons,
             metrics=self.metrics,
+            routed_experts=routed_experts,
         )
 
 
@@ -312,7 +413,17 @@ def _slice_prompt_image_features(
     if image_embeds is None:
         image_embeds = _feature_tensor(features, "projected_image_embeds")
     if image_embeds is None:
-        if not any(key in features for key in ("pixel_values", "image_grid_thw")):
+        if not any(
+            key in features
+            for key in (
+                "pixel_values",
+                "image_grid_thw",
+                "target_sizes",
+                "pixel_values_videos",
+                "input_features",
+                "multimodal_feature_rows",
+            )
+        ):
             return [False] * chunk_len, None
     full_mask = _prompt_image_mask(features, prompt)
     local_mask = full_mask[cursor : cursor + chunk_len]
@@ -322,11 +433,36 @@ def _slice_prompt_image_features(
     start = sum(full_mask[:cursor])
     end = start + local_count
     if image_embeds is None:
-        payload_features = {
-            "image_token_offset": start,
-            "image_token_count": local_count,
-        }
-        for key in ("pixel_values", "image_grid_thw", "image_token_id"):
+        payload_features = dict(features)
+        modality_token_ids = dict(features.get("modality_token_ids") or {})
+        if features.get("image_token_id") is not None:
+            modality_token_ids.setdefault("image", int(features["image_token_id"]))
+        modality_offsets = {}
+        modality_counts = {}
+        chunk = prompt[cursor : cursor + chunk_len]
+        for modality, token_id in modality_token_ids.items():
+            token_id = int(token_id)
+            modality_offsets[modality] = sum(int(token) == token_id for token in prompt[:cursor])
+            modality_counts[modality] = sum(int(token) == token_id for token in chunk)
+        payload_features.update(
+            {
+                "multimodal_token_offset": start,
+                "multimodal_token_count": local_count,
+                "modality_token_offsets": modality_offsets,
+                "modality_token_counts": modality_counts,
+                "image_token_offset": start,
+                "image_token_count": local_count,
+            }
+        )
+        for key in (
+            "pixel_values",
+            "image_grid_thw",
+            "target_sizes",
+            "num_patches_per_image",
+            "downsample_mode",
+            "processor_expanded_image_tokens",
+            "image_token_id",
+        ):
             if features.get(key) is not None:
                 payload_features[key] = features[key]
         return local_mask, payload_features
@@ -401,10 +537,13 @@ def _prompt_image_mask(features: dict, prompt: list[int]) -> list[bool]:
         if len(mask_list) != len(prompt):
             raise ValueError("image_token_mask length must match prompt length")
         return mask_list
-    image_token_id = features.get("image_token_id")
-    if image_token_id is None:
-        raise ValueError("image multimodal features require image_token_mask or image_token_id")
-    return [int(token) == int(image_token_id) for token in prompt]
+    token_ids = dict(features.get("modality_token_ids") or {})
+    if features.get("image_token_id") is not None:
+        token_ids.setdefault("image", int(features["image_token_id"]))
+    if not token_ids:
+        raise ValueError("multimodal features require a token mask or modality token ids")
+    values = {int(value) for value in token_ids.values()}
+    return [int(token) in values for token in prompt]
 
 
 def payload_to_infer_meta(payload: dict, device: torch.device) -> InferMeta:
@@ -422,6 +561,7 @@ def payload_to_infer_meta(payload: dict, device: torch.device) -> InferMeta:
             block_table=payload["block_table"].to(device, non_blocking=True),
             cache_block_ids=payload["cache_block_ids"].to(device, non_blocking=True),
             cache_block_offsets=payload["cache_block_offsets"].to(device, non_blocking=True),
+            recurrent_slots=payload["recurrent_slots"].to(device, non_blocking=True),
         )
     # Decode runs one token per active sequence and reads previously written
     # KV through the same `block_table`, with `cache_seqlens` giving how many
@@ -431,6 +571,11 @@ def payload_to_infer_meta(payload: dict, device: torch.device) -> InferMeta:
         sample_indices=payload["sample_indices"].to(device, non_blocking=True),
         cache_seqlens=payload["cache_seqlens"].to(device, non_blocking=True),
         block_table=payload["block_table"].to(device, non_blocking=True),
+        recurrent_slots=(
+            payload["recurrent_slots"].to(device, non_blocking=True)
+            if payload.get("recurrent_slots") is not None
+            else None
+        ),
     )
 
 

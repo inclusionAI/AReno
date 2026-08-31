@@ -126,20 +126,30 @@ def create_tensorboard_writer(log_dir: str):
 def collect_train_batch_stats(train_batch) -> dict:
     """Summarize rewards, advantages, lengths, and rollout logprobs.
 
-    Walks every `TrainSequence` and isolates response-only slices using
-    `prompt_mask`. Prompt positions carry zeroed advantage/logprob entries by
-    construction (see trainer code), so dropping them gives an honest mean
-    over the tokens that actually participated in the loss.
+    Walks every `TrainSequence` and isolates response-only slices using the
+    prompt layout. Rows carry either a per-token `prompt_mask` list or the
+    structured `prompt_len`/`scalar_advantage` convention (the policy-only
+    trainer uses the latter); prompt positions carry zeroed advantage/logprob
+    entries by construction (see trainer code), so dropping them gives an
+    honest mean over the tokens that actually participated in the loss.
     """
 
     stats = init_rollout_stats()
     for seq in train_batch:
-        prompt_mask = list(seq.prompt_mask)
-        # `prompt_mask[i] == True` marks a prompt token; rollout signals only
-        # exist on response positions so we filter the prompt prefix out.
-        response_logprobs = [lp for lp, is_prompt in zip(seq.logprobs, prompt_mask) if not is_prompt]
-        response_advantages = [adv for adv, is_prompt in zip(seq.advantages, prompt_mask) if not is_prompt]
-        prefix_len = sum(1 for is_prompt in prompt_mask if is_prompt)
+        if seq.prompt_mask:
+            # `prompt_mask[i] == True` marks a prompt token; rollout signals
+            # only exist on response positions so we filter the prefix out.
+            prompt_mask = list(seq.prompt_mask)
+            response_logprobs = [lp for lp, is_prompt in zip(seq.logprobs, prompt_mask) if not is_prompt]
+            response_advantages = [adv for adv, is_prompt in zip(seq.advantages, prompt_mask) if not is_prompt]
+            prefix_len = sum(1 for is_prompt in prompt_mask if is_prompt)
+        else:
+            prefix_len = int(seq.prompt_len or 0)
+            response_logprobs = list(seq.logprobs[prefix_len:])
+            if seq.scalar_advantage is not None:
+                response_advantages = [float(seq.scalar_advantage)] * len(response_logprobs)
+            else:
+                response_advantages = list(seq.advantages[prefix_len:])
         response_len = len(response_logprobs)
         stats["rewards"].append(seq.reward)
         stats["advantages"].extend(response_advantages)

@@ -93,6 +93,13 @@ class Trainer:
             raise ValueError(f"unsupported backend type: {self._backend_type}")
         self._backend = backend_cls()
         self._backend.initialize(self._ctx)
+        components = self._backend.runtime_components()
+        if components.tokenizer is not None:
+            self._tokenizer = components.tokenizer
+            self._ctx.tokenizer = components.tokenizer
+            self._ctx.eos_token_ids = eos_token_ids(real_path, components.tokenizer)
+        if components.processor is not None:
+            self._processor = components.processor
         self._initialized = True
 
     def get_tokenizer(self) -> Any:
@@ -245,6 +252,8 @@ class Trainer:
 
         cursor = 0
         total_skipped_long = 0
+        shortest_skipped = None
+        longest_skipped = None
         while cursor < len(dataset):
             items = []
             scanned = 0
@@ -301,6 +310,12 @@ class Trainer:
                 if len(input_tokens) > max_prompt_tokens:
                     skipped_long += 1
                     total_skipped_long += 1
+                    shortest_skipped = (
+                        len(input_tokens) if shortest_skipped is None else min(shortest_skipped, len(input_tokens))
+                    )
+                    longest_skipped = (
+                        len(input_tokens) if longest_skipped is None else max(longest_skipped, len(input_tokens))
+                    )
                     continue
                 items.append(
                     PromptItem(
@@ -311,6 +326,13 @@ class Trainer:
                     )
                 )
             if not items:
+                if total_skipped_long == len(dataset) and total_skipped_long > 0:
+                    raise ValueError(
+                        f"all {total_skipped_long} dataset prompts exceed "
+                        f"--max-prompt-tokens={max_prompt_tokens} "
+                        f"(shortest={shortest_skipped}, longest={longest_skipped}); "
+                        "increase --max-prompt-tokens or shorten the dataset prompts"
+                    )
                 break
             yield PromptBatch(
                 items=items,
@@ -376,7 +398,6 @@ class Trainer:
         sampling_params: SamplingParams,
         loss_mask_policy: LossMaskPolicy | None = None,
         max_running_prompts: int | None = None,
-        timeout_s: float = 300.0,
         proxy: bool = True,
     ) -> RolloutSession:
         """Create an async rollout session, optionally with an OpenAI-compatible proxy."""
@@ -386,7 +407,6 @@ class Trainer:
             sampling_params=sampling_params,
             loss_mask_policy=loss_mask_policy,
             max_running_prompts=max_running_prompts,
-            timeout_s=timeout_s,
             proxy=proxy,
         )
 
@@ -460,17 +480,18 @@ class Trainer:
         token_rows: list[list[int]],
         *,
         features: list[dict | None] | None = None,
+        routed_experts: list[object] | None = None,
         microbatch_size: int | None = None,
     ) -> list[list[float]]:
         """Score fixed token sequences with a backend-owned model role."""
 
-        return self._backend.score_logprobs(
-            self._ctx,
-            role,
-            token_rows,
-            features=features,
-            microbatch_size=self._score_micro_bs if microbatch_size is None else int(microbatch_size),
-        )
+        kwargs = {
+            "features": features,
+            "microbatch_size": self._score_micro_bs if microbatch_size is None else int(microbatch_size),
+        }
+        if routed_experts is not None:
+            kwargs["routed_experts"] = routed_experts
+        return self._backend.score_logprobs(self._ctx, role, token_rows, **kwargs)
 
     def score_values(
         self, role: str, token_rows: list[list[int]], *, features: list[dict | None] | None = None
@@ -514,9 +535,14 @@ class Trainer:
         )
 
     def save_checkpoint(self, path: str) -> str:
-        """Save a HuggingFace-compatible checkpoint when supported by backend."""
+        """Save a native backend checkpoint, or a PEFT artifact for native LoRA."""
 
         return self._backend.save_checkpoint(self._ctx, path)
+
+    def export_adapter(self, path: str) -> str:
+        """Export the live native LoRA weights as a standard PEFT adapter."""
+
+        return self._backend.export_adapter(self._ctx, path)
 
     def close(self) -> None:
         """Release backend workers and local resources such as metric writers."""

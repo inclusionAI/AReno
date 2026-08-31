@@ -2,25 +2,35 @@
 
 from __future__ import annotations
 
+import platform
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
+from areno.adapters.config import LoraConfig
 from areno.api.models import BackendType
 
 
 @dataclass(slots=True)
-class ArenoConfig:
-    """Typed backend config for the local/process based areno backend.
+class CudaConfig:
+    """Typed backend config for the local/process based CUDA backend.
 
     `tp_size`/`dp_size` describe the parallelism layout used by `ArenoEngine`
     (when `dp_size` is None the backend infers it from world size / tp size).
+    `sequence_parallel` is a tri-state checkpoint override: None preserves the
+    model adapter's value while True/False explicitly replace it.
     The `optimizer` and `runtime` dicts are passed verbatim to the engine's
     `OptimizerConfig`/`RuntimeConfig` so any new tuning knob can be added
     without changing this file.
+
+    `base_model_name_or_path` keeps the caller-facing model reference for
+    portable PEFT metadata when `model_path` has already resolved to a local
+    cache path.
     """
 
     model_path: str | None = None
+    base_model_name_or_path: str | None = field(default=None, kw_only=True)
     tp_size: int = 1
+    sequence_parallel: bool | None = None
     dp_size: int | None = None
     devices: list[int] | None = None
     rollout_tp_size: int | None = None
@@ -31,6 +41,8 @@ class ArenoConfig:
     runtime: dict[str, Any] = field(default_factory=dict)
     max_running_prompts: int = 64
     decode_progress_interval_s: float = 10.0
+    lora: LoraConfig | None = None
+    reference_mode: Literal["independent", "reuse_actor_base"] = "independent"
 
     def uses_separate_rollout_engine(self) -> bool:
         """Return whether rollout runs on its own CUDA device partition."""
@@ -43,16 +55,49 @@ class ArenoConfig:
         return self.tp_size if self.rollout_tp_size is None else self.rollout_tp_size
 
 
-BackendConfig = ArenoConfig
+@dataclass(slots=True)
+class MlxConfig:
+    """Configuration for the in-process MLX/MLX-LM backend."""
+
+    model_path: str | None = None
+    adapter_path: str | None = None
+    optimizer: dict[str, Any] = field(default_factory=dict)
+    max_running_prompts: int = 32
+    completion_batch_size: int = 32
+    prefill_batch_size: int = 8
+    prefill_step_size: int = 2048
+    max_kv_size: int | None = None
+    decode_progress_interval_s: float = 10.0
+    keep_rollout_state: bool = True
+    logits_chunk_size: int = 4096
+    compile_train_step: bool = True
+    gradient_checkpointing: bool = True
+
+
+BackendConfig = CudaConfig | MlxConfig
+
+
+def default_backend_type() -> BackendType:
+    """Select the native backend for the current host platform."""
+
+    system = platform.system()
+    machine = platform.machine().lower()
+    if system == "Linux":
+        return BackendType.CUDA
+    if system == "Darwin" and machine in {"arm64", "aarch64"}:
+        return BackendType.MLX
+    raise RuntimeError(
+        f"AReno has no native backend for {system}/{machine}; CUDA requires Linux and MLX requires Apple Silicon"
+    )
 
 
 def resolve_backend_type(backend_type: BackendType | None, custom_config: Any) -> BackendType:
-    """Choose the backend from an explicit value or the default Areno."""
+    """Choose an explicit backend or the native backend for this platform."""
 
     del custom_config
     if backend_type is not None:
         return backend_type
-    return BackendType.Areno
+    return default_backend_type()
 
 
 def coerce_backend_config(backend_type: BackendType, custom_config: Any) -> BackendConfig | None:
@@ -65,6 +110,8 @@ def coerce_backend_config(backend_type: BackendType, custom_config: Any) -> Back
 
     if custom_config is None:
         return None
-    if backend_type == BackendType.Areno and isinstance(custom_config, ArenoConfig):
+    if backend_type == BackendType.CUDA and isinstance(custom_config, CudaConfig):
+        return custom_config
+    if backend_type == BackendType.MLX and isinstance(custom_config, MlxConfig):
         return custom_config
     raise TypeError(f"{backend_type.value} requires its typed backend config dataclass, got {type(custom_config)!r}")

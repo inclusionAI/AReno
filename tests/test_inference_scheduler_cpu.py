@@ -10,7 +10,7 @@ import areno.engine.worker as worker_mod
 from areno.engine.api import ArenoEngine, _chunk_prompts_for_prefill_budget, _merge_async_dp_rollouts
 from areno.engine.data import SamplingParams
 from areno.engine.data.rollout_state import InferenceBatchState
-from areno.engine.inference import InferenceManager
+from areno.engine.inference import InferCacheSpec, InferenceManager
 from areno.engine.protocol import Command, Op, RolloutPayload
 from areno.engine.runtime.rollout import _build_rollout_from_rows
 from tests.helpers import PatchedContext
@@ -41,6 +41,7 @@ class _FakeInferenceManager(InferenceManager):
         position_ids,
         cache_seqlens,
         block_table,
+        recurrent_slots,
         active_count,
         sampling_params,
         sample_generator,
@@ -48,9 +49,100 @@ class _FakeInferenceManager(InferenceManager):
         sample_step,
         eos_token_id,
     ):
-        del position_ids, cache_seqlens, block_table, active_count, sampling_params, sample_generator, eos_token_id
+        del (
+            position_ids,
+            cache_seqlens,
+            block_table,
+            recurrent_slots,
+            active_count,
+            sampling_params,
+            sample_generator,
+            eos_token_id,
+        )
         self.ops.append(("decode", int(next_tokens.numel())))
         return next_tokens + 1, torch.zeros_like(next_tokens, dtype=torch.float32) - float(sample_step)
+
+
+def test_drop_rollout_state_is_deferred_until_agentic_session_end():
+    worker = object.__new__(worker_mod.ArenoWorker)
+    worker.config = SimpleNamespace(
+        role="rollout",
+        runtime=SimpleNamespace(keep_rollout_state=False),
+    )
+    worker._rollout_session_active = False
+    worker._rollout_session_infer_weights_ready = False
+    events = []
+    worker._prepare_actor_onloaded = lambda: events.append("prepare")
+    worker._drop_rollout_hbm = lambda: events.append("drop")
+
+    worker.rollout_session_begin(None)
+    assert worker._rollout_session_active
+    assert not worker._can_reuse_rollout_session_infer_weights()
+    assert events == ["prepare"]
+
+    worker._mark_rollout_session_infer_weights_ready()
+    assert worker._can_reuse_rollout_session_infer_weights()
+
+    # InferenceManager's per-call finally guard must retain state between
+    # agentic turns while the explicit rollout session is active.
+    assert not worker._should_drop_rollout_hbm_after_infer()
+    assert events == ["prepare"]
+
+    worker.rollout_session_end(None)
+    assert not worker._rollout_session_active
+    assert not worker._can_reuse_rollout_session_infer_weights()
+    assert events == ["prepare", "drop"]
+
+    assert worker._should_drop_rollout_hbm_after_infer()
+
+
+def test_infer_cache_reuse_skips_weight_conversion_within_agentic_session():
+    calls = []
+    model = SimpleNamespace(
+        onload_kv_caches=lambda device: calls.append(("onload_kv", device.type)),
+        reset_kv_caches=lambda: calls.append(("reset_kv",)),
+        allocate_kv_caches=lambda blocks, block_size, device: (
+            calls.append(("allocate_kv", blocks, block_size, device.type)) or []
+        ),
+        set_kv_caches=lambda caches, num_slots: calls.append(("set_kv", len(caches), num_slots)),
+        onload_train_weights=lambda device: calls.append(("onload_weights", device.type)),
+        prepare_infer_weights=lambda: calls.append(("prepare_weights",)),
+        offload_train_weights=lambda: calls.append(("offload_weights",)),
+    )
+    worker = SimpleNamespace(
+        device=torch.device("cpu"),
+        model=model,
+        _infer_cache_spec=(4, 8, 4, 16, 4),
+        _infer_batch_size=4,
+        _infer_cache_blocks=9,
+        _max_cache_len=16,
+        _max_blocks_per_seq=4,
+        _train_state_ready=False,
+        _decode_graphs={},
+        _decode_graph_skipped_buckets=set(),
+        _decode_graph_init_attempted=False,
+        _prepare_actor_onloaded=lambda: calls.append(("prepare_actor",)),
+        _can_reuse_rollout_session_infer_weights=lambda: True,
+        _mark_rollout_session_infer_weights_ready=lambda: calls.append(("mark_ready",)),
+    )
+    manager = InferenceManager(worker)
+
+    manager._init_infer_cache(
+        InferCacheSpec(max_running_seqs=4, num_blocks=8, block_size=4, max_cache_len=16, max_blocks_per_seq=4)
+    )
+
+    assert calls == [("prepare_actor",), ("onload_kv", "cpu"), ("reset_kv",)]
+
+    calls.clear()
+    manager._init_infer_cache(
+        InferCacheSpec(max_running_seqs=4, num_blocks=12, block_size=4, max_cache_len=20, max_blocks_per_seq=5)
+    )
+
+    assert calls == [
+        ("prepare_actor",),
+        ("allocate_kv", 13, 4, "cpu"),
+        ("set_kv", 0, 5),
+    ]
 
 
 def test_no_sync_rollout_continues_pending_prompts_beyond_running_slots():
@@ -155,6 +247,39 @@ def test_prefill_reserves_prompt_blocks_without_max_new_token_overreservation():
     assert state._free_blocks == [1]
     state.ensure_decode_blocks([0], [4])
     assert state._seq_to_blocks == {0: [0, 1]}
+
+
+def test_finished_row_resets_and_reuses_recurrent_slot():
+    """Dense recurrent slots must be cleared before a later request reuses them."""
+
+    class ModelStub:
+        def __init__(self):
+            self.reset_slots = []
+
+        def reset_recurrent_cache_slots(self, slots):
+            self.reset_slots.append(slots.tolist())
+
+    manager = _FakeInferenceManager()
+    manager.worker.model = ModelStub()
+    state = InferenceBatchState(
+        prompts=[[10], [20]],
+        max_new_tokens=1,
+        max_running_seqs=1,
+        max_cache_len=4,
+        kv_block_size=4,
+        num_cache_blocks=1,
+    )
+
+    first = state.build_prefill_payload()
+    assert first is not None
+    assert first["recurrent_slots"].tolist() == [0]
+
+    manager._free_rollout_rows(state, torch.tensor([0], dtype=torch.long))
+    second = state.build_prefill_payload()
+
+    assert manager.worker.model.reset_slots == [[0]]
+    assert second is not None
+    assert second["recurrent_slots"].tolist() == [0]
 
 
 def test_chunked_prefill_interleaves_with_active_decode():

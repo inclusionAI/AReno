@@ -39,7 +39,7 @@ def register_adapter(adapter: ModelAdapter) -> None:
 def _adapter(name: str) -> ModelAdapter:
     """Look up a registered adapter by ``name`` (loading plugins on first use)."""
 
-    load_model_plugins()
+    _load_model_plugin(name)
     try:
         return _ADAPTERS[name]
     except KeyError as exc:
@@ -50,8 +50,9 @@ def _adapter(name: str) -> ModelAdapter:
 def adapter_from_hf(model_path: str | Path) -> ModelAdapter:
     """Pick the adapter that claims the HF config at ``model_path``."""
 
-    load_model_plugins()
     hf_config = read_hf_config(model_path)
+    if not _load_model_plugin(str(hf_config.get("model_type", ""))):
+        load_model_plugins()
     # Adapters are queried in registration order; the first to match wins.
     for adapter in _ADAPTERS.values():
         if adapter.match_hf_config(hf_config):
@@ -134,3 +135,14 @@ def load_model_plugins() -> None:
 
         areno.models.register_models()
         _PLUGINS_LOADED = True
+
+
+def _load_model_plugin(model_type: str) -> bool:
+    """Register only the adapter group required by one model type."""
+
+    if _PLUGINS_LOADED:
+        return True
+    with _REGISTRY_LOCK:
+        import areno.models
+
+        return areno.models.register_models(model_type)

@@ -1,5 +1,10 @@
 # Agentic Tic-Tac-Toe Example
 
+DGX Spark walkthroughs using Ling 3.0 Tiny:
+
+- [English guide](DGX_SPARK_GUIDE_EN.md)
+- [中文指南](DGX_SPARK_GUIDE_CN.md)
+
 This example trains a policy to choose one Tic-Tac-Toe move for `X` from a
 rendered board. It includes both an OpenAI tool-call variant and an XML no-tool
 variant. The environment is deterministic and self-contained.

@@ -17,10 +17,11 @@ from typing import Any, Literal
 from urllib.parse import urlparse
 
 import click
-import torch
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from areno.adapters import LoraConfig
+from areno.api import MLX, BackendType, MlxConfig, SamplingParams, Trainer, default_backend_type
 from areno.api.multimodal import (
     expand_image_tokens,
     image_token_counts_from_features,
@@ -30,18 +31,38 @@ from areno.api.openai_chat import build_chat_completion_response, messages_to_pr
 from areno.api.tokenizer import apply_chat_template_with_options, configure_chat_template_enable_thinking
 from areno.api.tool_call_parser import ToolCallParser, get_tool_call_parser, infer_tool_call_parser_name
 from areno.cli.model_refs import resolve_model_ref
-from areno.engine import ArenoEngine
-from areno.engine.config import (
-    RuntimeConfig,
-    flash_attention_unsupported_gpu_reason,
-    flash_attention_unsupported_model_reason,
-)
-from areno.engine.data import SamplingParams
 from areno.engine.data.tokenizer import load_processor, load_tokenizer
-from areno.models.registry import config_from_hf
+
+# Kept as an injectable compatibility seam for CPU tests and embedders. The
+# CUDA runtime imports the real class lazily; MLX installations never import it.
+ArenoEngine = None
 
 
-def _serve_loss_fn(*_: Any) -> torch.Tensor:
+def config_from_hf(model_path: str):
+    """Load CUDA model config lazily while preserving the injectable CLI seam."""
+
+    from areno.models.registry import config_from_hf as load_config
+
+    return load_config(model_path)
+
+
+def flash_attention_unsupported_gpu_reason(devices):
+    """Resolve CUDA capability lazily so MLX-only imports do not require Torch."""
+
+    from areno.engine.config import flash_attention_unsupported_gpu_reason as resolve_reason
+
+    return resolve_reason(devices)
+
+
+def flash_attention_unsupported_model_reason(model_config):
+    """Resolve model attention support lazily so tests can replace the probe."""
+
+    from areno.engine.config import flash_attention_unsupported_model_reason as resolve_reason
+
+    return resolve_reason(model_config)
+
+
+def _serve_loss_fn(*_: Any) -> Any:
     """Placeholder loss function; serving never trains, so any invocation is an error."""
     raise RuntimeError("areno serve engine does not support training")
 
@@ -146,7 +167,7 @@ class ServeState:
     model_path: str
     tokenizer: Any
     processor: Any
-    engine: ArenoEngine
+    engine: Any
     max_running_prompts: int
     default_max_tokens: int
     max_model_len: int
@@ -167,6 +188,154 @@ class _ToolParserTrainerShim:
         return self._tokenizer
 
 
+@dataclass(slots=True)
+class _ServeRollout:
+    response_ids: list[list[int]]
+    finish_reason: list[str]
+
+
+class _CudaServeRuntime:
+    """Lazy CUDA adapter preserving the existing ArenoEngine serving path."""
+
+    def __init__(
+        self,
+        model_path: str,
+        *,
+        tp_size: int,
+        world_size: int,
+        eager_decode: bool,
+        attn_backend: str,
+        lora: LoraConfig | None,
+        base_model_name_or_path: str | None,
+    ) -> None:
+        from areno.engine.config import RuntimeConfig
+
+        engine_cls = ArenoEngine
+        if engine_cls is None:
+            from areno.engine import ArenoEngine as engine_cls
+
+        self._engine = engine_cls.from_pretrained(
+            model_path,
+            tp_size=tp_size,
+            dp_size=world_size // tp_size,
+            devices=list(range(world_size)),
+            runtime_config=RuntimeConfig(eager_decode=bool(eager_decode), attn_backend=attn_backend),
+            loss_fn=_serve_loss_fn,
+            lora_config=lora,
+            base_model_name_or_path=base_model_name_or_path,
+        )
+        self.max_model_len = int(self._engine.config.model.max_position_embeddings)
+
+    async def begin_rollout_session_async(self) -> None:
+        await self._engine.begin_rollout_session_async()
+
+    async def end_rollout_session_async(self) -> None:
+        await self._engine.end_rollout_session_async()
+
+    def close(self) -> None:
+        self._engine.close()
+
+    async def generate_rollout_async(self, prompts, *, sampling_params: SamplingParams, **kwargs) -> Any:
+        from areno.engine.data import SamplingParams as CudaSamplingParams
+
+        cuda_sampling = CudaSamplingParams(
+            temperature=0.0 if sampling_params.greedy else sampling_params.temperature,
+            top_p=sampling_params.top_p,
+            top_k=max(sampling_params.top_k, 0),
+            seed=getattr(sampling_params, "seed", None),
+            stop_token_ids=tuple(sampling_params.stop_token_ids or ()),
+        )
+        return await self._engine.generate_rollout_async(prompts, sampling_params=cuda_sampling, **kwargs)
+
+
+class _MlxServeRuntime:
+    """Serve adapter over the same public Trainer lifecycle used by training."""
+
+    def __init__(
+        self,
+        model_path: str,
+        *,
+        max_running_prompts: int,
+        decode_progress_interval_s: float,
+    ) -> None:
+        config = MlxConfig(
+            model_path=model_path,
+            max_running_prompts=max_running_prompts,
+            decode_progress_interval_s=decode_progress_interval_s,
+        )
+        self._trainer = Trainer(1, model_path, backend_type=MLX, custom_config=config)
+        self._trainer.init()
+        self.tokenizer = self._trainer.get_tokenizer()
+        self.processor = self._trainer.get_processor()
+        self.max_model_len = int(self._trainer.model_context_len() or 32768)
+
+    async def begin_rollout_session_async(self) -> None:
+        await self._trainer.begin_rollout_session_async()
+
+    async def end_rollout_session_async(self) -> None:
+        await self._trainer.end_rollout_session_async()
+
+    def close(self) -> None:
+        self._trainer.close()
+
+    async def generate_rollout_async(
+        self,
+        prompts,
+        *,
+        max_new_tokens: int,
+        sampling_params: SamplingParams,
+        prompt_features=None,
+        **kwargs,
+    ) -> _ServeRollout:
+        del kwargs
+        params = sampling_params.model_copy(update={"max_new_tokens": int(max_new_tokens)})
+        results = await self._trainer.rollout_token_batch_async(
+            prompts,
+            n_samples=1,
+            sampling_params=params,
+            prompt_features=prompt_features,
+        )
+        sequences = [result.sequences[0] for result in results]
+        response_ids = [sequence.resp_tokens for sequence in sequences]
+        finish_reason = ["length" if len(tokens) >= max_new_tokens else "stop" for tokens in response_ids]
+        return _ServeRollout(response_ids=response_ids, finish_reason=finish_reason)
+
+
+def _create_serve_runtime(
+    *,
+    model_path: str,
+    backend_type: BackendType,
+    tp_size: int,
+    world_size: int,
+    max_running_prompts: int,
+    decode_progress_interval_s: float,
+    eager_decode: bool,
+    attn_backend: str,
+    lora: LoraConfig | None,
+    base_model_name_or_path: str | None,
+) -> _CudaServeRuntime | _MlxServeRuntime:
+    if backend_type == MLX:
+        if lora is not None:
+            raise ValueError("native LoRA serving is only supported by the CUDA backend")
+        if world_size != 1 or tp_size != 1:
+            raise ValueError("MLX serving requires --world-size 1 and --tp-size 1")
+        return _MlxServeRuntime(
+            model_path,
+            max_running_prompts=max_running_prompts,
+            decode_progress_interval_s=decode_progress_interval_s,
+        )
+    del max_running_prompts
+    return _CudaServeRuntime(
+        model_path,
+        tp_size=tp_size,
+        world_size=world_size,
+        eager_decode=eager_decode,
+        attn_backend=attn_backend,
+        lora=lora,
+        base_model_name_or_path=base_model_name_or_path,
+    )
+
+
 def create_app(
     *,
     model_path: str,
@@ -178,6 +347,8 @@ def create_app(
     eager_decode: bool = False,
     attn_backend: Literal["flash", "native"] = "flash",
     chat_template_enable_thinking: bool | None = None,
+    lora: LoraConfig | None = None,
+    base_model_name_or_path: str | None = None,
 ) -> FastAPI:
     """Construct the FastAPI app: load tokenizer/engine, install routes and lifecycle hooks."""
     if world_size < 1:
@@ -187,26 +358,34 @@ def create_app(
     if world_size % tp_size != 0:
         raise ValueError("world_size must be divisible by tp_size")
 
+    backend_type = default_backend_type()
     tokenizer = load_tokenizer(model_path)
     processor = load_processor(model_path)
     configure_chat_template_enable_thinking(tokenizer, chat_template_enable_thinking)
     configure_chat_template_enable_thinking(processor, chat_template_enable_thinking)
     attn_backend, attn_warning = _resolve_serve_attn_backend(
-        model_path=model_path,
-        attn_backend=attn_backend,
-        world_size=world_size,
+        model_path=model_path, attn_backend=attn_backend, world_size=world_size, backend_type=backend_type
     )
     if attn_warning is not None:
         warnings.warn(attn_warning, RuntimeWarning, stacklevel=2)
     parser_trainer = _ToolParserTrainerShim(model_path=model_path, tokenizer=tokenizer)
-    engine = ArenoEngine.from_pretrained(
-        model_path,
+    engine = _create_serve_runtime(
+        model_path=model_path,
+        backend_type=backend_type,
         tp_size=tp_size,
-        dp_size=world_size // tp_size,
-        devices=list(range(world_size)),
-        runtime_config=RuntimeConfig(eager_decode=bool(eager_decode), attn_backend=attn_backend),
-        loss_fn=_serve_loss_fn,
+        world_size=world_size,
+        max_running_prompts=max_running_prompts,
+        decode_progress_interval_s=decode_progress_interval_s,
+        eager_decode=eager_decode,
+        attn_backend=attn_backend,
+        lora=lora,
+        base_model_name_or_path=base_model_name_or_path,
     )
+    if backend_type == MLX:
+        tokenizer = engine.tokenizer
+        processor = engine.processor
+        configure_chat_template_enable_thinking(tokenizer, chat_template_enable_thinking)
+        configure_chat_template_enable_thinking(processor, chat_template_enable_thinking)
     state = ServeState(
         model_path=model_path,
         tokenizer=tokenizer,
@@ -214,7 +393,7 @@ def create_app(
         engine=engine,
         max_running_prompts=max_running_prompts,
         default_max_tokens=default_max_tokens,
-        max_model_len=int(engine.config.model.max_position_embeddings),
+        max_model_len=int(engine.max_model_len),
         tool_call_parser=get_tool_call_parser(infer_tool_call_parser_name(parser_trainer)),
     )
     app = FastAPI(title="areno OpenAI-compatible server")
@@ -311,9 +490,12 @@ def _resolve_serve_attn_backend(
     model_path: str,
     attn_backend: Literal["flash", "native"],
     world_size: int,
+    backend_type: BackendType = BackendType.CUDA,
 ) -> tuple[Literal["flash", "native"], str | None]:
     """Apply flash-attn compatibility fallback before serve starts workers."""
 
+    if backend_type == MLX:
+        return "native", None
     if attn_backend != "flash":
         return attn_backend, None
     model_config = None
@@ -463,7 +645,7 @@ def _build_response_from(
     data = build_chat_completion_response(
         tokenizer=tokenizer,
         model=request.model or model_path,
-        prompt_tokens=len(prompt) * len(response_ids),
+        prompt_tokens=len(prompt),
         response_ids=response_ids,
         finish_reasons=finish_reasons,
         tools=request.tools,
@@ -490,7 +672,7 @@ def _encode_messages_with_features(
     tools: list[dict[str, Any]] | None = None,
 ) -> tuple[list[int], dict[str, Any] | None]:
     payload = [_chat_message_payload(msg, preserve_content_parts=True) for msg in messages]
-    if not _messages_have_images(payload):
+    if not _messages_have_multimodal(payload):
         return (
             messages_to_prompt_tokens(
                 tokenizer, payload, tools=tools, fallback_prompt=_messages_fallback_text(payload)
@@ -498,7 +680,11 @@ def _encode_messages_with_features(
             None,
         )
     if processor is None:
-        raise ValueError("image input requires a checkpoint processor")
+        raise ValueError("multimodal input requires a checkpoint processor")
+    from areno.api.multimodal import encode_processor_messages
+
+    if _messages_have_audio_or_video(payload):
+        return encode_processor_messages(processor, payload, tools=tools)
     images = _load_message_images(payload)
     text = _processor_chat_text(processor, payload, tools=tools)
     encoded = _encode_text_and_images(tokenizer, processor, text, images)
@@ -530,14 +716,15 @@ def _encode_messages_with_features(
 
 
 def _encode_text_and_images(tokenizer: Any, processor: Any, text: str, images: list[Any]) -> dict[str, Any]:
+    return_tensors = getattr(processor, "_areno_return_tensors", "pt")
     try:
-        return dict(processor(text=[text], images=images, return_tensors="pt"))
+        return dict(processor(text=[text], images=images, return_tensors=return_tensors))
     except TypeError as exc:
         if "images" not in str(exc):
             raise
     image_processor = _image_processor_from_processor(processor)
-    text_encoded = tokenizer([text], return_tensors="pt")
-    image_encoded = image_processor(images=images, return_tensors="pt")
+    text_encoded = tokenizer([text], return_tensors=return_tensors)
+    image_encoded = image_processor(images=images, return_tensors=return_tensors)
     encoded = dict(image_encoded)
     encoded["input_ids"] = text_encoded["input_ids"]
     if text_encoded.get("attention_mask") is not None:
@@ -593,6 +780,34 @@ def _message_content(content: str | list[Any] | None) -> str:
 
 def _messages_have_images(messages: list[dict[str, Any]]) -> bool:
     return any(_content_has_image(message.get("content")) for message in messages)
+
+
+def _messages_have_multimodal(messages: list[dict[str, Any]]) -> bool:
+    return any(_content_has_multimodal(message.get("content")) for message in messages)
+
+
+def _messages_have_audio_or_video(messages: list[dict[str, Any]]) -> bool:
+    for message in messages:
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            kind = str(part.get("type", ""))
+            if kind == "input_audio" or kind.removesuffix("_url") in {"audio", "video"}:
+                return True
+    return False
+
+
+def _content_has_multimodal(content: Any) -> bool:
+    if not isinstance(content, list):
+        return False
+    return any(
+        isinstance(item, dict)
+        and item.get("type") in {"image", "image_url", "audio", "audio_url", "input_audio", "video", "video_url"}
+        for item in content
+    )
 
 
 def _content_has_image(content: Any) -> bool:
@@ -748,6 +963,11 @@ def _normalize_stop(stop: str | list[str] | None) -> list[str]:
     show_default=True,
     help="Remote hub for non-local model refs. Use 'modelscope' for ModelScope or 'hf' for Hugging Face.",
 )
+@click.option(
+    "--base-model-name-or-path",
+    default=None,
+    help="Stable base model reference associated with the PEFT adapter; defaults to the original model path.",
+)
 @click.option("--tp-size", type=int, default=1, show_default=True, help="Tensor parallel size.")
 @click.option("--world-size", type=int, default=1, show_default=True, help="Total number of local worker ranks.")
 @click.option("--host", default="0.0.0.0", show_default=True, help="HTTP bind host.")
@@ -780,9 +1000,23 @@ def _normalize_stop(stop: str | list[str] | None) -> list[str]:
     is_flag=True,
     help="Pass enable_thinking=False to tokenizer chat templates when supported.",
 )
+@click.option("--lora-rank", type=int, default=None, help="Enable native LoRA with this rank.")
+@click.option("--lora-alpha", type=float, default=16.0, show_default=True, help="Native LoRA alpha.")
+@click.option("--lora-dropout", type=float, default=0.0, show_default=True, help="Native LoRA dropout (must be 0).")
+@click.option(
+    "--lora-target-modules",
+    default="q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj",
+    show_default=True,
+    help=(
+        "Comma-separated native projection targets (selected Bailing V3 KDA q/k/v/f/g projections "
+        "use independent canonical adapters)."
+    ),
+)
+@click.option("--lora-adapter-path", default=None, help="Standard PEFT adapter to serve.")
 def serve_command(
     model_path: str,
     model_hub: Literal["hf", "modelscope"],
+    base_model_name_or_path: str | None,
     tp_size: int,
     world_size: int,
     host: str,
@@ -793,11 +1027,27 @@ def serve_command(
     eager_decode: bool,
     attn_backend: Literal["flash", "native"],
     disable_thinking: bool,
+    lora_rank: int | None,
+    lora_alpha: float,
+    lora_dropout: float,
+    lora_target_modules: str,
+    lora_adapter_path: str | None,
 ) -> None:
     """Click entry point: build the app and hand it to uvicorn."""
     import uvicorn
 
+    if base_model_name_or_path is None:
+        base_model_name_or_path = model_path
     model_path = resolve_model_ref(model_path, model_hub=model_hub)
+    lora = None
+    if lora_rank is not None or lora_adapter_path is not None:
+        lora = LoraConfig(
+            rank=8 if lora_rank is None else lora_rank,
+            alpha=lora_alpha,
+            dropout=lora_dropout,
+            target_modules=tuple(item.strip() for item in lora_target_modules.split(",") if item.strip()),
+            adapter_path=lora_adapter_path,
+        )
     from areno.cli.dashboard_registry import register_dashboard_job
 
     register_dashboard_job(
@@ -827,6 +1077,8 @@ def serve_command(
         eager_decode=eager_decode,
         attn_backend=attn_backend,
         chat_template_enable_thinking=False if disable_thinking else None,
+        lora=lora,
+        base_model_name_or_path=base_model_name_or_path,
     )
     uvicorn.run(app, host=host, port=port)
 

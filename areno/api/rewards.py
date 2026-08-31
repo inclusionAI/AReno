@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import importlib.util
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Literal
 
@@ -84,6 +85,16 @@ def load_reward_fn(path: str) -> Callable[[RewardRecord], float]:
     if not callable(reward_fn):
         raise ValueError(f"{module_path} must define callable reward_fn(record)")
     return reward_fn
+
+
+def score_reward_records(reward_fn: Callable[[RewardRecord], float], records: list[RewardRecord]) -> list[float]:
+    """Score records in order, using opt-in parallelism for remote rewards."""
+
+    workers = max(1, int(getattr(reward_fn, "parallel_workers", 1)))
+    if workers == 1 or len(records) < 2:
+        return [float(reward_fn(record)) for record in records]
+    with ThreadPoolExecutor(max_workers=min(workers, len(records)), thread_name_prefix="areno-reward") as pool:
+        return [float(value) for value in pool.map(reward_fn, records)]
 
 
 def make_reward_record(

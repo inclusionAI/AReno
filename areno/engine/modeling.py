@@ -108,3 +108,23 @@ def build_optimizer(params, optimizer_config, ctx, *, lr: float | None = None):
         dp_size=ctx.dp_size,
         dp_group=ctx.dp_group,
     )
+
+
+def configure_multimodal_training(model: torch.nn.Module, optimizer_config, *, trainable: bool) -> None:
+    """Apply optional model-defined media trainability and relative learning rates."""
+
+    unwrapped = unwrap_model(model)
+    configure = getattr(unwrapped, "configure_multimodal_training", None)
+    requested = optimizer_config.unfreeze_multimodal_tower or optimizer_config.unfreeze_multimodal_projector
+    if configure is None:
+        if requested:
+            raise ValueError(f"{type(unwrapped).__name__} does not expose configurable multimodal modules")
+        return
+    configure(
+        unfreeze_tower=optimizer_config.unfreeze_multimodal_tower,
+        unfreeze_projector=optimizer_config.unfreeze_multimodal_projector,
+        tower_lr=optimizer_config.multimodal_tower_lr,
+        projector_lr=optimizer_config.multimodal_projector_lr,
+        base_lr=optimizer_config.lr,
+        trainable=trainable,
+    )

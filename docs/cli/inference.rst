@@ -5,10 +5,11 @@ Inference CLI reference
 
 ``areno serve``
 
-Start an OpenAI-compatible HTTP server backed by the Areno inference engine.
+Start an OpenAI-compatible HTTP server backed by the native AReno runtime.
 The server exposes ``/v1/chat/completions``, accepts standard chat-completion
 ``tools`` fields, and keeps one rollout session open for the process lifetime
-so rollout state and CUDA graph state can be reused across requests.
+so rollout and scheduler state can be reused across requests. Linux selects
+CUDA; Apple Silicon selects MLX.
 
 .. code-block:: bash
 
@@ -35,10 +36,10 @@ Options:
    ModelScope. Default: ``modelscope``.
 
 ``--tp-size INTEGER``
-   Tensor parallel size. Default: ``1``.
+   Tensor parallel size. Default: ``1``. MLX requires ``1``.
 
 ``--world-size INTEGER``
-   Total number of local worker ranks. Default: ``1``.
+   Total number of local worker ranks. Default: ``1``. MLX requires ``1``.
 
 ``--host TEXT``
    HTTP bind host. Default: ``0.0.0.0``.
@@ -57,7 +58,8 @@ Options:
    Worker decode progress log interval. Default: ``0.0``.
 
 ``--eager-decode``
-   Disable decode CUDA graph and run rollout decode eagerly.
+   Disable decode CUDA graph and run rollout decode eagerly. CUDA only; MLX
+   does not use this setting.
 
 ``--attn-backend [flash|native]``
    Attention backend. Default: ``flash``. Use ``native`` to run without
@@ -65,6 +67,8 @@ Options:
    automatically falls back to ``native`` on flash-attn-unsupported GPUs such
    as Tesla T4 and prints a warning. ``native`` is slower than ``flash`` on
    supported GPUs.
+   This setting is CUDA only; MLX uses the attention implementation supplied
+   by the loaded MLX model.
 
 ``--disable-thinking``
    Pass ``enable_thinking=False`` to tokenizer chat templates when supported.
@@ -180,6 +184,34 @@ Request fields
 ``content``
    Message content as ``str | list | None``.
 
+Multimodal content
+------------------
+
+For a checkpoint with a compatible processor, ``content`` may be a list of
+text, image, audio, and video parts. AReno accepts OpenAI-style ``*_url``
+parts and forwards normalized media references to the checkpoint processor:
+
+.. code-block:: json
+
+   {
+     "role": "user",
+     "content": [
+       {"type": "video_url", "video_url": {"url": "/data/clip.mp4"}},
+       {"type": "audio_url", "audio_url": {"url": "/data/clip.wav"}},
+       {"type": "text", "text": "Describe the synchronized event."}
+     ]
+   }
+
+Supported part types are ``image_url``, ``audio_url``, ``video_url``, and
+``input_audio``. The direct processor forms ``image``, ``audio``, and
+``video`` are also accepted. ``input_audio`` contains base64 data and a format
+such as ``wav`` or ``mp3``. Local paths are resolved on the server, not on the
+client, so the media files must be visible to the serving process. Data URLs
+can be used when the client and server do not share a filesystem.
+
+Media support depends on the loaded model processor. See
+:doc:`../concepts/multimodal-inputs` for serving and training guidance.
+
 Continuous batching behavior
 ----------------------------
 
@@ -198,6 +230,12 @@ compatible when these fields match:
 
 Requests with different generation settings are scheduled separately.
 
+On MLX, the long-lived scheduler is in process and uses one model on unified
+memory. Continuous batching is not established merely by sending concurrent
+HTTP requests: a black-box test should submit short probes while earlier long
+requests are active and verify that a probe completes before the earlier group
+has drained.
+
 Decode progress logs
 --------------------
 
@@ -213,6 +251,9 @@ the reporting window. It excludes prefill and is not the same as end-to-end
 request throughput. ``cuda_graph=True`` means the worker used CUDA graph replay
 for at least one decode step in that window; ``False`` means the window ran
 eagerly.
+
+The ``cuda_graph`` field and DP-worker interpretation apply to CUDA logs. MLX
+does not report CUDA graph state.
 
 Tool calls
 ----------

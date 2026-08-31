@@ -16,6 +16,8 @@ from typing import Any, Literal
 
 import torch
 
+from areno.adapters.config import LoraConfig
+
 # AReno's flash path uses flash-attn features beyond the Turing-compatible
 # forward kernels, including paged KV/cache and training paths, so require
 # Ampere+ even though flash-attn 2.x has partial sm75 forward support.
@@ -37,6 +39,16 @@ class OptimizerConfig:
     grad_clip_norm: float | None = None
     adam_8bit: bool = False
     fp32_master_bucket_numel: int = 16 * 1024 * 1024
+    unfreeze_multimodal_tower: bool = False
+    unfreeze_multimodal_projector: bool = False
+    multimodal_tower_lr: float | None = None
+    multimodal_tower_min_lr: float | None = None
+    multimodal_tower_lr_decay_steps: int | None = None
+    multimodal_tower_lr_decay_style: Literal["constant", "linear", "cosine"] | None = None
+    multimodal_projector_lr: float | None = None
+    multimodal_projector_min_lr: float | None = None
+    multimodal_projector_lr_decay_steps: int | None = None
+    multimodal_projector_lr_decay_style: Literal["constant", "linear", "cosine"] | None = None
 
 
 @dataclass(slots=True)
@@ -48,7 +60,11 @@ class RuntimeConfig:
     compile_model: bool = True
     activation_checkpointing: bool = True
     keep_rollout_state: bool = True
+    optimizer_state_offload: Literal["none", "cpu", "disk"] | bool = "none"
+    optimizer_state_offload_dir: str | None = None
+    optimizer_state_offload_batch_size: int = 1
     eager_decode: bool = False
+    rollout_routing_replay: bool = False
     decode_graph_buckets: list[int] = field(
         default_factory=lambda: [1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 56, 64, 96, 128, 192, 256]
     )
@@ -56,6 +72,14 @@ class RuntimeConfig:
     def __post_init__(self) -> None:
         if self.attn_backend not in {"flash", "native"}:
             raise ValueError("runtime.attn_backend must be one of: flash, native")
+        if isinstance(self.optimizer_state_offload, bool):
+            self.optimizer_state_offload = "cpu" if self.optimizer_state_offload else "none"
+        if self.optimizer_state_offload not in {"none", "cpu", "disk"}:
+            raise ValueError("runtime.optimizer_state_offload must be one of: none, cpu, disk")
+        if self.optimizer_state_offload == "disk" and not self.optimizer_state_offload_dir:
+            raise ValueError("runtime.optimizer_state_offload_dir is required for disk offload")
+        if self.optimizer_state_offload_batch_size < 1:
+            raise ValueError("runtime.optimizer_state_offload_batch_size must be positive")
 
     def resolve_attn_backend(self, *, model: ModelConfig, devices: list[int]) -> None:
         """Switch flash-attn unsupported hardware or model shapes to native attention."""
@@ -98,6 +122,23 @@ class RuntimeConfig:
         )
         self.compile_model = False
 
+    def resolve_eager_decode(self, *, model: ModelConfig, lora: LoraConfig | None) -> None:
+        """Use eager decode when routed-expert adapters lack a fused rollout path."""
+
+        if self.eager_decode or lora is None:
+            return
+        if model.model_type == "qwen3_moe" and {
+            "gate_proj",
+            "up_proj",
+            "down_proj",
+        } & set(lora.target_modules):
+            warnings.warn(
+                "routed-expert LoRA uses grouped execution during rollout; falling back to eager decode.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            self.eager_decode = True
+
 
 @dataclass(slots=True)
 class ModelConfig:
@@ -107,6 +148,7 @@ class ModelConfig:
     checkpoint_prefix: str = "model"
     checkpoint_lm_head_key: str = "lm_head.weight"
     vocab_size: int = 151936
+    pad_token_id: int = 0
     hidden_size: int = 1024
     intermediate_size: int = 3072
     num_hidden_layers: int = 28
@@ -148,7 +190,11 @@ class ModelConfig:
     num_shared_experts: int | None = None
     shared_expert_intermediate_size: int = 0
     vision_config: dict[str, Any] | None = None
+    audio_config: dict[str, Any] | None = None
+    hf_text_config: dict[str, Any] | None = None
     image_token_id: int | None = None
+    video_token_id: int | None = None
+    audio_token_id: int | None = None
     vision_start_token_id: int | None = None
     vision_end_token_id: int | None = None
     moe_router_enable_expert_bias: bool = True
@@ -162,7 +208,11 @@ class ModelConfig:
     qk_nope_head_dim: int = 0
     qk_rope_head_dim: int = 0
     v_head_dim: int = 0
+    q_lora_rank: int | None = None
     kv_lora_rank: int | None = None
+    kda_safe_gate: bool = False
+    kda_lower_bound: float | None = None
+    no_kda_lora: bool = False
     linear_backend: str = "minimax"
     linear_scale: bool = True
     linear_silu: bool = False
@@ -227,16 +277,33 @@ class EngineConfig:
     optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
     tp_size: int = 1
+    sequence_parallel: bool | None = None
     dp_size: int | None = None
     devices: list[int] | None = None
     dummy_load: bool = False
     role: Literal["train", "rollout"] = "train"
     policy_sync_bucket_mb: int = 64
+    lora: LoraConfig | None = None
+    lora_seed: int = 0
+    reference_mode: Literal["independent", "reuse_actor_base"] = "independent"
+    base_model_name_or_path: str | None = None
 
     def __post_init__(self) -> None:
         """Infer DP/devices and validate the distributed layout."""
 
+        if self.sequence_parallel is not None:
+            self.model.sequence_parallel = bool(self.sequence_parallel)
         self.model.validate_tp(self.tp_size)
+        if self.reference_mode not in {"independent", "reuse_actor_base"}:
+            raise ValueError("reference_mode must be one of: independent, reuse_actor_base")
+        if self.reference_mode == "reuse_actor_base" and self.lora is None:
+            raise ValueError("reference_mode='reuse_actor_base' requires native LoRA")
+        if (
+            self.lora is not None
+            and self.model.model_type == "bailing_moe_v3"
+            and self.model.moe_router_bias_update_rate != 0.0
+        ):
+            raise ValueError("native LoRA requires moe_router_bias_update_rate=0 to keep the base policy frozen")
         if self.devices is None:
             if torch.cuda.is_available():
                 device_count = torch.cuda.device_count()
@@ -270,9 +337,20 @@ class EngineConfig:
             raise ValueError("runtime.kv_block_size must be >= 1")
         if self.runtime.kv_block_size % 256 != 0:
             raise ValueError("runtime.kv_block_size must be a multiple of 256 for FlashAttention paged KV")
+        # CUDA rollout trainers request R3 by default. Dense checkpoints do
+        # not have router decisions to capture and retain the original path.
+        if self.runtime.rollout_routing_replay and self.model.num_experts is None:
+            self.runtime.rollout_routing_replay = False
         self.runtime.resolve_attn_backend(model=self.model, devices=self.devices)
         self.runtime.resolve_compile_model(model=self.model, devices=self.devices)
+        self.runtime.resolve_eager_decode(model=self.model, lora=self.lora)
         self.model.attn_backend = self.runtime.attn_backend
+
+    @property
+    def effective_sequence_parallel(self) -> bool:
+        """Return whether training should shard activations across TP ranks."""
+
+        return bool(self.tp_size > 1 and self.model.sequence_parallel)
 
 
 def flash_attention_unsupported_model_reason(model: ModelConfig) -> str | None:

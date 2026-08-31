@@ -14,6 +14,7 @@ coverage can be added without changing trainer boundaries.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib.util
 import json
 import logging
@@ -26,7 +27,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
-from areno.api.multimodal import encode_multimodal_prompt
+import torch
+
+from areno.api.multimodal import encode_multimodal_prompt, encode_processor_messages, modality_token_ids
 from areno.api.openai_chat import (
     build_chat_completion_response,
     first_user_text,
@@ -118,6 +121,8 @@ class AgentTrainBatch:
     rewards: list[float] | None
     records: list[dict[str, Any]]
     reward_records: list[RewardRecord]
+    routed_experts: list[torch.Tensor] | None = None
+    row_reward_indices: list[int] | None = None
 
 
 @dataclass(slots=True)
@@ -127,19 +132,27 @@ class AgentTrajectoryTurn:
     item: AgentItem
     messages: list[dict[str, Any]]
     response: Any | None = None
+    input_tokens: list[int] = field(default_factory=list)
     response_tokens: list[int] = field(default_factory=list)
     response_logprobs: list[float] = field(default_factory=list)
+    routed_experts: torch.Tensor | None = None
+    routing_replay_id: str | None = None
     parsed_tool_calls: list[dict[str, Any]] = field(default_factory=list)
     model: str = "policy"
     tools: list[dict[str, Any]] = field(default_factory=list)
     tool_choice: Any = None
+    filtered: bool = False
 
     def __post_init__(self) -> None:
         if self.response is None:
             return
         metadata = _chat_response_agentic_metadata(self.response)
+        self.input_tokens = list(metadata.get("input_tokens") or [])
         self.response_tokens = list(metadata["response_tokens"])
         self.response_logprobs = [float(value) for value in metadata["response_logprobs"]]
+        self.routed_experts = _routing_to_cpu_tensor(metadata.get("routed_experts"))
+        self.routing_replay_id = metadata.get("routing_replay_id") or None
+        self.filtered = bool(metadata.get("filtered", False))
         self.parsed_tool_calls = _chat_response_message_tool_calls(self.response)
 
 
@@ -148,6 +161,7 @@ class AgentTrajectory:
     """Explicit trajectories returned by ``run_agent`` for one rollout batch."""
 
     turns: list[AgentTrajectoryTurn] = field(default_factory=list)
+    invalid_items: list[AgentItem] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -167,12 +181,14 @@ class _AgentSample:
     loss_mask_row: list[bool] = field(default_factory=list)
     rollout_logprobs_row: list[float] = field(default_factory=list)
     features: dict[str, Any] | None = None
+    routed_experts_row: torch.Tensor | None = None
 
 
 @dataclass(slots=True)
 class _ResponseData:
     response_tokens: list[int]
     response_logprobs: list[float]
+    routed_experts: Any | None = None
 
 
 @dataclass(slots=True)
@@ -183,6 +199,7 @@ class _AgentTrainRows:
     rollout_logprobs: list[list[float]]
     features: list[dict[str, Any] | None]
     total_tokens: int
+    routed_experts: list[torch.Tensor] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -254,7 +271,6 @@ class RolloutSession:
         sampling_params: SamplingParams,
         loss_mask_policy: LossMaskPolicy | None = None,
         max_running_prompts: int | None = None,
-        timeout_s: float = 300.0,
         proxy: bool = True,
     ) -> None:
         self._trainer = trainer
@@ -265,14 +281,15 @@ class RolloutSession:
         self._max_running_prompts = (
             max(1, int(max_running_prompts)) if max_running_prompts is not None else self._dp_size
         )
-        self._local_max_running_prompts = max(_ceil_div(self._max_running_prompts, self._dp_size), 1)
-        self._timeout_s = float(timeout_s)
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._closing = False
         self._base_url = ""
         self._proxy_enabled = bool(proxy)
+        self._multimodal_encoding_cache: dict[str, tuple[list[int], dict[str, Any] | None]] = {}
+        self._multimodal_encoding_cache_limit = max(self._max_running_prompts * 2, 32)
+        self._routing_sidecar: dict[str, torch.Tensor] = {}
 
     @property
     def max_running_prompts(self) -> int:
@@ -312,6 +329,7 @@ class RolloutSession:
             if self._thread is not None:
                 self._thread.join(timeout=2.0)
         finally:
+            self._routing_sidecar.clear()
             await self._trainer.end_rollout_session_async()
 
     @property
@@ -327,6 +345,11 @@ class RolloutSession:
 
         return self.base_url
 
+    def get_tokenizer(self):
+        """Return the tokenizer used to encode agentic rollout requests."""
+
+        return self._trainer.get_tokenizer()
+
     def finish_requests(self) -> None:
         """Compatibility no-op for agents that mark request submission done."""
 
@@ -339,7 +362,10 @@ class RolloutSession:
         return type(
             "AgenticRolloutHTTPServer",
             (_AgenticHTTPServer,),
-            {"request_queue_size": max(2048, self._max_running_prompts), "max_threads": 2048},
+            {
+                "request_queue_size": max(2048, self._max_running_prompts),
+                "max_threads": 2048,
+            },
         )
 
     def reward_record(self, sample: _AgentSample) -> RewardRecord:
@@ -395,6 +421,8 @@ class RolloutSession:
         loss_masks: list[list[bool]] = []
         rollout_logprobs: list[list[float]] = []
         features: list[dict[str, Any] | None] = []
+        routed_experts: list[torch.Tensor] = []
+        route_presence: list[bool] = []
         total_tokens = 0
         for sample in samples:
             if sample.token_row:
@@ -403,6 +431,9 @@ class RolloutSession:
                 loss_masks.append(sample.loss_mask_row)
                 rollout_logprobs.append(sample.rollout_logprobs_row)
                 features.append(sample.features)
+                route_presence.append(sample.routed_experts_row is not None)
+                if sample.routed_experts_row is not None:
+                    routed_experts.append(sample.routed_experts_row)
                 total_tokens += len(sample.token_row)
                 continue
             prompt_len = len(sample.item.input_tokens)
@@ -413,7 +444,12 @@ class RolloutSession:
             loss_masks.append([False] * prompt_len + self._response_loss_mask(sample))
             rollout_logprobs.append([0.0] * prompt_len + list(sample.response_logprobs))
             features.append(sample.features)
+            route_presence.append(sample.routed_experts_row is not None)
+            if sample.routed_experts_row is not None:
+                routed_experts.append(sample.routed_experts_row)
             total_tokens += len(token_row)
+        if any(route_presence) and not all(route_presence):
+            raise ValueError("agentic routing replay must be present for every trajectory in the train batch")
         return _AgentTrainRows(
             token_rows=token_rows,
             response_masks=response_masks,
@@ -421,6 +457,7 @@ class RolloutSession:
             rollout_logprobs=rollout_logprobs,
             features=features,
             total_tokens=total_tokens,
+            routed_experts=routed_experts or None,
         )
 
     def _handler_cls(self):
@@ -453,7 +490,7 @@ class RolloutSession:
             return
         try:
             future = asyncio.run_coroutine_threadsafe(self._complete_chat(body), self._loop)
-            response = future.result(timeout=self._timeout_s)
+            response = future.result()
             _write_json(handler, 200, response)
         except ValueError as exc:
             _write_json(handler, 400, {"error": {"message": str(exc)}})
@@ -489,11 +526,7 @@ class RolloutSession:
         )
         if self._loop is None:
             raise RuntimeError("agent rollout proxy is not running")
-        try:
-            await asyncio.wait_for(asyncio.shield(self._run_chat_request(pending)), timeout=self._timeout_s)
-        except asyncio.TimeoutError:
-            pending.cancelled = True
-            raise TimeoutError("agent rollout proxy timed out waiting for completion")
+        await asyncio.shield(self._run_chat_request(pending))
         if pending.error is not None:
             raise pending.error
         if pending.response is None:
@@ -531,7 +564,11 @@ class RolloutSession:
                     pending,
                     self._build_chat_response(
                         pending,
-                        _ResponseData(response_tokens=sequence.resp_tokens, response_logprobs=sequence.resp_logprobs),
+                        _ResponseData(
+                            response_tokens=sequence.resp_tokens,
+                            response_logprobs=sequence.resp_logprobs,
+                            routed_experts=getattr(sequence, "routed_experts", None),
+                        ),
                     ),
                 )
         except BaseException as exc:
@@ -539,13 +576,27 @@ class RolloutSession:
 
     def _messages_to_tokens_and_features(self, pending: _PendingChat) -> tuple[list[int], dict[str, Any] | None]:
         tokenizer = self._trainer.get_tokenizer()
-        if _messages_have_images(pending.messages):
-            record = {
-                "messages": pending.messages,
-                "tools": pending.tools,
-                "images_base64": _message_images_base64(pending.messages),
-            }
-            return encode_multimodal_prompt(tokenizer, self._trainer.get_processor(), record)
+        if _messages_have_multimodal(pending.messages):
+            cache_key = _multimodal_encoding_cache_key(pending.messages, pending.tools)
+            cached = self._multimodal_encoding_cache.get(cache_key)
+            if cached is not None:
+                return list(cached[0]), cached[1]
+            processor = self._trainer.get_processor()
+            if processor is None:
+                raise ValueError("multimodal input requires a checkpoint processor")
+            if modality_token_ids(processor).keys() & {"audio", "video"}:
+                encoded = encode_processor_messages(processor, pending.messages, tools=pending.tools)
+            else:
+                record = {
+                    "messages": pending.messages,
+                    "tools": pending.tools,
+                    "images_base64": _message_images_base64(pending.messages),
+                }
+                encoded = encode_multimodal_prompt(tokenizer, processor, record)
+            if len(self._multimodal_encoding_cache) >= self._multimodal_encoding_cache_limit:
+                self._multimodal_encoding_cache.pop(next(iter(self._multimodal_encoding_cache)))
+            self._multimodal_encoding_cache[cache_key] = encoded
+            return list(encoded[0]), encoded[1]
         return (
             _messages_to_prompt_tokens(
                 tokenizer,
@@ -569,10 +620,29 @@ class RolloutSession:
             tool_choice=turn.tool_choice,
             created_at=time.monotonic(),
         )
-        pending.input_tokens, pending.features = self._messages_to_tokens_and_features(pending)
+        if turn.input_tokens:
+            pending.input_tokens = list(turn.input_tokens)
+            if _messages_have_multimodal(pending.messages):
+                encoded_tokens, pending.features = self._messages_to_tokens_and_features(pending)
+                if encoded_tokens != pending.input_tokens:
+                    raise ValueError(
+                        "multimodal trajectory tokens differ from the original rollout request; "
+                        "training cannot replay the sampled policy distribution"
+                    )
+        else:
+            pending.input_tokens, pending.features = self._messages_to_tokens_and_features(pending)
+        routed_experts = turn.routed_experts
+        if routed_experts is None and turn.routing_replay_id is not None:
+            routed_experts = self._routing_sidecar.pop(turn.routing_replay_id, None)
+            if routed_experts is None:
+                raise ValueError("agentic routing replay sidecar is missing for trajectory turn")
         return self._sample_from_pending_chat(
             pending,
-            _ResponseData(response_tokens=list(turn.response_tokens), response_logprobs=list(turn.response_logprobs)),
+            _ResponseData(
+                response_tokens=list(turn.response_tokens),
+                response_logprobs=list(turn.response_logprobs),
+                routed_experts=routed_experts,
+            ),
             tool_calls=turn.parsed_tool_calls,
         )
 
@@ -631,6 +701,7 @@ class RolloutSession:
             trace=trace,
             response_kind=response_kind,
             features=pending.features,
+            routed_experts_row=_routing_to_cpu_tensor(response.routed_experts),
             loss_mask_override=_tool_call_loss_mask(tokenizer, response.response_tokens) if tool_calls else None,
         )
         # The prompt tokens are the fully rendered chat context for this turn,
@@ -647,12 +718,13 @@ class RolloutSession:
             pending,
             response.response_tokens,
             response_logprobs=response.response_logprobs,
+            routed_experts=response.routed_experts,
             content=content,
             tool_calls=tool_parse.tool_calls,
         )
 
     def _append_sample_response(self, existing: _AgentSample, new_sample: _AgentSample) -> None:
-        """Append another model response to an existing multi-call trajectory."""
+        """Aggregate multi-call reward history without flattening train rows."""
 
         old_response_kind = existing.response_kind
         old_response_len = len(existing.response_tokens)
@@ -668,21 +740,6 @@ class RolloutSession:
         existing.response_logprobs.extend(new_sample.response_logprobs)
         existing.trace.extend(new_sample.trace)
         existing.messages = new_sample.messages
-        # Each later turn is rendered as: previous messages + new assistant.
-        # Append only the suffix so the training row becomes one trajectory
-        # instead of duplicating the shared prefix for every tool call.
-        prefix_len = _common_prefix_len(existing.token_row, new_sample.token_row)
-        if prefix_len < len(new_sample.token_row):
-            existing.token_row.extend(new_sample.token_row[prefix_len:])
-            existing.response_mask_row.extend(new_sample.response_mask_row[prefix_len:])
-            existing.loss_mask_row.extend(new_sample.loss_mask_row[prefix_len:])
-            existing.rollout_logprobs_row.extend(new_sample.rollout_logprobs_row[prefix_len:])
-        elif not existing.token_row:
-            existing.token_row = list(existing.item.input_tokens) + list(existing.response_tokens)
-            prompt_len = len(existing.item.input_tokens)
-            existing.response_mask_row = [False] * prompt_len + [True] * len(existing.response_tokens)
-            existing.loss_mask_row = [False] * prompt_len + self._response_loss_mask(existing)
-            existing.rollout_logprobs_row = [0.0] * prompt_len + list(existing.response_logprobs)
         old_mask = existing.loss_mask_override
         if old_mask is None:
             old_mask = self._response_loss_mask_for_span(old_response_kind, old_response_len)
@@ -701,6 +758,8 @@ class RolloutSession:
         sample.response_mask_row = [False] * len(prompt_tokens) + response_mask
         sample.loss_mask_row = [False] * len(prompt_tokens) + loss_mask
         sample.rollout_logprobs_row = [0.0] * len(prompt_tokens) + list(sample.response_logprobs)
+        if sample.routed_experts_row is not None and len(sample.routed_experts_row) != len(sample.token_row) - 1:
+            raise ValueError("agentic routing replay must contain one route for every token except the final token")
 
     def _build_pending_chat_response(
         self,
@@ -708,12 +767,13 @@ class RolloutSession:
         response_tokens: list[int],
         *,
         response_logprobs: list[float] | None = None,
+        routed_experts: Any | None = None,
         content: str | None = None,
         tool_calls: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         del content
         finish_reason = "tool_calls" if tool_calls else "stop"
-        return build_chat_completion_response(
+        response = build_chat_completion_response(
             tokenizer=self._trainer.get_tokenizer(),
             model=pending.model,
             prompt_tokens=len(pending.input_tokens),
@@ -727,6 +787,31 @@ class RolloutSession:
             include_areno_metadata=True,
             input_tokens=pending.input_tokens,
         )
+        response["areno"].pop("routed_experts", None)
+        if routed_experts is not None:
+            routing_replay_id = str(response["id"])
+            self._routing_sidecar[routing_replay_id] = _routing_to_cpu_tensor(routed_experts)
+            response["areno"]["routing_replay_id"] = routing_replay_id
+        return response
+
+
+def _multimodal_encoding_cache_key(messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> str:
+    payload = json.dumps([messages, tools], sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _routing_to_cpu_tensor(routed_experts: Any | None) -> torch.Tensor | None:
+    if routed_experts is None:
+        return None
+    if isinstance(routed_experts, torch.Tensor):
+        routes = routed_experts.detach().to(device="cpu", dtype=torch.int16)
+    else:
+        routes = torch.as_tensor(routed_experts, dtype=torch.int16, device="cpu")
+    if routes.numel() == 0:
+        return None
+    if routes.ndim != 3:
+        raise ValueError("agentic routing replay must have shape (tokens, layers, top_k)")
+    return routes.contiguous()
 
 
 def load_agent_run_fn(path: str) -> Callable[[RolloutSession, AgentBatch], Any]:
@@ -818,7 +903,7 @@ def _render_messages_for_display(tokenizer, messages: list[dict[str, Any]]) -> s
     """Render a message trajectory with the tokenizer chat template when available."""
 
     messages = _normalize_messages(messages)
-    if _messages_have_images(messages):
+    if _messages_have_multimodal(messages):
         return _messages_to_text(messages)
     if getattr(tokenizer, "chat_template", None):
         try:
@@ -868,6 +953,10 @@ def _filtered_chat_response(*, model: str, prompt_tokens: int, max_sequence_len:
             "input_tokens": [],
             "response_tokens": [],
             "response_logprobs": [],
+            # No model forward was executed, so this response must terminate
+            # the trajectory without becoming a route-less training turn.
+            "filtered": True,
+            "filter_reason": "max_context_len",
         },
     }
 
@@ -877,7 +966,7 @@ def _normalize_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _messages_to_text(messages: list[dict[str, Any]]) -> str:
-    if _messages_have_images(messages):
+    if _messages_have_multimodal(messages):
         parts = []
         for message in messages:
             content = message.get("content")
@@ -887,8 +976,10 @@ def _messages_to_text(messages: list[dict[str, Any]]) -> str:
                 for item in content:
                     if not isinstance(item, dict):
                         continue
-                    if item.get("type") in {"image", "image_url"}:
-                        parts.append("<image>")
+                    kind = str(item.get("type", ""))
+                    modality = kind.removesuffix("_url")
+                    if modality in {"image", "audio", "video"} or kind == "input_audio":
+                        parts.append(f"<{('audio' if kind == 'input_audio' else modality)}>")
                     elif item.get("type") == "text" and item.get("text") is not None:
                         parts.append(str(item["text"]))
         return "\n".join(parts)
@@ -901,6 +992,18 @@ def _first_user_text(messages: list[dict[str, Any]]) -> str:
 
 def _messages_have_images(messages: list[dict[str, Any]]) -> bool:
     return any(_content_has_image(message.get("content")) for message in messages)
+
+
+def _messages_have_multimodal(messages: list[dict[str, Any]]) -> bool:
+    return any(_content_has_multimodal(message.get("content")) for message in messages)
+
+
+def _content_has_multimodal(content: Any) -> bool:
+    return isinstance(content, list) and any(
+        isinstance(item, dict)
+        and item.get("type") in {"image", "image_url", "audio", "audio_url", "input_audio", "video", "video_url"}
+        for item in content
+    )
 
 
 def _content_has_image(content: Any) -> bool:
@@ -1004,16 +1107,6 @@ def _trace_with_tool_results(trace: list[RewardEvent], messages: list[dict[str, 
     return augmented
 
 
-def _common_prefix_len(left: list[int], right: list[int]) -> int:
-    """Return the shared token prefix length for incremental multi-turn rows."""
-
-    limit = min(len(left), len(right))
-    for idx in range(limit):
-        if left[idx] != right[idx]:
-            return idx
-    return limit
-
-
 def _chat_batch_key(params: Any) -> _ChatBatchKey:
     return _ChatBatchKey(
         greedy=bool(getattr(params, "greedy", False)),
@@ -1041,10 +1134,6 @@ def _trainer_dp_size(trainer: Any) -> int:
         if tp_size <= 0:
             return 1
         return max(world_size // tp_size, 1)
-
-
-def _ceil_div(a: int, b: int) -> int:
-    return (a + b - 1) // b
 
 
 def _write_json(handler: BaseHTTPRequestHandler, status: int, payload: dict[str, Any]) -> None:

@@ -1,12 +1,20 @@
 Installation
 ============
 
-The installer is the single entry point for local AReno setup. Users do not
-need to choose PyTorch packages, set CUDA build variables, or order Python
-dependencies before running it.
+AReno has native CUDA and MLX installation paths. Linux and WSL2 use the CUDA
+installer; Apple Silicon uses a normal pip source install with platform-marked
+MLX dependencies.
 
-Install AReno
--------------
+The :doc:`backends` guide compares both native runtimes. Its platform pages
+describe the complete, parallel train/serve setup:
+
+* :doc:`cuda` for Linux, WSL2, NVIDIA CUDA, distributed topology, and CUDA
+  checkpoints.
+* :doc:`mlx` for Apple Silicon, unified memory, MLX checkpoints, and the
+  single-process runtime.
+
+Install CUDA AReno
+------------------
 
 Clone the repository and run one command:
 
@@ -43,6 +51,9 @@ To preview the plan without changing the environment:
 
    bash scripts/install.sh --dry-run
 
+Continue with :doc:`cuda` for CUDA training, serving, memory controls,
+checkpoints, model support, and SDK configuration.
+
 Compatibility matrix
 --------------------
 
@@ -62,11 +73,37 @@ Compatibility matrix
      - Supported
      - Follow the Linux install path inside WSL2. Native Windows is not supported.
    * - macOS Apple Silicon
-     - Not supported
-     - The installer requires Linux with NVIDIA CUDA.
+     - Supported
+     - Use native ``arm64`` Python and the MLX pip installation below. The CUDA installer does not apply.
    * - CPU-only environments
      - Not supported
-     - AReno training and serving require an NVIDIA GPU and CUDA-enabled PyTorch.
+     - Training and serving require either NVIDIA CUDA or Apple Silicon MLX.
+
+Install on Apple Silicon
+------------------------
+
+The repository installer currently prepares the CUDA toolchain, so do not run
+``scripts/install.sh`` on macOS. Use a native ``arm64`` virtual environment:
+
+.. code-block:: bash
+
+   git clone https://github.com/inclusionAI/AReno.git
+   cd AReno
+   python3 -m venv .venv
+   source .venv/bin/activate
+   python -m pip install --upgrade pip
+   python -m pip install -e .
+
+The project metadata installs MLX dependencies only on Apple Silicon and CUDA
+dependencies only on Linux. Verify that Python is not running through Rosetta:
+
+.. code-block:: bash
+
+   python -c "import platform; from areno.api import DefaultBackend; print(platform.machine(), DefaultBackend)"
+
+Expected output contains ``arm64`` and ``BackendType.MLX``. Continue with
+:doc:`mlx` for training, serving, checkpoints, memory controls, and
+multimodal support.
 
 Docker
 ------
@@ -126,7 +163,8 @@ For setup reports, also collect a machine-readable environment bundle:
 
    areno env --json
 
-``areno check`` reports common build-time and runtime setup problems with next
-steps: missing or CPU-only PyTorch, unsupported PyTorch versions, missing
-``CUDA_HOME`` or ``nvcc``, missing build-time dependencies such as ``psutil``,
-and unsupported platforms.
+On CUDA, ``areno check`` reports common build-time and runtime setup problems
+such as missing or CPU-only PyTorch, unsupported PyTorch versions, missing
+``CUDA_HOME`` or ``nvcc``, and missing build dependencies. On Apple Silicon,
+verify the backend and MLX device from the active environment before loading a
+checkpoint.

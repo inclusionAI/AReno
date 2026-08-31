@@ -6,6 +6,7 @@ and maintained by the AReno community.
   <a href="LICENSE"><img alt="License: Apache 2.0" src="https://img.shields.io/badge/License-Apache_2.0-blue.svg"></a>
   <a href="https://www.python.org/downloads/"><img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-blue.svg"></a>
   <a href="https://pytorch.org/"><img alt="PyTorch 2.6+" src="https://img.shields.io/badge/PyTorch-2.6%2B-ee4c2c.svg"></a>
+  <a href="https://github.com/ml-explore/mlx"><img alt="MLX" src="https://img.shields.io/badge/Apple_Silicon-MLX-555555.svg"></a>
   <a href="https://asystem-ai.io/docs/areno/"><img alt="Documentation" src="https://img.shields.io/badge/documentation-AReno-2ea44f.svg"></a>
 </p>
 
@@ -28,21 +29,44 @@ AReno's mission is to make LLM RL **accessible** for a broad community of resear
 ## Highlights
 
 - ✨ **Plug-and-play**: various post-training methods are easily accessible via the `--algo` flag or the same `Trainer` class from Python, no cluster or launcher to set up.
-- 🪶 **Lightweight**: single self-contained package, no external training/inference backend, just PyTorch, FlashAttention, and a handful of other libraries.
+- 🪶 **Lightweight**: one self-contained train/serve stack that installs and loads only the native backend needed by the host—CUDA on Linux or MLX on Apple Silicon.
 - 🧰 **Agentic RL ready**: run an agent function against AReno's local OpenAI-compatible proxy, return explicit trajectories, and train from tokens, logprobs, rewards, and loss masks derived by the trainer.
+- 🎞️ **Multimodal**: use image, audio, and video content with compatible model processors through the same OpenAI-style message format in serving and agentic training.
+- 🧩 **Native LoRA**: train TP-aware adapters for Qwen3, Qwen3-MoE, and Bailing-MoE V3, save standard PEFT artifacts, and reload them for training or serving.
 - 🧩 **Extensible**: easily register new algorithms, model adapters, reward functions, and hardware backends without changing the core.
 
 ## Installation
 
 ### From source
 
-AReno currently requires Linux (x86_64 or aarch64) with an NVIDIA GPU and CUDA-enabled PyTorch 2.6 or newer; Windows users can use WSL2.
+AReno supports Linux (x86_64 or aarch64) with an NVIDIA GPU and CUDA-enabled
+PyTorch 2.6 or newer, plus Apple Silicon macOS through MLX. Windows users can
+use WSL2 for the CUDA path. The CLI selects CUDA on Linux and MLX on native
+``arm64`` macOS; it does not silently fall back between backends.
+
+CUDA/WSL2 installation:
 
 ```bash
 git clone https://github.com/inclusionAI/AReno.git
 cd AReno
 bash scripts/install.sh
 ```
+
+Apple Silicon installation:
+
+```bash
+git clone https://github.com/inclusionAI/AReno.git
+cd AReno
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -U pip
+python -m pip install -e .
+```
+
+Platform dependency markers install the MLX stack on Apple Silicon without
+pulling in Linux-only Torch/CUDA packages. See the
+[Apple Silicon and MLX guide](docs/getting-started/mlx.rst) for supported
+algorithms, checkpoints, serving, multimodal behavior, and memory controls.
 
 ### Docker
 
@@ -51,104 +75,72 @@ Use our official [AReno image](https://ghcr.io/inclusionai/areno) `inclusionai/a
 ```bash
 # Please make sure the host has an NVIDIA driver and NVIDIA Container Toolkit.
 docker run --gpus all --rm -it \
-  ghcr.io/inclusionai/areno:v0.0.6 \
+  ghcr.io/inclusionai/areno:v0.0.7 \
   areno check
 ```
 
 ## Quick Start
 
-With the SDK, RL loop is a short cycle of `Trainer` calls. Each step below maps a concept to the SDK call that performs it:
+AReno provides core API abstractions for LLM post-training, with AReno SDK, RL loop is a short cycle of `Trainer` calls. Each step below maps a concept to the SDK call that performs it:
 
-```mermaid
-flowchart LR
-    A["Trainer<br/>init()"] -->
-    B["rollout_batch<br/>on-policy samples"] -->
-    C["reward fn<br/>score"] -->
-    D["train<br/>optimizer step"] -->|repeat| B
-```
+![AReno training loop](docs/_static/train_loop.png)
 
 1. **Create the trainer** — construct a `Trainer` on the AReno backend and `init()` it to load the tokenizer and start workers.
-2. **Roll out** — inside `rollout_session(...)`, `rollout_batch(...)` generates on-policy completions for each prompt.
+2. **Rollout** — inside `rollout_session(...)`, `rollout_batch(...)` generates on-policy completions for each prompt.
 3. **Score** — reward each completion and turn rewards into advantages (your reward function, not AReno's).
 4. **Train** — pack the rollout into `TrainSequence` objects and call `train(batch, loss_fn)` to run one optimizer step.
 5. **Repeat** — new weights produce new rollouts; loop until done, then `close()`.
 
 ```python
 import asyncio
-from functools import partial
 
 from datasets import load_dataset
 
-from areno.api import (
-    Areno,
-    ArenoConfig,
-    SamplingParams,
-    Trainer,
-    TrainSequence,
-    gspo_loss_fn,
-)
+from areno import Trainer
+from areno.api import RewardRecord, SamplingParams, TrainSequence, gspo_loss_fn
+from areno.api.rewards import compute_group_advantages
 from examples.math.math_verify_reward import reward_fn
-
-
-def to_advantages(rewards):
-    mean = sum(rewards) / len(rewards)
-    var = sum((r - mean) ** 2 for r in rewards) / max(len(rewards), 1)
-    std = max(var**0.5, 1e-6)
-    return [(r - mean) / std for r in rewards]
 
 
 async def main():
     # 1. Create the trainer
-    trainer = Trainer(
-        world_size=1,
-        model_path="Qwen/Qwen3-0.6B",
-        backend_type=Areno,
-        custom_config=ArenoConfig(tp_size=1),
-    )
+    trainer = Trainer(world_size=1, model_path="Qwen/Qwen3-0.6B")
     trainer.init()
+    tokenizer = trainer.get_tokenizer()
 
-    try:
-        # 2. Roll out on-policy completions for one GSM8K prompt
-        row = load_dataset("gsm8k", "main", split="train[0:1]")[0]
-        prompt = (
-            "Solve the problem and put the final answer in \\boxed{}.\n\n"
-            f"Problem: {row['question']}\nSolution:"
+    row = load_dataset("gsm8k", "main", split="train[0:1]")[0]
+    target = str(row["answer"]).rsplit("####", 1)[-1].strip()
+    prompt = f"Solve the problem and put the final answer in \\boxed{{}}.\n\nProblem: {row['question']}\nSolution:"
+    prompt_tokens = tokenizer.encode(prompt)
+    sampling = SamplingParams(max_new_tokens=512)
+
+    # 2. Rollout on-policy completions
+    async with trainer.rollout_session(sampling_params=sampling, proxy=False):
+        sequences = trainer.rollout_token_batch([prompt_tokens], n_samples=8, sampling_params=sampling)[0].sequences
+
+    # 3. Score and normalize rewards within the sample group
+    rewards = [
+        reward_fn(RewardRecord(prompt=prompt, completion=tokenizer.decode(seq.resp_tokens), answer=[target]))
+        for seq in sequences
+    ]
+    advantages = compute_group_advantages(rewards)
+
+    # 4. Train one step
+    batch = [
+        TrainSequence(
+            tokens=prompt_tokens + seq.resp_tokens,
+            logprobs=[0.0] * len(prompt_tokens) + seq.resp_logprobs,
+            prompt_len=len(prompt_tokens),
+            scalar_advantage=advantage,
+            reward=reward,
+            eos_token_id=tokenizer.eos_token_id,
         )
-        prompt_tokens = trainer.get_tokenizer().encode(prompt)
-        sampling = SamplingParams(max_new_tokens=512, temperature=1.0)
+        for seq, reward, advantage in zip(sequences, rewards, advantages, strict=True)
+    ]
+    trainer.train(batch, gspo_loss_fn)
 
-        async with trainer.rollout_session(sampling_params=sampling, proxy=False):
-            rollout = trainer.rollout_batch(
-                [prompt],
-                n_samples=8,
-                sampling_params=sampling,
-            )[0]
-
-        # 3. Score with the same reward function the CLI uses, then form advantages
-        completions = [trainer.get_tokenizer().decode(seq.resp_tokens) for seq in rollout.sequences]
-        rewards = reward_fn(row, completions)
-        advantages = to_advantages(rewards)
-
-        batch = []
-        for seq, reward, advantage in zip(rollout.sequences, rewards, advantages, strict=True):
-            response_len = len(seq.resp_tokens)
-            batch.append(
-                TrainSequence(
-                    prompt_mask=[True] * len(prompt_tokens) + [False] * response_len,
-                    tokens=prompt_tokens + seq.resp_tokens,
-                    logprobs=[0.0] * len(prompt_tokens) + seq.resp_logprobs,
-                    advantages=[0.0] * len(prompt_tokens) + [advantage] * response_len,
-                    reward=reward,
-                    eos_token_id=trainer.get_tokenizer().eos_token_id,
-                )
-            )
-
-        # 4. Train one step
-        stats = trainer.train(batch, partial(gspo_loss_fn, clip_eps=3.0e-4), mini_bs=4)
-
-        # 5. Repeat the loop over more prompts
-    finally:
-        trainer.close()
+    # 5. Repeat for more prompts, then close
+    trainer.close()
 
 
 asyncio.run(main())
@@ -225,7 +217,12 @@ areno train \
   --batch-size 1
 ```
 
-This is a smoke/sanity task for the CLI, dataset loader, reward function, rollout, and training-step wiring. It is not a quality benchmark. It requires a CUDA-capable NVIDIA GPU; CPU-only machines can install the package for docs and metadata checks, but cannot run the AReno training engine. A successful run should reach rollout logs and a `train_stats=...` line without raising an exception.
+This is a smoke/sanity task for the CLI, dataset loader, reward function,
+rollout, and training-step wiring. It is not a quality benchmark. It requires
+either a CUDA-capable NVIDIA GPU on Linux or Apple Silicon with MLX. A
+successful run should reach rollout logs and a `train_stats=...` line without
+raising an exception. On Apple Silicon, use a checkpoint implemented by
+`mlx-lm` and start with `--tp-size 1 --world-size 1 --mini-bs 1`.
 
 Run GSPO on a GSM8K-style dataset with a reward function:
 
@@ -310,6 +307,31 @@ reward function, OpenAI-compatible agent, and browser UI.
 
 For the full list of training options, run `areno train --help`.
 
+#### Native LoRA
+
+Enable CUDA-native LoRA by passing a rank. AReno freezes the base model and
+trains the selected projection adapters through the same rollout and training
+engine, including agentic RL:
+
+```bash
+areno train \
+  --ckpt Qwen/Qwen3-0.6B \
+  --dataset-path gsm8k:main \
+  --dataset-loader-fn examples/math/dataset_loader.py \
+  --reward-fn-path examples/math/math_verify_reward.py \
+  --algo gspo \
+  --lora-rank 8 \
+  --lora-alpha 16 \
+  --save-path outputs/qwen3-lora \
+  --save-interval 100
+```
+
+Saved checkpoints contain standard PEFT `adapter_config.json` and
+`adapter_model.safetensors` files. Resume training or serve an adapter by
+supplying the frozen base checkpoint together with `--lora-adapter-path`.
+See the [native LoRA guide](docs/concepts/native-lora.rst) for supported
+models and targets, agentic training, save/reload, and serving examples.
+
 ### Serving
 
 Serve a trained checkpoint as an OpenAI-compatible endpoint with continuous batching:
@@ -321,6 +343,21 @@ areno serve \
   --world-size 1 \
   --port 8000
 ```
+
+To serve a saved native LoRA adapter without merging it into the base model:
+
+```bash
+areno serve \
+  --model-path Qwen/Qwen3-0.6B \
+  --lora-adapter-path outputs/qwen3-lora/step_000100 \
+  --tp-size 1 \
+  --world-size 1 \
+  --port 8000
+```
+
+The command selects CUDA or MLX from the host platform. MLX serving is
+single-process (`--tp-size 1 --world-size 1`) and uses the same long-lived
+continuous-batch request scheduler and HTTP API.
 
 Point any OpenAI client at `http://localhost:8000/v1/chat/completions` to start generating. For the full list of serving options, run `areno serve --help`.
 

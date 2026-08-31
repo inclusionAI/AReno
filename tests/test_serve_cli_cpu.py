@@ -21,6 +21,7 @@ def test_create_app_passes_eager_decode_runtime_config(monkeypatch):
         def from_pretrained(cls, *args, **kwargs):
             del args
             captured["runtime_config"] = kwargs["runtime_config"]
+            captured["base_model_name_or_path"] = kwargs["base_model_name_or_path"]
             return cls()
 
     monkeypatch.setattr(serve_mod, "load_tokenizer", lambda model_path: SimpleNamespace(eos_token_id=1))
@@ -35,10 +36,12 @@ def test_create_app_passes_eager_decode_runtime_config(monkeypatch):
         decode_progress_interval_s=0.0,
         eager_decode=True,
         attn_backend="native",
+        base_model_name_or_path="org/base",
     )
 
     assert captured["runtime_config"].eager_decode is True
     assert captured["runtime_config"].attn_backend == "native"
+    assert captured["base_model_name_or_path"] == "org/base"
 
 
 def test_create_app_can_disable_chat_template_thinking(monkeypatch):
@@ -194,6 +197,31 @@ def test_serve_text_response_preserves_decoded_content():
     choice = response.choices[0]
     assert "reasoning_content" not in choice.message
     assert choice.message["content"] == "plan the answer</think>\n\nFinal answer"
+
+
+def test_serve_usage_counts_prompt_tokens_once_for_multiple_completions():
+    tokenizer = _TokenTokenizer({1: "a", 2: "b", 3: "c"})
+    request = serve_mod.ChatCompletionRequest(
+        model="areno",
+        messages=[serve_mod.ChatMessage(role="user", content="hi")],
+        n=2,
+    )
+    prompt = [10, 11]
+
+    response = serve_mod._build_response_from(
+        tokenizer,
+        "model",
+        QwenToolCallParser(),
+        request,
+        prompt,
+        [[1, 2], [2, 3]],
+        ["stop", "stop"],
+    )
+
+    assert len(response.choices) == 2
+    assert response.usage.prompt_tokens == len(prompt)
+    assert response.usage.completion_tokens == 4
+    assert response.usage.total_tokens == len(prompt) + 4
 
 
 def test_serve_tool_call_response_does_not_attach_reasoning_content():

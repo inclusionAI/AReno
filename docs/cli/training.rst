@@ -10,6 +10,10 @@ command owns the full loop: dataset loading, optional normalization, rollout,
 reward scoring, loss computation, optimizer steps, metrics, and checkpoint
 saving.
 
+The command selects CUDA on Linux and MLX on native Apple Silicon. It has no
+backend flag and does not fall back between runtimes. See
+:doc:`../getting-started/mlx` for the MLX installation and execution model.
+
 .. code-block:: bash
 
    areno train \
@@ -82,18 +86,31 @@ Built-in algorithms: ``sft``, ``dpo``, ``gspo``, ``grpo``, ``ppo``.
 ``--world-size INTEGER``
    Total training device count. Default: ``8``. When ``--train-devices`` is
    provided, AReno infers this value from the expanded device list.
+   MLX is single-process and normalizes the CLI default to ``1``; explicitly
+   supplied MLX values must be ``1``.
 
 ``--tp-size INTEGER``, ``--train-tp-size INTEGER``
    Tensor parallel size for training. The two option names are aliases.
    Default: ``4``.
 
+   Tensor parallelism is CUDA-only. MLX normalizes the CLI default to ``1``;
+   explicitly supplied MLX values must be ``1``.
+
 ``world-size`` must be divisible by ``tp-size``.
+
+``--sequence-parallel / --no-sequence-parallel``
+   Explicitly enable or disable sequence parallelism for CUDA training. When
+   neither flag is passed, AReno uses ``sequence_parallel`` from the loaded
+   checkpoint's model configuration. The CLI value takes precedence over the
+   model configuration. Sequence parallelism is inactive when ``tp-size`` is
+   ``1`` even if it is requested.
 
 ``--train-devices TEXT``
    Comma-separated logical CUDA device indices or inclusive ranges used by
    training. For example, ``0..8,11..29`` includes both endpoints. AReno
    derives ``world-size`` from the expanded count. When omitted, AReno uses
    ``0`` through ``world-size - 1``.
+   CUDA only; MLX rejects device lists.
 
 Rollout
 ~~~~~~~
@@ -107,15 +124,23 @@ signal.
    independent rollout engine. They may overlap ``--train-devices`` when the
    GPU has enough memory for both worker processes. This option is valid only
    for online algorithms that generate rollouts.
+   CUDA only; MLX uses the same in-process model for rollout and training.
 
 ``--rollout-tp-size INTEGER``
    Tensor parallel size of the independent rollout engine. It defaults to the
    training ``tp-size``. The rollout device count must be divisible by this
    value.
+   CUDA only.
 
 ``--policy-sync-bucket-mb INTEGER``
    Maximum reusable GPU buffer used while streaming policy weights from the
    training engine to the rollout engine. Default: ``64`` MiB.
+   CUDA only. MLX does not copy policy weights to a second rollout model.
+
+R3 is enabled automatically for sparse-MoE RL training on CUDA. AReno records
+each token's expert ids during rollout and reuses those ids in the policy
+training forward while recomputing routing weights from the current router
+logits. Dense models and the MLX backend retain their original paths.
 
 For example, the following uses four visible GPUs for training and two
 different visible GPUs for rollout:
@@ -167,11 +192,12 @@ different visible GPUs for rollout:
    Use greedy rollout decoding.
 
 ``--eager-decode``
-   Disable decode CUDA graph and run rollout decode eagerly.
+   Disable decode CUDA graph and run rollout decode eagerly. CUDA only.
 
 ``--drop-rollout-state``
-   Drop rollout state after each step to save GPU memory. By default, Areno
-   keeps rollout state on GPU between steps for lower rollout setup overhead.
+   Drop completed rollout KV/cache state after each step to save device
+   memory. By default, Areno keeps reusable rollout state between steps for
+   lower setup overhead. Supported by both CUDA and MLX.
 
 ``--attn-backend [flash|native]``
    Attention backend. Default: ``flash``. Use ``native`` to run without
@@ -179,6 +205,7 @@ different visible GPUs for rollout:
    automatically falls back to ``native`` on flash-attn-unsupported GPUs such
    as Tesla T4 and prints a warning. ``native`` is slower than ``flash`` on
    supported GPUs.
+   CUDA only; MLX uses its model-native attention implementation.
 
 ``--disable-thinking``
    Pass ``enable_thinking=False`` to tokenizer chat templates when supported.
@@ -188,9 +215,10 @@ different visible GPUs for rollout:
    normal chat-template call.
 
 Training rollouts run inside a rollout session. The session owns actor
-onload/offload, rollout cache state, CUDA graph state, and cleanup between
-rollout and train phases. Direct prompt rollout and agentic rollout both use
-the same session lifecycle.
+lifecycle, rollout cache state, backend-native decode state, and cleanup
+between rollout and train phases. Direct prompt rollout and agentic rollout
+both use the same session lifecycle. CUDA may additionally own onload/offload
+and CUDA graph state; MLX retains one in-process model.
 
 ``--agent-fn TEXT``
    Python file defining ``async def run_agent(ctx, batch)``. When provided,
@@ -202,10 +230,6 @@ the same session lifecycle.
    trajectories: one ``AgentTrajectoryTurn``, one ``AgentTrajectory``, or an
    iterable of either. Each turn must carry its ``AgentItem``, message list,
    and OpenAI response.
-
-``--agent-timeout-s FLOAT``
-   Timeout for agentic proxy requests and the agent function. Default:
-   ``300.0``.
 
 ``--train-tool-results``
    Include tool-result spans in policy loss. Disabled by default because tool
@@ -303,7 +327,9 @@ loss knobs. Each algorithm-specific flag applies only to the algorithms named
 in its description; flags for other algorithms are ignored.
 
 ``--mini-bs INTEGER``
-   Backend training microbatch size. Default: ``16``.
+   Number of training rows in one backend gradient microbatch. Default:
+   ``16``. The meaning is identical on CUDA and MLX; reducing it limits
+   activation memory but does not change ``batch-size`` or ``n-samples``.
 
 ``--gradient-accumulation-steps INTEGER``
    Optimizer step interval in microbatches. Defaults to accumulating all
@@ -312,6 +338,28 @@ in its description; flags for other algorithms are ignored.
 ``--activation-checkpointing / --no-activation-checkpointing``
    Enable decoder-layer activation recompute during training. Default:
    enabled.
+
+``--optimizer-state-offload [none|cpu|disk]``
+   Select CUDA optimizer-state residency. ``none`` keeps state on the training
+   device. ``cpu`` moves state to host memory between train calls. ``disk``
+   stages a bounded bucket group through host memory and stores the state in
+   persistent writable raw-mmap files, copying each bucket back only when the
+   next optimizer step needs it. Default: ``none``. This option is supported
+   only by the CUDA backend and applies to both FP32-master AdamW and
+   ``--adam-8bit``.
+
+``--optimizer-state-offload-dir DIRECTORY``
+   Required when ``--optimizer-state-offload disk`` is selected. Use a fast
+   local NVMe filesystem with enough free capacity for the optimizer state.
+   AReno creates a process-private subdirectory and removes it on normal
+   optimizer onload or teardown. The mmap files are runtime scratch state,
+   not restartable checkpoints; use ``--save-path`` for checkpointing.
+
+``--optimizer-state-offload-batch-size INTEGER``
+   Number of optimizer buckets assigned to each persistent mmap and flushed
+   together. Default: ``1``. A smaller value bounds CPU staging memory more
+   tightly; a larger value creates fewer files and flush calls. This setting
+   is used only by disk offload.
 
 ``--lr FLOAT``
    Policy optimizer learning rate. Default: ``1.0e-6``.
@@ -332,7 +380,22 @@ in its description; flags for other algorithms are ignored.
    Policy optimizer Adam beta2. Default: ``0.999``.
 
 ``--adam-8bit``
-   Use 8-bit Adam moment states instead of FP32 Adam states.
+   Use 8-bit Adam moment states instead of FP32 Adam states. Supported by both
+   native backends; validate convergence when changing optimizer precision.
+
+``--unfreeze-mm-tower``
+   Train recognized vision/audio encoder tower parameters. Towers are frozen
+   by default.
+
+``--unfreeze-mm-projector``, ``--unfreeze-mm-merger``
+   Train recognized multimodal projector, merger, resampler, or embedder
+   parameters. The two option names are aliases.
+
+``--mm-tower-lr FLOAT``, ``--mm-projector-lr FLOAT``
+   Optional learning rates for unfrozen tower and projector/merger parameter
+   groups. Each defaults to the policy ``--lr``. The corresponding
+   ``--mm-*-min-lr``, ``--mm-*-lr-steps``, and ``--mm-*-lr-style`` options
+   control each group's schedule independently.
 
 ``--weight-decay FLOAT``
    Policy optimizer weight decay. Default: ``1.0e-2``.
