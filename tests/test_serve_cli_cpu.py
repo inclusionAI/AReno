@@ -171,6 +171,58 @@ def test_serve_response_reuses_tool_call_parser():
     assert '"direction":"left"' in choice.message["tool_calls"][0]["function"]["arguments"]
 
 
+def test_serve_response_normalizes_qwen_action_value_used_as_tool_name():
+    tokenizer = _TokenTokenizer(
+        {
+            1: "<think>Compare every candidate.</think>",
+            2: "<tool_call>",
+            3: '{"name":"guess:BATTERY","arguments":{"action":"guess:BATTERY"}}',
+            4: "</tool_call>",
+        }
+    )
+    request = serve_mod.ChatCompletionRequest(
+        model="areno",
+        messages=[serve_mod.ChatMessage(role="user", content="choose")],
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "access_terminal",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "action": {
+                                "type": "string",
+                                "enum": ["guess:BATTERY", "probe:P0"],
+                            }
+                        },
+                        "required": ["action"],
+                        "additionalProperties": False,
+                    },
+                },
+            }
+        ],
+        tool_choice="required",
+    )
+
+    response = serve_mod._build_response_from(
+        tokenizer,
+        "model",
+        QwenToolCallParser(),
+        request,
+        [10, 11],
+        [[1, 2, 3, 4]],
+        ["stop"],
+    )
+
+    choice = response.choices[0]
+    assert choice.finish_reason == "tool_calls"
+    assert choice.message["content"] is None
+    assert choice.message["reasoning_content"] == "<think>Compare every candidate.</think>"
+    assert choice.message["tool_calls"][0]["function"]["name"] == "access_terminal"
+    assert choice.message["tool_calls"][0]["function"]["arguments"] == '{"action":"guess:BATTERY"}'
+
+
 def test_serve_text_response_preserves_decoded_content():
     class ThinkTokenizer:
         def decode(self, token_ids, *, skip_special_tokens=False):
@@ -224,7 +276,7 @@ def test_serve_usage_counts_prompt_tokens_once_for_multiple_completions():
     assert response.usage.total_tokens == len(prompt) + 4
 
 
-def test_serve_tool_call_response_does_not_attach_reasoning_content():
+def test_serve_tool_call_response_preserves_reasoning_content():
     tokenizer = _TokenTokenizer(
         {
             1: "<think>block the fork</think>",
@@ -257,7 +309,7 @@ def test_serve_tool_call_response_does_not_attach_reasoning_content():
 
     choice = response.choices[0]
     assert choice.message["content"] is None
-    assert "reasoning_content" not in choice.message
+    assert choice.message["reasoning_content"] == "<think>block the fork</think>"
     assert choice.message["tool_calls"][0]["function"]["name"] == "choose_move"
 
 

@@ -96,9 +96,15 @@ class QwenToolCallParser(JsonToolCallParser):
     def parse(self, content: str, tools: list[dict[str, Any]], tool_choice: Any) -> ToolCallParseResult:
         calls: list[dict[str, Any]] = []
         for block in self._block_re.findall(content):
-            calls.extend(_parse_json_tool_calls(block, tools, _chosen_tool_name(tools, tool_choice)))
-            calls.extend(_parse_angle_tool_calls(block, tools, tool_choice))
-            calls.extend(_parse_arg_key_value_tool_calls(block, tools, tool_choice))
+            block_calls = _parse_json_tool_calls(
+                block,
+                tools,
+                _chosen_tool_name(tools, tool_choice),
+                recover_unknown_name_as_chosen=True,
+            )
+            block_calls.extend(_parse_angle_tool_calls(block, tools, tool_choice))
+            block_calls.extend(_parse_arg_key_value_tool_calls(block, tools, tool_choice))
+            calls.extend(block_calls)
         if calls:
             normal = content[: content.find("<tool_call>")].strip()
             return ToolCallParseResult(normal_text=normal, tool_calls=calls)
@@ -186,7 +192,13 @@ def _read_model_type(model_path: str) -> str:
     return " ".join(part for part in (model_type, text_type, architectures) if part)
 
 
-def _parse_json_tool_calls(content: str, tools: list[dict[str, Any]], chosen_name: str | None) -> list[dict[str, Any]]:
+def _parse_json_tool_calls(
+    content: str,
+    tools: list[dict[str, Any]],
+    chosen_name: str | None,
+    *,
+    recover_unknown_name_as_chosen: bool = False,
+) -> list[dict[str, Any]]:
     obj = _load_json_object(content)
     if obj is None:
         return []
@@ -206,6 +218,19 @@ def _parse_json_tool_calls(content: str, tools: list[dict[str, Any]], chosen_nam
         name, args = parsed
         if _tool_name_allowed(name, tools, _forced_tool_choice(chosen_name)):
             calls.append(_openai_tool_call(name, args))
+            continue
+        # Qwen3 occasionally emits the selected action value as ``name`` while
+        # placing the same value correctly inside the sole function's arguments,
+        # for example ``{"name":"guess:WORD","arguments":{"action":"guess:WORD"}}``.
+        # Recover only an unknown name, only when one function was explicitly
+        # selected, and only when the arguments satisfy that function's schema.
+        if (
+            recover_unknown_name_as_chosen
+            and chosen_name is not None
+            and name not in _tool_names(tools)
+            and _arguments_match_tool_schema(chosen_name, args, tools)
+        ):
+            calls.append(_openai_tool_call(chosen_name, args))
     return calls
 
 
@@ -299,6 +324,60 @@ def _tool_function(tool: dict[str, Any]) -> dict[str, Any] | None:
             "parameters": tool.get("parameters"),
         }
     return None
+
+
+def _arguments_match_tool_schema(name: str, arguments: dict[str, Any], tools: list[dict[str, Any]]) -> bool:
+    """Return whether arguments satisfy the selected tool's relevant JSON schema."""
+
+    for tool in tools:
+        function = _tool_function(tool)
+        if not isinstance(function, dict) or function.get("name") != name:
+            continue
+        parameters = function.get("parameters")
+        return not isinstance(parameters, dict) or _value_matches_schema(arguments, parameters)
+    return False
+
+
+def _value_matches_schema(value: Any, schema: dict[str, Any]) -> bool:
+    if "const" in schema and value != schema["const"]:
+        return False
+    enum = schema.get("enum")
+    if isinstance(enum, list) and value not in enum:
+        return False
+    schema_type = schema.get("type")
+    if schema_type == "object":
+        if not isinstance(value, dict):
+            return False
+        properties = schema.get("properties") or {}
+        if not isinstance(properties, dict):
+            return False
+        required = schema.get("required") or []
+        if not isinstance(required, list) or any(key not in value for key in required):
+            return False
+        if schema.get("additionalProperties") is False and any(key not in properties for key in value):
+            return False
+        return all(
+            key not in properties
+            or not isinstance(properties[key], dict)
+            or _value_matches_schema(item, properties[key])
+            for key, item in value.items()
+        )
+    if schema_type == "array":
+        if not isinstance(value, list):
+            return False
+        items = schema.get("items")
+        return not isinstance(items, dict) or all(_value_matches_schema(item, items) for item in value)
+    if schema_type == "string":
+        return isinstance(value, str)
+    if schema_type == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if schema_type == "number":
+        return isinstance(value, int | float) and not isinstance(value, bool)
+    if schema_type == "boolean":
+        return isinstance(value, bool)
+    if schema_type == "null":
+        return value is None
+    return True
 
 
 def _parse_gemma4_call(inner: str) -> tuple[str, dict[str, Any]] | None:

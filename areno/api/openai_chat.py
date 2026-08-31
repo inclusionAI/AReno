@@ -160,15 +160,18 @@ def build_chat_completion_response(
         display_text = _decode(tokenizer, token_ids, skip_special_tokens=True)
         display_text, stop_hit = _trim_stop_strings(display_text, stop_strings)
         completion_tokens += len(token_ids)
+        tool_parse = tool_call_parser.parse(raw_text, tools, tool_choice) if tools and tool_call_parser is not None else None
         tool_calls = (
             parsed_tool_calls[index] if parsed_tool_calls is not None and index < len(parsed_tool_calls) else []
         )
-        if not tool_calls and tools and tool_call_parser is not None:
-            tool_calls = tool_call_parser.parse(raw_text, tools, tool_choice).tool_calls
+        if not tool_calls and tool_parse is not None:
+            tool_calls = tool_parse.tool_calls
         finish_reason = "stop" if stop_hit or finish_reasons[index] == "stop" else "length"
         message: dict[str, Any] = {"role": "assistant", "content": display_text}
         if tool_calls:
             message = {"role": "assistant", "content": None, "tool_calls": tool_calls}
+            if tool_parse is not None and tool_parse.tool_calls and tool_parse.normal_text:
+                message["reasoning_content"] = tool_parse.normal_text
             finish_reason = "tool_calls"
         choices.append({"index": index, "message": message, "finish_reason": finish_reason})
 

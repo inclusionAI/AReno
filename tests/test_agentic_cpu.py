@@ -1221,6 +1221,71 @@ def test_qwen_tool_call_parser_supports_chat_completions_tools():
     assert '"direction":"right"' in parsed.tool_calls[0]["function"]["arguments"]
 
 
+def test_qwen_tool_call_parser_recovers_action_value_emitted_as_tool_name():
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "access_terminal",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["guess:BATTERY", "probe:P0"],
+                        }
+                    },
+                    "required": ["action"],
+                    "additionalProperties": False,
+                },
+            },
+        }
+    ]
+
+    parsed = QwenToolCallParser().parse(
+        "<think>Compare every candidate.</think>\n"
+        '<tool_call>{"name":"guess:BATTERY","arguments":{"action":"guess:BATTERY"}}</tool_call>',
+        tools,
+        "required",
+    )
+
+    assert parsed.normal_text == "<think>Compare every candidate.</think>"
+    assert len(parsed.tool_calls) == 1
+    assert parsed.tool_calls[0]["function"]["name"] == "access_terminal"
+    assert json.loads(parsed.tool_calls[0]["function"]["arguments"]) == {"action": "guess:BATTERY"}
+
+
+def test_qwen_tool_call_parser_rejects_misnamed_call_when_arguments_do_not_match_schema():
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "access_terminal",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"action": {"type": "string", "enum": ["guess:BATTERY"]}},
+                    "required": ["action"],
+                    "additionalProperties": False,
+                },
+            },
+        }
+    ]
+
+    invalid_enum = QwenToolCallParser().parse(
+        '<tool_call>{"name":"guess:UNKNOWN","arguments":{"action":"guess:UNKNOWN"}}</tool_call>',
+        tools,
+        "required",
+    )
+    extra_argument = QwenToolCallParser().parse(
+        '<tool_call>{"name":"guess:BATTERY","arguments":{"action":"guess:BATTERY","extra":true}}</tool_call>',
+        tools,
+        "required",
+    )
+
+    assert invalid_enum.tool_calls == []
+    assert extra_argument.tool_calls == []
+
+
 def test_qwen_tool_call_parser_supports_angle_function_blocks():
     tools = [
         {
