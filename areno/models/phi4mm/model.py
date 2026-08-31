@@ -150,10 +150,7 @@ def _phi4mm_longrope_sequence_length(
             raise ValueError("Phi4MM decode requires cache_seqlens for LongRoPE selection")
         sequence_length = int(infer_meta.cache_seqlens.max().item()) + 1
         if sequence_length > original_max_position_embeddings:
-            raise ValueError(
-                "Phi4MM cached decode cannot cross the LongRoPE boundary because cached keys may use short factors; "
-                "run a full long-context prefill"
-            )
+            raise ValueError("Phi4MM cached decode requires cache re-prefill before crossing the LongRoPE boundary")
         return sequence_length
 
     if infer_meta is not None:
@@ -275,7 +272,7 @@ class Phi4MMForCausalLM(nn.Module):
         if not config.tie_word_embeddings:
             raise ValueError("Phi4MMForCausalLM requires tied word embeddings")
         self.config = config
-        self.decode_cache_length_limit = int(config.hf_text_config["original_max_position_embeddings"])
+        self._longrope_cache_boundary = int(config.hf_text_config["original_max_position_embeddings"])
         self.model = Phi4MMModel(config)
         self.lm_head = VocabParallelLMHead(config.hidden_size, config.vocab_size, dtype=config.dtype)
         self._tie_word_embeddings()
@@ -358,6 +355,11 @@ class Phi4MMForCausalLM(nn.Module):
     def clear_kv_caches(self) -> None:
         for layer in self.layers:
             layer.self_attn.clear_kv_cache()
+
+    def cache_reprefill_required(self, cache_seqlens: torch.Tensor) -> torch.Tensor:
+        """Request a full long-factor KV rebuild immediately before the boundary decode."""
+
+        return cache_seqlens.eq(self._longrope_cache_boundary)
 
     @torch.no_grad()
     def reset_kv_caches(self) -> None:
@@ -465,3 +467,8 @@ class Phi4MMAdapter(ModelAdapter):
         from areno.models.phi4mm.checkpoint import save_phi4mm_weights
 
         return save_phi4mm_weights(model, output_path, source_path)
+
+    def build_policy_plan(self, model: nn.Module):
+        from areno.models.phi4mm.checkpoint import build_phi4mm_policy_plan
+
+        return build_phi4mm_policy_plan(model)

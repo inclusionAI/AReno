@@ -468,7 +468,13 @@ def build_checkpoint_policy_plan(
     return tensors
 
 
-def copy_source_passthrough_weights(source_path: str | Path, output_path: str | Path, protected_prefix: str) -> None:
+def copy_source_passthrough_weights(
+    source_path: str | Path,
+    output_path: str | Path,
+    protected_prefix: str,
+    *,
+    allowed_keys: set[str] | None = None,
+) -> None:
     """Copy source checkpoint tensors outside the runtime trunk into output.
 
     Multimodal HF checkpoints often store text weights under
@@ -487,9 +493,18 @@ def copy_source_passthrough_weights(source_path: str | Path, output_path: str | 
     source_weight_map = _read_weight_map(source)
     output_index = json.loads(output_index_path.read_text())
     output_weight_map = dict(output_index["weight_map"])
-    passthrough_keys = [
-        key for key in source_weight_map if not key.startswith(protected_prefix) and key not in output_weight_map
-    ]
+    if allowed_keys is None:
+        passthrough_keys = [
+            key for key in source_weight_map if not key.startswith(protected_prefix) and key not in output_weight_map
+        ]
+    else:
+        missing = sorted(allowed_keys - set(source_weight_map))
+        if missing:
+            raise ValueError(f"source checkpoint is missing approved passthrough tensor {missing[0]}")
+        overlap = sorted(allowed_keys & set(output_weight_map))
+        if overlap:
+            raise ValueError(f"output checkpoint already owns approved passthrough tensor {overlap[0]}")
+        passthrough_keys = sorted(allowed_keys)
     if not passthrough_keys:
         return
 

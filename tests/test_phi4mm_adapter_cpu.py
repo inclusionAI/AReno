@@ -15,7 +15,6 @@ from areno.engine.layers import mlp, norm, vocab
 from areno.engine.modeling import build_optimizer
 from areno.engine.parallel.collectives import is_sequence_parallel_active
 from areno.engine.parallel.context import TPContext, get_tp_context, set_tp_context
-from areno.engine.runtime.decode_graph import _validate_decode_cache_length
 from areno.engine.runtime.metadata import InferMeta, TrainMeta
 from areno.models import registry
 from areno.models.phi4mm import Phi4MMAdapter, Phi4MMForCausalLM
@@ -410,19 +409,39 @@ def test_phi4mm_longrope_rejects_chunked_prefill_crossing_boundary():
         _phi4mm_longrope_sequence_length(positions, None, infer_meta, 32)
 
 
-def test_phi4mm_longrope_rejects_cached_decode_crossing_boundary():
+def test_phi4mm_longrope_requires_runtime_reprefill_for_cached_boundary_crossing():
     below_boundary = InferMeta(mode="decode", cache_seqlens=torch.tensor([31], dtype=torch.int32))
     crossing_boundary = InferMeta(mode="decode", cache_seqlens=torch.tensor([32], dtype=torch.int32))
 
     assert _phi4mm_longrope_sequence_length(torch.tensor([[31]]), None, below_boundary, 32) == 32
-    with pytest.raises(ValueError, match="cached decode cannot cross"):
+    with pytest.raises(ValueError, match="requires cache re-prefill"):
         _phi4mm_longrope_sequence_length(torch.tensor([[32]]), None, crossing_boundary, 32)
 
 
-def test_phi4mm_longrope_decode_graph_replay_enforces_same_boundary():
-    _validate_decode_cache_length(torch.tensor([31, 99], dtype=torch.int32), actual=1, limit=32)
-    with pytest.raises(ValueError, match="rotary-factor boundary"):
-        _validate_decode_cache_length(torch.tensor([32], dtype=torch.int32), actual=1, limit=32)
+def test_phi4mm_longrope_reprefill_matches_full_long_factor_recompute():
+    rope = Phi4MMLongRoPEScaledRotaryEmbedding(_tiny_model_config())
+    q = torch.randn(1, 33, 2, 8)
+    k = torch.randn(1, 33, 1, 8)
+    positions = torch.arange(33).unsqueeze(0)
+
+    full_q, full_k = rope(q, k, positions, sequence_length=33)
+    short_q, short_k = rope(q[:, :32], k[:, :32], positions[:, :32], sequence_length=32)
+    rebuilt_q, rebuilt_k = rope(q, k, positions, sequence_length=33)
+
+    assert not torch.allclose(short_q, full_q[:, :32])
+    assert not torch.allclose(short_k, full_k[:, :32])
+    torch.testing.assert_close(rebuilt_q, full_q, rtol=0, atol=0)
+    torch.testing.assert_close(rebuilt_k, full_k, rtol=0, atol=0)
+
+
+def test_phi4mm_declares_exact_longrope_cache_reprefill_boundary():
+    model = Phi4MMAdapter().build(_tiny_model_config())
+
+    assert model.cache_reprefill_required(torch.tensor([31, 32, 33], dtype=torch.int32)).tolist() == [
+        False,
+        True,
+        False,
+    ]
 
 
 @pytest.mark.parametrize("tp_size", [1, 2, 4])

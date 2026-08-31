@@ -11,6 +11,7 @@ from areno.engine.checkpoints.common import load_packed_section_column_spec, sav
 from areno.engine.checkpoints.io import PolicyTensorStore, SafetensorsIndex
 from areno.engine.config import ModelConfig
 from areno.engine.parallel.context import TPContext, get_tp_context, set_tp_context
+from areno.engine.policy_sync import build_policy_plan
 from areno.models.phi4mm import Phi4MMAdapter
 from areno.models.phi4mm.checkpoint import QKV_SPEC, audit_phi4mm_checkpoint
 
@@ -260,10 +261,19 @@ def test_phi4mm_text_only_checkpoint_load_save_reload_closes(tmp_path, monkeypat
         assert first_name == second_name
         torch.testing.assert_close(first_parameter, second_parameter, rtol=0, atol=0)
     audit = audit_phi4mm_checkpoint(output, num_hidden_layers=2)
-    assert audit.total == audit.consumed == 14
+    assert audit.total == 18
+    assert audit.consumed == 14
     with open(output / "model.safetensors.index.json", encoding="utf-8") as handle:
         saved_keys = set(json.load(handle)["weight_map"])
-    assert not any("embed_tokens_extend" in key or ".lora_" in key for key in saved_keys)
+    assert saved_keys == set(tensors)
+    source_index = SafetensorsIndex(source, progress=False)
+    output_index = SafetensorsIndex(output, progress=False)
+    try:
+        for key in sorted(tensors):
+            torch.testing.assert_close(output_index.get_tensor(key), source_index.get_tensor(key), rtol=0, atol=0)
+    finally:
+        source_index.close()
+        output_index.close()
     with safe_open(output / "model-rank00000-00002-layer-00000.safetensors", framework="pt") as handle:
         torch.testing.assert_close(
             handle.get_tensor("model.layers.0.self_attn.qkv_proj.base_layer.weight"),
@@ -273,3 +283,88 @@ def test_phi4mm_text_only_checkpoint_load_save_reload_closes(tmp_path, monkeypat
             handle.get_tensor("model.layers.0.mlp.gate_up_proj.base_layer.weight"),
             tensors["model.layers.0.mlp.gate_up_proj.base_layer.weight"],
         )
+
+
+@pytest.mark.parametrize(("train_tp", "rollout_tp"), [(1, 2), (2, 1), (2, 4)])
+def test_phi4mm_policy_plan_constructs_for_mismatched_topologies(train_tp, rollout_tp):
+    """Canonical Phi tensors stay identical while physical TP shards change."""
+
+    old_context = get_tp_context()
+    try:
+        plans = []
+        for tp_size in (train_tp, rollout_tp):
+            set_tp_context(TPContext(rank=0, world_size=tp_size, device=torch.device("cpu"), group=None))
+            model = Phi4MMAdapter().build(_tiny_config())
+            worker = type(
+                "Worker",
+                (),
+                {"model": model, "config": type("Config", (), {"model": model.config})(), "adapter_registry": None},
+            )()
+            plan, metadata = build_policy_plan(worker)
+            assert tuple(plan) == tuple(meta.key for meta in metadata)
+            plans.append(metadata)
+    finally:
+        set_tp_context(old_context)
+
+    assert plans[0] == plans[1]
+    assert "model.embed_tokens.weight" in {meta.key for meta in plans[0]}
+    assert "model.layers.0.self_attn.qkv_proj.base_layer.weight" in {meta.key for meta in plans[0]}
+    assert "model.layers.0.mlp.gate_up_proj.base_layer.weight" in {meta.key for meta in plans[0]}
+
+
+@pytest.mark.parametrize(("train_tp", "rollout_tp"), [(1, 2), (2, 1), (2, 4)])
+def test_phi4mm_policy_plan_reshards_all_canonical_weights_for_mismatched_topologies(
+    tmp_path, monkeypatch, train_tp, rollout_tp
+):
+    monkeypatch.setenv("ARENO_CKPT_PROGRESS", "0")
+    source = tmp_path / "source"
+    _write_checkpoint(source, _synthetic_weights())
+    old_context = get_tp_context()
+    try:
+        train_layouts = []
+        for rank in range(train_tp):
+            set_tp_context(TPContext(rank=rank, world_size=train_tp, device=torch.device("cpu"), group=None))
+            model = Phi4MMAdapter().build(_tiny_config())
+            Phi4MMAdapter().load_weights(model, source)
+            worker = type(
+                "Worker",
+                (),
+                {"model": model, "config": type("Config", (), {"model": model.config})(), "adapter_registry": None},
+            )()
+            plan, _ = build_policy_plan(worker)
+            train_layouts.append({key: task.policy_layout() for key, task in plan.items()})
+
+        canonical = {}
+        for key in train_layouts[0]:
+            layout = train_layouts[0][key]
+            full = torch.zeros(layout.numel, dtype=layout.dtype)
+            for rank, layouts in enumerate(train_layouts):
+                contribution = torch.empty_like(full)
+                layouts[key].read_chunk(0, contribution, include_replicated=rank == 0)
+                full.add_(contribution)
+            canonical[key] = full
+
+        rollout_layouts = []
+        for rank in range(rollout_tp):
+            set_tp_context(TPContext(rank=rank, world_size=rollout_tp, device=torch.device("cpu"), group=None))
+            model = Phi4MMAdapter().build(_tiny_config())
+            worker = type(
+                "Worker",
+                (),
+                {"model": model, "config": type("Config", (), {"model": model.config})(), "adapter_registry": None},
+            )()
+            plan, _ = build_policy_plan(worker)
+            rollout_layouts.append({key: task.policy_layout() for key, task in plan.items()})
+        for key, full in canonical.items():
+            for layouts in rollout_layouts:
+                layouts[key].write_chunk(0, full)
+
+        for key, full in canonical.items():
+            reconstructed = torch.zeros_like(full)
+            for rank, layouts in enumerate(rollout_layouts):
+                contribution = torch.empty_like(full)
+                layouts[key].read_chunk(0, contribution, include_replicated=rank == 0)
+                reconstructed.add_(contribution)
+            torch.testing.assert_close(reconstructed, full, rtol=0, atol=0)
+    finally:
+        set_tp_context(old_context)

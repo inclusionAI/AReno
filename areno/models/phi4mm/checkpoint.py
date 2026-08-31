@@ -15,6 +15,8 @@ from areno.engine.checkpoints.common import (
     ParallelTensorSpec,
     ReplicatedTensorSpec,
     TopLevelSpec,
+    build_checkpoint_policy_plan,
+    copy_source_passthrough_weights,
     load_checkpoint_weights,
     save_checkpoint_weights,
 )
@@ -150,13 +152,41 @@ def save_phi4mm_weights(
     output_path: str | Path,
     source_path: str | Path | None,
 ) -> str | None:
-    """Save only Phi-4 base-language weights in official HF key layout."""
+    """Save an auditable official-style Phi-4 checkpoint without dropping modalities."""
 
     model.config.validate_tp(get_tp_context().world_size)
-    return save_checkpoint_weights(
+    if source_path is None:
+        raise ValueError("Phi4MM save requires source_path to preserve audited multimodal checkpoint tensors")
+    passthrough_keys = _phi4mm_passthrough_keys(source_path, len(model.layers))
+    saved_path = save_checkpoint_weights(
         model,
         str(output_path),
-        None if source_path is None else str(source_path),
+        str(source_path),
         CHECKPOINT_SPEC,
         copy_passthrough=False,
     )
+    if saved_path is not None:
+        copy_source_passthrough_weights(
+            source_path,
+            saved_path,
+            protected_prefix="model.",
+            allowed_keys=passthrough_keys,
+        )
+    return saved_path
+
+
+def build_phi4mm_policy_plan(model: nn.Module):
+    """Build the canonical text-backbone layout used for policy synchronization."""
+
+    return build_checkpoint_policy_plan(model, CHECKPOINT_SPEC)
+
+
+def _phi4mm_passthrough_keys(model_path: str | Path, num_hidden_layers: int) -> set[str]:
+    """Return the strictly-audited non-language tensors retained by a text-only runtime."""
+
+    audit_phi4mm_checkpoint(model_path, num_hidden_layers)
+    index = SafetensorsIndex(model_path, progress=False)
+    try:
+        return set(index.weight_map) - _required_base_keys(num_hidden_layers)
+    finally:
+        index.close()
