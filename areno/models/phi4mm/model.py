@@ -14,6 +14,7 @@ from typing import Any
 import torch
 from torch import nn
 
+from areno.accel.utils import is_cuda_graph_capturing
 from areno.engine.config import ModelConfig, _parse_dtype
 from areno.engine.layers.attention import CausalSelfAttention
 from areno.engine.layers.mlp import GatedMLP
@@ -185,6 +186,26 @@ def _phi4mm_longrope_sequence_length(
     return int(position_ids.shape[-1])
 
 
+def _phi4mm_prefill_longrope_factor_mask(
+    position_ids: torch.Tensor,
+    infer_meta: InferMeta,
+    original_max_position_embeddings: int,
+) -> torch.Tensor:
+    """Select one LongRoPE factor per packed prefill sequence without scalars."""
+
+    if infer_meta.cu_seqlens is None:
+        raise ValueError("Phi4MM prefill requires cu_seqlens for LongRoPE selection")
+    flat_positions = position_ids.reshape(-1)
+    sequence_ends = infer_meta.cu_seqlens[1:].to(dtype=torch.long) - 1
+    long_by_sequence = flat_positions[sequence_ends].ge(original_max_position_embeddings)
+    # `cu_seqlens` boundaries identify which packed sequence owns each token.
+    # Unlike repeat_interleave, bucketize keeps the output shape statically
+    # determined by position_ids, which is safe for graph capture.
+    token_indices = torch.arange(flat_positions.numel(), device=position_ids.device)
+    sequence_indices = torch.bucketize(token_indices, infer_meta.cu_seqlens[1:-1], right=True)
+    return long_by_sequence[sequence_indices].reshape_as(position_ids)
+
+
 class Phi4MMAttention(CausalSelfAttention):
     """AReno GQA attention with a Phi-owned rotary implementation."""
 
@@ -213,6 +234,30 @@ class Phi4MMAttention(CausalSelfAttention):
                 k,
                 position_ids,
                 use_long_factor=position_ids.ge(self.rope.original_max_position_embeddings),
+            )
+        if infer_meta is not None:
+            # Prefill needs one factor for every token in a packed sequence:
+            # a full sequence crossing the boundary uses long factors even at
+            # position zero.  Do that with graph-safe tensor operations.  The
+            # eager validation remains a useful guard against a caller trying
+            # to append a chunk to short-factor cached keys, but must not run
+            # while Dynamo/CUDA Graph capture is active.
+            if not torch.compiler.is_compiling() and not is_cuda_graph_capturing(q):
+                _phi4mm_longrope_sequence_length(
+                    position_ids,
+                    train_meta,
+                    infer_meta,
+                    self.rope.original_max_position_embeddings,
+                )
+            return self.rope(
+                q,
+                k,
+                position_ids,
+                use_long_factor=_phi4mm_prefill_longrope_factor_mask(
+                    position_ids,
+                    infer_meta,
+                    self.rope.original_max_position_embeddings,
+                ),
             )
         sequence_length = _phi4mm_longrope_sequence_length(
             position_ids,

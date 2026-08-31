@@ -401,6 +401,21 @@ def test_phi4mm_longrope_full_long_prefill_selects_long_factors():
     torch.testing.assert_close(actual_k, expected_k)
 
 
+def test_phi4mm_prefill_longrope_factor_selection_is_fullgraph_compatible():
+    attention = Phi4MMAdapter().build(_tiny_model_config()).model.layers[0].self_attn
+    positions = torch.arange(40).unsqueeze(0)
+    infer_meta = InferMeta(mode="prefill", cu_seqlens=torch.tensor([0, 40], dtype=torch.int32), max_seqlen=40)
+    q = torch.randn(1, 40, attention.local_heads, attention.head_dim)
+    k = torch.randn(1, 40, attention.local_kv_heads, attention.head_dim)
+
+    compiled_apply_rotary = torch.compile(attention.apply_rotary, backend="eager", fullgraph=True)
+    actual_q, actual_k = compiled_apply_rotary(q, k, positions, None, infer_meta)
+    expected_q, expected_k = attention.rope(q, k, positions, sequence_length=40)
+
+    torch.testing.assert_close(actual_q, expected_q)
+    torch.testing.assert_close(actual_k, expected_k)
+
+
 def test_phi4mm_longrope_rejects_chunked_prefill_crossing_boundary():
     positions = torch.arange(28, 40).unsqueeze(0)
     infer_meta = InferMeta(mode="prefill", cu_seqlens=torch.tensor([0, 12], dtype=torch.int32), max_seqlen=12)
@@ -443,6 +458,36 @@ def test_phi4mm_decode_longrope_factor_selection_captures_cuda_graph():
     k = torch.randn(1, 2, attention.local_kv_heads, attention.head_dim, device="cuda")
     positions = torch.tensor([[31, 33]], device="cuda")
     infer_meta = InferMeta(mode="decode", cache_seqlens=torch.tensor([31, 33], device="cuda", dtype=torch.int32))
+
+    warmup_stream = torch.cuda.Stream()
+    warmup_stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(warmup_stream):
+        for _ in range(3):
+            attention.apply_rotary(q, k, positions, None, infer_meta)
+    torch.cuda.current_stream().wait_stream(warmup_stream)
+    torch.cuda.synchronize()
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured_q, captured_k = attention.apply_rotary(q, k, positions, None, infer_meta)
+    graph.replay()
+    torch.cuda.synchronize()
+
+    assert captured_q.shape == q.shape
+    assert captured_k.shape == k.shape
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA graph regression test requires CUDA")
+def test_phi4mm_prefill_longrope_factor_selection_captures_cuda_graph():
+    attention = Phi4MMAdapter().build(_tiny_model_config()).model.layers[0].self_attn.cuda().eval()
+    q = torch.randn(1, 40, attention.local_heads, attention.head_dim, device="cuda")
+    k = torch.randn(1, 40, attention.local_kv_heads, attention.head_dim, device="cuda")
+    positions = torch.arange(40, device="cuda").unsqueeze(0)
+    infer_meta = InferMeta(
+        mode="prefill",
+        cu_seqlens=torch.tensor([0, 40], device="cuda", dtype=torch.int32),
+        max_seqlen=40,
+    )
 
     warmup_stream = torch.cuda.Stream()
     warmup_stream.wait_stream(torch.cuda.current_stream())
