@@ -7,7 +7,7 @@ import torch
 
 import areno.engine.inference as inference_mod
 import areno.engine.worker as worker_mod
-from areno.engine.api import ArenoEngine, _chunk_prompts_for_prefill_budget, _merge_async_dp_rollouts
+from areno.engine.api import ArenoEngine, _merge_async_dp_rollouts
 from areno.engine.data import SamplingParams
 from areno.engine.data.rollout_state import InferenceBatchState
 from areno.engine.inference import InferCacheSpec, InferenceManager
@@ -478,21 +478,6 @@ def test_async_single_prompt_requests_round_robin_across_dp_ranks():
         [0, 0, 0, 1],
     ]
     assert [output.response_ids for output in outputs] == [[[10]], [[11]], [[12]], [[13]]]
-
-
-def test_prefill_chunking_uses_global_max_running_prompts():
-    """A 256-row flat rollout should stay one chunk even when dp_size is 8."""
-
-    prompts = [[idx] for idx in range(256)]
-
-    chunks = _chunk_prompts_for_prefill_budget(
-        prompts,
-        max_running_prompts=256,
-        dp_size=8,
-        max_prefill_tokens=1024,
-    )
-
-    assert [len(chunk) for chunk in chunks] == [256]
 
 
 def test_decode_progress_log_is_worker_aggregated(monkeypatch):
