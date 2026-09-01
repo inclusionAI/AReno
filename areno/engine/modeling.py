@@ -7,7 +7,7 @@ from pathlib import Path
 import torch
 
 from areno.engine.config import EngineConfig
-from areno.engine.optim import AdamW8bit, AdamWFP32Master
+from areno.engine.optim import AdamW4bit, AdamW8bit, AdamWFP32Master
 from areno.models.registry import build_model
 
 
@@ -97,7 +97,12 @@ def canonical_model_path(path: str | None) -> str | None:
 def build_optimizer(params, optimizer_config, ctx, *, lr: float | None = None):
     """Construct the configured DP-sharded optimizer implementation."""
 
-    optimizer_cls = AdamW8bit if optimizer_config.adam_8bit else AdamWFP32Master
+    if optimizer_config.adam_4bit:
+        optimizer_cls = AdamW4bit
+    elif optimizer_config.adam_8bit:
+        optimizer_cls = AdamW8bit
+    else:
+        optimizer_cls = AdamWFP32Master
     return optimizer_cls(
         params,
         lr=optimizer_config.lr if lr is None else float(lr),

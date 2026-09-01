@@ -38,6 +38,7 @@ class OptimizerConfig:
     weight_decay: float = 0.0
     grad_clip_norm: float | None = None
     adam_8bit: bool = False
+    adam_4bit: bool = False
     fp32_master_bucket_numel: int = 16 * 1024 * 1024
     unfreeze_multimodal_tower: bool = False
     unfreeze_multimodal_projector: bool = False
@@ -49,6 +50,10 @@ class OptimizerConfig:
     multimodal_projector_min_lr: float | None = None
     multimodal_projector_lr_decay_steps: int | None = None
     multimodal_projector_lr_decay_style: Literal["constant", "linear", "cosine"] | None = None
+
+    def __post_init__(self) -> None:
+        if self.adam_4bit and self.adam_8bit:
+            raise ValueError("optimizer.adam_4bit and optimizer.adam_8bit are mutually exclusive")
 
 
 @dataclass(slots=True)

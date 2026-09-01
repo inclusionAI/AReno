@@ -11,7 +11,7 @@ from areno.engine.checkpoints.io import SafetensorsIndex
 from areno.engine.config import EngineConfig
 from areno.engine.data import to_device
 from areno.engine.modeling import build_model_on_device, build_optimizer, canonical_model_path, param_grad, unwrap_model
-from areno.engine.optim import AdamW8bit, AdamWFP32Master
+from areno.engine.optim import AdamW4bit, AdamW8bit, AdamWFP32Master
 from areno.engine.parallel.collectives import gather_from_sequence_parallel_region
 from areno.engine.parallel.context import get_tp_context
 from areno.engine.protocol import EnsureRolesPayload, ScorePayload, TrainValuesPayload
@@ -172,7 +172,7 @@ class WorkerRole:
         self,
         path: str,
         model: torch.nn.Module,
-        optimizer: AdamW8bit | AdamWFP32Master | None,
+        optimizer: AdamW4bit | AdamW8bit | AdamWFP32Master | None,
         value_head: torch.nn.Module | None,
         sequence_parallel: bool = False,
         *,
