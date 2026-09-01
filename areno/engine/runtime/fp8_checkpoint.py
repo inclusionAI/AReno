@@ -46,9 +46,16 @@ _LOCK = Lock()
 def reset_fp8_checkpoint_stats() -> None:
     """Reset process-local counters collected for the next train microbatch."""
 
-    global _STATS
     with _LOCK:
-        _STATS = _MemoryStats()
+        # Reset in place. Compiled saved-tensor pack paths can retain the
+        # original stats object captured during their first trace; rebinding
+        # ``_STATS`` would make those paths update a stale object while the
+        # metrics reader observes a new, permanently-zero object.
+        _STATS.boundaries = 0
+        _STATS.fallback_boundaries = 0
+        _STATS.warmup_boundaries = 0
+        _STATS.original_bytes = 0
+        _STATS.stored_bytes = 0
 
 
 def fp8_checkpoint_metrics() -> dict[str, float]:

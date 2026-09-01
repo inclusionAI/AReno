@@ -5,6 +5,7 @@ import unittest
 import torch
 
 from areno.engine.parallel.collectives import is_sequence_parallel_active
+from areno.engine.runtime import fp8_checkpoint as fp8_checkpoint_module
 from areno.engine.runtime.fp8_checkpoint import (
     fp8_checkpoint_metrics,
     pack_fp8_checkpoint_tensor,
@@ -17,6 +18,16 @@ from areno.engine.runtime.recompute import checkpoint_layer, checkpoint_routed_m
 
 class RecomputeTest(unittest.TestCase):
     """Activation checkpoint tests use tiny CPU tensors and no model weights."""
+
+    def test_fp8_checkpoint_stats_reset_preserves_compiled_reference(self):
+        captured_stats = fp8_checkpoint_module._STATS
+
+        reset_fp8_checkpoint_stats()
+
+        self.assertIs(fp8_checkpoint_module._STATS, captured_stats)
+        captured_stats.boundaries += 1
+        self.assertEqual(fp8_checkpoint_metrics()["fp8_ckpt_boundaries"], 1.0)
+        reset_fp8_checkpoint_stats()
 
     def test_should_checkpoint_layer_requires_training_forward(self):
         """Recompute is enabled only for grad-enabled training forwards."""
