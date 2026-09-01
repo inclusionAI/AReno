@@ -1602,6 +1602,7 @@ def _gemma4_moe_feedforward_no_compile(
         dense_input,
         train_meta=train_meta,
         infer_meta=infer_meta,
+        compress_boundary=False,
     )
     router_logits = layer.router(residual)
     topk_idx, topk_weight = layer.moe.route(router_logits)
@@ -1624,6 +1625,7 @@ def _gemma4_moe_feedforward_no_compile(
             topk_weight,
             train_meta=train_meta,
             infer_meta=infer_meta,
+            compress_boundary=False,
         )
     if moe_sequence_parallel:
         moe_hidden = scatter_to_sequence_parallel_region(moe_hidden)

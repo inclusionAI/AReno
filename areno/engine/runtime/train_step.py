@@ -64,6 +64,12 @@ def _train_meta(data_pack: dict[str, Any], tokens: torch.Tensor, *, sequence_par
         packed=True,
         sequence_parallel=sequence_parallel,
         activation_checkpointing=bool(data_pack.get("_activation_checkpointing_enabled", False)),
+        fp8_checkpoint_activations=bool(data_pack.get("_fp8_checkpoint_activations_enabled", False)),
+        fp8_checkpoint_group_size=int(data_pack.get("_fp8_checkpoint_group_size", 128)),
+        fp8_checkpoint_stochastic=bool(data_pack.get("_fp8_checkpoint_stochastic", False)),
+        fp8_checkpoint_warmup_steps=int(data_pack.get("_fp8_checkpoint_warmup_steps", 0)),
+        fp8_checkpoint_fallback_layers=tuple(data_pack.get("_fp8_checkpoint_fallback_layers", ())),
+        global_step=int(data_pack.get("_global_step", 0)),
         num_padding_tokens=int(data_pack.get("packed_singleton_padding", 0)),
         routing_replay=data_pack.get("packed_routing_replay"),
     )

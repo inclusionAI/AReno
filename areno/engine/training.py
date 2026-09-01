@@ -11,6 +11,7 @@ from areno.engine.data import to_device
 from areno.engine.modeling import param_grad, unwrap_model
 from areno.engine.parallel.context import get_tp_context
 from areno.engine.protocol import TrainPayload
+from areno.engine.runtime.fp8_checkpoint import fp8_checkpoint_metrics, reset_fp8_checkpoint_stats
 from areno.engine.runtime.logprobs import (
     packed_next_token_logprobs,
     packed_next_token_logprobs_from_hidden,
@@ -114,7 +115,16 @@ class TrainingManager:
             torch.cuda.synchronize(worker.device)
             torch.cuda.reset_peak_memory_stats(worker.device)
         data_pack = to_device(data_pack, worker.device)
-        data_pack["_activation_checkpointing_enabled"] = worker.config.runtime.activation_checkpointing
+        runtime = worker.config.runtime
+        data_pack["_activation_checkpointing_enabled"] = runtime.activation_checkpointing
+        data_pack["_fp8_checkpoint_activations_enabled"] = runtime.fp8_checkpoint_activations
+        data_pack["_fp8_checkpoint_group_size"] = runtime.fp8_checkpoint_group_size
+        data_pack["_fp8_checkpoint_stochastic"] = runtime.fp8_checkpoint_stochastic
+        data_pack["_fp8_checkpoint_warmup_steps"] = runtime.fp8_checkpoint_warmup_steps
+        data_pack["_fp8_checkpoint_fallback_layers"] = runtime.fp8_checkpoint_fallback_layers
+        data_pack["_global_step"] = worker._global_step
+        if runtime.fp8_checkpoint_activations:
+            reset_fp8_checkpoint_stats()
         tokens = data_pack["input_ids"].long()
         position_ids = data_pack.get("position_ids")
         train_meta = _train_meta(
@@ -213,6 +223,7 @@ class TrainingManager:
                     {"lr": current_lr},
                     multimodal_lrs,
                     {"sequence_parallel": float(model_kwargs["train_meta"].sequence_parallel)},
+                    fp8_checkpoint_metrics() if runtime.fp8_checkpoint_activations else None,
                     {"grad_norm": grad_norm} if grad_norm is not None else None,
                     multimodal_grad_metrics,
                     {"clipped_grad_norm": clipped_grad_norm} if clipped_grad_norm is not None else None,

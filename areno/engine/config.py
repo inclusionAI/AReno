@@ -64,6 +64,11 @@ class RuntimeConfig:
     attn_backend: Literal["flash", "native"] = "flash"
     compile_model: bool = True
     activation_checkpointing: bool = True
+    fp8_checkpoint_activations: bool = False
+    fp8_checkpoint_group_size: int = 128
+    fp8_checkpoint_stochastic: bool = False
+    fp8_checkpoint_warmup_steps: int = 0
+    fp8_checkpoint_fallback_layers: tuple[int, ...] = ()
     keep_rollout_state: bool = True
     optimizer_state_offload: Literal["none", "cpu", "disk"] | bool = "none"
     optimizer_state_offload_dir: str | None = None
@@ -75,8 +80,17 @@ class RuntimeConfig:
     )
 
     def __post_init__(self) -> None:
+        self.fp8_checkpoint_fallback_layers = tuple(self.fp8_checkpoint_fallback_layers)
         if self.attn_backend not in {"flash", "native"}:
             raise ValueError("runtime.attn_backend must be one of: flash, native")
+        if self.fp8_checkpoint_activations and not self.activation_checkpointing:
+            raise ValueError("runtime.fp8_checkpoint_activations requires activation_checkpointing")
+        if self.fp8_checkpoint_group_size not in {0, 128, 256}:
+            raise ValueError("runtime.fp8_checkpoint_group_size must be one of: 0, 128, 256")
+        if self.fp8_checkpoint_warmup_steps < 0:
+            raise ValueError("runtime.fp8_checkpoint_warmup_steps must be non-negative")
+        if any(layer < 0 for layer in self.fp8_checkpoint_fallback_layers):
+            raise ValueError("runtime.fp8_checkpoint_fallback_layers must contain non-negative indices")
         if isinstance(self.optimizer_state_offload, bool):
             self.optimizer_state_offload = "cpu" if self.optimizer_state_offload else "none"
         if self.optimizer_state_offload not in {"none", "cpu", "disk"}:

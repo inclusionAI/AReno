@@ -711,6 +711,7 @@ def build_train_command(config: dict[str, Any]) -> list[str]:
         "--greedy": config.get("greedy"),
         "--adam-8bit": config.get("adam_8bit"),
         "--adam-4bit": config.get("adam_4bit"),
+        "--fp8-ckpt-activations": config.get("fp8_checkpoint_activations"),
         "--unfreeze-mm-tower": config.get("unfreeze_multimodal_tower"),
         "--unfreeze-mm-projector": config.get("unfreeze_multimodal_projector"),
         "--drop-rollout-state": config.get("drop_rollout_state"),

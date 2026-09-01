@@ -653,6 +653,72 @@ class ConfigAndDataTest(unittest.TestCase):
         self.assertEqual(cfg.cuda_config().runtime["optimizer_state_offload_batch_size"], 1)
         self.assertTrue(cfg.mlx_config().keep_rollout_state)
 
+    def test_fp8_checkpoint_activation_config_reaches_cuda_runtime(self):
+        """The SDK knob should preserve advanced compression controls."""
+        cfg = TrainerConfig(
+            algo="sft",
+            backend="cuda",
+            ckpt="unused",
+            dataset_path="unused",
+            fp8_checkpoint_activations=True,
+            fp8_checkpoint_group_size=256,
+            fp8_checkpoint_stochastic=True,
+            fp8_checkpoint_warmup_steps=2,
+            fp8_checkpoint_fallback_layers=(0, 7),
+        )
+
+        runtime = cfg.cuda_config().runtime
+        self.assertTrue(runtime["fp8_checkpoint_activations"])
+        self.assertEqual(runtime["fp8_checkpoint_group_size"], 256)
+        self.assertTrue(runtime["fp8_checkpoint_stochastic"])
+        self.assertEqual(runtime["fp8_checkpoint_warmup_steps"], 2)
+        self.assertEqual(runtime["fp8_checkpoint_fallback_layers"], (0, 7))
+
+    def test_fp8_checkpoint_activation_config_rejects_invalid_combinations(self):
+        with self.assertRaisesRegex(ValueError, "requires activation_checkpointing"):
+            TrainerConfig(
+                algo="sft",
+                backend="cuda",
+                ckpt="unused",
+                dataset_path="unused",
+                activation_checkpointing=False,
+                fp8_checkpoint_activations=True,
+            )
+        with self.assertRaisesRegex(ValueError, "only supported by the CUDA backend"):
+            TrainerConfig(
+                algo="sft",
+                backend="mlx",
+                ckpt="unused",
+                dataset_path="unused",
+                fp8_checkpoint_activations=True,
+            )
+        with self.assertRaisesRegex(ValueError, "group_size"):
+            RuntimeConfig(fp8_checkpoint_group_size=64)
+
+    def test_fp8_checkpoint_activation_settings_reach_train_metadata(self):
+        tokens = torch.ones((1, 4), dtype=torch.long)
+        meta = train_step_runtime._train_meta(
+            {
+                "train_cu_seqlens": torch.tensor([0, 4], dtype=torch.int32),
+                "_activation_checkpointing_enabled": True,
+                "_fp8_checkpoint_activations_enabled": True,
+                "_fp8_checkpoint_group_size": 256,
+                "_fp8_checkpoint_stochastic": True,
+                "_fp8_checkpoint_warmup_steps": 3,
+                "_fp8_checkpoint_fallback_layers": (1, 5),
+                "_global_step": 2,
+            },
+            tokens,
+            sequence_parallel=False,
+        )
+
+        self.assertTrue(meta.fp8_checkpoint_activations)
+        self.assertEqual(meta.fp8_checkpoint_group_size, 256)
+        self.assertTrue(meta.fp8_checkpoint_stochastic)
+        self.assertEqual(meta.fp8_checkpoint_warmup_steps, 3)
+        self.assertEqual(meta.fp8_checkpoint_fallback_layers, (1, 5))
+        self.assertEqual(meta.global_step, 2)
+
     def test_train_cli_drop_rollout_state_inverts_runtime_flag(self):
         """The public CLI exposes the memory-saving inverse of keep_rollout_state."""
         args = _train_args(algo="sft", drop_rollout_state=True)

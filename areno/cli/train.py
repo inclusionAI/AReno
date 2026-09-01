@@ -132,6 +132,7 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "score_micro_bs",
             "gradient_accumulation_steps",
             "activation_checkpointing",
+            "fp8_checkpoint_activations",
             "lora_rank",
             "lora_alpha",
             "lora_dropout",
@@ -240,6 +241,7 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
     args.rollout_devices = getattr(args, "rollout_devices", None)
     args.policy_sync_bucket_mb = getattr(args, "policy_sync_bucket_mb", 64)
     args.adam_4bit = getattr(args, "adam_4bit", False)
+    args.fp8_checkpoint_activations = getattr(args, "fp8_checkpoint_activations", False)
     args.optimizer_state_offload = getattr(args, "optimizer_state_offload", "none")
     args.optimizer_state_offload_dir = getattr(args, "optimizer_state_offload_dir", None)
     args.optimizer_state_offload_batch_size = getattr(args, "optimizer_state_offload_batch_size", 1)
@@ -525,6 +527,7 @@ def _format_training_config_summary(
             [
                 ("max_steps", _format_optional(config.max_steps)),
                 ("sequence_parallel", _sequence_parallel_for_summary(config, model_config)),
+                ("fp8_ckpt_activations", _format_bool(config.fp8_checkpoint_activations)),
                 ("mini_bs", str(config.mini_bs)),
                 ("score_micro_bs", str(config.score_micro_bs)),
                 ("gradient_accumulation_steps", _format_optional(config.gradient_accumulation_steps, default="auto")),
@@ -848,6 +851,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
     args.rollout_devices = getattr(args, "rollout_devices", None)
     args.policy_sync_bucket_mb = getattr(args, "policy_sync_bucket_mb", 64)
     args.adam_4bit = getattr(args, "adam_4bit", False)
+    args.fp8_checkpoint_activations = getattr(args, "fp8_checkpoint_activations", False)
     args.unfreeze_multimodal_tower = getattr(args, "unfreeze_multimodal_tower", False)
     args.unfreeze_multimodal_projector = getattr(args, "unfreeze_multimodal_projector", False)
     args.multimodal_tower_lr = getattr(args, "multimodal_tower_lr", None)
@@ -907,6 +911,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             multimodal_projector_lr_decay_steps=args.multimodal_projector_lr_decay_steps,
             multimodal_projector_lr_decay_style=args.multimodal_projector_lr_decay_style,
             activation_checkpointing=args.activation_checkpointing,
+            fp8_checkpoint_activations=args.fp8_checkpoint_activations,
             keep_rollout_state=not args.drop_rollout_state,
             optimizer_state_offload=args.optimizer_state_offload,
             optimizer_state_offload_dir=args.optimizer_state_offload_dir,
@@ -967,6 +972,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             multimodal_projector_lr_decay_steps=args.multimodal_projector_lr_decay_steps,
             multimodal_projector_lr_decay_style=args.multimodal_projector_lr_decay_style,
             activation_checkpointing=args.activation_checkpointing,
+            fp8_checkpoint_activations=args.fp8_checkpoint_activations,
             keep_rollout_state=not args.drop_rollout_state,
             optimizer_state_offload=args.optimizer_state_offload,
             optimizer_state_offload_dir=args.optimizer_state_offload_dir,
@@ -1035,6 +1041,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             multimodal_projector_lr_decay_steps=args.multimodal_projector_lr_decay_steps,
             multimodal_projector_lr_decay_style=args.multimodal_projector_lr_decay_style,
             activation_checkpointing=args.activation_checkpointing,
+            fp8_checkpoint_activations=args.fp8_checkpoint_activations,
             keep_rollout_state=not args.drop_rollout_state,
             optimizer_state_offload=args.optimizer_state_offload,
             optimizer_state_offload_dir=args.optimizer_state_offload_dir,
@@ -1104,6 +1111,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
         multimodal_projector_lr_decay_steps=args.multimodal_projector_lr_decay_steps,
         multimodal_projector_lr_decay_style=args.multimodal_projector_lr_decay_style,
         activation_checkpointing=args.activation_checkpointing,
+        fp8_checkpoint_activations=args.fp8_checkpoint_activations,
         keep_rollout_state=not args.drop_rollout_state,
         optimizer_state_offload=args.optimizer_state_offload,
         optimizer_state_offload_dir=args.optimizer_state_offload_dir,
@@ -1232,6 +1240,7 @@ def _training_config_settings(config: TrainerConfig) -> dict:
                 "attn_backend",
                 "eager_decode",
                 "activation_checkpointing",
+                "fp8_checkpoint_activations",
                 "keep_rollout_state",
                 "optimizer_state_offload",
                 "optimizer_state_offload_dir",
@@ -1751,6 +1760,12 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     default=True,
     show_default=True,
     help="Enable decoder-layer activation recompute during training.",
+)
+@click.option(
+    "--fp8-ckpt-activations",
+    "fp8_checkpoint_activations",
+    is_flag=True,
+    help="Store activation-checkpoint boundary tensors in FP8 E4M3.",
 )
 @click.option(
     "--drop-rollout-state",

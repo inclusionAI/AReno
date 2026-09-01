@@ -924,6 +924,21 @@ def test_train_help_places_epochs_under_basic_not_checkpointing():
     assert "--epochs" not in output[checkpoint:]
 
 
+def test_train_help_exposes_fp8_checkpoint_activation_flag():
+    output = _help_output()
+
+    assert "--fp8-ckpt-activations" in output
+
+
+def test_train_fp8_checkpoint_activation_flag_reaches_runtime():
+    cfg = _trainer_config_from_options(
+        **_options(algo="sft", backend="cuda", fp8_checkpoint_activations=True)
+    )
+
+    assert cfg.fp8_checkpoint_activations is True
+    assert cfg.cuda_config().runtime["fp8_checkpoint_activations"] is True
+
+
 def test_train_help_remains_complete_and_groups_every_declared_option():
     ctx = train_cli.click.Context(train_cli.train_command)
     declared = {

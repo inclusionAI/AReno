@@ -339,6 +339,12 @@ in its description; flags for other algorithms are ignored.
    Enable decoder-layer activation recompute during training. Default:
    enabled.
 
+``--fp8-ckpt-activations``
+   Store the BF16 tensors retained at decoder activation-checkpoint boundaries
+   as group-wise FP8 E4M3 and restore them before backward recomputation. The
+   original forward remains BF16. CUDA only; activation checkpointing must be
+   enabled.
+
 ``--optimizer-state-offload [none|cpu|disk]``
    Select CUDA optimizer-state residency. ``none`` keeps state on the training
    device. ``cpu`` moves state to host memory between train calls. ``disk``

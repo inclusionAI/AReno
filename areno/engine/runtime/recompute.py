@@ -9,6 +9,7 @@ import torch
 from torch.utils.checkpoint import checkpoint
 
 from areno.engine.parallel.collectives import sequence_parallel_region
+from areno.engine.runtime.fp8_checkpoint import checkpoint_saved_tensor_hooks
 from areno.engine.runtime.metadata import InferMeta, TrainMeta
 
 
@@ -39,6 +40,7 @@ def checkpoint_layer(
     *args: Any,
     train_meta: TrainMeta | None = None,
     infer_meta: InferMeta | None = None,
+    compress_boundary: bool = True,
 ) -> Any:
     """Checkpoint one decoder layer, recomputing its activations in backward."""
 
@@ -52,12 +54,25 @@ def checkpoint_layer(
         with sequence_parallel_region(bool(train_meta.sequence_parallel)):
             return layer_fn(states, *args)
 
-    return checkpoint(
-        recompute,
-        hidden_states,
-        use_reentrant=False,
-        preserve_rng_state=True,
+    def run_checkpoint() -> Any:
+        return checkpoint(
+            recompute,
+            hidden_states,
+            use_reentrant=False,
+            preserve_rng_state=True,
+        )
+
+    if not compress_boundary or not getattr(train_meta, "fp8_checkpoint_activations", False):
+        return run_checkpoint()
+    hooks = checkpoint_saved_tensor_hooks(
+        layer_fn,
+        group_size=train_meta.fp8_checkpoint_group_size,
+        stochastic=train_meta.fp8_checkpoint_stochastic,
+        warmup=train_meta.global_step < train_meta.fp8_checkpoint_warmup_steps,
+        fallback_layers=train_meta.fp8_checkpoint_fallback_layers,
     )
+    with hooks:
+        return run_checkpoint()
 
 
 @_disable_dynamo_frame
@@ -89,5 +104,6 @@ def checkpoint_routed_moe_layer(
         topk_weight,
         train_meta=train_meta,
         infer_meta=infer_meta,
+        compress_boundary=False,
     )
     return attended + expert_output

@@ -69,6 +69,11 @@ class TrainerConfig:
     multimodal_projector_lr_decay_steps: int | None = None
     multimodal_projector_lr_decay_style: str | None = None
     activation_checkpointing: bool = True
+    fp8_checkpoint_activations: bool = False
+    fp8_checkpoint_group_size: int = 128
+    fp8_checkpoint_stochastic: bool = False
+    fp8_checkpoint_warmup_steps: int = 0
+    fp8_checkpoint_fallback_layers: tuple[int, ...] = ()
     keep_rollout_state: bool = True
     optimizer_state_offload: str | bool = "none"
     optimizer_state_offload_dir: str | None = None
@@ -89,12 +94,23 @@ class TrainerConfig:
             self.backend = default_backend_type().value.lower()
         else:
             self.backend = self.backend.lower()
+        self.fp8_checkpoint_fallback_layers = tuple(self.fp8_checkpoint_fallback_layers)
         if self.backend not in {"cuda", "mlx"}:
             raise ValueError("backend must be one of: cuda, mlx")
         if self.adam_4bit and self.adam_8bit:
             raise ValueError("adam_4bit and adam_8bit are mutually exclusive")
         if self.adam_4bit and self.backend != "cuda":
             raise ValueError("adam_4bit is only supported by the CUDA backend")
+        if self.fp8_checkpoint_activations and self.backend != "cuda":
+            raise ValueError("fp8_checkpoint_activations is only supported by the CUDA backend")
+        if self.fp8_checkpoint_activations and not self.activation_checkpointing:
+            raise ValueError("fp8_checkpoint_activations requires activation_checkpointing")
+        if self.fp8_checkpoint_group_size not in {0, 128, 256}:
+            raise ValueError("fp8_checkpoint_group_size must be one of: 0, 128, 256")
+        if self.fp8_checkpoint_warmup_steps < 0:
+            raise ValueError("fp8_checkpoint_warmup_steps must be non-negative")
+        if any(layer < 0 for layer in self.fp8_checkpoint_fallback_layers):
+            raise ValueError("fp8_checkpoint_fallback_layers must contain non-negative indices")
         if self.attn_backend not in {"flash", "native"}:
             raise ValueError("attn_backend must be one of: flash, native")
         if self.model_hub not in {"hf", "modelscope"}:
@@ -216,6 +232,11 @@ class TrainerConfig:
             optimizer=self.optimizer_config(),
             runtime={
                 "activation_checkpointing": self.activation_checkpointing,
+                "fp8_checkpoint_activations": self.fp8_checkpoint_activations,
+                "fp8_checkpoint_group_size": self.fp8_checkpoint_group_size,
+                "fp8_checkpoint_stochastic": self.fp8_checkpoint_stochastic,
+                "fp8_checkpoint_warmup_steps": self.fp8_checkpoint_warmup_steps,
+                "fp8_checkpoint_fallback_layers": self.fp8_checkpoint_fallback_layers,
                 "keep_rollout_state": self.keep_rollout_state,
                 "optimizer_state_offload": self.optimizer_state_offload,
                 "optimizer_state_offload_dir": self.optimizer_state_offload_dir,
@@ -266,6 +287,11 @@ class RolloutTrainerConfig(TrainerConfig):
             optimizer=self.optimizer_config(),
             runtime={
                 "activation_checkpointing": self.activation_checkpointing,
+                "fp8_checkpoint_activations": self.fp8_checkpoint_activations,
+                "fp8_checkpoint_group_size": self.fp8_checkpoint_group_size,
+                "fp8_checkpoint_stochastic": self.fp8_checkpoint_stochastic,
+                "fp8_checkpoint_warmup_steps": self.fp8_checkpoint_warmup_steps,
+                "fp8_checkpoint_fallback_layers": self.fp8_checkpoint_fallback_layers,
                 "keep_rollout_state": self.keep_rollout_state,
                 "optimizer_state_offload": self.optimizer_state_offload,
                 "optimizer_state_offload_dir": self.optimizer_state_offload_dir,

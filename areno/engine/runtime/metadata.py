@@ -24,6 +24,12 @@ class TrainMeta:
     packed: bool = False
     sequence_parallel: bool = False
     activation_checkpointing: bool = False
+    fp8_checkpoint_activations: bool = False
+    fp8_checkpoint_group_size: int = 128
+    fp8_checkpoint_stochastic: bool = False
+    fp8_checkpoint_warmup_steps: int = 0
+    fp8_checkpoint_fallback_layers: tuple[int, ...] = ()
+    global_step: int = 0
     num_padding_tokens: int = 0
     routing_replay: torch.Tensor | None = None
 

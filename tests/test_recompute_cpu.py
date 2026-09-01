@@ -5,6 +5,12 @@ import unittest
 import torch
 
 from areno.engine.parallel.collectives import is_sequence_parallel_active
+from areno.engine.runtime.fp8_checkpoint import (
+    fp8_checkpoint_metrics,
+    pack_fp8_checkpoint_tensor,
+    reset_fp8_checkpoint_stats,
+    unpack_fp8_checkpoint_tensor,
+)
 from areno.engine.runtime.metadata import InferMeta, TrainMeta
 from areno.engine.runtime.recompute import checkpoint_layer, checkpoint_routed_moe_layer, should_checkpoint_layer
 
@@ -40,6 +46,105 @@ class RecomputeTest(unittest.TestCase):
         self.assertEqual(float(out.detach()), 15.5)
         self.assertTrue(torch.equal(x.grad, torch.tensor([2.0, 4.0, 6.0])))
         self.assertGreaterEqual(calls["count"], 1)
+
+    def test_fp8_boundary_storage_reduces_bytes_and_restores_bf16(self):
+        """Group-128 E4M3 storage should be far smaller than its BF16 source."""
+        states = torch.randn((2, 4, 256), dtype=torch.bfloat16)
+
+        packed = pack_fp8_checkpoint_tensor(states, group_size=128)
+        restored = unpack_fp8_checkpoint_tensor(packed)
+
+        self.assertEqual(packed.values.dtype, torch.float8_e4m3fn)
+        self.assertEqual(restored.dtype, torch.bfloat16)
+        self.assertEqual(restored.shape, states.shape)
+        stored_bytes = packed.values.numel() * packed.values.element_size()
+        stored_bytes += packed.scales.numel() * packed.scales.element_size()
+        original_bytes = states.numel() * states.element_size()
+        self.assertLessEqual(stored_bytes, original_bytes * 0.55)
+        self.assertTrue(torch.allclose(restored.float(), states.float(), rtol=0.13, atol=0.13))
+
+    def test_fp8_checkpoint_keeps_forward_exact_and_gradient_close(self):
+        """Only backward recomputation observes restored FP8 boundary values."""
+        source = torch.randn((2, 3, 256), dtype=torch.bfloat16)
+        exact_states = source.clone().requires_grad_(True)
+        fp8_states = source.clone().requires_grad_(True)
+
+        def layer_fn(states):
+            return torch.sin(states.float()).square().sum()
+
+        exact = checkpoint_layer(
+            layer_fn,
+            exact_states,
+            train_meta=TrainMeta(activation_checkpointing=True),
+        )
+        reset_fp8_checkpoint_stats()
+        compressed = checkpoint_layer(
+            layer_fn,
+            fp8_states,
+            train_meta=TrainMeta(activation_checkpointing=True, fp8_checkpoint_activations=True),
+        )
+        self.assertTrue(torch.equal(exact, compressed))
+        exact.backward()
+        compressed.backward()
+
+        cosine = torch.nn.functional.cosine_similarity(
+            exact_states.grad.float().flatten(), fp8_states.grad.float().flatten(), dim=0
+        )
+        self.assertGreaterEqual(float(cosine), 0.99)
+        metrics = fp8_checkpoint_metrics()
+        self.assertEqual(metrics["fp8_ckpt_boundaries"], 1.0)
+        self.assertGreaterEqual(metrics["fp8_ckpt_storage_reduction"], 0.45)
+
+    def test_fp8_checkpoint_warmup_fallback_and_opt_out(self):
+        """Warm-up, layer fallback, and sensitive boundaries retain BF16."""
+
+        class Layer(torch.nn.Module):
+            layer_idx = 2
+
+            def forward(self, states):
+                return states.float().square().sum()
+
+        for meta, compress_boundary in (
+            (
+                TrainMeta(
+                    activation_checkpointing=True,
+                    fp8_checkpoint_activations=True,
+                    fp8_checkpoint_warmup_steps=1,
+                    global_step=0,
+                ),
+                True,
+            ),
+            (
+                TrainMeta(
+                    activation_checkpointing=True,
+                    fp8_checkpoint_activations=True,
+                    fp8_checkpoint_fallback_layers=(2,),
+                ),
+                True,
+            ),
+            (TrainMeta(activation_checkpointing=True, fp8_checkpoint_activations=True), False),
+        ):
+            reset_fp8_checkpoint_stats()
+            states = torch.randn((1, 2, 256), dtype=torch.bfloat16, requires_grad=True)
+            output = checkpoint_layer(
+                Layer(),
+                states,
+                train_meta=meta,
+                compress_boundary=compress_boundary,
+            )
+            output.backward()
+            metrics = fp8_checkpoint_metrics()
+            self.assertEqual(metrics["fp8_ckpt_boundaries"], 0.0)
+            self.assertEqual(metrics["fp8_ckpt_storage_reduction"], 0.0)
+
+    def test_stochastic_fp8_pack_preserves_caller_rng(self):
+        """Boundary rounding must not perturb dropout RNG in the exact forward."""
+        states = torch.randn((2, 2, 256), dtype=torch.bfloat16)
+        torch.manual_seed(1234)
+        rng_before = torch.random.get_rng_state()
+        pack_fp8_checkpoint_tensor(states, stochastic=True)
+        rng_after = torch.random.get_rng_state()
+        self.assertTrue(torch.equal(rng_before, rng_after))
 
     def test_checkpoint_layer_bypasses_checkpoint_for_infer_meta(self):
         """Inference metadata must bypass checkpointing even when train_meta opts in."""
