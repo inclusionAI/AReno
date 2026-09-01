@@ -156,5 +156,6 @@ Troubleshooting
 * Set ``ARENO_LOG_COMPLETIONS=1`` during agentic smoke tests to verify output
   and tool-call formatting before launching a long run.
 * On Apple Silicon, reduce ``--mini-bs`` and ``--max-running-prompts`` first;
-  use ``--drop-rollout-state`` when retained KV/cache state competes with
-  training activations. See :doc:`../getting-started/mlx`.
+  completed rollout KV/cache state is dropped by default so it does not
+  compete with training activations. Use ``--keep-rollout-state`` only when
+  retaining reusable state is preferable. See :doc:`../getting-started/mlx`.

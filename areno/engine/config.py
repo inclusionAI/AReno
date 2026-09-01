@@ -64,12 +64,12 @@ class RuntimeConfig:
     attn_backend: Literal["flash", "native"] = "flash"
     compile_model: bool = True
     activation_checkpointing: bool = True
-    fp8_checkpoint_activations: bool = False
+    fp8_checkpoint_activations: bool | None = None
     fp8_checkpoint_group_size: int = 128
     fp8_checkpoint_stochastic: bool = False
     fp8_checkpoint_warmup_steps: int = 0
     fp8_checkpoint_fallback_layers: tuple[int, ...] = ()
-    keep_rollout_state: bool = True
+    keep_rollout_state: bool = False
     optimizer_state_offload: Literal["none", "cpu", "disk"] | bool = "none"
     optimizer_state_offload_dir: str | None = None
     optimizer_state_offload_batch_size: int = 1
@@ -80,6 +80,8 @@ class RuntimeConfig:
     )
 
     def __post_init__(self) -> None:
+        if self.fp8_checkpoint_activations is None:
+            self.fp8_checkpoint_activations = self.activation_checkpointing
         self.fp8_checkpoint_fallback_layers = tuple(self.fp8_checkpoint_fallback_layers)
         if self.attn_backend not in {"flash", "native"}:
             raise ValueError("runtime.attn_backend must be one of: flash, native")

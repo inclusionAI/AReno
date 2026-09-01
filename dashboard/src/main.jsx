@@ -258,7 +258,8 @@ const defaultTrainConfig = {
   tp_size: 1,
   attn_backend: "flash",
   activation_checkpointing: true,
-  drop_rollout_state: false,
+  fp8_checkpoint_activations: true,
+  drop_rollout_state: true,
   eager_decode: false,
   disable_thinking: false,
   batch_size: 8,
@@ -1789,13 +1790,18 @@ function inferPlanRunTool(plan) {
 function commandForPlan(tool, parameters = {}) {
   const mode = tool === "start_serve" ? "serve" : "train";
   const args = [];
-  const negativeFlags = new Set(["activation_checkpointing", "use_kl_loss"]);
+  const negativeFlags = new Map([
+    ["activation_checkpointing", "--no-activation-checkpointing"],
+    ["fp8_checkpoint_activations", "--no-fp8-ckpt-activations"],
+    ["drop_rollout_state", "--keep-rollout-state"],
+    ["use_kl_loss", "--no-use-kl-loss"],
+  ]);
   for (const [key, value] of Object.entries(parameters)) {
     if (key === "extra_args" || value === "" || value === null || value === undefined) continue;
     const flag = `--${key.replaceAll("_", "-")}`;
     if (isPlanBoolean(value)) {
       if (planBoolValue(value)) args.push(flag);
-      else if (negativeFlags.has(key)) args.push(`--no-${key.replaceAll("_", "-")}`);
+      else if (negativeFlags.has(key)) args.push(negativeFlags.get(key));
       continue;
     }
     args.push(`${flag} ${shellQuote(value)}`);
@@ -2878,6 +2884,7 @@ function trainLauncherSections(algo) {
         field("tp_size", "TP", true),
         selectField("attn_backend", "Attention", ["flash", "native"], true),
         checkField("activation_checkpointing", "Activation ckpt"),
+        checkField("fp8_checkpoint_activations", "FP8 ckpt activations"),
         checkField("drop_rollout_state", "Drop rollout state"),
         checkField("eager_decode", "Eager decode"),
         checkField("disable_thinking", "Disable thinking"),

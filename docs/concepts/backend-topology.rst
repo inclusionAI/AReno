@@ -77,8 +77,9 @@ DPO and PPO.
 
 MLX runs with ``world-size=1`` and ``tp-size=1`` on unified memory. CUDA
 device lists, independent rollout partitions, NCCL policy synchronization,
-and CUDA graph capture do not apply. ``--drop-rollout-state`` controls whether
-completed rollout cache state is retained across session boundaries.
+and CUDA graph capture do not apply. Completed rollout cache state is dropped
+at session boundaries by default; ``--keep-rollout-state`` retains it across
+boundaries.
 
 Shared behavior
 ---------------

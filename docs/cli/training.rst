@@ -194,10 +194,11 @@ different visible GPUs for rollout:
 ``--eager-decode``
    Disable decode CUDA graph and run rollout decode eagerly. CUDA only.
 
-``--drop-rollout-state``
+``--drop-rollout-state / --keep-rollout-state``
    Drop completed rollout KV/cache state after each step to save device
-   memory. By default, Areno keeps reusable rollout state between steps for
-   lower setup overhead. Supported by both CUDA and MLX.
+   memory. Dropping is enabled by default. Use ``--keep-rollout-state`` to
+   retain reusable state between steps for lower setup overhead. Supported by
+   both CUDA and MLX.
 
 ``--attn-backend [flash|native]``
    Attention backend. Default: ``flash``. Use ``native`` to run without
@@ -284,8 +285,8 @@ Search is deliberately conservative:
   skipped and that concurrency is used directly for training-parameter tuning;
 * training uses the rollout-selected concurrency to derive a batch size, then
   tries larger to smaller ``--mini-bs`` values;
-* ``--drop-rollout-state`` is enabled for the tuned run so rollout memory does
-  not remain resident during the training probe or optimizer step.
+* the default dropped rollout state is used for the tuned run so rollout
+  memory does not remain resident during the training probe or optimizer step.
 
 ``--mem-frac FLOAT``
    Target maximum GPU memory fraction for tuning. Default: ``0.9``. Lower this
@@ -339,11 +340,12 @@ in its description; flags for other algorithms are ignored.
    Enable decoder-layer activation recompute during training. Default:
    enabled.
 
-``--fp8-ckpt-activations``
+``--fp8-ckpt-activations / --no-fp8-ckpt-activations``
    Store the BF16 tensors retained at decoder activation-checkpoint boundaries
    as group-wise FP8 E4M3 and restore them before backward recomputation. The
-   original forward remains BF16. CUDA only; activation checkpointing must be
-   enabled.
+   original forward remains BF16. Enabled by default on CUDA when activation
+   checkpointing is enabled. Use ``--no-fp8-ckpt-activations`` to retain BF16
+   boundary tensors. CUDA only.
 
 ``--optimizer-state-offload [none|cpu|disk]``
    Select CUDA optimizer-state residency. ``none`` keeps state on the training

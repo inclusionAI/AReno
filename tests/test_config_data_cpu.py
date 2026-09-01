@@ -643,15 +643,31 @@ class ConfigAndDataTest(unittest.TestCase):
 
         self.assertEqual(cfg.resolved_max_running_prompts(), 64)
 
-    def test_trainer_config_keeps_rollout_state_by_default(self):
-        """Runtime defaults should favor rollout speed unless explicitly disabled."""
+    def test_trainer_config_drops_rollout_state_by_default(self):
+        """Runtime defaults should favor lower memory unless explicitly retained."""
         cfg = TrainerConfig(algo="sft", ckpt="unused", dataset_path="unused")
 
-        self.assertTrue(cfg.keep_rollout_state)
+        self.assertFalse(cfg.keep_rollout_state)
         self.assertEqual(cfg.optimizer_state_offload_batch_size, 1)
-        self.assertTrue(cfg.cuda_config().runtime["keep_rollout_state"])
+        self.assertFalse(cfg.cuda_config().runtime["keep_rollout_state"])
         self.assertEqual(cfg.cuda_config().runtime["optimizer_state_offload_batch_size"], 1)
-        self.assertTrue(cfg.mlx_config().keep_rollout_state)
+        self.assertFalse(cfg.mlx_config().keep_rollout_state)
+
+    def test_fp8_checkpoint_activations_default_to_cuda_checkpointing(self):
+        cuda = TrainerConfig(algo="sft", backend="cuda", ckpt="unused", dataset_path="unused")
+        cuda_without_checkpointing = TrainerConfig(
+            algo="sft",
+            backend="cuda",
+            ckpt="unused",
+            dataset_path="unused",
+            activation_checkpointing=False,
+        )
+        mlx = TrainerConfig(algo="sft", backend="mlx", ckpt="unused", dataset_path="unused")
+
+        self.assertTrue(cuda.fp8_checkpoint_activations)
+        self.assertFalse(cuda_without_checkpointing.fp8_checkpoint_activations)
+        self.assertFalse(mlx.fp8_checkpoint_activations)
+        self.assertTrue(RuntimeConfig().fp8_checkpoint_activations)
 
     def test_fp8_checkpoint_activation_config_reaches_cuda_runtime(self):
         """The SDK knob should preserve advanced compression controls."""
@@ -728,13 +744,16 @@ class ConfigAndDataTest(unittest.TestCase):
         self.assertFalse(cfg.keep_rollout_state)
         self.assertFalse(cfg.mlx_config().keep_rollout_state)
 
+        kept = train_cli._trainer_config_from_args(_train_args(algo="sft", drop_rollout_state=False))
+        self.assertTrue(kept.keep_rollout_state)
+
     def test_train_cli_optimizer_state_offload_reaches_cuda_runtime(self):
         """SFT can offload optimizer state without changing rollout-state retention."""
         args = _train_args(algo="sft", optimizer_state_offload="cpu")
 
         cfg = train_cli._trainer_config_from_args(args)
 
-        self.assertTrue(cfg.keep_rollout_state)
+        self.assertFalse(cfg.keep_rollout_state)
         self.assertEqual(cfg.optimizer_state_offload, "cpu")
         self.assertEqual(cfg.cuda_config().runtime["optimizer_state_offload"], "cpu")
 
@@ -1127,7 +1146,7 @@ def _train_args(**overrides):
         weight_decay=1e-2,
         grad_clip_norm=1.0,
         activation_checkpointing=True,
-        drop_rollout_state=False,
+        drop_rollout_state=True,
         optimizer_state_offload="none",
         optimizer_state_offload_dir=None,
         optimizer_state_offload_batch_size=1,

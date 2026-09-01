@@ -92,13 +92,19 @@ The main CUDA controls are:
 ``--max-running-prompts N``
    Caps active rollout sequences and their KV-cache demand.
 
-``--drop-rollout-state``
-   Releases completed rollout state at the session boundary rather than
-   retaining reusable cache and graph state for the next rollout.
+``--drop-rollout-state / --keep-rollout-state``
+   Completed rollout state is released at the session boundary by default.
+   Use ``--keep-rollout-state`` to retain reusable cache and graph state for
+   the next rollout.
 
 ``--activation-checkpointing``
    Recomputes supported decoder activations during backward. It is enabled by
    default.
+
+``--fp8-ckpt-activations / --no-fp8-ckpt-activations``
+   Stores activation-checkpoint boundary tensors in FP8 E4M3 by default while
+   keeping the original forward in BF16. Use the negative flag to retain BF16
+   boundary storage.
 
 ``--optimizer-state-offload cpu``
    Moves optimizer state to host memory between train calls.

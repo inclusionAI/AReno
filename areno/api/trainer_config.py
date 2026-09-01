@@ -69,12 +69,12 @@ class TrainerConfig:
     multimodal_projector_lr_decay_steps: int | None = None
     multimodal_projector_lr_decay_style: str | None = None
     activation_checkpointing: bool = True
-    fp8_checkpoint_activations: bool = False
+    fp8_checkpoint_activations: bool | None = None
     fp8_checkpoint_group_size: int = 128
     fp8_checkpoint_stochastic: bool = False
     fp8_checkpoint_warmup_steps: int = 0
     fp8_checkpoint_fallback_layers: tuple[int, ...] = ()
-    keep_rollout_state: bool = True
+    keep_rollout_state: bool = False
     optimizer_state_offload: str | bool = "none"
     optimizer_state_offload_dir: str | None = None
     optimizer_state_offload_batch_size: int = 1
@@ -94,6 +94,8 @@ class TrainerConfig:
             self.backend = default_backend_type().value.lower()
         else:
             self.backend = self.backend.lower()
+        if self.fp8_checkpoint_activations is None:
+            self.fp8_checkpoint_activations = self.backend == "cuda" and self.activation_checkpointing
         self.fp8_checkpoint_fallback_layers = tuple(self.fp8_checkpoint_fallback_layers)
         if self.backend not in {"cuda", "mlx"}:
             raise ValueError("backend must be one of: cuda, mlx")

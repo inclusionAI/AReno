@@ -241,7 +241,7 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
     args.rollout_devices = getattr(args, "rollout_devices", None)
     args.policy_sync_bucket_mb = getattr(args, "policy_sync_bucket_mb", 64)
     args.adam_4bit = getattr(args, "adam_4bit", False)
-    args.fp8_checkpoint_activations = getattr(args, "fp8_checkpoint_activations", False)
+    args.fp8_checkpoint_activations = getattr(args, "fp8_checkpoint_activations", None)
     args.optimizer_state_offload = getattr(args, "optimizer_state_offload", "none")
     args.optimizer_state_offload_dir = getattr(args, "optimizer_state_offload_dir", None)
     args.optimizer_state_offload_batch_size = getattr(args, "optimizer_state_offload_batch_size", 1)
@@ -851,7 +851,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
     args.rollout_devices = getattr(args, "rollout_devices", None)
     args.policy_sync_bucket_mb = getattr(args, "policy_sync_bucket_mb", 64)
     args.adam_4bit = getattr(args, "adam_4bit", False)
-    args.fp8_checkpoint_activations = getattr(args, "fp8_checkpoint_activations", False)
+    args.fp8_checkpoint_activations = getattr(args, "fp8_checkpoint_activations", None)
     args.unfreeze_multimodal_tower = getattr(args, "unfreeze_multimodal_tower", False)
     args.unfreeze_multimodal_projector = getattr(args, "unfreeze_multimodal_projector", False)
     args.multimodal_tower_lr = getattr(args, "multimodal_tower_lr", None)
@@ -1762,14 +1762,15 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     help="Enable decoder-layer activation recompute during training.",
 )
 @click.option(
-    "--fp8-ckpt-activations",
+    "--fp8-ckpt-activations/--no-fp8-ckpt-activations",
     "fp8_checkpoint_activations",
-    is_flag=True,
-    help="Store activation-checkpoint boundary tensors in FP8 E4M3.",
+    default=None,
+    help="Store activation-checkpoint boundary tensors in FP8 E4M3 (enabled by default on CUDA).",
 )
 @click.option(
-    "--drop-rollout-state",
-    is_flag=True,
+    "--drop-rollout-state/--keep-rollout-state",
+    default=True,
+    show_default=True,
     help="Release completed rollout KV/cache state after each step.",
 )
 @click.option(

@@ -87,9 +87,10 @@ options have the largest effect on MLX unified-memory use:
    Caps active rollout sequences. Reduce it when KV cache or multimodal
    prefill features dominate memory.
 
-``--drop-rollout-state``
-   Releases completed rollout KV/cache state at the rollout-session boundary
-   instead of retaining it for the next rollout.
+``--drop-rollout-state / --keep-rollout-state``
+   Completed rollout KV/cache state is released at the rollout-session
+   boundary by default. Use ``--keep-rollout-state`` to retain it for the next
+   rollout.
 
 ``--adam-8bit``
    Stores Adam moment state in the MLX backend's 8-bit representation. This

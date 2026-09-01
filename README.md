@@ -260,8 +260,8 @@ areno train \
 ```
 
 The tuner uses dummy-loaded model weights and synthetic token rows, respects
-the configured sequence limits and tensor-parallel size, and enables
-`--drop-rollout-state` for the tuned run. See `docs/cli/training.rst` for the
+the configured sequence limits and tensor-parallel size, and uses the default
+dropped rollout state for the tuned run. See `docs/cli/training.rst` for the
 full tuning rules.
 
 For Agentic RL, add `--agent-fn` to supply an agent function. The agent calls the local OpenAI-compatible endpoint, including `tools` and `tool_choice` when needed, and returns explicit `AgentTrajectoryTurn` objects. AReno converts those turns into trainable assistant outputs and masks tool results by default:

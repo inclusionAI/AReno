@@ -68,7 +68,7 @@ class MlxConfig:
     prefill_step_size: int = 2048
     max_kv_size: int | None = None
     decode_progress_interval_s: float = 10.0
-    keep_rollout_state: bool = True
+    keep_rollout_state: bool = False
     logits_chunk_size: int = 4096
     compile_train_step: bool = True
     gradient_checkpointing: bool = True

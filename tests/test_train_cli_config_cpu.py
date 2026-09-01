@@ -928,15 +928,32 @@ def test_train_help_exposes_fp8_checkpoint_activation_flag():
     output = _help_output()
 
     assert "--fp8-ckpt-activations" in output
+    assert "--no-fp8-ckpt-activations" in output
+    assert "--keep-rollout-state" in output
 
 
 def test_train_fp8_checkpoint_activation_flag_reaches_runtime():
-    cfg = _trainer_config_from_options(
-        **_options(algo="sft", backend="cuda", fp8_checkpoint_activations=True)
-    )
+    cfg = _trainer_config_from_options(**_options(algo="sft", backend="cuda", fp8_checkpoint_activations=True))
 
     assert cfg.fp8_checkpoint_activations is True
     assert cfg.cuda_config().runtime["fp8_checkpoint_activations"] is True
+
+
+def test_train_memory_saving_defaults_can_be_disabled():
+    defaults = _trainer_config_from_options(**_options(algo="sft", backend="cuda"))
+    disabled = _trainer_config_from_options(
+        **_options(
+            algo="sft",
+            backend="cuda",
+            fp8_checkpoint_activations=False,
+            drop_rollout_state=False,
+        )
+    )
+
+    assert defaults.fp8_checkpoint_activations is True
+    assert defaults.keep_rollout_state is False
+    assert disabled.fp8_checkpoint_activations is False
+    assert disabled.keep_rollout_state is True
 
 
 def test_train_help_remains_complete_and_groups_every_declared_option():
@@ -1020,7 +1037,7 @@ def _options(**overrides):
         weight_decay=1e-2,
         grad_clip_norm=1.0,
         activation_checkpointing=True,
-        drop_rollout_state=False,
+        drop_rollout_state=True,
         eager_decode=False,
         attn_backend="flash",
         disable_thinking=False,

@@ -8,6 +8,7 @@ from areno.dashboard.server import (
     DashboardState,
     Job,
     agent_language_instruction,
+    build_train_command,
     repair_action_for_check,
     sample_media_references,
     start_runtime_repair,
@@ -89,6 +90,16 @@ def test_agent_language_instruction_follows_dashboard_language():
     assert "Simplified Chinese" in agent_language_instruction({"language": "zh"})
     assert "commands" in agent_language_instruction({"language": "zh"})
     assert "English" in agent_language_instruction({"language": "en"})
+
+
+def test_train_command_emits_memory_saving_boolean_choices():
+    defaults = build_train_command({"fp8_checkpoint_activations": True, "drop_rollout_state": True})
+    disabled = build_train_command({"fp8_checkpoint_activations": False, "drop_rollout_state": False})
+
+    assert "--fp8-ckpt-activations" in defaults
+    assert "--drop-rollout-state" in defaults
+    assert "--no-fp8-ckpt-activations" in disabled
+    assert "--keep-rollout-state" in disabled
 
 
 @pytest.mark.parametrize(

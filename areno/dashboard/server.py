@@ -711,10 +711,8 @@ def build_train_command(config: dict[str, Any]) -> list[str]:
         "--greedy": config.get("greedy"),
         "--adam-8bit": config.get("adam_8bit"),
         "--adam-4bit": config.get("adam_4bit"),
-        "--fp8-ckpt-activations": config.get("fp8_checkpoint_activations"),
         "--unfreeze-mm-tower": config.get("unfreeze_multimodal_tower"),
         "--unfreeze-mm-projector": config.get("unfreeze_multimodal_projector"),
-        "--drop-rollout-state": config.get("drop_rollout_state"),
         "--eager-decode": config.get("eager_decode"),
         "--disable-thinking": config.get("disable_thinking"),
         "--train-tool-results": config.get("train_tool_results"),
@@ -724,6 +722,14 @@ def build_train_command(config: dict[str, Any]) -> list[str]:
         command.append(
             "--activation-checkpointing" if bool_like(activation_checkpointing) else "--no-activation-checkpointing"
         )
+    fp8_checkpoint_activations = config.get("fp8_checkpoint_activations")
+    if fp8_checkpoint_activations not in (None, ""):
+        command.append(
+            "--fp8-ckpt-activations" if bool_like(fp8_checkpoint_activations) else "--no-fp8-ckpt-activations"
+        )
+    drop_rollout_state = config.get("drop_rollout_state")
+    if drop_rollout_state not in (None, ""):
+        command.append("--drop-rollout-state" if bool_like(drop_rollout_state) else "--keep-rollout-state")
     use_kl_loss = config.get("use_kl_loss")
     if use_kl_loss not in (None, ""):
         command.append("--use-kl-loss" if bool_like(use_kl_loss) else "--no-use-kl-loss")
