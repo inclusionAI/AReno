@@ -91,6 +91,7 @@ from areno.engine.parallel.collectives import (
 )
 from areno.engine.parallel.context import get_tp_context
 from areno.engine.runtime.metadata import InferMeta, TrainMeta
+from areno.engine.runtime.recompute import checkpoint_layer
 from areno.engine.runtime.routing_replay import resolve_sigmoid_routes
 from areno.models._shared.dynamo_wrappers import (
     _areno_depthwise_causal_conv1d_silu_decode_no_compile,
@@ -1520,6 +1521,18 @@ class BailingDecoderLayer(nn.Module):
             else BailingDenseMLP(config, config.intermediate_size)
         )
 
+    def _attention_block(
+        self,
+        hidden_states: torch.Tensor,
+        position_ids: torch.Tensor,
+        train_meta: TrainMeta | None,
+        infer_meta: InferMeta | None,
+    ) -> torch.Tensor:
+        return self.attention(self.input_layernorm(hidden_states), position_ids, train_meta, infer_meta)
+
+    def _dense_mlp_block(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return self.mlp(self.post_attention_layernorm(hidden_states))
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -1527,17 +1540,30 @@ class BailingDecoderLayer(nn.Module):
         train_meta: TrainMeta | None,
         infer_meta: InferMeta | None,
     ) -> torch.Tensor:
-        # Standard pre-norm residual: norm -> sublayer -> add.
+        # Checkpoint attention for every Ling/Bailing V3 layer. Sparse MoE
+        # routing remains outside recomputation so its load counters are not
+        # accumulated twice and rollout-replayed routes stay authoritative.
         residual = hidden_states
-        hidden_states = residual + self.attention(
-            self.input_layernorm(hidden_states), position_ids, train_meta, infer_meta
+        hidden_states = residual + checkpoint_layer(
+            self._attention_block,
+            hidden_states,
+            position_ids,
+            train_meta,
+            infer_meta,
+            train_meta=train_meta,
+            infer_meta=infer_meta,
         )
         residual = hidden_states
-        mlp_input = self.post_attention_layernorm(hidden_states)
         if isinstance(self.mlp, BailingSparseMoeBlock):
+            mlp_input = self.post_attention_layernorm(hidden_states)
             num_padding_tokens = train_meta.num_padding_tokens if train_meta is not None else 0
             return residual + self.mlp(mlp_input, num_padding_tokens)
-        return residual + self.mlp(mlp_input)
+        return residual + checkpoint_layer(
+            self._dense_mlp_block,
+            hidden_states,
+            train_meta=train_meta,
+            infer_meta=infer_meta,
+        )
 
 
 class BailingMoeV3ForCausalLM(nn.Module):
@@ -1695,7 +1721,7 @@ class BailingMoeV3ForCausalLM(nn.Module):
         slots = slots.to(device=next(self.parameters()).device, dtype=torch.long)
         for layer in self.layers:
             attn = layer.attention
-            if isinstance(attn, (BailingLinearAttention, BailingKDAAttention)) and attn.state_cache.numel() > 0:
+            if isinstance(attn, BailingLinearAttention | BailingKDAAttention) and attn.state_cache.numel() > 0:
                 attn.state_cache.index_fill_(0, slots, 0)
             if isinstance(attn, BailingKDAAttention) and attn.conv_cache.numel() > 0:
                 attn.conv_cache.index_fill_(0, slots, 0)

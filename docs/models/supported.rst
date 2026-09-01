@@ -27,6 +27,9 @@ family is available on both backends.
        ``qwen3_5_moe`` layouts, with Areno MoE kernels.
    * - Bailing MoE Linear v2
      - Local model adapter for Bailing MoE Linear v2 checkpoints.
+   * - Ling / Bailing MoE V3
+     - ``bailing_hybrid`` checkpoints with softmax/KDA attention, sparse MoE,
+       activation checkpointing, and FP8 checkpoint-boundary storage.
    * - Gemma4
      - Gemma4 text and conditional-generation checkpoints. Native Gemma4 and
        Gemma4 Unified processors support image, audio, and video inputs for

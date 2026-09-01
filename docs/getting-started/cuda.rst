@@ -104,7 +104,9 @@ The main CUDA controls are:
 ``--fp8-ckpt-activations / --no-fp8-ckpt-activations``
    Stores activation-checkpoint boundary tensors in FP8 E4M3 by default while
    keeping the original forward in BF16. Use the negative flag to retain BF16
-   boundary storage.
+   boundary storage. Ling/Bailing V3 checkpoints attention in every decoder
+   layer and dense MLP blocks; sparse routing and routed experts remain outside
+   recomputation so routing load counters are updated exactly once.
 
 ``--optimizer-state-offload cpu``
    Moves optimizer state to host memory between train calls.
