@@ -11,7 +11,7 @@ from safetensors.torch import load_file
 
 from areno import Trainer
 from areno.adapters import LoraConfig
-from areno.api import ArenoConfig, SamplingParams
+from areno.api import CudaConfig, SamplingParams
 from areno.api.algorithms import get_algorithm
 from areno.api.trainer_config import PolicyTrainerConfig
 from areno.api.trainers.policy_only import PolicyOnlyTrainer
@@ -59,7 +59,7 @@ def test_flash_v3_tp8_sp_rollout_train_next_rollout(tmp_path: Path) -> None:
     initial_path = tmp_path / "adapter-initial"
     trained_path = tmp_path / "adapter-trained"
     lora = LoraConfig(rank=4, alpha=4.0, target_modules=FLASH_V3_TARGETS)
-    backend_config = ArenoConfig(
+    backend_config = CudaConfig(
         tp_size=8,
         dp_size=1,
         devices=list(range(8)),
