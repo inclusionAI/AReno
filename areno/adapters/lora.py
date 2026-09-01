@@ -332,20 +332,24 @@ def _initialize_bailing_v3_lora(
         attention_prefix = f"{prefix}.attention"
         if hasattr(attention, "q_conv1d_weight"):
             for component in ("q_proj", "k_proj", "v_proj", "f_proj", "g_proj"):
-                if component in requested:
-                    matched.add(component)
+                logical_name = f"{attention_prefix}.{component}"
+                selected = _matching_targets(requested, component, logical_name)
+                if selected:
+                    matched.update(selected)
                     _install_column_slot(
-                        f"{attention_prefix}.{component}",
+                        logical_name,
                         getattr(attention, component),
                         config,
                         seed,
                         runtime_state,
                         slots,
                     )
-            if "o_proj" in requested:
-                matched.add("o_proj")
+            logical_name = f"{attention_prefix}.o_proj"
+            selected = _matching_targets(requested, "o_proj", logical_name)
+            if selected:
+                matched.update(selected)
                 _install_row_slot(
-                    f"{attention_prefix}.o_proj",
+                    logical_name,
                     attention.o_proj,
                     config,
                     seed,
@@ -353,10 +357,12 @@ def _initialize_bailing_v3_lora(
                     slots,
                 )
         else:
-            if "q_proj" in requested and attention.q_proj is not None:
-                matched.add("q_proj")
+            logical_name = f"{attention_prefix}.q_proj"
+            selected = _matching_targets(requested, "q_proj", logical_name)
+            if selected and attention.q_proj is not None:
+                matched.update(selected)
                 _install_column_slot(
-                    f"{attention_prefix}.q_proj",
+                    logical_name,
                     attention.q_proj,
                     config,
                     seed,
@@ -365,20 +371,26 @@ def _initialize_bailing_v3_lora(
                 )
             for component in ("q_a_proj", "kv_a_proj_with_mqa"):
                 owner = getattr(attention, component, None)
-                if component in requested and owner is not None:
-                    matched.add(component)
-                    slot = _replicated_slot(f"{attention_prefix}.{component}", owner, config, seed, runtime_state)
+                logical_name = f"{attention_prefix}.{component}"
+                selected = _matching_targets(requested, component, logical_name)
+                if selected and owner is not None:
+                    matched.update(selected)
+                    slot = _replicated_slot(logical_name, owner, config, seed, runtime_state)
                     attention.install_lora_component(component, slot)
                     slots[slot.logical_name] = slot
             for component in ("q_b_proj", "kv_b_proj"):
                 owner = getattr(attention, component, None)
-                if component in requested and owner is not None:
-                    matched.add(component)
-                    _install_column_slot(f"{attention_prefix}.{component}", owner, config, seed, runtime_state, slots)
-            if "dense" in requested:
-                matched.add("dense")
+                logical_name = f"{attention_prefix}.{component}"
+                selected = _matching_targets(requested, component, logical_name)
+                if selected and owner is not None:
+                    matched.update(selected)
+                    _install_column_slot(logical_name, owner, config, seed, runtime_state, slots)
+            logical_name = f"{attention_prefix}.dense"
+            selected = _matching_targets(requested, "dense", logical_name)
+            if selected:
+                matched.update(selected)
                 _install_row_slot(
-                    f"{attention_prefix}.dense",
+                    logical_name,
                     attention.dense,
                     config,
                     seed,
@@ -478,12 +490,16 @@ def _install_dense_mlp_slots(
 ) -> set[str]:
     matched: set[str] = set()
     for component in ("gate_proj", "up_proj"):
-        if component in requested:
-            matched.add(component)
-            _install_column_slot(f"{prefix}.{component}", getattr(mlp, component), config, seed, runtime_state, slots)
-    if "down_proj" in requested:
-        matched.add("down_proj")
-        _install_row_slot(f"{prefix}.down_proj", mlp.down_proj, config, seed, runtime_state, slots)
+        logical_name = f"{prefix}.{component}"
+        selected = _matching_targets(requested, component, logical_name)
+        if selected:
+            matched.update(selected)
+            _install_column_slot(logical_name, getattr(mlp, component), config, seed, runtime_state, slots)
+    logical_name = f"{prefix}.down_proj"
+    selected = _matching_targets(requested, "down_proj", logical_name)
+    if selected:
+        matched.update(selected)
+        _install_row_slot(logical_name, mlp.down_proj, config, seed, runtime_state, slots)
     return matched
 
 
@@ -523,13 +539,16 @@ def _install_moe_slots(
         ("gate_proj", experts.hidden_size, experts.intermediate_size, gate_up_weight),
         ("up_proj", experts.hidden_size, experts.intermediate_size, gate_up_weight),
         ("down_proj", experts.intermediate_size, experts.hidden_size, down_weight),
+        ("linear_fc1", experts.hidden_size, 2 * experts.intermediate_size, gate_up_weight),
+        ("linear_fc2", experts.intermediate_size, experts.hidden_size, down_weight),
     )
     matched: set[str] = set()
     for component, in_features, out_features, base_weight in components:
-        if component not in requested:
-            continue
-        matched.add(component)
         logical_name = f"{prefix}.mlp.experts.{{expert}}.{component}"
+        selected = _matching_targets(requested, component, logical_name)
+        if not selected:
+            continue
+        matched.update(selected)
         slot = RoutedExpertLoraSlot(
             logical_name=logical_name,
             base_weight=base_weight,
@@ -544,3 +563,10 @@ def _install_moe_slots(
         experts.install_lora_component(component, slot)
         slots[logical_name] = slot
     return matched
+
+
+def _matching_targets(requested: set[str], component: str, logical_name: str) -> set[str]:
+    aliases = {component, logical_name}
+    if ".{expert}." in logical_name:
+        aliases.add(logical_name.replace(".{expert}.", "."))
+    return requested & aliases

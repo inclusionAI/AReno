@@ -27,8 +27,8 @@ and a sparse mixture-of-experts MLP:
       ``all_reduce`` to sum back the per-rank contributions.
     * An optional ``shared_experts`` dense MLP runs unconditionally on every
       token and is added to the routed output.
-    * Inference uses a separate ``_forward_fused_moe`` path that stacks the
-      per-expert gate/up/down weights into contiguous w1/w2 buffers and runs
+    * Inference uses a separate ``_forward_fused_moe`` path that materializes
+      the grouped expert weights as contiguous w1/w2 buffers and runs
       ``areno_fused_experts``; training keeps the permute/unpermute path
       so autograd can flow through.
 """
@@ -116,8 +116,9 @@ class BailingDenseMLP(nn.Module):
     """Plain SwiGLU MLP used for shared experts and for the first
     ``first_k_dense_replace`` decoder layers (before MoE kicks in)."""
 
-    def __init__(self, config: ModelConfig, intermediate_size: int):
+    def __init__(self, config: ModelConfig, intermediate_size: int, *, swiglu_limit: float | None = None):
         super().__init__()
+        self.swiglu_limit = swiglu_limit
         self.gate_proj = ColumnParallelLinear(config.hidden_size, intermediate_size, bias=False)
         self.up_proj = ColumnParallelLinear(config.hidden_size, intermediate_size, bias=False)
         self.down_proj = RowParallelLinear(intermediate_size, config.hidden_size, bias=False)
@@ -131,7 +132,7 @@ class BailingDenseMLP(nn.Module):
         up = self.up_proj(proj_input)
         # Fused SiLU(gate) * up kernel — same as areno_silu_and_mul but reused
         # under torch._dynamo.disable so eager and compiled paths agree.
-        hidden = _areno_silu_pair_no_compile(gate, up)
+        hidden = _swiglu(gate, up, self.swiglu_limit)
         return self.down_proj(hidden)
 
 
@@ -261,21 +262,25 @@ class BailingSparseMoeBlock(nn.Module):
         self.num_experts = int(config.num_experts or 0)
         self.num_experts_per_tok = config.num_experts_per_tok
         self.gate = BailingGate(config, routing_layer_slot)
-        self.experts = BailingGroupedExperts(config)
+        layer_idx = routing_layer_slot + config.first_k_dense_replace
+        expert_swiglu_limit = _swiglu_limit_for_layer(config.expert_swiglu_limit_list, layer_idx)
+        shared_swiglu_limit = _swiglu_limit_for_layer(config.share_expert_swiglu_limit_list, layer_idx)
+        self.experts = BailingGroupedExperts(config, swiglu_limit=expert_swiglu_limit)
         # Shared experts always run (no routing decision) — their intermediate
         # size scales with ``num_shared_experts``. Output is added to the
         # routed result post-reduce.
         self.shared_experts = (
-            BailingDenseMLP(config, config.moe_intermediate_size * config.num_shared_experts)
+            BailingDenseMLP(
+                config,
+                config.moe_intermediate_size * config.num_shared_experts,
+                swiglu_limit=shared_swiglu_limit,
+            )
             if config.num_shared_experts is not None
             else None
         )
         # Inference-only fused weight buffers, populated by
         # ``prepare_infer_weights``. w1 stacks the (gate, up) projections per
         # expert; w2 holds the per-expert down projection.
-        self.register_buffer("_infer_gate_weight", torch.empty(0), persistent=False)
-        self.register_buffer("_infer_up_weight", torch.empty(0), persistent=False)
-        self.register_buffer("_infer_down_weight", torch.empty(0), persistent=False)
         self.register_buffer("_infer_w1_weight", torch.empty(0), persistent=False)
         self.register_buffer("_infer_w2_weight", torch.empty(0), persistent=False)
         self._infer_weights_ready = False
@@ -285,6 +290,7 @@ class BailingSparseMoeBlock(nn.Module):
             intermediate_size=self.config.moe_intermediate_size,
             top_k=self.num_experts_per_tok,
             routed_scaling_factor=self.config.routed_scaling_factor,
+            swiglu_limit=expert_swiglu_limit,
         )
 
     def route(self, hidden_states: torch.Tensor, num_padding_tokens: int = 0) -> tuple[torch.Tensor, torch.Tensor]:
@@ -352,49 +358,28 @@ class BailingSparseMoeBlock(nn.Module):
 
     @torch.no_grad()
     def prepare_infer_weights(self) -> None:
-        """Stack per-expert weights into contiguous fused tiles for inference.
+        """Materialize contiguous fused expert tiles for inference.
 
         ``_infer_w1_weight`` concatenates (gate, up) per expert so the fused
         kernel does one matmul per expert. ``_infer_w2_weight`` mirrors the
         down projection. Buffers are reused across calls if the shape/device
-        already match to avoid reallocating on every weight refresh.
+        already match to avoid reallocating on every weight refresh. The
+        grouped train weights already use the final fused layout, so build the
+        rollout copies directly and merge LoRA into them without retaining
+        gate/up/down staging buffers.
         """
-        gate_weights, up_weights, down_weights = self.experts.inference_weights()
-        self._infer_gate_weight = self._updated_infer_weight(
-            self._infer_gate_weight, gate_weights.to(dtype=self.config.dtype).contiguous()
-        )
-        self._infer_up_weight = self._updated_infer_weight(
-            self._infer_up_weight, up_weights.to(dtype=self.config.dtype).contiguous()
-        )
-        self._infer_down_weight = self._updated_infer_weight(
-            self._infer_down_weight, down_weights.to(dtype=self.config.dtype).contiguous()
-        )
-        # w1 = [gate || up] along the intermediate dim so SiLU(gate) * up can
-        # be folded into a single fused kernel call.
-        self._infer_w1_weight = self._updated_infer_weight(
+        self._infer_w1_weight, self._infer_w2_weight = self.experts.inference_weights(
             self._infer_w1_weight,
-            torch.cat((self._infer_gate_weight, self._infer_up_weight), dim=1).contiguous(),
+            self._infer_w2_weight,
+            dtype=self.config.dtype,
         )
-        self._infer_w2_weight = self._updated_infer_weight(self._infer_w2_weight, self._infer_down_weight.contiguous())
         self._infer_weights_ready = True
-
-    @torch.no_grad()
-    def _updated_infer_weight(self, current: torch.Tensor, value: torch.Tensor) -> torch.Tensor:
-        # Reuse the existing storage when possible — important when the trainer
-        # keeps swapping weights in and out (e.g. for evaluation cycles).
-        if current.shape == value.shape and current.device == value.device and current.dtype == value.dtype:
-            current.copy_(value)
-            return current
-        return value
 
     @torch.no_grad()
     def clear_infer_weights(self) -> None:
         """Drop the fused inference tiles and reclaim memory."""
-        device = self._infer_gate_weight.device
-        dtype = self._infer_gate_weight.dtype
-        self._infer_gate_weight = torch.empty(0, device=device, dtype=dtype)
-        self._infer_up_weight = torch.empty(0, device=device, dtype=dtype)
-        self._infer_down_weight = torch.empty(0, device=device, dtype=dtype)
+        device = self._infer_w1_weight.device
+        dtype = self._infer_w1_weight.dtype
         self._infer_w1_weight = torch.empty(0, device=device, dtype=dtype)
         self._infer_w2_weight = torch.empty(0, device=device, dtype=dtype)
         self._infer_weights_ready = False
@@ -428,7 +413,7 @@ class BailingGroupedExperts(nn.Module):
     GEMM per expert without materialising per-expert slices.
     """
 
-    def __init__(self, config: ModelConfig):
+    def __init__(self, config: ModelConfig, *, swiglu_limit: float | None = None):
         super().__init__()
         ctx = get_tp_context()
         self.config = config
@@ -441,6 +426,7 @@ class BailingGroupedExperts(nn.Module):
         self.local_expert_end = self.local_expert_start + self.local_num_experts
         self.hidden_size = config.hidden_size
         self.intermediate_size = config.moe_intermediate_size
+        self.swiglu_limit = swiglu_limit
         # fc1 = [gate || up] fused into ``2 * intermediate_size`` rows so
         # SiLU(gate) * up can collapse into a single kernel; fc2 is the down
         # projection back to hidden size.
@@ -502,6 +488,8 @@ class BailingGroupedExperts(nn.Module):
             return all_reduce(flat.new_zeros(flat.shape) + zero)
         hidden, _ = _grouped_linear_forward(self.linear_fc1, x.contiguous(), tokens_per_expert)
         if self.has_active_lora():
+            if "linear_fc1" in self.lora_slots:
+                hidden = hidden + self.lora_slots["linear_fc1"](x, tokens_per_expert)
             gate, up = hidden.chunk(2, dim=-1)
             if "gate_proj" in self.lora_slots:
                 gate = gate + self.lora_slots["gate_proj"](x, tokens_per_expert)
@@ -509,10 +497,13 @@ class BailingGroupedExperts(nn.Module):
                 up = up + self.lora_slots["up_proj"](x, tokens_per_expert)
             hidden = torch.cat((gate, up), dim=-1)
         # Apply routing weight before fc2 so it stays inside the fp32 reduction.
+        gate, up = hidden.chunk(2, dim=-1)
         hidden = (
-            _areno_silu_and_mul_no_compile(hidden) * sorted_route_weight.unsqueeze(-1).to(dtype=hidden.dtype)
+            _swiglu(gate, up, self.swiglu_limit) * sorted_route_weight.unsqueeze(-1).to(dtype=hidden.dtype)
         ).contiguous()
         expert_out, _ = _grouped_linear_forward(self.linear_fc2, hidden, tokens_per_expert)
+        if self.has_active_lora() and "linear_fc2" in self.lora_slots:
+            expert_out = expert_out + self.lora_slots["linear_fc2"](hidden, tokens_per_expert)
         if self.has_active_lora() and "down_proj" in self.lora_slots:
             expert_out = expert_out + self.lora_slots["down_proj"](hidden, tokens_per_expert)
         # Unpermute back to original (batch, seq) order, then scale and reduce.
@@ -563,23 +554,54 @@ class BailingGroupedExperts(nn.Module):
         return gate_weights, up_weights, down_weights
 
     @torch.no_grad()
-    def inference_weights(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Build derived fused-rollout weights without modifying the frozen base."""
+    def inference_weights(
+        self,
+        current_w1: torch.Tensor,
+        current_w2: torch.Tensor,
+        *,
+        dtype: torch.dtype,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Build final fused-rollout weights without modifying the frozen base.
 
-        gate_weights, up_weights, down_weights = self.expert_weights()
-        merged = {
-            "gate_proj": torch.stack(gate_weights, dim=0),
-            "up_proj": torch.stack(up_weights, dim=0),
-            "down_proj": torch.stack(down_weights, dim=0),
-        }
+        The train weights are already stored as ``w1=[gate || up]`` and
+        ``w2=down``. Copy those tensors directly into reusable rollout buffers,
+        then merge each active LoRA delta in place. This keeps only the train
+        and final infer representations alive during conversion.
+        """
+
+        w1 = self._copy_inference_weight(current_w1, self.linear_fc1.weight, dtype=dtype)
+        w2 = self._copy_inference_weight(current_w2, self.linear_fc2.weight, dtype=dtype)
         if self.has_active_lora():
-            for component, weight in merged.items():
-                if component not in self.lora_slots:
-                    continue
-                slot = self.lora_slots[component]
-                delta = torch.bmm(slot.lora_B, slot.lora_A)
-                weight.add_(delta.mul_(slot.scale))
-        return merged["gate_proj"], merged["up_proj"], merged["down_proj"]
+            if "linear_fc1" in self.lora_slots:
+                self._add_lora_delta_(w1, self.lora_slots["linear_fc1"])
+            if "linear_fc2" in self.lora_slots:
+                self._add_lora_delta_(w2, self.lora_slots["linear_fc2"])
+            if "gate_proj" in self.lora_slots:
+                self._add_lora_delta_(w1[:, : self.intermediate_size], self.lora_slots["gate_proj"])
+            if "up_proj" in self.lora_slots:
+                self._add_lora_delta_(w1[:, self.intermediate_size :], self.lora_slots["up_proj"])
+            if "down_proj" in self.lora_slots:
+                self._add_lora_delta_(w2, self.lora_slots["down_proj"])
+        return w1, w2
+
+    @staticmethod
+    @torch.no_grad()
+    def _copy_inference_weight(current: torch.Tensor, source: torch.Tensor, *, dtype: torch.dtype) -> torch.Tensor:
+        """Overwrite a reusable infer buffer from train storage without aliasing it."""
+
+        if current.shape == source.shape and current.device == source.device and current.dtype == dtype:
+            current.copy_(source)
+            return current
+        result = torch.empty(source.shape, device=source.device, dtype=dtype)
+        result.copy_(source)
+        return result
+
+    @staticmethod
+    @torch.no_grad()
+    def _add_lora_delta_(weight: torch.Tensor, slot: nn.Module) -> None:
+        """Accumulate ``scale * B @ A`` directly into its final fused tile."""
+
+        weight.baddbmm_(slot.lora_B, slot.lora_A, beta=1.0, alpha=float(slot.scale.item()))
 
     @torch.no_grad()
     def full_expert_weights(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
@@ -687,8 +709,10 @@ def _cast_linear_weights(module: nn.Module, dtype: torch.dtype) -> None:
 
 
 @torch._dynamo.disable
-def _areno_silu_pair_no_compile(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
-    return areno_silu_and_mul(torch.cat((gate, up), dim=-1))
+def _swiglu(gate: torch.Tensor, up: torch.Tensor, limit: float | None) -> torch.Tensor:
+    if limit is None:
+        return areno_silu_and_mul(torch.cat((gate, up), dim=-1))
+    return F.silu(gate).clamp(max=limit) * up.clamp(min=-limit, max=limit)
 
 
 @torch._dynamo.disable
@@ -758,6 +782,24 @@ def _parse_bool(value: Any, default: bool) -> bool:
         if lowered in {"0", "false", "no", "off"}:
             return False
     return bool(value)
+
+
+def _parse_swiglu_limits(value: Any) -> tuple[float, ...] | None:
+    if value is None:
+        return None
+    if not isinstance(value, Sequence) or isinstance(value, str | bytes):
+        raise ValueError("SwiGLU limit lists must be sequences of non-negative numbers")
+    limits = tuple(float(item) for item in value)
+    if any(limit < 0 for limit in limits):
+        raise ValueError("SwiGLU limits must be non-negative")
+    return limits
+
+
+def _swiglu_limit_for_layer(limits: tuple[float, ...] | None, layer_idx: int) -> float | None:
+    if limits is None or layer_idx < 0 or layer_idx >= len(limits):
+        return None
+    limit = float(limits[layer_idx])
+    return None if limit == 0 else limit
 
 
 class BailingSoftmaxAttention(nn.Module):
@@ -1691,12 +1733,13 @@ class BailingMoeV3ForCausalLM(nn.Module):
 
     @torch.no_grad()
     def prepare_infer_weights(self) -> None:
-        """Prepare KDA LoRA and fused-MoE inference views."""
+        """Prepare infer views and release each expert train tile immediately."""
         for layer in self.layers:
             if isinstance(layer.attention, BailingKDAAttention):
                 layer.attention.prepare_lora_infer_weights()
             if isinstance(layer.mlp, BailingSparseMoeBlock):
                 layer.mlp.prepare_infer_weights()
+                layer.mlp.experts.offload_to_cpu()
 
     @torch.no_grad()
     def clear_infer_weights(self) -> None:
@@ -1933,6 +1976,8 @@ class BailingMoeV3Adapter(ModelAdapter):
             linear_num_value_heads=num_heads,
             sequence_parallel=_parse_bool(hf_config.get("sequence_parallel"), True),
             moe_router_bias_update_rate=float(hf_config.get("moe_router_bias_update_rate", 0.0)),
+            expert_swiglu_limit_list=_parse_swiglu_limits(hf_config.get("expert_swiglu_limit_list")),
+            share_expert_swiglu_limit_list=_parse_swiglu_limits(hf_config.get("share_expert_swiglu_limit_list")),
         )
 
     def build(self, config: ModelConfig) -> nn.Module:
