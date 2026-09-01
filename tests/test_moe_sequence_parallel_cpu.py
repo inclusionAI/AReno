@@ -154,6 +154,142 @@ def test_bailing_router_load_ignores_alignment_tokens(monkeypatch):
         torch.testing.assert_close(gate.local_tokens_per_expert, torch.tensor([1.0, 2.0]))
 
 
+def test_bailing_v3_decoder_checkpoints_attention_and_dense_mlp(monkeypatch):
+    pytest.importorskip("triton")
+    import areno.models.bailing_v3.model as bailing_v3
+
+    checkpointed = []
+
+    def checkpoint(function, states, *args, train_meta=None, infer_meta=None):
+        del train_meta, infer_meta
+        checkpointed.append(function.__name__)
+        return function(states, *args)
+
+    monkeypatch.setattr(bailing_v3, "checkpoint_layer", checkpoint)
+
+    class DenseMlp:
+        pass
+
+    def attention_block(states, position_ids, train_meta, infer_meta):
+        del position_ids, train_meta, infer_meta
+        return states * 2
+
+    def dense_mlp_block(states):
+        return states * 3
+
+    layer = SimpleNamespace(
+        _attention_block=attention_block,
+        _dense_mlp_block=dense_mlp_block,
+        mlp=DenseMlp(),
+    )
+    hidden = torch.ones((1, 2, 2))
+
+    output = bailing_v3.BailingDecoderLayer.forward(
+        layer,
+        hidden,
+        torch.arange(2).unsqueeze(0),
+        SimpleNamespace(num_padding_tokens=0),
+        None,
+    )
+
+    assert checkpointed == ["attention_block", "dense_mlp_block"]
+    torch.testing.assert_close(output, torch.full_like(output, 12))
+
+
+def test_bailing_v3_decoder_keeps_sparse_router_outside_recompute(monkeypatch):
+    pytest.importorskip("triton")
+    import areno.models.bailing_v3.model as bailing_v3
+
+    checkpointed = []
+    route_calls = []
+    expert_calls = []
+
+    def checkpoint(function, states, *args, train_meta=None, infer_meta=None):
+        del train_meta, infer_meta
+        checkpointed.append(function.__name__)
+        return function(states, *args)
+
+    class SparseMlp:
+        def route(self, states, num_padding_tokens):
+            route_calls.append(num_padding_tokens)
+            count = states.numel() // states.shape[-1]
+            return torch.zeros((count, 1), dtype=torch.long), torch.ones((count, 1))
+
+        def forward_with_routes(self, states, topk_idx, topk_weight):
+            expert_calls.append((topk_idx.shape, topk_weight.shape))
+            return states * 3
+
+    monkeypatch.setattr(bailing_v3, "checkpoint_layer", checkpoint)
+    monkeypatch.setattr(bailing_v3, "BailingSparseMoeBlock", SparseMlp)
+    monkeypatch.setattr(bailing_v3, "should_checkpoint_layer", lambda train_meta, infer_meta: True)
+
+    def attention_block(states, position_ids, train_meta, infer_meta):
+        del position_ids, train_meta, infer_meta
+        return states * 2
+
+    layer = SimpleNamespace(
+        _attention_block=attention_block,
+        post_attention_layernorm=lambda states: states,
+        mlp=SparseMlp(),
+    )
+    hidden = torch.ones((1, 2, 2))
+
+    output = bailing_v3.BailingDecoderLayer.forward(
+        layer,
+        hidden,
+        torch.arange(2).unsqueeze(0),
+        SimpleNamespace(num_padding_tokens=1),
+        None,
+    )
+
+    assert checkpointed == ["attention_block", "forward_with_routes"]
+    assert route_calls == [1]
+    assert expert_calls == [((2, 1), (2, 1))]
+    torch.testing.assert_close(output, torch.full_like(output, 12))
+
+
+def test_bailing_v3_decoder_uses_direct_sparse_path_without_checkpoint(monkeypatch):
+    pytest.importorskip("triton")
+    import areno.models.bailing_v3.model as bailing_v3
+
+    direct_calls = []
+
+    class SparseMlp:
+        def __call__(self, states, num_padding_tokens):
+            direct_calls.append(num_padding_tokens)
+            return states * 3
+
+        def route(self, states, num_padding_tokens):
+            raise AssertionError("disabled checkpointing must use the single-gather sparse path")
+
+        def forward_with_routes(self, states, topk_idx, topk_weight):
+            raise AssertionError("disabled checkpointing must use the single-gather sparse path")
+
+    monkeypatch.setattr(bailing_v3, "BailingSparseMoeBlock", SparseMlp)
+
+    def attention_block(states, position_ids, train_meta, infer_meta):
+        del position_ids, train_meta, infer_meta
+        return states * 2
+
+    layer = SimpleNamespace(
+        _attention_block=attention_block,
+        post_attention_layernorm=lambda states: states,
+        mlp=SparseMlp(),
+    )
+    hidden = torch.ones((1, 2, 2))
+
+    output = bailing_v3.BailingDecoderLayer.forward(
+        layer,
+        hidden,
+        torch.arange(2).unsqueeze(0),
+        SimpleNamespace(num_padding_tokens=1, activation_checkpointing=False),
+        None,
+    )
+
+    assert direct_calls == [1]
+    torch.testing.assert_close(output, torch.full_like(output, 12))
+
+
 def test_gemma4_moe_routes_local_shard_then_gathers_expert_inputs(monkeypatch):
     pytest.importorskip("triton")
     import areno.models.gemma4.model as gemma4
