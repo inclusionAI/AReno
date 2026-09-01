@@ -346,7 +346,7 @@ in its description; flags for other algorithms are ignored.
    persistent writable raw-mmap files, copying each bucket back only when the
    next optimizer step needs it. Default: ``none``. This option is supported
    only by the CUDA backend and applies to both FP32-master AdamW and
-   ``--adam-8bit``.
+   ``--adam-8bit`` or ``--adam-4bit``.
 
 ``--optimizer-state-offload-dir DIRECTORY``
    Required when ``--optimizer-state-offload disk`` is selected. Use a fast
@@ -382,6 +382,11 @@ in its description; flags for other algorithms are ignored.
 ``--adam-8bit``
    Use 8-bit Adam moment states instead of FP32 Adam states. Supported by both
    native backends; validate convergence when changing optimizer precision.
+
+``--adam-4bit``
+   Use packed block-wise 4-bit Adam moment states. This option is CUDA-only
+   and cannot be combined with ``--adam-8bit``. See
+   :doc:`../reference/adamw-4bit` for complete usage examples.
 
 ``--unfreeze-mm-tower``
    Train recognized vision/audio encoder tower parameters. Towers are frozen

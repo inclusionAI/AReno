@@ -18,6 +18,9 @@ from areno.engine.optim.adamw_fp32_master import (
     _ParamRef,
 )
 
+_DEFAULT_QUANT_BLOCK_SIZE = 128
+_MAX_FUSED_QUANT_BLOCK_SIZE = 4096
+
 
 @dataclass(slots=True)
 class _Adam8bitBucketState:
@@ -53,7 +56,12 @@ class AdamW8bit(AdamWFP32Master):
         dp_rank: int = 0,
         dp_size: int = 1,
         dp_group: dist.ProcessGroup | None = None,
+        quant_block_size: int = _DEFAULT_QUANT_BLOCK_SIZE,
     ):
+        if quant_block_size < 1 or quant_block_size > _MAX_FUSED_QUANT_BLOCK_SIZE:
+            raise ValueError(
+                f"quant_block_size must be between 1 and {_MAX_FUSED_QUANT_BLOCK_SIZE}, got {quant_block_size}"
+            )
         super().__init__(
             params,
             lr=lr,
@@ -64,6 +72,7 @@ class AdamW8bit(AdamWFP32Master):
             dp_size=dp_size,
             dp_group=dp_group,
         )
+        self.quant_block_size = quant_block_size
         self._states = [_Adam8bitBucketState() for _ in self.buckets]
 
     @torch.no_grad()
@@ -181,6 +190,7 @@ class AdamW8bit(AdamWFP32Master):
             "dp_rank": self.dp_rank,
             "dp_size": self.dp_size,
             "adam_8bit": True,
+            "quant_block_size": self.quant_block_size,
             "state": [
                 {
                     "step": state.step,
@@ -207,6 +217,11 @@ class AdamW8bit(AdamWFP32Master):
             state.offload_group = None
             state.offload_ready_events = ()
         saved_states = state_dict.get("state", [])
+        if "quant_block_size" in state_dict:
+            saved_block_size = int(state_dict["quant_block_size"])
+            if saved_block_size < 1 or saved_block_size > _MAX_FUSED_QUANT_BLOCK_SIZE:
+                raise ValueError(f"invalid saved AdamW8bit quant_block_size: {saved_block_size}")
+            self.quant_block_size = saved_block_size
         for saved, bucket, state in zip(saved_states[: len(self.buckets)], self.buckets, self._states, strict=False):
             if saved is None:
                 continue
@@ -219,21 +234,31 @@ class AdamW8bit(AdamWFP32Master):
             state.exp_avg_q = (
                 None if exp_avg_q is None else exp_avg_q.detach().to(device=device, dtype=torch.uint8).view(-1).clone()
             )
-            state.exp_avg_scale = (
-                None
-                if exp_avg_scale is None
-                else exp_avg_scale.detach().to(device=device, dtype=torch.float32).view(()).clone()
-            )
+            state.exp_avg_scale = None if exp_avg_scale is None else self._restore_scales(exp_avg_scale, bucket, device)
             state.exp_avg_sq_q = (
                 None
                 if exp_avg_sq_q is None
                 else exp_avg_sq_q.detach().to(device=device, dtype=torch.uint8).view(-1).clone()
             )
             state.exp_avg_sq_scale = (
-                None
-                if exp_avg_sq_scale is None
-                else exp_avg_sq_scale.detach().to(device=device, dtype=torch.float32).view(()).clone()
+                None if exp_avg_sq_scale is None else self._restore_scales(exp_avg_sq_scale, bucket, device)
             )
+
+    def _restore_scales(
+        self,
+        saved: torch.Tensor,
+        bucket: _MasterBucket,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """Restore block scales, expanding legacy bucket-level scalar scales."""
+
+        expected = self._bucket_scale_count(bucket)
+        scales = saved.detach().to(device=device, dtype=torch.float32).view(-1)
+        if scales.numel() == 1 and expected != 1:
+            return scales.expand(expected).clone()
+        if scales.numel() != expected:
+            raise ValueError(f"AdamW8bit checkpoint has {scales.numel()} scales for a bucket requiring {expected}")
+        return scales.clone()
 
     @torch.no_grad()
     def _ensure_bucket_state(self, bucket: _MasterBucket, state: _Adam8bitBucketState) -> None:
@@ -252,10 +277,26 @@ class AdamW8bit(AdamWFP32Master):
             state.exp_avg_sq_scale = state.exp_avg_sq_scale.to(device=device)
         if state.exp_avg_q is None:
             state.exp_avg_q = torch.full((bucket.shard_numel,), 128, device=device, dtype=torch.uint8)
-            state.exp_avg_scale = torch.ones((), device=device, dtype=torch.float32)
+            state.exp_avg_scale = torch.ones(self._bucket_scale_count(bucket), device=device, dtype=torch.float32)
         if state.exp_avg_sq_q is None:
             state.exp_avg_sq_q = torch.zeros(bucket.shard_numel, device=device, dtype=torch.uint8)
-            state.exp_avg_sq_scale = torch.ones((), device=device, dtype=torch.float32)
+            state.exp_avg_sq_scale = torch.ones(self._bucket_scale_count(bucket), device=device, dtype=torch.float32)
+
+    def _bucket_scale_count(self, bucket: _MasterBucket) -> int:
+        """Return the number of independently scaled blocks in one DP shard."""
+
+        return sum(_ceil_div(ref.shard_numel, self.quant_block_size) for ref in bucket.refs)
+
+    def _ref_scale_layout(self, bucket: _MasterBucket) -> list[tuple[_ParamRef, int, int]]:
+        """Map each parameter ref to its contiguous range in the scale tensors."""
+
+        layout: list[tuple[_ParamRef, int, int]] = []
+        scale_offset = 0
+        for ref in bucket.refs:
+            block_count = _ceil_div(ref.shard_numel, self.quant_block_size)
+            layout.append((ref, scale_offset, block_count))
+            scale_offset += block_count
+        return layout
 
     def _load_state_offload(self, state: _Adam8bitBucketState, device: torch.device) -> None:
         """Copy one quantized bucket from its persistent raw mmap."""
@@ -287,9 +328,9 @@ class AdamW8bit(AdamWFP32Master):
         return {
             index: {
                 "exp_avg_q": (torch.uint8, (self.buckets[index].shard_numel,)),
-                "exp_avg_scale": (torch.float32, ()),
+                "exp_avg_scale": (torch.float32, (self._bucket_scale_count(self.buckets[index]),)),
                 "exp_avg_sq_q": (torch.uint8, (self.buckets[index].shard_numel,)),
-                "exp_avg_sq_scale": (torch.float32, ()),
+                "exp_avg_sq_scale": (torch.float32, (self._bucket_scale_count(self.buckets[index]),)),
             }
             for index in indices
         }
@@ -371,7 +412,7 @@ class AdamW8bit(AdamWFP32Master):
 
     @torch.no_grad()
     def _step_bucket_8bit(self, bucket: _MasterBucket, state: _Adam8bitBucketState) -> None:
-        """Update all parameter chunks in one bucket using dequantized moments."""
+        """Update one bucket without materializing full FP32 moment tensors."""
 
         assert state.exp_avg_q is not None
         assert state.exp_avg_scale is not None
@@ -383,9 +424,7 @@ class AdamW8bit(AdamWFP32Master):
         bias_correction2 = 1.0 - beta2**state.step
         bias_correction2_sqrt = bias_correction2**0.5
 
-        exp_avg = _dequantize_symmetric(state.exp_avg_q, state.exp_avg_scale)
-        exp_avg_sq = _dequantize_positive(state.exp_avg_sq_q, state.exp_avg_sq_scale)
-        for ref in bucket.refs:
+        for ref, scale_offset, block_count in self._ref_scale_layout(bucket):
             grad = self._gradient_for_ref(bucket, ref)
             if grad is None:
                 continue
@@ -395,8 +434,9 @@ class AdamW8bit(AdamWFP32Master):
                 bucket,
                 ref,
                 grad,
-                exp_avg,
-                exp_avg_sq,
+                state,
+                scale_offset,
+                block_count,
                 beta1,
                 beta2,
                 effective_lr,
@@ -407,8 +447,6 @@ class AdamW8bit(AdamWFP32Master):
                 ref.model_param.grad = None
                 if isinstance(getattr(ref.model_param, "main_grad", None), torch.Tensor):
                     ref.model_param.main_grad = None
-        state.exp_avg_q, state.exp_avg_scale = _quantize_symmetric(exp_avg)
-        state.exp_avg_sq_q, state.exp_avg_sq_scale = _quantize_positive(exp_avg_sq)
         # Collective order is bucket-global, not rank-local. A rank can own
         # no values from a small DP bucket and must still join the gather that
         # refreshes every replicated model parameter.
@@ -422,8 +460,9 @@ class AdamW8bit(AdamWFP32Master):
         bucket: _MasterBucket,
         ref: _ParamRef,
         grad: torch.Tensor,
-        exp_avg: torch.Tensor,
-        exp_avg_sq: torch.Tensor,
+        state: _Adam8bitBucketState,
+        scale_offset: int,
+        block_count: int,
         beta1: float,
         beta2: float,
         effective_lr: float,
@@ -434,22 +473,64 @@ class AdamW8bit(AdamWFP32Master):
 
         if ref.shard_numel == 0:
             return
+        assert state.exp_avg_q is not None
+        assert state.exp_avg_scale is not None
+        assert state.exp_avg_sq_q is not None
+        assert state.exp_avg_sq_scale is not None
         if bucket.grad_shard is not None:
-            grad_shard = grad.to(dtype=torch.float32)
+            grad_shard = grad
         else:
-            grad_shard = grad.narrow(0, ref.shard_start, ref.shard_numel).to(dtype=torch.float32)
+            grad_shard = grad.narrow(0, ref.shard_start, ref.shard_numel)
         model_chunk = ref.model_param.detach().reshape(-1).narrow(0, ref.param_start, ref.numel)
         model_shard = model_chunk.narrow(0, ref.shard_start, ref.shard_numel)
-        weight = model_shard.to(dtype=torch.float32)
-        if self.weight_decay != 0.0:
-            weight.mul_(1.0 - effective_lr * self.weight_decay)
-        moment = exp_avg.narrow(0, ref.shard_bucket_start, ref.shard_numel)
-        variance = exp_avg_sq.narrow(0, ref.shard_bucket_start, ref.shard_numel)
-        moment.mul_(beta1).add_(grad_shard, alpha=1.0 - beta1)
-        variance.mul_(beta2).addcmul_(grad_shard, grad_shard, value=1.0 - beta2)
-        denom = variance.sqrt().div_(bias_correction2_sqrt).add_(self.eps)
-        weight.addcdiv_(moment, denom, value=-step_size)
-        model_shard.copy_(weight)
+        moment_q = state.exp_avg_q.narrow(0, ref.shard_bucket_start, ref.shard_numel)
+        variance_q = state.exp_avg_sq_q.narrow(0, ref.shard_bucket_start, ref.shard_numel)
+        moment_scales = state.exp_avg_scale.narrow(0, scale_offset, block_count)
+        variance_scales = state.exp_avg_sq_scale.narrow(0, scale_offset, block_count)
+
+        if model_shard.is_cuda:
+            from areno.accel.optimizer import areno_adamw_8bit_step
+
+            areno_adamw_8bit_step(
+                model_shard,
+                grad_shard.contiguous(),
+                moment_q,
+                moment_scales,
+                variance_q,
+                variance_scales,
+                block_size=self.quant_block_size,
+                beta1=beta1,
+                beta2=beta2,
+                effective_lr=effective_lr,
+                weight_decay=self.weight_decay,
+                eps=self.eps,
+                step_size=step_size,
+                bias_correction2_sqrt=bias_correction2_sqrt,
+            )
+            return
+
+        for block_index in range(block_count):
+            start = block_index * self.quant_block_size
+            numel = min(self.quant_block_size, ref.shard_numel - start)
+            weight = model_shard.narrow(0, start, numel).to(dtype=torch.float32)
+            block_grad = grad_shard.narrow(0, start, numel).to(dtype=torch.float32)
+            block_moment_q = moment_q.narrow(0, start, numel)
+            block_variance_q = variance_q.narrow(0, start, numel)
+            moment = _dequantize_symmetric(block_moment_q, moment_scales[block_index])
+            variance = _dequantize_positive(block_variance_q, variance_scales[block_index])
+            if self.weight_decay != 0.0:
+                weight.mul_(1.0 - effective_lr * self.weight_decay)
+            moment.mul_(beta1).add_(block_grad, alpha=1.0 - beta1)
+            variance.mul_(beta2).addcmul_(block_grad, block_grad, value=1.0 - beta2)
+            denom = variance.sqrt().div_(bias_correction2_sqrt).add_(self.eps)
+            weight.addcdiv_(moment, denom, value=-step_size)
+            model_shard.narrow(0, start, numel).copy_(weight)
+            quantized_moment, moment_scale = _quantize_symmetric(moment)
+            quantized_variance, variance_scale = _quantize_positive(variance)
+            block_moment_q.copy_(quantized_moment)
+            block_variance_q.copy_(quantized_variance)
+            moment_scales[block_index].copy_(moment_scale)
+            variance_scales[block_index].copy_(variance_scale)
 
 
 def _quantize_symmetric(tensor: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -469,7 +550,7 @@ def _dequantize_symmetric(quantized: torch.Tensor, scale: torch.Tensor) -> torch
 
 
 def _quantize_positive(tensor: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """Quantize a non-negative FP32 tensor to uint8 with one bucket-level scale."""
+    """Quantize one non-negative FP32 block to uint8."""
 
     if tensor.numel() == 0:
         return tensor.to(dtype=torch.uint8), torch.ones((), device=tensor.device, dtype=torch.float32)
@@ -488,3 +569,7 @@ def _cpu_clone(value: torch.Tensor | None) -> torch.Tensor | None:
     """Return an independent CPU copy of an optional quantized-state tensor."""
 
     return None if value is None else value.detach().to(device="cpu").clone()
+
+
+def _ceil_div(numerator: int, denominator: int) -> int:
+    return (numerator + denominator - 1) // denominator

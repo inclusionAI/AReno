@@ -710,6 +710,7 @@ def build_train_command(config: dict[str, Any]) -> list[str]:
         "--tune-params": config.get("tune_params"),
         "--greedy": config.get("greedy"),
         "--adam-8bit": config.get("adam_8bit"),
+        "--adam-4bit": config.get("adam_4bit"),
         "--unfreeze-mm-tower": config.get("unfreeze_multimodal_tower"),
         "--unfreeze-mm-projector": config.get("unfreeze_multimodal_projector"),
         "--drop-rollout-state": config.get("drop_rollout_state"),
@@ -1388,6 +1389,7 @@ def launcher_preflight_action(payload: dict[str, Any]) -> dict[str, Any]:
             "mini_bs": mini_bs,
             "max_running_prompts": 1,
             "adam_8bit": bool_like(config.get("adam_8bit")),
+            "adam_4bit": bool_like(config.get("adam_4bit")),
             "keep_rollout_state": False,
         }
     )

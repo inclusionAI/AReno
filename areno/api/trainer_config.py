@@ -57,6 +57,7 @@ class TrainerConfig:
     weight_decay: float = 1.0e-2
     grad_clip_norm: float = 1.0
     adam_8bit: bool = False
+    adam_4bit: bool = False
     unfreeze_multimodal_tower: bool = False
     unfreeze_multimodal_projector: bool = False
     multimodal_tower_lr: float | None = None
@@ -90,6 +91,10 @@ class TrainerConfig:
             self.backend = self.backend.lower()
         if self.backend not in {"cuda", "mlx"}:
             raise ValueError("backend must be one of: cuda, mlx")
+        if self.adam_4bit and self.adam_8bit:
+            raise ValueError("adam_4bit and adam_8bit are mutually exclusive")
+        if self.adam_4bit and self.backend != "cuda":
+            raise ValueError("adam_4bit is only supported by the CUDA backend")
         if self.attn_backend not in {"flash", "native"}:
             raise ValueError("attn_backend must be one of: flash, native")
         if self.model_hub not in {"hf", "modelscope"}:
@@ -155,6 +160,7 @@ class TrainerConfig:
             "weight_decay": self.weight_decay,
             "grad_clip_norm": self.grad_clip_norm,
             "adam_8bit": self.adam_8bit,
+            "adam_4bit": self.adam_4bit,
             "unfreeze_multimodal_tower": self.unfreeze_multimodal_tower,
             "unfreeze_multimodal_projector": self.unfreeze_multimodal_projector,
             "multimodal_tower_lr": self.multimodal_tower_lr,
