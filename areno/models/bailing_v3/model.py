@@ -91,6 +91,7 @@ from areno.engine.parallel.collectives import (
 )
 from areno.engine.parallel.context import get_tp_context
 from areno.engine.runtime.metadata import InferMeta, TrainMeta
+from areno.engine.runtime.recompute import checkpoint_layer
 from areno.engine.runtime.routing_replay import resolve_sigmoid_routes
 from areno.models._shared.dynamo_wrappers import (
     _areno_depthwise_causal_conv1d_silu_decode_no_compile,
@@ -286,9 +287,23 @@ class BailingSparseMoeBlock(nn.Module):
             routed_scaling_factor=self.config.routed_scaling_factor,
         )
 
-    def forward(self, hidden_states: torch.Tensor, num_padding_tokens: int = 0) -> torch.Tensor:
-        # In SP mode we need the full (un-scattered) hidden states for routing
-        # since the router weight isn't sharded along the sequence dim.
+    def route(self, hidden_states: torch.Tensor, num_padding_tokens: int = 0) -> tuple[torch.Tensor, torch.Tensor]:
+        """Compute routing once so activation recompute can reuse it."""
+
+        if is_sequence_parallel_active():
+            hidden_states = gather_from_sequence_parallel_region(hidden_states)
+        with sequence_parallel_region(False):
+            topk_idx, topk_weight, _ = self.gate(hidden_states, num_padding_tokens)
+        return topk_idx, topk_weight
+
+    def forward_with_routes(
+        self,
+        hidden_states: torch.Tensor,
+        topk_idx: torch.Tensor,
+        topk_weight: torch.Tensor,
+    ) -> torch.Tensor:
+        """Run routed and shared experts with a fixed routing decision."""
+
         moe_sequence_parallel = is_sequence_parallel_active()
         sequence_parallel_hidden_states = hidden_states
         if moe_sequence_parallel:
@@ -296,7 +311,6 @@ class BailingSparseMoeBlock(nn.Module):
         bsz, seqlen, hidden = hidden_states.shape
         expert_input = hidden_states.to(dtype=self.experts.linear_fc1.weight.dtype)
         with sequence_parallel_region(False):
-            topk_idx, topk_weight, _ = self.gate(hidden_states, num_padding_tokens)
             flat = expert_input.view(-1, hidden)
             if self.training or not self._infer_weights_ready:
                 # Permute/unpermute path is autograd-friendly.
@@ -310,6 +324,10 @@ class BailingSparseMoeBlock(nn.Module):
             shared_input = sequence_parallel_hidden_states if moe_sequence_parallel else hidden_states
             out = out + self.shared_experts(shared_input)
         return out
+
+    def forward(self, hidden_states: torch.Tensor, num_padding_tokens: int = 0) -> torch.Tensor:
+        topk_idx, topk_weight = self.route(hidden_states, num_padding_tokens)
+        return self.forward_with_routes(hidden_states, topk_idx, topk_weight)
 
     @torch.no_grad()
     def prepare_infer_weights(self) -> None:
@@ -1520,6 +1538,18 @@ class BailingDecoderLayer(nn.Module):
             else BailingDenseMLP(config, config.intermediate_size)
         )
 
+    def _attention_block(
+        self,
+        hidden_states: torch.Tensor,
+        position_ids: torch.Tensor,
+        train_meta: TrainMeta | None,
+        infer_meta: InferMeta | None,
+    ) -> torch.Tensor:
+        return self.attention(self.input_layernorm(hidden_states), position_ids, train_meta, infer_meta)
+
+    def _dense_mlp_block(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return self.mlp(self.post_attention_layernorm(hidden_states))
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -1527,17 +1557,38 @@ class BailingDecoderLayer(nn.Module):
         train_meta: TrainMeta | None,
         infer_meta: InferMeta | None,
     ) -> torch.Tensor:
-        # Standard pre-norm residual: norm -> sublayer -> add.
+        # Checkpoint attention for every Ling/Bailing V3 layer. Sparse MoE
+        # routing remains outside recomputation so its load counters are not
+        # accumulated twice and rollout-replayed routes stay authoritative.
         residual = hidden_states
-        hidden_states = residual + self.attention(
-            self.input_layernorm(hidden_states), position_ids, train_meta, infer_meta
+        hidden_states = residual + checkpoint_layer(
+            self._attention_block,
+            hidden_states,
+            position_ids,
+            train_meta,
+            infer_meta,
+            train_meta=train_meta,
+            infer_meta=infer_meta,
         )
         residual = hidden_states
-        mlp_input = self.post_attention_layernorm(hidden_states)
         if isinstance(self.mlp, BailingSparseMoeBlock):
+            mlp_input = self.post_attention_layernorm(hidden_states)
             num_padding_tokens = train_meta.num_padding_tokens if train_meta is not None else 0
-            return residual + self.mlp(mlp_input, num_padding_tokens)
-        return residual + self.mlp(mlp_input)
+            topk_idx, topk_weight = self.mlp.route(mlp_input, num_padding_tokens)
+            return residual + checkpoint_layer(
+                self.mlp.forward_with_routes,
+                mlp_input,
+                topk_idx,
+                topk_weight,
+                train_meta=train_meta,
+                infer_meta=infer_meta,
+            )
+        return residual + checkpoint_layer(
+            self._dense_mlp_block,
+            hidden_states,
+            train_meta=train_meta,
+            infer_meta=infer_meta,
+        )
 
 
 class BailingMoeV3ForCausalLM(nn.Module):
