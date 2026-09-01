@@ -46,6 +46,7 @@ AReno documentation
    :caption: Reference
 
    CLI Reference <reference/cli>
+   4-bit AdamW <reference/adamw-4bit>
    SDK Reference <sdk/trainer>
    Supported Models <models/supported>
 
