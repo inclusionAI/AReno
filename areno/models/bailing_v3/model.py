@@ -91,7 +91,7 @@ from areno.engine.parallel.collectives import (
 )
 from areno.engine.parallel.context import get_tp_context
 from areno.engine.runtime.metadata import InferMeta, TrainMeta
-from areno.engine.runtime.recompute import checkpoint_layer
+from areno.engine.runtime.recompute import checkpoint_layer, should_checkpoint_layer
 from areno.engine.runtime.routing_replay import resolve_sigmoid_routes
 from areno.models._shared.dynamo_wrappers import (
     _areno_depthwise_causal_conv1d_silu_decode_no_compile,
@@ -326,8 +326,29 @@ class BailingSparseMoeBlock(nn.Module):
         return out
 
     def forward(self, hidden_states: torch.Tensor, num_padding_tokens: int = 0) -> torch.Tensor:
-        topk_idx, topk_weight = self.route(hidden_states, num_padding_tokens)
-        return self.forward_with_routes(hidden_states, topk_idx, topk_weight)
+        # Preserve the single-gather path used when activation recomputation
+        # is disabled. The split route/experts methods intentionally gather
+        # independently so checkpointed expert recompute can start from the
+        # local SP shard.
+        moe_sequence_parallel = is_sequence_parallel_active()
+        sequence_parallel_hidden_states = hidden_states
+        if moe_sequence_parallel:
+            hidden_states = gather_from_sequence_parallel_region(hidden_states)
+        bsz, seqlen, hidden = hidden_states.shape
+        expert_input = hidden_states.to(dtype=self.experts.linear_fc1.weight.dtype)
+        with sequence_parallel_region(False):
+            topk_idx, topk_weight, _ = self.gate(hidden_states, num_padding_tokens)
+            flat = expert_input.view(-1, hidden)
+            if self.training or not self._infer_weights_ready:
+                out = self.experts(flat, topk_idx, topk_weight).view(bsz, seqlen, hidden)
+            else:
+                out = self._forward_fused_moe(flat, topk_idx, topk_weight).view(bsz, seqlen, hidden)
+        if moe_sequence_parallel:
+            out = scatter_to_sequence_parallel_region(out)
+        if self.shared_experts is not None:
+            shared_input = sequence_parallel_hidden_states if moe_sequence_parallel else hidden_states
+            out = out + self.shared_experts(shared_input)
+        return out
 
     @torch.no_grad()
     def prepare_infer_weights(self) -> None:
@@ -1574,6 +1595,8 @@ class BailingDecoderLayer(nn.Module):
         if isinstance(self.mlp, BailingSparseMoeBlock):
             mlp_input = self.post_attention_layernorm(hidden_states)
             num_padding_tokens = train_meta.num_padding_tokens if train_meta is not None else 0
+            if not should_checkpoint_layer(train_meta, infer_meta):
+                return residual + self.mlp(mlp_input, num_padding_tokens)
             topk_idx, topk_weight = self.mlp.route(mlp_input, num_padding_tokens)
             return residual + checkpoint_layer(
                 self.mlp.forward_with_routes,
