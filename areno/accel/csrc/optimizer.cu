@@ -275,17 +275,14 @@ __global__ void adamw_4bit_rank1_stats_kernel(
     int64_t parameter_shard_start,
     float beta2,
     bool has_state) {
-  __shared__ int invalid_block;
-  const int tid = threadIdx.x;
-  const int64_t local_index = static_cast<int64_t>(blockIdx.x) * blockDim.x + tid;
-  const bool active = local_index < numel;
-  if (tid == 0) {
-    invalid_block = 0;
-  }
-  __syncthreads();
-  float variance = 0.0f;
-  if (active) {
+  // This pass has no block-local reduction. A bounded grid-stride launch
+  // avoids provisioning per-thread CUDA local storage for one thread per
+  // parameter element on very large expert tensors.
+  for (int64_t local_index = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+       local_index < numel;
+       local_index += static_cast<int64_t>(blockDim.x) * gridDim.x) {
     const int64_t parameter_index = parameter_shard_start + local_index;
+    float variance = 0.0f;
     if (has_state) {
       const float old_scale = rank1_scale(previous_scales, shape, strides, ndim, parameter_index);
       const uint8_t code = load_nibble(exp_avg_sq_q + packed_offset, local_index);
@@ -294,18 +291,9 @@ __global__ void adamw_4bit_rank1_stats_kernel(
     const float gradient = load_grad(grad, local_index);
     variance = beta2 * variance + (1.0f - beta2) * gradient * gradient;
     if (!isfinite(gradient) || !isfinite(variance)) {
-      atomicExch(&invalid_block, 1);
-    }
-  }
-  __syncthreads();
-  if (invalid_block != 0) {
-    if (tid == 0) {
       atomicExch(invalid, 1);
+      continue;
     }
-    return;
-  }
-  if (active) {
-    const int64_t parameter_index = parameter_shard_start + local_index;
     int64_t axis_offset = 0;
     for (int64_t axis = 0; axis < ndim; ++axis) {
       const int64_t coordinate = (parameter_index / strides[axis]) % shape[axis];
@@ -663,12 +651,14 @@ void launch_adamw_4bit_rank1_stats(
     torch::Tensor strides,
     int64_t packed_offset,
     int64_t parameter_shard_start,
-    int64_t quant_block_size,
     float beta2,
     bool has_state) {
-  const int blocks = static_cast<int>((grad.numel() + quant_block_size - 1) / quant_block_size);
+  constexpr int threads = 256;
+  constexpr int max_blocks = 4096;
+  int blocks = static_cast<int>((grad.numel() + threads - 1) / threads);
+  blocks = blocks < max_blocks ? blocks : max_blocks;
   const auto stream = at::cuda::getCurrentCUDAStream();
-  adamw_4bit_rank1_stats_kernel<grad_t><<<blocks, static_cast<int>(quant_block_size), 0, stream>>>(
+  adamw_4bit_rank1_stats_kernel<grad_t><<<blocks, threads, 0, stream>>>(
       grad.data_ptr<grad_t>(),
       exp_avg_sq_q.data_ptr<uint8_t>(),
       previous_scales.data_ptr<float>(),
@@ -1056,11 +1046,11 @@ void areno_adamw_4bit_rank1_stats_cuda(
   if (grad.scalar_type() == at::kBFloat16) {
     launch_adamw_4bit_rank1_stats<at::BFloat16>(
         grad, exp_avg_sq_q, previous_scales, updated_scales, invalid, shape, strides, packed_offset,
-        parameter_shard_start, quant_block_size, beta2, has_state);
+        parameter_shard_start, beta2, has_state);
   } else if (grad.scalar_type() == at::kFloat) {
     launch_adamw_4bit_rank1_stats<float>(
         grad, exp_avg_sq_q, previous_scales, updated_scales, invalid, shape, strides, packed_offset,
-        parameter_shard_start, quant_block_size, beta2, has_state);
+        parameter_shard_start, beta2, has_state);
   } else {
     TORCH_CHECK(false, "AdamW4bit rank-1 gradient must be bfloat16 or float32");
   }
