@@ -20,6 +20,7 @@ import queue
 import torch
 import torch.distributed as dist
 
+from areno import _configure_torch_runtime
 from areno.adapters import initialize_lora
 from areno.adapters.peft import export_peft_adapter, load_peft_adapter
 from areno.api.backend.cuda.roles import RoleManager, WorkerRole
@@ -57,6 +58,7 @@ class ArenoWorker:
     """
 
     def __init__(self, config: EngineConfig):
+        _configure_torch_runtime()
         self.config = config
         ctx = get_tp_context()
         self.device = ctx.device

@@ -22,6 +22,7 @@ from collections.abc import Callable
 from pathlib import Path
 from threading import Lock
 
+from areno import _configure_torch_runtime
 from areno.api.backend.base import Backend, BackendCapabilities, register_backend
 from areno.api.backend.common import (
     expand_prompt_features,
@@ -43,6 +44,8 @@ from areno.api.config import CudaConfig
 from areno.api.context import Context
 from areno.api.models import BackendType, RolloutResult, RolloutSequence, SamplingParams, TrainSequence
 from areno.api.roles import ModelRole
+
+_configure_torch_runtime()
 
 logger = logging.getLogger(__name__)
 _SYS_PATH_LOCK = Lock()

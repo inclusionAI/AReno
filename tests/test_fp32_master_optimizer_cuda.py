@@ -35,6 +35,38 @@ def test_fused_low_bit_adamw_matches_cpu_reference(optimizer_cls) -> None:
     torch.testing.assert_close(cuda_param.cpu(), cpu_param, rtol=0.0, atol=2.0e-3)
 
 
+def test_fused_adamw4bit_rank1_matches_bounded_cpu_reference() -> None:
+    shape = (65, 67)
+    initial = torch.linspace(-1.0, 1.0, shape[0] * shape[1]).reshape(shape).to(torch.bfloat16)
+    cuda_param = torch.nn.Parameter(initial.cuda())
+    cpu_param = torch.nn.Parameter(initial.clone())
+    kwargs = {
+        "lr": 2.0e-4,
+        "betas": (0.9, 0.99),
+        "weight_decay": 0.02,
+        "bucket_numel": 1024,
+        "quant_block_size": 128,
+    }
+    cuda_optimizer = AdamW4bit([cuda_param], **kwargs)
+    cpu_optimizer = AdamW4bit([cpu_param], **kwargs)
+
+    for step in range(4):
+        gradient = torch.sin(torch.linspace(-3.0, 2.0, initial.numel()) + step * 0.17).reshape(shape)
+        cuda_param.grad = gradient.to(torch.bfloat16).cuda()
+        cpu_param.grad = gradient.to(torch.bfloat16)
+        cuda_optimizer.step()
+        cpu_optimizer.step()
+
+    torch.testing.assert_close(cuda_param.cpu(), cpu_param, rtol=0.0, atol=2.0e-3)
+    torch.testing.assert_close(
+        cuda_optimizer._states[0].exp_avg_sq_scale.cpu(),
+        cpu_optimizer._states[0].exp_avg_sq_scale,
+        rtol=2.0e-5,
+        atol=1.0e-7,
+    )
+    assert cuda_optimizer._states[0].exp_avg_sq_scale.numel() == sum(shape)
+
+
 def test_fused_fp32_master_adamw_matches_torch_reference() -> None:
     device = torch.device("cuda", 0)
     initial = torch.linspace(-1.0, 1.0, 4099, device=device, dtype=torch.float32).to(torch.bfloat16)

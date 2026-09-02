@@ -257,11 +257,15 @@ class _MlxServeRuntime:
         *,
         max_running_prompts: int,
         decode_progress_interval_s: float,
+        lora: LoraConfig | None,
+        base_model_name_or_path: str | None,
     ) -> None:
         config = MlxConfig(
             model_path=model_path,
+            base_model_name_or_path=base_model_name_or_path,
             max_running_prompts=max_running_prompts,
             decode_progress_interval_s=decode_progress_interval_s,
+            lora=lora,
         )
         self._trainer = Trainer(1, model_path, backend_type=MLX, custom_config=config)
         self._trainer.init()
@@ -315,14 +319,14 @@ def _create_serve_runtime(
     base_model_name_or_path: str | None,
 ) -> _CudaServeRuntime | _MlxServeRuntime:
     if backend_type == MLX:
-        if lora is not None:
-            raise ValueError("native LoRA serving is only supported by the CUDA backend")
         if world_size != 1 or tp_size != 1:
             raise ValueError("MLX serving requires --world-size 1 and --tp-size 1")
         return _MlxServeRuntime(
             model_path,
             max_running_prompts=max_running_prompts,
             decode_progress_interval_s=decode_progress_interval_s,
+            lora=lora,
+            base_model_name_or_path=base_model_name_or_path,
         )
     del max_running_prompts
     return _CudaServeRuntime(

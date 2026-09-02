@@ -2497,7 +2497,9 @@ function SampleMedia({ jobId, media }) {
       <div className={classNames("sampleMediaGrid", media.length === 1 && "single")}>
         {media.map((item, index) => {
           const source = sampleMediaUrl(jobId, item.source);
-          if (item.type === "video") return <video key={`${item.type}-${item.source}`} src={source} controls preload="metadata" />;
+          if (item.type === "video") {
+            return <video key={`${item.type}-${item.source}`} src={source} autoPlay loop muted playsInline controls preload="metadata" />;
+          }
           if (item.type === "audio") return <audio key={`${item.type}-${item.source}`} src={source} controls preload="metadata" />;
           return <img key={`${item.type}-${item.source}`} src={source} alt={`Sample media ${index + 1}`} loading="lazy" />;
         })}
@@ -2530,19 +2532,15 @@ function SampleView({ samples, jobId, hideTitle = false }) {
     () => Array.from(new Set(orderedSamples.map((sample) => Number(sample.step || 0)))).sort((a, b) => b - a),
     [orderedSamples]
   );
+  const latestStep = stepOptions[0];
   const [selectedStep, setSelectedStep] = useState("");
   const [selectedSampleKey, setSelectedSampleKey] = useState("");
   useEffect(() => {
-    if (!stepOptions.length) {
-      setSelectedStep("");
-      setSelectedSampleKey("");
-      return;
-    }
-    if (selectedStep === "" || !stepOptions.includes(Number(selectedStep))) {
-      setSelectedStep(String(stepOptions[0]));
-      setSelectedSampleKey("");
-    }
-  }, [selectedStep, stepOptions]);
+    // Follow a newly captured rollout step, while leaving manual selection
+    // alone between polls that do not advance the latest step.
+    setSelectedStep(latestStep == null ? "" : String(latestStep));
+    setSelectedSampleKey("");
+  }, [jobId, latestStep]);
   const stepSamples = selectedStep === "" ? [] : orderedSamples.filter((sample) => Number(sample.step || 0) === Number(selectedStep));
   const sampleOptions = stepSamples.map((sample, index) => ({
     key: sampleKey(sample, index),
@@ -2571,7 +2569,7 @@ function SampleView({ samples, jobId, hideTitle = false }) {
       </div>}
       {sample ? (
         <div className="sampleContent">
-          <SampleMedia jobId={jobId} media={media} />
+          <SampleMedia key={activeOption?.key} jobId={jobId} media={media} />
           <div className="sampleGrid">
             <div>
               <span>Prompt</span>

@@ -57,9 +57,15 @@ class CudaConfig:
 
 @dataclass(slots=True)
 class MlxConfig:
-    """Configuration for the in-process MLX/MLX-LM backend."""
+    """Configuration for the in-process MLX/MLX-LM backend.
+
+    ``adapter_path`` is the legacy MLX-LM-native adapter input. ``lora`` is
+    the AReno PEFT-compatible LoRA configuration shared with the CUDA backend;
+    the two adapter mechanisms cannot be combined.
+    """
 
     model_path: str | None = None
+    base_model_name_or_path: str | None = field(default=None, kw_only=True)
     adapter_path: str | None = None
     optimizer: dict[str, Any] = field(default_factory=dict)
     max_running_prompts: int = 32
@@ -72,6 +78,19 @@ class MlxConfig:
     logits_chunk_size: int = 4096
     compile_train_step: bool = True
     gradient_checkpointing: bool = True
+    lora: LoraConfig | None = None
+    reference_mode: Literal["independent", "reuse_actor_base"] = "independent"
+
+    def __post_init__(self) -> None:
+        if self.adapter_path is not None and self.lora is not None:
+            raise ValueError("MlxConfig.adapter_path cannot be combined with MlxConfig.lora")
+        if self.reference_mode != "independent":
+            raise ValueError("MLX currently supports only reference_mode='independent'")
+        if self.lora is not None and any(
+            bool(self.optimizer.get(option))
+            for option in ("unfreeze_multimodal_tower", "unfreeze_multimodal_projector")
+        ):
+            raise ValueError("MLX LoRA cannot be combined with multimodal tower or projector unfreezing")
 
 
 BackendConfig = CudaConfig | MlxConfig

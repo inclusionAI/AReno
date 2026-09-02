@@ -11,7 +11,6 @@
 namespace {
 
 constexpr int kAttentionThreads = 256;
-constexpr int kAttentionTileN = 16;
 
 int64_t attention_tile_n(int64_t head_dim) {
   if (head_dim <= 256) {
