@@ -2497,7 +2497,9 @@ function SampleMedia({ jobId, media }) {
       <div className={classNames("sampleMediaGrid", media.length === 1 && "single")}>
         {media.map((item, index) => {
           const source = sampleMediaUrl(jobId, item.source);
-          if (item.type === "video") return <video key={`${item.type}-${item.source}`} src={source} controls preload="metadata" />;
+          if (item.type === "video") {
+            return <video key={`${item.type}-${item.source}`} src={source} autoPlay loop muted playsInline controls preload="metadata" />;
+          }
           if (item.type === "audio") return <audio key={`${item.type}-${item.source}`} src={source} controls preload="metadata" />;
           return <img key={`${item.type}-${item.source}`} src={source} alt={`Sample media ${index + 1}`} loading="lazy" />;
         })}
