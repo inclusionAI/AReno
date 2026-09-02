@@ -76,6 +76,8 @@ def areno_adamw_8bit_step(
     exp_avg_scale: torch.Tensor,
     exp_avg_sq_q: torch.Tensor,
     exp_avg_sq_scale: torch.Tensor,
+    signed_codebook: torch.Tensor,
+    unsigned_codebook: torch.Tensor,
     *,
     block_size: int,
     beta1: float,
@@ -88,7 +90,16 @@ def areno_adamw_8bit_step(
 ) -> None:
     """Update block-quantized AdamW state without full FP32 moments."""
 
-    tensors = (model, grad, exp_avg_q, exp_avg_scale, exp_avg_sq_q, exp_avg_sq_scale)
+    tensors = (
+        model,
+        grad,
+        exp_avg_q,
+        exp_avg_scale,
+        exp_avg_sq_q,
+        exp_avg_sq_scale,
+        signed_codebook,
+        unsigned_codebook,
+    )
     if any(not tensor.is_cuda for tensor in tensors):
         raise ValueError("fused 8-bit AdamW requires CUDA tensors")
     if any(tensor.device != model.device for tensor in tensors[1:]):
@@ -101,6 +112,10 @@ def areno_adamw_8bit_step(
         raise TypeError("quantized Adam moments must use uint8")
     if exp_avg_scale.dtype != torch.float32 or exp_avg_sq_scale.dtype != torch.float32:
         raise TypeError("quantized Adam scales must use float32")
+    if signed_codebook.dtype != torch.float32 or unsigned_codebook.dtype != torch.float32:
+        raise TypeError("dynamic quantization codebooks must use float32")
+    if signed_codebook.numel() != 256 or unsigned_codebook.numel() != 256:
+        raise ValueError("dynamic quantization codebooks must contain 256 entries")
     if any(not tensor.is_contiguous() for tensor in tensors):
         raise ValueError("fused 8-bit AdamW requires contiguous tensors")
     if model.numel() != grad.numel() or model.numel() != exp_avg_q.numel():
@@ -119,7 +134,57 @@ def areno_adamw_8bit_step(
         exp_avg_scale,
         exp_avg_sq_q,
         exp_avg_sq_scale,
+        signed_codebook,
+        unsigned_codebook,
         block_size,
+        beta1,
+        beta2,
+        effective_lr,
+        weight_decay,
+        eps,
+        step_size,
+        bias_correction2_sqrt,
+    )
+
+
+@torch._dynamo.disable
+@torch.no_grad()
+def areno_adamw_fp32_state_step(
+    model: torch.Tensor,
+    grad: torch.Tensor,
+    exp_avg: torch.Tensor,
+    exp_avg_sq: torch.Tensor,
+    *,
+    beta1: float,
+    beta2: float,
+    effective_lr: float,
+    weight_decay: float,
+    eps: float,
+    step_size: float,
+    bias_correction2_sqrt: float,
+) -> None:
+    """Update BF16/FP32 weights with persistent FP32 Adam moments."""
+
+    tensors = (model, grad, exp_avg, exp_avg_sq)
+    if any(not tensor.is_cuda for tensor in tensors):
+        raise ValueError("fused FP32-state AdamW requires CUDA tensors")
+    if any(tensor.device != model.device for tensor in tensors[1:]):
+        raise ValueError("fused FP32-state AdamW requires every tensor on the model device")
+    if model.dtype not in {torch.bfloat16, torch.float32}:
+        raise TypeError(f"fused FP32-state AdamW requires bfloat16 or float32 model weights, got {model.dtype}")
+    if grad.dtype not in {torch.bfloat16, torch.float32}:
+        raise TypeError(f"fused FP32-state AdamW requires bfloat16 or float32 gradients, got {grad.dtype}")
+    if exp_avg.dtype != torch.float32 or exp_avg_sq.dtype != torch.float32:
+        raise TypeError("FP32-state Adam moments must use float32")
+    if any(not tensor.is_contiguous() for tensor in tensors):
+        raise ValueError("fused FP32-state AdamW requires contiguous tensors")
+    if any(tensor.numel() != model.numel() for tensor in tensors[1:]):
+        raise ValueError("model, gradient, and FP32 moments must have the same number of elements")
+    extension().areno_adamw_fp32_state_step(
+        model,
+        grad,
+        exp_avg,
+        exp_avg_sq,
         beta1,
         beta2,
         effective_lr,
@@ -200,4 +265,9 @@ def areno_adamw_4bit_step(
     )
 
 
-__all__ = ["areno_adamw_4bit_step", "areno_adamw_8bit_step", "areno_adamw_fp32_master_step"]
+__all__ = [
+    "areno_adamw_4bit_step",
+    "areno_adamw_8bit_step",
+    "areno_adamw_fp32_master_step",
+    "areno_adamw_fp32_state_step",
+]

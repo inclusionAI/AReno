@@ -31,6 +31,25 @@ __device__ __forceinline__ uint8_t nearest_signed_dynamic_code(float normalized)
   return best;
 }
 
+__device__ __forceinline__ uint8_t nearest_dynamic_code(float value, const float* codebook) {
+  int lower = 0;
+  int upper = 255;
+  while (lower < upper) {
+    const int middle = (lower + upper) >> 1;
+    if (codebook[middle] < value) {
+      lower = middle + 1;
+    } else {
+      upper = middle;
+    }
+  }
+  if (lower == 0) {
+    return 0;
+  }
+  const float left_distance = fabsf(value - codebook[lower - 1]);
+  const float right_distance = fabsf(codebook[lower] - value);
+  return static_cast<uint8_t>(left_distance <= right_distance ? lower - 1 : lower);
+}
+
 __device__ __forceinline__ float adamw_update(
     float master,
     float grad,
@@ -397,6 +416,8 @@ __global__ void adamw_8bit_blockwise_kernel(
     float* exp_avg_scale,
     uint8_t* exp_avg_sq_q,
     float* exp_avg_sq_scale,
+    const float* signed_codebook,
+    const float* unsigned_codebook,
     int64_t numel,
     int64_t quant_block_size,
     float beta1,
@@ -410,6 +431,7 @@ __global__ void adamw_8bit_blockwise_kernel(
   constexpr int max_warps = 8;
   __shared__ float warp_moment_maxima[max_warps];
   __shared__ float warp_variance_maxima[max_warps];
+  __shared__ int invalid_block;
 
   const int64_t block_start = static_cast<int64_t>(blockIdx.x) * quant_block_size;
   const int64_t remaining = numel - block_start;
@@ -418,12 +440,16 @@ __global__ void adamw_8bit_blockwise_kernel(
   const float old_variance_scale = exp_avg_sq_scale[blockIdx.x];
   float local_moment_max = 0.0f;
   float local_variance_max = 0.0f;
+  if (threadIdx.x == 0) {
+    invalid_block = 0;
+  }
+  __syncthreads();
 
   for (int64_t offset = threadIdx.x; offset < block_numel; offset += blockDim.x) {
     const int64_t index = block_start + offset;
     const float gradient = load_grad(grad, index);
-    float moment = (static_cast<int>(exp_avg_q[index]) - 128) * old_moment_scale;
-    float variance = static_cast<float>(exp_avg_sq_q[index]) * old_variance_scale;
+    float moment = signed_codebook[exp_avg_q[index]] * old_moment_scale;
+    float variance = unsigned_codebook[exp_avg_sq_q[index]] * old_variance_scale;
     float weight = load_model(model, index);
     weight = adamw_update(
         weight,
@@ -437,7 +463,9 @@ __global__ void adamw_8bit_blockwise_kernel(
         eps,
         step_size,
         bias_correction2_sqrt);
-    store_model(model, index, weight);
+    if (!isfinite(gradient) || !isfinite(moment) || !isfinite(variance) || !isfinite(weight)) {
+      atomicExch(&invalid_block, 1);
+    }
     local_moment_max = fmaxf(local_moment_max, fabsf(moment));
     local_variance_max = fmaxf(local_variance_max, variance);
   }
@@ -454,6 +482,9 @@ __global__ void adamw_8bit_blockwise_kernel(
     warp_variance_maxima[warp] = local_variance_max;
   }
   __syncthreads();
+  if (invalid_block != 0) {
+    return;
+  }
 
   if (warp == 0) {
     const int warp_count = blockDim.x / warp_size;
@@ -466,8 +497,8 @@ __global__ void adamw_8bit_blockwise_kernel(
           fmaxf(block_variance_max, __shfl_down_sync(0xFFFFFFFFu, block_variance_max, offset));
     }
     if (lane == 0) {
-      exp_avg_scale[blockIdx.x] = fmaxf(block_moment_max / 127.0f, 1.0e-30f);
-      exp_avg_sq_scale[blockIdx.x] = fmaxf(block_variance_max / 255.0f, 1.0e-30f);
+      exp_avg_scale[blockIdx.x] = block_moment_max;
+      exp_avg_sq_scale[blockIdx.x] = block_variance_max;
     }
   }
   __syncthreads();
@@ -476,14 +507,49 @@ __global__ void adamw_8bit_blockwise_kernel(
   for (int64_t offset = threadIdx.x; offset < block_numel; offset += blockDim.x) {
     const int64_t index = block_start + offset;
     const float gradient = load_grad(grad, index);
-    const float moment =
-        beta1 * (static_cast<int>(exp_avg_q[index]) - 128) * old_moment_scale + (1.0f - beta1) * gradient;
-    const float variance = beta2 * static_cast<float>(exp_avg_sq_q[index]) * old_variance_scale +
-        (1.0f - beta2) * gradient * gradient;
-    const float moment_q = nearbyintf(moment / new_moment_scale) + 128.0f;
-    const float variance_q = nearbyintf(variance / new_variance_scale);
-    exp_avg_q[index] = static_cast<uint8_t>(fminf(fmaxf(moment_q, 0.0f), 255.0f));
-    exp_avg_sq_q[index] = static_cast<uint8_t>(fminf(fmaxf(variance_q, 0.0f), 255.0f));
+    const float previous_moment = signed_codebook[exp_avg_q[index]] * old_moment_scale;
+    const float previous_variance = unsigned_codebook[exp_avg_sq_q[index]] * old_variance_scale;
+    const float moment = beta1 * previous_moment + (1.0f - beta1) * gradient;
+    const float variance = beta2 * previous_variance + (1.0f - beta2) * gradient * gradient;
+    float weight = load_model(model, index);
+    if (weight_decay != 0.0f) {
+      weight *= 1.0f - effective_lr * weight_decay;
+    }
+    const float denom = sqrtf(variance) / bias_correction2_sqrt + eps;
+    weight -= step_size * moment / denom;
+    const float normalized_moment = moment / fmaxf(new_moment_scale, 1.0e-30f);
+    const float normalized_variance = variance / fmaxf(new_variance_scale, 1.0e-30f);
+    exp_avg_q[index] = nearest_dynamic_code(normalized_moment, signed_codebook);
+    exp_avg_sq_q[index] = nearest_dynamic_code(normalized_variance, unsigned_codebook);
+    store_model(model, index, weight);
+  }
+}
+
+template <typename model_t, typename grad_t>
+__global__ void adamw_fp32_state_kernel(
+    model_t* model,
+    const grad_t* grad,
+    float* exp_avg,
+    float* exp_avg_sq,
+    int64_t numel,
+    float beta1,
+    float beta2,
+    float effective_lr,
+    float weight_decay,
+    float eps,
+    float step_size,
+    float bias_correction2_sqrt) {
+  for (int64_t index = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+       index < numel;
+       index += static_cast<int64_t>(blockDim.x) * gridDim.x) {
+    float moment = exp_avg[index];
+    float variance = exp_avg_sq[index];
+    const float weight = adamw_update(
+        load_model(model, index), load_grad(grad, index), moment, variance, beta1, beta2,
+        effective_lr, weight_decay, eps, step_size, bias_correction2_sqrt);
+    exp_avg[index] = moment;
+    exp_avg_sq[index] = variance;
+    store_model(model, index, weight);
   }
 }
 
@@ -495,6 +561,8 @@ void launch_adamw_8bit(
     torch::Tensor exp_avg_scale,
     torch::Tensor exp_avg_sq_q,
     torch::Tensor exp_avg_sq_scale,
+    torch::Tensor signed_codebook,
+    torch::Tensor unsigned_codebook,
     int64_t quant_block_size,
     float beta1,
     float beta2,
@@ -513,6 +581,8 @@ void launch_adamw_8bit(
       exp_avg_scale.data_ptr<float>(),
       exp_avg_sq_q.data_ptr<uint8_t>(),
       exp_avg_sq_scale.data_ptr<float>(),
+      signed_codebook.data_ptr<float>(),
+      unsigned_codebook.data_ptr<float>(),
       model.numel(),
       quant_block_size,
       beta1,
@@ -522,6 +592,28 @@ void launch_adamw_8bit(
       eps,
       step_size,
       bias_correction2_sqrt);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+template <typename model_t, typename grad_t>
+void launch_adamw_fp32_state(
+    torch::Tensor model,
+    torch::Tensor grad,
+    torch::Tensor exp_avg,
+    torch::Tensor exp_avg_sq,
+    float beta1,
+    float beta2,
+    float effective_lr,
+    float weight_decay,
+    float eps,
+    float step_size,
+    float bias_correction2_sqrt) {
+  constexpr int threads = 256;
+  const int blocks = static_cast<int>((model.numel() + threads - 1) / threads);
+  const auto stream = at::cuda::getCurrentCUDAStream();
+  adamw_fp32_state_kernel<model_t, grad_t><<<blocks, threads, 0, stream>>>(
+      model.data_ptr<model_t>(), grad.data_ptr<grad_t>(), exp_avg.data_ptr<float>(), exp_avg_sq.data_ptr<float>(),
+      model.numel(), beta1, beta2, effective_lr, weight_decay, eps, step_size, bias_correction2_sqrt);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
@@ -614,6 +706,8 @@ void areno_adamw_8bit_step_cuda(
     torch::Tensor exp_avg_scale,
     torch::Tensor exp_avg_sq_q,
     torch::Tensor exp_avg_sq_scale,
+    torch::Tensor signed_codebook,
+    torch::Tensor unsigned_codebook,
     int64_t quant_block_size,
     double beta1,
     double beta2,
@@ -625,11 +719,13 @@ void areno_adamw_8bit_step_cuda(
   c10::cuda::CUDAGuard guard(model.device());
   TORCH_CHECK(
       model.is_cuda() && grad.is_cuda() && exp_avg_q.is_cuda() && exp_avg_scale.is_cuda() &&
-          exp_avg_sq_q.is_cuda() && exp_avg_sq_scale.is_cuda(),
+          exp_avg_sq_q.is_cuda() && exp_avg_sq_scale.is_cuda() && signed_codebook.is_cuda() &&
+          unsigned_codebook.is_cuda(),
       "all 8-bit AdamW inputs must be CUDA tensors");
   TORCH_CHECK(
       model.is_contiguous() && grad.is_contiguous() && exp_avg_q.is_contiguous() && exp_avg_scale.is_contiguous() &&
-          exp_avg_sq_q.is_contiguous() && exp_avg_sq_scale.is_contiguous(),
+          exp_avg_sq_q.is_contiguous() && exp_avg_sq_scale.is_contiguous() && signed_codebook.is_contiguous() &&
+          unsigned_codebook.is_contiguous(),
       "all 8-bit AdamW inputs must be contiguous");
   TORCH_CHECK(model.numel() == grad.numel(), "model and gradient sizes must match");
   TORCH_CHECK(model.numel() == exp_avg_q.numel(), "model and first-moment sizes must match");
@@ -638,11 +734,14 @@ void areno_adamw_8bit_step_cuda(
   const int64_t block_count = (model.numel() + quant_block_size - 1) / quant_block_size;
   TORCH_CHECK(exp_avg_scale.numel() == block_count, "first-moment scale count must match quantization blocks");
   TORCH_CHECK(exp_avg_sq_scale.numel() == block_count, "second-moment scale count must match quantization blocks");
+  TORCH_CHECK(signed_codebook.numel() == 256, "signed dynamic codebook must have 256 entries");
+  TORCH_CHECK(unsigned_codebook.numel() == 256, "unsigned dynamic codebook must have 256 entries");
 
-#define LAUNCH_ADAMW8(MODEL_T, GRAD_T)                                                                \
-  launch_adamw_8bit<MODEL_T, GRAD_T>(                                                                 \
-      model, grad, exp_avg_q, exp_avg_scale, exp_avg_sq_q, exp_avg_sq_scale, quant_block_size, beta1, \
-      beta2, effective_lr, weight_decay, eps, step_size, bias_correction2_sqrt)
+#define LAUNCH_ADAMW8(MODEL_T, GRAD_T)                                                              \
+  launch_adamw_8bit<MODEL_T, GRAD_T>(                                                               \
+      model, grad, exp_avg_q, exp_avg_scale, exp_avg_sq_q, exp_avg_sq_scale, signed_codebook,        \
+      unsigned_codebook, quant_block_size, beta1, beta2, effective_lr, weight_decay, eps, step_size, \
+      bias_correction2_sqrt)
 
   if (model.scalar_type() == at::kBFloat16 && grad.scalar_type() == at::kBFloat16) {
     LAUNCH_ADAMW8(at::BFloat16, at::BFloat16);
@@ -656,4 +755,46 @@ void areno_adamw_8bit_step_cuda(
     TORCH_CHECK(false, "model and gradient must be bfloat16 or float32");
   }
 #undef LAUNCH_ADAMW8
+}
+
+void areno_adamw_fp32_state_step_cuda(
+    torch::Tensor model,
+    torch::Tensor grad,
+    torch::Tensor exp_avg,
+    torch::Tensor exp_avg_sq,
+    double beta1,
+    double beta2,
+    double effective_lr,
+    double weight_decay,
+    double eps,
+    double step_size,
+    double bias_correction2_sqrt) {
+  c10::cuda::CUDAGuard guard(model.device());
+  TORCH_CHECK(
+      model.is_cuda() && grad.is_cuda() && exp_avg.is_cuda() && exp_avg_sq.is_cuda(),
+      "all FP32-state AdamW inputs must be CUDA tensors");
+  TORCH_CHECK(
+      model.is_contiguous() && grad.is_contiguous() && exp_avg.is_contiguous() && exp_avg_sq.is_contiguous(),
+      "all FP32-state AdamW inputs must be contiguous");
+  TORCH_CHECK(model.numel() == grad.numel(), "model and gradient sizes must match");
+  TORCH_CHECK(model.numel() == exp_avg.numel(), "model and first-moment sizes must match");
+  TORCH_CHECK(model.numel() == exp_avg_sq.numel(), "model and second-moment sizes must match");
+
+#define LAUNCH_ADAMW_FP32_STATE(MODEL_T, GRAD_T)                                                     \
+  launch_adamw_fp32_state<MODEL_T, GRAD_T>(                                                         \
+      model, grad, exp_avg, exp_avg_sq, beta1, beta2, effective_lr, weight_decay, eps, step_size,    \
+      bias_correction2_sqrt)
+
+  if (model.scalar_type() == at::kBFloat16 && grad.scalar_type() == at::kBFloat16) {
+    LAUNCH_ADAMW_FP32_STATE(at::BFloat16, at::BFloat16);
+  } else if (model.scalar_type() == at::kBFloat16 && grad.scalar_type() == at::kFloat) {
+    LAUNCH_ADAMW_FP32_STATE(at::BFloat16, float);
+  } else if (model.scalar_type() == at::kFloat && grad.scalar_type() == at::kBFloat16) {
+    LAUNCH_ADAMW_FP32_STATE(float, at::BFloat16);
+  } else if (model.scalar_type() == at::kFloat && grad.scalar_type() == at::kFloat) {
+    LAUNCH_ADAMW_FP32_STATE(float, float);
+  } else {
+    TORCH_CHECK(false, "model and gradient must be bfloat16 or float32");
+  }
+#undef LAUNCH_ADAMW_FP32_STATE
 }

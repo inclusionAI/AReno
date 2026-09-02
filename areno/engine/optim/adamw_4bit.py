@@ -49,6 +49,13 @@ class AdamW4bit(AdamW8bit):
     state directly with a fused block-wise kernel.
     """
 
+    _embedding_fp32_state = False
+    state_quantizer = "signed-de4/zero-excluding-linear4"
+
+    def _precision_for_parameter(self, parameter: torch.nn.Parameter) -> str:
+        del parameter
+        return "8bit"
+
     def __init__(
         self,
         params: Iterable[torch.nn.Parameter],
@@ -82,6 +89,14 @@ class AdamW4bit(AdamW8bit):
 
         payload = super().state_dict()
         payload.pop("adam_8bit", None)
+        payload.pop("quantizer", None)
+        payload.pop("precision_policy", None)
+        payload.pop("state_memory", None)
+        for state in payload["state"]:
+            state.pop("precision", None)
+            state.pop("quantizer", None)
+            state.pop("exp_avg", None)
+            state.pop("exp_avg_sq", None)
         payload["adam_4bit"] = True
         payload["state_format_version"] = _STATE_FORMAT_VERSION
         payload["quant_block_size"] = self.quant_block_size

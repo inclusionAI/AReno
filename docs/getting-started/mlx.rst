@@ -92,8 +92,12 @@ options have the largest effect on MLX unified-memory use:
    instead of retaining it for the next rollout.
 
 ``--adam-8bit``
-   Stores Adam moment state in the MLX backend's 8-bit representation. This
-   reduces optimizer memory; validate convergence for the target task.
+   Stores non-embedding Adam moments in the same block-wise dynamic 8-bit
+   representation used by the CUDA backend. Token-embedding optimizer moments
+   stay FP32, selected by parameter identity rather than name matching; model
+   weights, gradients, and forward behavior are unchanged. This reduces
+   optimizer memory for the remaining parameters; validate convergence for the
+   target task.
 
 ``--activation-checkpointing``
    Recomputes supported decoder activations during backward. It is enabled by

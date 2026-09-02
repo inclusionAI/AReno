@@ -380,8 +380,22 @@ in its description; flags for other algorithms are ignored.
    Policy optimizer Adam beta2. Default: ``0.999``.
 
 ``--adam-8bit``
-   Use 8-bit Adam moment states instead of FP32 Adam states. Supported by both
-   native backends; validate convergence when changing optimizer precision.
+   Use block-wise 8-bit Adam moment states instead of FP32 Adam states.
+   CUDA and MLX use the signed dynamic-tree codebook for the first moment and
+   the unsigned dynamic codebook for the second moment from *8-Bit Optimizers
+   via Block-wise Quantization*. Token-embedding weights and gradients retain
+   their normal model precision, while their optimizer moments remain FP32 to
+   avoid quantizing embedding-gradient outliers. Other initialized moment
+   state uses two bytes per parameter plus FP32 block scales.
+   CUDA training metrics expose ``adam8_quantized_state_bytes``,
+   ``adam8_fp32_exempt_bytes``, ``adam8_block_metadata_bytes``, and
+   ``adam8_total_bytes`` for initialized DP-local optimizer state.
+
+   This option does not insert a normalization layer or reinitialize a loaded
+   embedding. The paper's Stable Embedding forward architecture is not enabled
+   for AReno's current RoPE-only language models because they do not expose the
+   compatible additive-position-embedding boundary. Supported by both native
+   backends; validate convergence when changing optimizer precision.
 
 ``--adam-4bit``
    Use packed block-wise 4-bit Adam moment states. This option is CUDA-only
