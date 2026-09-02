@@ -19,6 +19,7 @@ from areno.engine.log import configure_default_logging
 # which is what areno's TP/DP all-reduce + all-gather patterns assume.
 os.environ.setdefault("CUDA_DEVICE_MAX_CONNECTIONS", "1")
 
+
 def _configure_torch_runtime() -> None:
     """Apply CUDA runtime defaults only when a Torch-backed API is requested."""
 
@@ -34,6 +35,7 @@ def _configure_torch_runtime() -> None:
         dynamo.config.accumulated_cache_size_limit = max(dynamo.config.accumulated_cache_size_limit, 256)
     except AttributeError:
         pass
+
 
 configure_default_logging()
 
