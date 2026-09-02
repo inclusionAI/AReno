@@ -482,3 +482,149 @@ def _print_env_report(report: dict[str, Any]) -> None:
     click.echo("  Environment variables:")
     for name, value in report["env"].items():
         click.echo(f"    {name}={value if value is not None else '<unset>'}")
+
+
+# ---------------------------------------------------------------------------
+# token-report command
+# ---------------------------------------------------------------------------
+
+
+@click.command(name="token-report", context_settings={"help_option_names": ["-h", "--help"]})
+@click.option("--dataset-path", required=True, help="Path to a local JSONL dataset file (one JSON object per line).")
+@click.option("--tokenizer", "tokenizer_path", required=True, help="Model path for tokenizer loading.")
+@click.option("--max-context", default=4096, type=int, help="Maximum context length for over-context stats.")
+@click.option("--sample-ratio", default=1.0, type=float, help="Fraction to sample (1.0 = full scan).")
+@click.option("--sample-seed", default=None, type=int, help="Random seed for deterministic sampling.")
+@click.option("--response-field", default=None, help="Dataset field to measure response length.")
+@click.option("--prompt-field", default="prompt", help="Dataset field containing prompt text.")
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON output.")
+def token_report_command(
+    dataset_path: str,
+    tokenizer_path: str,
+    max_context: int,
+    sample_ratio: float,
+    sample_seed: int | None,
+    response_field: str | None,
+    prompt_field: str,
+    as_json: bool,
+) -> None:
+    """Report token-length distributions and context capacity."""
+
+    report = _run_token_report(
+        dataset_path=dataset_path,
+        tokenizer_path=tokenizer_path,
+        max_context=max_context,
+        sample_ratio=sample_ratio,
+        sample_seed=sample_seed,
+        response_field=response_field,
+        prompt_field=prompt_field,
+    )
+    if as_json:
+        click.echo(json.dumps(report.as_dict(), indent=2, sort_keys=True))
+    else:
+        _print_token_report(report, dataset_path, tokenizer_path)
+
+
+def _run_token_report(
+    *,
+    dataset_path: str,
+    tokenizer_path: str,
+    max_context: int,
+    sample_ratio: float,
+    sample_seed: int | None,
+    response_field: str | None,
+    prompt_field: str,
+):
+    """Load data and compute the token-length report."""
+
+    from areno.api.data import PromptItem, compute_token_length_report
+    from areno.api.tokenizer import encode_generation_prompt, load_tokenizer
+
+    # Validate inputs before expensive operations
+    if sample_ratio <= 0 or sample_ratio > 1.0:
+        raise click.UsageError(f"sample_ratio must be in (0, 1.0], got {sample_ratio}")
+
+    path = Path(dataset_path)
+    if not path.exists():
+        raise click.UsageError(f"dataset file not found: {dataset_path}")
+
+    # Load tokenizer
+    tokenizer = load_tokenizer(tokenizer_path)
+
+    # Load JSONL dataset
+    items: list[PromptItem] = []
+    with path.open("r", encoding="utf-8") as f:
+        for line_num, line in enumerate(f, 1):
+            line = line.strip()
+            if not line:
+                continue
+            record = json.loads(line)
+            prompt_text = record.get(prompt_field, "")
+            if not isinstance(prompt_text, str):
+                raise click.UsageError(
+                    f"line {line_num}: field '{prompt_field}' is not a string, got {type(prompt_text).__name__}"
+                )
+            input_tokens = encode_generation_prompt(tokenizer, prompt_text)
+            items.append(
+                PromptItem(
+                    prompt=prompt_text,
+                    solutions=None,
+                    input_tokens=input_tokens,
+                    record=record,
+                )
+            )
+
+    if not items:
+        raise click.UsageError(f"dataset is empty: {dataset_path}")
+
+    return compute_token_length_report(
+        items,
+        max_context=max_context,
+        sample_ratio=sample_ratio,
+        sample_seed=sample_seed,
+        response_field=response_field,
+        tokenizer=tokenizer,
+    )
+
+
+def _print_token_report(report, dataset_path: str, tokenizer_path: str) -> None:
+    """Print a human-readable token-length report."""
+
+    click.echo("Token Length Distribution Report")
+    click.echo("=" * 40)
+    click.echo(f"Dataset:         {dataset_path}")
+    click.echo(f"Tokenizer:       {tokenizer_path}")
+    click.echo(f"Max context:     {report.max_context}")
+    if report.sampling_seed is not None:
+        click.echo(f"Sampled:         {report.sampled} / {report.total_samples}  seed={report.sampling_seed}")
+    else:
+        click.echo(f"Sampled:         {report.sampled} / {report.total_samples}  (full scan)")
+    click.echo()
+
+    def _print_section(title: str, stats):
+        if stats is None:
+            return
+        click.echo(f"  {title}")
+        click.echo(f"  {'-' * 36}")
+        click.echo(
+            f"  {'count':>6}  {'min':>4}  {'p50':>4}  {'p90':>4}  {'p95':>4}  {'p99':>4}  {'max':>5}  {'mean':>6}"
+        )
+        click.echo(
+            f"  {stats.count:>6}  {stats.min:>4}  {stats.p50:>4}  {stats.p90:>4}  {stats.p95:>4}  {stats.p99:>4}"
+            f"  {stats.max:>5}  {stats.mean:>6.1f}"
+        )
+        click.echo()
+
+    _print_section("Prompt Length", report.prompt_stats)
+    _print_section("Response Length", report.response_stats)
+    _print_section("Total Length", report.total_stats)
+
+    click.echo(f"  Over-context (max={report.max_context})")
+    click.echo(f"  {'-' * 36}")
+    click.echo(f"  count:  {report.over_context_count} / {report.sampled} ({report.over_context_pct:.1f}%)")
+    click.echo()
+
+    click.echo("  Retained under policy")
+    click.echo(f"  {'-' * 36}")
+    for policy, count in report.retained_under_policy.items():
+        click.echo(f"  {policy:>10}:  {count} / {report.sampled}")
