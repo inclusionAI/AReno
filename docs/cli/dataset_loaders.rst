@@ -65,3 +65,45 @@ Agentic loaders also return ``prompt`` plus task metadata consumed by
 ``run_agent.py`` and ``reward.py``. Examples include
 ``examples/agentic/coding/dataset_loader.py`` and
 ``examples/agentic/shopping/dataset_loader.py``.
+
+Normalized row example
+----------------------
+
+A minimal prompt-RL JSONL file already in the canonical schema needs no
+loader at all:
+
+.. code-block:: json
+
+   {"prompt": "Solve: 2+2. Put the answer in \boxed{}.", "solutions": ["4"]}
+   {"prompt": "Solve: 3*7. Put the answer in \boxed{}.", "solutions": ["21"]}
+
+``solutions`` is optional for the trainer but required by the math reward
+function, which reads it as ``record.answer``. Raw Hugging Face datasets work
+the same way once a loader rewrites their columns into this shape; the math
+loader turns GSM8K ``question``/``answer`` rows into ``prompt``/``solutions``
+rows, and ``examples/math/math_verify_reward.py`` scores them.
+
+Common failure cases
+--------------------
+
+Missing ``prompt`` in a rollout row
+   ``load_prompt_batches`` raises ``dataset row must contain `prompt`; use
+   --dataset-loader-fn to normalize raw rows`` as soon as it scans the first
+   bad row. Add a loader that writes the canonical ``prompt`` key.
+
+Missing ``prompt`` or ``response`` in an SFT row
+   The SFT trainer raises ``SFT dataset loader must return rows with `prompt`
+   and `response`; normalize raw dataset fields in --dataset-loader-fn``.
+   Rows whose ``prompt`` or ``response`` is ``None`` or empty are skipped
+   instead; if every row is skipped, training fails with ``SFT dataset
+   produced no valid training rows after filtering``.
+
+Missing ``chosen`` or ``rejected`` in a DPO row
+   The DPO trainer raises ``DPO dataset row must contain `chosen` and
+   `rejected```.
+
+Missing ground truth for the reward
+   When the loader drops ``solutions``, the math reward raises ``math reward
+   expects `record.answer`; use the math dataset loader to normalize raw
+   rows``. Reward failures like this mean the loader lost task metadata, not
+   that the reward function is wrong.
