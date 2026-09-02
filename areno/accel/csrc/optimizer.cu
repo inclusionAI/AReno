@@ -243,9 +243,10 @@ __global__ void adamw_4bit_kernel(
     const float normalized_moment = moment / fmaxf(new_moment_scale, 1.0e-30f);
     moment_codes[tid] = nearest_signed_dynamic_code(normalized_moment);
     const float normalized_variance = variance / fmaxf(new_variance_scale, 1.0e-30f);
-    int variance_code = __float2int_rn(normalized_variance * 16.0f - 1.0f);
-    variance_code = variance_code < 0 ? 0 : (variance_code > 15 ? 15 : variance_code);
-    variance_codes[tid] = static_cast<uint8_t>(variance_code);
+    int updated_variance_code = __float2int_rn(normalized_variance * 16.0f - 1.0f);
+    updated_variance_code =
+        updated_variance_code < 0 ? 0 : (updated_variance_code > 15 ? 15 : updated_variance_code);
+    variance_codes[tid] = static_cast<uint8_t>(updated_variance_code);
     store_model(model, local_index, updated_weight);
   } else {
     moment_codes[tid] = 7;
@@ -420,9 +421,11 @@ __global__ void adamw_4bit_rank1_step_kernel(
     updated_weight -= step_size * moment / denom;
     moment_codes[tid] = nearest_signed_dynamic_code(moment / fmaxf(new_moment_scale, 1.0e-30f));
     const float new_scale = rank1_scale(updated_scales, shape, strides, ndim, parameter_index);
-    int variance_code = __float2int_rn(variance / fmaxf(new_scale, 1.0e-30f) * 16.0f - 1.0f);
-    variance_code = variance_code < 0 ? 0 : (variance_code > 15 ? 15 : variance_code);
-    variance_codes[tid] = static_cast<uint8_t>(variance_code);
+    int updated_variance_code =
+        __float2int_rn(variance / fmaxf(new_scale, 1.0e-30f) * 16.0f - 1.0f);
+    updated_variance_code =
+        updated_variance_code < 0 ? 0 : (updated_variance_code > 15 ? 15 : updated_variance_code);
+    variance_codes[tid] = static_cast<uint8_t>(updated_variance_code);
     store_model(model, local_index, updated_weight);
   } else {
     moment_codes[tid] = 7;
