@@ -187,11 +187,11 @@ class TrainingManager:
             multimodal_lrs = self._set_multimodal_lrs(worker._global_step + 1)
             worker.optimizer.step()
             state_memory_metrics = getattr(worker.optimizer, "state_memory_metrics", None)
-            if (
-                callable(state_memory_metrics)
-                and getattr(worker.optimizer, "state_quantizer", None) == "dynamic-tree-v1"
-            ):
+            state_quantizer = getattr(worker.optimizer, "state_quantizer", None)
+            if callable(state_memory_metrics) and state_quantizer == "dynamic-tree-v1":
                 optimizer_state_metrics = {f"adam8_{name}": value for name, value in state_memory_metrics().items()}
+            elif callable(state_memory_metrics) and str(state_quantizer).startswith("signed-de4/"):
+                optimizer_state_metrics = {f"adam4_{name}": value for name, value in state_memory_metrics().items()}
             worker.optimizer.zero_grad(set_to_none=True)
             worker._global_step += 1
             if worker.adapter_registry is not None:

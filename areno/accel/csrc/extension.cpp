@@ -193,7 +193,42 @@ void areno_adamw_4bit_step_cuda(
     torch::Tensor exp_avg_sq_q,
     torch::Tensor exp_avg_sq_scale,
     int64_t packed_offset,
-    int64_t scale_offset,
+    int64_t moment_scale_offset,
+    int64_t variance_scale_offset,
+    int64_t quant_block_size,
+    double beta1,
+    double beta2,
+    double effective_lr,
+    double weight_decay,
+    double eps,
+    double step_size,
+    double bias_correction2_sqrt);
+void areno_adamw_4bit_rank1_stats_cuda(
+    torch::Tensor grad,
+    torch::Tensor exp_avg_sq_q,
+    torch::Tensor previous_scales,
+    torch::Tensor updated_scales,
+    torch::Tensor invalid,
+    torch::Tensor shape,
+    torch::Tensor strides,
+    int64_t packed_offset,
+    int64_t parameter_shard_start,
+    int64_t quant_block_size,
+    double beta2);
+void areno_adamw_4bit_rank1_step_cuda(
+    torch::Tensor model,
+    torch::Tensor grad,
+    torch::Tensor exp_avg_q,
+    torch::Tensor exp_avg_scale,
+    torch::Tensor exp_avg_sq_q,
+    torch::Tensor previous_scales,
+    torch::Tensor updated_scales,
+    torch::Tensor invalid,
+    torch::Tensor shape,
+    torch::Tensor strides,
+    int64_t packed_offset,
+    int64_t moment_scale_offset,
+    int64_t parameter_shard_start,
     int64_t quant_block_size,
     double beta1,
     double beta2,
@@ -235,6 +270,14 @@ void areno_adamw_fp32_state_step_cuda(
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("areno_adamw_fp32_master_step", &areno_adamw_fp32_master_step_cuda, "ARENO compact FP32-master AdamW step");
   m.def("areno_adamw_4bit_step", &areno_adamw_4bit_step_cuda, "ARENO packed block-wise AdamW4bit step");
+  m.def(
+      "areno_adamw_4bit_rank1_stats",
+      &areno_adamw_4bit_rank1_stats_cuda,
+      "ARENO rank-1 AdamW4bit statistics pass");
+  m.def(
+      "areno_adamw_4bit_rank1_step",
+      &areno_adamw_4bit_rank1_step_cuda,
+      "ARENO rank-1 AdamW4bit update pass");
   m.def("areno_adamw_8bit_step", &areno_adamw_8bit_step_cuda, "ARENO block-wise 8-bit AdamW step");
   m.def("areno_adamw_fp32_state_step", &areno_adamw_fp32_state_step_cuda, "ARENO FP32-state AdamW step");
   m.def("areno_silu_and_mul", &areno_silu_and_mul_cuda, "ARENO SiLU and multiply");

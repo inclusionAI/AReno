@@ -5,6 +5,23 @@ AReno provides an opt-in packed 4-bit AdamW optimizer for CUDA training. It
 changes optimizer-state storage only; the model checkpoint and training data
 format are unchanged.
 
+State representation
+--------------------
+
+The first moment uses parameter-local blocks and the signed dynamic-exponent
+4-bit map. For matrix and higher-rank parameters, the second moment uses
+rank-1 normalization from *Memory Efficient Optimizers with 4-bit States*:
+AReno records the maximum along every coordinate of every axis and scales each
+element by the minimum applicable axis statistic. One-dimensional parameters
+use 128-element block normalization. The second-moment 4-bit map excludes zero.
+
+For data-parallel training, axis statistics are defined over the original
+parameter shape and combined with ``MAX`` across the DP group. Tensor-parallel
+parameters use each rank's local model-tensor shape; this does not add a TP
+collective. The fused update uses bounded block-local FP32 work and does not
+materialize a parameter-sized FP32 moment tensor. The internal block size is
+configurable for programmatic users and defaults to 128.
+
 Command line
 ------------
 
@@ -129,6 +146,11 @@ Requirements and errors
   fused 4-bit optimizer kernel.
 * A saved 4-bit optimizer state must be resumed with the 4-bit optimizer. The
   separately saved model weights remain usable without ``--adam-4bit``.
+* Optimizer-state checkpoints from the earlier block-only representation are
+  intentionally incompatible. Model-weight checkpoints remain portable.
+
+Initialized state is reported as ``adam4_quantized_state_bytes``,
+``adam4_scale_metadata_bytes``, and ``adam4_total_bytes``.
 
 Confirm that the option is available with:
 

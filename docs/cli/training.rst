@@ -398,8 +398,9 @@ in its description; flags for other algorithms are ignored.
    backends; validate convergence when changing optimizer precision.
 
 ``--adam-4bit``
-   Use packed block-wise 4-bit Adam moment states. This option is CUDA-only
-   and cannot be combined with ``--adam-8bit``. See
+   Use packed 4-bit Adam moment states with rank-1 second-moment normalization
+   for tensors of rank two or greater and B128 fallback for vectors. This
+   option is CUDA-only and cannot be combined with ``--adam-8bit``. See
    :doc:`../reference/adamw-4bit` for complete usage examples.
 
 ``--unfreeze-mm-tower``
