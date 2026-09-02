@@ -102,6 +102,9 @@ class AdamWFP32Master:
     BF16 model parameters after each bucket update.
     """
 
+    gradient_shard_dtype = torch.float32
+    stream_gradient_shards = False
+
     def __init__(
         self,
         params: Iterable[torch.nn.Parameter],
@@ -310,14 +313,14 @@ class AdamWFP32Master:
 
     @torch.no_grad()
     def reduce_scatter_gradients(self) -> None:
-        """Reduce one microbatch into persistent FP32 DP gradient shards."""
+        """Reduce one microbatch into persistent optimizer-selected DP shards."""
 
         for bucket in self.buckets:
             device = bucket.refs[0].model_param.device
-            # Preserve the historical FP32-main-grad reduction contract. The
-            # model gradient may be BF16, but casting only after the collective
-            # would permanently round the cross-rank sum in BF16.
-            dtype = torch.float32
+            # Optimizers may explicitly accept a compact gradient shard. The
+            # default remains FP32 so existing optimizers preserve their
+            # accumulation and collective precision.
+            dtype = self.gradient_shard_dtype
             shard_size = self._max_shard_numel(bucket.numel)
             padded_numel = shard_size * self.dp_size
             send = self._arena(device, dtype, "grad_reduce_input", padded_numel)
@@ -347,7 +350,7 @@ class AdamWFP32Master:
             # collective shard; keep only its valid prefix.
             reduced = output.narrow(0, 0, bucket.shard_numel)
             if bucket.grad_shard is None:
-                bucket.grad_shard = reduced.to(dtype=torch.float32)
+                bucket.grad_shard = reduced.to(dtype=dtype)
             else:
                 bucket.grad_shard.add_(reduced)
             bucket.grad_param_ids = bucket.grad_param_ids.union(present)
