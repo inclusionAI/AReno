@@ -224,6 +224,56 @@ def test_mlx_backend_uses_default_config_before_loading_provider(monkeypatch):
     assert backend.config == MlxConfig()
 
 
+def test_mlx_backend_forwards_legacy_native_adapter_path(monkeypatch):
+    from areno.api.backend.mlx.backend import MlxBackend
+    from areno.api.config import MlxConfig
+
+    mlx_module = ModuleType("mlx")
+    mlx_core_module = ModuleType("mlx.core")
+    mlx_module.core = mlx_core_module
+    monkeypatch.setitem(sys.modules, "mlx", mlx_module)
+    monkeypatch.setitem(sys.modules, "mlx.core", mlx_core_module)
+
+    class ProviderLoadReached(Exception):
+        pass
+
+    def load_provider(model_path, *, adapter_path=None):
+        assert model_path == "model"
+        assert adapter_path == "mlx-native-adapter"
+        raise ProviderLoadReached
+
+    monkeypatch.setattr("areno.api.backend.mlx.backend.load_provider", load_provider)
+    config = MlxConfig(adapter_path="mlx-native-adapter")
+    backend = MlxBackend()
+    ctx = SimpleNamespace(world_size=1, custom_config=config, model_path="model")
+
+    with pytest.raises(ProviderLoadReached):
+        backend.initialize(ctx)
+
+    assert backend.config is config
+
+
+def test_mlx_backend_rejects_peft_lora_before_loading_provider(monkeypatch):
+    from areno.adapters import LoraConfig
+    from areno.api.backend.mlx.backend import MlxBackend
+    from areno.api.config import MlxConfig
+
+    def unexpected_load(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("provider loading must not start before MLX LoRA injection exists")
+
+    monkeypatch.setattr("areno.api.backend.mlx.backend.load_provider", unexpected_load)
+    backend = MlxBackend()
+    ctx = SimpleNamespace(
+        world_size=1,
+        custom_config=MlxConfig(lora=LoraConfig()),
+        model_path="model",
+    )
+
+    with pytest.raises(NotImplementedError, match="adapter injection is not implemented"):
+        backend.initialize(ctx)
+
+
 def test_adam8bit_lazy_state_remains_stable_after_zero_gradient_steps():
     mx = pytest.importorskip("mlx.core")
     nn = pytest.importorskip("mlx.nn")

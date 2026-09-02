@@ -294,6 +294,7 @@ class ConfigAndDataTest(unittest.TestCase):
     def test_trainer_config_propagates_lora_reference_view(self):
         config = TrainerConfig(
             algo="dpo",
+            backend="cuda",
             ckpt="actor",
             dataset_path="dataset",
             lora=LoraConfig(),
@@ -301,6 +302,73 @@ class ConfigAndDataTest(unittest.TestCase):
         )
 
         self.assertEqual(config.cuda_config().reference_mode, "reuse_actor_base")
+
+    def test_trainer_config_propagates_lora_to_mlx_config(self):
+        lora = LoraConfig(rank=4, alpha=8)
+        base_config = TrainerConfig(
+            algo="sft",
+            backend="mlx",
+            ckpt="resolved/model",
+            base_model_name_or_path="org/model",
+            dataset_path="dataset",
+            lora=lora,
+        )
+        config = RolloutTrainerConfig(
+            algo="gspo",
+            backend="mlx",
+            ckpt="resolved/model",
+            base_model_name_or_path="org/model",
+            dataset_path="dataset",
+            lora=lora,
+            batch_size=2,
+            n_samples=2,
+        )
+
+        base_mlx = base_config.mlx_config()
+        mlx = config.mlx_config()
+
+        self.assertIs(base_mlx.lora, lora)
+        self.assertEqual(base_mlx.base_model_name_or_path, "org/model")
+        self.assertIs(mlx.lora, lora)
+        self.assertEqual(mlx.base_model_name_or_path, "org/model")
+        self.assertEqual(mlx.reference_mode, "independent")
+        self.assertEqual(mlx.max_running_prompts, 4)
+
+    def test_mlx_config_rejects_ambiguous_adapter_inputs(self):
+        from areno.api.config import MlxConfig
+
+        with self.assertRaisesRegex(ValueError, "cannot be combined"):
+            MlxConfig(adapter_path="mlx-native-adapter", lora=LoraConfig())
+
+    def test_mlx_config_rejects_lora_with_multimodal_unfreezing(self):
+        from areno.api.config import MlxConfig
+
+        for option in ("unfreeze_multimodal_tower", "unfreeze_multimodal_projector"):
+            with self.subTest(option=option):
+                with self.assertRaisesRegex(ValueError, "cannot be combined with multimodal"):
+                    MlxConfig(lora=LoraConfig(), optimizer={option: True})
+
+    def test_mlx_trainer_rejects_unsupported_reference_and_multimodal_unfreezing(self):
+        with self.assertRaisesRegex(ValueError, "only reference_mode='independent'"):
+            TrainerConfig(
+                algo="dpo",
+                backend="mlx",
+                ckpt="actor",
+                dataset_path="dataset",
+                lora=LoraConfig(),
+                reference_mode="reuse_actor_base",
+            )
+
+        config = TrainerConfig(
+            algo="sft",
+            backend="mlx",
+            ckpt="actor",
+            dataset_path="dataset",
+            lora=LoraConfig(),
+            unfreeze_multimodal_projector=True,
+        )
+        with self.assertRaisesRegex(ValueError, "cannot be combined with multimodal"):
+            config.mlx_config()
 
     def test_adapter_path_uses_peft_metadata(self):
         """A PEFT artifact should configure non-default native slots itself."""
