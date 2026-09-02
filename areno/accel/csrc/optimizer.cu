@@ -143,10 +143,15 @@ __global__ void adamw_4bit_kernel(
     float eps,
     float step_size,
     float bias_correction2_sqrt) {
-  __shared__ float moment_max[1024];
-  __shared__ float variance_max[1024];
-  __shared__ uint8_t moment_codes[1024];
-  __shared__ uint8_t variance_codes[1024];
+  constexpr int warp_size = 32;
+  constexpr int max_warps = 32;
+  __shared__ float warp_moment_maxima[max_warps];
+  __shared__ float warp_variance_maxima[max_warps];
+  extern __shared__ uint8_t packed_codes[];
+  uint8_t* moment_codes = packed_codes;
+  uint8_t* variance_codes = packed_codes + blockDim.x;
+  __shared__ float old_moment_scale;
+  __shared__ float old_variance_scale;
   __shared__ float new_moment_scale;
   __shared__ float new_variance_scale;
   __shared__ int invalid_block;
@@ -157,21 +162,20 @@ __global__ void adamw_4bit_kernel(
   const bool active = local_index < numel;
   if (tid == 0) {
     invalid_block = 0;
+    old_moment_scale = exp_avg_scale[moment_scale_offset + blockIdx.x];
+    old_variance_scale = exp_avg_sq_scale[variance_scale_offset + blockIdx.x];
   }
   __syncthreads();
 
-  float moment = 0.0f;
-  float variance = 0.0f;
-  float updated_weight = 0.0f;
+  float local_moment_max = 0.0f;
+  float local_variance_max = 0.0f;
   if (active) {
     const uint8_t moment_code = load_nibble(exp_avg_q + packed_offset, local_index);
     const uint8_t variance_code = load_nibble(exp_avg_sq_q + packed_offset, local_index);
-    const int64_t moment_scale_index = moment_scale_offset + blockIdx.x;
-    const int64_t variance_scale_index = variance_scale_offset + blockIdx.x;
-    moment = kSigned4bitDynamicMap[moment_code] * exp_avg_scale[moment_scale_index];
-    variance = (static_cast<float>(variance_code) + 1.0f) * exp_avg_sq_scale[variance_scale_index] / 16.0f;
+    float moment = kSigned4bitDynamicMap[moment_code] * old_moment_scale;
+    float variance = (static_cast<float>(variance_code) + 1.0f) * old_variance_scale / 16.0f;
     const float gradient = load_grad(grad, local_index);
-    updated_weight = load_model(model, local_index);
+    float updated_weight = load_model(model, local_index);
     if (weight_decay != 0.0f) {
       updated_weight *= 1.0f - effective_lr * weight_decay;
     }
@@ -182,30 +186,60 @@ __global__ void adamw_4bit_kernel(
     if (!isfinite(gradient) || !isfinite(moment) || !isfinite(variance) || !isfinite(updated_weight)) {
       atomicExch(&invalid_block, 1);
     }
+    local_moment_max = fabsf(moment);
+    local_variance_max = variance;
   }
-  moment_max[tid] = active ? fabsf(moment) : 0.0f;
-  variance_max[tid] = active ? variance : 0.0f;
+  for (int offset = warp_size / 2; offset > 0; offset >>= 1) {
+    local_moment_max = fmaxf(local_moment_max, __shfl_down_sync(0xFFFFFFFFu, local_moment_max, offset));
+    local_variance_max =
+        fmaxf(local_variance_max, __shfl_down_sync(0xFFFFFFFFu, local_variance_max, offset));
+  }
+  const int lane = tid & (warp_size - 1);
+  const int warp = tid / warp_size;
+  if (lane == 0) {
+    warp_moment_maxima[warp] = local_moment_max;
+    warp_variance_maxima[warp] = local_variance_max;
+  }
   __syncthreads();
-
-  for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
-    if (tid < stride) {
-      moment_max[tid] = fmaxf(moment_max[tid], moment_max[tid + stride]);
-      variance_max[tid] = fmaxf(variance_max[tid], variance_max[tid + stride]);
-    }
-    __syncthreads();
-  }
   if (invalid_block != 0) {
     return;
   }
-  if (tid == 0) {
-    new_moment_scale = moment_max[0];
-    new_variance_scale = variance_max[0];
-    exp_avg_scale[moment_scale_offset + blockIdx.x] = new_moment_scale;
-    exp_avg_sq_scale[variance_scale_offset + blockIdx.x] = new_variance_scale;
+  if (warp == 0) {
+    const int warp_count = blockDim.x / warp_size;
+    float block_moment_max = lane < warp_count ? warp_moment_maxima[lane] : 0.0f;
+    float block_variance_max = lane < warp_count ? warp_variance_maxima[lane] : 0.0f;
+    for (int offset = warp_size / 2; offset > 0; offset >>= 1) {
+      block_moment_max =
+          fmaxf(block_moment_max, __shfl_down_sync(0xFFFFFFFFu, block_moment_max, offset));
+      block_variance_max =
+          fmaxf(block_variance_max, __shfl_down_sync(0xFFFFFFFFu, block_variance_max, offset));
+    }
+    if (lane == 0) {
+      new_moment_scale = block_moment_max;
+      new_variance_scale = block_variance_max;
+      exp_avg_scale[moment_scale_offset + blockIdx.x] = block_moment_max;
+      exp_avg_sq_scale[variance_scale_offset + blockIdx.x] = block_variance_max;
+    }
   }
   __syncthreads();
 
+  // Recompute instead of keeping FP32 moment, variance and weight values live
+  // across the reduction. This mirrors the 8-bit kernel and avoids register
+  // spills into CUDA local memory for the packed 4-bit update.
   if (active) {
+    const uint8_t moment_code = load_nibble(exp_avg_q + packed_offset, local_index);
+    const uint8_t variance_code = load_nibble(exp_avg_sq_q + packed_offset, local_index);
+    float moment = kSigned4bitDynamicMap[moment_code] * old_moment_scale;
+    float variance = (static_cast<float>(variance_code) + 1.0f) * old_variance_scale / 16.0f;
+    const float gradient = load_grad(grad, local_index);
+    float updated_weight = load_model(model, local_index);
+    if (weight_decay != 0.0f) {
+      updated_weight *= 1.0f - effective_lr * weight_decay;
+    }
+    moment = beta1 * moment + (1.0f - beta1) * gradient;
+    variance = beta2 * variance + (1.0f - beta2) * gradient * gradient;
+    const float denom = sqrtf(variance) / bias_correction2_sqrt + eps;
+    updated_weight -= step_size * moment / denom;
     const float normalized_moment = moment / fmaxf(new_moment_scale, 1.0e-30f);
     moment_codes[tid] = nearest_signed_dynamic_code(normalized_moment);
     const float normalized_variance = variance / fmaxf(new_variance_scale, 1.0e-30f);
@@ -239,7 +273,6 @@ __global__ void adamw_4bit_rank1_stats_kernel(
     int64_t packed_offset,
     int64_t parameter_shard_start,
     float beta2) {
-  __shared__ float variance_values[1024];
   __shared__ int invalid_block;
   const int tid = threadIdx.x;
   const int64_t local_index = static_cast<int64_t>(blockIdx.x) * blockDim.x + tid;
@@ -260,7 +293,6 @@ __global__ void adamw_4bit_rank1_stats_kernel(
       atomicExch(&invalid_block, 1);
     }
   }
-  variance_values[tid] = variance;
   __syncthreads();
   if (invalid_block != 0) {
     if (tid == 0) {
@@ -273,7 +305,7 @@ __global__ void adamw_4bit_rank1_stats_kernel(
     int64_t axis_offset = 0;
     for (int64_t axis = 0; axis < ndim; ++axis) {
       const int64_t coordinate = (parameter_index / strides[axis]) % shape[axis];
-      atomic_max_nonnegative(updated_scales + axis_offset + coordinate, variance_values[tid]);
+      atomic_max_nonnegative(updated_scales + axis_offset + coordinate, variance);
       axis_offset += shape[axis];
     }
   }
@@ -303,9 +335,13 @@ __global__ void adamw_4bit_rank1_step_kernel(
     float eps,
     float step_size,
     float bias_correction2_sqrt) {
-  __shared__ float moment_max[1024];
-  __shared__ uint8_t moment_codes[1024];
-  __shared__ uint8_t variance_codes[1024];
+  constexpr int warp_size = 32;
+  constexpr int max_warps = 32;
+  __shared__ float warp_moment_maxima[max_warps];
+  extern __shared__ uint8_t packed_codes[];
+  uint8_t* moment_codes = packed_codes;
+  uint8_t* variance_codes = packed_codes + blockDim.x;
+  __shared__ float old_moment_scale;
   __shared__ float new_moment_scale;
   __shared__ int invalid_block;
   const int tid = threadIdx.x;
@@ -316,20 +352,19 @@ __global__ void adamw_4bit_rank1_step_kernel(
   const bool active = local_index < numel;
   if (tid == 0) {
     invalid_block = 0;
+    old_moment_scale = exp_avg_scale[moment_scale_offset + blockIdx.x];
   }
   __syncthreads();
-  float moment = 0.0f;
-  float variance = 0.0f;
-  float updated_weight = 0.0f;
+  float local_moment_max = 0.0f;
   if (active) {
     const int64_t parameter_index = parameter_shard_start + local_index;
     const uint8_t moment_code = load_nibble(exp_avg_q + packed_offset, local_index);
     const uint8_t variance_code = load_nibble(exp_avg_sq_q + packed_offset, local_index);
-    moment = kSigned4bitDynamicMap[moment_code] * exp_avg_scale[moment_scale_offset + blockIdx.x];
+    float moment = kSigned4bitDynamicMap[moment_code] * old_moment_scale;
     const float old_scale = rank1_scale(previous_scales, shape, strides, ndim, parameter_index);
-    variance = (static_cast<float>(variance_code) + 1.0f) * old_scale / 16.0f;
+    float variance = (static_cast<float>(variance_code) + 1.0f) * old_scale / 16.0f;
     const float gradient = load_grad(grad, local_index);
-    updated_weight = load_model(model, local_index);
+    float updated_weight = load_model(model, local_index);
     if (weight_decay != 0.0f) {
       updated_weight *= 1.0f - effective_lr * weight_decay;
     }
@@ -340,25 +375,49 @@ __global__ void adamw_4bit_rank1_step_kernel(
     if (!isfinite(gradient) || !isfinite(moment) || !isfinite(variance) || !isfinite(updated_weight)) {
       atomicExch(&invalid_block, 1);
     }
+    local_moment_max = fabsf(moment);
   }
-  moment_max[tid] = active ? fabsf(moment) : 0.0f;
+  for (int offset = warp_size / 2; offset > 0; offset >>= 1) {
+    local_moment_max = fmaxf(local_moment_max, __shfl_down_sync(0xFFFFFFFFu, local_moment_max, offset));
+  }
+  const int lane = tid & (warp_size - 1);
+  const int warp = tid / warp_size;
+  if (lane == 0) {
+    warp_moment_maxima[warp] = local_moment_max;
+  }
   __syncthreads();
-  for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
-    if (tid < stride) {
-      moment_max[tid] = fmaxf(moment_max[tid], moment_max[tid + stride]);
-    }
-    __syncthreads();
-  }
   if (invalid_block != 0) {
     return;
   }
-  if (tid == 0) {
-    new_moment_scale = moment_max[0];
-    exp_avg_scale[moment_scale_offset + blockIdx.x] = new_moment_scale;
+  if (warp == 0) {
+    const int warp_count = blockDim.x / warp_size;
+    float block_moment_max = lane < warp_count ? warp_moment_maxima[lane] : 0.0f;
+    for (int offset = warp_size / 2; offset > 0; offset >>= 1) {
+      block_moment_max =
+          fmaxf(block_moment_max, __shfl_down_sync(0xFFFFFFFFu, block_moment_max, offset));
+    }
+    if (lane == 0) {
+      new_moment_scale = block_moment_max;
+      exp_avg_scale[moment_scale_offset + blockIdx.x] = block_moment_max;
+    }
   }
   __syncthreads();
   if (active) {
     const int64_t parameter_index = parameter_shard_start + local_index;
+    const uint8_t moment_code = load_nibble(exp_avg_q + packed_offset, local_index);
+    const uint8_t variance_code = load_nibble(exp_avg_sq_q + packed_offset, local_index);
+    float moment = kSigned4bitDynamicMap[moment_code] * old_moment_scale;
+    const float old_scale = rank1_scale(previous_scales, shape, strides, ndim, parameter_index);
+    float variance = (static_cast<float>(variance_code) + 1.0f) * old_scale / 16.0f;
+    const float gradient = load_grad(grad, local_index);
+    float updated_weight = load_model(model, local_index);
+    if (weight_decay != 0.0f) {
+      updated_weight *= 1.0f - effective_lr * weight_decay;
+    }
+    moment = beta1 * moment + (1.0f - beta1) * gradient;
+    variance = beta2 * variance + (1.0f - beta2) * gradient * gradient;
+    const float denom = sqrtf(variance) / bias_correction2_sqrt + eps;
+    updated_weight -= step_size * moment / denom;
     moment_codes[tid] = nearest_signed_dynamic_code(moment / fmaxf(new_moment_scale, 1.0e-30f));
     const float new_scale = rank1_scale(updated_scales, shape, strides, ndim, parameter_index);
     int variance_code = __float2int_rn(variance / fmaxf(new_scale, 1.0e-30f) * 16.0f - 1.0f);
@@ -565,7 +624,8 @@ void launch_adamw_4bit(
     float bias_correction2_sqrt) {
   const int blocks = static_cast<int>((model.numel() + quant_block_size - 1) / quant_block_size);
   const auto stream = at::cuda::getCurrentCUDAStream();
-  adamw_4bit_kernel<model_t, grad_t><<<blocks, static_cast<int>(quant_block_size), 0, stream>>>(
+  const size_t shared_bytes = static_cast<size_t>(2 * quant_block_size) * sizeof(uint8_t);
+  adamw_4bit_kernel<model_t, grad_t><<<blocks, static_cast<int>(quant_block_size), shared_bytes, stream>>>(
       model.data_ptr<model_t>(),
       grad.data_ptr<grad_t>(),
       exp_avg_q.data_ptr<uint8_t>(),
@@ -642,7 +702,9 @@ void launch_adamw_4bit_rank1_step(
     float bias_correction2_sqrt) {
   const int blocks = static_cast<int>((model.numel() + quant_block_size - 1) / quant_block_size);
   const auto stream = at::cuda::getCurrentCUDAStream();
-  adamw_4bit_rank1_step_kernel<model_t, grad_t><<<blocks, static_cast<int>(quant_block_size), 0, stream>>>(
+  const size_t shared_bytes = static_cast<size_t>(2 * quant_block_size) * sizeof(uint8_t);
+  adamw_4bit_rank1_step_kernel<model_t, grad_t>
+      <<<blocks, static_cast<int>(quant_block_size), shared_bytes, stream>>>(
       model.data_ptr<model_t>(),
       grad.data_ptr<grad_t>(),
       exp_avg_q.data_ptr<uint8_t>(),
