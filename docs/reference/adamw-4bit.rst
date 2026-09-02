@@ -2,25 +2,30 @@ Using 4-bit AdamW
 =================
 
 AReno provides an opt-in packed 4-bit AdamW optimizer for CUDA training. It
-changes optimizer-state storage only; the model checkpoint and training data
-format are unchanged.
+changes optimizer-state storage and gradient accumulation precision; the model
+checkpoint and training data format are unchanged.
 
 State representation
 --------------------
 
 The first moment uses parameter-local blocks and the signed dynamic-exponent
-4-bit map. For matrix and higher-rank parameters, the second moment uses
-rank-1 normalization from *Memory Efficient Optimizers with 4-bit States*:
-AReno records the maximum along every coordinate of every axis and scales each
-element by the minimum applicable axis statistic. One-dimensional parameters
-use 128-element block normalization. The second-moment 4-bit map excludes zero.
+4-bit map. Matrix and higher-rank parameters use Adafactor-style row and column
+means for the second moment, with every local tensor interpreted as
+``[shape[0], -1]``. One-dimensional parameters retain packed 4-bit second
+moments with 128-element block normalization. The second-moment 4-bit map used
+for those vectors excludes zero.
 
-For data-parallel training, axis statistics are defined over the original
-parameter shape and combined with ``MAX`` across the DP group. Tensor-parallel
-parameters use each rank's local model-tensor shape; this does not add a TP
-collective. The fused update uses bounded block-local FP32 work and does not
-materialize a parameter-sized FP32 moment tensor. The internal block size is
-configurable for programmatic users and defaults to 128.
+For data-parallel training, partial row and column sums are combined across the
+DP group before their exponential update. Tensor-parallel parameters use each
+rank's local model-tensor shape; this does not add a TP collective. The fused
+update uses bounded block-local FP32 work and does not materialize a
+parameter-sized FP32 moment tensor.
+
+Enabling ``--adam-4bit`` also streams every microbatch into BF16 DP gradient
+shards instead of retaining a full-model FP32 ``main_grad`` copy. Gradient norm
+and clipping operate directly on those shards. This behavior belongs to the
+4-bit mode only; AdamW8bit and FP32 AdamW keep their existing FP32 gradient
+accumulation path. The internal quantization block size defaults to 128.
 
 Command line
 ------------
@@ -146,8 +151,9 @@ Requirements and errors
   fused 4-bit optimizer kernel.
 * A saved 4-bit optimizer state must be resumed with the 4-bit optimizer. The
   separately saved model weights remain usable without ``--adam-4bit``.
-* Optimizer-state checkpoints from the earlier block-only representation are
-  intentionally incompatible. Model-weight checkpoints remain portable.
+* Optimizer-state checkpoints from the earlier block-only or rank-normalized
+  representations are intentionally incompatible. Model-weight checkpoints
+  remain portable.
 
 Initialized state is reported as ``adam4_quantized_state_bytes``,
 ``adam4_scale_metadata_bytes``, and ``adam4_total_bytes``.
