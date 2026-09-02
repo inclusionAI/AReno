@@ -8,6 +8,8 @@ import threading
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+import torch
+
 from areno.api.tokenizer import apply_chat_template_with_options, normalize_token_ids
 
 _MODALITIES = ("image", "video", "audio")
@@ -84,6 +86,14 @@ def encode_multimodal_prompt(
     image_token_id = _image_token_id(tokenizer, processor)
     if image_token_id is not None:
         features["image_token_id"] = image_token_id
+    if "target_sizes" in features and "num_patches_per_image" in features:
+        # MiniCPM-V processors replace each source `<image>` marker with the
+        # complete visual-token span, including optional high-resolution slices.
+        features["processor_expanded_image_tokens"] = True
+        image_processor = getattr(processor, "image_processor", None)
+        downsample_mode = getattr(image_processor, "downsample_mode", None)
+        if downsample_mode is not None:
+            features["downsample_mode"] = str(downsample_mode)
     tokens = normalize_token_ids(input_ids[0].tolist())
     counts = image_token_counts_from_features(features)
     if counts:
@@ -452,9 +462,41 @@ def image_token_counts_from_features(features: dict[str, Any] | None) -> list[in
 
     if not features:
         return []
+    if features.get("processor_expanded_image_tokens"):
+        return []
     grid = features.get("image_grid_thw")
     if grid is None:
-        return []
+        target_sizes = features.get("target_sizes")
+        patches_per_image = features.get("num_patches_per_image")
+        if target_sizes is None or patches_per_image is None:
+            return []
+        if not isinstance(target_sizes, torch.Tensor):
+            target_sizes = torch.as_tensor(target_sizes)
+        target_sizes = target_sizes.detach().cpu().to(dtype=torch.long).reshape(-1, 2)
+        divisor = 4 if str(features.get("downsample_mode", "16x")) == "4x" else 16
+        counts = []
+        offset = 0
+        for patch_count in patches_per_image:
+            patch_count = int(patch_count)
+            rows = target_sizes[offset : offset + patch_count]
+            if rows.shape[0] != patch_count:
+                raise ValueError("MiniCPM target_sizes does not match num_patches_per_image")
+            image_count = 0
+            for row in rows:
+                patches = int(row[0]) * int(row[1])
+                if patches % divisor:
+                    raise ValueError(
+                        f"MiniCPM target_sizes patches={patches} is not divisible by downsample divisor {divisor}"
+                    )
+                image_count += patches // divisor
+            counts.append(image_count)
+            offset += patch_count
+        if offset != int(target_sizes.shape[0]):
+            raise ValueError("MiniCPM num_patches_per_image does not cover target_sizes")
+        return counts
+    if not isinstance(grid, torch.Tensor):
+        grid = torch.as_tensor(grid)
+    grid = grid.detach().cpu().to(dtype=torch.long).reshape(-1, 3)
     grid_rows = _array_to_numpy(grid).astype("int64", copy=False).reshape(-1, 3)
     merge = int(features.get("spatial_merge_size", features.get("merge_size", 2)) or 2)
     merge_unit = merge * merge

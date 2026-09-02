@@ -78,10 +78,10 @@ class CausalSelfAttention(nn.Module):
     ) -> torch.Tensor:
         """Project, normalize, apply RoPE, then dispatch to train or infer."""
 
-        batch, seqlen, _ = hidden_states.shape
         q_size = self.local_heads * self.head_dim
         kv_size = self.local_kv_heads * self.head_dim
         qkv = self.qkv_proj(hidden_states)
+        batch, seqlen, _ = qkv.shape
         # Split the fused projection into Q, K, V using local sizes (after TP).
         q, k, v = qkv.split((q_size, kv_size, kv_size), dim=-1)
         q = q.view(batch, seqlen, self.local_heads, self.head_dim)

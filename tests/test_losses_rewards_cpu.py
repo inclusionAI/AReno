@@ -43,16 +43,18 @@ class AdvantageAndRewardTest(unittest.TestCase):
 
 
 class LossFunctionTest(unittest.TestCase):
-    """GRPO/PPO loss tests cover padded and packed response layouts."""
+    """GRPO/PPO loss tests cover canonical packed response layouts."""
 
-    def test_grpo_padded_loss_backpropagates(self):
-        """Padded GRPO should produce finite loss and gradients."""
+    def test_grpo_packed_loss_backpropagates(self):
+        """Packed GRPO should produce finite loss and gradients."""
         data_pack = {
-            "prompt_mask": torch.tensor([[True, True, False, False]]),
-            "advantages": torch.tensor([[0.0, 0.0, 1.0, 1.0]]),
-            "logprobs": torch.tensor([[0.0, 0.0, -0.3, -0.4]]),
+            "packed_response_mask": torch.tensor([False, True, True]),
+            "packed_seq_ids": torch.tensor([0, 0, 0]),
+            "packed_num_sequences": 1,
+            "packed_advantages": torch.tensor([0.0, 1.0, 1.0]),
+            "packed_logprobs": torch.tensor([0.0, -0.3, -0.4]),
         }
-        logprobs = torch.tensor([[0.0, -0.2, -0.3]], requires_grad=True)
+        logprobs = torch.tensor([0.0, -0.2, -0.3], requires_grad=True)
 
         loss, stats = grpo_loss_fn(data_pack, logprobs)
         loss.backward()
@@ -61,24 +63,25 @@ class LossFunctionTest(unittest.TestCase):
         self.assertIsNotNone(logprobs.grad)
         self.assertIn("policy_loss", stats)
 
-    def test_grpo_padded_loss_mask_blocks_masked_response_gradients(self):
+    def test_grpo_packed_loss_mask_blocks_masked_response_gradients(self):
         """Explicit loss masks should remove selected response tokens from loss."""
         data_pack = {
-            "prompt_mask": torch.tensor([[True, True, False, False]]),
-            "loss_mask": torch.tensor([[False, False, True, False]]),
-            "advantages": torch.tensor([[0.0, 0.0, 1.0, 100.0]]),
-            "logprobs": torch.tensor([[0.0, 0.0, -0.3, -0.4]]),
+            "packed_response_mask": torch.tensor([False, True, False]),
+            "packed_seq_ids": torch.tensor([0, 0, 0]),
+            "packed_num_sequences": 1,
+            "packed_advantages": torch.tensor([0.0, 1.0, 100.0]),
+            "packed_logprobs": torch.tensor([0.0, -0.3, -0.4]),
         }
-        logprobs = torch.tensor([[0.0, -0.3, -0.4]], requires_grad=True)
+        logprobs = torch.tensor([0.0, -0.3, -0.4], requires_grad=True)
 
         loss, stats = grpo_loss_fn(data_pack, logprobs)
         loss.backward()
 
         self.assertTrue(torch.isfinite(loss))
         self.assertEqual(float(stats["response_len"]), 1.0)
-        self.assertEqual(float(logprobs.grad[0, 0]), 0.0)
-        self.assertNotEqual(float(logprobs.grad[0, 1]), 0.0)
-        self.assertEqual(float(logprobs.grad[0, 2]), 0.0)
+        self.assertEqual(float(logprobs.grad[0]), 0.0)
+        self.assertNotEqual(float(logprobs.grad[1]), 0.0)
+        self.assertEqual(float(logprobs.grad[2]), 0.0)
 
     def test_grpo_packed_loss_groups_tokens_by_sequence(self):
         """Packed GRPO should aggregate response tokens by sequence id."""
@@ -98,15 +101,15 @@ class LossFunctionTest(unittest.TestCase):
         self.assertIsNotNone(logprobs.grad)
         self.assertEqual(float(stats["response_len"]), 1.5)
 
-    def test_ppo_padded_loss_reports_kl_and_clip_stats(self):
-        """Padded PPO should emit KL and clipping diagnostics."""
+    def test_ppo_packed_loss_reports_kl_and_clip_stats(self):
+        """Packed PPO should emit KL and clipping diagnostics."""
         data_pack = {
-            "prompt_mask": torch.tensor([[True, True, False, False]]),
-            "advantages": torch.tensor([[0.0, 0.0, 1.0, -1.0]]),
-            "logprobs": torch.tensor([[0.0, 0.0, -0.3, -0.4]]),
-            "ref_logprobs": torch.tensor([[0.0, 0.0, -0.25, -0.35]]),
+            "packed_response_mask": torch.tensor([False, True, True]),
+            "packed_advantages": torch.tensor([0.0, 1.0, -1.0]),
+            "packed_logprobs": torch.tensor([0.0, -0.3, -0.4]),
+            "packed_ref_logprobs": torch.tensor([0.0, -0.25, -0.35]),
         }
-        logprobs = torch.tensor([[0.0, -0.2, -0.45]], requires_grad=True)
+        logprobs = torch.tensor([0.0, -0.2, -0.45], requires_grad=True)
 
         loss, stats = ppo_loss_fn(data_pack, logprobs, use_kl_loss=True, kl_loss_coef=0.01)
         loss.backward()

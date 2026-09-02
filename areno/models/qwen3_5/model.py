@@ -46,6 +46,7 @@ from areno.engine.parallel.collectives import (
 from areno.engine.parallel.context import get_tp_context
 from areno.engine.runtime.metadata import InferMeta, TrainMeta
 from areno.engine.runtime.recompute import checkpoint_layer
+from areno.engine.runtime.routing_replay import resolve_softmax_routes
 from areno.models._shared.dynamo_wrappers import (
     _areno_depthwise_causal_conv1d_silu_decode_no_compile,
     _areno_depthwise_causal_conv1d_silu_no_compile,
@@ -116,6 +117,7 @@ class Qwen35FullAttention(nn.Module):
                 "Qwen3.5 full attention requires num_key_value_heads to divide TP or TP to divide into replicated KV groups"
             )
         self.local_kv_heads = self.qkv_proj.local_out_features[1] // self.head_dim
+        self.replicated_kv = self.num_kv_heads < ctx.world_size
         self.o_proj = RowParallelLinear(self.num_heads * self.head_dim, config.hidden_size, bias=False)
         self.q_norm = RMSNorm(config.head_dim, config.rms_norm_eps)
         self.k_norm = RMSNorm(config.head_dim, config.rms_norm_eps)
@@ -178,7 +180,12 @@ class Qwen35FullAttention(nn.Module):
         if self.k_cache.numel() == 0 or self.v_cache.numel() == 0:
             raise RuntimeError("Qwen3.5 full attention inference requires KV cache")
         if self.infer_backend is None:
-            self.infer_backend = build_infer_attention_backend(self.attn_backend)
+            # The automatic split-KV decode heuristic accumulates substantial
+            # rollout/train drift for the two-Q-head replicated-KV layout.
+            self.infer_backend = build_infer_attention_backend(
+                self.attn_backend,
+                decode_num_splits=1 if self.replicated_kv else None,
+            )
         return self.infer_backend(q, k, v, self.k_cache, self.v_cache, infer_meta)
 
     def set_kv_cache(self, k_cache: torch.Tensor, v_cache: torch.Tensor) -> None:
@@ -340,7 +347,11 @@ class Qwen35GatedDeltaNet(nn.Module):
             raise RuntimeError("Qwen3.5 GDN inference requires block_table")
         if self.conv_cache.numel() == 0:
             raise RuntimeError("Qwen3.5 GDN inference requires conv state cache")
-        slots = infer_meta.block_table[:, 0].long()
+        slots = (
+            infer_meta.recurrent_slots.long()
+            if infer_meta.recurrent_slots is not None
+            else infer_meta.block_table[:, 0].long()
+        )
         if infer_meta.mode == "decode":
             current = x.reshape(-1, x.shape[-1])
             history = self.conv_cache.index_select(0, slots).to(dtype=current.dtype)
@@ -400,7 +411,11 @@ class Qwen35GatedDeltaNet(nn.Module):
             raise RuntimeError("Qwen3.5 GDN inference requires block_table")
         if self.state_cache.numel() == 0:
             raise RuntimeError("Qwen3.5 GDN inference requires recurrent state cache")
-        slots = infer_meta.block_table[:, 0].long()
+        slots = (
+            infer_meta.recurrent_slots.long()
+            if infer_meta.recurrent_slots is not None
+            else infer_meta.block_table[:, 0].long()
+        )
         cu = infer_meta.cu_seqlens
         _require_fla_gdn()
         if infer_meta.mode == "decode":
@@ -502,13 +517,14 @@ class Qwen35DecoderLayer(nn.Module):
 class Qwen35MoeMLP(nn.Module):
     """Qwen3.5-MoE router, routed experts, and dense shared expert."""
 
-    def __init__(self, config: ModelConfig):
+    def __init__(self, config: ModelConfig, routing_layer_slot: int):
         super().__init__()
         if config.num_experts is None:
             raise ValueError("qwen3_5_moe requires num_experts")
         self.num_experts = config.num_experts
         self.top_k = config.num_experts_per_tok
         self.norm_topk_prob = config.norm_topk_prob
+        self.routing_layer_slot = routing_layer_slot
         self.gate = nn.Parameter(torch.empty(self.num_experts, config.hidden_size, dtype=torch.float32))
         mark_tensor_parallel_parameter(self.gate, False, sequence_parallel=False, tp_grad_allreduce=True)
         self.experts = Qwen3MoeExperts(config)
@@ -533,21 +549,37 @@ class Qwen35MoeMLP(nn.Module):
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        moe_sequence_parallel = is_sequence_parallel_active()
+        sequence_parallel_hidden_states = hidden_states
+        if moe_sequence_parallel:
+            hidden_states = gather_from_sequence_parallel_region(hidden_states)
         batch, seqlen, hidden = hidden_states.shape
         flat = hidden_states.reshape(-1, hidden)
-        logits = _areno_linear_no_compile(flat.to(dtype=self.gate.dtype), self.gate)
-        log_once("qwen35_moe_topk_softmax", "using ARENO fused topk_softmax router for Qwen3.5-MoE")
-        topk_idx, topk_weight = _areno_topk_softmax_no_compile(logits, self.top_k, self.norm_topk_prob)
-        if self.training:
-            out = self.experts(flat, topk_idx.to(torch.long), topk_weight)
-        else:
-            out = self._forward_fused_moe(flat, topk_idx, topk_weight)
+        with sequence_parallel_region(False):
+            logits = _areno_linear_no_compile(flat.to(dtype=self.gate.dtype), self.gate)
+            log_once("qwen35_moe_topk_softmax", "using ARENO fused topk_softmax router for Qwen3.5-MoE")
+            topk_idx, topk_weight = _areno_topk_softmax_no_compile(logits, self.top_k, self.norm_topk_prob)
+            topk_idx, topk_weight = resolve_softmax_routes(
+                self.routing_layer_slot,
+                logits,
+                topk_idx,
+                topk_weight,
+                renormalize=self.norm_topk_prob,
+            )
+            if self.training:
+                out = self.experts(flat, topk_idx.to(torch.long), topk_weight)
+            else:
+                out = self._forward_fused_moe(flat, topk_idx, topk_weight)
+        out = out.view(batch, seqlen, hidden)
+        if moe_sequence_parallel:
+            out = scatter_to_sequence_parallel_region(out)
         if self.shared_expert is not None:
-            shared = self.shared_expert(hidden_states)
+            shared_input = sequence_parallel_hidden_states if moe_sequence_parallel else hidden_states
+            shared = self.shared_expert(shared_input)
             if self.shared_expert_gate is not None:
-                shared = shared * torch.sigmoid(F.linear(hidden_states, self.shared_expert_gate.unsqueeze(0)))
-            out = out + shared.reshape(-1, hidden)
-        return out.view(batch, seqlen, hidden)
+                shared = shared * torch.sigmoid(F.linear(shared_input, self.shared_expert_gate.unsqueeze(0)))
+            out = out + shared
+        return out
 
     @torch.no_grad()
     def prepare_infer_weights(self) -> None:
@@ -613,7 +645,7 @@ class Qwen35MoeDecoderLayer(Qwen35DecoderLayer):
 
     def __init__(self, config: ModelConfig, layer_idx: int):
         super().__init__(config, layer_idx)
-        self.mlp = Qwen35MoeMLP(config)
+        self.mlp = Qwen35MoeMLP(config, layer_idx)
 
     def _attention_block(
         self,
@@ -1152,10 +1184,6 @@ class Qwen35ForCausalLM(nn.Module):
         use_sequence_parallel = bool(train_meta is not None and train_meta.sequence_parallel)
         if use_sequence_parallel:
             hidden_states = scatter_to_sequence_parallel_region(hidden_states)
-            if position_ids.dim() == 3:
-                position_ids = scatter_to_sequence_parallel_region(position_ids.permute(1, 2, 0)).permute(2, 0, 1)
-            else:
-                position_ids = scatter_to_sequence_parallel_region(position_ids)
         with sequence_parallel_region(use_sequence_parallel):
             for layer in self.layers:
                 if getattr(layer, "handles_activation_checkpointing", False):
@@ -1207,10 +1235,12 @@ class Qwen35ForCausalLM(nn.Module):
             hidden_states[row_idx, mask] = image_embeds
         return hidden_states
 
-    def set_kv_caches(self, kv_caches: list[tuple[torch.Tensor, torch.Tensor]]) -> None:
+    def set_kv_caches(
+        self, kv_caches: list[tuple[torch.Tensor, torch.Tensor]], *, num_slots: int | None = None
+    ) -> None:
         idx = 0
         device = next(self.parameters()).device
-        num_slots = kv_caches[0][0].shape[0] if kv_caches else 1
+        num_slots = int(num_slots) if num_slots is not None else (int(kv_caches[0][0].shape[0]) if kv_caches else 1)
         for layer in self.layers:
             attn = layer.attention
             if isinstance(attn, Qwen35FullAttention):
@@ -1290,6 +1320,15 @@ class Qwen35ForCausalLM(nn.Module):
     def reset_kv_caches(self) -> None:
         for layer in self.layers:
             layer.attention.reset_kv_cache()
+
+    @torch.no_grad()
+    def reset_recurrent_cache_slots(self, slots: torch.Tensor) -> None:
+        slots = slots.to(device=next(self.parameters()).device, dtype=torch.long)
+        for layer in self.layers:
+            attn = layer.attention
+            if isinstance(attn, Qwen35GatedDeltaNet):
+                attn.state_cache.index_fill_(0, slots, 0)
+                attn.conv_cache.index_fill_(0, slots, 0)
 
     @torch.no_grad()
     def offload_kv_caches(self) -> None:

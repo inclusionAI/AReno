@@ -42,6 +42,9 @@ class VocabParallelEmbedding(nn.Module):
         self.vocab_start, self.vocab_end = _shard_range(vocab_size, ctx.rank, ctx.world_size)
         self.weight = nn.Parameter(torch.empty(self.vocab_end - self.vocab_start, hidden_size, dtype=dtype))
         mark_tensor_parallel_parameter(self.weight, True, sequence_parallel=True)
+        # Optimizer-role metadata is consumed by AdamW8bit without relying on
+        # module/parameter name substrings. It does not change model outputs.
+        self.weight._areno_optimizer_role = "token_embedding"
         nn.init.normal_(self.weight, mean=0.0, std=0.02)
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:

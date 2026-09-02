@@ -8,7 +8,8 @@ from dataclasses import dataclass
 import torch
 import torch.distributed as dist
 
-from areno.engine.checkpoints.io import PolicyTensorLayout
+from areno.adapters.lora import AdapterRegistry, LoraSlot, RoutedExpertLoraSlot
+from areno.engine.checkpoints.io import PolicyTensorLayout, PolicyTensorPiece, PolicyTensorStore
 from areno.engine.parallel.context import get_tp_context
 from areno.engine.protocol import PolicySyncPayload
 from areno.models.registry import build_policy_weight_plan
@@ -25,9 +26,13 @@ class PolicyTensorMeta:
 
 
 def build_policy_plan(worker) -> tuple[dict[str, object], tuple[PolicyTensorMeta, ...]]:
-    """Build and cache live adapter tasks plus transport metadata."""
+    """Build and cache live policy tasks plus transport metadata."""
 
-    plan = build_policy_weight_plan(worker.model, worker.config.model)
+    plan = (
+        build_adapter_policy_plan(worker.adapter_registry)
+        if worker.adapter_registry is not None
+        else build_policy_weight_plan(worker.model, worker.config.model)
+    )
     metadata = []
     for key, task in plan.items():
         layout = task.policy_layout()
@@ -42,6 +47,95 @@ def build_policy_plan(worker) -> tuple[dict[str, object], tuple[PolicyTensorMeta
     worker._policy_sync_plan = plan
     worker._policy_sync_metadata = tuple(metadata)
     return plan, tuple(metadata)
+
+
+def build_adapter_policy_plan(registry: AdapterRegistry) -> PolicyTensorStore:
+    """Describe canonical A/B tensors without materializing frozen base weights."""
+
+    ctx = get_tp_context()
+    plan = PolicyTensorStore()
+    for logical_name, slot in registry.slots.items():
+        key_a = f"{logical_name}.lora_A.weight"
+        key_b = f"{logical_name}.lora_B.weight"
+        if isinstance(slot, RoutedExpertLoraSlot):
+            global_experts = slot.local_num_experts * ctx.world_size
+            plan.add_layout(
+                key_a,
+                _sharded_layout(
+                    slot.lora_A,
+                    (global_experts, slot.rank, slot.in_features),
+                    dim=0,
+                    start=slot.local_expert_start,
+                ),
+            )
+            plan.add_layout(
+                key_b,
+                _sharded_layout(
+                    slot.lora_B,
+                    (global_experts, slot.out_features, slot.rank),
+                    dim=0,
+                    start=slot.local_expert_start,
+                ),
+            )
+        elif slot.row_parallel:
+            plan.add_layout(
+                key_a,
+                _sharded_layout(
+                    slot.lora_A,
+                    (slot.rank, slot.global_in_features),
+                    dim=1,
+                    start=ctx.rank * slot.local_in_features,
+                ),
+            )
+            plan.add_layout(key_b, _replicated_layout(slot.lora_B))
+        else:
+            plan.add_layout(key_a, _replicated_layout(slot.lora_A))
+            plan.add_layout(
+                key_b,
+                _sharded_layout(
+                    slot.lora_B,
+                    (slot.global_out_features, slot.rank),
+                    dim=0,
+                    start=slot.output_start,
+                    publish=_column_range_publisher(slot, ctx.rank, ctx.world_size),
+                ),
+            )
+    return plan
+
+
+def _sharded_layout(
+    tensor: torch.Tensor,
+    shape: tuple[int, ...],
+    *,
+    dim: int,
+    start: int,
+    publish: bool = True,
+) -> PolicyTensorLayout:
+    local_size = tensor.shape[dim]
+    return PolicyTensorLayout(
+        shape=shape,
+        dtype=tensor.dtype,
+        pieces=(PolicyTensorPiece(tensor.detach(), shape, dim, start, start + local_size, publish=publish),),
+    )
+
+
+def _column_range_publisher(slot: LoraSlot, tp_rank: int, tp_size: int) -> bool:
+    if not slot.output_replicated:
+        return True
+    unique_shards = slot.global_out_features // slot.local_out_features
+    ranks_per_shard = tp_size // unique_shards
+    owner_rank = (slot.output_start // slot.local_out_features) * ranks_per_shard
+    return tp_rank == owner_rank
+
+
+def _replicated_layout(tensor: torch.Tensor) -> PolicyTensorLayout:
+    shape = tuple(tensor.shape)
+    return PolicyTensorLayout(
+        shape=shape,
+        dtype=tensor.dtype,
+        pieces=(PolicyTensorPiece(tensor.detach(), shape, 0, 0, shape[0]),),
+        replicated=True,
+    )
 
 
 def policy_plan_metadata(worker) -> tuple[PolicyTensorMeta, ...]:

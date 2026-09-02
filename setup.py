@@ -68,6 +68,7 @@ def _cuda_extensions():
                 "areno/accel/csrc/moe_align_kernel.cu",
                 "areno/accel/csrc/moe_permute.cu",
                 "areno/accel/csrc/normalization.cu",
+                "areno/accel/csrc/optimizer.cu",
                 "areno/accel/csrc/router.cu",
                 "areno/accel/csrc/topk.cu",
             ],

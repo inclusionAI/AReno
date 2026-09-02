@@ -98,6 +98,13 @@ Built-in algorithms: ``sft``, ``dpo``, ``gspo``, ``grpo``, ``ppo``.
 
 ``world-size`` must be divisible by ``tp-size``.
 
+``--sequence-parallel / --no-sequence-parallel``
+   Explicitly enable or disable sequence parallelism for CUDA training. When
+   neither flag is passed, AReno uses ``sequence_parallel`` from the loaded
+   checkpoint's model configuration. The CLI value takes precedence over the
+   model configuration. Sequence parallelism is inactive when ``tp-size`` is
+   ``1`` even if it is requested.
+
 ``--train-devices TEXT``
    Comma-separated logical CUDA device indices or inclusive ranges used by
    training. For example, ``0..8,11..29`` includes both endpoints. AReno
@@ -129,6 +136,11 @@ signal.
    Maximum reusable GPU buffer used while streaming policy weights from the
    training engine to the rollout engine. Default: ``64`` MiB.
    CUDA only. MLX does not copy policy weights to a second rollout model.
+
+R3 is enabled automatically for sparse-MoE RL training on CUDA. AReno records
+each token's expert ids during rollout and reuses those ids in the policy
+training forward while recomputing routing weights from the current router
+logits. Dense models and the MLX backend retain their original paths.
 
 For example, the following uses four visible GPUs for training and two
 different visible GPUs for rollout:
@@ -218,10 +230,6 @@ and CUDA graph state; MLX retains one in-process model.
    trajectories: one ``AgentTrajectoryTurn``, one ``AgentTrajectory``, or an
    iterable of either. Each turn must carry its ``AgentItem``, message list,
    and OpenAI response.
-
-``--agent-timeout-s FLOAT``
-   Timeout for agentic proxy requests and the agent function. Default:
-   ``300.0``.
 
 ``--train-tool-results``
    Include tool-result spans in policy loss. Disabled by default because tool
@@ -331,6 +339,28 @@ in its description; flags for other algorithms are ignored.
    Enable decoder-layer activation recompute during training. Default:
    enabled.
 
+``--optimizer-state-offload [none|cpu|disk]``
+   Select CUDA optimizer-state residency. ``none`` keeps state on the training
+   device. ``cpu`` moves state to host memory between train calls. ``disk``
+   stages a bounded bucket group through host memory and stores the state in
+   persistent writable raw-mmap files, copying each bucket back only when the
+   next optimizer step needs it. Default: ``none``. This option is supported
+   only by the CUDA backend and applies to both FP32-master AdamW and
+   ``--adam-8bit`` or ``--adam-4bit``.
+
+``--optimizer-state-offload-dir DIRECTORY``
+   Required when ``--optimizer-state-offload disk`` is selected. Use a fast
+   local NVMe filesystem with enough free capacity for the optimizer state.
+   AReno creates a process-private subdirectory and removes it on normal
+   optimizer onload or teardown. The mmap files are runtime scratch state,
+   not restartable checkpoints; use ``--save-path`` for checkpointing.
+
+``--optimizer-state-offload-batch-size INTEGER``
+   Number of optimizer buckets assigned to each persistent mmap and flushed
+   together. Default: ``1``. A smaller value bounds CPU staging memory more
+   tightly; a larger value creates fewer files and flush calls. This setting
+   is used only by disk offload.
+
 ``--lr FLOAT``
    Policy optimizer learning rate. Default: ``1.0e-6``.
 
@@ -350,8 +380,27 @@ in its description; flags for other algorithms are ignored.
    Policy optimizer Adam beta2. Default: ``0.999``.
 
 ``--adam-8bit``
-   Use 8-bit Adam moment states instead of FP32 Adam states. Supported by both
-   native backends; validate convergence when changing optimizer precision.
+   Use block-wise 8-bit Adam moment states instead of FP32 Adam states.
+   CUDA and MLX use the signed dynamic-tree codebook for the first moment and
+   the unsigned dynamic codebook for the second moment from *8-Bit Optimizers
+   via Block-wise Quantization*. Token-embedding weights and gradients retain
+   their normal model precision, while their optimizer moments remain FP32 to
+   avoid quantizing embedding-gradient outliers. Other initialized moment
+   state uses two bytes per parameter plus FP32 block scales.
+   CUDA training metrics expose ``adam8_quantized_state_bytes``,
+   ``adam8_fp32_exempt_bytes``, ``adam8_block_metadata_bytes``, and
+   ``adam8_total_bytes`` for initialized DP-local optimizer state.
+
+   This option does not insert a normalization layer or reinitialize a loaded
+   embedding. The paper's Stable Embedding forward architecture is not enabled
+   for AReno's current RoPE-only language models because they do not expose the
+   compatible additive-position-embedding boundary. Supported by both native
+   backends; validate convergence when changing optimizer precision.
+
+``--adam-4bit``
+   Use packed block-wise 4-bit Adam moment states. This option is CUDA-only
+   and cannot be combined with ``--adam-8bit``. See
+   :doc:`../reference/adamw-4bit` for complete usage examples.
 
 ``--unfreeze-mm-tower``
    Train recognized vision/audio encoder tower parameters. Towers are frozen

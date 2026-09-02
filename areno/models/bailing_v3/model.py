@@ -44,6 +44,7 @@ import torch
 import torch.distributed as dist
 from fla.ops.lightning_attn import chunk_lightning_attn
 from torch import nn
+from torch.nn import functional as F
 
 from areno.accel import (
     areno_grouped_linear,
@@ -82,14 +83,16 @@ from areno.engine.layers.rotary import PartialRotaryEmbedding
 from areno.engine.layers.vocab import VocabParallelEmbedding, VocabParallelLMHead
 from areno.engine.parallel.collectives import (
     all_reduce,
+    copy_to_tensor_parallel_region,
     gather_from_sequence_parallel_region,
     is_sequence_parallel_active,
-    reduce_scatter_to_sequence_parallel_region,
     scatter_to_sequence_parallel_region,
     sequence_parallel_region,
 )
 from areno.engine.parallel.context import get_tp_context
 from areno.engine.runtime.metadata import InferMeta, TrainMeta
+from areno.engine.runtime.recompute import checkpoint_layer, should_checkpoint_layer
+from areno.engine.runtime.routing_replay import resolve_sigmoid_routes
 from areno.models._shared.dynamo_wrappers import (
     _areno_depthwise_causal_conv1d_silu_decode_no_compile,
     _areno_depthwise_causal_conv1d_silu_no_compile,
@@ -99,6 +102,14 @@ from areno.models._shared.dynamo_wrappers import (
 )
 from areno.models.bailing_v3.checkpoint import CHECKPOINT_SPEC
 from areno.models.base import CausalLMOutput, ModelAdapter
+
+
+def _recurrent_cache_slots(infer_meta: InferMeta) -> torch.Tensor:
+    if infer_meta.recurrent_slots is not None:
+        return infer_meta.recurrent_slots.long()
+    if infer_meta.block_table is None:
+        raise RuntimeError("Bailing V3 recurrent attention inference requires recurrent_slots or block_table")
+    return infer_meta.block_table[:, 0].long()
 
 
 class BailingDenseMLP(nn.Module):
@@ -133,7 +144,7 @@ class BailingGate(nn.Module):
     during training the bias is updated to push load back towards balance.
     """
 
-    def __init__(self, config: ModelConfig):
+    def __init__(self, config: ModelConfig, routing_layer_slot: int):
         super().__init__()
         if config.score_function != "sigmoid":
             raise ValueError(f"BailingGate only supports sigmoid scoring, got {config.score_function!r}")
@@ -147,6 +158,7 @@ class BailingGate(nn.Module):
         self.topk_group = config.topk_group
         self.routed_scaling_factor = config.routed_scaling_factor
         self.router_dtype = config.moe_router_dtype
+        self.routing_layer_slot = routing_layer_slot
         # Router projection: hidden_size -> num_experts logits. Replicated
         # across TP ranks (sequence-parallel on the input side) so every rank
         # sees identical routing decisions and accumulates the gradient via
@@ -166,15 +178,24 @@ class BailingGate(nn.Module):
         self.register_buffer("local_expert_bias", torch.zeros(self.num_experts), persistent=False)
 
     @torch._dynamo.disable
-    def forward(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(
+        self, hidden_states: torch.Tensor, num_padding_tokens: int = 0
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         x = hidden_states.view(-1, hidden_states.shape[-1])
         # Promote to router_dtype (typically fp32) for numerical stability of
         # the sigmoid/top-k selection.
         logits = _areno_linear_no_compile(x.to(dtype=self.weight.dtype), self.weight)
         topk_idx, topk_weight = self._forward_grouped_topk(logits)
+        topk_idx, topk_weight = resolve_sigmoid_routes(
+            self.routing_layer_slot,
+            logits,
+            topk_idx,
+            topk_weight,
+        )
         if torch.is_grad_enabled():
             # Only track load when training; eval calls keep counters cold.
-            _accumulate_tokens_per_expert(self.local_tokens_per_expert, topk_idx, self.num_experts)
+            routed_tokens = topk_idx[:-num_padding_tokens] if num_padding_tokens else topk_idx
+            _accumulate_tokens_per_expert(self.local_tokens_per_expert, routed_tokens, self.num_experts)
         return topk_idx, topk_weight.float(), logits
 
     @torch._dynamo.disable
@@ -234,12 +255,12 @@ class BailingSparseMoeBlock(nn.Module):
     ``areno_fused_experts`` kernel over stacked w1/w2 weight tiles.
     """
 
-    def __init__(self, config: ModelConfig):
+    def __init__(self, config: ModelConfig, routing_layer_slot: int):
         super().__init__()
         self.config = config
         self.num_experts = int(config.num_experts or 0)
         self.num_experts_per_tok = config.num_experts_per_tok
-        self.gate = BailingGate(config)
+        self.gate = BailingGate(config, routing_layer_slot)
         self.experts = BailingGroupedExperts(config)
         # Shared experts always run (no routing decision) — their intermediate
         # size scales with ``num_shared_experts``. Output is added to the
@@ -266,30 +287,68 @@ class BailingSparseMoeBlock(nn.Module):
             routed_scaling_factor=self.config.routed_scaling_factor,
         )
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        # In SP mode we need the full (un-scattered) hidden states for routing
-        # since the router weight isn't sharded along the sequence dim.
+    def route(self, hidden_states: torch.Tensor, num_padding_tokens: int = 0) -> tuple[torch.Tensor, torch.Tensor]:
+        """Compute routing once so activation recompute can reuse it."""
+
+        if is_sequence_parallel_active():
+            hidden_states = gather_from_sequence_parallel_region(hidden_states)
+        with sequence_parallel_region(False):
+            topk_idx, topk_weight, _ = self.gate(hidden_states, num_padding_tokens)
+        return topk_idx, topk_weight
+
+    def forward_with_routes(
+        self,
+        hidden_states: torch.Tensor,
+        topk_idx: torch.Tensor,
+        topk_weight: torch.Tensor,
+    ) -> torch.Tensor:
+        """Run routed and shared experts with a fixed routing decision."""
+
         moe_sequence_parallel = is_sequence_parallel_active()
+        sequence_parallel_hidden_states = hidden_states
         if moe_sequence_parallel:
             hidden_states = gather_from_sequence_parallel_region(hidden_states)
-        identity = hidden_states
         bsz, seqlen, hidden = hidden_states.shape
         expert_input = hidden_states.to(dtype=self.experts.linear_fc1.weight.dtype)
         with sequence_parallel_region(False):
-            topk_idx, topk_weight, _ = self.gate(hidden_states)
             flat = expert_input.view(-1, hidden)
-            if self.training:
+            if self.training or not self._infer_weights_ready:
                 # Permute/unpermute path is autograd-friendly.
                 out = self.experts(flat, topk_idx, topk_weight).view(bsz, seqlen, hidden)
-                if self.shared_experts is not None:
-                    out = out + self.shared_experts(identity)
-                return reduce_scatter_to_sequence_parallel_region(out) if moe_sequence_parallel else out
-            # Inference: fused-MoE kernel over the stacked w1/w2 weights.
-            out = self._forward_fused_moe(flat, topk_idx, topk_weight)
-        out = out.view(bsz, seqlen, hidden)
+            else:
+                # Inference: fused-MoE kernel over the stacked w1/w2 weights.
+                out = self._forward_fused_moe(flat, topk_idx, topk_weight).view(bsz, seqlen, hidden)
+        if moe_sequence_parallel:
+            out = scatter_to_sequence_parallel_region(out)
         if self.shared_experts is not None:
-            out = out + self.shared_experts(identity)
-        return reduce_scatter_to_sequence_parallel_region(out) if moe_sequence_parallel else out
+            shared_input = sequence_parallel_hidden_states if moe_sequence_parallel else hidden_states
+            out = out + self.shared_experts(shared_input)
+        return out
+
+    def forward(self, hidden_states: torch.Tensor, num_padding_tokens: int = 0) -> torch.Tensor:
+        # Preserve the single-gather path used when activation recomputation
+        # is disabled. The split route/experts methods intentionally gather
+        # independently so checkpointed expert recompute can start from the
+        # local SP shard.
+        moe_sequence_parallel = is_sequence_parallel_active()
+        sequence_parallel_hidden_states = hidden_states
+        if moe_sequence_parallel:
+            hidden_states = gather_from_sequence_parallel_region(hidden_states)
+        bsz, seqlen, hidden = hidden_states.shape
+        expert_input = hidden_states.to(dtype=self.experts.linear_fc1.weight.dtype)
+        with sequence_parallel_region(False):
+            topk_idx, topk_weight, _ = self.gate(hidden_states, num_padding_tokens)
+            flat = expert_input.view(-1, hidden)
+            if self.training or not self._infer_weights_ready:
+                out = self.experts(flat, topk_idx, topk_weight).view(bsz, seqlen, hidden)
+            else:
+                out = self._forward_fused_moe(flat, topk_idx, topk_weight).view(bsz, seqlen, hidden)
+        if moe_sequence_parallel:
+            out = scatter_to_sequence_parallel_region(out)
+        if self.shared_experts is not None:
+            shared_input = sequence_parallel_hidden_states if moe_sequence_parallel else hidden_states
+            out = out + self.shared_experts(shared_input)
+        return out
 
     @torch.no_grad()
     def prepare_infer_weights(self) -> None:
@@ -300,18 +359,15 @@ class BailingSparseMoeBlock(nn.Module):
         down projection. Buffers are reused across calls if the shape/device
         already match to avoid reallocating on every weight refresh.
         """
-        gate_weights, up_weights, down_weights = self.experts.expert_weights()
+        gate_weights, up_weights, down_weights = self.experts.inference_weights()
         self._infer_gate_weight = self._updated_infer_weight(
-            self._infer_gate_weight,
-            torch.stack(gate_weights, dim=0).to(dtype=self.config.dtype).contiguous(),
+            self._infer_gate_weight, gate_weights.to(dtype=self.config.dtype).contiguous()
         )
         self._infer_up_weight = self._updated_infer_weight(
-            self._infer_up_weight,
-            torch.stack(up_weights, dim=0).to(dtype=self.config.dtype).contiguous(),
+            self._infer_up_weight, up_weights.to(dtype=self.config.dtype).contiguous()
         )
         self._infer_down_weight = self._updated_infer_weight(
-            self._infer_down_weight,
-            torch.stack(down_weights, dim=0).to(dtype=self.config.dtype).contiguous(),
+            self._infer_down_weight, down_weights.to(dtype=self.config.dtype).contiguous()
         )
         # w1 = [gate || up] along the intermediate dim so SiLU(gate) * up can
         # be folded into a single fused kernel call.
@@ -400,10 +456,20 @@ class BailingGroupedExperts(nn.Module):
             self.hidden_size,
             dtype=config.dtype,
         )
+        self.lora_slots = nn.ModuleDict()
         # Expert weights are sharded by EP (collapsed into TP); flag them as
         # not-TP/not-SP so the standard TP collectives leave them alone.
         for param in self.parameters():
             mark_tensor_parallel_parameter(param, False, sequence_parallel=False)
+
+    def install_lora_component(self, component: str, slot: nn.Module) -> None:
+        self.lora_slots[component] = slot
+
+    def has_lora(self) -> bool:
+        return bool(self.lora_slots)
+
+    def has_active_lora(self) -> bool:
+        return self.has_lora() and next(iter(self.lora_slots.values())).enabled
 
     def forward(self, flat: torch.Tensor, topk_idx: torch.Tensor, topk_weight: torch.Tensor) -> torch.Tensor:
         return self._forward_fused_permute(flat, topk_idx, topk_weight)
@@ -423,19 +489,41 @@ class BailingGroupedExperts(nn.Module):
             self.local_num_experts,
         )
         if x.shape[0] == 0:
-            # No tokens routed to this rank — still need to all_reduce to keep
-            # collective sync with peers.
-            return all_reduce(flat.new_zeros(flat.shape))
+            # Every TP/DP replica must produce gradients for the same parameter
+            # set even when this rank owns no active routes.
+            zero = (
+                self.linear_fc1.weight.reshape(-1)[0] * 0
+                + self.linear_fc2.weight.reshape(-1)[0] * 0
+                + topk_weight.sum().to(dtype=self.linear_fc1.weight.dtype) * 0
+            )
+            if self.has_active_lora():
+                for slot in self.lora_slots.values():
+                    zero = zero + slot.lora_A.reshape(-1)[0] * 0 + slot.lora_B.reshape(-1)[0] * 0
+            return all_reduce(flat.new_zeros(flat.shape) + zero)
         hidden, _ = _grouped_linear_forward(self.linear_fc1, x.contiguous(), tokens_per_expert)
+        if self.has_active_lora():
+            gate, up = hidden.chunk(2, dim=-1)
+            if "gate_proj" in self.lora_slots:
+                gate = gate + self.lora_slots["gate_proj"](x, tokens_per_expert)
+            if "up_proj" in self.lora_slots:
+                up = up + self.lora_slots["up_proj"](x, tokens_per_expert)
+            hidden = torch.cat((gate, up), dim=-1)
         # Apply routing weight before fc2 so it stays inside the fp32 reduction.
         hidden = (
             _areno_silu_and_mul_no_compile(hidden) * sorted_route_weight.unsqueeze(-1).to(dtype=hidden.dtype)
         ).contiguous()
         expert_out, _ = _grouped_linear_forward(self.linear_fc2, hidden, tokens_per_expert)
+        if self.has_active_lora() and "down_proj" in self.lora_slots:
+            expert_out = expert_out + self.lora_slots["down_proj"](hidden, tokens_per_expert)
         # Unpermute back to original (batch, seq) order, then scale and reduce.
-        out = _areno_moe_unpermute_no_compile(
-            expert_out, sorted_token_idx, merging_probs=None, restore_shape=flat.shape
-        )
+        if self.has_lora():
+            out = _areno_moe_unpermute_no_compile(
+                expert_out.float(), sorted_token_idx, merging_probs=None, restore_shape=flat.shape
+            ).to(dtype=flat.dtype)
+        else:
+            out = _areno_moe_unpermute_no_compile(
+                expert_out, sorted_token_idx, merging_probs=None, restore_shape=flat.shape
+            )
         return all_reduce(out * self.config.routed_scaling_factor)
 
     def local_routes(self, topk_idx: torch.Tensor, topk_weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -473,6 +561,25 @@ class BailingGroupedExperts(nn.Module):
             up_weights.append(up)
             down_weights.append(_grouped_weight(self.linear_fc2, expert_id).detach())
         return gate_weights, up_weights, down_weights
+
+    @torch.no_grad()
+    def inference_weights(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Build derived fused-rollout weights without modifying the frozen base."""
+
+        gate_weights, up_weights, down_weights = self.expert_weights()
+        merged = {
+            "gate_proj": torch.stack(gate_weights, dim=0),
+            "up_proj": torch.stack(up_weights, dim=0),
+            "down_proj": torch.stack(down_weights, dim=0),
+        }
+        if self.has_active_lora():
+            for component, weight in merged.items():
+                if component not in self.lora_slots:
+                    continue
+                slot = self.lora_slots[component]
+                delta = torch.bmm(slot.lora_B, slot.lora_A)
+                weight.add_(delta.mul_(slot.scale))
+        return merged["gate_proj"], merged["up_proj"], merged["down_proj"]
 
     @torch.no_grad()
     def full_expert_weights(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
@@ -665,6 +772,7 @@ class BailingSoftmaxAttention(nn.Module):
 
     def __init__(self, config: ModelConfig, layer_idx: int):
         super().__init__()
+        self.lora_slots = nn.ModuleDict()
         ctx = get_tp_context()
         self.layer_idx = layer_idx
         # Head-dim split: rope vs non-rope channels on Q/K, plus separate V dim.
@@ -703,7 +811,12 @@ class BailingSoftmaxAttention(nn.Module):
             # decompression (``kv_b_proj``). The ``kv_a`` output also carries
             # the rope channels in its tail (``qk_rope_head_dim`` cols).
             if self.q_lora_rank is None:
-                self.q_proj = ColumnParallelLinear(config.hidden_size, self.num_heads * self.head_dim, bias=False)
+                self.q_proj = ColumnParallelLinear(
+                    config.hidden_size,
+                    self.num_heads * self.head_dim,
+                    bias=False,
+                    input_grad_allreduce=False,
+                )
                 _cast_linear_weights(self.q_proj, config.dtype)
             else:
                 self.q_a_proj = nn.Linear(config.hidden_size, self.q_lora_rank, bias=False)
@@ -712,7 +825,12 @@ class BailingSoftmaxAttention(nn.Module):
                     self.q_a_proj.weight, False, sequence_parallel=True, tp_grad_allreduce=True
                 )
                 self.q_a_layernorm = RMSNorm(self.q_lora_rank, config.rms_norm_eps)
-                self.q_b_proj = ColumnParallelLinear(self.q_lora_rank, self.num_heads * self.head_dim, bias=False)
+                self.q_b_proj = ColumnParallelLinear(
+                    self.q_lora_rank,
+                    self.num_heads * self.head_dim,
+                    bias=False,
+                    input_grad_allreduce=False,
+                )
                 _cast_linear_weights(self.q_b_proj, config.dtype)
             self.kv_a_proj_with_mqa = nn.Linear(
                 config.hidden_size, self.kv_lora_rank + self.qk_rope_head_dim, bias=False
@@ -723,7 +841,10 @@ class BailingSoftmaxAttention(nn.Module):
             )
             self.kv_a_layernorm = RMSNorm(self.kv_lora_rank, config.rms_norm_eps)
             self.kv_b_proj = ColumnParallelLinear(
-                config.kv_lora_rank, self.num_heads * (self.qk_nope_head_dim + self.v_head_dim), bias=False
+                config.kv_lora_rank,
+                self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
+                bias=False,
+                input_grad_allreduce=False,
             )
             _cast_linear_weights(self.kv_b_proj, config.dtype)
             self.query_layernorm = None
@@ -750,6 +871,15 @@ class BailingSoftmaxAttention(nn.Module):
         self.k_cache = torch.tensor([])
         self.v_cache = torch.tensor([])
 
+    def install_lora_component(self, component: str, slot: nn.Module) -> None:
+        """Attach an adapter to one replicated MLA projection."""
+
+        self.lora_slots[component] = slot
+
+    def _with_lora(self, component: str, x: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
+        slot = self.lora_slots[component] if component in self.lora_slots else None
+        return output + slot(x) if slot is not None and slot.enabled else output
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -758,8 +888,8 @@ class BailingSoftmaxAttention(nn.Module):
         infer_meta: InferMeta | None,
     ) -> torch.Tensor:
         hidden_states = hidden_states.to(dtype=self.dense.weight.dtype)
-        bsz, seqlen, _ = hidden_states.shape
         q, k, v = self._project(hidden_states, position_ids)
+        bsz, seqlen = q.shape[:2]
         if infer_meta is not None:
             # Lazily build the inference backend so weight-only training paths
             # don't pay the cost.
@@ -776,14 +906,13 @@ class BailingSoftmaxAttention(nn.Module):
     def _project(
         self, hidden_states: torch.Tensor, position_ids: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        bsz, seqlen, _ = hidden_states.shape
         if self.kv_lora_rank is None:
             # Standard GQA path: split fused QKV, optional per-head norm, rope
             # on the trailing qk_rope_head_dim channels only.
             assert self.query_key_value is not None
-            qkv = self.query_key_value(hidden_states).view(
-                bsz, seqlen, self.local_heads + 2 * self.local_kv_heads, self.head_dim
-            )
+            qkv = self.query_key_value(hidden_states)
+            bsz, seqlen = qkv.shape[:2]
+            qkv = qkv.view(bsz, seqlen, self.local_heads + 2 * self.local_kv_heads, self.head_dim)
             q, k, v = qkv.split([self.local_heads, self.local_kv_heads, self.local_kv_heads], dim=-2)
             if self.query_layernorm is not None:
                 q = self.query_layernorm(q)
@@ -798,17 +927,21 @@ class BailingSoftmaxAttention(nn.Module):
         # MLA path: split Q into nope/rope chunks, decompress KV from the
         # shared low-rank rep, then re-attach a broadcast rope channel.
         assert self.kv_a_proj_with_mqa is not None and self.kv_a_layernorm is not None and self.kv_b_proj is not None
+        mla_input = hidden_states if is_sequence_parallel_active() else copy_to_tensor_parallel_region(hidden_states)
         if self.q_lora_rank is None:
             assert self.q_proj is not None
-            q = self.q_proj(hidden_states).view(bsz, seqlen, self.local_heads, self.head_dim)
+            q = self.q_proj(mla_input)
         else:
             assert self.q_a_proj is not None and self.q_a_layernorm is not None and self.q_b_proj is not None
-            q = self.q_b_proj(self.q_a_layernorm(self.q_a_proj(hidden_states))).view(
-                bsz, seqlen, self.local_heads, self.head_dim
-            )
+            q_a = self._with_lora("q_a_proj", mla_input, self.q_a_proj(mla_input))
+            q = self.q_b_proj(self.q_a_layernorm(q_a))
+        bsz, seqlen = q.shape[:2]
+        q = q.view(bsz, seqlen, self.local_heads, self.head_dim)
         q_nope, q_rope = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
-        kv_a = self.kv_a_proj_with_mqa(hidden_states)
+        kv_a = self._with_lora("kv_a_proj_with_mqa", mla_input, self.kv_a_proj_with_mqa(mla_input))
         compressed_kv, k_rope = kv_a.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+        if is_sequence_parallel_active():
+            k_rope = gather_from_sequence_parallel_region(k_rope)
         kv = self.kv_b_proj(self.kv_a_layernorm(compressed_kv)).view(
             bsz, seqlen, self.local_heads, self.qk_nope_head_dim + self.v_head_dim
         )
@@ -919,8 +1052,8 @@ class BailingLinearAttention(nn.Module):
         train_meta: TrainMeta | None,
         infer_meta: InferMeta | None,
     ) -> torch.Tensor:
-        bsz, seqlen, _ = hidden_states.shape
         qkv = self.query_key_value(hidden_states)
+        bsz, seqlen = qkv.shape[:2]
         if self.linear_silu:
             qkv = _areno_silu_no_compile(qkv)
         qkv = qkv.view(bsz, seqlen, 3 * self.local_heads, self.head_dim)
@@ -985,8 +1118,7 @@ class BailingLinearAttention(nn.Module):
             raise RuntimeError("linear attention inference requires block_table")
         if self.state_cache.numel() == 0:
             raise RuntimeError("linear attention inference requires recurrent state cache")
-        # Each request maps to one state-cache slot (first column of its block table).
-        slots = infer_meta.block_table[:, 0].long()
+        slots = _recurrent_cache_slots(infer_meta)
         if infer_meta.mode == "decode":
             return self._forward_decode(q, k, v, slots)
         if infer_meta.mode == "prefill":
@@ -1129,6 +1261,55 @@ class BailingKDAAttention(nn.Module):
         self.eps = config.rms_norm_eps
         self.state_cache = torch.tensor([])
         self.conv_cache = torch.tensor([])
+        self.register_buffer("_infer_lora_A", torch.empty(0), persistent=False)
+        self._infer_lora_rank = 0
+
+    @torch.no_grad()
+    def prepare_lora_infer_weights(self) -> None:
+        """Pack the five KDA LoRA A projections for single-adapter inference."""
+
+        projections = (self.q_proj, self.k_proj, self.v_proj, self.f_proj, self.g_proj)
+        slots = tuple(projection.lora_slot for projection in projections)
+        if any(slot is None or not slot.enabled for slot in slots):
+            self._infer_lora_A = self._infer_lora_A.new_empty(0)
+            self._infer_lora_rank = 0
+            return
+        value = torch.cat(tuple(slot.lora_A for slot in slots), dim=0).contiguous()
+        if (
+            self._infer_lora_A.shape == value.shape
+            and self._infer_lora_A.device == value.device
+            and self._infer_lora_A.dtype == value.dtype
+        ):
+            self._infer_lora_A.copy_(value)
+        else:
+            self._infer_lora_A = value
+        self._infer_lora_rank = slots[0].rank
+
+    @torch.no_grad()
+    def clear_lora_infer_weights(self) -> None:
+        self._infer_lora_A = self._infer_lora_A.new_empty(0)
+        self._infer_lora_rank = 0
+
+    def _project_qkvfg(
+        self, hidden_states: torch.Tensor, infer_meta: InferMeta | None
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        projections = (self.q_proj, self.k_proj, self.v_proj, self.f_proj, self.g_proj)
+        slots = tuple(projection.lora_slot for projection in projections)
+        use_packed_lora = (
+            infer_meta is not None
+            and self._infer_lora_A.numel() > 0
+            and all(slot is not None and slot.enabled for slot in slots)
+        )
+        if not use_packed_lora:
+            return tuple(projection(hidden_states) for projection in projections)
+
+        packed_hidden = F.linear(hidden_states, self._infer_lora_A)
+        lora_inputs = packed_hidden.split(self._infer_lora_rank, dim=-1)
+        return tuple(
+            areno_linear(hidden_states, projection.weight, projection.bias)
+            + F.linear(lora_input, slot.lora_B) * slot.scale
+            for projection, slot, lora_input in zip(projections, slots, lora_inputs, strict=True)
+        )
 
     @torch._dynamo.disable
     def forward(
@@ -1140,15 +1321,16 @@ class BailingKDAAttention(nn.Module):
     ) -> torch.Tensor:
         del position_ids
         hidden_states = hidden_states.to(dtype=self.q_proj.weight.dtype)
-        batch, seqlen, _ = hidden_states.shape
-        q = self._causal_conv(self.q_proj(hidden_states), self.q_conv1d_weight, 0, train_meta, infer_meta)
-        k = self._causal_conv(self.k_proj(hidden_states), self.k_conv1d_weight, 1, train_meta, infer_meta)
-        v = self._causal_conv(self.v_proj(hidden_states), self.v_conv1d_weight, 2, train_meta, infer_meta)
+        q, k, v, f, gate = self._project_qkvfg(hidden_states, infer_meta)
+        batch, seqlen = q.shape[:2]
+        q = self._causal_conv(q, self.q_conv1d_weight, 0, train_meta, infer_meta)
+        k = self._causal_conv(k, self.k_conv1d_weight, 1, train_meta, infer_meta)
+        v = self._causal_conv(v, self.v_conv1d_weight, 2, train_meta, infer_meta)
         q = q.to(dtype=hidden_states.dtype)
         k = k.to(dtype=hidden_states.dtype)
         v = v.to(dtype=hidden_states.dtype)
-        f = self.f_proj(hidden_states).view(batch, seqlen, self.local_heads, self.head_dim)
-        gate = self.g_proj(hidden_states).view(batch, seqlen, self.local_heads, self.head_dim)
+        f = f.view(batch, seqlen, self.local_heads, self.head_dim)
+        gate = gate.view(batch, seqlen, self.local_heads, self.head_dim)
         beta = self.b_proj(hidden_states).view(batch, seqlen, self.local_heads)
         q = q.view(batch, seqlen, self.local_heads, self.head_dim)
         k = k.view(batch, seqlen, self.local_heads, self.head_dim)
@@ -1184,7 +1366,7 @@ class BailingKDAAttention(nn.Module):
             raise RuntimeError("Bailing V3 KDA inference requires block_table")
         if self.conv_cache.numel() == 0:
             raise RuntimeError("Bailing V3 KDA inference requires conv state cache")
-        slots = infer_meta.block_table[:, 0].long()
+        slots = _recurrent_cache_slots(infer_meta)
         if infer_meta.mode == "decode":
             current = x.reshape(-1, x.shape[-1])
             history = self.conv_cache.index_select(0, slots)[:, cache_idx].to(dtype=current.dtype)
@@ -1280,7 +1462,7 @@ class BailingKDAAttention(nn.Module):
             raise RuntimeError("Bailing V3 KDA inference requires block_table")
         if self.state_cache.numel() == 0:
             raise RuntimeError("Bailing V3 KDA inference requires recurrent state cache")
-        slots = infer_meta.block_table[:, 0].long()
+        slots = _recurrent_cache_slots(infer_meta)
         initial_state = self.state_cache.index_select(0, slots).to(device=q.device)
         cu = (
             torch.arange(slots.numel() + 1, device=q.device, dtype=torch.long)
@@ -1372,10 +1554,22 @@ class BailingDecoderLayer(nn.Module):
         )
         # Dense MLP for the warmup layers, sparse MoE for the rest.
         self.mlp = (
-            BailingSparseMoeBlock(config)
+            BailingSparseMoeBlock(config, layer_idx - config.first_k_dense_replace)
             if config.num_experts is not None and layer_idx >= config.first_k_dense_replace
             else BailingDenseMLP(config, config.intermediate_size)
         )
+
+    def _attention_block(
+        self,
+        hidden_states: torch.Tensor,
+        position_ids: torch.Tensor,
+        train_meta: TrainMeta | None,
+        infer_meta: InferMeta | None,
+    ) -> torch.Tensor:
+        return self.attention(self.input_layernorm(hidden_states), position_ids, train_meta, infer_meta)
+
+    def _dense_mlp_block(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return self.mlp(self.post_attention_layernorm(hidden_states))
 
     def forward(
         self,
@@ -1384,13 +1578,40 @@ class BailingDecoderLayer(nn.Module):
         train_meta: TrainMeta | None,
         infer_meta: InferMeta | None,
     ) -> torch.Tensor:
-        # Standard pre-norm residual: norm -> sublayer -> add.
+        # Checkpoint attention for every Ling/Bailing V3 layer. Sparse MoE
+        # routing remains outside recomputation so its load counters are not
+        # accumulated twice and rollout-replayed routes stay authoritative.
         residual = hidden_states
-        hidden_states = residual + self.attention(
-            self.input_layernorm(hidden_states), position_ids, train_meta, infer_meta
+        hidden_states = residual + checkpoint_layer(
+            self._attention_block,
+            hidden_states,
+            position_ids,
+            train_meta,
+            infer_meta,
+            train_meta=train_meta,
+            infer_meta=infer_meta,
         )
         residual = hidden_states
-        return residual + self.mlp(self.post_attention_layernorm(hidden_states))
+        if isinstance(self.mlp, BailingSparseMoeBlock):
+            mlp_input = self.post_attention_layernorm(hidden_states)
+            num_padding_tokens = train_meta.num_padding_tokens if train_meta is not None else 0
+            if not should_checkpoint_layer(train_meta, infer_meta):
+                return residual + self.mlp(mlp_input, num_padding_tokens)
+            topk_idx, topk_weight = self.mlp.route(mlp_input, num_padding_tokens)
+            return residual + checkpoint_layer(
+                self.mlp.forward_with_routes,
+                mlp_input,
+                topk_idx,
+                topk_weight,
+                train_meta=train_meta,
+                infer_meta=infer_meta,
+            )
+        return residual + checkpoint_layer(
+            self._dense_mlp_block,
+            hidden_states,
+            train_meta=train_meta,
+            infer_meta=infer_meta,
+        )
 
 
 class BailingMoeV3ForCausalLM(nn.Module):
@@ -1431,23 +1652,25 @@ class BailingMoeV3ForCausalLM(nn.Module):
                 logits_input = hidden_states.float()
             return CausalLMOutput(logits_shard=self.lm_head(logits_input), hidden_states=hidden_states)
 
-    def set_kv_caches(self, kv_caches: list[tuple[torch.Tensor, torch.Tensor]]) -> None:
+    def set_kv_caches(
+        self, kv_caches: list[tuple[torch.Tensor, torch.Tensor]], *, num_slots: int | None = None
+    ) -> None:
         """Bind per-softmax-layer KV caches and pre-allocate per-linear-layer
         recurrent state cache.
 
         ``kv_caches`` lists KV pairs *only* for softmax layers (in order of
         appearance); linear layers get a fresh zero state of shape
         ``[num_slots, heads, head_dim, head_dim]`` sized from the first KV
-        cache.
+        cache when ``num_slots`` is not provided explicitly.
         """
+        device = kv_caches[0][0].device if kv_caches else next(self.parameters()).device
+        num_slots = int(num_slots) if num_slots is not None else (int(kv_caches[0][0].shape[0]) if kv_caches else 1)
         softmax_idx = 0
         for layer in self.layers:
             if isinstance(layer.attention, BailingSoftmaxAttention):
                 layer.attention.set_kv_cache(*kv_caches[softmax_idx])
                 softmax_idx += 1
             elif isinstance(layer.attention, BailingKDAAttention):
-                num_slots = kv_caches[0][0].shape[0] if kv_caches else 1
-                device = kv_caches[0][0].device if kv_caches else next(self.parameters()).device
                 state = torch.zeros(
                     num_slots,
                     layer.attention.local_heads,
@@ -1468,15 +1691,19 @@ class BailingMoeV3ForCausalLM(nn.Module):
 
     @torch.no_grad()
     def prepare_infer_weights(self) -> None:
-        """Stack per-expert weights for fused-MoE inference on every MoE block."""
+        """Prepare KDA LoRA and fused-MoE inference views."""
         for layer in self.layers:
+            if isinstance(layer.attention, BailingKDAAttention):
+                layer.attention.prepare_lora_infer_weights()
             if isinstance(layer.mlp, BailingSparseMoeBlock):
                 layer.mlp.prepare_infer_weights()
 
     @torch.no_grad()
     def clear_infer_weights(self) -> None:
-        """Drop fused-MoE inference tiles to reclaim memory before training."""
+        """Drop KDA LoRA and fused-MoE inference views before training."""
         for layer in self.layers:
+            if isinstance(layer.attention, BailingKDAAttention):
+                layer.attention.clear_lora_infer_weights()
             if isinstance(layer.mlp, BailingSparseMoeBlock):
                 layer.mlp.clear_infer_weights()
 
@@ -1534,6 +1761,18 @@ class BailingMoeV3ForCausalLM(nn.Module):
     def reset_kv_caches(self) -> None:
         for layer in self.layers:
             layer.attention.reset_kv_cache()
+
+    @torch.no_grad()
+    def reset_recurrent_cache_slots(self, slots: torch.Tensor) -> None:
+        """Clear recurrent state before a released inference slot is reused."""
+
+        slots = slots.to(device=next(self.parameters()).device, dtype=torch.long)
+        for layer in self.layers:
+            attn = layer.attention
+            if isinstance(attn, (BailingLinearAttention, BailingKDAAttention)) and attn.state_cache.numel() > 0:
+                attn.state_cache.index_fill_(0, slots, 0)
+            if isinstance(attn, BailingKDAAttention) and attn.conv_cache.numel() > 0:
+                attn.conv_cache.index_fill_(0, slots, 0)
 
     @torch.no_grad()
     def offload_kv_caches(self) -> None:

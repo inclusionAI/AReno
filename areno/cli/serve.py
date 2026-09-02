@@ -20,6 +20,7 @@ import click
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from areno.adapters import LoraConfig
 from areno.api import MLX, BackendType, MlxConfig, SamplingParams, Trainer, default_backend_type
 from areno.api.multimodal import (
     expand_image_tokens,
@@ -204,6 +205,8 @@ class _CudaServeRuntime:
         world_size: int,
         eager_decode: bool,
         attn_backend: str,
+        lora: LoraConfig | None,
+        base_model_name_or_path: str | None,
     ) -> None:
         from areno.engine.config import RuntimeConfig
 
@@ -218,6 +221,8 @@ class _CudaServeRuntime:
             devices=list(range(world_size)),
             runtime_config=RuntimeConfig(eager_decode=bool(eager_decode), attn_backend=attn_backend),
             loss_fn=_serve_loss_fn,
+            lora_config=lora,
+            base_model_name_or_path=base_model_name_or_path,
         )
         self.max_model_len = int(self._engine.config.model.max_position_embeddings)
 
@@ -306,8 +311,12 @@ def _create_serve_runtime(
     decode_progress_interval_s: float,
     eager_decode: bool,
     attn_backend: str,
+    lora: LoraConfig | None,
+    base_model_name_or_path: str | None,
 ) -> _CudaServeRuntime | _MlxServeRuntime:
     if backend_type == MLX:
+        if lora is not None:
+            raise ValueError("native LoRA serving is only supported by the CUDA backend")
         if world_size != 1 or tp_size != 1:
             raise ValueError("MLX serving requires --world-size 1 and --tp-size 1")
         return _MlxServeRuntime(
@@ -322,6 +331,8 @@ def _create_serve_runtime(
         world_size=world_size,
         eager_decode=eager_decode,
         attn_backend=attn_backend,
+        lora=lora,
+        base_model_name_or_path=base_model_name_or_path,
     )
 
 
@@ -336,6 +347,8 @@ def create_app(
     eager_decode: bool = False,
     attn_backend: Literal["flash", "native"] = "flash",
     chat_template_enable_thinking: bool | None = None,
+    lora: LoraConfig | None = None,
+    base_model_name_or_path: str | None = None,
 ) -> FastAPI:
     """Construct the FastAPI app: load tokenizer/engine, install routes and lifecycle hooks."""
     if world_size < 1:
@@ -365,6 +378,8 @@ def create_app(
         decode_progress_interval_s=decode_progress_interval_s,
         eager_decode=eager_decode,
         attn_backend=attn_backend,
+        lora=lora,
+        base_model_name_or_path=base_model_name_or_path,
     )
     if backend_type == MLX:
         tokenizer = engine.tokenizer
@@ -948,6 +963,11 @@ def _normalize_stop(stop: str | list[str] | None) -> list[str]:
     show_default=True,
     help="Remote hub for non-local model refs. Use 'modelscope' for ModelScope or 'hf' for Hugging Face.",
 )
+@click.option(
+    "--base-model-name-or-path",
+    default=None,
+    help="Stable base model reference associated with the PEFT adapter; defaults to the original model path.",
+)
 @click.option("--tp-size", type=int, default=1, show_default=True, help="Tensor parallel size.")
 @click.option("--world-size", type=int, default=1, show_default=True, help="Total number of local worker ranks.")
 @click.option("--host", default="0.0.0.0", show_default=True, help="HTTP bind host.")
@@ -980,9 +1000,23 @@ def _normalize_stop(stop: str | list[str] | None) -> list[str]:
     is_flag=True,
     help="Pass enable_thinking=False to tokenizer chat templates when supported.",
 )
+@click.option("--lora-rank", type=int, default=None, help="Enable native LoRA with this rank.")
+@click.option("--lora-alpha", type=float, default=16.0, show_default=True, help="Native LoRA alpha.")
+@click.option("--lora-dropout", type=float, default=0.0, show_default=True, help="Native LoRA dropout (must be 0).")
+@click.option(
+    "--lora-target-modules",
+    default="q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj",
+    show_default=True,
+    help=(
+        "Comma-separated native projection targets (selected Bailing V3 KDA q/k/v/f/g projections "
+        "use independent canonical adapters)."
+    ),
+)
+@click.option("--lora-adapter-path", default=None, help="Standard PEFT adapter to serve.")
 def serve_command(
     model_path: str,
     model_hub: Literal["hf", "modelscope"],
+    base_model_name_or_path: str | None,
     tp_size: int,
     world_size: int,
     host: str,
@@ -993,11 +1027,27 @@ def serve_command(
     eager_decode: bool,
     attn_backend: Literal["flash", "native"],
     disable_thinking: bool,
+    lora_rank: int | None,
+    lora_alpha: float,
+    lora_dropout: float,
+    lora_target_modules: str,
+    lora_adapter_path: str | None,
 ) -> None:
     """Click entry point: build the app and hand it to uvicorn."""
     import uvicorn
 
+    if base_model_name_or_path is None:
+        base_model_name_or_path = model_path
     model_path = resolve_model_ref(model_path, model_hub=model_hub)
+    lora = None
+    if lora_rank is not None or lora_adapter_path is not None:
+        lora = LoraConfig(
+            rank=8 if lora_rank is None else lora_rank,
+            alpha=lora_alpha,
+            dropout=lora_dropout,
+            target_modules=tuple(item.strip() for item in lora_target_modules.split(",") if item.strip()),
+            adapter_path=lora_adapter_path,
+        )
     from areno.cli.dashboard_registry import register_dashboard_job
 
     register_dashboard_job(
@@ -1027,6 +1077,8 @@ def serve_command(
         eager_decode=eager_decode,
         attn_backend=attn_backend,
         chat_template_enable_thinking=False if disable_thinking else None,
+        lora=lora,
+        base_model_name_or_path=base_model_name_or_path,
     )
     uvicorn.run(app, host=host, port=port)
 

@@ -9,7 +9,50 @@ CPU-only debugging.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+
+
+def compute_batch_group_advantages(
+    rewards: Sequence[float],
+    group_sizes: Sequence[int],
+    eps: float = 1e-8,
+) -> list[float]:
+    """Vectorized group-relative reward normalization for GRPO/GSPO.
+
+    Equivalent to applying the per-group standardization used by
+    ``areno.api.rewards.compute_group_advantages`` to every prompt group, but
+    computed with one numpy pass over the whole batch using group boundaries
+    (``np.add.reduceat``) instead of one numpy call per group. For a batch with
+    ``G`` prompt groups this turns ``G`` small numpy round trips into one call,
+    and keeps the advantage computation independent of the group count.
+
+    The per-group math mirrors the reference (population mean/std over float32
+    rewards with the same ``eps`` floor); results agree with the reference up
+    to floating-point accumulation order, which the CPU equivalence tests pin
+    with a tight tolerance.
+    """
+
+    if not group_sizes:
+        return []
+    sizes = [int(size) for size in group_sizes]
+    if any(size <= 0 for size in sizes):
+        raise ValueError(f"group_sizes must be positive, got {group_sizes}")
+    if sum(sizes) != len(rewards):
+        raise ValueError(f"group_sizes sum ({sum(sizes)}) must equal len(rewards) ({len(rewards)})")
+
+    import numpy as np
+
+    rewards_arr = np.asarray(rewards, dtype=np.float32)
+    offsets = np.concatenate(([0], np.cumsum(np.asarray(sizes[:-1], dtype=np.int64))))
+    counts = np.asarray(sizes, dtype=np.float32)
+    group_sum = np.add.reduceat(rewards_arr, offsets)
+    group_mean = group_sum / counts
+    # Population standard deviation per group: sqrt(E[x^2] - E[x]^2).
+    group_sq_sum = np.add.reduceat(rewards_arr**2, offsets)
+    group_std = np.sqrt(np.maximum(group_sq_sum / counts - group_mean**2, 0.0))
+    means = np.repeat(group_mean, sizes)
+    stds = np.repeat(group_std, sizes)
+    return ((rewards_arr - means) / (stds + eps)).tolist()
 
 
 def compute_gae(

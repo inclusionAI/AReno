@@ -9,11 +9,13 @@ import numpy as np
 import pytest
 
 from areno.api.backend.common import (
+    LOGP_METRIC_WEIGHT,
     MetricReduction,
     TrainMetric,
     accumulation_group_size,
     accumulation_steps,
     metric_reduction,
+    reduce_microbatch_metrics,
 )
 from areno.api.backend.mlx.generation import ContinuousBatchScheduler, GenerationConfig, _Request
 from areno.api.backend.mlx.provider import parameter_group
@@ -68,9 +70,37 @@ def test_accumulation_windows_match_cuda_mini_batch_semantics():
 def test_policy_metric_reductions_use_typed_names():
     assert str(TrainMetric.LOGP_ABS_DIFF_MEAN) == "logp_abs_diff_mean"
     assert str(MetricReduction.FIRST) == "first"
-    assert metric_reduction(TrainMetric.LOGP_ABS_DIFF_MEAN) is MetricReduction.FIRST
-    assert metric_reduction(str(TrainMetric.LOGP_ABS_DIFF_MEAN)) is MetricReduction.FIRST
+    assert metric_reduction(TrainMetric.LOGP_ABS_DIFF_MEAN) is MetricReduction.WEIGHTED_MEAN
+    assert metric_reduction(str(TrainMetric.LOGP_ABS_DIFF_MEAN)) is MetricReduction.WEIGHTED_MEAN
+    assert metric_reduction(TrainMetric.RATIO_MEAN) is MetricReduction.FIRST
     assert metric_reduction("policy_loss") is MetricReduction.MEAN
+
+
+def test_logprob_metrics_are_weighted_by_active_tokens_across_microbatches():
+    reduced = reduce_microbatch_metrics(
+        [
+            {
+                TrainMetric.LOGP_ABS_DIFF_MEAN: 0.1,
+                TrainMetric.TRAIN_LOGPROBS_MEAN: -0.2,
+                TrainMetric.RATIO_MEAN: 1.0,
+                "policy_loss": 2.0,
+                LOGP_METRIC_WEIGHT: 2.0,
+            },
+            {
+                TrainMetric.LOGP_ABS_DIFF_MEAN: 0.01,
+                TrainMetric.TRAIN_LOGPROBS_MEAN: -0.5,
+                TrainMetric.RATIO_MEAN: 1.1,
+                "policy_loss": 4.0,
+                LOGP_METRIC_WEIGHT: 8.0,
+            },
+        ]
+    )
+
+    assert reduced[TrainMetric.LOGP_ABS_DIFF_MEAN] == pytest.approx(0.028)
+    assert reduced[TrainMetric.TRAIN_LOGPROBS_MEAN] == pytest.approx(-0.44)
+    assert reduced[TrainMetric.RATIO_MEAN] == pytest.approx(1.0)
+    assert reduced["policy_loss"] == pytest.approx(3.0)
+    assert LOGP_METRIC_WEIGHT not in reduced
 
 
 def test_multimodal_projector_group_takes_precedence_over_parent_tower():
@@ -255,3 +285,63 @@ def test_adam8bit_matches_bias_corrected_adamw_for_uniform_moments():
         mx.eval(reference_model.parameters(), quantized_model.parameters())
 
     assert bool(mx.allclose(reference_model.weight, quantized_model.weight, atol=2e-5, rtol=2e-5).item())
+
+
+def test_adam8bit_dynamic_codebooks_match_cuda_reference():
+    mx = pytest.importorskip("mlx.core")
+
+    from areno.api.backend.mlx.optimizer import _mlx_dynamic_codebook
+    from areno.engine.optim.dynamic_quant import SIGNED_DYNAMIC_MAP, UNSIGNED_DYNAMIC_MAP
+
+    _require_mlx_device(mx)
+    signed = _mlx_dynamic_codebook(signed=True)
+    unsigned = _mlx_dynamic_codebook(signed=False)
+    mx.eval(signed, unsigned)
+
+    np.testing.assert_array_equal(np.array(signed), np.asarray(SIGNED_DYNAMIC_MAP, dtype=np.float32))
+    np.testing.assert_array_equal(np.array(unsigned), np.asarray(UNSIGNED_DYNAMIC_MAP, dtype=np.float32))
+
+
+def test_adam8bit_mlx_precision_callback_keeps_fp32_moments():
+    mx = pytest.importorskip("mlx.core")
+    nn = pytest.importorskip("mlx.nn")
+    from mlx.utils import tree_flatten, tree_unflatten
+
+    from areno.api.backend.mlx.optimizer import _quantized_adamw_class, apply_optimizer_update
+
+    _require_mlx_device(mx)
+    model = nn.Linear(8, 2, bias=False)
+    optimizer = _quantized_adamw_class()(
+        learning_rate=1e-3,
+        weight_decay=0.0,
+        state_precision_for_parameter=lambda _path, _parameter: "fp32",
+    )
+    path = tree_flatten(model.trainable_parameters())[0][0]
+    gradient = mx.ones_like(model.weight)
+    apply_optimizer_update(model, optimizer, tree_unflatten([(path, gradient)]))
+    state_names = {name for name, _ in tree_flatten(optimizer.state)}
+
+    assert any(name.endswith("m") for name in state_names)
+    assert any(name.endswith("v") for name in state_names)
+    assert not any(name.endswith(("m_q", "v_q", "m_scale", "v_scale")) for name in state_names)
+
+
+def test_mlx_provider_routes_embedding_by_identity_without_path_matching():
+    from areno.api.backend.mlx.provider import MlxModelProvider
+
+    embedding_weight = object()
+    per_layer_weight = object()
+    ordinary_weight = object()
+    embedding = SimpleNamespace(weight=embedding_weight)
+    per_layer_embedding = SimpleNamespace(weight=per_layer_weight)
+    model = SimpleNamespace(
+        model=SimpleNamespace(
+            embed_tokens=embedding,
+            embed_tokens_per_layer=[per_layer_embedding],
+        )
+    )
+    provider = MlxModelProvider(model, tokenizer=None, processor=None, config={})
+
+    assert provider.optimizer_state_precision("unexpected.path", embedding_weight) == "fp32"
+    assert provider.optimizer_state_precision("another.unexpected.path", per_layer_weight) == "fp32"
+    assert provider.optimizer_state_precision("embed_tokens.lookalike", ordinary_weight) == "8bit"

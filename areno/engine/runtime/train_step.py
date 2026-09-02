@@ -48,42 +48,25 @@ def _merge_metrics(*metrics_list: dict[str, Any] | None) -> dict[str, float] | N
     return out or None
 
 
-def _dense_train_meta(tokens: torch.Tensor, *, sequence_parallel_enabled: bool) -> TrainMeta:
-    """Build attention metadata for a dense rectangular (B, T) train batch."""
-
-    batch, seqlen = tokens.shape
-    # FlashAttention varlen API expects cumulative seqlens. For dense batches
-    # every row has the same length, so the prefix sum is regular: 0, T, 2T...
-    cu_seqlens = torch.arange(
-        0,
-        (batch + 1) * seqlen,
-        seqlen,
-        device=tokens.device,
-        dtype=torch.int32,
-    )
-    ctx = get_tp_context()
-    return TrainMeta(
-        cu_seqlens=cu_seqlens,
-        max_seqlen=seqlen,
-        sequence_parallel=sequence_parallel_enabled and ctx.world_size > 1 and seqlen % ctx.world_size == 0,
-    )
-
-
-def _train_meta(data_pack: dict[str, Any], tokens: torch.Tensor) -> TrainMeta:
-    """Pick packed vs dense `TrainMeta` based on whether the pack is packed."""
+def _train_meta(data_pack: dict[str, Any], tokens: torch.Tensor, *, sequence_parallel: bool) -> TrainMeta:
+    """Build packed metadata using the resolved model/CLI SP setting."""
 
     cu_seqlens = data_pack.get("train_cu_seqlens")
-    if isinstance(cu_seqlens, torch.Tensor):
-        max_seqlen = int(data_pack.get("train_max_seqlen", 0))
-        return TrainMeta(
-            cu_seqlens=cu_seqlens.to(device=tokens.device, dtype=torch.int32),
-            max_seqlen=max_seqlen,
-            packed=True,
-            activation_checkpointing=bool(data_pack.get("_activation_checkpointing_enabled", False)),
-        )
-    meta = _dense_train_meta(tokens, sequence_parallel_enabled=bool(data_pack.get("_sequence_parallel_enabled", True)))
-    meta.activation_checkpointing = bool(data_pack.get("_activation_checkpointing_enabled", False))
-    return meta
+    if not isinstance(cu_seqlens, torch.Tensor):
+        raise ValueError("training requires canonical packed data with train_cu_seqlens")
+    ctx = get_tp_context()
+    sequence_parallel = bool(sequence_parallel and ctx.world_size > 1)
+    if sequence_parallel and tokens.numel() % ctx.world_size != 0:
+        raise ValueError("packed token count must be divisible by tensor-parallel size")
+    return TrainMeta(
+        cu_seqlens=cu_seqlens.to(device=tokens.device, dtype=torch.int32),
+        max_seqlen=int(data_pack.get("train_max_seqlen", 0)),
+        packed=True,
+        sequence_parallel=sequence_parallel,
+        activation_checkpointing=bool(data_pack.get("_activation_checkpointing_enabled", False)),
+        num_padding_tokens=int(data_pack.get("packed_singleton_padding", 0)),
+        routing_replay=data_pack.get("packed_routing_replay"),
+    )
 
 
 def _pack_train_data(data_pack: dict[str, Any]) -> dict[str, Any]:
@@ -92,23 +75,50 @@ def _pack_train_data(data_pack: dict[str, Any]) -> dict[str, Any]:
     Packed training removes pad tokens from the forward graph while preserving
     per-action masks, advantages, and rollout logprobs for the loss function.
     """
-    lengths = data_pack.get("lengths")
-    input_ids = data_pack.get("input_ids")
-    if not isinstance(lengths, torch.Tensor) or not isinstance(input_ids, torch.Tensor):
-        return data_pack
+    required = ("input_ids", "lengths", "prompt_mask", "advantages", "logprobs")
+    missing = [name for name in required if not isinstance(data_pack.get(name), torch.Tensor)]
+    if missing:
+        raise ValueError(f"training data is missing required tensor fields: {', '.join(missing)}")
+    lengths = data_pack["lengths"]
+    input_ids = data_pack["input_ids"]
     if input_ids.ndim != 2 or lengths.ndim != 1:
-        return data_pack
+        raise ValueError("training input_ids must be 2D and lengths must be 1D")
     batch = int(input_ids.shape[0])
     if int(lengths.numel()) != batch:
-        return data_pack
+        raise ValueError("training lengths must contain one entry per input row")
+
+    prompt_mask = data_pack["prompt_mask"]
+    loss_mask = data_pack.get("loss_mask")
+    advantages = data_pack["advantages"]
+    rollout_logprobs = data_pack["logprobs"]
+    ref_logprobs = data_pack.get("ref_logprobs")
+    values = data_pack.get("values")
+    returns = data_pack.get("returns")
+    features = data_pack.get("features")
+    for name, tensor in (
+        ("prompt_mask", prompt_mask),
+        ("advantages", advantages),
+        ("logprobs", rollout_logprobs),
+        ("loss_mask", loss_mask),
+        ("ref_logprobs", ref_logprobs),
+        ("values", values),
+        ("returns", returns),
+    ):
+        if tensor is not None and (not isinstance(tensor, torch.Tensor) or tensor.shape != input_ids.shape):
+            raise ValueError(f"training {name} must be a tensor with shape {tuple(input_ids.shape)}")
 
     # Token-axis bookkeeping. `cu_seqlens[i+1]` is the prefix sum of valid
     # tokens up to row i, matching the FlashAttention varlen contract.
-    lengths = lengths.to(device=input_ids.device, dtype=torch.long).clamp(min=1, max=input_ids.shape[1])
+    lengths = lengths.to(device=input_ids.device, dtype=torch.long)
+    if bool(((lengths < 1) | (lengths > input_ids.shape[1])).any()):
+        raise ValueError(f"training lengths must be in [1, {input_ids.shape[1]}]")
     total_tokens = int(lengths.sum().item())
-    packed_ids = torch.empty(total_tokens, device=input_ids.device, dtype=input_ids.dtype)
-    position_ids = torch.empty(total_tokens, device=input_ids.device, dtype=torch.long)
-    cu_seqlens = torch.empty(batch + 1, device=input_ids.device, dtype=torch.int32)
+    ctx = get_tp_context()
+    singleton_padding = (-total_tokens) % ctx.world_size
+    aligned_total_tokens = total_tokens + singleton_padding
+    packed_ids = torch.zeros(aligned_total_tokens, device=input_ids.device, dtype=input_ids.dtype)
+    position_ids = torch.zeros(aligned_total_tokens, device=input_ids.device, dtype=torch.long)
+    cu_seqlens = torch.empty(batch + singleton_padding + 1, device=input_ids.device, dtype=torch.int32)
     cu_seqlens[0] = 0
 
     # Action-axis bookkeeping. Each row contributes `length-1` action sites
@@ -123,18 +133,23 @@ def _pack_train_data(data_pack: dict[str, Any]) -> dict[str, Any]:
     packed_returns = torch.empty(action_count, device=input_ids.device, dtype=torch.float32)
     packed_seq_ids = torch.empty(action_count, device=input_ids.device, dtype=torch.long)
 
-    prompt_mask = data_pack.get("prompt_mask")
-    loss_mask = data_pack.get("loss_mask")
-    advantages = data_pack.get("advantages")
-    rollout_logprobs = data_pack.get("logprobs")
-    ref_logprobs = data_pack.get("ref_logprobs")
-    values = data_pack.get("values")
-    returns = data_pack.get("returns")
-    features = data_pack.get("features")
-    if not all(isinstance(x, torch.Tensor) for x in (prompt_mask, advantages, rollout_logprobs)):
-        return data_pack
-    has_ppo_fields = all(isinstance(x, torch.Tensor) for x in (ref_logprobs, values, returns))
+    has_ref_logprobs = isinstance(ref_logprobs, torch.Tensor)
+    has_values = isinstance(values, torch.Tensor)
+    has_returns = isinstance(returns, torch.Tensor)
     packed_features = _pack_multimodal_features(features, input_ids, lengths, packed_ids.device)
+    routing_replay = data_pack.get("routing_replay")
+    packed_routing_replay = None
+    if routing_replay is not None:
+        if not isinstance(routing_replay, torch.Tensor) or routing_replay.ndim != 4:
+            raise ValueError("training routing_replay must have shape (batch, seqlen, layers, top_k)")
+        if tuple(routing_replay.shape[:2]) != tuple(input_ids.shape):
+            raise ValueError("training routing_replay batch/token shape must match input_ids")
+        packed_routing_replay = torch.full(
+            (aligned_total_tokens, *routing_replay.shape[2:]),
+            -1,
+            device=input_ids.device,
+            dtype=routing_replay.dtype,
+        )
 
     token_offset = 0
     action_offset = 0
@@ -143,6 +158,8 @@ def _pack_train_data(data_pack: dict[str, Any]) -> dict[str, Any]:
         length = int(lengths[row].item())
         max_seqlen = max(max_seqlen, length)
         packed_ids[token_offset : token_offset + length] = input_ids[row, :length]
+        if packed_routing_replay is not None:
+            packed_routing_replay[token_offset : token_offset + length] = routing_replay[row, :length]
         # Position ids restart at 0 for each packed row, so rotary embeddings
         # treat the packed sequence as a concatenation of independent sequences.
         position_ids[token_offset : token_offset + length] = torch.arange(length, device=input_ids.device)
@@ -158,13 +175,19 @@ def _pack_train_data(data_pack: dict[str, Any]) -> dict[str, Any]:
             packed_response_mask[action_slice] = response_mask
             packed_advantages[action_slice] = advantages[row, 1:length].to(dtype=torch.float32)
             packed_logprobs[action_slice] = rollout_logprobs[row, 1:length].to(dtype=torch.float32)
-            if has_ppo_fields:
+            if has_ref_logprobs:
                 packed_ref_logprobs[action_slice] = ref_logprobs[row, 1:length].to(dtype=torch.float32)
+            if has_values:
                 packed_values[action_slice] = values[row, 1:length].to(dtype=torch.float32)
+            if has_returns:
                 packed_returns[action_slice] = returns[row, 1:length].to(dtype=torch.float32)
             packed_seq_ids[action_slice] = row
             action_offset += action_len
         token_offset += length
+
+    for index in range(singleton_padding):
+        cu_seqlens[batch + index + 1] = total_tokens + index + 1
+    packed_features = _pad_packed_multimodal_features(packed_features, singleton_padding)
 
     # The result keeps the original keys (so the loss can still read them) but
     # adds the new packed views. `input_ids` keeps shape (1, total_tokens) to
@@ -181,19 +204,49 @@ def _pack_train_data(data_pack: dict[str, Any]) -> dict[str, Any]:
             "packed_logprobs": packed_logprobs,
             "packed_seq_ids": packed_seq_ids,
             "packed_num_sequences": batch,
+            "packed_singleton_padding": singleton_padding,
         }
     )
     if packed_features is not None:
         packed["features"] = packed_features
-    if has_ppo_fields:
-        packed.update(
-            {
-                "packed_ref_logprobs": packed_ref_logprobs,
-                "packed_values": packed_values,
-                "packed_returns": packed_returns,
-            }
-        )
+    else:
+        packed.pop("features", None)
+    if has_ref_logprobs:
+        packed["packed_ref_logprobs"] = packed_ref_logprobs
+    if has_values:
+        packed["packed_values"] = packed_values
+    if has_returns:
+        packed["packed_returns"] = packed_returns
+    if packed_routing_replay is not None:
+        packed["packed_routing_replay"] = packed_routing_replay
+        # Only the compact packed view is consumed by TrainMeta. Keeping the
+        # rectangular source would copy the same routing metadata to CUDA a
+        # second time and retain both tensors for the whole microbatch.
+        packed.pop("routing_replay", None)
     return packed
+
+
+def _pad_packed_multimodal_features(features: dict | None, padding: int) -> dict | None:
+    """Append token metadata for isolated one-token TP-alignment sequences."""
+
+    if features is None or padding == 0:
+        return features
+    padded = dict(features)
+    image_mask = padded.get("image_token_mask")
+    if isinstance(image_mask, torch.Tensor):
+        padded["image_token_mask"] = torch.cat(
+            (image_mask, torch.zeros(padding, device=image_mask.device, dtype=torch.bool)), dim=0
+        )
+    positions = padded.get("mrope_position_ids")
+    if isinstance(positions, torch.Tensor):
+        padded["mrope_position_ids"] = torch.cat(
+            (
+                positions,
+                torch.zeros(*positions.shape[:-1], padding, device=positions.device, dtype=positions.dtype),
+            ),
+            dim=-1,
+        )
+    return padded
 
 
 def _pack_multimodal_features(
@@ -348,21 +401,63 @@ def _clip_grad_norm(parameters, grad_norm: float, max_norm: float) -> None:
         grad.mul_(coef)
 
 
+def _grad_norms_from_shards(gradient_shards, groups=()) -> dict[str, float]:
+    """Compute TP+DP global norms from unique optimizer-owned DP shards."""
+
+    names = ("global", *groups)
+    group_indexes = {name: index for index, name in enumerate(names[1:], start=1)}
+    ctx = get_tp_context()
+    totals = None
+    for param, grad in gradient_shards:
+        is_tp_parallel = bool(getattr(param, "tensor_model_parallel", False))
+        if not is_tp_parallel and ctx.rank != 0:
+            continue
+        norm = torch.linalg.vector_norm(grad.detach(), ord=2, dtype=torch.float32)
+        if totals is None:
+            totals = torch.zeros(len(names), device=grad.device, dtype=torch.float32)
+        squared = norm.square()
+        totals[0].add_(squared)
+        group = getattr(param, "_areno_lr_group", None)
+        if group in group_indexes:
+            totals[group_indexes[group]].add_(squared)
+    if totals is None:
+        return dict.fromkeys(names, 0.0)
+    # DP ranks own disjoint slices of every gradient; TP ranks own disjoint
+    # model parameters except for replicated tensors counted only on TP rank 0.
+    if ctx.dp_size > 1:
+        dist.all_reduce(totals, op=dist.ReduceOp.SUM, group=ctx.dp_group)
+    if ctx.world_size > 1:
+        dist.all_reduce(totals, op=dist.ReduceOp.SUM, group=ctx.group)
+    return dict(zip(names, totals.sqrt().cpu().tolist(), strict=True))
+
+
 def _grads_for_norm(parameters):
     """Yield params whose grads should contribute to the global TP grad norm.
 
     TP-sharded params contribute on every rank (they are different slices).
-    Replicated params only contribute on rank 0 so the TP all-reduce does not
-    double-count them.
+    Replicated params contribute from one owner per unique output shard so the
+    TP all-reduce does not double-count replicas.
     """
 
     ctx = get_tp_context()
     for param in parameters:
         if _param_grad(param) is None:
             continue
-        is_tp_parallel = bool(getattr(param, "tensor_model_parallel", False))
-        if is_tp_parallel or ctx.rank == 0:
+        if _is_tp_norm_owner(param, ctx):
             yield param
+
+
+def _is_tp_norm_owner(param: torch.nn.Parameter, ctx) -> bool:
+    """Select one owner for replicated output ranges and every true TP shard."""
+
+    output_range = getattr(param, "tp_replicated_output_range", None)
+    if output_range is not None:
+        start, end, global_size = output_range
+        local_size = end - start
+        unique_shards = global_size // local_size
+        ranks_per_shard = ctx.world_size // unique_shards
+        return ctx.rank == (start // local_size) * ranks_per_shard
+    return bool(getattr(param, "tensor_model_parallel", False)) or ctx.rank == 0
 
 
 def _param_grad(param: torch.nn.Parameter) -> torch.Tensor | None:
