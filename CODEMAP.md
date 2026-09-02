@@ -55,7 +55,7 @@ backend-only view.
 | Change SDK rollout or training behavior | `areno/api/trainer.py`, then follow the `Backend` call | `tests/test_trainer_api_cpu.py` and `tests/test_protocol_cpu.py` |
 | Add or change an algorithm or loss | `areno/api/algorithms.py`, `areno/api/trainers/`, and `areno/api/loss_fns/` | `tests/test_algorithms_cpu.py` and `tests/test_losses_rewards_cpu.py` |
 | Add or change a model family | `areno/models/base.py`, `areno/models/registry.py`, then the closest family under `areno/models/` | `tests/test_registry_cpu.py` and `tests/test_registry_discovery_cpu.py` |
-| Change agentic rollout behavior | `areno/api/agentic.py`, then a matching task under `examples/agentic/` | `tests/test_agentic_cpu.py` and the matching example test |
+| Change agentic rollout behavior | `areno/api/agentic.py`, then a matching task under `examples/agentic/` | `tests/test_agentic_cpu.py` and the matching example test (`test_agentic_{tictactoe,shopping,2048}_example_cpu.py`) |
 
 ## Tests, examples, and skills
 
