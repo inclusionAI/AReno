@@ -88,6 +88,7 @@ class AdamW4bit(AdamW8bit):
             quant_block_size=quant_block_size,
         )
         self._rank1_metadata_cache: dict[tuple[int, torch.device], tuple[torch.Tensor, torch.Tensor]] = {}
+        self._rank1_empty_codes: dict[torch.device, torch.Tensor] = {}
         self._rank1_scales: dict[int, torch.Tensor | None] = {
             id(parameter): None for parameter in self.model_params if parameter.ndim >= 2
         }
@@ -184,6 +185,7 @@ class AdamW4bit(AdamW8bit):
         for parameter_id in self._rank1_scales:
             self._rank1_scales[parameter_id] = None
         self._rank1_metadata_cache.clear()
+        self._rank1_empty_codes.clear()
 
     @torch.no_grad()
     def offload_state(self, mode: str = "cpu", directory: str | None = None, batch_size: int = 1) -> None:
@@ -194,6 +196,7 @@ class AdamW4bit(AdamW8bit):
             if scales is not None and scales.device.type != "cpu":
                 self._rank1_scales[parameter_id] = scales.to(device="cpu")
         self._rank1_metadata_cache.clear()
+        self._rank1_empty_codes.clear()
 
     @torch.no_grad()
     def onload_state(self, device: torch.device) -> None:
@@ -204,6 +207,7 @@ class AdamW4bit(AdamW8bit):
             if scales is not None and scales.device != device:
                 self._rank1_scales[parameter_id] = scales.to(device=device)
         self._rank1_metadata_cache.clear()
+        self._rank1_empty_codes.clear()
 
     @torch.no_grad()
     def _ensure_bucket_state(self, bucket: _MasterBucket, state) -> None:
@@ -277,7 +281,13 @@ class AdamW4bit(AdamW8bit):
                     _uses_rank1_normalization(ref) and self._ref_has_gradient(bucket, ref) for ref in bucket.refs
                 ):
                     continue
-                self._ensure_bucket_state(bucket, state)
+                # A fresh optimizer has an implicit all-zero second moment.
+                # Do not materialize every packed bucket during the statistics
+                # pass while every FP32 gradient shard is still resident. The
+                # update pass below initializes one bucket at a time and drops
+                # its gradient immediately, preserving streaming peak memory.
+                if state.step > 0 or state.exp_avg_sq_q is not None or state.offload_file is not None:
+                    self._ensure_bucket_state(bucket, state)
                 for ref, packed_offset, _moment_scale_offset, _variance_scale_offset in self._iter_ref_layout(bucket):
                     if not _uses_rank1_normalization(ref) or not self._ref_has_gradient(bucket, ref):
                         continue
@@ -525,7 +535,6 @@ class AdamW4bit(AdamW8bit):
     ) -> None:
         """Compute updated per-axis maxima without a full FP32 moment."""
 
-        assert state.exp_avg_sq_q is not None
         if grad is None or ref.shard_numel == 0:
             return
         grad_shard = grad if bucket.grad_shard is not None else grad.narrow(0, ref.shard_start, ref.shard_numel)
@@ -534,18 +543,26 @@ class AdamW4bit(AdamW8bit):
             from areno.accel.optimizer import areno_adamw_4bit_rank1_stats
 
             shape, strides = self._rank1_metadata(ref)
+            variance_codes = state.exp_avg_sq_q
+            has_state = variance_codes is not None
+            if variance_codes is None:
+                variance_codes = self._rank1_empty_codes.get(grad_shard.device)
+                if variance_codes is None:
+                    variance_codes = torch.empty(1, device=grad_shard.device, dtype=torch.uint8)
+                    self._rank1_empty_codes[grad_shard.device] = variance_codes
             areno_adamw_4bit_rank1_stats(
                 grad_shard.contiguous(),
-                state.exp_avg_sq_q,
+                variance_codes,
                 previous_scales,
                 updated_scales,
                 invalid,
                 shape,
                 strides,
-                packed_offset=packed_offset,
+                packed_offset=packed_offset if has_state else 0,
                 parameter_shard_start=parameter_shard_start,
                 quant_block_size=self.quant_block_size,
                 beta2=beta2,
+                has_state=has_state,
             )
             return
 
@@ -556,10 +573,13 @@ class AdamW4bit(AdamW8bit):
             byte_count = (count + 1) // 2
             flat_start = parameter_shard_start + start
             element_scales = _rank1_element_scales(previous_scales, shape_tuple, flat_start, count)
-            variance = _unpack_positive_4bit_elementwise(
-                state.exp_avg_sq_q.narrow(0, byte_start, byte_count), count, element_scales
-            )
             gradient = grad_shard.narrow(0, start, count).to(dtype=torch.float32)
+            if state.exp_avg_sq_q is None:
+                variance = torch.zeros(count, device=gradient.device, dtype=torch.float32)
+            else:
+                variance = _unpack_positive_4bit_elementwise(
+                    state.exp_avg_sq_q.narrow(0, byte_start, byte_count), count, element_scales
+                )
             variance.mul_(beta2).addcmul_(gradient, gradient, value=1.0 - beta2)
             if not bool(torch.isfinite(gradient).all() & torch.isfinite(variance).all()):
                 invalid.fill_(1)

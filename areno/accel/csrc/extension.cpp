@@ -214,7 +214,8 @@ void areno_adamw_4bit_rank1_stats_cuda(
     int64_t packed_offset,
     int64_t parameter_shard_start,
     int64_t quant_block_size,
-    double beta2);
+    double beta2,
+    bool has_state);
 void areno_adamw_4bit_rank1_step_cuda(
     torch::Tensor model,
     torch::Tensor grad,

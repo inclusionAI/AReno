@@ -112,6 +112,35 @@ def test_adamw4bit_packs_two_moments_within_storage_budget() -> None:
     assert optimizer.persistent_moment_bytes() <= eight_bit_bytes * 0.6
 
 
+def test_adamw4bit_fresh_rank1_state_is_initialized_during_streaming_update() -> None:
+    parameters = [torch.nn.Parameter(torch.zeros(32, 32)) for _ in range(2)]
+    optimizer = AdamW4bit(
+        parameters,
+        lr=3.0e-4,
+        betas=(0.9, 0.99),
+        weight_decay=0.01,
+        bucket_numel=1024,
+        quant_block_size=128,
+    )
+    for parameter in parameters:
+        parameter.grad = torch.ones_like(parameter)
+
+    live_gradients_at_initialization: list[int] = []
+    ensure_bucket_state = optimizer._ensure_bucket_state
+
+    def tracked_ensure_bucket_state(bucket, state) -> None:
+        live_gradients_at_initialization.append(sum(parameter.grad is not None for parameter in parameters))
+        ensure_bucket_state(bucket, state)
+
+    optimizer._ensure_bucket_state = tracked_ensure_bucket_state
+    optimizer.step()
+
+    # The statistics pass consumes the implicit zero second moment without
+    # allocating packed state. State is initialized only in the update pass,
+    # where each completed parameter releases its gradient before the next.
+    assert live_gradients_at_initialization == [2, 1]
+
+
 def test_adamw4bit_second_moment_mapping_excludes_zero() -> None:
     values = torch.tensor([0.0, 1.0 / 16.0, 0.5, 1.0])
 

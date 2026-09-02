@@ -291,6 +291,7 @@ def areno_adamw_4bit_rank1_stats(
     parameter_shard_start: int,
     quant_block_size: int,
     beta2: float,
+    has_state: bool = True,
 ) -> None:
     """Accumulate updated rank-1 second-moment maxima in bounded CUDA blocks."""
 
@@ -311,7 +312,7 @@ def areno_adamw_4bit_rank1_stats(
     if previous_scales.numel() != updated_scales.numel():
         raise ValueError("AdamW4bit previous and updated rank-1 scale layouts must match")
     packed_numel = (grad.numel() + 1) // 2
-    if packed_offset < 0 or packed_offset + packed_numel > exp_avg_sq_q.numel():
+    if has_state and (packed_offset < 0 or packed_offset + packed_numel > exp_avg_sq_q.numel()):
         raise ValueError("AdamW4bit rank-1 packed variance slice is out of bounds")
     if parameter_shard_start < 0:
         raise ValueError("AdamW4bit rank-1 parameter shard start must be non-negative")
@@ -327,6 +328,7 @@ def areno_adamw_4bit_rank1_stats(
         parameter_shard_start,
         quant_block_size,
         beta2,
+        has_state,
     )
 
 

@@ -273,7 +273,8 @@ __global__ void adamw_4bit_rank1_stats_kernel(
     int64_t numel,
     int64_t packed_offset,
     int64_t parameter_shard_start,
-    float beta2) {
+    float beta2,
+    bool has_state) {
   __shared__ int invalid_block;
   const int tid = threadIdx.x;
   const int64_t local_index = static_cast<int64_t>(blockIdx.x) * blockDim.x + tid;
@@ -285,9 +286,11 @@ __global__ void adamw_4bit_rank1_stats_kernel(
   float variance = 0.0f;
   if (active) {
     const int64_t parameter_index = parameter_shard_start + local_index;
-    const float old_scale = rank1_scale(previous_scales, shape, strides, ndim, parameter_index);
-    const uint8_t code = load_nibble(exp_avg_sq_q + packed_offset, local_index);
-    variance = (static_cast<float>(code) + 1.0f) * old_scale / 16.0f;
+    if (has_state) {
+      const float old_scale = rank1_scale(previous_scales, shape, strides, ndim, parameter_index);
+      const uint8_t code = load_nibble(exp_avg_sq_q + packed_offset, local_index);
+      variance = (static_cast<float>(code) + 1.0f) * old_scale / 16.0f;
+    }
     const float gradient = load_grad(grad, local_index);
     variance = beta2 * variance + (1.0f - beta2) * gradient * gradient;
     if (!isfinite(gradient) || !isfinite(variance)) {
@@ -661,7 +664,8 @@ void launch_adamw_4bit_rank1_stats(
     int64_t packed_offset,
     int64_t parameter_shard_start,
     int64_t quant_block_size,
-    float beta2) {
+    float beta2,
+    bool has_state) {
   const int blocks = static_cast<int>((grad.numel() + quant_block_size - 1) / quant_block_size);
   const auto stream = at::cuda::getCurrentCUDAStream();
   adamw_4bit_rank1_stats_kernel<grad_t><<<blocks, static_cast<int>(quant_block_size), 0, stream>>>(
@@ -676,7 +680,8 @@ void launch_adamw_4bit_rank1_stats(
       grad.numel(),
       packed_offset,
       parameter_shard_start,
-      beta2);
+      beta2,
+      has_state);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
@@ -1037,7 +1042,8 @@ void areno_adamw_4bit_rank1_stats_cuda(
     int64_t packed_offset,
     int64_t parameter_shard_start,
     int64_t quant_block_size,
-    double beta2) {
+    double beta2,
+    bool has_state) {
   c10::cuda::CUDAGuard guard(grad.device());
   TORCH_CHECK(
       grad.is_cuda() && exp_avg_sq_q.is_cuda() && previous_scales.is_cuda() && updated_scales.is_cuda() &&
@@ -1050,11 +1056,11 @@ void areno_adamw_4bit_rank1_stats_cuda(
   if (grad.scalar_type() == at::kBFloat16) {
     launch_adamw_4bit_rank1_stats<at::BFloat16>(
         grad, exp_avg_sq_q, previous_scales, updated_scales, invalid, shape, strides, packed_offset,
-        parameter_shard_start, quant_block_size, beta2);
+        parameter_shard_start, quant_block_size, beta2, has_state);
   } else if (grad.scalar_type() == at::kFloat) {
     launch_adamw_4bit_rank1_stats<float>(
         grad, exp_avg_sq_q, previous_scales, updated_scales, invalid, shape, strides, packed_offset,
-        parameter_shard_start, quant_block_size, beta2);
+        parameter_shard_start, quant_block_size, beta2, has_state);
   } else {
     TORCH_CHECK(false, "AdamW4bit rank-1 gradient must be bfloat16 or float32");
   }
