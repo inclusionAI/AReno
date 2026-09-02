@@ -209,7 +209,21 @@ void areno_adamw_8bit_step_cuda(
     torch::Tensor exp_avg_scale,
     torch::Tensor exp_avg_sq_q,
     torch::Tensor exp_avg_sq_scale,
+    torch::Tensor signed_codebook,
+    torch::Tensor unsigned_codebook,
     int64_t quant_block_size,
+    double beta1,
+    double beta2,
+    double effective_lr,
+    double weight_decay,
+    double eps,
+    double step_size,
+    double bias_correction2_sqrt);
+void areno_adamw_fp32_state_step_cuda(
+    torch::Tensor model,
+    torch::Tensor grad,
+    torch::Tensor exp_avg,
+    torch::Tensor exp_avg_sq,
     double beta1,
     double beta2,
     double effective_lr,
@@ -222,6 +236,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("areno_adamw_fp32_master_step", &areno_adamw_fp32_master_step_cuda, "ARENO compact FP32-master AdamW step");
   m.def("areno_adamw_4bit_step", &areno_adamw_4bit_step_cuda, "ARENO packed block-wise AdamW4bit step");
   m.def("areno_adamw_8bit_step", &areno_adamw_8bit_step_cuda, "ARENO block-wise 8-bit AdamW step");
+  m.def("areno_adamw_fp32_state_step", &areno_adamw_fp32_state_step_cuda, "ARENO FP32-state AdamW step");
   m.def("areno_silu_and_mul", &areno_silu_and_mul_cuda, "ARENO SiLU and multiply");
   m.def("areno_gelu_tanh_and_mul", &areno_gelu_tanh_and_mul_cuda, "ARENO tanh GELU and multiply");
   m.def("areno_silu", &areno_silu_cuda, "ARENO SiLU");

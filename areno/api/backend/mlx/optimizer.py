@@ -2,12 +2,20 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 from areno.api.backend.mlx.provider import parameter_group
+from areno.engine.optim.dynamic_quant import SIGNED_DYNAMIC_MAP, UNSIGNED_DYNAMIC_MAP
+
+_MLX_CODEBOOK_CACHE: dict[bool, Any] = {}
 
 
-def build_optimizer(config: dict[str, Any]):
+def build_optimizer(
+    config: dict[str, Any],
+    *,
+    state_precision_for_parameter: Callable[[str, Any], str] | None = None,
+):
     """Build AdamW groups matching CUDA policy/tower/projector controls."""
 
     import mlx.optimizers as optim
@@ -16,14 +24,14 @@ def build_optimizer(config: dict[str, Any]):
     filters = []
     if config.get("unfreeze_multimodal_tower"):
         tower_config = _group_config(config, "tower")
-        groups.append(("tower", _adamw(tower_config), tower_config))
+        groups.append(("tower", _adamw(tower_config, state_precision_for_parameter), tower_config))
         filters.append(lambda path, _: parameter_group(path) == "tower")
     if config.get("unfreeze_multimodal_projector"):
         projector_config = _group_config(config, "projector")
-        groups.append(("projector", _adamw(projector_config), projector_config))
+        groups.append(("projector", _adamw(projector_config, state_precision_for_parameter), projector_config))
         filters.append(lambda path, _: parameter_group(path) == "projector")
     model_config = dict(config)
-    groups.append(("model", _adamw(model_config), model_config))
+    groups.append(("model", _adamw(model_config, state_precision_for_parameter), model_config))
     if len(groups) == 1:
         return groups[0][1], groups
     optimizer_type = _streaming_multi_optimizer_class() if config.get("adam_8bit") else optim.MultiOptimizer
@@ -78,7 +86,10 @@ def _group_config(config: dict[str, Any], group: str) -> dict[str, Any]:
     return result
 
 
-def _adamw(config: dict[str, Any]):
+def _adamw(
+    config: dict[str, Any],
+    state_precision_for_parameter: Callable[[str, Any], str] | None = None,
+):
     import mlx.optimizers as optim
 
     kwargs = {
@@ -88,7 +99,10 @@ def _adamw(config: dict[str, Any]):
     }
     if not config.get("adam_8bit"):
         return optim.AdamW(**kwargs, bias_correction=True)
-    return _quantized_adamw_class()(**kwargs)
+    return _quantized_adamw_class()(
+        **kwargs,
+        state_precision_for_parameter=state_precision_for_parameter,
+    )
 
 
 def _quantized_adamw_class():
@@ -96,7 +110,7 @@ def _quantized_adamw_class():
     from mlx.optimizers import Optimizer
 
     class AdamW8bit(Optimizer):
-        """AdamW with blockwise uint8 first-moment and root-second-moment storage."""
+        """Paper-compatible blockwise dynamic AdamW with FP32 embedding states."""
 
         def __init__(
             self,
@@ -104,8 +118,9 @@ def _quantized_adamw_class():
             betas=(0.9, 0.999),
             eps: float = 1e-8,
             weight_decay: float = 0.01,
-            block_size: int = 256,
+            block_size: int = 128,
             update_blocks: int = 8192,
+            state_precision_for_parameter: Callable[[str, Any], str] | None = None,
         ) -> None:
             super().__init__()
             self._maybe_schedule("learning_rate", learning_rate)
@@ -114,6 +129,7 @@ def _quantized_adamw_class():
             self.weight_decay = float(weight_decay)
             self.block_size = int(block_size)
             self.update_blocks = int(update_blocks)
+            self.state_precision_for_parameter = state_precision_for_parameter
 
         def init_single(self, parameter, state: dict) -> None:
             size = int(parameter.size)
@@ -128,6 +144,28 @@ def _quantized_adamw_class():
             bias_correction2_sqrt = mx.sqrt(1.0 - beta2**step)
             size = int(state["size"])
             initialized = bool(state["initialized"])
+            precision = str(state.get("precision", "8bit"))
+            if precision == "fp32":
+                grad = gradient.astype(mx.float32)
+                values = parameter.astype(mx.float32)
+                if initialized:
+                    m = state["m"]
+                    v = state["v"]
+                else:
+                    m = mx.zeros_like(values, dtype=mx.float32)
+                    v = mx.zeros_like(values, dtype=mx.float32)
+                m = beta1 * m + (1.0 - beta1) * grad
+                v = beta2 * v + (1.0 - beta2) * mx.square(grad)
+                denom = mx.sqrt(v) / bias_correction2_sqrt + self.eps
+                updated = (values * (1.0 - lr * self.weight_decay) - (lr / bias_correction1) * m / denom).astype(
+                    parameter.dtype
+                )
+                state["m"] = m
+                state["v"] = v
+                state["initialized"] = True
+                mx.eval(updated, m, v)
+                mx.clear_cache()
+                return updated
             block_count = (size + self.block_size - 1) // self.block_size
             grad = gradient.reshape(-1)
             values = parameter.reshape(-1)
@@ -154,19 +192,18 @@ def _quantized_adamw_class():
                         state["m_scale"][block_start:block_end],
                         signed=True,
                     )
-                    v_root = _dequant_blocks(
+                    v = _dequant_blocks(
                         state["v_q"][value_start:padded_end],
                         state["v_scale"][block_start:block_end],
                         signed=False,
                     )
-                    v = mx.square(v_root)
                     m = beta1 * m + (1.0 - beta1) * grad_chunk
                     v = beta2 * v + (1.0 - beta2) * mx.square(grad_chunk)
                 else:
                     m = (1.0 - beta1) * grad_chunk
                     v = (1.0 - beta2) * mx.square(grad_chunk)
                 next_m_q, next_m_scale = _quantize_signed(m, self.block_size)
-                next_v_q, next_v_scale = _quantize_unsigned(mx.sqrt(v), self.block_size)
+                next_v_q, next_v_scale = _quantize_unsigned(v, self.block_size)
                 denom = mx.sqrt(v) / bias_correction2_sqrt + self.eps
                 updated = (value_chunk * (1.0 - lr * self.weight_decay) - (lr / bias_correction1) * m / denom)[
                     :actual
@@ -193,6 +230,18 @@ def _quantized_adamw_class():
                 self.init(gradients)
             self._begin_streaming_step()
             _apply_streaming_leaves(model, gradients, lambda _: self)
+
+        def prepare_parameter_state(self, path: str, parameter: Any, state: dict) -> None:
+            if "precision" in state:
+                return
+            precision = (
+                "8bit"
+                if self.state_precision_for_parameter is None
+                else str(self.state_precision_for_parameter(path, parameter))
+            )
+            if precision not in {"8bit", "fp32"}:
+                raise ValueError(f"unsupported MLX AdamW8bit state precision: {precision!r}")
+            state["precision"] = precision
 
         def _begin_streaming_step(self) -> None:
             for name, scheduler in self._schedulers.items():
@@ -235,6 +284,9 @@ def _apply_streaming_leaves(model: Any, gradients: dict, optimizer_for_path) -> 
         optimizer = optimizer_for_path(path)
         state = _tree_get(optimizer.state, path)
         parameter = _model_parameter(model, path)
+        prepare = getattr(optimizer, "prepare_parameter_state", None)
+        if prepare is not None:
+            prepare(path, parameter, state)
         updated = optimizer.apply_single(gradient, parameter, state)
         _set_model_parameter(model, path, updated)
         _tree_set(gradients, path, None)
@@ -245,7 +297,7 @@ def _apply_streaming_leaves(model: Any, gradients: dict, optimizer_for_path) -> 
 def _tree_get(tree: Any, path: str) -> Any:
     current = tree
     for part in path.split("."):
-        current = current[int(part)] if isinstance(current, (list, tuple)) else current[part]
+        current = current[int(part)] if isinstance(current, list | tuple) else current[part]
     return current
 
 
@@ -253,7 +305,7 @@ def _tree_set(tree: Any, path: str, value: Any) -> None:
     parts = path.split(".")
     current = tree
     for part in parts[:-1]:
-        current = current[int(part)] if isinstance(current, (list, tuple)) else current[part]
+        current = current[int(part)] if isinstance(current, list | tuple) else current[part]
     final = parts[-1]
     if isinstance(current, list):
         current[int(final)] = value
@@ -264,7 +316,7 @@ def _tree_set(tree: Any, path: str, value: Any) -> None:
 def _model_parameter(model: Any, path: str):
     current = model
     for part in path.split("."):
-        current = current[int(part)] if isinstance(current, (list, tuple)) else getattr(current, part)
+        current = current[int(part)] if isinstance(current, list | tuple) else getattr(current, part)
     return current
 
 
@@ -272,7 +324,7 @@ def _set_model_parameter(model: Any, path: str, value: Any) -> None:
     parts = path.split(".")
     current = model
     for part in parts[:-1]:
-        current = current[int(part)] if isinstance(current, (list, tuple)) else getattr(current, part)
+        current = current[int(part)] if isinstance(current, list | tuple) else getattr(current, part)
     final = parts[-1]
     if isinstance(current, list):
         current[int(final)] = value
@@ -291,28 +343,44 @@ def _blocked(value, block_size: int):
 
 
 def _quantize_signed(value, block_size: int):
-    import mlx.core as mx
-
-    blocks = _blocked(value, block_size)
-    scale = mx.maximum(mx.max(mx.abs(blocks), axis=1, keepdims=True) / 127.0, mx.array(1e-12))
-    quantized = mx.clip(mx.round(blocks / scale), -127, 127).astype(mx.int16) + 128
-    return quantized.astype(mx.uint8).reshape(-1), scale
+    return _quantize_dynamic(value, block_size, signed=True)
 
 
 def _quantize_unsigned(value, block_size: int):
+    return _quantize_dynamic(value, block_size, signed=False)
+
+
+def _quantize_dynamic(value, block_size: int, *, signed: bool):
     import mlx.core as mx
 
     blocks = _blocked(value, block_size)
-    scale = mx.maximum(mx.max(blocks, axis=1, keepdims=True) / 255.0, mx.array(1e-12))
-    quantized = mx.clip(mx.round(blocks / scale), 0, 255).astype(mx.uint8)
-    return quantized.reshape(-1), scale
+    scale = mx.max(mx.abs(blocks) if signed else mx.maximum(blocks, 0.0), axis=1, keepdims=True)
+    normalized = blocks / mx.maximum(scale, mx.array(1.0e-30, dtype=mx.float32))
+    if not signed:
+        normalized = mx.maximum(normalized, 0.0)
+    codebook = _mlx_dynamic_codebook(signed=signed)
+    boundaries = (codebook[:-1] + codebook[1:]) * 0.5
+    quantized = mx.searchsorted(boundaries, normalized).astype(mx.uint8)
+    return quantized.reshape(-1), scale.astype(mx.float32)
 
 
 def _dequant_blocks(quantized, scale, *, signed: bool):
-    values = quantized.reshape(scale.shape[0], -1).astype(scale.dtype)
-    if signed:
-        values = values - 128.0
+    import mlx.core as mx
+
+    codebook = _mlx_dynamic_codebook(signed=signed)
+    values = codebook[quantized.reshape(scale.shape[0], -1).astype(mx.uint32)]
     return (values * scale).reshape(-1)
+
+
+def _mlx_dynamic_codebook(*, signed: bool):
+    import mlx.core as mx
+
+    codebook = _MLX_CODEBOOK_CACHE.get(signed)
+    if codebook is None:
+        values = SIGNED_DYNAMIC_MAP if signed else UNSIGNED_DYNAMIC_MAP
+        codebook = mx.array(values, dtype=mx.float32)
+        _MLX_CODEBOOK_CACHE[signed] = codebook
+    return codebook
 
 
 __all__ = ["apply_optimizer_update", "build_optimizer", "materialize_optimizer_update", "set_group_learning_rates"]
