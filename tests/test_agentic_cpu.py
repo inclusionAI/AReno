@@ -1,16 +1,21 @@
 import asyncio
 import importlib.util
+import json
 import logging
 import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
 
+import torch
+
+from areno.api.agentic import AgentTrajectory as RuntimeAgentTrajectory
 from areno.api.tool_call_parser import (
     Gemma4ToolCallParser,
     JsonToolCallParser,
     MiniCPMToolCallParser,
     QwenToolCallParser,
+    infer_tool_call_parser_name,
 )
 from areno.api.trainers.policy_only import PolicyOnlyTrainer
 
@@ -122,10 +127,17 @@ def test_agent_trajectory_turn_extracts_response_metadata():
     turn = AgentTrajectoryTurn(
         item=item,
         messages=[{"role": "user", "content": "same prompt"}],
-        response={"areno": {"response_tokens": [10, 11], "response_logprobs": [-0.1, -0.2]}},
+        response={
+            "areno": {
+                "input_tokens": [1, 2, 3],
+                "response_tokens": [10, 11],
+                "response_logprobs": [-0.1, -0.2],
+            }
+        },
     )
 
     assert turn.item.record == {"task": "same"}
+    assert turn.input_tokens == [1, 2, 3]
     assert turn.response_tokens == [10, 11]
     assert turn.response_logprobs == [-0.1, -0.2]
 
@@ -222,6 +234,39 @@ def test_normalize_messages_rewrites_null_tool_call_content_for_templates():
     assert messages[1]["content"] == ""
 
 
+def test_normalize_messages_flattens_openai_text_parts_for_templates():
+    tokenizer = _StrictContentTokenizer()
+    messages = agentic._normalize_messages(
+        [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "inspect "},
+                    {"type": "text", "text": "the repository"},
+                ],
+            },
+            {"role": "tool", "content": [{"type": "text", "text": "README.md"}]},
+        ]
+    )
+
+    tokens = agentic._messages_to_prompt_tokens(tokenizer, messages, tools=[], fallback_prompt="fallback")
+
+    assert tokens == [2]
+    assert messages[0]["content"] == "inspect the repository"
+    assert messages[1]["content"] == "README.md"
+
+
+def test_normalize_messages_preserves_multimodal_content_parts():
+    content = [
+        {"type": "text", "text": "describe"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}},
+    ]
+
+    messages = agentic._normalize_messages([{"role": "user", "content": content}])
+
+    assert messages[0]["content"] == content
+
+
 def test_messages_to_prompt_tokens_normalizes_tool_call_arguments_for_templates():
     tokenizer = _ToolCallArgumentsMappingTokenizer()
     messages = [
@@ -278,6 +323,59 @@ def test_render_messages_for_display_normalizes_tool_call_arguments_for_template
     assert rendered == "rendered"
 
 
+def test_render_messages_for_display_skips_template_for_image_payloads():
+    class _FailingTemplateTokenizer:
+        chat_template = "template"
+
+        def apply_chat_template(self, *args, **kwargs):
+            raise AssertionError("image reward display should not render large image payloads with chat templates")
+
+    image = "a" * 4096
+    messages = [
+        {"role": "system", "content": "system"},
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image}"}},
+                {"type": "text", "text": "choose"},
+            ],
+        },
+        {"role": "assistant", "content": "square five"},
+    ]
+
+    rendered = agentic._render_messages_for_display(_FailingTemplateTokenizer(), messages)
+
+    assert rendered == "system\n<image>\nchoose\nsquare five"
+    assert image not in rendered
+
+
+def test_agentic_policy_train_sequence_uses_compact_prompt_and_advantage_rows():
+    from areno.api.backend.cuda.training import make_train_pack
+    from areno.api.models import TrainSequence
+
+    seq = TrainSequence.model_construct(
+        prompt_mask=[],
+        loss_mask=[],
+        tokens=[1, 2, 3, 4],
+        logprobs=[0.0, 0.0, -0.1, -0.2],
+        advantages=[],
+        prompt_len=2,
+        scalar_advantage=1.5,
+        eos_token_id=0,
+        returns=[],
+        values=[],
+        ref_logprobs=[],
+        features=None,
+        reward=1.0,
+    )
+
+    pack = make_train_pack([seq])
+
+    assert pack["prompt_mask"].tolist() == [[True, True, False, False]]
+    assert "loss_mask" not in pack
+    assert pack["advantages"].tolist() == [[0.0, 0.0, 1.5, 1.5]]
+
+
 def test_explicit_trajectory_tokenization_normalizes_null_tool_call_content():
     trainer = _FakeTrainer(world_size=1, tp_size=1)
     trainer.tokenizer = _StrictContentTokenizer()
@@ -304,6 +402,120 @@ def test_explicit_trajectory_tokenization_normalizes_null_tool_call_content():
     assert sample.token_row == [3, 1]
 
 
+def test_explicit_trajectory_uses_exact_input_tokens_from_response_metadata():
+    trainer = _FakeTrainer(world_size=1, tp_size=1)
+    trainer.tokenizer = _ExactInputTokenizer()
+    session = RolloutSession(trainer, sampling_params=_FakeSamplingParams(), loss_mask_policy=LossMaskPolicy())
+    item = next(AgentBatch(records=[{}], prompts=["p"], input_tokens=[[1]], n_samples=1).iter_samples())
+    turn = AgentTrajectoryTurn(
+        item=item,
+        messages=[{"role": "user", "content": [{"type": "text", "text": "Pi-owned prompt"}]}],
+        response={
+            "areno": {
+                "input_tokens": [7, 8, 9],
+                "response_tokens": [10],
+                "response_logprobs": [-0.1],
+            }
+        },
+    )
+
+    sample = session._sample_from_trajectory_turn(turn)
+
+    assert sample.token_row == [7, 8, 9, 10]
+
+
+def test_explicit_multimodal_trajectory_rebuilds_features_for_training(monkeypatch):
+    trainer = _FakeTrainer(world_size=1, tp_size=1)
+    session = RolloutSession(trainer, sampling_params=_FakeSamplingParams(), loss_mask_policy=LossMaskPolicy())
+    item = next(AgentBatch(records=[{}], prompts=["p"], input_tokens=[[1]], n_samples=1).iter_samples())
+    turn = AgentTrajectoryTurn(
+        item=item,
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "video_url", "video_url": {"url": "/tmp/sample.mp4"}},
+                    {"type": "text", "text": "count"},
+                ],
+            }
+        ],
+        response={
+            "areno": {
+                "input_tokens": [7, 8, 9],
+                "response_tokens": [10],
+                "response_logprobs": [-0.1],
+            }
+        },
+    )
+    features = {"pixel_values_videos": object()}
+    monkeypatch.setattr(
+        RolloutSession,
+        "_messages_to_tokens_and_features",
+        lambda self, pending: ([7, 8, 9], features),
+    )
+
+    sample = session._sample_from_trajectory_turn(turn)
+
+    assert sample.token_row == [7, 8, 9, 10]
+    assert sample.features is features
+
+
+def test_multimodal_request_encoding_is_cached_within_rollout_session(monkeypatch):
+    trainer = _FakeTrainer(world_size=1, tp_size=1)
+    processor = object()
+    trainer.get_processor = lambda: processor
+    session = RolloutSession(trainer, sampling_params=_FakeSamplingParams(), loss_mask_policy=LossMaskPolicy())
+    pending = SimpleNamespace(
+        messages=[{"role": "user", "content": [{"type": "video_url", "video_url": {"url": "/tmp/v.mp4"}}]}],
+        tools=[{"type": "function", "function": {"name": "report", "parameters": {}}}],
+    )
+    features = {"pixel_values_videos": object()}
+    calls = []
+
+    monkeypatch.setattr(agentic, "modality_token_ids", lambda value: {"video": 42})
+    monkeypatch.setattr(
+        agentic,
+        "encode_processor_messages",
+        lambda value, messages, tools: calls.append((value, messages, tools)) or ([1, 2], features),
+    )
+
+    first = session._messages_to_tokens_and_features(pending)
+    second = session._messages_to_tokens_and_features(pending)
+
+    assert len(calls) == 1
+    assert first[0] == second[0] == [1, 2]
+    assert first[1] is second[1] is features
+
+
+def test_explicit_multimodal_trajectory_rejects_reencoded_token_drift(monkeypatch):
+    trainer = _FakeTrainer(world_size=1, tp_size=1)
+    session = RolloutSession(trainer, sampling_params=_FakeSamplingParams(), loss_mask_policy=LossMaskPolicy())
+    item = next(AgentBatch(records=[{}], prompts=["p"], input_tokens=[[1]], n_samples=1).iter_samples())
+    turn = AgentTrajectoryTurn(
+        item=item,
+        messages=[{"role": "user", "content": [{"type": "audio_url", "audio_url": {"url": "/tmp/a.wav"}}]}],
+        response={
+            "areno": {
+                "input_tokens": [7, 8, 9],
+                "response_tokens": [10],
+                "response_logprobs": [-0.1],
+            }
+        },
+    )
+    monkeypatch.setattr(
+        RolloutSession,
+        "_messages_to_tokens_and_features",
+        lambda self, pending: ([7, 8], {"input_features": object()}),
+    )
+
+    try:
+        session._sample_from_trajectory_turn(turn)
+    except ValueError as exc:
+        assert "differ from the original rollout request" in str(exc)
+    else:
+        raise AssertionError("expected multimodal token drift to be rejected")
+
+
 def test_messages_to_prompt_tokens_falls_back_when_template_rejects_tools():
     tokenizer = _ToolRejectingTokenizer()
     messages = [{"role": "user", "content": "choose"}]
@@ -313,19 +525,6 @@ def test_messages_to_prompt_tokens_falls_back_when_template_rejects_tools():
 
     assert tokens == [1]
     assert tokenizer.calls == [messages]
-
-
-def test_proxy_keeps_max_running_prompts_global_across_dp():
-    trainer = _FakeTrainer(world_size=8, tp_size=1)
-    session = RolloutSession(
-        trainer,
-        sampling_params=_FakeSamplingParams(),
-        loss_mask_policy=LossMaskPolicy(),
-        max_running_prompts=64,
-    )
-
-    assert session.max_running_prompts == 64
-    assert session._local_max_running_prompts == 8
 
 
 def test_proxy_http_server_allows_large_thread_pool():
@@ -486,7 +685,7 @@ def test_agentic_trajectory_filter_respects_configured_max_context_len():
     assert diagnostics["top"][0]["tokens"] == 6
 
 
-def test_agentic_trajectory_filter_counts_concatenated_turns():
+def test_agentic_trajectory_filter_checks_each_exact_turn():
     trainer = _FakeTrainer(world_size=1, tp_size=1)
     session = RolloutSession(trainer, sampling_params=_FakeSamplingParams(), loss_mask_policy=LossMaskPolicy())
     item = agentic.AgentItem(record={}, prompt="p0", input_tokens=[1], prompt_index=0, sample_index=0)
@@ -501,9 +700,14 @@ def test_agentic_trajectory_filter_counts_concatenated_turns():
     policy.config = SimpleNamespace(max_context_len=4)
     policy.areno = SimpleNamespace(model_context_len=lambda: 100)
 
-    kept, filtered, diagnostics = policy._filter_overlong_agent_samples(session, [first], params)
+    kept, filtered, diagnostics = policy._filter_overlong_agent_samples(
+        session,
+        [first],
+        params,
+        turn_samples_by_item={(0, 0): [first, second]},
+    )
 
-    assert len(first.token_row) == 5
+    assert len(first.token_row) == 3
     assert kept == []
     assert filtered == 1
     assert diagnostics["top"][0]["tokens"] == 5
@@ -571,6 +775,25 @@ def test_proxy_client_cancellation_does_not_cancel_queued_rollout():
     assert trainer.rollout_batches == [([[2]], 1)]
 
 
+def test_rollout_proxy_does_not_impose_request_timeout():
+    trainer = _FakeTrainer(world_size=1, tp_size=1)
+    trainer.rollout_delay_s = 0.05
+    session = RolloutSession(
+        trainer,
+        sampling_params=_FakeSamplingParams(),
+        loss_mask_policy=LossMaskPolicy(),
+        max_running_prompts=1,
+    )
+
+    async def run():
+        session._loop = asyncio.get_running_loop()
+        return await session._complete_chat({"model": "policy", "messages": [{"role": "user", "content": "slow"}]})
+
+    response = asyncio.run(run())
+
+    assert response["choices"][0]["message"]["content"] == "100"
+
+
 def test_rollout_session_context_owns_backend_lifecycle():
     trainer = _FakeTrainer(world_size=1, tp_size=1)
 
@@ -588,22 +811,6 @@ def test_rollout_session_context_owns_backend_lifecycle():
     asyncio.run(run_session())
 
     assert trainer.rollout_session_events == ["begin", "end"]
-
-
-def test_rollout_session_uses_trainer_effective_dp_size():
-    trainer = _FakeTrainer(world_size=8, tp_size=4)
-    trainer.effective_dp_size = 4
-
-    session = RolloutSession(
-        trainer,
-        sampling_params=_FakeSamplingParams(),
-        loss_mask_policy=LossMaskPolicy(),
-        max_running_prompts=10,
-        proxy=False,
-    )
-
-    assert session._dp_size == 4
-    assert session._local_max_running_prompts == 3
 
 
 def test_rollout_session_sync_is_explicit_batch_level_hook():
@@ -651,8 +858,16 @@ def test_proxy_filters_prompt_exceeding_max_sequence_len_without_rollout():
     assert response["usage"]["max_sequence_len"] == 5
     assert response["areno"]["response_tokens"] == []
     assert response["areno"]["response_logprobs"] == []
+    assert response["areno"]["filtered"] is True
+    assert response["areno"]["filter_reason"] == "max_context_len"
     assert trainer.rollout_batches == []
     assert trainer.rollout_sync_count == 0
+
+    item = next(AgentBatch(records=[{}], prompts=["p"], input_tokens=[[1]], n_samples=1).iter_samples())
+    turn = AgentTrajectoryTurn(item=item, messages=[{"role": "user", "content": "long prompt"}], response=response)
+    assert turn.filtered is True
+    assert turn.response_tokens == []
+    assert turn.routed_experts is None
 
 
 def test_agentic_partial_with_logprobs_completes_http_request():
@@ -672,8 +887,8 @@ def test_agentic_partial_with_logprobs_completes_http_request():
     assert response["areno"]["response_logprobs"] == [-0.3, -0.4]
 
 
-def test_agentic_multi_turn_calls_merge_into_one_training_sample():
-    """Multiple model calls for one agent item should form one trajectory sample."""
+def test_agentic_multi_turn_calls_merge_reward_history_only():
+    """Multiple calls aggregate reward data without fabricating one token row."""
 
     trainer = _FakeTrainer(world_size=1, tp_size=1)
     session = RolloutSession(
@@ -703,10 +918,10 @@ def test_agentic_multi_turn_calls_merge_into_one_training_sample():
     rows = session._train_rows_from_samples([first_sample])
     record = session.reward_record(first_sample)
 
-    assert rows.token_rows == [[1, 2, 10, 11, 30, 31, 20]]
-    assert rows.response_masks == [[False, False, True, True, False, False, True]]
-    assert rows.loss_masks == [[False, False, True, True, False, False, True]]
-    assert rows.rollout_logprobs == [[0.0, 0.0, -0.1, -0.2, 0.0, 0.0, -0.3]]
+    assert rows.token_rows == [[1, 2, 10, 11]]
+    assert rows.response_masks == [[False, False, True, True]]
+    assert rows.loss_masks == [[False, False, True, True]]
+    assert rows.rollout_logprobs == [[0.0, 0.0, -0.1, -0.2]]
     assert record.tokens == [10, 11, 20]
     assert record.tool_results == [{"name": None, "tool_call_id": None, "content": "tool result"}]
     assert record.completion == "10 11\n20"
@@ -714,6 +929,112 @@ def test_agentic_multi_turn_calls_merge_into_one_training_sample():
     assert [event.type for event in record.trace].count("request") == 2
     assert [event.type for event in record.trace].count("tool_result") == 1
     assert record.source_record == {"task": "multi"}
+
+
+def test_agentic_reward_aggregation_does_not_flatten_training_contexts():
+    """Reward history may aggregate turns without inventing a causal token row."""
+
+    trainer = _FakeTrainer(world_size=1, tp_size=1)
+    session = RolloutSession(trainer, sampling_params=_FakeSamplingParams(), loss_mask_policy=LossMaskPolicy())
+    item = agentic.AgentItem(record={"task": "multi"}, prompt="p", input_tokens=[1, 2], prompt_index=0, sample_index=0)
+    first = _pending_chat(0, _FakeSamplingParams())
+    first.item = item
+    first.input_tokens = [1, 2]
+    second = _pending_chat(0, _FakeSamplingParams())
+    second.item = item
+    second.input_tokens = [1, 2, 99]
+
+    aggregate = session._sample_from_pending_chat(first, agentic._ResponseData([10, 11], [-0.1, -0.2]))
+    second_sample = session._sample_from_pending_chat(second, agentic._ResponseData([20], [-0.3]))
+    session._append_sample_response(aggregate, second_sample)
+
+    assert aggregate.token_row == [1, 2, 10, 11]
+    assert aggregate.response_tokens == [10, 11, 20]
+    assert aggregate.response_logprobs == [-0.1, -0.2, -0.3]
+    assert session._train_rows_from_samples([aggregate, second_sample]).token_rows == [
+        [1, 2, 10, 11],
+        [1, 2, 99, 20],
+    ]
+
+
+def test_agentic_turn_rows_share_trajectory_advantage():
+    """Splitting turns must not count them as extra samples in group normalization."""
+
+    from areno.api.rewards import RewardRecord
+
+    batch = SimpleNamespace(
+        token_rows=[[1, 10], [1, 10, 20], [1, 30]],
+        response_masks=[[False, True], [False, False, True], [False, True]],
+        loss_masks=[[False, True], [False, False, True], [False, True]],
+        rollout_logprobs=[[0.0, -0.1], [0.0, 0.0, -0.2], [0.0, -0.3]],
+        features=[None, None, None],
+        routed_experts=None,
+        rewards=[0.0, 1.0],
+        reward_records=[
+            RewardRecord(prompt="p", completion="a", metadata={"prompt_index": 0}),
+            RewardRecord(prompt="p", completion="b", metadata={"prompt_index": 0}),
+        ],
+        row_reward_indices=[0, 0, 1],
+    )
+    policy = object.__new__(PolicyOnlyTrainer)
+
+    train_batch, rewards, _ = policy._materialize_agentic_train_batch(SimpleNamespace(eos_token_id=0), None, batch)
+
+    assert rewards == [0.0, 1.0]
+    assert [sequence.reward for sequence in train_batch] == [0.0, 0.0, 1.0]
+    assert [sequence.scalar_advantage for sequence in train_batch] == [-1.0, -1.0, 1.0]
+
+
+def test_agentic_multi_turn_routing_stays_with_exact_turn_context():
+    trainer = _FakeTrainer(world_size=1, tp_size=1)
+    session = RolloutSession(trainer, sampling_params=_FakeSamplingParams(), loss_mask_policy=LossMaskPolicy())
+    item = agentic.AgentItem(record={}, prompt="p", input_tokens=[1, 2], prompt_index=0, sample_index=0)
+    first = _pending_chat(0, _FakeSamplingParams())
+    first.item = item
+    first.input_tokens = [1, 2]
+    second = _pending_chat(0, _FakeSamplingParams())
+    second.item = item
+    second.input_tokens = [1, 2, 99]
+    first_routes = [[[10]], [[11]], [[12]]]
+    second_routes = [[[20]], [[21]], [[22]]]
+
+    first_sample = session._sample_from_pending_chat(
+        first, agentic._ResponseData([10, 11], [-0.1, -0.2], routed_experts=first_routes)
+    )
+    second_sample = session._sample_from_pending_chat(
+        second, agentic._ResponseData([20], [-0.3], routed_experts=second_routes)
+    )
+
+    session._append_sample_response(first_sample, second_sample)
+
+    assert first_sample.token_row == [1, 2, 10, 11]
+    assert torch.equal(first_sample.routed_experts_row, torch.tensor(first_routes, dtype=torch.int16))
+    assert second_sample.token_row == [1, 2, 99, 20]
+    assert torch.equal(second_sample.routed_experts_row, torch.tensor(second_routes, dtype=torch.int16))
+    assert len(first_sample.routed_experts_row) == len(first_sample.token_row) - 1
+    assert len(second_sample.routed_experts_row) == len(second_sample.token_row) - 1
+
+
+def test_agentic_routing_uses_compact_session_sidecar():
+    trainer = _FakeTrainer(world_size=1, tp_size=1)
+    session = RolloutSession(trainer, sampling_params=_FakeSamplingParams(), loss_mask_policy=LossMaskPolicy())
+    item = agentic.AgentItem(record={}, prompt="p", input_tokens=[1, 2], prompt_index=0, sample_index=0)
+    pending = _pending_chat(0, _FakeSamplingParams())
+    pending.item = item
+    pending.input_tokens = [1, 2]
+    routes = torch.tensor([[[10]], [[11]]], dtype=torch.int16)
+
+    response = session._build_chat_response(pending, agentic._ResponseData([3], [-0.1], routed_experts=routes))
+    turn = AgentTrajectoryTurn(item=item, messages=pending.messages, response=response)
+
+    assert "routed_experts" not in response["areno"]
+    assert turn.routed_experts is None
+    assert turn.routing_replay_id in session._routing_sidecar
+
+    sample = session._sample_from_trajectory_turn(turn)
+
+    assert torch.equal(sample.routed_experts_row, routes)
+    assert turn.routing_replay_id not in session._routing_sidecar
 
 
 def test_agentic_interleaved_trajectories_do_not_cross_items():
@@ -846,7 +1167,7 @@ def test_agentic_tool_request_returns_tool_call_and_reward_record():
     assert record.loss_mask == [True, True]
 
 
-def test_json_tool_call_parser_prefers_explicit_final_direction():
+def test_json_tool_call_parser_rejects_explicit_direction_in_plain_text():
     tools = [
         {
             "type": "function",
@@ -866,8 +1187,8 @@ def test_json_tool_call_parser_prefers_explicit_final_direction():
         {"type": "function", "function": {"name": "choose_move"}},
     )
 
-    assert len(parsed.tool_calls) == 1
-    assert '"direction":"left"' in parsed.tool_calls[0]["function"]["arguments"]
+    assert parsed.tool_calls == []
+    assert parsed.normal_text == "Valid moves are up, down, left, right. I choose left."
 
 
 def test_json_tool_call_parser_rejects_plain_reasoning_without_action():
@@ -958,6 +1279,95 @@ def test_qwen_tool_call_parser_supports_angle_function_blocks():
     assert parsed.tool_calls[0]["function"]["name"] == "inspect_tree"
     assert '"path":"."' in parsed.tool_calls[0]["function"]["arguments"]
     assert '"max_depth":3' in parsed.tool_calls[0]["function"]["arguments"]
+
+
+def test_qwen_tool_call_parser_supports_ling_arg_key_value_blocks():
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "bash",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "command": {"type": "string"},
+                        "timeout": {"type": "integer"},
+                    },
+                },
+            },
+        }
+    ]
+
+    parsed = QwenToolCallParser().parse(
+        "Inspecting the workspace.</think><tool_call>bash\n"
+        "<arg_key>command</arg_key>\n"
+        "<arg_value>ls -la /tmp/pi-rollout/</arg_value>\n"
+        "<arg_key>timeout</arg_key>\n"
+        "<arg_value>30</arg_value>\n"
+        "</tool_call>",
+        tools,
+        "required",
+    )
+
+    assert parsed.normal_text == "Inspecting the workspace.</think>"
+    assert len(parsed.tool_calls) == 1
+    assert parsed.tool_calls[0]["function"]["name"] == "bash"
+    assert json.loads(parsed.tool_calls[0]["function"]["arguments"]) == {
+        "command": "ls -la /tmp/pi-rollout/",
+        "timeout": 30,
+    }
+
+
+def test_qwen_tool_call_parser_does_not_infer_auto_call_from_truncated_reasoning():
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "move",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"direction": {"type": "string", "enum": ["up", "down", "left", "right"]}},
+                },
+            },
+        }
+    ]
+    content = "I considered every move. The best move is up, but let me reconsider. <tool_call>move\n<arg_key>direction"
+
+    parsed = QwenToolCallParser().parse(content, tools, "auto")
+
+    assert parsed.tool_calls == []
+    assert parsed.normal_text == content
+
+
+def test_qwen_tool_call_parser_accepts_complete_ling_block_in_auto_mode():
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "move",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"direction": {"type": "string", "enum": ["up", "down", "left", "right"]}},
+                },
+            },
+        }
+    ]
+    content = (
+        "The best move is up.</think><tool_call>move\n"
+        "<arg_key>direction</arg_key>\n<arg_value>up</arg_value>\n</tool_call>"
+    )
+
+    parsed = QwenToolCallParser().parse(content, tools, "auto")
+
+    assert len(parsed.tool_calls) == 1
+    assert json.loads(parsed.tool_calls[0]["function"]["arguments"]) == {"direction": "up"}
+
+
+def test_tool_call_parser_infers_qwen_protocol_for_ling_model():
+    tokenizer = SimpleNamespace(chat_template="", name_or_path="Ling-Tiny-v3")
+    trainer = SimpleNamespace(get_tokenizer=lambda: tokenizer, _model_path="/models/Ling-Tiny-v3")
+
+    assert infer_tool_call_parser_name(trainer) == "qwen"
 
 
 def test_gemma4_tool_call_parser_supports_chat_completions_tools():
@@ -1103,6 +1513,14 @@ def test_tool_call_parser_supports_flat_tool_schema():
     assert parsed.tool_calls[0]["function"]["name"] == "choose_move"
 
 
+def test_policy_trainer_counts_explicitly_invalid_agent_items():
+    trainer = PolicyOnlyTrainer.__new__(PolicyOnlyTrainer)
+    trajectory = RuntimeAgentTrajectory(invalid_items=[object(), object()])
+
+    assert trainer._agent_trajectory_invalid_count(trajectory) == 2
+    assert trainer._agent_trajectory_invalid_count([trajectory, RuntimeAgentTrajectory()]) == 2
+
+
 def test_json_tool_call_parser_rejects_tool_choice_mismatch():
     tools = [
         {
@@ -1245,6 +1663,13 @@ class _StrictContentTokenizer(_FakeTokenizer):
         for message in messages:
             assert isinstance(message.get("content"), str)
         return [len(messages)]
+
+
+class _ExactInputTokenizer(_FakeTokenizer):
+    chat_template = "template"
+
+    def apply_chat_template(self, *args, **kwargs):
+        raise AssertionError("exact Pi input tokens must bypass chat-template reconstruction")
 
 
 class _ToolCallArgumentsMappingTokenizer(_StrictContentTokenizer):

@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from areno.api.backend.areno.backend import ArenoBackend
+from areno.api.backend.cuda.backend import CudaBackend
 from areno.engine.policy_sync import PolicyTensorMeta
 from areno.engine.protocol import Op
 
@@ -74,11 +74,11 @@ class _Engine:
         self.events.append("close")
 
 
-def _backend(*, rollout_error: Exception | None = None) -> tuple[ArenoBackend, _Engine, _Engine]:
+def _backend(*, rollout_error: Exception | None = None) -> tuple[CudaBackend, _Engine, _Engine]:
     plan = (PolicyTensorMeta("weight", (4,), "float32", 16),)
     train = _Engine("train", plan)
     rollout = _Engine("rollout", plan, sync_error=rollout_error)
-    backend = ArenoBackend()
+    backend = CudaBackend()
     backend._train_engine = train
     backend._rollout_engine = rollout
     backend._separate_rollout = True

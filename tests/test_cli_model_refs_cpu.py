@@ -7,6 +7,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from areno.api.trainer_config import TrainerConfig
 from areno.cli import model_refs
 
 
@@ -86,6 +87,17 @@ class CliModelReferenceTest(unittest.TestCase):
         self.assertEqual(resolved.critic_ckpt, "/ms/org/actor")
         self.assertEqual(resolved.reward_ckpt, "/ms/org/reward")
         self.assertEqual(calls, ["org/actor", "org/reward"])
+
+    def test_resolve_model_refs_preserves_actor_reference_for_adapter_metadata(self):
+        fake_modelscope = types.SimpleNamespace(snapshot_download=lambda repo: f"/ms/{repo}")
+        config = TrainerConfig(algo="sft", ckpt="org/actor", dataset_path="/data")
+
+        with patch.dict(sys.modules, {"modelscope": fake_modelscope}):
+            resolved = model_refs.resolve_model_refs_for_config(config)
+
+        self.assertEqual(resolved.ckpt, "/ms/org/actor")
+        self.assertEqual(resolved.base_model_name_or_path, "org/actor")
+        self.assertEqual(resolved.cuda_config().base_model_name_or_path, "org/actor")
 
 
 if __name__ == "__main__":

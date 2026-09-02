@@ -10,6 +10,7 @@ loss functions.
 from __future__ import annotations
 
 from enum import Enum
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -17,7 +18,8 @@ from pydantic import BaseModel, Field
 class BackendType(Enum):
     """Available execution backends for an `Trainer`."""
 
-    Areno = "Areno"
+    CUDA = "CUDA"
+    MLX = "MLX"
 
 
 class SamplingParams(BaseModel):
@@ -41,6 +43,7 @@ class SamplingParams(BaseModel):
     stop: list[str] | None = Field(default=None)
     stop_token_ids: list[int] | None = Field(default=None)
     ignore_eos: bool = Field(default=False)
+    seed: int | None = Field(default=None)
     skip_special_tokens: bool = Field(default=True)
     max_prompt_len: int | None = Field(default=None)
 
@@ -55,12 +58,17 @@ class RolloutSequence(BaseModel):
 
     resp_tokens: list[int] = Field(default_factory=list)
     resp_logprobs: list[float] = Field(default_factory=list)
+    # Kept as ``Any`` so CUDA rollouts can retain a compact CPU tensor instead
+    # of expanding every route id into millions of Python integers. Agentic
+    # OpenAI responses serialize the same value to nested lists at the edge.
+    routed_experts: Any | None = Field(default=None)
 
 
 class RolloutResult(BaseModel):
     """All sampled completions for one prompt."""
 
     sequences: list[RolloutSequence] = Field(default_factory=list)
+    adapter_version: int | None = Field(default=None)
 
 
 class TrainSequence(BaseModel):
@@ -78,8 +86,12 @@ class TrainSequence(BaseModel):
     tokens: list[int] = Field(default_factory=list)
     logprobs: list[float] = Field(default_factory=list)
     advantages: list[float] = Field(default_factory=list)
+    prompt_len: int | None = Field(default=None)
+    scalar_advantage: float | None = Field(default=None)
     returns: list[float] = Field(default_factory=list)
     values: list[float] = Field(default_factory=list)
     ref_logprobs: list[float] = Field(default_factory=list)
+    features: dict[str, Any] | list[dict[str, Any] | None] | None = Field(default=None)
     reward: float = Field(default=0.0)
     eos_token_id: int = Field(default=0)
+    routed_experts: Any | None = Field(default=None)

@@ -92,4 +92,4 @@ jobs:
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ env.PYPI_TOKEN }}
-        run: python -m twine upload --non-interactive dist/*.tar.gz
+        run: python -m twine upload --non-interactive --verbose dist/*.tar.gz

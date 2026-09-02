@@ -3,9 +3,14 @@ from __future__ import annotations
 import functools
 import unittest
 
-from areno.api.algorithms import AlgorithmSpec, get_algorithm, list_algorithms, register_algorithm
-from areno.api.loss_fns.gspo import gspo_loss_fn
-from areno.api.loss_fns.ppo import ppo_loss_fn
+from areno.api.algorithms import (
+    AlgorithmSpec,
+    get_algorithm,
+    gspo_loss_fn,
+    list_algorithms,
+    ppo_loss_fn,
+    register_algorithm,
+)
 from areno.api.trainer_config import PolicyTrainerConfig, TrainerConfig
 from areno.api.trainer_factory import build_trainer
 

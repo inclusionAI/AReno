@@ -85,7 +85,8 @@ Host resource preflight
 Before ``areno train`` and ``areno serve`` spawn worker ranks, AReno reads
 process-level limits and compares them with a documented demand estimate for
 the requested ``world_size``/``tp_size``. The preflight never changes the host;
-it only reports and, optionally, blocks.
+it only reports and, optionally, blocks. The check applies to CUDA runs; the
+single-process MLX backend does not spawn these workers and skips it.
 
 The ``--resource-check`` option (on both ``train`` and ``serve``) selects
 behavior:
@@ -105,9 +106,10 @@ Probed limits:
 Demand estimate (conservative upper bound, see
 ``areno.cli.diagnostics.estimate_resource_demand``):
 
-* file descriptors: ``64 * world_size + world_size * (world_size - 1)`` --
-  per-worker base plus one socket per cross-rank peer for the
-  NCCL/tensor-parallel mesh.
+* file descriptors: ``64 + (world_size - 1)`` -- the per-process base plus one
+  socket per cross-rank peer for the NCCL/tensor-parallel mesh. Since
+  ``RLIMIT_NOFILE`` is a per-process limit, this is not multiplied by the
+  number of workers.
 * processes: ``world_size + 1`` worker ranks plus the driver.
 * shared memory: ``1 GiB * tp_size`` for NCCL/CUDA IPC per tensor-parallel
   group.
@@ -121,7 +123,8 @@ Each probe produces one of three severities, mirroring ``areno check``:
   ``WARN`` never blocks, even under ``--resource-check block``.
 * ``FAIL`` -- the observed limit is below demand; the result carries the exact
   ``observed``/``required``/``delta`` values and a remediation hint such as
-  ``ulimit -n 65536`` or ``sudo sysctl -w kernel.shmmax=<required>``.
+  ``ulimit -n 65536`` or a concrete command such as
+  ``sudo sysctl -w kernel.shmmax=4294967296``.
 
 Because a probe may be unavailable per platform, a run is only blocked when a
 limit was actually observed and is below demand -- the preflight degrades
@@ -142,7 +145,7 @@ sufficient; a failing probe prints to stderr, for example:
 
    Host resource preflight:
      FAIL file descriptors (RLIMIT_NOFILE)
-          observed=1024 required=568 delta=-456
+          observed=64 required=71 delta=-7
           -> raise the soft limit before launching workers, e.g. `ulimit -n 65536`
 
 Boundary/invalid input: with ``--resource-check block`` and a below-demand

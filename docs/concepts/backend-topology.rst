@@ -1,14 +1,15 @@
 Backend Topology
 ================
 
-The current SDK runtime follows one AReno backend path:
+The SDK keeps one public training and serving contract with two native backend
+implementations:
 
 .. code-block:: text
 
    Trainer
      -> Backend
-       -> ArenoBackend
-         -> ArenoEngine
+       +-> CudaBackend -> ArenoEngine -> process/GPU workers
+       +-> MlxBackend  -> MLX model   -> in-process Metal runtime
 
 ``Trainer`` is the public coordinator. In ``areno/api/trainer.py``,
 ``Trainer.init`` resolves a registered backend implementation, while
@@ -16,18 +17,25 @@ The current SDK runtime follows one AReno backend path:
 training to that backend.
 
 ``Backend`` is the execution contract in ``areno/api/backend/base.py``. Its
-``rollout_batch`` and ``train`` methods define the operations required by the
-training loop. ``ArenoBackend`` is the registered AReno implementation in
-``areno/api/backend/areno/backend.py``.
+rollout, scoring, role, training, and checkpoint methods define the operations
+required by the shared trainer. ``CudaBackend`` lives in
+``areno/api/backend/cuda/`` and ``MlxBackend`` lives in
+``areno/api/backend/mlx/``. Backend modules are imported lazily, so selecting
+MLX does not import Torch/CUDA and selecting CUDA does not import MLX.
 
-Colocated and partitioned engines
----------------------------------
+The CLI selects the backend from the host: Linux uses CUDA and native Apple
+Silicon uses MLX. There is no runtime fallback. SDK callers may pass
+``backend_type=CUDA`` with ``CudaConfig`` or ``backend_type=MLX`` with
+``MlxConfig`` explicitly. These backend symbols are exported by ``areno.api``.
 
-By default, ``ArenoBackend.initialize`` creates one ``ArenoEngine``. The same
+CUDA colocated and partitioned engines
+--------------------------------------
+
+By default, ``CudaBackend.initialize`` creates one ``ArenoEngine``. The same
 engine handles both sides of the loop:
 
-* ``ArenoBackend.rollout_batch`` calls ``ArenoEngine.generate_rollout``.
-* ``ArenoBackend.train`` calls ``ArenoEngine.step``.
+* ``CudaBackend.rollout_batch`` calls ``ArenoEngine.generate_rollout``.
+* ``CudaBackend.train`` calls ``ArenoEngine.step``.
 
 ``ArenoEngine`` is implemented in ``areno/engine/api.py``. It coordinates the
 worker cluster used by both rollout and training.
@@ -56,3 +64,28 @@ bytes, tensor count, and effective throughput. The same values are emitted
 with the next training metrics as ``policy_sync_time_s``,
 ``policy_sync_transfer_time_s``, ``policy_sync_bytes``,
 ``policy_sync_tensors``, and ``policy_sync_throughput_gbps``.
+
+MLX integrated runtime
+----------------------
+
+``MlxBackend`` owns one in-process model used by rollout, scoring, and
+training. A long-lived scheduler performs prefill and token generation with
+continuous batching. Training updates the same policy object after the rollout
+session closes, so there is no second rollout model and no cross-device weight
+copy. Reference, reward, and critic roles are backend-owned model roles for
+DPO and PPO.
+
+MLX runs with ``world-size=1`` and ``tp-size=1`` on unified memory. CUDA
+device lists, independent rollout partitions, NCCL policy synchronization,
+and CUDA graph capture do not apply. ``--drop-rollout-state`` controls whether
+completed rollout cache state is retained across session boundaries.
+
+Shared behavior
+---------------
+
+Both backends implement the same ``TrainSequence`` batches, algorithm loss
+names, microbatch semantics, role APIs, rollout-session lifecycle, metrics,
+and checkpoint entry point. The numerical kernels and native checkpoint
+formats differ. CUDA saves its Hugging Face-oriented checkpoint layout; MLX
+saves the model in native MLX format with tokenizer/processor assets and AReno
+metadata.

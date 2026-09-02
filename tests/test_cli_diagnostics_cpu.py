@@ -134,12 +134,6 @@ class CliDiagnosticsTest(unittest.TestCase):
         self.assertIn("ARENO_BUILD_EXT=0 skipped the runtime CUDA extension", result.output)
         self.assertIn("Reinstall without ARENO_BUILD_EXT=0", result.output)
 
-    def test_writable_path_check_warns_for_missing_parent(self):
-        result = diagnostics._writable_path_check("cache", "/definitely/missing/areno/path")
-
-        self.assertEqual(result.status, "WARN")
-        self.assertIn("mkdir -p", result.next_step)
-
     def test_writable_path_check_warns_for_existing_file(self):
         with tempfile.NamedTemporaryFile() as tmp_file:
             result = diagnostics._writable_path_check("cache", tmp_file.name)

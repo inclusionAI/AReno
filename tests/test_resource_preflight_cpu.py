@@ -8,10 +8,13 @@ so they import cleanly in any Python 3.10+ environment.
 
 from __future__ import annotations
 
+import builtins
+
 import pytest
 from click import UsageError
 from click.testing import CliRunner
 
+from areno.api import CUDA, MLX
 from areno.cli import diagnostics
 from areno.cli import serve as serve_mod
 from areno.cli import train as train_mod
@@ -165,6 +168,24 @@ def test_unavailable_probe_degrades_to_warn_not_fail():
     assert shm.status != RESOURCE_FAIL
 
 
+def test_missing_resource_module_degrades_rlimit_probes(monkeypatch):
+    real_import = builtins.__import__
+
+    def import_without_resource(name, *args, **kwargs):
+        if name == "resource":
+            raise ImportError("resource module unavailable")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", import_without_resource)
+
+    fd = diagnostics._fd_limit()
+    processes = diagnostics._nproc_limit()
+    assert fd["available"] is False
+    assert processes["available"] is False
+    assert "ImportError" in fd["error"]
+    assert "ImportError" in processes["error"]
+
+
 def test_should_block_on_resources_only_counts_fail():
     limits = _limits(shm_value=None, shm_available=False)
     results = preflight_host_resources(8, 4, policy="block", limits=limits)
@@ -221,7 +242,9 @@ def _train_options(**overrides):
     from tests.test_train_cli_config_cpu import _options
 
     overrides.setdefault("resource_check", "warn")
-    return _options(world_size=2, tp_size=1, **overrides)
+    overrides.setdefault("world_size", 2)
+    overrides.setdefault("tp_size", 1)
+    return _options(**overrides)
 
 
 @pytest.fixture
@@ -250,6 +273,7 @@ def patched_preflight(monkeypatch):
     # The CLI calls the module-level `_preflight_host_resources` wrapper.
     monkeypatch.setattr(train_mod, "_preflight_host_resources", _fake)
     monkeypatch.setattr(serve_mod, "_preflight_host_resources", _fake)
+    monkeypatch.setattr(serve_mod, "default_backend_type", lambda: CUDA)
     return calls
 
 
@@ -277,6 +301,15 @@ def test_train_skip_does_not_invoke_preflight(monkeypatch):
     monkeypatch.setattr(train_mod, "preflight_host_resources", lambda *a, **k: probe_calls.append((a, k)) or [])
     monkeypatch.setattr(train_mod, "run", lambda trainer_config: None)
     train_mod._trainer_config_from_options(**_train_options(resource_check="skip"))
+    assert probe_calls == []
+
+
+def test_train_mlx_does_not_invoke_worker_resource_preflight(monkeypatch):
+    probe_calls = []
+    monkeypatch.setattr(train_mod, "_preflight_host_resources", lambda *a, **k: probe_calls.append((a, k)))
+    train_mod._trainer_config_from_options(
+        **_train_options(backend="mlx", world_size=1, tp_size=1, resource_check="block")
+    )
     assert probe_calls == []
 
 
@@ -321,3 +354,18 @@ def test_serve_warn_proceeds_to_engine_init(monkeypatch, patched_preflight):
     )
     assert patched_preflight == [(2, 1, "warn")]
     assert reached["resolve"] is True  # warn policy did not block engine init
+
+
+def test_serve_mlx_does_not_invoke_worker_resource_preflight(monkeypatch):
+    probe_calls = []
+    monkeypatch.setattr(serve_mod, "default_backend_type", lambda: MLX)
+    monkeypatch.setattr(serve_mod, "_preflight_host_resources", lambda *a, **k: probe_calls.append((a, k)))
+    monkeypatch.setattr(serve_mod, "resolve_model_ref", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("stop")))
+
+    result = CliRunner().invoke(
+        serve_mod.serve_command,
+        ["--model-path", "x", "--world-size", "1", "--tp-size", "1", "--resource-check", "block"],
+    )
+
+    assert isinstance(result.exception, RuntimeError)
+    assert probe_calls == []

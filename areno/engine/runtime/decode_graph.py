@@ -14,6 +14,7 @@ import torch.distributed as dist
 
 from areno.engine.runtime.common import ceil_div as ceil_div  # noqa: F401
 from areno.engine.runtime.metadata import InferMeta
+from areno.engine.runtime.routing_replay import captured_routing, routing_replay_context
 
 
 def bucket_for(batch_size: int, buckets: list[int]) -> int:
@@ -75,13 +76,17 @@ class DecodeGraph:
         bucket: int,
         max_blocks_per_seq: int,
         scratch_block: int,
+        scratch_recurrent_slot: int,
         device: torch.device,
+        *,
+        capture_routing: bool = False,
     ):
         """Allocate static input buffers and the `InferMeta` baked into capture."""
 
         self.model = model
         self.bucket = bucket
         self.scratch_block = scratch_block
+        self.scratch_recurrent_slot = scratch_recurrent_slot
         self.device = device
         # Stable input pointers. The captured CUDA graph remembers these as
         # source/destination addresses, so replay must write through the same
@@ -89,6 +94,10 @@ class DecodeGraph:
         self.input_ids = torch.zeros((1, bucket), device=device, dtype=torch.long)
         self.position_ids = torch.zeros((1, bucket), device=device, dtype=torch.long)
         self.cache_seqlens = torch.zeros(bucket, device=device, dtype=torch.int32)
+        # Graph warmup/capture executes the model before any request is
+        # admitted. Point every dummy row at the dedicated scratch recurrent
+        # slot so it cannot seed live request state with synthetic tokens.
+        self.recurrent_slots = torch.full((bucket,), scratch_recurrent_slot, device=device, dtype=torch.long)
         # Padding columns point to `scratch_block`, a dedicated block that the
         # scheduler never assigns to a real sequence. This keeps the attention
         # kernel safe when actual batch size < bucket.
@@ -98,9 +107,12 @@ class DecodeGraph:
             sample_indices=torch.arange(bucket, device=device, dtype=torch.long),
             cache_seqlens=self.cache_seqlens,
             block_table=self.block_table,
+            recurrent_slots=self.recurrent_slots,
+            capture_routing=capture_routing,
         )
         self.graph = torch.cuda.CUDAGraph()
         self.logits_shard: torch.Tensor | None = None
+        self.routing_capture: torch.Tensor | None = None
 
     @torch.inference_mode()
     def warmup(self, iterations: int = 3) -> int:
@@ -114,11 +126,12 @@ class DecodeGraph:
         stream.wait_stream(torch.cuda.current_stream(self.device))
         with torch.cuda.device(self.device), torch.cuda.stream(stream):
             for _ in range(iterations):
-                logits_shard = self.model(
-                    input_ids=self.input_ids,
-                    position_ids=self.position_ids,
-                    infer_meta=self.meta,
-                ).logits_shard
+                with routing_replay_context(self.meta):
+                    logits_shard = self.model(
+                        input_ids=self.input_ids,
+                        position_ids=self.position_ids,
+                        infer_meta=self.meta,
+                    ).logits_shard
                 del logits_shard
         torch.cuda.current_stream(self.device).wait_stream(stream)
         torch.cuda.synchronize(self.device)
@@ -132,9 +145,14 @@ class DecodeGraph:
         # and must remain alive at the same addresses for the lifetime of the
         # graph, which is exactly what `self.input_ids/...` provide.
         with torch.cuda.device(self.device), torch.cuda.graph(self.graph):
-            self.logits_shard = self.model(
-                input_ids=self.input_ids, position_ids=self.position_ids, infer_meta=self.meta
-            ).logits_shard
+            with routing_replay_context(self.meta):
+                self.logits_shard = self.model(
+                    input_ids=self.input_ids, position_ids=self.position_ids, infer_meta=self.meta
+                ).logits_shard
+            # Stack per-layer routes while capture is active. Replay then
+            # updates this fixed contiguous tensor without launching a new
+            # stack kernel or allocating an output tensor from Python.
+            self.routing_capture = captured_routing(self.meta)
 
     @torch.inference_mode()
     def replay_tensors(
@@ -143,6 +161,7 @@ class DecodeGraph:
         position_ids: torch.Tensor,
         cache_seqlens: torch.Tensor,
         block_table: torch.Tensor,
+        recurrent_slots: torch.Tensor,
     ) -> torch.Tensor:
         """Copy one dynamic decode step into static buffers and replay the graph."""
         actual = int(input_ids.numel())
@@ -155,6 +174,7 @@ class DecodeGraph:
         self.input_ids[0, :actual].copy_(input_ids)
         self.position_ids[0, :actual].copy_(position_ids)
         self.cache_seqlens[:actual].copy_(cache_seqlens)
+        self.recurrent_slots[:actual].copy_(recurrent_slots)
         block_cols = int(block_table.shape[1])
         if block_cols > self.block_table.shape[1]:
             raise ValueError(
@@ -172,6 +192,7 @@ class DecodeGraph:
             self.position_ids[0, actual : self.bucket].fill_(0)
             self.block_table[actual : self.bucket].fill_(self.scratch_block)
             self.cache_seqlens[actual : self.bucket].fill_(0)
+            self.recurrent_slots[actual : self.bucket].fill_(self.scratch_recurrent_slot)
 
         self.graph.replay()
         assert self.logits_shard is not None

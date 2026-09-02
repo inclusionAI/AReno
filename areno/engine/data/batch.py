@@ -22,6 +22,7 @@ class TrainStats:
     loss: float
     stepped: bool = True
     metrics: dict[str, float] | None = None
+    adapter_version: int | None = None
 
 
 @dataclass(slots=True)
@@ -50,21 +51,29 @@ class RolloutOutput:
     logprobs: torch.Tensor
     finish_reason: list[str]
     metrics: dict[str, float] | None = None
+    adapter_version: int | None = None
+    routed_experts: list[torch.Tensor] | None = None
 
 
-def to_device(obj: Any, device: torch.device) -> Any:
-    """Recursively move tensors inside Python containers to a device."""
+def to_device(obj: Any, device: torch.device, _memo: dict[int, torch.Tensor] | None = None) -> Any:
+    """Recursively move tensors while preserving aliases inside the object tree."""
 
+    if _memo is None:
+        _memo = {}
     if isinstance(obj, torch.Tensor):
         if obj.device == device:
             return obj
-        return obj.to(device, non_blocking=True)
+        cached = _memo.get(id(obj))
+        if cached is None:
+            cached = obj.to(device, non_blocking=True)
+            _memo[id(obj)] = cached
+        return cached
     if isinstance(obj, dict):
-        return {k: to_device(v, device) for k, v in obj.items()}
+        return {k: to_device(v, device, _memo) for k, v in obj.items()}
     if isinstance(obj, list):
-        return [to_device(v, device) for v in obj]
+        return [to_device(v, device, _memo) for v in obj]
     if isinstance(obj, tuple):
-        return tuple(to_device(v, device) for v in obj)
+        return tuple(to_device(v, device, _memo) for v in obj)
     return obj
 
 

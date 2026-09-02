@@ -18,8 +18,21 @@ from areno.api.context import Context
 from areno.api.data import PromptBatch, PromptItem
 from areno.api.metrics import MetricsRecorder
 from areno.api.models import BackendType, RolloutResult, SamplingParams, TrainSequence
+from areno.api.multimodal import (
+    encode_multimodal_prompt,
+    expand_image_tokens,
+    image_token_counts_from_features,
+    mrope_position_ids_from_image_grid,
+    record_has_image,
+)
 from areno.api.roles import ModelRole
-from areno.api.tokenizer import encode_generation_prompt, eos_token_ids, load_tokenizer, normalize_token_ids
+from areno.api.tokenizer import (
+    encode_generation_prompt,
+    eos_token_ids,
+    load_processor,
+    load_tokenizer,
+    normalize_token_ids,
+)
 
 
 class Trainer:
@@ -38,6 +51,7 @@ class Trainer:
         backend_type: BackendType | None = None,
         custom_config: BackendConfig | None = None,
         metrics_log_dir: str | None = None,
+        score_micro_bs: int = 8,
     ) -> None:
         """Create a trainer without starting backend workers.
 
@@ -46,6 +60,7 @@ class Trainer:
         """
 
         self._tokenizer = None
+        self._processor = None
         self._backend: Backend | None = None
         # Resolve backend type from the explicit value or default to Areno.
         self._backend_type = resolve_backend_type(backend_type, custom_config)
@@ -55,6 +70,7 @@ class Trainer:
         self._initialized = False
         self._custom_config = coerce_backend_config(self._backend_type, custom_config)
         self._metrics = MetricsRecorder(metrics_log_dir) if metrics_log_dir else None
+        self._score_micro_bs = int(score_micro_bs)
         # Per-step wall-time bag accumulated by the rollout/train helpers
         # so `record_train_step` can flush a complete timing snapshot.
         self._metric_timings: dict[str, float] = {}
@@ -68,6 +84,7 @@ class Trainer:
 
         real_path = self._model_path
         self._tokenizer = load_tokenizer(real_path)
+        self._processor = load_processor(real_path)
         self._ctx = Context(
             self._world_size, real_path, self._tokenizer, self._custom_config, eos_token_ids(real_path, self._tokenizer)
         )
@@ -76,12 +93,24 @@ class Trainer:
             raise ValueError(f"unsupported backend type: {self._backend_type}")
         self._backend = backend_cls()
         self._backend.initialize(self._ctx)
+        components = self._backend.runtime_components()
+        if components.tokenizer is not None:
+            self._tokenizer = components.tokenizer
+            self._ctx.tokenizer = components.tokenizer
+            self._ctx.eos_token_ids = eos_token_ids(real_path, components.tokenizer)
+        if components.processor is not None:
+            self._processor = components.processor
         self._initialized = True
 
     def get_tokenizer(self) -> Any:
         """Return the initialized tokenizer for prompt and completion handling."""
 
         return self._tokenizer
+
+    def get_processor(self) -> Any:
+        """Return the initialized multimodal processor when the checkpoint provides one."""
+
+        return self._processor
 
     def _begin_step(self) -> None:
         """Open a trainer-owned step if rollout/train has not already done so."""
@@ -223,6 +252,8 @@ class Trainer:
 
         cursor = 0
         total_skipped_long = 0
+        shortest_skipped = None
+        longest_skipped = None
         while cursor < len(dataset):
             items = []
             scanned = 0
@@ -231,28 +262,77 @@ class Trainer:
             # exhaust the dataset; over-long prompts increment the skip counter
             # but do not fill the batch.
             while len(items) < batch_size and cursor < len(dataset):
-                record = dataset[cursor]
+                record = dict(dataset[cursor])
                 cursor += 1
                 scanned += 1
-                if prompt_key not in record:
+                if record_has_image(record):
+                    prompt = str(record.get(prompt_key, ""))
+                    input_tokens, features = encode_multimodal_prompt(
+                        self._tokenizer,
+                        self._processor,
+                        record,
+                        prompt_key=prompt_key,
+                    )
+                    if features is not None:
+                        record["features"] = features
+                    record["tokens"] = input_tokens
+                elif "tokens" in record:
+                    prompt = str(record.get(prompt_key, "<encoded prompt>"))
+                    input_tokens = [int(token) for token in record["tokens"]]
+                    features = record.get("features")
+                    image_counts = image_token_counts_from_features(features if isinstance(features, dict) else None)
+                    if image_counts:
+                        image_token_id = features.get("image_token_id") if isinstance(features, dict) else None
+                        if image_token_id is None:
+                            raise ValueError("multimodal prompt rows require features.image_token_id")
+                        input_tokens, _ = expand_image_tokens(
+                            input_tokens,
+                            image_token_id=int(image_token_id),
+                            image_token_counts=image_counts,
+                        )
+                        mrope_position_ids = mrope_position_ids_from_image_grid(
+                            input_tokens,
+                            image_token_id=int(image_token_id),
+                            features=features,
+                        )
+                        if mrope_position_ids is not None:
+                            features = dict(features)
+                            features["mrope_position_ids"] = mrope_position_ids
+                            record["features"] = features
+                    record["tokens"] = input_tokens
+                elif prompt_key in record:
+                    prompt = record[prompt_key]
+                    input_tokens = encode_generation_prompt(self._tokenizer, prompt)
+                else:
                     raise ValueError(
                         f"dataset row must contain `{prompt_key}`; use --dataset-loader-fn to normalize raw rows"
                     )
-                prompt = record[prompt_key]
-                input_tokens = encode_generation_prompt(self._tokenizer, prompt)
                 if len(input_tokens) > max_prompt_tokens:
                     skipped_long += 1
                     total_skipped_long += 1
+                    shortest_skipped = (
+                        len(input_tokens) if shortest_skipped is None else min(shortest_skipped, len(input_tokens))
+                    )
+                    longest_skipped = (
+                        len(input_tokens) if longest_skipped is None else max(longest_skipped, len(input_tokens))
+                    )
                     continue
                 items.append(
                     PromptItem(
                         prompt=prompt,
                         solutions=record[solutions_key] if solutions_key in record else None,
                         input_tokens=input_tokens,
-                        record=dict(record),
+                        record=record,
                     )
                 )
             if not items:
+                if total_skipped_long == len(dataset) and total_skipped_long > 0:
+                    raise ValueError(
+                        f"all {total_skipped_long} dataset prompts exceed "
+                        f"--max-prompt-tokens={max_prompt_tokens} "
+                        f"(shortest={shortest_skipped}, longest={longest_skipped}); "
+                        "increase --max-prompt-tokens or shorten the dataset prompts"
+                    )
                 break
             yield PromptBatch(
                 items=items,
@@ -272,6 +352,7 @@ class Trainer:
         prompt_tokens: list[list[int]],
         n_samples: int,
         sampling_params: SamplingParams,
+        prompt_features: list[dict | None] | None = None,
     ) -> list[RolloutResult]:
         """Generate completions for prompts that were already tokenized."""
 
@@ -281,7 +362,11 @@ class Trainer:
             raise RuntimeError("rollout_token_batch must be called inside `async with trainer.rollout_session(...)`")
         self._begin_step()
         return self._backend.rollout_batch(
-            self._ctx, _normalize_prompt_token_batch(prompt_tokens), n_samples, sampling_params
+            self._ctx,
+            _normalize_prompt_token_batch(prompt_tokens),
+            n_samples,
+            sampling_params,
+            prompt_features=prompt_features,
         )
 
     async def rollout_token_batch_async(
@@ -289,6 +374,7 @@ class Trainer:
         prompt_tokens: list[list[int]],
         n_samples: int,
         sampling_params: SamplingParams,
+        prompt_features: list[dict | None] | None = None,
     ) -> list[RolloutResult]:
         """Async rollout variant for request-concurrent callers."""
 
@@ -298,7 +384,13 @@ class Trainer:
             )
         self._begin_step()
         rollout_async = getattr(self._backend, "rollout_batch_async")
-        return await rollout_async(self._ctx, _normalize_prompt_token_batch(prompt_tokens), n_samples, sampling_params)
+        return await rollout_async(
+            self._ctx,
+            _normalize_prompt_token_batch(prompt_tokens),
+            n_samples,
+            sampling_params,
+            prompt_features=prompt_features,
+        )
 
     def rollout_session(
         self,
@@ -306,7 +398,6 @@ class Trainer:
         sampling_params: SamplingParams,
         loss_mask_policy: LossMaskPolicy | None = None,
         max_running_prompts: int | None = None,
-        timeout_s: float = 300.0,
         proxy: bool = True,
     ) -> RolloutSession:
         """Create an async rollout session, optionally with an OpenAI-compatible proxy."""
@@ -316,7 +407,6 @@ class Trainer:
             sampling_params=sampling_params,
             loss_mask_policy=loss_mask_policy,
             max_running_prompts=max_running_prompts,
-            timeout_s=timeout_s,
             proxy=proxy,
         )
 
@@ -384,20 +474,38 @@ class Trainer:
 
         self._backend.ensure_roles(self._ctx, roles)
 
-    def score_logprobs(self, role: str, token_rows: list[list[int]], *, microbatch_size: int = 8) -> list[list[float]]:
+    def score_logprobs(
+        self,
+        role: str,
+        token_rows: list[list[int]],
+        *,
+        features: list[dict | None] | None = None,
+        routed_experts: list[object] | None = None,
+        microbatch_size: int | None = None,
+    ) -> list[list[float]]:
         """Score fixed token sequences with a backend-owned model role."""
 
-        return self._backend.score_logprobs(self._ctx, role, token_rows, microbatch_size=microbatch_size)
+        kwargs = {
+            "features": features,
+            "microbatch_size": self._score_micro_bs if microbatch_size is None else int(microbatch_size),
+        }
+        if routed_experts is not None:
+            kwargs["routed_experts"] = routed_experts
+        return self._backend.score_logprobs(self._ctx, role, token_rows, **kwargs)
 
-    def score_values(self, role: str, token_rows: list[list[int]]) -> list[list[float]]:
+    def score_values(
+        self, role: str, token_rows: list[list[int]], *, features: list[dict | None] | None = None
+    ) -> list[list[float]]:
         """Score per-token critic values with a backend-owned model role."""
 
-        return self._backend.score_values(self._ctx, role, token_rows)
+        return self._backend.score_values(self._ctx, role, token_rows, features=features)
 
-    def score_rewards(self, role: str, token_rows: list[list[int]]) -> list[float]:
+    def score_rewards(
+        self, role: str, token_rows: list[list[int]], *, features: list[dict | None] | None = None
+    ) -> list[float]:
         """Score sequence rewards with a backend-owned reward model role."""
 
-        return self._backend.score_rewards(self._ctx, role, token_rows)
+        return self._backend.score_rewards(self._ctx, role, token_rows, features=features)
 
     def train_values(
         self,
@@ -427,9 +535,14 @@ class Trainer:
         )
 
     def save_checkpoint(self, path: str) -> str:
-        """Save a HuggingFace-compatible checkpoint when supported by backend."""
+        """Save a native backend checkpoint, or a PEFT artifact for native LoRA."""
 
         return self._backend.save_checkpoint(self._ctx, path)
+
+    def export_adapter(self, path: str) -> str:
+        """Export the live native LoRA weights as a standard PEFT adapter."""
+
+        return self._backend.export_adapter(self._ctx, path)
 
     def close(self) -> None:
         """Release backend workers and local resources such as metric writers."""

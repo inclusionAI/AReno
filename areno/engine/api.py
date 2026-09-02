@@ -26,11 +26,14 @@ from typing import Any
 
 import torch
 
+from areno.adapters.config import LoraConfig
 from areno.engine.checkpoints.io import resolve_model_path
 from areno.engine.config import EngineConfig, OptimizerConfig, RuntimeConfig
 from areno.engine.data import RolloutOutput, SamplingParams, TrainStats, to_cpu
+from areno.engine.modeling import canonical_model_path
 from areno.engine.protocol import (
     EnsureRolesPayload,
+    ExportAdapterPayload,
     Op,
     RoleSpecPayload,
     RolloutCacheProbePayload,
@@ -80,7 +83,10 @@ def _merge_dp_rollouts_by_prompt_indices(
 
     if total_count == 0:
         return _merge_rollouts([])
-    rows: list[tuple[list[int], list[int], str, torch.Tensor] | None] = [None for _ in range(total_count)]
+    routed_experts = [] if any(output is not None and output.routed_experts is not None for output in outputs) else None
+    rows: list[tuple[list[int], list[int], str, torch.Tensor, torch.Tensor | None] | None] = [
+        None for _ in range(total_count)
+    ]
     for dp_rank, output in enumerate(outputs):
         if output is None:
             continue
@@ -94,11 +100,17 @@ def _merge_dp_rollouts_by_prompt_indices(
             if row_idx < 0 or row_idx >= total_count:
                 raise RuntimeError(f"DP rollout prompt index out of chunk range: original_idx={original_idx}")
             response = output.response_ids[local_idx]
+            routes = None
+            if routed_experts is not None:
+                if output.routed_experts is None:
+                    raise RuntimeError("routing replay is missing from one DP rollout shard")
+                routes = output.routed_experts[local_idx]
             rows[row_idx] = (
                 output.prompt_ids[local_idx],
                 response,
                 output.finish_reason[local_idx],
                 output.logprobs[local_idx, : len(response)].detach().cpu(),
+                routes,
             )
     if any(row is None for row in rows):
         missing = [idx for idx, row in enumerate(rows) if row is None]
@@ -110,7 +122,18 @@ def _merge_dp_rollouts_by_prompt_indices(
         [row[2] for row in materialized],
         [row[3] for row in materialized],
         metrics=None,
+        adapter_version=_rollout_version(non_empty=[output for output in outputs if output is not None]),
+        routed_experts=[row[4] for row in materialized if row[4] is not None] if routed_experts is not None else None,
     )
+
+
+def _rollout_version(*, non_empty: list[RolloutOutput]) -> int | None:
+    versions = {output.adapter_version for output in non_empty}
+    if not versions:
+        return None
+    if len(versions) != 1:
+        raise RuntimeError(f"rollout DP replicas reported different adapter versions: {versions}")
+    return versions.pop()
 
 
 class ArenoEngine:
@@ -187,6 +210,7 @@ class ArenoEngine:
         model: str,
         *,
         tp_size: int = 1,
+        sequence_parallel: bool | None = None,
         dp_size: int | None = None,
         devices: list[int] | None = None,
         dummy_load: bool = False,
@@ -197,6 +221,9 @@ class ArenoEngine:
         start: bool = True,
         cluster_kwargs: dict[str, Any] | None = None,
         policy_sync_bucket_mb: int = 64,
+        lora_config: LoraConfig | None = None,
+        reference_mode: str = "independent",
+        base_model_name_or_path: str | None = None,
     ) -> ArenoEngine:
         """Build an engine by reading model config from a checkpoint path.
 
@@ -217,8 +244,10 @@ class ArenoEngine:
         cfg = EngineConfig(
             model=model_config,
             model_path=model_path,
+            base_model_name_or_path=(model if base_model_name_or_path is None else base_model_name_or_path),
             train_loss_fn=loss_fn,
             tp_size=tp_size,
+            sequence_parallel=sequence_parallel,
             dp_size=dp_size,
             devices=devices,
             dummy_load=dummy_load,
@@ -226,6 +255,9 @@ class ArenoEngine:
             runtime=runtime_config or RuntimeConfig(),
             role=role,
             policy_sync_bucket_mb=policy_sync_bucket_mb,
+            lora=lora_config,
+            lora_seed=torch.initial_seed(),
+            reference_mode=reference_mode,
         )
         return cls(cfg, start=start, cluster_kwargs=cluster_kwargs)
 
@@ -238,6 +270,7 @@ class ArenoEngine:
         max_prompt_len: int | None = None,
         eos_token_id: int | None = None,
         sampling_params: SamplingParams | None = None,
+        prompt_features: list[dict[str, Any] | None] | None = None,
         decode_progress_interval_s: float = 0.0,
         cancel_flags: torch.Tensor | None = None,
     ) -> RolloutOutput:
@@ -248,17 +281,19 @@ class ArenoEngine:
         :class:`RolloutOutput` carries response token ids and finish reasons
         merged across DP ranks in the original input order.
 
-        Prompts are chunked by DP size and prefill-token budget so each worker
-        can run bounded prefill batches while decode continues to use a fixed
-        paged-KV allocation.
+        All prompts are submitted to the worker scheduler in one payload. The
+        worker keeps at most ``max_running_prompts`` rows active and admits
+        pending rows under the prefill-token and paged-KV budgets as slots are
+        released.
         """
 
         if not prompts:
             raise ValueError("prompts must be non-empty")
+        if prompt_features is not None and len(prompt_features) != len(prompts):
+            raise ValueError("prompt_features must have the same length as prompts")
         if max_running_prompts < 1:
             raise ValueError("max_running_prompts must be >= 1")
         sampling_params = sampling_params or SamplingParams()
-        outputs = []
         # Cap prompt length for KV sizing; either honour caller-provided bound
         # or fall back to the longest prompt actually seen.
         rollout_max_prompt_len = (
@@ -270,68 +305,51 @@ class ArenoEngine:
         # Worst-case per-rank prefill = every local running slot prefilling its
         # full prompt. The public max_running_prompts value is global.
         max_prefill_tokens = local_max_running_prompts * rollout_max_prompt_len
-        chunks = _chunk_prompts_for_prefill_budget(
-            prompts,
-            max_running_prompts=max_running_prompts,
-            dp_size=dp_size,
-            max_prefill_tokens=max_prefill_tokens,
+        # InferenceBatchState already owns bounded admission and continuous
+        # refill. Keeping the whole request in one worker payload prevents the
+        # coordinator from serialising independent max-running-sized chunks and
+        # repeatedly paying their long decode tails.
+        prompts_by_dp = split_list_by_dp(prompts, dp_size)
+        prompt_features_by_dp = split_list_by_dp(prompt_features, dp_size) if prompt_features is not None else None
+        # Parallel split of the global prompt indices for downstream mapping.
+        prompt_indices_by_dp = split_list_by_dp(list(range(len(prompts))), dp_size)
+        # The payload may contain more pending rows than the KV pool can run at
+        # once. Keep allocation bounded by the configured capacity.
+        max_cache_len = max(
+            max(len(prompt) + max_new_tokens for prompt in prompts),
+            rollout_max_cache_len,
         )
-        for chunk in chunks:
-            # Global offset of this chunk inside the user's input list, used to
-            # restore original indices when merging DP results.
-            chunk_start = sum(len(output.prompt_ids) for output in outputs)
-            # Round-robin chunk rows across DP ranks; per-rank token rows.
-            prompts_by_dp = split_list_by_dp(chunk, int(self.config.dp_size))
-            # Parallel split of the global prompt indices for downstream mapping.
-            prompt_indices_by_dp = split_list_by_dp(
-                list(range(chunk_start, chunk_start + len(chunk))), int(self.config.dp_size)
-            )
-            # Largest per-rank queue depth for the current chunk; floor of 1
-            # avoids zero-sized KV pools for trailing chunks.
-            current_local_running = max(max((len(rows) for rows in prompts_by_dp), default=0), 1)
-            local_max_running = current_local_running
-            # Honour per-prompt cache length if any prompt+max_new exceeds the
-            # global ceiling computed from rollout_max_prompt_len.
-            max_cache_len = max(max(len(prompt) + max_new_tokens for prompt in chunk), rollout_max_cache_len)
-            max_blocks_per_seq = ceil_div(max_cache_len, self.config.runtime.kv_block_size)
-            # Blocking RPC: returns one result per rank after every prompt
-            # finishes (or the cancel flag fires).
-            results = self.cluster.call(
-                Op.INFER_ROLLOUT,
-                RolloutPayload(
-                    prompts_by_dp=prompts_by_dp,
-                    prompt_indices_by_dp=prompt_indices_by_dp,
-                    max_new_tokens=max_new_tokens,
-                    eos_token_id=eos_token_id,
-                    sampling_params=sampling_params,
-                    max_running_seqs=local_max_running,
-                    max_cache_len=max_cache_len,
-                    max_blocks_per_seq=max_blocks_per_seq,
-                    max_prefill_tokens=max_prefill_tokens,
-                    num_blocks=local_max_running * max_blocks_per_seq,
-                    block_size=self.config.runtime.kv_block_size,
-                    decode_progress_interval_s=decode_progress_interval_s,
-                    cancel_flags=cancel_flags,
-                    cancel_indices_by_dp=split_list_by_dp(
-                        list(range(chunk_start, chunk_start + len(chunk))),
-                        int(self.config.dp_size),
-                    )
-                    if cancel_flags is not None
-                    else None,
-                ),
-            )
-            # Drop TP duplicates (only DP rank 0 carries real results) and
-            # re-order DP-shuffled rows back into chunk input order.
-            dp_outputs = dp_rank0_results(results, self.config.tp_size, int(self.config.dp_size))
-            total_count = len(chunk)
-            outputs.append(
-                _merge_dp_rollouts_in_input_order(
-                    dp_outputs,
-                    total_count=total_count,
-                )
-            )
-        # Fast path for single-chunk inputs; otherwise concat per-chunk outputs.
-        return outputs[0] if len(outputs) == 1 else _merge_rollouts(outputs)
+        max_blocks_per_seq = ceil_div(max_cache_len, self.config.runtime.kv_block_size)
+        # Blocking RPC: returns one result per rank after every prompt finishes
+        # (or the cancel flag fires).
+        results = self.cluster.call(
+            Op.INFER_ROLLOUT,
+            RolloutPayload(
+                prompts_by_dp=prompts_by_dp,
+                prompt_indices_by_dp=prompt_indices_by_dp,
+                prompt_features_by_dp=prompt_features_by_dp,
+                max_new_tokens=max_new_tokens,
+                eos_token_id=eos_token_id,
+                sampling_params=sampling_params,
+                max_running_seqs=local_max_running_prompts,
+                max_cache_len=max_cache_len,
+                max_blocks_per_seq=max_blocks_per_seq,
+                max_prefill_tokens=max_prefill_tokens,
+                num_blocks=local_max_running_prompts * max_blocks_per_seq,
+                block_size=self.config.runtime.kv_block_size,
+                decode_progress_interval_s=decode_progress_interval_s,
+                cancel_flags=cancel_flags,
+                cancel_indices_by_dp=split_list_by_dp(list(range(len(prompts))), dp_size)
+                if cancel_flags is not None
+                else None,
+            ),
+        )
+        # Drop TP duplicates (only DP rank 0 carries real results) and re-order
+        # DP-shuffled rows back into input order.
+        return _merge_dp_rollouts_in_input_order(
+            dp_rank0_results(results, self.config.tp_size, dp_size),
+            total_count=len(prompts),
+        )
 
     def probe_rollout_cache(
         self,
@@ -373,6 +391,7 @@ class ArenoEngine:
         max_prompt_len: int | None = None,
         eos_token_id: int | None = None,
         sampling_params: SamplingParams | None = None,
+        prompt_features: list[dict[str, Any] | None] | None = None,
         decode_progress_interval_s: float = 0.0,
         cancel_flags: torch.Tensor | None = None,
     ) -> RolloutOutput:
@@ -385,6 +404,7 @@ class ArenoEngine:
             max_prompt_len=max_prompt_len,
             eos_token_id=eos_token_id,
             sampling_params=sampling_params,
+            prompt_features=prompt_features,
             decode_progress_interval_s=decode_progress_interval_s,
             cancel_flags=cancel_flags,
         )
@@ -398,6 +418,7 @@ class ArenoEngine:
         max_prompt_len: int | None = None,
         eos_token_id: int | None = None,
         sampling_params: SamplingParams | None = None,
+        prompt_features: list[dict[str, Any] | None] | None = None,
         decode_progress_interval_s: float = 0.0,
         cancel_flags: torch.Tensor | None = None,
     ) -> RolloutOutput:
@@ -405,10 +426,11 @@ class ArenoEngine:
 
         if not prompts:
             raise ValueError("prompts must be non-empty")
+        if prompt_features is not None and len(prompt_features) != len(prompts):
+            raise ValueError("prompt_features must have the same length as prompts")
         if max_running_prompts < 1:
             raise ValueError("max_running_prompts must be >= 1")
         sampling_params = sampling_params or SamplingParams()
-        outputs = []
         rollout_max_prompt_len = (
             int(max_prompt_len) if max_prompt_len is not None else max(len(prompt) for prompt in prompts)
         )
@@ -419,56 +441,49 @@ class ArenoEngine:
         dp_start = next(self._async_dp_cursor) % dp_size
         local_max_running_prompts = max(ceil_div(int(max_running_prompts), dp_size), 1)
         max_prefill_tokens = local_max_running_prompts * rollout_max_prompt_len
-        chunks = _chunk_prompts_for_prefill_budget(
-            prompts,
-            max_running_prompts=max_running_prompts,
-            dp_size=dp_size,
-            max_prefill_tokens=max_prefill_tokens,
+        # InferenceBatchState already owns bounded admission and continuous
+        # refill. Submit all rows together so pending prompts can enter a free
+        # slot without waiting for an earlier coordinator chunk to finish.
+        prompts_by_dp = _split_list_by_dp_with_offset(prompts, dp_size, dp_start)
+        prompt_features_by_dp = (
+            _split_list_by_dp_with_offset(prompt_features, dp_size, dp_start) if prompt_features is not None else None
         )
-        for chunk in chunks:
-            chunk_start = sum(len(output.prompt_ids) for output in outputs)
-            prompts_by_dp = _split_list_by_dp_with_offset(chunk, dp_size, dp_start)
-            prompt_indices_by_dp = _split_list_by_dp_with_offset(
-                list(range(chunk_start, chunk_start + len(chunk))), dp_size, dp_start
-            )
-            current_local_running = max(max((len(rows) for rows in prompts_by_dp), default=0), 1)
-            capacity_local_running = local_max_running_prompts if cancel_flags is None else current_local_running
-            max_cache_len = max(max(len(prompt) + max_new_tokens for prompt in chunk), rollout_max_cache_len)
-            max_blocks_per_seq = ceil_div(max_cache_len, self.config.runtime.kv_block_size)
-            payload = RolloutPayload(
-                prompts_by_dp=prompts_by_dp,
-                prompt_indices_by_dp=prompt_indices_by_dp,
-                max_new_tokens=max_new_tokens,
-                eos_token_id=eos_token_id,
-                sampling_params=sampling_params,
-                max_running_seqs=capacity_local_running,
-                max_cache_len=max_cache_len,
-                max_blocks_per_seq=max_blocks_per_seq,
-                max_prefill_tokens=max_prefill_tokens,
-                num_blocks=capacity_local_running * max_blocks_per_seq,
-                block_size=self.config.runtime.kv_block_size,
-                decode_progress_interval_s=decode_progress_interval_s,
-                cancel_flags=cancel_flags,
-                cancel_indices_by_dp=_split_list_by_dp_with_offset(
-                    list(range(chunk_start, chunk_start + len(chunk))), dp_size, dp_start
-                )
-                if cancel_flags is not None
-                else None,
-            )
-            results = await self.cluster.call_async(
-                Op.INFER_ROLLOUT,
-                payload,
-                result_ranks={dp_rank * int(self.config.tp_size) for dp_rank in range(dp_size)},
-            )
-            outputs.append(
-                _merge_dp_rollouts_by_prompt_indices(
-                    dp_rank0_results(results, self.config.tp_size, dp_size),
-                    prompt_indices_by_dp,
-                    chunk_start=chunk_start,
-                    total_count=len(chunk),
-                )
-            )
-        return outputs[0] if len(outputs) == 1 else _merge_rollouts(outputs)
+        prompt_indices_by_dp = _split_list_by_dp_with_offset(list(range(len(prompts))), dp_size, dp_start)
+        max_cache_len = max(
+            max(len(prompt) + max_new_tokens for prompt in prompts),
+            rollout_max_cache_len,
+        )
+        max_blocks_per_seq = ceil_div(max_cache_len, self.config.runtime.kv_block_size)
+        payload = RolloutPayload(
+            prompts_by_dp=prompts_by_dp,
+            prompt_indices_by_dp=prompt_indices_by_dp,
+            prompt_features_by_dp=prompt_features_by_dp,
+            max_new_tokens=max_new_tokens,
+            eos_token_id=eos_token_id,
+            sampling_params=sampling_params,
+            max_running_seqs=local_max_running_prompts,
+            max_cache_len=max_cache_len,
+            max_blocks_per_seq=max_blocks_per_seq,
+            max_prefill_tokens=max_prefill_tokens,
+            num_blocks=local_max_running_prompts * max_blocks_per_seq,
+            block_size=self.config.runtime.kv_block_size,
+            decode_progress_interval_s=decode_progress_interval_s,
+            cancel_flags=cancel_flags,
+            cancel_indices_by_dp=_split_list_by_dp_with_offset(list(range(len(prompts))), dp_size, dp_start)
+            if cancel_flags is not None
+            else None,
+        )
+        results = await self.cluster.call_async(
+            Op.INFER_ROLLOUT,
+            payload,
+            result_ranks={dp_rank * int(self.config.tp_size) for dp_rank in range(dp_size)},
+        )
+        return _merge_dp_rollouts_by_prompt_indices(
+            dp_rank0_results(results, self.config.tp_size, dp_size),
+            prompt_indices_by_dp,
+            chunk_start=0,
+            total_count=len(prompts),
+        )
 
     def step(
         self, data_packs: list[dict[str, Any]], *, gradient_accumulation_steps: int | None = None
@@ -526,14 +541,28 @@ class ArenoEngine:
                     path=str(spec.path),
                     trainable=bool(spec.trainable),
                     optimizer_lr=getattr(spec, "optimizer_lr", None),
+                    reference_mode=self._role_reference_mode(name, str(spec.path)),
                 )
                 for name, spec in roles.items()
             }
         )
         self.cluster.call(Op.ENSURE_ROLES, payload)
 
+    def _role_reference_mode(self, name: str, path: str) -> str:
+        mode = self.config.reference_mode if name == "ref" else "independent"
+        if mode == "reuse_actor_base" and canonical_model_path(path) != canonical_model_path(self.config.model_path):
+            raise ValueError("reuse_actor_base requires the reference checkpoint to match the actor base checkpoint")
+        return mode
+
     def score_logprobs(
-        self, role: str, token_rows: list[list[int]], *, pad_token_id: int, microbatch_size: int = 8
+        self,
+        role: str,
+        token_rows: list[list[int]],
+        *,
+        pad_token_id: int,
+        features: list[dict[str, Any] | None] | None = None,
+        routed_experts: list[object] | None = None,
+        microbatch_size: int = 8,
     ) -> list[list[float]]:
         """Score fixed token rows with a model role.
 
@@ -544,18 +573,33 @@ class ArenoEngine:
 
         if not token_rows:
             return []
+        if features is not None and len(features) != len(token_rows):
+            raise ValueError("features must have the same length as token_rows")
+        if routed_experts is not None and len(routed_experts) != len(token_rows):
+            raise ValueError("routed_experts must have the same length as token_rows")
         results = self.cluster.call(
             Op.SCORE_LOGPROBS,
             ScorePayload(
                 role=role,
                 token_rows_by_dp=split_list_by_dp(token_rows, int(self.config.dp_size)),
+                features_by_dp=split_list_by_dp(features, int(self.config.dp_size)) if features is not None else None,
                 pad_token_id=int(pad_token_id),
+                routing_replay_by_dp=(
+                    split_list_by_dp(routed_experts, int(self.config.dp_size)) if routed_experts is not None else None
+                ),
                 microbatch_size=int(microbatch_size),
             ),
         )
         return _merge_dp_rank0_strided_results(results, self.config.tp_size, int(self.config.dp_size))
 
-    def score_values(self, role: str, token_rows: list[list[int]], *, pad_token_id: int) -> list[list[float]]:
+    def score_values(
+        self,
+        role: str,
+        token_rows: list[list[int]],
+        *,
+        pad_token_id: int,
+        features: list[dict[str, Any] | None] | None = None,
+    ) -> list[list[float]]:
         """Score per-token values with a critic role.
 
         Dispatches ``Op.SCORE_VALUES`` (blocking). Same shape contract as
@@ -564,17 +608,27 @@ class ArenoEngine:
 
         if not token_rows:
             return []
+        if features is not None and len(features) != len(token_rows):
+            raise ValueError("features must have the same length as token_rows")
         results = self.cluster.call(
             Op.SCORE_VALUES,
             ScorePayload(
                 role=role,
                 token_rows_by_dp=split_list_by_dp(token_rows, int(self.config.dp_size)),
+                features_by_dp=split_list_by_dp(features, int(self.config.dp_size)) if features is not None else None,
                 pad_token_id=int(pad_token_id),
             ),
         )
         return _merge_dp_rank0_strided_results(results, self.config.tp_size, int(self.config.dp_size))
 
-    def score_rewards(self, role: str, token_rows: list[list[int]], *, pad_token_id: int) -> list[float]:
+    def score_rewards(
+        self,
+        role: str,
+        token_rows: list[list[int]],
+        *,
+        pad_token_id: int,
+        features: list[dict[str, Any] | None] | None = None,
+    ) -> list[float]:
         """Score sequence rewards with a reward model role.
 
         Dispatches ``Op.SCORE_REWARDS`` (blocking). Returns one scalar reward
@@ -583,11 +637,14 @@ class ArenoEngine:
 
         if not token_rows:
             return []
+        if features is not None and len(features) != len(token_rows):
+            raise ValueError("features must have the same length as token_rows")
         results = self.cluster.call(
             Op.SCORE_REWARDS,
             ScorePayload(
                 role=role,
                 token_rows_by_dp=split_list_by_dp(token_rows, int(self.config.dp_size)),
+                features_by_dp=split_list_by_dp(features, int(self.config.dp_size)) if features is not None else None,
                 pad_token_id=int(pad_token_id),
             ),
         )
@@ -637,15 +694,26 @@ class ArenoEngine:
         return merge_metric_dicts(rank0_results) or {}
 
     def save_checkpoint(self, path: str) -> str:
-        """Ask workers to write a HuggingFace-compatible checkpoint.
+        """Save base weights, or the standard PEFT artifact in native LoRA mode.
 
-        Dispatches ``Op.SAVE_CHECKPOINT`` (blocking). Workers cooperatively
-        write shards to ``path``; only rank 0's returned path is propagated
-        back to the caller.
+        Fullweight workers cooperatively write HuggingFace shards to ``path``.
+        Native LoRA keeps the base frozen, so its checkpoint is the adapter-only
+        PEFT artifact consumed by training and serving.
         """
 
+        if self.config.lora is not None:
+            return self.export_adapter(path)
         results = self.cluster.call(Op.SAVE_CHECKPOINT, SaveCheckpointPayload(path=path))
         return results[0]["path"]
+
+    def export_adapter(self, path: str) -> str:
+        """Export the live native LoRA weights as a standard PEFT adapter."""
+
+        results = self.cluster.call(Op.EXPORT_ADAPTER, ExportAdapterPayload(path=path))
+        result = next((result for result in results if result is not None), None)
+        if result is None:
+            raise RuntimeError("native LoRA export did not produce an artifact")
+        return result["path"]
 
     def _transport_payload(self, payload: Any) -> Any:
         """Move tensors to CPU shared memory for zero-copy IPC to workers."""
@@ -671,47 +739,6 @@ class ArenoEngine:
         """Close workers when leaving a context manager."""
 
         self.close()
-
-
-def _chunk_prompts_for_prefill_budget(
-    prompts: list[list[int]],
-    *,
-    max_running_prompts: int,
-    dp_size: int,
-    max_prefill_tokens: int,
-) -> list[list[list[int]]]:
-    """Split prompts so each DP rank stays within prefill token budget.
-
-    Greedy packer that walks the prompt list once and starts a new chunk when
-    either the per-chunk count cap (``max_running_prompts * dp_size``) or the
-    per-DP-rank token cap (``max_prefill_tokens``) would be exceeded. The
-    per-rank index is computed via round-robin position inside the chunk.
-    """
-
-    # Hard cap on prompts per chunk. max_running_prompts is a global flat
-    # rollout cap; DP splitting happens after chunking.
-    max_chunk_size = max_running_prompts
-    chunks: list[list[list[int]]] = []
-    chunk: list[list[int]] = []
-    token_sums = [0 for _ in range(dp_size)]
-    for prompt in prompts:
-        # Round-robin DP assignment matches split_list_by_dp's layout.
-        dp_rank = len(chunk) % dp_size
-        would_exceed_count = len(chunk) >= max_chunk_size
-        # token_sums[dp_rank] > 0 guard: always allow the first prompt for a
-        # rank even if it alone exceeds the prefill budget.
-        would_exceed_tokens = token_sums[dp_rank] > 0 and token_sums[dp_rank] + len(prompt) > max_prefill_tokens
-        if chunk and (would_exceed_count or would_exceed_tokens):
-            # Flush current chunk and start fresh; reset per-rank token tally.
-            chunks.append(chunk)
-            chunk = []
-            token_sums = [0 for _ in range(dp_size)]
-            dp_rank = 0
-        chunk.append(prompt)
-        token_sums[dp_rank] += len(prompt)
-    if chunk:
-        chunks.append(chunk)
-    return chunks
 
 
 def _split_list_by_dp_with_offset(items: list[Any], dp_size: int, offset: int) -> list[list[Any]]:

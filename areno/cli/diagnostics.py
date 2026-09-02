@@ -521,7 +521,7 @@ def _fd_limit() -> dict[str, Any]:
         import resource
 
         soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-    except (OSError, ValueError) as exc:
+    except (AttributeError, ImportError, OSError, ValueError) as exc:
         return _unavailable(f"{type(exc).__name__}: {exc}")
     return _rlimit_entry(soft, hard)
 
@@ -531,7 +531,7 @@ def _nproc_limit() -> dict[str, Any]:
         import resource
 
         soft, hard = resource.getrlimit(resource.RLIMIT_NPROC)
-    except (OSError, ValueError) as exc:
+    except (ImportError, OSError, ValueError) as exc:
         return _unavailable(f"{type(exc).__name__}: {exc}")
     except AttributeError:
         # RLIMIT_NPROC is not defined on every platform; degrade to a warning.

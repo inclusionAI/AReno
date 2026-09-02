@@ -9,6 +9,7 @@ and are imported lazily from `BACKEND_MODULES`.
 
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+from dataclasses import dataclass
 
 from areno.api.context import Context
 from areno.api.models import RolloutResult, SamplingParams, TrainSequence
@@ -20,8 +21,28 @@ BACKEND_CLS = {}
 # module the first time a backend is requested, which both registers the class
 # and avoids paying the import cost for backends that are never used.
 BACKEND_MODULES = {
-    "Areno": "areno.api.backend.areno",
+    "CUDA": "areno.api.backend.cuda.backend",
+    "MLX": "areno.api.backend.mlx.backend",
 }
+
+
+@dataclass(frozen=True, slots=True)
+class BackendCapabilities:
+    """Features a backend can execute without fallback or emulation."""
+
+    algorithms: frozenset[str]
+    model_roles: frozenset[str] = frozenset()
+    multimodal: bool = False
+    distributed: bool = False
+    custom_loss: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class BackendRuntimeComponents:
+    """Backend-native text and media processors exposed through one contract."""
+
+    tokenizer: object | None = None
+    processor: object | None = None
 
 
 def register_backend(backend_type):
@@ -64,10 +85,22 @@ class Backend(ABC):
 
         pass
 
+    @classmethod
+    @abstractmethod
+    def capabilities(cls) -> BackendCapabilities:
+        """Describe supported algorithms and runtime features."""
+
+        pass
+
     def close(self) -> None:
         """Release backend-owned resources."""
 
         return None
+
+    def runtime_components(self) -> BackendRuntimeComponents:
+        """Return backend-native tokenizer/processor overrides when required."""
+
+        return BackendRuntimeComponents()
 
     @abstractmethod
     def rollout_batch(
@@ -76,6 +109,7 @@ class Backend(ABC):
         prompt_tokens: list[list[int]],
         n_samples: int,
         sampling_params: SamplingParams,
+        prompt_features: list[dict | None] | None = None,
     ) -> list[RolloutResult]:
         """Generate samples for a prompt batch, preserving input order."""
 
@@ -98,6 +132,11 @@ class Backend(ABC):
         """Persist model weights, or raise when the backend cannot save."""
 
         raise NotImplementedError(f"{type(self).__name__} does not support checkpoint saving")
+
+    def export_adapter(self, ctx: Context, path: str) -> str:
+        """Persist a standard adapter artifact, or raise when unsupported."""
+
+        raise NotImplementedError(f"{type(self).__name__} does not support adapter export")
 
     def ensure_roles(self, ctx: Context, roles: dict[str, ModelRole]) -> None:
         """Prepare backend-owned auxiliary model roles, or raise if unsupported."""
@@ -155,18 +194,29 @@ class Backend(ABC):
         self.end_rollout_session(ctx)
 
     def score_logprobs(
-        self, ctx: Context, role: str, token_rows: list[list[int]], *, microbatch_size: int = 8
+        self,
+        ctx: Context,
+        role: str,
+        token_rows: list[list[int]],
+        *,
+        features: list[dict | None] | None = None,
+        routed_experts: list[object] | None = None,
+        microbatch_size: int = 8,
     ) -> list[list[float]]:
         """Score fixed token rows with a backend-owned role."""
 
         raise NotImplementedError(f"{type(self).__name__} does not support role logprob scoring")
 
-    def score_values(self, ctx: Context, role: str, token_rows: list[list[int]]) -> list[list[float]]:
+    def score_values(
+        self, ctx: Context, role: str, token_rows: list[list[int]], *, features: list[dict | None] | None = None
+    ) -> list[list[float]]:
         """Score fixed token rows with a backend-owned critic role."""
 
         raise NotImplementedError(f"{type(self).__name__} does not support role value scoring")
 
-    def score_rewards(self, ctx: Context, role: str, token_rows: list[list[int]]) -> list[float]:
+    def score_rewards(
+        self, ctx: Context, role: str, token_rows: list[list[int]], *, features: list[dict | None] | None = None
+    ) -> list[float]:
         """Score fixed token rows with a backend-owned reward role."""
 
         raise NotImplementedError(f"{type(self).__name__} does not support role reward scoring")

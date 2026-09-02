@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import re
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -70,7 +72,6 @@ def test_train_config_requires_world_size_divisible_by_tp_size():
         ("max_new_tokens", 0, "--max-new-tokens must be positive"),
         ("max_context_len", 0, "--max-context-len must be positive"),
         ("max_running_prompts", 0, "--max-running-prompts must be positive"),
-        ("agent_timeout_s", 0.0, "--agent-timeout-s must be positive"),
         ("lr", 0.0, "--lr must be positive"),
         ("min_lr", -0.1, "--min-lr must be non-negative"),
         ("lr_decay_steps", 0, "--lr-decay-steps must be positive"),
@@ -86,6 +87,35 @@ def test_train_config_requires_world_size_divisible_by_tp_size():
 def test_train_config_validates_common_positive_fields(field, value, message):
     with pytest.raises(UsageError, match=message):
         _trainer_config_from_options(**_options(algo="gspo", **{field: value}))
+
+
+def test_train_config_supports_independent_multimodal_lr_schedules():
+    config = _trainer_config_from_options(
+        **_options(
+            algo="sft",
+            unfreeze_multimodal_tower=True,
+            multimodal_tower_lr=2e-6,
+            multimodal_tower_min_lr=2e-7,
+            multimodal_tower_lr_decay_steps=200,
+            multimodal_tower_lr_decay_style="linear",
+            unfreeze_multimodal_projector=True,
+            multimodal_projector_lr=3e-6,
+            multimodal_projector_min_lr=3e-7,
+            multimodal_projector_lr_decay_steps=300,
+            multimodal_projector_lr_decay_style="constant",
+        )
+    )
+
+    optimizer = config.optimizer_config()
+    assert optimizer["multimodal_tower_lr"] == 2e-6
+    assert optimizer["multimodal_tower_lr_decay_style"] == "linear"
+    assert optimizer["multimodal_projector_lr"] == 3e-6
+    assert optimizer["multimodal_projector_lr_decay_steps"] == 300
+
+
+def test_train_config_rejects_multimodal_lr_for_frozen_group():
+    with pytest.raises(UsageError, match="--mm-tower-lr requires --unfreeze-mm-tower"):
+        _trainer_config_from_options(**_options(multimodal_tower_lr=2e-6))
 
 
 def test_train_config_validates_tune_params_for_rollout_algorithms():
@@ -157,7 +187,7 @@ def test_train_config_builds_sft_shape_without_rollout_or_role_fields():
     assert cfg.model_hub == "modelscope"
     assert cfg.optimizer_min_lr == 0.0
     assert cfg.attn_backend == "native"
-    assert cfg.areno_config().runtime["attn_backend"] == "native"
+    assert cfg.cuda_config().runtime["attn_backend"] == "native"
     assert cfg.batch_size == 2
     assert cfg.mini_bs == 1
     assert not hasattr(cfg, "n_samples")
@@ -324,9 +354,9 @@ def test_training_config_summary_shows_resolved_values_and_warning():
     assert "attn_backend  flash" in summary
     assert "max_running_prompts  12" in summary
     assert "sampling             greedy=no, temperature=0.7, top_k=20, top_p=0.9" in summary
-    assert "max_steps                    11" in summary
-    assert "score_micro_bs               8" in summary
-    assert "optimizer                    lr=2e-06, min_lr=0.0, decay=cosine/100" in summary
+    assert re.search(r"(?m)^  max_steps\s+11$", summary)
+    assert re.search(r"(?m)^  score_micro_bs\s+8$", summary)
+    assert re.search(r"(?m)^  optimizer\s+lr=2e-06, min_lr=0.0, decay=cosine/100", summary)
     assert "metrics_log_dir  /tmp/metrics" in summary
     assert "WARNING: no checkpoint output path configured (--save-path)" in summary
 
@@ -353,6 +383,65 @@ def test_training_config_summary_can_colorize_output():
 
     assert "\x1b[" in summary
     assert "AReno training config" in summary
+
+
+def test_training_config_summary_shows_lora_parameters():
+    cfg = _trainer_config_from_options(
+        **_options(
+            lora_rank=8,
+            lora_alpha=16.0,
+            lora_target_modules="q_proj,v_proj",
+            lora_adapter_path=None,
+        )
+    )
+
+    summary = _format_training_config_summary(cfg)
+
+    assert re.search(r"(?m)^  lora_rank\s+8$", summary)
+    assert re.search(r"(?m)^  lora_alpha\s+16\.0$", summary)
+    assert re.search(r"(?m)^  lora_dropout\s+0\.0$", summary)
+    assert re.search(r"(?m)^  lora_target_modules\s+q_proj,v_proj$", summary)
+    assert re.search(r"(?m)^  lora_adapter_path\s+none$", summary)
+
+
+def test_training_config_summary_marks_lora_disabled():
+    cfg = _trainer_config_from_options(**_options(lora_rank=None, lora_adapter_path=None))
+
+    summary = _format_training_config_summary(cfg)
+
+    assert re.search(r"(?m)^  lora_rank\s+disabled$", summary)
+    assert re.search(r"(?m)^  lora_alpha\s+n/a$", summary)
+    assert re.search(r"(?m)^  lora_adapter_path\s+n/a$", summary)
+
+
+def test_dashboard_run_config_serializes_lora(tmp_path):
+    cfg = _trainer_config_from_options(**_options(lora_rank=8, lora_alpha=16.0, metrics_log_dir=str(tmp_path)))
+
+    train_cli._write_dashboard_run_config(cfg)
+
+    payload = json.loads(next(tmp_path.glob("areno_run_config.*.json")).read_text())
+    settings = payload["settings"]["sections"]
+    other = next(section for section in settings if section["title"] == "Other")
+    lora = next(item["value"] for item in other["items"] if item["key"] == "lora")
+    assert lora["rank"] == 8
+    assert lora["target_modules"] == [
+        "q_proj",
+        "k_proj",
+        "v_proj",
+        "o_proj",
+        "gate_proj",
+        "up_proj",
+        "down_proj",
+    ]
+
+
+def test_train_config_propagates_reference_view():
+    config = _trainer_config_from_options(
+        **_options(algo="dpo", lora_rank=8, reference_mode="reuse_actor_base", reward_ckpt=None)
+    )
+
+    assert config.reference_mode == "reuse_actor_base"
+    assert config.cuda_config().reference_mode == "reuse_actor_base"
 
 
 def test_training_config_summary_wraps_for_narrow_terminals(monkeypatch):
@@ -419,11 +508,19 @@ def test_independent_rollout_topology_parses_distinct_cuda_devices() -> None:
     assert cfg.rollout_devices == [1, 3]
     assert cfg.rollout_tp_size == 1
     assert cfg.policy_sync_bucket_mb == 32
-    backend = cfg.areno_config()
+    backend = cfg.cuda_config()
     assert backend.devices == [0, 2]
     assert backend.rollout_devices == [1, 3]
     assert backend.resolved_rollout_tp_size() == 1
     assert backend.uses_separate_rollout_engine()
+
+
+@pytest.mark.parametrize("value", [None, True, False])
+def test_sequence_parallel_cli_override_reaches_cuda_config(value) -> None:
+    cfg = _trainer_config_from_options(**_options(sequence_parallel=value))
+
+    assert cfg.sequence_parallel is value
+    assert cfg.cuda_config().sequence_parallel is value
 
 
 @pytest.mark.parametrize(
@@ -440,7 +537,11 @@ def test_independent_rollout_topology_parses_distinct_cuda_devices() -> None:
             {"world_size": 2, "rollout_devices": "2,3,4", "rollout_tp_size": 2},
             "--rollout-devices count must be divisible",
         ),
-        ({"rollout_tp_size": 2}, "--rollout-tp-size requires --rollout-devices"),
+        (
+            {"world_size": 3, "rollout_tp_size": 2},
+            "--rollout-devices count must be divisible",
+        ),
+        ({"rollout_tp_size": 0}, "--rollout-tp-size must be positive"),
         ({"policy_sync_bucket_mb": 0}, "--policy-sync-bucket-mb must be positive"),
     ],
 )
@@ -463,6 +564,36 @@ def test_train_and_rollout_devices_may_overlap() -> None:
 
     assert cfg.train_devices == [0, 1]
     assert cfg.rollout_devices == [0, 1]
+
+
+def test_world_size_infers_shared_train_and_rollout_devices() -> None:
+    cfg = _trainer_config_from_options(
+        **_options(
+            reward_ckpt="reward",
+            world_size=8,
+            tp_size=4,
+            rollout_tp_size=2,
+        )
+    )
+
+    assert cfg.world_size == 8
+    assert cfg.train_devices == list(range(8))
+    assert cfg.rollout_devices == list(range(8))
+    assert cfg.rollout_tp_size == 2
+
+
+def test_world_size_infers_train_devices_without_separate_rollout() -> None:
+    cfg = _trainer_config_from_options(
+        **_options(
+            reward_ckpt="reward",
+            world_size=4,
+            tp_size=2,
+        )
+    )
+
+    assert cfg.world_size == 4
+    assert cfg.train_devices == [0, 1, 2, 3]
+    assert cfg.rollout_devices is None
 
 
 def test_cuda_device_ranges_are_inclusive_and_composable() -> None:
@@ -712,6 +843,48 @@ def test_train_command_smoke_resolves_model_ref_before_probe(monkeypatch):
     assert events == [("resolve", "actor"), ("smoke", "/cache/actor")]
 
 
+@pytest.mark.parametrize(
+    ("algo", "extra_args", "expected_type"),
+    [
+        ("sft", ["--dataset-loader-fn", "examples/sft/alpaca/dataset_loader.py"], TrainerConfig),
+        ("dpo", [], DPOTrainerConfig),
+    ],
+)
+def test_train_command_smoke_train_supports_offline_algorithms(monkeypatch, algo, extra_args, expected_type):
+    events = []
+
+    def fake_resolve(config):
+        events.append(("resolve", type(config), config.ckpt))
+        return config
+
+    def fake_smoke(config):
+        events.append(("smoke", type(config), config.ckpt))
+        return SimpleNamespace(
+            ok=True,
+            error=None,
+            peak_mem_frac=0.1,
+            candidate=SimpleNamespace(
+                tp_size=1,
+                batch_size=1,
+                n_samples=1,
+                mini_bs=1,
+                max_running_prompts=1,
+                adam_8bit=False,
+                keep_rollout_state=False,
+            ),
+        )
+
+    monkeypatch.setattr(train_cli, "resolve_model_refs_for_config", fake_resolve)
+    monkeypatch.setattr("areno.cli.auto_tune.smoke_train_config", fake_smoke)
+    result = CliRunner().invoke(
+        train_cli.train_command,
+        ["--algo", algo, "--ckpt", "actor", "--dataset-path", "dataset", "--smoke-train", *extra_args],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert events == [("resolve", expected_type, "actor"), ("smoke", expected_type, "actor")]
+
+
 EXPECTED_HELP_SECTIONS = [
     "Basic:",
     "Rollout:",
@@ -754,7 +927,9 @@ def test_train_help_places_epochs_under_basic_not_checkpointing():
 def test_train_help_remains_complete_and_groups_every_declared_option():
     ctx = train_cli.click.Context(train_cli.train_command)
     declared = {
-        param.name for param in train_cli.train_command.get_params(ctx) if param.get_help_record(ctx) is not None
+        param.name
+        for param in train_cli.train_command.get_params(ctx)
+        if param.get_help_record(ctx) is not None and not param.name.startswith("_click_")
     }
     grouped = [name for _, names in TRAIN_OPTION_GROUPS for name in names]
 
@@ -765,6 +940,8 @@ def test_train_help_remains_complete_and_groups_every_declared_option():
 
     output = _help_output()
     for param in train_cli.train_command.get_params(ctx):
+        if param.name.startswith("_click_"):
+            continue
         record = param.get_help_record(ctx)
         if record is not None:
             assert record[0].split()[0].rstrip(",") in output, f"option dropped from help: {param.name}"
@@ -773,6 +950,7 @@ def test_train_help_remains_complete_and_groups_every_declared_option():
 def _options(**overrides):
     defaults = dict(
         algo="gspo",
+        backend="cuda",
         ckpt="actor",
         dataset_path="dataset",
         model_hub="modelscope",
@@ -787,6 +965,7 @@ def _options(**overrides):
         max_steps=None,
         score_micro_bs=8,
         tp_size=1,
+        sequence_parallel=None,
         world_size=1,
         batch_size=2,
         n_samples=2,
@@ -800,6 +979,12 @@ def _options(**overrides):
         top_k=-1,
         top_p=1.0,
         max_running_prompts=None,
+        lora_rank=None,
+        lora_alpha=16.0,
+        lora_dropout=0.0,
+        lora_target_modules="q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj",
+        lora_adapter_path=None,
+        reference_mode="independent",
         lr=1e-6,
         min_lr=1e-7,
         lr_decay_steps=100,
@@ -807,6 +992,16 @@ def _options(**overrides):
         adam_beta1=0.9,
         adam_beta2=0.999,
         adam_8bit=False,
+        unfreeze_multimodal_tower=False,
+        unfreeze_multimodal_projector=False,
+        multimodal_tower_lr=None,
+        multimodal_tower_min_lr=None,
+        multimodal_tower_lr_decay_steps=None,
+        multimodal_tower_lr_decay_style=None,
+        multimodal_projector_lr=None,
+        multimodal_projector_min_lr=None,
+        multimodal_projector_lr_decay_steps=None,
+        multimodal_projector_lr_decay_style=None,
         weight_decay=1e-2,
         grad_clip_norm=1.0,
         activation_checkpointing=True,
@@ -816,7 +1011,6 @@ def _options(**overrides):
         disable_thinking=False,
         metrics_log_dir=None,
         agent_fn=None,
-        agent_timeout_s=300.0,
         train_tool_results=False,
         gspo_clip_eps=3.0e-4,
         grpo_clip_eps=0.2,

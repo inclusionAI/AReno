@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
@@ -17,8 +18,9 @@ from areno.engine.runtime.common import (
     split_data_pack_by_dp,
     split_list_by_dp,
 )
-from areno.engine.runtime.decode_graph import bucket_for, ceil_div
+from areno.engine.runtime.decode_graph import DecodeGraph, bucket_for, ceil_div
 from areno.engine.runtime.rollout import _empty_rollout, _merge_dp_rollouts_in_input_order, _merge_rollouts
+from areno.engine.runtime.train_step import _grad_norms
 
 
 def _rollout(prompt_ids, response_ids, logprobs, finish_reason=None, metrics=None):
@@ -112,6 +114,28 @@ class RuntimeCommonTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "sample out of vocab range"):
                 _check_token_ids(torch.tensor([0, 3]), vocab_size=3, name="sample")
 
+    def test_grad_norms_fuses_global_and_parameter_groups(self):
+        """One gradient pass should produce exact global and group norms."""
+
+        text = torch.nn.Parameter(torch.zeros(2))
+        tower = torch.nn.Parameter(torch.zeros(2))
+        projector = torch.nn.Parameter(torch.zeros(1))
+        text.main_grad = torch.tensor([3.0, 4.0])
+        tower.main_grad = torch.tensor([5.0, 12.0])
+        projector.main_grad = torch.tensor([84.0])
+        tower._areno_lr_group = "tower"
+        projector._areno_lr_group = "projector"
+
+        with patch(
+            "areno.engine.runtime.train_step.get_tp_context",
+            return_value=SimpleNamespace(world_size=1, rank=0, group=None),
+        ):
+            norms = _grad_norms([text, tower, projector], ("tower", "projector"))
+
+        self.assertAlmostEqual(norms["global"], 85.14693450927734)
+        self.assertEqual(norms["tower"], 13.0)
+        self.assertEqual(norms["projector"], 84.0)
+
 
 class DecodeGraphUtilityTest(unittest.TestCase):
     """Decode graph pure helpers can be tested without CUDA graph capture."""
@@ -125,6 +149,33 @@ class DecodeGraphUtilityTest(unittest.TestCase):
         """Ceil division is used for block counts and should round up."""
         self.assertEqual(ceil_div(9, 4), 3)
         self.assertEqual(ceil_div(8, 4), 2)
+
+    def test_recurrent_padding_uses_dedicated_scratch_slot(self):
+        """Graph capture and padded rows must not mutate a live request slot."""
+
+        fake_graph = SimpleNamespace(replay=lambda: None)
+        with patch("torch.cuda.CUDAGraph", return_value=fake_graph):
+            graph = DecodeGraph(
+                SimpleNamespace(),
+                bucket=4,
+                max_blocks_per_seq=2,
+                scratch_block=9,
+                scratch_recurrent_slot=4,
+                device=torch.device("cpu"),
+            )
+        graph.logits_shard = torch.zeros(1, 4, 1)
+
+        self.assertIsNone(graph.routing_capture)
+
+        graph.replay_tensors(
+            input_ids=torch.tensor([11, 12]),
+            position_ids=torch.tensor([3, 7]),
+            cache_seqlens=torch.tensor([3, 7], dtype=torch.int32),
+            block_table=torch.tensor([[1, 2], [3, 4]], dtype=torch.int32),
+            recurrent_slots=torch.tensor([0, 2]),
+        )
+
+        self.assertEqual(graph.recurrent_slots.tolist(), [0, 2, 4, 4])
 
 
 class RolloutMergeTest(unittest.TestCase):

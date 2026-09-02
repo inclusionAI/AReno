@@ -15,6 +15,7 @@ AReno documentation
 
    Welcome <getting-started/welcome>
    getting-started/installation
+   Backends <getting-started/backends>
    getting-started/quickstart
 
 .. toctree::
@@ -26,6 +27,8 @@ AReno documentation
    Backend Topology <concepts/backend-topology>
    Chat Templates <concepts/chat-templates>
    Dataset Formats <concepts/dataset-formats>
+   Multimodal Inputs <concepts/multimodal-inputs>
+   Native LoRA <concepts/native-lora>
    Reward Functions <concepts/reward-functions>
 
 .. toctree::
@@ -43,6 +46,7 @@ AReno documentation
    :caption: Reference
 
    CLI Reference <reference/cli>
+   4-bit AdamW <reference/adamw-4bit>
    SDK Reference <sdk/trainer>
    Supported Models <models/supported>
 

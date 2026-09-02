@@ -103,6 +103,7 @@ class PPOTrainer(PolicyOnlyTrainer):
         # Collect (full_token_row, metadata) for every prompt/sample pair so
         # we can issue a single batched forward to each role.
         token_rows: list[list[int]] = []
+        token_features: list[dict | None] = []
         row_meta = []
         reward_records = []
         for item_idx, (item, result) in enumerate(zip(prompt_batch.items, rollout_results, strict=True)):
@@ -111,6 +112,7 @@ class PPOTrainer(PolicyOnlyTrainer):
             for sample_idx, (completion, seq) in enumerate(zip(completions, result.sequences, strict=True)):
                 tokens = item.input_tokens + seq.resp_tokens
                 token_rows.append(tokens)
+                token_features.append(item.record.get("features"))
                 row_meta.append((item, seq, prefix_len, len(seq.resp_tokens)))
                 reward_records.append(
                     make_reward_record(
@@ -130,14 +132,14 @@ class PPOTrainer(PolicyOnlyTrainer):
         if self.reward_fn is not None:
             self._record_ppo_state(stage="score_start", role="reward")
             reward_start = time.perf_counter()
-            rewards_all = [float(self.reward_fn(record)) for record in reward_records]
+            rewards_all = self._score_reward_records(reward_records)
             self._last_ppo_stats["reward_score_time_s"] = time.perf_counter() - reward_start
             self._record_ppo_state(stage="score_end", role="reward")
         else:
             self.logger.info("role=reward stage=score_start rows=%d", len(token_rows))
             self._record_ppo_state(stage="score_start", role="reward")
             reward_start = time.perf_counter()
-            raw_rewards = [float(reward) for reward in self._score_rewards(token_rows)]
+            raw_rewards = [float(reward) for reward in self._score_rewards(token_rows, features=token_features)]
             rewards_all = raw_rewards
             self._last_ppo_stats.update(_summary_stats("reward_model_raw_reward", raw_rewards))
             self._last_ppo_stats["reward_score_time_s"] = time.perf_counter() - reward_start
@@ -150,7 +152,7 @@ class PPOTrainer(PolicyOnlyTrainer):
         self.logger.info("role=ref stage=logprob_score_start rows=%d", len(token_rows))
         self._record_ppo_state(stage="logprob_score_start", role="ref")
         ref_start = time.perf_counter()
-        ref_logprob_rows = self._score_logprobs("ref", token_rows)
+        ref_logprob_rows = self._score_logprobs("ref", token_rows, features=token_features)
         self._last_ppo_stats["ref_logprob_forward_time_s"] = time.perf_counter() - ref_start
         self.logger.info("role=ref stage=logprob_score_end rows=%d", len(token_rows))
         self._record_ppo_state(stage="logprob_score_end", role="ref")
@@ -160,14 +162,20 @@ class PPOTrainer(PolicyOnlyTrainer):
         # Even though we already have rollout logprobs, PPO needs an actor
         # forward pass at the same parameters used by the upcoming update to
         # form the "old logprobs" baseline in the importance ratio.
-        old_logprob_rows = self._score_logprobs("actor", token_rows)
+        token_routes = [seq.routed_experts for _, seq, _, _ in row_meta]
+        old_logprob_rows = self._score_logprobs(
+            "actor",
+            token_rows,
+            features=token_features,
+            routed_experts=token_routes if any(routes is not None for routes in token_routes) else None,
+        )
         self._last_ppo_stats["actor_old_logprob_forward_time_s"] = time.perf_counter() - actor_logprob_start
         self.logger.info("role=actor stage=old_logprob_score_end rows=%d", len(token_rows))
         self._record_ppo_state(stage="old_logprob_score_end", role="actor")
         self.logger.info("role=critic stage=value_score_start rows=%d", len(token_rows))
         self._record_ppo_state(stage="value_score_start", role="critic")
         critic_value_start = time.perf_counter()
-        value_rows = self._score_values("critic", token_rows)
+        value_rows = self._score_values("critic", token_rows, features=token_features)
         self._last_ppo_stats["critic_value_forward_time_s"] = time.perf_counter() - critic_value_start
         self.logger.info("role=critic stage=value_score_end rows=%d", len(token_rows))
         self._record_ppo_state(stage="value_score_end", role="critic")
@@ -175,8 +183,9 @@ class PPOTrainer(PolicyOnlyTrainer):
         self._record_ppo_state(stage="advantage_start", role="critic")
         old_logprobs_all = []
         logp_diff_all = []
-        for (item, seq, prefix_len, resp_len), reward, ref_logprobs, old_logprobs, values in zip(
+        for (item, seq, prefix_len, resp_len), row_features, reward, ref_logprobs, old_logprobs, values in zip(
             row_meta,
+            token_features,
             rewards_all,
             ref_logprob_rows,
             old_logprob_rows,
@@ -230,8 +239,10 @@ class PPOTrainer(PolicyOnlyTrainer):
                     returns=full_returns,
                     values=full_values,
                     ref_logprobs=ref_logprobs,
+                    features=row_features,
                     reward=float(reward),
                     eos_token_id=tokenizer.eos_token_id,
+                    routed_experts=seq.routed_experts,
                 )
             )
 
@@ -280,39 +291,58 @@ class PPOTrainer(PolicyOnlyTrainer):
         returns_all = []
         advantages_all = []
         token_rows = agent_batch.token_rows
+        token_features = getattr(agent_batch, "features", None)
+        row_reward_indices = getattr(agent_batch, "row_reward_indices", None)
+        if row_reward_indices is None:
+            row_reward_indices = list(range(len(token_rows)))
+        if len(row_reward_indices) != len(token_rows):
+            raise ValueError("agentic PPO row_reward_indices must align with training rows")
 
         if agent_batch.rewards is not None:
             self._record_ppo_state(stage="score_start", role="reward")
             rewards_all = [float(reward) for reward in agent_batch.rewards]
             self._record_ppo_state(stage="score_end", role="reward")
         else:
-            self.logger.info("role=reward stage=score_start rows=%d", len(token_rows))
+            trajectory_count = len(agent_batch.reward_records)
+            terminal_rows = [None] * trajectory_count
+            for row_index, reward_index in enumerate(row_reward_indices):
+                if reward_index < 0 or reward_index >= trajectory_count:
+                    raise ValueError("agentic PPO row_reward_indices contains an invalid reward index")
+                terminal_rows[reward_index] = row_index
+            if any(row_index is None for row_index in terminal_rows):
+                raise ValueError("agentic PPO has a trajectory without a trainable turn")
+            reward_rows = [token_rows[row_index] for row_index in terminal_rows]
+            reward_features = [token_features[row_index] for row_index in terminal_rows] if token_features else None
+            self.logger.info("role=reward stage=score_start rows=%d", len(reward_rows))
             self._record_ppo_state(stage="score_start", role="reward")
             reward_start = time.perf_counter()
-            rewards_all = [float(reward) for reward in self._score_rewards(token_rows)]
+            rewards_all = [float(reward) for reward in self._score_rewards(reward_rows, features=reward_features)]
             self._last_ppo_stats.update(_summary_stats("reward_model_raw_reward", rewards_all))
             self._last_ppo_stats["reward_score_time_s"] = time.perf_counter() - reward_start
-            self.logger.info("role=reward stage=score_end rows=%d", len(token_rows))
+            self.logger.info("role=reward stage=score_end rows=%d", len(reward_rows))
             self._record_ppo_state(stage="score_end", role="reward")
+        if any(index < 0 or index >= len(rewards_all) for index in row_reward_indices):
+            raise ValueError("agentic PPO row_reward_indices contains an invalid reward index")
 
         self.logger.info("role=ref stage=logprob_score_start rows=%d", len(token_rows))
         self._record_ppo_state(stage="logprob_score_start", role="ref")
         ref_start = time.perf_counter()
-        ref_logprob_rows = self._score_logprobs("ref", token_rows)
+        ref_logprob_rows = self._score_logprobs("ref", token_rows, features=token_features)
         self._last_ppo_stats["ref_logprob_forward_time_s"] = time.perf_counter() - ref_start
         self.logger.info("role=ref stage=logprob_score_end rows=%d", len(token_rows))
         self._record_ppo_state(stage="logprob_score_end", role="ref")
         self.logger.info("role=actor stage=old_logprob_score_start rows=%d", len(token_rows))
         self._record_ppo_state(stage="old_logprob_score_start", role="actor")
         actor_logprob_start = time.perf_counter()
-        old_logprob_rows = self._score_logprobs("actor", token_rows)
+        row_routes = getattr(agent_batch, "routed_experts", None)
+        old_logprob_rows = self._score_logprobs("actor", token_rows, features=token_features, routed_experts=row_routes)
         self._last_ppo_stats["actor_old_logprob_forward_time_s"] = time.perf_counter() - actor_logprob_start
         self.logger.info("role=actor stage=old_logprob_score_end rows=%d", len(token_rows))
         self._record_ppo_state(stage="old_logprob_score_end", role="actor")
         self.logger.info("role=critic stage=value_score_start rows=%d", len(token_rows))
         self._record_ppo_state(stage="value_score_start", role="critic")
         critic_value_start = time.perf_counter()
-        value_rows = self._score_values("critic", token_rows)
+        value_rows = self._score_values("critic", token_rows, features=token_features)
         self._last_ppo_stats["critic_value_forward_time_s"] = time.perf_counter() - critic_value_start
         self.logger.info("role=critic stage=value_score_end rows=%d", len(token_rows))
         self._record_ppo_state(stage="value_score_end", role="critic")
@@ -320,16 +350,32 @@ class PPOTrainer(PolicyOnlyTrainer):
         self._record_ppo_state(stage="advantage_start", role="critic")
         old_logprobs_all = []
         logp_diff_all = []
-        for tokens, response_mask, loss_mask, rollout_row, reward, ref_logprobs, old_logprobs, values in zip(
-            token_rows,
-            agent_batch.response_masks,
-            agent_batch.loss_masks,
-            agent_batch.rollout_logprobs,
-            rewards_all,
-            ref_logprob_rows,
-            old_logprob_rows,
-            value_rows,
-            strict=True,
+        row_features = token_features or [None] * len(token_rows)
+        row_routes = row_routes or [None] * len(token_rows)
+        trajectory_rows = {}
+        for row_idx, (
+            tokens,
+            response_mask,
+            loss_mask,
+            rollout_row,
+            features,
+            routed_experts,
+            ref_logprobs,
+            old_logprobs,
+            values,
+        ) in enumerate(
+            zip(
+                token_rows,
+                agent_batch.response_masks,
+                agent_batch.loss_masks,
+                agent_batch.rollout_logprobs,
+                row_features,
+                row_routes,
+                ref_logprob_rows,
+                old_logprob_rows,
+                value_rows,
+                strict=True,
+            )
         ):
             if not (len(tokens) == len(response_mask) == len(loss_mask) == len(rollout_row)):
                 raise ValueError("agentic PPO batch has misaligned token/mask/logprob rows")
@@ -353,39 +399,78 @@ class PPOTrainer(PolicyOnlyTrainer):
                 float(old_logprob) - float(rollout_logprob)
                 for old_logprob, rollout_logprob in zip(action_old_logprobs, row_rollout_logprobs, strict=True)
             )
-            token_rewards = [0.0 for _ in range(resp_len)]
-            token_rewards[-1] = float(reward)
             action_values = values[prefix_len - 1 : prefix_len + resp_len - 1]
             if len(action_values) != resp_len:
                 raise ValueError("critic returned misaligned token values")
-            advantages, returns = self._gae_for_response(token_rewards, action_values)
-            full_advantages = [0.0] * len(tokens)
-            full_returns = [0.0] * len(tokens)
-            full_values = [0.0] * len(tokens)
-            for rel_idx, tok_idx in enumerate(response_indices):
-                if loss_mask[tok_idx]:
-                    full_advantages[tok_idx] = advantages[rel_idx]
-                full_returns[tok_idx] = returns[rel_idx]
-                full_values[tok_idx] = action_values[rel_idx]
-            prompt_mask = [not item for item in response_mask]
             ref_logprobs_all.extend(ref_logprobs[prefix_len : prefix_len + resp_len])
             critic_values_all.extend(action_values)
-            returns_all.extend(returns)
-            advantages_all.extend(advantages)
-            train_batch.append(
-                areno.api.TrainSequence(
-                    prompt_mask=prompt_mask,
-                    loss_mask=loss_mask,
-                    tokens=tokens,
-                    logprobs=[0.0] * prefix_len + action_old_logprobs,
-                    advantages=full_advantages,
-                    returns=full_returns,
-                    values=full_values,
-                    ref_logprobs=ref_logprobs,
-                    reward=float(reward),
-                    eos_token_id=tokenizer.eos_token_id,
+            reward_index = row_reward_indices[row_idx]
+            trajectory_rows.setdefault(reward_index, []).append(
+                (
+                    tokens,
+                    response_mask,
+                    loss_mask,
+                    features,
+                    routed_experts,
+                    ref_logprobs,
+                    action_old_logprobs,
+                    action_values,
+                    response_indices,
                 )
             )
+
+        # GAE spans all assistant actions in a trajectory, but each turn keeps
+        # the exact prompt/routes used by its own rollout forward.
+        for reward_index, payloads in trajectory_rows.items():
+            reward = rewards_all[reward_index]
+            trajectory_values = [value for payload in payloads for value in payload[7]]
+            token_rewards = [0.0] * len(trajectory_values)
+            token_rewards[-1] = float(reward)
+            trajectory_advantages, trajectory_returns = self._gae_for_response(token_rewards, trajectory_values)
+            offset = 0
+            for payload in payloads:
+                (
+                    tokens,
+                    response_mask,
+                    loss_mask,
+                    features,
+                    routed_experts,
+                    ref_logprobs,
+                    action_old_logprobs,
+                    action_values,
+                    response_indices,
+                ) = payload
+                resp_len = len(response_indices)
+                advantages = trajectory_advantages[offset : offset + resp_len]
+                returns = trajectory_returns[offset : offset + resp_len]
+                offset += resp_len
+                full_advantages = [0.0] * len(tokens)
+                full_returns = [0.0] * len(tokens)
+                full_values = [0.0] * len(tokens)
+                for rel_idx, tok_idx in enumerate(response_indices):
+                    if loss_mask[tok_idx]:
+                        full_advantages[tok_idx] = advantages[rel_idx]
+                    full_returns[tok_idx] = returns[rel_idx]
+                    full_values[tok_idx] = action_values[rel_idx]
+                prefix_len = response_indices[0]
+                returns_all.extend(returns)
+                advantages_all.extend(advantages)
+                train_batch.append(
+                    areno.api.TrainSequence(
+                        prompt_mask=[not item for item in response_mask],
+                        loss_mask=loss_mask,
+                        tokens=tokens,
+                        logprobs=[0.0] * prefix_len + action_old_logprobs,
+                        advantages=full_advantages,
+                        returns=full_returns,
+                        values=full_values,
+                        ref_logprobs=ref_logprobs,
+                        features=features,
+                        reward=float(reward),
+                        eos_token_id=tokenizer.eos_token_id,
+                        routed_experts=routed_experts,
+                    )
+                )
 
         if train_batch:
             self.logger.info("role=critic stage=train_start rows=%d", len(train_batch))
@@ -438,14 +523,29 @@ class PPOTrainer(PolicyOnlyTrainer):
         finally:
             self.areno.close()
 
-    def _score_logprobs(self, role: str, token_rows: list[list[int]]) -> list[list[float]]:
-        return self.areno.score_logprobs(role, token_rows, microbatch_size=self.config.score_micro_bs)
+    def _score_logprobs(
+        self,
+        role: str,
+        token_rows: list[list[int]],
+        *,
+        features: list[dict | None] | None = None,
+        routed_experts: list[object] | None = None,
+    ) -> list[list[float]]:
+        return self.areno.score_logprobs(
+            role,
+            token_rows,
+            features=features,
+            routed_experts=routed_experts,
+            microbatch_size=self.config.score_micro_bs,
+        )
 
-    def _score_values(self, role: str, token_rows: list[list[int]]) -> list[list[float]]:
-        return self.areno.score_values(role, token_rows)
+    def _score_values(
+        self, role: str, token_rows: list[list[int]], *, features: list[dict | None] | None = None
+    ) -> list[list[float]]:
+        return self.areno.score_values(role, token_rows, features=features)
 
-    def _score_rewards(self, token_rows: list[list[int]]) -> list[float]:
-        return self.areno.score_rewards("reward", token_rows)
+    def _score_rewards(self, token_rows: list[list[int]], *, features: list[dict | None] | None = None) -> list[float]:
+        return self.areno.score_rewards("reward", token_rows, features=features)
 
     def _train_values(self, train_batch) -> dict[str, float]:
         return self.areno.train_values(
