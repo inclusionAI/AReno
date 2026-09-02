@@ -22,7 +22,7 @@ from areno.engine.policy_sync import (
     build_adapter_policy_plan,
     transfer_policy_weights,
 )
-from areno.engine.protocol import PolicySyncPayload, find_free_port
+from areno.engine.protocol import PolicySyncPayload, _create_rendezvous_store
 
 
 def _set_rank(rank: int, world_size: int) -> None:
@@ -353,7 +353,9 @@ def _gloo_policy_sync_worker(global_rank: int, port: int, output_queue) -> None:
 def test_real_gloo_collectives_reshard_train_tp2_to_rollout_tp1() -> None:
     ctx = mp.get_context("spawn")
     output_queue = ctx.Queue()
-    port = find_free_port()
+    # Coordinator-held store mirrors production: workers join as client stores.
+    store = _create_rendezvous_store("127.0.0.1", 3)
+    port = int(store.port)
     processes = [ctx.Process(target=_gloo_policy_sync_worker, args=(rank, port, output_queue)) for rank in range(3)]
     for process in processes:
         process.start()
@@ -402,7 +404,9 @@ def _gloo_policy_sync_reverse_worker(global_rank: int, port: int, output_queue) 
 def test_real_gloo_collectives_reshard_train_tp1_to_rollout_tp2() -> None:
     ctx = mp.get_context("spawn")
     output_queue = ctx.Queue()
-    port = find_free_port()
+    # Coordinator-held store mirrors production: workers join as client stores.
+    store = _create_rendezvous_store("127.0.0.1", 3)
+    port = int(store.port)
     processes = [
         ctx.Process(target=_gloo_policy_sync_reverse_worker, args=(rank, port, output_queue)) for rank in range(3)
     ]

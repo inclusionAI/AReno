@@ -1,0 +1,4 @@
+interface:
+  display_name: "Build an AReno Single-Turn Game Demo"
+  short_description: "Research, train, evaluate, and ship RLVR games"
+  default_prompt: "Use $areno-build-singleturn-game-demo to autonomously build and validate a new single-turn RLVR game demo."

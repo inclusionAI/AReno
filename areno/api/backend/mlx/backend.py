@@ -92,7 +92,10 @@ class MlxBackend(Backend):
         self._validate_tokenizer(ctx.tokenizer)
         optimizer_config = self.config.optimizer
         self.provider.configure_trainability(optimizer_config)
-        self.optimizer, self._optimizer_groups = build_optimizer(optimizer_config)
+        self.optimizer, self._optimizer_groups = build_optimizer(
+            optimizer_config,
+            state_precision_for_parameter=self.provider.optimizer_state_precision,
+        )
         if self.config.gradient_checkpointing:
             self._enable_gradient_checkpointing()
         self.model.train()

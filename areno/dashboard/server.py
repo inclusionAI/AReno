@@ -684,7 +684,6 @@ def build_train_command(config: dict[str, Any]) -> list[str]:
         "--weight-decay": config.get("weight_decay"),
         "--grad-clip-norm": config.get("grad_clip_norm"),
         "--attn-backend": config.get("attn_backend"),
-        "--agent-timeout-s": config.get("agent_timeout_s"),
         "--gspo-clip-eps": config.get("gspo_clip_eps"),
         "--grpo-clip-eps": config.get("grpo_clip_eps"),
         "--dpo-beta": config.get("dpo_beta"),
@@ -711,6 +710,7 @@ def build_train_command(config: dict[str, Any]) -> list[str]:
         "--tune-params": config.get("tune_params"),
         "--greedy": config.get("greedy"),
         "--adam-8bit": config.get("adam_8bit"),
+        "--adam-4bit": config.get("adam_4bit"),
         "--unfreeze-mm-tower": config.get("unfreeze_multimodal_tower"),
         "--unfreeze-mm-projector": config.get("unfreeze_multimodal_projector"),
         "--drop-rollout-state": config.get("drop_rollout_state"),
@@ -1389,6 +1389,7 @@ def launcher_preflight_action(payload: dict[str, Any]) -> dict[str, Any]:
             "mini_bs": mini_bs,
             "max_running_prompts": 1,
             "adam_8bit": bool_like(config.get("adam_8bit")),
+            "adam_4bit": bool_like(config.get("adam_4bit")),
             "keep_rollout_state": False,
         }
     )

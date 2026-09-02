@@ -5,9 +5,34 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from areno.engine.optim import AdamW8bit, AdamWFP32Master
+from areno.engine.optim import AdamW4bit, AdamW8bit, AdamWFP32Master
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+
+
+@pytest.mark.parametrize("optimizer_cls", [AdamW4bit, AdamW8bit])
+def test_fused_low_bit_adamw_matches_cpu_reference(optimizer_cls) -> None:
+    initial = torch.linspace(-1.0, 1.0, 4099).to(torch.bfloat16)
+    cuda_param = torch.nn.Parameter(initial.cuda())
+    cpu_param = torch.nn.Parameter(initial.clone())
+    kwargs = {
+        "lr": 2.0e-4,
+        "betas": (0.9, 0.99),
+        "weight_decay": 0.02,
+        "bucket_numel": 8192,
+        "quant_block_size": 128 if optimizer_cls is AdamW4bit else 2048,
+    }
+    cuda_optimizer = optimizer_cls([cuda_param], **kwargs)
+    cpu_optimizer = optimizer_cls([cpu_param], **kwargs)
+
+    for step in range(4):
+        gradient = torch.sin(torch.linspace(-2.0, 2.0, initial.numel()) + step * 0.2).to(torch.bfloat16)
+        cuda_param.grad = gradient.cuda()
+        cpu_param.grad = gradient.clone()
+        cuda_optimizer.step()
+        cpu_optimizer.step()
+
+    torch.testing.assert_close(cuda_param.cpu(), cpu_param, rtol=0.0, atol=2.0e-3)
 
 
 def test_fused_fp32_master_adamw_matches_torch_reference() -> None:

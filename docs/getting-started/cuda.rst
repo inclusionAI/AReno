@@ -98,7 +98,9 @@ The main CUDA controls are:
 
 ``--activation-checkpointing``
    Recomputes supported decoder activations during backward. It is enabled by
-   default.
+   default. Ling/Bailing V3 checkpoints attention in every decoder layer and
+   both dense and routed expert MLP blocks. Sparse routing remains outside
+   recomputation so routing load counters are updated exactly once.
 
 ``--optimizer-state-offload cpu``
    Moves optimizer state to host memory between train calls.

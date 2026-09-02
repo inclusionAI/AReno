@@ -163,6 +163,7 @@ class TrainingManager:
         grad_norm = None
         multimodal_grad_metrics = None
         clipped_grad_norm = None
+        optimizer_state_metrics = None
         if stepped:
             self._sync_data_parallel_gradients()
             self._sync_tensor_parallel_replicated_gradients()
@@ -185,6 +186,12 @@ class TrainingManager:
             worker.optimizer.lr = current_lr
             multimodal_lrs = self._set_multimodal_lrs(worker._global_step + 1)
             worker.optimizer.step()
+            state_memory_metrics = getattr(worker.optimizer, "state_memory_metrics", None)
+            if (
+                callable(state_memory_metrics)
+                and getattr(worker.optimizer, "state_quantizer", None) == "dynamic-tree-v1"
+            ):
+                optimizer_state_metrics = {f"adam8_{name}": value for name, value in state_memory_metrics().items()}
             worker.optimizer.zero_grad(set_to_none=True)
             worker._global_step += 1
             if worker.adapter_registry is not None:
@@ -216,6 +223,7 @@ class TrainingManager:
                     {"grad_norm": grad_norm} if grad_norm is not None else None,
                     multimodal_grad_metrics,
                     {"clipped_grad_norm": clipped_grad_norm} if clipped_grad_norm is not None else None,
+                    optimizer_state_metrics,
                 ),
             }
         return None

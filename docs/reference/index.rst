@@ -13,5 +13,6 @@ tasks, use :doc:`/cookbook/math-rlvr`.
 Reference pages:
 
 * :doc:`cli`
+* :doc:`adamw-4bit`
 * :doc:`/sdk/trainer`
 * :doc:`/models/supported`

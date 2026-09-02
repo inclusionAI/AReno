@@ -820,11 +820,87 @@ class MiniCPMV46ForCausalLM(nn.Module):
         else:
             self.vision_tower = None
             self.merger = None
+        self._train_multimodal_tower = False
+        self._train_multimodal_projector = False
+        for module in (self.vision_tower, self.merger):
+            if module is not None:
+                module.requires_grad_(False)
+        self._apply_multimodal_module_modes()
 
     @property
     def language_model(self) -> MiniCPMV46ForCausalLM:
         """Expose the direct AReno text trunk under the HF-compatible name."""
 
+        return self
+
+    def configure_multimodal_training(
+        self,
+        *,
+        unfreeze_tower: bool,
+        unfreeze_projector: bool,
+        tower_lr: float | None,
+        projector_lr: float | None,
+        base_lr: float,
+        trainable: bool = True,
+    ) -> None:
+        """Configure vision tower and merger trainability and LR groups."""
+
+        if unfreeze_tower and self.vision_tower is None:
+            raise ValueError("MiniCPM-V checkpoint has no vision tower parameters to unfreeze")
+        if unfreeze_projector and self.merger is None:
+            raise ValueError("MiniCPM-V checkpoint has no merger parameters to unfreeze")
+        self._configure_multimodal_parameters(
+            list(self.vision_tower.parameters()) if self.vision_tower is not None else [],
+            "tower",
+            unfreeze_tower,
+            tower_lr,
+            base_lr,
+            trainable=trainable,
+        )
+        self._configure_multimodal_parameters(
+            list(self.merger.parameters()) if self.merger is not None else [],
+            "projector",
+            unfreeze_projector,
+            projector_lr,
+            base_lr,
+            trainable=trainable,
+        )
+        self._train_multimodal_tower = unfreeze_tower and trainable
+        self._train_multimodal_projector = unfreeze_projector and trainable
+        self.train(self.training)
+
+    @staticmethod
+    def _configure_multimodal_parameters(
+        params: list[nn.Parameter],
+        group: str,
+        unfreeze: bool,
+        configured_lr: float | None,
+        base_lr: float,
+        *,
+        trainable: bool,
+    ) -> None:
+        for parameter in params:
+            parameter.requires_grad_(unfreeze and trainable)
+            parameter._areno_policy_sync = unfreeze
+            if unfreeze and trainable:
+                parameter._areno_lr_group = group
+                parameter._areno_lr = base_lr if configured_lr is None else configured_lr
+            else:
+                for attribute in ("_areno_lr_group", "_areno_lr"):
+                    if hasattr(parameter, attribute):
+                        delattr(parameter, attribute)
+
+    def _apply_multimodal_module_modes(self) -> None:
+        if self.vision_tower is not None:
+            self.vision_tower.train(self.training and self._train_multimodal_tower)
+        if self.merger is not None:
+            self.merger.train(self.training and self._train_multimodal_projector)
+
+    def train(self, mode: bool = True):
+        """Keep frozen visual modules in evaluation mode."""
+
+        super().train(mode)
+        self._apply_multimodal_module_modes()
         return self
 
     def forward(

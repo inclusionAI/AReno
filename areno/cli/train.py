@@ -120,7 +120,6 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "attn_backend",
             "disable_thinking",
             "agent_fn",
-            "agent_timeout_s",
             "train_tool_results",
             "degenerate_policy",
             "reward_fn_path",
@@ -147,6 +146,7 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "adam_beta1",
             "adam_beta2",
             "adam_8bit",
+            "adam_4bit",
             "optimizer_state_offload",
             "optimizer_state_offload_dir",
             "optimizer_state_offload_batch_size",
@@ -240,6 +240,7 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
     args.rollout_tp_size = getattr(args, "rollout_tp_size", None)
     args.rollout_devices = getattr(args, "rollout_devices", None)
     args.policy_sync_bucket_mb = getattr(args, "policy_sync_bucket_mb", 64)
+    args.adam_4bit = getattr(args, "adam_4bit", False)
     args.optimizer_state_offload = getattr(args, "optimizer_state_offload", "none")
     args.optimizer_state_offload_dir = getattr(args, "optimizer_state_offload_dir", None)
     args.optimizer_state_offload_batch_size = getattr(args, "optimizer_state_offload_batch_size", 1)
@@ -351,8 +352,6 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
         raise click.UsageError("--max-context-len must be positive")
     if algorithm.requires_rollout and args.max_running_prompts is not None and args.max_running_prompts <= 0:
         raise click.UsageError("--max-running-prompts must be positive")
-    if args.agent_timeout_s <= 0:
-        raise click.UsageError("--agent-timeout-s must be positive")
     _require_positive_float(args.lr, "--lr")
     if args.multimodal_tower_lr is not None:
         _require_positive_float(args.multimodal_tower_lr, "--mm-tower-lr")
@@ -547,7 +546,8 @@ def _format_training_config_summary(
                         f"lr={config.optimizer_lr}, min_lr={config.optimizer_min_lr}, "
                         f"decay={config.lr_decay_style}/{config.lr_decay_steps}, "
                         f"betas=({config.optimizer_beta1}, {config.optimizer_beta2}), "
-                        f"weight_decay={config.weight_decay}, adam_8bit={_format_bool(config.adam_8bit)}"
+                        f"weight_decay={config.weight_decay}, adam_8bit={_format_bool(config.adam_8bit)}, "
+                        f"adam_4bit={_format_bool(config.adam_4bit)}"
                     ),
                 ),
                 ("optimizer_state_offload", str(config.optimizer_state_offload)),
@@ -849,6 +849,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
     args.rollout_tp_size = getattr(args, "rollout_tp_size", None)
     args.rollout_devices = getattr(args, "rollout_devices", None)
     args.policy_sync_bucket_mb = getattr(args, "policy_sync_bucket_mb", 64)
+    args.adam_4bit = getattr(args, "adam_4bit", False)
     args.unfreeze_multimodal_tower = getattr(args, "unfreeze_multimodal_tower", False)
     args.unfreeze_multimodal_projector = getattr(args, "unfreeze_multimodal_projector", False)
     args.multimodal_tower_lr = getattr(args, "multimodal_tower_lr", None)
@@ -899,6 +900,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             weight_decay=args.weight_decay,
             grad_clip_norm=args.grad_clip_norm,
             adam_8bit=args.adam_8bit,
+            adam_4bit=args.adam_4bit,
             unfreeze_multimodal_tower=args.unfreeze_multimodal_tower,
             unfreeze_multimodal_projector=args.unfreeze_multimodal_projector,
             multimodal_tower_lr=args.multimodal_tower_lr,
@@ -918,7 +920,6 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             attn_backend=args.attn_backend,
             metrics_log_dir=args.metrics_log_dir,
             agent_fn=args.agent_fn,
-            agent_timeout_s=args.agent_timeout_s,
             train_tool_results=args.train_tool_results,
             chat_template_enable_thinking=chat_template_enable_thinking,
             ref_ckpt=args.ref_ckpt,
@@ -960,6 +961,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             weight_decay=args.weight_decay,
             grad_clip_norm=args.grad_clip_norm,
             adam_8bit=args.adam_8bit,
+            adam_4bit=args.adam_4bit,
             unfreeze_multimodal_tower=args.unfreeze_multimodal_tower,
             unfreeze_multimodal_projector=args.unfreeze_multimodal_projector,
             multimodal_tower_lr=args.multimodal_tower_lr,
@@ -979,7 +981,6 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             attn_backend=args.attn_backend,
             metrics_log_dir=args.metrics_log_dir,
             agent_fn=args.agent_fn,
-            agent_timeout_s=args.agent_timeout_s,
             train_tool_results=args.train_tool_results,
             chat_template_enable_thinking=chat_template_enable_thinking,
             lora=lora,
@@ -1029,6 +1030,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             weight_decay=args.weight_decay,
             grad_clip_norm=args.grad_clip_norm,
             adam_8bit=args.adam_8bit,
+            adam_4bit=args.adam_4bit,
             unfreeze_multimodal_tower=args.unfreeze_multimodal_tower,
             unfreeze_multimodal_projector=args.unfreeze_multimodal_projector,
             multimodal_tower_lr=args.multimodal_tower_lr,
@@ -1050,7 +1052,6 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             grpo_clip_eps=args.grpo_clip_eps,
             metrics_log_dir=args.metrics_log_dir,
             agent_fn=args.agent_fn,
-            agent_timeout_s=args.agent_timeout_s,
             train_tool_results=args.train_tool_results,
             chat_template_enable_thinking=chat_template_enable_thinking,
             lora=lora,
@@ -1099,6 +1100,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
         weight_decay=args.weight_decay,
         grad_clip_norm=args.grad_clip_norm,
         adam_8bit=args.adam_8bit,
+        adam_4bit=args.adam_4bit,
         unfreeze_multimodal_tower=args.unfreeze_multimodal_tower,
         unfreeze_multimodal_projector=args.unfreeze_multimodal_projector,
         multimodal_tower_lr=args.multimodal_tower_lr,
@@ -1134,7 +1136,6 @@ def _trainer_config_from_args(args) -> TrainerConfig:
         lam=args.lam,
         critic_warmup_steps=args.critic_warmup_steps,
         agent_fn=args.agent_fn,
-        agent_timeout_s=args.agent_timeout_s,
         train_tool_results=args.train_tool_results,
         chat_template_enable_thinking=chat_template_enable_thinking,
         lora=lora,
@@ -1261,7 +1262,6 @@ def _training_config_settings(config: TrainerConfig) -> dict:
                 "top_k",
                 "top_p",
                 "agent_fn",
-                "agent_timeout_s",
                 "train_tool_results",
                 "degenerate_policy",
                 "reward_fn_path",
@@ -1288,6 +1288,7 @@ def _training_config_settings(config: TrainerConfig) -> dict:
                 "weight_decay",
                 "grad_clip_norm",
                 "adam_8bit",
+                "adam_4bit",
             ],
         ),
         section(
@@ -1694,6 +1695,7 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
 @click.option("--adam-beta1", type=float, default=0.9, show_default=True, help="Policy optimizer Adam beta1.")
 @click.option("--adam-beta2", type=float, default=0.999, show_default=True, help="Policy optimizer Adam beta2.")
 @click.option("--adam-8bit", is_flag=True, help="Use 8-bit Adam moment states instead of FP32 Adam states.")
+@click.option("--adam-4bit", is_flag=True, help="Use packed block-wise 4-bit Adam moment states.")
 @click.option("--unfreeze-mm-tower", "unfreeze_multimodal_tower", is_flag=True, help="Train multimodal encoder towers.")
 @click.option(
     "--unfreeze-mm-projector",
@@ -1798,9 +1800,6 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     help="Pass enable_thinking=False to tokenizer chat templates when supported.",
 )
 @click.option("--agent-fn", default=None, help="Python file defining async run_agent(ctx, batch) for agentic rollout.")
-@click.option(
-    "--agent-timeout-s", type=float, default=300.0, show_default=True, help="Agentic rollout proxy request timeout."
-)
 @click.option("--train-tool-results", is_flag=True, help="Include tool-result spans in agentic policy loss.")
 @click.option(
     "--degenerate-policy",

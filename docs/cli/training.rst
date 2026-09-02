@@ -231,10 +231,6 @@ and CUDA graph state; MLX retains one in-process model.
    iterable of either. Each turn must carry its ``AgentItem``, message list,
    and OpenAI response.
 
-``--agent-timeout-s FLOAT``
-   Timeout for agentic proxy requests and the agent function. Default:
-   ``300.0``.
-
 ``--train-tool-results``
    Include tool-result spans in policy loss. Disabled by default because tool
    results are environment observations rather than policy actions. Assistant
@@ -350,7 +346,7 @@ in its description; flags for other algorithms are ignored.
    persistent writable raw-mmap files, copying each bucket back only when the
    next optimizer step needs it. Default: ``none``. This option is supported
    only by the CUDA backend and applies to both FP32-master AdamW and
-   ``--adam-8bit``.
+   ``--adam-8bit`` or ``--adam-4bit``.
 
 ``--optimizer-state-offload-dir DIRECTORY``
    Required when ``--optimizer-state-offload disk`` is selected. Use a fast
@@ -384,8 +380,27 @@ in its description; flags for other algorithms are ignored.
    Policy optimizer Adam beta2. Default: ``0.999``.
 
 ``--adam-8bit``
-   Use 8-bit Adam moment states instead of FP32 Adam states. Supported by both
-   native backends; validate convergence when changing optimizer precision.
+   Use block-wise 8-bit Adam moment states instead of FP32 Adam states.
+   CUDA and MLX use the signed dynamic-tree codebook for the first moment and
+   the unsigned dynamic codebook for the second moment from *8-Bit Optimizers
+   via Block-wise Quantization*. Token-embedding weights and gradients retain
+   their normal model precision, while their optimizer moments remain FP32 to
+   avoid quantizing embedding-gradient outliers. Other initialized moment
+   state uses two bytes per parameter plus FP32 block scales.
+   CUDA training metrics expose ``adam8_quantized_state_bytes``,
+   ``adam8_fp32_exempt_bytes``, ``adam8_block_metadata_bytes``, and
+   ``adam8_total_bytes`` for initialized DP-local optimizer state.
+
+   This option does not insert a normalization layer or reinitialize a loaded
+   embedding. The paper's Stable Embedding forward architecture is not enabled
+   for AReno's current RoPE-only language models because they do not expose the
+   compatible additive-position-embedding boundary. Supported by both native
+   backends; validate convergence when changing optimizer precision.
+
+``--adam-4bit``
+   Use packed block-wise 4-bit Adam moment states. This option is CUDA-only
+   and cannot be combined with ``--adam-8bit``. See
+   :doc:`../reference/adamw-4bit` for complete usage examples.
 
 ``--unfreeze-mm-tower``
    Train recognized vision/audio encoder tower parameters. Towers are frozen

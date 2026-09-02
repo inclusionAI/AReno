@@ -5,7 +5,8 @@ Other optimizer variants should be added here as separate modules and
 re-exported through `__all__`.
 """
 
-from areno.engine.optim.adamw_8bit import AdamW8bit
+from areno.engine.optim.adamw_4bit import AdamW4bit
+from areno.engine.optim.adamw_8bit import AdamW8bit, set_optimizer_state_precision
 from areno.engine.optim.adamw_fp32_master import AdamWFP32Master
 
-__all__ = ["AdamW8bit", "AdamWFP32Master"]
+__all__ = ["AdamW4bit", "AdamW8bit", "AdamWFP32Master", "set_optimizer_state_precision"]
