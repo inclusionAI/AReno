@@ -48,6 +48,10 @@ def __getattr__(name: str):
         from areno.engine import config
 
         return getattr(config, name)
+    if name == "LoraConfig":
+        from areno.adapters import LoraConfig
+
+        return LoraConfig
     if name in {"RolloutOutput", "SamplingParams", "TrainStats"}:
         from areno.engine import data
 
@@ -62,6 +66,7 @@ def __getattr__(name: str):
 __all__ = [
     "ArenoEngine",
     "EngineConfig",
+    "LoraConfig",
     "ModelConfig",
     "OptimizerConfig",
     "RolloutOutput",

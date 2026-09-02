@@ -65,6 +65,43 @@ class MlxModelProvider:
     def configure_trainability(self, optimizer_config: dict[str, Any]) -> None:
         del optimizer_config
 
+    def optimizer_state_precision(self, path: str, parameter: Any) -> str:
+        """Return role-aware optimizer-state precision for one MLX parameter."""
+
+        del path
+        for embedding in self._token_embedding_modules():
+            if getattr(embedding, "weight", None) is parameter:
+                return "fp32"
+        return "8bit"
+
+    def _token_embedding_modules(self) -> tuple[Any, ...]:
+        language_model = self.generation_model
+        body = getattr(language_model, "model", None)
+        modules = []
+        seen: set[int] = set()
+
+        def add(module: Any) -> None:
+            if module is None:
+                return
+            if isinstance(module, dict):
+                for child in module.values():
+                    add(child)
+                return
+            if isinstance(module, list | tuple):
+                for child in module:
+                    add(child)
+                return
+            if id(module) not in seen:
+                modules.append(module)
+                seen.add(id(module))
+
+        for owner in (body, language_model):
+            if owner is None:
+                continue
+            for name in ("embed_tokens", "word_embeddings", "embed_tokens_per_layer"):
+                add(getattr(owner, name, None))
+        return tuple(modules)
+
     def prepare_generation_prompt(self, tokens: list[int], features: dict[str, Any] | None) -> dict[str, Any]:
         if features is not None:
             raise ValueError("text-only MLX checkpoints cannot consume multimodal prompt features")

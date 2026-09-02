@@ -143,6 +143,7 @@ def build_chat_completion_response(
     tool_call_parser: ToolCallParser | None = None,
     parsed_tool_calls: list[list[dict[str, Any]]] | None = None,
     response_logprobs: list[list[float]] | None = None,
+    routed_experts: list[list[list[list[int]]]] | None = None,
     include_areno_metadata: bool = False,
     input_tokens: list[int] | None = None,
     stop_strings: list[str] | None = None,
@@ -188,6 +189,7 @@ def build_chat_completion_response(
             "input_tokens": list(input_tokens or []),
             "response_tokens": list(response_ids[0] if response_ids else []),
             "response_logprobs": list(response_logprobs[0] if response_logprobs else []),
+            "routed_experts": list(routed_experts[0] if routed_experts else []),
         }
     return response
 

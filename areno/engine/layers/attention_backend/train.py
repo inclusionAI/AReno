@@ -160,11 +160,6 @@ def _native_train(
 ) -> torch.Tensor:
     """Training path for attn_backend=native using PyTorch SDPA math."""
 
-    if meta is not None and meta.sequence_parallel:
-        raise RuntimeError(
-            "native attention backend training does not support sequence parallelism with SDPA math yet. "
-            "Disable sequence parallelism for logprob diagnostics or use --attn-backend flash."
-        )
     if meta is not None and meta.cu_seqlens is not None:
         cu = meta.cu_seqlens.detach().cpu().tolist()
         q_flat = q.reshape(-1, q.shape[-2], q.shape[-1])

@@ -13,10 +13,9 @@ from __future__ import annotations
 import asyncio
 import multiprocessing as mp
 import queue
-import socket
 import threading
 import traceback
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum, auto
 from itertools import count
 from typing import Any, Literal
@@ -43,6 +42,7 @@ class Op(Enum):
     ROLLOUT_SESSION_SYNC = auto()
     ROLLOUT_SESSION_END = auto()
     SAVE_CHECKPOINT = auto()
+    EXPORT_ADAPTER = auto()
     POLICY_SYNC_PLAN = auto()
     POLICY_SYNC_PUBLISH = auto()
     POLICY_SYNC_RECEIVE = auto()
@@ -118,6 +118,7 @@ class RoleSpecPayload:
     path: str
     trainable: bool
     optimizer_lr: float | None = None
+    reference_mode: str = "independent"
 
 
 @dataclass(slots=True)
@@ -135,6 +136,7 @@ class ScorePayload:
     token_rows_by_dp: list[list[list[int]]]
     features_by_dp: list[list[dict[str, Any] | None]] | None
     pad_token_id: int
+    routing_replay_by_dp: list[list[torch.Tensor]] | None = None
     microbatch_size: int = 8
 
 
@@ -152,6 +154,13 @@ class TrainValuesPayload:
 @dataclass(slots=True)
 class SaveCheckpointPayload:
     """Typed payload for Op.SAVE_CHECKPOINT."""
+
+    path: str
+
+
+@dataclass(slots=True)
+class ExportAdapterPayload:
+    """Typed payload for Op.EXPORT_ADAPTER."""
 
     path: str
 
@@ -225,12 +234,20 @@ class ClusterCallHandle:
         return self._pending.results
 
 
-def find_free_port() -> int:
-    """Reserve an available localhost TCP port for torch distributed init."""
+def _create_rendezvous_store(master_addr: str, world_size: int):
+    """Create and retain a coordinator-side TCPStore with an OS-assigned port.
 
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
+    The store binds ``port=0`` and keeps the listening socket open for the
+    coordinator's lifetime, so no other process (including outbound traffic
+    reusing ephemeral ports) can steal the resolved port before the workers
+    connect as client stores. This replaces the bind-close-bind probe of the
+    old ``find_free_port``, which raced with outbound connections on busy
+    hosts and failed worker startup with EADDRINUSE (#517).
+    """
+
+    import torch.distributed as dist
+
+    return dist.TCPStore(master_addr, 0, world_size=world_size, is_master=True, wait_for_workers=False)
 
 
 def _rollout_payload_count(payload: RolloutPayload) -> int:
@@ -282,6 +299,9 @@ class TPCluster:
             raise ValueError("world_spec and partition must be provided together")
         self.world_spec = world_spec
         self.partition = partition
+        # Coordinator-side rendezvous store; retained for the cluster lifetime
+        # so the resolved master port stays reserved for the workers (#517).
+        self._rendezvous_store = None
         # `spawn` start method is required by CUDA-aware workers; do not
         # inherit fds/CUDA state from the parent.
         self.ctx = mp.get_context("spawn")
@@ -304,9 +324,12 @@ class TPCluster:
         if self.world_spec is not None:
             raise RuntimeError("partitioned clusters must be started with start_partitioned_clusters()")
         world_size = self.config.tp_size * int(self.config.dp_size)
+        # The coordinator holds the rendezvous store open so the resolved port
+        # is genuinely reserved until the workers connect (see #517).
+        self._rendezvous_store = _create_rendezvous_store("127.0.0.1", world_size)
         world_spec = DistributedWorldSpec(
             master_addr="127.0.0.1",
-            master_port=find_free_port(),
+            master_port=int(self._rendezvous_store.port),
             global_world_size=world_size,
             train=ClusterPartition(
                 role="train",
@@ -700,6 +723,13 @@ def start_partitioned_clusters(
     clusters = (train_cluster, rollout_cluster)
     if train_cluster.world_spec != world_spec or rollout_cluster.world_spec != world_spec:
         raise ValueError("both clusters must use the supplied world_spec")
+    # One coordinator-held store serves the combined world; the resolved port
+    # is rebuilt into the frozen world_spec before any worker spawns (#517).
+    store = _create_rendezvous_store(world_spec.master_addr, world_spec.global_world_size)
+    resolved_spec = replace(world_spec, master_port=int(store.port))
+    for cluster in clusters:
+        cluster.world_spec = resolved_spec
+        cluster._rendezvous_store = store
     try:
         for cluster in clusters:
             cluster._spawn_workers()

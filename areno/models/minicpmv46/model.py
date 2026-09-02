@@ -1,13 +1,10 @@
 """MiniCPM-V-4.6 language-backbone causal-LM adapter.
 
 Targets the OpenBMB MiniCPM-V-4.6 multimodal checkpoints
-(``model_type == "minicpmv4_6"``). The HF release ships a vision encoder and
-a multimodal projector on top of a text decoder; only the text decoder is
-realised here — image embeddings are produced upstream (by the caller's
-preprocessing pipeline) and arrive as ordinary token embeddings via
-``input_ids`` already containing image-placeholder ids. The adapter therefore
-simply wires the language model, leaving the vision tower and the
-hidden->LM projector to the data pipeline.
+(``model_type == "minicpmv4_6"``). The adapter owns the NaViT vision encoder,
+window merger, visual-to-LLM projector, and hybrid text decoder. Processor
+features are accepted at the model boundary and image placeholder token rows
+are replaced with projected visual embeddings before the decoder runs.
 
 Notable peculiarities:
     * Hybrid layer stack — each decoder block is either a standard softmax
@@ -63,13 +60,326 @@ from areno.models._shared.dynamo_wrappers import (
 )
 from areno.models.base import CausalLMOutput, ModelAdapter
 
-# Gated Delta-Net topology constants (fixed by the MiniCPM-V-4.6 architecture,
-# not exposed in the HF config). 16 heads of dim 128 -> 2048-d key/value path.
+# MiniCPM-V-4.6 uses the Qwen3.5 hybrid text topology.  Keep these defaults
+# for old configs which predate the explicit linear-* fields.
 _LINEAR_NUM_HEADS = 16
 _LINEAR_HEAD_DIM = 128
-# Short-term Conv1d kernel size: each step sees the current token plus
-# (kernel-1) immediate predecessors.
 _LINEAR_CONV_KERNEL = 4
+
+
+def _feature_tensor(
+    features: dict[str, Any], key: str, device: torch.device, dtype: torch.dtype
+) -> torch.Tensor | None:
+    value = features.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, torch.Tensor):
+        value = torch.as_tensor(value)
+    return value.to(device=device, dtype=dtype)
+
+
+def _features_by_row(features: dict[str, Any] | list[dict[str, Any] | None], batch: int) -> list[dict[str, Any] | None]:
+    if isinstance(features, list):
+        if len(features) != batch:
+            raise ValueError(f"MiniCPM multimodal features batch mismatch: got {len(features)} rows for batch {batch}")
+        return features
+    if not isinstance(features, dict):
+        raise TypeError("MiniCPM multimodal features must be a dict or a batch-aligned list of dicts")
+    if batch == 1:
+        return [features]
+    rows = []
+    for row_idx in range(batch):
+        row = {}
+        for key, value in features.items():
+            if isinstance(value, torch.Tensor) and value.ndim > 0 and int(value.shape[0]) == batch:
+                row[key] = value[row_idx]
+            elif isinstance(value, list) and len(value) == batch:
+                row[key] = value[row_idx]
+            else:
+                row[key] = value
+        rows.append(row)
+    return rows
+
+
+def _image_embeds_for_row(features: dict[str, Any], device: torch.device, dtype: torch.dtype) -> torch.Tensor | None:
+    for key in ("image_embeds", "image_features", "projected_image_embeds", "inputs_embeds"):
+        value = features.get(key)
+        if value is not None:
+            if not isinstance(value, torch.Tensor):
+                value = torch.as_tensor(value)
+            return value.to(device=device, dtype=dtype)
+    return None
+
+
+def _image_token_mask(features: dict[str, Any], input_ids: torch.Tensor) -> torch.Tensor:
+    mask = features.get("image_token_mask")
+    if mask is not None:
+        if not isinstance(mask, torch.Tensor):
+            mask = torch.as_tensor(mask)
+        mask = mask.reshape(-1).to(device=input_ids.device, dtype=torch.bool)
+        if mask.shape != input_ids.shape:
+            raise ValueError(
+                f"MiniCPM image_token_mask shape {tuple(mask.shape)} does not match input row {tuple(input_ids.shape)}"
+            )
+        return mask
+    image_token_id = features.get("image_token_id")
+    if image_token_id is None:
+        raise ValueError("MiniCPM multimodal features require image_token_mask or image_token_id")
+    return input_ids == int(image_token_id)
+
+
+def _recurrent_cache_slots(infer_meta: InferMeta) -> torch.Tensor:
+    if infer_meta.recurrent_slots is not None:
+        return infer_meta.recurrent_slots.long()
+    if infer_meta.block_table is None:
+        raise RuntimeError("MiniCPM GDN inference requires recurrent_slots or block_table")
+    return infer_meta.block_table[:, 0].long()
+
+
+class MiniCPMV46VisionEmbeddings(nn.Module):
+    """NaViT-style variable-resolution patch embedding used by MiniCPM-V."""
+
+    def __init__(self, vision_config: dict[str, Any], dtype: torch.dtype):
+        super().__init__()
+        self.embed_dim = int(vision_config["hidden_size"])
+        self.image_size = int(vision_config.get("image_size", 224))
+        self.patch_size = int(vision_config.get("patch_size", 16))
+        self.patch_embedding = nn.Conv2d(
+            int(vision_config.get("num_channels", 3)),
+            self.embed_dim,
+            kernel_size=self.patch_size,
+            stride=self.patch_size,
+            bias=True,
+            dtype=dtype,
+        )
+        num_side = self.image_size // self.patch_size
+        self.num_patches_per_side = num_side
+        self.position_embedding = nn.Embedding(num_side * num_side, self.embed_dim, dtype=dtype)
+
+    def forward(self, pixel_values: torch.Tensor, target_sizes: torch.Tensor) -> torch.Tensor:
+        if pixel_values.ndim != 4:
+            raise ValueError("MiniCPM-V pixel_values must have shape (1, C, patch_size, packed_width)")
+        patch_embeds = self.patch_embedding(pixel_values.to(dtype=self.patch_embedding.weight.dtype))
+        embeddings = patch_embeds.flatten(2).transpose(1, 2)
+        boundaries = torch.arange(
+            1 / self.num_patches_per_side,
+            1.0,
+            1 / self.num_patches_per_side,
+            device=self.position_embedding.weight.device,
+        )
+        position_embeddings = []
+        for target_size in target_sizes.detach().cpu().to(dtype=torch.long):
+            height, width = (int(target_size[0]), int(target_size[1]))
+            fractional_h = torch.arange(0, 1 - 1e-6, 1 / height, device=boundaries.device)
+            fractional_w = torch.arange(0, 1 - 1e-6, 1 / width, device=boundaries.device)
+            bucket_h = torch.bucketize(fractional_h, boundaries, right=True)
+            bucket_w = torch.bucketize(fractional_w, boundaries, right=True)
+            pos_ids = (bucket_h[:, None] * self.num_patches_per_side + bucket_w).flatten()
+            position_embeddings.append(self.position_embedding(pos_ids))
+        if position_embeddings:
+            embeddings = embeddings + torch.cat(position_embeddings, dim=0).unsqueeze(0).to(embeddings.dtype)
+        return embeddings
+
+
+class MiniCPMV46VisionAttention(nn.Module):
+    def __init__(self, vision_config: dict[str, Any], dtype: torch.dtype):
+        super().__init__()
+        self.dim = int(vision_config["hidden_size"])
+        self.num_heads = int(vision_config["num_attention_heads"])
+        self.head_dim = self.dim // self.num_heads
+        if self.head_dim * self.num_heads != self.dim:
+            raise ValueError("MiniCPM vision hidden_size must be divisible by num_attention_heads")
+        self.q_proj = nn.Linear(self.dim, self.dim, dtype=dtype)
+        self.k_proj = nn.Linear(self.dim, self.dim, dtype=dtype)
+        self.v_proj = nn.Linear(self.dim, self.dim, dtype=dtype)
+        self.out_proj = nn.Linear(self.dim, self.dim, dtype=dtype)
+
+    @torch._dynamo.disable
+    def forward(self, hidden_states: torch.Tensor, cu_seqlens: torch.Tensor) -> torch.Tensor:
+        q = self.q_proj(hidden_states).view(1, -1, self.num_heads, self.head_dim).transpose(1, 2)
+        k = self.k_proj(hidden_states).view(1, -1, self.num_heads, self.head_dim).transpose(1, 2)
+        v = self.v_proj(hidden_states).view(1, -1, self.num_heads, self.head_dim).transpose(1, 2)
+        lengths = (cu_seqlens[1:] - cu_seqlens[:-1]).detach().cpu().tolist()
+        q_parts = torch.split(q, lengths, dim=2)
+        k_parts = torch.split(k, lengths, dim=2)
+        v_parts = torch.split(v, lengths, dim=2)
+        outputs = [
+            F.scaled_dot_product_attention(qi, ki, vi, is_causal=False).transpose(1, 2)
+            for qi, ki, vi in zip(q_parts, k_parts, v_parts)
+        ]
+        return self.out_proj(torch.cat(outputs, dim=1).reshape(1, -1, self.dim))
+
+
+class MiniCPMV46VisionMLP(nn.Module):
+    def __init__(self, vision_config: dict[str, Any], dtype: torch.dtype):
+        super().__init__()
+        hidden = int(vision_config["hidden_size"])
+        intermediate = int(vision_config["intermediate_size"])
+        self.fc1 = nn.Linear(hidden, intermediate, dtype=dtype)
+        self.fc2 = nn.Linear(intermediate, hidden, dtype=dtype)
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return self.fc2(F.gelu(self.fc1(hidden_states), approximate="tanh"))
+
+
+class MiniCPMV46VisionEncoderLayer(nn.Module):
+    def __init__(self, vision_config: dict[str, Any], dtype: torch.dtype):
+        super().__init__()
+        hidden = int(vision_config["hidden_size"])
+        eps = float(vision_config.get("layer_norm_eps", 1e-6))
+        self.layer_norm1 = nn.LayerNorm(hidden, eps=eps, dtype=dtype)
+        self.self_attn = MiniCPMV46VisionAttention(vision_config, dtype)
+        self.layer_norm2 = nn.LayerNorm(hidden, eps=eps, dtype=dtype)
+        self.mlp = MiniCPMV46VisionMLP(vision_config, dtype)
+
+    def forward(self, hidden_states: torch.Tensor, cu_seqlens: torch.Tensor) -> torch.Tensor:
+        hidden_states = hidden_states + self.self_attn(self.layer_norm1(hidden_states), cu_seqlens)
+        return hidden_states + self.mlp(self.layer_norm2(hidden_states))
+
+
+class MiniCPMV46VisionEncoder(nn.Module):
+    def __init__(self, vision_config: dict[str, Any], dtype: torch.dtype):
+        super().__init__()
+        self.layers = nn.ModuleList(
+            [MiniCPMV46VisionEncoderLayer(vision_config, dtype) for _ in range(int(vision_config["num_hidden_layers"]))]
+        )
+
+    def forward(self, hidden_states: torch.Tensor, cu_seqlens: torch.Tensor) -> torch.Tensor:
+        for layer in self.layers:
+            hidden_states = layer(hidden_states, cu_seqlens)
+        return hidden_states
+
+
+class MiniCPMV46ViTWindowAttentionMerger(nn.Module):
+    def __init__(self, vision_config: dict[str, Any], dtype: torch.dtype):
+        super().__init__()
+        self.window_h, self.window_w = tuple(vision_config.get("window_kernel_size", (2, 2)))
+        hidden = int(vision_config["hidden_size"])
+        eps = float(vision_config.get("layer_norm_eps", 1e-6))
+        self.self_attn = MiniCPMV46VisionAttention(vision_config, dtype)
+        self.layer_norm1 = nn.LayerNorm(hidden, eps=eps, dtype=dtype)
+        merged = hidden * self.window_h * self.window_w
+        self.pre_norm = nn.LayerNorm(merged, eps=eps, dtype=dtype)
+        self.linear_1 = nn.Linear(merged, int(vision_config.get("intermediate_size", merged)) * 4, dtype=dtype)
+        self.linear_2 = nn.Linear(int(vision_config.get("intermediate_size", merged)) * 4, hidden, dtype=dtype)
+
+    @torch._dynamo.disable
+    def _window_index(self, target_sizes: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        indices = []
+        cu = [0]
+        offset = 0
+        for target in target_sizes.detach().cpu().to(dtype=torch.long):
+            height, width = int(target[0]), int(target[1])
+            if height % self.window_h or width % self.window_w:
+                raise ValueError("MiniCPM vision patch grid must be divisible by window_kernel_size")
+            grid = torch.arange(height * width).reshape(height, width)
+            grid = grid.reshape(height // self.window_h, self.window_h, width // self.window_w, self.window_w)
+            grid = grid.permute(0, 2, 1, 3).reshape(-1, self.window_h * self.window_w)
+            indices.append(grid.flatten() + offset)
+            cu.extend((torch.arange(1, grid.shape[0] + 1) * (self.window_h * self.window_w) + cu[-1]).tolist())
+            offset += height * width
+        return torch.cat(indices), torch.tensor(cu, dtype=torch.int32)
+
+    @torch._dynamo.disable
+    def forward(
+        self, hidden_states: torch.Tensor, target_sizes: torch.Tensor, cu_seqlens: torch.Tensor
+    ) -> torch.Tensor:
+        residual = hidden_states
+        index, window_cu = self._window_index(target_sizes)
+        windowed = self.layer_norm1(hidden_states)[:, index.to(hidden_states.device), :]
+        windowed = self.self_attn(windowed, window_cu.to(hidden_states.device))
+        hidden_states = residual + windowed[:, torch.argsort(index).to(hidden_states.device), :]
+        outputs = []
+        start = 0
+        for target in target_sizes.detach().cpu().to(dtype=torch.long):
+            height, width = int(target[0]), int(target[1])
+            patch = hidden_states[:, start : start + height * width, :].squeeze(0)
+            merged_h, merged_w = height // self.window_h, width // self.window_w
+            patch = patch.view(merged_h, self.window_h, merged_w, self.window_w, -1).permute(0, 2, 1, 3, 4)
+            value = patch.reshape(merged_h * merged_w, -1)
+            residual_patch = patch.reshape(merged_h * merged_w, self.window_h * self.window_w, -1).mean(dim=1)
+            value = self.linear_2(F.gelu(self.linear_1(self.pre_norm(value)), approximate="tanh"))
+            outputs.append(value + residual_patch)
+            start += height * width
+        return torch.cat(outputs, dim=0).unsqueeze(0)
+
+
+class MiniCPMV46VisionModel(nn.Module):
+    def __init__(self, vision_config: dict[str, Any], dtype: torch.dtype):
+        super().__init__()
+        self.config = vision_config
+        hidden = int(vision_config["hidden_size"])
+        self.embeddings = MiniCPMV46VisionEmbeddings(vision_config, dtype)
+        self.encoder = MiniCPMV46VisionEncoder(vision_config, dtype)
+        self.post_layernorm = nn.LayerNorm(hidden, eps=float(vision_config.get("layer_norm_eps", 1e-6)), dtype=dtype)
+        self.vit_merger = MiniCPMV46ViTWindowAttentionMerger(vision_config, dtype)
+
+    @torch._dynamo.disable
+    def forward(
+        self, pixel_values: torch.Tensor, target_sizes: torch.Tensor, use_vit_merger: bool = True
+    ) -> torch.Tensor:
+        hidden_states = self.embeddings(pixel_values, target_sizes)
+        target_sizes = target_sizes.to(device=hidden_states.device, dtype=torch.long).reshape(-1, 2)
+        cu_seqlens = F.pad(torch.cumsum(target_sizes[:, 0] * target_sizes[:, 1], dim=0, dtype=torch.int32), (1, 0))
+        insert_layer = int(self.config.get("insert_layer_id", 6)) if use_vit_merger else -1
+        for layer_idx, layer in enumerate(self.encoder.layers):
+            hidden_states = layer(hidden_states, cu_seqlens)
+            if layer_idx == insert_layer:
+                hidden_states = self.vit_merger(hidden_states, target_sizes, cu_seqlens)
+                target_sizes = target_sizes // 2
+                cu_seqlens = F.pad(
+                    torch.cumsum(target_sizes[:, 0] * target_sizes[:, 1], dim=0, dtype=torch.int32), (1, 0)
+                )
+        return self.post_layernorm(hidden_states)
+
+
+class MiniCPMV46DownsampleMLP(nn.Module):
+    def __init__(self, hidden_size: int, output_size: int, dtype: torch.dtype):
+        super().__init__()
+        merged = hidden_size * 4
+        self.pre_norm = nn.LayerNorm(merged, eps=1e-6, dtype=dtype)
+        self.linear_1 = nn.Linear(merged, merged, dtype=dtype)
+        self.linear_2 = nn.Linear(merged, output_size, dtype=dtype)
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
+        return self.linear_2(F.gelu(self.linear_1(self.pre_norm(hidden_states)), approximate="none"))
+
+
+class MiniCPMV46Merger(nn.Module):
+    def __init__(self, vision_config: dict[str, Any], text_hidden_size: int, dtype: torch.dtype):
+        super().__init__()
+        self.merge_h, self.merge_w = tuple(vision_config.get("merge_kernel_size", (2, 2)))
+        self.merger_times = int(vision_config.get("merger_times", 1))
+        hidden = int(vision_config["hidden_size"])
+        mlps = [MiniCPMV46DownsampleMLP(hidden, hidden, dtype) for _ in range(self.merger_times - 1)]
+        mlps.append(MiniCPMV46DownsampleMLP(hidden, text_hidden_size, dtype))
+        self.mlp = nn.ModuleList(mlps)
+
+    @torch._dynamo.disable
+    def forward(self, hidden_states: torch.Tensor, target_sizes: torch.Tensor) -> list[torch.Tensor]:
+        outputs = []
+        start = 0
+        for target in target_sizes.detach().cpu().to(dtype=torch.long):
+            height, width = int(target[0]), int(target[1])
+            count = height * width
+            if height % self.merge_h or width % self.merge_w:
+                raise ValueError("MiniCPM vision patch grid must be divisible by merge_kernel_size")
+            value = hidden_states[0, start : start + count]
+            merged_h, merged_w = height // self.merge_h, width // self.merge_w
+            value = value.view(merged_h, self.merge_h, merged_w, self.merge_w, -1).permute(0, 2, 1, 3, 4)
+            value = self.mlp[0](value.reshape(merged_h * merged_w, -1))
+            current_h, current_w = merged_h, merged_w
+            for mlp in self.mlp[1:]:
+                if current_h % self.merge_h or current_w % self.merge_w:
+                    raise ValueError("MiniCPM vision patch grid is not divisible for repeated merger")
+                current_h //= self.merge_h
+                current_w //= self.merge_w
+                value = value.view(current_h, self.merge_h, current_w, self.merge_w, -1).permute(0, 2, 1, 3, 4)
+                value = mlp(value.reshape(current_h * current_w, -1))
+            outputs.append(value)
+            start += count
+        return outputs
 
 
 class MiniCPMFullAttention(nn.Module):
@@ -118,13 +428,14 @@ class MiniCPMFullAttention(nn.Module):
         train_meta: TrainMeta | None,
         infer_meta: InferMeta | None,
     ) -> torch.Tensor:
-        batch, seqlen, _ = hidden_states.shape
         q_size = self.local_heads * self.head_dim
         kv_size = self.local_kv_heads * self.head_dim
         # Single fused projection, split into the four parts; ``gate`` stays
         # flat (no head split) so it can multiply the attention output as a
         # per-channel scalar after the sigmoid.
-        q, gate, k, v = self.qkv_proj(hidden_states).split((q_size, q_size, kv_size, kv_size), dim=-1)
+        qkv = self.qkv_proj(hidden_states)
+        batch, seqlen, _ = qkv.shape
+        q, gate, k, v = qkv.split((q_size, q_size, kv_size, kv_size), dim=-1)
         q = q.view(batch, seqlen, self.local_heads, self.head_dim)
         gate = gate.view(batch, seqlen, self.local_heads * self.head_dim)
         k = k.view(batch, seqlen, self.local_kv_heads, self.head_dim)
@@ -186,14 +497,17 @@ class MiniCPMGatedDeltaNet(nn.Module):
         super().__init__()
         ctx = get_tp_context()
         self.layer_idx = layer_idx
-        self.num_heads = _LINEAR_NUM_HEADS
-        self.head_dim = _LINEAR_HEAD_DIM
-        self.local_heads = self.num_heads // ctx.world_size
-        self.key_dim = self.num_heads * self.head_dim
-        self.value_dim = self.num_heads * self.head_dim
-        self.local_key_dim = self.key_dim // ctx.world_size
-        self.local_value_dim = self.value_dim // ctx.world_size
-        self.conv_kernel_size = _LINEAR_CONV_KERNEL
+        self.num_key_heads = int(config.linear_num_key_heads or _LINEAR_NUM_HEADS)
+        self.num_value_heads = int(config.linear_num_value_heads or self.num_key_heads)
+        self.head_k_dim = int(config.linear_key_head_dim or _LINEAR_HEAD_DIM)
+        self.head_v_dim = int(config.linear_value_head_dim or self.head_k_dim)
+        self.local_key_heads = self.num_key_heads // ctx.world_size
+        self.local_value_heads = self.num_value_heads // ctx.world_size
+        self.key_dim = self.num_key_heads * self.head_k_dim
+        self.value_dim = self.num_value_heads * self.head_v_dim
+        self.local_key_dim = self.local_key_heads * self.head_k_dim
+        self.local_value_dim = self.local_value_heads * self.head_v_dim
+        self.conv_kernel_size = int(config.linear_conv_kernel_dim or _LINEAR_CONV_KERNEL)
         # Fused (q, k, v, z) projection.
         self.in_proj_qkvz = MergedColumnParallelLinear(
             config.hidden_size,
@@ -201,21 +515,23 @@ class MiniCPMGatedDeltaNet(nn.Module):
             bias=False,
         )
         # Fused (b, a) projection — per-head scalars.
-        self.in_proj_ba = MergedColumnParallelLinear(config.hidden_size, (self.num_heads, self.num_heads), bias=False)
+        self.in_proj_ba = MergedColumnParallelLinear(
+            config.hidden_size, (self.num_value_heads, self.num_value_heads), bias=False
+        )
         # Depthwise causal conv1d weight: one filter per channel (groups=channels).
         self.conv1d_weight = nn.Parameter(
             torch.empty(self.local_key_dim * 2 + self.local_value_dim, 1, self.conv_kernel_size)
         )
         mark_tensor_parallel_parameter(self.conv1d_weight, True, sequence_parallel=True)
         # Per-head time-step bias and (log) decay parameter.
-        self.dt_bias = nn.Parameter(torch.empty(self.local_heads))
-        self.A_log = nn.Parameter(torch.empty(self.local_heads, dtype=torch.float32))
+        self.dt_bias = nn.Parameter(torch.empty(self.local_value_heads))
+        self.A_log = nn.Parameter(torch.empty(self.local_value_heads, dtype=torch.float32))
         mark_tensor_parallel_parameter(self.dt_bias, True, sequence_parallel=True)
         mark_tensor_parallel_parameter(self.A_log, True, sequence_parallel=True)
-        self.norm_weight = nn.Parameter(torch.ones(self.head_dim))
+        self.norm_weight = nn.Parameter(torch.ones(self.head_v_dim))
         self.out_proj = RowParallelLinear(self.value_dim, config.hidden_size, bias=False)
         self.eps = config.rms_norm_eps
-        self.scale = self.head_dim**-0.5
+        self.scale = self.head_k_dim**-0.5
         # Recurrent state and conv-history caches, sized by ``set_state_cache``.
         self.state_cache = torch.tensor([])
         self.conv_cache = torch.tensor([])
@@ -228,20 +544,20 @@ class MiniCPMGatedDeltaNet(nn.Module):
         infer_meta: InferMeta | None,
     ) -> torch.Tensor:
         del position_ids
-        batch, seqlen, _ = hidden_states.shape
         qkvz = self.in_proj_qkvz(hidden_states)
         ba = self.in_proj_ba(hidden_states)
+        batch, seqlen, _ = qkvz.shape
         # Mix only the (q, k, v) prefix through the causal conv; z bypasses.
         mixed_qkv = self._causal_conv(
             qkvz[..., : self.local_key_dim * 2 + self.local_value_dim], train_meta, infer_meta
         )
         query_key, value = mixed_qkv.split((self.local_key_dim * 2, self.local_value_dim), dim=-1)
         z = qkvz[..., self.local_key_dim * 2 + self.local_value_dim :]
-        b_gate, a_gate = ba.split((self.local_heads, self.local_heads), dim=-1)
-        query_key = query_key.view(batch, seqlen, self.local_heads * 2, self.head_dim)
-        query, key = query_key.split((self.local_heads, self.local_heads), dim=2)
-        value = value.view(batch, seqlen, self.local_heads, self.head_dim)
-        z = z.view(batch, seqlen, self.local_heads, self.head_dim)
+        b_gate, a_gate = ba.split((self.local_value_heads, self.local_value_heads), dim=-1)
+        query_key = query_key.view(batch, seqlen, self.local_key_heads * 2, self.head_k_dim)
+        query, key = query_key.split((self.local_key_heads, self.local_key_heads), dim=2)
+        value = value.view(batch, seqlen, self.local_value_heads, self.head_v_dim)
+        z = z.view(batch, seqlen, self.local_value_heads, self.head_v_dim)
         if infer_meta is not None:
             out = self._forward_infer(query, key, value, a_gate, b_gate, infer_meta)
         else:
@@ -294,7 +610,7 @@ class MiniCPMGatedDeltaNet(nn.Module):
         if self.conv_cache.numel() == 0:
             raise RuntimeError("MiniCPM GDN inference requires conv state cache")
         # One conv-history slot per request (first column of the block table).
-        slots = infer_meta.block_table[:, 0].long()
+        slots = _recurrent_cache_slots(infer_meta)
         if infer_meta.mode == "decode":
             # Decode: one token per request. Pull the (kernel-1)-history,
             # run the fused decode kernel, then slide the window forward.
@@ -370,18 +686,18 @@ class MiniCPMGatedDeltaNet(nn.Module):
             raise RuntimeError("MiniCPM GDN inference requires block_table")
         if self.state_cache.numel() == 0:
             raise RuntimeError("MiniCPM GDN inference requires recurrent state cache")
-        slots = infer_meta.block_table[:, 0].long()
+        slots = _recurrent_cache_slots(infer_meta)
         cu = infer_meta.cu_seqlens
         if infer_meta.mode == "decode":
             # Decode is single-token per request, so collapse batch/seq into
             # one effective batch and run FLA recurrent scan against the
             # selected per-request states.
             decode_shape = q.shape
-            q = q.reshape(1, -1, self.local_heads, self.head_dim)
-            k = k.reshape(1, -1, self.local_heads, self.head_dim)
-            v = v.reshape(1, -1, self.local_heads, self.head_dim)
-            a = a.reshape(1, -1, self.local_heads)
-            b = b.reshape(1, -1, self.local_heads)
+            q = q.reshape(1, -1, self.local_key_heads, self.head_k_dim)
+            k = k.reshape(1, -1, self.local_key_heads, self.head_k_dim)
+            v = v.reshape(1, -1, self.local_value_heads, self.head_v_dim)
+            a = a.reshape(1, -1, self.local_value_heads)
+            b = b.reshape(1, -1, self.local_value_heads)
             _require_fla_gdn()
             g = -self.A_log.float().exp().view(1, 1, -1) * _areno_softplus_no_compile(
                 a.float() + self.dt_bias.float().view(1, 1, -1)
@@ -401,7 +717,7 @@ class MiniCPMGatedDeltaNet(nn.Module):
                 cu_seqlens=torch.arange(slots.numel() + 1, device=q.device, dtype=torch.long),
             )
             self.state_cache[slots] = state.detach().to(dtype=self.state_cache.dtype)
-            return out.reshape(decode_shape)
+            return out.reshape(decode_shape[:-2] + (self.local_value_heads, self.head_v_dim))
         if cu is None:
             raise RuntimeError("MiniCPM GDN inference requires cu_seqlens")
         _require_fla_gdn()
@@ -486,13 +802,7 @@ class MiniCPMDecoderLayer(nn.Module):
 
 
 class MiniCPMV46ForCausalLM(nn.Module):
-    """Top-level MiniCPM-V-4.6 text-only causal LM.
-
-    The vision encoder and multimodal projector live outside this module;
-    callers preprocess image regions into the input id stream (using the
-    model's image-token placeholders) and the standard
-    ``VocabParallelEmbedding`` handles them like normal tokens.
-    """
+    """MiniCPM-V-4.6 language model with an AReno-owned vision path."""
 
     def __init__(self, config: ModelConfig):
         super().__init__()
@@ -501,6 +811,97 @@ class MiniCPMV46ForCausalLM(nn.Module):
         self.layers = nn.ModuleList([MiniCPMDecoderLayer(config, i) for i in range(config.num_hidden_layers)])
         self.norm = RMSNorm(config.hidden_size, config.rms_norm_eps)
         self.lm_head = VocabParallelLMHead(config.hidden_size, config.vocab_size, dtype=config.dtype)
+        if config.vision_config is not None:
+            vision_config = dict(config.vision_config)
+            self.vision_tower = MiniCPMV46VisionModel(vision_config, config.dtype)
+            self.merger = MiniCPMV46Merger(vision_config, config.hidden_size, config.dtype)
+            for parameter in (*self.vision_tower.parameters(), *self.merger.parameters()):
+                mark_tensor_parallel_parameter(parameter, False, sequence_parallel=False, tp_grad_allreduce=True)
+        else:
+            self.vision_tower = None
+            self.merger = None
+        self._train_multimodal_tower = False
+        self._train_multimodal_projector = False
+        for module in (self.vision_tower, self.merger):
+            if module is not None:
+                module.requires_grad_(False)
+        self._apply_multimodal_module_modes()
+
+    @property
+    def language_model(self) -> MiniCPMV46ForCausalLM:
+        """Expose the direct AReno text trunk under the HF-compatible name."""
+
+        return self
+
+    def configure_multimodal_training(
+        self,
+        *,
+        unfreeze_tower: bool,
+        unfreeze_projector: bool,
+        tower_lr: float | None,
+        projector_lr: float | None,
+        base_lr: float,
+        trainable: bool = True,
+    ) -> None:
+        """Configure vision tower and merger trainability and LR groups."""
+
+        if unfreeze_tower and self.vision_tower is None:
+            raise ValueError("MiniCPM-V checkpoint has no vision tower parameters to unfreeze")
+        if unfreeze_projector and self.merger is None:
+            raise ValueError("MiniCPM-V checkpoint has no merger parameters to unfreeze")
+        self._configure_multimodal_parameters(
+            list(self.vision_tower.parameters()) if self.vision_tower is not None else [],
+            "tower",
+            unfreeze_tower,
+            tower_lr,
+            base_lr,
+            trainable=trainable,
+        )
+        self._configure_multimodal_parameters(
+            list(self.merger.parameters()) if self.merger is not None else [],
+            "projector",
+            unfreeze_projector,
+            projector_lr,
+            base_lr,
+            trainable=trainable,
+        )
+        self._train_multimodal_tower = unfreeze_tower and trainable
+        self._train_multimodal_projector = unfreeze_projector and trainable
+        self.train(self.training)
+
+    @staticmethod
+    def _configure_multimodal_parameters(
+        params: list[nn.Parameter],
+        group: str,
+        unfreeze: bool,
+        configured_lr: float | None,
+        base_lr: float,
+        *,
+        trainable: bool,
+    ) -> None:
+        for parameter in params:
+            parameter.requires_grad_(unfreeze and trainable)
+            parameter._areno_policy_sync = unfreeze
+            if unfreeze and trainable:
+                parameter._areno_lr_group = group
+                parameter._areno_lr = base_lr if configured_lr is None else configured_lr
+            else:
+                for attribute in ("_areno_lr_group", "_areno_lr"):
+                    if hasattr(parameter, attribute):
+                        delattr(parameter, attribute)
+
+    def _apply_multimodal_module_modes(self) -> None:
+        if self.vision_tower is not None:
+            self.vision_tower.train(self.training and self._train_multimodal_tower)
+        if self.merger is not None:
+            self.merger.train(self.training and self._train_multimodal_projector)
+
+    def train(self, mode: bool = True):
+        """Keep frozen visual modules in evaluation mode."""
+
+        super().train(mode)
+        self._apply_multimodal_module_modes()
+        return self
 
     def forward(
         self,
@@ -508,10 +909,17 @@ class MiniCPMV46ForCausalLM(nn.Module):
         position_ids: torch.Tensor | None = None,
         train_meta: TrainMeta | None = None,
         infer_meta: InferMeta | None = None,
+        features: dict[str, Any] | list[dict[str, Any] | None] | None = None,
     ) -> CausalLMOutput:
         if position_ids is None:
             position_ids = torch.arange(input_ids.shape[1], device=input_ids.device).unsqueeze(0).expand_as(input_ids)
         hidden_states = self.embed_tokens(input_ids)
+        if features is not None:
+            hidden_states = self._apply_multimodal_features(
+                hidden_states,
+                input_ids,
+                self._project_pixel_values(features, input_ids.device, int(input_ids.shape[0])),
+            )
         use_sequence_parallel = bool(train_meta is not None and train_meta.sequence_parallel)
         if use_sequence_parallel:
             # Split sequence dim across TP ranks before entering the SP region.
@@ -531,7 +939,111 @@ class MiniCPMV46ForCausalLM(nn.Module):
             logits_shard = self.lm_head(hidden_states)
         return CausalLMOutput(logits_shard=logits_shard, hidden_states=hidden_states)
 
-    def set_kv_caches(self, kv_caches: list[tuple[torch.Tensor, torch.Tensor]]) -> None:
+    @torch._dynamo.disable
+    def _apply_multimodal_features(
+        self,
+        hidden_states: torch.Tensor,
+        input_ids: torch.Tensor,
+        features: dict[str, Any] | list[dict[str, Any] | None] | None,
+    ) -> torch.Tensor:
+        if features is None:
+            return hidden_states
+        rows = _features_by_row(features, int(input_ids.shape[0]))
+        if not any(row is not None for row in rows):
+            return hidden_states
+        hidden_states = hidden_states.clone()
+        for row_idx, row in enumerate(rows):
+            if row is None:
+                continue
+            image_embeds = _image_embeds_for_row(row, hidden_states.device, hidden_states.dtype)
+            if image_embeds is None:
+                continue
+            if image_embeds.ndim != 2 or int(image_embeds.shape[-1]) != self.config.hidden_size:
+                raise ValueError(f"MiniCPM image_embeds must have shape (num_image_tokens, {self.config.hidden_size})")
+            mask = _image_token_mask(row, input_ids[row_idx])
+            if int(mask.sum().item()) != int(image_embeds.shape[0]):
+                raise ValueError(
+                    "MiniCPM image token count does not match image_embeds: "
+                    f"tokens={int(mask.sum().item())} embeds={int(image_embeds.shape[0])}"
+                )
+            hidden_states[row_idx, mask] = image_embeds
+        return hidden_states
+
+    @torch._dynamo.disable
+    def _project_pixel_values(
+        self,
+        features: dict[str, Any] | list[dict[str, Any] | None] | None,
+        device: torch.device,
+        batch: int,
+    ) -> dict[str, Any] | list[dict[str, Any] | None] | None:
+        if features is None or self.vision_tower is None or self.merger is None:
+            return features
+        rows = _features_by_row(features, batch)
+        projected: list[dict[str, Any] | None] = []
+        changed = False
+        for row in rows:
+            if row is None:
+                projected.append(None)
+                continue
+            row_features = dict(row)
+            if _image_embeds_for_row(row_features, device, self.config.dtype) is None:
+                image_embeds = self._project_image_feature_rows(row_features, device)
+                if image_embeds is not None:
+                    row_features["image_embeds"] = image_embeds
+                    changed = True
+            if row_features.get("image_token_id") is None and self.config.image_token_id is not None:
+                row_features["image_token_id"] = self.config.image_token_id
+                changed = True
+            projected.append(row_features)
+        if not changed:
+            return features
+        return projected[0] if batch == 1 else projected
+
+    @torch._dynamo.disable
+    def _project_image_feature_rows(self, features: dict[str, Any], device: torch.device) -> torch.Tensor | None:
+        rows = features.get("image_feature_rows")
+        if rows is not None:
+            embeds = []
+            for row in rows:
+                if row is None:
+                    continue
+                value = _image_embeds_for_row(dict(row), device, self.config.dtype)
+                if value is None:
+                    value = self._project_pixel_feature(dict(row), device)
+                if value is not None:
+                    embeds.append(value)
+            return torch.cat(embeds, dim=0) if embeds else None
+        return self._project_pixel_feature(features, device)
+
+    @torch._dynamo.disable
+    def _project_pixel_feature(self, features: dict[str, Any], device: torch.device) -> torch.Tensor | None:
+        if features.get("pixel_values") is None or features.get("target_sizes") is None:
+            return None
+        pixel_values = _feature_tensor(features, "pixel_values", device, self.config.dtype)
+        target_sizes = _feature_tensor(features, "target_sizes", device, torch.long)
+        if pixel_values is None or target_sizes is None:
+            return None
+        downsample_mode = str(features.get("downsample_mode", self.config.vision_config.get("downsample_mode", "16x")))
+        insert_layer_id = int(self.config.vision_config.get("insert_layer_id", 6))
+        use_vit_merger = downsample_mode != "4x" and 0 <= insert_layer_id < len(self.vision_tower.encoder.layers)
+        hidden = self.vision_tower(pixel_values, target_sizes, use_vit_merger=use_vit_merger)
+        if use_vit_merger:
+            target_sizes = target_sizes // 2
+        per_image = self.merger(hidden, target_sizes)
+        image_embeds = (
+            torch.cat(per_image, dim=0) if per_image else torch.empty((0, self.config.hidden_size), device=device)
+        )
+        offset = int(features.get("image_token_offset", 0) or 0)
+        count = features.get("image_token_count")
+        if count is not None:
+            image_embeds = image_embeds[offset : offset + int(count)]
+        elif offset:
+            image_embeds = image_embeds[offset:]
+        return image_embeds
+
+    def set_kv_caches(
+        self, kv_caches: list[tuple[torch.Tensor, torch.Tensor]], *, num_slots: int | None = None
+    ) -> None:
         """Bind per-full-attention KV caches and allocate GDN state caches.
 
         ``kv_caches`` only contains entries for ``MiniCPMFullAttention``
@@ -541,17 +1053,22 @@ class MiniCPMV46ForCausalLM(nn.Module):
         """
         idx = 0
         device = next(self.parameters()).device
-        num_slots = kv_caches[0][0].shape[0] if kv_caches else 1
+        num_slots = int(num_slots) if num_slots is not None else (int(kv_caches[0][0].shape[0]) if kv_caches else 1)
         for layer in self.layers:
             attn = layer.attention
             if isinstance(attn, MiniCPMFullAttention):
                 attn.set_kv_cache(*kv_caches[idx])
                 idx += 1
             else:
-                # GDN needs both a recurrent state ([heads, head_dim, head_dim])
+                # GDN needs both a recurrent state ([value_heads, key_dim, value_dim])
                 # and (kernel-1) columns of conv history per slot.
                 state = torch.zeros(
-                    num_slots, attn.local_heads, attn.head_dim, attn.head_dim, device=device, dtype=torch.float32
+                    num_slots,
+                    attn.local_value_heads,
+                    attn.head_k_dim,
+                    attn.head_v_dim,
+                    device=device,
+                    dtype=torch.float32,
                 )
                 conv = torch.zeros(
                     num_slots,
@@ -614,6 +1131,15 @@ class MiniCPMV46ForCausalLM(nn.Module):
             layer.attention.reset_kv_cache()
 
     @torch.no_grad()
+    def reset_recurrent_cache_slots(self, slots: torch.Tensor) -> None:
+        slots = slots.to(device=next(self.parameters()).device, dtype=torch.long)
+        for layer in self.layers:
+            attn = layer.attention
+            if isinstance(attn, MiniCPMGatedDeltaNet):
+                attn.state_cache.index_fill_(0, slots, 0)
+                attn.conv_cache.index_fill_(0, slots, 0)
+
+    @torch.no_grad()
     def offload_kv_caches(self) -> None:
         """Move all per-layer caches to CPU (used when swapping to training)."""
         for layer in self.layers:
@@ -659,17 +1185,15 @@ class MiniCPMV46Adapter(ModelAdapter):
         return str(hf_config.get("model_type", "")).lower() == "minicpmv4_6"
 
     def config_from_hf(self, hf_config: dict[str, Any]) -> ModelConfig:
-        """Pull the text-trunk subset of the HF multimodal config.
-
-        MiniCPM-V wraps the language backbone settings under ``text_config``
-        and exposes a separate ``rope_parameters`` dict; the vision config is
-        ignored here because the vision tower is handled externally.
-        ``checkpoint_prefix`` tells the loader to look under
-        ``model.language_model.*`` rather than the usual ``model.*``.
-        """
+        """Translate the nested text and vision configs into AReno fields."""
         text = hf_config["text_config"]
         dtype = _parse_dtype(hf_config.get("torch_dtype") or hf_config.get("dtype") or text.get("dtype"))
         rope = text.get("rope_parameters") or {}
+        vision = dict(hf_config.get("vision_config") or {})
+        vision["insert_layer_id"] = int(hf_config.get("insert_layer_id", vision.get("insert_layer_id", 6)))
+        vision["merge_kernel_size"] = tuple(hf_config.get("merge_kernel_size", (2, 2)))
+        vision["merger_times"] = int(hf_config.get("merger_times", 1))
+        vision["downsample_mode"] = str(hf_config.get("downsample_mode", "16x"))
         return ModelConfig(
             model_type=self.name,
             checkpoint_prefix="model.language_model",
@@ -681,7 +1205,7 @@ class MiniCPMV46Adapter(ModelAdapter):
             num_key_value_heads=int(text["num_key_value_heads"]),
             head_dim=int(text["head_dim"]),
             rms_norm_eps=float(text.get("rms_norm_eps", 1e-6)),
-            rope_theta=float(rope.get("rope_theta", 10_000_000.0)),
+            rope_theta=float(rope.get("rope_theta", 10_000.0)),
             max_position_embeddings=int(text.get("max_position_embeddings", 262144)),
             tie_word_embeddings=bool(hf_config.get("tie_word_embeddings", True)),
             qkv_bias=False,
@@ -690,7 +1214,14 @@ class MiniCPMV46Adapter(ModelAdapter):
             hidden_act=str(text.get("hidden_act", "silu")),
             layer_types=tuple(text["layer_types"]),
             partial_rotary_factor=float(text.get("partial_rotary_factor", rope.get("partial_rotary_factor", 0.25))),
+            linear_conv_kernel_dim=int(text.get("linear_conv_kernel_dim", 4)),
+            linear_key_head_dim=int(text.get("linear_key_head_dim", 128)),
+            linear_value_head_dim=int(text.get("linear_value_head_dim", 128)),
+            linear_num_key_heads=int(text.get("linear_num_key_heads", 16)),
+            linear_num_value_heads=int(text.get("linear_num_value_heads", 32)),
             sequence_parallel=bool(text.get("sequence_parallel", True)),
+            vision_config=vision,
+            image_token_id=(int(hf_config["image_token_id"]) if hf_config.get("image_token_id") is not None else None),
         )
 
     def build(self, config: ModelConfig) -> nn.Module:
@@ -720,3 +1251,8 @@ class MiniCPMV46Adapter(ModelAdapter):
         from areno.models.minicpmv46.checkpoint import build_minicpmv46_policy_plan
 
         return build_minicpmv46_policy_plan(model)
+
+
+# Match the Transformers public class name while retaining AReno's existing
+# causal-LM adapter type and checkpoint dispatch.
+MiniCPMV46ForConditionalGeneration = MiniCPMV46ForCausalLM

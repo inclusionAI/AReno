@@ -22,7 +22,7 @@ import os
 import shutil
 import textwrap
 from collections.abc import Mapping
-from dataclasses import fields
+from dataclasses import asdict, fields, is_dataclass
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -87,6 +87,7 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         (
             "algo",
             "ckpt",
+            "base_model_name_or_path",
             "dataset_path",
             "dataset_mix_config",
             "dataset_sources",
@@ -104,6 +105,7 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "max_steps",
             "world_size",
             "tp_size",
+            "sequence_parallel",
             "train_devices",
         ),
     ),
@@ -128,7 +130,6 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "attn_backend",
             "disable_thinking",
             "agent_fn",
-            "agent_timeout_s",
             "train_tool_results",
             "reward_fn_path",
             "reward_ckpt",
@@ -141,6 +142,12 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "score_micro_bs",
             "gradient_accumulation_steps",
             "activation_checkpointing",
+            "lora_rank",
+            "lora_alpha",
+            "lora_dropout",
+            "lora_target_modules",
+            "lora_adapter_path",
+            "reference_mode",
             "lr",
             "min_lr",
             "lr_decay_steps",
@@ -148,6 +155,10 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "adam_beta1",
             "adam_beta2",
             "adam_8bit",
+            "adam_4bit",
+            "optimizer_state_offload",
+            "optimizer_state_offload_dir",
+            "optimizer_state_offload_batch_size",
             "unfreeze_multimodal_tower",
             "unfreeze_multimodal_projector",
             "multimodal_tower_lr",
@@ -238,10 +249,16 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
     args.dataset_mix_seed = getattr(args, "dataset_mix_seed", 42)
     args.dataset_mix_exhaustion = getattr(args, "dataset_mix_exhaustion", "cycle")
     args.dataset_mix_samples_per_epoch = getattr(args, "dataset_mix_samples_per_epoch", None)
+    args.base_model_name_or_path = getattr(args, "base_model_name_or_path", None)
     args.train_devices = getattr(args, "train_devices", None)
+    args.sequence_parallel = getattr(args, "sequence_parallel", None)
     args.rollout_tp_size = getattr(args, "rollout_tp_size", None)
     args.rollout_devices = getattr(args, "rollout_devices", None)
     args.policy_sync_bucket_mb = getattr(args, "policy_sync_bucket_mb", 64)
+    args.adam_4bit = getattr(args, "adam_4bit", False)
+    args.optimizer_state_offload = getattr(args, "optimizer_state_offload", "none")
+    args.optimizer_state_offload_dir = getattr(args, "optimizer_state_offload_dir", None)
+    args.optimizer_state_offload_batch_size = getattr(args, "optimizer_state_offload_batch_size", 1)
     args.unfreeze_multimodal_tower = getattr(args, "unfreeze_multimodal_tower", False)
     args.unfreeze_multimodal_projector = getattr(args, "unfreeze_multimodal_projector", False)
     args.multimodal_tower_lr = getattr(args, "multimodal_tower_lr", None)
@@ -252,6 +269,8 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
     args.multimodal_projector_min_lr = getattr(args, "multimodal_projector_min_lr", None)
     args.multimodal_projector_lr_decay_steps = getattr(args, "multimodal_projector_lr_decay_steps", None)
     args.multimodal_projector_lr_decay_style = getattr(args, "multimodal_projector_lr_decay_style", None)
+    args.reference_mode = getattr(args, "reference_mode", "independent")
+    args.lora = _lora_config_from_options(args)
     if args.backend == "mlx":
         if args.train_devices is not None or args.rollout_devices is not None or args.rollout_tp_size is not None:
             raise click.UsageError("MLX does not use CUDA device or rollout TP options")
@@ -378,8 +397,6 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
         raise click.UsageError("--max-context-len must be positive")
     if algorithm.requires_rollout and args.max_running_prompts is not None and args.max_running_prompts <= 0:
         raise click.UsageError("--max-running-prompts must be positive")
-    if args.agent_timeout_s <= 0:
-        raise click.UsageError("--agent-timeout-s must be positive")
     _require_positive_float(args.lr, "--lr")
     if args.multimodal_tower_lr is not None:
         _require_positive_float(args.multimodal_tower_lr, "--mm-tower-lr")
@@ -548,6 +565,26 @@ def _validate_dataset_mix_weight_range(weights: list[float], label: str) -> None
         raise ValueError(f"{label} have an unsupported numeric range")
 
 
+def _lora_config_from_options(args):
+    rank = getattr(args, "lora_rank", None)
+    adapter_path = getattr(args, "lora_adapter_path", None)
+    if rank is None and adapter_path is None:
+        return None
+    from areno.adapters import LoraConfig
+
+    targets = tuple(item.strip() for item in args.lora_target_modules.split(",") if item.strip())
+    try:
+        return LoraConfig(
+            rank=8 if rank is None else rank,
+            alpha=args.lora_alpha,
+            dropout=args.lora_dropout,
+            target_modules=targets,
+            adapter_path=adapter_path,
+        )
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from exc
+
+
 def _parse_cuda_devices(value: str | None, option_name: str) -> list[int] | None:
     """Parse CUDA indices and inclusive ranges such as ``0..3,8``."""
 
@@ -651,18 +688,34 @@ def _format_training_config_summary(
             "Training",
             [
                 ("max_steps", _format_optional(config.max_steps)),
+                ("sequence_parallel", _sequence_parallel_for_summary(config, model_config)),
                 ("mini_bs", str(config.mini_bs)),
                 ("score_micro_bs", str(config.score_micro_bs)),
                 ("gradient_accumulation_steps", _format_optional(config.gradient_accumulation_steps, default="auto")),
+                ("lora_rank", str(config.lora.rank) if config.lora is not None else "disabled"),
+                ("lora_alpha", str(config.lora.alpha) if config.lora is not None else "n/a"),
+                ("lora_dropout", str(config.lora.dropout) if config.lora is not None else "n/a"),
+                (
+                    "lora_target_modules",
+                    ",".join(config.lora.target_modules) if config.lora is not None else "n/a",
+                ),
+                (
+                    "lora_adapter_path",
+                    _format_optional(config.lora.adapter_path) if config.lora is not None else "n/a",
+                ),
                 (
                     "optimizer",
                     (
                         f"lr={config.optimizer_lr}, min_lr={config.optimizer_min_lr}, "
                         f"decay={config.lr_decay_style}/{config.lr_decay_steps}, "
                         f"betas=({config.optimizer_beta1}, {config.optimizer_beta2}), "
-                        f"weight_decay={config.weight_decay}, adam_8bit={_format_bool(config.adam_8bit)}"
+                        f"weight_decay={config.weight_decay}, adam_8bit={_format_bool(config.adam_8bit)}, "
+                        f"adam_4bit={_format_bool(config.adam_4bit)}"
                     ),
                 ),
+                ("optimizer_state_offload", str(config.optimizer_state_offload)),
+                ("optimizer_state_offload_dir", _format_optional(config.optimizer_state_offload_dir)),
+                ("optimizer_state_offload_batch_size", str(config.optimizer_state_offload_batch_size)),
                 ("grad_clip_norm", str(config.grad_clip_norm)),
             ],
         ),
@@ -845,6 +898,20 @@ def _resolved_dp_size_for_summary(config: TrainerConfig) -> str:
     return str(config.world_size // config.tp_size) if config.tp_size else "n/a"
 
 
+def _sequence_parallel_for_summary(config: TrainerConfig, model_config: ModelConfig | None) -> str:
+    if config.sequence_parallel is not None:
+        requested = bool(config.sequence_parallel)
+        source = "CLI"
+    elif model_config is not None:
+        requested = bool(model_config.sequence_parallel)
+        source = "model config"
+    else:
+        return "model config (resolved at load)"
+    enabled = requested and config.tp_size > 1
+    suffix = source if config.tp_size > 1 else f"{source}; disabled for TP1"
+    return f"{_format_bool(enabled)} ({suffix})"
+
+
 def _format_bool(value: bool) -> str:
     return "yes" if value else "no"
 
@@ -943,10 +1010,13 @@ def _trainer_config_from_args(args) -> TrainerConfig:
     args.dataset_mix_seed = getattr(args, "dataset_mix_seed", 42)
     args.dataset_mix_exhaustion = getattr(args, "dataset_mix_exhaustion", "cycle")
     args.dataset_mix_samples_per_epoch = getattr(args, "dataset_mix_samples_per_epoch", None)
+    args.base_model_name_or_path = getattr(args, "base_model_name_or_path", None)
     args.train_devices = getattr(args, "train_devices", None)
+    args.sequence_parallel = getattr(args, "sequence_parallel", None)
     args.rollout_tp_size = getattr(args, "rollout_tp_size", None)
     args.rollout_devices = getattr(args, "rollout_devices", None)
     args.policy_sync_bucket_mb = getattr(args, "policy_sync_bucket_mb", 64)
+    args.adam_4bit = getattr(args, "adam_4bit", False)
     args.unfreeze_multimodal_tower = getattr(args, "unfreeze_multimodal_tower", False)
     args.unfreeze_multimodal_projector = getattr(args, "unfreeze_multimodal_projector", False)
     args.multimodal_tower_lr = getattr(args, "multimodal_tower_lr", None)
@@ -957,6 +1027,8 @@ def _trainer_config_from_args(args) -> TrainerConfig:
     args.multimodal_projector_min_lr = getattr(args, "multimodal_projector_min_lr", None)
     args.multimodal_projector_lr_decay_steps = getattr(args, "multimodal_projector_lr_decay_steps", None)
     args.multimodal_projector_lr_decay_style = getattr(args, "multimodal_projector_lr_decay_style", None)
+    args.reference_mode = getattr(args, "reference_mode", "independent")
+    lora = getattr(args, "lora", None)
     algorithm = get_algorithm(args.algo)
     chat_template_enable_thinking = False if args.disable_thinking else None
     if algorithm.name == "dpo":
@@ -965,6 +1037,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             ckpt=args.ckpt,
             dataset_path=args.dataset_path,
             backend=args.backend,
+            base_model_name_or_path=args.base_model_name_or_path,
             model_hub=args.model_hub,
             dataset_loader_fn=args.dataset_loader_fn,
             dataset_mix_config=args.dataset_mix_config,
@@ -977,6 +1050,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             epochs=args.epochs,
             max_steps=args.max_steps,
             tp_size=args.tp_size,
+            sequence_parallel=args.sequence_parallel,
             world_size=args.world_size,
             train_devices=args.train_devices,
             batch_size=args.batch_size,
@@ -995,6 +1069,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             weight_decay=args.weight_decay,
             grad_clip_norm=args.grad_clip_norm,
             adam_8bit=args.adam_8bit,
+            adam_4bit=args.adam_4bit,
             unfreeze_multimodal_tower=args.unfreeze_multimodal_tower,
             unfreeze_multimodal_projector=args.unfreeze_multimodal_projector,
             multimodal_tower_lr=args.multimodal_tower_lr,
@@ -1007,15 +1082,19 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             multimodal_projector_lr_decay_style=args.multimodal_projector_lr_decay_style,
             activation_checkpointing=args.activation_checkpointing,
             keep_rollout_state=not args.drop_rollout_state,
+            optimizer_state_offload=args.optimizer_state_offload,
+            optimizer_state_offload_dir=args.optimizer_state_offload_dir,
+            optimizer_state_offload_batch_size=args.optimizer_state_offload_batch_size,
             eager_decode=args.eager_decode,
             attn_backend=args.attn_backend,
             metrics_log_dir=args.metrics_log_dir,
             agent_fn=args.agent_fn,
-            agent_timeout_s=args.agent_timeout_s,
             train_tool_results=args.train_tool_results,
             chat_template_enable_thinking=chat_template_enable_thinking,
             ref_ckpt=args.ref_ckpt,
             dpo_beta=args.dpo_beta,
+            lora=lora,
+            reference_mode=args.reference_mode,
         )
     if algorithm.name == "sft":
         return TrainerConfig(
@@ -1023,6 +1102,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             ckpt=args.ckpt,
             dataset_path=args.dataset_path,
             backend=args.backend,
+            base_model_name_or_path=args.base_model_name_or_path,
             model_hub=args.model_hub,
             dataset_loader_fn=args.dataset_loader_fn,
             dataset_mix_config=args.dataset_mix_config,
@@ -1035,6 +1115,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             epochs=args.epochs,
             max_steps=args.max_steps,
             tp_size=args.tp_size,
+            sequence_parallel=args.sequence_parallel,
             world_size=args.world_size,
             train_devices=args.train_devices,
             batch_size=args.batch_size,
@@ -1053,6 +1134,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             weight_decay=args.weight_decay,
             grad_clip_norm=args.grad_clip_norm,
             adam_8bit=args.adam_8bit,
+            adam_4bit=args.adam_4bit,
             unfreeze_multimodal_tower=args.unfreeze_multimodal_tower,
             unfreeze_multimodal_projector=args.unfreeze_multimodal_projector,
             multimodal_tower_lr=args.multimodal_tower_lr,
@@ -1065,13 +1147,17 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             multimodal_projector_lr_decay_style=args.multimodal_projector_lr_decay_style,
             activation_checkpointing=args.activation_checkpointing,
             keep_rollout_state=not args.drop_rollout_state,
+            optimizer_state_offload=args.optimizer_state_offload,
+            optimizer_state_offload_dir=args.optimizer_state_offload_dir,
+            optimizer_state_offload_batch_size=args.optimizer_state_offload_batch_size,
             eager_decode=args.eager_decode,
             attn_backend=args.attn_backend,
             metrics_log_dir=args.metrics_log_dir,
             agent_fn=args.agent_fn,
-            agent_timeout_s=args.agent_timeout_s,
             train_tool_results=args.train_tool_results,
             chat_template_enable_thinking=chat_template_enable_thinking,
+            lora=lora,
+            reference_mode=args.reference_mode,
         )
     if algorithm.name != "ppo":
         return PolicyTrainerConfig(
@@ -1079,6 +1165,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             ckpt=args.ckpt,
             dataset_path=args.dataset_path,
             backend=args.backend,
+            base_model_name_or_path=args.base_model_name_or_path,
             model_hub=args.model_hub,
             dataset_loader_fn=args.dataset_loader_fn,
             dataset_mix_config=args.dataset_mix_config,
@@ -1092,6 +1179,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             epochs=args.epochs,
             max_steps=args.max_steps,
             tp_size=args.tp_size,
+            sequence_parallel=args.sequence_parallel,
             world_size=args.world_size,
             train_devices=args.train_devices,
             rollout_tp_size=args.rollout_tp_size,
@@ -1119,6 +1207,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             weight_decay=args.weight_decay,
             grad_clip_norm=args.grad_clip_norm,
             adam_8bit=args.adam_8bit,
+            adam_4bit=args.adam_4bit,
             unfreeze_multimodal_tower=args.unfreeze_multimodal_tower,
             unfreeze_multimodal_projector=args.unfreeze_multimodal_projector,
             multimodal_tower_lr=args.multimodal_tower_lr,
@@ -1131,21 +1220,26 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             multimodal_projector_lr_decay_style=args.multimodal_projector_lr_decay_style,
             activation_checkpointing=args.activation_checkpointing,
             keep_rollout_state=not args.drop_rollout_state,
+            optimizer_state_offload=args.optimizer_state_offload,
+            optimizer_state_offload_dir=args.optimizer_state_offload_dir,
+            optimizer_state_offload_batch_size=args.optimizer_state_offload_batch_size,
             eager_decode=args.eager_decode,
             attn_backend=args.attn_backend,
             gspo_clip_eps=args.gspo_clip_eps,
             grpo_clip_eps=args.grpo_clip_eps,
             metrics_log_dir=args.metrics_log_dir,
             agent_fn=args.agent_fn,
-            agent_timeout_s=args.agent_timeout_s,
             train_tool_results=args.train_tool_results,
             chat_template_enable_thinking=chat_template_enable_thinking,
+            lora=lora,
+            reference_mode=args.reference_mode,
         )
     return PPOTrainerConfig(
         algo=algorithm.name,
         ckpt=args.ckpt,
         dataset_path=args.dataset_path,
         backend=args.backend,
+        base_model_name_or_path=args.base_model_name_or_path,
         model_hub=args.model_hub,
         dataset_loader_fn=args.dataset_loader_fn,
         dataset_mix_config=args.dataset_mix_config,
@@ -1159,6 +1253,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
         epochs=args.epochs,
         max_steps=args.max_steps,
         tp_size=args.tp_size,
+        sequence_parallel=args.sequence_parallel,
         world_size=args.world_size,
         train_devices=args.train_devices,
         rollout_tp_size=args.rollout_tp_size,
@@ -1186,6 +1281,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
         weight_decay=args.weight_decay,
         grad_clip_norm=args.grad_clip_norm,
         adam_8bit=args.adam_8bit,
+        adam_4bit=args.adam_4bit,
         unfreeze_multimodal_tower=args.unfreeze_multimodal_tower,
         unfreeze_multimodal_projector=args.unfreeze_multimodal_projector,
         multimodal_tower_lr=args.multimodal_tower_lr,
@@ -1198,6 +1294,9 @@ def _trainer_config_from_args(args) -> TrainerConfig:
         multimodal_projector_lr_decay_style=args.multimodal_projector_lr_decay_style,
         activation_checkpointing=args.activation_checkpointing,
         keep_rollout_state=not args.drop_rollout_state,
+        optimizer_state_offload=args.optimizer_state_offload,
+        optimizer_state_offload_dir=args.optimizer_state_offload_dir,
+        optimizer_state_offload_batch_size=args.optimizer_state_offload_batch_size,
         eager_decode=args.eager_decode,
         attn_backend=args.attn_backend,
         gspo_clip_eps=args.gspo_clip_eps,
@@ -1218,9 +1317,10 @@ def _trainer_config_from_args(args) -> TrainerConfig:
         lam=args.lam,
         critic_warmup_steps=args.critic_warmup_steps,
         agent_fn=args.agent_fn,
-        agent_timeout_s=args.agent_timeout_s,
         train_tool_results=args.train_tool_results,
         chat_template_enable_thinking=chat_template_enable_thinking,
+        lora=lora,
+        reference_mode=args.reference_mode,
     )
 
 
@@ -1314,13 +1414,17 @@ def _write_dashboard_run_config(config: TrainerConfig) -> None:
 def _training_config_settings(config: TrainerConfig) -> dict:
     used: set[str] = set()
 
+    def value(name: str):
+        item = getattr(config, name)
+        return asdict(item) if is_dataclass(item) else item
+
     def section(title: str, names: list[str]) -> dict:
         items = []
         for name in names:
             if not hasattr(config, name):
                 continue
             used.add(name)
-            items.append({"key": name, "value": getattr(config, name)})
+            items.append({"key": name, "value": value(name)})
         return {"title": title, "items": items}
 
     sections = [
@@ -1346,10 +1450,14 @@ def _training_config_settings(config: TrainerConfig) -> dict:
             [
                 "world_size",
                 "tp_size",
+                "sequence_parallel",
                 "attn_backend",
                 "eager_decode",
                 "activation_checkpointing",
                 "keep_rollout_state",
+                "optimizer_state_offload",
+                "optimizer_state_offload_dir",
+                "optimizer_state_offload_batch_size",
                 "chat_template_enable_thinking",
             ],
         ),
@@ -1367,7 +1475,6 @@ def _training_config_settings(config: TrainerConfig) -> dict:
                 "top_k",
                 "top_p",
                 "agent_fn",
-                "agent_timeout_s",
                 "train_tool_results",
                 "reward_fn_path",
                 "reward_ckpt",
@@ -1393,6 +1500,7 @@ def _training_config_settings(config: TrainerConfig) -> dict:
                 "weight_decay",
                 "grad_clip_norm",
                 "adam_8bit",
+                "adam_4bit",
             ],
         ),
         section(
@@ -1423,7 +1531,7 @@ def _training_config_settings(config: TrainerConfig) -> dict:
     extras = []
     for field in fields(config):
         if field.name not in used:
-            extras.append({"key": field.name, "value": getattr(config, field.name)})
+            extras.append({"key": field.name, "value": value(field.name)})
     if extras:
         sections.append({"title": "Other", "items": extras})
     if isinstance(config, RolloutTrainerConfig):
@@ -1897,6 +2005,11 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
 @click.option("--algo", type=str, default="gspo", show_default=True, help="Training algorithm registered in areno.api.")
 @click.option("--ckpt", default=None, help="Actor model/tokenizer checkpoint path or remote model repo ID.")
 @click.option(
+    "--base-model-name-or-path",
+    default=None,
+    help="Stable base model reference written to PEFT adapter metadata; defaults to the original --ckpt value.",
+)
+@click.option(
     "--dataset-path", default=None, help="Training dataset path, HF save_to_disk directory, or remote dataset ref."
 )
 @click.option(
@@ -1995,6 +2108,11 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     show_default=True,
     help="Tensor parallel size for training.",
 )
+@click.option(
+    "--sequence-parallel/--no-sequence-parallel",
+    default=None,
+    help="Override checkpoint sequence_parallel; when omitted, use the model configuration.",
+)
 @click.option("--world-size", type=int, default=8, show_default=True, help="Total device count for the backend.")
 @click.option(
     "--train-devices",
@@ -2061,12 +2179,33 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     help="Override global concurrent rollout prompts; defaults to batch-size * n-samples.",
 )
 @click.option("--lr", type=float, default=1.0e-6, show_default=True, help="Policy optimizer learning rate.")
+@click.option("--lora-rank", type=int, default=None, help="Enable native LoRA with this rank.")
+@click.option("--lora-alpha", type=float, default=16.0, show_default=True, help="Native LoRA alpha.")
+@click.option("--lora-dropout", type=float, default=0.0, show_default=True, help="Native LoRA dropout (must be 0).")
+@click.option(
+    "--lora-target-modules",
+    default="q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj",
+    show_default=True,
+    help=(
+        "Comma-separated native projection targets (MoE MLP targets apply to each routed expert; "
+        "selected Bailing V3 KDA q/k/v/f/g projections use independent canonical adapters)."
+    ),
+)
+@click.option("--lora-adapter-path", default=None, help="Standard PEFT adapter used to initialize native LoRA.")
+@click.option(
+    "--reference-mode",
+    type=click.Choice(["independent", "reuse_actor_base"]),
+    default="independent",
+    show_default=True,
+    help="Use the frozen actor base as the PPO/DPO reference instead of loading a second reference model.",
+)
 @click.option("--min-lr", type=float, default=1.0e-7, show_default=True, help="Policy optimizer minimum learning rate.")
 @click.option("--lr-decay-steps", type=int, default=1000, show_default=True, help="Policy LR decay steps.")
 @click.option("--lr-decay-style", default="cosine", show_default=True, help="Policy LR decay style.")
 @click.option("--adam-beta1", type=float, default=0.9, show_default=True, help="Policy optimizer Adam beta1.")
 @click.option("--adam-beta2", type=float, default=0.999, show_default=True, help="Policy optimizer Adam beta2.")
 @click.option("--adam-8bit", is_flag=True, help="Use 8-bit Adam moment states instead of FP32 Adam states.")
+@click.option("--adam-4bit", is_flag=True, help="Use packed block-wise 4-bit Adam moment states.")
 @click.option("--unfreeze-mm-tower", "unfreeze_multimodal_tower", is_flag=True, help="Train multimodal encoder towers.")
 @click.option(
     "--unfreeze-mm-projector",
@@ -2138,6 +2277,25 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     is_flag=True,
     help="Release completed rollout KV/cache state after each step.",
 )
+@click.option(
+    "--optimizer-state-offload",
+    type=click.Choice(["none", "cpu", "disk"]),
+    default="none",
+    show_default=True,
+    help="CUDA optimizer-state residency: device, CPU, or persistent raw mmap on local disk.",
+)
+@click.option(
+    "--optimizer-state-offload-dir",
+    type=click.Path(file_okay=False, path_type=str),
+    help="Local NVMe directory used by --optimizer-state-offload disk (required for disk mode).",
+)
+@click.option(
+    "--optimizer-state-offload-batch-size",
+    type=click.IntRange(min=1),
+    default=1,
+    show_default=True,
+    help="Number of optimizer buckets per persistent disk mmap and flush group.",
+)
 @click.option("--eager-decode", is_flag=True, help="Disable decode CUDA graph and run rollout decode eagerly.")
 @click.option(
     "--attn-backend",
@@ -2152,9 +2310,6 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     help="Pass enable_thinking=False to tokenizer chat templates when supported.",
 )
 @click.option("--agent-fn", default=None, help="Python file defining async run_agent(ctx, batch) for agentic rollout.")
-@click.option(
-    "--agent-timeout-s", type=float, default=300.0, show_default=True, help="Agentic rollout proxy request timeout."
-)
 @click.option("--train-tool-results", is_flag=True, help="Include tool-result spans in agentic policy loss.")
 @click.option(
     "--gspo-clip-eps", type=float, default=3.0e-4, show_default=True, help="GSPO sequence-ratio clipping epsilon."
