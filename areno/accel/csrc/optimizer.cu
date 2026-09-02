@@ -43,7 +43,7 @@ __device__ __forceinline__ float rank1_scale(
     const int64_t* strides,
     int64_t ndim,
     int64_t flat_index) {
-  float scale = CUDART_INF_F;
+  float scale = __int_as_float(0x7f800000);
   int64_t axis_offset = 0;
   for (int64_t axis = 0; axis < ndim; ++axis) {
     const int64_t coordinate = (flat_index / strides[axis]) % shape[axis];
