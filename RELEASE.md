@@ -9,8 +9,8 @@ GitHub milestone, and the docs do not drift apart.
 | Concern | Convention |
 | --- | --- |
 | Git tag format | `vMAJOR.MINOR.PATCH`, e.g. `v0.0.2`. The leading `v` is required; the publish workflow rejects a tag without it. Pre-release suffixes are allowed (`v1.2.0rc1`). |
-| Package version | PEP 440, without the `v`, e.g. `0.0.2`. `pyproject.toml` carries this string, and the publish workflow derives it from the tag by stripping the leading `v` (`v0.0.2` -> `0.0.2`). |
-| `pyproject.toml` `version` | Kept in sync with the release being cut. The publish workflow also rewrites it from the tag at build time, so the tag is the ultimate source of truth, but the committed value should still match the latest release. |
+| Package version | PEP 440, without the `v`, e.g. `0.0.2`. Setuptools reads it dynamically from `VERSION`. |
+| `VERSION` file | The committed source of truth for local package metadata. Keep it in sync with the release being cut; the publish workflow rewrites it from the tag at build time. |
 | GitHub milestone | `vMAJOR.MINOR.PATCH`, matching the tag (e.g. milestone `v0.0.2` <-> tag `v0.0.2`). |
 | Release artifacts | Source distribution (sdist) only. No wheels are built or published — the CUDA extension is compiled at install time on the user's machine. |
 | Release notes | Written from the closed issues in the matching GitHub milestone. There is no committed `CHANGELOG.md`; the milestone is the source of truth. |
@@ -19,8 +19,8 @@ GitHub milestone, and the docs do not drift apart.
 
 1. **All milestone issues closed.** Every issue in the `vX.Y.Z` milestone is
    closed (or explicitly moved to a later milestone).
-2. **Version string matches.** `pyproject.toml` `version = "X.Y.Z"` equals the
-   release you are about to tag (without the `v`).
+2. **Version string matches.** `VERSION` contains `X.Y.Z`, equal to the release
+   you are about to tag (without the `v`).
 3. **CI is green on `main`.** The required checks pass on the commit you will
    tag:
    - `cpu_unit_tests` (`pytest tests/ -k cpu`)
@@ -32,7 +32,7 @@ GitHub milestone, and the docs do not drift apart.
 ## Cutting the release
 
 1. Ensure `main` is at the commit you want to release and CI is green.
-2. Confirm `pyproject.toml` `version` is `X.Y.Z`.
+2. Confirm `VERSION` contains `X.Y.Z`.
 3. Tag the release commit and push the tag:
 
    ```bash
@@ -46,7 +46,7 @@ GitHub milestone, and the docs do not drift apart.
    input set to `vX.Y.Z`. The workflow:
    - validates the tag format (leading `v` required);
    - checks out the tagged commit and confirms it is reachable from `main`;
-   - rewrites `pyproject.toml` `version` to `X.Y.Z` (the `v` stripped);
+   - validates the tag-derived version as PEP 440 and writes it to `VERSION`;
    - builds an sdist only (asserts no wheel is produced);
    - runs `twine check` and uploads to PyPI.
 5. Publish the GitHub release for `vX.Y.Z` with notes generated from the
@@ -68,10 +68,9 @@ Group the resulting lines by label (e.g. `kind/feature`, `kind/fix`,
 
 ## Notes
 
-- The committed `pyproject.toml` version and the publish-time rewrite are
-  intentionally redundant: the rewrite guarantees the published artifact always
-  matches the tag, while the committed value keeps local installs and source
-  inspection honest.
+- The committed `VERSION` file is the source of truth for local installs and
+  source inspection. The publish-time rewrite guarantees the published artifact
+  matches the tag without changing the tagged commit.
 - Wheels are deliberately not shipped. AReno builds a CUDA extension at install
   time, so a prebuilt wheel would be environment-specific; the sdist lets each
   user build against their own CUDA/PyTorch.
