@@ -31,7 +31,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from game import BashGame, VALID_MAX_TAKES, normalize_record  # noqa: E402
+from game import VALID_MAX_TAKES, BashGame, normalize_record  # noqa: E402
 
 # Split-specific big offsets (arbitrary but fixed) keep the three instance
 # streams disjoint without sharing a counter.
@@ -49,8 +49,9 @@ def _make_rng(split: str, index: int, seed: int) -> random.Random:
     return random.Random(_mix(seed + _SPLIT_OFFSET[split] + index))
 
 
-def generate_records(split: str, count: int, seed: int, n_max: int,
-                     max_takes: tuple[int, ...], include_losing: bool = True) -> list[dict]:
+def generate_records(
+    split: str, count: int, seed: int, n_max: int, max_takes: tuple[int, ...], include_losing: bool = True
+) -> list[dict]:
     records: list[dict] = []
     seen: set[tuple[int, int]] = set()
     index = 0
@@ -67,8 +68,9 @@ def generate_records(split: str, count: int, seed: int, n_max: int,
     return records
 
 
-def generate_splits(train: int, val: int, test: int, seed: int, n_max: int,
-                    max_takes: tuple[int, ...], include_losing: bool = True) -> dict[str, list[dict]]:
+def generate_splits(
+    train: int, val: int, test: int, seed: int, n_max: int, max_takes: tuple[int, ...], include_losing: bool = True
+) -> dict[str, list[dict]]:
     """Generate three disjoint splits with a global fingerprint dedup."""
     splits: dict[str, list[dict]] = {}
     seen: set[tuple[int, int]] = set()
@@ -120,11 +122,15 @@ def main() -> None:
     p.add_argument("--count", type=int, default=2048)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--n-max", type=int, default=40, help="Max pile size n.")
-    p.add_argument("--max-takes", type=int, nargs="+", default=list(VALID_MAX_TAKES),
-                   help="Allowed max-take values m.")
+    p.add_argument("--max-takes", type=int, nargs="+", default=list(VALID_MAX_TAKES), help="Allowed max-take values m.")
     p.add_argument("--no-losing", action="store_true", help="Generate winning positions only.")
-    p.add_argument("--split-all", type=int, nargs=3, metavar=("TRAIN", "VAL", "TEST"),
-                   help="Generate three splits into --output directory.")
+    p.add_argument(
+        "--split-all",
+        type=int,
+        nargs=3,
+        metavar=("TRAIN", "VAL", "TEST"),
+        help="Generate three splits into --output directory.",
+    )
     a = p.parse_args()
 
     max_takes = tuple(v for v in a.max_takes if v in VALID_MAX_TAKES)

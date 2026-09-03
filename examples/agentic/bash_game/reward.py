@@ -54,9 +54,9 @@ def reward_fn(record) -> float:
             if 1 <= k <= m and k <= n:
                 return _closeness(k, k_star, m)
             return 0.0  # illegal take
-        return 0.0      # resigned a won position
+        return 0.0  # resigned a won position
 
     # losing position: resign is the only correct answer
     if move.get("resign"):
         return 1.0
-    return 0.0          # taking stones from a lost position still loses
+    return 0.0  # taking stones from a lost position still loses

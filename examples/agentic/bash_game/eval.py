@@ -55,6 +55,7 @@ def load_records(dataset_path: str) -> list[dict]:
 
 def evaluate(*, records, base_url, api_key, model, n_samples, temperature, seed, workers=8) -> dict:
     from concurrent.futures import ThreadPoolExecutor
+
     from openai import OpenAI
 
     client = OpenAI(base_url=base_url, api_key=api_key, max_retries=3)

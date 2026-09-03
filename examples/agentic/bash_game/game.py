@@ -21,8 +21,8 @@ import copy
 import random
 from typing import Any
 
-VALID_MAX_TAKES = (2, 3, 4, 5, 6)   # difficulty axis 1: the max take m
-DEFAULT_N_MAX = 40                  # default cap on pile size
+VALID_MAX_TAKES = (2, 3, 4, 5, 6)  # difficulty axis 1: the max take m
+DEFAULT_N_MAX = 40  # default cap on pile size
 DEFAULT_M = 3
 
 
@@ -57,7 +57,7 @@ class BashGame:
             return {"resign": True}
         return {"take": k}
 
-    def after_move(self, take: int) -> "BashGame":
+    def after_move(self, take: int) -> BashGame:
         """Apply a legal move and return the successor position."""
         if take < 1 or take > self.m or take > self.n:
             raise ValueError(f"illegal take {take} for n={self.n} m={self.m}")
@@ -78,8 +78,8 @@ def normalize_record(raw: dict[str, Any]) -> dict[str, Any]:
     game = BashGame(n, m)
     move = game.optimal_move()
     record["winning"] = game.is_winning()
-    record["oracle_move"] = move          # hidden: never shown to the model
-    record["solution"] = move             # aliased for consistency with loader
+    record["oracle_move"] = move  # hidden: never shown to the model
+    record["solution"] = move  # aliased for consistency with loader
     return record
 
 
@@ -194,8 +194,9 @@ def legal_moves(n: int, m: int) -> list[int]:
     return list(range(1, min(m, n) + 1))
 
 
-def random_record(rng: random.Random, n_max: int = DEFAULT_N_MAX, m: int | None = None,
-                  force_winning: bool | None = None) -> dict[str, Any]:
+def random_record(
+    rng: random.Random, n_max: int = DEFAULT_N_MAX, m: int | None = None, force_winning: bool | None = None
+) -> dict[str, Any]:
     """Sample a random position (used by tests / quick inspection)."""
     mm = m if m is not None else rng.choice(VALID_MAX_TAKES)
     n = rng.randint(1, n_max)

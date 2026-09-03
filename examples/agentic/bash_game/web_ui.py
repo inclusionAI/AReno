@@ -324,7 +324,7 @@ def _apply_take(server: BashServer, take: int, player: str) -> None:
     server.events.append(f"{'你' if player == 'human' else '智能体'}拿了 {take} 颗石子，剩余 {server.n} 颗。")
     if server.n == 0:
         server.over = True
-        server.human_won = (player == "human")
+        server.human_won = player == "human"
         who = "你" if server.human_won else "智能体"
         server.events.append(f"{who}拿到最后一颗，获胜！")
     else:
