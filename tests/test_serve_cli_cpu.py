@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from areno.adapters import LoraConfig
 from areno.api.tokenizer import configure_chat_template_enable_thinking
 from areno.api.tool_call_parser import QwenToolCallParser
 from areno.cli import serve as serve_mod
@@ -122,6 +123,52 @@ def test_serve_default_model_hub_is_modelscope():
     option = next(param for param in serve_mod.serve_command.params if param.name == "model_hub")
 
     assert option.default == "modelscope"
+
+
+def test_mlx_serve_runtime_receives_peft_lora_config(monkeypatch):
+    captured = {}
+
+    class FakeTrainer:
+        def __init__(self, world_size, model_path, *, backend_type, custom_config):
+            captured.update(
+                world_size=world_size,
+                model_path=model_path,
+                backend_type=backend_type,
+                custom_config=custom_config,
+            )
+
+        def init(self):
+            pass
+
+        def get_tokenizer(self):
+            return SimpleNamespace()
+
+        def get_processor(self):
+            return None
+
+        def model_context_len(self):
+            return 1024
+
+    lora = LoraConfig(rank=4, alpha=8)
+    monkeypatch.setattr(serve_mod, "Trainer", FakeTrainer)
+
+    runtime = serve_mod._create_serve_runtime(
+        model_path="resolved/model",
+        backend_type=serve_mod.MLX,
+        tp_size=1,
+        world_size=1,
+        max_running_prompts=4,
+        decode_progress_interval_s=0.5,
+        eager_decode=False,
+        attn_backend="native",
+        lora=lora,
+        base_model_name_or_path="org/model",
+    )
+
+    assert isinstance(runtime, serve_mod._MlxServeRuntime)
+    assert captured["backend_type"] == serve_mod.MLX
+    assert captured["custom_config"].lora is lora
+    assert captured["custom_config"].base_model_name_or_path == "org/model"
 
 
 def test_chat_completion_request_defaults_match_sampling_params():

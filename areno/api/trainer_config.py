@@ -126,8 +126,8 @@ class TrainerConfig:
             self.multimodal_projector_lr_decay_steps,
             self.multimodal_projector_lr_decay_style,
         )
-        if self.lora is not None and self.backend != "cuda":
-            raise ValueError("native LoRA is only supported by the CUDA backend")
+        if self.backend == "mlx" and self.reference_mode != "independent":
+            raise ValueError("MLX currently supports only reference_mode='independent'")
         if self.degenerate_policy not in {"skip", "error"}:
             raise ValueError("degenerate_policy must be one of: skip, error")
 
@@ -205,10 +205,13 @@ class TrainerConfig:
         from areno.api.config import MlxConfig
 
         return MlxConfig(
+            base_model_name_or_path=self.base_model_name_or_path,
             optimizer=self.optimizer_config(),
             keep_rollout_state=self.keep_rollout_state,
             compile_train_step=True,
             gradient_checkpointing=self.activation_checkpointing,
+            lora=self.lora,
+            reference_mode=self.reference_mode,
         )
 
     def cuda_config(self):
@@ -299,6 +302,7 @@ class RolloutTrainerConfig(TrainerConfig):
 
         max_running = self.resolved_max_running_prompts()
         return MlxConfig(
+            base_model_name_or_path=self.base_model_name_or_path,
             optimizer=self.optimizer_config(),
             max_running_prompts=max_running,
             completion_batch_size=max_running,
@@ -306,6 +310,8 @@ class RolloutTrainerConfig(TrainerConfig):
             keep_rollout_state=self.keep_rollout_state,
             compile_train_step=True,
             gradient_checkpointing=self.activation_checkpointing,
+            lora=self.lora,
+            reference_mode=self.reference_mode,
         )
 
 
