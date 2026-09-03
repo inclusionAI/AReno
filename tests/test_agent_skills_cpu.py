@@ -26,7 +26,7 @@ def test_repository_agent_skills_are_valid():
         )
 
     result = json.loads(process.stdout)
-    assert result["skill_count"] == 11
+    assert result["skill_count"] == 10
     assert result["script_count"] >= 15
 
 
