@@ -253,25 +253,125 @@ def test_mlx_backend_forwards_legacy_native_adapter_path(monkeypatch):
     assert backend.config is config
 
 
-def test_mlx_backend_rejects_peft_lora_before_loading_provider(monkeypatch):
+def test_mlx_backend_injects_peft_lora_before_building_optimizer(monkeypatch):
     from areno.adapters import LoraConfig
     from areno.api.backend.mlx.backend import MlxBackend
     from areno.api.config import MlxConfig
 
-    def unexpected_load(*args, **kwargs):
-        del args, kwargs
-        raise AssertionError("provider loading must not start before MLX LoRA injection exists")
+    events = []
+    mlx_module = ModuleType("mlx")
+    mlx_core_module = ModuleType("mlx.core")
+    mlx_core_module.metal = SimpleNamespace(is_available=lambda: False)
+    mlx_core_module.eval = lambda *args: events.append("eval")
+    mlx_module.core = mlx_core_module
+    monkeypatch.setitem(sys.modules, "mlx", mlx_module)
+    monkeypatch.setitem(sys.modules, "mlx.core", mlx_core_module)
 
-    monkeypatch.setattr("areno.api.backend.mlx.backend.load_provider", unexpected_load)
+    class FakeTokenizer:
+        def encode(self, text, *, add_special_tokens):
+            del text, add_special_tokens
+            return [1, 2, 3]
+
+    class FakeModel:
+        def parameters(self):
+            return {}
+
+        def train(self):
+            events.append("train")
+
+    model = FakeModel()
+    tokenizer = FakeTokenizer()
+    provider = SimpleNamespace(
+        model=model,
+        tokenizer=tokenizer,
+        processor=None,
+        config={"model_type": "qwen3"},
+        is_multimodal=False,
+        optimizer_state_precision=lambda path, parameter: "8bit",
+    )
+    lora_state = object()
+    optimizer = SimpleNamespace(state={})
+
+    def load_provider(model_path, *, adapter_path=None):
+        assert model_path == "model"
+        assert adapter_path is None
+        events.append("load_provider")
+        return provider
+
+    def inject(model_arg, config_arg, *, model_type):
+        assert model_arg is model
+        assert config_arg is config.lora
+        assert model_type == "qwen3"
+        events.append("initialize_lora")
+        return lora_state
+
+    def make_optimizer(optimizer_config, *, state_precision_for_parameter):
+        assert optimizer_config == {}
+        assert state_precision_for_parameter is provider.optimizer_state_precision
+        events.append("build_optimizer")
+        return optimizer, [("model", optimizer, {})]
+
+    monkeypatch.setattr("areno.api.backend.mlx.backend.load_provider", load_provider)
+    monkeypatch.setattr("areno.api.backend.mlx.backend.initialize_lora", inject)
+    monkeypatch.setattr("areno.api.backend.mlx.backend.build_optimizer", make_optimizer)
+    config = MlxConfig(lora=LoraConfig(), gradient_checkpointing=False)
     backend = MlxBackend()
     ctx = SimpleNamespace(
         world_size=1,
-        custom_config=MlxConfig(lora=LoraConfig()),
+        custom_config=config,
         model_path="model",
+        tokenizer=tokenizer,
     )
 
-    with pytest.raises(NotImplementedError, match="adapter injection is not implemented"):
-        backend.initialize(ctx)
+    backend.initialize(ctx)
+
+    assert events[:3] == ["load_provider", "initialize_lora", "build_optimizer"]
+    assert backend._lora_state is lora_state
+
+
+def test_mlx_backend_saves_and_exports_lora_as_peft(monkeypatch):
+    from areno.adapters import LoraConfig
+    from areno.api.backend.mlx.backend import MlxBackend
+    from areno.api.config import MlxConfig
+
+    calls = []
+    lora_state = object()
+
+    def export(state, path, *, base_model_name_or_path):
+        calls.append((state, path, base_model_name_or_path))
+        return path
+
+    monkeypatch.setattr("areno.api.backend.mlx.backend.export_peft_adapter", export)
+    backend = MlxBackend()
+    backend.provider = SimpleNamespace()
+    backend.model = SimpleNamespace()
+    backend.tokenizer = SimpleNamespace()
+    backend.optimizer = SimpleNamespace()
+    backend.config = MlxConfig(base_model_name_or_path="Qwen/Qwen3-0.6B", lora=LoraConfig())
+    backend._lora_state = lora_state
+    ctx = SimpleNamespace(model_path="resolved-model", global_step=2)
+
+    assert backend.save_checkpoint(ctx, "checkpoint") == "checkpoint"
+    assert backend.export_adapter(ctx, "manual-adapter") == "manual-adapter"
+    assert calls == [
+        (lora_state, "checkpoint", "Qwen/Qwen3-0.6B"),
+        (lora_state, "manual-adapter", "Qwen/Qwen3-0.6B"),
+    ]
+
+
+def test_mlx_backend_export_adapter_requires_lora():
+    from areno.api.backend.mlx.backend import MlxBackend
+    from areno.api.config import MlxConfig
+
+    backend = MlxBackend()
+    backend.provider = SimpleNamespace()
+    backend.model = SimpleNamespace()
+    backend.tokenizer = SimpleNamespace()
+    backend.optimizer = SimpleNamespace()
+    backend.config = MlxConfig()
+
+    with pytest.raises(RuntimeError, match="requires MLX LoRA"):
+        backend.export_adapter(SimpleNamespace(model_path="model"), "adapter")
 
 
 def test_adam8bit_lazy_state_remains_stable_after_zero_gradient_steps():

@@ -16,6 +16,7 @@ from areno.api.backend.common import (
 )
 from areno.api.backend.mlx.checkpoint import save_checkpoint
 from areno.api.backend.mlx.generation import ContinuousBatchScheduler, GenerationConfig
+from areno.api.backend.mlx.lora import MlxLoraState, export_peft_adapter, initialize_lora
 from areno.api.backend.mlx.losses import mlx_loss
 from areno.api.backend.mlx.numerics import selected_token_logprobs
 from areno.api.backend.mlx.optimizer import apply_optimizer_update, build_optimizer, set_group_learning_rates
@@ -47,6 +48,7 @@ class MlxBackend(Backend):
         self._rollout_scheduler: ContinuousBatchScheduler | None = None
         self._roles: dict[str, MlxRole] = {}
         self._compiled_losses: dict[tuple[str, tuple[tuple[str, object], ...]], Callable] = {}
+        self._lora_state: MlxLoraState | None = None
 
     @classmethod
     def capabilities(cls) -> BackendCapabilities:
@@ -66,10 +68,6 @@ class MlxBackend(Backend):
             config = MlxConfig()
         if not isinstance(config, MlxConfig):
             raise TypeError(f"MlxBackend requires MlxConfig, got {type(config)!r}")
-        if config.lora is not None:
-            raise NotImplementedError(
-                "MLX PEFT LoRA configuration is accepted, but adapter injection is not implemented yet"
-            )
         try:
             import mlx.core as mx
         except ImportError as exc:
@@ -95,7 +93,16 @@ class MlxBackend(Backend):
             )
         self._validate_tokenizer(ctx.tokenizer)
         optimizer_config = self.config.optimizer
-        self.provider.configure_trainability(optimizer_config)
+        if self.config.lora is None:
+            self.provider.configure_trainability(optimizer_config)
+        else:
+            if self.provider.is_multimodal:
+                raise ValueError("MLX LoRA currently supports text-only checkpoints")
+            self._lora_state = initialize_lora(
+                self.model,
+                self.config.lora,
+                model_type=str(self.model_config.get("model_type", "")),
+            )
         self.optimizer, self._optimizer_groups = build_optimizer(
             optimizer_config,
             state_precision_for_parameter=self.provider.optimizer_state_precision,
@@ -125,6 +132,7 @@ class MlxBackend(Backend):
         self.processor = None
         self.optimizer = None
         self._optimizer_groups = []
+        self._lora_state = None
         mx.clear_cache()
 
     def begin_rollout_session(self, ctx: Context) -> None:
@@ -284,9 +292,11 @@ class MlxBackend(Backend):
         return result
 
     def save_checkpoint(self, ctx: Context, path: str) -> str:
-        """Save MLX weights plus tokenizer/config files in MLX-LM format."""
+        """Save full MLX weights, or a standard PEFT artifact in LoRA mode."""
 
         self._require_runtime()
+        if self._lora_state is not None:
+            return self.export_adapter(ctx, path)
         return save_checkpoint(
             self.provider,
             self.optimizer,
@@ -294,6 +304,18 @@ class MlxBackend(Backend):
             destination_path=path,
             policy_version=self._policy_version,
             global_step=ctx.global_step,
+        )
+
+    def export_adapter(self, ctx: Context, path: str) -> str:
+        """Export the live MLX LoRA weights as a standard PEFT adapter."""
+
+        self._require_runtime()
+        if self._lora_state is None:
+            raise RuntimeError("export_adapter requires MLX LoRA")
+        return export_peft_adapter(
+            self._lora_state,
+            path,
+            base_model_name_or_path=(self.config.base_model_name_or_path or self.config.model_path or ctx.model_path),
         )
 
     def ensure_roles(self, ctx: Context, roles: dict[str, ModelRole]) -> None:
