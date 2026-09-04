@@ -16,6 +16,7 @@ import areno.engine.inference as inference_mod
 from areno.engine.data import SamplingParams
 from areno.engine.data.rollout_state import InferenceBatchState
 from areno.engine.inference import InferenceManager
+from areno.engine.parallel import context as tp_context
 from areno.models.base import CausalLMOutput
 from tests.helpers import PatchedContext
 
@@ -86,11 +87,18 @@ def _rollout(prompts, *, draft_shift, max_new_tokens, eos=None, max_running=4, d
         kv_block_size=4,
         num_cache_blocks=64,
     )
-    ctx = SimpleNamespace(is_rank0=True, dp_rank=0, dp_size=1, rank=0, world_size=1)
-    with PatchedContext(inference_mod, get_tp_context=lambda: ctx, broadcast_object=lambda value, src=0: value):
-        manager._generate_rollout_tokens_no_sync(
-            state, SamplingParams(temperature=0.0), eos_token_id=eos, prompt_indices=list(range(len(prompts)))
-        )
+    # The sampler, collectives and logprob helpers read the module-global TP
+    # context, which another test may leave at world_size > 1; pin it to one rank.
+    previous = tp_context.get_tp_context()
+    single = tp_context.TPContext(rank=0, world_size=1, device=torch.device("cpu"), group=None)
+    tp_context.set_tp_context(single)
+    try:
+        with PatchedContext(inference_mod, broadcast_object=lambda value, src=0: value):
+            manager._generate_rollout_tokens_no_sync(
+                state, SamplingParams(temperature=0.0), eos_token_id=eos, prompt_indices=list(range(len(prompts)))
+            )
+    finally:
+        tp_context.set_tp_context(previous)
     assert model.draft_enabled
     return state, model
 
