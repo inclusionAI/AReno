@@ -111,8 +111,10 @@ __global__ void adamw_4bit_kernel(
     uint8_t* exp_avg_sq_q,
     float* exp_avg_sq_scale,
     int64_t numel,
-    int64_t packed_offset,
-    int64_t scale_offset,
+    int64_t moment_packed_offset,
+    int64_t moment_scale_offset,
+    int64_t variance_packed_offset,
+    int64_t variance_scale_offset,
     float beta1,
     float beta2,
     float effective_lr,
@@ -120,10 +122,15 @@ __global__ void adamw_4bit_kernel(
     float eps,
     float step_size,
     float bias_correction2_sqrt) {
-  __shared__ float moment_max[1024];
-  __shared__ float variance_max[1024];
-  __shared__ uint8_t moment_codes[1024];
-  __shared__ uint8_t variance_codes[1024];
+  constexpr int warp_size = 32;
+  constexpr int max_warps = 32;
+  __shared__ float warp_moment_maxima[max_warps];
+  __shared__ float warp_variance_maxima[max_warps];
+  extern __shared__ uint8_t packed_codes[];
+  uint8_t* moment_codes = packed_codes;
+  uint8_t* variance_codes = packed_codes + blockDim.x;
+  __shared__ float old_moment_scale;
+  __shared__ float old_variance_scale;
   __shared__ float new_moment_scale;
   __shared__ float new_variance_scale;
   __shared__ int invalid_block;
@@ -134,20 +141,20 @@ __global__ void adamw_4bit_kernel(
   const bool active = local_index < numel;
   if (tid == 0) {
     invalid_block = 0;
+    old_moment_scale = exp_avg_scale[moment_scale_offset + blockIdx.x];
+    old_variance_scale = exp_avg_sq_scale[variance_scale_offset + blockIdx.x];
   }
   __syncthreads();
 
-  float moment = 0.0f;
-  float variance = 0.0f;
-  float updated_weight = 0.0f;
+  float local_moment_max = 0.0f;
+  float local_variance_max = 0.0f;
   if (active) {
-    const uint8_t moment_code = load_nibble(exp_avg_q + packed_offset, local_index);
-    const uint8_t variance_code = load_nibble(exp_avg_sq_q + packed_offset, local_index);
-    const int64_t block_scale_index = scale_offset + blockIdx.x;
-    moment = kSigned4bitDynamicMap[moment_code] * exp_avg_scale[block_scale_index];
-    variance = (static_cast<float>(variance_code) + 1.0f) * exp_avg_sq_scale[block_scale_index] / 16.0f;
+    const uint8_t moment_code = load_nibble(exp_avg_q + moment_packed_offset, local_index);
+    const uint8_t variance_code = load_nibble(exp_avg_sq_q + variance_packed_offset, local_index);
+    float moment = kSigned4bitDynamicMap[moment_code] * old_moment_scale;
+    float variance = (static_cast<float>(variance_code) + 1.0f) * old_variance_scale / 16.0f;
     const float gradient = load_grad(grad, local_index);
-    updated_weight = load_model(model, local_index);
+    float updated_weight = load_model(model, local_index);
     if (weight_decay != 0.0f) {
       updated_weight *= 1.0f - effective_lr * weight_decay;
     }
@@ -158,36 +165,67 @@ __global__ void adamw_4bit_kernel(
     if (!isfinite(gradient) || !isfinite(moment) || !isfinite(variance) || !isfinite(updated_weight)) {
       atomicExch(&invalid_block, 1);
     }
+    local_moment_max = fabsf(moment);
+    local_variance_max = variance;
   }
-  moment_max[tid] = active ? fabsf(moment) : 0.0f;
-  variance_max[tid] = active ? variance : 0.0f;
+  for (int offset = warp_size / 2; offset > 0; offset >>= 1) {
+    local_moment_max = fmaxf(local_moment_max, __shfl_down_sync(0xFFFFFFFFu, local_moment_max, offset));
+    local_variance_max =
+        fmaxf(local_variance_max, __shfl_down_sync(0xFFFFFFFFu, local_variance_max, offset));
+  }
+  const int lane = tid & (warp_size - 1);
+  const int warp = tid / warp_size;
+  if (lane == 0) {
+    warp_moment_maxima[warp] = local_moment_max;
+    warp_variance_maxima[warp] = local_variance_max;
+  }
   __syncthreads();
-
-  for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
-    if (tid < stride) {
-      moment_max[tid] = fmaxf(moment_max[tid], moment_max[tid + stride]);
-      variance_max[tid] = fmaxf(variance_max[tid], variance_max[tid + stride]);
-    }
-    __syncthreads();
-  }
   if (invalid_block != 0) {
     return;
   }
-  if (tid == 0) {
-    new_moment_scale = moment_max[0];
-    new_variance_scale = variance_max[0];
-    exp_avg_scale[scale_offset + blockIdx.x] = new_moment_scale;
-    exp_avg_sq_scale[scale_offset + blockIdx.x] = new_variance_scale;
+  if (warp == 0) {
+    const int warp_count = blockDim.x / warp_size;
+    float block_moment_max = lane < warp_count ? warp_moment_maxima[lane] : 0.0f;
+    float block_variance_max = lane < warp_count ? warp_variance_maxima[lane] : 0.0f;
+    for (int offset = warp_size / 2; offset > 0; offset >>= 1) {
+      block_moment_max =
+          fmaxf(block_moment_max, __shfl_down_sync(0xFFFFFFFFu, block_moment_max, offset));
+      block_variance_max =
+          fmaxf(block_variance_max, __shfl_down_sync(0xFFFFFFFFu, block_variance_max, offset));
+    }
+    if (lane == 0) {
+      new_moment_scale = block_moment_max;
+      new_variance_scale = block_variance_max;
+      exp_avg_scale[moment_scale_offset + blockIdx.x] = block_moment_max;
+      exp_avg_sq_scale[variance_scale_offset + blockIdx.x] = block_variance_max;
+    }
   }
   __syncthreads();
 
+  // Recompute instead of keeping FP32 moment, variance and weight values live
+  // across the reduction. This mirrors the 8-bit kernel and avoids register
+  // spills into CUDA local memory for the packed 4-bit update.
   if (active) {
+    const uint8_t moment_code = load_nibble(exp_avg_q + moment_packed_offset, local_index);
+    const uint8_t variance_code = load_nibble(exp_avg_sq_q + variance_packed_offset, local_index);
+    float moment = kSigned4bitDynamicMap[moment_code] * old_moment_scale;
+    float variance = (static_cast<float>(variance_code) + 1.0f) * old_variance_scale / 16.0f;
+    const float gradient = load_grad(grad, local_index);
+    float updated_weight = load_model(model, local_index);
+    if (weight_decay != 0.0f) {
+      updated_weight *= 1.0f - effective_lr * weight_decay;
+    }
+    moment = beta1 * moment + (1.0f - beta1) * gradient;
+    variance = beta2 * variance + (1.0f - beta2) * gradient * gradient;
+    const float denom = sqrtf(variance) / bias_correction2_sqrt + eps;
+    updated_weight -= step_size * moment / denom;
     const float normalized_moment = moment / fmaxf(new_moment_scale, 1.0e-30f);
     moment_codes[tid] = nearest_signed_dynamic_code(normalized_moment);
     const float normalized_variance = variance / fmaxf(new_variance_scale, 1.0e-30f);
-    int variance_code = __float2int_rn(normalized_variance * 16.0f - 1.0f);
-    variance_code = variance_code < 0 ? 0 : (variance_code > 15 ? 15 : variance_code);
-    variance_codes[tid] = static_cast<uint8_t>(variance_code);
+    int updated_variance_code = __float2int_rn(normalized_variance * 16.0f - 1.0f);
+    updated_variance_code =
+        updated_variance_code < 0 ? 0 : (updated_variance_code > 15 ? 15 : updated_variance_code);
+    variance_codes[tid] = static_cast<uint8_t>(updated_variance_code);
     store_model(model, local_index, updated_weight);
   } else {
     moment_codes[tid] = 7;
@@ -195,9 +233,148 @@ __global__ void adamw_4bit_kernel(
   }
   __syncthreads();
   if ((tid & 1) == 0 && local_index < numel) {
-    const int64_t byte_index = packed_offset + (local_index >> 1);
+    const int64_t moment_byte_index = moment_packed_offset + (local_index >> 1);
+    const int64_t variance_byte_index = variance_packed_offset + (local_index >> 1);
+    exp_avg_q[moment_byte_index] = moment_codes[tid] | static_cast<uint8_t>(moment_codes[tid + 1] << 4);
+    exp_avg_sq_q[variance_byte_index] =
+        variance_codes[tid] | static_cast<uint8_t>(variance_codes[tid + 1] << 4);
+  }
+}
+
+template <typename grad_t>
+__global__ void adamw_4bit_factored_stats_kernel(
+    const grad_t* grad,
+    float* factor_sums,
+    int* invalid,
+    int64_t numel,
+    int64_t parameter_shard_start,
+    int64_t rows,
+    int64_t columns) {
+  for (int64_t local_index = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+       local_index < numel;
+       local_index += static_cast<int64_t>(blockDim.x) * gridDim.x) {
+    const int64_t parameter_index = parameter_shard_start + local_index;
+    const float gradient = load_grad(grad, local_index);
+    const float squared = gradient * gradient;
+    if (!isfinite(squared)) {
+      atomicExch(invalid, 1);
+      continue;
+    }
+    atomicAdd(factor_sums + parameter_index / columns, squared);
+    atomicAdd(factor_sums + rows + parameter_index % columns, squared);
+  }
+}
+
+template <typename model_t, typename grad_t>
+__global__ void adamw_4bit_factored_step_kernel(
+    model_t* model,
+    const grad_t* grad,
+    uint8_t* exp_avg_q,
+    float* exp_avg_scale,
+    const float* factors,
+    const float* row_mean,
+    const int* invalid,
+    int64_t numel,
+    int64_t moment_packed_offset,
+    int64_t moment_scale_offset,
+    int64_t parameter_shard_start,
+    int64_t rows,
+    int64_t columns,
+    float beta1,
+    float effective_lr,
+    float weight_decay,
+    float eps,
+    float step_size,
+    float bias_correction2_sqrt) {
+  constexpr int warp_size = 32;
+  constexpr int max_warps = 32;
+  __shared__ float warp_moment_maxima[max_warps];
+  extern __shared__ uint8_t packed_codes[];
+  uint8_t* moment_codes = packed_codes;
+  __shared__ float old_moment_scale;
+  __shared__ float new_moment_scale;
+  __shared__ int invalid_block;
+  const int tid = threadIdx.x;
+  if (*invalid != 0) {
+    return;
+  }
+  const int64_t local_index = static_cast<int64_t>(blockIdx.x) * blockDim.x + tid;
+  const bool active = local_index < numel;
+  if (tid == 0) {
+    invalid_block = 0;
+    old_moment_scale = exp_avg_scale[moment_scale_offset + blockIdx.x];
+  }
+  __syncthreads();
+  float local_moment_max = 0.0f;
+  if (active) {
+    const int64_t parameter_index = parameter_shard_start + local_index;
+    const uint8_t moment_code = load_nibble(exp_avg_q + moment_packed_offset, local_index);
+    float moment = kSigned4bitDynamicMap[moment_code] * old_moment_scale;
+    const int64_t row = parameter_index / columns;
+    const int64_t column = parameter_index % columns;
+    const float variance = factors[row] * factors[rows + column] / fmaxf(*row_mean, 1.0e-30f);
+    const float gradient = load_grad(grad, local_index);
+    float updated_weight = load_model(model, local_index);
+    if (weight_decay != 0.0f) {
+      updated_weight *= 1.0f - effective_lr * weight_decay;
+    }
+    moment = beta1 * moment + (1.0f - beta1) * gradient;
+    const float denom = sqrtf(variance) / bias_correction2_sqrt + eps;
+    updated_weight -= step_size * moment / denom;
+    if (!isfinite(gradient) || !isfinite(moment) || !isfinite(variance) || !isfinite(updated_weight)) {
+      atomicExch(&invalid_block, 1);
+    }
+    local_moment_max = fabsf(moment);
+  }
+  for (int offset = warp_size / 2; offset > 0; offset >>= 1) {
+    local_moment_max = fmaxf(local_moment_max, __shfl_down_sync(0xFFFFFFFFu, local_moment_max, offset));
+  }
+  const int lane = tid & (warp_size - 1);
+  const int warp = tid / warp_size;
+  if (lane == 0) {
+    warp_moment_maxima[warp] = local_moment_max;
+  }
+  __syncthreads();
+  if (invalid_block != 0) {
+    return;
+  }
+  if (warp == 0) {
+    const int warp_count = blockDim.x / warp_size;
+    float block_moment_max = lane < warp_count ? warp_moment_maxima[lane] : 0.0f;
+    for (int offset = warp_size / 2; offset > 0; offset >>= 1) {
+      block_moment_max =
+          fmaxf(block_moment_max, __shfl_down_sync(0xFFFFFFFFu, block_moment_max, offset));
+    }
+    if (lane == 0) {
+      new_moment_scale = block_moment_max;
+      exp_avg_scale[moment_scale_offset + blockIdx.x] = block_moment_max;
+    }
+  }
+  __syncthreads();
+  if (active) {
+    const int64_t parameter_index = parameter_shard_start + local_index;
+    const uint8_t moment_code = load_nibble(exp_avg_q + moment_packed_offset, local_index);
+    float moment = kSigned4bitDynamicMap[moment_code] * old_moment_scale;
+    const int64_t row = parameter_index / columns;
+    const int64_t column = parameter_index % columns;
+    const float variance = factors[row] * factors[rows + column] / fmaxf(*row_mean, 1.0e-30f);
+    const float gradient = load_grad(grad, local_index);
+    float updated_weight = load_model(model, local_index);
+    if (weight_decay != 0.0f) {
+      updated_weight *= 1.0f - effective_lr * weight_decay;
+    }
+    moment = beta1 * moment + (1.0f - beta1) * gradient;
+    const float denom = sqrtf(variance) / bias_correction2_sqrt + eps;
+    updated_weight -= step_size * moment / denom;
+    moment_codes[tid] = nearest_signed_dynamic_code(moment / fmaxf(new_moment_scale, 1.0e-30f));
+    store_model(model, local_index, updated_weight);
+  } else {
+    moment_codes[tid] = 7;
+  }
+  __syncthreads();
+  if ((tid & 1) == 0 && local_index < numel) {
+    const int64_t byte_index = moment_packed_offset + (local_index >> 1);
     exp_avg_q[byte_index] = moment_codes[tid] | static_cast<uint8_t>(moment_codes[tid + 1] << 4);
-    exp_avg_sq_q[byte_index] = variance_codes[tid] | static_cast<uint8_t>(variance_codes[tid + 1] << 4);
   }
 }
 
@@ -376,8 +553,10 @@ void launch_adamw_4bit(
     torch::Tensor exp_avg_scale,
     torch::Tensor exp_avg_sq_q,
     torch::Tensor exp_avg_sq_scale,
-    int64_t packed_offset,
-    int64_t scale_offset,
+    int64_t moment_packed_offset,
+    int64_t moment_scale_offset,
+    int64_t variance_packed_offset,
+    int64_t variance_scale_offset,
     int64_t quant_block_size,
     float beta1,
     float beta2,
@@ -388,7 +567,8 @@ void launch_adamw_4bit(
     float bias_correction2_sqrt) {
   const int blocks = static_cast<int>((model.numel() + quant_block_size - 1) / quant_block_size);
   const auto stream = at::cuda::getCurrentCUDAStream();
-  adamw_4bit_kernel<model_t, grad_t><<<blocks, static_cast<int>(quant_block_size), 0, stream>>>(
+  const size_t shared_bytes = static_cast<size_t>(2 * quant_block_size) * sizeof(uint8_t);
+  adamw_4bit_kernel<model_t, grad_t><<<blocks, static_cast<int>(quant_block_size), shared_bytes, stream>>>(
       model.data_ptr<model_t>(),
       grad.data_ptr<grad_t>(),
       exp_avg_q.data_ptr<uint8_t>(),
@@ -396,10 +576,84 @@ void launch_adamw_4bit(
       exp_avg_sq_q.data_ptr<uint8_t>(),
       exp_avg_sq_scale.data_ptr<float>(),
       model.numel(),
-      packed_offset,
-      scale_offset,
+      moment_packed_offset,
+      moment_scale_offset,
+      variance_packed_offset,
+      variance_scale_offset,
       beta1,
       beta2,
+      effective_lr,
+      weight_decay,
+      eps,
+      step_size,
+      bias_correction2_sqrt);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+template <typename grad_t>
+void launch_adamw_4bit_factored_stats(
+    torch::Tensor grad,
+    torch::Tensor factor_sums,
+    torch::Tensor invalid,
+    int64_t parameter_shard_start,
+    int64_t rows,
+    int64_t columns) {
+  constexpr int threads = 256;
+  constexpr int max_blocks = 4096;
+  int blocks = static_cast<int>((grad.numel() + threads - 1) / threads);
+  blocks = blocks < max_blocks ? blocks : max_blocks;
+  const auto stream = at::cuda::getCurrentCUDAStream();
+  adamw_4bit_factored_stats_kernel<grad_t><<<blocks, threads, 0, stream>>>(
+      grad.data_ptr<grad_t>(),
+      factor_sums.data_ptr<float>(),
+      invalid.data_ptr<int>(),
+      grad.numel(),
+      parameter_shard_start,
+      rows,
+      columns);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+template <typename model_t, typename grad_t>
+void launch_adamw_4bit_factored_step(
+    torch::Tensor model,
+    torch::Tensor grad,
+    torch::Tensor exp_avg_q,
+    torch::Tensor exp_avg_scale,
+    torch::Tensor factors,
+    torch::Tensor row_mean,
+    torch::Tensor invalid,
+    int64_t moment_packed_offset,
+    int64_t moment_scale_offset,
+    int64_t parameter_shard_start,
+    int64_t quant_block_size,
+    int64_t rows,
+    int64_t columns,
+    float beta1,
+    float effective_lr,
+    float weight_decay,
+    float eps,
+    float step_size,
+    float bias_correction2_sqrt) {
+  const int blocks = static_cast<int>((model.numel() + quant_block_size - 1) / quant_block_size);
+  const auto stream = at::cuda::getCurrentCUDAStream();
+  const size_t shared_bytes = static_cast<size_t>(quant_block_size) * sizeof(uint8_t);
+  adamw_4bit_factored_step_kernel<model_t, grad_t>
+      <<<blocks, static_cast<int>(quant_block_size), shared_bytes, stream>>>(
+      model.data_ptr<model_t>(),
+      grad.data_ptr<grad_t>(),
+      exp_avg_q.data_ptr<uint8_t>(),
+      exp_avg_scale.data_ptr<float>(),
+      factors.data_ptr<float>(),
+      row_mean.data_ptr<float>(),
+      invalid.data_ptr<int>(),
+      model.numel(),
+      moment_packed_offset,
+      moment_scale_offset,
+      parameter_shard_start,
+      rows,
+      columns,
+      beta1,
       effective_lr,
       weight_decay,
       eps,
@@ -658,8 +912,10 @@ void areno_adamw_4bit_step_cuda(
     torch::Tensor exp_avg_scale,
     torch::Tensor exp_avg_sq_q,
     torch::Tensor exp_avg_sq_scale,
-    int64_t packed_offset,
-    int64_t scale_offset,
+    int64_t moment_packed_offset,
+    int64_t moment_scale_offset,
+    int64_t variance_packed_offset,
+    int64_t variance_scale_offset,
     int64_t quant_block_size,
     double beta1,
     double beta2,
@@ -682,7 +938,8 @@ void areno_adamw_4bit_step_cuda(
 
 #define LAUNCH_ADAMW4(MODEL_T, GRAD_T)                                                                    \
   launch_adamw_4bit<MODEL_T, GRAD_T>(                                                                     \
-      model, grad, exp_avg_q, exp_avg_scale, exp_avg_sq_q, exp_avg_sq_scale, packed_offset, scale_offset, \
+      model, grad, exp_avg_q, exp_avg_scale, exp_avg_sq_q, exp_avg_sq_scale, moment_packed_offset,        \
+      moment_scale_offset, variance_packed_offset, variance_scale_offset,                                 \
       quant_block_size, beta1, beta2, effective_lr, weight_decay, eps, step_size, bias_correction2_sqrt)
 
   if (model.scalar_type() == at::kBFloat16 && grad.scalar_type() == at::kBFloat16) {
@@ -697,6 +954,101 @@ void areno_adamw_4bit_step_cuda(
     TORCH_CHECK(false, "model and gradient must be bfloat16 or float32");
   }
 #undef LAUNCH_ADAMW4
+}
+
+void areno_adamw_4bit_factored_stats_cuda(
+    torch::Tensor grad,
+    torch::Tensor factor_sums,
+    torch::Tensor invalid,
+    int64_t parameter_shard_start,
+    int64_t rows,
+    int64_t columns) {
+  c10::cuda::CUDAGuard guard(grad.device());
+  TORCH_CHECK(
+      grad.is_cuda() && factor_sums.is_cuda() && invalid.is_cuda(),
+      "AdamW4bit factored statistics tensors must be CUDA tensors");
+  TORCH_CHECK(
+      grad.is_contiguous() && factor_sums.is_contiguous() && invalid.is_contiguous(),
+      "AdamW4bit factored statistics tensors must be contiguous");
+  TORCH_CHECK(factor_sums.scalar_type() == at::kFloat, "AdamW4bit factored sums must be float32");
+  TORCH_CHECK(invalid.scalar_type() == at::kInt && invalid.numel() == 1, "AdamW4bit invalid flag must be int32");
+  TORCH_CHECK(rows > 0 && columns > 0, "AdamW4bit factored dimensions must be positive");
+  TORCH_CHECK(factor_sums.numel() == rows + columns, "AdamW4bit factored state size must match matrix shape");
+  TORCH_CHECK(
+      parameter_shard_start >= 0 && parameter_shard_start + grad.numel() <= rows * columns,
+      "AdamW4bit factored gradient slice is out of bounds");
+  if (grad.scalar_type() == at::kBFloat16) {
+    launch_adamw_4bit_factored_stats<at::BFloat16>(
+        grad, factor_sums, invalid, parameter_shard_start, rows, columns);
+  } else if (grad.scalar_type() == at::kFloat) {
+    launch_adamw_4bit_factored_stats<float>(grad, factor_sums, invalid, parameter_shard_start, rows, columns);
+  } else {
+    TORCH_CHECK(false, "AdamW4bit factored gradient must be bfloat16 or float32");
+  }
+}
+
+void areno_adamw_4bit_factored_step_cuda(
+    torch::Tensor model,
+    torch::Tensor grad,
+    torch::Tensor exp_avg_q,
+    torch::Tensor exp_avg_scale,
+    torch::Tensor factors,
+    torch::Tensor row_mean,
+    torch::Tensor invalid,
+    int64_t moment_packed_offset,
+    int64_t moment_scale_offset,
+    int64_t parameter_shard_start,
+    int64_t quant_block_size,
+    int64_t rows,
+    int64_t columns,
+    double beta1,
+    double effective_lr,
+    double weight_decay,
+    double eps,
+    double step_size,
+    double bias_correction2_sqrt) {
+  c10::cuda::CUDAGuard guard(model.device());
+  TORCH_CHECK(
+      model.is_cuda() && grad.is_cuda() && exp_avg_q.is_cuda() && exp_avg_scale.is_cuda() && factors.is_cuda() &&
+          row_mean.is_cuda() && invalid.is_cuda(),
+      "AdamW4bit factored update tensors must be CUDA tensors");
+  TORCH_CHECK(
+      model.is_contiguous() && grad.is_contiguous() && exp_avg_q.is_contiguous() && exp_avg_scale.is_contiguous() &&
+          factors.is_contiguous() && row_mean.is_contiguous() && invalid.is_contiguous(),
+      "AdamW4bit factored update tensors must be contiguous");
+  TORCH_CHECK(model.numel() == grad.numel(), "AdamW4bit factored model and gradient sizes must match");
+  TORCH_CHECK(exp_avg_q.scalar_type() == at::kByte, "AdamW4bit packed momentum must be uint8");
+  TORCH_CHECK(
+      exp_avg_scale.scalar_type() == at::kFloat && factors.scalar_type() == at::kFloat &&
+          row_mean.scalar_type() == at::kFloat,
+      "AdamW4bit factored scales must be float32");
+  TORCH_CHECK(invalid.scalar_type() == at::kInt && invalid.numel() == 1, "AdamW4bit invalid flag must be int32");
+  TORCH_CHECK(
+      quant_block_size >= 32 && quant_block_size <= 1024 &&
+          (quant_block_size & (quant_block_size - 1)) == 0,
+      "AdamW4bit block size must be a power of two between 32 and 1024");
+  TORCH_CHECK(rows > 0 && columns > 0, "AdamW4bit factored dimensions must be positive");
+  TORCH_CHECK(factors.numel() == rows + columns && row_mean.numel() == 1, "AdamW4bit factored state shape mismatch");
+  TORCH_CHECK(
+      parameter_shard_start >= 0 && parameter_shard_start + model.numel() <= rows * columns,
+      "AdamW4bit factored parameter slice is out of bounds");
+#define LAUNCH_ADAMW4_FACTORED(MODEL_T, GRAD_T)                                                           \
+  launch_adamw_4bit_factored_step<MODEL_T, GRAD_T>(                                                       \
+      model, grad, exp_avg_q, exp_avg_scale, factors, row_mean, invalid, moment_packed_offset,            \
+      moment_scale_offset, parameter_shard_start, quant_block_size, rows, columns, beta1, effective_lr,  \
+      weight_decay, eps, step_size, bias_correction2_sqrt)
+  if (model.scalar_type() == at::kBFloat16 && grad.scalar_type() == at::kBFloat16) {
+    LAUNCH_ADAMW4_FACTORED(at::BFloat16, at::BFloat16);
+  } else if (model.scalar_type() == at::kBFloat16 && grad.scalar_type() == at::kFloat) {
+    LAUNCH_ADAMW4_FACTORED(at::BFloat16, float);
+  } else if (model.scalar_type() == at::kFloat && grad.scalar_type() == at::kBFloat16) {
+    LAUNCH_ADAMW4_FACTORED(float, at::BFloat16);
+  } else if (model.scalar_type() == at::kFloat && grad.scalar_type() == at::kFloat) {
+    LAUNCH_ADAMW4_FACTORED(float, float);
+  } else {
+    TORCH_CHECK(false, "AdamW4bit factored model and gradient must be bfloat16 or float32");
+  }
+#undef LAUNCH_ADAMW4_FACTORED
 }
 
 void areno_adamw_8bit_step_cuda(

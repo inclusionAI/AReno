@@ -28,6 +28,7 @@ Practical rules
 Where to go next
 ----------------
 
+* :doc:`/cookbook/writing-loaders-and-rewards` — step-by-step tutorial.
 * :doc:`/cli/training` documents the training CLI flag.
 * :doc:`/troubleshooting/reward-function` covers debugging workflow.
 * :doc:`/reference/reward-function-api` documents the API contract.

@@ -19,6 +19,7 @@ from areno.engine.runtime.routing_replay import routing_replay_context
 from areno.engine.runtime.train_step import (
     _clip_grad_norm,
     _grad_norms,
+    _grad_norms_from_shards,
     _merge_metrics,
     _pack_train_data,
     _train_meta,
@@ -155,43 +156,59 @@ class TrainingManager:
         if not isinstance(loss, torch.Tensor):
             raise TypeError("train_loss_fn must return a torch.Tensor")
         (loss / max(grad_scale, 1)).backward()
-        # Keep the original full-gradient path for every optimizer residency
-        # mode, including disk. Disk offload still streams optimizer state,
-        # but it does not alter gradient accumulation or synchronization.
-        self._accumulate_main_gradients()
+        stream_gradient_shards = bool(getattr(worker.optimizer, "stream_gradient_shards", False))
+        if stream_gradient_shards:
+            # AdamW4bit consumes each microbatch directly into compact BF16 DP
+            # shards. This avoids materializing the full-model FP32 main_grad
+            # copy that otherwise dominates optimizer-step peak memory.
+            self._sync_tensor_parallel_replicated_gradients()
+            worker.optimizer.reduce_scatter_gradients()
+        else:
+            # Preserve the established FP32 accumulation path for every other
+            # optimizer, including AdamW8bit.
+            self._accumulate_main_gradients()
         stepped = allow_step
         grad_norm = None
         multimodal_grad_metrics = None
         clipped_grad_norm = None
         optimizer_state_metrics = None
         if stepped:
-            self._sync_data_parallel_gradients()
-            self._sync_tensor_parallel_replicated_gradients()
+            if not stream_gradient_shards:
+                self._sync_data_parallel_gradients()
+                self._sync_tensor_parallel_replicated_gradients()
             self._finalize_router_expert_bias()
             multimodal_groups = tuple(
                 group
                 for group in worker.multimodal_lr_schedules
                 if any(getattr(param, "_areno_lr_group", None) == group for param in worker.model.parameters())
             )
-            grad_norms = _grad_norms(worker.model.parameters(), multimodal_groups)
+            if stream_gradient_shards:
+                grad_norms = _grad_norms_from_shards(worker.optimizer.grad_shards(), multimodal_groups)
+            else:
+                grad_norms = _grad_norms(worker.model.parameters(), multimodal_groups)
             grad_norm = grad_norms.pop("global")
             multimodal_grad_metrics = (
                 {f"{group}_grad_norm": grad_norms[group] for group in multimodal_groups} if multimodal_groups else None
             )
             clipped_grad_norm = grad_norm
             if worker.grad_clip_norm is not None:
-                _clip_grad_norm(worker.model.parameters(), grad_norm, worker.grad_clip_norm)
+                if stream_gradient_shards:
+                    clip_coefficient = float(worker.grad_clip_norm) / (grad_norm + 1.0e-6) if grad_norm > 0.0 else 1.0
+                    if clip_coefficient < 1.0:
+                        worker.optimizer.scale_gradients(clip_coefficient)
+                else:
+                    _clip_grad_norm(worker.model.parameters(), grad_norm, worker.grad_clip_norm)
                 clipped_grad_norm = min(grad_norm, float(worker.grad_clip_norm))
             current_lr = self._lr_for_step(worker._global_step + 1)
             worker.optimizer.lr = current_lr
             multimodal_lrs = self._set_multimodal_lrs(worker._global_step + 1)
             worker.optimizer.step()
             state_memory_metrics = getattr(worker.optimizer, "state_memory_metrics", None)
-            if (
-                callable(state_memory_metrics)
-                and getattr(worker.optimizer, "state_quantizer", None) == "dynamic-tree-v1"
-            ):
+            state_quantizer = getattr(worker.optimizer, "state_quantizer", None)
+            if callable(state_memory_metrics) and state_quantizer == "dynamic-tree-v1":
                 optimizer_state_metrics = {f"adam8_{name}": value for name, value in state_memory_metrics().items()}
+            elif callable(state_memory_metrics) and str(state_quantizer).startswith("signed-de4/"):
+                optimizer_state_metrics = {f"adam4_{name}": value for name, value in state_memory_metrics().items()}
             worker.optimizer.zero_grad(set_to_none=True)
             worker._global_step += 1
             if worker.adapter_registry is not None:
