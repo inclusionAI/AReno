@@ -21,20 +21,19 @@ from areno.engine.data.sampling import (
     _token_id_tuple,
     _truncate_generated,
 )
+from areno.engine.modeling import unwrap_model
 from areno.engine.parallel.collectives import all_gather_last_dim, broadcast_object, broadcast_tensor
 from areno.engine.parallel.context import get_tp_context
 from areno.engine.protocol import RolloutPayload
 from areno.engine.runtime.common import _check_token_ids, _device_long, ceil_div
 from areno.engine.runtime.decode_graph import (
     DecodeGraph,
-    bucket_for,
     has_graph_capture_memory,
     sync_before_graph_capture,
 )
 from areno.engine.runtime.metadata import InferMeta
 from areno.engine.runtime.rollout import _empty_rollout
 from areno.engine.runtime.routing_replay import captured_routing, routing_replay_context
-from areno.engine.modeling import unwrap_model
 from areno.engine.runtime.speculative import (
     mtp_input_tokens,
     new_token_mask,
@@ -1533,7 +1532,6 @@ class InferenceManager:
         self._decode_graph_init_attempted = True
         if self.model.training:
             self.model.eval()
-        ctx = get_tp_context()
         # User-configured buckets clamped to [1, max_running_seqs], plus the
         # max so the largest active batch always has a graph.
         buckets = sorted(
