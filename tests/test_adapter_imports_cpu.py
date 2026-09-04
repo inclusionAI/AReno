@@ -17,7 +17,13 @@ import sys
 class BlockHeavyImports(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
         del path, target
-        if fullname == "torch" or fullname.startswith("torch.") or fullname == "areno.adapters.lora":
+        if (
+            fullname == "torch"
+            or fullname.startswith("torch.")
+            or fullname == "mlx"
+            or fullname.startswith("mlx.")
+            or fullname == "areno.adapters.lora"
+        ):
             raise AssertionError(f"unexpected heavy import: {fullname}")
         return None
 
@@ -26,13 +32,16 @@ sys.meta_path.insert(0, BlockHeavyImports())
 
 from areno.adapters import LoraConfig as PublicLoraConfig
 from areno.adapters.config import LoraConfig
+from areno.api.backend.mlx.lora import MlxLoraState
 from areno.api.config import MlxConfig
 from areno.api.trainer_config import TrainerConfig
 
 assert PublicLoraConfig is LoraConfig
+assert MlxLoraState.__module__ == "areno.api.backend.mlx.lora"
 assert MlxConfig(lora=LoraConfig()).lora is not None
 assert TrainerConfig(algo="sft", backend="mlx", ckpt="model", dataset_path="data").backend == "mlx"
 assert "torch" not in sys.modules
+assert "mlx" not in sys.modules
 assert "areno.adapters.lora" not in sys.modules
 """
 
