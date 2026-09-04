@@ -21,7 +21,7 @@ runtime.
    * - Apple Silicon macOS
      - MLX
      - Single-process unified-memory runtime
-     - MLX safetensors and processor assets
+     - MLX full weights or standard PEFT LoRA adapter
 
 Linux and CUDA
 --------------
@@ -41,7 +41,8 @@ Apple Silicon and MLX
 The MLX backend owns one in-process model for rollout, scoring, and training,
 plus a long-lived continuous-batch scheduler. It installs only the Apple
 Silicon dependency set and does not require Torch or CUDA. MLX runs with
-``world-size=1`` and ``tp-size=1`` and saves native MLX checkpoints.
+``world-size=1`` and ``tp-size=1`` and saves either native full-weight
+checkpoints or standard PEFT adapters for supported LoRA training.
 
 Read :doc:`mlx` for installation, unified-memory controls, continuous-batch
 serving, checkpoint behavior, ``mlx-lm``/``mlx-vlm`` model support, and

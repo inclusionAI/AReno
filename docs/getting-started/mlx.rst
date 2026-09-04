@@ -73,6 +73,35 @@ them explicitly, use ``--world-size 1 --tp-size 1``.
 training rows in one gradient microbatch. ``--gradient-accumulation-steps``
 controls how many such microbatches contribute to an optimizer update.
 
+LoRA
+~~~~
+
+Dense Qwen3 text checkpoints support the same standard PEFT-compatible LoRA
+configuration used by the CUDA backend. The base model stays frozen and only
+the requested adapter A/B arrays are optimized:
+
+.. code-block:: bash
+
+   areno train \
+     --ckpt /path/to/qwen3-model \
+     --dataset-path /path/to/train.jsonl \
+     --dataset-loader-fn /path/to/dataset_loader.py \
+     --algo sft \
+     --lora-rank 8 \
+     --lora-alpha 16 \
+     --save-path /path/to/adapters \
+     --save-interval 100
+
+Use ``--lora-adapter-path /path/to/peft-adapter`` to initialize training from
+an existing standard PEFT directory. The adapter metadata is authoritative for
+rank, alpha, dropout, and target modules. The same option can serve an exported
+adapter with ``areno serve`` while ``--model-path`` continues to identify its
+base checkpoint.
+
+MLX LoRA currently requires an unquantized Qwen3 Dense text checkpoint,
+``--lora-dropout 0``, and ``--reference-mode independent``. QLoRA, Qwen3 MoE,
+multimodal LoRA, multiple adapters, and ``reuse_actor_base`` are not supported.
+
 Memory controls
 ~~~~~~~~~~~~~~~
 
@@ -139,16 +168,26 @@ Checkpoints
 -----------
 
 The MLX providers can load compatible Hugging Face-layout and MLX-native
-checkpoints supported by ``mlx-lm`` or ``mlx-vlm``. AReno saves the trained
-policy in native MLX format, including model configuration, safetensors,
-tokenizer or processor assets, and ``areno_mlx_state.json``. Reload the saved
+checkpoints supported by ``mlx-lm`` or ``mlx-vlm``. Full-weight training saves
+the policy in native MLX format, including model configuration, safetensors,
+tokenizer or processor assets, and ``areno_mlx_state.json``. Reload that saved
 directory directly with either ``--ckpt`` or ``--model-path``.
 
-An MLX checkpoint is not advertised as a portable CUDA/Transformers export.
-Some unquantized model layouts may happen to be compatible, but MLX model
-sanitization, tensor layout, and quantization are model-family concerns. Test
-the target loader instead of renaming metadata. Optimizer and scheduler state
-are not part of the current MLX checkpoint round trip.
+LoRA training instead saves an adapter-only standard PEFT directory containing
+``adapter_config.json`` and ``adapter_model.safetensors``. The frozen base
+checkpoint is not copied. Continue adapter training with the base checkpoint
+as ``--ckpt`` plus the saved directory as ``--lora-adapter-path``; use the same
+pair with ``--model-path`` and ``--lora-adapter-path`` for serving. SDK callers
+can write the same artifact explicitly through ``Trainer.export_adapter``.
+Optimizer and scheduler state restart with the new trainer process.
+
+An MLX full-weight checkpoint is not advertised as a portable
+CUDA/Transformers export. Some unquantized model layouts may happen to be
+compatible, but MLX model sanitization, tensor layout, and quantization are
+model-family concerns. Test the target loader instead of renaming metadata.
+This restriction does not apply to the standard PEFT LoRA artifact described
+above. Optimizer and scheduler state are not part of the current MLX checkpoint
+round trip.
 
 Models and multimodal input
 ---------------------------
