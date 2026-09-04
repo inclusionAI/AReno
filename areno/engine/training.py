@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import warnings
 
 import torch
 import torch.distributed as dist
@@ -12,6 +13,7 @@ from areno.engine.modeling import param_grad, unwrap_model
 from areno.engine.parallel.context import get_tp_context
 from areno.engine.protocol import TrainPayload
 from areno.engine.runtime.logprobs import (
+    packed_mtp_token_logprobs,
     packed_next_token_logprobs,
     packed_next_token_logprobs_from_hidden,
 )
@@ -117,10 +119,12 @@ class TrainingManager:
         data_pack["_activation_checkpointing_enabled"] = worker.config.runtime.activation_checkpointing
         tokens = data_pack["input_ids"].long()
         position_ids = data_pack.get("position_ids")
+        mtp_loss_scale = self._resolved_mtp_loss_scale()
         train_meta = _train_meta(
             data_pack,
             tokens,
             sequence_parallel=worker.config.effective_sequence_parallel,
+            mtp_enabled=mtp_loss_scale > 0.0,
         )
         model_kwargs = {
             "input_ids": tokens,
@@ -154,6 +158,23 @@ class TrainingManager:
             loss = loss_out
         if not isinstance(loss, torch.Tensor):
             raise TypeError("train_loss_fn must return a torch.Tensor")
+        if out.mtp_logits_shard is not None:
+            mtp_loss = self._mtp_loss(out.mtp_logits_shard, tokens, data_pack)
+            loss = loss + mtp_loss_scale * mtp_loss
+            # Keep the tensor; the returned metrics are converted to floats
+            # after backward, avoiding a GPU sync on the hot path here.
+            metrics = dict(metrics or {})
+            metrics["mtp_loss"] = mtp_loss.detach()
+        elif mtp_loss_scale > 0.0:
+            # E.g. bailing v2 checkpoints declare MTP layers in their config
+            # but the model family implements none; without this the opt-in
+            # would no-op with nothing distinguishing it from a working run.
+            warnings.warn(
+                "runtime.mtp_loss_scale is set but the model produced no MTP logits; "
+                "the MTP loss is inactive for this model family.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
         (loss / max(grad_scale, 1)).backward()
         # Keep the original full-gradient path for every optimizer residency
         # mode, including disk. Disk offload still streams optimizer state,
@@ -326,6 +347,34 @@ class TrainingManager:
                 continue
             dist.all_reduce(grad, op=dist.ReduceOp.SUM, group=ctx.dp_group)
             grad.div_(ctx.dp_size)
+
+    def _resolved_mtp_loss_scale(self) -> float:
+        """Explicit runtime opt-in for the auxiliary MTP loss; 0 disables.
+
+        The checkpoint's `mtp_loss_scaling_factor` is deliberately not
+        inherited: it is a pretraining artifact, and the auxiliary NLL trains
+        toward every response token — silently inheriting it would corrupt
+        objectives like DPO where half the packed rows are rejected samples.
+        """
+
+        config = self.worker.config
+        if config.model.num_nextn_predict_layers <= 0:
+            return 0.0
+        return float(config.runtime.mtp_loss_scale or 0.0)
+
+    def _mtp_loss(self, mtp_logits_shard: torch.Tensor, tokens: torch.Tensor, data_pack: dict) -> torch.Tensor:
+        """Mean negative logprob of each response token t+2 under the MTP head."""
+
+        mtp_logprobs, mtp_valid = packed_mtp_token_logprobs(mtp_logits_shard, tokens, data_pack["train_cu_seqlens"])
+        response_mask = data_pack["packed_response_mask"]
+        seq_ids = data_pack["packed_seq_ids"]
+        # The t+2 target at action site k is trainable iff the next action
+        # site of the same row targets a response token.
+        mtp_mask = torch.zeros_like(response_mask)
+        if response_mask.numel() > 1:
+            mtp_mask[:-1] = response_mask[1:] & (seq_ids[:-1] == seq_ids[1:])
+        mtp_mask &= mtp_valid
+        return -(mtp_logprobs * mtp_mask).sum() / mtp_mask.sum().clamp(min=1)
 
     def _accumulate_main_gradients(self) -> None:
         """Fold one microbatch into resident FP32 parameter gradients."""

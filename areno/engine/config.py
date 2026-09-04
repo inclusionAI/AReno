@@ -70,6 +70,16 @@ class RuntimeConfig:
     optimizer_state_offload_batch_size: int = 1
     eager_decode: bool = False
     rollout_routing_replay: bool = False
+    # Explicit opt-in: a positive value enables the auxiliary MTP loss on
+    # models that ship MTP layers. The checkpoint's `mtp_loss_scaling_factor`
+    # is never inherited, and the loss trains toward every response token, so
+    # it is meant for SFT / policy-gradient RL — not preference objectives
+    # like DPO whose packed rows include rejected samples.
+    mtp_loss_scale: float | None = None
+    # Rollout speculative decoding: draft this many tokens per step with the
+    # checkpoint's MTP layer and verify them in one target forward. 0 = off.
+    # Requires the flash attention backend and a model with MTP layers.
+    speculative_draft_tokens: int = 0
     decode_graph_buckets: list[int] = field(
         default_factory=lambda: [1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 56, 64, 96, 128, 192, 256]
     )
@@ -85,6 +95,8 @@ class RuntimeConfig:
             raise ValueError("runtime.optimizer_state_offload_dir is required for disk offload")
         if self.optimizer_state_offload_batch_size < 1:
             raise ValueError("runtime.optimizer_state_offload_batch_size must be positive")
+        if self.speculative_draft_tokens < 0:
+            raise ValueError("runtime.speculative_draft_tokens must be non-negative")
 
     def resolve_attn_backend(self, *, model: ModelConfig, devices: list[int]) -> None:
         """Switch flash-attn unsupported hardware or model shapes to native attention."""

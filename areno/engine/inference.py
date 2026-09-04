@@ -18,12 +18,13 @@ from areno.engine.data.sampling import (
     _sample_full_vocab,
     _sample_greedy_sharded,
     _stop_token_ids,
+    _token_id_tuple,
     _truncate_generated,
 )
-from areno.engine.parallel.collectives import broadcast_object, broadcast_tensor
+from areno.engine.parallel.collectives import all_gather_last_dim, broadcast_object, broadcast_tensor
 from areno.engine.parallel.context import get_tp_context
 from areno.engine.protocol import RolloutPayload
-from areno.engine.runtime.common import _check_token_ids, _device_long
+from areno.engine.runtime.common import _check_token_ids, _device_long, ceil_div
 from areno.engine.runtime.decode_graph import (
     DecodeGraph,
     bucket_for,
@@ -33,6 +34,16 @@ from areno.engine.runtime.decode_graph import (
 from areno.engine.runtime.metadata import InferMeta
 from areno.engine.runtime.rollout import _empty_rollout
 from areno.engine.runtime.routing_replay import captured_routing, routing_replay_context
+from areno.engine.modeling import unwrap_model
+from areno.engine.runtime.speculative import (
+    mtp_input_tokens,
+    new_token_mask,
+    sample_from_probs,
+    sampling_probs,
+    selected_logprobs,
+    verify_drafts,
+)
+from areno.models.base import SpeculativeDraftModel
 
 logger = logging.getLogger(__name__)
 
@@ -59,11 +70,33 @@ def _cancel_stop_token(stop_token_ids: list[int], eos_token_id: int | tuple[int,
 
     if stop_token_ids:
         return int(stop_token_ids[0])
-    if isinstance(eos_token_id, tuple) and eos_token_id:
-        return int(eos_token_id[0])
+    if isinstance(eos_token_id, tuple):
+        return int(eos_token_id[0]) if eos_token_id else 0
     if eos_token_id is not None:
         return int(eos_token_id)
     return 0
+
+
+def _graph_for_rows(graphs: dict[int, DecodeGraph], rows: int) -> DecodeGraph | None:
+    """Smallest captured bucket that fits ``rows``; padded rows use the scratch block."""
+
+    for bucket in sorted(graphs):
+        if bucket >= rows:
+            return graphs[bucket]
+    return None
+
+
+def _prefill_next_input_ids(state: InferenceBatchState, raw: dict) -> torch.Tensor:
+    """Token after each packed prefill token: the prompt continuation, or -1 where sampling fills it."""
+
+    next_ids = torch.roll(raw["input_ids"], shifts=-1)
+    sampled = set(raw["sample_indices"].tolist())
+    boundaries = raw["cu_seqlens"].tolist()
+    positions = raw["position_ids"]
+    for seq_id, end in zip(raw["prefill_seq_ids"], boundaries[1:], strict=True):
+        last = end - 1
+        next_ids[last] = -1 if last in sampled else state.prompts[seq_id][int(positions[last]) + 1]
+    return next_ids
 
 
 @dataclass(slots=True)
@@ -92,6 +125,9 @@ class PrefillPayload:
     return_logprobs: bool
     infer_meta: object | None
     raw: dict
+    # Speculative decoding only: the prompt token after each packed prefill
+    # token, with -1 where the sampled first token fills in.
+    next_input_ids: torch.Tensor | None = None
 
     @classmethod
     def from_state_payload(
@@ -127,6 +163,9 @@ class InferenceManager:
     def __init__(self, worker):
         object.__setattr__(self, "worker", worker)
         self._last_routing_capture: torch.Tensor | None = None
+        # (rows, draft logits shard, draft hidden) at the sampled prefill
+        # positions, consumed when those rows enter the speculative loop.
+        self._last_prefill_draft: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
         if not hasattr(worker, "_decode_progress_lock"):
             worker._decode_progress_lock = threading.Lock()
             worker._decode_progress_next_time = 0.0
@@ -188,6 +227,8 @@ class InferenceManager:
             # Reallocation: prior CUDA graphs were captured against the old
             # cache pointers and are no longer valid.
             self._decode_graphs.clear()
+            self._verify_graphs.clear()
+            self._draft_graphs.clear()
             self._decode_graph_skipped_buckets.clear()
             self._decode_graph_init_attempted = False
         self._infer_batch_size = max_running_seqs
@@ -203,6 +244,8 @@ class InferenceManager:
         self._max_cache_len = max_cache_len
         self._max_blocks_per_seq = max_blocks_per_seq
         self._decode_graphs.clear()
+        self._verify_graphs.clear()
+        self._draft_graphs.clear()
         self._decode_graph_skipped_buckets.clear()
         self._decode_graph_init_attempted = False
         self._infer_cache_spec = (
@@ -212,6 +255,8 @@ class InferenceManager:
             self._max_cache_len,
             self._max_blocks_per_seq,
         )
+        if self.config.runtime.speculative_draft_tokens > 0:
+            self._enable_speculative_draft()
         caches = self.model.allocate_kv_caches(self._infer_cache_blocks, block_size, self.device)
         self.model.set_kv_caches(caches, num_slots=max_running_seqs + 1)
         self._train_state_ready = False
@@ -253,6 +298,18 @@ class InferenceManager:
             max_new_tokens = int(payload.max_new_tokens)
             eos_token_id = payload.eos_token_id
             max_cache_len = int(payload.max_cache_len)
+            num_cache_blocks = int(payload.num_blocks)
+            spec_k = self.config.runtime.speculative_draft_tokens
+            if spec_k > 0:
+                # A step writes k drafts plus k - 1 chained draft positions past
+                # the last committed token, so the last response token can have
+                # 2k speculative KV rows after it.
+                block_size = int(payload.block_size)
+                spec_cache_len = max_cache_len + 2 * spec_k
+                extra_blocks = ceil_div(spec_cache_len, block_size) - ceil_div(max_cache_len, block_size)
+                num_cache_blocks += extra_blocks * int(payload.max_running_seqs)
+                max_cache_len = spec_cache_len
+                self._last_prefill_draft = None
             state = InferenceBatchState(
                 prompts,
                 max_new_tokens,
@@ -260,7 +317,7 @@ class InferenceManager:
                 max_cache_len=max_cache_len,
                 max_prefill_tokens=int(payload.max_prefill_tokens),
                 kv_block_size=int(payload.block_size),
-                num_cache_blocks=int(payload.num_blocks),
+                num_cache_blocks=num_cache_blocks,
                 prompt_features=payload.prompt_features_by_dp[ctx.dp_rank]
                 if payload.prompt_features_by_dp is not None
                 else None,
@@ -358,11 +415,13 @@ class InferenceManager:
             torch.tensor(stop_token_ids, device=self.device, dtype=torch.long) if stop_token_ids else None
         )
         cancel_token = _cancel_stop_token(stop_token_ids, eos_token_id)
-        # When stop tokens exist, cancellation injects one of them; otherwise
-        # we still need *something* recognisable downstream as "stop".
-        truncate_stop_token_ids = (
-            stop_token_ids if stop_token_ids else ([cancel_token] if cancel_flags is not None else [])
-        )
+        # When stop tokens exist, cancellation injects one of them so the
+        # marker is recognisable downstream. Without stop tokens (ignore_eos)
+        # the fallback marker is a real vocab id and must NOT become a
+        # truncation stop token — it would silently cut healthy rows at any
+        # genuinely sampled occurrence; cancelled rows already terminate via
+        # their recorded response_lens.
+        truncate_stop_token_ids = stop_token_ids if stop_token_ids else []
         prompt_indices_list = list(prompt_indices) if prompt_indices is not None else list(range(prompt_count))
         # Convert per-DP cancel-index list into a tensor on CPU so the engine
         # can mutate the underlying shared memory between decode steps.
@@ -384,6 +443,12 @@ class InferenceManager:
         # active_rows[k] = the row index in `generated` of the k-th active seq.
         active_rows = torch.empty(0, device=self.device, dtype=torch.long)
         active_count = 0
+        # Speculative decoding: per active row, the k pending drafts and the
+        # full-vocab distributions they were drawn from (needed for rejection).
+        spec_k = self.config.runtime.speculative_draft_tokens
+        draft_tokens = torch.empty((0, spec_k), device=self.device, dtype=torch.long)
+        draft_probs = torch.empty((0, spec_k, self.config.model.vocab_size), device=self.device, dtype=torch.float32)
+        spec_verify_rows = 0
         # -------- decode loop --------
         self._record_decode_progress(
             enabled=progress_enabled,
@@ -406,6 +471,7 @@ class InferenceManager:
                         len(state.prompts),
                         state.max_new_tokens,
                     )
+            previous_count = active_count
             admitted = self._admit_pending_rollout_rows(
                 state,
                 generated,
@@ -439,6 +505,19 @@ class InferenceManager:
                     active_rows,
                     active_count,
                 ) = admitted
+            if spec_k > 0 and active_count > previous_count:
+                new_drafts, new_probs = self._admitted_row_drafts(
+                    state,
+                    active_rows[previous_count:],
+                    cache_seqlens[previous_count:],
+                    position_ids[previous_count:],
+                    response_lens,
+                    sampling_params,
+                    sample_generator,
+                    eos_token_id,
+                )
+                draft_tokens = torch.cat([draft_tokens[:previous_count], new_drafts], dim=0)
+                draft_probs = torch.cat([draft_probs[:previous_count], new_probs], dim=0)
             cancelled = self._cancel_mask_for_active_rows(active_rows, cancel_flags, cancel_indices_tensor)
             if cancelled is not None:
                 generated[active_rows[cancelled], 0] = cancel_token
@@ -461,49 +540,79 @@ class InferenceManager:
                 cache_seqlens = cache_seqlens[keep]
                 position_ids = position_ids[keep]
                 block_table = block_table[keep]
+                if spec_k > 0:
+                    draft_tokens = draft_tokens[keep]
+                    draft_probs = draft_probs[keep]
                 active_count = int(active_rows.numel())
             if active_count == 0 and not state.has_pending_prompts:
                 break
             if active_count == 0:
                 continue
-            self._ensure_decode_kv_blocks(state, active_rows, cache_seqlens)
+            if spec_k > 0:
+                self._ensure_speculative_kv_blocks(state, active_rows, cache_seqlens, 2 * spec_k)
+            else:
+                self._ensure_decode_kv_blocks(state, active_rows, cache_seqlens)
             block_table = self._block_table_for_active_rows(state, active_rows)
             recurrent_slots = self._recurrent_slots_for_active_rows(state, active_rows)
-            next_tokens, next_logprobs = self._infer_decode_next_token_tensor(
-                next_tokens,
-                position_ids,
-                cache_seqlens,
-                block_table,
-                recurrent_slots,
-                active_count,
-                sampling_params,
-                sample_generator,
-                sample_step=sample_step,
-                eos_token_id=eos_token_id,
-            )
-            state.record_decode_routing(active_rows, cache_seqlens, self._last_routing_capture)
+            if spec_k > 0:
+                next_tokens, draft_tokens, draft_probs, new_counts, finished = self._speculative_step(
+                    state,
+                    active_rows,
+                    next_tokens,
+                    draft_tokens,
+                    draft_probs,
+                    position_ids,
+                    cache_seqlens,
+                    block_table,
+                    recurrent_slots,
+                    generated,
+                    logprobs,
+                    response_lens,
+                    sampling_params,
+                    sample_generator,
+                    eos_token_id,
+                    stop_token_tensor,
+                )
+                step_tokens = int(new_counts.sum().item())
+                spec_verify_rows += active_count
+            else:
+                next_tokens, next_logprobs = self._infer_decode_next_token_tensor(
+                    next_tokens,
+                    position_ids,
+                    cache_seqlens,
+                    block_table,
+                    recurrent_slots,
+                    active_count,
+                    sampling_params,
+                    sample_generator,
+                    sample_step=sample_step,
+                    eos_token_id=eos_token_id,
+                )
+                state.record_decode_routing(active_rows, cache_seqlens, self._last_routing_capture)
+                # Write the new tokens into the per-row response buffer using
+                # advanced indexing: write_pos[k] is the next free slot for row k.
+                write_pos = response_lens[active_rows]
+                generated[active_rows, write_pos] = next_tokens
+                logprobs[active_rows, write_pos] = next_logprobs
+                response_lens[active_rows] = write_pos + 1
+                cache_seqlens.add_(1)
+                position_ids.add_(1)
+                step_tokens = active_count
+                finished = None
+                # EOS / stop-token filter.
+                if stop_token_tensor is not None:
+                    finished = next_tokens.unsqueeze(-1).eq(stop_token_tensor).any(dim=-1)
             sample_step += 1
-            # Write the new tokens into the per-row response buffer using
-            # advanced indexing: write_pos[k] is the next free slot for row k.
-            write_pos = response_lens[active_rows]
-            generated[active_rows, write_pos] = next_tokens
-            logprobs[active_rows, write_pos] = next_logprobs
-            response_lens[active_rows] = write_pos + 1
-            decoded_tokens += active_count
+            decoded_tokens += step_tokens
             self._record_decode_progress(
                 enabled=progress_enabled,
                 interval_s=decode_progress_interval_s,
                 rollout_key=progress_key,
                 active_count=active_count,
-                token_delta=active_count,
+                token_delta=step_tokens,
             )
-            cache_seqlens.add_(1)
-            position_ids.add_(1)
             remove = torch.zeros(active_count, device=self.device, dtype=torch.bool)
-            finished = None
-            # EOS / stop-token filter.
-            if stop_token_tensor is not None:
-                finished = next_tokens.unsqueeze(-1).eq(stop_token_tensor).any(dim=-1)
+            if finished is not None:
                 remove |= finished
             full_length = response_lens[active_rows] >= state.max_new_tokens
             remove |= full_length
@@ -548,6 +657,9 @@ class InferenceManager:
                 cache_seqlens = cache_seqlens[keep]
                 position_ids = position_ids[keep]
                 block_table = block_table[keep]
+                if spec_k > 0:
+                    draft_tokens = draft_tokens[keep]
+                    draft_probs = draft_probs[keep]
                 active_count = int(active_rows.numel())
         # Any rows still active at this point hit the length cap.
         if active_count > 0:
@@ -562,6 +674,17 @@ class InferenceManager:
                 tuple(truncate_stop_token_ids),
             )
         state.metrics["decode_scheduled_tokens"] = float(decoded_tokens)
+        if spec_k > 0:
+            # Mean accepted length per verified row = decode_scheduled_tokens / spec_verify_rows.
+            state.metrics["spec_verify_rows"] = float(spec_verify_rows)
+            if ctx.is_rank0:
+                logger.info(
+                    "speculative decode: drafts=%d verified_rows=%d new_tokens=%d mean_accept_len=%.3f",
+                    spec_k,
+                    spec_verify_rows,
+                    decoded_tokens,
+                    decoded_tokens / max(spec_verify_rows, 1),
+                )
         self._record_decode_progress(
             enabled=progress_enabled,
             interval_s=decode_progress_interval_s,
@@ -783,6 +906,8 @@ class InferenceManager:
                 sample_generator=sample_generator,
                 return_logprobs=True,
             )
+            if self.config.runtime.speculative_draft_tokens > 0:
+                prefill.next_input_ids = _prefill_next_input_ids(state, prefill.raw)
             new_rows = torch.tensor(state._last_active_ids, device=self.device, dtype=torch.long)
             if new_rows.numel() == 0:
                 self._run_prefill_payload(prefill)
@@ -919,8 +1044,15 @@ class InferenceManager:
         if payload.raw.get("features") is not None:
             model_kwargs["features"] = payload.raw["features"]
         with routing_replay_context(infer_meta):
-            self.model(**model_kwargs)
+            out = self.model(**model_kwargs)
         self._last_routing_capture = captured_routing(infer_meta)
+        if payload.next_input_ids is not None:
+            self.model.mtp_draft_forward(
+                input_ids=payload.next_input_ids.to(self.device).unsqueeze(0),
+                hidden_states=out.hidden_states,
+                position_ids=position_ids,
+                infer_meta=infer_meta,
+            )
 
     def _mark_rollout_finished_rows(
         self,
@@ -939,6 +1071,287 @@ class InferenceManager:
         if rows.numel() == 0 or finished_callback is None:
             return
         finished_callback(rows, generated, logprobs, response_lens, finish_reason, truncate_stop_token_ids)
+
+    def _enable_speculative_draft(self) -> None:
+        if self.config.runtime.attn_backend != "flash":
+            raise ValueError("runtime.speculative_draft_tokens requires attn_backend='flash'")
+        # Protocol checks look through `torch.compile`'s wrapper only after unwrapping.
+        model = unwrap_model(self.model)
+        if not isinstance(model, SpeculativeDraftModel):
+            raise ValueError(f"{type(model).__name__} has no MTP layers for speculative drafting")
+        model.enable_mtp_draft(
+            max_rows=self._infer_batch_size, tokens_per_seq=self.config.runtime.speculative_draft_tokens + 1
+        )
+
+    def _mtp_prefill_draft(
+        self,
+        payload: PrefillPayload,
+        infer_meta: InferMeta,
+        position_ids: torch.Tensor,
+        hidden_states: torch.Tensor,
+        sample_indices: torch.Tensor,
+        next_tokens: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Run the MTP layer over a sampled prefill chunk; keep its outputs at the sampled positions."""
+
+        assert payload.next_input_ids is not None
+        mtp_ids = payload.next_input_ids.to(self.device)
+        mtp_ids[sample_indices] = next_tokens
+        draft_logits, draft_hidden = self.model.mtp_draft_forward(
+            input_ids=mtp_ids.unsqueeze(0),
+            hidden_states=hidden_states,
+            position_ids=position_ids,
+            infer_meta=infer_meta,
+        )
+        rows = torch.tensor(payload.raw["prefill_seq_ids"], device=self.device, dtype=torch.long)
+        complete = _device_long(payload.raw["cu_seqlens"], self.device)[1:] - 1
+        sampled_rows = rows[torch.isin(complete, sample_indices)]
+        return sampled_rows, draft_logits[0, sample_indices], draft_hidden[0, sample_indices]
+
+    def _ensure_speculative_kv_blocks(
+        self, state: InferenceBatchState, active_rows: torch.Tensor, cache_seqlens: torch.Tensor, span: int
+    ) -> None:
+        """Ensure paged-KV blocks exist for the next ``span`` positions of every active row."""
+
+        if active_rows.numel() == 0:
+            return
+        rows = [int(row) for row in active_rows.detach().cpu().tolist()]
+        starts = [int(pos) for pos in cache_seqlens.detach().cpu().tolist()]
+        for offset in range(span):
+            state.ensure_decode_blocks(rows, [start + offset for start in starts])
+
+    def _admitted_row_drafts(
+        self,
+        state: InferenceBatchState,
+        rows: torch.Tensor,
+        cache_seqlens: torch.Tensor,
+        position_ids: torch.Tensor,
+        response_lens: torch.Tensor,
+        sampling_params: SamplingParams,
+        sample_generator: torch.Generator | None,
+        eos_token_id: int | tuple[int, ...] | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Draft for rows that just left prefill, from the MTP outputs stashed by that prefill."""
+
+        if self._last_prefill_draft is None:
+            raise RuntimeError("speculative rollout admitted rows without a prefill draft")
+        stash_rows, draft_logits, draft_hidden = self._last_prefill_draft
+        keep = torch.isin(stash_rows, rows)
+        if int(keep.sum().item()) != int(rows.numel()):
+            raise RuntimeError("prefill draft stash does not cover the admitted rows")
+        spec_k = self.config.runtime.speculative_draft_tokens
+        self._ensure_speculative_kv_blocks(state, rows, cache_seqlens, max(spec_k - 1, 1))
+        return self._draft_chain(
+            draft_logits[keep],
+            draft_hidden[keep],
+            cache_seqlens,
+            position_ids,
+            self._block_table_for_active_rows(state, rows),
+            self._recurrent_slots_for_active_rows(state, rows),
+            response_lens[rows],
+            sampling_params,
+            sample_generator,
+            eos_token_id,
+        )
+
+    def _draft_chain(
+        self,
+        draft_logits: torch.Tensor,
+        draft_hidden: torch.Tensor,
+        cache_seqlens: torch.Tensor,
+        position_ids: torch.Tensor,
+        block_table: torch.Tensor,
+        recurrent_slots: torch.Tensor,
+        response_lens: torch.Tensor,
+        sampling_params: SamplingParams,
+        sample_generator: torch.Generator | None,
+        eos_token_id: int | tuple[int, ...] | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Sample ``k`` chained drafts per row starting from the MTP layer's output for the sampled token.
+
+        ``draft_logits`` / ``draft_hidden`` come from the MTP position just
+        before the freshly sampled token, which sits at ``position_ids`` with
+        ``cache_seqlens`` tokens cached. Each further draft feeds the previous
+        draft and the MTP layer's own hidden state through the layer again.
+        """
+
+        spec_k = self.config.runtime.speculative_draft_tokens
+        eos_ids = _token_id_tuple(eos_token_id)
+        drafts, probs = [], []
+        for depth in range(spec_k):
+            step_probs = sampling_probs(
+                all_gather_last_dim(draft_logits), sampling_params, eos_ids, response_lens + depth
+            )
+            token = broadcast_tensor(sample_from_probs(step_probs, sample_generator).contiguous(), src=0)
+            drafts.append(token)
+            probs.append(step_probs)
+            if depth + 1 < spec_k:
+                draft_logits, draft_hidden = self._draft_forward(
+                    token,
+                    draft_hidden,
+                    position_ids + depth,
+                    cache_seqlens + depth,
+                    block_table,
+                    recurrent_slots,
+                    1,
+                )
+        return torch.stack(drafts, dim=1), torch.stack(probs, dim=1)
+
+    def _verify_forward(
+        self,
+        fed: torch.Tensor,
+        positions: torch.Tensor,
+        cache_seqlens: torch.Tensor,
+        block_table: torch.Tensor,
+        recurrent_slots: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, InferMeta]:
+        """Target forward over ``(rows, k + 1)`` fed tokens; returns flat logits, hidden, routes, meta."""
+
+        rows, steps = fed.shape
+        tokens = rows * steps
+        graph = _graph_for_rows(self._verify_graphs, rows) if not self.config.runtime.eager_decode else None
+        if graph is not None:
+            self._decode_progress_cuda_graph = True
+            logits_shard = graph.replay_tensors(fed, positions, cache_seqlens, block_table, recurrent_slots)
+            assert graph.output_hidden is not None
+            return logits_shard[0, :tokens], graph.output_hidden[0, :tokens], graph.routing_capture, graph.meta
+        infer_meta = InferMeta(
+            mode="decode",
+            cache_seqlens=cache_seqlens,
+            block_table=block_table,
+            recurrent_slots=recurrent_slots,
+            capture_routing=self.config.runtime.rollout_routing_replay,
+            tokens_per_seq=steps,
+        )
+        with routing_replay_context(infer_meta):
+            out = self.model(input_ids=fed.view(1, -1), position_ids=positions.view(1, -1), infer_meta=infer_meta)
+        return out.logits_shard[0], out.hidden_states[0], captured_routing(infer_meta), infer_meta
+
+    def _draft_forward(
+        self,
+        input_ids: torch.Tensor,
+        hidden_states: torch.Tensor,
+        positions: torch.Tensor,
+        cache_seqlens: torch.Tensor,
+        block_table: torch.Tensor,
+        recurrent_slots: torch.Tensor,
+        tokens_per_seq: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """MTP draft forward over ``rows * tokens_per_seq`` flat tokens; returns flat logits and hidden."""
+
+        rows = int(cache_seqlens.numel())
+        tokens = rows * tokens_per_seq
+        graphs = {b: g for (b, t), g in self._draft_graphs.items() if t == tokens_per_seq}
+        graph = _graph_for_rows(graphs, rows) if not self.config.runtime.eager_decode else None
+        if graph is not None:
+            logits_shard = graph.replay_tensors(
+                input_ids, positions, cache_seqlens, block_table, recurrent_slots, hidden_states=hidden_states
+            )
+            assert graph.output_hidden is not None
+            return logits_shard[0, :tokens], graph.output_hidden[0, :tokens]
+        infer_meta = InferMeta(
+            mode="decode",
+            cache_seqlens=cache_seqlens,
+            block_table=block_table,
+            recurrent_slots=recurrent_slots,
+            tokens_per_seq=tokens_per_seq,
+        )
+        logits_shard, hidden = self.model.mtp_draft_forward(
+            input_ids=input_ids.view(1, -1),
+            hidden_states=hidden_states.reshape(1, tokens, -1),
+            position_ids=positions.view(1, -1),
+            infer_meta=infer_meta,
+        )
+        return logits_shard[0], hidden[0]
+
+    @torch.inference_mode()
+    def _speculative_step(
+        self,
+        state: InferenceBatchState,
+        active_rows: torch.Tensor,
+        next_tokens: torch.Tensor,
+        draft_tokens: torch.Tensor,
+        draft_probs: torch.Tensor,
+        position_ids: torch.Tensor,
+        cache_seqlens: torch.Tensor,
+        block_table: torch.Tensor,
+        recurrent_slots: torch.Tensor,
+        generated: torch.Tensor,
+        logprobs: torch.Tensor,
+        response_lens: torch.Tensor,
+        sampling_params: SamplingParams,
+        sample_generator: torch.Generator | None,
+        eos_token_id: int | tuple[int, ...] | None,
+        stop_token_tensor: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        """Verify the drafts, commit accepted tokens, and draft for the next step.
+
+        Advances ``cache_seqlens`` / ``position_ids`` in place by the number of
+        committed fed tokens and writes the new response tokens. Returns the
+        next fed token, the next drafts and their distributions, the number of
+        response tokens written per row, and the stop mask.
+        """
+
+        rows, spec_k = draft_tokens.shape
+        steps = spec_k + 1
+        offsets = torch.arange(steps, device=self.device)
+        fed = torch.cat([next_tokens.unsqueeze(-1), draft_tokens], dim=-1)
+        positions = position_ids.unsqueeze(-1) + offsets
+        logits_shard, hidden, routes, infer_meta = self._verify_forward(
+            fed, positions, cache_seqlens, block_table, recurrent_slots
+        )
+        write_pos = response_lens[active_rows]
+        sample_steps = (write_pos.unsqueeze(-1) + offsets).view(-1)
+        full_logits = all_gather_last_dim(logits_shard)
+        target_probs = sampling_probs(full_logits, sampling_params, _token_id_tuple(eos_token_id), sample_steps).view(
+            rows, steps, -1
+        )
+        new_tokens, accepted = verify_drafts(target_probs, draft_tokens, draft_probs, generator=sample_generator)
+        new_tokens = broadcast_tensor(new_tokens.contiguous(), src=0)
+        accepted = broadcast_tensor(accepted.contiguous(), src=0)
+        _check_token_ids(new_tokens, self.config.model.vocab_size, "speculative new_tokens")
+        committed = accepted + 1
+        self.model.commit_speculative_state(committed, infer_meta=infer_meta)
+        if routes is not None:
+            # Routes for rejected positions get overwritten when those positions are re-fed.
+            state.record_decode_routing(
+                active_rows.repeat_interleave(steps), (cache_seqlens.unsqueeze(-1) + offsets).view(-1), routes
+            )
+        # Response tokens: the accepted drafts and the resampled token, cut at
+        # the first stop token and at the response cap.
+        token_logprobs = selected_logprobs(full_logits, new_tokens.view(-1)).view(rows, steps)
+        valid = new_token_mask(new_tokens, accepted, stop_token_tensor, write_pos, state.max_new_tokens)
+        # Dense write without a host sync: invalid columns re-write the row's
+        # previous token slot (write_pos - 1 >= 0 after prefill) with its own value.
+        dest_rows = active_rows.unsqueeze(-1).expand(rows, steps)
+        dest_cols = torch.where(valid, write_pos.unsqueeze(-1) + offsets, (write_pos - 1).unsqueeze(-1))
+        generated[dest_rows, dest_cols] = torch.where(valid, new_tokens, generated[dest_rows, dest_cols])
+        logprobs[dest_rows, dest_cols] = torch.where(valid, token_logprobs, logprobs[dest_rows, dest_cols])
+        new_counts = valid.sum(dim=-1)
+        response_lens[active_rows] = write_pos + new_counts
+        finished = None
+        if stop_token_tensor is not None:
+            finished = (new_tokens.unsqueeze(-1).eq(stop_token_tensor).any(dim=-1) & valid).any(dim=-1)
+        row_ids = torch.arange(rows, device=self.device)
+        mtp_ids = mtp_input_tokens(fed, new_tokens, accepted)
+        draft_logits, draft_hidden = self._draft_forward(
+            mtp_ids, hidden, positions, cache_seqlens, block_table, recurrent_slots, steps
+        )
+        cache_seqlens.add_(committed.to(cache_seqlens.dtype))
+        position_ids.add_(committed)
+        next_drafts, next_probs = self._draft_chain(
+            draft_logits.view(rows, steps, -1)[row_ids, accepted],
+            draft_hidden.view(rows, steps, -1)[row_ids, accepted],
+            cache_seqlens,
+            position_ids,
+            block_table,
+            recurrent_slots,
+            response_lens[active_rows],
+            sampling_params,
+            sample_generator,
+            eos_token_id,
+        )
+        return new_tokens[row_ids, accepted], next_drafts, next_probs, new_counts, finished
 
     @torch.inference_mode()
     def _infer_next_token_tensor(self, payload: PrefillPayload) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
@@ -992,6 +1405,10 @@ class InferenceManager:
             )
         # broadcast_tensor src=0: keep the sampled ids identical across TP.
         next_tokens = broadcast_tensor(next_tokens.contiguous(), src=0)
+        if payload.next_input_ids is not None:
+            self._last_prefill_draft = self._mtp_prefill_draft(
+                payload, infer_meta, position_ids, out.hidden_states, sample_indices, next_tokens
+            )
         if payload.return_logprobs:
             _check_token_ids(next_tokens, self.config.model.vocab_size, "sampled next_tokens")
             token_logprobs = _policy_token_logprobs(
@@ -1090,14 +1507,7 @@ class InferenceManager:
         """
         if self.config.runtime.eager_decode:
             return None
-        bucket = bucket_for(active_count, self.config.runtime.decode_graph_buckets)
-        graph = self._decode_graphs.get(bucket)
-        if graph is not None:
-            return graph
-        for captured_bucket in sorted(self._decode_graphs):
-            if captured_bucket >= active_count:
-                return self._decode_graphs[captured_bucket]
-        return None
+        return _graph_for_rows(self._decode_graphs, active_count)
 
     @torch.inference_mode()
     def _init_decode_graphs(self) -> None:
@@ -1130,52 +1540,83 @@ class InferenceManager:
             {bucket for bucket in self.config.runtime.decode_graph_buckets if 1 <= bucket <= self._infer_batch_size}
         )
         buckets.append(self._infer_batch_size)
+        spec_k = self.config.runtime.speculative_draft_tokens
         for bucket in sorted(set(buckets)):
             if bucket in self._decode_graphs or bucket in self._decode_graph_skipped_buckets:
                 continue
-            graph = DecodeGraph(
-                self.model,
-                bucket,
-                self._max_blocks_per_seq,
-                self._scratch_block,
-                self._scratch_recurrent_slot,
-                self.device,
-                capture_routing=self.config.runtime.rollout_routing_replay,
-            )
-            # Warmup: run a few eager forwards at this bucket size to (a) trim
-            # compiler / allocator noise and (b) measure the working-set peak
-            # we need free at capture time.
-            warmup_bytes = graph.warmup()
-            sync_before_graph_capture(self.device, ctx.group)
-            # All ranks vote on whether HBM headroom exists; any rank tight on
-            # memory aborts the whole bucket so no rank is left half-captured.
-            if not has_graph_capture_memory(self.device, ctx.group, warmup_bytes):
-                if ctx.is_rank0:
-                    free_bytes, _ = torch.cuda.mem_get_info(self.device)
-                    logger.info(
-                        "skipping decode CUDA graph capture: bucket=%d free_gib=%.2f warmup_peak_gib=%.2f",
-                        bucket,
-                        free_bytes / (1024**3),
-                        warmup_bytes / (1024**3),
-                    )
-                sync_before_graph_capture(self.device, ctx.group)
-                self._decode_graph_skipped_buckets.add(bucket)
-                continue
-            try:
-                graph.capture()
-            except torch.OutOfMemoryError:
-                # Capture itself can still OOM (extra workspace allocations);
-                # in that case fall back to eager for this bucket and move on.
-                if self.device.type == "cuda":
-                    torch.cuda.empty_cache()
-                if ctx.is_rank0:
-                    free_bytes, _ = torch.cuda.mem_get_info(self.device)
-                    logger.warning(
-                        "skipping decode CUDA graph capture after OOM: bucket=%d free_gib=%.2f fallback=eager",
-                        bucket,
-                        free_bytes / (1024**3),
-                    )
-                sync_before_graph_capture(self.device, ctx.group)
+            graph = self._new_decode_graph(bucket)
+            if not self._capture_graph(graph, f"decode bucket={bucket}"):
                 self._decode_graph_skipped_buckets.add(bucket)
                 continue
             self._decode_graphs[bucket] = graph
+            if spec_k > 0:
+                self._init_speculative_graphs(bucket, spec_k)
+
+    def _new_decode_graph(self, bucket: int, **kwargs) -> DecodeGraph:
+        return DecodeGraph(
+            self.model,
+            bucket,
+            self._max_blocks_per_seq,
+            self._scratch_block,
+            self._scratch_recurrent_slot,
+            self.device,
+            capture_routing=self.config.runtime.rollout_routing_replay,
+            **kwargs,
+        )
+
+    def _init_speculative_graphs(self, bucket: int, spec_k: int) -> None:
+        """Capture the verify graph and the MTP draft graphs (full step and single chain token)."""
+
+        steps = spec_k + 1
+        verify = self._new_decode_graph(bucket, tokens_per_seq=steps)
+        if self._capture_graph(verify, f"verify bucket={bucket} tokens_per_seq={steps}"):
+            self._verify_graphs[bucket] = verify
+        for tokens_per_seq in sorted({steps, 1} if spec_k > 1 else {steps}):
+            draft = self._new_decode_graph(
+                bucket,
+                tokens_per_seq=tokens_per_seq,
+                draft_hidden_size=self.config.model.hidden_size,
+                hidden_dtype=self.config.model.dtype,
+            )
+            if self._capture_graph(draft, f"draft bucket={bucket} tokens_per_seq={tokens_per_seq}"):
+                self._draft_graphs[(bucket, tokens_per_seq)] = draft
+
+    def _capture_graph(self, graph: DecodeGraph, label: str) -> bool:
+        """Warm up, vote on memory across ranks, and capture; False means fall back to eager."""
+
+        ctx = get_tp_context()
+        # Warmup: run a few eager forwards at this bucket size to (a) trim
+        # compiler / allocator noise and (b) measure the working-set peak
+        # we need free at capture time.
+        warmup_bytes = graph.warmup()
+        sync_before_graph_capture(self.device, ctx.group)
+        # All ranks vote on whether HBM headroom exists; any rank tight on
+        # memory aborts the whole bucket so no rank is left half-captured.
+        if not has_graph_capture_memory(self.device, ctx.group, warmup_bytes):
+            if ctx.is_rank0:
+                free_bytes, _ = torch.cuda.mem_get_info(self.device)
+                logger.info(
+                    "skipping CUDA graph capture: %s free_gib=%.2f warmup_peak_gib=%.2f",
+                    label,
+                    free_bytes / (1024**3),
+                    warmup_bytes / (1024**3),
+                )
+            sync_before_graph_capture(self.device, ctx.group)
+            return False
+        try:
+            graph.capture()
+        except torch.OutOfMemoryError:
+            # Capture itself can still OOM (extra workspace allocations);
+            # in that case fall back to eager for this bucket and move on.
+            if self.device.type == "cuda":
+                torch.cuda.empty_cache()
+            if ctx.is_rank0:
+                free_bytes, _ = torch.cuda.mem_get_info(self.device)
+                logger.warning(
+                    "skipping CUDA graph capture after OOM: %s free_gib=%.2f fallback=eager",
+                    label,
+                    free_bytes / (1024**3),
+                )
+            sync_before_graph_capture(self.device, ctx.group)
+            return False
+        return True
