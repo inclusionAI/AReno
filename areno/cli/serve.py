@@ -28,7 +28,11 @@ from areno.api.multimodal import (
     mrope_position_ids_from_image_grid,
 )
 from areno.api.openai_chat import build_chat_completion_response, messages_to_prompt_tokens
-from areno.api.tokenizer import apply_chat_template_with_options, configure_chat_template_enable_thinking
+from areno.api.tokenizer import (
+    apply_chat_template_with_options,
+    configure_chat_template_enable_thinking,
+    eos_token_ids,
+)
 from areno.api.tool_call_parser import ToolCallParser, get_tool_call_parser, infer_tool_call_parser_name
 from areno.cli.model_refs import resolve_model_ref
 from areno.engine.data.tokenizer import load_processor, load_tokenizer
@@ -933,21 +937,7 @@ def _image_token_id(tokenizer: Any, processor: Any) -> int | None:
 def _generation_eos_token_ids(model_path: str, tokenizer: Any) -> tuple[int, ...]:
     """Use the checkpoint generation config's complete EOS set when available."""
 
-    tokenizer_eos = getattr(tokenizer, "eos_token_id", None)
-    fallback = (int(tokenizer_eos),) if isinstance(tokenizer_eos, int) else tuple(tokenizer_eos or ())
-    try:
-        from transformers import GenerationConfig
-
-        configured = GenerationConfig.from_pretrained(model_path).eos_token_id
-    except (OSError, ValueError):
-        configured = None
-    if isinstance(configured, int):
-        configured = (configured,)
-    if isinstance(configured, list | tuple):
-        # Preserve checkpoint order: the first value is also passed to samplers
-        # that accept only one EOS id.  Dict deduplication is deterministic.
-        return tuple(dict.fromkeys(int(value) for value in tuple(configured) + fallback))
-    return tuple(int(value) for value in fallback)
+    return eos_token_ids(model_path, tokenizer)
 
 
 def _normalize_stop(stop: str | list[str] | None) -> list[str]:
