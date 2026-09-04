@@ -23,6 +23,7 @@ from areno.api.dashboard import record_dashboard_state
 from areno.api.data_utils import apply_chat_template, encode_prompt_value, response_to_tokens_and_mask
 from areno.api.roles import ModelRole
 from areno.api.tokenizer import configure_chat_template_enable_thinking
+from areno.engine.runtime.oom_diagnostics import OOMStage, oom_stage
 
 
 class DPOTrainer:
@@ -48,8 +49,9 @@ class DPOTrainer:
         }
 
     def fit(self) -> None:
-        self.areno.init()
-        self._ensure_roles()
+        with oom_stage(OOMStage.MODEL_LOADING):
+            self.areno.init()
+            self._ensure_roles()
         try:
             self._fit_initialized()
         finally:
@@ -80,9 +82,10 @@ class DPOTrainer:
                 ref_start = time.perf_counter()
                 # Score the exact chosen/rejected token rows under the frozen
                 # reference before the actor update.
-                ref_logprob_rows = self.areno.score_logprobs(
-                    "ref", [seq.tokens for seq in train_batch], microbatch_size=self.config.score_micro_bs
-                )
+                with oom_stage(OOMStage.TRAINING):
+                    ref_logprob_rows = self.areno.score_logprobs(
+                        "ref", [seq.tokens for seq in train_batch], microbatch_size=self.config.score_micro_bs
+                    )
                 ref_time_s = time.perf_counter() - ref_start
                 self.logger.info(
                     "epoch=%d step=%d role=ref stage=logprob_score_end rows=%d", epoch, step, len(train_batch)
@@ -108,12 +111,13 @@ class DPOTrainer:
                 train_start = time.perf_counter()
                 # The train batch rows are [chosen, rejected, ...]; dpo_loss_fn
                 # recovers pairs by row order inside each even-sized microbatch.
-                result = self.areno.train(
-                    train_batch,
-                    self.loss_fn,
-                    mini_bs=self.config.mini_bs,
-                    gradient_accumulation_steps=self.config.gradient_accumulation_steps,
-                )
+                with oom_stage(OOMStage.TRAINING):
+                    result = self.areno.train(
+                        train_batch,
+                        self.loss_fn,
+                        mini_bs=self.config.mini_bs,
+                        gradient_accumulation_steps=self.config.gradient_accumulation_steps,
+                    )
                 train_time_s = time.perf_counter() - train_start
                 if isinstance(result, dict):
                     result["ref_logprob_forward_time_s"] = ref_time_s
