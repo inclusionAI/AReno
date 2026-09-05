@@ -222,6 +222,10 @@ class ModelConfig:
     group_norm_size: int = 128
     num_nextn_predict_layers: int = 0
     mtp_loss_scaling_factor: float = 0.0
+    # Whether to build the checkpoint's MTP layers at all. EngineConfig turns
+    # this off unless the MTP loss or speculative decoding needs them, so idle
+    # partitions do not load, hold, or policy-sync unused parameters.
+    mtp_layers_enabled: bool = True
     qk_nope_head_dim: int = 0
     qk_rope_head_dim: int = 0
     v_head_dim: int = 0
@@ -362,6 +366,11 @@ class EngineConfig:
         self.runtime.resolve_compile_model(model=self.model, devices=self.devices)
         self.runtime.resolve_eager_decode(model=self.model, lora=self.lora)
         self.model.attn_backend = self.runtime.attn_backend
+        # Train and rollout partitions share this runtime, so both sides agree
+        # on whether MTP tensors exist and the policy-sync plans stay aligned.
+        self.model.mtp_layers_enabled = self.model.num_nextn_predict_layers > 0 and (
+            self.runtime.mtp_loss_scale is not None or self.runtime.speculative_draft_tokens > 0
+        )
 
     @property
     def effective_sequence_parallel(self) -> bool:

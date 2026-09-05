@@ -35,6 +35,7 @@ and a sparse mixture-of-experts MLP:
 
 from __future__ import annotations
 
+import logging
 import math
 from collections.abc import Iterator, Sequence
 from pathlib import Path
@@ -1724,7 +1725,10 @@ class BailingMoeV3ForCausalLM(nn.Module):
         # layer holds a view so the speculative commit touches one tensor.
         self._kda_state_cache: torch.Tensor | None = None
         self._kda_conv_cache: torch.Tensor | None = None
-        # Shared speculative verify-state buffers, sized by `enable_mtp_draft`.
+        # Shared speculative verify-state buffers: sized by `enable_mtp_draft`,
+        # allocated on first use, dropped with the inference caches.
+        self._spec_max_rows = 0
+        self._spec_tokens_per_seq = 0
         self._spec_state_buffer: torch.Tensor | None = None
         self._spec_conv_buffer: torch.Tensor | None = None
         if config.num_nextn_predict_layers > 1:
@@ -1740,9 +1744,16 @@ class BailingMoeV3ForCausalLM(nn.Module):
             nn.ModuleList(
                 BailingMTPLayer(config, config.num_hidden_layers + i) for i in range(config.num_nextn_predict_layers)
             )
-            if config.num_nextn_predict_layers > 0
+            if config.num_nextn_predict_layers > 0 and config.mtp_layers_enabled
             else None
         )
+        if config.num_nextn_predict_layers > 0 and not config.mtp_layers_enabled:
+            log_once(
+                "bailing_v3_mtp_layers_skipped",
+                "checkpoint ships MTP layers that are not built; set runtime.mtp_loss_scale or "
+                "runtime.speculative_draft_tokens to use them (checkpoints saved from this model omit them)",
+                level=logging.INFO,
+            )
         # Set by `enable_mtp_draft`; only then do MTP layers get KV caches.
         self.mtp_draft_enabled = False
         self.norm = RMSNorm(config.hidden_size, config.rms_norm_eps)
@@ -1761,18 +1772,8 @@ class BailingMoeV3ForCausalLM(nn.Module):
     ) -> CausalLMOutput:
         if position_ids is None:
             position_ids = torch.arange(input_ids.shape[1], device=input_ids.device).unsqueeze(0).expand_as(input_ids)
-        if (
-            infer_meta is not None
-            and infer_meta.tokens_per_seq > 1
-            and infer_meta.speculative_recurrent_states is None
-            and self._spec_state_buffer is not None
-            and self._spec_conv_buffer is not None
-        ):
-            rows = input_ids.shape[1] // infer_meta.tokens_per_seq
-            if infer_meta.tokens_per_seq != self._spec_state_buffer.shape[2]:
-                raise ValueError("verify tokens_per_seq differs from the size passed to enable_mtp_draft")
-            infer_meta.speculative_recurrent_states = self._spec_state_buffer[:, :rows]
-            infer_meta.speculative_conv_windows = self._spec_conv_buffer[:, :rows]
+        if infer_meta is not None and infer_meta.tokens_per_seq > 1 and infer_meta.speculative_recurrent_states is None:
+            self._attach_speculative_buffers(infer_meta, rows=input_ids.shape[1] // infer_meta.tokens_per_seq)
         hidden_states = self.word_embeddings(input_ids)
         use_sequence_parallel = bool(train_meta is not None and train_meta.sequence_parallel)
         if use_sequence_parallel:
@@ -1816,23 +1817,36 @@ class BailingMoeV3ForCausalLM(nn.Module):
         if self.mtp_layers is None:
             raise ValueError("this checkpoint has no MTP layers to draft with")
         self.mtp_draft_enabled = True
+        self._spec_max_rows = int(max_rows)
+        self._spec_tokens_per_seq = int(tokens_per_seq)
+        self._spec_state_buffer = None
+        self._spec_conv_buffer = None
+
+    def _attach_speculative_buffers(self, infer_meta: InferMeta, *, rows: int) -> None:
+        """Hand a verify forward its row slice of the shared KDA verify-state buffers."""
         kda = _kda_attentions(self)
-        if not kda:
+        if not kda or self._spec_max_rows == 0:
             return
-        # One buffer for every verify forward and every CUDA-graph bucket;
-        # forwards take a row slice, so buckets do not each hold a copy.
-        device = next(self.parameters()).device
-        first = kda[0]
-        self._spec_state_buffer = torch.empty(
-            (len(kda), max_rows, tokens_per_seq, first.local_heads, first.head_dim, first.v_head_dim),
-            device=device,
-            dtype=torch.float32,
-        )
-        self._spec_conv_buffer = torch.empty(
-            (len(kda), max_rows, 3, first.local_proj_dim, first.conv_kernel_size - 1 + tokens_per_seq),
-            device=device,
-            dtype=self.config.dtype,
-        )
+        if infer_meta.tokens_per_seq != self._spec_tokens_per_seq:
+            raise ValueError("verify tokens_per_seq differs from the size passed to enable_mtp_draft")
+        if self._spec_state_buffer is None or self._spec_conv_buffer is None:
+            # One buffer for every verify forward and every CUDA-graph bucket;
+            # forwards take a row slice, so buckets do not each hold a copy.
+            first = kda[0]
+            device = first.state_cache.device
+            steps = self._spec_tokens_per_seq
+            self._spec_state_buffer = torch.empty(
+                (len(kda), self._spec_max_rows, steps, first.local_heads, first.head_dim, first.v_head_dim),
+                device=device,
+                dtype=torch.float32,
+            )
+            self._spec_conv_buffer = torch.empty(
+                (len(kda), self._spec_max_rows, 3, first.local_proj_dim, first.conv_kernel_size - 1 + steps),
+                device=device,
+                dtype=self.config.dtype,
+            )
+        infer_meta.speculative_recurrent_states = self._spec_state_buffer[:, :rows]
+        infer_meta.speculative_conv_windows = self._spec_conv_buffer[:, :rows]
 
     def mtp_draft_forward(
         self,
@@ -1982,6 +1996,11 @@ class BailingMoeV3ForCausalLM(nn.Module):
     def clear_kv_caches(self) -> None:
         for layer in _infer_cache_layers(self):
             layer.attention.clear_kv_cache()
+        # The per-layer caches above are views of these; drop the owners too.
+        self._kda_state_cache = None
+        self._kda_conv_cache = None
+        self._spec_state_buffer = None
+        self._spec_conv_buffer = None
 
     @torch.no_grad()
     def reset_kv_caches(self) -> None:
@@ -2014,6 +2033,9 @@ class BailingMoeV3ForCausalLM(nn.Module):
             self._kda_state_cache = self._kda_state_cache.to(device="cpu")
             self._kda_conv_cache = self._kda_conv_cache.to(device="cpu")
             _bind_kda_caches(self)
+        # Verify scratch holds no request state; free it and reallocate on demand.
+        self._spec_state_buffer = None
+        self._spec_conv_buffer = None
 
     @torch.no_grad()
     def onload_kv_caches(self, device: torch.device) -> bool:

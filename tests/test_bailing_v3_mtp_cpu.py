@@ -143,6 +143,52 @@ def test_model_builds_mtp_layers_only_when_configured():
     without_mtp = BailingMoeV3ForCausalLM(_tiny_moe_config(num_nextn_predict_layers=0))
     assert without_mtp.mtp_layers is None
 
+    disabled = BailingMoeV3ForCausalLM(_tiny_moe_config(mtp_layers_enabled=False))
+    assert disabled.mtp_layers is None
+
+
+def test_engine_config_builds_mtp_layers_only_when_a_feature_needs_them():
+    from areno.engine.config import EngineConfig, RuntimeConfig
+
+    def resolved(**runtime) -> bool:
+        cfg = EngineConfig(model=_tiny_config(), tp_size=1, devices=[0], runtime=RuntimeConfig(**runtime))
+        return cfg.model.mtp_layers_enabled
+
+    assert resolved() is False
+    assert resolved(mtp_loss_scale=0.1) is True
+    assert resolved(speculative_draft_tokens=2) is True
+    no_head = EngineConfig(
+        model=_tiny_config(num_nextn_predict_layers=0),
+        tp_size=1,
+        devices=[0],
+        runtime=RuntimeConfig(speculative_draft_tokens=2),
+    )
+    assert no_head.model.mtp_layers_enabled is False
+
+
+def test_clear_and_offload_release_stacked_kda_and_verify_buffers():
+    pytest.importorskip("fla")
+    from areno.engine.runtime.metadata import InferMeta
+    from areno.models.bailing_v3.model import BailingMoeV3ForCausalLM
+
+    model = BailingMoeV3ForCausalLM(_tiny_config())
+    model.set_kv_caches(model.allocate_kv_caches(2, 256, torch.device("cpu")), num_slots=2)
+    model.enable_mtp_draft(max_rows=2, tokens_per_seq=3)
+    meta = InferMeta(mode="decode", tokens_per_seq=3)
+    model._attach_speculative_buffers(meta, rows=1)
+    assert meta.speculative_recurrent_states is not None and meta.speculative_recurrent_states.shape[1] == 1
+    assert model._kda_state_cache is not None and model._spec_state_buffer is not None
+    kda = model.layers[0].attention
+    assert kda.state_cache.data_ptr() == model._kda_state_cache[0].data_ptr()
+
+    model.offload_kv_caches()
+    assert model._spec_state_buffer is None and model._spec_conv_buffer is None
+    assert model._kda_state_cache is not None and kda.state_cache.numel() > 0
+
+    model.clear_kv_caches()
+    assert model._kda_state_cache is None and model._kda_conv_cache is None
+    assert kda.state_cache.numel() == 0 and kda.conv_cache.numel() == 0
+
 
 def test_model_rejects_multi_layer_mtp():
     pytest.importorskip("fla")

@@ -120,7 +120,9 @@ Performance (decode loop measured inside the worker; the client-side wall clock 
 
 Two defects found by the sweep are fixed: a single active row made the verify conv output a strided view that the recurrent kernel read as contiguous (garbage at B=1), and every verify CUDA graph bucket held its own KDA intermediate-state buffer (about 16 GB across buckets at 64 running rows); the buffer is now allocated once and shared.
 
-Not done: native backend support, TP > 1 measurement, gating MTP layer construction on the worker role (reference workers still build them), and an async scheduler to hide the host syncs.
+MTP layers are built only when a feature needs them: `EngineConfig` resolves `ModelConfig.mtp_layers_enabled` from `runtime.mtp_loss_scale` / `runtime.speculative_draft_tokens` (shared by the train and rollout partitions so policy-sync plans stay aligned), and reference / critic / reward roles never build them. Checkpoints saved from a model built without them omit the MTP head, which the model logs once at construction. Both knobs are exposed as `TrainerConfig.mtp_loss_scale`, `RolloutTrainerConfig.speculative_draft_tokens`, and the `--mtp-loss-scale` / `--speculative-draft-tokens` flags of `areno train`. Speculative mode captures only verify and draft graphs, and the stacked KDA caches plus the shared verify buffers are released by `clear_kv_caches` / `offload_kv_caches` so role switching does not leak HBM.
+
+Not done: native backend support, TP > 1 measurement, and an async scheduler to hide the host syncs.
 
 ## Related fix found during the study
 

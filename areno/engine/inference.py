@@ -1540,15 +1540,20 @@ class InferenceManager:
         buckets.append(self._infer_batch_size)
         spec_k = self.config.runtime.speculative_draft_tokens
         for bucket in sorted(set(buckets)):
-            if bucket in self._decode_graphs or bucket in self._decode_graph_skipped_buckets:
+            if bucket in self._decode_graph_skipped_buckets:
+                continue
+            if spec_k > 0:
+                # The speculative loop never runs the single-token decode graph.
+                if bucket not in self._verify_graphs:
+                    self._init_speculative_graphs(bucket, spec_k)
+                continue
+            if bucket in self._decode_graphs:
                 continue
             graph = self._new_decode_graph(bucket)
             if not self._capture_graph(graph, f"decode bucket={bucket}"):
                 self._decode_graph_skipped_buckets.add(bucket)
                 continue
             self._decode_graphs[bucket] = graph
-            if spec_k > 0:
-                self._init_speculative_graphs(bucket, spec_k)
 
     def _new_decode_graph(self, bucket: int, **kwargs) -> DecodeGraph:
         return DecodeGraph(
@@ -1567,8 +1572,10 @@ class InferenceManager:
 
         steps = spec_k + 1
         verify = self._new_decode_graph(bucket, tokens_per_seq=steps)
-        if self._capture_graph(verify, f"verify bucket={bucket} tokens_per_seq={steps}"):
-            self._verify_graphs[bucket] = verify
+        if not self._capture_graph(verify, f"verify bucket={bucket} tokens_per_seq={steps}"):
+            self._decode_graph_skipped_buckets.add(bucket)
+            return
+        self._verify_graphs[bucket] = verify
         for tokens_per_seq in sorted({steps, 1} if spec_k > 1 else {steps}):
             draft = self._new_decode_graph(
                 bucket,

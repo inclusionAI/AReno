@@ -116,6 +116,7 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "top_p",
             "greedy",
             "eager_decode",
+            "speculative_draft_tokens",
             "drop_rollout_state",
             "attn_backend",
             "disable_thinking",
@@ -132,6 +133,7 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "score_micro_bs",
             "gradient_accumulation_steps",
             "activation_checkpointing",
+            "mtp_loss_scale",
             "lora_rank",
             "lora_alpha",
             "lora_dropout",
@@ -913,6 +915,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             optimizer_state_offload_batch_size=args.optimizer_state_offload_batch_size,
             eager_decode=args.eager_decode,
             attn_backend=args.attn_backend,
+            mtp_loss_scale=args.mtp_loss_scale,
             metrics_log_dir=args.metrics_log_dir,
             agent_fn=args.agent_fn,
             train_tool_results=args.train_tool_results,
@@ -973,6 +976,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             optimizer_state_offload_batch_size=args.optimizer_state_offload_batch_size,
             eager_decode=args.eager_decode,
             attn_backend=args.attn_backend,
+            mtp_loss_scale=args.mtp_loss_scale,
             metrics_log_dir=args.metrics_log_dir,
             agent_fn=args.agent_fn,
             train_tool_results=args.train_tool_results,
@@ -1041,6 +1045,8 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             optimizer_state_offload_batch_size=args.optimizer_state_offload_batch_size,
             eager_decode=args.eager_decode,
             attn_backend=args.attn_backend,
+            mtp_loss_scale=args.mtp_loss_scale,
+            speculative_draft_tokens=args.speculative_draft_tokens,
             gspo_clip_eps=args.gspo_clip_eps,
             grpo_clip_eps=args.grpo_clip_eps,
             metrics_log_dir=args.metrics_log_dir,
@@ -1110,6 +1116,8 @@ def _trainer_config_from_args(args) -> TrainerConfig:
         optimizer_state_offload_batch_size=args.optimizer_state_offload_batch_size,
         eager_decode=args.eager_decode,
         attn_backend=args.attn_backend,
+        mtp_loss_scale=args.mtp_loss_scale,
+        speculative_draft_tokens=args.speculative_draft_tokens,
         gspo_clip_eps=args.gspo_clip_eps,
         grpo_clip_eps=args.grpo_clip_eps,
         metrics_log_dir=args.metrics_log_dir,
@@ -1231,6 +1239,8 @@ def _training_config_settings(config: TrainerConfig) -> dict:
                 "sequence_parallel",
                 "attn_backend",
                 "eager_decode",
+                "speculative_draft_tokens",
+                "mtp_loss_scale",
                 "activation_checkpointing",
                 "keep_rollout_state",
                 "optimizer_state_offload",
@@ -1777,6 +1787,19 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     help="Number of optimizer buckets per persistent disk mmap and flush group.",
 )
 @click.option("--eager-decode", is_flag=True, help="Disable decode CUDA graph and run rollout decode eagerly.")
+@click.option(
+    "--speculative-draft-tokens",
+    type=click.IntRange(min=0),
+    default=0,
+    show_default=True,
+    help="Rollout speculative decoding: draft this many tokens per step with the checkpoint's MTP layer (0 = off).",
+)
+@click.option(
+    "--mtp-loss-scale",
+    type=float,
+    default=None,
+    help="Weight of the auxiliary MTP (t+2) loss for checkpoints with MTP layers; unset leaves the layers unbuilt.",
+)
 @click.option(
     "--attn-backend",
     type=click.Choice(["flash", "native"]),
