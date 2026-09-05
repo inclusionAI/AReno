@@ -227,6 +227,46 @@ def test_chunked_prefill_runs_intermediate_chunks_without_sampling():
     assert state.finish_reason == ["length"]
 
 
+def test_cached_generation_reprefills_at_model_declared_cache_boundary():
+    """The generic scheduler replaces a stale cache with a full prefill before decode."""
+
+    class RePrefillManager(_FakeInferenceManager):
+        def __init__(self):
+            super().__init__()
+            self.reprefill_payload = None
+
+        def _infer_next_token_tensor(self, payload):
+            if int(payload.input_ids.numel()) == 33:
+                self.reprefill_payload = payload
+            return super()._infer_next_token_tensor(payload)
+
+    manager = RePrefillManager()
+    manager.worker.model = SimpleNamespace(cache_reprefill_required=lambda lengths: lengths.eq(32))
+    state = InferenceBatchState(
+        prompts=[list(range(32))],
+        max_new_tokens=2,
+        max_running_seqs=1,
+        max_cache_len=40,
+        max_prefill_tokens=64,
+        kv_block_size=8,
+        num_cache_blocks=5,
+    )
+    ctx = SimpleNamespace(is_rank0=True, dp_rank=0, dp_size=1)
+
+    with PatchedContext(inference_mod, get_tp_context=lambda: ctx, broadcast_object=lambda value, src=0: value):
+        manager._generate_rollout_tokens_no_sync(
+            state,
+            SamplingParams(),
+            eos_token_id=None,
+            prompt_indices=[0],
+        )
+
+    assert state.generated == [[1, 1]]
+    assert manager.reprefill_payload is not None
+    assert manager.reprefill_payload.input_ids.tolist() == [*range(32), 1]
+    assert manager.ops == [("sample_prefill", 1), ("sample_prefill", 1)]
+
+
 def test_prefill_reserves_prompt_blocks_without_max_new_token_overreservation():
     """Paged KV should grow for decode instead of reserving full response length upfront."""
 

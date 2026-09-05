@@ -73,6 +73,7 @@ def messages_to_prompt_tokens(
 
     messages = normalize_messages(messages)
     if getattr(tokenizer, "chat_template", None):
+        messages = _embed_tools_in_system_message(tokenizer, messages, tools)
         kwargs: dict[str, Any] = {"tokenize": True, "add_generation_prompt": True}
         if tools:
             kwargs["tools"] = tools
@@ -88,6 +89,42 @@ def messages_to_prompt_tokens(
             kwargs.pop("tools", None)
             return normalize_token_ids(apply_chat_template_with_options(tokenizer, messages, **kwargs))
     return normalize_token_ids(tokenizer.encode(messages_to_text(messages) or fallback_prompt))
+
+
+def _embed_tools_in_system_message(
+    tokenizer: Any,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Adapt templates that read a JSON tool list from the system message.
+
+    Phi-4-Multimodal's published template ignores the conventional global
+    ``tools`` variable and instead concatenates ``message['tools']`` between
+    ``<|tool|>`` markers. Keep the normal ``tools=`` call contract while also
+    supplying that model-specific message field when the template declares it.
+    """
+
+    template = str(getattr(tokenizer, "chat_template", "") or "")
+    embeds_message_tools = "<|tool|>" in template and (
+        "'tools' in message" in template or '"tools" in message' in template
+    )
+    if not tools or not embeds_message_tools:
+        return messages
+
+    flat_tools = []
+    for tool in tools:
+        function = tool.get("function") if isinstance(tool, dict) else None
+        flat_tools.append(function if isinstance(function, dict) else tool)
+    serialized_tools = json.dumps(flat_tools, ensure_ascii=False, separators=(",", ":"))
+
+    rendered_messages = [dict(message) for message in messages]
+    for message in rendered_messages:
+        if message.get("role") == "system":
+            message.setdefault("tools", serialized_tools)
+            break
+    else:
+        rendered_messages.insert(0, {"role": "system", "content": "", "tools": serialized_tools})
+    return rendered_messages
 
 
 def _normalize_tools_for_chat_template(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:

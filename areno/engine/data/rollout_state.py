@@ -283,6 +283,83 @@ class InferenceBatchState:
                     raise RuntimeError("paged KV cache exhausted during decode")
                 blocks.append(self._free_blocks.pop(0))
 
+    def build_cache_reprefill_payload(
+        self,
+        seq_ids: list[int],
+        generated: torch.Tensor,
+        response_lens: torch.Tensor,
+    ) -> dict:
+        """Rebuild selected live KV rows from their complete token history.
+
+        Models may request this when a cache representation becomes invalid at a
+        sequence-length boundary.  The scheduler owns token/block history, so
+        the rebuild stays runtime-generic and reuses each row's existing pages.
+        """
+
+        input_ids: list[int] = []
+        position_ids: list[int] = []
+        mrope_position_parts: list[torch.Tensor] = []
+        has_mrope_positions = False
+        feature_mask: list[bool] = []
+        image_features: list[dict] = []
+        cu_seqlens = [0]
+        sample_indices: list[int] = []
+        block_table: list[list[int]] = []
+        cache_block_ids: list[int] = []
+        cache_block_offsets: list[int] = []
+        recurrent_slots: list[int] = []
+        for seq_id in seq_ids:
+            response_len = int(response_lens[seq_id].item())
+            history = self.prompts[seq_id] + generated[seq_id, :response_len].detach().cpu().tolist()
+            if not history:
+                raise ValueError("cache re-prefill requires at least one token")
+            blocks = self._seq_to_blocks[seq_id]
+            if len(blocks) < ceil_div(len(history), self.kv_block_size):
+                raise RuntimeError("cache re-prefill is missing paged KV blocks")
+            input_ids.extend(history)
+            position_ids.extend(range(len(history)))
+            prompt_mask, prompt_image_features = _slice_prompt_image_features(
+                self.prompt_features[seq_id], self.prompts[seq_id], 0, len(self.prompts[seq_id])
+            )
+            feature_mask.extend(prompt_mask)
+            feature_mask.extend([False] * response_len)
+            if prompt_image_features is not None:
+                image_features.append(prompt_image_features)
+            prompt_mrope = _slice_prompt_mrope_positions(self.prompt_features[seq_id], 0, len(self.prompts[seq_id]))
+            if prompt_mrope is not None:
+                has_mrope_positions = True
+                generated_positions = (
+                    torch.arange(len(self.prompts[seq_id]), len(history), dtype=torch.long).view(1, -1).expand(3, -1)
+                )
+                generated_positions.add_(
+                    _prompt_mrope_position_delta(self.prompt_features[seq_id], len(self.prompts[seq_id]))
+                )
+                mrope_position_parts.append(torch.cat((prompt_mrope, generated_positions), dim=1))
+            else:
+                mrope_position_parts.append(torch.arange(len(history), dtype=torch.long).view(1, -1).expand(3, -1))
+            for token_idx in range(len(history)):
+                cache_block_ids.append(blocks[token_idx // self.kv_block_size])
+                cache_block_offsets.append(token_idx % self.kv_block_size)
+            cu_seqlens.append(len(input_ids))
+            sample_indices.append(len(input_ids) - 1)
+            block_table.append(_pad_blocks(blocks, self.max_blocks_per_seq))
+            recurrent_slots.append(self._seq_to_recurrent_slot[seq_id])
+        return self._prefill_payload(
+            input_ids,
+            position_ids,
+            mrope_position_parts if has_mrope_positions else None,
+            feature_mask,
+            image_features,
+            cu_seqlens,
+            sample_indices,
+            block_table,
+            cache_block_ids,
+            cache_block_offsets,
+            recurrent_slots,
+            [],
+            seq_ids,
+        )
+
     def decode_position_deltas(self, seq_ids: list[int]) -> list[int]:
         """Return per-sequence MRoPE decode position deltas."""
 

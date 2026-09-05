@@ -60,6 +60,23 @@ class TokenizerApiTest(unittest.TestCase):
 
         self.assertEqual(ids, (1, 2, 3))
 
+    def test_eos_token_ids_prefers_generation_config_stop_tokens(self):
+        """Phi-style chat stops must precede the tokenizer's generic EOS."""
+        tokenizer = FakeTokenizer()
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "generation_config.json").write_text(
+                json.dumps({"eos_token_id": [4, 1]}),
+                encoding="utf-8",
+            )
+            Path(tmp, "config.json").write_text(
+                json.dumps({"eos_token_id": 2}),
+                encoding="utf-8",
+            )
+
+            ids = eos_token_ids(tmp, tokenizer)
+
+        self.assertEqual(ids, (4, 1, 2))
+
     def test_encode_generation_prompt_applies_template_once(self):
         """Already formatted chat prompts must not be wrapped a second time."""
         tokenizer = FakeTokenizer()

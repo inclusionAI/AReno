@@ -469,18 +469,37 @@ class InferenceManager:
             self._ensure_decode_kv_blocks(state, active_rows, cache_seqlens)
             block_table = self._block_table_for_active_rows(state, active_rows)
             recurrent_slots = self._recurrent_slots_for_active_rows(state, active_rows)
-            next_tokens, next_logprobs = self._infer_decode_next_token_tensor(
-                next_tokens,
-                position_ids,
-                cache_seqlens,
-                block_table,
-                recurrent_slots,
-                active_count,
-                sampling_params,
-                sample_generator,
-                sample_step=sample_step,
-                eos_token_id=eos_token_id,
-            )
+            reprefill_mask = self._cache_reprefill_mask(cache_seqlens)
+            if bool(reprefill_mask.any().item()):
+                next_tokens, next_logprobs = self._infer_with_cache_reprefill(
+                    state,
+                    generated,
+                    response_lens,
+                    active_rows,
+                    next_tokens,
+                    position_ids,
+                    cache_seqlens,
+                    block_table,
+                    recurrent_slots,
+                    reprefill_mask,
+                    sampling_params,
+                    sample_generator,
+                    sample_step=sample_step,
+                    eos_token_id=eos_token_id,
+                )
+            else:
+                next_tokens, next_logprobs = self._infer_decode_next_token_tensor(
+                    next_tokens,
+                    position_ids,
+                    cache_seqlens,
+                    block_table,
+                    recurrent_slots,
+                    active_count,
+                    sampling_params,
+                    sample_generator,
+                    sample_step=sample_step,
+                    eos_token_id=eos_token_id,
+                )
             state.record_decode_routing(active_rows, cache_seqlens, self._last_routing_capture)
             sample_step += 1
             # Write the new tokens into the per-row response buffer using
@@ -635,6 +654,71 @@ class InferenceManager:
             [int(row) for row in active_rows.detach().cpu().tolist()],
             [int(pos) for pos in cache_seqlens.detach().cpu().tolist()],
         )
+
+    def _cache_reprefill_mask(self, cache_seqlens: torch.Tensor) -> torch.Tensor:
+        """Ask the active model whether any cached rows must be rebuilt."""
+
+        required = getattr(getattr(self.worker, "model", None), "cache_reprefill_required", None)
+        if required is None:
+            return torch.zeros_like(cache_seqlens, dtype=torch.bool)
+        mask = required(cache_seqlens)
+        if not isinstance(mask, torch.Tensor) or mask.shape != cache_seqlens.shape or mask.dtype != torch.bool:
+            raise TypeError("model cache_reprefill_required must return a bool tensor matching cache_seqlens")
+        return mask
+
+    def _infer_with_cache_reprefill(
+        self,
+        state: InferenceBatchState,
+        generated: torch.Tensor,
+        response_lens: torch.Tensor,
+        active_rows: torch.Tensor,
+        next_tokens: torch.Tensor,
+        position_ids: torch.Tensor,
+        cache_seqlens: torch.Tensor,
+        block_table: torch.Tensor,
+        recurrent_slots: torch.Tensor,
+        reprefill_mask: torch.Tensor,
+        sampling_params: SamplingParams,
+        sample_generator: torch.Generator | None,
+        *,
+        sample_step: int,
+        eos_token_id: int | tuple[int, ...] | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Re-prefill invalid rows, then decode the remaining rows normally."""
+
+        refreshed_indices = torch.nonzero(reprefill_mask, as_tuple=False).flatten()
+        refreshed_rows = [int(row) for row in active_rows[refreshed_indices].detach().cpu().tolist()]
+        payload = PrefillPayload.from_state_payload(
+            state.build_cache_reprefill_payload(refreshed_rows, generated, response_lens),
+            sampling_params=sampling_params,
+            sample_step=sample_step,
+            eos_token_id=eos_token_id,
+            sample_generator=sample_generator,
+            return_logprobs=True,
+        )
+        refreshed_tokens, refreshed_logprobs = self._infer_next_token_tensor(payload)
+        result_tokens = torch.empty_like(next_tokens)
+        result_logprobs = torch.empty(next_tokens.shape, device=self.device, dtype=refreshed_logprobs.dtype)
+        result_tokens[refreshed_indices] = refreshed_tokens
+        result_logprobs[refreshed_indices] = refreshed_logprobs
+        decode_indices = torch.nonzero(~reprefill_mask, as_tuple=False).flatten()
+        if decode_indices.numel() == 0:
+            return result_tokens, result_logprobs
+        decoded_tokens, decoded_logprobs = self._infer_decode_next_token_tensor(
+            next_tokens[decode_indices],
+            position_ids[decode_indices],
+            cache_seqlens[decode_indices],
+            block_table[decode_indices],
+            recurrent_slots[decode_indices],
+            int(decode_indices.numel()),
+            sampling_params,
+            sample_generator,
+            sample_step=sample_step,
+            eos_token_id=eos_token_id,
+        )
+        result_tokens[decode_indices] = decoded_tokens
+        result_logprobs[decode_indices] = decoded_logprobs
+        return result_tokens, result_logprobs
 
     def _block_table_for_active_rows(self, state: InferenceBatchState, active_rows: torch.Tensor) -> torch.Tensor:
         """Build a device block table for the current active rows."""

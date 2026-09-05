@@ -212,6 +212,29 @@ def test_messages_to_prompt_tokens_passes_tools_to_chat_template():
     assert tokenizer.calls == [(messages, tools)]
 
 
+def test_messages_to_prompt_tokens_embeds_tools_for_phi_message_template():
+    tokenizer = _MessageEmbeddedToolsTokenizer()
+    messages = [{"role": "system", "content": "play"}, {"role": "user", "content": "choose"}]
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "choose_square",
+                "description": "Choose a square.",
+                "parameters": {"type": "object", "properties": {"square": {"type": "integer"}}},
+            },
+        }
+    ]
+
+    tokens = agentic._messages_to_prompt_tokens(tokenizer, messages, tools=tools, fallback_prompt="fallback")
+
+    assert tokens == [2]
+    rendered_messages, passed_tools = tokenizer.calls[0]
+    assert passed_tools == tools
+    assert json.loads(rendered_messages[0]["tools"]) == [tools[0]["function"]]
+    assert "tools" not in messages[0]
+
+
 def test_normalize_messages_rewrites_null_tool_call_content_for_templates():
     tokenizer = _StrictContentTokenizer()
     messages = agentic._normalize_messages(
@@ -1642,6 +1665,19 @@ class _ToolAwareTokenizer(_FakeTokenizer):
         assert add_generation_prompt is True
         self.calls.append((messages, tools))
         return [len(messages), len(tools or [])]
+
+
+class _MessageEmbeddedToolsTokenizer(_ToolAwareTokenizer):
+    chat_template = "{% if message['role'] == 'system' and 'tools' in message %}<|tool|>{% endif %}"
+
+    def apply_chat_template(self, messages, *, tools=None, tokenize, add_generation_prompt):
+        super().apply_chat_template(
+            messages,
+            tools=tools,
+            tokenize=tokenize,
+            add_generation_prompt=add_generation_prompt,
+        )
+        return [len(messages)]
 
 
 class _DisplayTokenizer(_FakeTokenizer):

@@ -51,14 +51,21 @@ def apply_chat_template_with_options(tokenizer, messages, **kwargs):
 
 
 def eos_token_ids(model_path: str | Path, tokenizer) -> tuple[int, ...]:
-    """Collect EOS ids from tokenizer and HF config.
+    """Collect EOS ids from generation config, tokenizer, and model config.
 
-    Some multimodal/chat configs expose multiple EOS ids at the top level and
-    inside `text_config`; rollout should stop on any of them. Duplicates are
-    removed while preserving first-seen order.
+    Generation config is authoritative for chat checkpoints whose tokenizer
+    exposes only a generic end-of-text token. Some multimodal configs also
+    expose EOS ids at the top level and inside ``text_config``; rollout should
+    stop on any of them. Duplicates are removed while preserving first-seen
+    order.
     """
 
     ids: list[int] = []
+    generation_config_path = Path(model_path) / "generation_config.json"
+    if generation_config_path.exists():
+        with generation_config_path.open("r", encoding="utf-8") as f:
+            generation_config = json.load(f)
+        _extend_token_ids(ids, generation_config.get("eos_token_id"))
     _extend_token_ids(ids, getattr(tokenizer, "eos_token_id", None))
     config_path = Path(model_path) / "config.json"
     if config_path.exists():
