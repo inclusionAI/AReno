@@ -75,6 +75,9 @@ class TrainerConfig:
     optimizer_state_offload_batch_size: int = 1
     eager_decode: bool = False
     attn_backend: str = "flash"
+    # Opt-in auxiliary MTP loss for checkpoints that ship MTP layers; None keeps
+    # the layers unbuilt unless speculative decoding needs them.
+    mtp_loss_scale: float | None = None
     metrics_log_dir: str | None = DEFAULT_METRICS_LOG_DIR
     agent_fn: str | None = None
     train_tool_results: bool = False
@@ -225,6 +228,7 @@ class TrainerConfig:
                 "optimizer_state_offload_batch_size": self.optimizer_state_offload_batch_size,
                 "eager_decode": self.eager_decode,
                 "attn_backend": self.attn_backend,
+                "mtp_loss_scale": self.mtp_loss_scale,
             },
             lora=self.lora,
             reference_mode=self.reference_mode,
@@ -235,6 +239,9 @@ class TrainerConfig:
 class RolloutTrainerConfig(TrainerConfig):
     """Sampling/rollout settings used by online RL trainers."""
 
+    # Rollout speculative decoding with the checkpoint's MTP layer: draft this
+    # many tokens per step and verify them in one target forward. 0 disables it.
+    speculative_draft_tokens: int = 0
     n_samples: int = 8
     greedy: bool = False
     temperature: float = 1.0
@@ -275,6 +282,8 @@ class RolloutTrainerConfig(TrainerConfig):
                 "optimizer_state_offload_batch_size": self.optimizer_state_offload_batch_size,
                 "eager_decode": self.eager_decode,
                 "attn_backend": self.attn_backend,
+                "mtp_loss_scale": self.mtp_loss_scale,
+                "speculative_draft_tokens": self.speculative_draft_tokens,
                 # R3 is the default CUDA path for rollout-based MoE training.
                 # EngineConfig disables it again when the checkpoint is dense.
                 "rollout_routing_replay": True,

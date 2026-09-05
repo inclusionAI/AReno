@@ -18,6 +18,7 @@ still making the common TP shard copy/gather rules explicit and reusable.
 from __future__ import annotations
 
 import json
+import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -205,11 +206,26 @@ class LayerSpec:
 
 
 @dataclass(frozen=True, slots=True)
+class ExtraLayerListSpec:
+    """Layer list stored outside ``model.layers`` (e.g. MTP prediction layers).
+
+    HF checkpoints number these layers after the trunk: layer ``i`` of the
+    module list at ``attr`` maps to ``layer.prefix`` formatted with
+    ``len(model.layers) + i``. A missing or ``None`` attribute means the model
+    was built without these layers and the list is skipped.
+    """
+
+    attr: str
+    layer: LayerSpec
+
+
+@dataclass(frozen=True, slots=True)
 class CheckpointSpec:
     """Full model checkpoint spec used by registry adapters."""
 
     top_level: TopLevelSpec
     layer: LayerSpec
+    extra_layers: tuple[ExtraLayerListSpec, ...] = ()
 
 
 def attr_path(obj: object, path: str):
@@ -386,14 +402,46 @@ def load_checkpoint_weights(model: nn.Module, model_path: str, spec: CheckpointS
     """Load a HF safetensors checkpoint into a tensor-parallel model."""
 
     ctx = get_tp_context()
+    extra_lists = _extra_layer_lists(model, spec)
     index = SafetensorsIndex(model_path)
-    index.set_progress_total(1 + len(model.layers), unit="stage", manual=True)
+    total_layers = len(model.layers) + sum(len(layers) for layers, _ in extra_lists)
+    index.set_progress_total(1 + total_layers, unit="stage", manual=True)
     try:
         load_embedding_norm_head(model, index, spec.top_level, ctx.rank, ctx.world_size)
         index.advance_progress()
         load_layer_specs(model, index, spec.layer, ctx.rank, ctx.world_size)
+        layer_offset = len(model.layers)
+        for layers, layer_spec in extra_lists:
+            first_prefix = layer_spec.prefix.format(layer=layer_offset)
+            if not index.keys_for_prefix(f"{first_prefix}."):
+                # Checkpoints saved before extra-layer support dropped these
+                # tensors while their config still declares the layers.
+                warnings.warn(
+                    f"checkpoint has no tensors under {first_prefix}; leaving these extra layers "
+                    "uninitialized. Do not enable features that use them (e.g. the MTP loss), "
+                    "or re-export from the original base checkpoint.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                for _ in layers:
+                    index.advance_progress()
+                layer_offset += len(layers)
+                continue
+            _load_module_layers(layers, index, layer_spec, ctx.rank, ctx.world_size, layer_offset=layer_offset)
+            layer_offset += len(layers)
     finally:
         index.close()
+
+
+def _extra_layer_lists(model: nn.Module, spec: CheckpointSpec) -> list[tuple[nn.ModuleList, LayerSpec]]:
+    """Resolve the model's populated extra layer lists declared by the spec."""
+
+    lists = []
+    for extra in spec.extra_layers:
+        layers = getattr(model, extra.attr, None)
+        if layers:
+            lists.append((layers, extra.layer))
+    return lists
 
 
 @torch.no_grad()
@@ -413,18 +461,19 @@ def save_checkpoint_weights(
         writer.write(tensors, "top-level")
         tensors.clear()
 
-        for layer_idx, layer in enumerate(model.layers):
-            prefix = spec.layer.prefix.format(layer=layer_idx)
-            delayed_column_tensors: list[tuple[str, torch.Tensor]] = []
-            save_replicated_tensors(tensors, layer, prefix, spec.layer.replicated)
-            for op in spec.layer.save_ops:
-                save_layer_op(tensors, layer, prefix, op, delayed_column_tensors)
-            for handler in spec.layer.save_handlers:
-                handler(tensors, prefix, layer, delayed_column_tensors)
-            if delayed_column_tensors:
-                save_column_tensors(tensors, delayed_column_tensors)
-            writer.write(tensors, f"layer-{layer_idx:05d}")
-            tensors.clear()
+        extra_lists = _extra_layer_lists(model, spec)
+        layer_lists = [(model.layers, spec.layer)] + extra_lists
+        layer_offset = 0
+        for layers, layer_spec in layer_lists:
+            for layer_idx, layer in enumerate(layers, start=layer_offset):
+                prefix = layer_spec.prefix.format(layer=layer_idx)
+                delayed_column_tensors: list[tuple[str, torch.Tensor]] = []
+                _save_layer_tensors(tensors, layer, prefix, layer_spec, delayed_column_tensors)
+                if delayed_column_tensors:
+                    save_column_tensors(tensors, delayed_column_tensors)
+                writer.write(tensors, f"layer-{layer_idx:05d}")
+                tensors.clear()
+            layer_offset += len(layers)
         if extra_tensors_fn is not None:
             extra_tensors_fn(tensors)
             writer.write(tensors, "extra-tensors")
@@ -449,6 +498,10 @@ def build_checkpoint_policy_plan(
         save_embedding_norm_head(tensors, model, spec.top_level)
         delayed_column_tensors: list[tuple[str, torch.Tensor]] = []
         save_layer_specs(tensors, model, spec.layer, context=delayed_column_tensors)
+        layer_offset = len(model.layers)
+        for layers, layer_spec in _extra_layer_lists(model, spec):
+            _save_module_layers(tensors, layers, layer_spec, delayed_column_tensors, layer_offset=layer_offset)
+            layer_offset += len(layers)
         if delayed_column_tensors:
             save_column_tensors(tensors, delayed_column_tensors)
         if extra_tensors_fn is not None:
@@ -521,7 +574,15 @@ def _read_weight_map(path: Path) -> dict[str, str]:
 def load_layer_specs(model: nn.Module, index: SafetensorsIndex, spec: LayerSpec, rank: int, world_size: int) -> None:
     """Load all transformer layers using the configured layer spec."""
 
-    for layer_idx, layer in enumerate(model.layers):
+    _load_module_layers(model.layers, index, spec, rank, world_size, layer_offset=0)
+
+
+def _load_module_layers(
+    layers, index: SafetensorsIndex, spec: LayerSpec, rank: int, world_size: int, *, layer_offset: int
+) -> None:
+    """Load one module list of layers, offsetting the HF layer index."""
+
+    for layer_idx, layer in enumerate(layers, start=layer_offset):
         prefix = spec.prefix.format(layer=layer_idx)
         layer_keys = index.keys_for_prefix(f"{prefix}.")
         if spec.prefetch_layer:
@@ -545,13 +606,28 @@ def save_layer_specs(
 ) -> None:
     """Stage all per-layer tensors via the spec's `save_ops` and handlers."""
 
-    for layer_idx, layer in enumerate(model.layers):
-        prefix = spec.prefix.format(layer=layer_idx)
-        save_replicated_tensors(tensors, layer, prefix, spec.replicated)
-        for op in spec.save_ops:
-            save_layer_op(tensors, layer, prefix, op, context)
-        for handler in spec.save_handlers:
-            handler(tensors, prefix, layer, context)
+    _save_module_layers(tensors, model.layers, spec, context, layer_offset=0)
+
+
+def _save_module_layers(
+    tensors: dict[str, torch.Tensor | None], layers, spec: LayerSpec, context: object | None, *, layer_offset: int
+) -> None:
+    """Stage one module list of layers, offsetting the HF layer index."""
+
+    for layer_idx, layer in enumerate(layers, start=layer_offset):
+        _save_layer_tensors(tensors, layer, spec.prefix.format(layer=layer_idx), spec, context)
+
+
+def _save_layer_tensors(
+    tensors: dict[str, torch.Tensor | None], layer: nn.Module, prefix: str, spec: LayerSpec, context: object | None
+) -> None:
+    """Stage one layer's tensors via the spec's replicated/save ops/handlers."""
+
+    save_replicated_tensors(tensors, layer, prefix, spec.replicated)
+    for op in spec.save_ops:
+        save_layer_op(tensors, layer, prefix, op, context)
+    for handler in spec.save_handlers:
+        handler(tensors, prefix, layer, context)
 
 
 def load_replicated_tensors(

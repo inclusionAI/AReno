@@ -126,6 +126,9 @@ class ArenoWorker:
         # Per-bucket captured decode CUDA graphs; buckets that OOM during
         # capture get tracked in `_skipped` and fall back to eager forward.
         self._decode_graphs: dict[int, DecodeGraph] = {}
+        # Speculative decoding graphs: verify by bucket, draft by (bucket, tokens_per_seq).
+        self._verify_graphs: dict[int, DecodeGraph] = {}
+        self._draft_graphs: dict[tuple[int, int], DecodeGraph] = {}
         self._decode_graph_skipped_buckets: set[int] = set()
         self._decode_graph_init_attempted = False
         # 5-tuple summarising the active cache config; used to decide whether
@@ -583,6 +586,8 @@ class ArenoWorker:
         """Drop captured decode CUDA graphs and release their cached memory."""
 
         self._decode_graphs.clear()
+        self._verify_graphs.clear()
+        self._draft_graphs.clear()
         self._decode_graph_skipped_buckets.clear()
         self._decode_graph_init_attempted = False
         if self.device.type == "cuda":
