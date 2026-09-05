@@ -13,7 +13,7 @@ import torch
 from torch import nn
 
 from areno.accel import areno_rmsnorm
-from areno.accel.ops import can_use_cuda_kernel, log_once, rms_norm_gate_fwd
+from areno.accel.utils import can_use_cuda_kernel, log_once
 from areno.engine.layers.linear import mark_tensor_parallel_parameter
 
 
@@ -90,8 +90,10 @@ class GroupRMSNormSigmoidGate(nn.Module):
         # Reshape last dim into (groups_per_rank, group_width) for the kernel.
         x = x.view(*shape[:-1], self.groups_per_rank, self.group_width)
         gate = gate.view(*shape[:-1], self.groups_per_rank, self.group_width)
-        if rms_norm_gate_fwd is None or not can_use_cuda_kernel(x, "fused group RMSNorm sigmoid gate kernel"):
+        if not can_use_cuda_kernel(x, "fused group RMSNorm sigmoid gate kernel"):
             raise RuntimeError("ARENO group RMSNorm sigmoid gate requires the fused CUDA kernel")
+        from areno.accel.kernels.group_rmsnorm import rms_norm_gate_fwd
+
         log_once("group_rmsnorm_sigmoid_gate", "using fused group RMSNorm sigmoid gate kernel")
         # Flatten the leading dims into a single batch so the kernel only
         # sees a 3D (B, groups, width) tensor.
