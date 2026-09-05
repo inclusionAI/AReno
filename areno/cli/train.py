@@ -1,4 +1,4 @@
-"""Command-line entrypoint for SFT/DPO/GSPO/GRPO/PPO training.
+"""Command-line entrypoint for built-in and registered training algorithms.
 
 The flow is:
     1. `train_command` collects Click options and builds either a
@@ -123,6 +123,10 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "train_tool_results",
             "reward_fn_path",
             "reward_ckpt",
+            "dapo_gen_batch_size",
+            "dapo_max_num_gen_batches",
+            "dapo_overlong_buffer_len",
+            "dapo_overlong_penalty_factor",
         ),
     ),
     (
@@ -167,6 +171,8 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "critic_warmup_steps",
             "gspo_clip_eps",
             "grpo_clip_eps",
+            "dapo_clip_eps_low",
+            "dapo_clip_eps_high",
             "dpo_beta",
             "use_kl_loss",
             "kl_loss_coef",
@@ -290,6 +296,8 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
     if args.model_hub not in {"hf", "modelscope"}:
         raise click.UsageError("--model-hub must be one of: hf, modelscope")
     algorithm = _algorithm_for_cli(args.algo)
+    if algorithm.name == "dapo" and args.backend != "cuda":
+        raise click.UsageError("DAPO currently supports only the CUDA backend")
     if algorithm.name == "sft" and args.dataset_loader_fn is None:
         raise click.UsageError("--dataset-loader-fn is required for --algo sft")
     tune_params = bool(getattr(args, "tune_params", False))
@@ -305,6 +313,8 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
         raise click.UsageError("--mem-frac must be in (0, 1]")
     if tune_max_samples <= 0:
         raise click.UsageError("--tune-max-samples must be positive")
+    if algorithm.name == "dapo" and not (smoke_infer or smoke_train) and args.reward_fn_path is None:
+        raise click.UsageError("--reward-fn-path is required for DAPO")
     if (
         algorithm.requires_rollout
         and not (smoke_infer or smoke_train)
@@ -387,6 +397,27 @@ def _trainer_config_from_options(**options) -> TrainerConfig:
         _require_positive_float(args.gspo_clip_eps, "--gspo-clip-eps")
     if algorithm.name == "grpo":
         _require_positive_float(args.grpo_clip_eps, "--grpo-clip-eps")
+    if algorithm.name == "dapo":
+        if args.n_samples < 2:
+            raise click.UsageError("--n-samples must be at least 2 for DAPO dynamic sampling")
+        if args.greedy:
+            raise click.UsageError("--greedy is not supported for DAPO dynamic sampling")
+        if args.agent_fn is not None:
+            raise click.UsageError("--agent-fn is not supported for DAPO")
+        if args.dapo_gen_batch_size is not None and args.dapo_gen_batch_size <= 0:
+            raise click.UsageError("--dapo-gen-batch-size must be positive")
+        if args.dapo_max_num_gen_batches <= 0:
+            raise click.UsageError("--dapo-max-num-gen-batches must be positive")
+        _require_positive_float(args.dapo_clip_eps_low, "--dapo-clip-eps-low")
+        _require_positive_float(args.dapo_clip_eps_high, "--dapo-clip-eps-high")
+        if args.dapo_clip_eps_high < args.dapo_clip_eps_low:
+            raise click.UsageError("--dapo-clip-eps-high must be greater than or equal to --dapo-clip-eps-low")
+        if args.dapo_overlong_buffer_len < 0:
+            raise click.UsageError("--dapo-overlong-buffer-len must be non-negative")
+        if args.dapo_overlong_buffer_len > args.max_new_tokens:
+            raise click.UsageError("--dapo-overlong-buffer-len must not exceed --max-new-tokens")
+        if args.dapo_overlong_penalty_factor < 0:
+            raise click.UsageError("--dapo-overlong-penalty-factor must be non-negative")
     if algorithm.name == "dpo":
         _require_positive_float(args.dpo_beta, "--dpo-beta")
     if algorithm.name == "ppo":
@@ -980,6 +1011,84 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             lora=lora,
             reference_mode=args.reference_mode,
         )
+    if algorithm.name == "dapo":
+        from areno.experimental.dapo.config import DAPOTrainerConfig
+
+        return DAPOTrainerConfig(
+            algo=algorithm.name,
+            ckpt=args.ckpt,
+            dataset_path=args.dataset_path,
+            backend=args.backend,
+            base_model_name_or_path=args.base_model_name_or_path,
+            model_hub=args.model_hub,
+            dataset_loader_fn=args.dataset_loader_fn,
+            reward_fn_path=args.reward_fn_path,
+            save_path=args.save_path,
+            save_interval=args.save_interval,
+            epochs=args.epochs,
+            max_steps=args.max_steps,
+            tp_size=args.tp_size,
+            sequence_parallel=args.sequence_parallel,
+            world_size=args.world_size,
+            train_devices=args.train_devices,
+            rollout_tp_size=args.rollout_tp_size,
+            rollout_devices=args.rollout_devices,
+            policy_sync_bucket_mb=args.policy_sync_bucket_mb,
+            batch_size=args.batch_size,
+            n_samples=args.n_samples,
+            mini_bs=args.mini_bs,
+            score_micro_bs=args.score_micro_bs,
+            gradient_accumulation_steps=(
+                1 if args.gradient_accumulation_steps is None else args.gradient_accumulation_steps
+            ),
+            max_prompt_tokens=args.max_prompt_tokens,
+            max_new_tokens=args.max_new_tokens,
+            max_context_len=args.max_context_len,
+            greedy=args.greedy,
+            temperature=args.temperature,
+            top_k=args.top_k,
+            top_p=args.top_p,
+            max_running_prompts=args.max_running_prompts,
+            optimizer_lr=args.lr,
+            optimizer_min_lr=args.min_lr,
+            lr_decay_steps=args.lr_decay_steps,
+            lr_decay_style=args.lr_decay_style,
+            optimizer_beta1=args.adam_beta1,
+            optimizer_beta2=args.adam_beta2,
+            weight_decay=args.weight_decay,
+            grad_clip_norm=args.grad_clip_norm,
+            adam_8bit=args.adam_8bit,
+            adam_4bit=args.adam_4bit,
+            unfreeze_multimodal_tower=args.unfreeze_multimodal_tower,
+            unfreeze_multimodal_projector=args.unfreeze_multimodal_projector,
+            multimodal_tower_lr=args.multimodal_tower_lr,
+            multimodal_tower_min_lr=args.multimodal_tower_min_lr,
+            multimodal_tower_lr_decay_steps=args.multimodal_tower_lr_decay_steps,
+            multimodal_tower_lr_decay_style=args.multimodal_tower_lr_decay_style,
+            multimodal_projector_lr=args.multimodal_projector_lr,
+            multimodal_projector_min_lr=args.multimodal_projector_min_lr,
+            multimodal_projector_lr_decay_steps=args.multimodal_projector_lr_decay_steps,
+            multimodal_projector_lr_decay_style=args.multimodal_projector_lr_decay_style,
+            activation_checkpointing=args.activation_checkpointing,
+            keep_rollout_state=not args.drop_rollout_state,
+            optimizer_state_offload=args.optimizer_state_offload,
+            optimizer_state_offload_dir=args.optimizer_state_offload_dir,
+            optimizer_state_offload_batch_size=args.optimizer_state_offload_batch_size,
+            eager_decode=args.eager_decode,
+            attn_backend=args.attn_backend,
+            metrics_log_dir=args.metrics_log_dir,
+            agent_fn=args.agent_fn,
+            train_tool_results=args.train_tool_results,
+            chat_template_enable_thinking=chat_template_enable_thinking,
+            lora=lora,
+            reference_mode=args.reference_mode,
+            dapo_gen_batch_size=args.dapo_gen_batch_size,
+            dapo_max_num_gen_batches=args.dapo_max_num_gen_batches,
+            dapo_clip_eps_low=args.dapo_clip_eps_low,
+            dapo_clip_eps_high=args.dapo_clip_eps_high,
+            dapo_overlong_buffer_len=args.dapo_overlong_buffer_len,
+            dapo_overlong_penalty_factor=args.dapo_overlong_penalty_factor,
+        )
     if algorithm.name != "ppo":
         return PolicyTrainerConfig(
             algo=algorithm.name,
@@ -1513,7 +1622,7 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     cls=GroupedOptionsCommand,
     option_groups=TRAIN_OPTION_GROUPS,
     context_settings={"help_option_names": ["-h", "--help"]},
-    help="Run SFT, DPO, GSPO, GRPO, or PPO training with the areno backend.",
+    help="Run a registered training algorithm (SFT, DPO, GSPO, GRPO, PPO, or experimental DAPO).",
 )
 @click.option("--algo", type=str, default="gspo", show_default=True, help="Training algorithm registered in areno.api.")
 @click.option("--ckpt", default=None, help="Actor model/tokenizer checkpoint path or remote model repo ID.")
@@ -1629,7 +1738,10 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     "--gradient-accumulation-steps",
     type=int,
     default=None,
-    help="Optimizer step interval in microbatches; defaults to accumulating all mini-batches in one train call.",
+    help=(
+        "Optimizer step interval in microbatches; defaults to all mini-batches in one train call "
+        "(DAPO defaults to one)."
+    ),
 )
 @click.option("--max-prompt-tokens", type=int, default=1024, show_default=True, help="Maximum tokenized prompt length.")
 @click.option(
@@ -1795,6 +1907,47 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     "--gspo-clip-eps", type=float, default=3.0e-4, show_default=True, help="GSPO sequence-ratio clipping epsilon."
 )
 @click.option("--grpo-clip-eps", type=float, default=0.2, show_default=True, help="GRPO token-ratio clipping epsilon.")
+@click.option(
+    "--dapo-gen-batch-size",
+    type=int,
+    default=None,
+    help="Candidate prompts generated per DAPO dynamic-sampling attempt; defaults to --batch-size.",
+)
+@click.option(
+    "--dapo-max-num-gen-batches",
+    type=int,
+    default=10,
+    show_default=True,
+    help="Maximum candidate batches used to fill one DAPO training batch.",
+)
+@click.option(
+    "--dapo-clip-eps-low",
+    type=float,
+    default=0.2,
+    show_default=True,
+    help="DAPO lower token-ratio clipping epsilon.",
+)
+@click.option(
+    "--dapo-clip-eps-high",
+    type=float,
+    default=0.28,
+    show_default=True,
+    help="DAPO upper token-ratio clipping epsilon (Clip-Higher).",
+)
+@click.option(
+    "--dapo-overlong-buffer-len",
+    type=int,
+    default=0,
+    show_default=True,
+    help="Response-token buffer over which DAPO applies a linear overlong penalty; zero disables it.",
+)
+@click.option(
+    "--dapo-overlong-penalty-factor",
+    type=float,
+    default=1.0,
+    show_default=True,
+    help="Maximum magnitude of DAPO's soft overlong reward penalty.",
+)
 @click.option("--dpo-beta", type=float, default=0.1, show_default=True, help="DPO preference margin temperature.")
 @click.option(
     "--critic-warmup-steps",
