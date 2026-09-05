@@ -59,3 +59,10 @@ AReno documentation
    Troubleshooting <troubleshooting/index>
    FAQ <troubleshooting/faq>
    Report an issue <troubleshooting/report-issue>
+
+.. toctree::
+   :hidden:
+   :maxdepth: 1
+   :caption: Release
+
+   v0.0.3 Criteria <release/v0.0.3-criteria>
