@@ -1190,6 +1190,31 @@ def test_agentic_tool_request_returns_tool_call_and_reward_record():
     assert record.loss_mask == [True, True]
 
 
+def test_json_tool_call_parser_accepts_phi_parameters_wrapper():
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "choose_square",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"square": {"type": "integer"}},
+                },
+            },
+        }
+    ]
+
+    parsed = JsonToolCallParser().parse(
+        '{"name":"choose_square","parameters":{"square":3}}',
+        tools,
+        {"type": "function", "function": {"name": "choose_square"}},
+    )
+
+    assert len(parsed.tool_calls) == 1
+    assert parsed.tool_calls[0]["function"]["name"] == "choose_square"
+    assert json.loads(parsed.tool_calls[0]["function"]["arguments"]) == {"square": 3}
+
+
 def test_json_tool_call_parser_rejects_explicit_direction_in_plain_text():
     tools = [
         {

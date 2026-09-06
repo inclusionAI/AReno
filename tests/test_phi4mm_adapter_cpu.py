@@ -108,6 +108,26 @@ assert 'areno.accel.kernels.seg_la' not in sys.modules
     subprocess.run([sys.executable, "-c", script], check=True)
 
 
+def test_phi4mm_head_preserves_fp32_logits_and_tied_gradients():
+    torch.manual_seed(17)
+    model = Phi4MMForCausalLM(_tiny_model_config()).to(dtype=torch.bfloat16)
+    hidden = torch.randn(1, 5, 64, dtype=torch.bfloat16, requires_grad=True)
+    ref_hidden = hidden.detach().float().requires_grad_()
+    ref_weight = model.lm_head.weight.detach().float().requires_grad_()
+    reference = F.linear(ref_hidden, ref_weight)
+    # An enclosing mixed-precision context must not round the output back.
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        logits = model.lm_head(hidden)
+    assert logits.dtype == torch.float32
+    torch.testing.assert_close(logits, reference, rtol=0, atol=0)
+    assert torch.any(logits != logits.bfloat16().float())
+    logits.square().mean().backward()
+    reference.square().mean().backward()
+    torch.testing.assert_close(hidden.grad, ref_hidden.grad.bfloat16(), rtol=0, atol=0)
+    assert model.lm_head.weight is model.model.embed_tokens.weight
+    torch.testing.assert_close(model.model.embed_tokens.weight.grad, ref_weight.grad.bfloat16(), rtol=0, atol=0)
+
+
 @pytest.fixture
 def cpu_reference_kernels(monkeypatch):
     def embedding(input_ids, weight, vocab_start, vocab_end):

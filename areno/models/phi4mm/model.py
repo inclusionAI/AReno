@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 from areno.accel.utils import is_cuda_graph_capturing
@@ -21,6 +22,9 @@ from areno.engine.layers.mlp import GatedMLP
 from areno.engine.layers.norm import RMSNorm
 from areno.engine.layers.vocab import VocabParallelEmbedding, VocabParallelLMHead
 from areno.engine.parallel.collectives import (
+    copy_to_tensor_parallel_region,
+    gather_from_sequence_parallel_region,
+    is_sequence_parallel_active,
     scatter_to_sequence_parallel_region,
     sequence_parallel_region,
 )
@@ -330,6 +334,25 @@ class Phi4MMModel(nn.Module):
             return self.norm(hidden_states)
 
 
+class Phi4MMLMHead(VocabParallelLMHead):
+    """Keep vocabulary projection output in FP32 before computing logprobs.
+
+    Casting BF16 logits after the projection cannot recover the rounding
+    lost there. Preserve the tied BF16 parameter and its TP/SP gradient
+    boundaries while doing the final projection in FP32.
+    """
+
+    @torch._dynamo.disable
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        hidden_states = (
+            gather_from_sequence_parallel_region(hidden_states)
+            if is_sequence_parallel_active()
+            else copy_to_tensor_parallel_region(hidden_states)
+        )
+        with torch.autocast(device_type=hidden_states.device.type, enabled=False):
+            return F.linear(hidden_states.float(), self.weight.float())
+
+
 class Phi4MMForCausalLM(nn.Module):
     """Text-only Phi-4 causal LM with a truly tied vocab-parallel head."""
 
@@ -340,7 +363,7 @@ class Phi4MMForCausalLM(nn.Module):
         self.config = config
         self._longrope_cache_boundary = int(config.hf_text_config["original_max_position_embeddings"])
         self.model = Phi4MMModel(config)
-        self.lm_head = VocabParallelLMHead(config.hidden_size, config.vocab_size, dtype=config.dtype)
+        self.lm_head = Phi4MMLMHead(config.hidden_size, config.vocab_size, dtype=config.dtype)
         self._tie_word_embeddings()
 
     def _tie_word_embeddings(self) -> None:

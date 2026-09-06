@@ -218,7 +218,14 @@ def _parse_json_call_object(obj: Any, chosen_name: str | None) -> tuple[str, dic
         args = function.get("arguments", obj.get("arguments", {}))
     else:
         name = obj.get("name") or chosen_name
-        args = obj.get("arguments") if "arguments" in obj else obj
+        if "arguments" in obj:
+            args = obj.get("arguments")
+        elif isinstance(obj.get("name"), str) and "parameters" in obj:
+            # Phi-family checkpoints sometimes emit a call-shaped
+            # ``parameters`` object instead of OpenAI's ``arguments``.
+            args = obj.get("parameters")
+        else:
+            args = obj
     if not isinstance(name, str) or not name:
         return None
     if isinstance(args, str):
