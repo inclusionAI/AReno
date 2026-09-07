@@ -1,9 +1,12 @@
-Using 4-bit AdamW
-=================
+4-bit AdamW
+===========
 
 AReno provides an opt-in packed 4-bit AdamW optimizer for CUDA training. It
 changes optimizer-state storage and gradient accumulation precision; the model
 checkpoint and training data format are unchanged.
+
+For blockwise 8-bit moments without second-moment factorization, see
+:doc:`adamw-8bit`.
 
 State representation
 --------------------

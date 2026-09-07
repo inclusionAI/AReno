@@ -395,14 +395,15 @@ in its description; flags for other algorithms are ignored.
    embedding. The paper's Stable Embedding forward architecture is not enabled
    for AReno's current RoPE-only language models because they do not expose the
    compatible additive-position-embedding boundary. Supported by both native
-   backends; validate convergence when changing optimizer precision.
+   backends; validate convergence when changing optimizer precision. See
+   :doc:`../concepts/adamw-8bit` for the state representation and usage examples.
 
 ``--adam-4bit``
    Use packed 4-bit first moments, factored row/column second moments for
    tensors of rank two or greater, B128 fallback for vectors, and BF16 streamed
    DP gradient shards. This option is CUDA-only and cannot be combined with
    ``--adam-8bit``. See
-   :doc:`../reference/adamw-4bit` for complete usage examples.
+   :doc:`../concepts/adamw-4bit` for complete usage examples.
 
 ``--unfreeze-mm-tower``
    Train recognized vision/audio encoder tower parameters. Towers are frozen

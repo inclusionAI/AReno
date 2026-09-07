@@ -29,6 +29,8 @@ AReno documentation
    Dataset Formats <concepts/dataset-formats>
    Multimodal Inputs <concepts/multimodal-inputs>
    Native LoRA <concepts/native-lora>
+   8-bit AdamW <concepts/adamw-8bit>
+   4-bit AdamW <concepts/adamw-4bit>
    Reward Functions <concepts/reward-functions>
 
 .. toctree::
@@ -47,7 +49,6 @@ AReno documentation
    :caption: Reference
 
    CLI Reference <reference/cli>
-   4-bit AdamW <reference/adamw-4bit>
    SDK Reference <sdk/trainer>
    Supported Models <models/supported>
 
