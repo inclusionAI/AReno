@@ -16,3 +16,4 @@ Troubleshooting pages:
 
 * :doc:`faq`
 * :doc:`report-issue`
+* :ref:`Policy ratio and drift failure modes <policy-ratio-drift-troubleshooting>`

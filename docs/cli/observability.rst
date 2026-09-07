@@ -1,5 +1,7 @@
 :orphan:
 
+.. _policy-ratio-drift-troubleshooting:
+
 Observability
 =============
 
@@ -109,6 +111,43 @@ assigned lower logprob than the rollout policy on average. ``loss`` can print
 as ``0.0`` for some policy-gradient batches when normalized advantages cancel
 in the scalar value at the current ratio, while gradients can still be non-zero
 because the derivative depends on the logprob term.
+
+Policy ratio and drift failure modes
+------------------------------------
+
+Read policy-ratio statistics together with rollout-vs-train drift metrics.
+The first checks below distinguish expected surrogate behavior from stale
+weights or masking problems without assuming that every training failure has
+the same cause.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 22 25 27 26
+
+   * - Symptom
+     - First inspect
+     - Likely explanation
+     - Next verification
+   * - ``ratio_mean`` stays near 1 and ``ratio_std`` near 0 while drift is
+       non-zero.
+     - ``logp_diff_mean``, ``logp_abs_diff_mean``, and both logprob means.
+     - Current GRPO/GSPO surrogates have a unit forward ratio while retaining
+       gradients; rollout drift is reported separately.
+     - Compare ``areno/api/loss_fns/grpo.py`` and ``gspo.py`` with
+       ``tests/test_losses_rewards_cpu.py``.
+   * - ``logp_abs_diff_mean`` grows or the two logprob means separate over
+       successive steps.
+     - The response masks and the policy weight-sync cadence.
+     - Rollout weights may be stale, or rollout and train paths may select
+       different tokens.
+     - Check ``prompt_mask``, ``loss_mask``, and packed masks in
+       ``areno/api/loss_fns/layout.py`` before changing sync frequency.
+   * - The scalar policy loss is near zero but gradient metrics are non-zero.
+     - ``advantage_mean``, ``grad_norm``, and ``grad_nonzero_ratio``.
+     - Positive and negative normalized advantages can cancel in the scalar
+       value even though the surrogate still has a gradient.
+     - Inspect the batch advantages and run the GRPO/GSPO CPU loss tests; do
+       not diagnose a stopped update from the rounded loss alone.
 
 TensorBoard metrics
 -------------------
