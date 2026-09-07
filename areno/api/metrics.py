@@ -123,6 +123,27 @@ def create_tensorboard_writer(log_dir: str):
     return SummaryWriter(log_dir=log_dir)
 
 
+def _effective_loss_token_count(prompt_mask: list[bool], loss_mask: list[bool] | None) -> int:
+    """Count tokens that actually contributed to the loss, using the same next-token convention as the packed path.
+
+    A position is a loss target when it is NOT a prompt token AND the (optional) `loss_mask` keeps it
+    trainable. The loss trains on next-token targets, so position `0` is never a target -- mirroring
+    `_sft_target_token_count` in `areno/api/backend/areno/backend.py`. When `loss_mask` is absent or
+    empty it defaults to `~prompt_mask` (the packer applies the same default at
+    `areno/api/backend/areno/backend.py`).
+    """
+
+    length = min(len(prompt_mask), len(loss_mask)) if loss_mask else len(prompt_mask)
+    count = 0
+    for idx in range(1, length):
+        if prompt_mask[idx]:
+            continue
+        if loss_mask and not loss_mask[idx]:
+            continue
+        count += 1
+    return count
+
+
 def collect_train_batch_stats(train_batch) -> dict:
     """Summarize rewards, advantages, lengths, and rollout logprobs.
 
@@ -159,6 +180,13 @@ def collect_train_batch_stats(train_batch) -> dict:
             response_logprobs=response_logprobs,
             response_len=response_len,
         )
+        # Effective-trainable-token accounting from the same mask the loss
+        # consumes. Length is clamped to the shorter of tokens/mask so a
+        # trailing mismatch can never index past the mask.
+        length = min(len(seq.tokens), len(prompt_mask))
+        effective = _effective_loss_token_count(prompt_mask, list(seq.loss_mask) if seq.loss_mask else None)
+        stats["effective_loss_tokens"].append(effective)
+        stats["total_input_tokens"].append(length)
     return stats
 
 
@@ -172,6 +200,8 @@ def init_rollout_stats(skipped_long: int = 0, total_skipped_long: int = 0) -> di
         "seq_len": [],
         "prompt_len": [],
         "response_len": [],
+        "effective_loss_tokens": [],
+        "total_input_tokens": [],
         "skipped_long": skipped_long,
         "total_skipped_long": total_skipped_long,
     }
@@ -217,6 +247,17 @@ def record_training_stats(writer, stats, step, train_res, train_batch, timings: 
         if values:
             writer.add_scalar(f"rollout/{key}_mean", np.mean(values), step)
     writer.add_scalar("rollout/num_sequences", len(train_batch), step)
+    effective_tokens = stats.get("effective_loss_tokens", [])
+    input_tokens = stats.get("total_input_tokens", [])
+    if effective_tokens and input_tokens:
+        effective_total = sum(effective_tokens)
+        input_total = sum(input_tokens)
+        writer.add_scalar("rollout/effective_loss_tokens", effective_total, step)
+        writer.add_scalar("rollout/total_input_tokens", input_total, step)
+        # `masked_tokens` is everything excluded from the loss: prompt tokens,
+        # padding, and response spans the loss mask dropped (total - effective).
+        writer.add_scalar("rollout/masked_tokens", input_total - effective_total, step)
+        writer.add_scalar("rollout/effective_length_mean", effective_total / len(effective_tokens), step)
     for key in ("skipped_long", "total_skipped_long"):
         if key in stats:
             writer.add_scalar(f"rollout/{key}", stats[key], step)
