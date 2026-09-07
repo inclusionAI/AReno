@@ -1167,6 +1167,22 @@ def run(trainer_config: TrainerConfig):
         load_dataset=load_dataset,
         load_from_disk=load_from_disk,
     )
+
+    # Validate dataset schema before expensive model initialization.
+    from areno.api.data_validation import format_validation_result, validate_dataset
+
+    result = validate_dataset(
+        dataset,
+        trainer_config.algo,
+        agent_fn=getattr(trainer_config, "agent_fn", None),
+    )
+    if not result.is_valid:
+        click.echo(format_validation_result(result), err=True)
+        raise click.UsageError(
+            f"数据集校验失败（{result.mode} 模式）：{len(result.errors)} 个错误。"
+            f"请根据上述错误修复数据后重试。"
+        )
+
     trainer = build_trainer(trainer_config, instance=api_trainer, dataset=dataset, reward_fn=reward_fn, loss_fn=loss_fn)
     trainer.fit()
 
