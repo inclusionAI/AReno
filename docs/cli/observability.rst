@@ -51,6 +51,17 @@ external agent code is executing tools, tests, sleeps, background commands, or
 other non-model work before asking the OpenAI-compatible proxy for the next
 model response.
 
+Adjust the verbosity with the ``ARENO_LOG_LEVEL`` environment variable
+(default ``INFO``). Set it to ``DEBUG`` to see per-request decode progress
+and fine-grained engine-level diagnostics:
+
+.. code-block:: bash
+
+   ARENO_LOG_LEVEL=DEBUG areno train ...
+
+The log level is resolved once at startup by ``areno.engine.log`` and
+applies to all submodules under the ``areno`` logger.
+
 ``train_stats``
 ---------------
 
@@ -145,6 +156,30 @@ The writer lives in ``areno.api.metrics``. It records three namespaces:
    Stage timings when available: ``time/rollout``, ``time/reward``,
    ``time/advantage``, and ``time/train``.
 
+
+Reading metrics during debugging
+--------------------------------
+
+You can read TensorBoard scalar series directly from Python without
+launching the TensorBoard UI. This is useful when you want to inspect
+metrics programmatically during debugging:
+
+.. code-block:: python
+
+   from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
+
+   ea = EventAccumulator("/tmp/areno/tfevent")
+   ea.Reload()
+   for scalar_event in ea.Scalars("rollout/rewards_mean"):
+       print(f"step={scalar_event.step}  reward_mean={scalar_event.value:.4f}")
+
+   # Filter a specific tag to a plain list for plotting or analysis:
+   values = [
+       event.value for event in ea.Scalars("train/loss")
+   ]
+   print(f"loss over {len(values)} steps: min={min(values):.4f}  max={max(values):.4f}")
+
+
 Agentic diagnostics
 -------------------
 
@@ -175,3 +210,64 @@ When a trajectory is dropped for exceeding the model context window,
 counts, message counts, assistant turn counts, tool-result counts, and a short
 prompt preview. This is the fastest way to debug overlong agentic examples
 without dumping every token in every trajectory.
+
+Dashboard
+---------
+
+AReno ships a lightweight local dashboard that surfaces training progress,
+metrics, and rollout samples without requiring TensorBoard.
+
+Launch it
+~~~~~~~~~
+
+Start the dashboard server in the background on the default port (8765):
+
+.. code-block:: bash
+
+   areno dashboard --start
+
+Pass ``--port`` to use a different port:
+
+.. code-block:: bash
+
+   areno dashboard --start --port 9090
+
+The command prints the dashboard URL (``http://host:port``) and the process
+PID. Stop a running dashboard server:
+
+.. code-block:: bash
+
+   areno dashboard --stop
+
+The dashboard reads from the same ``--metrics-log-dir`` directory that
+feeds TensorBoard (default ``/tmp/areno/tfevent``). Every training run
+that records metrics is automatically discoverable by the dashboard.
+
+Metrics-directory artifacts
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+When ``--metrics-log-dir`` is set, every training step writes a small set
+of JSON and JSONL files alongside the TensorBoard event files:
+
+``dashboard_state.{pid}.json``
+   Per-step lightweight state snapshot with ``stage``, ``step``, ``epoch``,
+   ``role``, and ``status`` fields. Used by the dashboard for low-latency
+   progress tracking without parsing TensorBoard events. At most one file
+   per process.
+
+``rollout_samples.{pid}.jsonl``
+   Decoded prompt/completion pairs written by ``MetricsRecorder``. Each
+   line is a JSON object with ``kind`` (``"rollout"`` or ``"agentic"``),
+   ``epoch``, ``step``, ``prompt_idx``, ``sample_idx``, prompt text, and
+   sampled completion text. The number of samples logged per step is
+   controlled by ``ARENO_LOG_COMPLETIONS`` (default 1).
+
+``areno_run_config.{pid}.json``
+   Run configuration snapshot in machine-readable form. Useful for
+   reproducing a run or correlating metrics with hyperparameters.
+
+``areno_run_config.{pid}.txt``
+   Human-readable summary of the run configuration.
+
+All files are scoped by ``pid`` so concurrent runs writing to the same
+directory do not interfere with each other.
