@@ -74,10 +74,12 @@ from areno.engine.layers.attention_backend.infer import FlashAttnInferBackend, b
 from areno.engine.layers.attention_backend.train import build_train_attention_backend
 from areno.engine.layers.linear import (
     ColumnParallelLinear,
+    ReplicatedLinear,
     RowParallelLinear,
     _shard_range,
     mark_tensor_parallel_parameter,
 )
+from areno.engine.layers.lora import RoutedExpertLoraBinding, RoutedLoraTarget
 from areno.engine.layers.norm import GroupRMSNormSigmoidGate, RMSNorm
 from areno.engine.layers.rotary import PartialRotaryEmbedding
 from areno.engine.layers.vocab import VocabParallelEmbedding, VocabParallelLMHead
@@ -442,20 +444,34 @@ class BailingGroupedExperts(nn.Module):
             self.hidden_size,
             dtype=config.dtype,
         )
-        self.lora_slots = nn.ModuleDict()
+        self.lora_slots = RoutedExpertLoraBinding(
+            intermediate_size=self.intermediate_size,
+            targets=(
+                RoutedLoraTarget("gate_proj", "linear_fc1.weight", self.hidden_size, self.intermediate_size),
+                RoutedLoraTarget("up_proj", "linear_fc1.weight", self.hidden_size, self.intermediate_size),
+                RoutedLoraTarget("down_proj", "linear_fc2.weight", self.intermediate_size, self.hidden_size),
+                RoutedLoraTarget(
+                    "linear_fc1",
+                    "linear_fc1.weight",
+                    self.hidden_size,
+                    2 * self.intermediate_size,
+                ),
+                RoutedLoraTarget("linear_fc2", "linear_fc2.weight", self.intermediate_size, self.hidden_size),
+            ),
+        )
         # Expert weights are sharded by EP (collapsed into TP); flag them as
         # not-TP/not-SP so the standard TP collectives leave them alone.
         for param in self.parameters():
             mark_tensor_parallel_parameter(param, False, sequence_parallel=False)
 
     def install_lora_component(self, component: str, slot: nn.Module) -> None:
-        self.lora_slots[component] = slot
+        self.lora_slots.bind(component, slot)
 
     def has_lora(self) -> bool:
         return bool(self.lora_slots)
 
     def has_active_lora(self) -> bool:
-        return self.has_lora() and next(iter(self.lora_slots.values())).enabled
+        return self.lora_slots.active
 
     def forward(self, flat: torch.Tensor, topk_idx: torch.Tensor, topk_weight: torch.Tensor) -> torch.Tensor:
         return self._forward_fused_permute(flat, topk_idx, topk_weight)
@@ -482,30 +498,17 @@ class BailingGroupedExperts(nn.Module):
                 + self.linear_fc2.weight.reshape(-1)[0] * 0
                 + topk_weight.sum().to(dtype=self.linear_fc1.weight.dtype) * 0
             )
-            if self.has_active_lora():
-                for slot in self.lora_slots.values():
-                    zero = zero + slot.lora_A.reshape(-1)[0] * 0 + slot.lora_B.reshape(-1)[0] * 0
+            zero = zero + self.lora_slots.zero_grad_edge(self.linear_fc1.weight)
             return all_reduce(flat.new_zeros(flat.shape) + zero)
         hidden, _ = _grouped_linear_forward(self.linear_fc1, x.contiguous(), tokens_per_expert)
-        if self.has_active_lora():
-            if "linear_fc1" in self.lora_slots:
-                hidden = hidden + self.lora_slots["linear_fc1"](x, tokens_per_expert)
-            gate, up = hidden.chunk(2, dim=-1)
-            if "gate_proj" in self.lora_slots:
-                gate = gate + self.lora_slots["gate_proj"](x, tokens_per_expert)
-            if "up_proj" in self.lora_slots:
-                up = up + self.lora_slots["up_proj"](x, tokens_per_expert)
-            hidden = torch.cat((gate, up), dim=-1)
+        hidden = self.lora_slots.apply_gate_up(x, hidden, tokens_per_expert)
         # Apply routing weight before fc2 so it stays inside the fp32 reduction.
         gate, up = hidden.chunk(2, dim=-1)
         hidden = (
             _swiglu(gate, up, self.swiglu_limit) * sorted_route_weight.unsqueeze(-1).to(dtype=hidden.dtype)
         ).contiguous()
         expert_out, _ = _grouped_linear_forward(self.linear_fc2, hidden, tokens_per_expert)
-        if self.has_active_lora() and "linear_fc2" in self.lora_slots:
-            expert_out = expert_out + self.lora_slots["linear_fc2"](hidden, tokens_per_expert)
-        if self.has_active_lora() and "down_proj" in self.lora_slots:
-            expert_out = expert_out + self.lora_slots["down_proj"](hidden, tokens_per_expert)
+        expert_out = self.lora_slots.apply_down(hidden, expert_out, tokens_per_expert)
         # Unpermute back to original (batch, seq) order, then scale and reduce.
         if self.has_lora():
             out = _areno_moe_unpermute_no_compile(
@@ -571,17 +574,7 @@ class BailingGroupedExperts(nn.Module):
 
         w1 = self._copy_inference_weight(current_w1, self.linear_fc1.weight, dtype=dtype)
         w2 = self._copy_inference_weight(current_w2, self.linear_fc2.weight, dtype=dtype)
-        if self.has_active_lora():
-            if "linear_fc1" in self.lora_slots:
-                self._add_lora_delta_(w1, self.lora_slots["linear_fc1"])
-            if "linear_fc2" in self.lora_slots:
-                self._add_lora_delta_(w2, self.lora_slots["linear_fc2"])
-            if "gate_proj" in self.lora_slots:
-                self._add_lora_delta_(w1[:, : self.intermediate_size], self.lora_slots["gate_proj"])
-            if "up_proj" in self.lora_slots:
-                self._add_lora_delta_(w1[:, self.intermediate_size :], self.lora_slots["up_proj"])
-            if "down_proj" in self.lora_slots:
-                self._add_lora_delta_(w2, self.lora_slots["down_proj"])
+        self.lora_slots.merge_inference_weights_(w1, w2)
         return w1, w2
 
     @staticmethod
@@ -595,13 +588,6 @@ class BailingGroupedExperts(nn.Module):
         result = torch.empty(source.shape, device=source.device, dtype=dtype)
         result.copy_(source)
         return result
-
-    @staticmethod
-    @torch.no_grad()
-    def _add_lora_delta_(weight: torch.Tensor, slot: nn.Module) -> None:
-        """Accumulate ``scale * B @ A`` directly into its final fused tile."""
-
-        weight.baddbmm_(slot.lora_B, slot.lora_A, beta=1.0, alpha=float(slot.scale.item()))
 
     @torch.no_grad()
     def full_expert_weights(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
@@ -814,7 +800,6 @@ class BailingSoftmaxAttention(nn.Module):
 
     def __init__(self, config: ModelConfig, layer_idx: int):
         super().__init__()
-        self.lora_slots = nn.ModuleDict()
         ctx = get_tp_context()
         self.layer_idx = layer_idx
         # Head-dim split: rope vs non-rope channels on Q/K, plus separate V dim.
@@ -861,7 +846,7 @@ class BailingSoftmaxAttention(nn.Module):
                 )
                 _cast_linear_weights(self.q_proj, config.dtype)
             else:
-                self.q_a_proj = nn.Linear(config.hidden_size, self.q_lora_rank, bias=False)
+                self.q_a_proj = ReplicatedLinear(config.hidden_size, self.q_lora_rank, bias=False)
                 _cast_linear_weights(self.q_a_proj, config.dtype)
                 mark_tensor_parallel_parameter(
                     self.q_a_proj.weight, False, sequence_parallel=True, tp_grad_allreduce=True
@@ -874,7 +859,7 @@ class BailingSoftmaxAttention(nn.Module):
                     input_grad_allreduce=False,
                 )
                 _cast_linear_weights(self.q_b_proj, config.dtype)
-            self.kv_a_proj_with_mqa = nn.Linear(
+            self.kv_a_proj_with_mqa = ReplicatedLinear(
                 config.hidden_size, self.kv_lora_rank + self.qk_rope_head_dim, bias=False
             )
             _cast_linear_weights(self.kv_a_proj_with_mqa, config.dtype)
@@ -912,15 +897,6 @@ class BailingSoftmaxAttention(nn.Module):
         # KV cache slots populated by the runtime at engine setup.
         self.k_cache = torch.tensor([])
         self.v_cache = torch.tensor([])
-
-    def install_lora_component(self, component: str, slot: nn.Module) -> None:
-        """Attach an adapter to one replicated MLA projection."""
-
-        self.lora_slots[component] = slot
-
-    def _with_lora(self, component: str, x: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
-        slot = self.lora_slots[component] if component in self.lora_slots else None
-        return output + slot(x) if slot is not None and slot.enabled else output
 
     def forward(
         self,
@@ -975,12 +951,12 @@ class BailingSoftmaxAttention(nn.Module):
             q = self.q_proj(mla_input)
         else:
             assert self.q_a_proj is not None and self.q_a_layernorm is not None and self.q_b_proj is not None
-            q_a = self._with_lora("q_a_proj", mla_input, self.q_a_proj(mla_input))
+            q_a = self.q_a_proj(mla_input)
             q = self.q_b_proj(self.q_a_layernorm(q_a))
         bsz, seqlen = q.shape[:2]
         q = q.view(bsz, seqlen, self.local_heads, self.head_dim)
         q_nope, q_rope = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
-        kv_a = self._with_lora("kv_a_proj_with_mqa", mla_input, self.kv_a_proj_with_mqa(mla_input))
+        kv_a = self.kv_a_proj_with_mqa(mla_input)
         compressed_kv, k_rope = kv_a.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
         if is_sequence_parallel_active():
             k_rope = gather_from_sequence_parallel_region(k_rope)

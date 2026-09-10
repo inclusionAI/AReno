@@ -18,6 +18,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from areno.accel import areno_linear
+from areno.engine.layers.lora import MergedLoraBinding
 from areno.engine.parallel.collectives import (
     all_gather_last_dim,
     all_reduce,
@@ -141,15 +142,24 @@ class MergedColumnParallelLinear(nn.Module):
     so callers can split the output back.
     """
 
-    def __init__(self, in_features: int, out_features: list[int] | tuple[int, ...], bias: bool = False):
+    def __init__(
+        self,
+        in_features: int,
+        out_features: list[int] | tuple[int, ...],
+        bias: bool = False,
+        *,
+        lora_components: tuple[str, ...] = (),
+    ):
         super().__init__()
-        self.lora_slots = nn.ModuleDict()
-        self._lora_component_indices: dict[str, int] = {}
+        self.lora_slots = MergedLoraBinding()
         ctx = get_tp_context()
         if not out_features:
             raise ValueError("out_features must not be empty")
         self.in_features = in_features
         self.out_features = tuple(out_features)
+        if lora_components and len(lora_components) != len(self.out_features):
+            raise ValueError("lora_components must match out_features")
+        self.lora_components = tuple(lora_components)
         self.local_out_features = []
         # Shard each output sub-block independently so that the fused weight
         # is the concatenation of per-block local shards.
@@ -165,8 +175,7 @@ class MergedColumnParallelLinear(nn.Module):
     def install_lora_component(self, component: str, component_index: int, slot: nn.Module) -> None:
         """Attach one canonical adapter to a fused output component."""
 
-        self.lora_slots[component] = slot
-        self._lora_component_indices[component] = component_index
+        self.lora_slots.bind(component, component_index, slot)
 
     def reset_parameters(self) -> None:
         nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
@@ -182,15 +191,7 @@ class MergedColumnParallelLinear(nn.Module):
             else copy_to_tensor_parallel_region(x)
         )
         out = _areno_linear_forward(x, self.weight, self.bias)
-        if not self.lora_slots:
-            return out
-        parts = list(out.split(self.local_out_features, dim=-1))
-        for component, slot in self.lora_slots.items():
-            if not slot.enabled:
-                continue
-            index = self._lora_component_indices[component]
-            parts[index] = parts[index] + slot(x)
-        return torch.cat(parts, dim=-1)
+        return self.lora_slots.apply(x, out, self.local_out_features)
 
 
 class QKVParallelLinear(MergedColumnParallelLinear):
@@ -211,8 +212,8 @@ class QKVParallelLinear(MergedColumnParallelLinear):
         bias: bool = False,
     ):
         nn.Module.__init__(self)
-        self.lora_slots = nn.ModuleDict()
-        self._lora_component_indices: dict[str, int] = {}
+        self.lora_slots = MergedLoraBinding()
+        self.lora_components = ("q_proj", "k_proj", "v_proj")
         self.head_dim = head_dim
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
@@ -286,6 +287,25 @@ class RowParallelLinear(nn.Module):
         out = reduce_scatter_to_sequence_parallel_region(out) if is_sequence_parallel_active() else all_reduce(out)
         if self.bias is not None:
             out = out + self.bias
+        return out
+
+
+class ReplicatedLinear(nn.Linear):
+    """Replicated projection whose LoRA delta shares the base forward."""
+
+    def __init__(self, in_features: int, out_features: int, bias: bool = False):
+        super().__init__(in_features, out_features, bias=bias)
+        self.lora_slot: nn.Module | None = None
+
+    def install_lora(self, slot: nn.Module) -> None:
+        if self.lora_slot is not None:
+            raise ValueError("LoRA is already bound to this projection")
+        self.lora_slot = slot
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out = F.linear(x, self.weight, self.bias)
+        if self.lora_slot is not None and self.lora_slot.enabled:
+            out = out + self.lora_slot(x)
         return out
 
 
