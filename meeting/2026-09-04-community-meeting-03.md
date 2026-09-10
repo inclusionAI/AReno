@@ -1,8 +1,8 @@
 # AReno Community Meeting #3
 
-Date: 2026-09-04  
-Time: 13:00-14:00 China Standard Time (UTC+8)  
-Attendance: Not counted  
+Date: 2026-09-04
+Time: 13:00-14:00 China Standard Time (UTC+8)
+Attendance: Not counted
 Format: Online community meeting
 
 ## Meeting Summary
@@ -135,8 +135,8 @@ The meeting agreed that Mac Mini is meaningful for community accessibility and s
 
 ## Next Meeting
 
-Date: TBD  
-Time: TBD  
+Date: TBD
+Time: TBD
 Suggested topics:
 
 - Review feedback and bug fixes after the `0.0.8` release.
