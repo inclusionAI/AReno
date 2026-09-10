@@ -12,6 +12,7 @@ parallelism is on) to recover the global output.
 from __future__ import annotations
 
 import math
+import weakref
 
 import torch
 import torch.nn.functional as F
@@ -293,19 +294,37 @@ class RowParallelLinear(nn.Module):
 class ReplicatedLinear(nn.Linear):
     """Replicated projection whose LoRA delta shares the base forward."""
 
-    def __init__(self, in_features: int, out_features: int, bias: bool = False):
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        bias: bool = False,
+        *,
+        lora_owner: nn.ModuleDict,
+        lora_component: str,
+    ):
         super().__init__(in_features, out_features, bias=bias)
-        self.lora_slot: nn.Module | None = None
+        object.__setattr__(self, "_lora_owner_ref", weakref.ref(lora_owner))
+        self._lora_component = lora_component
+
+    @property
+    def lora_slot(self) -> nn.Module | None:
+        owner = self._lora_owner_ref()
+        return owner[self._lora_component] if owner is not None and self._lora_component in owner else None
 
     def install_lora(self, slot: nn.Module) -> None:
         if self.lora_slot is not None:
             raise ValueError("LoRA is already bound to this projection")
-        self.lora_slot = slot
+        owner = self._lora_owner_ref()
+        if owner is None:
+            raise RuntimeError("replicated LoRA owner has been released")
+        owner[self._lora_component] = slot
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         out = F.linear(x, self.weight, self.bias)
-        if self.lora_slot is not None and self.lora_slot.enabled:
-            out = out + self.lora_slot(x)
+        slot = self.lora_slot
+        if slot is not None and slot.enabled:
+            out = out + slot(x)
         return out
 
 

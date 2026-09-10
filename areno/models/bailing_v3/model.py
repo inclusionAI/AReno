@@ -800,6 +800,7 @@ class BailingSoftmaxAttention(nn.Module):
 
     def __init__(self, config: ModelConfig, layer_idx: int):
         super().__init__()
+        self.lora_slots = nn.ModuleDict()
         ctx = get_tp_context()
         self.layer_idx = layer_idx
         # Head-dim split: rope vs non-rope channels on Q/K, plus separate V dim.
@@ -846,7 +847,13 @@ class BailingSoftmaxAttention(nn.Module):
                 )
                 _cast_linear_weights(self.q_proj, config.dtype)
             else:
-                self.q_a_proj = ReplicatedLinear(config.hidden_size, self.q_lora_rank, bias=False)
+                self.q_a_proj = ReplicatedLinear(
+                    config.hidden_size,
+                    self.q_lora_rank,
+                    bias=False,
+                    lora_owner=self.lora_slots,
+                    lora_component="q_a_proj",
+                )
                 _cast_linear_weights(self.q_a_proj, config.dtype)
                 mark_tensor_parallel_parameter(
                     self.q_a_proj.weight, False, sequence_parallel=True, tp_grad_allreduce=True
@@ -860,7 +867,11 @@ class BailingSoftmaxAttention(nn.Module):
                 )
                 _cast_linear_weights(self.q_b_proj, config.dtype)
             self.kv_a_proj_with_mqa = ReplicatedLinear(
-                config.hidden_size, self.kv_lora_rank + self.qk_rope_head_dim, bias=False
+                config.hidden_size,
+                self.kv_lora_rank + self.qk_rope_head_dim,
+                bias=False,
+                lora_owner=self.lora_slots,
+                lora_component="kv_a_proj_with_mqa",
             )
             _cast_linear_weights(self.kv_a_proj_with_mqa, config.dtype)
             mark_tensor_parallel_parameter(
