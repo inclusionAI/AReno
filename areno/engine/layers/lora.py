@@ -14,6 +14,8 @@ from dataclasses import dataclass
 import torch
 from torch import nn
 
+from areno.accel import areno_linear
+
 
 class MergedLoraBinding(nn.ModuleDict):
     """LoRA slots bound to independently sharded components of one GEMM."""
@@ -40,6 +42,63 @@ class MergedLoraBinding(nn.ModuleDict):
             parts[index] = parts[index] + slot(x)
             changed = True
         return torch.cat(parts, dim=-1) if changed else output
+
+
+class PackedColumnLoraBinding(nn.Module):
+    """Inference binding that shares one input projection across LoRA slots.
+
+    The native column projections remain the sole owners of their base weights
+    and adapter slots.  This binding owns only the derived, non-persistent
+    packed-A cache and the execution rule that consumes it.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.register_buffer("packed_A", torch.empty(0), persistent=False)
+        self.rank = 0
+
+    @torch.no_grad()
+    def prepare(self, projections: Iterable[nn.Module]) -> None:
+        projections = tuple(projections)
+        slots = tuple(projection.lora_slot for projection in projections)
+        if not slots or any(slot is None or not slot.enabled for slot in slots):
+            self.clear()
+            return
+        value = torch.cat(tuple(slot.lora_A for slot in slots), dim=0).contiguous()
+        if (
+            self.packed_A.shape == value.shape
+            and self.packed_A.device == value.device
+            and self.packed_A.dtype == value.dtype
+        ):
+            self.packed_A.copy_(value)
+        else:
+            self.packed_A = value
+        self.rank = slots[0].rank
+
+    @torch.no_grad()
+    def clear(self) -> None:
+        self.packed_A = self.packed_A.new_empty(0)
+        self.rank = 0
+
+    def project(
+        self,
+        x: torch.Tensor,
+        projections: Iterable[nn.Module],
+        *,
+        use_cache: bool,
+    ) -> tuple[torch.Tensor, ...]:
+        projections = tuple(projections)
+        slots = tuple(projection.lora_slot for projection in projections)
+        if not use_cache or self.packed_A.numel() == 0 or any(slot is None or not slot.enabled for slot in slots):
+            return tuple(projection(x) for projection in projections)
+
+        packed_hidden = torch.nn.functional.linear(x, self.packed_A)
+        lora_inputs = packed_hidden.split(self.rank, dim=-1)
+        return tuple(
+            areno_linear(x, projection.weight, projection.bias)
+            + torch.nn.functional.linear(lora_input, slot.lora_B) * slot.scale
+            for projection, slot, lora_input in zip(projections, slots, lora_inputs, strict=True)
+        )
 
 
 @dataclass(frozen=True, slots=True)
