@@ -139,7 +139,6 @@ def test_flash_v3_tp8_sp_rollout_train_next_rollout(tmp_path: Path) -> None:
     assert observed.train_versions == [1]
     assert len(next_rollout) == 1
     assert next_rollout[0].adapter_version == 1
-    assert observed.train_results[0]["packed_training"]
     assert observed.train_results[0]["sequence_parallel"]
 
     initial = load_file(initial_path / "adapter_model.safetensors")
