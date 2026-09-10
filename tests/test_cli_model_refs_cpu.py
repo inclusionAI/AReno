@@ -87,5 +87,6 @@ class CliModelReferenceTest(unittest.TestCase):
         self.assertEqual(resolved.reward_ckpt, "/ms/org/reward")
         self.assertEqual(calls, ["org/actor", "org/reward"])
 
+
 if __name__ == "__main__":
     unittest.main()
