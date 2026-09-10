@@ -21,6 +21,11 @@ class ArenoCli(click.Group):
         "dashboard": ("areno.cli.dashboard", "dashboard_command", "Start or stop the AReno React dashboard."),
         "train": ("areno.cli.train", "train_command", "Run SFT, DPO, GSPO, GRPO, or PPO training."),
         "serve": ("areno.cli.serve", "serve_command", "Serve an OpenAI-compatible chat API."),
+        "timing-summary": (
+            "areno.cli.timing_summary",
+            "timing_summary_command",
+            "Summarize time spent in each RL training phase for a run.",
+        ),
     }
 
     def list_commands(self, ctx: click.Context) -> list[str]:
