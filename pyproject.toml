@@ -102,6 +102,8 @@ include = ["areno*"]
 
 [tool.setuptools.package-data]
 "areno.dashboard" = ["dist/*", "dist/assets/*"]
+"areno.experimental.world_model_vla" = ["worker.sbatch"]
 
 [project.scripts]
 areno = "areno.cli.main:main"
+areno-world-model-vla = "areno.experimental.world_model_vla.cli:main"

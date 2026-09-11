@@ -1,0 +1,42 @@
+{
+  "rlinf_root": "../../../RLinf",
+  "rlinf_python": "../../../RLinf/.venv/bin/python",
+  "world_model_path": "../../../assets/models/RLinf-Wan-LIBERO-Spatial",
+  "policy_path": "../../../assets/models/Openvla-oft-SFT-libero-spatial-traj1",
+  "output_dir": "../../../runs/areno-wan-libero-spatial",
+  "cache_root": "../../../cache/areno-world-model-vla",
+  "stage_ends": [
+    2,
+    20,
+    40,
+    60,
+    80,
+    100
+  ],
+  "actor_micro_batch_size": 1,
+  "eval_trajectories": 496,
+  "target_success_rate": 0.775,
+  "ray_object_store_bytes": 17179869184,
+  "verify_sha256": false,
+  "gpu_monitor": true,
+  "gpu_monitor_interval": 2,
+  "require_rlinf_compatibility_patchset": false,
+  "setup_script": null,
+  "train_overrides": [],
+  "eval_overrides": [],
+  "extra_env": {},
+  "slurm": {
+    "partition": "gpu",
+    "train_qos": null,
+    "eval_qos": null,
+    "train_time_limit": "3-00:00:00",
+    "eval_time_limit": "06:00:00",
+    "constraint": null,
+    "account": null,
+    "gpus": 8,
+    "cpus": 64,
+    "memory": "500G",
+    "node": null,
+    "disable_gpu_binding": false
+  }
+}
