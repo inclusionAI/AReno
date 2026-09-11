@@ -184,4 +184,4 @@ def test_flash_v3_tp8_sp_rollout_train_next_rollout(tmp_path: Path) -> None:
     finally:
         reloaded.close()
 
-    assert reloaded_rollout[0].output_tokens == next_rollout[0].output_tokens
+    assert reloaded_rollout[0].sequences[0].resp_tokens == next_rollout[0].sequences[0].resp_tokens
