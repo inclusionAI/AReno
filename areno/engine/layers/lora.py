@@ -30,7 +30,7 @@ class MergedLoraBinding(nn.ModuleDict):
         self[component] = slot
         self._component_indices[component] = int(component_index)
 
-    def apply(self, x: torch.Tensor, output: torch.Tensor, output_sizes: Iterable[int]) -> torch.Tensor:
+    def apply_delta(self, x: torch.Tensor, output: torch.Tensor, output_sizes: Iterable[int]) -> torch.Tensor:
         if not self:
             return output
         parts = list(output.split(tuple(output_sizes), dim=-1))

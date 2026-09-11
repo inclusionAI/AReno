@@ -326,8 +326,10 @@ areno train \
   --save-interval 100
 ```
 
-Saved checkpoints contain standard PEFT `adapter_config.json` and
-`adapter_model.safetensors` files. Resume training or serve an adapter by
+Pure LoRA checkpoints contain standard PEFT `adapter_config.json` and
+`adapter_model.safetensors` files. Explicit `--full-parameter-targets` can
+train selected base parameters together with LoRA; those saves use AReno's
+versioned hybrid metadata in the same two-file artifact. Resume training or serve an adapter by
 supplying the frozen base checkpoint together with `--lora-adapter-path`.
 See the [native LoRA guide](docs/concepts/native-lora.rst) for supported
 models and targets, agentic training, save/reload, and serving examples.

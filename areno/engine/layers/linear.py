@@ -192,7 +192,7 @@ class MergedColumnParallelLinear(nn.Module):
             else copy_to_tensor_parallel_region(x)
         )
         out = _areno_linear_forward(x, self.weight, self.bias)
-        return self.lora_slots.apply(x, out, self.local_out_features)
+        return self.lora_slots.apply_delta(x, out, self.local_out_features)
 
 
 class QKVParallelLinear(MergedColumnParallelLinear):

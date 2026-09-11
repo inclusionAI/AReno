@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -22,6 +23,7 @@ FLASH_V3_TARGETS = (
     "layers.2.mlp.experts.linear_fc1",
     "layers.2.mlp.experts.linear_fc2",
 )
+FLASH_V3_FULL_PARAMETER_TARGETS = ("layers.2.mlp.gate.weight",)
 
 
 class _ObservedTrainer:
@@ -58,7 +60,12 @@ def test_flash_v3_tp8_sp_rollout_train_next_rollout(tmp_path: Path) -> None:
 
     initial_path = tmp_path / "adapter-initial"
     trained_path = tmp_path / "adapter-trained"
-    lora = LoraConfig(rank=4, alpha=4.0, target_modules=FLASH_V3_TARGETS)
+    lora = LoraConfig(
+        rank=4,
+        alpha=4.0,
+        target_modules=FLASH_V3_TARGETS,
+        full_parameter_targets=FLASH_V3_FULL_PARAMETER_TARGETS,
+    )
     backend_config = CudaConfig(
         tp_size=8,
         dp_size=1,
@@ -84,8 +91,8 @@ def test_flash_v3_tp8_sp_rollout_train_next_rollout(tmp_path: Path) -> None:
         algo="grpo",
         ckpt=model_path,
         dataset_path="e2e://flash-v3-version-closure",
-        epochs=1,
-        max_steps=1,
+        epochs=2,
+        max_steps=2,
         world_size=8,
         tp_size=8,
         train_devices=list(range(8)),
@@ -135,14 +142,46 @@ def test_flash_v3_tp8_sp_rollout_train_next_rollout(tmp_path: Path) -> None:
     finally:
         observed.close()
 
-    assert observed.rollout_versions == [0]
-    assert observed.train_versions == [1]
+    assert observed.rollout_versions == [0, 1]
+    assert observed.train_versions == [1, 2]
     assert len(next_rollout) == 1
-    assert next_rollout[0].adapter_version == 1
-    assert observed.train_results[0]["sequence_parallel"]
+    assert next_rollout[0].adapter_version == 2
+    assert all(result["sequence_parallel"] for result in observed.train_results)
 
     initial = load_file(initial_path / "adapter_model.safetensors")
     trained = load_file(trained_path / "adapter_model.safetensors")
+    artifact_config = json.loads((trained_path / "adapter_config.json").read_text(encoding="utf-8"))
+    assert artifact_config["peft_type"] == "ARENO_HYBRID"
+    assert artifact_config["format_version"] == 1
+    assert tuple(artifact_config["full_parameter_targets"]) == FLASH_V3_FULL_PARAMETER_TARGETS
     changed = {key for key in initial if not torch.equal(initial[key], trained[key])}
     assert any("layers.0.attention" in key for key in changed)
     assert any("layers.2.mlp.experts" in key for key in changed)
+    assert any(key.endswith("layers.2.mlp.gate.weight") for key in changed)
+
+    reloaded_config = CudaConfig(
+        tp_size=8,
+        dp_size=1,
+        devices=list(range(8)),
+        lora=LoraConfig(adapter_path=os.fspath(trained_path)),
+        max_running_prompts=1,
+        runtime={
+            "compile_model": False,
+            "activation_checkpointing": True,
+            "keep_rollout_state": False,
+            "eager_decode": False,
+        },
+    )
+    reloaded = Trainer(8, model_path, custom_config=reloaded_config)
+    reloaded.init()
+    try:
+        reloaded.begin_rollout_session()
+        try:
+            reloaded_rollout = reloaded.rollout_token_batch([prompt_tokens], 1, sampling_params)
+        finally:
+            reloaded.end_rollout_session()
+            reloaded.finish_step()
+    finally:
+        reloaded.close()
+
+    assert reloaded_rollout[0].output_tokens == next_rollout[0].output_tokens

@@ -694,11 +694,11 @@ class ArenoEngine:
         return merge_metric_dicts(rank0_results) or {}
 
     def save_checkpoint(self, path: str) -> str:
-        """Save base weights, or the standard PEFT artifact in native LoRA mode.
+        """Save base weights, or an adapter artifact in native policy mode.
 
         Fullweight workers cooperatively write HuggingFace shards to ``path``.
-        Native LoRA keeps the base frozen, so its checkpoint is the adapter-only
-        PEFT artifact consumed by training and serving.
+        Native LoRA writes standard PEFT; explicit trainable base parameters
+        are included in an AReno hybrid artifact consumed by training and serving.
         """
 
         if self.config.lora is not None:
@@ -707,7 +707,7 @@ class ArenoEngine:
         return results[0]["path"]
 
     def export_adapter(self, path: str) -> str:
-        """Export the live native LoRA weights as a standard PEFT adapter."""
+        """Export the live native LoRA or explicit hybrid policy artifact."""
 
         results = self.cluster.call(Op.EXPORT_ADAPTER, ExportAdapterPayload(path=path))
         result = next((result for result in results if result is not None), None)

@@ -310,6 +310,11 @@ class EngineConfig:
             raise ValueError("reference_mode must be one of: independent, reuse_actor_base")
         if self.reference_mode == "reuse_actor_base" and self.lora is None:
             raise ValueError("reference_mode='reuse_actor_base' requires native LoRA")
+        if self.reference_mode == "reuse_actor_base" and self.lora is not None and self.lora.full_parameter_targets:
+            raise ValueError(
+                "reference_mode='reuse_actor_base' cannot be used with full_parameter_targets "
+                "because the actor base is trainable"
+            )
         if (
             self.lora is not None
             and self.model.model_type == "bailing_moe_v3"

@@ -136,6 +136,7 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "lora_alpha",
             "lora_dropout",
             "lora_target_modules",
+            "full_parameter_targets",
             "lora_adapter_path",
             "reference_mode",
             "lr",
@@ -412,11 +413,18 @@ def _require_positive_float(value: float, option_name: str) -> None:
 def _lora_config_from_options(args):
     rank = getattr(args, "lora_rank", None)
     adapter_path = getattr(args, "lora_adapter_path", None)
-    if rank is None and adapter_path is None:
+    full_targets = tuple(
+        item.strip() for item in getattr(args, "full_parameter_targets", "").split(",") if item.strip()
+    )
+    if rank is None and adapter_path is None and not full_targets:
         return None
     from areno.adapters import LoraConfig
 
-    targets = tuple(item.strip() for item in args.lora_target_modules.split(",") if item.strip())
+    targets = (
+        ()
+        if rank is None and adapter_path is None
+        else tuple(item.strip() for item in args.lora_target_modules.split(",") if item.strip())
+    )
     try:
         return LoraConfig(
             rank=8 if rank is None else rank,
@@ -424,6 +432,7 @@ def _lora_config_from_options(args):
             dropout=args.lora_dropout,
             target_modules=targets,
             adapter_path=adapter_path,
+            full_parameter_targets=full_targets,
         )
     except ValueError as exc:
         raise click.UsageError(str(exc)) from exc
@@ -534,6 +543,10 @@ def _format_training_config_summary(
                 (
                     "lora_target_modules",
                     ",".join(config.lora.target_modules) if config.lora is not None else "n/a",
+                ),
+                (
+                    "full_parameter_targets",
+                    ",".join(config.lora.full_parameter_targets) if config.lora is not None else "n/a",
                 ),
                 (
                     "lora_adapter_path",
@@ -1669,6 +1682,14 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     help=(
         "Comma-separated native projection targets (MoE MLP targets apply to each routed expert; "
         "selected Bailing V3 KDA q/k/v/f/g projections use independent canonical adapters)."
+    ),
+)
+@click.option(
+    "--full-parameter-targets",
+    default="",
+    help=(
+        "Comma-separated trainable parameter or module paths. Exact paths are preferred; "
+        "an unqualified name matches a parameter name or its immediate parent module."
     ),
 )
 @click.option("--lora-adapter-path", default=None, help="Standard PEFT adapter used to initialize native LoRA.")

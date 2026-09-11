@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import math
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -25,6 +26,8 @@ from areno.engine.layers.linear import (
 )
 from areno.engine.layers.lora import RoutedExpertLoraBinding
 from areno.engine.parallel.context import get_tp_context
+
+logger = logging.getLogger(__name__)
 
 
 class _AdapterRuntimeState:
@@ -189,23 +192,29 @@ class RoutedExpertLoraSlot(nn.Module):
 
 
 class AdapterRegistry:
-    """Non-owning index over LoRA slots; projection modules remain sole owners."""
+    """One resolved index over every trainable policy parameter."""
 
     def __init__(
         self,
         slots: dict[str, LoraSlot | RoutedExpertLoraSlot],
         config: LoraConfig,
         runtime_state: _AdapterRuntimeState,
+        full_parameters: dict[str, nn.Parameter] | None = None,
     ) -> None:
         self.slots = slots
+        self.full_parameters = {} if full_parameters is None else full_parameters
         self.config = config
         self._runtime_state = runtime_state
         self.version = 0
 
-    def named_parameters(self):
+    def named_adapter_parameters(self):
         for name, slot in self.slots.items():
             yield f"{name}.lora_A.weight", slot.lora_A
             yield f"{name}.lora_B.weight", slot.lora_B
+
+    def named_parameters(self):
+        yield from self.named_adapter_parameters()
+        yield from self.full_parameters.items()
 
     def parameters(self) -> tuple[nn.Parameter, ...]:
         return tuple(parameter for _, parameter in self.named_parameters())
@@ -272,17 +281,71 @@ def initialize_lora(model: nn.Module, config: LoraConfig, *, seed: int) -> Adapt
     if missing:
         raise ValueError(f"target_modules are not present in {model_type}: {', '.join(sorted(missing))}")
     _validate_resolved_targets(resolved)
+    full_parameters = _resolve_full_parameter_targets(model, config.full_parameter_targets)
+    lora_base_ids = {id(spec.base_weight) for spec in resolved}
+    conflicts = sorted(name for name, parameter in full_parameters.items() if id(parameter) in lora_base_ids)
+    if conflicts:
+        raise ValueError("parameters cannot be trained both in full and LoRA modes: " + ", ".join(conflicts[:3]))
 
     runtime_state = _AdapterRuntimeState()
     pending = [(spec, _new_slot(spec, config, seed, runtime_state)) for spec in resolved]
     for parameter in model.parameters():
         parameter.requires_grad_(False)
+    for parameter in full_parameters.values():
+        parameter.requires_grad_(True)
 
     slots: dict[str, LoraSlot | RoutedExpertLoraSlot] = {}
     for spec, slot in pending:
         _bind_slot(spec, slot)
         slots[spec.logical_name] = slot
-    return AdapterRegistry(slots, config, runtime_state)
+    registry = AdapterRegistry(slots, config, runtime_state, full_parameters)
+    if get_tp_context().is_rank0:
+        logger.info(
+            "native policy targets resolved: lora=%d, full_parameters=%d, trainable_parameters=%d",
+            len(slots),
+            len(full_parameters),
+            sum(parameter.numel() for parameter in registry.parameters()),
+        )
+    return registry
+
+
+def _resolve_full_parameter_targets(model: nn.Module, selectors: tuple[str, ...]) -> dict[str, nn.Parameter]:
+    """Resolve exact paths or unqualified component names to model parameters."""
+
+    if not selectors:
+        return {}
+    named_parameters = dict(model.named_parameters())
+    named_modules = dict(model.named_modules())
+    resolved: dict[str, nn.Parameter] = {}
+    owners: dict[int, str] = {}
+    missing = []
+    for selector in selectors:
+        matches: dict[str, nn.Parameter] = {}
+        parameter = named_parameters.get(selector)
+        module = named_modules.get(selector)
+        if parameter is not None:
+            matches[selector] = parameter
+        elif module is not None:
+            prefix = f"{selector}." if selector else ""
+            matches.update((name, candidate) for name, candidate in named_parameters.items() if name.startswith(prefix))
+        elif "." not in selector:
+            for name, candidate in named_parameters.items():
+                parent = name.rsplit(".", 1)[0] if "." in name else ""
+                if name.rsplit(".", 1)[-1] == selector or parent.rsplit(".", 1)[-1] == selector:
+                    matches[name] = candidate
+        if not matches:
+            missing.append(selector)
+            continue
+        for name, candidate in matches.items():
+            previous = owners.get(id(candidate))
+            if previous is not None and previous != selector:
+                raise ValueError(f"full_parameter_targets {previous!r} and {selector!r} overlap at {name!r}")
+            owners[id(candidate)] = selector
+            resolved[name] = candidate
+    if missing:
+        model_type = getattr(getattr(model, "config", None), "model_type", type(model).__name__)
+        raise ValueError(f"full_parameter_targets are not present in {model_type}: {', '.join(sorted(missing))}")
+    return dict(sorted(resolved.items()))
 
 
 def _iter_lora_targets(model: nn.Module) -> Iterator[LoraTargetSpec]:

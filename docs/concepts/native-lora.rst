@@ -1,8 +1,8 @@
 Native LoRA
 ===========
 
-AReno can train and serve LoRA adapters directly in its CUDA engine. The base
-model stays frozen while the LoRA A and B parameters participate in the same
+AReno can train and serve LoRA adapters directly in its CUDA engine. By
+default the base model stays frozen while the LoRA A and B parameters participate in the same
 tensor-parallel, data-parallel, sequence-parallel, rollout, and optimizer
 paths as full-parameter training. No external PEFT runtime is required during
 training or inference.
@@ -24,6 +24,14 @@ native attention projection names, including ``q_a_proj``, ``q_b_proj``,
 their fused routed-expert projections as ``linear_fc1`` and ``linear_fc2``.
 Concrete projection paths such as ``layers.2.mlp.experts.linear_fc1`` are
 accepted when only specific layers should receive adapters.
+
+The CUDA backend also accepts ``--full-parameter-targets`` for a small set of
+base parameters that must be trained together with LoRA, such as a sparse-MoE
+router. This is one explicit selector contract, not a model-specific preset:
+an exact parameter path selects one parameter, an exact module path selects
+its parameter subtree, and an unqualified name matches a parameter name or
+its immediate parent module. Missing, overlapping, or LoRA/full conflicts fail
+during model initialization.
 
 LoRA dropout must currently be zero. Standard PEFT LoRA adapters are accepted,
 but options that change the adapter structure, such as DoRA, RS-LoRA, bias
@@ -53,7 +61,7 @@ the default target list covers attention and MLP projections:
      --save-path outputs/qwen3-lora \
      --save-interval 100
 
-The resolved LoRA rank, alpha, dropout, target modules, and adapter path are
+The resolved LoRA rank, alpha, dropout, LoRA/full targets, and adapter path are
 shown in the configuration summary printed before model loading.
 
 Agentic LoRA uses the normal agent hooks. For example, this trains the
@@ -85,9 +93,12 @@ Tic-Tac-Toe tool-calling policy:
 Save and reload
 ---------------
 
-Each LoRA save directory contains PEFT-compatible
-``adapter_config.json`` and ``adapter_model.safetensors`` files. The save is
-adapter-only: continue to pass the original base checkpoint with ``--ckpt``.
+Each LoRA save directory contains ``adapter_config.json`` and
+``adapter_model.safetensors`` files. Pure LoRA saves are standard PEFT
+artifacts. Saves containing explicit full parameters use the versioned
+``ARENO_HYBRID`` metadata contract and store those canonical tensors beside
+LoRA A/B. Both remain delta-only saves, so continue to pass the original base
+checkpoint with ``--ckpt``.
 To initialize a new training run from a saved adapter:
 
 .. code-block:: bash
@@ -103,7 +114,8 @@ To initialize a new training run from a saved adapter:
 
 Adapter metadata is authoritative when ``--lora-adapter-path`` is present, so
 its rank, alpha, dropout, and target modules replace the corresponding CLI
-defaults. Adapter-only saves do not contain optimizer, scheduler, or RNG state;
+defaults; hybrid metadata also restores its full-parameter selectors. Adapter
+saves do not contain optimizer, scheduler, or RNG state;
 loading one initializes the policy weights for a new run rather than exactly
 resuming the old trainer state.
 
@@ -132,3 +144,5 @@ For algorithms that require a frozen reference policy, use
 actor's frozen base checkpoint. AReno temporarily disables the adapter to
 evaluate the base policy, avoiding a second model copy. Keep the default
 ``independent`` mode when the reference checkpoint is different.
+This reuse mode is rejected when ``full_parameter_targets`` is non-empty,
+because the actor base is then trainable and cannot serve as a frozen reference.

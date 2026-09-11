@@ -28,11 +28,19 @@ class PolicyTensorMeta:
 def build_policy_plan(worker) -> tuple[dict[str, object], tuple[PolicyTensorMeta, ...]]:
     """Build and cache live policy tasks plus transport metadata."""
 
-    plan = (
-        build_adapter_policy_plan(worker.adapter_registry)
-        if worker.adapter_registry is not None
-        else build_policy_weight_plan(worker.model, worker.config.model)
-    )
+    if worker.adapter_registry is None:
+        plan = build_policy_weight_plan(worker.model, worker.config.model)
+    else:
+        plan = build_adapter_policy_plan(worker.adapter_registry)
+        full_plan = build_full_parameter_policy_plan(
+            worker.model,
+            worker.config.model,
+            worker.adapter_registry,
+        )
+        collisions = plan.keys() & full_plan.keys()
+        if collisions:
+            raise RuntimeError(f"LoRA and full-parameter policy keys collide: {sorted(collisions)[:3]}")
+        plan.update(full_plan)
     metadata = []
     for key, task in plan.items():
         layout = task.policy_layout()
@@ -47,6 +55,42 @@ def build_policy_plan(worker) -> tuple[dict[str, object], tuple[PolicyTensorMeta
     worker._policy_sync_plan = plan
     worker._policy_sync_metadata = tuple(metadata)
     return plan, tuple(metadata)
+
+
+def build_full_parameter_policy_plan(model, model_config, registry: AdapterRegistry) -> PolicyTensorStore:
+    """Select checkpoint layouts backed by explicitly trainable base parameters.
+
+    Model checkpoint layouts remain the single source of truth for TP/grouped
+    tensor transformations. Selection is by underlying storage, so a physical
+    fused parameter correctly selects every canonical tensor represented by it.
+    """
+
+    selected = {_storage_key(parameter): name for name, parameter in registry.full_parameters.items()}
+    output = PolicyTensorStore()
+    if not selected:
+        return output
+
+    matched: set[tuple[str, int | None, int]] = set()
+    full_plan = build_policy_weight_plan(model, model_config)
+    for key, task in full_plan.items():
+        layout = task.policy_layout()
+        layout_storage = {_storage_key(piece.tensor) for piece in (*layout.pieces, *layout.flat_pieces)}
+        overlap = layout_storage & selected.keys()
+        if overlap:
+            output[key] = task
+            matched.update(overlap)
+
+    if matched != selected.keys():
+        missing = sorted(selected[key] for key in selected.keys() - matched)
+        raise RuntimeError(
+            "full-parameter targets are not represented by the model policy layout: " + ", ".join(missing)
+        )
+    return output
+
+
+def _storage_key(tensor: torch.Tensor) -> tuple[str, int | None, int]:
+    device = tensor.device
+    return (device.type, device.index, tensor.untyped_storage().data_ptr())
 
 
 def build_adapter_policy_plan(registry: AdapterRegistry) -> PolicyTensorStore:
