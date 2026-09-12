@@ -211,6 +211,7 @@ class _CudaServeRuntime:
         world_size: int,
         eager_decode: bool,
         attn_backend: str,
+        quant_method: str = "none",
         lora: LoraConfig | None,
         base_model_name_or_path: str | None,
     ) -> None:
@@ -227,6 +228,7 @@ class _CudaServeRuntime:
             devices=list(range(world_size)),
             runtime_config=RuntimeConfig(eager_decode=bool(eager_decode), attn_backend=attn_backend),
             loss_fn=_serve_loss_fn,
+            quant_method=quant_method,
             lora_config=lora,
             base_model_name_or_path=base_model_name_or_path,
         )
@@ -321,6 +323,7 @@ def _create_serve_runtime(
     decode_progress_interval_s: float,
     eager_decode: bool,
     attn_backend: str,
+    quant_method: str = "none",
     lora: LoraConfig | None,
     base_model_name_or_path: str | None,
 ) -> _CudaServeRuntime | _MlxServeRuntime:
@@ -341,6 +344,7 @@ def _create_serve_runtime(
         world_size=world_size,
         eager_decode=eager_decode,
         attn_backend=attn_backend,
+        quant_method=quant_method,
         lora=lora,
         base_model_name_or_path=base_model_name_or_path,
     )
@@ -356,6 +360,7 @@ def create_app(
     decode_progress_interval_s: float,
     eager_decode: bool = False,
     attn_backend: Literal["flash", "native"] = "flash",
+    quant_method: str = "none",
     chat_template_enable_thinking: bool | None = None,
     lora: LoraConfig | None = None,
     base_model_name_or_path: str | None = None,
@@ -388,6 +393,7 @@ def create_app(
         decode_progress_interval_s=decode_progress_interval_s,
         eager_decode=eager_decode,
         attn_backend=attn_backend,
+        quant_method=quant_method,
         lora=lora,
         base_model_name_or_path=base_model_name_or_path,
     )
@@ -995,6 +1001,15 @@ def _normalize_stop(stop: str | list[str] | None) -> list[str]:
     help="Attention backend. Use native for slower areno_accel attention compatibility/logprob diagnostics.",
 )
 @click.option(
+    "--quant",
+    "quant_method",
+    type=click.Choice(["none", "fp8"]),
+    default="none",
+    show_default=True,
+    help="Decode-time weight quantization. fp8 quantizes linear weights for decode; "
+    "requires an FP8-capable GPU (Hopper/Ada), otherwise decode stays full precision.",
+)
+@click.option(
     "--disable-thinking",
     is_flag=True,
     help="Pass enable_thinking=False to tokenizer chat templates when supported.",
@@ -1025,6 +1040,7 @@ def serve_command(
     decode_progress_interval_s: float,
     eager_decode: bool,
     attn_backend: Literal["flash", "native"],
+    quant_method: str,
     disable_thinking: bool,
     lora_rank: int | None,
     lora_alpha: float,
@@ -1063,6 +1079,7 @@ def serve_command(
             "default_max_tokens": default_max_tokens,
             "eager_decode": eager_decode,
             "attn_backend": attn_backend,
+            "quant_method": quant_method,
         },
         metrics_dir=None,
     )
@@ -1075,6 +1092,7 @@ def serve_command(
         decode_progress_interval_s=decode_progress_interval_s,
         eager_decode=eager_decode,
         attn_backend=attn_backend,
+        quant_method=quant_method,
         chat_template_enable_thinking=False if disable_thinking else None,
         lora=lora,
         base_model_name_or_path=base_model_name_or_path,

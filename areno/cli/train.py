@@ -118,6 +118,7 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "eager_decode",
             "drop_rollout_state",
             "attn_backend",
+            "quant_method",
             "disable_thinking",
             "agent_fn",
             "train_tool_results",
@@ -913,6 +914,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             optimizer_state_offload_batch_size=args.optimizer_state_offload_batch_size,
             eager_decode=args.eager_decode,
             attn_backend=args.attn_backend,
+            quant_method=args.quant_method,
             metrics_log_dir=args.metrics_log_dir,
             agent_fn=args.agent_fn,
             train_tool_results=args.train_tool_results,
@@ -973,6 +975,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             optimizer_state_offload_batch_size=args.optimizer_state_offload_batch_size,
             eager_decode=args.eager_decode,
             attn_backend=args.attn_backend,
+            quant_method=args.quant_method,
             metrics_log_dir=args.metrics_log_dir,
             agent_fn=args.agent_fn,
             train_tool_results=args.train_tool_results,
@@ -1041,6 +1044,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             optimizer_state_offload_batch_size=args.optimizer_state_offload_batch_size,
             eager_decode=args.eager_decode,
             attn_backend=args.attn_backend,
+            quant_method=args.quant_method,
             gspo_clip_eps=args.gspo_clip_eps,
             grpo_clip_eps=args.grpo_clip_eps,
             metrics_log_dir=args.metrics_log_dir,
@@ -1777,6 +1781,16 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     help="Number of optimizer buckets per persistent disk mmap and flush group.",
 )
 @click.option("--eager-decode", is_flag=True, help="Disable decode CUDA graph and run rollout decode eagerly.")
+@click.option(
+    "--quant",
+    "quant_method",
+    type=click.Choice(["none", "fp8", "int4"]),
+    default="none",
+    show_default=True,
+    help="Decode-time weight quantization. fp8 quantizes rollout decode weights; "
+    "training math stays bf16. Requires an FP8-capable GPU (Hopper/Ada). "
+    "int4 is not implemented yet.",
+)
 @click.option(
     "--attn-backend",
     type=click.Choice(["flash", "native"]),

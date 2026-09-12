@@ -11,6 +11,7 @@ parallelism is on) to recover the global output.
 
 from __future__ import annotations
 
+import logging
 import math
 
 import torch
@@ -18,6 +19,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from areno.accel import areno_linear
+from areno.accel.utils import log_once
 from areno.engine.parallel.collectives import (
     all_gather_last_dim,
     all_reduce,
@@ -289,8 +291,52 @@ class RowParallelLinear(nn.Module):
         return out
 
 
+def _fp8_decode_linear(x: torch.Tensor, weight: torch.Tensor, fp8: torch.Tensor) -> torch.Tensor | None:
+    """FP8 decode linear for a marked weight; ``None`` when no backend applies.
+
+    Runs only on FP8-capable GPUs (Hopper/Ada: ``torch._scaled_mm``); anything
+    else returns ``None`` so the caller falls back to the bf16 path.
+    """
+    from areno.accel.kernels.fp8_scaled_mm import quantized_fp8_scaled_mm, scaled_mm_available
+
+    if not x.is_cuda:
+        # CPU reference math (unit tests); same scale semantics as the GPU path.
+        from areno.engine.quantization import dequant_fp8
+
+        return torch.nn.functional.linear(x, dequant_fp8(fp8, weight._areno_fp8_scale).to(x.dtype))
+    if not scaled_mm_available():
+        log_once(
+            "fp8-decode-unsupported-device",
+            "quant_method='fp8' needs an FP8-capable GPU (Hopper/Ada, cc >= 8.9); "
+            "decode keeps full precision on this device",
+            level=logging.WARNING,
+        )
+        return None
+    return quantized_fp8_scaled_mm(x, fp8, weight._areno_fp8_scale)
+
+
 def _areno_linear_forward(x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None) -> torch.Tensor:
     """Single entry point so all parallel linears share the areno.accel matmul."""
+
+    # FP8 decode path: a weight carrying a quantized payload (``weight._areno_fp8``
+    # + ``weight._areno_fp8_scale``) routes through the FP8 linear **only when
+    # gradients are disabled** (decode runs under inference_mode / CUDA-graph
+    # capture; training forwards keep the bf16 path so autograd and the optimizer
+    # are unaffected). Opt-in and backward-compatible: unmarked weights always
+    # take the existing path.
+    fp8 = getattr(weight, "_areno_fp8", None)
+    if fp8 is not None and not torch.is_grad_enabled():
+        # Decode/prefill may hand a 3-D (1, seq, hidden) activation; flatten to
+        # 2-D for the kernel then restore the leading dims.
+        out_ndim = x.ndim
+        xx = x.reshape(-1, x.shape[-1]) if x.ndim > 2 else x
+        out = _fp8_decode_linear(xx, weight, fp8)
+        if out is not None:
+            if bias is not None:
+                out = out + bias
+            if out_ndim > 2:
+                out = out.reshape(*x.shape[:-1], out.shape[-1])
+            return out
 
     if x.ndim >= 3 and torch.is_grad_enabled():
         return F.linear(x, weight, bias)

@@ -67,6 +67,11 @@ class ArenoWorker:
         self.model = build_model_on_device(config, self.device)
         if config.model_path is not None and not config.dummy_load:
             load_model_weights(self.model, config.model, config.model_path)
+        # quant_method="fp8" quantizes at decode-session start (see
+        # InferenceManager._init_infer_cache), not at build: RL rollout refreshes
+        # weights every policy sync, so a build-time payload would go stale.
+        # Training never sees the payload: the linear hook routes to the FP8
+        # kernel only when gradients are disabled.
         configure_multimodal_training(self.model, config.optimizer, trainable=config.role == "train")
         self.adapter_registry = (
             initialize_lora(self.model, config.lora, seed=config.lora_seed) if config.lora is not None else None

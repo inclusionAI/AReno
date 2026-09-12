@@ -37,6 +37,7 @@ class CudaConfig:
     rollout_devices: list[int] | None = None
     policy_sync_bucket_mb: int = 64
     dummy_load: bool = False
+    quant_method: str = "none"
     optimizer: dict[str, Any] = field(default_factory=dict)
     runtime: dict[str, Any] = field(default_factory=dict)
     max_running_prompts: int = 64

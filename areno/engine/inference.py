@@ -23,6 +23,7 @@ from areno.engine.data.sampling import (
 from areno.engine.parallel.collectives import broadcast_object, broadcast_tensor
 from areno.engine.parallel.context import get_tp_context
 from areno.engine.protocol import RolloutPayload
+from areno.engine.quantization import quantize_infer_weights_fp8
 from areno.engine.runtime.common import _check_token_ids, _device_long
 from areno.engine.runtime.decode_graph import (
     DecodeGraph,
@@ -177,6 +178,8 @@ class InferenceManager:
                 if not reuse_session_weights:
                     self.model.onload_train_weights(self.device)
                     self.model.prepare_infer_weights()
+                    if self.config.model.quant_method == "fp8":
+                        quantize_infer_weights_fp8(self.model)
                     self._train_state_ready = False
                     self.model.offload_train_weights()
                     mark_ready = getattr(self.worker, "_mark_rollout_session_infer_weights_ready", None)
@@ -220,6 +223,8 @@ class InferenceManager:
         if not reuse_session_weights:
             self.model.onload_train_weights(self.device)
             self.model.prepare_infer_weights()
+            if self.config.model.quant_method == "fp8":
+                quantize_infer_weights_fp8(self.model)
             self.model.offload_train_weights()
             mark_ready = getattr(self.worker, "_mark_rollout_session_infer_weights_ready", None)
             if callable(mark_ready):

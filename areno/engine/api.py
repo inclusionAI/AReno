@@ -221,6 +221,7 @@ class ArenoEngine:
         start: bool = True,
         cluster_kwargs: dict[str, Any] | None = None,
         policy_sync_bucket_mb: int = 64,
+        quant_method: str = "none",
         lora_config: LoraConfig | None = None,
         reference_mode: str = "independent",
         base_model_name_or_path: str | None = None,
@@ -231,6 +232,11 @@ class ArenoEngine:
         directory, parses the HF config into the internal model config, and
         wraps the result in an :class:`EngineConfig` before delegating to
         ``__init__``. Blocking: workers are started before the call returns.
+
+        ``quant_method`` selects decode-time weight quantization:
+        ``"fp8"`` quantizes parallel-linear weights when a decode session
+        starts (requires an FP8-capable GPU, e.g. Hopper/Ada); ``"none"``
+        (default) keeps full precision.
         """
 
         if model is None:
@@ -241,6 +247,12 @@ class ArenoEngine:
             raise ValueError(f"could not resolve model path: {model!r}")
         # Translate the HF config.json into the engine's internal model schema.
         model_config = config_from_hf(model_path)
+        if quant_method != "none":
+            if quant_method == "int4":
+                raise NotImplementedError("quant_method='int4' is not implemented yet")
+            if quant_method != "fp8":
+                raise ValueError(f"unknown quant_method {quant_method!r}; expected 'none', 'fp8' or 'int4'")
+            model_config.quant_method = "fp8"
         cfg = EngineConfig(
             model=model_config,
             model_path=model_path,

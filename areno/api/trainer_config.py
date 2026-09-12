@@ -75,6 +75,7 @@ class TrainerConfig:
     optimizer_state_offload_batch_size: int = 1
     eager_decode: bool = False
     attn_backend: str = "flash"
+    quant_method: str = "none"
     metrics_log_dir: str | None = DEFAULT_METRICS_LOG_DIR
     agent_fn: str | None = None
     train_tool_results: bool = False
@@ -97,6 +98,8 @@ class TrainerConfig:
             raise ValueError("adam_4bit is only supported by the CUDA backend")
         if self.attn_backend not in {"flash", "native"}:
             raise ValueError("attn_backend must be one of: flash, native")
+        if self.quant_method not in {"none", "fp8", "int4"}:
+            raise ValueError("quant_method must be one of: none, fp8, int4")
         if self.model_hub not in {"hf", "modelscope"}:
             raise ValueError("model_hub must be one of: hf, modelscope")
         if isinstance(self.optimizer_state_offload, bool):
@@ -216,6 +219,7 @@ class TrainerConfig:
             tp_size=self.tp_size,
             sequence_parallel=self.sequence_parallel,
             devices=self.train_devices,
+            quant_method=self.quant_method,
             optimizer=self.optimizer_config(),
             runtime={
                 "activation_checkpointing": self.activation_checkpointing,
@@ -266,6 +270,7 @@ class RolloutTrainerConfig(TrainerConfig):
             rollout_devices=self.rollout_devices,
             policy_sync_bucket_mb=self.policy_sync_bucket_mb,
             max_running_prompts=self.resolved_max_running_prompts(),
+            quant_method=self.quant_method,
             optimizer=self.optimizer_config(),
             runtime={
                 "activation_checkpointing": self.activation_checkpointing,

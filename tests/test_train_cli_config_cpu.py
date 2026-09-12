@@ -1008,6 +1008,7 @@ def _options(**overrides):
         drop_rollout_state=False,
         eager_decode=False,
         attn_backend="flash",
+        quant_method="none",
         disable_thinking=False,
         metrics_log_dir=None,
         agent_fn=None,
