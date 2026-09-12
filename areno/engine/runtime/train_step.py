@@ -48,7 +48,9 @@ def _merge_metrics(*metrics_list: dict[str, Any] | None) -> dict[str, float] | N
     return out or None
 
 
-def _train_meta(data_pack: dict[str, Any], tokens: torch.Tensor, *, sequence_parallel: bool) -> TrainMeta:
+def _train_meta(
+    data_pack: dict[str, Any], tokens: torch.Tensor, *, sequence_parallel: bool, mtp_enabled: bool = False
+) -> TrainMeta:
     """Build packed metadata using the resolved model/CLI SP setting."""
 
     cu_seqlens = data_pack.get("train_cu_seqlens")
@@ -66,6 +68,7 @@ def _train_meta(data_pack: dict[str, Any], tokens: torch.Tensor, *, sequence_par
         activation_checkpointing=bool(data_pack.get("_activation_checkpointing_enabled", False)),
         num_padding_tokens=int(data_pack.get("packed_singleton_padding", 0)),
         routing_replay=data_pack.get("packed_routing_replay"),
+        mtp_enabled=mtp_enabled,
     )
 
 

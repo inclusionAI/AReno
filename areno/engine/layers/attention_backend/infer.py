@@ -6,10 +6,11 @@ The backend serves two distinct modes signalled by `InferMeta.mode`:
   rows are scattered into the paged KV cache by ``(block_id, offset)``
   index puts, then `flash_attn_varlen_func` runs causal attention over the
   packed segments using `cu_seqlens` boundaries.
-- decode: each active sequence contributes one new token. The new K/V row
-  is appended at the next slot inside the last block of each sequence's
-  block table, and `flash_attn_with_kvcache` reads the full history for
-  each sequence directly from the paged cache.
+- decode: each active sequence contributes ``tokens_per_seq`` new tokens
+  (one for plain decode, ``k + 1`` for speculative verify). The new K/V rows
+  are appended after the sequence's current length, and
+  `flash_attn_with_kvcache` reads the full history for each sequence
+  directly from the paged cache with a causal mask over the new rows.
 
 The ``native`` backend selects the areno_accel native attention path that
 shares forward math with training attention for logprob diagnostics.
@@ -118,6 +119,8 @@ class FlashAttnInferBackend(nn.Module):
             if use_native_attention(self.attn_backend):
                 if not update_cache:
                     raise ValueError("native decode requires update_cache=True")
+                if meta.tokens_per_seq != 1:
+                    raise ValueError("native decode attention supports one token per sequence")
                 out = _native_decode(
                     q=q_flat,
                     k_update=k_flat,
@@ -131,18 +134,24 @@ class FlashAttnInferBackend(nn.Module):
                 out = call.trim_value_dim(out)
                 return out.view(q.shape[0], q.shape[1], q.shape[2], call.value_dim)
             require_flash_attention_supported(call, mode="decode attention")
+            # flash-attn's kvcache entry takes (rows, new_tokens, heads, dim):
+            # regroup the flat sequence-major token axis by active row.
+            rows = int(meta.cache_seqlens.shape[0])
+            steps = meta.tokens_per_seq
+            if q_flat.shape[0] != rows * steps:
+                raise ValueError(
+                    f"decode attention got {q_flat.shape[0]} tokens for {rows} rows x {steps} tokens per sequence"
+                )
             # When value head dim < cache head dim we pad to match the cache
             # layout that was sized to the QK head dim at prefill time.
-            v_update = (
-                pad_last_dim(v_flat, v_cache_dim).unsqueeze(1) if v_cache_dim != call.value_dim else v_flat.unsqueeze(1)
-            )
-            cache_seqlens = meta.cache_seqlens if update_cache else meta.cache_seqlens + 1
-            k_update = k_flat.unsqueeze(1) if update_cache else None
-            v_update = v_update if update_cache else None
-            # flash-attn appends the new token in-place inside the paged cache
+            v_update = pad_last_dim(v_flat, v_cache_dim) if v_cache_dim != call.value_dim else v_flat
+            cache_seqlens = meta.cache_seqlens if update_cache else meta.cache_seqlens + steps
+            k_update = k_flat.view(rows, steps, *k_flat.shape[1:]) if update_cache else None
+            v_update = v_update.view(rows, steps, *v_update.shape[1:]) if update_cache else None
+            # flash-attn appends the new tokens in-place inside the paged cache
             # using cache_seqlens (current length) and block_table mapping.
             out = _flash_attn_with_kvcache_no_compile(
-                q_flat.unsqueeze(1),
+                q_flat.view(rows, steps, *q_flat.shape[1:]),
                 k_cache,
                 v_cache,
                 k=k_update,

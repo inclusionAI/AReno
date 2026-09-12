@@ -113,6 +113,88 @@ def test_create_app_falls_back_to_native_for_flash_unsupported_model(monkeypatch
     assert captured["runtime_config"].attn_backend == "native"
 
 
+def _mtp_model_config(num_nextn_predict_layers: int) -> ModelConfig:
+    return ModelConfig(
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        intermediate_size=16,
+        vocab_size=32,
+        num_nextn_predict_layers=num_nextn_predict_layers,
+    )
+
+
+def test_create_app_passes_speculative_draft_tokens(monkeypatch):
+    captured = {}
+
+    class FakeEngine:
+        config = SimpleNamespace(model=SimpleNamespace(max_position_embeddings=1024))
+
+        @classmethod
+        def from_pretrained(cls, *args, **kwargs):
+            del args
+            captured["runtime_config"] = kwargs["runtime_config"]
+            return cls()
+
+    monkeypatch.setattr(serve_mod, "load_tokenizer", lambda model_path: SimpleNamespace(eos_token_id=1))
+    monkeypatch.setattr(serve_mod, "ArenoEngine", FakeEngine)
+    monkeypatch.setattr(serve_mod, "config_from_hf", lambda model_path: _mtp_model_config(1))
+    monkeypatch.setattr(serve_mod, "flash_attention_unsupported_gpu_reason", lambda devices: None)
+
+    serve_mod.create_app(
+        model_path="model",
+        tp_size=1,
+        world_size=1,
+        max_running_prompts=4,
+        default_max_tokens=16,
+        decode_progress_interval_s=0.0,
+        attn_backend="flash",
+        speculative_draft_tokens=2,
+    )
+
+    assert captured["runtime_config"].speculative_draft_tokens == 2
+
+
+def test_create_app_rejects_speculative_without_mtp_layers(monkeypatch):
+    monkeypatch.setattr(serve_mod, "load_tokenizer", lambda model_path: SimpleNamespace(eos_token_id=1))
+    monkeypatch.setattr(serve_mod, "config_from_hf", lambda model_path: _mtp_model_config(0))
+    monkeypatch.setattr(serve_mod, "flash_attention_unsupported_gpu_reason", lambda devices: None)
+
+    with pytest.raises(ValueError, match="num_nextn_predict_layers=0"):
+        serve_mod.create_app(
+            model_path="model",
+            tp_size=1,
+            world_size=1,
+            max_running_prompts=4,
+            default_max_tokens=16,
+            decode_progress_interval_s=0.0,
+            attn_backend="flash",
+            speculative_draft_tokens=2,
+        )
+
+
+def test_create_app_rejects_speculative_on_native_attention(monkeypatch):
+    monkeypatch.setattr(serve_mod, "load_tokenizer", lambda model_path: SimpleNamespace(eos_token_id=1))
+    monkeypatch.setattr(serve_mod, "config_from_hf", lambda model_path: _mtp_model_config(1))
+
+    with pytest.raises(ValueError, match="requires the flash attention backend"):
+        serve_mod.create_app(
+            model_path="model",
+            tp_size=1,
+            world_size=1,
+            max_running_prompts=4,
+            default_max_tokens=16,
+            decode_progress_interval_s=0.0,
+            attn_backend="native",
+            speculative_draft_tokens=2,
+        )
+
+
+def test_serve_speculative_draft_tokens_defaults_to_off():
+    option = next(param for param in serve_mod.serve_command.params if param.name == "speculative_draft_tokens")
+
+    assert option.default == 0
+
+
 def test_serve_default_max_running_prompts_is_16():
     option = next(param for param in serve_mod.serve_command.params if param.name == "max_running_prompts")
 

@@ -165,6 +165,17 @@ def _zero_init_value_head(value_head: torch.nn.Module | None) -> None:
         param.zero_()
 
 
+def _load_shared_base_state(model: torch.nn.Module, state: dict[str, torch.Tensor]) -> None:
+    """Load an actor's weights into a role model that may lack the actor's MTP layers."""
+
+    result = model.load_state_dict(state, strict=False)
+    unexpected = [key for key in result.unexpected_keys if not key.startswith("mtp_layers.")]
+    if result.missing_keys or unexpected:
+        raise RuntimeError(
+            f"role model does not match the actor: missing={result.missing_keys} unexpected={unexpected}"
+        )
+
+
 class WorkerRole:
     """A swap-in non-actor model (reference / critic / reward) on this rank."""
 
@@ -222,11 +233,14 @@ class WorkerRole:
             devices=devices,
             dummy_load=False,
         )
+        # Reference, critic and reward roles neither train nor draft with an
+        # MTP head, so they skip its parameters even when the actor keeps them.
+        role_config.model.mtp_layers_enabled = False
         model = build_model_on_device(role_config, device)
         if source_model is None:
             load_model_weights(model, model_config, path)
         else:
-            model.load_state_dict(unwrap_model(source_model).state_dict())
+            _load_shared_base_state(model, unwrap_model(source_model).state_dict())
         checkpoint_head_out = _maybe_reward_head_out_features(path) if critic else None
         head_out = _reward_head_out_features(path) if reward else checkpoint_head_out or 1
         head_bias = _reward_head_uses_bias(path) if reward or checkpoint_head_out is not None else False

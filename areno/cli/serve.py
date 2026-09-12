@@ -211,6 +211,7 @@ class _CudaServeRuntime:
         world_size: int,
         eager_decode: bool,
         attn_backend: str,
+        speculative_draft_tokens: int,
         lora: LoraConfig | None,
         base_model_name_or_path: str | None,
     ) -> None:
@@ -225,7 +226,11 @@ class _CudaServeRuntime:
             tp_size=tp_size,
             dp_size=world_size // tp_size,
             devices=list(range(world_size)),
-            runtime_config=RuntimeConfig(eager_decode=bool(eager_decode), attn_backend=attn_backend),
+            runtime_config=RuntimeConfig(
+                eager_decode=bool(eager_decode),
+                attn_backend=attn_backend,
+                speculative_draft_tokens=int(speculative_draft_tokens),
+            ),
             loss_fn=_serve_loss_fn,
             lora_config=lora,
             base_model_name_or_path=base_model_name_or_path,
@@ -321,6 +326,7 @@ def _create_serve_runtime(
     decode_progress_interval_s: float,
     eager_decode: bool,
     attn_backend: str,
+    speculative_draft_tokens: int = 0,
     lora: LoraConfig | None,
     base_model_name_or_path: str | None,
 ) -> _CudaServeRuntime | _MlxServeRuntime:
@@ -341,6 +347,7 @@ def _create_serve_runtime(
         world_size=world_size,
         eager_decode=eager_decode,
         attn_backend=attn_backend,
+        speculative_draft_tokens=speculative_draft_tokens,
         lora=lora,
         base_model_name_or_path=base_model_name_or_path,
     )
@@ -356,6 +363,7 @@ def create_app(
     decode_progress_interval_s: float,
     eager_decode: bool = False,
     attn_backend: Literal["flash", "native"] = "flash",
+    speculative_draft_tokens: int = 0,
     chat_template_enable_thinking: bool | None = None,
     lora: LoraConfig | None = None,
     base_model_name_or_path: str | None = None,
@@ -378,6 +386,12 @@ def create_app(
     )
     if attn_warning is not None:
         warnings.warn(attn_warning, RuntimeWarning, stacklevel=2)
+    _check_serve_speculative(
+        model_path=model_path,
+        speculative_draft_tokens=speculative_draft_tokens,
+        attn_backend=attn_backend,
+        backend_type=backend_type,
+    )
     parser_trainer = _ToolParserTrainerShim(model_path=model_path, tokenizer=tokenizer)
     engine = _create_serve_runtime(
         model_path=model_path,
@@ -388,6 +402,7 @@ def create_app(
         decode_progress_interval_s=decode_progress_interval_s,
         eager_decode=eager_decode,
         attn_backend=attn_backend,
+        speculative_draft_tokens=speculative_draft_tokens,
         lora=lora,
         base_model_name_or_path=base_model_name_or_path,
     )
@@ -534,6 +549,40 @@ def _resolve_serve_attn_backend(
         "AReno will use attn_backend='native'. Native attention is a compatibility path and may be slower."
     )
     return "native", warning
+
+
+def _check_serve_speculative(
+    *,
+    model_path: str,
+    speculative_draft_tokens: int,
+    attn_backend: Literal["flash", "native"],
+    backend_type: BackendType = BackendType.CUDA,
+) -> None:
+    """Reject a speculative-decoding request the serve runtime cannot honour.
+
+    Runs before workers start so the caller gets one clear error instead of the
+    same failure raised inside every rank at the first request.
+    """
+
+    if speculative_draft_tokens <= 0:
+        return
+    if backend_type == MLX:
+        raise ValueError("--speculative-draft-tokens requires the CUDA backend")
+    if attn_backend != "flash":
+        raise ValueError(
+            "--speculative-draft-tokens requires the flash attention backend "
+            f"(resolved attn_backend={attn_backend!r}); the native backend verifies one token per step"
+        )
+    try:
+        model_config = config_from_hf(model_path)
+    except Exception:
+        # Engine startup still owns config loading errors.
+        return
+    if int(getattr(model_config, "num_nextn_predict_layers", 0) or 0) <= 0:
+        raise ValueError(
+            "--speculative-draft-tokens needs a checkpoint that ships MTP layers "
+            f"(num_nextn_predict_layers=0 in {model_path})"
+        )
 
 
 async def _run_request_task(app: FastAPI, item: PendingRequest) -> None:
@@ -995,6 +1044,13 @@ def _normalize_stop(stop: str | list[str] | None) -> list[str]:
     help="Attention backend. Use native for slower areno_accel attention compatibility/logprob diagnostics.",
 )
 @click.option(
+    "--speculative-draft-tokens",
+    type=click.IntRange(min=0),
+    default=0,
+    show_default=True,
+    help="Speculative decoding: draft this many tokens per step with the checkpoint's MTP layer (0 = off).",
+)
+@click.option(
     "--disable-thinking",
     is_flag=True,
     help="Pass enable_thinking=False to tokenizer chat templates when supported.",
@@ -1025,6 +1081,7 @@ def serve_command(
     decode_progress_interval_s: float,
     eager_decode: bool,
     attn_backend: Literal["flash", "native"],
+    speculative_draft_tokens: int,
     disable_thinking: bool,
     lora_rank: int | None,
     lora_alpha: float,
@@ -1063,6 +1120,7 @@ def serve_command(
             "default_max_tokens": default_max_tokens,
             "eager_decode": eager_decode,
             "attn_backend": attn_backend,
+            "speculative_draft_tokens": speculative_draft_tokens,
         },
         metrics_dir=None,
     )
@@ -1075,6 +1133,7 @@ def serve_command(
         decode_progress_interval_s=decode_progress_interval_s,
         eager_decode=eager_decode,
         attn_backend=attn_backend,
+        speculative_draft_tokens=speculative_draft_tokens,
         chat_template_enable_thinking=False if disable_thinking else None,
         lora=lora,
         base_model_name_or_path=base_model_name_or_path,
