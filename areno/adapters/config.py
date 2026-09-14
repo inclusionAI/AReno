@@ -31,6 +31,8 @@ BAILING_V3_TARGETS = (
     "gate_proj",
     "up_proj",
     "down_proj",
+    "linear_fc1",
+    "linear_fc2",
 )
 
 NATIVE_LORA_TARGETS = tuple(dict.fromkeys((*QWEN3_DENSE_TARGETS, *BAILING_V3_TARGETS)))
@@ -64,10 +66,10 @@ class LoraConfig:
             raise ValueError("lora alpha must be > 0")
         if self.dropout != 0.0:
             raise ValueError("native LoRA currently requires dropout=0")
-        requested = set(self.target_modules)
-        supported = set(NATIVE_LORA_TARGETS)
-        if not requested or not requested <= supported:
-            raise ValueError(f"target_modules must be a non-empty subset of {NATIVE_LORA_TARGETS}")
+        if not self.target_modules or any(
+            not isinstance(target, str) or not target.strip() for target in self.target_modules
+        ):
+            raise ValueError("target_modules must contain non-empty module selectors")
 
     @property
     def scale(self) -> float:

@@ -20,7 +20,10 @@ The default target modules are ``q_proj``, ``k_proj``, ``v_proj``,
 ``o_proj``, ``gate_proj``, ``up_proj``, and ``down_proj``. Select a subset
 with ``--lora-target-modules``. Bailing-MoE V3 additionally supports its
 native attention projection names, including ``q_a_proj``, ``q_b_proj``,
-``kv_a_proj_with_mqa``, and ``kv_b_proj``.
+``kv_a_proj_with_mqa``, and ``kv_b_proj``. Flash V3 checkpoints may select
+their fused routed-expert projections as ``linear_fc1`` and ``linear_fc2``.
+Concrete projection paths such as ``layers.2.mlp.experts.linear_fc1`` are
+accepted when only specific layers should receive adapters.
 
 LoRA dropout must currently be zero. Standard PEFT LoRA adapters are accepted,
 but options that change the adapter structure, such as DoRA, RS-LoRA, bias

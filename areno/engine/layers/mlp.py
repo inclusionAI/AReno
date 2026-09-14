@@ -32,6 +32,7 @@ class GatedMLP(nn.Module):
             config.hidden_size,
             (config.intermediate_size, config.intermediate_size),
             bias=False,
+            lora_components=("gate_proj", "up_proj"),
         )
         # Row-parallel projection that all-reduces (or reduce-scatters under
         # sequence parallelism) the partial sums.

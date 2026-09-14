@@ -132,11 +132,16 @@ class RuntimeConfig:
 
         if self.eager_decode or lora is None:
             return
-        if model.model_type == "qwen3_moe" and {
-            "gate_proj",
-            "up_proj",
-            "down_proj",
-        } & set(lora.target_modules):
+        target_components = {target.rsplit(".", 1)[-1] for target in lora.target_modules}
+        if (
+            model.model_type == "qwen3_moe"
+            and {
+                "gate_proj",
+                "up_proj",
+                "down_proj",
+            }
+            & target_components
+        ):
             warnings.warn(
                 "routed-expert LoRA uses grouped execution during rollout; falling back to eager decode.",
                 RuntimeWarning,
@@ -224,6 +229,8 @@ class ModelConfig:
     moe_backend: str = "grouped"
     sequence_parallel: bool = True
     moe_router_bias_update_rate: float = 0.0
+    expert_swiglu_limit_list: tuple[float, ...] | None = None
+    share_expert_swiglu_limit_list: tuple[float, ...] | None = None
     attention_softmax_scale: float | None = None
     final_logit_softcapping: float | None = None
     attn_output_gate: bool = False
