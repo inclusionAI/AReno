@@ -78,6 +78,30 @@ def test_phi4mm_adapter_constructs_native_vision_path():
     assert model.model.embed_tokens_extend.image_embed.img_processor.encoder.layers.__len__() == 2
 
 
+def test_phi4mm_vision_attention_uses_memory_efficient_sdpa(monkeypatch):
+    from areno.models.phi4mm import vision
+
+    calls = []
+    original = F.scaled_dot_product_attention
+
+    def tracked_sdpa(query, key, value, **kwargs):
+        calls.append(kwargs)
+        return original(query, key, value, **kwargs)
+
+    monkeypatch.setattr(vision.F, "scaled_dot_product_attention", tracked_sdpa)
+    attention = vision.Phi4MMVisionAttention(
+        vision.Phi4MMVisionConfig(hidden_size=8, num_attention_heads=2),
+        torch.float32,
+    )
+    mask = torch.tensor([[True, True, False]])
+
+    output = attention(torch.randn(1, 3, 8), mask)
+
+    assert output.shape == (1, 3, 8)
+    assert len(calls) == 1
+    assert torch.equal(calls[0]["attn_mask"], mask[:, None, None, :])
+
+
 def test_phi4mm_hd_projection_matches_expanded_image_token_count():
     pytest.importorskip("triton")
     from areno.models.phi4mm.model import Phi4MMAdapter
@@ -118,6 +142,15 @@ def test_phi4mm_replaces_only_expanded_image_slots():
 
 def test_phi4mm_processor_token_fallback_uses_endoftext10():
     tokenizer = SimpleNamespace(convert_tokens_to_ids=lambda token: 200010 if token == "<|endoftext10|>" else -1)
+
+    assert _image_token_id(tokenizer, object()) == 200010
+
+
+def test_phi4mm_processor_token_fallback_rejects_unknown_token_id():
+    tokenizer = SimpleNamespace(
+        convert_tokens_to_ids=lambda token: 200010 if token == "<|endoftext10|>" else 199999,
+        get_vocab=lambda: {"<|endoftext|>": 199999, "<|endoftext10|>": 200010},
+    )
 
     assert _image_token_id(tokenizer, object()) == 200010
 
@@ -174,6 +207,36 @@ def test_phi4mm_chunked_prefill_keeps_vision_lora_active_after_image_chunk():
 
     assert mask.tolist() == [[True, True]]
     assert model.model.vision_lora_slots.tolist() == [True]
+
+
+def test_phi4mm_cache_reprefill_restores_vision_features_and_lora_mode():
+    features = {
+        "input_image_embeds": torch.zeros(1, 2, 3, 8, 8),
+        "image_sizes": torch.tensor([[8, 8]], dtype=torch.long),
+        "image_attention_mask": torch.ones(1, 2, 4, 4, dtype=torch.bool),
+        "image_token_id": 99,
+    }
+    state = InferenceBatchState(
+        [[99, 1]],
+        max_new_tokens=2,
+        max_prefill_tokens=4,
+        max_cache_len=4,
+        kv_block_size=2,
+        num_cache_blocks=2,
+        prompt_features=[features],
+    )
+    state.build_prefill_payload()
+    state.ensure_decode_blocks([0], [2])
+
+    payload = state.build_cache_reprefill_payload(
+        [0],
+        generated=torch.tensor([[2]], dtype=torch.long),
+        response_lens=torch.tensor([1], dtype=torch.long),
+    )
+
+    assert payload["features"]["image_sequence_mask"].tolist() == [True]
+    assert payload["features"]["image_token_mask"].tolist() == [True, False, False]
+    assert payload["features"]["image_feature_rows"][0]["input_image_embeds"] is features["input_image_embeds"]
 
 
 def test_phi4mm_projects_multiple_images_with_different_crop_counts():
@@ -335,6 +398,45 @@ def test_phi4mm_vision_lora_tp1_forward_matches_peft_formula():
     torch.testing.assert_close(actual, expected, rtol=1e-6, atol=1e-6)
 
 
+def test_phi4mm_row_lora_scatter_matches_sequence_parallel_output(monkeypatch):
+    pytest.importorskip("triton")
+    import areno.engine.layers.linear as linear
+    import areno.models.phi4mm.model as phi4mm
+    from areno.engine.parallel.collectives import sequence_parallel_region
+
+    previous = get_tp_context()
+    try:
+        set_tp_context(TPContext(rank=0, world_size=2, device=torch.device("cpu"), group=None))
+        projection = phi4mm._Phi4MMRowLoRA(32, 16, phi4mm.Phi4MMAdapter().config_from_hf(_config())).float()
+        projection.weight.data.zero_()
+        projection.lora_A["vision"].weight.data.copy_(torch.arange(4 * 16).view(4, 16).float() / 100)
+        projection.lora_B["vision"].weight.data.copy_(torch.arange(16 * 4).view(16, 4).float() / 100)
+        projection.vision_lora_mask = torch.tensor([[True, False, True, True]])
+        inputs = torch.arange(4 * 16).view(1, 4, 16).float() / 100
+        scatter_calls = []
+
+        monkeypatch.setattr(linear, "reduce_scatter_to_sequence_parallel_region", lambda tensor: tensor[:, :2])
+        monkeypatch.setattr(phi4mm, "all_reduce", lambda tensor: tensor)
+
+        def fake_scatter(tensor):
+            scatter_calls.append(tuple(tensor.shape))
+            return tensor[:, :2]
+
+        monkeypatch.setattr(phi4mm, "scatter_to_sequence_parallel_region", fake_scatter)
+        with sequence_parallel_region(True):
+            actual = projection(inputs)
+        expected = 2.0 * F.linear(
+            F.linear(inputs, projection.lora_A["vision"].weight),
+            projection.lora_B["vision"].weight,
+        )
+        expected = (expected * projection.vision_lora_mask.unsqueeze(-1))[:, :2]
+
+        assert scatter_calls == [(1, 4, 16)]
+        torch.testing.assert_close(actual, expected, rtol=1e-6, atol=1e-6)
+    finally:
+        set_tp_context(previous)
+
+
 @pytest.mark.parametrize("tp_size", [2, 4])
 def test_phi4mm_vision_lora_tp_shards_reconstruct_peft_formula(tmp_path, tp_size):
     pytest.importorskip("triton")
@@ -410,8 +512,11 @@ def test_phi4mm_vision_lora_tp_shards_reconstruct_peft_formula(tmp_path, tp_size
 
 def test_phi4mm_vision_checkpoint_save_reload_closes(tmp_path, monkeypatch):
     pytest.importorskip("triton")
+    from areno.engine.checkpoints.common import save_checkpoint_weights
     from areno.engine.checkpoints.io import SafetensorsIndex
     from areno.models.phi4mm.checkpoint import (
+        CHECKPOINT_SPEC,
+        _save_vision_weights,
         _vision_checkpoint_keys,
         _vision_lora_checkpoint_keys,
         audit_phi4mm_checkpoint,
@@ -423,9 +528,27 @@ def test_phi4mm_vision_checkpoint_save_reload_closes(tmp_path, monkeypatch):
     adapter = Phi4MMAdapter()
     config = adapter.config_from_hf(_config())
     first = adapter.build(config).float()
+    seed = tmp_path / "seed"
+    save_checkpoint_weights(
+        first,
+        str(seed),
+        None,
+        CHECKPOINT_SPEC,
+        extra_tensors_fn=lambda tensors: _save_vision_weights(tensors, first),
+    )
+    seed_index = SafetensorsIndex(seed, progress=False)
+    try:
+        source_tensors = {key: seed_index.get_tensor(key) for key in seed_index.weight_map}
+    finally:
+        seed_index.close()
+    source_tensors["model.layers.0.self_attn.qkv_proj.lora_A.speech.weight"] = torch.ones(1)
+    source_tensors["model.embed_tokens_extend.audio_embed.dummy.weight"] = torch.ones(1)
+    source = tmp_path / "source"
+    source.mkdir()
+    save_file(source_tensors, source / "model.safetensors")
     output = tmp_path / "output"
 
-    saved_path = adapter.save_weights(first, output, None)
+    saved_path = adapter.save_weights(first, output, source)
     second = adapter.build(config).float()
     adapter.load_weights(second, output)
 
@@ -440,8 +563,9 @@ def test_phi4mm_vision_checkpoint_save_reload_closes(tmp_path, monkeypatch):
     vision_keys = _vision_checkpoint_keys(first)
     vision_lora_keys = _vision_lora_checkpoint_keys(first)
     audit = audit_phi4mm_checkpoint(output, len(first.layers), vision_keys, vision_lora_keys)
-    assert audit.consumed == audit.total
-    assert audit.speech_lora_skipped == audit.audio_skipped == audit.unknown == 0
+    assert audit.consumed + audit.speech_lora_skipped + audit.audio_skipped == audit.total
+    assert audit.speech_lora_skipped == audit.audio_skipped == 1
+    assert audit.unknown == 0
     assert "model.embed_tokens_extend.image_embed.sub_GN" in vision_keys
     assert "model.embed_tokens_extend.image_embed.glb_GN" in vision_keys
     assert len(vision_lora_keys) == 8
@@ -452,7 +576,20 @@ def test_phi4mm_vision_checkpoint_save_reload_closes(tmp_path, monkeypatch):
     finally:
         index.close()
     assert vision_keys | vision_lora_keys <= saved_keys
-    assert not any(".speech." in key or ".audio_embed." in key for key in saved_keys)
+    assert "model.layers.0.self_attn.qkv_proj.lora_A.speech.weight" in saved_keys
+    assert "model.embed_tokens_extend.audio_embed.dummy.weight" in saved_keys
+
+
+def test_phi4mm_policy_plan_includes_vision_and_lora_weights():
+    pytest.importorskip("triton")
+    from areno.models.phi4mm.checkpoint import build_phi4mm_policy_plan
+    from areno.models.phi4mm.model import Phi4MMAdapter
+
+    model = Phi4MMAdapter().build(Phi4MMAdapter().config_from_hf(_config())).float()
+    plan = build_phi4mm_policy_plan(model)
+
+    assert "model.embed_tokens_extend.image_embed.sub_GN" in plan
+    assert "model.layers.0.self_attn.qkv_proj.lora_B.vision.weight" in plan
 
 
 @pytest.mark.parametrize("tp_size", [2, 4])

@@ -429,6 +429,9 @@ def _image_processor_from_processor(processor: Any):
 
 
 def _image_token_id(tokenizer: Any, processor: Any) -> int | None:
+    get_vocab = getattr(tokenizer, "get_vocab", None)
+    vocab = get_vocab() if callable(get_vocab) else None
+    known_vocab = vocab if isinstance(vocab, dict) else None
     for obj in (processor, tokenizer):
         for attr in ("image_token_id", "image_token_index", "special_image_token_id"):
             value = getattr(obj, attr, None)
@@ -436,18 +439,26 @@ def _image_token_id(tokenizer: Any, processor: Any) -> int | None:
                 return int(value)
         token = getattr(obj, "image_token", None)
         if isinstance(token, str):
-            convert = getattr(tokenizer, "convert_tokens_to_ids", None)
-            if callable(convert):
-                token_id = convert(token)
-                if isinstance(token_id, int) and token_id >= 0:
-                    return int(token_id)
-    convert = getattr(tokenizer, "convert_tokens_to_ids", None)
-    if callable(convert):
-        for token in ("<|image_pad|>", "<|image|>", "<image>", "<|endoftext10|>"):
-            token_id = convert(token)
-            if isinstance(token_id, int) and token_id >= 0:
-                return int(token_id)
+            token_id = _token_id_if_present(tokenizer, token, known_vocab)
+            if token_id is not None:
+                return token_id
+    for token in ("<|image_pad|>", "<|image|>", "<image>", "<|endoftext10|>"):
+        token_id = _token_id_if_present(tokenizer, token, known_vocab)
+        if token_id is not None:
+            return token_id
     return None
+
+
+def _token_id_if_present(tokenizer: Any, token: str, vocab: dict[str, int] | None) -> int | None:
+    """Resolve a token without accepting a tokenizer's unknown-token fallback."""
+
+    if vocab is not None and token not in vocab:
+        return None
+    convert = getattr(tokenizer, "convert_tokens_to_ids", None)
+    if not callable(convert):
+        return None
+    token_id = convert(token)
+    return int(token_id) if isinstance(token_id, int) and token_id >= 0 else None
 
 
 def image_token_counts_from_features(features: dict[str, Any] | None) -> list[int]:

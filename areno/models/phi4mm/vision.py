@@ -95,12 +95,16 @@ class Phi4MMVisionAttention(nn.Module):
         query = self.q_proj(hidden_states).view(batch, seqlen, self.num_heads, self.head_dim).transpose(1, 2)
         key = self.k_proj(hidden_states).view(batch, seqlen, self.num_heads, self.head_dim).transpose(1, 2)
         value = self.v_proj(hidden_states).view(batch, seqlen, self.num_heads, self.head_dim).transpose(1, 2)
-        scores = torch.matmul(query, key.transpose(-2, -1)) * self.scale
-        if attention_mask is not None:
-            scores = scores.masked_fill(~attention_mask[:, None, None, :], torch.finfo(scores.dtype).min)
-        probabilities = F.softmax(scores, dim=-1, dtype=torch.float32).to(dtype=query.dtype)
-        probabilities = F.dropout(probabilities, p=self.dropout, training=self.training)
-        output = torch.matmul(probabilities, value).transpose(1, 2).reshape(batch, seqlen, hidden_size)
+        key_mask = None if attention_mask is None else attention_mask[:, None, None, :]
+        output = F.scaled_dot_product_attention(
+            query,
+            key,
+            value,
+            attn_mask=key_mask,
+            dropout_p=self.dropout if self.training else 0.0,
+            scale=self.scale,
+        )
+        output = output.transpose(1, 2).reshape(batch, seqlen, hidden_size)
         return self.out_proj(output)
 
 

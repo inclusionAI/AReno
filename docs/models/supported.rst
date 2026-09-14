@@ -37,6 +37,10 @@ family is available on both backends.
    * - MiniCPM-family adapters
      - MiniCPM-family text and vision adapters used by the local training
        stack.
+   * - Phi-4 Multimodal
+     - Native text and image support for ``phi4mm`` checkpoints, including
+       the SigLIP vision tower, HD projector, and vision LoRA weights. Audio
+       inputs are not yet supported by the CUDA runtime.
 
 .. important::
 
