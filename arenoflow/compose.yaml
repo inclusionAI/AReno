@@ -1,0 +1,15 @@
+services:
+  arenoflow:
+    build:
+      context: ..
+      dockerfile: arenoflow/Dockerfile
+    ports:
+      - "127.0.0.1:8787:8787"
+    environment:
+      MODAL_TOKEN_ID: ${MODAL_TOKEN_ID:-}
+      MODAL_TOKEN_SECRET: ${MODAL_TOKEN_SECRET:-}
+    volumes:
+      - arenoflow-data:/data
+    restart: unless-stopped
+volumes:
+  arenoflow-data:
