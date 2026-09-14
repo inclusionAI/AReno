@@ -12,6 +12,19 @@ import torch
 from areno.engine.config import OptimizerConfig
 from areno.engine.modeling import configure_multimodal_training
 from areno.engine.optim import AdamWFP32Master
+from areno.engine.parallel.context import TPContext, get_tp_context, set_tp_context
+
+
+@pytest.fixture(autouse=True)
+def _isolate_tp_context():
+    """Run these CPU models at TP=1 regardless of earlier parallel tests."""
+
+    previous_context = get_tp_context()
+    set_tp_context(TPContext(rank=0, world_size=1, device=torch.device("cpu"), group=None))
+    try:
+        yield
+    finally:
+        set_tp_context(previous_context)
 
 
 @pytest.fixture(scope="module")
