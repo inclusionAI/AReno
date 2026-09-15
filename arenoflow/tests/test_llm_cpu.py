@@ -129,6 +129,7 @@ def test_batch_generation_uses_one_request_for_all_scripts(monkeypatch, setup):
     )
     assert len(calls) == 1
     assert len(result["scripts"]) == 3
+    assert all(s["name"] == "sample - " + s["kind"] for s in result["scripts"])
     assert not app.controller.store.functions()
     saved = app.post("/api/scripts/batch", result)
     assert len(saved["scripts"]) == 3

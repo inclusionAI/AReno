@@ -158,3 +158,32 @@ def test_model_catalog_uses_huggingface_and_omits_bailing_linear():
     assert "bailing_moe_linear_v2" not in {m["id"] for m in metadata["models"]}
     assert all(m["checkpoint"] and "/" in m["checkpoint"] for m in metadata["models"])
     assert all(preset["model_hub"] == "hf" for preset in metadata["presets"].values())
+
+
+def test_loader_is_selected_per_training_stage(tmp_path):
+    store = Store(tmp_path)
+    one = save_function(store, {"name": "Loader one", "kind": "dataset_loader", "source": LOADER})
+    two = save_function(store, {"name": "Loader two", "kind": "dataset_loader", "source": LOADER + "\n# alternative\n"})
+    dataset = save_dataset(store, {"name": "Shared", "source": "org/data"})
+    resolved = resolve_request(
+        {
+            "stages": [
+                {"algo": "sft", "dataset_id": dataset["id"], "dataset_loader_id": one["id"]},
+                {"algo": "grpo", "dataset_id": dataset["id"], "dataset_loader_id": two["id"]},
+                {"algo": "dpo", "dataset_id": dataset["id"], "dataset_loader_id": ""},
+            ]
+        },
+        store,
+    )
+    loaders = [s["params"]["dataset_loader_fn"] for s in resolved["stages"]]
+    assert loaders[0] != loaders[1]
+    assert loaders[0].endswith(":load_training_dataset")
+    assert loaders[2] is None
+    assert store.datasets()[0]["loader_id"] is None
+
+
+def test_stage_rejects_reward_script_as_loader(tmp_path):
+    store = Store(tmp_path)
+    reward = save_function(store, {"name": "Reward", "kind": "reward", "source": REWARD})
+    with pytest.raises(ValueError, match="dataset_loader"):
+        resolve_request({"stages": [{"algo": "sft", "dataset_loader_id": reward["id"]}]}, store)

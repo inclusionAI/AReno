@@ -142,7 +142,7 @@ class ScriptGenerator:
             scripts = [
                 {
                     "kind": item["kind"],
-                    "name": item["name"],
+                    "name": dataset["name"][: 117 - len(item["kind"])] + " - " + item["kind"],
                     "source": item["source"],
                     "dataset_id": dataset["id"],
                     "algorithm": algorithm["id"],

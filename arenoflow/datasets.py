@@ -199,6 +199,10 @@ def resolve_request(request, store):
                 model_hub=dataset["model_hub"],
                 dataset_loader_fn=reference(dataset["loader_id"], "dataset_loader") if dataset["loader_id"] else None,
             )
+        if "dataset_loader_id" in stage:
+            params["dataset_loader_fn"] = (
+                reference(stage["dataset_loader_id"], "dataset_loader") if stage["dataset_loader_id"] else None
+            )
         for field, kind, option in (
             ("reward_function_id", "reward", "reward_fn_path"),
             ("agentic_function_id", "agentic", "agent_fn"),

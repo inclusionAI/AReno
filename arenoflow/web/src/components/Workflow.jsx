@@ -210,7 +210,7 @@ export default function Workflow({
     name,
     kind,
     model,
-    stages,
+    stages: stages.map((s) => ({ ...s, dataset_loader_id: s.dataset_loader_id ?? '' })),
     resources,
     image,
     serve,
@@ -590,47 +590,60 @@ export default function Workflow({
                     </select>
                     <small>
                       <a href="#datasets">{t('Manage datasets ↗')}</a>
-                      {t('· Loader is configured on the dataset.')}
                     </small>
                   </label>
-                  {catalog.algorithms.find((a) => a.id === stage.algo)?.rollout &&
+                  {[
                     [
-                      ['reward_function_id', 'reward', 'Reward script', 'Repository math verifier'],
-                      ['agentic_function_id', 'agentic', 'Agent script', 'Standard rollout'],
-                    ].map(([key, kind, label, fallback]) => (
-                      <label className="field" key={key}>
-                        <span>{t(label)}</span>
-                        <select
-                          value={stage[key] || ''}
-                          onChange={(e) =>
-                            edit(() =>
-                              setStages((list) =>
-                                list.map((s, i) =>
-                                  i === active
-                                    ? {
-                                        ...s,
-                                        [key]: e.target.value,
-                                      }
-                                    : s,
-                                ),
+                      'dataset_loader_id',
+                      'dataset_loader',
+                      'Dataset loader script',
+                      'AReno default loader',
+                    ],
+                    ...(catalog.algorithms.find((a) => a.id === stage.algo)?.rollout
+                      ? [
+                          [
+                            'reward_function_id',
+                            'reward',
+                            'Reward script',
+                            'Repository math verifier',
+                          ],
+                          ['agentic_function_id', 'agentic', 'Agent script', 'Standard rollout'],
+                        ]
+                      : []),
+                  ].map(([key, kind, label, fallback]) => (
+                    <label className="field" key={key}>
+                      <span>{t(label)}</span>
+                      <select
+                        value={stage[key] || ''}
+                        onChange={(e) =>
+                          edit(() =>
+                            setStages((list) =>
+                              list.map((s, i) =>
+                                i === active
+                                  ? {
+                                      ...s,
+                                      [key]: e.target.value,
+                                    }
+                                  : s,
                               ),
-                            )
-                          }
-                        >
-                          <option value="">{t(fallback)}</option>
-                          {library.functions
-                            .filter((f) => f.kind === kind)
-                            .map((f) => (
-                              <option key={f.id} value={f.id}>
-                                {f.name}
-                              </option>
-                            ))}
-                        </select>
-                        <small>
-                          <a href="#functions">{t('Manage scripts ↗')}</a>
-                        </small>
-                      </label>
-                    ))}
+                            ),
+                          )
+                        }
+                      >
+                        <option value="">{t(fallback)}</option>
+                        {library.functions
+                          .filter((f) => f.kind === kind)
+                          .map((f) => (
+                            <option key={f.id} value={f.id}>
+                              {f.name}
+                            </option>
+                          ))}
+                      </select>
+                      <small>
+                        <a href="#functions">{t('Manage scripts ↗')}</a>
+                      </small>
+                    </label>
+                  ))}
                 </div>
                 <div className="subsection">
                   <h3>

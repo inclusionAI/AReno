@@ -756,4 +756,8 @@ export default {
   'Load or enter a dataset sample.': '请获取或填写数据集样本。',
   'Enter script requirements. The placeholder is an example, not submitted text.':
     '请填写脚本需求。灰色占位文字仅为示例，不会作为需求提交。',
+  'Add a repository or upload a dataset. Select the loader script when configuring a training stage.':
+    '添加仓库或上传数据集，在配置训练阶段时选择数据加载脚本。',
+  'Manage dataset sources, media attachments and local sample caches.':
+    '管理数据集来源、媒体附件和本地样本缓存。',
 };

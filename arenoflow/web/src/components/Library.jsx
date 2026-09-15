@@ -80,7 +80,6 @@ export default function Library({ type, notify }) {
             source_type: 'upload',
             source: '',
             model_hub: 'hf',
-            loader_id: '',
             modalities: ['text'],
             media: [],
           },
@@ -100,7 +99,7 @@ export default function Library({ type, notify }) {
     setBusy(true);
     setError('');
     try {
-      setDraft(await api(`/${type}`, draft));
+      setDraft(await api(`/${type}`, isFunction ? draft : { ...draft, loader_id: '' }));
       await library.refresh();
       notify(isFunction ? 'Script saved and syntax checked.' : 'Dataset saved.');
     } catch (e) {
@@ -140,7 +139,7 @@ export default function Library({ type, notify }) {
           ? t(
               'Complete Python scripts for data loading, rewards and agentic rollouts. Scripts may include imports, helper functions and classes.',
             )
-          : t('Organize your datasets and choose how each one is loaded.')}
+          : t('Manage dataset sources, media attachments and local sample caches.')}
       </PageHeader>
       {library.error && <Notice error>{library.error}</Notice>}
       {isFunction && (
@@ -224,7 +223,7 @@ export default function Library({ type, notify }) {
                   'Write or import a Python script, then select it by name in datasets and training workflows.',
                 )
               : t(
-                  'Add a repository or upload a dataset. Choose a Dataset loader script from Script Manager.',
+                  'Add a repository or upload a dataset. Select the loader script when configuring a training stage.',
                 )}
           </Empty>
         ) : (
@@ -505,26 +504,6 @@ export default function Library({ type, notify }) {
                     ))}
                   </section>
                 )}
-                <label className="field">
-                  <span>{t('Dataset loader script')}</span>
-                  <select
-                    value={draft.loader_id || ''}
-                    onChange={(e) => edit('loader_id', e.target.value)}
-                  >
-                    <option value="">{t('AReno default loader')}</option>
-                    {library.functions
-                      .filter((f) => f.kind === 'dataset_loader')
-                      .map((f) => (
-                        <option value={f.id} key={f.id}>
-                          {f.name}
-                        </option>
-                      ))}
-                  </select>
-                  <small>
-                    {t('Manage Python scripts in')}
-                    <a href="#functions">{t('Script Manager ↗')}</a>.
-                  </small>
-                </label>
               </>
             )}
             {error && <Notice error>{error}</Notice>}

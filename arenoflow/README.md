@@ -92,8 +92,9 @@ until those datasets select another loader.
 
 **Dataset Manager** defaults to local upload: drag a dataset onto the upload area or choose **Browse local files**. Switch to **Dataset repository** to use remote data. It stores repository references or uploaded data files, their
 modalities, media attachments, and a Dataset Loader selection. Function bodies belong
-exclusively in Script Manager. The training form selects datasets and, for rollout
-algorithms, reward and agent scripts by name. SFT and DPO omit rollout hooks.
+exclusively in Script Manager. Each training stage selects its dataset and data
+loader script independently, plus reward and agent scripts for rollout algorithms.
+SFT and DPO omit rollout hooks. Dataset Manager does not select training scripts.
 
 Text, image, audio and video datasets are supported as data inputs. For local media,
 upload a JSON, JSONL, CSV or TSV manifest and attach the referenced media files.
@@ -298,3 +299,7 @@ changing the source, hub, config, or split selects a new cache entry. This downl
 preview data, not the complete training dataset. Training continues to use the
 configured dataset source. Use Dataset Manager to refresh the provider sample;
 Script Manager's reload action rereads the local cache.
+
+Generated script names default to `<dataset name> - <script type>` and remain
+editable before saving. Long dataset-name prefixes are shortened to fit the
+120-character script-name limit.

@@ -127,7 +127,7 @@ export default function ScriptGenerator({ datasets, onSaved }) {
         )}{' '}
         <a href="#settings">{t('LLM connection')}</a>
       </p>
-      <fieldset disabled={busy || saving} style={{ border: 0, padding: 0 }}>
+      <fieldset disabled={busy || saving} className="script-generation-form">
         <div className="field-grid">
           <label className="field">
             <span>{t('Dataset')}</span>
@@ -232,27 +232,30 @@ export default function ScriptGenerator({ datasets, onSaved }) {
             />
           </label>
         </div>
-        <Button
-          type="button"
-          busy={busy}
-          disabled={saving || missingRequirements.length > 0}
-          aria-describedby={
-            missingRequirements.length ? 'script-generation-requirements' : undefined
-          }
-          title={missingRequirements.join(' ')}
-          onClick={generate}
-        >
-          {t('Generate selected scripts')}
-        </Button>
-        {missingRequirements.length > 0 && (
-          <div id="script-generation-requirements" className="notice" role="status">
-            <ul>
-              {missingRequirements.map((reason) => (
-                <li key={reason}>{reason}</li>
-              ))}
-            </ul>
-          </div>
-        )}
+        <div className="script-generation-actions">
+          <Button
+            type="button"
+            busy={busy}
+            className="primary"
+            disabled={saving || missingRequirements.length > 0}
+            aria-describedby={
+              missingRequirements.length ? 'script-generation-requirements' : undefined
+            }
+            title={missingRequirements.join(' ')}
+            onClick={generate}
+          >
+            {t('Generate selected scripts')}
+          </Button>
+          {missingRequirements.length > 0 && (
+            <div id="script-generation-requirements" className="notice" role="status">
+              <ul>
+                {missingRequirements.map((reason) => (
+                  <li key={reason}>{reason}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
       </fieldset>
       {error && <Notice error>{error}</Notice>}
       {result && (

@@ -2305,3 +2305,32 @@ html:lang(zh-CN) .hero-copy h1 {
 .sample-loading svg {
   flex-shrink: 0;
 }
+
+.script-generation-form {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.script-generation-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 16px;
+  margin-top: 24px;
+  min-width: 0;
+}
+.script-generation-actions > .notice {
+  align-self: stretch;
+  margin: 0;
+}
+.script-generation-actions ul {
+  margin: 0;
+  padding-left: 18px;
+  line-height: 1.8;
+}
+@media (max-width: 640px) {
+  .script-generation-actions > .button {
+    width: 100%;
+  }
+}
