@@ -318,9 +318,7 @@ export default function Workflow({
     <>
       <PageHeader
         eyebrow={kind === 'training' ? t('WORKFLOW BUILDER') : t('DEPLOYMENTS')}
-        title={
-          kind === 'training' ? t('Give your model a direction.') : t('Put your model to work.')
-        }
+        title={kind === 'training' ? t('Configure training') : t('Deploy a model checkpoint')}
         action={
           <Button onClick={exportFlow}>
             <Download size={16} />
@@ -328,14 +326,16 @@ export default function Workflow({
           </Button>
         }
       >
-        {t('Recommended starting points. Every parameter is yours to change.')}
+        {t(
+          'Parameters are initialized from algorithm presets and can be edited before submission.',
+        )}
       </PageHeader>
       <div className="builder-layout">
         <div className="builder-main">
           <section className="panel">
             <div className="panel-heading">
               <span className="section-number">01</span>
-              <h2>{t('The foundation')}</h2>
+              <h2>{t('Model configuration')}</h2>
               <Badge>{t('Repository catalog')}</Badge>
             </div>
             <div className="field-grid">
@@ -396,7 +396,7 @@ export default function Workflow({
             <section className="panel">
               <div className="panel-heading">
                 <span className="section-number">02</span>
-                <h2>{t('Shape the training flow')}</h2>
+                <h2>{t('Training stages')}</h2>
                 <span className="muted">
                   {stages.length} {t('stage')}
                   {stages.length > 1 ? t('s') : ''}
@@ -790,7 +790,7 @@ export default function Workflow({
         <aside className="review-panel">
           <div className="review-heading">
             <Rocket size={20} />
-            <h3>{t('Ready when you are.')}</h3>
+            <h3>{t('Workflow summary')}</h3>
           </div>
           <dl>
             <dt>{t('Execution')}</dt>

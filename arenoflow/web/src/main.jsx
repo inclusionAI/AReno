@@ -262,7 +262,7 @@ function App() {
             )}
         </main>
         <footer className="workspace-footer">
-          <span>{t('Built on AReno. Run on your terms.')}</span>
+          <span>{t('AReno · Local control plane')}</span>
           <span>
             {bootstrap.catalog.models.length} {t('adapters ·')} {bootstrap.catalog.train.length}
             {t('training parameters')}

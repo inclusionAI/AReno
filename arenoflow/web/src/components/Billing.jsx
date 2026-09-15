@@ -11,7 +11,7 @@ export default function Billing({ data, error, loading, connected, refresh }) {
     <>
       <PageHeader
         eyebrow={t('USAGE & BILLING')}
-        title={t('Know where your compute goes.')}
+        title={t('Usage and billing')}
         action={
           <Button busy={loading} onClick={refresh}>
             <RefreshCw size={16} />

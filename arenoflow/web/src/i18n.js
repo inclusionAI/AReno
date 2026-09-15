@@ -25,7 +25,7 @@ export function t(key, values = {}) {
 function updateDocument() {
   if (!globalThis.document) return;
   document.documentElement.lang = getLocale();
-  document.title = language === 'zh' ? t('Page title') : 'AReno — From model to momentum';
+  document.title = language === 'zh' ? t('Page title') : 'AReno — Model training and deployment';
 }
 export function setLanguage(next) {
   if (!['en', 'zh'].includes(next) || next === language) return;

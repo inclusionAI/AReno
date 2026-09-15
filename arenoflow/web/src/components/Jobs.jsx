@@ -22,7 +22,7 @@ export function JobList({ jobs, deployments = false }) {
     <>
       <PageHeader
         eyebrow={deployments ? t('MODEL SERVING') : t('TRAINING RUNS')}
-        title={deployments ? t('Models, out in the world.') : t('Every experiment has a story.')}
+        title={deployments ? t('Model deployments') : t('Training runs')}
         action={
           <a className="button primary" href={deployments ? '#deploy' : '#workspace'}>
             {t('New')}
@@ -30,17 +30,13 @@ export function JobList({ jobs, deployments = false }) {
           </a>
         }
       >
-        {t('Live status, reproducible configurations, and a persistent history.')}
+        {t('View task status, saved configurations, and execution history.')}
       </PageHeader>
       {!deployments && <RunEstimates compact />}
       {!list.length ? (
         <Empty
           icon={deployments ? Radio : GitBranch}
-          title={
-            deployments
-              ? t('Your first endpoint starts here')
-              : t('A clean slate for your next model')
-          }
+          title={deployments ? t('No deployments') : t('No training runs')}
           action={
             <a className="button primary" href={deployments ? '#deploy' : '#workspace'}>
               {deployments ? t('Deploy a model') : t('Create a training flow')}
@@ -49,9 +45,7 @@ export function JobList({ jobs, deployments = false }) {
         >
           {deployments
             ? t('Deploy a supported checkpoint as an authenticated, OpenAI-compatible endpoint.')
-            : t(
-                'Create a flow with a recommended preset. Your real training runs will appear here.',
-              )}
+            : t('Create a training workflow. Submitted tasks will appear here.')}
         </Empty>
       ) : (
         <div className="panel table-scroll">

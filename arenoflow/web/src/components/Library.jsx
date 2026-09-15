@@ -180,11 +180,7 @@ export default function Library({ type, notify }) {
         {!draft ? (
           <Empty
             icon={isFunction ? Code2 : Database}
-            title={
-              isFunction
-                ? t('Define once. Reuse across runs.')
-                : t('Give your training data a home.')
-            }
+            title={isFunction ? t('Function definitions') : t('Dataset configuration')}
             action={
               <Button onClick={create}>
                 {t('Create')} {isFunction ? t('a function') : t('a dataset')}
@@ -489,7 +485,7 @@ export default function Library({ type, notify }) {
                     {t('Remove now')}
                   </Button>
                   <Button type="button" onClick={() => setDeleting(false)}>
-                    {t('Keep it')}
+                    {t('Cancel deletion')}
                   </Button>
                 </div>
               </Notice>

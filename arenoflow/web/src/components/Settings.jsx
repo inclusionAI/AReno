@@ -32,7 +32,7 @@ export default function Settings({ bootstrap, onConnected }) {
   }
   return (
     <>
-      <PageHeader eyebrow={t('WORKSPACE SETTINGS')} title={t('Your cloud. Your credentials.')}>
+      <PageHeader eyebrow={t('WORKSPACE SETTINGS')} title={t('Modal connection settings')}>
         {t('ARenoflow runs locally. Training and serving run in your own Modal workspace.')}
       </PageHeader>
       <div className="settings-layout">
@@ -93,8 +93,8 @@ export default function Settings({ bootstrap, onConnected }) {
           <External href="https://modal.com/settings">{t('Manage Modal API tokens')}</External>
         </section>
         <aside className="panel connection-notes">
-          <span className="eyebrow">{t('ONE SMALL LOCAL SERVICE')}</span>
-          <h2>{t('A clear boundary.')}</h2>
+          <span className="eyebrow">{t('Runtime configuration')}</span>
+          <h2>{t('Execution environment')}</h2>
           {[
             'Local React workspace and job history',
             'Modal GPU execution and persistent artifacts',

@@ -68,32 +68,32 @@ export default function Landing({ catalog }) {
         <div className="hero-copy">
           <span className="eyebrow">
             <i className="live-dot" />
-            {t('OPEN SOURCE. YOUR WORKSPACE. YOUR MODELS.')}
+            {t('AReno training and deployment')}
           </span>
           <h1>
-            {t('From model')}
+            {t('Model training')}
             <br />
-            {t('to')} <em>{t('momentum.')}</em>
+            <em>{t('Deployment')}</em>
           </h1>
           <p>
-            {t('A clear path from your first fine-tune to a live endpoint.')}
+            {t('Configure training workflows and deploy model checkpoints.')}
             <br className="desktop" />
-            {t('Built on AReno. Powered by your Modal workspace.')}
+            {t('Training and inference run on Modal using AReno containers.')}
           </p>
           <div className="hero-actions">
             <a href="#workspace" className="button primary">
-              {t('Build your first flow')}
+              {t('Create training workflow')}
               <ArrowRight size={17} />
             </a>
             <a href="#workflow" className="text-button">
-              {t('Explore the workflow')}
+              {t('View workflow overview')}
               <span>↓</span>
             </a>
           </div>
           <div className="hero-footnote">
             <Terminal size={14} /> {t('Run locally')} <span>·</span> {t('Train in the cloud')}{' '}
             <span>·</span>
-            {t('Keep control')}
+            {t('Local configuration')}
           </div>
         </div>
         <div
@@ -103,7 +103,7 @@ export default function Landing({ catalog }) {
           <div className="orbit orbit-one" />
           <div className="orbit orbit-two" />
           <div className="scene-label">
-            <span>{t('YOUR NEXT MODEL')}</span>
+            <span>{t('Workflow example')}</span>
             <span>01 — 03</span>
           </div>
           <div className="float-card flow-card">
@@ -115,25 +115,25 @@ export default function Landing({ catalog }) {
               <div>
                 <Box />
                 <b>{t('Base model')}</b>
-                <small>{t('Start with AReno')}</small>
+                <small>{t('Initial checkpoint')}</small>
               </div>
               <ArrowRight size={14} />
               <div className="selected">
                 <Layers />
                 <b>{t('SFT')}</b>
-                <small>{t('Teach the task')}</small>
+                <small>{t('Supervised fine-tuning')}</small>
               </div>
               <ArrowRight size={14} />
               <div>
                 <Activity />
                 <b>{t('GSPO')}</b>
-                <small>{t('Refine reasoning')}</small>
+                <small>{t('Reinforcement learning')}</small>
               </div>
             </div>
             <div className="card-footer">
               <span>
                 <i className="live-dot" />
-                {t('A connected training journey')}
+                {t('Sequential training stages')}
               </span>
               <span>{t('Modal GPU ↗')}</span>
             </div>
@@ -153,17 +153,17 @@ export default function Landing({ catalog }) {
               <Radio size={22} />
             </div>
             <div>
-              <span className="eyebrow">{t('NEXT STOP')}</span>
-              <b>{t('Your model, deployed.')}</b>
+              <span className="eyebrow">{t('Inference API')}</span>
+              <b>{t('Model endpoint')}</b>
               <code>/v1/chat/completions</code>
             </div>
             <ArrowUpRight size={18} />
           </div>
-          <div className="scene-coordinate">{t('WEIGHTS → KNOWLEDGE → POSSIBILITY')}</div>
+          <div className="scene-coordinate">{t('CHECKPOINT → SFT → GSPO')}</div>
         </div>
       </section>
       <div className="capability-strip">
-        <span>{t('One native training stack')}</span>
+        <span>{t('Supported algorithms')}</span>
         {['SFT', 'DPO', 'GRPO', 'GSPO', 'PPO'].map((s) => (
           <span key={s}>{s}</span>
         ))}
@@ -174,15 +174,15 @@ export default function Landing({ catalog }) {
       </div>
       <section id="workflow" className="story-section">
         <div className="story-intro">
-          <span className="eyebrow">{t('LESS GLUE CODE. MORE PROGRESS.')}</span>
+          <span className="eyebrow">{t('Workflow orchestration')}</span>
           <h2>
-            {t('Every step.')}
+            {t('Multi-stage training')}
             <br />
-            {t('In the same flow.')}
+            {t('Checkpoint transfer')}
           </h2>
           <p>
             {t(
-              'Choose a model, teach it your task, and put it to work. The checkpoint connects the stages. You stay in control.',
+              'Configure sequential training stages. Each stage uses the checkpoint produced by the previous stage.',
             )}
           </p>
           <a href="#workspace" className="text-button">
@@ -194,20 +194,20 @@ export default function Landing({ catalog }) {
           {[
             [
               '01',
-              'Start with a good foundation.',
-              'Models discovered from the AReno registry. Practical presets, with the complete training surface one click away.',
+              'Select a model and configure parameters',
+              'Model adapters are read from the AReno registry. Algorithm presets provide initial values; applicable training parameters can be edited.',
               Box,
             ],
             [
               '02',
-              'Make the learning visible.',
-              'Compose SFT and reinforcement learning stages. Follow actual training metrics and logs as the work happens.',
+              'Monitor training metrics and logs',
+              'Run SFT and reinforcement learning stages sequentially. View reported training metrics and sandbox logs.',
               Activity,
             ],
             [
               '03',
-              'Put your model to work.',
-              'Launch a protected API from a checkpoint. See endpoint status and pull reported costs directly from Modal.',
+              'Deploy a model checkpoint',
+              'Deploy a checkpoint as an authenticated API endpoint. Inspect endpoint status and workspace billing reported by Modal.',
               Radio,
             ],
           ].map(([number, title, description, Icon]) => (
@@ -224,11 +224,9 @@ export default function Landing({ catalog }) {
       </section>
       <section className="model-section" id="models">
         <div>
-          <span className="eyebrow">{t('IN SYNC WITH THE SOURCE')}</span>
-          <h2>{t('Your toolkit keeps growing.')}</h2>
-          <p>
-            {t('The model catalog comes from this AReno checkout. No separate list to maintain.')}
-          </p>
+          <span className="eyebrow">{t('Model registry')}</span>
+          <h2>{t('Supported models')}</h2>
+          <p>{t('Available model adapters are read from the current AReno checkout.')}</p>
         </div>
         <div className="model-tags">
           {[...new Set(catalog.models.map((m) => m.family))].map((f) => (
@@ -245,11 +243,11 @@ export default function Landing({ catalog }) {
         </div>
       </section>
       <section className="closing">
-        <span className="eyebrow">{t('LOCAL CONTROL. CLOUD COMPUTE.')}</span>
+        <span className="eyebrow">{t('Local UI · Modal compute')}</span>
         <h2>
-          {t('Make your next')}
+          {t('Configure a')}
           <br />
-          <em>{t('model yours.')}</em>
+          <em>{t('Training workflow')}</em>
         </h2>
         <a href="#workspace" className="button primary">
           {t('Open AReno')}
@@ -258,7 +256,7 @@ export default function Landing({ catalog }) {
       </section>
       <footer>
         <Brand compact />
-        <span>{t('Built with AReno. Open by design.')}</span>
+        <span>{t('AReno training and inference interface')}</span>
         <External href="https://github.com/inclusionAI/AReno">{t('Source on GitHub')}</External>
       </footer>
     </div>
