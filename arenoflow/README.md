@@ -134,8 +134,9 @@ The **Prepare runtime** controls in **Compute & runtime** create independent tas
 - **Build container** resolves and builds the selected image in Modal's image cache,
   without creating a training sandbox or reserving a GPU.
 - **Pre-download model** downloads the selected original model repository using a
-  CPU sandbox (2 cores, 8 GiB RAM) into the shared Volume. Choose Hugging Face or
-  ModelScope and use the same source for training to reuse that cache. The sandbox
+  CPU sandbox (2 cores, 8 GiB RAM) into the shared Volume. The model and source follow the first training stage (including parameter overrides)
+  or deployment configuration. Changing the preparation source updates that same
+  configuration. Hugging Face and ModelScope caches are independent. The sandbox
   uses the form's maximum lifetime in seconds. No training dataset or scripts are required.
 
 Preparation tasks appear in task history with status, phase events, and errors;

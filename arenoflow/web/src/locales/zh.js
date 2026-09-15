@@ -1,4 +1,10 @@
 export default {
+  'Model source · shared with runtime': '模型来源 · 与运行配置同步',
+  'Pre-download uses the first training stage or deployment model configuration. Changing this source also updates that configuration.':
+    '预下载使用训练首阶段或部署的模型配置，修改此来源会同步更新对应配置。',
+  'Downloads original weights on CPU into the shared Modal Volume. Hugging Face and ModelScope have separate caches. Modal usage charges apply.':
+    '使用 CPU 将原始权重下载到共享 Modal Volume。Hugging Face 和 ModelScope 的缓存相互独立。资源使用按 Modal 账单计费。',
+
   'Build container': '构建容器',
   'Pre-download model': '预下载模型',
   'Prepare runtime': '准备运行环境',
