@@ -131,8 +131,8 @@ def save_dataset(store, body):
     elif source_type != "repository" or source.startswith(("/", ".", "~")):
         raise ValueError("Enter a dataset repository ID or upload a dataset")
     hub = body.get("model_hub", "hf")
-    if hub not in ("modelscope", "hf"):
-        raise ValueError("Select ModelScope or Hugging Face")
+    if hub != "hf":
+        raise ValueError("Only Hugging Face is supported")
     loader_id = body.get("loader_id") or None
     if loader_id and find(store.functions(), loader_id, "Dataset loader")["kind"] != "dataset_loader":
         raise ValueError("Select a Dataset Loader function")
@@ -193,6 +193,8 @@ def resolve_request(request, store):
         params = stage.setdefault("params", {})
         if stage.get("dataset_id"):
             dataset = find(store.datasets(), stage["dataset_id"], "Dataset")
+            if dataset.get("model_hub", "hf") != "hf":
+                raise ValueError("Only Hugging Face datasets are supported; update the dataset configuration")
             result.setdefault("input_assets", []).extend(item["path"] for item in dataset.get("media", []))
             params.update(
                 dataset_path=materialize_dataset(dataset, store),

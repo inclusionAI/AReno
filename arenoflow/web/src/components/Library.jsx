@@ -398,16 +398,10 @@ export default function Library({ type, notify }) {
                         onChange={(e) => edit('source', e.target.value)}
                       />
                     </label>
-                    <label className="field">
+                    <div className="field">
                       <span>{t('Dataset hub')}</span>
-                      <select
-                        value={draft.model_hub}
-                        onChange={(e) => edit('model_hub', e.target.value)}
-                      >
-                        <option value="modelscope">{t('ModelScope')}</option>
-                        <option value="hf">{t('Hugging Face')}</option>
-                      </select>
-                    </label>
+                      <p>Hugging Face</p>
+                    </div>
                   </div>
                 ) : (
                   <>

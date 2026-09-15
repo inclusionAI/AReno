@@ -1,9 +1,9 @@
 export default {
-  'Model source · shared with runtime': '模型来源 · 与运行配置同步',
-  'Pre-download uses the first training stage or deployment model configuration. Changing this source also updates that configuration.':
-    '预下载使用训练首阶段或部署的模型配置，修改此来源会同步更新对应配置。',
-  'Downloads original weights on CPU into the shared Modal Volume. Hugging Face and ModelScope have separate caches. Modal usage charges apply.':
-    '使用 CPU 将原始权重下载到共享 Modal Volume。Hugging Face 和 ModelScope 的缓存相互独立。资源使用按 Modal 账单计费。',
+  'Pre-download uses Hugging Face and the first training stage or deployment model configuration.':
+    '预下载使用 Hugging Face，以及训练首阶段或部署的模型配置。',
+  'Downloads original Hugging Face weights on CPU into the shared Modal Volume. Modal usage charges apply.':
+    '使用 CPU 将 Hugging Face 原始权重下载到共享 Modal Volume，资源使用按 Modal 账单计费。',
+  'Model and dataset repositories use Hugging Face.': '模型和数据集仓库均使用 Hugging Face。',
 
   'Build container': '构建容器',
   'Pre-download model': '预下载模型',
@@ -381,8 +381,6 @@ export default {
   'Training dataset path, HF save_to_disk directory, or remote dataset ref.':
     '训练数据集、HF save_to_disk 数据或远程数据集引用。',
   'model hub': '模型平台',
-  "Remote hub for non-local model refs. Use 'modelscope' for ModelScope or 'hf' for Hugging Face.":
-    '远程模型平台：modelscope 或 hf（Hugging Face）。',
   'dataset loader fn': '数据加载函数',
   'Optional Python dataset loader function as file.py or file.py:function.':
     '可选的 Python 数据加载函数。',

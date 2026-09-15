@@ -134,9 +134,9 @@ The **Prepare runtime** controls in **Compute & runtime** create independent tas
 - **Build container** resolves and builds the selected image in Modal's image cache,
   without creating a training sandbox or reserving a GPU.
 - **Pre-download model** downloads the selected original model repository using a
-  CPU sandbox (2 cores, 8 GiB RAM) into the shared Volume. The model and source follow the first training stage (including parameter overrides)
-  or deployment configuration. Changing the preparation source updates that same
-  configuration. Hugging Face and ModelScope caches are independent. The sandbox
+  CPU sandbox (2 cores, 8 GiB RAM) into the shared Volume. The model follows the first training stage (including parameter overrides)
+  or deployment configuration. Model and dataset repositories use Hugging Face only.
+  The sandbox
   uses the form's maximum lifetime in seconds. No training dataset or scripts are required.
 
 Preparation tasks appear in task history with status, phase events, and errors;
@@ -151,7 +151,7 @@ Only new tasks use updated runtime code; existing sandboxes keep their original 
 
 Artifacts and model caches persist on the `arenoflow-artifacts` Modal Volume.
 Original training, reference, reward, critic, and serving model references are
-resolved into Hugging Face or ModelScope snapshot caches on that Volume before
+resolved into Hugging Face snapshot caches on that Volume before
 AReno loads them. Cache reuse follows the hub library's snapshot validation.
 Stages run sequentially in the same sandbox; failures prevent dependent stages
 from starting. A single-stage LoRA run can be deployed with its base model.
@@ -290,20 +290,16 @@ In Script Manager, select a dataset and algorithm, inspect the sample, enter the
 requirements, and check the script types to generate. One LLM request generates the
 complete selected set with consistent dataset fields and interfaces. Reward and agent scripts require a rollout algorithm;
 SFT and DPO support dataset loader generation only. Samples load automatically for uploaded JSON/JSONL/CSV/TSV/Parquet/Arrow files and
-Hugging Face / ModelScope repositories. References support `repository:config:split`;
-the default split is train. Hugging Face uses its Dataset Viewer API; ModelScope
-reads a matching raw-data shard from its repository tree. Custom script-only dataset
-layouts require a manually supplied sample. No dataset code is executed.
+Hugging Face repositories. References support `repository:config:split`;
+the default split is train. Remote samples use the Hugging Face Dataset Viewer API.
+Custom script-only dataset layouts require a manually supplied sample. No dataset code is executed.
 
 Previews contain up to three records. Text fields may be shortened and embedded
-binary media is replaced by a size marker. ModelScope small shards are capped at
-16 MiB; larger Parquet shards use HTTP range reads with a 32 MiB transfer budget.
-Providers must support the relevant preview or range API. For private data, use
-`HF_TOKEN` or `MODELSCOPE_API_TOKEN` in the server environment. Failed previews can
-be retried or supplied manually. Sample fetching itself does not call the LLM.
+binary media is replaced by a size marker. For private data, use `HF_TOKEN` in the
+server environment. Failed previews can be retried or supplied manually. Sample
+fetching itself does not call the LLM.
 
-Provider references: [Hugging Face Dataset Viewer](https://huggingface.co/docs/dataset-viewer/rows),
-[ModelScope dataset repository APIs](https://github.com/modelscope/modelscope/blob/v1.34.0/modelscope/hub/api.py).
+Provider reference: [Hugging Face Dataset Viewer](https://huggingface.co/docs/dataset-viewer/rows).
 Only the displayed sample, prompt, dataset metadata, and repository API references
 are sent to the configured LLM; media files and Modal credentials are not sent.
 Generation may incur charges from that LLM provider, separate from Modal billing.

@@ -24,7 +24,11 @@ def emit(kind, **data):
 def cache_model_refs(args):
     """Resolve original model snapshots in the mounted Volume before starting AReno."""
     result = list(args)
-    hub = result[result.index("--model-hub") + 1] if "--model-hub" in result else "modelscope"
+    hub = result[result.index("--model-hub") + 1] if "--model-hub" in result else "hf"
+    if hub != "hf":
+        raise ValueError("Only Hugging Face is supported")
+    if "--model-hub" not in result:
+        result.extend(["--model-hub", "hf"])
     resolved = {}
     for index, option in enumerate(result[:-1]):
         if option not in ("--ckpt", "--model-path", "--ref-ckpt", "--reward-ckpt", "--critic-ckpt"):
@@ -37,16 +41,9 @@ def cache_model_refs(args):
         if reference not in resolved:
             emit("phase", phase="caching_model")
             emit("model_cache", model=reference, hub=hub, status="checking")
-            if hub == "hf":
-                from huggingface_hub import snapshot_download
+            from huggingface_hub import snapshot_download
 
-                directory = os.environ.get("HF_HUB_CACHE", "/artifacts/cache/hf/hub")
-            elif hub == "modelscope":
-                from modelscope import snapshot_download
-
-                directory = os.environ.get("MODELSCOPE_CACHE", "/artifacts/cache/modelscope")
-            else:
-                raise ValueError("Unsupported model hub")
+            directory = os.environ.get("HF_HUB_CACHE", "/artifacts/cache/hf/hub")
             resolved[reference] = snapshot_download(reference, cache_dir=directory)
             emit("model_cache", model=reference, hub=hub, status="ready")
         result[index + 1] = resolved[reference]

@@ -88,6 +88,9 @@ def plan(request, catalog, job_id="preview"):
                 raise ValueError(f"Stage {index + 1}: dataset is required")
             if algo in ("grpo", "gspo", "ppo") and not (params.get("reward_fn_path") or params.get("reward_ckpt")):
                 raise ValueError(f"Stage {index + 1}: configure a reward function or reward checkpoint")
+            if params.get("model_hub") not in (None, "hf"):
+                raise ValueError("Only Hugging Face is supported")
+            params["model_hub"] = "hf"
             validate_devices(params, resource)
             for field in ("save_path", "metrics_log_dir"):
                 if not str(params.get(field, "")).startswith("/artifacts/") or ".." in params[field].split("/"):
@@ -103,7 +106,9 @@ def plan(request, catalog, job_id="preview"):
     else:
         params = dict(request.get("serve", {}))
         params.setdefault("model_path", model["checkpoint"])
-        params.setdefault("model_hub", "hf")
+        if params.get("model_hub") not in (None, "hf"):
+            raise ValueError("Only Hugging Face is supported")
+        params["model_hub"] = "hf"
         params.setdefault("tp_size", resource["count"])
         params.setdefault("world_size", resource["count"])
         params.update(host="127.0.0.1", port=8000)
@@ -131,8 +136,8 @@ def preparation_plan(request, catalog):
         if not isinstance(checkpoint, str) or not checkpoint.strip() or checkpoint.startswith(("/", ".")):
             raise ValueError("Select a model repository ID to download")
     hub = request.get("model_hub", "hf")
-    if hub not in ("hf", "modelscope"):
-        raise ValueError("Model hub must be hf or modelscope")
+    if hub != "hf":
+        raise ValueError("Only Hugging Face is supported")
     return dict(
         manifest=dict(
             kind=kind,

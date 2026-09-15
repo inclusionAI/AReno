@@ -134,7 +134,6 @@ class ModalProvider:
                 "HF_HOME": "/artifacts/cache/hf",
                 "HF_HUB_CACHE": "/artifacts/cache/hf/hub",
                 "HF_DATASETS_CACHE": "/artifacts/cache/hf/datasets",
-                "MODELSCOPE_CACHE": "/artifacts/cache/modelscope",
             },
             encrypted_ports=[8080] if manifest["kind"] == "deployment" else [],
         )

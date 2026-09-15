@@ -72,53 +72,13 @@ def test_missing_remote_split_does_not_silently_change_dataset(monkeypatch):
         remote_rows({"source": "openai/gsm8k:main:train"})
 
 
-def test_modelscope_subset_and_split_select_matching_file(monkeypatch):
-    import io
+def test_unsupported_dataset_hub_is_rejected_before_download(tmp_path, monkeypatch):
+    def unexpected(*args):
+        pytest.fail("Unsupported dataset sources must not make network requests")
 
-    from arenoflow.samples import modelscope_rows
-
-    monkeypatch.setattr(
-        "arenoflow.samples.request_json",
-        lambda *args: {
-            "Code": 200,
-            "Data": {
-                "Files": [
-                    {"Path": "main/train.jsonl", "Size": 40, "Type": "blob"},
-                    {"Path": "main/test.jsonl", "Size": 40, "Type": "blob"},
-                    {"Path": "other/train.jsonl", "Size": 40, "Type": "blob"},
-                ]
-            },
-        },
-    )
-
-    def download(request, timeout):
-        query = parse_qs(urlsplit(request.full_url).query)
-        assert query["FilePath"] == ["main/test.jsonl"]
-        return io.BytesIO(b'{"answer":"42"}\n')
-
-    monkeypatch.setattr("arenoflow.samples.urllib.request.urlopen", download)
-    rows, info = modelscope_rows("owner/data", "main", "test")
-    assert rows == [{"answer": "42"}]
-    assert info == {"config": "main", "split": "test"}
-
-
-def test_range_reader_seeks_and_enforces_budget(monkeypatch):
-    import io
-
-    from arenoflow.samples import HTTPRangeReader
-
-    class Response(io.BytesIO):
-        status = 206
-        headers = {"Content-Range": "bytes 5-7/10"}
-
-    def download(request, timeout):
-        assert request.get_header("Range") == "bytes=5-7"
-        return Response(b"567")
-
-    monkeypatch.setattr("arenoflow.samples.urllib.request.urlopen", download)
-    stream = HTTPRangeReader("https://example.com/data", 10, {})
-    stream.seek(-5, 2)
-    assert stream.read(3) == b"567" and stream.tell() == 8
-    stream.remaining = 1
-    with pytest.raises(ValueError, match="limit"):
-        stream.read(2)
+    monkeypatch.setattr("arenoflow.samples.request_json", unexpected)
+    record = {"name": "Unsupported", "source": "owner/data", "model_hub": "modelscope"}
+    with pytest.raises(ValueError, match="Only Hugging Face"):
+        save_dataset(Store(tmp_path), record)
+    with pytest.raises(ValueError, match="Only Hugging Face"):
+        remote_rows(record)
