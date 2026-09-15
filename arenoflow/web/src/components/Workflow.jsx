@@ -192,6 +192,8 @@ export default function Workflow({
   const [autoImage, setAutoImage] = useState(initial?.autoImage ?? true);
   const [imageInfo, setImageInfo] = useState(null);
   const [imageError, setImageError] = useState('');
+  const [preparing, setPreparing] = useState('');
+  const [preparationHub, setPreparationHub] = useState('hf');
   const [endpointKey, setEndpointKey] = useState('');
   const [estimateHours, setEstimateHours] = useState(initial?.estimate_hours ?? 1);
   useEffect(() => {
@@ -308,6 +310,28 @@ export default function Workflow({
       setError(e.message);
     } finally {
       setBusy(false);
+    }
+  }
+  async function prepare(preparationKind) {
+    setPreparing(preparationKind);
+    setError('');
+    try {
+      const job = await api('/jobs', {
+        kind: preparationKind,
+        name:
+          preparationKind === 'image_build'
+            ? t('Build container')
+            : `${t('Pre-download model')} · ${model.checkpoint}`,
+        image,
+        model,
+        model_hub: preparationHub,
+        resources: { timeout_seconds: resources.timeout_seconds },
+      });
+      onLaunched(job);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setPreparing('');
     }
   }
   function exportFlow() {
@@ -794,6 +818,51 @@ export default function Workflow({
                   )}
                 </small>
               </label>
+              <div className="field full preparation-actions">
+                <h3>{t('Prepare runtime')}</h3>
+                <label className="field">
+                  <span>{t('Model download source')}</span>
+                  <select
+                    value={preparationHub}
+                    onChange={(e) => setPreparationHub(e.target.value)}
+                  >
+                    <option value="hf">Hugging Face</option>
+                    <option value="modelscope">ModelScope</option>
+                  </select>
+                </label>
+                <div className="preparation-buttons">
+                  <Button
+                    busy={preparing === 'image_build'}
+                    disabled={!!preparing || busy || !bootstrap.connected || !image.trim()}
+                    onClick={() => prepare('image_build')}
+                  >
+                    <Box size={16} />
+                    {t('Build container')}
+                  </Button>
+                  <Button
+                    busy={preparing === 'model_download'}
+                    disabled={
+                      !!preparing ||
+                      busy ||
+                      !bootstrap.connected ||
+                      !image.trim() ||
+                      !model.checkpoint.trim()
+                    }
+                    onClick={() => prepare('model_download')}
+                  >
+                    <Download size={16} />
+                    {t('Pre-download model')}
+                  </Button>
+                </div>
+                <small>
+                  {t(
+                    'Downloads original weights on CPU into the shared Modal Volume. Use the same model source for training to reuse the cache. Modal usage charges apply.',
+                  )}
+                </small>
+                {!bootstrap.connected && (
+                  <small>{t('Connect Modal in settings to prepare the runtime.')}</small>
+                )}
+              </div>
               {autoImage && imageError && (
                 <Notice error>
                   {t('Image discovery failed:')}

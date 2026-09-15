@@ -91,7 +91,7 @@ class Controller:
             sandbox_id=None,
             **prepared,
         )
-        if self.cost_estimator:
+        if self.cost_estimator and record["kind"] in ("training", "deployment"):
             try:
                 record["estimate"] = self.cost_estimator(
                     record["resources"], request.get("estimate_hours", record["resources"]["timeout_seconds"] / 3600)
@@ -102,12 +102,24 @@ class Controller:
         self._thread(self._start, job_id, self.provider, endpoint_key)
         return record
 
+    def _phase(self, job_id, phase):
+        with self.store.lock:
+            job = self.store.get(job_id)
+            if job.get("cancel_requested"):
+                raise InterruptedError("Job cancellation requested")
+            if job["status"] in TERMINAL:
+                return
+            stamp = time.time()
+            self.store.update(job_id, phase=phase, phase_started_at=stamp)
+            self.store.event(job_id, {"type": "phase", "phase": phase, "time": stamp})
+
     def _start(self, job_id, provider, endpoint_key):
         sandbox = None
         try:
-            self.store.update(job_id, status="starting")
+            self.store.update(job_id, status="starting", started_at=time.time())
             job = self.store.get(job_id)
             manifest = job["manifest"]
+            self._phase(job_id, "resolving_image")
             manifest["image"] = self.image_resolver(manifest["image"])
             self.store.update(job_id, manifest=manifest)
             if self.store.get(job_id).get("cancel_requested"):
@@ -115,9 +127,24 @@ class Controller:
                 return
             uploads = referenced_uploads(manifest, self.store.directory)
             if uploads:
+                self._phase(job_id, "uploading_data")
                 provider.upload(uploads)
-            sandbox = provider.start(manifest, job["resources"], endpoint_key)
-            self.store.update(job_id, sandbox_id=sandbox.object_id, status="running", started_at=time.time())
+            sandbox = provider.start(
+                manifest, job["resources"], endpoint_key, on_phase=lambda phase: self._phase(job_id, phase)
+            )
+            if manifest["kind"] == "image_build":
+                cancelled = self.store.get(job_id).get("cancel_requested")
+                self.store.update(job_id, status="cancelled" if cancelled else "succeeded", finished_at=time.time())
+                self.store.event(job_id, {"type": "log", "message": "Container build finished", "time": time.time()})
+                return
+            self.store.update(
+                job_id,
+                sandbox_id=sandbox.object_id,
+                status="stopping" if self.store.get(job_id).get("cancel_requested") else "running",
+                phase="starting_runtime",
+                phase_started_at=time.time(),
+                started_at=time.time(),
+            )
             if self.store.get(job_id).get("cancel_requested"):
                 sandbox.terminate()
             self._watch(job_id, sandbox)
@@ -130,7 +157,12 @@ class Controller:
                         job_id, status="unknown", error="Monitoring failed; reconnect to reconcile the sandbox"
                     )
                     return
-            self.store.update(job_id, status="failed", error=self.redact(str(exc)), finished_at=time.time())
+            self.store.update(
+                job_id,
+                status="cancelled" if self.store.get(job_id).get("cancel_requested") else "failed",
+                error=self.redact(str(exc)),
+                finished_at=time.time(),
+            )
 
     def _reattach(self, job_id, provider):
         try:
@@ -173,7 +205,21 @@ class Controller:
             for line in lines(stream):
                 event = parse_line(self.redact(line))
                 self.store.event(job_id, event)
-                if event.get("type") == "stage":
+                if event.get("type") == "phase":
+                    with self.store.lock:
+                        job = self.store.get(job_id)
+                        if (
+                            job["status"] not in TERMINAL
+                            and not job.get("cancel_requested")
+                            and event.get("time", 0) >= job.get("remote_phase_time", 0)
+                        ):
+                            self.store.update(
+                                job_id,
+                                phase=event["phase"],
+                                phase_started_at=event["time"],
+                                remote_phase_time=event["time"],
+                            )
+                elif event.get("type") == "stage":
                     self.store.update(job_id, stage=event["index"])
                 elif event.get("type") == "checkpoint":
                     self.store.update(job_id, checkpoint=event["path"], adapter_only=event.get("adapter_only", False))

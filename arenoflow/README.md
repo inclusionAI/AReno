@@ -129,7 +129,29 @@ Explicit tags never fall back to another version. AReno runs through
 its own CLI and public Trainer API. The remote adapter forwards scalar writes and
 saves a final successful checkpoint before the Trainer closes.
 
+The **Prepare runtime** controls in **Compute & runtime** create independent tasks:
+
+- **Build container** resolves and builds the selected image in Modal's image cache,
+  without creating a training sandbox or reserving a GPU.
+- **Pre-download model** downloads the selected original model repository using a
+  CPU sandbox (2 cores, 8 GiB RAM) into the shared Volume. Choose Hugging Face or
+  ModelScope and use the same source for training to reuse that cache. The sandbox
+  uses the form's maximum lifetime in seconds. No training dataset or scripts are required.
+
+Preparation tasks appear in task history with status, phase events, and errors;
+model download output appears in logs. Image build internals remain in Modal's
+workspace. Stopping during an image build prevents the next sandbox from starting,
+although the in-flight Modal image build may finish. Preparation usage contributes
+to actual Modal workspace billing; it is excluded from training-run estimates.
+
+The task view distinguishes image resolution, image build, sandbox startup, original
+model caching, data preparation, model loading, training, and checkpoint saving.
+Only new tasks use updated runtime code; existing sandboxes keep their original runner.
+
 Artifacts and model caches persist on the `arenoflow-artifacts` Modal Volume.
+Original training, reference, reward, critic, and serving model references are
+resolved into Hugging Face or ModelScope snapshot caches on that Volume before
+AReno loads them. Cache reuse follows the hub library's snapshot validation.
 Stages run sequentially in the same sandbox; failures prevent dependent stages
 from starting. A single-stage LoRA run can be deployed with its base model.
 Multi-stage adapter-only chaining is currently rejected because it needs an explicit

@@ -1,4 +1,17 @@
 export default {
+  'Build container': '构建容器',
+  'Pre-download model': '预下载模型',
+  'Prepare runtime': '准备运行环境',
+  'Model download source': '模型下载来源',
+  'Container builder': '容器构建服务',
+  'CPU only': '仅 CPU',
+  'Connect Modal in settings to prepare the runtime.': '请在设置中连接 Modal 后准备运行环境。',
+  'Original model downloads are stored in the shared model cache.':
+    '下载的原始模型保存在共享模型缓存中。',
+  'Downloads original weights on CPU into the shared Modal Volume. Use the same model source for training to reuse the cache. Modal usage charges apply.':
+    '使用 CPU 将原始权重下载到共享 Modal Volume。训练时选择相同的模型来源以复用缓存。资源使用按 Modal 账单计费。',
+
+  'Preparing original model cache': '准备基础模型缓存',
   'AReno container image': 'AReno 容器镜像',
   'AReno default loader': 'AReno 默认加载器',
   'AReno home': 'AReno 主页',
@@ -760,4 +773,15 @@ export default {
     '添加仓库或上传数据集，在配置训练阶段时选择数据加载脚本。',
   'Manage dataset sources, media attachments and local sample caches.':
     '管理数据集来源、媒体附件和本地样本缓存。',
+  'Resolving image': '解析镜像版本',
+  'Uploading data': '上传训练数据',
+  'Preparing Modal resources': '准备 Modal 资源',
+  'Building image': '构建镜像中',
+  'Starting sandbox': '启动沙箱中',
+  'Starting runtime': '启动运行环境',
+  'Preparing training data': '准备训练数据',
+  'Loading model': '加载模型中',
+  Training: '训练中',
+  'Saving checkpoint': '保存检查点',
+  'Execution phases': '执行阶段',
 };

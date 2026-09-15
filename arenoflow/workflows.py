@@ -45,6 +45,8 @@ def resources(raw):
 
 def plan(request, catalog, job_id="preview"):
     kind = request.get("kind", "training")
+    if kind in ("image_build", "model_download"):
+        return preparation_plan(request, catalog)
     if kind not in ("training", "deployment"):
         raise ValueError("Job kind must be training or deployment")
     resource = resources(request.get("resources", {}))
@@ -116,3 +118,33 @@ def validate_devices(params, resource):
     tp = bounded(params.get("tp_size", 1), "tp_size", 1, world, True)
     if world % tp:
         raise ValueError("world_size must be divisible by tp_size")
+
+
+def preparation_plan(request, catalog):
+    """Preparation jobs share the training image and Volume, without GPU reservations."""
+    kind = request["kind"]
+    model = request.get("model", {}) if kind == "model_download" else {"checkpoint": ""}
+    if kind == "model_download":
+        if model.get("adapter") not in {m["id"] for m in catalog["models"]}:
+            raise ValueError("Select a model adapter from the repository catalog")
+        checkpoint = model.get("checkpoint", "")
+        if not isinstance(checkpoint, str) or not checkpoint.strip() or checkpoint.startswith(("/", ".")):
+            raise ValueError("Select a model repository ID to download")
+    hub = request.get("model_hub", "hf")
+    if hub not in ("hf", "modelscope"):
+        raise ValueError("Model hub must be hf or modelscope")
+    return dict(
+        manifest=dict(
+            kind=kind,
+            revision=catalog["revision"],
+            schema_version=catalog["schema_version"],
+            image=request.get("image") or catalog["image"],
+            model=model,
+            model_hub=hub,
+            stages=[],
+        ),
+        resources=dict(
+            gpu=None, count=0, cpu=2, memory_gib=8, timeout_seconds=timeout_seconds(request.get("resources", {}))
+        ),
+        commands=[],
+    )
