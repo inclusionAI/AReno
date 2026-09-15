@@ -16,11 +16,11 @@ from arenoflow.assets import save_upload
 from arenoflow.billing import fetch_billing
 from arenoflow.catalog import ROOT, catalog
 from arenoflow.controller import Controller
-from arenoflow.datasets import resolve_request, save_dataset, save_function, save_script_batch
+from arenoflow.datasets import find, resolve_request, save_dataset, save_function, save_script_batch
 from arenoflow.llm import ScriptGenerator
 from arenoflow.pricing import Pricing
 from arenoflow.provider import latest_image
-from arenoflow.samples import dataset_sample
+from arenoflow.sample_cache import SampleCache
 from arenoflow.store import Store
 from arenoflow.workflows import GPU_TYPES, plan
 
@@ -39,6 +39,7 @@ class Application:
         self.image_lock = threading.Lock()
         self.pricing = Pricing()
         self.llm = ScriptGenerator()
+        self.samples = SampleCache(self.controller.store)
         self.controller.cost_estimator = self.pricing.quote
 
     def get(self, path, query):
@@ -55,7 +56,7 @@ class Application:
         if path == "/api/jobs":
             return self.controller.store.jobs()
         if path == "/api/datasets":
-            return self.controller.store.datasets()
+            return [{**d, "sample_status": self.samples.status(d)["status"]} for d in self.controller.store.datasets()]
         if path == "/api/functions":
             return self.controller.store.functions()
         if path == "/api/estimates":
@@ -87,7 +88,8 @@ class Application:
         if path == "/api/llm":
             return self.llm.configure(body)
         if path == "/api/scripts/sample":
-            return dataset_sample(self.controller.store, body.get("dataset_id"))
+            dataset = find(self.controller.store.datasets(), body.get("dataset_id"), "Dataset")
+            return self.samples.enqueue(dataset, retry=bool(body.get("retry")))
         if path == "/api/scripts/batch":
             return save_script_batch(self.controller.store, body)
         if path == "/api/scripts/generate":
@@ -99,7 +101,9 @@ class Application:
         if path.startswith("/api/functions/") and path.endswith("/delete"):
             return self.controller.store.delete_function(path.split("/")[3])
         if path == "/api/datasets":
-            return save_dataset(self.controller.store, body)
+            dataset = save_dataset(self.controller.store, body)
+            state = self.samples.enqueue(dataset)
+            return {**dataset, "sample_status": state["status"]}
         if path.startswith("/api/datasets/") and path.endswith("/delete"):
             return self.controller.store.delete_dataset(path.split("/")[3])
         if path == "/api/connect":

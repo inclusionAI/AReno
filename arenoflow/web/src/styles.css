@@ -2291,3 +2291,17 @@ html:lang(zh-CN) .hero-copy h1 {
   color: var(--muted);
   cursor: default;
 }
+
+.sample-loading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: var(--brand-soft);
+  color: var(--brand-dark);
+  font-size: 12px;
+}
+.sample-loading svg {
+  flex-shrink: 0;
+}

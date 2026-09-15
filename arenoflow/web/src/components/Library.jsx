@@ -1,7 +1,7 @@
 import ScriptGenerator from './ScriptGenerator';
 import { t } from '../i18n';
 import { lazy, Suspense, useEffect, useState } from 'react';
-import { Code2, Database, Plus, Save, Trash2, UploadCloud } from 'lucide-react';
+import { Code2, Database, LoaderCircle, Plus, Save, Trash2, UploadCloud } from 'lucide-react';
 import { api } from '../api';
 import { Button, Empty, Notice, PageHeader } from './UI';
 import Upload, { uploadFile } from './Upload';
@@ -60,6 +60,13 @@ export default function Library({ type, notify }) {
     [busy, setBusy] = useState(false);
   const [query, setQuery] = useState(''),
     [deleting, setDeleting] = useState(false);
+  useEffect(() => {
+    if (isFunction) return;
+    const timer = setInterval(library.refresh, 2000);
+    return () => clearInterval(timer);
+  }, [isFunction]);
+  const savedDataset =
+    !isFunction && draft?.id ? library.datasets.find((d) => d.id === draft.id) : null;
   function create() {
     setDraft(
       isFunction
@@ -173,6 +180,19 @@ export default function Library({ type, notify }) {
                 {isFunction ? <Code2 size={18} /> : <Database size={18} />}
                 <span>
                   <b>{record.name}</b>
+                  {!isFunction && (
+                    <small>
+                      {t(
+                        record.sample_status === 'ready'
+                          ? 'Sample ready'
+                          : record.sample_status === 'downloading'
+                            ? 'Downloading sample…'
+                            : record.sample_status === 'failed'
+                              ? 'Sample download failed'
+                              : 'Sample not cached',
+                      )}
+                    </small>
+                  )}
                   <small>
                     {isFunction
                       ? t(functionKinds[record.kind])
@@ -288,6 +308,37 @@ export default function Library({ type, notify }) {
               </>
             ) : (
               <>
+                {savedDataset && (
+                  <div className="notice" role="status">
+                    {savedDataset.sample_status === 'downloading' && (
+                      <LoaderCircle size={16} className="spin" aria-hidden="true" />
+                    )}
+                    {t(
+                      savedDataset.sample_status === 'ready'
+                        ? 'Sample ready'
+                        : savedDataset.sample_status === 'downloading'
+                          ? 'Downloading sample…'
+                          : savedDataset.sample_status === 'failed'
+                            ? 'Sample download failed'
+                            : 'Sample not cached',
+                    )}
+                    {savedDataset.sample_status !== 'downloading' && (
+                      <Button
+                        type="button"
+                        onClick={async () => {
+                          try {
+                            await api('/scripts/sample', { dataset_id: draft.id, retry: true });
+                            await library.refresh();
+                          } catch (e) {
+                            setError(e.message);
+                          }
+                        }}
+                      >
+                        {t('Download sample again')}
+                      </Button>
+                    )}
+                  </div>
+                )}
                 <fieldset className="modality-picker">
                   <legend>{t('Data modalities')}</legend>
                   {['text', 'image', 'audio', 'video'].map((mode) => (

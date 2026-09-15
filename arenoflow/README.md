@@ -290,3 +290,11 @@ in one action. Batch save validates every script before inserting all records in
 single transaction. Existing scripts are not overwritten. Syntax validation is
 not a runtime correctness check. Saved generated scripts retain the dataset and
 algorithm used for generation; these are provenance, not restrictions on reuse.
+
+Dataset registration starts background sample prefetch (two concurrent workers).
+Dataset Manager shows downloading, ready, or failed status and provides retry.
+Samples are cached under the local data directory and reused by Script Manager;
+changing the source, hub, config, or split selects a new cache entry. This downloads
+preview data, not the complete training dataset. Training continues to use the
+configured dataset source. Use Dataset Manager to refresh the provider sample;
+Script Manager's reload action rereads the local cache.

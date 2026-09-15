@@ -739,4 +739,10 @@ export default {
     '样本获取失败或超时，请重试或手动粘贴',
   'Automatic preview is unavailable for this dataset hub; paste a sample':
     '此数据集平台暂不支持自动预览，请粘贴样本',
+  'Sample ready': '样本已就绪',
+  'Downloading sample…': '正在下载样本…',
+  'Sample download failed': '样本下载失败',
+  'Sample not cached': '样本未缓存',
+  'Download sample again': '重新下载样本',
+  'Sample download failed; retry from Dataset Manager': '样本下载失败，请在数据集管理中重试',
 };

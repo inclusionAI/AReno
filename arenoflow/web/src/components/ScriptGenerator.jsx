@@ -1,4 +1,5 @@
 import { lazy, Suspense, useEffect, useState } from 'react';
+import { LoaderCircle } from 'lucide-react';
 import { api } from '../api';
 import { t } from '../i18n';
 import { Button, Notice } from './UI';
@@ -39,22 +40,33 @@ export default function ScriptGenerator({ datasets, onSaved }) {
       return;
     }
     let cancelled = false;
+    let timer;
+    const abort = new AbortController();
     setLoading(true);
-    api('/scripts/sample', { dataset_id: dataset })
-      .then((data) => {
-        if (!cancelled) {
-          setSample(data.sample);
-          setSampleInfo(data);
+    async function poll() {
+      try {
+        const data = await api('/scripts/sample', { dataset_id: dataset }, abort.signal);
+        if (cancelled) return;
+        if (data.status === 'downloading') {
+          timer = setTimeout(poll, 1000);
+          return;
         }
-      })
-      .catch((e) => {
-        if (!cancelled) setError(e.message);
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
+        if (data.status === 'failed') throw new Error(data.error);
+        setSample(data.sample);
+        setSampleInfo(data);
+        setLoading(false);
+      } catch (e) {
+        if (!cancelled) {
+          setError(e.message);
+          setLoading(false);
+        }
+      }
+    }
+    poll();
     return () => {
       cancelled = true;
+      abort.abort();
+      clearTimeout(timer);
     };
   }, [dataset, sampleRefresh]);
   const choices = algorithms;
@@ -167,7 +179,12 @@ export default function ScriptGenerator({ datasets, onSaved }) {
             >
               {t('Reload sample')}
             </Button>
-            {loading && <small>{t('Loading dataset sample…')}</small>}
+            {loading && (
+              <div className="sample-loading" role="status">
+                <LoaderCircle size={16} className="spin" aria-hidden="true" />
+                <span>{t('Loading dataset sample…')}</span>
+              </div>
+            )}
             {sampleInfo && (
               <small>
                 {t('Sample loaded: {p0} records', { p0: sampleInfo.row_count ?? 3 })}
@@ -176,6 +193,7 @@ export default function ScriptGenerator({ datasets, onSaved }) {
             )}
             <textarea
               id="generation-dataset-sample"
+              aria-busy={loading}
               rows={7}
               maxLength={12000}
               disabled={loading}
