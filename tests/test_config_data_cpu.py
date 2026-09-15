@@ -293,6 +293,22 @@ class ConfigAndDataTest(unittest.TestCase):
 
         self.assertEqual(model.attn_backend, "native")
 
+    def test_flash_runtime_loads_float32_checkpoint_as_bfloat16(self):
+        """Checkpoint storage precision must not select an unsupported FlashAttention dtype."""
+        model = ModelConfig(
+            num_attention_heads=4,
+            num_key_value_heads=4,
+            intermediate_size=16,
+            vocab_size=32,
+            dtype=torch.float32,
+        )
+
+        with self.assertWarnsRegex(RuntimeWarning, "checkpoint declares float32.*bfloat16"):
+            cfg = EngineConfig(model=model, tp_size=1, devices=[0], runtime=RuntimeConfig(attn_backend="flash"))
+
+        self.assertIs(cfg.model.dtype, torch.bfloat16)
+        self.assertEqual(cfg.runtime.attn_backend, "flash")
+
     def test_runtime_config_falls_back_to_native_on_turing_gpu(self):
         """Turing GPUs like T4 should use native attention instead of flash-attn."""
         model = ModelConfig(num_attention_heads=4, num_key_value_heads=4, intermediate_size=16, vocab_size=32)
