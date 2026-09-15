@@ -26,6 +26,22 @@ class _Case:
 
 
 _CASES = {
+    "bailing_legacy": _Case(
+        model_env="ARENO_E2E_BAILING_LEGACY_MODEL",
+        targets=(
+            "layers.0.attention.query_key_value",
+            "layers.0.attention.g_proj",
+            "layers.0.attention.dense",
+            "layers.4.attention.query_key_value",
+            "layers.4.attention.dense",
+            "layers.0.mlp.gate_proj",
+            "layers.0.mlp.up_proj",
+            "layers.0.mlp.down_proj",
+            "layers.1.experts.linear_fc1",
+            "layers.1.experts.linear_fc2",
+        ),
+        changed_fragments=(".attention.", ".mlp.", ".experts."),
+    ),
     "gemma4": _Case(
         model_env="ARENO_E2E_GEMMA4_MODEL",
         targets=(
