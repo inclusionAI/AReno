@@ -26,6 +26,19 @@ class _Case:
 
 
 _CASES = {
+    "olmo2": _Case(
+        model_env="ARENO_E2E_OLMO2_MODEL",
+        targets=(
+            "layers.0.self_attn.q_proj",
+            "layers.0.self_attn.k_proj",
+            "layers.0.self_attn.v_proj",
+            "layers.0.self_attn.o_proj",
+            "layers.0.mlp.gate_proj",
+            "layers.0.mlp.up_proj",
+            "layers.0.mlp.down_proj",
+        ),
+        changed_fragments=(".self_attn.", ".mlp."),
+    ),
     "bailing_legacy": _Case(
         model_env="ARENO_E2E_BAILING_LEGACY_MODEL",
         targets=(
