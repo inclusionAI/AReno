@@ -26,6 +26,19 @@ class _Case:
 
 
 _CASES = {
+    "phi4mm": _Case(
+        model_env="ARENO_E2E_PHI4MM_MODEL",
+        targets=(
+            "model.layers.0.self_attn.q_proj",
+            "model.layers.0.self_attn.k_proj",
+            "model.layers.0.self_attn.v_proj",
+            "model.layers.0.self_attn.o_proj",
+            "model.layers.0.mlp.gate_proj",
+            "model.layers.0.mlp.up_proj",
+            "model.layers.0.mlp.down_proj",
+        ),
+        changed_fragments=(".self_attn.", ".mlp."),
+    ),
     "qwen35_vl": _Case(
         model_env="ARENO_E2E_QWEN35_MODEL",
         targets=(
