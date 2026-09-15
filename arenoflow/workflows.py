@@ -22,6 +22,13 @@ def bounded(value, name, lower, upper, integer=False):
     return int(value) if integer else value
 
 
+def timeout_seconds(raw):
+    if "timeout_seconds" in raw:
+        return bounded(raw["timeout_seconds"], "Timeout seconds", 1, 86400, True)
+    # Older exported workflows and stored runs used whole hours.
+    return bounded(raw.get("timeout_hours", 4), "Timeout hours", 1, 24, True) * 3600
+
+
 def resources(raw):
     gpu = raw.get("gpu", "H100")
     if gpu not in GPU_TYPES:
@@ -31,7 +38,7 @@ def resources(raw):
         count=bounded(raw.get("count", 1), "GPU count", 1, 8, True),
         cpu=bounded(raw.get("cpu", 4), "CPU cores", 1, 64),
         memory_gib=bounded(raw.get("memory_gib", 32), "Memory GiB", 4, 512, True),
-        timeout_hours=bounded(raw.get("timeout_hours", 4), "Timeout hours", 1, 24, True),
+        timeout_seconds=timeout_seconds(raw),
     )
     return result
 

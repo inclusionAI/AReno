@@ -176,15 +176,17 @@ export default function Workflow({
     ],
   );
   const [active, setActive] = useState(0);
-  const [resources, setResources] = useState(
-    initial?.resources || {
+  const [resources, setResources] = useState(() => {
+    const { timeout_hours = 4, ...saved } = initial?.resources || {};
+    return {
       gpu: 'H100',
       count: 1,
       cpu: 4,
       memory_gib: 32,
-      timeout_hours: 4,
-    },
-  );
+      ...saved,
+      timeout_seconds: saved.timeout_seconds ?? timeout_hours * 3600,
+    };
+  });
   const [serve, setServe] = useState(initial?.serve || {});
   const [image, setImage] = useState(initial?.image || catalog.image);
   const [autoImage, setAutoImage] = useState(initial?.autoImage ?? true);
@@ -192,6 +194,13 @@ export default function Workflow({
   const [imageError, setImageError] = useState('');
   const [endpointKey, setEndpointKey] = useState('');
   const [estimateHours, setEstimateHours] = useState(initial?.estimate_hours ?? 1);
+  useEffect(() => {
+    if (resources.timeout_seconds >= 1) {
+      setEstimateHours((current) =>
+        current > resources.timeout_seconds / 3600 ? resources.timeout_seconds / 3600 : current,
+      );
+    }
+  }, [resources.timeout_seconds]);
   const [preview, setPreview] = useState(null),
     [error, setError] = useState(''),
     [busy, setBusy] = useState(false);
@@ -720,7 +729,7 @@ export default function Workflow({
                 ['count', 'GPU count', 1, 8],
                 ['cpu', 'CPU cores', 1, 64],
                 ['memory_gib', 'Memory · GiB', 4, 512],
-                ['timeout_hours', 'Maximum lifetime · hours', 1, 24],
+                ['timeout_seconds', 'Maximum lifetime · s', 1, 86400],
               ].map(([key, label, min, max]) => (
                 <label className="field" key={key}>
                   <span>{t(label)}</span>
@@ -802,9 +811,7 @@ export default function Workflow({
               {resources.count} × {resources.gpu}
             </dd>
             <dt>{t('Maximum lifetime')}</dt>
-            <dd>
-              {resources.timeout_hours} {t('hours')}
-            </dd>
+            <dd>{resources.timeout_seconds} s</dd>
             <dt>{t('Billing')}</dt>
             <dd>{t('Actual Modal usage')}</dd>
           </dl>

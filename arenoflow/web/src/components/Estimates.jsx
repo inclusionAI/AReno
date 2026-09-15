@@ -34,8 +34,8 @@ export function RunEstimate({ resources, hours, onHoursChange }) {
         <span>{t('Expected runtime · hours')}</span>
         <input
           type="number"
-          min={1 / 60}
-          max={resources.timeout_hours}
+          min={1 / 3600}
+          max={resources.timeout_seconds / 3600}
           step="any"
           value={hours}
           onChange={(e) => onHoursChange(e.target.value === '' ? '' : Number(e.target.value))}

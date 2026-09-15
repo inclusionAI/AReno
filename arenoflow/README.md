@@ -243,3 +243,7 @@ Chinese translations live in `web/src/locales/zh.js`. Translate presentation lab
 only, never submitted values or user-authored content. New CLI metadata falls back
 to its English source until translated. Run the locale checks with
 `node --test arenoflow/web/src/i18n.test.js` from the repository root.
+
+Maximum runtime is configured in whole seconds (`timeout_seconds`), from 1 to
+86400 s, with a default of 14400 s. Legacy `timeout_hours` configurations are
+converted when read. Expected duration for cost estimates remains in hours.

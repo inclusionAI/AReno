@@ -94,7 +94,7 @@ class Controller:
         if self.cost_estimator:
             try:
                 record["estimate"] = self.cost_estimator(
-                    record["resources"], request.get("estimate_hours", record["resources"]["timeout_hours"])
+                    record["resources"], request.get("estimate_hours", record["resources"]["timeout_seconds"] / 3600)
                 )
             except Exception as exc:
                 record["estimate_error"] = self.redact(str(exc))

@@ -295,7 +295,7 @@ export default {
   function: '函数',
   functions: '函数',
   hours: '小时',
-  'hours · stop it here when finished.': '小时 · 使用完毕后可在这里停止。',
+  's · stop it here when finished.': 's · 使用完毕后可在这里停止。',
   'hours, using Modal public list rates. Actual usage and billing are reported separately.':
     '小时，采用 Modal 公开价格。实际用量与账单单独显示。',
   'illustrative curve': '示意曲线',
@@ -602,7 +602,7 @@ export default {
   'GRPO objective': 'GRPO 目标',
   'DPO objective': 'DPO 目标',
   'Memory · GiB': '内存 · GiB',
-  'Maximum lifetime · hours': '最长运行时间 · 小时',
+  'Maximum lifetime · s': '最长运行时间 · s',
   'Repository math verifier': '仓库内置数学验证器',
   'Standard rollout': '标准 rollout',
   metrics: '指标',

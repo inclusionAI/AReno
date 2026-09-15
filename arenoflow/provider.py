@@ -117,7 +117,7 @@ class ModalProvider:
             gpu=f"{resources['gpu']}:{resources['count']}",
             cpu=resources["cpu"],
             memory=resources["memory_gib"] * 1024,
-            timeout=resources["timeout_hours"] * 3600,
+            timeout=resources["timeout_seconds"],
             volumes={"/artifacts": volume},
             secrets=secrets,
             client=self.client,

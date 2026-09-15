@@ -262,8 +262,8 @@ export function JobDetail({ id, onDeploy, notify }) {
           )}
           <p className="muted">
             {t('GPU-backed endpoint · maximum lifetime')}
-            {job.resources.timeout_hours}
-            {t('hours · stop it here when finished.')}
+            {job.resources.timeout_seconds ?? job.resources.timeout_hours * 3600}
+            {t('s · stop it here when finished.')}
           </p>
         </section>
       )}

@@ -9,7 +9,7 @@ import urllib.request
 from decimal import Decimal
 from html.parser import HTMLParser
 
-from arenoflow.workflows import bounded, resources
+from arenoflow.workflows import bounded, resources, timeout_seconds
 
 PRICING_URL = "https://modal.com/pricing"
 GPU_LABELS = {
@@ -77,8 +77,8 @@ def parse_rates(html):
 
 def estimate(raw_resources, hours, rates, count=1):
     reserved = resources(raw_resources)
-    hours = bounded(hours, "Estimated duration (hours)", 1 / 60, 24)
-    if hours > reserved["timeout_hours"]:
+    hours = bounded(hours, "Estimated duration (hours)", 1 / 3600, 24)
+    if hours > reserved["timeout_seconds"] / 3600:
         raise ValueError("Estimated duration cannot exceed the configured maximum lifetime")
     count = bounded(count, "Run count", 1, 10000, True)
     components = {
@@ -97,7 +97,7 @@ def estimate(raw_resources, hours, rates, count=1):
         currency="USD",
         rates=rates,
         breakdown={key: str(value * 3600 * Decimal(str(hours))) for key, value in components.items()},
-        lifetime_cost=str(hourly * reserved["timeout_hours"]),
+        lifetime_cost=str(sum(components.values()) * reserved["timeout_seconds"]),
     )
 
 
@@ -132,7 +132,9 @@ class Pricing:
             try:
                 if not job.get("estimate") and rate_error:
                     raise ValueError(rate_error)
-                quote = job.get("estimate") or estimate(job["resources"], job["resources"]["timeout_hours"], rates)
+                quote = job.get("estimate") or estimate(
+                    job["resources"], timeout_seconds(job["resources"]) / 3600, rates
+                )
                 elapsed = (
                     max(0, (job.get("finished_at") or time.time()) - job["started_at"]) if job.get("started_at") else 0
                 )
