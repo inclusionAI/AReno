@@ -749,4 +749,11 @@ export default {
   Downloading: '下载中',
   'Download failed': '下载失败',
   'Not cached': '未缓存',
+  'Select a dataset.': '请选择数据集。',
+  'Select an algorithm.': '请选择算法。',
+  'Select at least one script.': '请至少选择一个脚本。',
+  'Wait for the dataset sample to load.': '请等待数据集样本加载完成。',
+  'Load or enter a dataset sample.': '请获取或填写数据集样本。',
+  'Enter script requirements. The placeholder is an example, not submitted text.':
+    '请填写脚本需求。灰色占位文字仅为示例，不会作为需求提交。',
 };

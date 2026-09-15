@@ -95,6 +95,15 @@ export default function ScriptGenerator({ datasets, onSaved }) {
   ]
     .filter(Boolean)
     .join('\n');
+  const missingRequirements = [
+    !dataset && t('Select a dataset.'),
+    !choices.some((a) => a.id === algorithm) && t('Select an algorithm.'),
+    !kinds.length && t('Select at least one script.'),
+    loading && t('Wait for the dataset sample to load.'),
+    !loading && !sample.trim() && t('Load or enter a dataset sample.'),
+    !prompt.trim() &&
+      t('Enter script requirements. The placeholder is an example, not submitted text.'),
+  ].filter(Boolean);
   async function generate() {
     setBusy(true);
     setError('');
@@ -226,19 +235,24 @@ export default function ScriptGenerator({ datasets, onSaved }) {
         <Button
           type="button"
           busy={busy}
-          disabled={
-            saving ||
-            !kinds.length ||
-            loading ||
-            !dataset ||
-            !choices.some((a) => a.id === algorithm) ||
-            !sample.trim() ||
-            !prompt.trim()
+          disabled={saving || missingRequirements.length > 0}
+          aria-describedby={
+            missingRequirements.length ? 'script-generation-requirements' : undefined
           }
+          title={missingRequirements.join(' ')}
           onClick={generate}
         >
           {t('Generate selected scripts')}
         </Button>
+        {missingRequirements.length > 0 && (
+          <div id="script-generation-requirements" className="notice" role="status">
+            <ul>
+              {missingRequirements.map((reason) => (
+                <li key={reason}>{reason}</li>
+              ))}
+            </ul>
+          </div>
+        )}
       </fieldset>
       {error && <Notice error>{error}</Notice>}
       {result && (
