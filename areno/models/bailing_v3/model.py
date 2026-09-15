@@ -1140,7 +1140,6 @@ class BailingLinearAttention(nn.Module):
             initial_state=None,
             output_final_state=False,
             cu_seqlens=cu_seqlens,
-            head_first=False,
         )
         return out
 
