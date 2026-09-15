@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from itertools import count
-from typing import Any
+from typing import Any, Literal
 
 import torch
 
@@ -221,6 +221,7 @@ class ArenoEngine:
         start: bool = True,
         cluster_kwargs: dict[str, Any] | None = None,
         policy_sync_bucket_mb: int = 64,
+        quant_method: Literal["none", "fp8", "int4"] = "none",
         lora_config: LoraConfig | None = None,
         reference_mode: str = "independent",
         base_model_name_or_path: str | None = None,
@@ -231,6 +232,13 @@ class ArenoEngine:
         directory, parses the HF config into the internal model config, and
         wraps the result in an :class:`EngineConfig` before delegating to
         ``__init__``. Blocking: workers are started before the call returns.
+
+        ``quant_method`` selects decode-time weight quantization: ``"fp8"``
+        quantizes parallel-linear weights when a decode session materializes
+        infer weights and routes them to the FP8 backend only inside that
+        session, so prefill, scoring and training forwards stay bf16. It
+        requires an FP8-capable GPU (e.g. Hopper/Ada); ``"none"`` (default)
+        keeps full precision.
         """
 
         if model is None:
@@ -241,6 +249,11 @@ class ArenoEngine:
             raise ValueError(f"could not resolve model path: {model!r}")
         # Translate the HF config.json into the engine's internal model schema.
         model_config = config_from_hf(model_path)
+        if quant_method == "int4":
+            raise NotImplementedError("quant_method='int4' is not implemented yet")
+        if quant_method not in ("none", "fp8"):
+            raise ValueError(f"unknown quant_method {quant_method!r}; expected 'none', 'fp8' or 'int4'")
+        model_config.quant_method = quant_method
         cfg = EngineConfig(
             model=model_config,
             model_path=model_path,
@@ -280,6 +293,11 @@ class ArenoEngine:
         path. Inputs are token-id rows (one row per prompt); the returned
         :class:`RolloutOutput` carries response token ids and finish reasons
         merged across DP ranks in the original input order.
+
+        With ``quant_method="fp8"`` this must run inside a rollout session:
+        decode is the only region that routes weights to the FP8 backend, so
+        calling it without :meth:`begin_rollout_session` fails instead of
+        silently decoding at full precision.
 
         All prompts are submitted to the worker scheduler in one payload. The
         worker keeps at most ``max_running_prompts`` rows active and admits

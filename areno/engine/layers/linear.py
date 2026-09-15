@@ -12,12 +12,14 @@ parallelism is on) to recover the global output.
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 
 import torch
 import torch.nn.functional as F
 from torch import nn
 
 from areno.accel import areno_linear
+from areno.accel.utils import warn_once
 from areno.engine.parallel.collectives import (
     all_gather_last_dim,
     all_reduce,
@@ -27,6 +29,9 @@ from areno.engine.parallel.collectives import (
     reduce_scatter_to_sequence_parallel_region,
 )
 from areno.engine.parallel.context import get_tp_context
+from areno.engine.quantization import PAYLOAD_ATTR, SCALE_ATTR, fp8_decode_active
+
+_FP8_BACKEND: tuple[Callable, Callable] | None = None
 
 
 def mark_tensor_parallel_parameter(
@@ -289,8 +294,53 @@ class RowParallelLinear(nn.Module):
         return out
 
 
+def _fp8_backend() -> tuple[Callable, Callable]:
+    """Import the FP8 backend once, so the training path never pulls in triton."""
+
+    global _FP8_BACKEND
+    if _FP8_BACKEND is None:
+        from areno.accel.kernels.fp8_scaled_mm import quantized_fp8_scaled_mm, scaled_mm_available
+
+        _FP8_BACKEND = (quantized_fp8_scaled_mm, scaled_mm_available)
+    return _FP8_BACKEND
+
+
+def _fp8_decode_linear(x: torch.Tensor, weight: torch.Tensor, fp8: torch.Tensor) -> torch.Tensor | None:
+    """FP8 decode linear for a payload-carrying weight, or None when unsupported.
+
+    The backend needs an FP8-capable GPU (Hopper/Ada); elsewhere this warns once
+    and returns None so the caller keeps full precision.
+    """
+
+    quantized_fp8_scaled_mm, scaled_mm_available = _fp8_backend()
+    if not scaled_mm_available(x.device):
+        warn_once(
+            "fp8-decode-unsupported-device",
+            "quant_method='fp8' needs an FP8-capable GPU (Hopper/Ada, cc >= 8.9); "
+            "decode keeps full precision on this device",
+        )
+        return None
+    return quantized_fp8_scaled_mm(x, fp8, getattr(weight, SCALE_ATTR))
+
+
 def _areno_linear_forward(x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None) -> torch.Tensor:
     """Single entry point so all parallel linears share the areno.accel matmul."""
+
+    # A payload-carrying weight routes through the FP8 linear only inside a
+    # decode scope, so prefill, scoring and training keep the bf16 path. Unmarked
+    # weights never take this branch.
+    fp8 = getattr(weight, PAYLOAD_ATTR, None)
+    if fp8 is not None and fp8_decode_active():
+        # Decode can hand a 3-D (1, seq, hidden) activation; flatten for the
+        # kernel, then restore the leading dims.
+        flat_input = x.reshape(-1, x.shape[-1]) if x.ndim > 2 else x
+        out = _fp8_decode_linear(flat_input, weight, fp8)
+        if out is not None:
+            if bias is not None:
+                out = out + bias
+            if x.ndim > 2:
+                out = out.reshape(*x.shape[:-1], out.shape[-1])
+            return out
 
     if x.ndim >= 3 and torch.is_grad_enabled():
         return F.linear(x, weight, bias)

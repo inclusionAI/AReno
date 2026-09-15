@@ -1135,6 +1135,7 @@ def _train_args(**overrides):
         optimizer_state_offload_batch_size=1,
         eager_decode=False,
         attn_backend="flash",
+        quant_method="none",
         disable_thinking=False,
         metrics_log_dir=None,
         agent_fn=None,
