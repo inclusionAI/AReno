@@ -709,4 +709,12 @@ export default {
   'LLM connection failed or timed out': 'LLM 连接失败或超时',
   'LLM response is not a valid Python script with the required AReno entrypoint; revise the prompt and retry':
     'LLM 未返回包含所需 AReno 入口的有效 Python 脚本，请修改提示词后重试',
+  'Generate scripts with LLM': '使用 LLM 批量生成脚本',
+  'Scripts to generate': '选择生成的脚本',
+  'Generate selected scripts': '生成所选脚本',
+  'Review and edit each script. Save the complete set when ready.':
+    '分别检查和编辑脚本，完成后统一保存。',
+  'Save all scripts': '保存全部脚本',
+  'Scripts saved.': '脚本已全部保存。',
+  'Loading editor…': '正在加载编辑器…',
 };

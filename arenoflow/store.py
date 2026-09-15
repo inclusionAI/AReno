@@ -99,6 +99,11 @@ class Store:
             self.db.execute("INSERT OR REPLACE INTO functions VALUES (?, ?)", (record["id"], json.dumps(record)))
         return record
 
+    def save_functions(self, records):
+        with self.lock, self.db:
+            self.db.executemany("INSERT INTO functions VALUES (?, ?)", [(r["id"], json.dumps(r)) for r in records])
+        return records
+
     def delete_function(self, identifier):
         with self.lock, self.db:
             if any(d.get("loader_id") == identifier for d in self.datasets()):

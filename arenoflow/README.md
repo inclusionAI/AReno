@@ -262,8 +262,9 @@ Key** in Settings. For example, a base URL ending in `/v1` receives requests at
 returns the key. Changing the provider clears the previous key unless a replacement
 is supplied. Saving settings does not contact the provider.
 
-In Script Manager, select a script type, dataset, and algorithm, inspect the sample,
-and enter the requirements. Reward and agent scripts require a rollout algorithm;
+In Script Manager, select a dataset and algorithm, inspect the sample, enter the
+requirements, and check the script types to generate. One LLM request generates the
+complete selected set with consistent dataset fields and interfaces. Reward and agent scripts require a rollout algorithm;
 SFT and DPO support dataset loader generation only. Uploaded JSON/JSONL/CSV/TSV data
 provides up to three sample records where bounded parsing is possible. Supply a
 sample manually for repository datasets, Parquet/Arrow, or oversized records.
@@ -271,7 +272,9 @@ Only the displayed sample, prompt, dataset metadata, and repository API referenc
 are sent to the configured LLM; media files and Modal credentials are not sent.
 Generation may incur charges from that LLM provider, separate from Modal billing.
 
-Generated source is checked for Python syntax and entrypoint compatibility, then
-shown for review. Apply it to the editor and save explicitly. Syntax validation is
+Every selected script must be returned and pass Python syntax and entrypoint checks
+before the batch is shown. Review and edit each script, then save the complete set
+in one action. Batch save validates every script before inserting all records in a
+single transaction. Existing scripts are not overwritten. Syntax validation is
 not a runtime correctness check. Saved generated scripts retain the dataset and
 algorithm used for generation; these are provenance, not restrictions on reuse.

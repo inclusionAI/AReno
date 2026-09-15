@@ -80,7 +80,7 @@ def validate_source(source, kind):
         raise ValueError(f"{name} does not accept AReno's hook arguments: {exc}") from None
 
 
-def save_function(store, body):
+def function_record(store, body):
     identifier = body.get("id")
     previous = find(store.functions(), identifier, "Function") if identifier else None
     kind = body.get("kind")
@@ -99,7 +99,23 @@ def save_function(store, body):
         created_at=previous["created_at"] if previous else time.time(),
         updated_at=time.time(),
     )
-    return store.save_function(record)
+    return record
+
+
+def save_function(store, body):
+    return store.save_function(function_record(store, body))
+
+
+def save_script_batch(store, body):
+    scripts = body.get("scripts")
+    if not isinstance(scripts, list) or not 1 <= len(scripts) <= 3:
+        raise ValueError("Provide one to three scripts")
+    if any(not isinstance(item, dict) or item.get("id") for item in scripts):
+        raise ValueError("Batch save creates new scripts only")
+    records = [function_record(store, item) for item in scripts]
+    if len({r["kind"] for r in records}) != len(records):
+        raise ValueError("Duplicate script types")
+    return {"scripts": store.save_functions(records)}
 
 
 def save_dataset(store, body):

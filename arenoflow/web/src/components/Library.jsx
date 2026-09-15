@@ -136,6 +136,16 @@ export default function Library({ type, notify }) {
           : t('Organize your datasets and choose how each one is loaded.')}
       </PageHeader>
       {library.error && <Notice error>{library.error}</Notice>}
+      {isFunction && (
+        <ScriptGenerator
+          datasets={library.datasets}
+          onSaved={async (scripts) => {
+            await library.refresh();
+            setDraft(scripts[0]);
+            notify(t('Scripts saved.'));
+          }}
+        />
+      )}
       <div className="library-layout">
         <section className="panel library-list">
           <label className="field">
@@ -237,19 +247,6 @@ export default function Library({ type, notify }) {
                   </select>
                 </label>
                 <Notice>{t(contracts[draft.kind])}</Notice>
-                <ScriptGenerator
-                  key={`${draft.id || 'new'}-${draft.kind}`}
-                  kind={draft.kind}
-                  datasets={library.datasets}
-                  onApply={(result) =>
-                    setDraft((d) => ({
-                      ...d,
-                      source: result.source,
-                      dataset_id: result.dataset_id,
-                      algorithm: result.algorithm,
-                    }))
-                  }
-                />
                 {draft.algorithm && (
                   <p className="muted">
                     {t('Generation context')}: {draft.algorithm.toUpperCase()} ·{' '}

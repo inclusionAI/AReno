@@ -1,9 +1,18 @@
-import { useEffect, useState } from 'react';
+import { lazy, Suspense, useEffect, useState } from 'react';
 import { api } from '../api';
 import { t } from '../i18n';
 import { Button, Notice } from './UI';
 
-export default function ScriptGenerator({ kind, datasets, onApply }) {
+const PythonEditor = lazy(() => import('./PythonEditor'));
+const scriptTypes = {
+  dataset_loader: 'Dataset loader script',
+  reward: 'Reward script',
+  agentic: 'Agent script',
+};
+
+export default function ScriptGenerator({ datasets, onSaved }) {
+  const [kinds, setKinds] = useState(['dataset_loader']);
+  const [saving, setSaving] = useState(false);
   const [dataset, setDataset] = useState('');
   const [algorithm, setAlgorithm] = useState('');
   const [algorithms, setAlgorithms] = useState([]);
@@ -22,7 +31,10 @@ export default function ScriptGenerator({ kind, datasets, onApply }) {
     setSample('');
     setResult(null);
     setError('');
-    if (!dataset) return;
+    if (!dataset) {
+      setLoading(false);
+      return;
+    }
     let cancelled = false;
     setLoading(true);
     api('/scripts/sample', { dataset_id: dataset })
@@ -39,14 +51,15 @@ export default function ScriptGenerator({ kind, datasets, onApply }) {
       cancelled = true;
     };
   }, [dataset]);
-  const choices = algorithms.filter((a) => kind === 'dataset_loader' || a.rollout);
+  const choices = algorithms;
+  const supportsRollout = algorithms.find((a) => a.id === algorithm)?.rollout;
   async function generate() {
     setBusy(true);
     setError('');
     setResult(null);
     try {
       setResult(
-        await api('/scripts/generate', { kind, dataset_id: dataset, algorithm, sample, prompt }),
+        await api('/scripts/generate', { kinds, dataset_id: dataset, algorithm, sample, prompt }),
       );
     } catch (e) {
       setError(e.message);
@@ -56,14 +69,14 @@ export default function ScriptGenerator({ kind, datasets, onApply }) {
   }
   return (
     <details className="panel">
-      <summary>{t('Generate script with LLM')}</summary>
+      <summary>{t('Generate scripts with LLM')}</summary>
       <p className="muted">
         {t(
           'The selected sample and prompt are sent to your configured LLM provider. Media files are not sent. Generated code is not executed.',
         )}{' '}
         <a href="#settings">{t('LLM connection')}</a>
       </p>
-      <fieldset disabled={busy} style={{ border: 0, padding: 0 }}>
+      <fieldset disabled={busy || saving} style={{ border: 0, padding: 0 }}>
         <div className="field-grid">
           <label className="field">
             <span>{t('Dataset')}</span>
@@ -82,6 +95,8 @@ export default function ScriptGenerator({ kind, datasets, onApply }) {
               value={algorithm}
               onChange={(e) => {
                 setAlgorithm(e.target.value);
+                if (!algorithms.find((a) => a.id === e.target.value)?.rollout)
+                  setKinds(['dataset_loader']);
                 setResult(null);
               }}
             >
@@ -93,6 +108,25 @@ export default function ScriptGenerator({ kind, datasets, onApply }) {
               ))}
             </select>
           </label>
+          <fieldset className="modality-picker field full">
+            <legend>{t('Scripts to generate')}</legend>
+            {Object.entries(scriptTypes).map(([kind, label]) => (
+              <label key={kind}>
+                <input
+                  type="checkbox"
+                  checked={kinds.includes(kind)}
+                  disabled={kind !== 'dataset_loader' && !supportsRollout}
+                  onChange={(e) => {
+                    setKinds((old) =>
+                      e.target.checked ? [...old, kind] : old.filter((k) => k !== kind),
+                    );
+                    setResult(null);
+                  }}
+                />
+                {t(label)}
+              </label>
+            ))}
+          </fieldset>
           <label className="field full">
             <span>{t('Dataset sample')}</span>
             <textarea
@@ -128,6 +162,8 @@ export default function ScriptGenerator({ kind, datasets, onApply }) {
           type="button"
           busy={busy}
           disabled={
+            saving ||
+            !kinds.length ||
             loading ||
             !dataset ||
             !choices.some((a) => a.id === algorithm) ||
@@ -136,26 +172,67 @@ export default function ScriptGenerator({ kind, datasets, onApply }) {
           }
           onClick={generate}
         >
-          {t('Generate script')}
+          {t('Generate selected scripts')}
         </Button>
       </fieldset>
       {error && <Notice error>{error}</Notice>}
       {result && (
-        <>
-          <p>{t('Review the generated script before applying it to the editor.')}</p>
-          <pre className="code-block" style={{ maxHeight: 360, overflow: 'auto' }}>
-            {result.source}
-          </pre>
+        <section>
+          <p>{t('Review and edit each script. Save the complete set when ready.')}</p>
+          {result.scripts.map((script, index) => (
+            <section className="panel" key={script.kind}>
+              <h3>{t(scriptTypes[script.kind])}</h3>
+              <label className="field">
+                <span>{t('Name')}</span>
+                <input
+                  value={script.name}
+                  maxLength={120}
+                  disabled={saving}
+                  onChange={(e) =>
+                    setResult((old) => ({
+                      ...old,
+                      scripts: old.scripts.map((s, i) =>
+                        i === index ? { ...s, name: e.target.value } : s,
+                      ),
+                    }))
+                  }
+                />
+              </label>
+              <Suspense fallback={<Notice>{t('Loading editor…')}</Notice>}>
+                <PythonEditor
+                  value={script.source}
+                  onChange={(source) => {
+                    if (!saving)
+                      setResult((old) => ({
+                        ...old,
+                        scripts: old.scripts.map((s, i) => (i === index ? { ...s, source } : s)),
+                      }));
+                  }}
+                />
+              </Suspense>
+            </section>
+          ))}
           <Button
             type="button"
-            onClick={() => {
-              onApply(result);
-              setResult(null);
+            busy={saving}
+            disabled={busy || result.scripts.some((s) => !s.name.trim())}
+            onClick={async () => {
+              setSaving(true);
+              setError('');
+              try {
+                const saved = await api('/scripts/batch', result);
+                setResult(null);
+                await onSaved(saved.scripts);
+              } catch (e) {
+                setError(e.message);
+              } finally {
+                setSaving(false);
+              }
             }}
           >
-            {t('Use generated script')}
+            {t('Save all scripts')}
           </Button>
-        </>
+        </section>
       )}
     </details>
   );

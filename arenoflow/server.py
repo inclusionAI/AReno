@@ -16,7 +16,7 @@ from arenoflow.assets import save_upload
 from arenoflow.billing import fetch_billing
 from arenoflow.catalog import ROOT, catalog
 from arenoflow.controller import Controller
-from arenoflow.datasets import resolve_request, save_dataset, save_function
+from arenoflow.datasets import resolve_request, save_dataset, save_function, save_script_batch
 from arenoflow.llm import ScriptGenerator, dataset_sample
 from arenoflow.pricing import Pricing
 from arenoflow.provider import latest_image
@@ -87,6 +87,8 @@ class Application:
             return self.llm.configure(body)
         if path == "/api/scripts/sample":
             return dataset_sample(self.controller.store, body.get("dataset_id"))
+        if path == "/api/scripts/batch":
+            return save_script_batch(self.controller.store, body)
         if path == "/api/scripts/generate":
             return self.llm.generate(body, self.controller.store, self.catalog)
         if path == "/api/estimate":
