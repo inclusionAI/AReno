@@ -17,6 +17,7 @@ from arenoflow.billing import fetch_billing
 from arenoflow.catalog import ROOT, catalog
 from arenoflow.controller import Controller
 from arenoflow.datasets import find, resolve_request, save_dataset, save_function, save_script_batch
+from arenoflow.inference import test_deployment
 from arenoflow.llm import ScriptGenerator
 from arenoflow.pricing import Pricing
 from arenoflow.provider import latest_image
@@ -116,6 +117,8 @@ class Application:
             return plan(resolve_request(body, self.controller.store), self.catalog)
         if path == "/api/jobs":
             return self.controller.submit(body)
+        if path.startswith("/api/jobs/") and path.endswith("/inference"):
+            return test_deployment(self.controller.store.get(path.split("/")[3]), body)
         if path.startswith("/api/jobs/") and path.endswith("/stop"):
             return self.controller.stop(path.split("/")[3])
         raise KeyError("Route not found")

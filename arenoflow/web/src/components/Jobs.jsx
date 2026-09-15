@@ -15,6 +15,7 @@ import { api, duration, money, time } from '../api';
 import { Badge, Button, Empty, External, Notice, PageHeader } from './UI';
 import { Chart } from './Chart';
 import { RunEstimates } from './Estimates';
+import InferenceTest from './InferenceTest';
 const terminal = ['succeeded', 'failed', 'cancelled'];
 const phaseLabels = {
   resolving_image: 'Resolving image',
@@ -112,7 +113,7 @@ export function JobList({ jobs, deployments = false }) {
     </>
   );
 }
-export function JobDetail({ id, onDeploy, notify }) {
+export function JobDetail({ id, onDeploy, notify, connected = true }) {
   const [job, setJob] = useState(null),
     [events, setEvents] = useState([]),
     [error, setError] = useState('');
@@ -137,7 +138,13 @@ export function JobDetail({ id, onDeploy, notify }) {
         ]);
         if (cancelled) return;
         if (first) {
-          setTab(['image_build', 'model_download'].includes(record.kind) ? 'logs' : 'metrics');
+          setTab(
+            record.kind === 'deployment'
+              ? 'inference'
+              : ['image_build', 'model_download'].includes(record.kind)
+                ? 'logs'
+                : 'metrics',
+          );
           first = false;
         }
         setJob(record);
@@ -204,6 +211,13 @@ export function JobDetail({ id, onDeploy, notify }) {
         <JobStatus job={job} />{' '}
         <span className="detail-model">{job.manifest.model.checkpoint}</span>
       </PageHeader>
+      {!connected && !terminal.includes(job.status) && (
+        <Notice>
+          {t(
+            'Modal is disconnected. Displayed status may be outdated; reconnect in Settings to resume monitoring.',
+          )}
+        </Notice>
+      )}
       {(error || job.error) && <Notice error>{error || job.error}</Notice>}
       {job.estimate && (
         <Notice>
@@ -314,17 +328,20 @@ export function JobDetail({ id, onDeploy, notify }) {
         </section>
       )}
       <div className="tabs" role="tablist" aria-label={t('Run views')}>
-        {(job.kind === 'image_build'
-          ? ['logs', 'configuration']
-          : job.kind === 'model_download'
-            ? ['logs', 'configuration', 'artifacts']
-            : ['metrics', 'logs', 'configuration', 'artifacts']
+        {(job.kind === 'deployment'
+          ? ['inference', 'logs', 'configuration']
+          : job.kind === 'image_build'
+            ? ['logs', 'configuration']
+            : job.kind === 'model_download'
+              ? ['logs', 'configuration', 'artifacts']
+              : ['metrics', 'logs', 'configuration', 'artifacts']
         ).map((view) => (
           <button key={view} role="tab" aria-selected={tab === view} onClick={() => setTab(view)}>
             {t(view)}
           </button>
         ))}
       </div>
+      {job.kind === 'deployment' && tab === 'inference' && <InferenceTest key={job.id} job={job} />}
       {tab === 'metrics' && job.manifest.stages.length > 1 && (
         <label className="field">
           <span>{t('Training stage')}</span>

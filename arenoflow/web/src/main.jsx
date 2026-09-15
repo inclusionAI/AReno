@@ -224,7 +224,12 @@ function App() {
           )}
           {route === 'deployments' && <JobList jobs={jobs} deployments />}
           {route.startsWith('run/') && (
-            <JobDetail id={route.split('/')[1]} onDeploy={deploy} notify={setToast} />
+            <JobDetail
+              id={route.split('/')[1]}
+              onDeploy={deploy}
+              notify={setToast}
+              connected={bootstrap.connected}
+            />
           )}
           {route === 'settings' && (
             <Settings

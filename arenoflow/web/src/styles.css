@@ -2360,3 +2360,22 @@ html:lang(zh-CN) .hero-copy h1 {
   gap: 12px;
   margin: 8px 0;
 }
+
+.inference-actions {
+  margin: 20px 0;
+}
+.inference-result {
+  border-top: 1px solid var(--line);
+  padding-top: 20px;
+  margin-top: 20px;
+}
+.inference-result pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: var(--inset);
+  padding: 16px;
+  border-radius: 8px;
+}
+.inference-result details {
+  margin-top: 12px;
+}
