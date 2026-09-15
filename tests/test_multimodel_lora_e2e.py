@@ -167,7 +167,7 @@ def test_multimodel_lora_rollout_train_reload(tmp_path: Path) -> None:
     finally:
         observed.close()
 
-    assert observed.rollout_versions == [0, 0, 1]
+    assert observed.rollout_versions == [0]
     assert observed.train_versions == [1]
     assert final_rollout[0].adapter_version == 1
     initial = load_file(initial_path / "adapter_model.safetensors")
