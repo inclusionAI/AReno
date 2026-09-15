@@ -13,6 +13,7 @@ from areno.engine.parallel.context import TPContext, get_tp_context, set_tp_cont
 from areno.models.olmo2 import Olmo2ForCausalLM
 from areno.models.phi4mm import Phi4MMForCausalLM
 from areno.models.gemma4.model import Gemma4MLP, Gemma4MoeExperts
+from areno.models.bailing.model import BailingDenseMLP, BailingGroupedExperts, BailingSoftmaxAttention
 from areno.models.minicpmv46.model import MiniCPMV46ForCausalLM
 from areno.models.qwen3_5.model import Qwen35ForCausalLM
 
@@ -167,3 +168,40 @@ def test_minicpmv46_language_exact_lora_targets_resolve() -> None:
     registry = initialize_lora(policy, LoraConfig(rank=2, alpha=2.0, target_modules=targets), seed=7)
 
     assert tuple(registry.slots) == targets
+
+
+class _BailingPolicy(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.config = _dense_config("bailing_moe_linear_v2")
+        self.config.num_experts = 2
+        self.config.moe_intermediate_size = 16
+        self.config.kv_lora_rank = 8
+        self.config.qk_nope_head_dim = 8
+        self.config.qk_rope_head_dim = 8
+        self.config.v_head_dim = 8
+        self.layers = nn.ModuleList([nn.Module()])
+        self.layers[0].attention = BailingSoftmaxAttention(self.config, 0)
+        self.layers[0].mlp = BailingDenseMLP(self.config, 64)
+        self.layers[0].experts = BailingGroupedExperts(self.config)
+
+
+def test_legacy_bailing_exact_lora_targets_resolve() -> None:
+    policy = _BailingPolicy()
+    targets = (
+        "layers.0.attention.q_proj",
+        "layers.0.attention.kv_a_proj_with_mqa",
+        "layers.0.attention.kv_b_proj",
+        "layers.0.attention.dense",
+        "layers.0.mlp.gate_proj",
+        "layers.0.experts.linear_fc1",
+        "layers.0.experts.linear_fc2",
+    )
+
+    registry = initialize_lora(policy, LoraConfig(rank=2, alpha=2.0, target_modules=targets), seed=7)
+
+    assert tuple(registry.slots) == (
+        *targets[:-2],
+        "layers.0.experts.{expert}.linear_fc1",
+        "layers.0.experts.{expert}.linear_fc2",
+    )
