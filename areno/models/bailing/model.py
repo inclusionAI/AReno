@@ -1336,7 +1336,22 @@ class BailingMoeLinearV2Adapter(ModelAdapter):
         dtype = _parse_dtype(hf_config.get("torch_dtype") or hf_config.get("dtype"))
         num_heads = int(hf_config["num_attention_heads"])
         head_dim = int(hf_config.get("head_dim", hf_config["hidden_size"] // num_heads))
-        rotary_dim = int(hf_config.get("rotary_dim", hf_config.get("qk_rope_head_dim", head_dim)))
+        configured_partial_rotary_factor = hf_config.get("partial_rotary_factor")
+        default_rotary_dim = head_dim * float(
+            configured_partial_rotary_factor if configured_partial_rotary_factor is not None else 1.0
+        )
+        rotary_dim = int(
+            hf_config.get(
+                "rotary_dim",
+                hf_config.get("qk_rope_head_dim", default_rotary_dim),
+            )
+        )
+        partial_rotary_factor = float(
+            configured_partial_rotary_factor
+            if configured_partial_rotary_factor is not None
+            else rotary_dim / head_dim
+        )
+        kv_lora_rank = hf_config.get("kv_lora_rank")
         num_experts = hf_config.get("num_experts", hf_config.get("n_routed_experts"))
         moe_intermediate_size = int(hf_config.get("moe_intermediate_size", hf_config.get("intermediate_size", 0)))
         num_experts_per_tok = int(hf_config.get("num_experts_per_tok", hf_config.get("moe_router_topk", 1)))
@@ -1390,7 +1405,7 @@ class BailingMoeLinearV2Adapter(ModelAdapter):
             hidden_act=str(hf_config.get("hidden_act", "silu")),
             use_bias=_parse_bool(hf_config.get("use_bias"), False),
             layer_group_size=int(hf_config.get("layer_group_size", 1)),
-            partial_rotary_factor=float(hf_config.get("partial_rotary_factor", rotary_dim / head_dim)),
+            partial_rotary_factor=partial_rotary_factor,
             num_experts=num_experts,
             num_experts_per_tok=num_experts_per_tok,
             n_group=n_group,
@@ -1411,10 +1426,15 @@ class BailingMoeLinearV2Adapter(ModelAdapter):
             ),
             num_nextn_predict_layers=int(hf_config.get("num_nextn_predict_layers", 0)),
             mtp_loss_scaling_factor=float(hf_config.get("mtp_loss_scaling_factor", 0.0)),
-            qk_nope_head_dim=int(hf_config.get("qk_nope_head_dim", head_dim)),
+            qk_nope_head_dim=int(
+                hf_config.get(
+                    "qk_nope_head_dim",
+                    head_dim - rotary_dim if kv_lora_rank is None else head_dim,
+                )
+            ),
             qk_rope_head_dim=int(hf_config.get("qk_rope_head_dim", rotary_dim)),
             v_head_dim=int(hf_config.get("v_head_dim", head_dim)),
-            kv_lora_rank=hf_config.get("kv_lora_rank"),
+            kv_lora_rank=kv_lora_rank,
             linear_backend=linear_backend,
             linear_scale=linear_backend == "minimax",
             linear_silu=_parse_bool(hf_config.get("use_linear_silu", hf_config.get("linear_silu")), False),

@@ -10,7 +10,12 @@ from areno.adapters import LoraConfig
 from areno.adapters.lora import initialize_lora
 from areno.engine.config import ModelConfig
 from areno.engine.parallel.context import TPContext, get_tp_context, set_tp_context
-from areno.models.bailing.model import BailingDenseMLP, BailingGroupedExperts, BailingSoftmaxAttention
+from areno.models.bailing.model import (
+    BailingDenseMLP,
+    BailingGroupedExperts,
+    BailingMoeLinearV2Adapter,
+    BailingSoftmaxAttention,
+)
 from areno.models.gemma4.model import Gemma4MLP, Gemma4MoeExperts
 from areno.models.minicpmv46.model import MiniCPMV46ForCausalLM
 from areno.models.olmo2 import Olmo2ForCausalLM
@@ -206,3 +211,33 @@ def test_legacy_bailing_exact_lora_targets_resolve() -> None:
         "layers.0.experts.{expert}.linear_fc1",
         "layers.0.experts.{expert}.linear_fc2",
     )
+
+
+def test_legacy_bailing_standard_gqa_uses_one_head_dim_for_fused_qkv() -> None:
+    config = BailingMoeLinearV2Adapter().config_from_hf(
+        {
+            "model_type": "bailing_moe_linear",
+            "torch_dtype": "bfloat16",
+            "vocab_size": 32000,
+            "hidden_size": 2048,
+            "intermediate_size": 5120,
+            "num_hidden_layers": 20,
+            "num_attention_heads": 16,
+            "num_key_value_heads": 4,
+            "head_dim": 128,
+            "partial_rotary_factor": 0.5,
+            "num_experts": 256,
+            "num_experts_per_tok": 8,
+            "moe_intermediate_size": 512,
+            "layer_group_size": 5,
+            "first_k_dense_replace": 1,
+        }
+    )
+
+    attention = BailingSoftmaxAttention(config, layer_idx=4)
+
+    assert config.qk_nope_head_dim == 64
+    assert config.qk_rope_head_dim == 64
+    assert attention.head_dim == 128
+    assert attention.query_key_value is not None
+    assert attention.query_key_value.out_features == 3072
