@@ -333,11 +333,16 @@ export default function Library({ type, notify }) {
                           }
                         }}
                       >
-                        {t('Download sample again')}
+                        {t('Refresh cached sample')}
                       </Button>
                     )}
                   </div>
                 )}
+                <p className="muted">
+                  {t(
+                    'Repository data downloads locally. Training uploads the cached data; the dataset source does not change the model source.',
+                  )}
+                </p>
                 <fieldset className="modality-picker">
                   <legend>{t('Data modalities')}</legend>
                   {['text', 'image', 'audio', 'video'].map((mode) => (
@@ -398,10 +403,16 @@ export default function Library({ type, notify }) {
                         onChange={(e) => edit('source', e.target.value)}
                       />
                     </label>
-                    <div className="field">
+                    <label className="field">
                       <span>{t('Dataset hub')}</span>
-                      <p>Hugging Face</p>
-                    </div>
+                      <select
+                        value={draft.model_hub}
+                        onChange={(e) => edit('model_hub', e.target.value)}
+                      >
+                        <option value="hf">Hugging Face</option>
+                        <option value="modelscope">ModelScope</option>
+                      </select>
+                    </label>
                   </div>
                 ) : (
                   <>

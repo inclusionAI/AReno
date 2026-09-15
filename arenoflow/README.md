@@ -135,7 +135,7 @@ The **Prepare runtime** controls in **Compute & runtime** create independent tas
   without creating a training sandbox or reserving a GPU.
 - **Pre-download model** downloads the selected original model repository using a
   CPU sandbox (2 cores, 8 GiB RAM) into the shared Volume. The model follows the first training stage (including parameter overrides)
-  or deployment configuration. Model and dataset repositories use Hugging Face only.
+  or deployment configuration. Model repositories use Hugging Face only; dataset sources are configured independently.
   The sandbox
   uses the form's maximum lifetime in seconds. No training dataset or scripts are required.
 
@@ -290,16 +290,21 @@ In Script Manager, select a dataset and algorithm, inspect the sample, enter the
 requirements, and check the script types to generate. One LLM request generates the
 complete selected set with consistent dataset fields and interfaces. Reward and agent scripts require a rollout algorithm;
 SFT and DPO support dataset loader generation only. Samples load automatically for uploaded JSON/JSONL/CSV/TSV/Parquet/Arrow files and
-Hugging Face repositories. References support `repository:config:split`;
-the default split is train. Remote samples use the Hugging Face Dataset Viewer API.
-Custom script-only dataset layouts require a manually supplied sample. No dataset code is executed.
+Hugging Face and ModelScope repositories. References support `repository:config:split`;
+the default split is train. Repository shards download on the local server, and
+samples are read from those cached files. No dataset code is executed.
+Hugging Face uses complete Parquet exports; partial, pending, or failed exports
+are rejected. ModelScope downloads every matching raw-data shard for the selected
+config and split, preferring one format when several representations exist.
+Script-only datasets and external media archives require preparing and uploading
+the data and media separately. Embedded media in Parquet/Arrow is retained.
 
 Previews contain up to three records. Text fields may be shortened and embedded
 binary media is replaced by a size marker. For private data, use `HF_TOKEN` in the
-server environment. Failed previews can be retried or supplied manually. Sample
+server environment; ModelScope uses `MODELSCOPE_API_TOKEN`. Failed downloads can be retried. Sample
 fetching itself does not call the LLM.
 
-Provider reference: [Hugging Face Dataset Viewer](https://huggingface.co/docs/dataset-viewer/rows).
+Provider reference: [Hugging Face Dataset Viewer](https://huggingface.co/docs/dataset-viewer/parquet).
 Only the displayed sample, prompt, dataset metadata, and repository API references
 are sent to the configured LLM; media files and Modal credentials are not sent.
 Generation may incur charges from that LLM provider, separate from Modal billing.
@@ -311,13 +316,19 @@ single transaction. Existing scripts are not overwritten. Syntax validation is
 not a runtime correctness check. Saved generated scripts retain the dataset and
 algorithm used for generation; these are provenance, not restrictions on reuse.
 
-Dataset registration starts background sample prefetch (two concurrent workers).
-Dataset Manager shows downloading, ready, or failed status and provides retry.
-Samples are cached under the local data directory and reused by Script Manager;
-changing the source, hub, config, or split selects a new cache entry. This downloads
-preview data, not the complete training dataset. Training continues to use the
-configured dataset source. Use Dataset Manager to refresh the provider sample;
-Script Manager's reload action rereads the local cache.
+Dataset registration starts a background local download (two concurrent workers).
+Dataset Manager shows downloading, ready, or failed status. Complete data shards
+are published atomically to the local cache only after every download succeeds;
+old sample-only entries do not count as a complete training cache. Samples contain
+up to three records and are read from these files for Script Manager. Changing the
+source, hub, config, or split selects a new cache entry.
+
+Training requires the selected dataset download to finish, uploads its cached
+shards to the Modal Volume, and gives AReno that data directory. A ModelScope
+dataset therefore works with a Hugging Face model without changing `model_hub`.
+No Modal CPU container is used for dataset downloading. Refreshing the sample
+rereads cached files; incomplete downloads are retried. Existing completed model
+caches and local uploaded datasets are unaffected.
 
 Generated script names default to `<dataset name> - <script type>` and remain
 editable before saving. Long dataset-name prefixes are shortened to fit the

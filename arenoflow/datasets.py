@@ -131,8 +131,8 @@ def save_dataset(store, body):
     elif source_type != "repository" or source.startswith(("/", ".", "~")):
         raise ValueError("Enter a dataset repository ID or upload a dataset")
     hub = body.get("model_hub", "hf")
-    if hub != "hf":
-        raise ValueError("Only Hugging Face is supported")
+    if hub not in ("hf", "modelscope"):
+        raise ValueError("Select Hugging Face or ModelScope")
     loader_id = body.get("loader_id") or None
     if loader_id and find(store.functions(), loader_id, "Dataset loader")["kind"] != "dataset_loader":
         raise ValueError("Select a Dataset Loader function")
@@ -193,12 +193,9 @@ def resolve_request(request, store):
         params = stage.setdefault("params", {})
         if stage.get("dataset_id"):
             dataset = find(store.datasets(), stage["dataset_id"], "Dataset")
-            if dataset.get("model_hub", "hf") != "hf":
-                raise ValueError("Only Hugging Face datasets are supported; update the dataset configuration")
             result.setdefault("input_assets", []).extend(item["path"] for item in dataset.get("media", []))
             params.update(
                 dataset_path=materialize_dataset(dataset, store),
-                model_hub=dataset["model_hub"],
                 dataset_loader_fn=reference(dataset["loader_id"], "dataset_loader") if dataset["loader_id"] else None,
             )
         if "dataset_loader_id" in stage:
@@ -218,6 +215,11 @@ def resolve_request(request, store):
 
 def materialize_dataset(dataset, store):
     """Resolve media names recursively in raw dataset manifests, without decoding media."""
+    if dataset.get("source_type", "repository") == "repository":
+        from arenoflow.dataset_cache import cache_key, cached_files
+
+        cached_files(dataset, store.directory)
+        return "/artifacts/datasets/" + cache_key(dataset)
     if not dataset.get("media"):
         return dataset["source"]
     names = {item["name"]: item["path"] for item in dataset["media"]}

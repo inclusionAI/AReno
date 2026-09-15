@@ -2,13 +2,12 @@
 
 import base64
 import json
-from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
 from arenoflow.assets import save_upload
 from arenoflow.datasets import save_dataset
-from arenoflow.samples import dataset_sample, remote_rows
+from arenoflow.samples import dataset_sample
 from arenoflow.store import Store
 
 
@@ -46,39 +45,15 @@ def test_large_json_still_loads_first_records(tmp_path):
     assert result["row_count"] == 3
 
 
-def test_remote_reference_preserves_config_and_split(monkeypatch):
-    queries = []
-
-    def fetch(url, token):
-        query = parse_qs(urlsplit(url).query)
-        queries.append(query)
-        if "/splits?" in url:
-            return {"splits": [{"config": "main", "split": "test"}]}
-        return {"rows": [{"row": {"answer": "42"}}]}
-
-    monkeypatch.setattr("arenoflow.samples.request_json", fetch)
-    rows, info = remote_rows({"source": "openai/gsm8k:main:test", "model_hub": "hf"})
-    assert info == {"config": "main", "split": "test"}
-    assert queries[1]["length"] == ["3"]
-    assert queries[1]["split"] == ["test"]
-    assert rows == [{"answer": "42"}]
-
-
-def test_missing_remote_split_does_not_silently_change_dataset(monkeypatch):
-    monkeypatch.setattr(
-        "arenoflow.samples.request_json", lambda *args: {"splits": [{"config": "main", "split": "test"}]}
-    )
-    with pytest.raises(ValueError, match="unavailable"):
-        remote_rows({"source": "openai/gsm8k:main:train"})
-
-
 def test_unsupported_dataset_hub_is_rejected_before_download(tmp_path, monkeypatch):
     def unexpected(*args):
         pytest.fail("Unsupported dataset sources must not make network requests")
 
     monkeypatch.setattr("arenoflow.samples.request_json", unexpected)
-    record = {"name": "Unsupported", "source": "owner/data", "model_hub": "modelscope"}
-    with pytest.raises(ValueError, match="Only Hugging Face"):
+    record = {"name": "Unsupported", "source": "owner/data", "model_hub": "unsupported"}
+    with pytest.raises(ValueError, match="Select Hugging Face or ModelScope"):
         save_dataset(Store(tmp_path), record)
-    with pytest.raises(ValueError, match="Only Hugging Face"):
-        remote_rows(record)
+    from arenoflow.dataset_cache import repository_files
+
+    with pytest.raises(ValueError, match="Select Hugging Face"):
+        repository_files(record)

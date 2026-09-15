@@ -124,7 +124,11 @@ def catalog(root: Path = ROOT) -> dict:
     train, serve = cli_schema("train", root), cli_schema("serve", root)
     for field in train + serve:
         if field["name"] == "model_hub":
-            field.update(default="hf", choices=["hf"], help="Model and dataset repositories use Hugging Face.")
+            field.update(
+                default="hf",
+                choices=["hf"],
+                help="Model repositories use Hugging Face. Dataset sources are configured separately.",
+            )
     try:
         revision = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True, timeout=5).strip()
     except (OSError, subprocess.SubprocessError):
