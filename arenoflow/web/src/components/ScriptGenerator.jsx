@@ -53,6 +53,30 @@ export default function ScriptGenerator({ datasets, onSaved }) {
   }, [dataset]);
   const choices = algorithms;
   const supportsRollout = algorithms.find((a) => a.id === algorithm)?.rollout;
+  const promptExample = [
+    algorithm === 'dpo'
+      ? t(
+          'Example: The dataset contains prompt, chosen and rejected fields. Preserve both preferred and rejected responses for DPO training.',
+        )
+      : t(
+          'Example: The dataset contains question and answer fields. Use question as the user message and answer as the expected response.',
+        ),
+    kinds.includes('dataset_loader') &&
+      t(
+        'Loader: normalize the sample fields into AReno training records and skip records with missing required fields.',
+      ),
+    kinds.includes('reward') &&
+      t(
+        'Reward: compare the generated answer with the reference answer after trimming whitespace; return 1 for a match and 0 otherwise.',
+      ),
+    kinds.includes('agentic') &&
+      t(
+        'Agent: implement a single-turn rollout using the normalized question and preserve the trajectory metadata required by AReno.',
+      ),
+    t('Adjust these requirements to match your dataset sample and task.'),
+  ]
+    .filter(Boolean)
+    .join('\n');
   async function generate() {
     setBusy(true);
     setError('');
@@ -108,7 +132,7 @@ export default function ScriptGenerator({ datasets, onSaved }) {
               ))}
             </select>
           </label>
-          <fieldset className="modality-picker field full">
+          <fieldset className="modality-picker script-picker">
             <legend>{t('Scripts to generate')}</legend>
             {Object.entries(scriptTypes).map(([kind, label]) => (
               <label key={kind}>
@@ -148,6 +172,7 @@ export default function ScriptGenerator({ datasets, onSaved }) {
           <label className="field full">
             <span>{t('Script requirements')}</span>
             <textarea
+              placeholder={promptExample}
               rows={4}
               maxLength={12000}
               value={prompt}

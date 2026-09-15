@@ -2268,3 +2268,26 @@ html:lang(zh-CN) .hero-copy h1 {
     gap: 10px;
   }
 }
+
+.script-picker {
+  grid-column: 1 / -1;
+  gap: 10px 20px;
+  margin: 0;
+}
+.script-picker label {
+  min-height: 28px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.script-picker input[type='checkbox'] {
+  width: 16px;
+  height: 16px;
+  min-height: 16px;
+  flex: 0 0 16px;
+  margin: 0;
+  padding: 0;
+}
+.script-picker label:has(input:disabled) {
+  color: var(--muted);
+  cursor: default;
+}

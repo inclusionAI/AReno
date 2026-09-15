@@ -717,4 +717,16 @@ export default {
   'Save all scripts': '保存全部脚本',
   'Scripts saved.': '脚本已全部保存。',
   'Loading editor…': '正在加载编辑器…',
+  'Example: The dataset contains prompt, chosen and rejected fields. Preserve both preferred and rejected responses for DPO training.':
+    '示例：数据集包含 prompt、chosen、rejected 字段。保留偏好回答与非偏好回答，用于 DPO 训练。',
+  'Example: The dataset contains question and answer fields. Use question as the user message and answer as the expected response.':
+    '示例：数据集包含 question 和 answer 字段。将 question 作为用户消息，将 answer 作为参考回答。',
+  'Loader: normalize the sample fields into AReno training records and skip records with missing required fields.':
+    '数据加载脚本：将样本字段转换为 AReno 训练记录，跳过缺少必需字段的记录。',
+  'Reward: compare the generated answer with the reference answer after trimming whitespace; return 1 for a match and 0 otherwise.':
+    '奖励脚本：去除首尾空白后，将模型回答与参考回答比较，一致返回 1，否则返回 0。',
+  'Agent: implement a single-turn rollout using the normalized question and preserve the trajectory metadata required by AReno.':
+    '智能体脚本：根据转换后的问题执行单轮 rollout，保留 AReno 所需的轨迹元数据。',
+  'Adjust these requirements to match your dataset sample and task.':
+    '请根据实际数据集样本和任务修改上述需求。',
 };
