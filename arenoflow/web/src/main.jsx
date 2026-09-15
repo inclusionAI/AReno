@@ -141,7 +141,7 @@ function App() {
     ['workspace', GitBranch, 'Create a flow'],
     ['runs', Activity, 'Training runs'],
     ['datasets', Database, 'Dataset Manager'],
-    ['functions', Code2, 'Fn Manager'],
+    ['functions', Code2, 'Script Manager'],
     ['deployments', Radio, 'Deployments'],
     ['billing', CreditCard, 'Usage & billing'],
     ['settings', SettingsIcon, 'Settings'],

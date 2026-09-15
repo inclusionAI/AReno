@@ -72,9 +72,9 @@ adapters (Bailing Linear V2 is excluded from the website). These counts are disc
 serving host/port participate in orchestration; reviewed commands show their resolved
 values. Dataset and function selectors expose names, with runtime file locations managed internally.
 
-## Dataset Manager and Fn Manager
+## Dataset Manager and Script Manager
 
-**Fn Manager** stores editable Python definitions by name and type:
+**Script Manager** stores complete Python modules by name and type:
 
 - **Dataset Loader:** `load_training_dataset(dataset_path, *, default_loader, **kwargs)`.
   AReno also passes `load_dataset` and `load_from_disk` keyword helpers. Return records
@@ -92,8 +92,8 @@ until those datasets select another loader.
 
 **Dataset Manager** defaults to local upload: drag a dataset onto the upload area or choose **Browse local files**. Switch to **Dataset repository** to use remote data. It stores repository references or uploaded data files, their
 modalities, media attachments, and a Dataset Loader selection. Function bodies belong
-exclusively in Fn Manager. The training form selects datasets and, for rollout
-algorithms, reward and agentic functions by name. SFT and DPO omit rollout hooks.
+exclusively in Script Manager. The training form selects datasets and, for rollout
+algorithms, reward and agent scripts by name. SFT and DPO omit rollout hooks.
 
 Text, image, audio and video datasets are supported as data inputs. For local media,
 upload a JSON, JSONL, CSV or TSV manifest and attach the referenced media files.
@@ -247,3 +247,31 @@ to its English source until translated. Run the locale checks with
 Maximum runtime is configured in whole seconds (`timeout_seconds`), from 1 to
 86400 s, with a default of 14400 s. Legacy `timeout_hours` configurations are
 converted when read. Expected duration for cost estimates remains in hours.
+
+### LLM-assisted Python scripts
+
+Script Manager stores complete Python modules, including imports, helper functions,
+classes, and the required AReno entrypoint (`load_training_dataset`, `reward_fn`, or
+`run_agent`). Modules are validated statically and executed only in the training
+sandbox. Imported third-party packages must already be available in the AReno image.
+The existing `/api/functions` and stored function IDs remain compatible.
+
+Configure an OpenAI-compatible Chat Completions **Base URL**, **Model**, and **API
+Key** in Settings. For example, a base URL ending in `/v1` receives requests at
+`/v1/chat/completions`. Settings are retained in server memory only; the API never
+returns the key. Changing the provider clears the previous key unless a replacement
+is supplied. Saving settings does not contact the provider.
+
+In Script Manager, select a script type, dataset, and algorithm, inspect the sample,
+and enter the requirements. Reward and agent scripts require a rollout algorithm;
+SFT and DPO support dataset loader generation only. Uploaded JSON/JSONL/CSV/TSV data
+provides up to three sample records where bounded parsing is possible. Supply a
+sample manually for repository datasets, Parquet/Arrow, or oversized records.
+Only the displayed sample, prompt, dataset metadata, and repository API references
+are sent to the configured LLM; media files and Modal credentials are not sent.
+Generation may incur charges from that LLM provider, separate from Modal billing.
+
+Generated source is checked for Python syntax and entrypoint compatibility, then
+shown for review. Apply it to the editor and save explicitly. Syntax validation is
+not a runtime correctness check. Saved generated scripts retain the dataset and
+algorithm used for generation; these are provenance, not restrictions on reuse.

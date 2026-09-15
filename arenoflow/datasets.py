@@ -94,6 +94,8 @@ def save_function(store, body):
         name=name,
         kind=kind,
         source=source,
+        dataset_id=body.get("dataset_id"),
+        algorithm=body.get("algorithm"),
         created_at=previous["created_at"] if previous else time.time(),
         updated_at=time.time(),
     )

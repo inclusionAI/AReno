@@ -595,13 +595,8 @@ export default function Workflow({
                   </label>
                   {catalog.algorithms.find((a) => a.id === stage.algo)?.rollout &&
                     [
-                      [
-                        'reward_function_id',
-                        'reward',
-                        'Reward Function',
-                        'Repository math verifier',
-                      ],
-                      ['agentic_function_id', 'agentic', 'Agentic Function', 'Standard rollout'],
+                      ['reward_function_id', 'reward', 'Reward script', 'Repository math verifier'],
+                      ['agentic_function_id', 'agentic', 'Agent script', 'Standard rollout'],
                     ].map(([key, kind, label, fallback]) => (
                       <label className="field" key={key}>
                         <span>{t(label)}</span>
@@ -632,7 +627,7 @@ export default function Workflow({
                             ))}
                         </select>
                         <small>
-                          <a href="#functions">{t('Manage functions ↗')}</a>
+                          <a href="#functions">{t('Manage scripts ↗')}</a>
                         </small>
                       </label>
                     ))}

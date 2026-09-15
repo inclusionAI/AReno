@@ -1,3 +1,4 @@
+import LLMSettings from './LLMSettings';
 import { t } from '../i18n';
 import { useState } from 'react';
 import { Check, KeyRound, ShieldCheck } from 'lucide-react';
@@ -35,6 +36,7 @@ export default function Settings({ bootstrap, onConnected }) {
       <PageHeader eyebrow={t('WORKSPACE SETTINGS')} title={t('Modal connection settings')}>
         {t('ARenoflow runs locally. Training and serving run in your own Modal workspace.')}
       </PageHeader>
+      <LLMSettings />
       <div className="settings-layout">
         <section className="panel">
           <div className="panel-heading">

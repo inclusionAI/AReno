@@ -1,3 +1,4 @@
+import ScriptGenerator from './ScriptGenerator';
 import { t } from '../i18n';
 import { lazy, Suspense, useEffect, useState } from 'react';
 import { Code2, Database, Plus, Save, Trash2, UploadCloud } from 'lucide-react';
@@ -6,9 +7,9 @@ import { Button, Empty, Notice, PageHeader } from './UI';
 import Upload, { uploadFile } from './Upload';
 const PythonEditor = lazy(() => import('./PythonEditor'));
 export const functionKinds = {
-  dataset_loader: 'Dataset Loader',
-  reward: 'Reward Function',
-  agentic: 'Agentic Function',
+  dataset_loader: 'Dataset loader script',
+  reward: 'Reward script',
+  agentic: 'Agent script',
 };
 const templates = {
   dataset_loader:
@@ -94,7 +95,7 @@ export default function Library({ type, notify }) {
     try {
       setDraft(await api(`/${type}`, draft));
       await library.refresh();
-      notify(isFunction ? 'Function saved and syntax checked.' : 'Dataset saved.');
+      notify(isFunction ? 'Script saved and syntax checked.' : 'Dataset saved.');
     } catch (e) {
       setError(e.message);
     } finally {
@@ -119,17 +120,19 @@ export default function Library({ type, notify }) {
   return (
     <>
       <PageHeader
-        eyebrow={isFunction ? t('FUNCTION LIBRARY') : t('DATA LIBRARY')}
-        title={isFunction ? t('Fn Manager') : t('Dataset Manager')}
+        eyebrow={isFunction ? t('SCRIPT LIBRARY') : t('DATA LIBRARY')}
+        title={isFunction ? t('Script Manager') : t('Dataset Manager')}
         action={
           <Button className="primary" onClick={create}>
             <Plus size={16} />
-            {isFunction ? t('New function') : t('New dataset')}
+            {isFunction ? t('New script') : t('New dataset')}
           </Button>
         }
       >
         {isFunction
-          ? t('Reusable Python functions for data loading, rewards and agentic rollouts.')
+          ? t(
+              'Complete Python scripts for data loading, rewards and agentic rollouts. Scripts may include imports, helper functions and classes.',
+            )
           : t('Organize your datasets and choose how each one is loaded.')}
       </PageHeader>
       {library.error && <Notice error>{library.error}</Notice>}
@@ -137,7 +140,7 @@ export default function Library({ type, notify }) {
         <section className="panel library-list">
           <label className="field">
             <span>
-              {t('Search')} {isFunction ? t('functions') : t('datasets')}
+              {t('Search')} {isFunction ? t('scripts') : t('datasets')}
             </span>
             <input
               value={query}
@@ -172,32 +175,33 @@ export default function Library({ type, notify }) {
             ))}
           {!records.length && (
             <p className="muted">
-              {t('Your saved')} {isFunction ? t('functions') : t('datasets')}{' '}
-              {t('will appear here.')}
+              {t('Your saved')} {isFunction ? t('scripts') : t('datasets')} {t('will appear here.')}
             </p>
           )}
         </section>
         {!draft ? (
           <Empty
             icon={isFunction ? Code2 : Database}
-            title={isFunction ? t('Function definitions') : t('Dataset configuration')}
+            title={isFunction ? t('Python scripts') : t('Dataset configuration')}
             action={
               <Button onClick={create}>
-                {t('Create')} {isFunction ? t('a function') : t('a dataset')}
+                {t('Create')} {isFunction ? t('a script') : t('a dataset')}
               </Button>
             }
           >
             {isFunction
               ? t(
-                  'Write or import Python code, then select functions by name in datasets and training flows.',
+                  'Write or import a Python script, then select it by name in datasets and training workflows.',
                 )
-              : t('Add a repository or upload a dataset. Choose a Dataset Loader from Fn Manager.')}
+              : t(
+                  'Add a repository or upload a dataset. Choose a Dataset loader script from Script Manager.',
+                )}
           </Empty>
         ) : (
           <form className="panel library-editor" onSubmit={save}>
             <div className="panel-heading">
               <h2>
-                {draft.id ? t('Edit') : t('New')} {isFunction ? t('function') : t('dataset')}
+                {draft.id ? t('Edit') : t('New')} {isFunction ? t('script') : t('dataset')}
               </h2>
             </div>
             <label className="field">
@@ -213,7 +217,7 @@ export default function Library({ type, notify }) {
             {isFunction ? (
               <>
                 <label className="field">
-                  <span>{t('Function type')}</span>
+                  <span>{t('Script type')}</span>
                   <select
                     disabled={!!draft.id}
                     value={draft.kind}
@@ -233,6 +237,26 @@ export default function Library({ type, notify }) {
                   </select>
                 </label>
                 <Notice>{t(contracts[draft.kind])}</Notice>
+                <ScriptGenerator
+                  key={`${draft.id || 'new'}-${draft.kind}`}
+                  kind={draft.kind}
+                  datasets={library.datasets}
+                  onApply={(result) =>
+                    setDraft((d) => ({
+                      ...d,
+                      source: result.source,
+                      dataset_id: result.dataset_id,
+                      algorithm: result.algorithm,
+                    }))
+                  }
+                />
+                {draft.algorithm && (
+                  <p className="muted">
+                    {t('Generation context')}: {draft.algorithm.toUpperCase()} ·{' '}
+                    {library.datasets.find((d) => d.id === draft.dataset_id)?.name ||
+                      t('Dataset unavailable')}
+                  </p>
+                )}
                 <div className="upload-dataset">
                   <label className="button">
                     <UploadCloud size={16} />
@@ -435,7 +459,7 @@ export default function Library({ type, notify }) {
                   </section>
                 )}
                 <label className="field">
-                  <span>{t('Dataset Loader')}</span>
+                  <span>{t('Dataset loader script')}</span>
                   <select
                     value={draft.loader_id || ''}
                     onChange={(e) => edit('loader_id', e.target.value)}
@@ -450,8 +474,8 @@ export default function Library({ type, notify }) {
                       ))}
                   </select>
                   <small>
-                    {t('Manage Python definitions in')}
-                    <a href="#functions">{t('Fn Manager ↗')}</a>.
+                    {t('Manage Python scripts in')}
+                    <a href="#functions">{t('Script Manager ↗')}</a>.
                   </small>
                 </label>
               </>
@@ -460,8 +484,7 @@ export default function Library({ type, notify }) {
             <div className="library-actions">
               <Button type="submit" className="primary" busy={busy}>
                 <Save size={16} />
-                {t('Save')}
-                {isFunction ? t('function') : t('dataset')}
+                {t('Save')} {isFunction ? t('script') : t('dataset')}
               </Button>
               {draft.id && (
                 <Button
