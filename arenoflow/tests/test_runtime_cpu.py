@@ -365,3 +365,63 @@ def test_loader_validation_preserves_all_generator_records():
     module = SimpleNamespace(_load_dataset_for_training=lambda: iter([{"prompt": "one"}, {"prompt": "two"}]))
     remote.install_dataset_validation(module)
     assert list(module._load_dataset_for_training()) == [{"prompt": "one"}, {"prompt": "two"}]
+
+
+def test_cancelled_finished_deployment_does_not_query_tunnels(tmp_path):
+    controller = Controller(Store(tmp_path), catalog(), FakeProvider, lambda x: x)
+    controller.connect("id", "secret")
+    controller._thread = lambda *_: None
+    record = controller.submit(
+        {"kind": "deployment", "endpoint_key": "x" * 24, "model": {"adapter": "qwen3", "checkpoint": "Qwen/Qwen3-0.6B"}}
+    )
+    controller.store.update(record["id"], cancel_requested=True, ready=True, sandbox_id="sb-test")
+    controller._reattach(record["id"], controller.provider)
+    assert controller.store.get(record["id"])["status"] == "cancelled"
+
+
+def test_failed_stream_is_reattached_and_recovers_readiness(tmp_path, monkeypatch):
+    import threading
+
+    controller = Controller(Store(tmp_path), catalog(), FakeProvider, lambda x: x)
+    controller.connect("id", "secret")
+    controller._thread = lambda *_: None
+    record = controller.submit(
+        {"kind": "deployment", "endpoint_key": "x" * 24, "model": {"adapter": "qwen3", "checkpoint": "Qwen/Qwen3-0.6B"}}
+    )
+    recovered = threading.Event()
+
+    class Broken:
+        def __iter__(self):
+            raise ConnectionError("test disconnect")
+
+    class Sandbox:
+        object_id = "sb-test"
+        stdout = Broken()
+        stderr = []
+        polls = 0
+
+        def poll(self):
+            self.polls += 1
+            assert self.polls < 1000
+            return 0 if controller.store.get(record["id"]).get("endpoint") else None
+
+        def tunnels(self):
+            return {8080: SimpleNamespace(url="https://example.modal.run")}
+
+    def ready_stream():
+        yield remote.PREFIX + json.dumps({"type": "ready", "time": 1}) + "\n"
+        recovered.set()
+
+    class Provider:
+        calls = 0
+
+        def attach(self, identifier):
+            self.calls += 1
+            return SimpleNamespace(stdout=ready_stream(), stderr=[])
+
+    provider = Provider()
+    real_sleep = time.sleep
+    monkeypatch.setattr("arenoflow.controller.time.sleep", lambda _: real_sleep(0.001))
+    controller._watch(record["id"], Sandbox(), provider)
+    assert recovered.is_set() and provider.calls == 1
+    assert controller.store.get(record["id"])["endpoint"] == "https://example.modal.run/v1"

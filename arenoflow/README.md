@@ -333,3 +333,16 @@ caches and local uploaded datasets are unaffected.
 Generated script names default to `<dataset name> - <script type>` and remain
 editable before saving. Long dataset-name prefixes are shortened to fit the
 120-character script-name limit.
+
+
+Deployment details open on **Inference test**, with **Logs** and **Configuration**
+as the other views. Enter the deployment endpoint key, an optional system prompt,
+a user prompt, output token limit, and temperature. Requests go through the local
+same-origin API to that deployment's recorded endpoint. The response shows text,
+elapsed time, token usage, finish reason, and optional raw JSON. Test inputs,
+outputs, and keys are not persisted. AReno currently returns complete responses;
+the test request has a 120-second timeout.
+
+Modal log streams reconnect after interruption. If the local control plane is
+disconnected, task details explicitly warn that the displayed state may be stale.
+Reconnect Modal in Settings to reattach to existing remote tasks.

@@ -145,9 +145,9 @@ class Controller:
                 phase_started_at=time.time(),
                 started_at=time.time(),
             )
-            if self.store.get(job_id).get("cancel_requested"):
+            if self.store.get(job_id).get("cancel_requested") and sandbox.poll() is None:
                 sandbox.terminate()
-            self._watch(job_id, sandbox)
+            self._watch(job_id, sandbox, provider)
         except Exception as exc:
             if sandbox is not None:
                 try:
@@ -167,35 +167,74 @@ class Controller:
     def _reattach(self, job_id, provider):
         try:
             sandbox = provider.attach(self.store.get(job_id)["sandbox_id"])
-            if self.store.get(job_id).get("cancel_requested"):
+            if self.store.get(job_id).get("cancel_requested") and sandbox.poll() is None:
                 sandbox.terminate()
-            self._watch(job_id, sandbox)
+            self._watch(job_id, sandbox, provider)
         except Exception as exc:
             self.store.update(job_id, status="unknown", error=self.redact(str(exc)))
 
-    def _watch(self, job_id, sandbox):
+    def _watch(self, job_id, sandbox, provider=None):
         with self.lock:
             if job_id in self.watching:
                 return
             self.watching.add(job_id)
-        readers = []
+        readers = {}
+        failures = {}
+        retries = {}
+
+        def follow(name, stream):
+            failures[name] = not self._read(job_id, stream)
+
+        def start_reader(name, stream):
+            failures[name] = False
+            thread = threading.Thread(target=follow, args=(name, stream), daemon=True)
+            readers[name] = thread
+            thread.start()
+
         try:
-            for stream in (sandbox.stdout, sandbox.stderr):
-                thread = threading.Thread(target=self._read, args=(job_id, stream), daemon=True)
-                thread.start()
-                readers.append(thread)
+            for name in ("stdout", "stderr"):
+                start_reader(name, getattr(sandbox, name))
             while sandbox.poll() is None:
-                if self.store.get(job_id).get("cancel_requested"):
+                job = self.store.get(job_id)
+                if job.get("cancel_requested"):
                     sandbox.terminate()
-                if self.store.get(job_id).get("ready") and not self.store.get(job_id).get("endpoint"):
-                    self.store.update(job_id, endpoint=sandbox.tunnels()[8080].url + "/v1", status="ready")
+                elif job.get("ready") and not job.get("endpoint"):
+                    try:
+                        endpoint = sandbox.tunnels()[8080].url + "/v1"
+                    except Exception:
+                        if sandbox.poll() is not None:
+                            break
+                        raise
+                    self.store.update(job_id, endpoint=endpoint, status="ready", error=None)
+                if provider and not job.get("cancel_requested"):
+                    for name, thread in list(readers.items()):
+                        if not thread.is_alive() and failures.get(name) and time.monotonic() >= retries.get(name, 0):
+                            retries[name] = time.monotonic() + 15
+                            try:
+                                fresh = provider.attach(sandbox.object_id)
+                                start_reader(name, getattr(fresh, name))
+                            except Exception as exc:
+                                self.store.event(
+                                    job_id,
+                                    {
+                                        "type": "log",
+                                        "message": self.redact(f"Log reconnect failed: {type(exc).__name__}: {exc}"),
+                                        "time": time.time(),
+                                    },
+                                )
                 time.sleep(2)
-            for thread in readers:
+            for thread in readers.values():
                 thread.join(timeout=5)
             job = self.store.get(job_id)
             code = sandbox.poll()
             status = "cancelled" if job.get("cancel_requested") else "succeeded" if code == 0 else "failed"
-            self.store.update(job_id, status=status, exit_code=code, finished_at=time.time())
+            self.store.update(
+                job_id,
+                status=status,
+                exit_code=code,
+                finished_at=time.time(),
+                error=None if status in ("cancelled", "succeeded") else job.get("error"),
+            )
         finally:
             with self.lock:
                 self.watching.discard(job_id)
@@ -227,11 +266,17 @@ class Controller:
                     self.store.update(job_id, ready=True)
                 elif event.get("type") == "error":
                     self.store.update(job_id, error=event.get("message"))
+            return True
         except Exception as exc:
             self.store.event(
                 job_id,
-                {"type": "log", "message": f"Log stream interrupted: {self.redact(str(exc))}", "time": time.time()},
+                {
+                    "type": "log",
+                    "message": f"Log stream interrupted: {type(exc).__name__}: {self.redact(str(exc))}",
+                    "time": time.time(),
+                },
             )
+            return False
 
     def stop(self, job_id):
         job = self.store.get(job_id)

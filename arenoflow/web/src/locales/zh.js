@@ -1,4 +1,33 @@
 export default {
+  'Modal is disconnected. Displayed status may be outdated; reconnect in Settings to resume monitoring.':
+    'Modal 未连接，当前状态可能已过期。请在设置中重新连接以恢复监控。',
+
+  inference: '推理测试',
+  'Inference test': '推理测试',
+  'Send a request to this deployment. Prompts, responses and the endpoint key are not saved.':
+    '向当前部署发送请求，输入、响应和接口密钥不会保存。',
+  'Inference testing is available when the deployment is ready.': '部署就绪后可进行推理测试。',
+  'System prompt (optional)': '系统提示（可选）',
+  'You are a helpful assistant.': '你是一个问答助手。',
+  'Test prompt': '测试输入',
+  'Explain why the sky appears blue in two sentences.': '请用两句话解释天空为什么呈现蓝色。',
+  'Maximum output tokens': '最大生成 token 数',
+  Temperature: 'Temperature',
+  'Generating response…': '正在生成响应…',
+  'Send test request': '发送测试请求',
+  'Model response': '模型响应',
+  Reasoning: '推理过程',
+  'No text content returned.': '未返回文本内容。',
+  'Response time: {p0} s': '响应耗时：{p0} 秒',
+  'Tokens · input: {p0} · output: {p1} · total: {p2}':
+    'Token 用量 · 输入：{p0} · 输出：{p1} · 合计：{p2}',
+  'Finish reason: {p0}': '结束原因：{p0}',
+  'Raw response': '原始响应',
+  'Endpoint authentication failed; check the endpoint API key':
+    '接口认证失败，请检查部署接口密钥。',
+  'Inference request failed or timed out; check deployment status':
+    '推理请求失败或超时，请检查部署状态。',
+
   'Refresh cached sample': '刷新缓存样本',
   'Repository data downloads locally. Training uploads the cached data; the dataset source does not change the model source.':
     '仓库数据在本地下载，训练时上传缓存数据；数据集来源不会改变模型来源。',
