@@ -96,3 +96,21 @@ def test_cached_upload_path_traversal_rejected(tmp_path):
     folder.with_suffix(".json").write_text(json.dumps({"files": ["../secret"]}))
     with pytest.raises(ValueError, match="incomplete"):
         referenced_uploads({"data": "/artifacts/datasets/" + key}, tmp_path)
+
+
+def test_modelscope_metadata_is_not_a_single_unsplit_training_shard(monkeypatch):
+    monkeypatch.setattr(
+        "arenoflow.samples.request_json",
+        lambda *args: {
+            "Code": 200,
+            "Data": {
+                "Files": [
+                    {"Path": "dataset_infos.json", "Size": 1768, "Type": "blob"},
+                    {"Path": "gsm8k.py", "Size": 4000, "Type": "blob"},
+                    {"Path": "README.md", "Size": 200, "Type": "blob"},
+                ]
+            },
+        },
+    )
+    with pytest.raises(ValueError, match="no raw training data"):
+        repository_files({"source": "modelscope/gsm8k", "model_hub": "modelscope"})

@@ -217,6 +217,7 @@ def test_final_checkpoint_saved_only_on_success(tmp_path, monkeypatch):
         except RuntimeError:
             trainer.close()
 
+    modules["areno.cli.train"]._load_dataset_for_training = lambda *args, **kwargs: []
     modules["areno.cli.train"].train_command = SimpleNamespace(main=main)
     for name, module in modules.items():
         monkeypatch.setitem(sys.modules, name, module)
@@ -350,3 +351,17 @@ def test_provider_preparation_build_and_gpu_reservation(kind):
         assert options["env"]["HF_HUB_CACHE"] == "/artifacts/cache/hf/hub"
         assert "/artifacts" in options["volumes"]
     assert "building_image" in phases
+
+
+@pytest.mark.parametrize("dataset", [[], iter(())])
+def test_empty_loader_is_rejected_before_model_initialization(dataset):
+    module = SimpleNamespace(_load_dataset_for_training=lambda: dataset)
+    remote.install_dataset_validation(module)
+    with pytest.raises(ValueError, match="no training records"):
+        module._load_dataset_for_training()
+
+
+def test_loader_validation_preserves_all_generator_records():
+    module = SimpleNamespace(_load_dataset_for_training=lambda: iter([{"prompt": "one"}, {"prompt": "two"}]))
+    remote.install_dataset_validation(module)
+    assert list(module._load_dataset_for_training()) == [{"prompt": "one"}, {"prompt": "two"}]

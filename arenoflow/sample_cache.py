@@ -21,7 +21,7 @@ class SampleCache:
 
     def key(self, dataset):
         identity = {k: dataset.get(k) for k in ("source", "source_type", "model_hub")}
-        identity["cache_version"] = 2
+        identity["cache_version"] = 3
         return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
 
     def status(self, dataset):
