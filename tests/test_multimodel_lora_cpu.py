@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 import torch
+from torch import nn
 
 from areno.adapters import LoraConfig
 from areno.adapters.lora import initialize_lora
@@ -11,6 +12,7 @@ from areno.engine.config import ModelConfig
 from areno.engine.parallel.context import TPContext, get_tp_context, set_tp_context
 from areno.models.olmo2 import Olmo2ForCausalLM
 from areno.models.phi4mm import Phi4MMForCausalLM
+from areno.models.gemma4.model import Gemma4MLP, Gemma4MoeExperts
 
 
 @pytest.fixture(autouse=True)
@@ -78,3 +80,38 @@ def test_dense_model_exact_lora_targets_resolve(model, targets: tuple[str, ...])
     assert all(parameter.requires_grad for parameter in registry.parameters())
     trainable_ids = {id(parameter) for parameter in registry.parameters()}
     assert all(parameter.requires_grad == (id(parameter) in trainable_ids) for parameter in policy.parameters())
+
+
+class _GemmaPolicy(nn.Module):
+    def __init__(self, *, moe: bool) -> None:
+        super().__init__()
+        self.config = _dense_config("gemma4")
+        self.config.num_experts = 2
+        self.config.moe_intermediate_size = 16
+        self.layers = nn.ModuleList([nn.Module()])
+        if moe:
+            self.layers[0].experts = Gemma4MoeExperts(self.config)
+        else:
+            self.layers[0].mlp = Gemma4MLP(self.config, use_double_wide_mlp=False)
+
+
+@pytest.mark.parametrize(
+    ("policy_factory", "targets", "logical_targets"),
+    (
+        (
+            lambda: _GemmaPolicy(moe=False),
+            ("layers.0.mlp.gate_proj", "layers.0.mlp.down_proj"),
+            ("layers.0.mlp.gate_proj", "layers.0.mlp.down_proj"),
+        ),
+        (
+            lambda: _GemmaPolicy(moe=True),
+            ("layers.0.experts.gate_proj", "layers.0.experts.down_proj"),
+            ("layers.0.experts.{expert}.gate_proj", "layers.0.experts.{expert}.down_proj"),
+        ),
+    ),
+)
+def test_gemma4_exact_lora_targets_resolve(policy_factory, targets, logical_targets) -> None:
+    policy = policy_factory()
+    registry = initialize_lora(policy, LoraConfig(rank=2, alpha=2.0, target_modules=targets), seed=7)
+
+    assert tuple(registry.slots) == logical_targets

@@ -55,6 +55,7 @@ from areno.engine.layers.linear import (
     _areno_linear_forward,
     mark_tensor_parallel_parameter,
 )
+from areno.engine.layers.lora import RoutedExpertLoraBinding, RoutedLoraTarget
 from areno.engine.layers.norm import RMSNorm
 from areno.engine.layers.rotary import Gemma4RotaryEmbedding
 from areno.engine.layers.vocab import VocabParallelEmbedding, VocabParallelLMHead
@@ -129,6 +130,7 @@ class Gemma4MLP(nn.Module):
             config.hidden_size,
             (intermediate_size, intermediate_size),
             bias=False,
+            lora_components=("gate_proj", "up_proj"),
         )
         self.down_proj = RowParallelLinear(intermediate_size, config.hidden_size, bias=False)
 
@@ -180,8 +182,30 @@ class Gemma4MoeExperts(nn.Module):
         self.down_weight = nn.Parameter(
             torch.empty(self.local_num_experts, self.hidden_size, self.intermediate_size, dtype=config.dtype)
         )
+        self.lora_slots = RoutedExpertLoraBinding(
+            intermediate_size=self.intermediate_size,
+            targets=(
+                RoutedLoraTarget("gate_proj", "gate_up_weight", self.hidden_size, self.intermediate_size),
+                RoutedLoraTarget("up_proj", "gate_up_weight", self.hidden_size, self.intermediate_size),
+                RoutedLoraTarget("down_proj", "down_weight", self.intermediate_size, self.hidden_size),
+            ),
+        )
         mark_tensor_parallel_parameter(self.gate_up_weight, True, sequence_parallel=False, tp_grad_allreduce=False)
         mark_tensor_parallel_parameter(self.down_weight, True, sequence_parallel=False, tp_grad_allreduce=False)
+
+    def install_lora_component(self, component: str, slot: nn.Module) -> None:
+        self.lora_slots.bind(component, slot)
+
+    def has_lora(self) -> bool:
+        return bool(self.lora_slots)
+
+    def _gate_up_forward(self, x: torch.Tensor, tokens_per_expert: torch.Tensor) -> torch.Tensor:
+        base = _areno_grouped_linear_no_compile(x.contiguous(), self.gate_up_weight, tokens_per_expert)
+        return self.lora_slots.apply_gate_up(x, base, tokens_per_expert)
+
+    def _down_forward(self, x: torch.Tensor, tokens_per_expert: torch.Tensor) -> torch.Tensor:
+        base = _areno_grouped_linear_no_compile(x, self.down_weight, tokens_per_expert)
+        return self.lora_slots.apply_down(x, base, tokens_per_expert)
 
     def forward(self, flat: torch.Tensor, topk_idx: torch.Tensor, topk_weight: torch.Tensor) -> torch.Tensor:
         x, route_weight, token_idx, tokens_per_expert = _areno_moe_topk_permute_no_compile(
@@ -197,12 +221,13 @@ class Gemma4MoeExperts(nn.Module):
                 + self.down_weight.reshape(-1)[0] * 0
                 + topk_weight.sum().to(dtype=self.gate_up_weight.dtype) * 0
             )
+            zero = zero + self.lora_slots.zero_grad_edge(self.gate_up_weight)
             return all_reduce(flat.new_zeros(flat.shape) + zero)
-        hidden = _areno_grouped_linear_no_compile(x.contiguous(), self.gate_up_weight, tokens_per_expert)
+        hidden = self._gate_up_forward(x, tokens_per_expert)
         hidden = (
             _areno_gelu_tanh_and_mul_no_compile(hidden) * route_weight.unsqueeze(-1).to(dtype=hidden.dtype)
         ).contiguous()
-        out = _areno_grouped_linear_no_compile(hidden, self.down_weight, tokens_per_expert)
+        out = self._down_forward(hidden, tokens_per_expert)
         out = _areno_moe_unpermute_no_compile(out, token_idx, flat.shape)
         return all_reduce(out)
 
@@ -290,7 +315,7 @@ class Gemma4MoeMLP(nn.Module):
 
         batch, seqlen, hidden = hidden_states.shape
         flat = hidden_states.reshape(-1, hidden)
-        if self.training:
+        if self.training or self.experts.has_lora():
             out = self.experts(flat, topk_idx.to(torch.long), topk_weight)
         else:
             out = self._forward_fused_moe(flat, topk_idx, topk_weight)
@@ -302,6 +327,9 @@ class Gemma4MoeMLP(nn.Module):
 
     @torch.no_grad()
     def prepare_infer_weights(self) -> None:
+        if self.experts.has_lora():
+            self.clear_infer_weights()
+            return
         self._infer_w1_weight = self._updated_infer_weight(
             self._infer_w1_weight,
             self.experts.gate_up_weight.detach().to(dtype=self.experts.gate_up_weight.dtype).contiguous(),
