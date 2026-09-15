@@ -10,11 +10,11 @@ from areno.adapters import LoraConfig
 from areno.adapters.lora import initialize_lora
 from areno.engine.config import ModelConfig
 from areno.engine.parallel.context import TPContext, get_tp_context, set_tp_context
+from areno.models.bailing.model import BailingDenseMLP, BailingGroupedExperts, BailingSoftmaxAttention
+from areno.models.gemma4.model import Gemma4MLP, Gemma4MoeExperts
+from areno.models.minicpmv46.model import MiniCPMV46ForCausalLM
 from areno.models.olmo2 import Olmo2ForCausalLM
 from areno.models.phi4mm import Phi4MMForCausalLM
-from areno.models.gemma4.model import Gemma4MLP, Gemma4MoeExperts
-from areno.models.bailing.model import BailingDenseMLP, BailingGroupedExperts, BailingSoftmaxAttention
-from areno.models.minicpmv46.model import MiniCPMV46ForCausalLM
 from areno.models.qwen3_5.model import Qwen35ForCausalLM
 
 
