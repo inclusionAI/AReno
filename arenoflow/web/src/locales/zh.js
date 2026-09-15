@@ -194,7 +194,6 @@ export default {
   'Persistent artifacts': '持久化产物',
   'Pinned manually. Automatic updates are paused.': '已手动固定版本，自动更新已暂停。',
   'Planned compute estimate:': '计划计算费用预估：',
-  'Planned compute total': '计划计算费用合计',
   'Planned estimate': '计划预估',
   'Planning only; launching still submits one workflow.': '仅用于规划，启动时仍只提交一个工作流。',
   'Previous checkpoint': '上一阶段检查点',

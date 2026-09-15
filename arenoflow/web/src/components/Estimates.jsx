@@ -126,10 +126,6 @@ export function RunEstimates({ compact = false }) {
       {error && <Notice error>{error}</Notice>}
       <div className="estimate-totals">
         <div>
-          <span>{t('Planned compute total')}</span>
-          <strong>{money(known ? data.planned_total : null)}</strong>
-        </div>
-        <div>
           <span>{t('Estimated compute elapsed')}</span>
           <strong>{money(known ? data.accrued_total : null)}</strong>
         </div>

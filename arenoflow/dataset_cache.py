@@ -15,6 +15,7 @@ from urllib.parse import quote, urlencode, urlsplit
 
 def cache_key(dataset):
     identity = {key: dataset.get(key) for key in ("source", "source_type", "model_hub")}
+    identity["cache_version"] = 2
     return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
 
 
@@ -79,7 +80,12 @@ def repository_files(dataset):
     else:
         raise ValueError("Dataset listing is too large; specify a smaller repository")
     formats = (".parquet", ".jsonl", ".json", ".csv", ".tsv", ".arrow")
-    files = [item for item in files if Path(item["Path"]).suffix in formats]
+    metadata_names = {"dataset_infos.json", "dataset_info.json", "dataset_dict.json", "state.json", "config.json"}
+    files = [
+        item
+        for item in files
+        if Path(item["Path"]).suffix in formats and Path(item["Path"]).name.lower() not in metadata_names
+    ]
     if config:
         files = [item for item in files if config in Path(item["Path"]).parts[:-1] or Path(item["Path"]).stem == config]
     pattern = re.compile(r"(?:^|[/_.-])" + re.escape(split) + r"(?:$|[/_.-])")
@@ -88,7 +94,9 @@ def repository_files(dataset):
         if not re.search(r"(?:^|[/_.-])(test|validation|eval)(?:$|[/_.-])", files[0]["Path"]):
             matching = files
     if not matching:
-        raise ValueError("Dataset config or split has no supported raw data files")
+        raise ValueError(
+            "Dataset config or split has no raw training data files. Script-only repositories are unsupported; select a repository with data shards or upload the data."
+        )
     if not config:
         groups = {str(Path(item["Path"]).parent) for item in matching}
         group = next((g for g in ("main", "default", ".", "data") if g in groups), None)

@@ -5,6 +5,8 @@ from __future__ import annotations
 import base64
 import hmac
 import http.client
+import importlib
+import itertools
 import json
 import os
 import subprocess
@@ -50,6 +52,31 @@ def cache_model_refs(args):
     return result
 
 
+def install_dataset_validation(module):
+    """Validate the loader's output before AReno initializes GPU model workers."""
+    original = module._load_dataset_for_training
+
+    def checked(*args, **kwargs):
+        dataset = original(*args, **kwargs)
+        if hasattr(dataset, "__len__"):
+            count = len(dataset)
+            emit("dataset", rows=count)
+            if count:
+                return dataset
+        else:
+            iterator = iter(dataset)
+            sentinel = object()
+            first = next(iterator, sentinel)
+            if first is not sentinel:
+                emit("dataset", rows=None, nonempty=True)
+                return itertools.chain([first], iterator)
+        raise ValueError(
+            "Dataset loader returned no training records. Check the dataset source, columns and loader filters."
+        )
+
+    module._load_dataset_for_training = checked
+
+
 def stage_main(stage):
     args = cache_model_refs(stage["args"])
     emit("phase", phase="preparing_data")
@@ -57,6 +84,8 @@ def stage_main(stage):
     import areno.api.metrics as metrics
     from areno import Trainer
     from areno.cli.train import train_command
+
+    install_dataset_validation(importlib.import_module("areno.cli.train"))
 
     class FlowTrainer(Trainer):
         """Save the final successful state before the CLI releases its backend."""
