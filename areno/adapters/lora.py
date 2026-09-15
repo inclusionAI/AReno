@@ -264,8 +264,10 @@ def initialize_lora(model: nn.Module, config: LoraConfig, *, seed: int) -> Adapt
 
     model_config = getattr(model, "config", None)
     model_type = getattr(model_config, "model_type", None)
-    if model_type not in {"qwen3", "qwen3_moe", "bailing_moe_v3"}:
-        raise ValueError("native LoRA currently supports Qwen3 and Bailing-MoE V3 models only")
+    if model_type not in {"qwen3", "qwen3_moe", "bailing_moe_v3", "olmo2", "phi4mm"}:
+        raise ValueError(
+            "native LoRA currently supports Qwen3, Bailing-MoE V3, OLMo2, and Phi4MM models only"
+        )
     if model_type == "bailing_moe_v3" and not bool(getattr(model_config, "no_kda_lora", False)):
         raise ValueError("Bailing-MoE V3 native LoRA currently requires no_kda_lora=true")
 
