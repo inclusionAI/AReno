@@ -43,6 +43,7 @@ def _dense_config(model_type: str) -> ModelConfig:
         attn_backend="native",
         sequence_parallel=False,
         tie_word_embeddings=model_type == "phi4mm",
+        qk_norm=model_type != "phi4mm",
         hf_text_config=(
             {
                 "original_max_position_embeddings": 32,
