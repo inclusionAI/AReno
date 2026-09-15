@@ -26,6 +26,27 @@ class _Case:
 
 
 _CASES = {
+    "minicpmv46": _Case(
+        model_env="ARENO_E2E_MINICPMV46_MODEL",
+        targets=(
+            "layers.0.attention.in_proj_q",
+            "layers.0.attention.in_proj_k",
+            "layers.0.attention.in_proj_v",
+            "layers.0.attention.in_proj_z",
+            "layers.0.attention.in_proj_b",
+            "layers.0.attention.in_proj_a",
+            "layers.0.attention.out_proj",
+            "layers.3.attention.q_proj",
+            "layers.3.attention.q_gate_proj",
+            "layers.3.attention.k_proj",
+            "layers.3.attention.v_proj",
+            "layers.3.attention.o_proj",
+            "layers.0.mlp.gate_proj",
+            "layers.0.mlp.up_proj",
+            "layers.0.mlp.down_proj",
+        ),
+        changed_fragments=(".attention.", ".mlp."),
+    ),
     "phi4mm": _Case(
         model_env="ARENO_E2E_PHI4MM_MODEL",
         targets=(
