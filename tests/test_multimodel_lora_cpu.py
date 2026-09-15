@@ -13,6 +13,7 @@ from areno.engine.parallel.context import TPContext, get_tp_context, set_tp_cont
 from areno.models.olmo2 import Olmo2ForCausalLM
 from areno.models.phi4mm import Phi4MMForCausalLM
 from areno.models.gemma4.model import Gemma4MLP, Gemma4MoeExperts
+from areno.models.qwen3_5.model import Qwen35ForCausalLM
 
 
 @pytest.fixture(autouse=True)
@@ -115,3 +116,28 @@ def test_gemma4_exact_lora_targets_resolve(policy_factory, targets, logical_targ
     registry = initialize_lora(policy, LoraConfig(rank=2, alpha=2.0, target_modules=targets), seed=7)
 
     assert tuple(registry.slots) == logical_targets
+
+
+def test_qwen35_full_and_linear_attention_exact_lora_targets_resolve() -> None:
+    config = _dense_config("qwen3_5")
+    config.num_hidden_layers = 2
+    config.layer_types = ("linear_attention", "full_attention")
+    config.attn_output_gate = True
+    config.linear_conv_kernel_dim = 4
+    config.linear_key_head_dim = 8
+    config.linear_value_head_dim = 8
+    config.linear_num_key_heads = 4
+    config.linear_num_value_heads = 4
+    policy = Qwen35ForCausalLM(config)
+    targets = (
+        "layers.0.attention.in_proj_q",
+        "layers.0.attention.in_proj_z",
+        "layers.0.attention.out_proj",
+        "layers.1.attention.q_proj",
+        "layers.1.attention.k_proj",
+        "layers.1.mlp.down_proj",
+    )
+
+    registry = initialize_lora(policy, LoraConfig(rank=2, alpha=2.0, target_modules=targets), seed=7)
+
+    assert tuple(registry.slots) == targets

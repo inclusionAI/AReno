@@ -24,7 +24,7 @@ from areno.engine.layers.linear import (
     RowParallelLinear,
     mark_tensor_parallel_parameter,
 )
-from areno.engine.layers.lora import RoutedExpertLoraBinding
+from areno.engine.layers.lora import MergedLoraBinding, RoutedExpertLoraBinding
 from areno.engine.parallel.context import get_tp_context
 
 logger = logging.getLogger(__name__)
@@ -264,9 +264,22 @@ def initialize_lora(model: nn.Module, config: LoraConfig, *, seed: int) -> Adapt
 
     model_config = getattr(model, "config", None)
     model_type = getattr(model_config, "model_type", None)
-    if model_type not in {"qwen3", "qwen3_moe", "bailing_moe_v3", "olmo2", "phi4mm", "gemma4"}:
+    supported_model_types = {
+        "qwen3",
+        "qwen3_moe",
+        "bailing_moe_v3",
+        "olmo2",
+        "phi4mm",
+        "gemma4",
+        "qwen3_5",
+        "qwen3_5_vl",
+        "qwen3_5_moe",
+        "qwen3_5_vl_moe",
+    }
+    if model_type not in supported_model_types:
         raise ValueError(
-            "native LoRA currently supports Qwen3, Bailing-MoE V3, OLMo2, Phi4MM, and Gemma4 models only"
+            "native LoRA does not support "
+            f"model_type={model_type!r}; supported model types: {', '.join(sorted(supported_model_types))}"
         )
     if model_type == "bailing_moe_v3" and not bool(getattr(model_config, "no_kda_lora", False)):
         raise ValueError("Bailing-MoE V3 native LoRA currently requires no_kda_lora=true")
@@ -385,6 +398,25 @@ def _iter_lora_targets(model: nn.Module) -> Iterator[LoraTargetSpec]:
                     local_in_features=owner.in_features,
                     local_out_features=owner.local_out_features[index],
                     component_index=index,
+                )
+            continue
+        binding = getattr(owner, "lora_slots", None)
+        components = tuple(getattr(owner, "lora_components", ()))
+        if isinstance(binding, MergedLoraBinding) and components:
+            output_ranges = tuple(getattr(owner, "shard_ranges", ()))
+            for index, component in enumerate(components):
+                yield LoraTargetSpec(
+                    logical_name=f"{module_name.rsplit('.', 1)[0]}.{component}",
+                    component=component,
+                    execution_pattern=LoraExecutionPattern.MERGED_COMPONENT,
+                    owner=owner,
+                    base_weight=owner.weight,
+                    global_in_features=owner.in_features,
+                    global_out_features=owner.out_features[index],
+                    local_in_features=owner.in_features,
+                    local_out_features=owner.local_out_features[index],
+                    component_index=index,
+                    output_range=output_ranges[index] if output_ranges else None,
                 )
             continue
         if isinstance(owner, ReplicatedLinear):

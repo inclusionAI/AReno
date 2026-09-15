@@ -31,6 +31,7 @@ from areno.engine.layers.linear import (
     _shard_range,
     mark_tensor_parallel_parameter,
 )
+from areno.engine.layers.lora import MergedLoraBinding
 from areno.engine.layers.mlp import GatedMLP
 from areno.engine.layers.norm import RMSNorm
 from areno.engine.layers.rotary import PartialRotaryEmbedding
@@ -103,7 +104,12 @@ class Qwen35FullAttention(nn.Module):
         q_size = self.num_heads * self.head_dim * (2 if self.attn_output_gate else 1)
         kv_size = self.num_kv_heads * self.head_dim
         if self.num_kv_heads % ctx.world_size == 0:
-            self.qkv_proj = MergedColumnParallelLinear(config.hidden_size, (q_size, kv_size, kv_size), bias=False)
+            self.qkv_proj = MergedColumnParallelLinear(
+                config.hidden_size,
+                (q_size, kv_size, kv_size),
+                bias=False,
+                lora_components=("q_proj", "k_proj", "v_proj"),
+            )
         elif ctx.world_size % self.num_kv_heads == 0:
             self.qkv_proj = Qwen35ReplicatedKVQKVLinear(
                 config.hidden_size,
@@ -227,6 +233,8 @@ class Qwen35ReplicatedKVQKVLinear(nn.Module):
         self.local_out_features = [q_range[1] - q_range[0], head_dim, head_dim]
         self.shard_ranges = (q_range, kv_range, kv_range)
         self.weight = nn.Parameter(torch.empty(sum(self.local_out_features), hidden_size))
+        self.lora_components = ("q_proj", "k_proj", "v_proj")
+        self.lora_slots = MergedLoraBinding()
         mark_tensor_parallel_parameter(self.weight, True, sequence_parallel=True)
         self._kv_grad_group, self._kv_grad_replication = _replicated_kv_grad_group(num_kv_heads)
         self.weight.register_hook(self._sync_replicated_kv_grad)
@@ -237,7 +245,11 @@ class Qwen35ReplicatedKVQKVLinear(nn.Module):
             if is_sequence_parallel_active()
             else copy_to_tensor_parallel_region(x)
         )
-        return _areno_linear_no_compile(x, self.weight)
+        output = _areno_linear_no_compile(x, self.weight)
+        return self.lora_slots.apply_delta(x, output, self.local_out_features)
+
+    def install_lora_component(self, component: str, component_index: int, slot: nn.Module) -> None:
+        self.lora_slots.bind(component, component_index, slot)
 
     def _sync_replicated_kv_grad(self, grad: torch.Tensor) -> torch.Tensor:
         if self._kv_grad_group is None or self._kv_grad_replication <= 1:
@@ -271,9 +283,13 @@ class Qwen35GatedDeltaNet(nn.Module):
             config.hidden_size,
             (self.key_dim, self.key_dim, self.value_dim, self.value_dim),
             bias=False,
+            lora_components=("in_proj_q", "in_proj_k", "in_proj_v", "in_proj_z"),
         )
         self.in_proj_ba = MergedColumnParallelLinear(
-            config.hidden_size, (self.num_value_heads, self.num_value_heads), bias=False
+            config.hidden_size,
+            (self.num_value_heads, self.num_value_heads),
+            bias=False,
+            lora_components=("in_proj_b", "in_proj_a"),
         )
         self.conv1d_weight = nn.Parameter(
             torch.empty(self.local_key_dim * 2 + self.local_value_dim, 1, self.conv_kernel_size)
@@ -566,7 +582,7 @@ class Qwen35MoeMLP(nn.Module):
                 topk_weight,
                 renormalize=self.norm_topk_prob,
             )
-            if self.training:
+            if self.training or self.experts.has_lora():
                 out = self.experts(flat, topk_idx.to(torch.long), topk_weight)
             else:
                 out = self._forward_fused_moe(flat, topk_idx, topk_weight)
@@ -583,6 +599,9 @@ class Qwen35MoeMLP(nn.Module):
 
     @torch.no_grad()
     def prepare_infer_weights(self) -> None:
+        if self.experts.has_lora():
+            self.clear_infer_weights()
+            return
         self._infer_w1_weight = self._updated_infer_weight(
             self._infer_w1_weight,
             self.experts.gate_up_weight.detach().to(dtype=self.experts.gate_up_weight.dtype).contiguous(),
