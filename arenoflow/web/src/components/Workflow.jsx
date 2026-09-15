@@ -193,7 +193,6 @@ export default function Workflow({
   const [imageInfo, setImageInfo] = useState(null);
   const [imageError, setImageError] = useState('');
   const [preparing, setPreparing] = useState('');
-  const [preparationHub, setPreparationHub] = useState('hf');
   const [endpointKey, setEndpointKey] = useState('');
   const [estimateHours, setEstimateHours] = useState(initial?.estimate_hours ?? 1);
   useEffect(() => {
@@ -219,6 +218,31 @@ export default function Workflow({
     autoImage,
     estimate_hours: estimateHours,
   });
+  // Preparation follows the first stage's effective model settings, including presets.
+  const preparationParams =
+    kind === 'training' ? { ...catalog.presets[stages[0].algo], ...stages[0].params } : serve;
+  const preparationHub =
+    preparationParams.model_hub ??
+    (kind === 'training'
+      ? catalog.train.find((field) => field.name === 'model_hub')?.default
+      : 'hf');
+  const preparationModel = {
+    ...model,
+    checkpoint:
+      (kind === 'training' ? preparationParams.ckpt : preparationParams.model_path) ||
+      model.checkpoint,
+  };
+  function setPreparationHub(hub) {
+    edit(() => {
+      if (kind === 'training') {
+        setStages((list) =>
+          list.map((s, i) => (i === 0 ? { ...s, params: { ...s.params, model_hub: hub } } : s)),
+        );
+      } else {
+        setServe((current) => ({ ...current, model_hub: hub }));
+      }
+    });
+  }
   const reviewed = preview?.request === JSON.stringify(request());
   // Keep navigation drafts in React memory; never persist credentials or endpoint keys.
   useEffect(() => {
@@ -321,9 +345,9 @@ export default function Workflow({
         name:
           preparationKind === 'image_build'
             ? t('Build container')
-            : `${t('Pre-download model')} · ${model.checkpoint}`,
+            : `${t('Pre-download model')} · ${preparationModel.checkpoint}`,
         image,
-        model,
+        model: preparationModel,
         model_hub: preparationHub,
         resources: { timeout_seconds: resources.timeout_seconds },
       });
@@ -821,7 +845,7 @@ export default function Workflow({
               <div className="field full preparation-actions">
                 <h3>{t('Prepare runtime')}</h3>
                 <label className="field">
-                  <span>{t('Model download source')}</span>
+                  <span>{t('Model source · shared with runtime')}</span>
                   <select
                     value={preparationHub}
                     onChange={(e) => setPreparationHub(e.target.value)}
@@ -830,6 +854,11 @@ export default function Workflow({
                     <option value="modelscope">ModelScope</option>
                   </select>
                 </label>
+                <small>
+                  {t(
+                    'Pre-download uses the first training stage or deployment model configuration. Changing this source also updates that configuration.',
+                  )}
+                </small>
                 <div className="preparation-buttons">
                   <Button
                     busy={preparing === 'image_build'}
@@ -846,7 +875,7 @@ export default function Workflow({
                       busy ||
                       !bootstrap.connected ||
                       !image.trim() ||
-                      !model.checkpoint.trim()
+                      !preparationModel.checkpoint.trim()
                     }
                     onClick={() => prepare('model_download')}
                   >
@@ -856,7 +885,7 @@ export default function Workflow({
                 </div>
                 <small>
                   {t(
-                    'Downloads original weights on CPU into the shared Modal Volume. Use the same model source for training to reuse the cache. Modal usage charges apply.',
+                    'Downloads original weights on CPU into the shared Modal Volume. Hugging Face and ModelScope have separate caches. Modal usage charges apply.',
                   )}
                 </small>
                 {!bootstrap.connected && (
