@@ -272,25 +272,12 @@ def test_original_model_snapshots_use_volume_cache_and_reuse_refs(monkeypatch, t
     result = cache_model_refs(["--ckpt", "org/model", "--ref-ckpt", "org/model", "--model-hub", "hf"])
     assert calls == [("org/model", "/artifacts/cache/hf/hub")]
     assert result[1] == result[3] == str(tmp_path / "snapshot")
-    assert cache_model_refs(["--ckpt", str(tmp_path)]) == ["--ckpt", str(tmp_path)]
+    assert cache_model_refs(["--ckpt", str(tmp_path)]) == ["--ckpt", str(tmp_path), "--model-hub", "hf"]
 
 
-def test_modelscope_original_weights_use_volume(monkeypatch, tmp_path):
-    import sys
-    from types import SimpleNamespace
-
-    from arenoflow.remote import cache_model_refs
-
-    calls = []
-
-    def download(reference, cache_dir):
-        calls.append((reference, cache_dir))
-        return str(tmp_path)
-
-    monkeypatch.setitem(sys.modules, "modelscope", SimpleNamespace(snapshot_download=download))
-    monkeypatch.setenv("MODELSCOPE_CACHE", "/artifacts/cache/modelscope")
-    cache_model_refs(["--model-path", "org/model", "--model-hub", "modelscope"])
-    assert calls == [("org/model", "/artifacts/cache/modelscope")]
+def test_remote_rejects_unsupported_model_hub():
+    with pytest.raises(ValueError, match="Only Hugging Face"):
+        remote.cache_model_refs(["--ckpt", "org/model", "--model-hub", "modelscope"])
 
 
 @pytest.mark.parametrize("kind", ["image_build", "model_download"])

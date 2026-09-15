@@ -140,3 +140,29 @@ def test_persistent_output_path_validation(metadata, request_config):
 
 def test_integer_inputs_are_normalized_for_click(metadata):
     assert arguments("train", {"max_steps": "1.0"}, metadata["train"]) == ["--max-steps", "1"]
+
+
+def test_platform_catalog_only_offers_hugging_face():
+    from arenoflow.catalog import catalog
+
+    metadata = catalog()
+    for schema in (metadata["train"], metadata["serve"]):
+        hub = next(field for field in schema if field["name"] == "model_hub")
+        assert hub["choices"] == ["hf"]
+        assert hub["default"] == "hf"
+
+
+@pytest.mark.parametrize("kind", ["training", "deployment", "model_download"])
+def test_platform_rejects_other_model_hubs(kind):
+    from arenoflow.catalog import catalog
+    from arenoflow.workflows import plan
+
+    request = {
+        "kind": kind,
+        "model": {"adapter": "qwen3", "checkpoint": "Qwen/Qwen3-0.6B"},
+        "model_hub": "modelscope",
+        "serve": {"model_hub": "modelscope"},
+        "stages": [{"algo": "sft", "params": {"dataset_path": "owner/data", "model_hub": "modelscope"}}],
+    }
+    with pytest.raises(ValueError, match="Only Hugging Face"):
+        plan(request, catalog())

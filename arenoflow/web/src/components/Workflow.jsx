@@ -98,6 +98,7 @@ export function Parameters({ schema, values, onChange, idPrefix = '', excluded =
   const [search, setSearch] = useState('');
   const filtered = schema.filter(
     (f) =>
+      f.name !== 'model_hub' &&
       !excluded.includes(f.name) &&
       `${f.name} ${f.help} ${t(f.name.replaceAll('_', ' '))} ${t(f.help)}`
         .toLowerCase()
@@ -221,28 +222,12 @@ export default function Workflow({
   // Preparation follows the first stage's effective model settings, including presets.
   const preparationParams =
     kind === 'training' ? { ...catalog.presets[stages[0].algo], ...stages[0].params } : serve;
-  const preparationHub =
-    preparationParams.model_hub ??
-    (kind === 'training'
-      ? catalog.train.find((field) => field.name === 'model_hub')?.default
-      : 'hf');
   const preparationModel = {
     ...model,
     checkpoint:
       (kind === 'training' ? preparationParams.ckpt : preparationParams.model_path) ||
       model.checkpoint,
   };
-  function setPreparationHub(hub) {
-    edit(() => {
-      if (kind === 'training') {
-        setStages((list) =>
-          list.map((s, i) => (i === 0 ? { ...s, params: { ...s.params, model_hub: hub } } : s)),
-        );
-      } else {
-        setServe((current) => ({ ...current, model_hub: hub }));
-      }
-    });
-  }
   const reviewed = preview?.request === JSON.stringify(request());
   // Keep navigation drafts in React memory; never persist credentials or endpoint keys.
   useEffect(() => {
@@ -348,7 +333,7 @@ export default function Workflow({
             : `${t('Pre-download model')} · ${preparationModel.checkpoint}`,
         image,
         model: preparationModel,
-        model_hub: preparationHub,
+        model_hub: 'hf',
         resources: { timeout_seconds: resources.timeout_seconds },
       });
       onLaunched(job);
@@ -844,19 +829,9 @@ export default function Workflow({
               </label>
               <div className="field full preparation-actions">
                 <h3>{t('Prepare runtime')}</h3>
-                <label className="field">
-                  <span>{t('Model source · shared with runtime')}</span>
-                  <select
-                    value={preparationHub}
-                    onChange={(e) => setPreparationHub(e.target.value)}
-                  >
-                    <option value="hf">Hugging Face</option>
-                    <option value="modelscope">ModelScope</option>
-                  </select>
-                </label>
                 <small>
                   {t(
-                    'Pre-download uses the first training stage or deployment model configuration. Changing this source also updates that configuration.',
+                    'Pre-download uses Hugging Face and the first training stage or deployment model configuration.',
                   )}
                 </small>
                 <div className="preparation-buttons">
@@ -885,7 +860,7 @@ export default function Workflow({
                 </div>
                 <small>
                   {t(
-                    'Downloads original weights on CPU into the shared Modal Volume. Hugging Face and ModelScope have separate caches. Modal usage charges apply.',
+                    'Downloads original Hugging Face weights on CPU into the shared Modal Volume. Modal usage charges apply.',
                   )}
                 </small>
                 {!bootstrap.connected && (
