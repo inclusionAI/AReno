@@ -35,8 +35,9 @@ and a sparse mixture-of-experts MLP:
 
 from __future__ import annotations
 
+import logging
 import math
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -144,7 +145,7 @@ class BailingGate(nn.Module):
     during training the bias is updated to push load back towards balance.
     """
 
-    def __init__(self, config: ModelConfig, routing_layer_slot: int):
+    def __init__(self, config: ModelConfig, routing_layer_slot: int | None):
         super().__init__()
         if config.score_function != "sigmoid":
             raise ValueError(f"BailingGate only supports sigmoid scoring, got {config.score_function!r}")
@@ -186,12 +187,15 @@ class BailingGate(nn.Module):
         # the sigmoid/top-k selection.
         logits = _areno_linear_no_compile(x.to(dtype=self.weight.dtype), self.weight)
         topk_idx, topk_weight = self._forward_grouped_topk(logits)
-        topk_idx, topk_weight = resolve_sigmoid_routes(
-            self.routing_layer_slot,
-            logits,
-            topk_idx,
-            topk_weight,
-        )
+        if self.routing_layer_slot is not None:
+            # A None slot opts out of rollout capture and training replay
+            # (e.g. MTP layers: draft routing is not a training target).
+            topk_idx, topk_weight = resolve_sigmoid_routes(
+                self.routing_layer_slot,
+                logits,
+                topk_idx,
+                topk_weight,
+            )
         if torch.is_grad_enabled():
             # Only track load when training; eval calls keep counters cold.
             routed_tokens = topk_idx[:-num_padding_tokens] if num_padding_tokens else topk_idx
@@ -255,7 +259,7 @@ class BailingSparseMoeBlock(nn.Module):
     ``areno_fused_experts`` kernel over stacked w1/w2 weight tiles.
     """
 
-    def __init__(self, config: ModelConfig, routing_layer_slot: int):
+    def __init__(self, config: ModelConfig, routing_layer_slot: int | None):
         super().__init__()
         self.config = config
         self.num_experts = int(config.num_experts or 0)
@@ -1120,6 +1124,8 @@ class BailingLinearAttention(nn.Module):
             raise RuntimeError("linear attention inference requires recurrent state cache")
         slots = _recurrent_cache_slots(infer_meta)
         if infer_meta.mode == "decode":
+            if infer_meta.tokens_per_seq != 1:
+                raise NotImplementedError("seg_la linear attention decode supports one token per sequence")
             return self._forward_decode(q, k, v, slots)
         if infer_meta.mode == "prefill":
             if infer_meta.cu_seqlens is None:
@@ -1261,6 +1267,10 @@ class BailingKDAAttention(nn.Module):
         self.eps = config.rms_norm_eps
         self.state_cache = torch.tensor([])
         self.conv_cache = torch.tensor([])
+        # Position among the model's KDA layers; the model sets both so the
+        # layers share one stacked speculative-state buffer.
+        self.kda_slot = 0
+        self.kda_layer_count = 1
         self.register_buffer("_infer_lora_A", torch.empty(0), persistent=False)
         self._infer_lora_rank = 0
 
@@ -1368,6 +1378,9 @@ class BailingKDAAttention(nn.Module):
             raise RuntimeError("Bailing V3 KDA inference requires conv state cache")
         slots = _recurrent_cache_slots(infer_meta)
         if infer_meta.mode == "decode":
+            if infer_meta.tokens_per_seq != 1:
+                history = self.conv_cache.index_select(0, slots)[:, cache_idx]
+                return self._causal_conv_verify(x, weight, cache_idx, history, infer_meta)
             current = x.reshape(-1, x.shape[-1])
             history = self.conv_cache.index_select(0, slots)[:, cache_idx].to(dtype=current.dtype)
             out = _areno_depthwise_causal_conv1d_silu_decode_no_compile(current, history, weight)
@@ -1379,6 +1392,29 @@ class BailingKDAAttention(nn.Module):
                 raise RuntimeError("Bailing V3 KDA prefill requires cu_seqlens")
             return self._causal_conv_infer_prefill(x, weight, cache_idx, infer_meta.cu_seqlens, slots)
         raise ValueError(f"unsupported inference mode: {infer_meta.mode}")
+
+    def _causal_conv_verify(
+        self, x: torch.Tensor, weight: torch.Tensor, cache_idx: int, history: torch.Tensor, infer_meta: InferMeta
+    ) -> torch.Tensor:
+        """Depthwise causal conv over the fed tokens of each row, seeded by the cached history."""
+        rows, channels, steps = history.shape[0], x.shape[-1], infer_meta.tokens_per_seq
+        current = x.reshape(rows, steps, channels).transpose(1, 2)
+        if infer_meta.speculative_conv_windows is None:
+            infer_meta.speculative_conv_windows = torch.empty(
+                (self.kda_layer_count, rows, 3, channels, self.conv_kernel_size - 1 + steps),
+                device=x.device,
+                dtype=x.dtype,
+            )
+        # (rows, channels, kernel - 1 + steps) in the activation dtype, matching
+        # the single-token kernel path that rounds the cached history the same
+        # way; the tail to keep depends on the commit, so the window waits.
+        window = infer_meta.speculative_conv_windows[self.kda_slot, :, cache_idx]
+        window.copy_(torch.cat((history.to(dtype=x.dtype), current), dim=-1))
+        out = F.silu(F.conv1d(window.float(), weight.float(), groups=channels))
+        # Materialize the (rows, steps, channels) layout: with a single row the
+        # transpose + reshape would stay a strided view, and the recurrent
+        # kernel reads q/k/v assuming contiguous head/dim axes.
+        return out.transpose(1, 2).contiguous().view(x.shape).to(dtype=x.dtype)
 
     @torch._dynamo.disable
     def _causal_conv_infer_prefill(
@@ -1464,8 +1500,9 @@ class BailingKDAAttention(nn.Module):
             raise RuntimeError("Bailing V3 KDA inference requires recurrent state cache")
         slots = _recurrent_cache_slots(infer_meta)
         initial_state = self.state_cache.index_select(0, slots).to(device=q.device)
+        steps = infer_meta.tokens_per_seq
         cu = (
-            torch.arange(slots.numel() + 1, device=q.device, dtype=torch.long)
+            torch.arange(slots.numel() + 1, device=q.device, dtype=torch.long) * steps
             if infer_meta.mode == "decode"
             else infer_meta.cu_seqlens.to(device=q.device, dtype=torch.long)
             if infer_meta.cu_seqlens is not None
@@ -1491,6 +1528,15 @@ class BailingKDAAttention(nn.Module):
             self.state_cache[slots] = final_state.detach().to(dtype=self.state_cache.dtype)
             return out
         beta = beta.to(dtype=q.dtype)
+        intermediate_states = None
+        if steps != 1:
+            if infer_meta.speculative_recurrent_states is None:
+                infer_meta.speculative_recurrent_states = torch.empty(
+                    (self.kda_layer_count, slots.numel(), steps, *initial_state.shape[1:]),
+                    device=q.device,
+                    dtype=torch.float32,
+                )
+            intermediate_states = infer_meta.speculative_recurrent_states[self.kda_slot]
         out = areno_kda_recurrent_update(
             q=q,
             k=k,
@@ -1511,7 +1557,13 @@ class BailingKDAAttention(nn.Module):
             if self.kda_safe_gate and self.kda_lower_bound is not None
             else None,
             use_qk_l2norm_in_kernel=True,
+            intermediate_states=intermediate_states,
+            intermediate_state_indices=state_indices if intermediate_states is not None else None,
+            disable_state_update=intermediate_states is not None,
         )
+        if intermediate_states is not None:
+            # The engine commits the accepted prefix through the stacked buffer.
+            return out
         self.state_cache[slots] = initial_state.detach().to(dtype=self.state_cache.dtype)
         return out
 
@@ -1541,10 +1593,19 @@ class BailingDecoderLayer(nn.Module):
     layers use the dense SwiGLU MLP before MoE kicks in.
     """
 
-    def __init__(self, config: ModelConfig, layer_idx: int):
+    def __init__(
+        self,
+        config: ModelConfig,
+        layer_idx: int,
+        *,
+        attention_layer_type: str | None = None,
+        replay_routing: bool = True,
+    ) -> None:
         super().__init__()
         self.layer_idx = layer_idx
-        self.attention_layer_type = "attention" if _is_softmax_layer(config, layer_idx) else "linear_attention"
+        self.attention_layer_type = attention_layer_type or (
+            "attention" if _is_softmax_layer(config, layer_idx) else "linear_attention"
+        )
         self.input_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps)
         self.attention = (
@@ -1554,7 +1615,7 @@ class BailingDecoderLayer(nn.Module):
         )
         # Dense MLP for the warmup layers, sparse MoE for the rest.
         self.mlp = (
-            BailingSparseMoeBlock(config, layer_idx - config.first_k_dense_replace)
+            BailingSparseMoeBlock(config, layer_idx - config.first_k_dense_replace if replay_routing else None)
             if config.num_experts is not None and layer_idx >= config.first_k_dense_replace
             else BailingDenseMLP(config, config.intermediate_size)
         )
@@ -1614,6 +1675,40 @@ class BailingDecoderLayer(nn.Module):
         )
 
 
+class BailingMTPLayer(BailingDecoderLayer):
+    """DeepSeek-style multi-token-prediction layer (HF ``model.layers[num_hidden_layers + i]``).
+
+    Wraps a standard decoder block with the MTP projection: RMSNorm the
+    shifted-token embeddings and the trunk hidden states, fuse them with
+    ``eh_proj``, run the block, and apply ``final_layernorm``. Bailing V3
+    checkpoints build MTP layers with softmax attention (``mtp_use_kda`` is
+    false); their MoE gate opts out of routing capture/replay because the
+    layer's routes are never a training target, only a draft.
+    """
+
+    def __init__(self, config: ModelConfig, layer_idx: int) -> None:
+        super().__init__(config, layer_idx, attention_layer_type="attention", replay_routing=False)
+        self.enorm = RMSNorm(config.hidden_size, config.rms_norm_eps)
+        self.hnorm = RMSNorm(config.hidden_size, config.rms_norm_eps)
+        self.eh_proj = nn.Linear(2 * config.hidden_size, config.hidden_size, bias=False, dtype=config.dtype)
+        # Replicated across TP ranks; its activation grads are rank-partial, so
+        # the gradient must be all-reduced like the other replicated projections.
+        mark_tensor_parallel_parameter(self.eh_proj.weight, False, sequence_parallel=True, tp_grad_allreduce=True)
+        self.final_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps)
+
+    def forward(  # type: ignore[override]
+        self,
+        input_embeds: torch.Tensor,
+        hidden_states: torch.Tensor,
+        position_ids: torch.Tensor,
+        train_meta: TrainMeta | None,
+        infer_meta: InferMeta | None = None,
+    ) -> torch.Tensor:
+        fused = self.eh_proj(torch.cat([self.enorm(input_embeds), self.hnorm(hidden_states)], dim=-1))
+        fused = super().forward(fused, position_ids, train_meta, infer_meta)
+        return self.final_layernorm(fused)
+
+
 class BailingMoeV3ForCausalLM(nn.Module):
     """Top-level Bailing-MoE V3 causal LM."""
 
@@ -1622,6 +1717,45 @@ class BailingMoeV3ForCausalLM(nn.Module):
         self.config = config
         self.word_embeddings = VocabParallelEmbedding(config.vocab_size, config.hidden_size, dtype=config.dtype)
         self.layers = nn.ModuleList([BailingDecoderLayer(config, i) for i in range(config.num_hidden_layers)])
+        kda_attentions = _kda_attentions(self)
+        for slot, attention in enumerate(kda_attentions):
+            attention.kda_slot = slot
+            attention.kda_layer_count = len(kda_attentions)
+        # Recurrent and conv caches of all KDA layers, stacked along dim 0; each
+        # layer holds a view so the speculative commit touches one tensor.
+        self._kda_state_cache: torch.Tensor | None = None
+        self._kda_conv_cache: torch.Tensor | None = None
+        # Shared speculative verify-state buffers: sized by `enable_mtp_draft`,
+        # allocated on first use, dropped with the inference caches.
+        self._spec_max_rows = 0
+        self._spec_tokens_per_seq = 0
+        self._spec_state_buffer: torch.Tensor | None = None
+        self._spec_conv_buffer: torch.Tensor | None = None
+        if config.num_nextn_predict_layers > 1:
+            # The MTP loss scores t+2 labels with one masked boundary site per
+            # row; a deeper chain would train a degenerate objective.
+            raise ValueError(
+                f"bailing_v3 supports at most one MTP layer, got num_nextn_predict_layers={config.num_nextn_predict_layers}"
+            )
+        # TODO(agent): reference partitions, and rollout partitions without
+        # `runtime.speculative_draft_tokens`, still build, load, and
+        # policy-sync these layers they never execute; gate on worker role.
+        self.mtp_layers = (
+            nn.ModuleList(
+                BailingMTPLayer(config, config.num_hidden_layers + i) for i in range(config.num_nextn_predict_layers)
+            )
+            if config.num_nextn_predict_layers > 0 and config.mtp_layers_enabled
+            else None
+        )
+        if config.num_nextn_predict_layers > 0 and not config.mtp_layers_enabled:
+            log_once(
+                "bailing_v3_mtp_layers_skipped",
+                "checkpoint ships MTP layers that are not built; set runtime.mtp_loss_scale or "
+                "runtime.speculative_draft_tokens to use them (checkpoints saved from this model omit them)",
+                level=logging.INFO,
+            )
+        # Set by `enable_mtp_draft`; only then do MTP layers get KV caches.
+        self.mtp_draft_enabled = False
         self.norm = RMSNorm(config.hidden_size, config.rms_norm_eps)
         # Bailing V3 checkpoints use an untied fp32 LM head. Keep the logits
         # projection in fp32 to match the reference implementation and avoid
@@ -1638,6 +1772,8 @@ class BailingMoeV3ForCausalLM(nn.Module):
     ) -> CausalLMOutput:
         if position_ids is None:
             position_ids = torch.arange(input_ids.shape[1], device=input_ids.device).unsqueeze(0).expand_as(input_ids)
+        if infer_meta is not None and infer_meta.tokens_per_seq > 1 and infer_meta.speculative_recurrent_states is None:
+            self._attach_speculative_buffers(infer_meta, rows=input_ids.shape[1] // infer_meta.tokens_per_seq)
         hidden_states = self.word_embeddings(input_ids)
         use_sequence_parallel = bool(train_meta is not None and train_meta.sequence_parallel)
         if use_sequence_parallel:
@@ -1647,10 +1783,104 @@ class BailingMoeV3ForCausalLM(nn.Module):
             for layer in self.layers:
                 hidden_states = layer(hidden_states, position_ids, train_meta, infer_meta)
             hidden_states = self.norm(hidden_states)
+            mtp_logits_shard = None
+            if self.mtp_layers is not None and train_meta is not None and train_meta.mtp_enabled:
+                mtp_hidden = hidden_states
+                mtp_ids = input_ids
+                for mtp_layer in self.mtp_layers:
+                    # Shift the token stream left once per MTP depth. The roll
+                    # crosses packed-row boundaries; those sites only affect
+                    # their own (masked) loss positions because each row's
+                    # final position is attended to by no later position.
+                    mtp_ids = torch.roll(mtp_ids, shifts=-1, dims=-1)
+                    mtp_embeds = self.word_embeddings(mtp_ids)
+                    if use_sequence_parallel:
+                        mtp_embeds = scatter_to_sequence_parallel_region(mtp_embeds)
+                    mtp_hidden = mtp_layer(mtp_embeds, mtp_hidden, position_ids, train_meta)
+                # TODO(agent): this holds a second full-sequence fp32 vocab
+                # shard live through backward; score MTP targets from
+                # mtp_hidden with a chunked-projection variant of
+                # packed_next_token_logprobs_from_hidden to remove the peak.
+                if self.lm_head.weight.dtype == torch.float32:
+                    mtp_hidden = mtp_hidden.float()
+                mtp_logits_shard = self.lm_head(mtp_hidden)
             logits_input = hidden_states
             if self.lm_head.weight.dtype == torch.float32:
                 logits_input = hidden_states.float()
-            return CausalLMOutput(logits_shard=self.lm_head(logits_input), hidden_states=hidden_states)
+            return CausalLMOutput(
+                logits_shard=self.lm_head(logits_input),
+                hidden_states=hidden_states,
+                mtp_logits_shard=mtp_logits_shard,
+            )
+
+    def enable_mtp_draft(self, *, max_rows: int, tokens_per_seq: int) -> None:
+        if self.mtp_layers is None:
+            raise ValueError("this checkpoint has no MTP layers to draft with")
+        self.mtp_draft_enabled = True
+        self._spec_max_rows = int(max_rows)
+        self._spec_tokens_per_seq = int(tokens_per_seq)
+        self._spec_state_buffer = None
+        self._spec_conv_buffer = None
+
+    def _attach_speculative_buffers(self, infer_meta: InferMeta, *, rows: int) -> None:
+        """Hand a verify forward its row slice of the shared KDA verify-state buffers."""
+        kda = _kda_attentions(self)
+        if not kda or self._spec_max_rows == 0:
+            return
+        if infer_meta.tokens_per_seq != self._spec_tokens_per_seq:
+            raise ValueError("verify tokens_per_seq differs from the size passed to enable_mtp_draft")
+        if self._spec_state_buffer is None or self._spec_conv_buffer is None:
+            # One buffer for every verify forward and every CUDA-graph bucket;
+            # forwards take a row slice, so buckets do not each hold a copy.
+            first = kda[0]
+            device = first.state_cache.device
+            steps = self._spec_tokens_per_seq
+            self._spec_state_buffer = torch.empty(
+                (len(kda), self._spec_max_rows, steps, first.local_heads, first.head_dim, first.v_head_dim),
+                device=device,
+                dtype=torch.float32,
+            )
+            self._spec_conv_buffer = torch.empty(
+                (len(kda), self._spec_max_rows, 3, first.local_proj_dim, first.conv_kernel_size - 1 + steps),
+                device=device,
+                dtype=self.config.dtype,
+            )
+        infer_meta.speculative_recurrent_states = self._spec_state_buffer[:, :rows]
+        infer_meta.speculative_conv_windows = self._spec_conv_buffer[:, :rows]
+
+    def mtp_draft_forward(
+        self,
+        *,
+        input_ids: torch.Tensor,
+        hidden_states: torch.Tensor,
+        position_ids: torch.Tensor,
+        infer_meta: InferMeta,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Draft with the MTP layer: embeds of the next tokens fused with the given hidden states."""
+        if self.mtp_layers is None or not self.mtp_draft_enabled:
+            raise RuntimeError("MTP drafting requires enable_mtp_draft() on a checkpoint with MTP layers")
+        mtp_hidden = self.mtp_layers[0](self.word_embeddings(input_ids), hidden_states, position_ids, None, infer_meta)
+        logits_input = mtp_hidden.float() if self.lm_head.weight.dtype == torch.float32 else mtp_hidden
+        return self.lm_head(logits_input), mtp_hidden
+
+    @torch.no_grad()
+    def commit_speculative_state(self, committed: torch.Tensor, *, infer_meta: InferMeta) -> None:
+        """Keep the KDA state and conv tail after ``committed[row]`` fed tokens of the verify forward."""
+        states, windows = infer_meta.speculative_recurrent_states, infer_meta.speculative_conv_windows
+        if states is None or windows is None or self._kda_state_cache is None or self._kda_conv_cache is None:
+            if not _kda_attentions(self):
+                return
+            raise RuntimeError("infer_meta carries no speculative KDA state to commit")
+        # CUDA-graph replays run a padded bucket; only the live rows commit.
+        live = committed.numel()
+        slots = _recurrent_cache_slots(infer_meta)[:live]
+        rows = torch.arange(live, device=committed.device)
+        self._kda_state_cache[:, slots] = states[:, rows, committed - 1].to(dtype=self._kda_state_cache.dtype)
+        kernel_tail = self._kda_conv_cache.shape[-1]
+        tail_offsets = torch.arange(kernel_tail, device=committed.device).view(1, 1, 1, 1, -1)
+        columns = committed.view(1, live, 1, 1, 1) + tail_offsets
+        tails = windows[:, :live].gather(-1, columns.expand(*windows.shape[:1], live, *windows.shape[2:4], kernel_tail))
+        self._kda_conv_cache[:, slots] = tails.to(dtype=self._kda_conv_cache.dtype)
 
     def set_kv_caches(
         self, kv_caches: list[tuple[torch.Tensor, torch.Tensor]], *, num_slots: int | None = None
@@ -1666,33 +1896,37 @@ class BailingMoeV3ForCausalLM(nn.Module):
         device = kv_caches[0][0].device if kv_caches else next(self.parameters()).device
         num_slots = int(num_slots) if num_slots is not None else (int(kv_caches[0][0].shape[0]) if kv_caches else 1)
         softmax_idx = 0
-        for layer in self.layers:
+        for layer in _infer_cache_layers(self):
             if isinstance(layer.attention, BailingSoftmaxAttention):
                 layer.attention.set_kv_cache(*kv_caches[softmax_idx])
                 softmax_idx += 1
-            elif isinstance(layer.attention, BailingKDAAttention):
-                state = torch.zeros(
-                    num_slots,
-                    layer.attention.local_heads,
-                    layer.attention.head_dim,
-                    layer.attention.v_head_dim,
-                    device=device,
-                    dtype=torch.float32,
-                )
-                conv_state = torch.zeros(
-                    num_slots,
-                    3,
-                    layer.attention.local_proj_dim,
-                    layer.attention.conv_kernel_size - 1,
-                    device=device,
-                    dtype=torch.float32,
-                )
-                layer.attention.set_state_cache(state, conv_state)
+        kda_attentions = _kda_attentions(self)
+        if kda_attentions:
+            first = kda_attentions[0]
+            self._kda_state_cache = torch.zeros(
+                len(kda_attentions),
+                num_slots,
+                first.local_heads,
+                first.head_dim,
+                first.v_head_dim,
+                device=device,
+                dtype=torch.float32,
+            )
+            self._kda_conv_cache = torch.zeros(
+                len(kda_attentions),
+                num_slots,
+                3,
+                first.local_proj_dim,
+                first.conv_kernel_size - 1,
+                device=device,
+                dtype=torch.float32,
+            )
+            _bind_kda_caches(self)
 
     @torch.no_grad()
     def prepare_infer_weights(self) -> None:
         """Prepare KDA LoRA and fused-MoE inference views."""
-        for layer in self.layers:
+        for layer in _infer_cache_layers(self):
             if isinstance(layer.attention, BailingKDAAttention):
                 layer.attention.prepare_lora_infer_weights()
             if isinstance(layer.mlp, BailingSparseMoeBlock):
@@ -1701,28 +1935,34 @@ class BailingMoeV3ForCausalLM(nn.Module):
     @torch.no_grad()
     def clear_infer_weights(self) -> None:
         """Drop KDA LoRA and fused-MoE inference views before training."""
-        for layer in self.layers:
+        for layer in _infer_cache_layers(self):
             if isinstance(layer.attention, BailingKDAAttention):
                 layer.attention.clear_lora_infer_weights()
             if isinstance(layer.mlp, BailingSparseMoeBlock):
                 layer.mlp.clear_infer_weights()
 
+    def _train_layers(self):
+        """All layers holding trainable weights: the trunk plus MTP layers."""
+        yield from self.layers
+        if self.mtp_layers is not None:
+            yield from self.mtp_layers
+
     @torch.no_grad()
     def offload_train_weights(self) -> None:
-        for layer in self.layers:
+        for layer in self._train_layers():
             if isinstance(layer.mlp, BailingSparseMoeBlock):
                 layer.mlp.experts.offload_to_cpu()
 
     @torch.no_grad()
     def onload_train_weights(self, device: torch.device) -> None:
-        for layer in self.layers:
+        for layer in self._train_layers():
             if isinstance(layer.mlp, BailingSparseMoeBlock):
                 layer.mlp.experts.onload_to_device(device)
 
     @torch.no_grad()
     def finalize_router_expert_bias(self, tp_group, dp_group) -> None:
         """Apply the per-step router-bias update on every MoE layer."""
-        for layer in self.layers:
+        for layer in self._train_layers():
             if isinstance(layer.mlp, BailingSparseMoeBlock):
                 layer.mlp.gate.finalize_expert_bias(tp_group, dp_group)
 
@@ -1731,7 +1971,7 @@ class BailingMoeV3ForCausalLM(nn.Module):
     ) -> list[tuple[torch.Tensor, torch.Tensor]]:
         """Allocate paged KV caches — only for softmax-attention layers."""
         caches = []
-        for layer in self.layers:
+        for layer in _infer_cache_layers(self):
             if not isinstance(layer.attention, BailingSoftmaxAttention):
                 continue
             k_cache = torch.empty(
@@ -1754,12 +1994,17 @@ class BailingMoeV3ForCausalLM(nn.Module):
         return caches
 
     def clear_kv_caches(self) -> None:
-        for layer in self.layers:
+        for layer in _infer_cache_layers(self):
             layer.attention.clear_kv_cache()
+        # The per-layer caches above are views of these; drop the owners too.
+        self._kda_state_cache = None
+        self._kda_conv_cache = None
+        self._spec_state_buffer = None
+        self._spec_conv_buffer = None
 
     @torch.no_grad()
     def reset_kv_caches(self) -> None:
-        for layer in self.layers:
+        for layer in _infer_cache_layers(self):
             layer.attention.reset_kv_cache()
 
     @torch.no_grad()
@@ -1776,7 +2021,7 @@ class BailingMoeV3ForCausalLM(nn.Module):
 
     @torch.no_grad()
     def offload_kv_caches(self) -> None:
-        for layer in self.layers:
+        for layer in _infer_cache_layers(self):
             attn = layer.attention
             if isinstance(attn, BailingSoftmaxAttention):
                 if attn.k_cache.numel() > 0:
@@ -1784,16 +2029,18 @@ class BailingMoeV3ForCausalLM(nn.Module):
                 if attn.v_cache.numel() > 0:
                     attn.v_cache = attn.v_cache.to(device="cpu")
                 attn.infer_backend = None
-            elif isinstance(attn, BailingKDAAttention):
-                if attn.state_cache.numel() > 0:
-                    attn.state_cache = attn.state_cache.to(device="cpu")
-                if attn.conv_cache.numel() > 0:
-                    attn.conv_cache = attn.conv_cache.to(device="cpu")
+        if self._kda_state_cache is not None and self._kda_conv_cache is not None:
+            self._kda_state_cache = self._kda_state_cache.to(device="cpu")
+            self._kda_conv_cache = self._kda_conv_cache.to(device="cpu")
+            _bind_kda_caches(self)
+        # Verify scratch holds no request state; free it and reallocate on demand.
+        self._spec_state_buffer = None
+        self._spec_conv_buffer = None
 
     @torch.no_grad()
     def onload_kv_caches(self, device: torch.device) -> bool:
         found = False
-        for layer in self.layers:
+        for layer in _infer_cache_layers(self):
             attn = layer.attention
             if isinstance(attn, BailingSoftmaxAttention):
                 if attn.k_cache.numel() > 0:
@@ -1804,15 +2051,12 @@ class BailingMoeV3ForCausalLM(nn.Module):
                     found = True
                     if attn.v_cache.device != device:
                         attn.v_cache = attn.v_cache.to(device=device)
-            elif isinstance(attn, BailingKDAAttention):
-                if attn.state_cache.numel() > 0:
-                    found = True
-                    if attn.state_cache.device != device:
-                        attn.state_cache = attn.state_cache.to(device=device)
-                if attn.conv_cache.numel() > 0:
-                    found = True
-                    if attn.conv_cache.device != device:
-                        attn.conv_cache = attn.conv_cache.to(device=device)
+        if self._kda_state_cache is not None and self._kda_conv_cache is not None:
+            found = True
+            if self._kda_state_cache.device != device:
+                self._kda_state_cache = self._kda_state_cache.to(device=device)
+                self._kda_conv_cache = self._kda_conv_cache.to(device=device)
+                _bind_kda_caches(self)
         return found
 
 
@@ -1952,6 +2196,25 @@ class BailingMoeV3Adapter(ModelAdapter):
 
     def build_policy_plan(self, model: nn.Module):
         return build_checkpoint_policy_plan(model, CHECKPOINT_SPEC)
+
+
+def _kda_attentions(model: nn.Module) -> list[BailingKDAAttention]:
+    return [layer.attention for layer in model.layers if isinstance(layer.attention, BailingKDAAttention)]
+
+
+def _bind_kda_caches(model: nn.Module) -> None:
+    """Point every KDA layer at its slice of the model's stacked recurrent caches."""
+    if model._kda_state_cache is None or model._kda_conv_cache is None:
+        return
+    for slot, attention in enumerate(_kda_attentions(model)):
+        attention.set_state_cache(model._kda_state_cache[slot], model._kda_conv_cache[slot])
+
+
+def _infer_cache_layers(model: nn.Module) -> Iterator[nn.Module]:
+    """Layers that own inference caches: the trunk, plus MTP layers when drafting."""
+    yield from model.layers
+    if model.mtp_draft_enabled and model.mtp_layers is not None:
+        yield from model.mtp_layers
 
 
 def _is_softmax_layer(config: ModelConfig, layer_idx: int) -> bool:

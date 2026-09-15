@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import multiprocessing as mp
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -9,6 +10,7 @@ import torch
 import areno.engine.runtime.common as runtime_common
 from areno.engine.api import _merge_dp_rank0_strided_results
 from areno.engine.data import RolloutOutput
+from areno.engine.protocol import _create_rendezvous_store
 from areno.engine.runtime.common import (
     _check_token_ids,
     _device_long,
@@ -18,7 +20,13 @@ from areno.engine.runtime.common import (
     split_data_pack_by_dp,
     split_list_by_dp,
 )
-from areno.engine.runtime.decode_graph import DecodeGraph, bucket_for, ceil_div
+from areno.engine.runtime.decode_graph import (
+    DecodeGraph,
+    agree_across_ranks,
+    bucket_for,
+    ceil_div,
+    graph_capture_headroom,
+)
 from areno.engine.runtime.rollout import _empty_rollout, _merge_dp_rollouts_in_input_order, _merge_rollouts
 from areno.engine.runtime.train_step import _grad_norms
 
@@ -176,6 +184,141 @@ class DecodeGraphUtilityTest(unittest.TestCase):
         )
 
         self.assertEqual(graph.recurrent_slots.tolist(), [0, 2, 4, 4])
+
+    def test_agree_across_ranks_returns_local_verdict_without_distributed(self):
+        """Single-process rollout keeps its own verdict; no collective is issued."""
+
+        device = torch.device("cpu")
+        self.assertTrue(agree_across_ranks(device, None, True))
+        self.assertFalse(agree_across_ranks(device, None, False))
+
+    def test_graph_capture_headroom_is_permissive_off_cuda(self):
+        """CPU workers never capture, so the headroom check must not query CUDA."""
+
+        self.assertEqual(graph_capture_headroom(torch.device("cpu"), 1 << 30), (True, 0))
+
+
+def _run_capture_vote(rank: int, port: int, output_queue) -> None:
+    """One gloo rank voting on capture; rank 1 reports a local failure."""
+
+    import torch.distributed as dist
+
+    # The parent process owns the server store, so both ranks join as clients.
+    store = dist.TCPStore("127.0.0.1", port, 2, is_master=False)
+    dist.init_process_group(backend="gloo", store=store, rank=rank, world_size=2)
+    try:
+        output_queue.put((rank, agree_across_ranks(torch.device("cpu"), None, rank == 0)))
+    finally:
+        dist.destroy_process_group()
+
+
+class GraphCaptureVoteTest(unittest.TestCase):
+    """A capture verdict must be unanimous or the group desynchronises."""
+
+    def test_real_gloo_capture_vote_is_unanimous(self):
+        spawn = mp.get_context("spawn")
+        output_queue = spawn.Queue()
+        store = _create_rendezvous_store("127.0.0.1", 2)
+        port = int(store.port)
+        processes = [spawn.Process(target=_run_capture_vote, args=(rank, port, output_queue)) for rank in range(2)]
+        for process in processes:
+            process.start()
+        results = dict(output_queue.get(timeout=60) for _ in processes)
+        for process in processes:
+            process.join(timeout=60)
+            self.assertEqual(process.exitcode, 0)
+
+        # Rank 0 could have captured, but rank 1 could not: both must skip, or
+        # rank 0 would replay a collective that rank 1 never joins.
+        self.assertEqual(results, {0: False, 1: False})
+
+
+class CaptureGraphOrderingTest(unittest.TestCase):
+    """The cross-rank vote has to precede warmup, which runs TP collectives."""
+
+    def _capture(self, *, headroom: bool, unanimous: bool) -> tuple[bool, list[str]]:
+        """Drive `_capture_graph` with stubs and record the order of the steps."""
+
+        from areno.engine import inference as inference_mod
+
+        calls: list[str] = []
+        # InferenceManager delegates attribute access to the worker it wraps.
+        worker = SimpleNamespace(device=torch.device("cpu"), _decode_graph_warmup_peak=1 << 20)
+        manager = inference_mod.InferenceManager(worker)
+
+        graph = SimpleNamespace(
+            warmup=lambda: calls.append("warmup") or (1 << 21),
+            capture=lambda: calls.append("capture"),
+        )
+
+        def fake_agree(device, group, local_ok):
+            del device, group
+            calls.append(f"vote({local_ok})")
+            return unanimous
+
+        with (
+            patch.object(inference_mod, "get_tp_context", lambda: SimpleNamespace(group=None, rank=1, is_rank0=False)),
+            patch.object(inference_mod, "graph_capture_headroom", lambda device, want: (headroom, 1 << 30)),
+            patch.object(inference_mod, "sync_before_graph_capture", lambda device, group: calls.append("barrier")),
+            patch.object(inference_mod, "agree_across_ranks", fake_agree),
+            # Capture only ever runs on CUDA; stub the accounting so this test
+            # does not depend on whether an earlier test initialized CUDA.
+            patch.object(torch.cuda, "memory_reserved", lambda device: 0),
+        ):
+            captured = manager._capture_graph(graph, "bucket=8")
+        return captured, calls
+
+    def test_vote_happens_before_warmup(self):
+        """Warmup all-reduces, so a rank must not enter it before the group agrees."""
+
+        captured, calls = self._capture(headroom=True, unanimous=True)
+
+        self.assertTrue(captured)
+        self.assertEqual(calls, ["barrier", "vote(True)", "warmup", "capture"])
+
+    def test_a_peer_veto_skips_warmup_entirely(self):
+        """A rank whose peer cannot capture must not run the model at all."""
+
+        captured, calls = self._capture(headroom=True, unanimous=False)
+
+        self.assertFalse(captured)
+        self.assertEqual(calls, ["barrier", "vote(True)"])
+
+    def test_local_veto_still_votes_so_peers_see_it(self):
+        """The local verdict is voted on, never acted on alone."""
+
+        captured, calls = self._capture(headroom=False, unanimous=False)
+
+        self.assertFalse(captured)
+        self.assertEqual(calls, ["barrier", "vote(False)"])
+
+    def test_capture_oom_after_the_vote_is_fatal_with_guidance(self):
+        """Past the vote there is no safe exit, so fail loudly instead of hanging."""
+
+        from areno.engine import inference as inference_mod
+
+        worker = SimpleNamespace(device=torch.device("cpu"), _decode_graph_warmup_peak=0)
+        manager = inference_mod.InferenceManager(worker)
+
+        def boom():
+            raise torch.OutOfMemoryError("CUDA out of memory. Tried to allocate 12.00 GiB")
+
+        graph = SimpleNamespace(warmup=boom, capture=lambda: None)
+
+        with (
+            patch.object(inference_mod, "get_tp_context", lambda: SimpleNamespace(group=None, rank=3, is_rank0=False)),
+            patch.object(inference_mod, "graph_capture_headroom", lambda device, want: (True, 1 << 30)),
+            patch.object(inference_mod, "sync_before_graph_capture", lambda device, group: None),
+            patch.object(inference_mod, "agree_across_ranks", lambda device, group, local_ok: True),
+            patch.object(torch.cuda, "empty_cache", lambda: None),
+            patch.object(torch.cuda, "memory_reserved", lambda device: 0),
+        ):
+            with self.assertRaises(RuntimeError) as raised:
+                manager._capture_graph(graph, "verify bucket=8 tokens_per_seq=3")
+
+        message = str(raised.exception)
+        self.assertIn("rank 3", message)
+        self.assertIn("--eager-decode", message)
 
 
 class RolloutMergeTest(unittest.TestCase):

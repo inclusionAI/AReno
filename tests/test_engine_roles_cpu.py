@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 import torch
 
 from areno.api.backend.cuda.roles import (
@@ -301,3 +302,31 @@ def test_prepare_actor_for_inference_rebuilds_weights_and_invalidates_train_stat
         ("offload_train_weights",),
     ]
     assert not worker._train_state_ready
+
+
+def test_shared_base_state_ignores_actor_mtp_layers_but_not_other_mismatches():
+    from areno.api.backend.cuda.roles import _load_shared_base_state
+
+    class _Actor(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.trunk = torch.nn.Linear(2, 2)
+            self.mtp_layers = torch.nn.ModuleList([torch.nn.Linear(2, 2)])
+
+    class _Role(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.trunk = torch.nn.Linear(2, 2)
+
+    actor, role = _Actor(), _Role()
+    _load_shared_base_state(role, actor.state_dict())
+    assert torch.equal(role.trunk.weight, actor.trunk.weight)
+
+    class _Other(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.trunk = torch.nn.Linear(2, 2)
+            self.head = torch.nn.Linear(2, 2)
+
+    with pytest.raises(RuntimeError, match="does not match the actor"):
+        _load_shared_base_state(_Other(), actor.state_dict())

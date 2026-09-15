@@ -62,7 +62,17 @@ def areno_kda_recurrent_update(
     dt_bias: torch.Tensor,
     lower_bound: float | None,
     use_qk_l2norm_in_kernel: bool = True,
+    intermediate_states: torch.Tensor | None = None,
+    intermediate_state_indices: torch.Tensor | None = None,
+    disable_state_update: bool = False,
 ) -> torch.Tensor:
+    """Recurrent KDA step over ``cu_seqlens`` segments, updating ``state`` in place.
+
+    Speculative verify passes ``intermediate_states`` shaped
+    ``(rows, steps, heads, head_dim, v_head_dim)`` to receive the state after
+    every token and ``disable_state_update=True`` to leave ``state`` untouched;
+    the caller commits the state of the last accepted token afterwards.
+    """
     return fused_sigmoid_gating_delta_rule_update(
         A_log=a_log,
         a=raw_gate,
@@ -79,6 +89,9 @@ def areno_kda_recurrent_update(
         use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
         cu_seqlens=cu_seqlens,
         is_kda=True,
+        disable_state_update=disable_state_update,
+        intermediate_states_buffer=intermediate_states,
+        intermediate_state_indices=intermediate_state_indices,
         lower_bound=lower_bound,
     )
 
