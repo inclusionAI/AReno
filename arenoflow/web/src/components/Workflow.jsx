@@ -283,6 +283,8 @@ export default function Workflow({
                 params: {
                   ...s.params,
                   [key]: value,
+                  ...(key === 'adam_8bit' && value === true ? { adam_4bit: false } : {}),
+                  ...(key === 'adam_4bit' && value === true ? { adam_8bit: false } : {}),
                 },
               }
             : s,

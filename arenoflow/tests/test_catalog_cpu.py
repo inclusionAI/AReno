@@ -166,3 +166,25 @@ def test_platform_rejects_other_model_hubs(kind):
     }
     with pytest.raises(ValueError, match="Only Hugging Face"):
         plan(request, catalog())
+
+
+@pytest.mark.parametrize("algorithm", ["sft", "dpo", "grpo", "gspo", "ppo"])
+def test_adam_4bit_default_and_explicit_override(metadata, algorithm):
+    request = {
+        "model": {"adapter": "qwen3", "checkpoint": "Qwen/Qwen3-0.6B"},
+        "stages": [{"algo": algorithm, "params": {"dataset_path": "data"}}],
+    }
+    assert metadata["presets"][algorithm]["adam_4bit"] is True
+    assert "--adam-4bit" in plan(request, metadata)["manifest"]["stages"][0]["args"]
+    request["stages"][0]["params"]["adam_4bit"] = False
+    assert "--adam-4bit" not in plan(request, metadata)["manifest"]["stages"][0]["args"]
+
+
+def test_adam_8bit_override_disables_default_4bit(metadata, request_config):
+    params = request_config["stages"][0]["params"]
+    params["adam_8bit"] = True
+    args = plan(request_config, metadata)["manifest"]["stages"][0]["args"]
+    assert "--adam-8bit" in args and "--adam-4bit" not in args
+    params["adam_4bit"] = True
+    with pytest.raises(ValueError, match="cannot both"):
+        plan(request_config, metadata)

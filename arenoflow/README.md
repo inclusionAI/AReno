@@ -346,3 +346,16 @@ the test request has a 120-second timeout.
 Modal log streams reconnect after interruption. If the local control plane is
 disconnected, task details explicitly warn that the displayed state may be stale.
 Reconnect Modal in Settings to reattach to existing remote tasks.
+
+
+New training stages enable `adam_4bit` in platform presets. This remains editable;
+selecting Adam 8-bit disables Adam 4-bit. Explicitly enabling both is rejected.
+The core AReno CLI defaults are unchanged.
+
+Every script-generation request includes complete repository demonstrations for
+math (loader and reward), tic-tac-toe (loader, agent, reward and game helpers),
+and Alpaca SFT (loader), together with illustrative input records and guidance on
+algorithm-specific use. Examples are read from this checkout rather than copied
+into a second implementation. The LLM still generates the selected scripts in one
+request. Its instructions require self-contained modules, the real cached dataset,
+and explicit errors for missing columns or empty loader output.

@@ -74,6 +74,10 @@ def plan(request, catalog, job_id="preview"):
             if algo not in {a["id"] for a in catalog["algorithms"]}:
                 raise ValueError("Select a registered algorithm")
             params = {**catalog["presets"].get(algo, {}), **stage.get("params", {}), "algo": algo}
+            if params.get("adam_8bit") and "adam_4bit" not in stage.get("params", {}):
+                params["adam_4bit"] = False
+            if params.get("adam_4bit") and params.get("adam_8bit"):
+                raise ValueError("Adam 4-bit and Adam 8-bit cannot both be enabled")
             incompatible = [
                 p["name"] for p in catalog["train"] if algo not in p["algorithms"] and params.get(p["name"]) is not None
             ]
