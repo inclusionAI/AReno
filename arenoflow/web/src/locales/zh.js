@@ -745,4 +745,8 @@ export default {
   'Sample not cached': '样本未缓存',
   'Download sample again': '重新下载样本',
   'Sample download failed; retry from Dataset Manager': '样本下载失败，请在数据集管理中重试',
+  Cached: '已缓存',
+  Downloading: '下载中',
+  'Download failed': '下载失败',
+  'Not cached': '未缓存',
 };

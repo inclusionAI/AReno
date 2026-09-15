@@ -184,12 +184,12 @@ export default function Library({ type, notify }) {
                     <small>
                       {t(
                         record.sample_status === 'ready'
-                          ? 'Sample ready'
+                          ? 'Cached'
                           : record.sample_status === 'downloading'
-                            ? 'Downloading sample…'
+                            ? 'Downloading'
                             : record.sample_status === 'failed'
-                              ? 'Sample download failed'
-                              : 'Sample not cached',
+                              ? 'Download failed'
+                              : 'Not cached',
                       )}
                     </small>
                   )}
@@ -315,12 +315,12 @@ export default function Library({ type, notify }) {
                     )}
                     {t(
                       savedDataset.sample_status === 'ready'
-                        ? 'Sample ready'
+                        ? 'Cached'
                         : savedDataset.sample_status === 'downloading'
-                          ? 'Downloading sample…'
+                          ? 'Downloading'
                           : savedDataset.sample_status === 'failed'
-                            ? 'Sample download failed'
-                            : 'Sample not cached',
+                            ? 'Download failed'
+                            : 'Not cached',
                     )}
                     {savedDataset.sample_status !== 'downloading' && (
                       <Button
@@ -396,7 +396,6 @@ export default function Library({ type, notify }) {
                       <input
                         required
                         value={draft.source}
-                        placeholder={t('gsm8k:main')}
                         onChange={(e) => edit('source', e.target.value)}
                       />
                     </label>
