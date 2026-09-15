@@ -6,10 +6,8 @@ import csv
 import itertools
 import json
 import math
-import os
 import urllib.error
 import urllib.request
-from urllib.parse import urlencode
 
 from arenoflow.assets import referenced_uploads
 from arenoflow.datasets import find
@@ -31,29 +29,6 @@ def request_json(url, token=None):
         ) from None
     except (urllib.error.URLError, TimeoutError):
         raise ValueError("Dataset sample request failed or timed out; retry or paste a sample") from None
-
-
-def remote_rows(dataset):
-    parts = dataset["source"].split(":")
-    if len(parts) > 3 or not parts[0]:
-        raise ValueError("Use repository, repository:config, or repository:config:split")
-    repo, config, split = parts[0], parts[1] if len(parts) > 1 else "", parts[2] if len(parts) > 2 else "train"
-    split = split or "train"
-    if dataset.get("model_hub", "hf") != "hf":
-        raise ValueError("Only Hugging Face datasets are supported")
-    token = os.environ.get("HF_TOKEN")
-    base = "https://datasets-server.huggingface.co"
-    available = request_json(base + "/splits?" + urlencode({"dataset": repo}), token).get("splits", [])
-    choices = [item for item in available if item["split"] == split and (not config or item["config"] == config)]
-    if not choices:
-        raise ValueError("Dataset config or split is unavailable; check the dataset reference")
-    choices.sort(key=lambda item: (item["config"] not in ("default", "main"), item["config"]))
-    if not config and len(choices) > 1 and choices[0]["config"] not in ("default", "main"):
-        raise ValueError("Dataset has multiple configs; specify repository:config:split")
-    selected = choices[0]
-    query = {"dataset": repo, "config": selected["config"], "split": split, "offset": 0, "length": ROWS}
-    result = request_json(base + "/rows?" + urlencode(query), token)
-    return [r["row"] for r in result.get("rows", [])[:ROWS]], {"config": selected["config"], "split": split}
 
 
 def local_rows(file):
@@ -120,7 +95,15 @@ def dataset_sample(store, identifier):
         file = referenced_uploads({"source": dataset["source"]}, store.directory)[0][0]
         rows = local_rows(file)
     else:
-        rows, metadata = remote_rows(dataset)
+        from arenoflow.dataset_cache import download_repository
+
+        files, metadata = download_repository(dataset, store.directory)
+        metadata = {key: value for key, value in metadata.items() if key != "files"}
+        rows = []
+        for file in files:
+            rows.extend(local_rows(file)[: ROWS - len(rows)])
+            if len(rows) >= ROWS:
+                break
     if not rows:
         raise ValueError("Dataset contains no sample records")
     rows = preview_value(rows)

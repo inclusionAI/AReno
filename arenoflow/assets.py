@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
+import re
 from pathlib import Path
 
 MAX_UPLOAD_BYTES = 16 * 1024 * 1024
@@ -59,6 +61,20 @@ def referenced_uploads(manifest: dict, directory: Path) -> list[tuple[Path, str]
         elif isinstance(value, list):
             for item in value:
                 visit(item)
+        elif isinstance(value, str) and value.startswith("/artifacts/datasets/"):
+            key = value.removeprefix("/artifacts/datasets/")
+            if not re.fullmatch(r"[0-9a-f]{64}", key):
+                raise ValueError("Invalid cached dataset reference")
+            folder = directory / "dataset_cache" / key
+            marker = folder.with_suffix(".json")
+            if not marker.is_file():
+                raise ValueError("Dataset cache is missing; download it again")
+            names = json.loads(marker.read_text())["files"]
+            for name in names:
+                local = folder / name
+                if local.parent != folder or not local.is_file():
+                    raise ValueError("Dataset cache is incomplete; download it again")
+                found.add((local, f"/datasets/{key}/{name}"))
         elif isinstance(value, str) and value.startswith("/artifacts/uploads/"):
             # Loader function syntax may include a :function suffix.
             filename = value.removeprefix("/artifacts/uploads/").split(":")[0]

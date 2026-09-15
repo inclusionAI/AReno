@@ -1,4 +1,10 @@
 export default {
+  'Refresh cached sample': '刷新缓存样本',
+  'Repository data downloads locally. Training uploads the cached data; the dataset source does not change the model source.':
+    '仓库数据在本地下载，训练时上传缓存数据；数据集来源不会改变模型来源。',
+  'Model repositories use Hugging Face. Dataset sources are configured separately.':
+    '模型使用 Hugging Face，数据集来源单独配置。',
+
   'Pre-download uses Hugging Face and the first training stage or deployment model configuration.':
     '预下载使用 Hugging Face，以及训练首阶段或部署的模型配置。',
   'Downloads original Hugging Face weights on CPU into the shared Modal Volume. Modal usage charges apply.':

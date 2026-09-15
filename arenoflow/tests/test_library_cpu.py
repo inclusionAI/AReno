@@ -67,7 +67,15 @@ def test_stage_hook_types_and_code_snapshot(tmp_path):
     loader = save_function(store, {"name": "Loader", "kind": "dataset_loader", "source": LOADER})
     reward = save_function(store, {"name": "Reward", "kind": "reward", "source": REWARD})
     agent = save_function(store, {"name": "Agent", "kind": "agentic", "source": AGENT})
-    dataset = save_dataset(store, {"name": "Data", "source": "org/data", "loader_id": loader["id"]})
+    dataset = save_dataset(
+        store,
+        {
+            "name": "Data",
+            "source_type": "upload",
+            "source": upload(store, "data.jsonl", b"{}\n")["path"],
+            "loader_id": loader["id"],
+        },
+    )
     request = {
         "model": {"adapter": "qwen3", "checkpoint": "Qwen/Qwen3-0.6B"},
         "stages": [
@@ -83,7 +91,7 @@ def test_stage_hook_types_and_code_snapshot(tmp_path):
     resolved = resolve_request(request, store)
     prepared = plan(resolved, catalog())
     files = referenced_uploads(prepared["manifest"], store.directory)
-    assert len(files) == 3
+    assert len(files) == 4
     assert "reward_fn_path" not in prepared["manifest"]["stages"][0]["params"]
     assert "--agent-fn" in prepared["commands"][1]
     old = resolved["stages"][1]["params"]["reward_fn_path"]
@@ -164,7 +172,9 @@ def test_loader_is_selected_per_training_stage(tmp_path):
     store = Store(tmp_path)
     one = save_function(store, {"name": "Loader one", "kind": "dataset_loader", "source": LOADER})
     two = save_function(store, {"name": "Loader two", "kind": "dataset_loader", "source": LOADER + "\n# alternative\n"})
-    dataset = save_dataset(store, {"name": "Shared", "source": "org/data"})
+    dataset = save_dataset(
+        store, {"name": "Shared", "source_type": "upload", "source": upload(store, "data.jsonl", b"{}\n")["path"]}
+    )
     resolved = resolve_request(
         {
             "stages": [
