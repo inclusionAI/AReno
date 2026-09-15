@@ -61,3 +61,10 @@ def test_cuda_rollout_reserves_full_agentic_context_capacity():
     options = rollout_options(ctx, params)
 
     assert options["max_prompt_len"] == 4744
+
+
+def test_cuda_rollout_preserves_explicit_seed_and_unseeded_default():
+    ctx = SimpleNamespace(tokenizer=_StructuredOutputTokenizer(), eos_token_ids=(106,), custom_config=CudaConfig())
+    for seed in (None, 0, 41):
+        options = rollout_options(ctx, SamplingParams(seed=seed))
+        assert options["sampling_params"].seed == seed
