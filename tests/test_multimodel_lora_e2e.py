@@ -26,6 +26,23 @@ class _Case:
 
 
 _CASES = {
+    "gemma4": _Case(
+        model_env="ARENO_E2E_GEMMA4_MODEL",
+        targets=(
+            "layers.0.self_attn.q_proj",
+            "layers.0.self_attn.k_proj",
+            "layers.0.self_attn.v_proj",
+            "layers.0.self_attn.o_proj",
+            "layers.4.self_attn.q_proj",
+            "layers.4.self_attn.k_proj",
+            "layers.4.self_attn.v_proj",
+            "layers.4.self_attn.o_proj",
+            "layers.0.mlp.gate_proj",
+            "layers.0.mlp.up_proj",
+            "layers.0.mlp.down_proj",
+        ),
+        changed_fragments=(".self_attn.", ".mlp."),
+    ),
     "minicpmv46": _Case(
         model_env="ARENO_E2E_MINICPMV46_MODEL",
         targets=(
