@@ -275,6 +275,7 @@ def initialize_lora(model: nn.Module, config: LoraConfig, *, seed: int) -> Adapt
         "qwen3_5_vl",
         "qwen3_5_moe",
         "qwen3_5_vl_moe",
+        "minicpmv46",
     }
     if model_type not in supported_model_types:
         raise ValueError(
