@@ -182,3 +182,73 @@ def test_incomplete_llm_batch_rejected(monkeypatch, setup):
             app.catalog,
         )
     assert not app.controller.store.functions()
+
+
+def test_demonstrations_include_complete_repository_sources_and_valid_board():
+    import ast
+    import runpy
+
+    from arenoflow.catalog import ROOT
+    from arenoflow.script_context import demonstration_context
+
+    demos = demonstration_context()
+    assert [demo["name"] for demo in demos] == ["math", "tictactoe", "sft"]
+    for demo in demos:
+        for file in demo["files"]:
+            assert file["source"] == (ROOT / file["reference"]).read_text()
+            ast.parse(file["source"])
+    game = runpy.run_path(str(ROOT / "examples/agentic/tictactoe/game.py"))
+    board = game["normalize_board"](demos[1]["sample"]["board"])
+    assert game["next_player"](board) == "X" and not game["is_terminal"](board)
+
+
+def test_sft_generation_includes_three_demos_without_requesting_reward(monkeypatch, setup):
+    app, dataset = setup
+    calls = []
+    source = "def load_training_dataset(path, **kwargs):\n    return kwargs['default_loader'](path)\n"
+
+    class Client:
+        def open(self, request, timeout):
+            payload = json.loads(request.data)
+            calls.append(payload)
+            context = json.loads(payload["messages"][1]["content"])
+            assert context["demonstrations"] == ["math", "tictactoe", "sft"]
+            assert context["scripts"] == [{"kind": "dataset_loader", "entrypoint": "load_training_dataset"}]
+            system = payload["messages"][0]["content"]
+            assert "SFT must not acquire reward or agent behavior" in system
+            assert "inline any required helpers" in system
+            for filename in (
+                "examples/math/dataset_loader.py",
+                "examples/agentic/tictactoe/run_agent.py",
+                "examples/sft/alpaca/dataset_loader.py",
+            ):
+                assert filename in system
+            return io.BytesIO(
+                json.dumps(
+                    {
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": json.dumps(
+                                        {"scripts": [{"kind": "dataset_loader", "name": "Loader", "source": source}]}
+                                    )
+                                }
+                            }
+                        ]
+                    }
+                ).encode()
+            )
+
+    monkeypatch.setattr("arenoflow.llm.urllib.request.build_opener", lambda *args: Client())
+    app.llm.generate(
+        {
+            "kinds": ["dataset_loader"],
+            "algorithm": "sft",
+            "dataset_id": dataset["id"],
+            "sample": "{}",
+            "prompt": "Normalize instruction/input/output",
+        },
+        app.controller.store,
+        app.catalog,
+    )
+    assert len(calls) == 1

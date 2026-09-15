@@ -160,6 +160,7 @@ def presets(schema: list[dict]) -> dict:
         max_prompt_tokens=1024,
         max_new_tokens=1024,
         activation_checkpointing=True,
+        adam_4bit=True,
         save_interval=25,
         model_hub="hf",
         attn_backend="native",

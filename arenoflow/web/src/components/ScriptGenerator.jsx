@@ -257,6 +257,11 @@ export default function ScriptGenerator({ datasets, onSaved }) {
           )}
         </div>
       </fieldset>
+      <p className="muted">
+        {t(
+          'Generation includes repository demos for math, tic-tac-toe and SFT as reference context.',
+        )}
+      </p>
       {error && <Notice error>{error}</Notice>}
       {result && (
         <section>

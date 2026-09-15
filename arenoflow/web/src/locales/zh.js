@@ -1,4 +1,7 @@
 export default {
+  'Generation includes repository demos for math, tic-tac-toe and SFT as reference context.':
+    '生成时会附带仓库中的 math、tic-tac-toe 和 SFT 示例作为参考上下文。',
+
   'Modal is disconnected. Displayed status may be outdated; reconnect in Settings to resume monitoring.':
     'Modal 未连接，当前状态可能已过期。请在设置中重新连接以恢复监控。',
 
