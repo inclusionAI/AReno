@@ -16,6 +16,31 @@ import { Badge, Button, Empty, External, Notice, PageHeader } from './UI';
 import { Chart } from './Chart';
 import { RunEstimates } from './Estimates';
 const terminal = ['succeeded', 'failed', 'cancelled'];
+const phaseLabels = {
+  resolving_image: 'Resolving image',
+  uploading_data: 'Uploading data',
+  preparing_resources: 'Preparing Modal resources',
+  building_image: 'Building image',
+  starting_sandbox: 'Starting sandbox',
+  starting_runtime: 'Starting runtime',
+  preparing_data: 'Preparing training data',
+  loading_model: 'Loading model',
+  caching_model: 'Preparing original model cache',
+  training: 'Training',
+  saving_checkpoint: 'Saving checkpoint',
+};
+function computeLabel(job) {
+  if (job.kind === 'image_build') return t('Container builder');
+  if (job.kind === 'model_download') return t('CPU only');
+  return `${job.resources.count} × ${job.resources.gpu}`;
+}
+function jobPhase(job) {
+  return ['starting', 'running'].includes(job.status) ? phaseLabels[job.phase] : null;
+}
+function JobStatus({ job }) {
+  return <Badge status={job.status}>{jobPhase(job) ? t(jobPhase(job)) : undefined}</Badge>;
+}
+
 export function JobList({ jobs, deployments = false }) {
   const list = jobs.filter((j) => (j.kind === 'deployment') === deployments);
   return (
@@ -70,14 +95,12 @@ export function JobList({ jobs, deployments = false }) {
                     </a>
                   </td>
                   <td>
-                    <Badge status={job.status} />
+                    <JobStatus job={job} />
                   </td>
                   <td>
                     <span className="model-cell">{job.manifest.model.checkpoint}</span>
                   </td>
-                  <td>
-                    {job.resources.count} × {job.resources.gpu}
-                  </td>
+                  <td>{computeLabel(job)}</td>
                   <td>{duration(job.started_at, job.finished_at)}</td>
                   <td>{money(job.estimate?.planned_cost)}</td>
                 </tr>
@@ -99,6 +122,7 @@ export function JobDetail({ id, onDeploy, notify }) {
   const cursor = useRef(0);
   const [metricStage, setMetricStage] = useState(null);
   useEffect(() => {
+    let first = true;
     let cancelled = false,
       timer;
     const abort = new AbortController();
@@ -112,6 +136,10 @@ export function JobDetail({ id, onDeploy, notify }) {
           api(`/jobs/${id}/events?after=${cursor.current}`, undefined, abort.signal),
         ]);
         if (cancelled) return;
+        if (first) {
+          setTab(['image_build', 'model_download'].includes(record.kind) ? 'logs' : 'metrics');
+          first = false;
+        }
         setJob(record);
         setError('');
         if (more.length) {
@@ -173,7 +201,7 @@ export function JobDetail({ id, onDeploy, notify }) {
           </div>
         }
       >
-        <Badge status={job.status} />{' '}
+        <JobStatus job={job} />{' '}
         <span className="detail-model">{job.manifest.model.checkpoint}</span>
       </PageHeader>
       {(error || job.error) && <Notice error>{error || job.error}</Notice>}
@@ -189,9 +217,7 @@ export function JobDetail({ id, onDeploy, notify }) {
       <div className="run-stats">
         <div>
           <span>{t('Compute')}</span>
-          <b>
-            {job.resources.count} × {job.resources.gpu}
-          </b>
+          <b>{computeLabel(job)}</b>
         </div>
         <div>
           <span>{t('Elapsed')}</span>
@@ -206,6 +232,22 @@ export function JobDetail({ id, onDeploy, notify }) {
           <a href="#billing">{t('Live Modal billing ↗')}</a>
         </div>
       </div>
+      {events.some((event) => event.type === 'phase') && (
+        <section className="panel">
+          <h2>{t('Execution phases')}</h2>
+          <ol className="execution-phases">
+            {events
+              .filter((event) => event.type === 'phase')
+              .slice(-40)
+              .map((event, index) => (
+                <li key={event.cursor ?? index}>
+                  <time>{time(event.time)}</time>
+                  <span>{t(phaseLabels[event.phase] || event.phase)}</span>
+                </li>
+              ))}
+          </ol>
+        </section>
+      )}
       {job.kind === 'training' && (
         <div className="panel execution-flow">
           {job.manifest.stages.map((stage, i) => {
@@ -222,7 +264,11 @@ export function JobDetail({ id, onDeploy, notify }) {
                     {t('STAGE')} {i + 1}
                   </small>
                   <b>{stage.algo.toUpperCase()}</b>
-                  <Badge status={status} />
+                  <Badge status={status}>
+                    {i === job.stage && jobPhase(job) && status !== 'succeeded'
+                      ? t(jobPhase(job))
+                      : undefined}
+                  </Badge>
                 </div>
                 {i < job.manifest.stages.length - 1 && <ArrowRight size={18} />}
               </div>
@@ -268,7 +314,12 @@ export function JobDetail({ id, onDeploy, notify }) {
         </section>
       )}
       <div className="tabs" role="tablist" aria-label={t('Run views')}>
-        {['metrics', 'logs', 'configuration', 'artifacts'].map((view) => (
+        {(job.kind === 'image_build'
+          ? ['logs', 'configuration']
+          : job.kind === 'model_download'
+            ? ['logs', 'configuration', 'artifacts']
+            : ['metrics', 'logs', 'configuration', 'artifacts']
+        ).map((view) => (
           <button key={view} role="tab" aria-selected={tab === view} onClick={() => setTab(view)}>
             {t(view)}
           </button>
@@ -378,7 +429,11 @@ export function JobDetail({ id, onDeploy, notify }) {
               </Button>
             </>
           ) : (
-            <p className="muted">{t('No checkpoint has been reported yet.')}</p>
+            <p className="muted">
+              {job.kind === 'model_download'
+                ? t('Original model downloads are stored in the shared model cache.')
+                : t('No checkpoint has been reported yet.')}
+            </p>
           )}
           <p className="muted">
             {t('Checkpoint and TensorBoard files stay on the volume after compute stops.')}

@@ -2334,3 +2334,29 @@ html:lang(zh-CN) .hero-copy h1 {
     width: 100%;
   }
 }
+
+.execution-phases {
+  display: grid;
+  gap: 10px;
+  padding-left: 20px;
+  margin: 16px 0 0;
+  font-size: 12px;
+}
+.execution-phases li {
+  overflow-wrap: anywhere;
+}
+.execution-phases time {
+  color: var(--secondary);
+  margin-right: 16px;
+}
+
+.preparation-actions {
+  border-top: 1px solid var(--line);
+  padding-top: 20px;
+}
+.preparation-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin: 8px 0;
+}

@@ -96,13 +96,20 @@ class ModalProvider:
             for local, remote in files:
                 batch.put_file(local, remote)
 
-    def start(self, manifest, resources, endpoint_key=None):
+    def start(self, manifest, resources, endpoint_key=None, on_phase=None):
+        progress = on_phase or (lambda phase: None)
         modal = self.modal
+        progress("preparing_resources")
         app = modal.App.lookup("arenoflow", create_if_missing=True, client=self.client)
         volume = modal.Volume.from_name("arenoflow-artifacts", create_if_missing=True, client=self.client)
         image = modal.Image.from_registry(manifest["image"]).add_local_file(
             Path(__file__).with_name("remote.py"), "/opt/arenoflow/remote.py"
         )
+        progress("building_image")
+        image.build(app)
+        if manifest["kind"] == "image_build":
+            return None
+        progress("starting_sandbox")
         secrets = []
         if endpoint_key:
             secrets.append(modal.Secret.from_dict({"ARENOFLOW_ENDPOINT_KEY": endpoint_key}))
@@ -114,7 +121,7 @@ class ModalProvider:
             encoded,
             app=app,
             image=image,
-            gpu=f"{resources['gpu']}:{resources['count']}",
+            gpu=f"{resources['gpu']}:{resources['count']}" if resources.get("gpu") else None,
             cpu=resources["cpu"],
             memory=resources["memory_gib"] * 1024,
             timeout=resources["timeout_seconds"],
@@ -125,6 +132,8 @@ class ModalProvider:
             env={
                 "PYTHONUNBUFFERED": "1",
                 "HF_HOME": "/artifacts/cache/hf",
+                "HF_HUB_CACHE": "/artifacts/cache/hf/hub",
+                "HF_DATASETS_CACHE": "/artifacts/cache/hf/datasets",
                 "MODELSCOPE_CACHE": "/artifacts/cache/modelscope",
             },
             encrypted_ports=[8080] if manifest["kind"] == "deployment" else [],

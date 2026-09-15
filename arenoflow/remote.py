@@ -21,8 +21,41 @@ def emit(kind, **data):
     print(PREFIX + json.dumps(dict(type=kind, time=time.time(), **data), allow_nan=False), flush=True)
 
 
+def cache_model_refs(args):
+    """Resolve original model snapshots in the mounted Volume before starting AReno."""
+    result = list(args)
+    hub = result[result.index("--model-hub") + 1] if "--model-hub" in result else "modelscope"
+    resolved = {}
+    for index, option in enumerate(result[:-1]):
+        if option not in ("--ckpt", "--model-path", "--ref-ckpt", "--reward-ckpt", "--critic-ckpt"):
+            continue
+        reference = result[index + 1]
+        if Path(reference).exists():
+            continue
+        if reference.startswith("/"):
+            raise FileNotFoundError("The selected checkpoint is not available on the mounted Volume")
+        if reference not in resolved:
+            emit("phase", phase="caching_model")
+            emit("model_cache", model=reference, hub=hub, status="checking")
+            if hub == "hf":
+                from huggingface_hub import snapshot_download
+
+                directory = os.environ.get("HF_HUB_CACHE", "/artifacts/cache/hf/hub")
+            elif hub == "modelscope":
+                from modelscope import snapshot_download
+
+                directory = os.environ.get("MODELSCOPE_CACHE", "/artifacts/cache/modelscope")
+            else:
+                raise ValueError("Unsupported model hub")
+            resolved[reference] = snapshot_download(reference, cache_dir=directory)
+            emit("model_cache", model=reference, hub=hub, status="ready")
+        result[index + 1] = resolved[reference]
+    return result
+
+
 def stage_main(stage):
-    args = stage["args"]
+    args = cache_model_refs(stage["args"])
+    emit("phase", phase="preparing_data")
     import areno.api
     import areno.api.metrics as metrics
     from areno import Trainer
@@ -32,7 +65,10 @@ def stage_main(stage):
         """Save the final successful state before the CLI releases its backend."""
 
         def init(self):
+            emit("phase", phase="loading_model")
             super().init()
+            emit("phase", phase="training")
+            emit("stage", index=stage["index"], status="running", algo=stage["algo"])
             self.flow_initialized = True
 
         def close(self):
@@ -40,6 +76,7 @@ def stage_main(stage):
             self.flow_initialized = False
             try:
                 if initialized and sys.exc_info()[0] is None:
+                    emit("phase", phase="saving_checkpoint")
                     self.save_checkpoint(str(Path(stage["save_path"]) / "final"))
             finally:
                 super().close()
@@ -133,8 +170,14 @@ def gateway():
 
 def main(manifest):
     emit("runtime", image=manifest["image"], source_revision=manifest["revision"])
+    if manifest["kind"] == "model_download":
+        cache_model_refs(["--model-path", manifest["model"]["checkpoint"], "--model-hub", manifest["model_hub"]])
+        emit("complete", model=manifest["model"]["checkpoint"])
+        return
     if manifest["kind"] == "deployment":
-        args = manifest["serve_args"]
+        emit("phase", phase="loading_model")
+        args = cache_model_refs(manifest["serve_args"])
+        emit("phase", phase="loading_model")
         proc = subprocess.Popen(["areno", "serve", *args])
         for _ in range(900):
             if proc.poll() is not None:
@@ -160,7 +203,8 @@ def main(manifest):
         args = [previous if arg == "__previous__" else arg for arg in stage["args"]]
         if None in args:
             raise RuntimeError("A previous checkpoint is required")
-        emit("stage", index=index, status="running", algo=stage["algo"])
+        emit("stage", index=index, status="starting", algo=stage["algo"])
+        emit("phase", phase="preparing_data")
         proc = subprocess.Popen(
             [sys.executable, "-u", __file__, "stage", json.dumps({**stage, "args": args, "index": index})],
             stderr=subprocess.STDOUT,

@@ -39,7 +39,10 @@ class FakeProvider:
     def check(self):
         pass
 
-    def start(self, manifest, resources, endpoint_key):
+    def start(self, manifest, resources, endpoint_key, on_phase=None):
+        if on_phase:
+            on_phase("building_image")
+            on_phase("starting_sandbox")
         self.manifest = manifest
         self.endpoint_key = endpoint_key
         return self.sandbox
@@ -63,9 +66,14 @@ def test_job_completion_and_persistence(tmp_path):
         time.sleep(0.01)
     final = store.get(record["id"])
     assert final["status"] == "succeeded"
+    assert [e["phase"] for e in store.events(record["id"]) if e["type"] == "phase"][:3] == [
+        "resolving_image",
+        "building_image",
+        "starting_sandbox",
+    ]
     assert final["checkpoint"] == "/artifacts/final"
     assert final["sandbox_id"] == "sb-test"
-    assert store.events(record["id"])[0]["tag"] == "train/loss"
+    assert any(event.get("tag") == "train/loss" for event in store.events(record["id"]))
     assert Store(tmp_path).get(record["id"]) == final
     assert "fake-secret" not in json.dumps(store.jobs())
 
@@ -212,7 +220,7 @@ def test_final_checkpoint_saved_only_on_success(tmp_path, monkeypatch):
     modules["areno.cli.train"].train_command = SimpleNamespace(main=main)
     for name, module in modules.items():
         monkeypatch.setitem(sys.modules, name, module)
-    remote.stage_main({"args": [], "save_path": str(tmp_path)})
+    remote.stage_main({"args": [], "save_path": str(tmp_path), "index": 0, "algo": "sft"})
     assert calls == [("save", str(tmp_path / "final")), ("close",), ("close",)]
 
 
@@ -245,3 +253,113 @@ def test_same_credentials_can_reconcile_active_jobs(tmp_path):
     assert controller.connect("token-id", "token-secret") == {"connected": True}
     with pytest.raises(ValueError, match="switching"):
         controller.connect("another-id", "another-secret")
+
+
+def test_original_model_snapshots_use_volume_cache_and_reuse_refs(monkeypatch, tmp_path):
+    import sys
+    from types import SimpleNamespace
+
+    from arenoflow.remote import cache_model_refs
+
+    calls = []
+
+    def download(reference, cache_dir):
+        calls.append((reference, cache_dir))
+        return str(tmp_path / "snapshot")
+
+    monkeypatch.setitem(sys.modules, "huggingface_hub", SimpleNamespace(snapshot_download=download))
+    monkeypatch.setenv("HF_HUB_CACHE", "/artifacts/cache/hf/hub")
+    result = cache_model_refs(["--ckpt", "org/model", "--ref-ckpt", "org/model", "--model-hub", "hf"])
+    assert calls == [("org/model", "/artifacts/cache/hf/hub")]
+    assert result[1] == result[3] == str(tmp_path / "snapshot")
+    assert cache_model_refs(["--ckpt", str(tmp_path)]) == ["--ckpt", str(tmp_path)]
+
+
+def test_modelscope_original_weights_use_volume(monkeypatch, tmp_path):
+    import sys
+    from types import SimpleNamespace
+
+    from arenoflow.remote import cache_model_refs
+
+    calls = []
+
+    def download(reference, cache_dir):
+        calls.append((reference, cache_dir))
+        return str(tmp_path)
+
+    monkeypatch.setitem(sys.modules, "modelscope", SimpleNamespace(snapshot_download=download))
+    monkeypatch.setenv("MODELSCOPE_CACHE", "/artifacts/cache/modelscope")
+    cache_model_refs(["--model-path", "org/model", "--model-hub", "modelscope"])
+    assert calls == [("org/model", "/artifacts/cache/modelscope")]
+
+
+@pytest.mark.parametrize("kind", ["image_build", "model_download"])
+def test_preparation_lifecycle_without_training_inputs(tmp_path, kind):
+    class PreparationProvider(FakeProvider):
+        def start(self, manifest, resources, endpoint_key, on_phase=None):
+            assert resources["gpu"] is None and resources["count"] == 0
+            assert manifest["stages"] == []
+            on_phase("building_image")
+            if manifest["kind"] == "image_build":
+                return None
+            sandbox = FakeSandbox()
+            sandbox.stdout = []
+            return sandbox
+
+    controller = Controller(Store(tmp_path), catalog(), PreparationProvider, lambda x: x)
+    controller.connect("id", "secret")
+    controller._thread = lambda *_args: None
+    record = controller.submit({"kind": kind, "model": {"adapter": "qwen3", "checkpoint": "Qwen/Qwen3-0.6B"}})
+    controller._start(record["id"], controller.provider, "")
+    job = controller.store.get(record["id"])
+    assert job["status"] == "succeeded"
+    assert bool(job["sandbox_id"]) == (kind == "model_download")
+    assert job["finished_at"] >= job["started_at"]
+
+
+def test_pre_download_only_resolves_original_model(monkeypatch):
+    calls = []
+    monkeypatch.setattr(remote, "cache_model_refs", lambda args: calls.append(args))
+    remote.main(
+        {
+            "kind": "model_download",
+            "image": "image",
+            "revision": "rev",
+            "model": {"checkpoint": "Qwen/Qwen3-0.6B"},
+            "model_hub": "hf",
+        }
+    )
+    assert calls == [["--model-path", "Qwen/Qwen3-0.6B", "--model-hub", "hf"]]
+
+
+@pytest.mark.parametrize("kind", ["image_build", "model_download", "training"])
+def test_provider_preparation_build_and_gpu_reservation(kind):
+    from unittest.mock import MagicMock
+
+    from arenoflow.provider import ModalProvider
+
+    provider = ModalProvider.__new__(ModalProvider)
+    provider.modal = MagicMock()
+    provider.client = object()
+    image = provider.modal.Image.from_registry.return_value.add_local_file.return_value
+    phases = []
+    provider.start(
+        {"kind": kind, "image": "image"},
+        {
+            "gpu": None if kind == "model_download" else "H100",
+            "count": 1,
+            "cpu": 2,
+            "memory_gib": 8,
+            "timeout_seconds": 120,
+        },
+        on_phase=phases.append,
+    )
+    image.build.assert_called_once_with(provider.modal.App.lookup.return_value)
+    if kind == "image_build":
+        provider.modal.Sandbox.create.assert_not_called()
+    else:
+        options = provider.modal.Sandbox.create.call_args.kwargs
+        assert options["gpu"] == (None if kind == "model_download" else "H100:1")
+        assert options["env"]["HF_HUB_CACHE"] == "/artifacts/cache/hf/hub"
+        assert "/artifacts" in options["volumes"]
+    assert "building_image" in phases
