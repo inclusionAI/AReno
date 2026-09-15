@@ -11,6 +11,7 @@ COPY arenoflow/requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
 # Source is read as metadata; the local control plane never imports CUDA code.
 COPY areno/ areno/
+COPY examples/ examples/
 COPY docs/ docs/
 COPY README.md ./
 COPY .github/workflows/create-docker-image.yml .github/workflows/create-docker-image.yml

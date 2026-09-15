@@ -2,44 +2,15 @@
 
 from __future__ import annotations
 
-import csv
-import io
 import json
 import threading
 import urllib.error
 import urllib.request
 from urllib.parse import urlsplit
 
-from arenoflow.assets import referenced_uploads
 from arenoflow.catalog import ROOT
 from arenoflow.datasets import FUNCTIONS, find, required_text, validate_source
-
-
-def dataset_sample(store, identifier):
-    dataset = find(store.datasets(), identifier, "Dataset")
-    if dataset.get("source_type") != "upload":
-        return {"sample": "", "manual": True}
-    file = referenced_uploads({"source": dataset["source"]}, store.directory)[0][0]
-    if file.suffix not in (".json", ".jsonl", ".csv", ".tsv"):
-        return {"sample": "", "manual": True}
-    # Read only a bounded prefix; never import a dataset loader or decode media.
-    try:
-        with file.open(encoding="utf-8-sig") as stream:
-            text = stream.read(65536)
-        if file.suffix == ".json":
-            rows = json.loads(text)
-            rows = rows[:3] if isinstance(rows, list) else rows
-        elif file.suffix == ".jsonl":
-            rows = [json.loads(line) for line in text.splitlines()[:3] if line.strip()]
-        else:
-            reader = csv.DictReader(io.StringIO(text), delimiter="\t" if file.suffix == ".tsv" else ",")
-            rows = [row for _, row in zip(range(3), reader)]
-        sample = json.dumps(rows, ensure_ascii=False, indent=2)
-        if len(sample) > 12000:
-            return {"sample": "", "manual": True}
-        return {"sample": sample, "manual": False}
-    except (ValueError, UnicodeError):
-        return {"sample": "", "manual": True}
+from arenoflow.samples import dataset_sample  # noqa: F401 - compatibility for existing callers
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):

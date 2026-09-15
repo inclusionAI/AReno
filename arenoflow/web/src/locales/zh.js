@@ -729,4 +729,14 @@ export default {
     '智能体脚本：根据转换后的问题执行单轮 rollout，保留 AReno 所需的轨迹元数据。',
   'Adjust these requirements to match your dataset sample and task.':
     '请根据实际数据集样本和任务修改上述需求。',
+  'Reload sample': '重新获取样本',
+  'Loading dataset sample…': '正在获取数据集样本…',
+  'Sample loaded: {p0} records': '已获取 {p0} 条样本',
+  'Samples load automatically after selecting a dataset. Inspect or edit them before generation. Long fields may be shortened; binary media is omitted. If loading fails, retry or paste a sample.':
+    '选择数据集后自动获取样本。生成前可检查和编辑；长字段可能被缩短，二进制媒体会被省略。获取失败时可重试或手动粘贴。',
+  'Dataset contains no sample records': '数据集中没有可用样本',
+  'Dataset sample request failed or timed out; retry or paste a sample':
+    '样本获取失败或超时，请重试或手动粘贴',
+  'Automatic preview is unavailable for this dataset hub; paste a sample':
+    '此数据集平台暂不支持自动预览，请粘贴样本',
 };

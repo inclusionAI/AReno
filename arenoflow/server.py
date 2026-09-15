@@ -17,9 +17,10 @@ from arenoflow.billing import fetch_billing
 from arenoflow.catalog import ROOT, catalog
 from arenoflow.controller import Controller
 from arenoflow.datasets import resolve_request, save_dataset, save_function, save_script_batch
-from arenoflow.llm import ScriptGenerator, dataset_sample
+from arenoflow.llm import ScriptGenerator
 from arenoflow.pricing import Pricing
 from arenoflow.provider import latest_image
+from arenoflow.samples import dataset_sample
 from arenoflow.store import Store
 from arenoflow.workflows import GPU_TYPES, plan
 

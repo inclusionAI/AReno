@@ -265,9 +265,21 @@ is supplied. Saving settings does not contact the provider.
 In Script Manager, select a dataset and algorithm, inspect the sample, enter the
 requirements, and check the script types to generate. One LLM request generates the
 complete selected set with consistent dataset fields and interfaces. Reward and agent scripts require a rollout algorithm;
-SFT and DPO support dataset loader generation only. Uploaded JSON/JSONL/CSV/TSV data
-provides up to three sample records where bounded parsing is possible. Supply a
-sample manually for repository datasets, Parquet/Arrow, or oversized records.
+SFT and DPO support dataset loader generation only. Samples load automatically for uploaded JSON/JSONL/CSV/TSV/Parquet/Arrow files and
+Hugging Face / ModelScope repositories. References support `repository:config:split`;
+the default split is train. Hugging Face uses its Dataset Viewer API; ModelScope
+reads a matching raw-data shard from its repository tree. Custom script-only dataset
+layouts require a manually supplied sample. No dataset code is executed.
+
+Previews contain up to three records. Text fields may be shortened and embedded
+binary media is replaced by a size marker. ModelScope small shards are capped at
+16 MiB; larger Parquet shards use HTTP range reads with a 32 MiB transfer budget.
+Providers must support the relevant preview or range API. For private data, use
+`HF_TOKEN` or `MODELSCOPE_API_TOKEN` in the server environment. Failed previews can
+be retried or supplied manually. Sample fetching itself does not call the LLM.
+
+Provider references: [Hugging Face Dataset Viewer](https://huggingface.co/docs/dataset-viewer/rows),
+[ModelScope dataset repository APIs](https://github.com/modelscope/modelscope/blob/v1.34.0/modelscope/hub/api.py).
 Only the displayed sample, prompt, dataset metadata, and repository API references
 are sent to the configured LLM; media files and Modal credentials are not sent.
 Generation may incur charges from that LLM provider, separate from Modal billing.

@@ -17,6 +17,8 @@ export default function ScriptGenerator({ datasets, onSaved }) {
   const [algorithm, setAlgorithm] = useState('');
   const [algorithms, setAlgorithms] = useState([]);
   const [sample, setSample] = useState('');
+  const [sampleRefresh, setSampleRefresh] = useState(0);
+  const [sampleInfo, setSampleInfo] = useState(null);
   const [prompt, setPrompt] = useState('');
   const [result, setResult] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -29,6 +31,7 @@ export default function ScriptGenerator({ datasets, onSaved }) {
   }, []);
   useEffect(() => {
     setSample('');
+    setSampleInfo(null);
     setResult(null);
     setError('');
     if (!dataset) {
@@ -39,7 +42,10 @@ export default function ScriptGenerator({ datasets, onSaved }) {
     setLoading(true);
     api('/scripts/sample', { dataset_id: dataset })
       .then((data) => {
-        if (!cancelled) setSample(data.sample);
+        if (!cancelled) {
+          setSample(data.sample);
+          setSampleInfo(data);
+        }
       })
       .catch((e) => {
         if (!cancelled) setError(e.message);
@@ -50,7 +56,7 @@ export default function ScriptGenerator({ datasets, onSaved }) {
     return () => {
       cancelled = true;
     };
-  }, [dataset]);
+  }, [dataset, sampleRefresh]);
   const choices = algorithms;
   const supportsRollout = algorithms.find((a) => a.id === algorithm)?.rollout;
   const promptExample = [
@@ -151,9 +157,25 @@ export default function ScriptGenerator({ datasets, onSaved }) {
               </label>
             ))}
           </fieldset>
-          <label className="field full">
-            <span>{t('Dataset sample')}</span>
+          <div className="field full">
+            <label htmlFor="generation-dataset-sample">{t('Dataset sample')}</label>
+            <Button
+              type="button"
+              busy={loading}
+              disabled={!dataset || busy || saving}
+              onClick={() => setSampleRefresh((n) => n + 1)}
+            >
+              {t('Reload sample')}
+            </Button>
+            {loading && <small>{t('Loading dataset sample…')}</small>}
+            {sampleInfo && (
+              <small>
+                {t('Sample loaded: {p0} records', { p0: sampleInfo.row_count ?? 3 })}
+                {sampleInfo.config ? ` · ${sampleInfo.config} / ${sampleInfo.split}` : ''}
+              </small>
+            )}
             <textarea
+              id="generation-dataset-sample"
               rows={7}
               maxLength={12000}
               disabled={loading}
@@ -165,10 +187,10 @@ export default function ScriptGenerator({ datasets, onSaved }) {
             />
             <small>
               {t(
-                'Inspect or paste representative records. Repository, Parquet, Arrow and large JSON samples must be supplied manually.',
+                'Samples load automatically after selecting a dataset. Inspect or edit them before generation. Long fields may be shortened; binary media is omitted. If loading fails, retry or paste a sample.',
               )}
             </small>
-          </label>
+          </div>
           <label className="field full">
             <span>{t('Script requirements')}</span>
             <textarea

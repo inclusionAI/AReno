@@ -1,3 +1,6 @@
 # The local UI and catalog use only Python's standard library.
 # Install this dependency to connect to Modal; no local CUDA/PyTorch required.
 modal>=1.5.5,<2
+
+# Local Parquet and Arrow previews; no CUDA/PyTorch dependency.
+pyarrow>=19,<26
