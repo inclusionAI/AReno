@@ -137,16 +137,20 @@ Building and validating on Gaudi
 
 Use a Linux Gaudi environment with matching SynapseAI, its PyTorch bridge,
 and TPC SDK. Keep the bridge-provided PyTorch installation. From the repository
-root, install the common Python dependencies and build the separate HPU extension:
+root, install AReno with build isolation disabled so the installer can detect
+the existing ``habana_frameworks.torch`` bridge. It automatically selects
+``requirements/hpu.txt`` and builds the HPU extension. HPU dependencies exclude
+PyTorch, torchvision, FLA and MLX, retaining the SynapseAI-provided PyTorch.
+Without the bridge, the original CUDA/MLX dependencies and build route apply.
 
 .. code-block:: bash
 
-   python -m pip install -r requirements/hpu.txt
-   ARENO_BUILD_EXT=0 python -m pip install -e . --no-deps --no-build-isolation
    export PT_HPU_LAZY_MODE=1
    export PT_ENABLE_INT64_SUPPORT=1
    export ARENO_HPU_ARCH=gaudi2
-   python areno/accel/csrc/hpu/setup.py build_ext --inplace
+   unset ARENO_BUILD_EXT
+   python -m pip install -e . --no-build-isolation
+   python -m pip install pytest
    python -m pytest -q tests/test_hpu_activation.py tests/test_hpu_dense.py tests/test_hpu_optimizer.py tests/test_hpu_operator_integration.py
 
 Run model acceptance in a fresh process, separately from the kernel tests,
@@ -163,8 +167,15 @@ train/rollout workers, additionally set ``ARENO_HPU_TEST_ROLLOUT_DEVICES`` and
 
 Set ``ARENO_HPU_ARCH=gaudi3`` for Gaudi 3. ``PT_HPU_LAZY_MODE`` must be explicitly
 set to ``0`` (eager) or ``1`` (lazy) at build and execution, with the same value
-for both. Rebuild when changing architecture or bridge mode. The original CUDA
-``setup.py`` remains unchanged.
+for both. Rebuild when changing architecture or bridge mode. The CUDA extension
+builder and CUDA/MLX dependency versions remain unchanged.
+
+``ARENO_BUILD_EXT=0`` skips native compilation while still selecting dependencies
+for the detected backend. Do not use it for the normal HPU runtime install.
+For an explicit kernel-only rebuild, the separate entry point remains available:
+``python areno/accel/csrc/hpu/setup.py build_ext --inplace``.
+Auto-detection applies when building from source; wheel dependency metadata is
+fixed at build time, so build HPU wheels in the SynapseAI environment as well.
 
 ``TPC_COMPILER`` may override ``tpc-clang``. ``TPC_INCLUDE_DIR`` may override
 ``/usr/lib/habanatools/include``; it must contain ``gc_interface.h`` and
