@@ -665,6 +665,7 @@ class ArenoWorker:
         if self.adapter_registry is None:
             raise RuntimeError("export_adapter requires native LoRA")
         self._prepare_actor_onloaded()
+        self.model.onload_train_weights(self.device)
         path = export_peft_adapter(
             self.adapter_registry,
             self.model,
