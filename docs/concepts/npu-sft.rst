@@ -20,6 +20,13 @@ The current kernels target A2/A3 (Ascend 910B variants and 910_93xx); a generic
 and other unsupported targets fail explicitly. ``ARENO_NPU_SOC`` provides an
 optional override for cross-compilation without visible hardware.
 
+Before building, ``python scripts/check_ascend.py`` probes the actual runtime
+SoC and checks BF16 matrix multiplication and its gradient on NPU 0. Use
+``--all-devices`` to check every visible NPU sequentially. The script requires
+the existing CANN/torch_npu environment, but does not import AReno. It ignores
+the build-time SoC override. A pass establishes the hardware target and basic
+TorchNPU execution only; it does not test AReno kernels or HCCL.
+
 .. code-block:: bash
 
    python -m pip install -e . --no-build-isolation
