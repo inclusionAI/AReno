@@ -7,6 +7,7 @@
 #include "torch_npu/csrc/framework/FormatHelper.h"
 #include "../moe_permute_common.h"
 #include "embedding_launch.h"
+#include "moe.h"
 #include "moe_launch.h"
 
 namespace areno_npu {
@@ -146,6 +147,8 @@ at::Tensor weight_backward(const at::Tensor& grad, const at::Tensor& ids, const 
     return output;
 }
 
+} // namespace
+
 void align(const at::Tensor& ids, int64_t experts, int64_t block_size, at::Tensor routed,
     at::Tensor block_ids, at::Tensor total, at::Tensor scratch, bool initialize) {
     check_tensor(ids, ids, ids.scalar_type());
@@ -178,7 +181,6 @@ void align(const at::Tensor& ids, int64_t experts, int64_t block_size, at::Tenso
         plan.partial.const_data_ptr<int32_t>(), nullptr, nullptr, nullptr, routed.data_ptr<int32_t>(),
         ids.numel(), 0, -1, experts, routed.numel());
 }
-} // namespace
 } // namespace areno_npu
 
 void register_moe(pybind11::module_& m) {

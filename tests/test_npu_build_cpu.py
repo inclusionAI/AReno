@@ -26,7 +26,7 @@ def builder(monkeypatch):
     return runpy.run_path(str(ROOT / "areno/accel/csrc/npu/setup.py"))
 
 
-@pytest.mark.parametrize("soc", ["Ascend910B2", "Ascend910B2C", "Ascend910B4-1", "Ascend910_9391"])
+@pytest.mark.parametrize("soc", ["Ascend910B2", "Ascend910B2C", "Ascend910B4-1", "Ascend910_9382", "Ascend910_9391"])
 def test_exact_soc_is_queried_from_cann(builder, monkeypatch, tmp_path, soc):
     init = Mock()
     monkeypatch.setattr(torch, "npu", SimpleNamespace(init=init), raising=False)
@@ -118,7 +118,10 @@ def test_kernel_archive_is_linked_and_triggers_extension_rebuild(builder, monkey
         assert "areno/accel/csrc/npu/moe.cpp" in self.extensions[0].sources
         assert "areno/accel/csrc/npu/attention.cpp" in self.extensions[0].sources
         assert "areno/accel/csrc/npu/attention_launch.h" in self.extensions[0].depends
-        assert {"opapi_nn", "nnopbase"}.issubset(self.extensions[0].libraries)
+        assert "areno/accel/csrc/npu/fused_experts.cpp" in self.extensions[0].sources
+        assert "areno/accel/csrc/npu/fused_experts_launch.h" in self.extensions[0].depends
+        assert "areno/accel/csrc/npu/moe.h" in self.extensions[0].depends
+        assert {"opapi_nn", "nnopbase", "tiling_api", "platform"}.issubset(self.extensions[0].libraries)
         calls.append("host")
 
     monkeypatch.setattr(builder["subprocess"], "run", mock_cmake)
@@ -184,5 +187,10 @@ def test_sdist_includes_native_build_inputs(tmp_path):
         "attention.cpp",
         "attention_kernel.cpp",
         "attention_launch.h",
+        "moe.h",
+        "fused_experts.cpp",
+        "fused_experts_kernel.cpp",
+        "fused_experts_matmul_kernel.cpp",
+        "fused_experts_launch.h",
     ):
         assert f"areno/accel/csrc/npu/{name}" in names

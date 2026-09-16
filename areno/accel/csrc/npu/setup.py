@@ -122,12 +122,14 @@ def build_extensions():
                     "routing",
                     "moe",
                     "attention",
+                    "fused_experts",
                 )
             ],
             depends=[
                 "areno/accel/csrc/grouped_linear_common.h",
                 "areno/accel/csrc/routing_common.h",
                 "areno/accel/csrc/moe_permute_common.h",
+                "areno/accel/csrc/npu/moe.h",
                 *[
                     f"areno/accel/csrc/npu/{name}_launch.h"
                     for name in (
@@ -140,12 +142,13 @@ def build_extensions():
                         "routing",
                         "moe",
                         "attention",
+                        "fused_experts",
                     )
                 ],
             ],
             include_dirs=[str(cann / "include")],
             library_dirs=[str(cann / "lib64")],
-            libraries=["ascendcl", "opapi_nn", "nnopbase"],
+            libraries=["ascendcl", "opapi_nn", "nnopbase", "tiling_api", "platform"],
             extra_compile_args=["-O2"],
         )
     ], {"build_ext": AscendBuildExtension}
