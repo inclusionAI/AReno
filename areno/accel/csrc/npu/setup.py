@@ -111,13 +111,23 @@ def build_extensions():
             "areno.accel._areno_accel_npu",
             sources=[
                 f"areno/accel/csrc/npu/{name}.cpp"
-                for name in ("extension", "activation", "normalization", "optimizer", "embedding", "linear", "conv")
+                for name in (
+                    "extension",
+                    "activation",
+                    "normalization",
+                    "optimizer",
+                    "embedding",
+                    "linear",
+                    "conv",
+                    "routing",
+                )
             ],
             depends=[
                 "areno/accel/csrc/grouped_linear_common.h",
+                "areno/accel/csrc/routing_common.h",
                 *[
                     f"areno/accel/csrc/npu/{name}_launch.h"
-                    for name in ("activation", "normalization", "optimizer", "embedding", "linear", "conv")
+                    for name in ("activation", "normalization", "optimizer", "embedding", "linear", "conv", "routing")
                 ],
             ],
             include_dirs=[str(cann / "include")],

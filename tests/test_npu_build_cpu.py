@@ -110,8 +110,10 @@ def test_kernel_archive_is_linked_and_triggers_extension_rebuild(builder, monkey
         assert str(archive) in self.extensions[0].depends
         assert "areno/accel/csrc/npu/activation_launch.h" in self.extensions[0].depends
         assert "areno/accel/csrc/grouped_linear_common.h" in self.extensions[0].depends
+        assert "areno/accel/csrc/routing_common.h" in self.extensions[0].depends
         assert "areno/accel/csrc/npu/conv_launch.h" in self.extensions[0].depends
         assert "areno/accel/csrc/npu/conv.cpp" in self.extensions[0].sources
+        assert "areno/accel/csrc/npu/routing.cpp" in self.extensions[0].sources
         assert {"opapi_nn", "nnopbase"}.issubset(self.extensions[0].libraries)
         calls.append("host")
 
@@ -129,6 +131,7 @@ def test_sdist_includes_native_build_inputs(tmp_path):
     shutil.copytree(ROOT / "requirements", tmp_path / "requirements")
     shutil.copytree(ROOT / "areno/accel/csrc/npu", tmp_path / "areno/accel/csrc/npu")
     shutil.copy2(ROOT / "areno/accel/csrc/grouped_linear_common.h", tmp_path / "areno/accel/csrc")
+    shutil.copy2(ROOT / "areno/accel/csrc/routing_common.h", tmp_path / "areno/accel/csrc")
     (tmp_path / "areno/__init__.py").touch()
     result = subprocess.run(
         [sys.executable, "-c", "from setuptools.build_meta import build_sdist; build_sdist('dist')"],
@@ -141,6 +144,7 @@ def test_sdist_includes_native_build_inputs(tmp_path):
     with tarfile.open(next((tmp_path / "dist").glob("*.tar.gz"))) as archive:
         names = {name.split("/", 1)[1] for name in archive.getnames() if "/" in name}
     assert "areno/accel/csrc/grouped_linear_common.h" in names
+    assert "areno/accel/csrc/routing_common.h" in names
     for name in (
         "setup.py",
         "CMakeLists.txt",
@@ -165,5 +169,8 @@ def test_sdist_includes_native_build_inputs(tmp_path):
         "conv.cpp",
         "conv_kernel.cpp",
         "conv_launch.h",
+        "routing.cpp",
+        "routing_kernel.cpp",
+        "routing_launch.h",
     ):
         assert f"areno/accel/csrc/npu/{name}" in names
