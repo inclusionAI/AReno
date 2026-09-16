@@ -27,6 +27,7 @@ optional override for cross-compilation without visible hardware.
    python -m pytest -q tests/test_npu_activation.py tests/test_npu_normalization.py \
      tests/test_npu_optimizer.py tests/test_npu_optimizer_factored.py tests/test_npu_embedding.py \
      tests/test_npu_linear.py
+   python -m pytest -q tests/test_grouped_linear.py -k npu
    torchrun --standalone --nproc_per_node=2 -m pytest -q tests/test_npu_optimizer_distributed.py
 
 Current validation boundary
@@ -82,8 +83,17 @@ to CUDA's cuBLAS calls. Transposes are matrix descriptors over existing storage.
 The Cube precision mode retains the input dtype instead of reducing FP32 input
 precision. Ascend C implements bias addition and FP32 bias-gradient accumulation.
 Bias addition preserves CUDA's separate GEMM-output and bias-output rounding.
-No alternate model or training workflow is introduced. Grouped linear remains
-unimplemented.
+No alternate model or training workflow is introduced.
+
+Grouped linear reuses the host-side expert loop extracted from CUDA into
+``grouped_linear_common.h``. Both devices share counts validation, tensor
+slicing, output allocation, empty-expert handling and gradient selection.
+CUDA supplies cuBLAS GEMM; NPU supplies the same CANN GEMM used by dense linear.
+The existing list and int32/int64 tensor-count entry points are preserved.
+Tensor counts still synchronize to the CPU, matching the existing CUDA
+implementation; this path is not suitable for graph capture. The list-count
+path retains a CUDA graph regression test. The common C++ code has a separate
+CPU test adapter, while the same contract suite targets CUDA and NPU kernels.
 
 Device guards and TorchNPU's current stream are used for each launch. The
 acceptance suite covers tile boundaries, strided tensors, storage offsets,
@@ -100,7 +110,7 @@ run on Ascend. Worker startup rejects the incomplete native extension before
 starting a training or serving job.
 
 Remaining native families include
-grouped linear, attention, convolution, routing/MoE and recurrent
+attention, convolution, routing/MoE and recurrent
 operators. The existing opt-in
 ``tests/test_npu_end_to_end.py`` becomes the SFT/rollout/checkpoint acceptance
 test once these kernels are complete; it is not expected to pass yet.
