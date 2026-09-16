@@ -1,6 +1,6 @@
 """Native Gaudi activation validation; requires a matching, built HPU extension.
 
-Run separately with PT_HPU_LAZY_MODE matching the extension's build mode.
+The default lazy mode matches the extension's default build mode.
 An installed bridge with missing/broken native kernels fails instead of skipping.
 """
 
@@ -27,8 +27,8 @@ TOLERANCES = {
 def hpu_core():
     if importlib.util.find_spec("habana_frameworks") is None:
         pytest.skip("Gaudi PyTorch bridge and HPU hardware are required")
-    assert os.environ.get("PT_HPU_LAZY_MODE") in {"0", "1"}, "Set the mode used to build the HPU extension"
     configure_hpu_kernel_library()
+    assert os.environ.get("PT_HPU_LAZY_MODE") in {"0", "1"}
     import habana_frameworks.torch.core as core
 
     assert torch.hpu.is_available(), "The bridge is installed but no HPU is available"

@@ -15,6 +15,8 @@ import importlib.util
 import os
 from types import ModuleType
 
+from areno._hpu import configure_hpu_environment
+
 # Cached reference to the compiled extension; populated on first call.
 _EXT: ModuleType | None = None
 _HPU_EXT: ModuleType | None = None
@@ -28,11 +30,7 @@ def configure_hpu_kernel_library() -> None:
             "AReno native HPU kernels are not installed: areno.accel._areno_hpu_kernels. "
             "Build them with `python areno/accel/csrc/hpu/setup.py build_ext --inplace` in a Gaudi SDK environment."
         )
-    # The bridge otherwise permits Long tensors to use int32 device storage.
-    # Native index kernels read both int64 words and must see the actual dtype.
-    if os.environ.get("PT_ENABLE_INT64_SUPPORT", "1").lower() not in {"1", "true"}:
-        raise RuntimeError("AReno HPU kernels require PT_ENABLE_INT64_SUPPORT=1 before importing the Gaudi bridge")
-    os.environ.setdefault("PT_ENABLE_INT64_SUPPORT", "1")
+    configure_hpu_environment()
     # Setting GC_KERNEL_PATH replaces the compiler's defaults. Retain the
     # standard Gaudi library when the environment has no explicit list.
     configured = os.environ.get("GC_KERNEL_PATH") or "/usr/lib/habanalabs/libtpc_kernels.so"

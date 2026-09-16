@@ -14,16 +14,7 @@ from setuptools import setup
 _METADATA_COMMANDS = {"egg_info", "dist_info", "sdist"}
 _MIN_TORCH_VERSION = (2, 6)
 _ROOT = Path(__file__).resolve().parent
-
-
-def _using_hpu() -> bool:
-    """Detect the installed bridge without importing torch or acquiring a device."""
-    if platform.system() != "Linux":
-        return False
-    try:
-        return find_spec("habana_frameworks.torch") is not None
-    except ModuleNotFoundError:
-        return False
+_using_hpu = runpy.run_path(str(_ROOT / "areno/_hpu.py"))["has_hpu_bridge"]
 
 
 def _runtime_dependencies(hpu: bool) -> list[str]:

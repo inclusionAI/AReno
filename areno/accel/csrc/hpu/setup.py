@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 import platform
 import re
+import runpy
 import shutil
 import subprocess
 from pathlib import Path
@@ -16,6 +17,45 @@ from setuptools import Extension, setup
 
 SOURCE = Path(__file__).resolve().parent
 ROOT = SOURCE.parents[3]
+
+
+def detect_arch() -> str:
+    explicit = os.environ.get("ARENO_HPU_ARCH")
+    if explicit is not None:
+        if explicit not in {"gaudi2", "gaudi3"}:
+            raise ValueError("ARENO_HPU_ARCH must be gaudi2 or gaudi3")
+        return explicit
+    try:
+        result = subprocess.run(
+            ["hl-smi", "-Q", "name", "-f", "csv,noheader"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(
+            "Cannot detect the Gaudi architecture with hl-smi; "
+            "check driver/device visibility or set ARENO_HPU_ARCH=gaudi2 or gaudi3 for an offline build"
+        ) from exc
+    names = [name.strip().strip('"') for name in result.stdout.splitlines() if name.strip()]
+    board_arch = {"hl225": "gaudi2", "hl325": "gaudi3", "hl338": "gaudi3"}
+    architectures = set()
+    for name in names:
+        normalized = re.sub(r"[\s-]+", "", name.lower())
+        architecture = board_arch.get(normalized)
+        if architecture is None:
+            match = re.search(r"\bgaudi[\s-]*([23])\b", name, re.IGNORECASE)
+            architecture = f"gaudi{match[1]}" if match else None
+        if architecture is None:
+            raise RuntimeError(f"Unsupported or unknown HPU board {name!r}; set ARENO_HPU_ARCH=gaudi2 or gaudi3")
+        architectures.add(architecture)
+    if len(architectures) != 1:
+        raise RuntimeError(
+            "No single Gaudi architecture was detected (no devices or mixed generations); "
+            "set ARENO_HPU_ARCH=gaudi2 or gaudi3"
+        )
+    return architectures.pop()
 
 
 def activation_specs():
@@ -139,6 +179,8 @@ def compile_kernels(build_dir: Path, compiler: str, arch: str) -> None:
 def build_extensions():
     if platform.system() != "Linux":
         raise RuntimeError("Native HPU kernels must be built on Linux with the Gaudi TPC SDK and PyTorch bridge")
+    configure = runpy.run_path(str(ROOT / "areno/_hpu.py"))["configure_hpu_environment"]
+    lazy_mode = configure()
     compiler = shutil.which(os.environ.get("TPC_COMPILER", "tpc-clang"))
     if compiler is None:
         raise RuntimeError("tpc-clang was not found; install the Gaudi TPC SDK or set TPC_COMPILER")
@@ -146,12 +188,7 @@ def build_extensions():
     for header in ("gc_interface.h", "tpc_kernel_lib_interface.h"):
         if not (sdk / header).is_file():
             raise RuntimeError(f"Missing TPC SDK header {sdk / header}; set TPC_INCLUDE_DIR")
-    arch = os.environ.get("ARENO_HPU_ARCH", "gaudi2")
-    if arch not in {"gaudi2", "gaudi3"}:
-        raise ValueError("ARENO_HPU_ARCH must be gaudi2 or gaudi3")
-    lazy_mode = os.environ.get("PT_HPU_LAZY_MODE")
-    if lazy_mode not in {"0", "1"}:
-        raise ValueError("Set PT_HPU_LAZY_MODE=0 (eager) or 1 (lazy) for both build and execution")
+    arch = detect_arch()
 
     from habana_frameworks.torch.utils.lib_utils import get_include_dir, get_lib_dir
     from torch.utils.cpp_extension import BuildExtension, CppExtension

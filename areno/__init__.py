@@ -13,7 +13,11 @@ from __future__ import annotations
 
 import os
 
+from areno._hpu import configure_hpu_environment, has_hpu_bridge
 from areno.engine.log import configure_default_logging
+
+if has_hpu_bridge():
+    configure_hpu_environment()
 
 # A single CUDA stream connection keeps NCCL collectives ordered with compute,
 # which is what areno's TP/DP all-reduce + all-gather patterns assume.

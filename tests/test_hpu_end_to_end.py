@@ -21,7 +21,7 @@ def test_sft_rollout_and_checkpoint_reload(tmp_path, optimizer):
     if not model:
         pytest.skip("Set ARENO_HPU_TEST_MODEL to a local Gaudi validation checkpoint")
     assert Path(model).is_dir(), "ARENO_HPU_TEST_MODEL must be a local checkpoint directory"
-    assert os.environ.get("PT_ENABLE_INT64_SUPPORT") == "1"
+    assert os.environ.get("PT_ENABLE_INT64_SUPPORT", "").lower() in {"1", "true"}
     assert os.environ.get("PT_HPU_LAZY_MODE") in {"0", "1"}
     world = int(os.environ.get("ARENO_HPU_TEST_WORLD_SIZE", "1"))
     tp = int(os.environ.get("ARENO_HPU_TEST_TP_SIZE", "1"))
