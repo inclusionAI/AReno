@@ -73,8 +73,15 @@ class RuntimeConfig:
     decode_graph_buckets: list[int] = field(
         default_factory=lambda: [1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 56, 64, 96, 128, 192, 256]
     )
+    device_type: Literal["cuda", "hpu"] = field(default="cuda", kw_only=True)
 
     def __post_init__(self) -> None:
+        if self.device_type not in {"cuda", "hpu"}:
+            raise ValueError("runtime.device_type must be one of: cuda, hpu")
+        if self.device_type == "hpu":
+            self.attn_backend = "native"
+            self.compile_model = False
+            self.eager_decode = True
         if self.attn_backend not in {"flash", "native"}:
             raise ValueError("runtime.attn_backend must be one of: flash, native")
         if isinstance(self.optimizer_state_offload, bool):
@@ -310,7 +317,7 @@ class EngineConfig:
         ):
             raise ValueError("native LoRA requires moe_router_bias_update_rate=0 to keep the base policy frozen")
         if self.devices is None:
-            if torch.cuda.is_available():
+            if self.runtime.device_type == "cuda" and torch.cuda.is_available():
                 device_count = torch.cuda.device_count()
                 if device_count < 1:
                     raise ValueError("CUDA is available but torch.cuda.device_count() is 0")
@@ -323,7 +330,7 @@ class EngineConfig:
             raise ValueError("devices must contain non-negative CUDA indices")
         if len(self.devices) != len(set(self.devices)):
             raise ValueError("devices must not contain duplicate CUDA indices")
-        if torch.cuda.is_available():
+        if self.runtime.device_type == "cuda" and torch.cuda.is_available():
             invalid = [device for device in self.devices if device >= torch.cuda.device_count()]
             if invalid:
                 raise ValueError(f"devices are outside CUDA_VISIBLE_DEVICES: {invalid}")

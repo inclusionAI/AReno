@@ -27,6 +27,10 @@ def test_public_api_imports_do_not_load_engine_heavy_modules():
 
         heavy_modules = [
             "areno.api.backend.cuda",
+            "areno.api.backend.mlx",
+            "areno.api.backend.hpu",
+            "habana_frameworks",
+            "triton",
             "areno.engine.api",
             "areno.engine.inference",
             "areno.engine.worker",

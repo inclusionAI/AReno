@@ -12,6 +12,7 @@ from collections.abc import Sequence
 import torch
 
 from areno.accel._extension import extension as _extension
+from areno.accel.utils import on_kernel_device
 
 
 class _Linear(torch.autograd.Function):
@@ -23,7 +24,9 @@ class _Linear(torch.autograd.Function):
         # The kernel always takes a concrete bias tensor; pass an empty
         # placeholder when bias is unused.
         kernel_bias = bias if use_bias else torch.empty(0, device=x.device, dtype=x.dtype)
-        out = _extension().areno_linear_forward(x.contiguous(), weight.contiguous(), kernel_bias.contiguous(), use_bias)
+        out = _extension(x.device).areno_linear_forward(
+            x.contiguous(), weight.contiguous(), kernel_bias.contiguous(), use_bias
+        )
         ctx.save_for_backward(x, weight)
         ctx.use_bias = use_bias
         return out
@@ -36,7 +39,7 @@ class _Linear(torch.autograd.Function):
         need_grad_input = bool(ctx.needs_input_grad[0])
         need_grad_weight = bool(ctx.needs_input_grad[1])
         need_grad_bias = ctx.use_bias and bool(ctx.needs_input_grad[2])
-        grad_input, grad_weight, grad_bias = _extension().areno_linear_backward(
+        grad_input, grad_weight, grad_bias = _extension(grad_output.device).areno_linear_backward(
             grad_output.contiguous(),
             x.contiguous(),
             weight.contiguous(),
@@ -59,10 +62,10 @@ def areno_linear(x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | Non
     Weight layout matches ``torch.nn.Linear`` (``out_features``, ``in_features``).
     Returns a tensor with the trailing dim replaced by ``out_features``.
     """
-    if not x.is_cuda or not weight.is_cuda:
-        raise RuntimeError("areno_linear requires CUDA input and weight")
-    if bias is not None and not bias.is_cuda:
-        raise RuntimeError("areno_linear bias must be CUDA")
+    if not on_kernel_device(x, weight):
+        raise RuntimeError("areno_linear requires CUDA or HPU input and weight on the same device")
+    if not on_kernel_device(x, bias):
+        raise RuntimeError("areno_linear bias must be CUDA or HPU on the same device")
     return _Linear.apply(x, weight, bias)
 
 
@@ -72,7 +75,7 @@ class _GroupedLinear(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x: torch.Tensor, weight: torch.Tensor, tokens_per_expert: list[int]) -> torch.Tensor:
         counts = [int(count) for count in tokens_per_expert]
-        out = _extension().areno_grouped_linear_forward(x.contiguous(), weight.contiguous(), counts)
+        out = _extension(x.device).areno_grouped_linear_forward(x.contiguous(), weight.contiguous(), counts)
         ctx.save_for_backward(x, weight)
         ctx.tokens_per_expert = counts
         return out
@@ -81,7 +84,7 @@ class _GroupedLinear(torch.autograd.Function):
     def backward(ctx, grad_output: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, None]:
         x, weight = ctx.saved_tensors
         need_grad_input, need_grad_weight, _ = ctx.needs_input_grad
-        grad_input, grad_weight = _extension().areno_grouped_linear_backward(
+        grad_input, grad_weight = _extension(grad_output.device).areno_grouped_linear_backward(
             grad_output.contiguous(),
             x.contiguous(),
             weight.contiguous(),
@@ -97,7 +100,7 @@ class _GroupedLinearCounts(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, x: torch.Tensor, weight: torch.Tensor, tokens_per_expert: torch.Tensor) -> torch.Tensor:
-        out = _extension().areno_grouped_linear_forward_counts(
+        out = _extension(x.device).areno_grouped_linear_forward_counts(
             x.contiguous(), weight.contiguous(), tokens_per_expert.contiguous()
         )
         ctx.save_for_backward(x, weight, tokens_per_expert)
@@ -107,7 +110,7 @@ class _GroupedLinearCounts(torch.autograd.Function):
     def backward(ctx, grad_output: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, None]:
         x, weight, tokens_per_expert = ctx.saved_tensors
         need_grad_input, need_grad_weight, _ = ctx.needs_input_grad
-        grad_input, grad_weight = _extension().areno_grouped_linear_backward_counts(
+        grad_input, grad_weight = _extension(grad_output.device).areno_grouped_linear_backward_counts(
             grad_output.contiguous(),
             x.contiguous(),
             weight.contiguous(),
@@ -129,12 +132,12 @@ def areno_grouped_linear(
     has shape ``(num_experts, out_features, in_features)``. Returns the
     expert-major output matrix; the caller is responsible for unpermuting.
     """
-    if not x.is_cuda or not weight.is_cuda:
-        raise RuntimeError("areno_grouped_linear requires CUDA input and weight")
+    if not on_kernel_device(x, weight):
+        raise RuntimeError("areno_grouped_linear requires CUDA or HPU input and weight on the same device")
     if weight.dim() != 3:
         raise ValueError(f"areno_grouped_linear weight must be 3D, got {tuple(weight.shape)}")
     if isinstance(tokens_per_expert, torch.Tensor):
-        if not tokens_per_expert.is_cuda:
-            raise RuntimeError("areno_grouped_linear tensor tokens_per_expert must be CUDA")
+        if not on_kernel_device(x, tokens_per_expert):
+            raise RuntimeError("areno_grouped_linear tensor tokens_per_expert must be CUDA or HPU on the same device")
         return _GroupedLinearCounts.apply(x, weight, tokens_per_expert)
     return _GroupedLinear.apply(x, weight, tokens_per_expert)

@@ -1,2 +1,3 @@
 recursive-include areno/accel/csrc *.cpp *.cu *.cuh *.h *.hpp
+recursive-include areno/accel/csrc/hpu *.c *.inc *.py
 recursive-include areno/dashboard/dist *.html *.css *.js

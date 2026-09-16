@@ -81,6 +81,7 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         "Basic",
         (
             "algo",
+            "backend",
             "ckpt",
             "base_model_name_or_path",
             "dataset_path",
@@ -692,6 +693,8 @@ def _reward_ckpt_for_summary(config: TrainerConfig, reward_ckpt: str | None) -> 
 def _resolved_attn_backend_for_summary(
     config: TrainerConfig, *, model_config: ModelConfig | None = None
 ) -> tuple[str, str | None]:
+    if config.backend == "hpu":
+        return "native", None
     if config.backend == "mlx":
         return "mlx", None
     if config.attn_backend != "flash":
@@ -1592,6 +1595,12 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     "--sequence-parallel/--no-sequence-parallel",
     default=None,
     help="Override checkpoint sequence_parallel; when omitted, use the model configuration.",
+)
+@click.option(
+    "--backend",
+    type=click.Choice(["cuda", "mlx", "hpu"]),
+    default=None,
+    help="Execution backend; defaults to the host backend.",
 )
 @click.option("--world-size", type=int, default=8, show_default=True, help="Total device count for the backend.")
 @click.option(

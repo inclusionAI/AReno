@@ -34,8 +34,17 @@ def is_cuda_graph_capturing(tensor: torch.Tensor) -> bool:
 
 @torch._dynamo.disable
 def can_use_cuda_kernel(tensor: torch.Tensor, name: str, *, allow_sm121: bool = False) -> bool:
-    """Return whether a fused CUDA kernel can run for ``tensor``."""
+    """Legacy selection entry point for fused kernels on CUDA or HPU."""
 
-    if not tensor.is_cuda:
-        return False
-    return True
+    return on_kernel_device(tensor)
+
+
+def on_kernel_device(*tensors: torch.Tensor | None) -> bool:
+    """Whether all supplied tensors share one supported kernel device."""
+
+    tensors = tuple(tensor for tensor in tensors if tensor is not None)
+    return (
+        bool(tensors)
+        and tensors[0].device.type in {"cuda", "hpu"}
+        and all(tensor.device == tensors[0].device for tensor in tensors[1:])
+    )

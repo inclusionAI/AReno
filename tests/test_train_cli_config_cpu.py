@@ -625,6 +625,8 @@ def test_train_tp_size_alias_is_accepted(monkeypatch) -> None:
     result = CliRunner().invoke(
         train_cli.train_command,
         [
+            "--backend",
+            "cuda",
             "--algo",
             "sft",
             "--ckpt",
@@ -696,6 +698,8 @@ def test_train_command_prints_summary_before_run(monkeypatch):
     result = CliRunner().invoke(
         train_cli.train_command,
         [
+            "--backend",
+            "cuda",
             "--algo",
             "sft",
             "--ckpt",
@@ -769,6 +773,8 @@ def test_train_command_tunes_params_before_summary_and_run(monkeypatch):
     result = CliRunner().invoke(
         train_cli.train_command,
         [
+            "--backend",
+            "cuda",
             "--algo",
             "gspo",
             "--ckpt",
@@ -831,6 +837,8 @@ def test_train_command_smoke_resolves_model_ref_before_probe(monkeypatch):
     result = CliRunner().invoke(
         train_cli.train_command,
         [
+            "--backend",
+            "cuda",
             "--algo",
             "gspo",
             "--ckpt",

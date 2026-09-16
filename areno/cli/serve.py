@@ -213,6 +213,7 @@ class _CudaServeRuntime:
         attn_backend: str,
         lora: LoraConfig | None,
         base_model_name_or_path: str | None,
+        device_type: str = "cuda",
     ) -> None:
         from areno.engine.config import RuntimeConfig
 
@@ -225,7 +226,9 @@ class _CudaServeRuntime:
             tp_size=tp_size,
             dp_size=world_size // tp_size,
             devices=list(range(world_size)),
-            runtime_config=RuntimeConfig(eager_decode=bool(eager_decode), attn_backend=attn_backend),
+            runtime_config=RuntimeConfig(
+                eager_decode=bool(eager_decode), attn_backend=attn_backend, device_type=device_type
+            ),
             loss_fn=_serve_loss_fn,
             lora_config=lora,
             base_model_name_or_path=base_model_name_or_path,
@@ -337,6 +340,7 @@ def _create_serve_runtime(
     del max_running_prompts
     return _CudaServeRuntime(
         model_path,
+        device_type=backend_type.value.lower(),
         tp_size=tp_size,
         world_size=world_size,
         eager_decode=eager_decode,
@@ -354,6 +358,7 @@ def create_app(
     max_running_prompts: int,
     default_max_tokens: int,
     decode_progress_interval_s: float,
+    backend_type: BackendType | None = None,
     eager_decode: bool = False,
     attn_backend: Literal["flash", "native"] = "flash",
     chat_template_enable_thinking: bool | None = None,
@@ -368,7 +373,7 @@ def create_app(
     if world_size % tp_size != 0:
         raise ValueError("world_size must be divisible by tp_size")
 
-    backend_type = default_backend_type()
+    backend_type = backend_type or default_backend_type()
     tokenizer = load_tokenizer(model_path)
     processor = load_processor(model_path)
     configure_chat_template_enable_thinking(tokenizer, chat_template_enable_thinking)
@@ -507,7 +512,7 @@ def _resolve_serve_attn_backend(
 ) -> tuple[Literal["flash", "native"], str | None]:
     """Apply flash-attn compatibility fallback before serve starts workers."""
 
-    if backend_type == MLX:
+    if backend_type != BackendType.CUDA:
         return "native", None
     if attn_backend != "flash":
         return attn_backend, None
@@ -1012,7 +1017,9 @@ def _normalize_stop(stop: str | list[str] | None) -> list[str]:
     ),
 )
 @click.option("--lora-adapter-path", default=None, help="Standard PEFT adapter to serve.")
+@click.option("--backend", type=click.Choice(["cuda", "mlx", "hpu"]), default=None)
 def serve_command(
+    backend: str | None,
     model_path: str,
     model_hub: Literal["hf", "modelscope"],
     base_model_name_or_path: str | None,
@@ -1067,6 +1074,7 @@ def serve_command(
         metrics_dir=None,
     )
     app = create_app(
+        backend_type=BackendType(backend.upper()) if backend else None,
         model_path=model_path,
         tp_size=tp_size,
         world_size=world_size,

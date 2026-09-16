@@ -12,6 +12,12 @@ from areno.cli import serve as serve_mod
 from areno.engine.config import ModelConfig
 
 
+@pytest.fixture(autouse=True)
+def local_serve_defaults(monkeypatch):
+    monkeypatch.setattr(serve_mod, "default_backend_type", lambda: serve_mod.BackendType.CUDA)
+    monkeypatch.setattr(serve_mod, "load_processor", lambda path: None)
+
+
 def test_create_app_passes_eager_decode_runtime_config(monkeypatch):
     captured = {}
 
