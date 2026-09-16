@@ -7,7 +7,7 @@ using namespace AscendC;
 // A core owns complete quantization blocks. A block's new FP32 values stay
 // in UB until all lanes pass the finite check, then codes/scales/model commit
 // together. UB usage is bounded (~142 KiB at the largest 4096-element block).
-template <typename Model, typename Grad, bool FourBit>
+template <typename Model, typename Grad, bool FourBit, bool Factored = false>
 class AdamQuantizedKernel {
     static constexpr uint32_t Tile = FourBit ? 1024 : 4096;
     TPipe pipe;
@@ -18,8 +18,12 @@ class AdamQuantizedKernel {
     GlobalTensor<Grad> gradient;
     GlobalTensor<uint8_t> moment, variance;
     GlobalTensor<float> momentScale, varianceScale, signedMap, unsignedMap;
+    GlobalTensor<float> factors, rowMean;
+    GlobalTensor<int32_t> invalidFlag;
     LocalTensor<float> p, g, m, v, a, b, signedTable, unsignedTable, scales;
     LocalTensor<uint8_t> mCodes, vCodes;
+    float meanDenominator;
+    bool invalidParameter;
 
     template <HardEvent Event>
     __aicore__ inline void Sync() {
@@ -78,14 +82,18 @@ class AdamQuantizedKernel {
                                   float eps, float step, float bias) {
         Muls(m, m, beta1, n);
         Muls(a, g, 1.0f - beta1, n);
-        Muls(v, v, beta2, n);
-        Muls(b, g, 1.0f - beta2, n);
+        if constexpr (!Factored) {
+            Muls(v, v, beta2, n);
+            Muls(b, g, 1.0f - beta2, n);
+        }
         if (decay != 0.0f) Muls(p, p, 1.0f - lr * decay, n);
         PipeBarrier<PIPE_V>();
         Add(m, m, a, n);
-        Mul(b, b, g, n);
-        PipeBarrier<PIPE_V>();
-        Add(v, v, b, n);
+        if constexpr (!Factored) {
+            Mul(b, b, g, n);
+            PipeBarrier<PIPE_V>();
+            Add(v, v, b, n);
+        }
         PipeBarrier<PIPE_V>();
         Sqrt(a, v, n);
         Duplicate(b, bias, n);
@@ -131,19 +139,23 @@ class AdamQuantizedKernel {
             float absolute = m.GetValue(i);
             if (absolute < 0.0f) absolute = -absolute;
             if (absolute > mMax) mMax = absolute;
-            if (v.GetValue(i) > vMax) vMax = v.GetValue(i);
+            if constexpr (!Factored) {
+                if (v.GetValue(i) > vMax) vMax = v.GetValue(i);
+            }
         }
         Sync<HardEvent::S_V>();
         if (invalid) return false;
         scales.SetValue(0, mMax);
-        scales.SetValue(8, vMax);
         Duplicate(a, mMax > 1e-30f ? mMax : 1e-30f, n);
-        Duplicate(b, vMax > 1e-30f ? vMax : 1e-30f, n);
+        if constexpr (!Factored) {
+            scales.SetValue(8, vMax);
+            Duplicate(b, vMax > 1e-30f ? vMax : 1e-30f, n);
+        }
         PipeBarrier<PIPE_V>();
         Div(m, m, a, n);
-        Div(v, v, b, n);
+        if constexpr (!Factored) Div(v, v, b, n);
         PipeBarrier<PIPE_V>();
-        if constexpr (FourBit) {
+        if constexpr (FourBit && !Factored) {
             Muls(v, v, 16.0f, n);
             PipeBarrier<PIPE_V>();
             Adds(v, v, -1.0f, n);
@@ -152,17 +164,20 @@ class AdamQuantizedKernel {
         }
         Sync<HardEvent::V_S>();
         for (uint32_t i = 0; i < n; ++i) {
-            uint8_t mc = Nearest(m.GetValue(i), signedTable), vc;
+            uint8_t mc = Nearest(m.GetValue(i), signedTable), vc = 0;
             if constexpr (FourBit) {
-                int32_t code = a.template ReinterpretCast<int32_t>().GetValue(i);
-                vc = static_cast<uint8_t>(code < 0 ? 0 : code > 15 ? 15 : code);
+                if constexpr (!Factored) {
+                    int32_t code = a.template ReinterpretCast<int32_t>().GetValue(i);
+                    vc = static_cast<uint8_t>(code < 0 ? 0 : code > 15 ? 15 : code);
+                }
                 if ((i & 1u) == 0) {
                     // The unused last high nibble is canonical zero state.
                     mCodes.SetValue(i / 2, static_cast<uint8_t>(mc | 0x70u));
-                    vCodes.SetValue(i / 2, vc);
+                    if constexpr (!Factored) vCodes.SetValue(i / 2, vc);
                 } else {
                     mCodes.SetValue(i / 2, static_cast<uint8_t>((mCodes.GetValue(i / 2) & 15u) | (mc << 4)));
-                    vCodes.SetValue(i / 2, static_cast<uint8_t>(vCodes.GetValue(i / 2) | (vc << 4)));
+                    if constexpr (!Factored)
+                        vCodes.SetValue(i / 2, static_cast<uint8_t>(vCodes.GetValue(i / 2) | (vc << 4)));
                 }
             } else {
                 vc = Nearest(v.GetValue(i), unsignedTable);
@@ -174,6 +189,24 @@ class AdamQuantizedKernel {
         return true;
     }
 
+    __aicore__ inline void LoadFactors(int64_t start, uint32_t n, int64_t rows, int64_t columns) {
+        // Load contiguous column-factor runs into aligned UB scratch. A
+        // quantization block may start inside a row or span several rows.
+        Sync<HardEvent::V_S>();
+        uint32_t done = 0;
+        while (done < n) {
+            int64_t position = start + done;
+            int64_t col = position % columns;
+            uint32_t count = columns - col < n - done ? columns - col : n - done;
+            ReadScalar(factors, a, rows + col, count);
+            ReadScalar(factors, scales[8], position / columns, 1);
+            float row = scales.GetValue(8);
+            for (uint32_t i = 0; i < count; ++i) v.SetValue(done + i, row * a.GetValue(i) / meanDenominator);
+            done += count;
+        }
+        Sync<HardEvent::S_V>();
+    }
+
 public:
     __aicore__ inline AdamQuantizedKernel() {}
 
@@ -182,9 +215,11 @@ public:
         model.SetGlobalBuffer(reinterpret_cast<__gm__ Model*>(modelIn));
         gradient.SetGlobalBuffer(reinterpret_cast<__gm__ Grad*>(gradIn));
         moment.SetGlobalBuffer(reinterpret_cast<__gm__ uint8_t*>(mIn));
-        variance.SetGlobalBuffer(reinterpret_cast<__gm__ uint8_t*>(vIn));
         momentScale.SetGlobalBuffer(reinterpret_cast<__gm__ float*>(msIn));
-        varianceScale.SetGlobalBuffer(reinterpret_cast<__gm__ float*>(vsIn));
+        if constexpr (!Factored) {
+            variance.SetGlobalBuffer(reinterpret_cast<__gm__ uint8_t*>(vIn));
+            varianceScale.SetGlobalBuffer(reinterpret_cast<__gm__ float*>(vsIn));
+        }
         pipe.InitBuffer(inQueue, 1, Tile * sizeof(float));
         pipe.InitBuffer(outQueue, 1, Tile * sizeof(float));
         pipe.InitBuffer(scratch, 6 * Tile * sizeof(float));
@@ -208,8 +243,23 @@ public:
         }
     }
 
+    __aicore__ inline void InitFactors(GM_ADDR factorIn, GM_ADDR meanIn, GM_ADDR invalidIn) {
+        factors.SetGlobalBuffer(reinterpret_cast<__gm__ float*>(factorIn));
+        rowMean.SetGlobalBuffer(reinterpret_cast<__gm__ float*>(meanIn));
+        invalidFlag.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(invalidIn));
+        auto flag = scales[8].template ReinterpretCast<int32_t>();
+        ReadScalar(invalidFlag, flag, 0, 1);
+        invalidParameter = flag.GetValue(0) != 0;
+        ReadScalar(rowMean, scales[8], 0, 1);
+        float mean = scales.GetValue(8);
+        // Match fmaxf(mean, 1e-30), including a NaN mean.
+        meanDenominator = mean > 1e-30f ? mean : 1e-30f;
+    }
+
     __aicore__ inline void Process(int64_t numel, int64_t mo, int64_t mso, int64_t vo, int64_t vso,
-        uint32_t blockSize, float beta1, float beta2, float lr, float decay, float eps, float step, float bias) {
+        uint32_t blockSize, float beta1, float beta2, float lr, float decay, float eps, float step, float bias,
+        int64_t shardStart = 0, int64_t rows = 0, int64_t columns = 0) {
+        if constexpr (Factored) { if (invalidParameter) return; }
         int64_t count = (numel + blockSize - 1) / blockSize;
         for (int64_t block = GetBlockIdx(); block < count; block += GetBlockNum()) {
             int64_t start = block * blockSize;
@@ -219,17 +269,22 @@ public:
             ReadFloat(model, p, start, n);
             ReadFloat(gradient, g, start, n);
             ReadScalar(moment, mCodes, mo + codeStart, codeCount);
-            ReadScalar(variance, vCodes, vo + codeStart, codeCount);
             ReadScalar(momentScale, scales, mso + block, 1);
-            ReadScalar(varianceScale, scales[8], vso + block, 1);
+            if constexpr (Factored) LoadFactors(shardStart + start, n, rows, columns);
+            else {
+                ReadScalar(variance, vCodes, vo + codeStart, codeCount);
+                ReadScalar(varianceScale, scales[8], vso + block, 1);
+            }
             Sync<HardEvent::V_S>();
             float ms = scales.GetValue(0), vs = scales.GetValue(8);
             for (uint32_t i = 0; i < n; ++i) {
                 uint8_t mc, vc;
                 if constexpr (FourBit) {
                     mc = (mCodes.GetValue(i / 2) >> (4 * (i % 2))) & 15u;
-                    vc = (vCodes.GetValue(i / 2) >> (4 * (i % 2))) & 15u;
-                    v.SetValue(i, (static_cast<float>(vc) + 1.0f) * vs / 16.0f);
+                    if constexpr (!Factored) {
+                        vc = (vCodes.GetValue(i / 2) >> (4 * (i % 2))) & 15u;
+                        v.SetValue(i, (static_cast<float>(vc) + 1.0f) * vs / 16.0f);
+                    }
                 } else {
                     mc = mCodes.GetValue(i); vc = vCodes.GetValue(i);
                     v.SetValue(i, unsignedTable.GetValue(vc) * vs);
@@ -240,9 +295,11 @@ public:
             Update(n, beta1, beta2, lr, decay, eps, step, bias);
             if (!Quantize(n)) continue;
             WriteScalar(moment, mCodes, mo + codeStart, codeCount);
-            WriteScalar(variance, vCodes, vo + codeStart, codeCount);
             WriteScalar(momentScale, scales, mso + block, 1);
-            WriteScalar(varianceScale, scales[8], vso + block, 1);
+            if constexpr (!Factored) {
+                WriteScalar(variance, vCodes, vo + codeStart, codeCount);
+                WriteScalar(varianceScale, scales[8], vso + block, 1);
+            }
             auto out = outQueue.template AllocTensor<Model>();
             if constexpr (sizeof(Model) == sizeof(float)) Adds(out, p, 0.0f, n);
             else Cast(out, p, RoundMode::CAST_RINT, n);
@@ -281,5 +338,35 @@ void launch_adamw_quantized(uint32_t blocks, void* stream, bool model_bf16, bool
     }
 #undef ARENO_QUANT_TYPE
 #undef ARENO_QUANT_LAUNCH
+}
+
+template <typename Model, typename Grad>
+__global__ __aicore__ void adam_factored_step_kernel(GM_ADDR model, GM_ADDR grad, GM_ADDR m, GM_ADDR ms,
+    GM_ADDR factors, GM_ADDR mean, GM_ADDR invalid, int64_t n, int64_t mo, int64_t mso,
+    int64_t start, int64_t rows, int64_t columns, uint32_t blockSize,
+    float beta1, float lr, float decay, float eps, float step, float bias) {
+    AdamQuantizedKernel<Model, Grad, true, true> kernel;
+    kernel.Init(model, grad, m, ms, nullptr, nullptr, nullptr, nullptr);
+    kernel.InitFactors(factors, mean, invalid);
+    kernel.Process(n, mo, mso, 0, 0, blockSize, beta1, 0.0f, lr, decay, eps, step, bias, start, rows, columns);
+}
+
+void launch_adamw_factored_step(uint32_t blocks, void* stream, bool model_bf16, bool grad_bf16,
+    void* model, const void* grad, uint8_t* moment, float* moment_scale,
+    const float* factors, const float* row_mean, const int32_t* invalid,
+    int64_t n, int64_t mo, int64_t mso, int64_t start, int64_t rows, int64_t columns, uint32_t block_size,
+    float beta1, float lr, float decay, float eps, float step, float bias) {
+#define ARENO_FACTORED_STEP(M, G) adam_factored_step_kernel<M, G><<<blocks, nullptr, stream>>>( \
+    (uint8_t*)model, (uint8_t*)grad, (uint8_t*)moment, (uint8_t*)moment_scale, (uint8_t*)factors, \
+    (uint8_t*)row_mean, (uint8_t*)invalid, n, mo, mso, start, rows, columns, block_size, \
+    beta1, lr, decay, eps, step, bias)
+    if (model_bf16) {
+        if (grad_bf16) { ARENO_FACTORED_STEP(bfloat16_t, bfloat16_t); }
+        else { ARENO_FACTORED_STEP(bfloat16_t, float); }
+    } else {
+        if (grad_bf16) { ARENO_FACTORED_STEP(float, bfloat16_t); }
+        else { ARENO_FACTORED_STEP(float, float); }
+    }
+#undef ARENO_FACTORED_STEP
 }
 } // namespace areno_npu

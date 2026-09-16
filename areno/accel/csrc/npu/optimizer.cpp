@@ -1,4 +1,5 @@
 #include <ATen/ATen.h>
+#include <limits>
 #include <torch/csrc/utils/pybind.h>
 #include "torch_npu/csrc/core/npu/NPUGuard.h"
 #include "torch_npu/csrc/core/npu/NPUStream.h"
@@ -105,11 +106,69 @@ void quantized_step(at::Tensor model, const at::Tensor& grad, at::Tensor moment,
         n, moment_offset, moment_scale_offset, variance_offset, variance_scale_offset,
         block_size, beta1, beta2, lr, decay, eps, step_size, bias_sqrt);
 }
+
+void check_factors(const at::Tensor& grad, const at::Tensor& factors, const at::Tensor& invalid,
+                    int64_t start, int64_t rows, int64_t columns) {
+    check_tensor(grad, grad);
+    check_tensor(factors, grad);
+    check_tensor(invalid, grad);
+    TORCH_CHECK(grad.scalar_type() == at::kFloat || grad.scalar_type() == at::kBFloat16,
+                "AdamW4bit factored gradient must be BF16 or FP32");
+    TORCH_CHECK(factors.scalar_type() == at::kFloat, "AdamW4bit factors must be FP32");
+    TORCH_CHECK(invalid.scalar_type() == at::kInt && invalid.numel() == 1,
+                "AdamW4bit invalid flag must be one int32 value");
+    TORCH_CHECK(rows > 0 && columns > 0 && rows <= std::numeric_limits<int64_t>::max() / columns &&
+                rows <= std::numeric_limits<int64_t>::max() - columns, "AdamW4bit factored shape is invalid");
+    TORCH_CHECK(factors.numel() == rows + columns, "AdamW4bit factor count must match matrix shape");
+    check_slice(start, grad.numel(), rows * columns);
+}
+
+void factored_stats(const at::Tensor& grad, at::Tensor sums, at::Tensor invalid,
+                     int64_t start, int64_t rows, int64_t columns) {
+    check_factors(grad, sums, invalid, start, rows, columns);
+    if (grad.numel() == 0) return;
+    const c10_npu::NPUGuard guard(grad.device());
+    auto stream = c10_npu::getCurrentNPUStream(grad.device().index()).stream(true);
+    const int64_t column_tiles = (columns - 1) / kAdamTile + 1;
+    const int64_t end = start + grad.numel() - 1;
+    const int64_t first = start / columns * column_tiles + start % columns / kAdamTile;
+    const int64_t last = end / columns * column_tiles + end % columns / kAdamTile;
+    launch_adamw_factored_stats(static_cast<uint32_t>(std::min<int64_t>(last - first + 1, 32)), stream,
+        grad.scalar_type() == at::kBFloat16, grad.const_data_ptr(), sums.data_ptr<float>(), invalid.data_ptr<int32_t>(),
+        grad.numel(), start, rows, columns);
+}
+
+void factored_step(at::Tensor model, const at::Tensor& grad, at::Tensor moment, at::Tensor moment_scale,
+    const at::Tensor& factors, const at::Tensor& row_mean, const at::Tensor& invalid,
+    int64_t moment_offset, int64_t moment_scale_offset, int64_t start, int64_t block_size,
+    int64_t rows, int64_t columns, double beta1, double lr, double decay, double eps, double step, double bias) {
+    check_model(model, grad);
+    check_factors(grad, factors, invalid, start, rows, columns);
+    for (const auto& tensor : {moment, moment_scale, row_mean}) check_tensor(tensor, model);
+    TORCH_CHECK(moment.scalar_type() == at::kByte, "AdamW4bit packed momentum must use uint8");
+    TORCH_CHECK(moment_scale.scalar_type() == at::kFloat && row_mean.scalar_type() == at::kFloat && row_mean.numel() == 1,
+                "AdamW4bit scales and single row mean must be FP32");
+    TORCH_CHECK(block_size >= 32 && block_size <= 1024 && (block_size & (block_size - 1)) == 0,
+                "AdamW4bit block size must be a power of two in [32, 1024]");
+    const int64_t count = (model.numel() + block_size - 1) / block_size;
+    check_slice(moment_offset, (model.numel() + 1) / 2, moment.numel());
+    check_slice(moment_scale_offset, count, moment_scale.numel());
+    if (model.numel() == 0) return;
+    const c10_npu::NPUGuard guard(model.device());
+    auto stream = c10_npu::getCurrentNPUStream(model.device().index()).stream(true);
+    launch_adamw_factored_step(static_cast<uint32_t>(std::min<int64_t>(count, 32)), stream,
+        model.scalar_type() == at::kBFloat16, grad.scalar_type() == at::kBFloat16,
+        model.data_ptr(), grad.const_data_ptr(), moment.data_ptr<uint8_t>(), moment_scale.data_ptr<float>(),
+        factors.const_data_ptr<float>(), row_mean.const_data_ptr<float>(), invalid.const_data_ptr<int32_t>(),
+        model.numel(), moment_offset, moment_scale_offset, start, rows, columns, block_size, beta1, lr, decay, eps, step, bias);
+}
 } // namespace
 } // namespace areno_npu
 
 void register_optimizer(pybind11::module_& m) {
     using namespace areno_npu;
+    m.def("areno_adamw_4bit_factored_stats", &factored_stats);
+    m.def("areno_adamw_4bit_factored_step", &factored_step);
     m.def("areno_adamw_fp32_state_step", [](at::Tensor model, const at::Tensor& grad,
         at::Tensor moment, at::Tensor variance, double beta1, double beta2, double lr, double decay,
         double eps, double step_size, double bias_sqrt) {

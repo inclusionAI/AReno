@@ -12,4 +12,5 @@ endif()
 message(STATUS "AReno Ascend C target: ${SOC_VERSION}")
 include("${ARENO_ASCENDC_CMAKE_DIR}/ascendc.cmake")
 ascendc_library(areno_npu_kernels STATIC
-    activation_kernel.cpp normalization_kernel.cpp optimizer_kernel.cpp optimizer_quantized_kernel.cpp)
+    activation_kernel.cpp normalization_kernel.cpp optimizer_kernel.cpp
+    optimizer_quantized_kernel.cpp optimizer_factored_kernel.cpp embedding_kernel.cpp)
