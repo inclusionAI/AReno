@@ -7,6 +7,7 @@ void register_embedding(pybind11::module_& m);
 void register_linear(pybind11::module_& m);
 void register_conv(pybind11::module_& m);
 void register_routing(pybind11::module_& m);
+void register_moe(pybind11::module_& m);
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     register_activations(m);
@@ -16,6 +17,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     register_linear(m);
     register_conv(m);
     register_routing(m);
+    register_moe(m);
     m.attr("activation_implementation") = "ascendc";
     m.attr("normalization_implementation") = "ascendc";
     m.attr("optimizer_implementation") = "ascendc";
@@ -23,5 +25,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.attr("linear_implementation") = "aclnn_ascendc";
     m.attr("conv_implementation") = "ascendc";
     m.attr("routing_implementation") = "ascendc";
+    m.attr("moe_implementation") = "ascendc";
     m.attr("supports_training_and_serving") = false;
 }

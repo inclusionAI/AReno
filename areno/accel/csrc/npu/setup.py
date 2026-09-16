@@ -120,14 +120,16 @@ def build_extensions():
                     "linear",
                     "conv",
                     "routing",
+                    "moe",
                 )
             ],
             depends=[
                 "areno/accel/csrc/grouped_linear_common.h",
                 "areno/accel/csrc/routing_common.h",
+                "areno/accel/csrc/moe_permute_common.h",
                 *[
                     f"areno/accel/csrc/npu/{name}_launch.h"
-                    for name in ("activation", "normalization", "optimizer", "embedding", "linear", "conv", "routing")
+                    for name in ("activation", "normalization", "optimizer", "embedding", "linear", "conv", "routing", "moe")
                 ],
             ],
             include_dirs=[str(cann / "include")],
