@@ -145,5 +145,9 @@ def test_sdist_includes_native_build_inputs(tmp_path):
         "normalization.cpp",
         "normalization_kernel.cpp",
         "normalization_launch.h",
+        "optimizer.cpp",
+        "optimizer_kernel.cpp",
+        "optimizer_quantized_kernel.cpp",
+        "optimizer_launch.h",
     ):
         assert f"areno/accel/csrc/npu/{name}" in names
