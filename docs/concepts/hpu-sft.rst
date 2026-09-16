@@ -145,9 +145,6 @@ Without the bridge, the original CUDA/MLX dependencies and build route apply.
 
 .. code-block:: bash
 
-   export PT_HPU_LAZY_MODE=1
-   export PT_ENABLE_INT64_SUPPORT=1
-   export ARENO_HPU_ARCH=gaudi2
    unset ARENO_BUILD_EXT
    python -m pip install -e . --no-build-isolation
    python -m pip install pytest
@@ -165,10 +162,26 @@ train/rollout workers, additionally set ``ARENO_HPU_TEST_ROLLOUT_DEVICES`` and
    ARENO_HPU_TEST_WORLD_SIZE=4 ARENO_HPU_TEST_TP_SIZE=2 \
    python -m pytest -q tests/test_hpu_end_to_end.py
 
-Set ``ARENO_HPU_ARCH=gaudi3`` for Gaudi 3. ``PT_HPU_LAZY_MODE`` must be explicitly
-set to ``0`` (eager) or ``1`` (lazy) at build and execution, with the same value
-for both. Rebuild when changing architecture or bridge mode. The CUDA extension
-builder and CUDA/MLX dependency versions remain unchanged.
+No HPU environment exports are needed for the default install:
+
+* ``PT_HPU_LAZY_MODE`` defaults to ``1`` in both the builder and runtime.
+  An explicit ``0`` selects eager mode; keep the same override at build and
+  execution, and rebuild when changing mode.
+* ``PT_ENABLE_INT64_SUPPORT`` defaults to ``1``. Disabling it is incompatible
+  with the native index kernels and raises an error.
+* ``ARENO_HPU_ARCH`` is detected at build time using
+  the `hl-smi product-name query <https://docs.habana.ai/en/latest/Management_and_Monitoring/Embedded_System_Tools_Guide/System_Management_Interface_Tool.html>`_
+  (``hl-smi -Q name -f csv,noheader``). Gaudi 2/3 names and the HL-225, HL-325,
+  and HL-338 boards are recognized. An explicit ``gaudi2`` or ``gaudi3``
+  overrides detection, including for builds without visible hardware.
+  Missing, unknown or mixed-generation devices produce an actionable error.
+
+The CLI applies runtime defaults before importing torch. In Python scripts,
+import ``areno`` before ``torch`` so the defaults precede bridge auto-loading.
+AReno does not import torch, load the bridge or acquire a device during its
+bootstrap. If the bridge is already loaded and the required environment is
+unset, AReno reports the import-order problem instead of changing its mode late.
+The CUDA extension builder and CUDA/MLX dependency versions remain unchanged.
 
 ``ARENO_BUILD_EXT=0`` skips native compilation while still selecting dependencies
 for the detected backend. Do not use it for the normal HPU runtime install.
@@ -184,10 +197,9 @@ fixed at build time, so build HPU wheels in the SynapseAI environment as well.
 The worker registers the built TPC library in ``GC_KERNEL_PATH`` before
 initializing the bridge. Direct accel users must call
 ``areno.accel._extension.configure_hpu_kernel_library()`` before initializing
-HPU. Set ``PT_ENABLE_INT64_SUPPORT=1`` before importing the bridge or creating
-HPU tensors; otherwise the bridge can silently store ``torch.long`` in int32
-memory. AReno's loader also sets this flag when absent and rejects an explicit
-disabled value. Existing compiler libraries are retained, including the standard Gaudi
+HPU. AReno sets ``PT_ENABLE_INT64_SUPPORT=1`` before bridge import; otherwise the
+bridge can silently store ``torch.long`` in int32 memory. The loader rejects an
+explicit disabled value. Existing compiler libraries are retained, including the standard Gaudi
 library when no explicit list is configured. See Intel's
 `Multiple Kernel Libraries <https://docs.habana.ai/en/latest/TPC/TPC_User_Guide/Multiple_Kernels_Library.html>`_
 and `PyTorch CustomOp API <https://docs.habana.ai/en/latest/PyTorch/Reference/PyTorch_CustomOp_API/page_index.html>`_.

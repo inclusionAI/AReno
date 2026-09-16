@@ -30,14 +30,21 @@ class SetupGuardrailsTest(unittest.TestCase):
         with (
             patch.object(setup_mod["platform"], "system", return_value="Linux"),
             patch.dict(sys.modules, {"torch": None, "habana_frameworks.torch": None}),
-            patch.dict(detect.__globals__, {"find_spec": Mock(return_value=object())}),
+            patch.dict(
+                detect.__globals__,
+                {"find_spec": Mock(return_value=types.SimpleNamespace(submodule_search_locations=["bridge"]))},
+            ),
+            patch.object(detect.__globals__["PathFinder"], "find_spec", return_value=object()),
         ):
             self.assertTrue(detect())
 
     def test_missing_bridge_preserves_default_build(self):
         setup_mod = _load_setup_module()
         detect = setup_mod["_using_hpu"]
-        for result in (Mock(return_value=None), Mock(side_effect=ModuleNotFoundError)):
+        for result in (
+            Mock(return_value=None),
+            Mock(return_value=types.SimpleNamespace(submodule_search_locations=None)),
+        ):
             with (
                 patch.object(setup_mod["platform"], "system", return_value="Linux"),
                 patch.dict(detect.__globals__, {"find_spec": result}),
@@ -102,6 +109,7 @@ class SetupGuardrailsTest(unittest.TestCase):
                 shutil.copytree(root / "requirements", project / "requirements")
                 (project / "areno").mkdir()
                 (project / "areno/__init__.py").touch()
+                shutil.copy2(root / "areno/_hpu.py", project / "areno/_hpu.py")
                 # A discoverable bridge is enough; importing it or torch during
                 # metadata generation would fail in this isolated subprocess.
                 (project / "torch.py").write_text("raise RuntimeError('torch must not be imported')\n")
