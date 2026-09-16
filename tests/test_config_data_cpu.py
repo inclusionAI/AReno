@@ -745,6 +745,7 @@ class ConfigAndDataTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "optimizer_state_offload_dir is required"):
             TrainerConfig(
                 algo="sft",
+                backend="cuda",
                 ckpt="unused",
                 dataset_path="unused",
                 optimizer_state_offload="disk",
@@ -752,6 +753,7 @@ class ConfigAndDataTest(unittest.TestCase):
 
         cfg = TrainerConfig(
             algo="sft",
+            backend="cuda",
             ckpt="unused",
             dataset_path="unused",
             optimizer_state_offload="disk",
@@ -768,6 +770,7 @@ class ConfigAndDataTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "optimizer_state_offload_batch_size must be positive"):
             TrainerConfig(
                 algo="sft",
+                backend="cuda",
                 ckpt="unused",
                 dataset_path="unused",
                 optimizer_state_offload_batch_size=0,

@@ -1,26 +1,65 @@
-"""Lazy loader for the compiled ``areno.accel._areno_accel`` C++/CUDA extension.
+"""Lazy device selection for AReno's native C extensions.
 
 The extension module is imported on first use rather than at package import
 time so that ``import areno.accel`` succeeds in environments where only the
 Python shims are needed (e.g. for type checking). Each shim calls
-``extension()`` to obtain the compiled module and dispatch into the fused
-kernel. There is no pure-Python fallback: if the extension was not built the
-``importlib.import_module`` call below raises ``ModuleNotFoundError``.
+``extension(tensor.device)`` to obtain the compiled module and dispatch into the fused
+kernel. A missing native extension raises an explicit error; there is no
+pure-Python or cross-device fallback.
 """
 
 from __future__ import annotations
 
 import importlib
+import importlib.util
 import os
 from types import ModuleType
 
 # Cached reference to the compiled extension; populated on first call.
 _EXT: ModuleType | None = None
+_HPU_EXT: ModuleType | None = None
 
 
-def extension() -> ModuleType:
-    """Return the compiled C++/CUDA extension module, importing it lazily."""
-    global _EXT
+def configure_hpu_kernel_library() -> None:
+    """Expose AReno's TPC library before the Gaudi graph compiler initializes."""
+    spec = importlib.util.find_spec("areno.accel._areno_hpu_kernels")
+    if spec is None or spec.origin is None:
+        raise RuntimeError(
+            "AReno native HPU kernels are not installed: areno.accel._areno_hpu_kernels. "
+            "Build them with `python areno/accel/csrc/hpu/setup.py build_ext --inplace` in a Gaudi SDK environment."
+        )
+    # The bridge otherwise permits Long tensors to use int32 device storage.
+    # Native index kernels read both int64 words and must see the actual dtype.
+    if os.environ.get("PT_ENABLE_INT64_SUPPORT", "1").lower() not in {"1", "true"}:
+        raise RuntimeError("AReno HPU kernels require PT_ENABLE_INT64_SUPPORT=1 before importing the Gaudi bridge")
+    os.environ.setdefault("PT_ENABLE_INT64_SUPPORT", "1")
+    # Setting GC_KERNEL_PATH replaces the compiler's defaults. Retain the
+    # standard Gaudi library when the environment has no explicit list.
+    configured = os.environ.get("GC_KERNEL_PATH") or "/usr/lib/habanalabs/libtpc_kernels.so"
+    paths = [path for path in configured.split(os.pathsep) if path]
+    if spec.origin not in paths:
+        os.environ["GC_KERNEL_PATH"] = os.pathsep.join([*paths, spec.origin])
+
+
+def extension(device="cuda") -> ModuleType:
+    """Load native kernels for this tensor's device; no cross-device fallback."""
+    global _EXT, _HPU_EXT
+    device_type = getattr(device, "type", str(device).split(":", 1)[0])
+    if device_type == "hpu":
+        if _HPU_EXT is None:
+            configure_hpu_kernel_library()
+            try:
+                _HPU_EXT = importlib.import_module("areno.accel._areno_accel_hpu")
+            except ModuleNotFoundError as exc:
+                if exc.name not in {None, "areno.accel._areno_accel_hpu"}:
+                    raise
+                raise RuntimeError(
+                    "AReno native HPU kernels are not installed: areno.accel._areno_accel_hpu. "
+                    "Build them with `python areno/accel/csrc/hpu/setup.py build_ext --inplace` in a Gaudi SDK environment."
+                ) from exc
+        return _HPU_EXT
+    if device_type != "cuda":
+        raise RuntimeError(f"AReno native kernels require CUDA or HPU tensors, got {device_type}")
     if _EXT is None:
         try:
             _EXT = importlib.import_module("areno.accel._areno_accel")

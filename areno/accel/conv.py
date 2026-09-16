@@ -11,6 +11,7 @@ using a separately maintained history cache.
 import torch
 
 from areno.accel._extension import extension as _extension
+from areno.accel.utils import on_kernel_device
 
 
 def _check_weight_shape(weight: torch.Tensor) -> None:
@@ -34,14 +35,16 @@ class _DepthwiseCausalConv1dSilu(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
-        out, preact = _extension().areno_depthwise_causal_conv1d_silu_forward(x.contiguous(), weight.contiguous())
+        out, preact = _extension(x.device).areno_depthwise_causal_conv1d_silu_forward(
+            x.contiguous(), weight.contiguous()
+        )
         ctx.save_for_backward(x, weight, preact)
         return out
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         x, weight, preact = ctx.saved_tensors
-        grad_input, grad_weight = _extension().areno_depthwise_causal_conv1d_silu_backward(
+        grad_input, grad_weight = _extension(grad_output.device).areno_depthwise_causal_conv1d_silu_backward(
             grad_output.contiguous(),
             x.contiguous(),
             weight.contiguous(),
@@ -56,7 +59,7 @@ class _PackedDepthwiseCausalConv1dSilu(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x: torch.Tensor, weight: torch.Tensor, cu_seqlens: torch.Tensor) -> torch.Tensor:
         cu_seqlens = cu_seqlens.to(device=x.device, dtype=torch.int32).contiguous()
-        out, preact = _extension().areno_packed_depthwise_causal_conv1d_silu_forward(
+        out, preact = _extension(x.device).areno_packed_depthwise_causal_conv1d_silu_forward(
             x.contiguous(),
             weight.contiguous(),
             cu_seqlens,
@@ -67,7 +70,7 @@ class _PackedDepthwiseCausalConv1dSilu(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, None]:
         x, weight, cu_seqlens, preact = ctx.saved_tensors
-        grad_input, grad_weight = _extension().areno_packed_depthwise_causal_conv1d_silu_backward(
+        grad_input, grad_weight = _extension(grad_output.device).areno_packed_depthwise_causal_conv1d_silu_backward(
             grad_output.contiguous(),
             x.contiguous(),
             weight.contiguous(),
@@ -85,8 +88,10 @@ def areno_depthwise_causal_conv1d_silu(x: torch.Tensor, weight: torch.Tensor) ->
     convolution causal. Falls through to the inference path when autograd is
     disabled to avoid stashing the pre-activation tensor.
     """
-    if not x.is_cuda or not weight.is_cuda:
-        raise RuntimeError("areno_depthwise_causal_conv1d_silu requires CUDA input and weight")
+    if not on_kernel_device(x, weight):
+        raise RuntimeError(
+            "areno_depthwise_causal_conv1d_silu requires CUDA or HPU input and weight on the same device"
+        )
     if x.dim() != 3:
         raise ValueError(f"input must have shape (batch, seqlen, channels), got {tuple(x.shape)}")
     weight = _kernel_weight(weight)
@@ -94,7 +99,7 @@ def areno_depthwise_causal_conv1d_silu(x: torch.Tensor, weight: torch.Tensor) ->
         raise ValueError(f"channel mismatch: input={x.shape[-1]} weight={weight.shape[0]}")
     if torch.is_grad_enabled() and (x.requires_grad or weight.requires_grad):
         return _DepthwiseCausalConv1dSilu.apply(x, weight)
-    out, _ = _extension().areno_depthwise_causal_conv1d_silu_forward(x.contiguous(), weight.contiguous())
+    out, _ = _extension(x.device).areno_depthwise_causal_conv1d_silu_forward(x.contiguous(), weight.contiguous())
     return out
 
 
@@ -103,8 +108,8 @@ def areno_packed_depthwise_causal_conv1d_silu(
     x: torch.Tensor, weight: torch.Tensor, cu_seqlens: torch.Tensor
 ) -> torch.Tensor:
     """Apply depthwise causal conv1d followed by SiLU to packed (1, tokens, channels) tensors."""
-    if not x.is_cuda or not weight.is_cuda or not cu_seqlens.is_cuda:
-        raise RuntimeError("areno_packed_depthwise_causal_conv1d_silu requires CUDA tensors")
+    if not on_kernel_device(x, weight, cu_seqlens):
+        raise RuntimeError("areno_packed_depthwise_causal_conv1d_silu requires CUDA or HPU tensors on the same device")
     if x.dim() != 3 or x.shape[0] != 1:
         raise ValueError(f"input must have shape (1, tokens, channels), got {tuple(x.shape)}")
     weight = _kernel_weight(weight)
@@ -112,7 +117,7 @@ def areno_packed_depthwise_causal_conv1d_silu(
         raise ValueError(f"channel mismatch: input={x.shape[-1]} weight={weight.shape[0]}")
     if torch.is_grad_enabled() and (x.requires_grad or weight.requires_grad):
         return _PackedDepthwiseCausalConv1dSilu.apply(x, weight, cu_seqlens)
-    out, _ = _extension().areno_packed_depthwise_causal_conv1d_silu_forward(
+    out, _ = _extension(x.device).areno_packed_depthwise_causal_conv1d_silu_forward(
         x.contiguous(),
         weight.contiguous(),
         cu_seqlens.to(device=x.device, dtype=torch.int32).contiguous(),
@@ -131,14 +136,14 @@ def areno_depthwise_causal_conv1d_silu_decode(
     ``(rows, channels, kernel - 1)``. Returns the activated single-step output;
     callers are responsible for shifting ``history``.
     """
-    if not current.is_cuda or not history.is_cuda or not weight.is_cuda:
-        raise RuntimeError("areno_depthwise_causal_conv1d_silu_decode requires CUDA tensors")
+    if not on_kernel_device(current, history, weight):
+        raise RuntimeError("areno_depthwise_causal_conv1d_silu_decode requires CUDA or HPU tensors on the same device")
     if current.dim() != 2:
         raise ValueError(f"current must have shape (rows, channels), got {tuple(current.shape)}")
     if history.dim() != 3:
         raise ValueError(f"history must have shape (rows, channels, kernel - 1), got {tuple(history.shape)}")
     weight = _kernel_weight(weight)
-    out, _ = _extension().areno_depthwise_causal_conv1d_silu_decode(
+    out, _ = _extension(current.device).areno_depthwise_causal_conv1d_silu_decode(
         current.contiguous(),
         history.contiguous(),
         weight.contiguous(),

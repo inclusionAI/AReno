@@ -11,6 +11,7 @@ weights ready for the permute / grouped-GEMM pipeline.
 import torch
 
 from areno.accel._extension import extension as _extension
+from areno.accel.utils import on_kernel_device
 
 
 @torch._dynamo.disable
@@ -27,13 +28,13 @@ def areno_grouped_topk_router(
     per-expert score offset. Returns ``(topk_idx, topk_weight)`` with shapes
     ``(tokens, top_k)`` for downstream permute / unpermute kernels.
     """
-    if not logits.is_cuda or not expert_bias.is_cuda:
-        raise RuntimeError("areno_grouped_topk_router requires CUDA logits and expert_bias")
+    if not on_kernel_device(logits, expert_bias):
+        raise RuntimeError("areno_grouped_topk_router requires CUDA or HPU logits and expert_bias on the same device")
     if logits.dim() != 2:
         raise ValueError(f"logits must have shape (tokens, experts), got {tuple(logits.shape)}")
     if expert_bias.dtype != torch.float32:
         raise TypeError("areno_grouped_topk_router expert_bias must be float32")
-    topk_idx, topk_weight = _extension().areno_grouped_topk_router(
+    topk_idx, topk_weight = _extension(logits.device).areno_grouped_topk_router(
         logits.contiguous(),
         expert_bias.contiguous(),
         int(top_k),

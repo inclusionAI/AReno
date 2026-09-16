@@ -174,7 +174,13 @@ class ArenoEngine:
         self.config = config
         # TPCluster owns the per-rank worker processes and the IPC channels;
         # ``ArenoWorker`` is the rank-side command loop.
-        self.cluster = TPCluster(config, ArenoWorker, **(cluster_kwargs or {}))
+        worker_cls = ArenoWorker
+        if config.runtime.device_type != "cuda":
+            from areno.api.backend.base import get_backend_cls
+            from areno.api.models import BackendType
+
+            worker_cls = get_backend_cls(BackendType(config.runtime.device_type.upper())).worker_cls
+        self.cluster = TPCluster(config, worker_cls, **(cluster_kwargs or {}))
         if start:
             self.cluster.start()
         self._async_dp_cursor = count()

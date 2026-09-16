@@ -4,10 +4,8 @@ from __future__ import annotations
 
 import torch
 
-from areno.accel.kernels.kda_fla.fused_sigmoid_gating_recurrent import (
-    fused_sigmoid_gating_delta_rule_update,
-)
-from areno.accel.kernels.kda_fla.kda import chunk_kda
+from areno.accel._extension import extension
+from areno.accel.utils import on_kernel_device
 
 
 @torch._dynamo.disable
@@ -28,6 +26,13 @@ def areno_kda_chunk(
     lower_bound: float | None,
     use_qk_l2norm_in_kernel: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
+    if not on_kernel_device(q, k, v, raw_gate, beta, initial_state, state_indices, cu_seqlens, a_log, dt_bias):
+        raise RuntimeError("areno_kda_chunk requires CUDA or HPU tensors on the same device")
+    if q.device.type == "hpu":
+        chunk_kda = extension(q.device).chunk_kda
+    else:
+        from areno.accel.kernels.kda_fla.kda import chunk_kda
+
     return chunk_kda(
         q=q,
         k=k,
@@ -63,6 +68,13 @@ def areno_kda_recurrent_update(
     lower_bound: float | None,
     use_qk_l2norm_in_kernel: bool = True,
 ) -> torch.Tensor:
+    if not on_kernel_device(q, k, v, raw_gate, beta, state, state_indices, cu_seqlens, a_log, dt_bias):
+        raise RuntimeError("areno_kda_recurrent_update requires CUDA or HPU tensors on the same device")
+    if q.device.type == "hpu":
+        fused_sigmoid_gating_delta_rule_update = extension(q.device).fused_sigmoid_gating_delta_rule_update
+    else:
+        from areno.accel.kernels.kda_fla.fused_sigmoid_gating_recurrent import fused_sigmoid_gating_delta_rule_update
+
     return fused_sigmoid_gating_delta_rule_update(
         A_log=a_log,
         a=raw_gate,

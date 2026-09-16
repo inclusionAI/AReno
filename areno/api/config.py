@@ -93,6 +93,8 @@ class MlxConfig:
             raise ValueError("MLX LoRA cannot be combined with multimodal tower or projector unfreezing")
 
 
+HpuConfig = CudaConfig
+
 BackendConfig = CudaConfig | MlxConfig
 
 
@@ -129,7 +131,7 @@ def coerce_backend_config(backend_type: BackendType, custom_config: Any) -> Back
 
     if custom_config is None:
         return None
-    if backend_type == BackendType.CUDA and isinstance(custom_config, CudaConfig):
+    if backend_type in {BackendType.CUDA, BackendType.HPU} and isinstance(custom_config, CudaConfig):
         return custom_config
     if backend_type == BackendType.MLX and isinstance(custom_config, MlxConfig):
         return custom_config
