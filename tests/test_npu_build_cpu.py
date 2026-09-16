@@ -135,5 +135,15 @@ def test_sdist_includes_native_build_inputs(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
     with tarfile.open(next((tmp_path / "dist").glob("*.tar.gz"))) as archive:
         names = {name.split("/", 1)[1] for name in archive.getnames() if "/" in name}
-    for name in ("setup.py", "CMakeLists.txt", "activation.cpp", "activation_kernel.cpp", "activation_launch.h"):
+    for name in (
+        "setup.py",
+        "CMakeLists.txt",
+        "extension.cpp",
+        "activation.cpp",
+        "activation_kernel.cpp",
+        "activation_launch.h",
+        "normalization.cpp",
+        "normalization_kernel.cpp",
+        "normalization_launch.h",
+    ):
         assert f"areno/accel/csrc/npu/{name}" in names

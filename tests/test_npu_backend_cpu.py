@@ -49,7 +49,7 @@ def test_incomplete_extension_rejects_jobs_before_device_or_collective_initializ
     monkeypatch.setattr("areno.api.backend.npu.backend.init_process_group", unexpected_initialization)
     for key in ("RANK", "LOCAL_RANK", "WORLD_SIZE"):
         monkeypatch.setenv(key, "0")
-    with pytest.raises(RuntimeError, match="activation validation only"):
+    with pytest.raises(RuntimeError, match="kernel validation only"):
         NpuProcess.initialize_process(
             0, 1, 0, SimpleNamespace(global_world_size=1), SimpleNamespace(global_rank_offset=0), SimpleNamespace()
         )

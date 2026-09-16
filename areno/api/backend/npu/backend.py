@@ -29,7 +29,7 @@ class NpuProcess:
         native = extension("npu")
         if not getattr(native, "supports_training_and_serving", False):
             raise RuntimeError(
-                "The Ascend native extension currently provides activation validation only; "
+                "The Ascend native extension currently provides kernel validation only; "
                 "training/serving kernels are not complete."
             )
 
