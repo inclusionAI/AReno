@@ -15,6 +15,25 @@ Native LoRA currently supports these CUDA model adapters:
 * Qwen3
 * Qwen3-MoE
 * Bailing-MoE V3 checkpoints with ``no_kda_lora=true``
+* OLMo2 and Phi4MM
+* Gemma4
+* Qwen3.5 dense and MoE adapters, including the VLM language trunk
+* MiniCPM-V 4.6 language trunk
+* Legacy Bailing-MoE linear V2
+
+For multimodal models, this support covers native language projections only;
+vision/audio towers and projectors are not LoRA targets. Model-family support
+does not imply that every checkpoint variant or TP/DP layout is qualified.
+Gemma4 and Qwen3.5 routed-MoE adapters use grouped execution during rollout
+when expert LoRA is active; their performance is not qualified by dense-model
+tests.
+
+This feature does not automatically change model precision. FlashAttention
+requires FP16 or BF16 execution tensors. A checkpoint configuration declaring
+FP32, including the official OLMo-2-0425-1B release, is not directly qualified
+for the FlashAttention path without an explicitly prepared compatible
+execution configuration. Checkpoint storage precision and execution precision
+must not be confused.
 
 The default target modules are ``q_proj``, ``k_proj``, ``v_proj``,
 ``o_proj``, ``gate_proj``, ``up_proj``, and ``down_proj``. Select a subset
