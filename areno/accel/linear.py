@@ -4,7 +4,7 @@
 ``F.linear`` would otherwise dispatch to cuBLAS, and lets the autograd path
 reuse the extension's tuned backward. ``areno_grouped_linear`` performs
 per-expert matmuls over contiguous token groups (post-permute MoE layout)
-without launching one kernel per expert.
+using shared grouping logic and the device's native GEMM implementation.
 """
 
 from collections.abc import Sequence

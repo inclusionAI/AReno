@@ -114,8 +114,11 @@ def build_extensions():
                 for name in ("extension", "activation", "normalization", "optimizer", "embedding", "linear")
             ],
             depends=[
-                f"areno/accel/csrc/npu/{name}_launch.h"
-                for name in ("activation", "normalization", "optimizer", "embedding", "linear")
+                "areno/accel/csrc/grouped_linear_common.h",
+                *[
+                    f"areno/accel/csrc/npu/{name}_launch.h"
+                    for name in ("activation", "normalization", "optimizer", "embedding", "linear")
+                ],
             ],
             include_dirs=[str(cann / "include")],
             library_dirs=[str(cann / "lib64")],

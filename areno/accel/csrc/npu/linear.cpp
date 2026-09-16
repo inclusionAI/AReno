@@ -8,6 +8,7 @@
 #include "torch_npu/csrc/core/npu/NPUStream.h"
 #include "torch_npu/csrc/framework/FormatHelper.h"
 #include "linear_launch.h"
+#include "../grouped_linear_common.h"
 
 namespace areno_npu {
 namespace {
@@ -119,10 +120,35 @@ std::vector<at::Tensor> linear_backward(const at::Tensor& grad, const at::Tensor
     if (need_bias) bias_kernel(grad, grad, db, rows, n, true);
     return {dx, dw, db};
 }
+
+at::Tensor grouped_forward(const at::Tensor& input, const at::Tensor& weight, const std::vector<int64_t>& counts) {
+    check_linear_tensor(input, input);
+    const c10_npu::NPUGuard guard(input.device());
+    return areno_accel::grouped_linear::forward(input, weight, counts, check_linear_tensor, mm);
+}
+
+std::vector<at::Tensor> grouped_backward(const at::Tensor& grad, const at::Tensor& input, const at::Tensor& weight,
+    const std::vector<int64_t>& counts, bool need_input, bool need_weight) {
+    check_linear_tensor(input, input);
+    const c10_npu::NPUGuard guard(input.device());
+    return areno_accel::grouped_linear::backward(grad, input, weight, counts, need_input, need_weight,
+                                               check_linear_tensor, mm);
+}
 } // namespace
 } // namespace areno_npu
 
 void register_linear(pybind11::module_& m) {
     m.def("areno_linear_forward", &areno_npu::linear_forward);
     m.def("areno_linear_backward", &areno_npu::linear_backward);
+    m.def("areno_grouped_linear_forward", &areno_npu::grouped_forward);
+    m.def("areno_grouped_linear_backward", &areno_npu::grouped_backward);
+    m.def("areno_grouped_linear_forward_counts", [](const at::Tensor& input, const at::Tensor& weight,
+        const at::Tensor& counts) {
+        return areno_npu::grouped_forward(input, weight, areno_accel::grouped_linear::host_counts(counts, input, weight));
+    });
+    m.def("areno_grouped_linear_backward_counts", [](const at::Tensor& grad, const at::Tensor& input,
+        const at::Tensor& weight, const at::Tensor& counts, bool need_input, bool need_weight) {
+        return areno_npu::grouped_backward(grad, input, weight, areno_accel::grouped_linear::host_counts(counts, input, weight),
+                                          need_input, need_weight);
+    });
 }
