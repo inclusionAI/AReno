@@ -111,19 +111,6 @@ class RuntimeConfig:
         )
         self.attn_backend = "native"
 
-    def resolve_model_dtype(self, *, model: ModelConfig) -> None:
-        """Use a FlashAttention-compatible execution dtype for FP32 checkpoints."""
-
-        if self.attn_backend != "flash" or model.dtype is not torch.float32:
-            return
-        warnings.warn(
-            "the checkpoint declares float32 weights, but flash-attn requires float16 or bfloat16; "
-            "loading the CUDA execution model as bfloat16",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        model.dtype = torch.bfloat16
-
     def resolve_compile_model(self, *, model: ModelConfig, devices: list[int]) -> None:
         """Disable torch.compile when the selected hardware cannot compile the model dtype."""
 
@@ -371,7 +358,6 @@ class EngineConfig:
         # not have router decisions to capture and retain the original path.
         if self.runtime.rollout_routing_replay and self.model.num_experts is None:
             self.runtime.rollout_routing_replay = False
-        self.runtime.resolve_model_dtype(model=self.model)
         self.runtime.resolve_attn_backend(model=self.model, devices=self.devices)
         self.runtime.resolve_compile_model(model=self.model, devices=self.devices)
         self.runtime.resolve_eager_decode(model=self.model, lora=self.lora)

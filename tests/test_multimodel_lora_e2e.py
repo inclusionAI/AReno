@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,7 +14,6 @@ from safetensors.torch import load_file
 from areno import Trainer
 from areno.adapters import LoraConfig
 from areno.api import CudaConfig, SamplingParams
-from areno.api.algorithms import get_algorithm
 from areno.api.trainer_config import PolicyTrainerConfig
 from areno.api.trainers.policy_only import PolicyOnlyTrainer
 
@@ -23,9 +23,27 @@ class _Case:
     model_env: str
     targets: tuple[str, ...]
     changed_fragments: tuple[str, ...]
+    tp_size: int = 2
+    steps: int = 1
+    full_parameter_targets: tuple[str, ...] = ()
+    activation_checkpointing: bool = False
 
 
 _CASES = {
+    "flash_v3": _Case(
+        model_env="ARENO_E2E_FLASH_V3_MODEL",
+        targets=(
+            "layers.0.attention.q_proj",
+            "layers.0.attention.k_proj",
+            "layers.2.mlp.experts.linear_fc1",
+            "layers.2.mlp.experts.linear_fc2",
+        ),
+        changed_fragments=(".attention.", ".mlp.experts.", ".mlp.gate.weight"),
+        tp_size=8,
+        steps=2,
+        full_parameter_targets=("layers.2.mlp.gate.weight",),
+        activation_checkpointing=True,
+    ),
     "olmo2": _Case(
         model_env="ARENO_E2E_OLMO2_MODEL",
         targets=(
@@ -129,6 +147,7 @@ class _ObservedTrainer:
         self.inner = inner
         self.rollout_versions: list[int | None] = []
         self.train_versions: list[int | None] = []
+        self.train_results: list[dict] = []
 
     def __getattr__(self, name: str):
         return getattr(self.inner, name)
@@ -146,14 +165,15 @@ class _ObservedTrainer:
     def train(self, batch_data, loss_fn, mini_bs=8, gradient_accumulation_steps=None):
         result = self.inner.train(batch_data, loss_fn, mini_bs, gradient_accumulation_steps)
         self.train_versions.append(result.get("adapter_version"))
+        self.train_results.append(result)
         return result
 
 
-def _cuda_config(lora: LoraConfig) -> CudaConfig:
+def _cuda_config(lora: LoraConfig, case: _Case) -> CudaConfig:
     return CudaConfig(
-        tp_size=2,
+        tp_size=case.tp_size,
         dp_size=1,
-        devices=[0, 1],
+        devices=list(range(case.tp_size)),
         sequence_parallel=True,
         lora=lora,
         max_running_prompts=2,
@@ -166,15 +186,26 @@ def _cuda_config(lora: LoraConfig) -> CudaConfig:
         },
         runtime={
             "compile_model": False,
-            "activation_checkpointing": False,
+            "activation_checkpointing": case.activation_checkpointing,
             "keep_rollout_state": False,
             "eager_decode": False,
         },
     )
 
 
+def _update_loss(_pack, logprobs: torch.Tensor) -> torch.Tensor:
+    """Exercise adapter updates without cancelling identical greedy samples.
+
+    This is a lifecycle diagnostic loss, not a GRPO objective qualification.
+    """
+
+    return -logprobs.mean()
+
+
 def test_multimodel_lora_rollout_train_reload(tmp_path: Path) -> None:
     case_name = os.getenv("ARENO_E2E_MULTIMODEL_CASE")
+    if not case_name and os.getenv("ARENO_E2E_FLASH_V3_MODEL"):
+        case_name = "flash_v3"
     if not case_name:
         pytest.skip("set ARENO_E2E_MULTIMODEL_CASE to select a real-checkpoint case")
     if case_name not in _CASES:
@@ -189,18 +220,20 @@ def test_multimodel_lora_rollout_train_reload(tmp_path: Path) -> None:
 
     initial_path = tmp_path / "adapter-initial"
     trained_path = tmp_path / "adapter-trained"
-    lora = LoraConfig(rank=4, alpha=4.0, target_modules=case.targets)
-    observed = _ObservedTrainer(Trainer(2, os.fspath(model_path), custom_config=_cuda_config(lora)))
+    lora = LoraConfig(
+        rank=4, alpha=4.0, target_modules=case.targets, full_parameter_targets=case.full_parameter_targets
+    )
+    observed = _ObservedTrainer(Trainer(case.tp_size, os.fspath(model_path), custom_config=_cuda_config(lora, case)))
     config = PolicyTrainerConfig(
         algo="grpo",
         ckpt=os.fspath(model_path),
         dataset_path=f"e2e://{case_name}",
-        epochs=1,
-        max_steps=1,
-        world_size=2,
-        tp_size=2,
+        epochs=case.steps,
+        max_steps=case.steps,
+        world_size=case.tp_size,
+        tp_size=case.tp_size,
         sequence_parallel=True,
-        train_devices=[0, 1],
+        train_devices=list(range(case.tp_size)),
         batch_size=1,
         mini_bs=2,
         n_samples=2,
@@ -212,7 +245,7 @@ def test_multimodel_lora_rollout_train_reload(tmp_path: Path) -> None:
         optimizer_min_lr=1.0e-4,
         lr_decay_style="constant",
         weight_decay=0.0,
-        activation_checkpointing=False,
+        activation_checkpointing=case.activation_checkpointing,
         keep_rollout_state=False,
         eager_decode=False,
         metrics_log_dir=None,
@@ -227,12 +260,13 @@ def test_multimodel_lora_rollout_train_reload(tmp_path: Path) -> None:
         instance=observed,
         dataset=[{"prompt": "Write one short English noun. Output only the noun."}],
         reward_fn=reward_fn,
-        loss_fn=get_algorithm("grpo").make_loss_fn(config),
+        loss_fn=_update_loss,
     )
 
     observed.init()
     try:
         parity_tokens = observed.get_tokenizer().encode("A fixed adapter parity check.", add_special_tokens=True)
+        initial_logprobs = observed.score_logprobs("actor", [parity_tokens], microbatch_size=1)[0]
         observed.export_adapter(os.fspath(initial_path))
         policy._fit_initialized()
         observed.export_adapter(os.fspath(trained_path))
@@ -247,18 +281,30 @@ def test_multimodel_lora_rollout_train_reload(tmp_path: Path) -> None:
     finally:
         observed.close()
 
-    assert observed.rollout_versions == [0]
-    assert observed.train_versions == [1]
-    assert final_rollout[0].adapter_version == 1
+    assert observed.rollout_versions == list(range(case.steps))
+    assert observed.train_versions == list(range(1, case.steps + 1))
+    assert final_rollout[0].adapter_version == case.steps
+    assert all(result["sequence_parallel"] for result in observed.train_results)
     initial = load_file(initial_path / "adapter_model.safetensors")
     trained = load_file(trained_path / "adapter_model.safetensors")
+    assert initial.keys() == trained.keys()
+    assert all(torch.isfinite(value).all() for value in trained.values())
     changed = {name for name in initial if not torch.equal(initial[name], trained[name])}
     assert all(any(fragment in name for name in changed) for fragment in case.changed_fragments)
+    before = torch.tensor(initial_logprobs)
+    after = torch.tensor(trained_logprobs)
+    assert torch.isfinite(before).all() and torch.isfinite(after).all()
+    assert (after - before).abs().max() > 1e-6
+    if case.full_parameter_targets:
+        metadata = json.loads((trained_path / "adapter_config.json").read_text(encoding="utf-8"))
+        assert metadata["peft_type"] == "ARENO_HYBRID"
+        assert metadata["format_version"] == 1
+        assert tuple(metadata["full_parameter_targets"]) == case.full_parameter_targets
 
     reloaded = Trainer(
-        2,
+        case.tp_size,
         os.fspath(model_path),
-        custom_config=_cuda_config(LoraConfig(adapter_path=os.fspath(trained_path))),
+        custom_config=_cuda_config(LoraConfig(adapter_path=os.fspath(trained_path)), case),
     )
     reloaded.init()
     try:
