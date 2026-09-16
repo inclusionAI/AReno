@@ -1,7 +1,7 @@
 Ascend NPU integration
 ======================
 
-The target environment is Linux/aarch64, Ascend 910, CANN 9.0.0,
+The target environment is Linux/aarch64, Ascend910_9382, CANN 9.0.0,
 PyTorch 2.10.0+cpu and torch_npu 2.10.0.post2. The CPU-tagged PyTorch
 installation is retained; torch_npu provides the NPU device and operators.
 
@@ -13,6 +13,8 @@ extension. Dense matrix multiplication links CANN 9's ``opapi_nn`` and
 ``nnopbase`` libraries, so the CANN NN operator package is also required.
 CMake and the CANN compiler are required. Source the toolkit's
 ``set_env.sh`` before building. No CUDA compiler is used.
+Fused experts additionally links the toolkit's ``tiling_api`` and ``platform``
+libraries to query Cube/Vector core counts and Matmul system workspace size.
 
 The exact SoC is queried from ``aclrtGetSocName`` after TorchNPU initialization.
 The current kernels target A2/A3 (Ascend 910B variants and 910_93xx); a generic
@@ -38,6 +40,7 @@ TorchNPU execution only; it does not test AReno kernels or HCCL.
    python -m pytest -q tests/test_routing.py -k npu
    python -m pytest -q tests/test_moe_native.py -k npu
    python -m pytest -q tests/test_attention_native.py -k npu
+   python -m pytest -q tests/test_fused_experts_native.py -k npu
    torchrun --standalone --nproc_per_node=2 -m pytest -q tests/test_npu_optimizer_distributed.py
 
 Current validation boundary
@@ -166,6 +169,29 @@ saved-output gradients, GQA, packed isolation, storage offsets, cache writes,
 empty splits, prefill/decode agreement, numerical stability and streams.
 These Ascend sources have not yet been compiled or run on hardware.
 
+Fused expert inference uses the existing public entry and model call sites.
+It reuses native route alignment, embedding row transfers and gated activation.
+The two projections run on Cube through Ascend C Matmul, using static
+16-by-64-by-128 tiles and FP32 accumulation across K tiles. Separate vector
+epilogues preserve the first projection's storage rounding and multiply the
+second projection's FP32 result by its routing weight before storage rounding.
+Reduction then follows original top-k slot order in FP32, applies the routed
+scale and casts the final output. Both SiLU and tanh-GELU are supported.
+``-1`` routes return zero even with nonfinite routing weights; valid zero-weight
+routes still evaluate their expert, as on CUDA. Route counts and expert metadata
+remain on device. Like CUDA's fused entry, this entry has no backward; training
+retains the shared permutation/grouped-linear autograd path.
+
+The initial Cube implementation uses packed input and a shared FP32 accumulation
+buffer in addition to storage-dtype intermediates. It has more temporary memory
+and GM traffic than CUDA's fused Triton implementation and has not been
+benchmarked. The shared device suite checks tails, repeated experts, local
+expert/TP shards, strided storage, streams and graph replay with changing routes.
+Targeted cases reject premature down-projection rounding, FP16 overflow before
+routing-weight multiplication, and summation in sorted expert order. CPU checks
+validate those references only; the Ascend sources still require compilation
+and numerical validation on the target machine.
+
 Device guards and TorchNPU's current stream are used for each launch. The
 acceptance suite covers tile boundaries, strided tensors, storage offsets,
 empty inputs, softplus tails, saved normalization statistics, every RMSNorm
@@ -180,7 +206,7 @@ and memory probes. The backend directory contains only ``__init__.py`` and
 run on Ascend. Worker startup rejects the incomplete native extension before
 starting a training or serving job.
 
-Remaining native families include fused experts and recurrent operators.
+Remaining native families include recurrent operators.
 The existing opt-in
 ``tests/test_npu_end_to_end.py`` becomes the SFT/rollout/checkpoint acceptance
 test once these kernels are complete; it is not expected to pass yet.
@@ -202,3 +228,6 @@ Implementation references
 * `CANN 9 vector Gather <https://www.hiascend.com/document/detail/en/CANNCommunityEdition/900/API/ascendcopapi/atlasascendc_api_07_0092.html>`_
 * `CANN 9 strided DataCopyPad <https://www.hiascend.com/document/detail/en/CANNCommunityEdition/900/API/ascendcopapi/atlasascendc_api_07_0265.html>`_
 * `Ascend C scalar memory synchronization <https://asc.gitcode.com/guide/technical_appendix/concepts_and_terms/memory_access/scalar_read_write.html>`_
+* `CANN 9 static Matmul tiling <https://www.hiascend.com/doc_center/source/en/CANNCommunityEdition/900/API/ascendcopapi/atlasascendc_api_07_0666.html>`_
+* `CANN 9 Matmul output and atomic accumulation <https://www.hiascend.com/doc_center/source/en/CANNCommunityEdition/900/API/ascendcopapi/atlasascendc_api_07_0640.html>`_
+* `Ascend C platform query and linking <https://asc.gitcode.com/api/Utils-API/platform_info/PlatformAscendCManager.html>`_
