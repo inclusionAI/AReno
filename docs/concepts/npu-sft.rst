@@ -29,6 +29,7 @@ optional override for cross-compilation without visible hardware.
      tests/test_npu_linear.py tests/test_npu_conv.py
    python -m pytest -q tests/test_grouped_linear.py -k 'npu and not cpu and not cuda'
    python -m pytest -q tests/test_routing.py -k npu
+   python -m pytest -q tests/test_moe_native.py -k npu
    torchrun --standalone --nproc_per_node=2 -m pytest -q tests/test_npu_optimizer_distributed.py
 
 Current validation boundary
@@ -122,6 +123,23 @@ have not run on Ascend and have not been benchmarked. A compiled CPU test
 executes the actual common selection helper; the device contract suite covers
 both CUDA and NPU, including gradients, ties and saturation.
 
+MoE permutation/alignment exposes the same six native entries as CUDA.
+Gather and unpermute reuse the Ascend embedding DMA/atomic kernels. Dense-map
+permutation preserves expert-major, ascending-token order and retains routed
+zero weights. Top-k permutation filters local expert shards and zero weights;
+its output allocation, counts copy and host prefix scan are shared with CUDA
+through ``moe_permute_common.h``. This retains CUDA's existing CPU synchronization
+and is not graph-capturable. Device-side indexing uses tiled route histograms,
+prefix scans and metadata writes. Top-k weight backward scatters into the
+saved token/top-k slots. Block alignment retains the ``-1`` expert bucket,
+route-count padding sentinel and caller-owned output buffers. The shared
+unpermute autograd wrapper now saves the contiguous indices used by forward,
+so backward also handles strided token indices correctly on both devices.
+Compiled CPU tests cover the common allocator; device tests cover expert
+shards, repeated indices, gradients, storage offsets, padding canaries and
+CUDA graph replay for fixed-shape paths. The native Ascend implementation
+still requires compilation and numerical validation on hardware.
+
 Device guards and TorchNPU's current stream are used for each launch. The
 acceptance suite covers tile boundaries, strided tensors, storage offsets,
 empty inputs, softplus tails, saved normalization statistics, every RMSNorm
@@ -137,7 +155,7 @@ run on Ascend. Worker startup rejects the incomplete native extension before
 starting a training or serving job.
 
 Remaining native families include
-attention, MoE token permutation/alignment, fused experts and recurrent
+attention, fused experts and recurrent
 operators. The existing opt-in
 ``tests/test_npu_end_to_end.py`` becomes the SFT/rollout/checkpoint acceptance
 test once these kernels are complete; it is not expected to pass yet.

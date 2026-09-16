@@ -106,9 +106,10 @@ class _MoeUnpermute(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, x: torch.Tensor, token_index: torch.Tensor, tokens: int, hidden: int) -> torch.Tensor:
+        token_index = token_index.contiguous()
         ctx.save_for_backward(token_index)
         return _extension(x.device).areno_moe_unpermute_forward(
-            x.contiguous(), token_index.contiguous(), int(tokens), int(hidden)
+            x.contiguous(), token_index, int(tokens), int(hidden)
         )
 
     @staticmethod

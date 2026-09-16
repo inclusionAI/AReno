@@ -95,7 +95,11 @@ def _cuda_extensions():
                 "areno/accel/csrc/router.cu",
                 "areno/accel/csrc/topk.cu",
             ],
-            depends=["areno/accel/csrc/grouped_linear_common.h", "areno/accel/csrc/routing_common.h"],
+            depends=[
+                "areno/accel/csrc/grouped_linear_common.h",
+                "areno/accel/csrc/routing_common.h",
+                "areno/accel/csrc/moe_permute_common.h",
+            ],
             extra_compile_args={
                 "cxx": ["-O3", "-Wno-deprecated-declarations"],
                 "nvcc": ["-O3", "--use_fast_math", "-Xcompiler", "-Wno-deprecated-declarations"],
