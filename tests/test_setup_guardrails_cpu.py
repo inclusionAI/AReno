@@ -24,6 +24,41 @@ def _load_setup_module() -> dict:
 
 
 class SetupGuardrailsTest(unittest.TestCase):
+    def test_ascend_is_rejected_before_cuda_dependencies_or_torch_import(self):
+        root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            (path / "torch_npu.py").write_text("raise RuntimeError('must not import torch_npu')\n")
+            (path / "torch.py").write_text("raise RuntimeError('must not import torch')\n")
+            # Hide any real Gaudi package in the test environment.
+            (path / "habana_frameworks").mkdir()
+            (path / "habana_frameworks/__init__.py").touch()
+            script = (
+                "import platform, runpy, sys; platform.system = lambda: 'Linux'; "
+                "sys.argv = ['setup.py', 'dist_info']; "
+                f"runpy.run_path({str(root / 'setup.py')!r})"
+            )
+            result = subprocess.run(
+                [sys.executable, "-c", script],
+                cwd=directory,
+                env={**os.environ, "PYTHONPATH": directory},
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Ascend NPU environment (torch_npu)", result.stderr)
+            self.assertIn("Ascend NPU/CANN kernels are not implemented", result.stderr)
+            self.assertNotIn("must not import", result.stderr)
+            self.assertNotIn("this PyTorch install is CPU-only", result.stderr)
+
+    def test_ascend_probe_does_not_change_gaudi_or_macos_builds(self):
+        setup_mod = _load_setup_module()
+        check = setup_mod["_check_runtime_target"]
+        with patch.dict(check.__globals__, {"find_spec": Mock(side_effect=AssertionError("unexpected probe"))}):
+            check(True)
+            with patch.object(setup_mod["platform"], "system", return_value="Darwin"):
+                check(False)
+
     def test_hpu_detection_does_not_import_torch(self):
         setup_mod = _load_setup_module()
         detect = setup_mod["_using_hpu"]

@@ -1,6 +1,15 @@
 HPU backend integration
 =======================
 
+This backend targets **Intel Gaudi HPU**, using SynapseAI and the
+``habana_frameworks.torch`` bridge. Huawei Ascend NPU uses ``torch_npu`` and
+CANN; its hardware is reported by ``npu-smi``. The Gaudi TPC kernels in this
+branch cannot run on Ascend. The installer detects ``torch_npu`` and rejects
+this unsupported target before resolving CUDA dependencies. Ascend commonly
+uses a CPU-tagged PyTorch build with ``torch_npu``; this is not evidence of a
+missing accelerator runtime. Ascend native kernels and end-to-end support
+remain unimplemented in this branch.
+
 HPU reuses the CUDA backend workflows. ``api/backend/hpu`` contains only
 ``__init__.py`` and ``backend.py``. ``HpuBackend`` inherits ``CudaBackend``;
 the shared ``ArenoEngine`` selects ``HpuWorker`` through ``RuntimeConfig.device_type``.
