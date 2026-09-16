@@ -9,7 +9,9 @@ Installation detects ``torch_npu`` without importing it and selects
 ``requirements/npu.txt``. CUDA and MLX retain their existing dependencies and
 builders. The NPU extension compiles its own Ascend C kernels with the CANN
 development toolkit, and links their static library into a TorchNPU C++
-extension. CMake and the CANN compiler are required. Source the toolkit's
+extension. Dense matrix multiplication links CANN 9's ``opapi_nn`` and
+``nnopbase`` libraries, so the CANN NN operator package is also required.
+CMake and the CANN compiler are required. Source the toolkit's
 ``set_env.sh`` before building. No CUDA compiler is used.
 
 The exact SoC is queried from ``aclrtGetSocName`` after TorchNPU initialization.
@@ -23,7 +25,8 @@ optional override for cross-compilation without visible hardware.
    python -m pip install -e . --no-build-isolation
    python -m pip install pytest
    python -m pytest -q tests/test_npu_activation.py tests/test_npu_normalization.py \
-     tests/test_npu_optimizer.py tests/test_npu_optimizer_factored.py tests/test_npu_embedding.py
+     tests/test_npu_optimizer.py tests/test_npu_optimizer_factored.py tests/test_npu_embedding.py \
+     tests/test_npu_linear.py
    torchrun --standalone --nproc_per_node=2 -m pytest -q tests/test_npu_optimizer_distributed.py
 
 Current validation boundary
@@ -73,6 +76,15 @@ backward uses storage-dtype atomic addition for repeated local token IDs.
 Tests cover strided inputs, scalar and empty IDs, uneven vocabulary shards,
 nonfinite values and bitwise preservation of stored forward values.
 
+Dense linear retains the existing Python autograd wrapper and calls CANN's
+``aclnnMm`` in C++ for forward, input gradient and weight gradient, corresponding
+to CUDA's cuBLAS calls. Transposes are matrix descriptors over existing storage.
+The Cube precision mode retains the input dtype instead of reducing FP32 input
+precision. Ascend C implements bias addition and FP32 bias-gradient accumulation.
+Bias addition preserves CUDA's separate GEMM-output and bias-output rounding.
+No alternate model or training workflow is introduced. Grouped linear remains
+unimplemented.
+
 Device guards and TorchNPU's current stream are used for each launch. The
 acceptance suite covers tile boundaries, strided tensors, storage offsets,
 empty inputs, softplus tails, saved normalization statistics, every RMSNorm
@@ -87,7 +99,7 @@ and memory probes. The backend directory contains only ``__init__.py`` and
 run on Ascend. Worker startup rejects the incomplete native extension before
 starting a training or serving job.
 
-Remaining native families include dense and
+Remaining native families include
 grouped linear, attention, convolution, routing/MoE and recurrent
 operators. The existing opt-in
 ``tests/test_npu_end_to_end.py`` becomes the SFT/rollout/checkpoint acceptance
@@ -105,4 +117,6 @@ Implementation references
 * `TorchNPU 2.10 extension builder <https://github.com/Ascend/pytorch/blob/v2.10.0/torch_npu/utils/cpp_extension.py>`_
 * `Ascend C DataCopyPad API <https://www.hiascend.com/doc_center/source/zh/CANNCommunityEdition/910beta2/API/ascendcopapi/atlasascendc_api_07_0265.html>`_
 * `CANN 9 DMA atomic addition <https://www.hiascend.com/document/detail/en/CANNCommunityEdition/900/API/ascendcopapi/atlasascendc_api_07_0210.html>`_
+* `CANN 9 matrix multiplication <https://www.hiascend.com/document/detail/en/CANNCommunityEdition/900/API/aolapi/context/ops-nn/aclnnMm.md>`_
+* `CANN 9 tensor descriptors <https://www.hiascend.com/document/detail/en/CANNCommunityEdition/900/API/aolapi/operatorlist_00019.html>`_
 * `Ascend C scalar memory synchronization <https://asc.gitcode.com/guide/technical_appendix/concepts_and_terms/memory_access/scalar_read_write.html>`_

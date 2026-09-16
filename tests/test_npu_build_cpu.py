@@ -109,6 +109,7 @@ def test_kernel_archive_is_linked_and_triggers_extension_rebuild(builder, monkey
         assert str(archive) in self.extensions[0].extra_objects
         assert str(archive) in self.extensions[0].depends
         assert "areno/accel/csrc/npu/activation_launch.h" in self.extensions[0].depends
+        assert {"opapi_nn", "nnopbase"}.issubset(self.extensions[0].libraries)
         calls.append("host")
 
     monkeypatch.setattr(builder["subprocess"], "run", mock_cmake)
@@ -153,5 +154,8 @@ def test_sdist_includes_native_build_inputs(tmp_path):
         "embedding.cpp",
         "embedding_kernel.cpp",
         "embedding_launch.h",
+        "linear.cpp",
+        "linear_kernel.cpp",
+        "linear_launch.h",
     ):
         assert f"areno/accel/csrc/npu/{name}" in names
