@@ -26,8 +26,8 @@ optional override for cross-compilation without visible hardware.
    python -m pip install pytest
    python -m pytest -q tests/test_npu_activation.py tests/test_npu_normalization.py \
      tests/test_npu_optimizer.py tests/test_npu_optimizer_factored.py tests/test_npu_embedding.py \
-     tests/test_npu_linear.py
-   python -m pytest -q tests/test_grouped_linear.py -k npu
+     tests/test_npu_linear.py tests/test_npu_conv.py
+   python -m pytest -q tests/test_grouped_linear.py -k 'npu and not cpu and not cuda'
    torchrun --standalone --nproc_per_node=2 -m pytest -q tests/test_npu_optimizer_distributed.py
 
 Current validation boundary
@@ -95,6 +95,19 @@ implementation; this path is not suitable for graph capture. The list-count
 path retains a CUDA graph regression test. The common C++ code has a separate
 CPU test adapter, while the same contract suite targets CUDA and NPU kernels.
 
+Causal depthwise Conv1d + SiLU has all five CUDA-compatible entries: ordinary
+and packed forward/backward, and one-token decode. The existing Python wrapper
+still casts weights to FP32 and handles autograd. Ascend C computes the
+convolution, SiLU, input gradient and weight gradient with FP32 intermediates;
+saved preactivations retain FP32. Bounded channel tiles use strided DMA and
+vector Gather for weights and decode history. Each weight-gradient tile has
+one owner and accumulates across tokens without atomics. Packed boundaries
+are read on device; as with CUDA, callers must provide valid nondecreasing
+offsets spanning all tokens. Empty segments are allowed. Decode leaves history
+updates to the caller. Tests include packed sequence isolation, decode/prefill
+agreement, storage offsets, empty shapes and unused nonfinite weight taps.
+These native sources remain uncompiled and unvalidated on Ascend.
+
 Device guards and TorchNPU's current stream are used for each launch. The
 acceptance suite covers tile boundaries, strided tensors, storage offsets,
 empty inputs, softplus tails, saved normalization statistics, every RMSNorm
@@ -110,7 +123,7 @@ run on Ascend. Worker startup rejects the incomplete native extension before
 starting a training or serving job.
 
 Remaining native families include
-attention, convolution, routing/MoE and recurrent
+attention, routing/MoE and recurrent
 operators. The existing opt-in
 ``tests/test_npu_end_to_end.py`` becomes the SFT/rollout/checkpoint acceptance
 test once these kernels are complete; it is not expected to pass yet.
@@ -129,4 +142,6 @@ Implementation references
 * `CANN 9 DMA atomic addition <https://www.hiascend.com/document/detail/en/CANNCommunityEdition/900/API/ascendcopapi/atlasascendc_api_07_0210.html>`_
 * `CANN 9 matrix multiplication <https://www.hiascend.com/document/detail/en/CANNCommunityEdition/900/API/aolapi/context/ops-nn/aclnnMm.md>`_
 * `CANN 9 tensor descriptors <https://www.hiascend.com/document/detail/en/CANNCommunityEdition/900/API/aolapi/operatorlist_00019.html>`_
+* `CANN 9 vector Gather <https://www.hiascend.com/document/detail/en/CANNCommunityEdition/900/API/ascendcopapi/atlasascendc_api_07_0092.html>`_
+* `CANN 9 strided DataCopyPad <https://www.hiascend.com/document/detail/en/CANNCommunityEdition/900/API/ascendcopapi/atlasascendc_api_07_0265.html>`_
 * `Ascend C scalar memory synchronization <https://asc.gitcode.com/guide/technical_appendix/concepts_and_terms/memory_access/scalar_read_write.html>`_

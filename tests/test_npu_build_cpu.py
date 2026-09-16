@@ -110,6 +110,8 @@ def test_kernel_archive_is_linked_and_triggers_extension_rebuild(builder, monkey
         assert str(archive) in self.extensions[0].depends
         assert "areno/accel/csrc/npu/activation_launch.h" in self.extensions[0].depends
         assert "areno/accel/csrc/grouped_linear_common.h" in self.extensions[0].depends
+        assert "areno/accel/csrc/npu/conv_launch.h" in self.extensions[0].depends
+        assert "areno/accel/csrc/npu/conv.cpp" in self.extensions[0].sources
         assert {"opapi_nn", "nnopbase"}.issubset(self.extensions[0].libraries)
         calls.append("host")
 
@@ -160,5 +162,8 @@ def test_sdist_includes_native_build_inputs(tmp_path):
         "linear.cpp",
         "linear_kernel.cpp",
         "linear_launch.h",
+        "conv.cpp",
+        "conv_kernel.cpp",
+        "conv_launch.h",
     ):
         assert f"areno/accel/csrc/npu/{name}" in names
