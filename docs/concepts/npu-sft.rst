@@ -22,7 +22,9 @@ optional override for cross-compilation without visible hardware.
 
    python -m pip install -e . --no-build-isolation
    python -m pip install pytest
-   python -m pytest -q tests/test_npu_activation.py tests/test_npu_normalization.py tests/test_npu_optimizer.py
+   python -m pytest -q tests/test_npu_activation.py tests/test_npu_normalization.py \
+     tests/test_npu_optimizer.py tests/test_npu_optimizer_factored.py tests/test_npu_embedding.py
+   torchrun --standalone --nproc_per_node=2 -m pytest -q tests/test_npu_optimizer_distributed.py
 
 Current validation boundary
 ---------------------------
@@ -56,8 +58,20 @@ synchronization. These implementations have not been benchmarked.
 The optimizer acceptance tests include multi-step updates, mixed gradient
 dtypes, metadata canaries, BF16 rounding ties, quantization block boundaries,
 nonfinite block skipping and shared optimizer checkpoint save/load. Matrix
-parameters in AdamW4bit still require the separate factored variance kernels;
-the blockwise entry does not replace that algorithm.
+parameters in AdamW4bit use native factored statistics and update kernels.
+Statistics accumulate row and column sums directly from each parameter shard;
+updates reconstruct variance within a bounded tile and reuse the blockwise
+momentum update and packing implementation. Factor reduction across DP ranks,
+EMA updates, optimizer state allocation and checkpoint handling reuse the
+existing shared Torch implementation. The distributed tests compare identical
+DP layouts on NPU/HCCL and CPU/Gloo, including empty shards and checkpoint
+resume. Only the CPU/Gloo version of this test flow has run locally.
+
+Vocab embedding also retains its shared autograd wrapper. Native forward uses
+DMA to gather local vocabulary rows and writes zero for nonlocal tokens;
+backward uses storage-dtype atomic addition for repeated local token IDs.
+Tests cover strided inputs, scalar and empty IDs, uneven vocabulary shards,
+nonfinite values and bitwise preservation of stored forward values.
 
 Device guards and TorchNPU's current stream are used for each launch. The
 acceptance suite covers tile boundaries, strided tensors, storage offsets,
@@ -74,8 +88,8 @@ run on Ascend. Worker startup rejects the incomplete native extension before
 starting a training or serving job.
 
 Remaining native families include dense and
-grouped linear, attention, embedding, convolution, routing/MoE, recurrent
-operators, and AdamW4bit factored statistics/update. The existing opt-in
+grouped linear, attention, convolution, routing/MoE and recurrent
+operators. The existing opt-in
 ``tests/test_npu_end_to_end.py`` becomes the SFT/rollout/checkpoint acceptance
 test once these kernels are complete; it is not expected to pass yet.
 

@@ -222,7 +222,7 @@ def test_shared_master_optimizer_checkpoint_resume(tmp_path):
     initial = [torch.linspace(-1, 1, 3).to(torch.bfloat16), torch.linspace(-2, 2, 2053).to(torch.bfloat16)]
     params = [torch.nn.Parameter(t.to("npu")) for t in initial]
     reference_params = [torch.nn.Parameter(t.float()) for t in initial]
-    kwargs = dict(lr=0.003, betas=(0.8, 0.95), weight_decay=0.02, eps=1e-6)
+    kwargs = dict(lr=0.003, betas=(0.8, 0.95), weight_decay=0.02)
     actual = AdamWFP32Master(params, bucket_numel=1024, **kwargs)
     expected = torch.optim.AdamW(reference_params, **kwargs)
     for step in range(5):
