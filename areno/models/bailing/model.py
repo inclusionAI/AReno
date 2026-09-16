@@ -417,9 +417,7 @@ class BailingGroupedExperts(nn.Module):
                 RoutedLoraTarget("gate_proj", "linear_fc1.weight", self.hidden_size, self.intermediate_size),
                 RoutedLoraTarget("up_proj", "linear_fc1.weight", self.hidden_size, self.intermediate_size),
                 RoutedLoraTarget("down_proj", "linear_fc2.weight", self.intermediate_size, self.hidden_size),
-                RoutedLoraTarget(
-                    "linear_fc1", "linear_fc1.weight", self.hidden_size, 2 * self.intermediate_size
-                ),
+                RoutedLoraTarget("linear_fc1", "linear_fc1.weight", self.hidden_size, 2 * self.intermediate_size),
                 RoutedLoraTarget("linear_fc2", "linear_fc2.weight", self.intermediate_size, self.hidden_size),
             ),
         )
@@ -1346,9 +1344,7 @@ class BailingMoeLinearV2Adapter(ModelAdapter):
             )
         )
         partial_rotary_factor = float(
-            configured_partial_rotary_factor
-            if configured_partial_rotary_factor is not None
-            else rotary_dim / head_dim
+            configured_partial_rotary_factor if configured_partial_rotary_factor is not None else rotary_dim / head_dim
         )
         kv_lora_rank = hf_config.get("kv_lora_rank")
         num_experts = hf_config.get("num_experts", hf_config.get("n_routed_experts"))
