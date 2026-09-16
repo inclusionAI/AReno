@@ -106,7 +106,7 @@ def areno_rmsnorm(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Te
     is internally cast to float32 to match the kernel signature.
     """
     if not on_kernel_device(x, weight):
-        raise RuntimeError("areno_rmsnorm requires CUDA or HPU input on the same device")
+        raise RuntimeError("areno_rmsnorm requires CUDA or NPU input on the same device")
     weight = _kernel_weight(weight)
     return _RMSNorm.apply(x, weight, float(eps))
 
@@ -118,7 +118,7 @@ def areno_optional_scale_rmsnorm(x: torch.Tensor, weight: torch.Tensor | None, e
     Passing ``weight=None`` skips the per-channel multiply entirely.
     """
     if not on_kernel_device(x, weight):
-        raise RuntimeError("areno_optional_scale_rmsnorm requires CUDA or HPU input on the same device")
+        raise RuntimeError("areno_optional_scale_rmsnorm requires CUDA or NPU input on the same device")
     if weight is not None:
         weight = _kernel_weight(weight)
     return _OptionalScaleRMSNorm.apply(x, weight, float(eps))
@@ -132,7 +132,7 @@ def areno_rmsnorm_silu_gate(x: torch.Tensor, gate: torch.Tensor, weight: torch.T
     share shape, ``weight`` is the per-channel gain over the last dimension.
     """
     if not on_kernel_device(x, gate, weight):
-        raise RuntimeError("areno_rmsnorm_silu_gate requires CUDA or HPU input and gate on the same device")
+        raise RuntimeError("areno_rmsnorm_silu_gate requires CUDA or NPU input and gate on the same device")
     if x.shape != gate.shape:
         raise ValueError(f"input/gate shape mismatch: {tuple(x.shape)} vs {tuple(gate.shape)}")
     weight = _kernel_weight(weight)

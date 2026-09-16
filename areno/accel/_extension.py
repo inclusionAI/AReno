@@ -11,53 +11,33 @@ pure-Python or cross-device fallback.
 from __future__ import annotations
 
 import importlib
-import importlib.util
 import os
 from types import ModuleType
 
-from areno._hpu import configure_hpu_environment
-
 # Cached reference to the compiled extension; populated on first call.
 _EXT: ModuleType | None = None
-_HPU_EXT: ModuleType | None = None
-
-
-def configure_hpu_kernel_library() -> None:
-    """Expose AReno's TPC library before the Gaudi graph compiler initializes."""
-    spec = importlib.util.find_spec("areno.accel._areno_hpu_kernels")
-    if spec is None or spec.origin is None:
-        raise RuntimeError(
-            "AReno native HPU kernels are not installed: areno.accel._areno_hpu_kernels. "
-            "Build them with `python areno/accel/csrc/hpu/setup.py build_ext --inplace` in a Gaudi SDK environment."
-        )
-    configure_hpu_environment()
-    # Setting GC_KERNEL_PATH replaces the compiler's defaults. Retain the
-    # standard Gaudi library when the environment has no explicit list.
-    configured = os.environ.get("GC_KERNEL_PATH") or "/usr/lib/habanalabs/libtpc_kernels.so"
-    paths = [path for path in configured.split(os.pathsep) if path]
-    if spec.origin not in paths:
-        os.environ["GC_KERNEL_PATH"] = os.pathsep.join([*paths, spec.origin])
+_NPU_EXT: ModuleType | None = None
 
 
 def extension(device="cuda") -> ModuleType:
     """Load native kernels for this tensor's device; no cross-device fallback."""
-    global _EXT, _HPU_EXT
+    global _EXT, _NPU_EXT
     device_type = getattr(device, "type", str(device).split(":", 1)[0])
-    if device_type == "hpu":
-        if _HPU_EXT is None:
-            configure_hpu_kernel_library()
+    if device_type == "npu":
+        if _NPU_EXT is None:
+            importlib.import_module("torch_npu")
             try:
-                _HPU_EXT = importlib.import_module("areno.accel._areno_accel_hpu")
+                _NPU_EXT = importlib.import_module("areno.accel._areno_accel_npu")
             except ModuleNotFoundError as exc:
-                if exc.name not in {None, "areno.accel._areno_accel_hpu"}:
+                if exc.name not in {None, "areno.accel._areno_accel_npu"}:
                     raise
                 raise RuntimeError(
-                    "AReno native HPU kernels are not installed: areno.accel._areno_accel_hpu. "
-                    "Build them with `python areno/accel/csrc/hpu/setup.py build_ext --inplace` in a Gaudi SDK environment."
+                    "AReno native NPU kernels are not installed: areno.accel._areno_accel_npu. "
+                    "Run `python -m pip install -e . --no-build-isolation` in the CANN/torch_npu environment."
                 ) from exc
-        return _HPU_EXT
+        return _NPU_EXT
     if device_type != "cuda":
-        raise RuntimeError(f"AReno native kernels require CUDA or HPU tensors, got {device_type}")
+        raise RuntimeError(f"AReno native kernels require CUDA or NPU tensors, got {device_type}")
     if _EXT is None:
         try:
             _EXT = importlib.import_module("areno.accel._areno_accel")

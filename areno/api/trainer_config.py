@@ -89,12 +89,12 @@ class TrainerConfig:
             self.backend = default_backend_type().value.lower()
         else:
             self.backend = self.backend.lower()
-        if self.backend not in {"cuda", "mlx", "hpu"}:
-            raise ValueError("backend must be one of: cuda, mlx, hpu")
+        if self.backend not in {"cuda", "mlx", "npu"}:
+            raise ValueError("backend must be one of: cuda, mlx, npu")
         if self.adam_4bit and self.adam_8bit:
             raise ValueError("adam_4bit and adam_8bit are mutually exclusive")
-        if self.adam_4bit and self.backend not in {"cuda", "hpu"}:
-            raise ValueError("adam_4bit is only supported by the CUDA and HPU backends")
+        if self.adam_4bit and self.backend not in {"cuda", "npu"}:
+            raise ValueError("adam_4bit is only supported by the CUDA and NPU backends")
         if self.attn_backend not in {"flash", "native"}:
             raise ValueError("attn_backend must be one of: flash, native")
         if self.model_hub not in {"hf", "modelscope"}:

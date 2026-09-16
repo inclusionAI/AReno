@@ -14,36 +14,25 @@ from setuptools import setup
 _METADATA_COMMANDS = {"egg_info", "dist_info", "sdist"}
 _MIN_TORCH_VERSION = (2, 6)
 _ROOT = Path(__file__).resolve().parent
-_using_hpu = runpy.run_path(str(_ROOT / "areno/_hpu.py"))["has_hpu_bridge"]
 
 
-def _check_runtime_target(hpu: bool) -> None:
-    """Reject Ascend before pip resolves this branch's CUDA dependencies."""
-    if hpu or platform.system() != "Linux" or find_spec("torch_npu") is None:
-        return
-    raise RuntimeError(
-        "AReno detected an Ascend NPU environment (torch_npu).\n"
-        "This branch implements Intel Gaudi HPU/SynapseAI kernels; Ascend NPU/CANN kernels are not implemented.\n"
-        "CPU-tagged PyTorch with torch_npu is expected on Ascend. Keep the existing PyTorch and torch_npu; "
-        "installing CUDA or SynapseAI will not enable these kernels on Ascend.\n"
-        "Ascend training/serving requires an NPU backend and native Ascend operators. "
-        "ARENO_BUILD_EXT=0 cannot provide that runtime support."
-    )
+def _using_npu() -> bool:
+    return platform.system() == "Linux" and find_spec("torch_npu") is not None
 
 
-def _runtime_dependencies(hpu: bool) -> list[str]:
-    path = _ROOT / "requirements" / ("hpu.txt" if hpu else "default.txt")
+def _runtime_dependencies(npu: bool) -> list[str]:
+    path = _ROOT / "requirements" / ("npu.txt" if npu else "default.txt")
     return [
         line.strip() for line in path.read_text().splitlines() if line.strip() and not line.lstrip().startswith("#")
     ]
 
 
-def _extensions(hpu: bool):
-    if not hpu:
+def _extensions(npu: bool):
+    if not npu:
         return _cuda_extensions()
     if _metadata_only_command() or os.environ.get("ARENO_BUILD_EXT", "auto").lower() in {"0", "false", "no", "off"}:
         return [], {}
-    build = runpy.run_path(str(_ROOT / "areno/accel/csrc/hpu/setup.py"))
+    build = runpy.run_path(str(_ROOT / "areno/accel/csrc/npu/setup.py"))
     return build["build_extensions"]()
 
 
@@ -210,9 +199,8 @@ def _version_at_least(version: str | None, minimum: tuple[int, int]) -> bool:
     return tuple(parts[: len(minimum)]) >= minimum
 
 
-hpu = _using_hpu()
-_check_runtime_target(hpu)
-ext_modules, cmdclass = _extensions(hpu)
+npu = _using_npu()
+ext_modules, cmdclass = _extensions(npu)
 
 
-setup(ext_modules=ext_modules, cmdclass=cmdclass, install_requires=_runtime_dependencies(hpu))
+setup(ext_modules=ext_modules, cmdclass=cmdclass, install_requires=_runtime_dependencies(npu))

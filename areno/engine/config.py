@@ -73,12 +73,12 @@ class RuntimeConfig:
     decode_graph_buckets: list[int] = field(
         default_factory=lambda: [1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 56, 64, 96, 128, 192, 256]
     )
-    device_type: Literal["cuda", "hpu"] = field(default="cuda", kw_only=True)
+    device_type: Literal["cuda", "npu"] = field(default="cuda", kw_only=True)
 
     def __post_init__(self) -> None:
-        if self.device_type not in {"cuda", "hpu"}:
-            raise ValueError("runtime.device_type must be one of: cuda, hpu")
-        if self.device_type == "hpu":
+        if self.device_type not in {"cuda", "npu"}:
+            raise ValueError("runtime.device_type must be one of: cuda, npu")
+        if self.device_type == "npu":
             self.attn_backend = "native"
             self.compile_model = False
             self.eager_decode = True

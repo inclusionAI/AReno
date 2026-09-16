@@ -134,7 +134,7 @@ def areno_moe_permute(
     the source row of each expert-major output row.
     """
     if not on_kernel_device(x, probs, routing_map):
-        raise RuntimeError("areno_moe_permute requires CUDA or HPU tensors on the same device")
+        raise RuntimeError("areno_moe_permute requires CUDA or NPU tensors on the same device")
     if routing_map.dtype != torch.bool:
         raise TypeError("areno_moe_permute routing_map must be bool")
     return _MoePermute.apply(x, probs, routing_map, int(num_out_tokens))
@@ -156,7 +156,7 @@ def areno_moe_topk_permute(
     tokens_per_expert)`` ready to feed into ``areno_grouped_linear``.
     """
     if not on_kernel_device(x, topk_idx, topk_weight):
-        raise RuntimeError("areno_moe_topk_permute requires CUDA or HPU tensors on the same device")
+        raise RuntimeError("areno_moe_topk_permute requires CUDA or NPU tensors on the same device")
     if topk_idx.dtype != torch.long:
         raise TypeError("areno_moe_topk_permute topk_idx must be int64")
     if topk_weight.dtype != torch.float32:
@@ -172,5 +172,5 @@ def areno_moe_unpermute(x: torch.Tensor, token_index: torch.Tensor, restore_shap
     Tokens that were routed to multiple experts accumulate via atomic add.
     """
     if not on_kernel_device(x, token_index):
-        raise RuntimeError("areno_moe_unpermute requires CUDA or HPU tensors on the same device")
+        raise RuntimeError("areno_moe_unpermute requires CUDA or NPU tensors on the same device")
     return _MoeUnpermute.apply(x, token_index, int(restore_shape[0]), int(restore_shape[1]))

@@ -29,7 +29,7 @@ def areno_grouped_topk_router(
     ``(tokens, top_k)`` for downstream permute / unpermute kernels.
     """
     if not on_kernel_device(logits, expert_bias):
-        raise RuntimeError("areno_grouped_topk_router requires CUDA or HPU logits and expert_bias on the same device")
+        raise RuntimeError("areno_grouped_topk_router requires CUDA or NPU logits and expert_bias on the same device")
     if logits.dim() != 2:
         raise ValueError(f"logits must have shape (tokens, experts), got {tuple(logits.shape)}")
     if expert_bias.dtype != torch.float32:

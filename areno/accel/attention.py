@@ -131,7 +131,7 @@ def areno_causal_attention(
     """Apply causal attention to ``(batch, heads, seqlen, head_dim)`` tensors."""
 
     if not on_kernel_device(q, k, v):
-        raise RuntimeError("areno_causal_attention requires CUDA or HPU q, k, and v tensors on the same device")
+        raise RuntimeError("areno_causal_attention requires CUDA or NPU q, k, and v tensors on the same device")
     if q.dim() != 4 or k.dim() != 4 or v.dim() != 4:
         raise ValueError("areno_causal_attention expects q/k/v tensors shaped (batch, heads, seqlen, head_dim)")
     if q.shape[0] != k.shape[0] or q.shape[0] != v.shape[0]:
@@ -197,7 +197,7 @@ def areno_varlen_causal_attention(
 
     if not on_kernel_device(q, k, v, cu_seqlens):
         raise RuntimeError(
-            "areno_varlen_causal_attention requires CUDA or HPU q, k, v, and cu_seqlens tensors on the same device"
+            "areno_varlen_causal_attention requires CUDA or NPU q, k, v, and cu_seqlens tensors on the same device"
         )
     if q.dim() != 3 or k.dim() != 3 or v.dim() != 3:
         raise ValueError("areno_varlen_causal_attention expects q/k/v tensors shaped (tokens, heads, head_dim)")
@@ -284,7 +284,7 @@ def areno_paged_causal_attention_decode(
     """Apply single-token paged-cache causal attention to ``(batch, heads, dim)`` Q."""
 
     if not on_kernel_device(q, k_update, v_update, k_cache, v_cache, block_table, cache_seqlens):
-        raise RuntimeError("areno_paged_causal_attention_decode requires CUDA or HPU tensors on the same device")
+        raise RuntimeError("areno_paged_causal_attention_decode requires CUDA or NPU tensors on the same device")
     if q.dim() != 3:
         raise ValueError("areno_paged_causal_attention_decode expects q shaped (batch, heads, head_dim)")
     if k_update.dim() != 3 or v_update.dim() != 3:

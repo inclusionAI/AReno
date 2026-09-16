@@ -693,7 +693,7 @@ def _reward_ckpt_for_summary(config: TrainerConfig, reward_ckpt: str | None) -> 
 def _resolved_attn_backend_for_summary(
     config: TrainerConfig, *, model_config: ModelConfig | None = None
 ) -> tuple[str, str | None]:
-    if config.backend == "hpu":
+    if config.backend == "npu":
         return "native", None
     if config.backend == "mlx":
         return "mlx", None
@@ -1598,7 +1598,7 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
 )
 @click.option(
     "--backend",
-    type=click.Choice(["cuda", "mlx", "hpu"]),
+    type=click.Choice(["cuda", "mlx", "npu"]),
     default=None,
     help="Execution backend; defaults to the host backend.",
 )

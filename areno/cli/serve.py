@@ -1017,7 +1017,7 @@ def _normalize_stop(stop: str | list[str] | None) -> list[str]:
     ),
 )
 @click.option("--lora-adapter-path", default=None, help="Standard PEFT adapter to serve.")
-@click.option("--backend", type=click.Choice(["cuda", "mlx", "hpu"]), default=None)
+@click.option("--backend", type=click.Choice(["cuda", "mlx", "npu"]), default=None)
 def serve_command(
     backend: str | None,
     model_path: str,

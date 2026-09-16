@@ -438,7 +438,7 @@ class AdamWFP32Master:
     @torch.no_grad()
     def _step_bucket(self, bucket: _MasterBucket) -> None:
         """Update all parameter chunks that live in one flattened master bucket."""
-        if bucket.refs[0].model_param.device.type in {"cuda", "hpu"}:
+        if bucket.refs[0].model_param.device.type in {"cuda", "npu"}:
             self._step_bucket_cuda(bucket)
             return
         bucket.master = self._materialize_master(bucket)

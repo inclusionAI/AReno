@@ -90,7 +90,7 @@ def areno_depthwise_causal_conv1d_silu(x: torch.Tensor, weight: torch.Tensor) ->
     """
     if not on_kernel_device(x, weight):
         raise RuntimeError(
-            "areno_depthwise_causal_conv1d_silu requires CUDA or HPU input and weight on the same device"
+            "areno_depthwise_causal_conv1d_silu requires CUDA or NPU input and weight on the same device"
         )
     if x.dim() != 3:
         raise ValueError(f"input must have shape (batch, seqlen, channels), got {tuple(x.shape)}")
@@ -109,7 +109,7 @@ def areno_packed_depthwise_causal_conv1d_silu(
 ) -> torch.Tensor:
     """Apply depthwise causal conv1d followed by SiLU to packed (1, tokens, channels) tensors."""
     if not on_kernel_device(x, weight, cu_seqlens):
-        raise RuntimeError("areno_packed_depthwise_causal_conv1d_silu requires CUDA or HPU tensors on the same device")
+        raise RuntimeError("areno_packed_depthwise_causal_conv1d_silu requires CUDA or NPU tensors on the same device")
     if x.dim() != 3 or x.shape[0] != 1:
         raise ValueError(f"input must have shape (1, tokens, channels), got {tuple(x.shape)}")
     weight = _kernel_weight(weight)
@@ -137,7 +137,7 @@ def areno_depthwise_causal_conv1d_silu_decode(
     callers are responsible for shifting ``history``.
     """
     if not on_kernel_device(current, history, weight):
-        raise RuntimeError("areno_depthwise_causal_conv1d_silu_decode requires CUDA or HPU tensors on the same device")
+        raise RuntimeError("areno_depthwise_causal_conv1d_silu_decode requires CUDA or NPU tensors on the same device")
     if current.dim() != 2:
         raise ValueError(f"current must have shape (rows, channels), got {tuple(current.shape)}")
     if history.dim() != 3:

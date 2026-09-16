@@ -31,7 +31,7 @@ def areno_adamw_fp32_master_step(
 
     tensors = (model, low_bits, round_up_bits, grad, exp_avg, exp_avg_sq)
     if not on_kernel_device(*tensors):
-        raise ValueError("fused FP32-master AdamW requires CUDA or HPU tensors on the same device")
+        raise ValueError("fused FP32-master AdamW requires CUDA or NPU tensors on the same device")
     if model.dtype not in {torch.bfloat16, torch.float32}:
         raise TypeError(f"fused FP32-master AdamW requires bfloat16 or float32 model weights, got {model.dtype}")
     if grad.dtype not in {torch.bfloat16, torch.float32}:
@@ -102,7 +102,7 @@ def areno_adamw_8bit_step(
         unsigned_codebook,
     )
     if not on_kernel_device(*tensors):
-        raise ValueError("fused 8-bit AdamW requires CUDA or HPU tensors on the same device")
+        raise ValueError("fused 8-bit AdamW requires CUDA or NPU tensors on the same device")
     if any(tensor.device != model.device for tensor in tensors[1:]):
         raise ValueError("fused 8-bit AdamW requires every tensor on the model device")
     if model.dtype not in {torch.bfloat16, torch.float32}:
@@ -168,7 +168,7 @@ def areno_adamw_fp32_state_step(
 
     tensors = (model, grad, exp_avg, exp_avg_sq)
     if not on_kernel_device(*tensors):
-        raise ValueError("fused FP32-state AdamW requires CUDA or HPU tensors on the same device")
+        raise ValueError("fused FP32-state AdamW requires CUDA or NPU tensors on the same device")
     if any(tensor.device != model.device for tensor in tensors[1:]):
         raise ValueError("fused FP32-state AdamW requires every tensor on the model device")
     if model.dtype not in {torch.bfloat16, torch.float32}:
@@ -223,7 +223,7 @@ def areno_adamw_4bit_step(
 
     tensors = (model, grad, exp_avg_q, exp_avg_scale, exp_avg_sq_q, exp_avg_sq_scale)
     if not on_kernel_device(*tensors):
-        raise ValueError("fused AdamW4bit requires CUDA or HPU tensors on the same device")
+        raise ValueError("fused AdamW4bit requires CUDA or NPU tensors on the same device")
     if model.dtype not in {torch.bfloat16, torch.float32}:
         raise TypeError(f"fused AdamW4bit requires bfloat16 or float32 model weights, got {model.dtype}")
     if grad.dtype not in {torch.bfloat16, torch.float32}:
@@ -285,7 +285,7 @@ def areno_adamw_4bit_factored_stats(
 
     tensors = (grad, factor_sums, invalid)
     if not on_kernel_device(*tensors):
-        raise ValueError("fused AdamW4bit factored statistics require CUDA or HPU tensors on the same device")
+        raise ValueError("fused AdamW4bit factored statistics require CUDA or NPU tensors on the same device")
     if any(tensor.device != grad.device for tensor in tensors[1:]):
         raise ValueError("fused AdamW4bit factored statistics require tensors on one device")
     if grad.dtype not in {torch.bfloat16, torch.float32}:
@@ -344,7 +344,7 @@ def areno_adamw_4bit_factored_step(
         invalid,
     )
     if not on_kernel_device(*tensors):
-        raise ValueError("fused AdamW4bit factored update requires CUDA or HPU tensors on the same device")
+        raise ValueError("fused AdamW4bit factored update requires CUDA or NPU tensors on the same device")
     if any(tensor.device != model.device for tensor in tensors[1:]):
         raise ValueError("fused AdamW4bit factored update requires tensors on one device")
     if model.dtype not in {torch.bfloat16, torch.float32} or grad.dtype not in {torch.bfloat16, torch.float32}:
