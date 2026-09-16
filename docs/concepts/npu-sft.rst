@@ -28,6 +28,7 @@ optional override for cross-compilation without visible hardware.
      tests/test_npu_optimizer.py tests/test_npu_optimizer_factored.py tests/test_npu_embedding.py \
      tests/test_npu_linear.py tests/test_npu_conv.py
    python -m pytest -q tests/test_grouped_linear.py -k 'npu and not cpu and not cuda'
+   python -m pytest -q tests/test_routing.py -k npu
    torchrun --standalone --nproc_per_node=2 -m pytest -q tests/test_npu_optimizer_distributed.py
 
 Current validation boundary
@@ -108,6 +109,19 @@ updates to the caller. Tests include packed sequence isolation, decode/prefill
 agreement, storage offsets, empty shapes and unused nonfinite weight taps.
 These native sources remain uncompiled and unvalidated on Ascend.
 
+Routing now includes native softmax top-k forward/backward and grouped
+sigmoid-plus-bias selection. CUDA and NPU use the same C++ top-k insertion
+helper, including the lower-index tie rule. Softmax can return the selected
+probabilities with or without renormalization; backward follows the same
+selected-probability derivative as CUDA. Grouped selection retains CUDA's
+``top_k // topk_group`` group-score count and applies expert bias only during
+selection. Returned indices are int64 and weights are FP32. Probability math
+uses Ascend C vector operations; bounded top-k insertion runs on the AI Core
+scalar pipeline, as CUDA's final selection runs in one thread. These sources
+have not run on Ascend and have not been benchmarked. A compiled CPU test
+executes the actual common selection helper; the device contract suite covers
+both CUDA and NPU, including gradients, ties and saturation.
+
 Device guards and TorchNPU's current stream are used for each launch. The
 acceptance suite covers tile boundaries, strided tensors, storage offsets,
 empty inputs, softplus tails, saved normalization statistics, every RMSNorm
@@ -123,7 +137,7 @@ run on Ascend. Worker startup rejects the incomplete native extension before
 starting a training or serving job.
 
 Remaining native families include
-attention, routing/MoE and recurrent
+attention, MoE token permutation/alignment, fused experts and recurrent
 operators. The existing opt-in
 ``tests/test_npu_end_to_end.py`` becomes the SFT/rollout/checkpoint acceptance
 test once these kernels are complete; it is not expected to pass yet.
