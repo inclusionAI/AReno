@@ -17,6 +17,20 @@ _ROOT = Path(__file__).resolve().parent
 _using_hpu = runpy.run_path(str(_ROOT / "areno/_hpu.py"))["has_hpu_bridge"]
 
 
+def _check_runtime_target(hpu: bool) -> None:
+    """Reject Ascend before pip resolves this branch's CUDA dependencies."""
+    if hpu or platform.system() != "Linux" or find_spec("torch_npu") is None:
+        return
+    raise RuntimeError(
+        "AReno detected an Ascend NPU environment (torch_npu).\n"
+        "This branch implements Intel Gaudi HPU/SynapseAI kernels; Ascend NPU/CANN kernels are not implemented.\n"
+        "CPU-tagged PyTorch with torch_npu is expected on Ascend. Keep the existing PyTorch and torch_npu; "
+        "installing CUDA or SynapseAI will not enable these kernels on Ascend.\n"
+        "Ascend training/serving requires an NPU backend and native Ascend operators. "
+        "ARENO_BUILD_EXT=0 cannot provide that runtime support."
+    )
+
+
 def _runtime_dependencies(hpu: bool) -> list[str]:
     path = _ROOT / "requirements" / ("hpu.txt" if hpu else "default.txt")
     return [
@@ -197,6 +211,7 @@ def _version_at_least(version: str | None, minimum: tuple[int, int]) -> bool:
 
 
 hpu = _using_hpu()
+_check_runtime_target(hpu)
 ext_modules, cmdclass = _extensions(hpu)
 
 
