@@ -1855,12 +1855,22 @@ class BailingMoeV3ForCausalLM(nn.Module):
         hidden_states: torch.Tensor,
         position_ids: torch.Tensor,
         infer_meta: InferMeta,
+        logits_indices: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Draft with the MTP layer: embeds of the next tokens fused with the given hidden states."""
+        """Draft with the MTP layer: embeds of the next tokens fused with the given hidden states.
+
+        ``logits_indices`` restricts the vocab projection to those sequence
+        positions, so the logits come back as ``[1, len(logits_indices), vocab]``
+        while the hidden states stay full. Prefill drafts from one position per
+        sequence, and projecting the whole chunk instead would materialise a
+        ``[chunk_tokens, vocab]`` fp32 tensor only to drop nearly all of it.
+        """
         if self.mtp_layers is None or not self.mtp_draft_enabled:
             raise RuntimeError("MTP drafting requires enable_mtp_draft() on a checkpoint with MTP layers")
         mtp_hidden = self.mtp_layers[0](self.word_embeddings(input_ids), hidden_states, position_ids, None, infer_meta)
-        logits_input = mtp_hidden.float() if self.lm_head.weight.dtype == torch.float32 else mtp_hidden
+        logits_input = mtp_hidden if logits_indices is None else mtp_hidden[:, logits_indices]
+        if self.lm_head.weight.dtype == torch.float32:
+            logits_input = logits_input.float()
         return self.lm_head(logits_input), mtp_hidden
 
     @torch.no_grad()

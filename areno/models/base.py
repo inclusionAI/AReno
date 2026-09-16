@@ -61,8 +61,13 @@ class SpeculativeDraftModel(Protocol):
         hidden_states: torch.Tensor,
         position_ids: torch.Tensor,
         infer_meta: Any,
+        logits_indices: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Run the MTP layer as the draft model; return (logits_shard, hidden_states)."""
+        """Run the MTP layer as the draft model; return (logits_shard, hidden_states).
+
+        ``logits_indices`` selects the sequence positions to project to vocab
+        (all of them when None); the hidden states are always returned in full.
+        """
 
     def commit_speculative_state(self, committed: torch.Tensor, *, infer_meta: Any) -> None:
         """Keep recurrent state after the first ``committed[row]`` fed tokens of the verify run with ``infer_meta``."""

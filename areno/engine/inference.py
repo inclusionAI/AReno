@@ -1146,11 +1146,14 @@ class InferenceManager:
             out = self.model(**model_kwargs)
         self._last_routing_capture = captured_routing(infer_meta)
         if payload.next_input_ids is not None:
+            # This chunk samples nothing, so only the MTP KV write matters;
+            # projecting any position to vocab would be pure waste.
             self.model.mtp_draft_forward(
                 input_ids=payload.next_input_ids.to(self.device).unsqueeze(0),
                 hidden_states=out.hidden_states,
                 position_ids=position_ids,
                 infer_meta=infer_meta,
+                logits_indices=torch.empty(0, dtype=torch.long, device=self.device),
             )
 
     def _mark_rollout_finished_rows(
@@ -1201,11 +1204,12 @@ class InferenceManager:
             hidden_states=hidden_states,
             position_ids=position_ids,
             infer_meta=infer_meta,
+            logits_indices=sample_indices,
         )
         rows = torch.tensor(payload.raw["prefill_seq_ids"], device=self.device, dtype=torch.long)
         complete = _device_long(payload.raw["cu_seqlens"], self.device)[1:] - 1
         sampled_rows = rows[torch.isin(complete, sample_indices)]
-        return sampled_rows, draft_logits[0, sample_indices], draft_hidden[0, sample_indices]
+        return sampled_rows, draft_logits[0], draft_hidden[0, sample_indices]
 
     def _ensure_speculative_kv_blocks(
         self, state: InferenceBatchState, active_rows: torch.Tensor, cache_seqlens: torch.Tensor, span: int

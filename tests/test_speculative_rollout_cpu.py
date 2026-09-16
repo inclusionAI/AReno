@@ -29,6 +29,8 @@ class _FakeSpecModel:
         self.draft_shift = draft_shift
         self.commits: list[list[int]] = []
         self.draft_enabled = False
+        # (fed positions, positions projected to vocab) of every draft forward.
+        self.draft_projections: list[tuple[int, int]] = []
 
     def enable_mtp_draft(self, *, max_rows: int, tokens_per_seq: int) -> None:
         assert max_rows >= 1 and tokens_per_seq >= 2
@@ -45,9 +47,11 @@ class _FakeSpecModel:
         hidden = input_ids.unsqueeze(-1).expand(-1, -1, HIDDEN).float()
         return CausalLMOutput(logits_shard=self._logits(input_ids, 1), hidden_states=hidden)
 
-    def mtp_draft_forward(self, *, input_ids, hidden_states, position_ids, infer_meta):
+    def mtp_draft_forward(self, *, input_ids, hidden_states, position_ids, infer_meta, logits_indices=None):
         assert hidden_states.shape[:2] == input_ids.shape
-        return self._logits(input_ids, self.draft_shift), hidden_states
+        projected = input_ids if logits_indices is None else input_ids[:, logits_indices]
+        self.draft_projections.append((input_ids.shape[1], projected.shape[1]))
+        return self._logits(projected, self.draft_shift), hidden_states
 
     def commit_speculative_state(self, committed: torch.Tensor, *, infer_meta) -> None:
         assert infer_meta.mode == "decode" and infer_meta.tokens_per_seq > 1
@@ -145,6 +149,17 @@ def test_continuous_batching_admits_rows_into_a_running_speculative_batch():
     state, _ = _rollout([[1], [2], [3]], draft_shift=1, max_new_tokens=4, max_running=2)
     assert state.generated == [_expected(1, 4), _expected(2, 4), _expected(3, 4)]
     assert state.finish_reason == ["length"] * 3
+
+
+def test_prefill_draft_projects_only_the_sampled_positions():
+    _, model = _rollout([[3, 4, 5], [7, 9]], draft_shift=1, max_new_tokens=4)
+    # Prefill feeds all 5 prompt tokens but drafts from one position per
+    # sequence. Projecting the whole chunk instead costs a
+    # [chunk_tokens, vocab] fp32 tensor that is dropped on the next line, which
+    # is what put speculative rollout out of memory at real prompt lengths.
+    assert model.draft_projections[0] == (5, 2)
+    # Every later draft forward is decode-shaped and projects all it feeds.
+    assert all(fed == projected for fed, projected in model.draft_projections[1:])
 
 
 def test_single_draft_needs_no_chain_step():
