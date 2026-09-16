@@ -121,6 +121,7 @@ def build_extensions():
                     "conv",
                     "routing",
                     "moe",
+                    "attention",
                 )
             ],
             depends=[
@@ -129,7 +130,17 @@ def build_extensions():
                 "areno/accel/csrc/moe_permute_common.h",
                 *[
                     f"areno/accel/csrc/npu/{name}_launch.h"
-                    for name in ("activation", "normalization", "optimizer", "embedding", "linear", "conv", "routing", "moe")
+                    for name in (
+                        "activation",
+                        "normalization",
+                        "optimizer",
+                        "embedding",
+                        "linear",
+                        "conv",
+                        "routing",
+                        "moe",
+                        "attention",
+                    )
                 ],
             ],
             include_dirs=[str(cann / "include")],

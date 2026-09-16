@@ -30,6 +30,7 @@ optional override for cross-compilation without visible hardware.
    python -m pytest -q tests/test_grouped_linear.py -k 'npu and not cpu and not cuda'
    python -m pytest -q tests/test_routing.py -k npu
    python -m pytest -q tests/test_moe_native.py -k npu
+   python -m pytest -q tests/test_attention_native.py -k npu
    torchrun --standalone --nproc_per_node=2 -m pytest -q tests/test_npu_optimizer_distributed.py
 
 Current validation boundary
@@ -140,6 +141,24 @@ shards, repeated indices, gradients, storage offsets, padding canaries and
 CUDA graph replay for fixed-shape paths. The native Ascend implementation
 still requires compilation and numerical validation on hardware.
 
+The five native attention entries cover dense and packed forward/backward,
+and paged single-token decode. They follow the CUDA diagnostic attention
+kernel's FP32 online softmax and saved-output derivative, using Ascend C
+vector arithmetic and FP32 atomic K/V gradient accumulation. Packed attention
+supports grouped query heads and reads sequence boundaries on device,
+including empty segments. Dense attention retains query offsets and sliding
+windows. Paged decode copies K/V updates into the caller's cache, evaluates
+the requested number of splits and merges their softmax statistics; empty
+or fully masked splits contribute nothing. Cache lengths remain caller-owned.
+Head dimensions stream through fixed UB tiles, without materializing a QK
+matrix. Heads wider than a tile repeat score calculations for each output
+tile; this implementation has not been benchmarked. The shared Python
+attention/autograd wrappers are unchanged, including CUDA's existing
+reference-based paged-decode backward. Device tests cover FP32/FP16/BF16,
+saved-output gradients, GQA, packed isolation, storage offsets, cache writes,
+empty splits, prefill/decode agreement, numerical stability and streams.
+These Ascend sources have not yet been compiled or run on hardware.
+
 Device guards and TorchNPU's current stream are used for each launch. The
 acceptance suite covers tile boundaries, strided tensors, storage offsets,
 empty inputs, softplus tails, saved normalization statistics, every RMSNorm
@@ -154,9 +173,8 @@ and memory probes. The backend directory contains only ``__init__.py`` and
 run on Ascend. Worker startup rejects the incomplete native extension before
 starting a training or serving job.
 
-Remaining native families include
-attention, fused experts and recurrent
-operators. The existing opt-in
+Remaining native families include fused experts and recurrent operators.
+The existing opt-in
 ``tests/test_npu_end_to_end.py`` becomes the SFT/rollout/checkpoint acceptance
 test once these kernels are complete; it is not expected to pass yet.
 

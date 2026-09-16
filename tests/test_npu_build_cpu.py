@@ -116,6 +116,8 @@ def test_kernel_archive_is_linked_and_triggers_extension_rebuild(builder, monkey
         assert "areno/accel/csrc/npu/conv.cpp" in self.extensions[0].sources
         assert "areno/accel/csrc/npu/routing.cpp" in self.extensions[0].sources
         assert "areno/accel/csrc/npu/moe.cpp" in self.extensions[0].sources
+        assert "areno/accel/csrc/npu/attention.cpp" in self.extensions[0].sources
+        assert "areno/accel/csrc/npu/attention_launch.h" in self.extensions[0].depends
         assert {"opapi_nn", "nnopbase"}.issubset(self.extensions[0].libraries)
         calls.append("host")
 
@@ -179,5 +181,8 @@ def test_sdist_includes_native_build_inputs(tmp_path):
         "moe.cpp",
         "moe_kernel.cpp",
         "moe_launch.h",
+        "attention.cpp",
+        "attention_kernel.cpp",
+        "attention_launch.h",
     ):
         assert f"areno/accel/csrc/npu/{name}" in names
