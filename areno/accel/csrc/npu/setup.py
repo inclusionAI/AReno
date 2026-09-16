@@ -111,15 +111,15 @@ def build_extensions():
             "areno.accel._areno_accel_npu",
             sources=[
                 f"areno/accel/csrc/npu/{name}.cpp"
-                for name in ("extension", "activation", "normalization", "optimizer", "embedding")
+                for name in ("extension", "activation", "normalization", "optimizer", "embedding", "linear")
             ],
             depends=[
                 f"areno/accel/csrc/npu/{name}_launch.h"
-                for name in ("activation", "normalization", "optimizer", "embedding")
+                for name in ("activation", "normalization", "optimizer", "embedding", "linear")
             ],
             include_dirs=[str(cann / "include")],
             library_dirs=[str(cann / "lib64")],
-            libraries=["ascendcl"],
+            libraries=["ascendcl", "opapi_nn", "nnopbase"],
             extra_compile_args=["-O2"],
         )
     ], {"build_ext": AscendBuildExtension}
