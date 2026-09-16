@@ -75,7 +75,7 @@ class FlashAttnTrainAttentionBackend(TrainAttentionBackend):
     ) -> torch.Tensor:
         call = build_attention_call(q, k, v, window_size, softmax_scale)
         if use_native_attention(self.attn_backend):
-            use_kernel = q.device.type == "hpu" or (self.native_train_matches_rollout and q.is_cuda)
+            use_kernel = q.device.type == "npu" or (self.native_train_matches_rollout and q.is_cuda)
             native_fn = _native_train_areno if use_kernel else _native_train
             out = native_fn(call.q, call.k, call.v, meta, call.window_size, call.softmax_scale)
             return call.trim_value_dim(out)

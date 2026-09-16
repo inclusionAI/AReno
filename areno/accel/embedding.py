@@ -49,7 +49,7 @@ def areno_vocab_embedding(
     ``(*input_ids.shape, hidden)`` ready for tensor-parallel reduction.
     """
     if not on_kernel_device(input_ids, weight):
-        raise RuntimeError("areno_vocab_embedding requires CUDA or HPU input_ids and weight on the same device")
+        raise RuntimeError("areno_vocab_embedding requires CUDA or NPU input_ids and weight on the same device")
     if input_ids.dtype != torch.long:
         raise TypeError("areno_vocab_embedding input_ids must be int64")
     return _VocabEmbedding.apply(input_ids, weight, int(vocab_start), int(vocab_end))

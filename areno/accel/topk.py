@@ -35,7 +35,7 @@ def areno_topk_softmax(logits: torch.Tensor, top_k: int, renormalize: bool = Tru
     """Return ``(topk_idx, topk_weight)`` using ARENO CUDA kernels."""
 
     if not on_kernel_device(logits):
-        raise RuntimeError("areno_topk_softmax requires CUDA or HPU logits on the same device")
+        raise RuntimeError("areno_topk_softmax requires CUDA or NPU logits on the same device")
     if logits.dim() != 2:
         raise ValueError(f"areno_topk_softmax logits must have shape (tokens, experts), got {tuple(logits.shape)}")
     return _TopKSoftmax.apply(logits, int(top_k), bool(renormalize))

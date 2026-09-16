@@ -34,7 +34,7 @@ def areno_moe_align(
     so that callers manage allocation lifetime explicitly.
     """
     if not on_kernel_device(topk_ids, sorted_token_ids, expert_ids, num_tokens_post_pad, cumsum_buffer):
-        raise ValueError("areno_moe_align expects CUDA or HPU tensors on the same device")
+        raise ValueError("areno_moe_align expects CUDA or NPU tensors on the same device")
     if cumsum_buffer is None:
         raise ValueError("areno_moe_align requires cumsum_buffer")
     _extension(topk_ids.device).areno_moe_align(

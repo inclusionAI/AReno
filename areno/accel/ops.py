@@ -116,8 +116,8 @@ def areno_fused_experts(
     activation: str = "silu",
 ) -> torch.Tensor:
     if not on_kernel_device(hidden_states, w1, w2, topk_weights, topk_ids):
-        raise RuntimeError("fused_experts requires CUDA or HPU tensors on the same device")
-    if hidden_states.device.type == "hpu":
+        raise RuntimeError("fused_experts requires CUDA or NPU tensors on the same device")
+    if hidden_states.device.type == "npu":
         return extension(hidden_states.device).areno_fused_experts(
             hidden_states, w1, w2, topk_weights, topk_ids, config, activation=activation
         )
@@ -128,7 +128,7 @@ def areno_fused_experts(
 
 def fused_moe_is_available():
     # The CUDA implementation exposes this same unconditional capability.
-    # Importing its Triton module here would also initialize it on HPU hosts.
+    # Importing its Triton module here would also initialize it on NPU hosts.
     return True
 
 
@@ -136,8 +136,8 @@ def rms_norm_gate_fwd(
     x: torch.Tensor, gate: torch.Tensor, weight: torch.Tensor, eps: float
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if not on_kernel_device(x, gate, weight):
-        raise RuntimeError("rms_norm_gate_fwd requires CUDA or HPU tensors on the same device")
-    if x.device.type == "hpu":
+        raise RuntimeError("rms_norm_gate_fwd requires CUDA or NPU tensors on the same device")
+    if x.device.type == "npu":
         return extension(x.device).rms_norm_gate_fwd(x, gate, weight, eps)
     from areno.accel.kernels.group_rmsnorm import rms_norm_gate_fwd as implementation
 
@@ -148,8 +148,8 @@ def seg_la_fwd(q, k, v, s, decay_scales, meta, caches=None, softmax_scale=None):
     if not on_kernel_device(
         q, k, v, s, decay_scales, meta.q_offsets, meta.s_offsets, meta.q_lengths, meta.s_scales, meta.mask, caches
     ):
-        raise RuntimeError("seg_la_fwd requires CUDA or HPU tensors on the same device")
-    if q.device.type == "hpu":
+        raise RuntimeError("seg_la_fwd requires CUDA or NPU tensors on the same device")
+    if q.device.type == "npu":
         return extension(q.device).seg_la_fwd(q, k, v, s, decay_scales, meta, caches, softmax_scale)
     from areno.accel.kernels.seg_la import seg_la_fwd as implementation
 

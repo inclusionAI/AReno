@@ -1,7 +1,6 @@
 """Check native dispatch with metadata-only tensors; no device kernels run here."""
 
 import importlib
-import os
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -19,105 +18,82 @@ class NativeReached(Exception):
     """Stop at the native boundary before any numerical work is performed."""
 
 
+@pytest.fixture(scope="module", autouse=True)
+def register_npu_device_name():
+    if torch._C._get_privateuse1_backend_name() == "privateuseone":
+        torch.utils.rename_privateuse1_backend("npu")
+
+
 @pytest.fixture
 def native_tensors(monkeypatch):
     monkeypatch.setattr(
-        torch, "hpu", SimpleNamespace(is_initialized=lambda: False, is_available=lambda: False), raising=False
+        torch, "npu", SimpleNamespace(is_initialized=lambda: False, is_available=lambda: False), raising=False
     )
     mode = FakeTensorMode()
 
-    def tensor(shape, dtype=torch.float32, device="hpu:0"):
+    def tensor(shape, dtype=torch.float32, device="npu:0"):
         return FakeTensor(mode, torch.empty(shape, device="meta", dtype=dtype), torch.device(device))
 
     return mode, tensor
 
 
-def test_extension_caches_cuda_and_hpu_independently(monkeypatch):
-    monkeypatch.setattr(_extension, "configure_hpu_kernel_library", lambda: None)
-    modules = {name: object() for name in ("areno.accel._areno_accel", "areno.accel._areno_accel_hpu")}
+def test_extension_caches_cuda_and_npu_independently(monkeypatch):
+    modules = {name: object() for name in ("areno.accel._areno_accel", "areno.accel._areno_accel_npu")}
     imports = []
 
     def load(name):
+        if name == "torch_npu":
+            return object()
         imports.append(name)
         return modules[name]
 
     monkeypatch.setattr(_extension, "_EXT", None)
-    monkeypatch.setattr(_extension, "_HPU_EXT", None)
+    monkeypatch.setattr(_extension, "_NPU_EXT", None)
     monkeypatch.setattr(_extension.importlib, "import_module", load)
     for _ in range(2):
-        assert _extension.extension(torch.device("hpu:0")) is modules["areno.accel._areno_accel_hpu"]
+        assert _extension.extension(torch.device("npu:0")) is modules["areno.accel._areno_accel_npu"]
         assert _extension.extension(torch.device("cuda:1")) is modules["areno.accel._areno_accel"]
-    assert imports == ["areno.accel._areno_accel_hpu", "areno.accel._areno_accel"]
+    assert imports == ["areno.accel._areno_accel_npu", "areno.accel._areno_accel"]
 
 
-def test_missing_hpu_extension_does_not_fall_back_to_cuda(monkeypatch):
-    monkeypatch.setattr(_extension, "configure_hpu_kernel_library", lambda: None)
+def test_missing_npu_extension_does_not_fall_back_to_cuda(monkeypatch):
     imports = []
 
     def load(name):
+        if name == "torch_npu":
+            return object()
         imports.append(name)
         raise ModuleNotFoundError(name=name)
 
     monkeypatch.setattr(_extension, "_EXT", object())
-    monkeypatch.setattr(_extension, "_HPU_EXT", None)
+    monkeypatch.setattr(_extension, "_NPU_EXT", None)
     monkeypatch.setattr(_extension.importlib, "import_module", load)
-    with pytest.raises(RuntimeError, match="native HPU kernels are not installed"):
-        _extension.extension("hpu")
-    assert imports == ["areno.accel._areno_accel_hpu"]
+    with pytest.raises(RuntimeError, match="native NPU kernels are not installed"):
+        _extension.extension("npu")
+    assert imports == ["areno.accel._areno_accel_npu"]
 
 
-def test_hpu_extension_dependency_error_is_preserved(monkeypatch):
-    monkeypatch.setattr(_extension, "configure_hpu_kernel_library", lambda: None)
+def test_npu_extension_dependency_error_is_preserved(monkeypatch):
 
     def load(name):
-        raise ModuleNotFoundError(name="habana_frameworks")
+        raise ModuleNotFoundError(name="torch_npu")
 
-    monkeypatch.setattr(_extension, "_HPU_EXT", None)
+    monkeypatch.setattr(_extension, "_NPU_EXT", None)
     monkeypatch.setattr(_extension.importlib, "import_module", load)
     with pytest.raises(ModuleNotFoundError) as exc:
-        _extension.extension("hpu")
-    assert exc.value.name == "habana_frameworks"
-
-
-def test_tpc_library_configuration_preserves_other_libraries(monkeypatch, tmp_path):
-    existing = str(tmp_path / "existing.so")
-    native = str(tmp_path / "areno.so")
-    monkeypatch.setenv("GC_KERNEL_PATH", existing)
-    monkeypatch.setattr(_extension.importlib.util, "find_spec", lambda name: SimpleNamespace(origin=native))
-    _extension.configure_hpu_kernel_library()
-    _extension.configure_hpu_kernel_library()
-    assert os.environ["GC_KERNEL_PATH"].split(os.pathsep) == [existing, native]
-
-
-@pytest.mark.parametrize("configured", [None, ""])
-def test_tpc_library_configuration_retains_default_library(monkeypatch, tmp_path, configured):
-    if configured is None:
-        monkeypatch.delenv("GC_KERNEL_PATH", raising=False)
-    else:
-        monkeypatch.setenv("GC_KERNEL_PATH", configured)
-    native = str(tmp_path / "areno.so")
-    monkeypatch.setattr(_extension.importlib.util, "find_spec", lambda name: SimpleNamespace(origin=native))
-    _extension.configure_hpu_kernel_library()
-    assert os.environ["GC_KERNEL_PATH"].split(os.pathsep) == ["/usr/lib/habanalabs/libtpc_kernels.so", native]
-
-
-def test_missing_tpc_library_does_not_change_compiler_paths(monkeypatch):
-    monkeypatch.setenv("GC_KERNEL_PATH", "existing.so")
-    monkeypatch.setattr(_extension.importlib.util, "find_spec", lambda name: None)
-    with pytest.raises(RuntimeError, match="_areno_hpu_kernels"):
-        _extension.configure_hpu_kernel_library()
-    assert os.environ["GC_KERNEL_PATH"] == "existing.so"
+        _extension.extension("npu")
+    assert exc.value.name == "torch_npu"
 
 
 def test_device_guard_rejects_mixed_devices():
     def tensor(device):
         return SimpleNamespace(device=torch.device(device))
 
-    assert on_kernel_device(tensor("hpu:0"), tensor("hpu:0"), None)
-    assert not on_kernel_device(tensor("hpu:0"), tensor("cuda:0"))
+    assert on_kernel_device(tensor("npu:0"), tensor("npu:0"), None)
+    assert not on_kernel_device(tensor("npu:0"), tensor("cuda:0"))
     assert not on_kernel_device(tensor("cuda:0"), tensor("cuda:1"))
-    assert not on_kernel_device(tensor("hpu:0"), tensor("cpu"))
-    with pytest.raises(RuntimeError, match="require CUDA or HPU"):
+    assert not on_kernel_device(tensor("npu:0"), tensor("cpu"))
+    with pytest.raises(RuntimeError, match="require CUDA or NPU"):
         _extension.extension("cpu")
 
 
@@ -191,7 +167,7 @@ def forward_calls(t):
     }
 
 
-@pytest.mark.parametrize("device", ["cuda:0", "hpu:0"])
+@pytest.mark.parametrize("device", ["cuda:0", "npu:0"])
 @pytest.mark.parametrize("op", FORWARD_OPS)
 def test_public_operators_select_the_input_device(monkeypatch, native_tensors, device, op):
     mode, make_tensor = native_tensors
@@ -205,13 +181,13 @@ def test_public_operators_select_the_input_device(monkeypatch, native_tensors, d
 
     native = Native()
     monkeypatch.setattr(_extension, "_EXT", native if device.startswith("cuda") else None)
-    monkeypatch.setattr(_extension, "_HPU_EXT", native if device.startswith("hpu") else None)
+    monkeypatch.setattr(_extension, "_NPU_EXT", native if device.startswith("npu") else None)
     calls = forward_calls(lambda shape, dtype=torch.float32: make_tensor(shape, dtype, device))
     with mode, pytest.raises(NativeReached, match=f"^areno_{op}$"):
         calls[op]()
 
 
-@pytest.mark.parametrize("device", ["cuda:0", "hpu:0"])
+@pytest.mark.parametrize("device", ["cuda:0", "npu:0"])
 @pytest.mark.parametrize("activation", ["Silu", "Sigmoid", "Softplus", "SiluMul", "GeluTanhMul"])
 def test_activation_backward_selects_the_gradient_device(monkeypatch, native_tensors, device, activation):
     mode, tensor = native_tensors
@@ -229,14 +205,14 @@ def test_activation_backward_selects_the_gradient_device(monkeypatch, native_ten
             return call
 
     monkeypatch.setattr(_extension, "_EXT", Native() if device.startswith("cuda") else None)
-    monkeypatch.setattr(_extension, "_HPU_EXT", Native() if device.startswith("hpu") else None)
+    monkeypatch.setattr(_extension, "_NPU_EXT", Native() if device.startswith("npu") else None)
     with mode:
         result = getattr(module, f"_{activation}").backward(SimpleNamespace(saved_tensors=(x,)), grad)
     assert result[0].device == x.device
     assert len(seen) == 1 and seen[0].startswith("areno_d_")
 
 
-@pytest.mark.parametrize("device", ["cuda:0", "hpu:0"])
+@pytest.mark.parametrize("device", ["cuda:0", "npu:0"])
 @pytest.mark.parametrize(
     "variant", ["fp32_master", "fp32_state", "8bit", "4bit", "4bit_factored_stats", "4bit_factored"]
 )
@@ -290,12 +266,12 @@ def test_all_adam_native_entries_select_the_parameter_device(monkeypatch, native
 
     native = SimpleNamespace(**{name: call})
     monkeypatch.setattr(_extension, "_EXT", native if device.startswith("cuda") else None)
-    monkeypatch.setattr(_extension, "_HPU_EXT", native if device.startswith("hpu") else None)
+    monkeypatch.setattr(_extension, "_NPU_EXT", native if device.startswith("npu") else None)
     with mode, pytest.raises(NativeReached, match=f"^{name}$"):
         getattr(optimizer, name)(*args, **kwargs)
 
 
-def test_hpu_training_attention_uses_the_shared_native_wrapper(monkeypatch, native_tensors):
+def test_npu_training_attention_uses_the_shared_native_wrapper(monkeypatch, native_tensors):
     from areno.engine.layers.attention_backend.train import FlashAttnTrainAttentionBackend
 
     mode, tensor = native_tensors
@@ -304,7 +280,7 @@ def test_hpu_training_attention_uses_the_shared_native_wrapper(monkeypatch, nati
     def call(*args):
         raise NativeReached("areno_varlen_causal_attention_forward")
 
-    monkeypatch.setattr(_extension, "_HPU_EXT", SimpleNamespace(areno_varlen_causal_attention_forward=call))
+    monkeypatch.setattr(_extension, "_NPU_EXT", SimpleNamespace(areno_varlen_causal_attention_forward=call))
     backend = FlashAttnTrainAttentionBackend("native")
     with mode, pytest.raises(NativeReached, match="areno_varlen_causal_attention_forward"):
         backend(q, q, q, None)
@@ -318,13 +294,13 @@ def test_accel_metadata_imports_do_not_require_triton_or_device_extensions():
             "import areno.accel; import areno.accel.ops; import areno.accel.kda; import sys; "
             "assert 'triton' not in sys.modules; "
             "assert 'areno.accel._areno_accel' not in sys.modules; "
-            "assert 'areno.accel._areno_accel_hpu' not in sys.modules",
+            "assert 'areno.accel._areno_accel_npu' not in sys.modules",
         ],
         check=True,
     )
 
 
-def test_hpu_triton_equivalents_route_to_native_extension(monkeypatch, native_tensors):
+def test_npu_triton_equivalents_route_to_native_extension(monkeypatch, native_tensors):
     mode, tensor = native_tensors
     x = tensor((2, 2, 4))
     calls = []
@@ -337,7 +313,7 @@ def test_hpu_triton_equivalents_route_to_native_extension(monkeypatch, native_te
 
             return call
 
-    monkeypatch.setattr(_extension, "_HPU_EXT", Native())
+    monkeypatch.setattr(_extension, "_NPU_EXT", Native())
     meta = ops.SegLaMeta(2, 2, x, x, x, x)
     with mode:
         ops.rms_norm_gate_fwd(x, x, x, 1e-6)
@@ -346,7 +322,7 @@ def test_hpu_triton_equivalents_route_to_native_extension(monkeypatch, native_te
     assert calls == ["rms_norm_gate_fwd", "areno_fused_experts", "seg_la_fwd"]
 
 
-@pytest.mark.parametrize("device", ["cuda:0", "hpu:0"])
+@pytest.mark.parametrize("device", ["cuda:0", "npu:0"])
 @pytest.mark.parametrize("variant", ["chunk", "recurrent_update"])
 def test_kda_keeps_the_same_native_arguments(monkeypatch, native_tensors, device, variant):
     from areno.accel import kda
@@ -365,8 +341,8 @@ def test_kda_keeps_the_same_native_arguments(monkeypatch, native_tensors, device
 
     name = "chunk_kda" if variant == "chunk" else "fused_sigmoid_gating_delta_rule_update"
     native = SimpleNamespace(**{name: kernel})
-    if device.startswith("hpu"):
-        monkeypatch.setattr(_extension, "_HPU_EXT", native)
+    if device.startswith("npu"):
+        monkeypatch.setattr(_extension, "_NPU_EXT", native)
     else:
         module = "kda" if variant == "chunk" else "fused_sigmoid_gating_recurrent"
         monkeypatch.setitem(sys.modules, f"areno.accel.kernels.kda_fla.{module}", native)
@@ -383,19 +359,3 @@ def test_kda_keeps_the_same_native_arguments(monkeypatch, native_tensors, device
     assert called["cu_seqlens"] is cu_seqlens
     assert called["lower_bound"] == -6.0
     assert called["use_qk_l2norm_in_kernel"] is True
-
-
-def test_hpu_native_indices_require_real_int64_storage(monkeypatch):
-    monkeypatch.setenv("PT_ENABLE_INT64_SUPPORT", "0")
-    monkeypatch.setattr(_extension.importlib.util, "find_spec", lambda name: SimpleNamespace(origin="native.so"))
-    with pytest.raises(RuntimeError, match="PT_ENABLE_INT64_SUPPORT=1"):
-        _extension.configure_hpu_kernel_library()
-    assert os.environ["PT_ENABLE_INT64_SUPPORT"] == "0"
-
-
-def test_hpu_library_enables_int64_before_bridge_initialization(monkeypatch):
-    monkeypatch.delenv("PT_ENABLE_INT64_SUPPORT", raising=False)
-    monkeypatch.setenv("GC_KERNEL_PATH", "default.so")
-    monkeypatch.setattr(_extension.importlib.util, "find_spec", lambda name: SimpleNamespace(origin="native.so"))
-    _extension.configure_hpu_kernel_library()
-    assert os.environ["PT_ENABLE_INT64_SUPPORT"] == "1"

@@ -90,11 +90,11 @@ formats differ. CUDA saves its Hugging Face-oriented checkpoint layout; MLX
 saves the model in native MLX format with tokenizer/processor assets and AReno
 metadata.
 
-HPU runtime
+NPU runtime
 -----------
 
-HPU inherits the CUDA backend and engine workflows. Its backend directory
+NPU inherits the CUDA backend and engine workflows. Its backend directory
 contains only the registration/device adapter. Configuration, optimizers,
 losses, training, generation, serving and checkpoints reuse existing code.
-HCCL initialization and HPU execution boundaries are device-specific.
-Native HPU accel kernels remain work in progress; see :doc:`hpu-sft`.
+HCCL initialization and NPU execution boundaries are device-specific.
+Native NPU accel kernels remain work in progress; see :doc:`npu-sft`.

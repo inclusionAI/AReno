@@ -693,7 +693,7 @@ class AdamW8bit(AdamWFP32Master):
         model_shard = ref.model_param.detach().reshape(-1).narrow(0, ref.param_start + ref.shard_start, ref.shard_numel)
         exp_avg = state.exp_avg.narrow(0, ref.shard_bucket_start, ref.shard_numel)
         exp_avg_sq = state.exp_avg_sq.narrow(0, ref.shard_bucket_start, ref.shard_numel)
-        if model_shard.device.type in {"cuda", "hpu"}:
+        if model_shard.device.type in {"cuda", "npu"}:
             from areno.accel.optimizer import areno_adamw_fp32_state_step
 
             areno_adamw_fp32_state_step(
@@ -754,7 +754,7 @@ class AdamW8bit(AdamWFP32Master):
         moment_scales = state.exp_avg_scale.narrow(0, scale_offset, block_count)
         variance_scales = state.exp_avg_sq_scale.narrow(0, scale_offset, block_count)
 
-        if model_shard.device.type in {"cuda", "hpu"}:
+        if model_shard.device.type in {"cuda", "npu"}:
             from areno.accel.optimizer import areno_adamw_8bit_step
 
             signed_codebook = _dynamic_codebook(model_shard.device, signed=True)

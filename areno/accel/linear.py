@@ -63,9 +63,9 @@ def areno_linear(x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | Non
     Returns a tensor with the trailing dim replaced by ``out_features``.
     """
     if not on_kernel_device(x, weight):
-        raise RuntimeError("areno_linear requires CUDA or HPU input and weight on the same device")
+        raise RuntimeError("areno_linear requires CUDA or NPU input and weight on the same device")
     if not on_kernel_device(x, bias):
-        raise RuntimeError("areno_linear bias must be CUDA or HPU on the same device")
+        raise RuntimeError("areno_linear bias must be CUDA or NPU on the same device")
     return _Linear.apply(x, weight, bias)
 
 
@@ -133,11 +133,11 @@ def areno_grouped_linear(
     expert-major output matrix; the caller is responsible for unpermuting.
     """
     if not on_kernel_device(x, weight):
-        raise RuntimeError("areno_grouped_linear requires CUDA or HPU input and weight on the same device")
+        raise RuntimeError("areno_grouped_linear requires CUDA or NPU input and weight on the same device")
     if weight.dim() != 3:
         raise ValueError(f"areno_grouped_linear weight must be 3D, got {tuple(weight.shape)}")
     if isinstance(tokens_per_expert, torch.Tensor):
         if not on_kernel_device(x, tokens_per_expert):
-            raise RuntimeError("areno_grouped_linear tensor tokens_per_expert must be CUDA or HPU on the same device")
+            raise RuntimeError("areno_grouped_linear tensor tokens_per_expert must be CUDA or NPU on the same device")
         return _GroupedLinearCounts.apply(x, weight, tokens_per_expert)
     return _GroupedLinear.apply(x, weight, tokens_per_expert)

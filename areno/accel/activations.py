@@ -25,7 +25,7 @@ def _activation_out(x: torch.Tensor, out: torch.Tensor | None) -> torch.Tensor:
     if tuple(out.shape) != expected_shape:
         raise ValueError(f"activation output shape must be {expected_shape}, got {tuple(out.shape)}")
     if not on_kernel_device(x, out):
-        raise RuntimeError("activation input and output must be on the same CUDA or HPU device")
+        raise RuntimeError("activation input and output must be on the same CUDA or NPU device")
     if out.dtype != x.dtype:
         raise TypeError("activation input and output must have the same dtype")
     return out
@@ -34,7 +34,7 @@ def _activation_out(x: torch.Tensor, out: torch.Tensor | None) -> torch.Tensor:
 def _can_use_extension(x: torch.Tensor) -> bool:
     """Guard that the input lives on a native kernel device; there is no CPU path."""
     if not on_kernel_device(x):
-        raise RuntimeError("ARENO activation kernels require CUDA or HPU tensors on the same device")
+        raise RuntimeError("ARENO activation kernels require CUDA or NPU tensors on the same device")
     return True
 
 

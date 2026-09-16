@@ -24,94 +24,28 @@ def _load_setup_module() -> dict:
 
 
 class SetupGuardrailsTest(unittest.TestCase):
-    def test_ascend_is_rejected_before_cuda_dependencies_or_torch_import(self):
-        root = Path(__file__).resolve().parents[1]
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory)
-            (path / "torch_npu.py").write_text("raise RuntimeError('must not import torch_npu')\n")
-            (path / "torch.py").write_text("raise RuntimeError('must not import torch')\n")
-            # Hide any real Gaudi package in the test environment.
-            (path / "habana_frameworks").mkdir()
-            (path / "habana_frameworks/__init__.py").touch()
-            script = (
-                "import platform, runpy, sys; platform.system = lambda: 'Linux'; "
-                "sys.argv = ['setup.py', 'dist_info']; "
-                f"runpy.run_path({str(root / 'setup.py')!r})"
-            )
-            result = subprocess.run(
-                [sys.executable, "-c", script],
-                cwd=directory,
-                env={**os.environ, "PYTHONPATH": directory},
-                capture_output=True,
-                text=True,
-            )
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("Ascend NPU environment (torch_npu)", result.stderr)
-            self.assertIn("Ascend NPU/CANN kernels are not implemented", result.stderr)
-            self.assertNotIn("must not import", result.stderr)
-            self.assertNotIn("this PyTorch install is CPU-only", result.stderr)
-
-    def test_ascend_probe_does_not_change_gaudi_or_macos_builds(self):
+    def test_macos_does_not_probe_npu(self):
         setup_mod = _load_setup_module()
-        check = setup_mod["_check_runtime_target"]
-        with patch.dict(check.__globals__, {"find_spec": Mock(side_effect=AssertionError("unexpected probe"))}):
-            check(True)
-            with patch.object(setup_mod["platform"], "system", return_value="Darwin"):
-                check(False)
-
-    def test_hpu_detection_does_not_import_torch(self):
-        setup_mod = _load_setup_module()
-        detect = setup_mod["_using_hpu"]
-        with (
-            patch.object(setup_mod["platform"], "system", return_value="Linux"),
-            patch.dict(sys.modules, {"torch": None, "habana_frameworks.torch": None}),
-            patch.dict(
-                detect.__globals__,
-                {"find_spec": Mock(return_value=types.SimpleNamespace(submodule_search_locations=["bridge"]))},
-            ),
-            patch.object(detect.__globals__["PathFinder"], "find_spec", return_value=object()),
-        ):
-            self.assertTrue(detect())
-
-    def test_missing_bridge_preserves_default_build(self):
-        setup_mod = _load_setup_module()
-        detect = setup_mod["_using_hpu"]
-        for result in (
-            Mock(return_value=None),
-            Mock(return_value=types.SimpleNamespace(submodule_search_locations=None)),
-        ):
-            with (
-                patch.object(setup_mod["platform"], "system", return_value="Linux"),
-                patch.dict(detect.__globals__, {"find_spec": result}),
-            ):
-                self.assertFalse(detect())
-        cuda_build = Mock(return_value=(["cuda"], {}))
-        with patch.dict(setup_mod["_extensions"].__globals__, {"_cuda_extensions": cuda_build}):
-            self.assertEqual(setup_mod["_extensions"](False), (["cuda"], {}))
-        cuda_build.assert_called_once_with()
-
-    def test_macos_does_not_probe_hpu(self):
-        setup_mod = _load_setup_module()
-        detect = setup_mod["_using_hpu"]
+        detect = setup_mod["_using_npu"]
         with (
             patch.object(setup_mod["platform"], "system", return_value="Darwin"),
             patch.dict(detect.__globals__, {"find_spec": Mock(side_effect=AssertionError("unexpected probe"))}),
         ):
             self.assertFalse(detect())
 
-    def test_hpu_build_uses_native_builder(self):
+    def test_npu_build_uses_native_builder(self):
         setup_mod = _load_setup_module()
-        build = Mock(return_value=(["hpu"], {"build_ext": "hpu_builder"}))
+        build = Mock(return_value=(["npu"], {"build_ext": "npu_builder"}))
         with (
             patch.object(sys, "argv", ["setup.py", "editable_wheel"]),
             patch.dict(os.environ, {"ARENO_BUILD_EXT": "auto"}),
             patch.object(setup_mod["runpy"], "run_path", return_value={"build_extensions": build}) as load,
         ):
-            self.assertEqual(setup_mod["_extensions"](True), (["hpu"], {"build_ext": "hpu_builder"}))
+            self.assertEqual(setup_mod["_extensions"](True), (["npu"], {"build_ext": "npu_builder"}))
         build.assert_called_once_with()
-        self.assertTrue(load.call_args.args[0].endswith("areno/accel/csrc/hpu/setup.py"))
+        self.assertTrue(load.call_args.args[0].endswith("areno/accel/csrc/npu/setup.py"))
 
-    def test_hpu_metadata_and_disabled_build_need_no_sdk(self):
+    def test_npu_metadata_and_disabled_build_need_no_sdk(self):
         setup_mod = _load_setup_module()
         for command, mode in (("egg_info", "auto"), ("dist_info", "auto"), ("sdist", "auto"), ("editable_wheel", "0")):
             with (
@@ -122,37 +56,33 @@ class SetupGuardrailsTest(unittest.TestCase):
             ):
                 self.assertEqual(setup_mod["_extensions"](True), ([], {}))
 
-    def test_hpu_dependencies_preserve_bridge_torch(self):
+    def test_npu_dependencies_preserve_bridge_torch(self):
         from packaging.requirements import Requirement
 
         setup_mod = _load_setup_module()
-        hpu = {Requirement(value).name for value in setup_mod["_runtime_dependencies"](True)}
+        npu = {Requirement(value).name for value in setup_mod["_runtime_dependencies"](True)}
         default = {Requirement(value).name for value in setup_mod["_runtime_dependencies"](False)}
-        self.assertTrue({"transformers", "safetensors", "datasets", "fastapi"} <= hpu)
-        self.assertFalse({"torch", "torchvision", "flash-linear-attention", "mlx", "mlx-lm", "mlx-vlm"} & hpu)
+        self.assertTrue({"transformers", "safetensors", "datasets", "fastapi"} <= npu)
+        self.assertFalse({"torch", "torchvision", "flash-linear-attention", "mlx", "mlx-lm", "mlx-vlm"} & npu)
         self.assertTrue({"torch", "torchvision", "flash-linear-attention", "mlx", "mlx-lm", "mlx-vlm"} <= default)
 
     def test_editable_build_selects_dependencies_without_importing_bridge(self):
         from packaging.requirements import Requirement
 
         root = Path(__file__).resolve().parents[1]
-        for hpu in (False, True):
-            with self.subTest(hpu=hpu), tempfile.TemporaryDirectory() as directory:
+        for npu in (False, True):
+            with self.subTest(npu=npu), tempfile.TemporaryDirectory() as directory:
                 project = Path(directory)
                 for name in ("setup.py", "pyproject.toml", "README.md", "LICENSE"):
                     shutil.copy2(root / name, project / name)
                 shutil.copytree(root / "requirements", project / "requirements")
                 (project / "areno").mkdir()
                 (project / "areno/__init__.py").touch()
-                shutil.copy2(root / "areno/_hpu.py", project / "areno/_hpu.py")
                 # A discoverable bridge is enough; importing it or torch during
                 # metadata generation would fail in this isolated subprocess.
                 (project / "torch.py").write_text("raise RuntimeError('torch must not be imported')\n")
-                bridge = project / "habana_frameworks"
-                bridge.mkdir()
-                (bridge / "__init__.py").touch()
-                if hpu:
-                    (bridge / "torch.py").write_text("raise RuntimeError('bridge must not be imported')\n")
+                if npu:
+                    (project / "torch_npu.py").write_text("raise RuntimeError('bridge must not be imported')\n")
                 (project / "metadata").mkdir()
                 result = subprocess.run(
                     [
@@ -171,7 +101,7 @@ class SetupGuardrailsTest(unittest.TestCase):
                 metadata = next((project / "metadata").glob("*.dist-info/METADATA")).read_text()
                 actual = [Requirement(value) for value in Parser().parsestr(metadata).get_all("Requires-Dist", [])]
                 actual = [value for value in actual if not value.marker or "extra" not in str(value.marker)]
-                expected = [Requirement(value) for value in _load_setup_module()["_runtime_dependencies"](hpu)]
+                expected = [Requirement(value) for value in _load_setup_module()["_runtime_dependencies"](npu)]
                 self.assertEqual(actual, expected)
                 with ZipFile(next((project / "metadata").glob("*.whl"))) as wheel:
                     name = next(name for name in wheel.namelist() if name.endswith(".dist-info/METADATA"))

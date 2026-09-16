@@ -9,14 +9,14 @@ having to know the internal package layout.
 from importlib import import_module
 from typing import Any
 
-from areno.api.config import CudaConfig, HpuConfig, LoraConfig, MlxConfig, default_backend_type
+from areno.api.config import CudaConfig, LoraConfig, MlxConfig, NpuConfig, default_backend_type
 from areno.api.models import BackendType
 
 # Friendly aliases mirroring the BackendType enum members. The default is
 # selected from the host platform without importing either backend.
 CUDA = BackendType.CUDA
 MLX = BackendType.MLX
-HPU = BackendType.HPU
+NPU = BackendType.NPU
 DefaultBackend = default_backend_type()
 
 _LAZY_EXPORTS = {
@@ -63,8 +63,8 @@ __all__ = [
     "AlgorithmSpec",
     "CudaConfig",
     "MlxConfig",
-    "HpuConfig",
-    "HPU",
+    "NpuConfig",
+    "NPU",
     "LoraConfig",
     "PromptBatch",
     "PromptItem",
