@@ -75,7 +75,7 @@ void gated(at::Tensor output, const at::Tensor& input, const at::Tensor& grad, A
 } // namespace
 } // namespace areno_npu
 
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+void register_activations(pybind11::module_& m) {
     using namespace areno_npu;
     m.def("areno_silu", [](const at::Tensor& x) { return unary(x, Silu); });
     m.def("areno_d_silu", [](const at::Tensor& g, const at::Tensor& x) { return unary_backward(g, x, DSilu); });
@@ -91,6 +91,4 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("areno_d_gelu_tanh_and_mul", [](at::Tensor out, const at::Tensor& g, const at::Tensor& x) {
         gated(out, x, g, DGeluTanhMul);
     });
-    m.attr("activation_implementation") = "ascendc";
-    m.attr("supports_training_and_serving") = false;
 }

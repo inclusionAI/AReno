@@ -109,8 +109,8 @@ def build_extensions():
     return [
         NpuExtension(
             "areno.accel._areno_accel_npu",
-            sources=["areno/accel/csrc/npu/activation.cpp"],
-            depends=["areno/accel/csrc/npu/activation_launch.h"],
+            sources=[f"areno/accel/csrc/npu/{name}.cpp" for name in ("extension", "activation", "normalization")],
+            depends=[f"areno/accel/csrc/npu/{name}_launch.h" for name in ("activation", "normalization")],
             include_dirs=[str(cann / "include")],
             library_dirs=[str(cann / "lib64")],
             libraries=["ascendcl"],
