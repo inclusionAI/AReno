@@ -1,4 +1,4 @@
-"""Explicit native HPU build; run from the repository root with build_ext --inplace.
+"""Native HPU build, also used by the root installer when the bridge is present.
 
 The regular CUDA/MLX installation path does not import or execute this file.
 """
@@ -15,6 +15,7 @@ from pathlib import Path
 from setuptools import Extension, setup
 
 SOURCE = Path(__file__).resolve().parent
+ROOT = SOURCE.parents[3]
 
 
 def activation_specs():
@@ -166,7 +167,7 @@ def build_extensions():
 
     kernel_library = Extension(
         "areno.accel._areno_hpu_kernels",
-        sources=[str(SOURCE / "kernel_library.cpp")],
+        sources=[str((SOURCE / "kernel_library.cpp").relative_to(ROOT))],
         include_dirs=[str(sdk), str(build_dir.resolve())],
         define_macros=[("ARENO_TPC_DEVICE", f"tpc_lib_api::DEVICE_ID_{arch.upper()}")],
         language="c++",
@@ -175,7 +176,7 @@ def build_extensions():
     binding = CppExtension(
         "areno.accel._areno_accel_hpu",
         sources=[
-            str(SOURCE / name)
+            str((SOURCE / name).relative_to(ROOT))
             for name in (
                 "extension.cpp",
                 "normalization.cpp",

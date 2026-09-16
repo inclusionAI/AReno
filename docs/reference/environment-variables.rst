@@ -7,8 +7,10 @@ AReno uses a small number of environment variables for build and runtime
 control.
 
 ``ARENO_BUILD_EXT``
-   Set ``ARENO_BUILD_EXT=0`` to skip CUDA extension compilation for
+   Set ``ARENO_BUILD_EXT=0`` to skip CUDA/HPU extension compilation for
    metadata-only installs, docs builds, or CPU-only packaging checks.
+   Dependency selection still detects the installed HPU bridge. Use
+   ``--no-build-isolation`` so source installs see the existing PyTorch environment.
 
 ``TORCH_CUDA_ARCH_LIST``
    Set this when narrowing CUDA extension builds to a target GPU architecture,
