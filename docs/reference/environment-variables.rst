@@ -21,6 +21,10 @@ control.
 
 For Ascend, the installed ``torch_npu`` selects NPU dependencies and the native
 NPU extension build. Keep the existing PyTorch/torch_npu/CANN versions and use
-``--no-build-isolation``. No AReno accelerator environment exports are required.
+``--no-build-isolation``. CANN's ``set_env.sh`` supplies the compiler paths.
+
+``ARENO_NPU_SOC``
+   Optional exact Ascend SoC override for cross-compilation. With visible NPU
+   hardware, CANN detects the SoC automatically; no override is required.
 
 For environment inspection, use :doc:`/cli/diagnostics`.
