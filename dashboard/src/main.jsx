@@ -384,6 +384,7 @@ function App() {
   const [runtimeCheckResult, setRuntimeCheckResult] = useState(null);
   const [runtimeRepair, setRuntimeRepair] = useState(null);
   const chatMessagesRef = useRef(null);
+  const chatFollowLatestRef = useRef(true);
   const env = usePolling(() => api("/api/env"), 5000);
   const jobs = usePolling(() => api("/api/jobs"), 2000);
   const jobDetail = usePolling(() => selectedJobId ? api(`/api/jobs/${selectedJobId}`) : Promise.resolve(null), 3000, [selectedJobId]);
@@ -499,11 +500,15 @@ function App() {
   }, [agentFailure]);
 
   useEffect(() => {
+    chatFollowLatestRef.current = true;
+  }, [activeAgentSessionId]);
+
+  useEffect(() => {
     const node = chatMessagesRef.current;
-    if (node) {
+    if (node && chatFollowLatestRef.current && !node.contains(document.activeElement)) {
       node.scrollTop = node.scrollHeight;
     }
-  }, [agentMessages, agentChatTab]);
+  }, [agentMessages, agentChatTab, activeAgentSessionId]);
 
   const pages = [
     { id: "overview", label: "Overview", icon: <LayoutDashboard size={17} /> },
@@ -971,7 +976,10 @@ function App() {
             <AgentHistory sessions={agentSessions} activeId={activeAgentSession.id} onOpen={openAgentSession} onNew={newAgentChat} />
           ) : (
             <>
-              <div className="chatMessages" ref={chatMessagesRef}>
+              <div className="chatMessages" ref={chatMessagesRef} onScroll={(event) => {
+                const node = event.currentTarget;
+                chatFollowLatestRef.current = node.scrollHeight - node.clientHeight - node.scrollTop <= 32;
+              }}>
                 {agentMessages.map((message, index) => (
                   <div key={`${message.id || message.role}-${index}`} className={classNames("chatBubble", message.role)}>
                     <span>{message.role}</span>

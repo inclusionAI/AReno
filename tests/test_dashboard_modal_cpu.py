@@ -280,3 +280,26 @@ def test_modal_rollout_samples_reach_job_details_and_survive_reload(flow):
         assert samples[0]["step"] == 5
         assert samples[-1]["completion"] == "answer"
         assert samples[-1]["stage_index"] == 1
+
+
+def test_explicit_loader_survives_plan_revision_and_execution(flow):
+    from areno.dashboard.flow.assets import save_upload
+    from areno.dashboard.flow.datasets import save_dataset
+
+    upload = save_upload(flow.app.controller.store.directory, "data.jsonl", base64.b64encode(b"{}\n").decode())
+    dataset = save_dataset(
+        flow.app.controller.store,
+        {"name": "Data", "source_type": "upload", "source": upload["path"]},
+    )
+    request = training()
+    request["stages"][0].update(dataset_id=dataset["id"], dataset_loader_id=None)
+    loader = "examples/sft/alpaca/dataset_loader.py"
+    request["stages"][0]["params"]["dataset_loader_fn"] = loader
+    plan = flow.preview(request)
+    assert plan["workflow"]["stages"][0]["params"]["dataset_loader_fn"] == loader
+    assert "--dataset-loader-fn" in plan["command"]
+    revised = flow.revise(plan["id"], plan["workflow"])
+    assert revised["workflow"]["stages"][0]["params"]["dataset_loader_fn"] == loader
+    identifier = flow.execute(plan["id"])["job_id"]
+    record = flow.app.controller.store.get(identifier[6:])
+    assert record["manifest"]["stages"][0]["params"]["dataset_loader_fn"] == loader

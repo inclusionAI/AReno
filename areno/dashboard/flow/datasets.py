@@ -194,14 +194,17 @@ def resolve_request(request, store):
         if stage.get("dataset_id"):
             dataset = find(store.datasets(), stage["dataset_id"], "Dataset")
             result.setdefault("input_assets", []).extend(item["path"] for item in dataset.get("media", []))
-            params.update(
-                dataset_path=materialize_dataset(dataset, store),
-                dataset_loader_fn=reference(dataset["loader_id"], "dataset_loader") if dataset["loader_id"] else None,
-            )
+            params["dataset_path"] = materialize_dataset(dataset, store)
+            # A dataset's default must not erase an explicit per-stage loader.
+            if "dataset_loader_fn" not in params and "dataset_loader_id" not in stage:
+                params["dataset_loader_fn"] = (
+                    reference(dataset["loader_id"], "dataset_loader") if dataset["loader_id"] else None
+                )
         if "dataset_loader_id" in stage:
-            params["dataset_loader_fn"] = (
-                reference(stage["dataset_loader_id"], "dataset_loader") if stage["dataset_loader_id"] else None
-            )
+            if stage["dataset_loader_id"]:
+                params["dataset_loader_fn"] = reference(stage["dataset_loader_id"], "dataset_loader")
+            else:
+                params.setdefault("dataset_loader_fn", None)
         for field, kind, option in (
             ("reward_function_id", "reward", "reward_fn_path"),
             ("agentic_function_id", "agentic", "agent_fn"),

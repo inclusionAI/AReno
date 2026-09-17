@@ -197,3 +197,32 @@ def test_stage_rejects_reward_script_as_loader(tmp_path):
     reward = save_function(store, {"name": "Reward", "kind": "reward", "source": REWARD})
     with pytest.raises(ValueError, match="dataset_loader"):
         resolve_request({"stages": [{"algo": "sft", "dataset_loader_id": reward["id"]}]}, store)
+
+
+@pytest.mark.parametrize("selector", ["missing", None, "", "selected"])
+@pytest.mark.parametrize("dataset_default", [False, True])
+def test_explicit_loader_survives_dataset_resolution(tmp_path, selector, dataset_default):
+    store = Store(tmp_path)
+    loader = save_function(store, {"name": "Loader", "kind": "dataset_loader", "source": LOADER})
+    dataset = save_dataset(
+        store,
+        {
+            "name": "Data",
+            "source_type": "upload",
+            "source": upload(store, "data.jsonl", b"{}\n")["path"],
+            "loader_id": loader["id"] if dataset_default else None,
+        },
+    )
+    explicit = "examples/math/dataset_loader.py"
+    stage = {"algo": "grpo", "dataset_id": dataset["id"], "params": {"dataset_loader_fn": explicit}}
+    if selector != "missing":
+        stage["dataset_loader_id"] = loader["id"] if selector == "selected" else selector
+    request = {"stages": [stage]}
+    resolved = resolve_request(request, store)
+    actual = resolved["stages"][0]["params"]["dataset_loader_fn"]
+    if selector == "selected":
+        assert actual.endswith(":load_training_dataset")
+    else:
+        assert actual == explicit
+    assert resolve_request(resolved, store) == resolved
+    assert stage["params"]["dataset_loader_fn"] == explicit
