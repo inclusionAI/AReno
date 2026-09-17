@@ -79,6 +79,9 @@ docker run --gpus all --rm -it \
   areno check
 ```
 
+For launching and monitoring local or Modal jobs in the web UI, see the
+[Dashboard guide](docs/cli/dashboard.rst).
+
 ## Quick Start
 
 AReno provides core API abstractions for LLM post-training, with AReno SDK, RL loop is a short cycle of `Trainer` calls. Each step below maps a concept to the SDK call that performs it:

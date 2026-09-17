@@ -10,6 +10,8 @@ metrics are recorded by ``areno.api.metrics`` and the CLI exposes the output
 directory through ``--metrics-log-dir``. AReno does not currently provide a
 built-in wandb integration.
 
+For the dashboard and Modal job views, see :doc:`dashboard`.
+
 Console logs
 ------------
 
