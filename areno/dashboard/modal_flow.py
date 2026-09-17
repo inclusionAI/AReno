@@ -13,6 +13,7 @@ from decimal import Decimal
 from urllib.parse import unquote, urlsplit
 
 from areno.dashboard.flow.datasets import resolve_request
+from areno.dashboard.flow.events import dashboard_state
 from areno.dashboard.flow.server import Application
 
 
@@ -195,6 +196,7 @@ class ModalFlow:
         job.stage = record.get("phase") or str(record.get("stage", "queued"))
         job.created_at = timestamp(record["created_at"])
         job.updated_at = timestamp(record["updated_at"])
+        job.finished_at = timestamp(record.get("finished_at")) or (job.updated_at if job.finished_at else None)
         job.returncode = record.get("exit_code")
         job.modal = {
             "sandbox_id": record.get("sandbox_id"),
@@ -213,6 +215,8 @@ class ModalFlow:
             "source": quote.get("rates", {}).get("source") if quote else None,
             "error": record.get("estimate_error") if not quote else None,
         }
+        trainer_state = record.get("trainer_state", {})
+        trainer_state_time = record.get("trainer_state_time", 0)
         if detail:
             cursor = 0
             while True:
@@ -221,6 +225,9 @@ class ModalFlow:
                     break
                 for event in events:
                     cursor = event["cursor"]
+                    state = dashboard_state(event)
+                    if state and event.get("time", 0) >= trainer_state_time:
+                        trainer_state, trainer_state_time = state, event.get("time", 0)
                     if event["type"] == "rollout_sample" and isinstance(event.get("sample"), dict):
                         job.samples.append(
                             {
@@ -235,12 +242,21 @@ class ModalFlow:
                 job.logs = job.logs[-300:]
             if record.get("error"):
                 job.logs.append(record["error"])
+        timing = {}
+        from areno.dashboard.server import tensorboard_time_segment_name
+
         for event in (
             self.app.controller.store.metrics(record["id"])
             if detail
             else self.app.controller.store.latest_metrics(record["id"])
         ):
             name = event["tag"]
+            segment = tensorboard_time_segment_name(name)
+            if name in {"train/step_e2e_time_s", "time/total", "time/e2e"}:
+                segment = "total"
+            if segment and math.isfinite(float(event["value"])):
+                key = (int(event.get("index", 0)), int(event.get("step", 0)))
+                timing.setdefault(key, {})[segment] = float(event["value"])
             if len(manifest.get("stages", [])) > 1:
                 name = f"stage-{event.get('index', 0)}/{name}"
             job.metrics.append(
@@ -253,4 +269,24 @@ class ModalFlow:
             )
             job.perf[name] = float(event["value"])
             job.step = max(job.step, int(event.get("step", 0)))
+        from areno.dashboard.server import DashboardState
+
+        for (stage_index, step), values in sorted(timing.items()):
+            total = values.pop("total", None)
+            if total is None:
+                total = sum(value for value in values.values() if value > 0)
+            # Steps restart at zero in each workflow stage.
+            job._timeperf_keys.clear()
+            count = len(job.timeperf)
+            DashboardState._append_timeperf_row(job, step=step, total=total, segments=values)
+            if len(job.timeperf) > count:
+                job.timeperf[-1]["stage_index"] = stage_index
+        if trainer_state:
+            job.stage = trainer_state["stage"]
+            job.role = trainer_state.get("role")
+            job.step = max(job.step, int(trainer_state.get("step") or 0))
+        if record.get("phase") == "saving_checkpoint" and record.get("remote_phase_time", 0) >= trainer_state_time:
+            job.stage = "save_checkpoint_start"
+        if record["status"] == "succeeded":
+            job.stage = "done"
         return job

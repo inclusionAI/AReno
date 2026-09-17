@@ -1528,7 +1528,8 @@ function jobHealthSummary(job) {
 
 function formatElapsed(job) {
   const start = Date.parse(job?.created_at || "");
-  const end = Date.parse(job?.status === "running" ? new Date().toISOString() : job?.updated_at || "");
+  const terminal = ["stopped", "exited", "failed", "succeeded", "cancelled", "done"].includes(job?.status);
+  const end = terminal ? Date.parse(job?.finished_at || job?.updated_at || "") : Date.now();
   if (!Number.isFinite(start) || !Number.isFinite(end)) return "—";
   const seconds = Math.max(0, Math.round((end - start) / 1000));
   if (seconds < 60) return `${seconds}s`;

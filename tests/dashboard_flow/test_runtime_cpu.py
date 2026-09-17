@@ -200,6 +200,9 @@ def test_final_checkpoint_saved_only_on_success(tmp_path, monkeypatch, sample_li
         def init(self):
             pass
 
+        def record_dashboard_state(self, **state):
+            pass
+
         def record_rollout_sample(self, sample):
             calls.append(("sample", sample))
 
@@ -218,6 +221,7 @@ def test_final_checkpoint_saved_only_on_success(tmp_path, monkeypatch, sample_li
     def main(**kwargs):
         trainer = modules["areno.api"].Trainer()
         trainer.init()
+        trainer.record_dashboard_state(stage="rollout_start", step=1)
         trainer.record_rollout_sample({"completion": "answer", "step": 1})
         trainer.close()
         trainer = modules["areno.api"].Trainer()
@@ -239,6 +243,7 @@ def test_final_checkpoint_saved_only_on_success(tmp_path, monkeypatch, sample_li
         ("close",),
     ]
     assert {"type": "rollout_sample", "sample": {"completion": "answer", "step": 1}, "index": 0} in events
+    assert {"type": "dashboard_state", "state": {"stage": "rollout_start", "step": 1}, "index": 0} in events
     assert remote.os.environ["ARENO_LOG_COMPLETIONS"] == (sample_limit or "1")
 
 
@@ -442,3 +447,14 @@ def test_failed_stream_is_reattached_and_recovers_readiness(tmp_path, monkeypatc
     controller._watch(record["id"], Sandbox(), provider)
     assert recovered.is_set() and provider.calls == 1
     assert controller.store.get(record["id"])["endpoint"] == "https://example.modal.run/v1"
+
+
+def test_trainer_state_is_persisted_for_job_summaries_and_ignores_old_replay(tmp_path):
+    controller = Controller(Store(tmp_path), catalog(), FakeProvider)
+    controller.store.put({"id": "job"})
+    events = [
+        {"type": "dashboard_state", "state": {"stage": "train_start", "step": 4}, "time": 20},
+        {"type": "dashboard_state", "state": {"stage": "rollout_start", "step": 3}, "time": 10},
+    ]
+    assert controller._read("job", [remote.PREFIX + json.dumps(event) + "\n" for event in events])
+    assert controller.store.get("job")["trainer_state"] == {"stage": "train_start", "step": 4}

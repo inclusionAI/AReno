@@ -204,3 +204,21 @@ def test_nonfinite_metrics_do_not_break_json_responses():
     for value in (float("nan"), float("inf"), -float("inf")):
         state._add_metric(job, "loss", value, 1)
     assert job.metrics == []
+
+
+@pytest.mark.parametrize("status", ["stopped", "exited", "failed", "succeeded"])
+def test_terminal_time_survives_updates_and_state_reload(status):
+    job = Job(kind="train", name="elapsed", command=[], config={}, metrics_dir=None)
+    with patch("areno.dashboard.server.now", return_value="2026-09-17T00:01:00+00:00"):
+        job.status = status
+    job.updated_at = "2026-09-17T01:00:00+00:00"
+    with patch("areno.dashboard.server.now", return_value="2026-09-17T02:00:00+00:00"):
+        job.status = status
+        restored = Job.from_json(job.to_json())
+    assert restored.finished_at == "2026-09-17T00:01:00+00:00"
+    assert restored.to_summary_json()["finished_at"] == restored.finished_at
+
+
+def test_legacy_terminal_job_uses_saved_update_time():
+    job = Job.from_json({"status": "exited", "updated_at": "2026-09-17T00:01:00+00:00"})
+    assert job.finished_at == "2026-09-17T00:01:00+00:00"

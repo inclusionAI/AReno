@@ -99,6 +99,10 @@ def stage_main(stage):
             emit("stage", index=stage["index"], status="running", algo=stage["algo"])
             self.flow_initialized = True
 
+        def record_dashboard_state(self, **state):
+            super().record_dashboard_state(**state)
+            emit("dashboard_state", state=state, index=stage["index"])
+
         def record_rollout_sample(self, sample):
             super().record_rollout_sample(sample)
             emit("rollout_sample", sample=sample, index=stage["index"])

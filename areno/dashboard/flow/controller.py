@@ -9,7 +9,7 @@ import uuid
 
 from areno.dashboard.flow.assets import referenced_uploads
 from areno.dashboard.flow.datasets import resolve_request
-from areno.dashboard.flow.events import lines, parse_line
+from areno.dashboard.flow.events import dashboard_state, lines, parse_line
 from areno.dashboard.flow.provider import ModalProvider, resolve_image
 from areno.dashboard.flow.workflows import plan
 
@@ -244,6 +244,12 @@ class Controller:
             for line in lines(stream):
                 event = parse_line(self.redact(line))
                 self.store.event(job_id, event)
+                state = dashboard_state(event)
+                if state:
+                    with self.store.lock:
+                        job = self.store.get(job_id)
+                        if event.get("time", 0) >= job.get("trainer_state_time", 0):
+                            self.store.update(job_id, trainer_state=state, trainer_state_time=event.get("time", 0))
                 if event.get("type") == "phase":
                     with self.store.lock:
                         job = self.store.get(job_id)

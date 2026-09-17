@@ -303,3 +303,45 @@ def test_explicit_loader_survives_plan_revision_and_execution(flow):
     identifier = flow.execute(plan["id"])["job_id"]
     record = flow.app.controller.store.get(identifier[6:])
     assert record["manifest"]["stages"][0]["params"]["dataset_loader_fn"] == loader
+
+
+def test_modal_timeperf_groups_stages_and_survives_event_pruning(flow):
+    request = training()
+    request["stages"].append(request["stages"][0].copy())
+    identifier = flow.execute(flow.preview(request)["id"])["job_id"]
+    store = flow.app.controller.store
+    for stage in (0, 1):
+        for tag, value in {
+            "time/rollout": 3,
+            "train/step_rollout_time_s": 3,
+            "time/train": 4,
+            "time/reward": 1,
+            "train/step_e2e_time_s": 10,
+        }.items():
+            store.event(identifier[6:], {"type": "metric", "tag": tag, "value": value, "step": 1, "index": stage})
+    with store.lock, store.db:
+        store.db.execute("DELETE FROM events WHERE job=?", (identifier[6:],))
+    rows = flow.job(identifier, server.Job).timeperf
+    assert len(rows) == 2
+    assert [row["stage_index"] for row in rows] == [0, 1]
+    assert all(row["total_s"] == 10 and row["rollout_s"] == 3 and row["train_s"] == 4 for row in rows)
+    assert {s["name"]: s["seconds"] for s in rows[0]["segments"]} == {"rollout": 3, "train": 4, "reward": 1, "other": 2}
+
+
+def test_modal_trainer_state_from_older_logs_and_new_events(flow):
+    identifier = flow.execute(flow.preview(training())["id"])["job_id"]
+    store = flow.app.controller.store
+    store.update(identifier[6:], status="running", phase="training")
+    store.event(
+        identifier[6:], {"type": "log", "message": "epoch=0 step=3 role=actor stage=rollout_start", "time": 100}
+    )
+    job = flow.job(identifier, server.Job)
+    assert (job.stage, job.step, job.role) == ("rollout_start", 3, "actor")
+    store.event(identifier[6:], {"type": "dashboard_state", "state": {"stage": "train_start", "step": 3}, "time": 101})
+    assert flow.job(identifier, server.Job).stage == "train_start"
+    store.update(identifier[6:], status="succeeded", finished_at=102)
+    job = flow.job(identifier, server.Job)
+    assert job.stage == "done"
+    assert job.finished_at == "1970-01-01T00:01:42+00:00"
+    store.update(identifier[6:], updated_at=200)
+    assert flow.job(identifier, server.Job).finished_at == job.finished_at

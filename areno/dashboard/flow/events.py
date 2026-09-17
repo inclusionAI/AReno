@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import time
 
 from areno.dashboard.flow.remote import PREFIX
@@ -38,3 +39,24 @@ def parse_line(line):
         except (ValueError, TypeError):
             pass
     return event
+
+
+def dashboard_state(event):
+    """Read trainer state, including logs from already-running older sandboxes."""
+    if event.get("type") == "dashboard_state":
+        state = event.get("state")
+        return state if isinstance(state, dict) and isinstance(state.get("stage"), str) else None
+    if event.get("type") == "log":
+        message = event.get("message", "")
+        stage = re.search(r"\bstage=([a-z_]+)\b", message)
+        epoch = re.search(r"\bepoch=(\d+)\b", message)
+        if stage and epoch:
+            state = {"stage": stage[1], "epoch": int(epoch[1])}
+            step = re.search(r"\bstep=(\d+)\b", message)
+            role = re.search(r"\brole=([a-z_]+)\b", message)
+            if step:
+                state["step"] = int(step[1])
+            if role:
+                state["role"] = role[1]
+            return state
+    return None

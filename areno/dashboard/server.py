@@ -100,6 +100,7 @@ class Job:
         self.config = config
         self.metrics_dir = metrics_dir
         self.cwd = cwd
+        self.finished_at: str | None = None
         self.status = "created"
         self.stage = "created"
         self.role = ""
@@ -121,6 +122,19 @@ class Job:
         self._timeperf_keys: set[int] = set()
         self._sample_keys: set[tuple[int, int, int]] = set()
 
+    @property
+    def status(self) -> str:
+        return self._status
+
+    @status.setter
+    def status(self, value: str) -> None:
+        self._status = value
+        if value in {"stopped", "exited", "failed", "succeeded", "cancelled", "done"}:
+            if self.finished_at is None:
+                self.finished_at = now()
+        else:
+            self.finished_at = None
+
     @classmethod
     def from_json(cls, item: dict[str, Any]) -> Job:
         job = cls(
@@ -139,6 +153,7 @@ class Job:
         job.step = int(item.get("step") or 0)
         job.created_at = item.get("created_at") or job.created_at
         job.updated_at = item.get("updated_at") or job.updated_at
+        job.finished_at = item.get("finished_at") or (job.updated_at if job.finished_at else None)
         job.returncode = item.get("returncode")
         job.logs = list(item.get("logs") or [])
         job.config = dict(item.get("config") or {})
@@ -168,6 +183,7 @@ class Job:
             "step": self.step,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+            "finished_at": self.finished_at,
             "returncode": self.returncode,
             "pid": self.pid,
             "logs": self.logs[-300:],
@@ -195,6 +211,7 @@ class Job:
             "step": self.step,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+            "finished_at": self.finished_at,
             "returncode": self.returncode,
             "pid": self.pid,
             "perf": self.perf,
@@ -269,8 +286,9 @@ class DashboardState:
             self._load_metric_files(job)
             self._save_state()
 
+    @staticmethod
     def _append_timeperf_row(
-        self, job: Job, *, step: int, total: float, segments: dict[str, float], source: str = "metrics"
+        job: Job, *, step: int, total: float, segments: dict[str, float], source: str = "metrics"
     ) -> None:
         if total <= 0:
             return
