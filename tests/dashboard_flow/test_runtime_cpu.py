@@ -343,7 +343,7 @@ def test_pre_download_only_resolves_original_model(monkeypatch):
     assert calls == [["--model-path", "Qwen/Qwen3-0.6B", "--model-hub", "hf"]]
 
 
-@pytest.mark.parametrize("kind", ["image_build", "model_download", "training"])
+@pytest.mark.parametrize("kind", ["image_build", "model_download", "training", "deployment"])
 def test_provider_preparation_build_and_gpu_reservation(kind):
     from unittest.mock import MagicMock
 
@@ -352,7 +352,8 @@ def test_provider_preparation_build_and_gpu_reservation(kind):
     provider = ModalProvider.__new__(ModalProvider)
     provider.modal = MagicMock()
     provider.client = object()
-    image = provider.modal.Image.from_registry.return_value.add_local_file.return_value
+    base_image = provider.modal.Image.from_registry.return_value
+    image = base_image.pip_install.return_value.add_local_file.return_value
     phases = []
     provider.start(
         {"kind": kind, "image": "image"},
@@ -365,6 +366,7 @@ def test_provider_preparation_build_and_gpu_reservation(kind):
         },
         on_phase=phases.append,
     )
+    base_image.pip_install.assert_called_once_with("tilelang")
     image.build.assert_called_once_with(provider.modal.App.lookup.return_value)
     if kind == "image_build":
         provider.modal.Sandbox.create.assert_not_called()

@@ -80,3 +80,9 @@ Parameter counts inferred from model names are explicitly approximate; custom
 models can supply `model.parameters_billion` (all experts for MoE). These are
 planning heuristics, not measured GPU probes. Manual GPU selection remains
 available. Auto-selected resources are recalculated when editing a plan.
+
+
+Modal image setup installs `tilelang` on top of the selected GHCR image before
+starting the sandbox. This supplies the FLA gated chunk backward workaround for
+Hopper images with Triton >=3.4.0 and <3.7.1. The layer applies to new sandboxes;
+existing jobs retain the image they started with.

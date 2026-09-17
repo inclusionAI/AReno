@@ -102,8 +102,12 @@ class ModalProvider:
         progress("preparing_resources")
         app = modal.App.lookup("arenoflow", create_if_missing=True, client=self.client)
         volume = modal.Volume.from_name("arenoflow-artifacts", create_if_missing=True, client=self.client)
-        image = modal.Image.from_registry(manifest["image"]).add_local_file(
-            Path(__file__).with_name("remote.py"), "/opt/arenoflow/remote.py"
+        # FLA's gated chunk backward needs TileLang on Hopper when the base
+        # image contains an affected Triton version (>=3.4.0, <3.7.1).
+        image = (
+            modal.Image.from_registry(manifest["image"])
+            .pip_install("tilelang")
+            .add_local_file(Path(__file__).with_name("remote.py"), "/opt/arenoflow/remote.py")
         )
         progress("building_image")
         image.build(app)
