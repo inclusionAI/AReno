@@ -32,6 +32,7 @@ __all__ = [
     "SegLaMeta",
     "areno_fused_experts",
     "can_use_cuda_kernel",
+    "chunk_lightning_attn",
     "fused_moe_is_available",
     "is_cuda_graph_capturing",
     "log_once",
@@ -142,6 +143,16 @@ def rms_norm_gate_fwd(
     from areno.accel.kernels.group_rmsnorm import rms_norm_gate_fwd as implementation
 
     return implementation(x, gate, weight, eps)
+
+
+def chunk_lightning_attn(q, k, v, *args, **kwargs):
+    """Keep CUDA's FLA call intact and adapt the Ascend FLA interface."""
+    if q.device.type == "npu":
+        from areno.accel.npu.seg_la import chunk_lightning_attn as implementation
+    else:
+        from fla.ops.lightning_attn import chunk_lightning_attn as implementation
+
+    return implementation(q, k, v, *args, **kwargs)
 
 
 def seg_la_fwd(q, k, v, s, decay_scales, meta, caches=None, softmax_scale=None):

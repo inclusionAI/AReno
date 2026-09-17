@@ -50,6 +50,7 @@ TorchNPU execution only; it does not test AReno kernels or HCCL.
    python -m pytest -q tests/test_routing.py -k npu
    python -m pytest -q tests/test_moe_native.py -k npu
    python -m pytest -q tests/test_npu_library_attention.py
+   python -m pytest -q tests/test_npu_linear_attention.py
    python -m pytest -q tests/test_attention_native.py -k npu
    python -m pytest -q tests/test_npu_runtime.py
    python -m pytest -q tests/test_fused_experts_native.py -k npu
@@ -58,12 +59,14 @@ TorchNPU execution only; it does not test AReno kernels or HCCL.
 Current validation boundary
 ---------------------------
 
-The target node has built the existing Ascend C static archive and the Python
-extension, but importing that extension failed with an unresolved template
-launcher. Kernel template discovery/instantiation and build-time symbol checks
-have been corrected in source; a rebuild and import on the target are still
-required. The newly added native attention kernels have not been compiled on
-Ascend. No AReno kernel numerical acceptance or end-to-end model run is proven.
+The target node has compiled the device kernels and Bisheng host wrappers,
+including native attention, but the subsequent generated host stub failed
+because its ordinary C++ compiler could not resolve ``half`` specializations.
+Floating dtype parameters now cross that boundary as integer IDs, with
+FP32/FP16/BF16 resolved inside each kernel. CPU tests cover separate stub
+compilation and linking; a CANN rebuild and extension import on the target
+are still required. No AReno kernel numerical acceptance or end-to-end model
+run is proven.
 
 This is **not complete NPU training/serving support**. The compiled extension
 currently exposes all ten CUDA activation entries: SiLU, sigmoid, softplus,
@@ -195,16 +198,23 @@ compatibility path has no fixed head-dimension limit, but is unbenchmarked and
 recomputes scores across head tiles. It is not selected to hide a library
 import or execution failure. The shared CUDA/NPU native suite checks outputs,
 gradients, cache canaries, empty segments, sliding windows, streams and head
-dimensions through 1025. These new kernels still require target compilation
+dimensions through 1025. The updated launchers still require a target rebuild
 and numerical acceptance before model support can be claimed.
 
 The unfinished seg-LA Ascend C sources have also been removed. KDA training
 reuses the existing Torch/FLA wrapper, including gate rounding, normalization
 and state layout. Decode calls FLA's recurrent KDA with fused gate and beta
 activation, then writes the selected state slots back. GatedDeltaNet and
-Lightning Attention retain their existing FLA imports; upstream owns device
-dispatch. Regular seg-LA prefill/decode adapts the state pool and head decay
-to FLA simple GLA. These adapters do not implement attention arithmetic.
+Lightning Attention use upstream FLA kernels. Bailing's shared Lightning
+entry forwards CUDA calls unchanged; the NPU adapter consumes the legacy
+``head_first`` argument and passes explicit TP-local decay slopes to FLA
+``simple_gla``. This prevents upstream Lightning from replacing the model's
+slopes with values derived from the local head count. Regular seg-LA
+prefill/decode adapts the state pool and head decay to FLA simple GLA.
+These adapters do not implement attention arithmetic. The standalone
+``tests/test_npu_linear_attention.py`` checks dense/packed Lightning forward,
+backward and final state, plus seg-LA prefill followed by decode and untouched
+state slots. It requires Ascend FLA, but not the AReno C++ extension.
 FLA state slots must be allocated nonnegative indices. Seg-LA state snapshots
 and tree masks are not integrated and fail explicitly. Numerical equivalence
 and compilation of the FLA paths on the target machine remain unverified.
