@@ -2271,6 +2271,8 @@ class Handler(BaseHTTPRequestHandler):
                     if payload.get("kind") == "deployment":
                         payload["endpoint_key"] = secrets.token_urlsafe(32)
                     self.json({"plan": flow.preview(payload)})
+                elif suffix == "/revise":
+                    self.json({"plan": flow.revise(str(payload.get("plan_id", "")), payload.get("workflow"))})
                 elif suffix == "/execute":
                     result = flow.execute(str(payload.get("plan_id", "")))
                     self.json(
@@ -2282,7 +2284,7 @@ class Handler(BaseHTTPRequestHandler):
                     )
                 elif suffix == "/datasets/url":
                     self.json(flow.import_url(payload))
-                elif suffix in {"/connect", "/uploads", "/datasets"} or re.fullmatch(
+                elif suffix in {"/connect", "/uploads", "/datasets", "/estimate"} or re.fullmatch(
                     r"/datasets/[a-f0-9]{16}/delete", suffix
                 ):
                     self.json(flow.app.post("/api" + suffix, payload))

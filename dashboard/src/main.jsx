@@ -33,7 +33,8 @@ import {
 } from "lucide-react";
 import "./styles.css";
 import { sampleMetricPoints } from "./metrics";
-import { ModalLauncher, ModalSettings, DatasetManager, ModalUsage } from "./modal";
+import { modalWorkflow } from "./modal-workflow";
+import { ModalResourceForm, ModalSettings, DatasetManager, ModalUsage, ModalPlanCard, PlanParameters } from "./modal";
 
 function dashboardBasePath() {
   const moduleScript = document.querySelector('script[type="module"][src]');
@@ -289,6 +290,7 @@ const defaultTrainConfig = {
   lr_decay_style: "cosine",
   adam_beta1: 0.9,
   adam_beta2: 0.999,
+  adam_4bit: true,
   adam_8bit: false,
   unfreeze_multimodal_tower: false,
   unfreeze_multimodal_projector: false,
@@ -360,12 +362,12 @@ function App() {
   const [jobFilter, setJobFilter] = useState("all");
   const [launcherMode, setLauncherMode] = useState("train");
   const [launcherModal, setLauncherModal] = useState(false);
+  const [modalResources, setModalResources] = useState({ adapter: "", gpu: "H100", count: 1, cpu: 4, memory_gib: 32, duration_hours: 4 });
   const [theme, setTheme] = useState(() => localStorage.getItem("areno-dashboard-theme-v2") || "light");
   const [language, setLanguage] = useState(() => localStorage.getItem(UI_LANGUAGE_STORAGE_KEY) || "en");
   const [busy, setBusy] = useState("");
   const [dashboardSettingsOpen, setDashboardSettingsOpen] = useState(false);
   const [datasetsOpen, setDatasetsOpen] = useState(false);
-  const [modalPlan, setModalPlan] = useState(null);
   const [endpointKey, setEndpointKey] = useState(null);
   const [jobPage, setJobPage] = useState(1);
   const [jobDetailOpen, setJobDetailOpen] = useState(false);
@@ -540,6 +542,15 @@ function App() {
     } finally {
       setBusy("");
     }
+  }
+
+  function showModalPlanInChat(plan) {
+    setAgentMessages(messages => [...messages, { id: `plan-${plan.id}`, role: "assistant", content: "", events: [{ type: "tool_result", result: { name: "prepare_modal_plan", ok: true, plan } }] }]);
+    setActivePage("agent"); setAgentChatTab("chat");
+  }
+
+  function updateChatPlan(plan) {
+    setAgentMessages(messages => messages.map(message => ({ ...message, events: message.events?.map(event => event.result?.plan?.id === plan.id ? { ...event, result: { ...event.result, plan } } : event) })));
   }
 
   async function executeAgentPlan(plan) {
@@ -809,7 +820,6 @@ function App() {
   }
 
   function applyAgentEvent(messageId, event) {
-    if (event.type === "tool_result" && event.tool_result?.plan?.tool === "start_modal") setModalPlan(event.tool_result.plan);
     setAgentMessages((messages) =>
       messages.map((message) => {
         if (message.id !== messageId) return message;
@@ -907,11 +917,15 @@ function App() {
     }
     if (activePage === "launcher") {
       const launcherControls = <LauncherControls mode={launcherMode} setMode={setLauncherMode} modal={launcherModal} setModal={setLauncherModal} />;
-      if (launcherModal) return <ModalLauncher mode={launcherMode} controls={launcherControls} request={modalApi} onPlan={setModalPlan} onSettings={() => setDashboardSettingsOpen(true)} onDatasets={() => setDatasetsOpen(true)} />;
       return (
         <LauncherPrdPage
           mode={launcherMode}
           controls={launcherControls}
+          modal={launcherModal}
+          modalResources={modalResources}
+          setModalResources={setModalResources}
+          onModalPlan={showModalPlanInChat}
+          onModalSettings={() => setDashboardSettingsOpen(true)}
           trainConfig={trainConfig}
           setTrainConfig={setTrainConfig}
           serveConfig={serveConfig}
@@ -961,7 +975,7 @@ function App() {
                 {agentMessages.map((message, index) => (
                   <div key={`${message.id || message.role}-${index}`} className={classNames("chatBubble", message.role)}>
                     <span>{message.role}</span>
-                    {message.events?.length ? <AgentEventList events={message.events} onPlanConfirm={executeAgentPlan} /> : <MarkdownBlock text={message.content} />}
+                    {message.events?.length ? <AgentEventList events={message.events} onPlanConfirm={executeAgentPlan} onPlanUpdate={updateChatPlan} /> : <MarkdownBlock text={message.content} />}
                   </div>
                 ))}
               </div>
@@ -1125,7 +1139,6 @@ function App() {
           setAgentPrompt(current => `${current}${current ? "\n" : ""}Use managed dataset "${dataset.name}" (dataset_id: ${dataset.id}) for the Modal training plan.`);
           setDatasetsOpen(false); setActivePage("agent"); setAgentChatTab("chat");
         }} /></Modal>}
-        {modalPlan && <Modal title="Modal Execution Plan" onClose={() => setModalPlan(null)}><AgentPlanCard key={modalPlan.id} plan={modalPlan} onConfirm={executeAgentPlan} /></Modal>}
         {endpointKey && <Modal title="Serving endpoint key" onClose={() => setEndpointKey(null)}><p>Save this key to authenticate requests to the Modal endpoint. It is shown once and is not saved in chat history.</p><pre className="commandPreview">{endpointKey}</pre><button className="secondaryButton" onClick={() => navigator.clipboard.writeText(endpointKey)}>Copy key</button></Modal>}
         {runtimeCheckResult && <RuntimeCheckResultModal result={runtimeCheckResult} onClose={() => setRuntimeCheckResult(null)} />}
       </main>
@@ -1753,7 +1766,7 @@ function JobMetricsView({ job, refreshNonce }) {
   );
 }
 
-function AgentEventList({ events, onPlanConfirm }) {
+function AgentEventList({ events, onPlanConfirm, onPlanUpdate }) {
   const planEvents = events.filter((event) => event.type === "tool_result" && event.result?.plan);
   const otherEvents = events.filter((event) => !(event.type === "tool_result" && event.result?.plan));
   return (
@@ -1765,12 +1778,16 @@ function AgentEventList({ events, onPlanConfirm }) {
         if (event.type === "tool_result") return <ToolResultCard key={index} result={event.result} />;
         return null;
       })}
-      {planEvents.map((event, index) => <AgentPlanCard key={event.result.plan.id || index} plan={event.result.plan} onConfirm={onPlanConfirm} />)}
+      {planEvents.map((event, index) => <AgentPlanCard key={event.result.plan.id || index} plan={event.result.plan} onConfirm={onPlanConfirm} onUpdate={onPlanUpdate} />)}
     </div>
   );
 }
 
-function AgentPlanCard({ plan, onConfirm }) {
+function AgentPlanCard({ plan, onConfirm, onUpdate }) {
+  return plan.tool === "start_modal" ? <ModalPlanCard plan={plan} request={modalApi} onConfirm={onConfirm} onUpdate={onUpdate} /> : <LocalAgentPlanCard plan={plan} onConfirm={onConfirm} />;
+}
+
+function LocalAgentPlanCard({ plan, onConfirm }) {
   const [editing, setEditing] = useState(false);
   const [parameters, setParameters] = useState(plan.parameters || {});
   const [execution, setExecution] = useState(null);
@@ -1784,7 +1801,8 @@ function AgentPlanCard({ plan, onConfirm }) {
     <section className="agentPlanCard">
       <div className="agentPlanHeader"><div><span>Execution plan</span><strong>{plan.objective}</strong></div><StatusBadge status={plan.status || "proposed"} /></div>
       {plan.summary && <p className="agentPlanSummary">{plan.summary}</p>}
-      {entries.length > 0 && <div className={classNames("agentPlanParams", editing && "editing")}>{entries.map(([label, value]) => <label key={label}><span>{label.replaceAll("_", " ")}</span>{editing ? <input value={String(value)} onChange={(event) => setParameters((current) => ({ ...current, [label]: event.target.value }))} /> : <strong>{String(value)}</strong>}</label>)}</div>}
+      {editing ? <PlanParameters title="Task parameters" value={parameters} onChange={setParameters} /> : entries.length > 0 && <div className="agentPlanParams">{entries.map(([label, value]) => <label key={label}><span>{label.replaceAll("_", " ")}</span><strong>{String(value)}</strong></label>)}</div>}
+
       <ol className="agentPlanSteps">{(plan.steps || []).map((step, index) => <li key={step.id || index}><span>{index + 1}</span><div><strong>{step.title}</strong>{step.detail && <p>{step.detail}</p>}</div><small>{step.status || "pending"}</small></li>)}</ol>
       {command && <pre className="agentPlanCommand">{command}</pre>}
       <div className="agentPlanActions">
@@ -1801,7 +1819,7 @@ function AgentPlanCard({ plan, onConfirm }) {
             }
           }}
         >{execution?.status === "running" ? "Executing..." : "Confirm Execution"}</button>
-        {!isModal && entries.length > 0 && <button className="secondaryButton" onClick={() => setEditing((value) => !value)}>{editing ? "Save Parameters" : "Edit Parameters"}</button>}
+        {!isModal && <button className="secondaryButton" onClick={() => setEditing((value) => !value)}>{editing ? "Save Parameters" : "Edit Parameters"}</button>}
         {command && <button className="secondaryButton" onClick={() => navigator.clipboard.writeText(command)}>Copy Command</button>}
       </div>
       {execution && execution.status !== "running" && <p className={classNames("agentPlanExecution", execution.status)}>{execution.message}</p>}
@@ -2708,15 +2726,17 @@ function LauncherControls({ mode, setMode, modal, setModal }) {
   </div>;
 }
 
-function LauncherPrdPage({ mode, controls, trainConfig, setTrainConfig, serveConfig, setServeConfig, onStartTrain, onStartServe, env, presets }) {
+function LauncherPrdPage({ mode, controls, modal, modalResources, setModalResources, onModalPlan, onModalSettings, trainConfig, setTrainConfig, serveConfig, setServeConfig, onStartTrain, onStartServe, env, presets }) {
   const config = mode === "train" ? trainConfig : serveConfig;
+  const [modalError, setModalError] = useState("");
+  const [modalPending, setModalPending] = useState(false);
   const [preflightResult, setPreflightResult] = useState(null);
   const [preflightBusy, setPreflightBusy] = useState("");
   const [preflightJob, setPreflightJob] = useState(null);
   const worldSize = Number(config.world_size || 0);
   const tpSize = Number(config.tp_size || 0);
-  const gpuCount = env?.gpus?.length || 0;
-  const smokeTrainTunable = mode === "train";
+  const gpuCount = modal ? Number(modalResources.count) : env?.gpus?.length || 0;
+  const smokeTrainTunable = !modal && mode === "train";
   const smokeInferTunable = smokeTrainTunable && ["gspo", "grpo", "ppo"].includes(String(config.algo || "").toLowerCase());
   useEffect(() => {
     if (!preflightJob?.job?.id || !["created", "running"].includes(preflightJob.job.status)) return undefined;
@@ -2743,7 +2763,7 @@ function LauncherPrdPage({ mode, controls, trainConfig, setTrainConfig, serveCon
       id: "gpu_count",
       name: "GPU count",
       status: gpuCount === 0 ? "warn" : worldSize <= gpuCount ? "ok" : "warn",
-      detail: gpuCount ? `World size ${worldSize} uses ${gpuCount} visible GPU${gpuCount === 1 ? "" : "s"}.` : "No visible GPU inventory is available.",
+      detail: gpuCount ? `World size ${worldSize} uses ${gpuCount} ${modal ? "reserved Modal" : "visible"} GPU${gpuCount === 1 ? "" : "s"}.` : "No visible GPU inventory is available.",
       tunable: smokeInferTunable && gpuCount > 0,
     },
     {
@@ -2774,9 +2794,19 @@ function LauncherPrdPage({ mode, controls, trainConfig, setTrainConfig, serveCon
       tunable: smokeInferTunable,
     }] : []),
   ];
+  async function previewModal() {
+    setModalPending(true); setModalError("");
+    try {
+      const bootstrap = await modalApi("/bootstrap");
+      const request = modalWorkflow(mode, config, bootstrap.catalog, modalResources);
+      onModalPlan((await modalApi("/preview", request)).plan);
+    } catch (error) { setModalError(error.message); } finally { setModalPending(false); }
+  }
+  const resourceForm = modal ? <ModalResourceForm request={modalApi} settings={modalResources} setSettings={setModalResources} onSettings={onModalSettings} /> : null;
   const command = launcherCommand(mode, config);
   const hasFailure = checks.some((check) => check.status === "fail");
   const runPreflightAction = async (check) => {
+    if (modal) { setPreflightResult({ ok: check.status === "ok", check, output: check.detail }); return; }
     const action = check.status !== "ok" && check.tunable ? "tune" : "view";
     setPreflightBusy(check.id);
     try {
@@ -2804,8 +2834,9 @@ function LauncherPrdPage({ mode, controls, trainConfig, setTrainConfig, serveCon
         {mode === "train" && presets.length > 0 && <div className="launcherPresetRow">
           {presets.map((preset) => <button key={preset.id} className="presetPill" title={preset.source} onClick={() => setTrainConfig((current) => ({ ...current, ...(preset.preset || {}) }))}>{preset.label}</button>)}
         </div>}
+        {modal && modalError && <p role="alert">{modalError}</p>}
         <div className="launcherFormScroll">
-          {mode === "train" ? <TrainForm config={trainConfig} setConfig={setTrainConfig} onStart={onStartTrain} /> : <ServeForm config={serveConfig} setConfig={setServeConfig} onStart={onStartServe} />}
+          {mode === "train" ? <TrainForm config={trainConfig} setConfig={setTrainConfig} onStart={modal ? previewModal : onStartTrain} extra={resourceForm} startLabel={modal ? "Review Modal execution plan" : "Start train"} disabled={modal && modalPending} /> : <ServeForm config={serveConfig} setConfig={setServeConfig} onStart={modal ? previewModal : onStartServe} extra={resourceForm} startLabel={modal ? "Review Modal execution plan" : "Start serve"} disabled={modal && modalPending} />}
         </div>
       </section>
       <aside className="launcherSideRail">
@@ -2850,10 +2881,13 @@ function shellQuote(value) {
   return /^[a-zA-Z0-9_./:@+-]+$/.test(text) ? text : `'${text.replaceAll("'", `'\\''`)}'`;
 }
 
-function TrainForm({ config, setConfig, onStart }) {
+function TrainForm({ config, setConfig, onStart, extra, startLabel = "Start train", disabled = false }) {
   const algo = String(config.algo || "sft").toLowerCase();
   const sections = trainLauncherSections(algo);
-  const updateField = (key, value) => setConfig({ ...config, [key]: value });
+  const updateField = (key, value) => setConfig({ ...config, [key]: value,
+    ...(key === "adam_4bit" && value ? { adam_8bit: false } : {}),
+    ...(key === "adam_8bit" && value ? { adam_4bit: false } : {}),
+  });
   const primaryFields = [
     selectField("algo", "Algorithm", ["sft", "dpo", "gspo", "grpo", "ppo"], true),
     field("ckpt", "Checkpoint"),
@@ -2878,7 +2912,8 @@ function TrainForm({ config, setConfig, onStart }) {
         <summary>Advanced settings</summary>
         <div className="launcherAdvancedBody">{advancedSections.map((section) => <div className="launcherSection" key={section.title}><div className="launcherSectionHeader"><strong>{section.title}</strong>{section.note && <span>{section.note}</span>}</div><div className="formGrid">{section.fields.map(renderLauncherField)}</div></div>)}</div>
       </details>
-      <button className="primaryButton launchButton wide" onClick={onStart}><Play size={16} /> Start train</button>
+      {extra}
+      <button className="primaryButton launchButton wide" disabled={disabled} onClick={onStart}><Play size={16} /> {disabled ? "Preparing…" : startLabel}</button>
     </div>
   );
 }
@@ -2956,6 +2991,7 @@ function trainLauncherSections(algo) {
         field("adam_beta2", "Adam beta2", true),
         field("weight_decay", "Weight decay", true),
         field("grad_clip_norm", "Grad clip", true),
+        checkField("adam_4bit", "4-bit Adam"),
         checkField("adam_8bit", "8-bit Adam"),
         checkField("unfreeze_multimodal_tower", "Train media tower"),
         field("multimodal_tower_lr", "Tower LR", true),
@@ -3031,7 +3067,7 @@ function checkField(key, label) {
   return { key, label, compact: true, type: "checkbox" };
 }
 
-function ServeForm({ config, setConfig, onStart }) {
+function ServeForm({ config, setConfig, onStart, extra, startLabel = "Start serve", disabled = false }) {
   return (
     <div className="formGrid">
       {[
@@ -3049,7 +3085,8 @@ function ServeForm({ config, setConfig, onStart }) {
         ["disable_thinking", "Disable thinking"],
         ["extra_args", "Extra args"],
       ].map(([key, label]) => <Field key={key} label={label} value={config[key]} onChange={(value) => setConfig({ ...config, [key]: value })} compact={key !== "model_path"} />)}
-      <button className="primaryButton launchButton wide" onClick={onStart}><Play size={16} /> Start serve</button>
+      {extra}
+      <button className="primaryButton launchButton wide" disabled={disabled} onClick={onStart}><Play size={16} /> {disabled ? "Preparing…" : startLabel}</button>
     </div>
   );
 }

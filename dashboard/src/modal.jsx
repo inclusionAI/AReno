@@ -89,50 +89,108 @@ export function DatasetManager({ request, onSelect }) {
   </div>;
 }
 
-export function ModalLauncher({ mode, controls, request, onPlan, onSettings, onDatasets }) {
+export function ModalResourceForm({ request, settings, setSettings, onSettings }) {
   const [bootstrap, setBootstrap] = useState(null);
-  const [datasets, setDatasets] = useState([]);
-  const kind = mode === "serve" ? "deployment" : "training";
-  const [adapter, setAdapter] = useState("");
-  const [checkpoint, setCheckpoint] = useState("");
-  const [datasetId, setDatasetId] = useState("");
-  const [datasetPath, setDatasetPath] = useState("");
-  const [algo, setAlgo] = useState("sft");
-  const [resources, setResources] = useState({ gpu: "H100", count: 1, cpu: 4, memory_gib: 32, timeout_seconds: 14400 });
-  const [optionsByKind, setOptionsByKind] = useState({ training: "{}", deployment: "{}" });
-  const options = optionsByKind[kind];
-  const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
+  const [quote, setQuote] = useState(null);
+  const [quoting, setQuoting] = useState(false);
+  const [quoteError, setQuoteError] = useState("");
+  useEffect(() => { let active = true; request("/bootstrap").then(value => { if (active) setBootstrap(value); }).catch(error => { if (active) setError(error.message); }); return () => { active = false; }; }, []);
   useEffect(() => {
-    Promise.all([request("/bootstrap"), request("/datasets")]).then(([boot, data]) => { setBootstrap(boot); setDatasets(data); }).catch(error => setError(error.message));
-  }, []);
-  async function preview(event) {
-    event.preventDefault(); setPending(true); setError("");
-    try {
-      const params = JSON.parse(options);
-      if (!params || Array.isArray(params) || typeof params !== "object") throw new Error("Advanced parameters must be a JSON object.");
-      const body = { kind, name: `${kind === "training" ? algo.toUpperCase() : "Serve"} ${checkpoint}`, model: { adapter, checkpoint }, resources,
-        ...(kind === "training" ? { stages: [{ algo, ...(datasetId ? { dataset_id: datasetId } : {}), params: { world_size: resources.count, tp_size: resources.count, ...(datasetPath && !datasetId ? { dataset_path: datasetPath } : {}), ...params } }] } : { serve: params }) };
-      onPlan((await request("/preview", body)).plan);
-    } catch (error) { setError(error.message); } finally { setPending(false); }
-  }
-  return <section className="panel"><div className="panelHeader"><div><h2>Task Launcher</h2><p>Run AReno {mode === "serve" ? "serving" : "training"} on a reserved Modal GPU.</p></div>{controls}</div>
-    <div className="modalResourceHeader"><strong>Modal configuration</strong><button className="secondaryButton" onClick={onSettings}>Modal settings</button></div>
+    let active = true;
+    setQuote(null); setQuoteError(""); setQuoting(true);
+    const timer = setTimeout(async () => {
+      try {
+        const result = await request("/estimate", { resources: { gpu: settings.gpu, count: settings.count, cpu: settings.cpu, memory_gib: settings.memory_gib, timeout_seconds: Math.round(settings.duration_hours * 3600) }, hours: settings.duration_hours });
+        if (active) setQuote(result);
+      } catch (error) { if (active) setQuoteError(error.message); }
+      finally { if (active) setQuoting(false); }
+    }, 400);
+    return () => { active = false; clearTimeout(timer); };
+  }, [settings.gpu, settings.count, settings.cpu, settings.memory_gib, settings.duration_hours]);
+  return <section className="modalResourceSection">
+    <div className="modalResourceHeader"><strong>Modal resources</strong><button type="button" className="secondaryButton" onClick={onSettings}>Modal settings</button></div>
+    <p>Container: <code>ghcr.io/inclusionai/areno:latest</code> · fetched from GHCR and pinned when the plan is prepared.</p>
+    {error && <p role="alert">{error}</p>}
     {!bootstrap && !error && <p>Loading Modal catalog…</p>}
-    {bootstrap && <form onSubmit={preview} className="launcherSections">
-      {!bootstrap.connected && <p role="status">Connect your workspace in dashboard Settings before executing a plan.</p>}
+    {bootstrap && <>
       <div className="formGrid">
-        <label className="field"><span>Model adapter</span><select required value={adapter} onChange={e => setAdapter(e.target.value)}><option value="">Select adapter</option>{bootstrap.catalog.models.map(model => <option key={model.id} value={model.id}>{model.id}</option>)}</select></label>
-        <label className="field"><span>Checkpoint / repository</span><input required value={checkpoint} onChange={e => setCheckpoint(e.target.value)} /></label>
-        {kind === "training" && <><label className="field"><span>Algorithm</span><select value={algo} onChange={e => setAlgo(e.target.value)}>{bootstrap.catalog.algorithms.map(item => <option key={item.id} value={item.id}>{item.id.toUpperCase()}</option>)}</select></label>
-        <label className="field"><span>Managed dataset</span><select value={datasetId} onChange={e => setDatasetId(e.target.value)}><option value="">Enter a dataset path below</option>{datasets.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
-        {!datasetId && <label className="field"><span>Dataset path / repository</span><input required value={datasetPath} onChange={e => setDatasetPath(e.target.value)} /></label>}</>}
-        <label className="field"><span>GPU</span><select value={resources.gpu} onChange={e => setResources({ ...resources, gpu: e.target.value })}>{bootstrap.gpu_types.map(gpu => <option key={gpu}>{gpu}</option>)}</select></label>
-        {[["count", "GPU count", 1, 8], ["cpu", "CPU cores", 1, 64], ["memory_gib", "Memory (GiB)", 4, 512], ["timeout_seconds", "Maximum lifetime (seconds)", 1, 86400]].map(([key, label, min, max]) => <label className="field" key={key}><span>{label}</span><input required type="number" min={min} max={max} value={resources[key]} onChange={e => setResources({ ...resources, [key]: Number(e.target.value) })} /></label>)}
+        <label className="field"><span>Model adapter</span><select value={settings.adapter} onChange={e => setSettings(current => ({ ...current, adapter: e.target.value }))}><option value="">Select adapter</option>{bootstrap.catalog.models.map(item => <option key={item.id} value={item.id}>{item.id}</option>)}</select></label>
+        <label className="field"><span>GPU type</span><select value={settings.gpu} onChange={e => setSettings(current => ({ ...current, gpu: e.target.value }))}>{bootstrap.gpu_types.map(gpu => <option key={gpu}>{gpu}</option>)}</select></label>
+        {[["count", "GPU count", 1, 8, 1], ["duration_hours", "Duration / maximum runtime (hours)", 0.01, 24, 0.01], ["cpu", "CPU cores", 1, 64, 1], ["memory_gib", "Memory (GiB)", 4, 512, 1]].map(([key, label, min, max, step]) => <label className="field" key={key}><span>{label}</span><input type="number" min={min} max={max} step={step} value={settings[key]} onChange={e => setSettings(current => ({ ...current, [key]: Number(e.target.value) }))} /></label>)}
       </div>
-      <label className="field"><span>Advanced {kind === "training" ? "training" : "serving"} parameters (JSON)</span><textarea className="mono" rows={5} value={options} onChange={e => setOptionsByKind(current => ({ ...current, [kind]: e.target.value }))} /></label>
-      <p>Use AReno parameter names for dataset loaders, reward functions, batch sizes and other options. Plans are validated against the repository catalog.</p>
-      <div className="detailActions"><button className="primaryButton" disabled={pending}>{pending ? "Preparing…" : "Review execution plan"}</button><button type="button" className="secondaryButton" onClick={onDatasets}><Database size={16} /> Manage datasets</button></div>
-    </form>}{error && <p role="alert">{error}</p>}
+      <div className="modalFee" role="status"><span>Estimated fee</span><strong>{quoting ? "Calculating…" : quote ? `$${Number(quote.planned_cost).toFixed(2)} USD` : "Unavailable"}</strong>
+        {quote && <small>${Number(quote.hourly_cost).toFixed(2)} / hour × {settings.duration_hours} hours · GPU + CPU + memory</small>}
+        {quoteError && <small>{quoteError}</small>}
+        <small>Compute estimate at public list rates for the full duration. Actual usage may differ; excludes storage and networking.</small>
+      </div>
+      <p>Uses the training or serving configuration above. Relative output paths are stored under /artifacts. Modal currently requires the Hugging Face model hub; local input files must be uploaded first.</p>
+    </>}
+  </section>;
+}
+
+export function PlanParameters({ title, value = {}, onChange }) {
+  const [newKey, setNewKey] = useState("");
+  const [newValue, setNewValue] = useState("");
+  function parse(value) { try { return JSON.parse(value); } catch { return value; } }
+  return <fieldset className="planParameterGroup"><legend>{title}</legend>
+    {Object.entries(value).map(([key, item]) => <div className="planParameterRow" key={key}>
+      <label className="field"><span>{key}</span><input value={typeof item === "string" ? item : JSON.stringify(item)} onChange={event => onChange({ ...value, [key]: parse(event.target.value) })} /></label>
+      <button type="button" className="secondaryButton" aria-label={`Delete ${title} ${key}`} onClick={() => { const next = { ...value }; delete next[key]; onChange(next); }}>Delete</button>
+    </div>)}
+    <div className="planParameterAdd"><label className="field"><span>Parameter name</span><input value={newKey} onChange={event => setNewKey(event.target.value)} /></label><label className="field"><span>Value</span><input value={newValue} onChange={event => setNewValue(event.target.value)} /></label>
+      <button type="button" className="secondaryButton" disabled={!newKey.trim() || Object.hasOwn(value, newKey.trim()) || ["__proto__", "constructor", "prototype"].includes(newKey.trim())} onClick={() => { onChange({ ...value, [newKey.trim()]: parse(newValue) }); setNewKey(""); setNewValue(""); }}>Add parameter</button>
+    </div>
+  </fieldset>;
+}
+
+export function ModalPlanCard({ plan, request, onConfirm, onUpdate }) {
+  const [current, setCurrent] = useState(plan);
+  const [draft, setDraft] = useState(plan.workflow || {});
+  const [editing, setEditing] = useState(false);
+  const [pending, setPending] = useState("");
+  const [message, setMessage] = useState("");
+  const [executed, setExecuted] = useState(plan.status === "started");
+  useEffect(() => { setCurrent(plan); setDraft(plan.workflow || {}); setExecuted(plan.status === "started"); }, [plan]);
+  async function save() {
+    setPending("Saving…"); setMessage("");
+    try {
+      const result = await request("/revise", { plan_id: current.id, workflow: draft });
+      setCurrent(result.plan); setDraft(result.plan.workflow); onUpdate?.(result.plan); setEditing(false);
+    } catch (error) { setMessage(error.message); } finally { setPending(""); }
+  }
+  async function execute() {
+    setPending("Starting…"); setMessage("");
+    try {
+      const result = await onConfirm(current);
+      if (result?.ok === false) throw new Error(result.error || "Execution failed");
+      const started = { ...current, status: "started" };
+      setCurrent(started); onUpdate?.(started); setExecuted(true); setMessage(`Started job ${result.job.id}`);
+    } catch (error) { setMessage(error.message); } finally { setPending(""); }
+  }
+  const estimate = current.estimate;
+  return <section className="agentPlanCard">
+    <div className="agentPlanHeader"><div><span>Modal execution plan</span><strong>{current.objective}</strong></div><span>{executed ? "Started" : "Proposed"}</span></div>
+    <p>{current.summary}</p>
+    <div className="modalFee"><span>Estimated fee</span><strong>{editing ? "Save changes to refresh" : estimate ? `$${Number(estimate.planned_cost).toFixed(2)} USD` : "Unavailable"}</strong>
+      {!editing && estimate && <small>${Number(estimate.hourly_cost).toFixed(2)} / hour · {(current.resources.timeout_seconds / 3600).toFixed(2)} hours</small>}
+      {!editing && current.estimate_error && <small>{current.estimate_error}</small>}
+      <small>Compute estimate for the full duration; excludes storage and networking.</small>
+    </div>
+    {editing ? <div className="planEditor">
+      <label className="field"><span>Job name</span><input value={draft.name || ""} onChange={e => setDraft({ ...draft, name: e.target.value })} /></label>
+      <PlanParameters title="Model" value={draft.model} onChange={model => setDraft({ ...draft, model })} />
+      <PlanParameters title="Resources" value={draft.resources} onChange={resources => setDraft({ ...draft, resources })} />
+      {(draft.stages || []).map((stage, index) => <div key={index}><label className="field"><span>Stage {index + 1} algorithm</span><input value={stage.algo} onChange={e => setDraft({ ...draft, stages: draft.stages.map((item, i) => i === index ? { ...item, algo: e.target.value } : item) })} /></label><PlanParameters title={`Stage ${index + 1} parameters`} value={stage.params} onChange={params => setDraft({ ...draft, stages: draft.stages.map((item, i) => i === index ? { ...item, params } : item) })} /></div>)}
+      {draft.kind === "deployment" && <PlanParameters title="Serving parameters" value={draft.serve} onChange={serve => setDraft({ ...draft, serve })} />}
+      <p>Use AReno parameter names. Values can be text, numbers, true/false, or JSON. Deleting an optional parameter restores its runtime default.</p>
+      <div className="agentPlanActions"><button className="primaryButton" disabled={!!pending} onClick={save}>Save changes &amp; estimate</button><button className="secondaryButton" disabled={!!pending} onClick={() => { setDraft(current.workflow); setEditing(false); setMessage(""); }}>Cancel edits</button></div>
+    </div> : <>
+      <div className="agentPlanParams">{Object.entries(current.resources || {}).map(([key, value]) => <label key={key}><span>{key.replaceAll("_", " ")}</span><strong>{String(value)}</strong></label>)}</div>
+      <p>Image: <code className="planImage">{current.image || "ghcr.io/inclusionai/areno:latest"}</code></p>
+      <pre className="agentPlanCommand">{current.command}</pre>
+      <div className="agentPlanActions"><button className="primaryButton" disabled={!!pending || executed} onClick={execute}>{executed ? "Started" : pending || "Confirm execution"}</button><button className="secondaryButton" disabled={!!pending || executed || !current.workflow} onClick={() => setEditing(true)}>Edit parameters</button></div>
+    </>}
+    {message && <p role="status">{message}</p>}
   </section>;
 }

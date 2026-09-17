@@ -19,6 +19,8 @@ def flow(tmp_path, monkeypatch):
     value = ModalFlow(tmp_path)
     value.app.samples.enqueue = Mock(return_value={"status": "ready"})
     value.app.controller.provider = object()
+    value.app.controller.image_resolver = lambda _: "ghcr.io/inclusionai/areno@sha256:" + "a" * 64
+    value.app.pricing.quote = Mock(return_value={"planned_cost": "14.4", "hourly_cost": "3.6"})
     value.app.controller._thread = Mock()
     value.app.controller.cost_estimator = lambda *_: {"hourly_cost": "3.6", "rates": {"source": "public list rates"}}
     monkeypatch.setattr(server, "MODAL_FLOW", value)
@@ -191,3 +193,28 @@ def test_agent_can_prepare_but_cannot_directly_launch_modal(flow):
     )
     assert result["ok"] and result["plan"]["tool"] == "start_modal"
     assert not flow.app.controller.store.jobs()
+
+
+def test_plan_defaults_image_fee_and_edit_add_remove(flow):
+    preview = flow.preview(training())
+    assert preview["image"].startswith("ghcr.io/inclusionai/areno@sha256:")
+    assert preview["estimate"]["planned_cost"] == "14.4"
+    params = preview["workflow"]["stages"][0]["params"]
+    assert params["adam_4bit"] is True and params["attn_backend"] == "flash"
+    params["lr"] = 0.0002
+    params["max_steps"] = 25
+    revised = flow.revise(preview["id"], preview["workflow"])
+    assert "--lr 0.0002" in revised["command"]
+    del revised["workflow"]["stages"][0]["params"]["lr"]
+    revised = flow.revise(preview["id"], revised["workflow"])
+    assert "lr" not in revised["workflow"]["stages"][0]["params"]
+    identifier = flow.execute(revised["id"])["job_id"]
+    assert flow.job(identifier, server.Job).config["stages"][0]["params"]["max_steps"] == 25
+
+
+def test_invalid_plan_edit_preserves_previous_plan(flow):
+    preview = flow.preview(training())
+    preview["workflow"]["resources"]["gpu"] = "invalid"
+    with pytest.raises(ValueError):
+        flow.revise(preview["id"], preview["workflow"])
+    assert flow.plans[preview["id"]][1]["resources"]["gpu"] == "L4"

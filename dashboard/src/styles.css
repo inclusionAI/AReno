@@ -2752,3 +2752,15 @@ textarea:focus {
 .modalExecutionSwitch input:checked::after { transform: translateX(16px); background: var(--deck-panel); }
 .modalExecutionSwitch input:focus-visible { outline: 2px solid var(--deck-cyan); outline-offset: 3px; }
 .modalResourceHeader { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 16px; }
+
+.modalResourceSection { grid-column: 1 / -1; border-top: 1px solid var(--deck-line); padding-top: 20px; margin-top: 8px; }
+.modalFee { display: grid; gap: 6px; margin-top: 16px; padding: 16px; background: var(--deck-panel-2); border-radius: var(--radius-md); font-variant-numeric: tabular-nums; }
+.modalFee strong { font-size: 22px; color: var(--deck-ink); }
+.modalFee small { color: var(--deck-muted); line-height: 1.5; }
+.planEditor { display: grid; gap: 16px; margin-top: 16px; }
+.planParameterGroup { min-width: 0; margin: 0; padding: 12px; border: 1px solid var(--deck-line); border-radius: var(--radius-sm); }
+.planParameterGroup legend { font-size: 13px; font-weight: 600; padding: 0 4px; }
+.planParameterRow, .planParameterAdd { display: flex; gap: 8px; align-items: end; margin-top: 8px; }
+.planParameterRow .field, .planParameterAdd .field { flex: 1; min-width: 0; }
+.planImage { overflow-wrap: anywhere; font-size: 11px; }
+@media (max-width: 640px) { .planParameterAdd { flex-wrap: wrap; } }

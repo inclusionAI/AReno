@@ -63,9 +63,26 @@ class ModalFlow:
     def preview(self, request):
         request = resolve_request(request, self.app.controller.store)
         for stage in request.get("stages", []):
+            params = stage.setdefault("params", {})
+            params.setdefault("attn_backend", "flash")
+            if "adam_4bit" not in params and not params.get("adam_8bit"):
+                params["adam_4bit"] = True
+        if request.get("kind") == "deployment":
+            request.setdefault("serve", {}).setdefault("attn_backend", "flash")
+        for stage in request.get("stages", []):
             for key in ("dataset_id", "dataset_loader_id", "reward_function_id", "agentic_function_id"):
                 stage.pop(key, None)
         prepared = self.app.post("/api/preview", request)
+        request["image"] = self.app.controller.image_resolver(
+            request.get("image") or "ghcr.io/inclusionai/areno:latest"
+        )
+        request["resources"] = prepared["resources"]
+        request["estimate_hours"] = prepared["resources"]["timeout_seconds"] / 3600
+        estimate, estimate_error = None, None
+        try:
+            estimate = self.app.pricing.quote(prepared["resources"], request["estimate_hours"])
+        except Exception as exc:
+            estimate_error = self.app.controller.redact(str(exc))
         # Keep endpoint keys on the server, never in chat history or browser storage.
         identifier = secrets.token_urlsafe(24)
         with self.lock:
@@ -79,11 +96,31 @@ class ModalFlow:
             "summary": "Review the GPU reservation and commands. Execution starts a billable Modal sandbox.",
             "parameters": {"plan_id": identifier},
             "resources": prepared["resources"],
+            "workflow": {key: value for key, value in request.items() if key != "endpoint_key"},
+            "image": request["image"],
+            "estimate": estimate,
+            "estimate_error": estimate_error,
             "steps": [
                 {"id": i + 1, "title": command, "status": "pending"} for i, command in enumerate(prepared["commands"])
             ],
             "command": "\n".join(prepared["commands"]),
         }
+
+    def revise(self, identifier, workflow):
+        if not isinstance(workflow, dict):
+            raise ValueError("Workflow must be an object")
+        with self.lock:
+            item = self.plans.get(identifier)
+            if not item or item[0] <= time.time():
+                raise ValueError("Plan expired or already executed; prepare another plan")
+            request = json.loads(json.dumps(workflow))
+            request.pop("endpoint_key", None)
+            if request.get("kind") == "deployment":
+                request["endpoint_key"] = item[1].get("endpoint_key") or secrets.token_urlsafe(32)
+            revised = self.preview(request)
+            self.plans[identifier] = self.plans.pop(revised["id"])
+            revised.update(id=identifier, parameters={"plan_id": identifier})
+            return revised
 
     def execute(self, identifier):
         with self.lock:

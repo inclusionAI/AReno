@@ -11,7 +11,17 @@ GPU training still runs remotely; local CUDA is not required for the control pla
   or `MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET` environment variables. Credentials stay
   in server memory and must be reconnected after a server restart.
 - **Launcher → Train / Serve → Run on Modal:** select the model adapter, checkpoint and GPU
-  reservation, configure parameters, review the execution plan, then execute.
+  reservation and maximum duration in the extra Modal section. The existing train /
+  serve form, presets, advanced settings and preflight stay visible. Estimated
+  GPU + CPU + memory fees update as resources or duration change.
+- Plans appear inline in Agent chat (including plans prepared from Launcher).
+  Edit, add or delete parameters there; saving validates the changes and refreshes
+  the fee estimate before execution. Required fields cannot be removed.
+- Training defaults to Flash attention and Adam 4-bit, with editable optimizer
+  controls. Serving defaults to Flash attention. Plans fetch
+  `ghcr.io/inclusionai/areno:latest` and pin its current digest; if no latest tag is
+  published, registry resolution falls back to the highest stable version. The
+  reviewed digest is retained through execution. No source-package install is used.
 - **Agent:** ask for a Modal training or serving task. The agent reads the live
   repository catalog and prepares a validated plan. Only the dashboard confirmation
   executes it. Plans expire after 30 minutes and can execute once.
