@@ -132,6 +132,24 @@ optional independent schedules through ``--mm-tower-lr`` and
 optimizer-state memory; start with the projector before unfreezing a large
 encoder tower.
 
+On CUDA, Qwen3.5 and Qwen3.5 MoE share the same vision training controls:
+the tower group contains ``visual.patch_embed``, ``visual.pos_embed``, and
+``visual.blocks``; the projector group contains all of ``visual.merger``,
+including its normalization layer. Either group can be trained independently
+or both can be unfrozen together. For example, append these options to an
+existing multimodal training command:
+
+.. code-block:: bash
+
+   --unfreeze-mm-tower --mm-tower-lr 1e-6 \
+   --unfreeze-mm-projector --mm-projector-lr 1e-5
+
+Frozen groups remain in evaluation mode. Training the tower alone still
+backpropagates through the frozen merger. Supply processor pixel features to
+train the vision path; precomputed ``image_embeds`` bypass both groups.
+Checkpoints retain all visual weights, and separate rollout workers receive
+updates for whichever visual groups are unfrozen.
+
 On MLX, processor output uses NumPy as the interchange format and is converted
 to MLX arrays by the provider. Supported PIL image processors therefore do not
 require Torch. Multimodal training uses the native lazy MLX graph rather than
