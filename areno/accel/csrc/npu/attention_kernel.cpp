@@ -1,5 +1,6 @@
 // Compatibility kernels for shapes/dtypes outside flash-attn-npu's range.
 #include "kernel_operator.h"
+#include "kernel_dtype.h"
 #include <math.h>
 #include "attention_launch.h"
 
@@ -295,9 +296,10 @@ public:
 
 } // namespace areno_npu
 
-template<typename T>
+template<uint32_t Storage>
 __global__ __aicore__ void attention_cache_update_kernel(GM_ADDR ku, GM_ADDR vu, GM_ADDR kc, GM_ADDR vc,
     GM_ADDR pages, GM_ADDR lens, int64_t batch, int64_t heads, int64_t dim, int64_t blockSize, int64_t maxBlocks) {
+    using T = typename areno_npu::KernelDtype<Storage>::type;
     using namespace AscendC;
     using namespace areno_npu;
     AttentionIO io;
@@ -323,9 +325,10 @@ __global__ __aicore__ void attention_cache_update_kernel(GM_ADDR ku, GM_ADDR vu,
     }
 }
 
-template<typename T>
+template<uint32_t Storage>
 __global__ __aicore__ void attention_split_reduce_kernel(GM_ADDR statistics, GM_ADDR accumulator, GM_ADDR result,
     int64_t rows, int64_t dim, int64_t splits) {
+    using T = typename areno_npu::KernelDtype<Storage>::type;
     using namespace AscendC;
     using namespace areno_npu;
     AttentionIO io;
@@ -368,11 +371,12 @@ __global__ __aicore__ void attention_split_reduce_kernel(GM_ADDR statistics, GM_
     }
 }
 
-template<typename T, uint32_t Layout, bool Backward>
+template<uint32_t Storage, uint32_t Layout, bool Backward>
 __global__ __aicore__ void attention_kernel(GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR grad, GM_ADDR saved,
     GM_ADDR cu, GM_ADDR table, GM_ADDR lengths, GM_ADDR output, GM_ADDR dk, GM_ADDR dv, GM_ADDR stats, GM_ADDR acc,
     int64_t rows, int64_t qHeads, int64_t kvHeads, int64_t dim, int64_t qLen, int64_t kLen, int64_t sequences,
     int64_t start, int64_t window, int64_t blockSize, int64_t maxBlocks, int64_t splits, float scale) {
+    using T = typename areno_npu::KernelDtype<Storage>::type;
     using namespace AscendC;
     using namespace areno_npu;
     AttentionKernel<T, static_cast<AttentionLayout>(Layout), Backward> kernel;
@@ -382,7 +386,7 @@ __global__ __aicore__ void attention_kernel(GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_
 
 // Materialize device entries before CANN extracts host launcher specializations.
 #define ARENO_ATTN_INSTANCE(T, L, B) \
-    template void attention_kernel<T, areno_npu::L, B>( \
+    template void attention_kernel<areno_npu::KernelDtypeId<T>::value, areno_npu::L, B>( \
         GM_ADDR, GM_ADDR, GM_ADDR, GM_ADDR, GM_ADDR, GM_ADDR, GM_ADDR, GM_ADDR, \
         GM_ADDR, GM_ADDR, GM_ADDR, GM_ADDR, GM_ADDR, \
         int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, \
@@ -404,7 +408,7 @@ void launch_attention_typed(uint32_t blocks, void* stream, AttentionLayout layou
     const void* q, const void* k, const void* v, const void* grad, const void* saved,
     const int32_t* boundaries, const int32_t* table, const int32_t* lengths,
     void* output, float* dk, float* dv, float* stats, float* acc, AttentionShape s, float scale) {
-#define ARENO_ATTN(L, B) attention_kernel<T, L, B><<<blocks, nullptr, stream>>>( \
+#define ARENO_ATTN(L, B) attention_kernel<KernelDtypeId<T>::value, L, B><<<blocks, nullptr, stream>>>( \
     (uint8_t*)q, (uint8_t*)k, (uint8_t*)v, (uint8_t*)grad, (uint8_t*)saved, (uint8_t*)boundaries, \
     (uint8_t*)table, (uint8_t*)lengths, (uint8_t*)output, (uint8_t*)dk, (uint8_t*)dv, (uint8_t*)stats, (uint8_t*)acc, \
     s.rows, s.q_heads, s.kv_heads, s.dim, s.q_len, s.k_len, s.sequences, s.query_start, s.window_left, \
@@ -434,7 +438,7 @@ void launch_attention(uint32_t blocks, void* stream, uint32_t storage, Attention
 void launch_attention_cache_update(uint32_t blocks, void* stream, uint32_t storage,
     const void* k, const void* v, void* kCache, void* vCache, const int32_t* table, const int32_t* lengths,
     int64_t batch, AttentionShape s) {
-#define ARENO_CACHE(T) attention_cache_update_kernel<T><<<blocks, nullptr, stream>>>( \
+#define ARENO_CACHE(T) attention_cache_update_kernel<KernelDtypeId<T>::value><<<blocks, nullptr, stream>>>( \
     (uint8_t*)k, (uint8_t*)v, (uint8_t*)kCache, (uint8_t*)vCache, (uint8_t*)table, (uint8_t*)lengths, \
     batch, s.kv_heads, s.dim, s.block_size, s.max_blocks)
     switch (storage) {
@@ -446,7 +450,7 @@ void launch_attention_cache_update(uint32_t blocks, void* stream, uint32_t stora
 }
 void launch_attention_split_reduce(uint32_t blocks, void* stream, uint32_t storage,
     const float* stats, const float* acc, void* output, AttentionShape s) {
-#define ARENO_REDUCE(T) attention_split_reduce_kernel<T><<<blocks, nullptr, stream>>>( \
+#define ARENO_REDUCE(T) attention_split_reduce_kernel<KernelDtypeId<T>::value><<<blocks, nullptr, stream>>>( \
     (uint8_t*)stats, (uint8_t*)acc, (uint8_t*)output, s.rows, s.dim, s.splits)
     switch (storage) {
         case 0: ARENO_REDUCE(float); break;

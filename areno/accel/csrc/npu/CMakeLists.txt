@@ -17,6 +17,8 @@ include("${ARENO_ASCENDC_CMAKE_DIR}/ascendc.cmake")
 # Use template< (no space) at kernel definitions: CANN's legacy
 # extract_src_template.py uses that spelling to enable template discovery.
 # Entries called through host templates also have explicit device instances.
+# Floating dtypes cross the generated host-stub boundary as integer IDs;
+# half/BF16 names and their compiler-specific mangling stay inside kernels.
 ascendc_library(areno_npu_kernels STATIC
     activation_kernel.cpp normalization_kernel.cpp optimizer_kernel.cpp
     optimizer_quantized_kernel.cpp optimizer_factored_kernel.cpp embedding_kernel.cpp

@@ -154,6 +154,7 @@ def build_extensions():
                 "areno/accel/csrc/routing_common.h",
                 "areno/accel/csrc/moe_permute_common.h",
                 "areno/accel/csrc/npu/moe.h",
+                "areno/accel/csrc/npu/kernel_dtype.h",
                 *[
                     f"areno/accel/csrc/npu/{name}_launch.h"
                     for name in (

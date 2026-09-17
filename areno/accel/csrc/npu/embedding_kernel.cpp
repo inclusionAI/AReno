@@ -1,4 +1,5 @@
 #include "kernel_operator.h"
+#include "kernel_dtype.h"
 #include "embedding_launch.h"
 
 namespace areno_npu {
@@ -89,9 +90,10 @@ public:
 
 } // namespace areno_npu
 
-template<typename T, bool Backward>
+template<uint32_t Storage, bool Backward>
 __global__ __aicore__ void embedding_kernel(GM_ADDR ids, GM_ADDR input, GM_ADDR output,
     int64_t tokens, int64_t hidden, int64_t start, int64_t end) {
+    using T = typename areno_npu::KernelDtype<Storage>::type;
     using namespace AscendC;
     using namespace areno_npu;
     EmbeddingKernel<T, Backward> kernel;
@@ -103,7 +105,7 @@ namespace areno_npu {
 
 void launch_embedding(uint32_t blocks, void* stream, uint32_t storage, bool backward,
     const int64_t* ids, const void* input, void* output, int64_t tokens, int64_t hidden, int64_t start, int64_t end) {
-#define ARENO_EMBEDDING_LAUNCH(T, B) embedding_kernel<T, B><<<blocks, nullptr, stream>>>( \
+#define ARENO_EMBEDDING_LAUNCH(T, B) embedding_kernel<KernelDtypeId<T>::value, B><<<blocks, nullptr, stream>>>( \
     (uint8_t*)ids, (uint8_t*)input, (uint8_t*)output, tokens, hidden, start, end)
 #define ARENO_EMBEDDING_TYPE(T) \
     if (backward) { ARENO_EMBEDDING_LAUNCH(T, true); } else { ARENO_EMBEDDING_LAUNCH(T, false); }

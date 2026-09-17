@@ -1,4 +1,5 @@
 #include "kernel_operator.h"
+#include "kernel_dtype.h"
 #include "activation_launch.h"
 
 namespace areno_npu {
@@ -209,9 +210,10 @@ public:
 
 } // namespace areno_npu
 
-template<typename T, uint32_t Op>
+template<uint32_t Storage, uint32_t Op>
 __global__ __aicore__ void activation_kernel(GM_ADDR out, GM_ADDR in, GM_ADDR grad,
                                             int64_t rows, int64_t width) {
+    using T = typename areno_npu::KernelDtype<Storage>::type;
     using namespace AscendC;
     using namespace areno_npu;
     ActivationKernel<T, Op> kernel;
@@ -224,7 +226,7 @@ __global__ __aicore__ void activation_kernel(GM_ADDR out, GM_ADDR in, GM_ADDR gr
 // Attributes are inherited from the definition. Repeating them here makes
 // CANN's source scanner mistake declarations for kernel definitions.
 #define ARENO_ACTIVATION_INSTANCE(T, OP) \
-    template void activation_kernel<T, areno_npu::OP>( \
+    template void activation_kernel<areno_npu::KernelDtypeId<T>::value, areno_npu::OP>( \
         GM_ADDR, GM_ADDR, GM_ADDR, int64_t, int64_t);
 #define ARENO_ACTIVATION_INSTANCES(T) \
     ARENO_ACTIVATION_INSTANCE(T, Silu) ARENO_ACTIVATION_INSTANCE(T, DSilu) \
@@ -244,7 +246,7 @@ template <typename T>
 void launch_typed(uint32_t blocks, void* stream, Activation op, void* output,
                   const void* input, const void* grad, int64_t rows, int64_t width) {
 #define ARENO_LAUNCH(OP) case OP: \
-    activation_kernel<T, OP><<<blocks, nullptr, stream>>>( \
+    activation_kernel<KernelDtypeId<T>::value, OP><<<blocks, nullptr, stream>>>( \
         static_cast<uint8_t*>(output), static_cast<uint8_t*>(const_cast<void*>(input)), \
         static_cast<uint8_t*>(const_cast<void*>(grad)), rows, width); break
     switch (op) {

@@ -1,4 +1,5 @@
 #include "kernel_operator.h"
+#include "kernel_dtype.h"
 #include "conv_launch.h"
 
 namespace areno_npu {
@@ -258,9 +259,10 @@ public:
 
 } // namespace areno_npu
 
-template<typename T, uint32_t Op, bool Packed>
+template<uint32_t Storage, uint32_t Op, bool Packed>
 __global__ __aicore__ void conv_kernel(GM_ADDR x, GM_ADDR w, GM_ADDR g, GM_ADDR p, GM_ADDR out,
     GM_ADDR h, GM_ADDR cu, int64_t batch, int64_t seqlen, int64_t channels, int64_t kernel_size, int64_t segments) {
+    using T = typename areno_npu::KernelDtype<Storage>::type;
     using namespace AscendC;
     using namespace areno_npu;
     ConvKernel<T, static_cast<ConvOp>(Op), Packed> kernel;
@@ -270,7 +272,7 @@ __global__ __aicore__ void conv_kernel(GM_ADDR x, GM_ADDR w, GM_ADDR g, GM_ADDR 
 
 // Materialize device entries before CANN extracts host launcher specializations.
 #define ARENO_CONV_INSTANCE(T, OP, P) \
-    template void conv_kernel<T, areno_npu::OP, P>( \
+    template void conv_kernel<areno_npu::KernelDtypeId<T>::value, areno_npu::OP, P>( \
         GM_ADDR, GM_ADDR, GM_ADDR, GM_ADDR, GM_ADDR, GM_ADDR, GM_ADDR, \
         int64_t, int64_t, int64_t, int64_t, int64_t);
 #define ARENO_CONV_INSTANCES(T, P) \
@@ -291,7 +293,7 @@ template <typename T, bool Packed>
 void launch_conv_typed(uint32_t blocks, void* stream, ConvOp op, const void* input, const float* weight,
     const void* grad, float* preact, void* output, const void* history, const int32_t* cu,
     int64_t batch, int64_t seqlen, int64_t channels, int64_t kernel_size, int64_t segments) {
-#define ARENO_CONV(OP) case OP: conv_kernel<T, OP, Packed><<<blocks, nullptr, stream>>>( \
+#define ARENO_CONV(OP) case OP: conv_kernel<KernelDtypeId<T>::value, OP, Packed><<<blocks, nullptr, stream>>>( \
     (uint8_t*)input, (uint8_t*)weight, (uint8_t*)grad, (uint8_t*)preact, (uint8_t*)output, (uint8_t*)history, \
     (uint8_t*)cu, batch, seqlen, channels, kernel_size, segments); break
     switch (op) {

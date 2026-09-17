@@ -1,5 +1,6 @@
 #define ASCENDC_CUBE_ONLY
 #include "kernel_operator.h"
+#include "kernel_dtype.h"
 #include "lib/matmul_intf.h"
 #include "fused_experts_launch.h"
 
@@ -16,9 +17,10 @@ __aicore__ constexpr MatmulConfig expert_matmul_config() {
 
 } // namespace areno_npu
 
-template<typename T>
+template<uint32_t Storage>
 __global__ __aicore__ void expert_matmul_kernel(GM_ADDR in, GM_ADDR w, GM_ADDR out,
     GM_ADDR expertIds, GM_ADDR paddedTotal, int64_t capacity, int64_t n, int64_t k, int64_t outputStride, GM_ADDR workspace) {
+    using T = typename areno_npu::KernelDtype<Storage>::type;
     using namespace AscendC;
     using namespace areno_npu;
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIC_ONLY);
@@ -71,7 +73,7 @@ namespace areno_npu {
 void launch_expert_matmul(uint32_t blocks, void* stream, uint32_t storage,
     const void* input, const void* weight, float* output, const int32_t* experts,
     const int32_t* total, int64_t capacity, int64_t n, int64_t k, int64_t output_stride, void* workspace) {
-#define ARENO_EXPERT_MATMUL(T) expert_matmul_kernel<T><<<blocks, nullptr, stream>>>( \
+#define ARENO_EXPERT_MATMUL(T) expert_matmul_kernel<KernelDtypeId<T>::value><<<blocks, nullptr, stream>>>( \
     (uint8_t*)input, (uint8_t*)weight, (uint8_t*)output, (uint8_t*)experts, (uint8_t*)total, \
     capacity, n, k, output_stride, (uint8_t*)workspace)
     if (storage == 1) { ARENO_EXPERT_MATMUL(half); }
