@@ -508,7 +508,7 @@ def _resolve_serve_attn_backend(
     """Apply flash-attn compatibility fallback before serve starts workers."""
 
     if backend_type != BackendType.CUDA:
-        return "native", None
+        return (attn_backend if backend_type == BackendType.NPU else "native"), None
     if attn_backend != "flash":
         return attn_backend, None
     model_config = None

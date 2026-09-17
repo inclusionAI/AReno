@@ -6,8 +6,8 @@ flash-attn, but keeps causal/window masking and softmax accumulation identical
 across paths so rollout old-logp and train logp can be compared without mixing
 attention implementations.
 
-Ascend uses flash-attn-npu for supported layouts and native C kernels for
-larger heads, FP32 and paged-cache layouts outside the library's range.
+Ascend uses flash-attn-npu when available for supported layouts. Native C
+kernels handle other cases; ``force_native=True`` bypasses the library entirely.
 """
 
 from __future__ import annotations
@@ -130,6 +130,7 @@ def areno_causal_attention(
     query_start: int = 0,
     window_left: int | None = None,
     softmax_scale: float | None = None,
+    force_native: bool = False,
 ) -> torch.Tensor:
     """Apply causal attention to ``(batch, heads, seqlen, head_dim)`` tensors."""
 
@@ -146,7 +147,9 @@ def areno_causal_attention(
     if q.device.type == "npu":
         from areno.accel.npu.attention import causal_attention
 
-        return causal_attention(q, k, v, int(query_start), _window_left(window_left), _scale(q, softmax_scale))
+        return causal_attention(
+            q, k, v, int(query_start), _window_left(window_left), _scale(q, softmax_scale), force_native=force_native
+        )
     return _ArenoCausalAttention.apply(q, k, v, int(query_start), _window_left(window_left), _scale(q, softmax_scale))
 
 
@@ -199,6 +202,7 @@ def areno_varlen_causal_attention(
     *,
     window_left: int | None = None,
     softmax_scale: float | None = None,
+    force_native: bool = False,
 ) -> torch.Tensor:
     """Apply packed causal attention to flat ``(tokens, heads, head_dim)`` tensors."""
 
@@ -219,7 +223,9 @@ def areno_varlen_causal_attention(
     if q.device.type == "npu":
         from areno.accel.npu.attention import varlen_causal_attention
 
-        return varlen_causal_attention(q, k, v, cu_seqlens, _window_left(window_left), _scale(q, softmax_scale))
+        return varlen_causal_attention(
+            q, k, v, cu_seqlens, _window_left(window_left), _scale(q, softmax_scale), force_native=force_native
+        )
     return _ArenoVarlenCausalAttention.apply(q, k, v, cu_seqlens, _window_left(window_left), _scale(q, softmax_scale))
 
 
@@ -291,6 +297,7 @@ def areno_paged_causal_attention_decode(
     window_left: int | None = None,
     num_splits: int = 8,
     softmax_scale: float | None = None,
+    force_native: bool = False,
 ) -> torch.Tensor:
     """Apply single-token paged-cache causal attention to ``(batch, heads, dim)`` Q."""
 
@@ -320,6 +327,7 @@ def areno_paged_causal_attention_decode(
             _window_left(window_left),
             int(num_splits),
             _scale(q, softmax_scale),
+            force_native=force_native,
         )
     return _ArenoPagedCausalAttentionDecode.apply(
         q,

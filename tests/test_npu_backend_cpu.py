@@ -166,7 +166,7 @@ def test_npu_initializes_shared_engine_with_tp_dp_and_optimizer(monkeypatch, opt
     assert captured["runtime_config"].activation_checkpointing
     assert captured["runtime_config"].eager_decode
     assert not captured["runtime_config"].compile_model
-    assert captured["runtime_config"].attn_backend == "native"
+    assert captured["runtime_config"].attn_backend == "flash"
     assert config.runtime == {"activation_checkpointing": True}
     backend.close()
 
@@ -214,17 +214,21 @@ def test_npu_worker_uses_shared_optimizer_only_for_training(monkeypatch, role, o
         assert worker.training is None
 
 
-def test_npu_config_does_not_probe_cuda(monkeypatch):
+@pytest.mark.parametrize("attn_backend", ["flash", "native"])
+def test_npu_config_does_not_probe_cuda(monkeypatch, attn_backend):
     def unexpected_cuda_probe():
         pytest.fail("NPU configuration must not probe CUDA hardware")
 
     monkeypatch.setattr("torch.cuda.is_available", unexpected_cuda_probe)
-    config = EngineConfig(model=ModelConfig(), runtime=RuntimeConfig(device_type="npu"), tp_size=2, dp_size=2)
+    config = EngineConfig(
+        model=ModelConfig(), runtime=RuntimeConfig(device_type="npu", attn_backend=attn_backend), tp_size=2, dp_size=2
+    )
     assert config.devices == [0, 1, 2, 3]
-    assert config.model.attn_backend == "native"
+    assert config.model.attn_backend == attn_backend
 
 
-def test_npu_serve_reuses_shared_engine_with_tp_dp(monkeypatch):
+@pytest.mark.parametrize("attn_backend", ["flash", "native"])
+def test_npu_serve_reuses_shared_engine_with_tp_dp(monkeypatch, attn_backend):
     import importlib
 
     serve = importlib.import_module("areno.cli.serve")
@@ -245,7 +249,7 @@ def test_npu_serve_reuses_shared_engine_with_tp_dp(monkeypatch):
         max_running_prompts=8,
         decode_progress_interval_s=0,
         eager_decode=False,
-        attn_backend="flash",
+        attn_backend=attn_backend,
         lora=None,
         base_model_name_or_path=None,
     )
@@ -256,7 +260,7 @@ def test_npu_serve_reuses_shared_engine_with_tp_dp(monkeypatch):
     assert captured["devices"] == [0, 1, 2, 3]
     assert captured["runtime_config"].device_type == "npu"
     assert captured["runtime_config"].eager_decode
-    assert captured["runtime_config"].attn_backend == "native"
+    assert captured["runtime_config"].attn_backend == attn_backend
 
 
 def test_npu_partition_groups_reuse_shared_rank_layout(monkeypatch):

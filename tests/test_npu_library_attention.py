@@ -1,4 +1,4 @@
-"""Numerical acceptance of flash-attn-npu through AReno, without AReno C extensions."""
+"""Numerical acceptance of NPU attention, including native availability fallback."""
 
 import importlib.util
 
@@ -21,14 +21,12 @@ def npu():
 
     assert torch.npu.is_available(), "torch_npu is installed but no NPU is available"
     torch.npu.set_device(0)
-    import flash_attn_npu  # noqa: F401
-
     return "npu:0"
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("dim,start,window", [(16, 0, -1), (64, 3, -1), (128, 2, 3), (256, 3, 0)])
-def test_npu_dense_forward_and_library_backward(npu, dtype, dim, start, window):
+def test_npu_dense_forward_and_backward(npu, dtype, dim, start, window):
     pairs = [
         values((2, 3, length, dim), dtype, npu, seed, strided=True, requires_grad=True)
         for length, seed in ((7, 11), (13, 12), (13, 13))
