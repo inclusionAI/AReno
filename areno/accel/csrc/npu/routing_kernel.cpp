@@ -1,4 +1,5 @@
 #include "kernel_operator.h"
+#include "kernel_dtype.h"
 #include <math.h>
 #define ARENO_ROUTING_INLINE __aicore__ inline
 #include "../routing_common.h"
@@ -227,9 +228,10 @@ public:
 
 } // namespace areno_npu
 
-template<typename T, uint32_t Op>
+template<uint32_t Storage, uint32_t Op>
 __global__ __aicore__ void routing_kernel(GM_ADDR x, GM_ADDR b, GM_ADDR ids, GM_ADDR w, GM_ADDR dx,
     int64_t tokens, int experts, int k, bool renormalize, int groups, int topk_group) {
+    using T = typename areno_npu::KernelDtype<Storage>::type;
     using namespace AscendC;
     using namespace areno_npu;
     RoutingKernel<T, static_cast<RoutingOp>(Op)> kernel;
@@ -239,7 +241,7 @@ __global__ __aicore__ void routing_kernel(GM_ADDR x, GM_ADDR b, GM_ADDR ids, GM_
 
 // Materialize device entries before CANN extracts host launcher specializations.
 #define ARENO_ROUTING_INSTANCE(T, OP) \
-    template void routing_kernel<T, areno_npu::OP>( \
+    template void routing_kernel<areno_npu::KernelDtypeId<T>::value, areno_npu::OP>( \
         GM_ADDR, GM_ADDR, GM_ADDR, GM_ADDR, GM_ADDR, int64_t, int, int, bool, int, int);
 #define ARENO_ROUTING_INSTANCES(T) \
     ARENO_ROUTING_INSTANCE(T, TopKForward) ARENO_ROUTING_INSTANCE(T, TopKBackward) \
@@ -256,7 +258,7 @@ template <typename T>
 void launch_routing_typed(uint32_t blocks, void* stream, RoutingOp op, const void* logits, const float* bias,
     int64_t* indices, float* weights, void* grad_logits, int64_t tokens, int experts, int k,
     bool renormalize, int groups, int topk_group) {
-#define ARENO_ROUTING(OP) case OP: routing_kernel<T, OP><<<blocks, nullptr, stream>>>( \
+#define ARENO_ROUTING(OP) case OP: routing_kernel<KernelDtypeId<T>::value, OP><<<blocks, nullptr, stream>>>( \
     (uint8_t*)logits, (uint8_t*)bias, (uint8_t*)indices, (uint8_t*)weights, (uint8_t*)grad_logits, \
     tokens, experts, k, renormalize, groups, topk_group); break
     switch (op) { ARENO_ROUTING(TopKForward); ARENO_ROUTING(TopKBackward); ARENO_ROUTING(GroupedRouter); }

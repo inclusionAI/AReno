@@ -1,4 +1,5 @@
 #include "kernel_operator.h"
+#include "kernel_dtype.h"
 #include "optimizer_launch.h"
 
 namespace areno_npu {
@@ -199,10 +200,12 @@ public:
 
 } // namespace areno_npu
 
-template<typename Model, typename Grad, bool Compact>
+template<uint32_t ModelStorage, uint32_t GradStorage, bool Compact>
 __global__ __aicore__ void adam_fp32_kernel(GM_ADDR model, GM_ADDR grad, GM_ADDR low, GM_ADDR carries,
     GM_ADDR moment, GM_ADDR variance, int64_t n, int64_t offset, float b1, float b2,
     float lr, float decay, float eps, float step, float bias) {
+    using Model = typename areno_npu::KernelDtype<ModelStorage>::type;
+    using Grad = typename areno_npu::KernelDtype<GradStorage>::type;
     using namespace AscendC;
     using namespace areno_npu;
     AdamFp32Kernel<Model, Grad, Compact> kernel;
@@ -217,7 +220,7 @@ void launch_adamw_fp32(uint32_t blocks, void* stream, bool model_bf16, bool grad
                        uint16_t* low_bits, uint8_t* carries, float* moment, float* variance,
                        int64_t n, int64_t offset, float b1, float b2, float lr, float decay,
                        float eps, float step, float bias) {
-#define ARENO_ADAM_LAUNCH(M, G, C) adam_fp32_kernel<M, G, C><<<blocks, nullptr, stream>>>( \
+#define ARENO_ADAM_LAUNCH(M, G, C) adam_fp32_kernel<KernelDtypeId<M>::value, KernelDtypeId<G>::value, C><<<blocks, nullptr, stream>>>( \
     (uint8_t*)model, (uint8_t*)grad, (uint8_t*)low_bits, (uint8_t*)carries, \
     (uint8_t*)moment, (uint8_t*)variance, n, offset, b1, b2, lr, decay, eps, step, bias)
     if (compact_master) {

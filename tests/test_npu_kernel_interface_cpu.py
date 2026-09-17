@@ -80,8 +80,9 @@ def test_indirect_launchers_have_explicit_device_instances(tmp_path, family, cou
     # device math. This checks type/enum combinations and signature agreement.
     # Unlike implicit calls in a host template, they must emit object symbols
     # without a single host call site in the translation unit.
+    (tmp_path / "kernel_operator.h").write_text("#pragma once\nstruct half {}; struct bfloat16_t {};\n")
     unit = f'#include "{family}_launch.h"\n'
-    unit += "using GM_ADDR = unsigned char*; struct half {}; struct bfloat16_t {};\n"
+    unit += '#include "kernel_dtype.h"\nusing GM_ADDR = unsigned char*;\n'
     for entry in ENTRY.finditer(source):
         if entry["template"]:
             unit += entry["template"] + f"void {entry['name']}({entry['args']}) {{}}\n"
@@ -92,7 +93,7 @@ def test_indirect_launchers_have_explicit_device_instances(tmp_path, family, cou
     unit += block
     obj = tmp_path / "instances.o"
     result = subprocess.run(
-        [compiler, "-std=c++17", "-I", str(ROOT), "-x", "c++", "-c", "-", "-o", str(obj)],
+        [compiler, "-std=c++17", "-I", str(tmp_path), "-I", str(ROOT), "-x", "c++", "-c", "-", "-o", str(obj)],
         input=unit,
         text=True,
         capture_output=True,
@@ -102,3 +103,70 @@ def test_indirect_launchers_have_explicit_device_instances(tmp_path, family, cou
     emitted = [line for line in symbols.splitlines() if "_kernel<" in line]
     assert len(emitted) == count, symbols
     assert not any(" U " in line for line in emitted), symbols
+
+
+@pytest.mark.parametrize("path", sorted(ROOT.glob("*_kernel.cpp")), ids=lambda path: path.stem)
+def test_launcher_specializations_compile_and_link_without_device_types(tmp_path, path):
+    compiler = shutil.which("clang++") or shutil.which("c++")
+    nm = shutil.which("nm")
+    if compiler is None or nm is None:
+        pytest.skip("C++ compiler and nm required")
+
+    # CANN's device compiler knows half/BF16. Its generated host_stub.cpp is
+    # compiled separately by the ordinary host compiler, without those types.
+    (tmp_path / "kernel_operator.h").write_text("#pragma once\nstruct half {}; struct bfloat16_t {};\n")
+    source = re.sub(r"//[^\n]*|/\*[\s\S]*?\*/", "", path.read_text())
+    entries = list(ENTRY.finditer(source))
+    includes = "\n".join(re.findall(r'^#include "(?:\w+_launch|kernel_dtype)\.h"', source, re.M))
+    prelude = '#include <cstdint>\n#include "kernel_operator.h"\nusing GM_ADDR = uint8_t*;\n' + includes + "\n"
+    device, host = source[entries[0].start() :], source[entries[0].start() :]
+    declarations = []
+    for entry in reversed(entries):
+        end, depth = entry.end(), 1
+        while depth:
+            depth += (source[end] == "{") - (source[end] == "}")
+            end += 1
+        definition = source[entry.start() : end]
+        signature = (entry["template"] or "") + f"void {entry['name']}({entry['args']})"
+        aliases = re.findall(r"using \w+ = typename areno_npu::KernelDtype<\w+>::type;", definition)
+        device = device.replace(definition, signature + " {" + "\n".join(aliases) + "}")
+        host = host.replace(definition, signature + ";")
+        declarations.append(signature + (";" if entry["template"] else " {}"))
+
+    # Keep real dispatch and explicit instantiations, replacing device math and
+    # launch syntax only. Removing explicit instantiations from the host unit
+    # ensures it must resolve every dispatched specialization from the stub.
+    device = re.sub(r"<<<[^>]+>>>", "", device)
+    host = re.sub(r"<<<[^>]+>>>", "", host)
+    host = re.sub(r"#define ARENO_(\w+)_INSTANCE\(.*?#undef ARENO_\1_INSTANCE\b", "", host, flags=re.S)
+
+    def compile_unit(name, unit):
+        obj = tmp_path / f"{name}.o"
+        result = subprocess.run(
+            [compiler, "-std=c++17", "-I", str(tmp_path), "-I", str(ROOT), "-x", "c++", "-c", "-", "-o", str(obj)],
+            input=unit,
+            text=True,
+            capture_output=True,
+        )
+        assert result.returncode == 0, result.stderr
+        return obj
+
+    device_obj = compile_unit("device", prelude + device)
+    symbols = subprocess.check_output([nm, "-C", str(device_obj)], text=True)
+    # Like CANN, derive specializations from demangled device object symbols.
+    # The stub deliberately includes no fake/device dtype declarations.
+    stub = "#include <cstdint>\nusing GM_ADDR = uint8_t*;\n" + "\n".join(declarations) + "\n"
+    specializations = list(re.finditer(r"\bvoid (\w+_kernel)(<.*>)?\(([^\n]*)\)$", symbols, re.M))
+    assert specializations, symbols
+    for symbol in specializations:
+        if symbol[2]:
+            stub += "template<>\n"
+        stub += f"void {symbol[1]}{symbol[2] or ''}({symbol[3]}) {{}}\n"
+    stub_obj = compile_unit("host_stub", stub)
+    host_obj = compile_unit("host", prelude + host + "\nint main() {}\n")
+    result = subprocess.run(
+        [compiler, str(host_obj), str(stub_obj), "-o", str(tmp_path / "launchers")],
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr

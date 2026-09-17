@@ -1,4 +1,5 @@
 #include "kernel_operator.h"
+#include "kernel_dtype.h"
 #include "linear_launch.h"
 
 namespace areno_npu {
@@ -82,8 +83,9 @@ public:
 
 } // namespace areno_npu
 
-template<typename T, bool Backward>
+template<uint32_t Storage, bool Backward>
 __global__ __aicore__ void linear_bias_kernel(GM_ADDR x, GM_ADDR bias, GM_ADDR y, int64_t rows, int64_t columns) {
+    using T = typename areno_npu::KernelDtype<Storage>::type;
     using namespace AscendC;
     using namespace areno_npu;
     LinearBiasKernel<T, Backward> kernel;
@@ -95,7 +97,7 @@ namespace areno_npu {
 
 void launch_linear_bias(uint32_t blocks, void* stream, uint32_t storage, bool backward,
                         const void* input, const void* bias, void* output, int64_t rows, int64_t columns) {
-#define ARENO_LINEAR_BIAS(T, B) linear_bias_kernel<T, B><<<blocks, nullptr, stream>>>( \
+#define ARENO_LINEAR_BIAS(T, B) linear_bias_kernel<KernelDtypeId<T>::value, B><<<blocks, nullptr, stream>>>( \
     (uint8_t*)input, (uint8_t*)bias, (uint8_t*)output, rows, columns)
 #define ARENO_LINEAR_TYPE(T) \
     if (backward) { ARENO_LINEAR_BIAS(T, true); } else { ARENO_LINEAR_BIAS(T, false); }

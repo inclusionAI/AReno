@@ -1,4 +1,5 @@
 #include "kernel_operator.h"
+#include "kernel_dtype.h"
 #include "optimizer_launch.h"
 
 namespace areno_npu {
@@ -115,9 +116,10 @@ public:
 
 } // namespace areno_npu
 
-template<typename Grad>
+template<uint32_t GradStorage>
 __global__ __aicore__ void factored_stats_kernel(GM_ADDR grad, GM_ADDR factors, GM_ADDR invalid,
     int64_t n, int64_t start, int64_t rows, int64_t columns) {
+    using Grad = typename areno_npu::KernelDtype<GradStorage>::type;
     using namespace AscendC;
     using namespace areno_npu;
     FactoredStatsKernel<Grad> kernel;
@@ -130,7 +132,7 @@ namespace areno_npu {
 void launch_adamw_factored_stats(uint32_t blocks, void* stream, bool grad_bf16, const void* grad,
                                  float* sums, int32_t* invalid, int64_t n, int64_t start,
                                  int64_t rows, int64_t columns) {
-#define ARENO_FACTORED_STATS(G) factored_stats_kernel<G><<<blocks, nullptr, stream>>>( \
+#define ARENO_FACTORED_STATS(G) factored_stats_kernel<KernelDtypeId<G>::value><<<blocks, nullptr, stream>>>( \
     (uint8_t*)grad, (uint8_t*)sums, (uint8_t*)invalid, n, start, rows, columns)
     if (grad_bf16) { ARENO_FACTORED_STATS(bfloat16_t); }
     else { ARENO_FACTORED_STATS(float); }

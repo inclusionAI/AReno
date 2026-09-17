@@ -1,4 +1,5 @@
 #include "kernel_operator.h"
+#include "kernel_dtype.h"
 #include "optimizer_launch.h"
 
 namespace areno_npu {
@@ -313,11 +314,13 @@ public:
 
 } // namespace areno_npu
 
-template<typename Model, typename Grad, bool FourBit>
+template<uint32_t ModelStorage, uint32_t GradStorage, bool FourBit>
 __global__ __aicore__ void adam_quantized_kernel(GM_ADDR model, GM_ADDR grad, GM_ADDR m, GM_ADDR ms,
     GM_ADDR v, GM_ADDR vs, GM_ADDR signedMap, GM_ADDR unsignedMap, int64_t n,
     int64_t mo, int64_t mso, int64_t vo, int64_t vso, uint32_t blockSize,
     float beta1, float beta2, float lr, float decay, float eps, float step, float bias) {
+    using Model = typename areno_npu::KernelDtype<ModelStorage>::type;
+    using Grad = typename areno_npu::KernelDtype<GradStorage>::type;
     using namespace AscendC;
     using namespace areno_npu;
     AdamQuantizedKernel<Model, Grad, FourBit> kernel;
@@ -332,7 +335,7 @@ void launch_adamw_quantized(uint32_t blocks, void* stream, bool model_bf16, bool
     uint8_t* variance, float* variance_scale, const float* signed_map, const float* unsigned_map,
     int64_t n, int64_t mo, int64_t mso, int64_t vo, int64_t vso, uint32_t block_size,
     float beta1, float beta2, float lr, float decay, float eps, float step, float bias) {
-#define ARENO_QUANT_LAUNCH(M, G, FOUR) adam_quantized_kernel<M, G, FOUR><<<blocks, nullptr, stream>>>( \
+#define ARENO_QUANT_LAUNCH(M, G, FOUR) adam_quantized_kernel<KernelDtypeId<M>::value, KernelDtypeId<G>::value, FOUR><<<blocks, nullptr, stream>>>( \
     (uint8_t*)model, (uint8_t*)grad, (uint8_t*)moment, (uint8_t*)moment_scale, (uint8_t*)variance, \
     (uint8_t*)variance_scale, (uint8_t*)signed_map, (uint8_t*)unsigned_map, n, mo, mso, vo, vso, \
     block_size, beta1, beta2, lr, decay, eps, step, bias)
@@ -351,11 +354,13 @@ void launch_adamw_quantized(uint32_t blocks, void* stream, bool model_bf16, bool
 
 } // namespace areno_npu
 
-template<typename Model, typename Grad>
+template<uint32_t ModelStorage, uint32_t GradStorage>
 __global__ __aicore__ void adam_factored_step_kernel(GM_ADDR model, GM_ADDR grad, GM_ADDR m, GM_ADDR ms,
     GM_ADDR factors, GM_ADDR mean, GM_ADDR invalid, int64_t n, int64_t mo, int64_t mso,
     int64_t start, int64_t rows, int64_t columns, uint32_t blockSize,
     float beta1, float lr, float decay, float eps, float step, float bias) {
+    using Model = typename areno_npu::KernelDtype<ModelStorage>::type;
+    using Grad = typename areno_npu::KernelDtype<GradStorage>::type;
     using namespace AscendC;
     using namespace areno_npu;
     AdamQuantizedKernel<Model, Grad, true, true> kernel;
@@ -371,7 +376,7 @@ void launch_adamw_factored_step(uint32_t blocks, void* stream, bool model_bf16, 
     const float* factors, const float* row_mean, const int32_t* invalid,
     int64_t n, int64_t mo, int64_t mso, int64_t start, int64_t rows, int64_t columns, uint32_t block_size,
     float beta1, float lr, float decay, float eps, float step, float bias) {
-#define ARENO_FACTORED_STEP(M, G) adam_factored_step_kernel<M, G><<<blocks, nullptr, stream>>>( \
+#define ARENO_FACTORED_STEP(M, G) adam_factored_step_kernel<KernelDtypeId<M>::value, KernelDtypeId<G>::value><<<blocks, nullptr, stream>>>( \
     (uint8_t*)model, (uint8_t*)grad, (uint8_t*)moment, (uint8_t*)moment_scale, (uint8_t*)factors, \
     (uint8_t*)row_mean, (uint8_t*)invalid, n, mo, mso, start, rows, columns, block_size, \
     beta1, lr, decay, eps, step, bias)

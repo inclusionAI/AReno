@@ -1,4 +1,5 @@
 #include "kernel_operator.h"
+#include "kernel_dtype.h"
 #include "fused_experts_launch.h"
 
 namespace areno_npu {
@@ -94,8 +95,9 @@ __global__ __aicore__ void expert_tokens_kernel(GM_ADDR sorted, GM_ADDR expertId
 }
 
 
-template<typename T>
+template<uint32_t Storage>
 __global__ __aicore__ void expert_cast_kernel(GM_ADDR in, GM_ADDR out, int64_t rows, int64_t width, int64_t inputStride) {
+    using T = typename areno_npu::KernelDtype<Storage>::type;
     using namespace AscendC;
     using namespace areno_npu;
     ExpertIO io;
@@ -114,9 +116,10 @@ __global__ __aicore__ void expert_cast_kernel(GM_ADDR in, GM_ADDR out, int64_t r
 }
 
 
-template<typename T>
+template<uint32_t Storage>
 __global__ __aicore__ void expert_weight_scatter_kernel(GM_ADDR in, GM_ADDR w, GM_ADDR sorted,
     GM_ADDR expertIds, GM_ADDR paddedTotal, GM_ADDR out, int64_t capacity, int64_t routes, int64_t hidden, int64_t inputStride) {
+    using T = typename areno_npu::KernelDtype<Storage>::type;
     using namespace AscendC;
     using namespace areno_npu;
     ExpertIO io;
@@ -152,9 +155,10 @@ __global__ __aicore__ void expert_weight_scatter_kernel(GM_ADDR in, GM_ADDR w, G
 }
 
 
-template<typename T>
+template<uint32_t Storage>
 __global__ __aicore__ void expert_reduce_kernel(GM_ADDR in, GM_ADDR out,
     int64_t tokens, int64_t hidden, int64_t topK, float scale) {
+    using T = typename areno_npu::KernelDtype<Storage>::type;
     using namespace AscendC;
     using namespace areno_npu;
     ExpertIO io;
@@ -189,7 +193,7 @@ void launch_expert_tokens(uint32_t blocks, void* stream, const int32_t* aligned,
 }
 void launch_expert_cast(uint32_t blocks, void* stream, uint32_t storage,
     const float* input, void* output, int64_t rows, int64_t width, int64_t input_stride) {
-#define ARENO_EXPERT_CAST(T) expert_cast_kernel<T><<<blocks, nullptr, stream>>>( \
+#define ARENO_EXPERT_CAST(T) expert_cast_kernel<KernelDtypeId<T>::value><<<blocks, nullptr, stream>>>( \
     (uint8_t*)input, (uint8_t*)output, rows, width, input_stride)
     if (storage == 1) { ARENO_EXPERT_CAST(half); }
     else { ARENO_EXPERT_CAST(bfloat16_t); }
@@ -198,7 +202,7 @@ void launch_expert_cast(uint32_t blocks, void* stream, uint32_t storage,
 void launch_expert_weight_scatter(uint32_t blocks, void* stream, uint32_t storage,
     const float* input, const float* weights, const int32_t* aligned, const int32_t* experts, const int32_t* total,
     void* output, int64_t capacity, int64_t routes, int64_t hidden, int64_t input_stride) {
-#define ARENO_EXPERT_SCATTER(T) expert_weight_scatter_kernel<T><<<blocks, nullptr, stream>>>( \
+#define ARENO_EXPERT_SCATTER(T) expert_weight_scatter_kernel<KernelDtypeId<T>::value><<<blocks, nullptr, stream>>>( \
     (uint8_t*)input, (uint8_t*)weights, (uint8_t*)aligned, (uint8_t*)experts, (uint8_t*)total, \
     (uint8_t*)output, capacity, routes, hidden, input_stride)
     if (storage == 1) { ARENO_EXPERT_SCATTER(half); }
@@ -207,7 +211,7 @@ void launch_expert_weight_scatter(uint32_t blocks, void* stream, uint32_t storag
 }
 void launch_expert_reduce(uint32_t blocks, void* stream, uint32_t storage,
     const void* input, void* output, int64_t tokens, int64_t hidden, int64_t top_k, float scale) {
-#define ARENO_EXPERT_REDUCE(T) expert_reduce_kernel<T><<<blocks, nullptr, stream>>>( \
+#define ARENO_EXPERT_REDUCE(T) expert_reduce_kernel<KernelDtypeId<T>::value><<<blocks, nullptr, stream>>>( \
     (uint8_t*)input, (uint8_t*)output, tokens, hidden, top_k, scale)
     if (storage == 1) { ARENO_EXPERT_REDUCE(half); }
     else { ARENO_EXPERT_REDUCE(bfloat16_t); }

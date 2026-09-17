@@ -1,4 +1,5 @@
 #include "kernel_operator.h"
+#include "kernel_dtype.h"
 #include "normalization_launch.h"
 
 namespace areno_npu {
@@ -212,10 +213,12 @@ public:
 
 } // namespace areno_npu
 
-template<typename T, typename W, bool Backward, bool Scale, uint32_t Gate>
+template<uint32_t Storage, uint32_t WeightStorage, bool Backward, bool Scale, uint32_t Gate>
 __global__ __aicore__ void normalization_kernel(GM_ADDR input, GM_ADDR gate, GM_ADDR weight, GM_ADDR grad,
                                                GM_ADDR output, GM_ADDR gradGate, GM_ADDR inv, GM_ADDR gradWeight,
                                                int64_t rows, int64_t width, int64_t groups, float eps) {
+    using T = typename areno_npu::KernelDtype<Storage>::type;
+    using W = typename areno_npu::KernelDtype<WeightStorage>::type;
     using namespace AscendC;
     using namespace areno_npu;
     NormalizationKernel<T, W, Backward, Scale, Gate> kernel;
@@ -225,7 +228,7 @@ __global__ __aicore__ void normalization_kernel(GM_ADDR input, GM_ADDR gate, GM_
 
 // Materialize device entries before CANN extracts host launcher specializations.
 #define ARENO_NORM_INSTANCE(T, W, B, S, G) \
-    template void normalization_kernel<T, W, B, S, G>( \
+    template void normalization_kernel<areno_npu::KernelDtypeId<T>::value, areno_npu::KernelDtypeId<W>::value, B, S, G>( \
         GM_ADDR, GM_ADDR, GM_ADDR, GM_ADDR, GM_ADDR, GM_ADDR, GM_ADDR, GM_ADDR, \
         int64_t, int64_t, int64_t, float);
 #define ARENO_NORM_INSTANCES(T) \
@@ -253,7 +256,7 @@ void launch_norm_typed(uint32_t blocks, void* stream, uint32_t weightStorage,
                        void* output, void* gradGate, float* inv, float* gradWeight,
                        int64_t rows, int64_t width, int64_t groups, float eps) {
 #define ARENO_NORM_LAUNCH(W, BACKWARD, SCALE, GATE) \
-    normalization_kernel<T, W, BACKWARD, SCALE, GATE><<<blocks, nullptr, stream>>>( \
+    normalization_kernel<KernelDtypeId<T>::value, KernelDtypeId<W>::value, BACKWARD, SCALE, GATE><<<blocks, nullptr, stream>>>( \
         (uint8_t*)input, (uint8_t*)gate, (uint8_t*)weight, (uint8_t*)grad, \
         (uint8_t*)output, (uint8_t*)gradGate, (uint8_t*)inv, (uint8_t*)gradWeight, rows, width, groups, eps)
     if (gateKind == 2) {
