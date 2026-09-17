@@ -71,36 +71,6 @@ class NpuWorker(ArenoWorker):
             )
         super().__init__(config)
 
-    def train(self, payload):
-        probe = any(
-            getattr(shard.get("_loss_fn"), "__name__", "") == "_dummy_policy_loss"
-            for pack in payload.data_packs_by_dp
-            for shard in pack
-        )
-        if probe:
-            torch.npu.synchronize()
-            torch.npu.reset_peak_memory_stats()
-        result = super().train(payload)
-        if probe and result is not None:
-            torch.npu.synchronize()
-            peak_fraction = torch.npu.max_memory_allocated() / torch.npu.get_device_properties().total_memory
-            for microbatch in result:
-                if microbatch is not None:
-                    microbatch.setdefault("metrics", {})["auto_tune_worker_peak_mem_frac"] = peak_fraction
-        return result
-
-    def probe_rollout_cache(self, payload):
-        torch.npu.synchronize()
-        torch.npu.reset_peak_memory_stats()
-        super().probe_rollout_cache(payload)
-        torch.npu.synchronize()
-        return torch.npu.max_memory_allocated() / torch.npu.get_device_properties().total_memory
-
-    def rollout_session_sync(self, payload):
-        torch.npu.synchronize()
-        super().rollout_session_sync(payload)
-        torch.npu.synchronize()
-
 
 @register_backend(BackendType.NPU)
 class NpuBackend(CudaBackend):

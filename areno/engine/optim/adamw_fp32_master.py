@@ -25,6 +25,7 @@ from areno.engine.optim.master_storage import (
     decode_fp32_master_slice,
     encode_fp32_master,
 )
+from areno.engine.runtime.device import Completion, accelerator_module
 
 # Per-bucket budget for the FP32 flat buffer (in elements, not bytes).
 _DEFAULT_BUCKET_NUMEL = 16 * 1024 * 1024
@@ -90,7 +91,7 @@ class _MasterBucket:
     offload_file: str | None = None
     offload_index: int | None = None
     offload_group: _MmapGroup | None = None
-    offload_ready_events: tuple[torch.cuda.Event, ...] = ()
+    offload_ready_events: tuple[Completion, ...] = ()
 
 
 class AdamWFP32Master:
@@ -137,7 +138,7 @@ class AdamWFP32Master:
         self._mmap_groups: dict[tuple[int, ...], _MmapGroup] = {}
         self._disk_prefetch_executor: ThreadPoolExecutor | None = None
         self._disk_prefetch_futures: dict[int, Future[dict[str, torch.Tensor]]] = {}
-        self._disk_prefetch_in_use: dict[int, tuple[dict[str, torch.Tensor], torch.cuda.Event | None]] = {}
+        self._disk_prefetch_in_use: dict[int, tuple[dict[str, torch.Tensor], Completion | None]] = {}
         self._disk_write_executor: ThreadPoolExecutor | None = None
         self._disk_write_futures: dict[tuple[int, ...], Future[None]] = {}
         self._active_offload_mode = "none"
@@ -809,7 +810,7 @@ class AdamWFP32Master:
             return
         group = self._get_or_create_mmap_group(indices, self._master_mmap_specs(indices))
         payloads: dict[int, dict[str, torch.Tensor]] = {}
-        ready_events: list[torch.cuda.Event] = []
+        ready_events: list[Completion] = []
         for index in present_indices:
             bucket = self.buckets[index]
             assert bucket.master_storage is not None
@@ -859,24 +860,25 @@ class AdamWFP32Master:
     def _stage_payload_on_cpu(
         self,
         payload: dict[str, torch.Tensor],
-    ) -> tuple[dict[str, torch.Tensor], tuple[torch.cuda.Event, ...]]:
+    ) -> tuple[dict[str, torch.Tensor], tuple[Completion, ...]]:
         """Queue disk-bound CUDA tensors into pinned host buffers without synchronizing."""
 
         async_disk = self._active_offload_mode == "disk"
         staged: dict[str, torch.Tensor] = {}
-        cuda_devices: set[torch.device] = set()
+        devices: set[torch.device] = set()
         for name, tensor in payload.items():
-            if async_disk and tensor.device.type == "cuda":
+            if async_disk and accelerator_module(tensor.device) is not None:
                 destination = torch.empty_like(tensor, device="cpu", pin_memory=True)
                 destination.copy_(tensor, non_blocking=True)
                 staged[name] = destination
-                cuda_devices.add(tensor.device)
+                devices.add(tensor.device)
             else:
                 staged[name] = tensor.to(device="cpu")
-        ready_events: list[torch.cuda.Event] = []
-        for device in cuda_devices:
-            event = torch.cuda.Event()
-            event.record(torch.cuda.current_stream(device))
+        ready_events: list[Completion] = []
+        for device in devices:
+            accelerator = accelerator_module(device)
+            event = accelerator.Event()
+            event.record(accelerator.current_stream(device))
             ready_events.append(event)
         return staged, tuple(ready_events)
 
@@ -897,7 +899,7 @@ class AdamWFP32Master:
         )
         bucket.exp_avg = _host_tensor_to(state["exp_avg"], device, prefetched=prefetched)
         bucket.exp_avg_sq = _host_tensor_to(state["exp_avg_sq"], device, prefetched=prefetched)
-        if prefetched and device.type == "cuda":
+        if prefetched and accelerator_module(device) is not None:
             self._retain_disk_prefetch(bucket.offload_index, state, device)
 
     def _disk_mmap_group_for_index(self, index: int) -> _MmapGroup | None:
@@ -926,7 +928,7 @@ class AdamWFP32Master:
                 self._disk_prefetch_futures[index] = self._disk_prefetch_executor.submit(
                     _prefetch_mmap_payload_after_write,
                     group.tensors[index],
-                    torch.cuda.is_available(),
+                    accelerator_module(self.buckets[index].refs[0].model_param.device) is not None,
                     self._disk_write_futures.get(tuple(group.tensors)),
                 )
                 next_index = index + 1
@@ -963,8 +965,9 @@ class AdamWFP32Master:
     ) -> None:
         """Keep pinned sources alive until their queued H2D copies complete."""
 
-        event = torch.cuda.Event()
-        event.record(torch.cuda.current_stream(device))
+        accelerator = accelerator_module(device)
+        event = accelerator.Event()
+        event.record(accelerator.current_stream(device))
         self._disk_prefetch_in_use[index] = (payload, event)
 
     def _release_disk_prefetch(self, index: int) -> None:
@@ -993,7 +996,7 @@ class AdamWFP32Master:
         indices: list[int],
         group: _MmapGroup,
         payloads: dict[int, dict[str, torch.Tensor]],
-        ready_events: tuple[torch.cuda.Event, ...] = (),
+        ready_events: tuple[Completion, ...] = (),
     ) -> None:
         """Queue one group write while bounding retained CPU state to one group."""
 
@@ -1297,7 +1300,7 @@ def _prefetch_mmap_payload_after_write(
 def _write_mmap_payloads(
     group: _MmapGroup,
     payloads: dict[int, dict[str, torch.Tensor]],
-    ready_events: tuple[torch.cuda.Event, ...] = (),
+    ready_events: tuple[Completion, ...] = (),
 ) -> None:
     """Write one staged optimizer group in the background and flush once."""
 

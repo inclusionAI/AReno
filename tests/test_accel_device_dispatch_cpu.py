@@ -12,6 +12,7 @@ from torch._subclasses.fake_tensor import FakeTensor, FakeTensorMode
 import areno.accel as accel
 from areno.accel import _extension, ops
 from areno.accel.utils import on_kernel_device
+from tests.npu_stub import register_npu_device
 
 
 class NativeReached(Exception):
@@ -20,8 +21,7 @@ class NativeReached(Exception):
 
 @pytest.fixture(scope="module", autouse=True)
 def register_npu_device_name():
-    if torch._C._get_privateuse1_backend_name() == "privateuseone":
-        torch.utils.rename_privateuse1_backend("npu")
+    register_npu_device()
 
 
 @pytest.fixture

@@ -15,12 +15,12 @@ from areno.api.context import Context
 from areno.engine.api import ArenoEngine
 from areno.engine.config import EngineConfig, ModelConfig, RuntimeConfig
 from areno.engine.worker import ArenoWorker
+from tests.npu_stub import register_npu_device
 
 
 @pytest.fixture(scope="module", autouse=True)
 def register_npu_device_name():
-    if torch._C._get_privateuse1_backend_name() == "privateuseone":
-        torch.utils.rename_privateuse1_backend("npu")
+    register_npu_device()
 
 
 def test_npu_reuses_cuda_workflows():
@@ -31,6 +31,9 @@ def test_npu_reuses_cuda_workflows():
     assert NpuWorker.handle is ArenoWorker.handle
     assert NpuWorker.save_checkpoint is ArenoWorker.save_checkpoint
     assert NpuWorker.run_rollout_command is ArenoWorker.run_rollout_command
+    assert NpuWorker.train is ArenoWorker.train
+    assert NpuWorker.probe_rollout_cache is ArenoWorker.probe_rollout_cache
+    assert NpuWorker.rollout_session_sync is ArenoWorker.rollout_session_sync
     assert {p.name for p in Path(__import__("areno.api.backend.npu", fromlist=["x"]).__file__).parent.glob("*.py")} == {
         "__init__.py",
         "backend.py",
@@ -186,32 +189,108 @@ def test_npu_partition_groups_reuse_shared_rank_layout(monkeypatch):
     assert layouts[0] == layouts[1] == [(0, 1), (2, 3), (0, 2), (1, 3), (4,), (5,), (4, 5), (0, 4), (2, 4)]
 
 
-def test_npu_worker_training_probe_uses_npu_memory_and_shared_train(monkeypatch):
-    import torch
+@pytest.mark.parametrize("device_type", ["cuda", "npu"])
+def test_shared_training_probe_measures_each_microbatch(monkeypatch, device_type):
+    from areno.engine import training
 
-    from areno.engine.protocol import TrainPayload
-
+    device = torch.device(device_type, 1)
     events = []
+    peaks = iter((40, 70))
 
     def _dummy_policy_loss():
         pass
 
     monkeypatch.setattr(
         torch,
-        "npu",
+        device_type,
         SimpleNamespace(
-            synchronize=lambda: events.append("sync"),
-            reset_peak_memory_stats=lambda: events.append("reset"),
-            max_memory_allocated=lambda: 40,
-            get_device_properties=lambda: SimpleNamespace(total_memory=100),
+            synchronize=lambda d: events.append(("sync", d)),
+            reset_peak_memory_stats=lambda d: events.append(("reset", d)),
+            max_memory_allocated=lambda d: next(peaks),
+            get_device_properties=lambda d: SimpleNamespace(total_memory=100),
         ),
         raising=False,
     )
-    monkeypatch.setattr(ArenoWorker, "train", lambda self, payload: [None, {"loss": 1.0, "metrics": {"existing": 2.0}}])
-    worker = object.__new__(NpuWorker)
-    result = worker.train(TrainPayload(data_packs_by_dp=[[{"_loss_fn": _dummy_policy_loss}]]))
-    assert result == [None, {"loss": 1.0, "metrics": {"existing": 2.0, "auto_tune_worker_peak_mem_frac": 0.4}}]
-    assert events == ["sync", "reset", "sync"]
+
+    # Run real CPU autograd while substituting the hardware/memory boundary.
+    class Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones(4))
+
+        def forward(self, input_ids, **kwargs):
+            return SimpleNamespace(logits_shard=self.weight.expand(input_ids.numel(), -1))
+
+    model = Model()
+    worker = SimpleNamespace(
+        device=device,
+        model=model,
+        _train_state_ready=True,
+        _global_step=0,
+        adapter_registry=None,
+        config=SimpleNamespace(
+            runtime=SimpleNamespace(activation_checkpointing=False),
+            model=SimpleNamespace(model_type="qwen3"),
+            effective_sequence_parallel=False,
+        ),
+        optimizer=SimpleNamespace(lr=0.001, model_params=list(model.parameters())),
+        loss_fn=lambda pack, logprobs: (logprobs.sum(), {"existing": 2.0}),
+    )
+    monkeypatch.setattr(training, "get_tp_context", lambda: SimpleNamespace(dp_rank=0, is_rank0=True))
+    monkeypatch.setattr(training, "_pack_train_data", lambda pack: pack)
+    monkeypatch.setattr(training, "to_device", lambda pack, device: pack)
+    monkeypatch.setattr(training, "_train_meta", lambda *a, **kw: SimpleNamespace(sequence_parallel=False))
+    monkeypatch.setattr(training, "packed_next_token_logprobs", lambda logits, *a: logits.sum(-1))
+    pack = {"input_ids": torch.tensor([1, 2]), "train_cu_seqlens": torch.tensor([0, 2])}
+    manager = training.TrainingManager(worker)
+    results = [
+        manager._train_step([{**pack, "_loss_fn": _dummy_policy_loss}], allow_step=False, grad_scale=2)
+        for _ in range(2)
+    ]
+    assert [r["metrics"]["auto_tune_worker_peak_mem_frac"] for r in results] == [0.4, 0.7]
+    assert all(r["metrics"]["existing"] == 2.0 for r in results)
+    assert events == [(op, device) for op in ("sync", "reset", "sync") * 2]
+    torch.testing.assert_close(model.weight.main_grad, torch.full((4,), 2.0))
+    # Ordinary microbatches must not synchronize or reset peak accounting.
+    manager._train_step([pack], allow_step=False, grad_scale=1)
+    assert len(events) == 6
+
+
+@pytest.mark.parametrize("device_type", ["cpu", "cuda", "npu"])
+def test_rollout_probe_and_session_sync_use_worker_device(monkeypatch, device_type):
+    from areno.engine.protocol import RolloutCacheProbePayload
+
+    events = []
+    device = torch.device(device_type, 1) if device_type != "cpu" else torch.device("cpu")
+    if device_type != "cpu":
+        monkeypatch.setattr(
+            torch,
+            device_type,
+            SimpleNamespace(
+                synchronize=lambda d: events.append(("sync", d)),
+                reset_peak_memory_stats=lambda d: events.append(("reset", d)),
+                max_memory_allocated=lambda d: 40,
+                get_device_properties=lambda d: SimpleNamespace(total_memory=100),
+            ),
+            raising=False,
+        )
+    worker = object.__new__(ArenoWorker)
+    worker.device = device
+    worker.inference = SimpleNamespace(_init_infer_cache=lambda spec: events.append(("cache", spec.num_blocks)))
+    peak = worker.probe_rollout_cache(RolloutCacheProbePayload(2, 512, 2, 4, 256))
+    assert peak == (0.0 if device_type == "cpu" else 0.4)
+    assert events == (
+        [("cache", 4)]
+        if device_type == "cpu"
+        else [("sync", device), ("reset", device), ("cache", 4), ("sync", device)]
+    )
+    events.clear()
+    group = object()
+    monkeypatch.setattr("areno.engine.worker.get_tp_context", lambda: SimpleNamespace(device=device, group=group))
+    monkeypatch.setattr("areno.engine.worker.dist.barrier", lambda **kw: events.append(("barrier", kw)))
+    worker.rollout_session_sync(None)
+    barrier = ("barrier", {"group": group, **({"device_ids": [1]} if device_type == "cuda" else {})})
+    assert events == ([barrier] if device_type == "cpu" else [("sync", device), barrier, ("sync", device)])
 
 
 def test_npu_registered_training_algorithms_and_roles_are_shared():
