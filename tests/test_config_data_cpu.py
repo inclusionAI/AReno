@@ -95,7 +95,8 @@ class ConfigAndDataTest(unittest.TestCase):
         cu_seqlens = torch.tensor([0, 2, 5], dtype=torch.int32)
         captured = {}
 
-        def fake_attention(q_flat, k_flat, v_flat, cu, *, window_left, softmax_scale):
+        def fake_attention(q_flat, k_flat, v_flat, cu, *, window_left, softmax_scale, force_native):
+            self.assertTrue(force_native)
             captured.update(
                 q_shape=tuple(q_flat.shape),
                 k_shape=tuple(k_flat.shape),
@@ -588,7 +589,8 @@ class ConfigAndDataTest(unittest.TestCase):
         meta = InferMeta(mode="prefill", cu_seqlens=torch.tensor([0, 3], dtype=torch.int32), max_seqlen=3)
         captured = {}
 
-        def fake_varlen(q_arg, k_arg, v_arg, cu_arg, *, window_left, softmax_scale):
+        def fake_varlen(q_arg, k_arg, v_arg, cu_arg, *, window_left, softmax_scale, force_native):
+            self.assertTrue(force_native)
             captured["q_shape"] = tuple(q_arg.shape)
             captured["k_shape"] = tuple(k_arg.shape)
             captured["v_shape"] = tuple(v_arg.shape)

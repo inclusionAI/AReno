@@ -283,7 +283,8 @@ def test_npu_training_attention_uses_the_shared_native_wrapper(monkeypatch, nati
     mode, tensor = native_tensors
     q = tensor((1, 2, 2, 4))
 
-    def call(*args):
+    def call(*args, force_native):
+        assert force_native
         raise NativeReached("areno_varlen_causal_attention_forward")
 
     monkeypatch.setattr(attention, "varlen_causal_attention", call)
@@ -324,7 +325,10 @@ def test_npu_attention_selects_library_or_native_by_shape(
             return call
 
     monkeypatch.setattr(_extension, "_NPU_EXT", Provider("native"))
+    monkeypatch.setattr(attention, "_UNAVAILABLE_FLASH_DEVICES", set())
     monkeypatch.setattr(attention, "flash_attention", lambda device: Provider("flash"))
+    loader = importlib.import_module("areno.accel.flash_attention")
+    monkeypatch.setattr(loader, "flash_attention", lambda device: Provider("flash"))
     native = dtype == torch.float32 or dim > 256
     if mode_name == "decode":
         native |= bool(dim % 8 or block_size % 256)
@@ -333,7 +337,7 @@ def test_npu_attention_selects_library_or_native_by_shape(
     expected_entry = (
         f"areno_{entry}_forward"
         if native
-        else {"decode": "flash_attn_with_kvcache"}.get(mode_name, "flash_attn_varlen_func")
+        else {"decode": "flash_attn_with_kvcache", "train": "flash_attn_func"}.get(mode_name, "flash_attn_varlen_func")
     )
     q = tensor((1, 1 if mode_name == "decode" else 2, 2, dim), dtype)
     cu = tensor((2,), torch.int32)
@@ -350,9 +354,9 @@ def test_npu_attention_selects_library_or_native_by_shape(
             flat = q.reshape(2, 2, dim)
             accel.areno_varlen_causal_attention(flat, flat, flat, cu)
         elif mode_name == "train":
-            FlashAttnTrainAttentionBackend("native")(q, q, q, None)
+            FlashAttnTrainAttentionBackend("flash")(q, q, q, None)
         else:
-            FlashAttnInferBackend("native")(q, q, q, cache, cache, meta, update_cache=mode_name == "decode")
+            FlashAttnInferBackend("flash")(q, q, q, cache, cache, meta, update_cache=mode_name == "decode")
 
 
 def test_accel_metadata_imports_do_not_require_triton_or_device_extensions():
@@ -367,6 +371,67 @@ def test_accel_metadata_imports_do_not_require_triton_or_device_extensions():
         ],
         check=True,
     )
+
+
+@pytest.mark.parametrize("selection", ["native", "unsupported_device", "missing_package"])
+def test_npu_native_selection_covers_train_prefill_and_decode(monkeypatch, native_tensors, selection):
+    import warnings
+
+    from areno.accel.npu import attention
+    from areno.engine.layers.attention_backend.infer import FlashAttnInferBackend
+    from areno.engine.layers.attention_backend.train import FlashAttnTrainAttentionBackend
+
+    mode, tensor = native_tensors
+    loader = importlib.import_module("areno.accel.flash_attention")
+    imports = []
+    entries = []
+    cache = tensor((2, 256, 1, 64), torch.bfloat16)
+    cu = tensor((2,), torch.int32)
+    table = tensor((1, 2), torch.int32)
+    lengths = tensor((1,), torch.int32)
+
+    def load(name):
+        imports.append(name)
+        if selection == "native":
+            pytest.fail("explicit native must not import FlashAttention")
+        if selection == "missing_package":
+            raise ModuleNotFoundError(name=name)
+        raise RuntimeError("Unsupported Ascend device: Ascend910_9382")
+
+    class Native:
+        def __getattr__(self, entry):
+            def call(*args):
+                entries.append(entry)
+                if "paged" in entry:
+                    assert args[3] is cache and args[4] is cache
+                    assert args[5] is table and args[6] is lengths
+                raise NativeReached(entry)
+
+            return call
+
+    monkeypatch.setattr(loader, "import_module", load)
+    monkeypatch.setattr(attention, "_UNAVAILABLE_FLASH_DEVICES", set())
+    monkeypatch.setattr(_extension, "_NPU_EXT", Native())
+    backend = "native" if selection == "native" else "flash"
+    with mode, warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        for phase in ("train", "prefill", "decode", "decode"):
+            q = tensor((1, 1 if phase == "decode" else 2, 2, 64), torch.bfloat16)
+            kv = tensor((*q.shape[:2], 1, 64), torch.bfloat16)
+            meta = SimpleNamespace(
+                mode=phase, cu_seqlens=cu, max_seqlen=2, block_table=table, cache_seqlens=lengths
+            )
+            with pytest.raises(NativeReached):
+                if phase == "train":
+                    FlashAttnTrainAttentionBackend(backend)(q, kv, kv, meta)
+                else:
+                    FlashAttnInferBackend(backend)(q, kv, kv, cache, cache, meta, update_cache=phase == "decode")
+    assert entries == ["areno_varlen_causal_attention_forward"] * 2 + [
+        "areno_paged_causal_attention_decode_forward"
+    ] * 2
+    assert imports == ([] if selection == "native" else ["flash_attn_npu"])
+    fallback_warnings = [w for w in caught if "falling back to attn_backend='native'" in str(w.message)]
+    assert len(fallback_warnings) == (0 if selection == "native" else 1)
 
 
 def test_npu_triton_equivalents_route_to_their_ascend_providers(monkeypatch, native_tensors):

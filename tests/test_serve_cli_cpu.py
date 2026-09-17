@@ -83,6 +83,42 @@ def test_create_app_can_disable_chat_template_thinking(monkeypatch):
     assert tokenizer.calls[0][1]["enable_thinking"] is False
 
 
+@pytest.mark.parametrize("attn_backend", ["native", "flash"])
+def test_npu_serve_preserves_attention_choice_without_coordinator_probes(monkeypatch, attn_backend):
+    import importlib
+
+    captured = {}
+
+    class FakeEngine:
+        config = SimpleNamespace(model=SimpleNamespace(max_position_embeddings=1024))
+
+        @classmethod
+        def from_pretrained(cls, *args, **kwargs):
+            captured.update(kwargs)
+            return cls()
+
+    def unexpected_probe(*args, **kwargs):
+        pytest.fail("NPU FlashAttention availability must be checked on the selected worker device")
+
+    monkeypatch.setattr(serve_mod, "load_tokenizer", lambda model_path: SimpleNamespace(eos_token_id=1))
+    monkeypatch.setattr(serve_mod, "ArenoEngine", FakeEngine)
+    monkeypatch.setattr(serve_mod, "flash_attention_unsupported_gpu_reason", unexpected_probe)
+    monkeypatch.setattr(importlib.import_module("areno.accel.flash_attention"), "import_module", unexpected_probe)
+    serve_mod.create_app(
+        model_path="model",
+        backend_type=serve_mod.BackendType.NPU,
+        tp_size=2,
+        world_size=4,
+        max_running_prompts=4,
+        default_max_tokens=16,
+        decode_progress_interval_s=0,
+        attn_backend=attn_backend,
+    )
+    assert captured["runtime_config"].attn_backend == attn_backend
+    assert captured["runtime_config"].device_type == "npu"
+    assert captured["role"] == "rollout"
+
+
 def test_create_app_falls_back_to_native_for_flash_unsupported_model(monkeypatch):
     captured = {}
 

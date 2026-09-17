@@ -59,9 +59,11 @@ TorchNPU execution only; it does not test AReno kernels or HCCL.
 Current validation boundary
 ---------------------------
 
-The latest target-node run successfully imported the extension and reached
-the old validation-only startup guard. That blanket guard and the backend's
-model whitelist have been removed. NPU workers now enter the shared model,
+The latest target-node run successfully started the Qwen3 HTTP server and
+entered prefill, where ``flash-attn-npu`` rejected the ``Ascend910_9382``
+device name. That import failure now selects native attention automatically.
+The old validation-only startup guard and model whitelist have been removed.
+NPU workers enter the shared model,
 training and rollout lifecycle after extension loading, device selection and
 HCCL initialization. Missing dependencies and unsupported operator arguments
 still fail at their respective entry points. No AReno kernel numerical
@@ -178,7 +180,8 @@ shards, repeated indices, gradients, storage offsets, padding canaries and
 CUDA graph replay for fixed-shape paths. The native Ascend implementation
 still requires a working extension import and numerical validation on hardware.
 
-Dense and packed FP16/BF16 attention with head dimensions up to 256 call
+With ``attn_backend="flash"`` (the default), dense and packed FP16/BF16
+attention with head dimensions up to 256 call
 ``flash-attn-npu`` with its own autograd. Supported paged decode calls its
 KV-cache API and updates the original cache. Both shared engine attention
 routes select the implementation by tensor device, dtype and layout.
@@ -189,8 +192,30 @@ lengths remain on device, with the total token count used as a conservative
 maximum length. The library KV-cache path is inference-only and requires head
 dimensions divisible by 8 and cache block sizes divisible by 256.
 The NPU library acceptance suite covers outputs and gradients, packed
-isolation, empty segments, cache writes, GQA and streams. It does not require
-the AReno C extension. These checks still need to run on the target node.
+isolation, empty segments, cache writes, GQA and streams. It also exercises
+native fallback when the library is unavailable, requiring the AReno C
+extension in that case. These checks still need to run on the target node.
+
+``areno serve --attn-backend native`` explicitly bypasses FlashAttention for
+both prefill and decode. The same runtime option applies to NPU training.
+With ``flash``, each worker checks library availability after selecting its
+device. A missing top-level ``flash_attn_npu`` package or the library's
+``Unsupported Ascend device:`` rejection triggers native attention and one
+warning per device. Version 0.3.0 rejects the reported ``Ascend910_9382``
+name. The decision is cached for the worker lifetime, so later layers and
+decode steps do not repeat the failed import. Missing internal dependencies,
+undefined symbols, and operator execution errors still propagate.
+
+To exercise explicit native serving with a local model:
+
+.. code-block:: bash
+
+   areno serve --model-path /path/to/local/checkpoint --port 8000 \
+     --max-running-prompts 1 --attn-backend native
+
+Omit ``--attn-backend native`` to exercise automatic selection. Both modes
+use the same shared serving engine and Ascend kernels. At the accel API,
+``force_native=True`` also bypasses the optional library.
 
 FP32, head dimensions above 256, and other paged layouts use native Ascend C
 compatibility kernels through the same public accel API and shared autograd
@@ -200,8 +225,8 @@ score matrix. Packed GQA boundaries and paged cache metadata remain on device.
 Paged decode updates the original cache and reduces split partials in FP32;
 its diagnostic backward reuses the existing shared Torch reference. The
 compatibility path has no fixed head-dimension limit, but is unbenchmarked and
-recomputes scores across head tiles. It is not selected to hide a library
-import or execution failure. The shared CUDA/NPU native suite checks outputs,
+recomputes scores across head tiles. Only the availability failures listed
+above trigger fallback. The shared CUDA/NPU native suite checks outputs,
 gradients, cache canaries, empty segments, sliding windows, streams and head
 dimensions through 1025. The updated launchers still require a target rebuild
 and numerical acceptance before model support can be claimed.
@@ -278,8 +303,9 @@ Remaining work includes the recurrent features listed above, library-stack
 validation, and native extension numerical acceptance. The opt-in
 ``tests/test_npu_end_to_end.py`` exercises SFT with all three optimizers,
 rollout, checkpoint reload and HTTP serving against a local checkpoint.
-The HTTP test checks model listing, greedy repeatability, batched completions
-and worker shutdown. Run these in a fresh process, separately from kernel
+The HTTP test runs with both ``native`` and ``flash`` selection and checks
+model listing, greedy repeatability, batched completions and worker shutdown.
+Run these in a fresh process, separately from kernel
 tests, so the coordinator has not acquired a worker's NPU:
 
 .. code-block:: bash

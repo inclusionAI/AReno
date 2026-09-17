@@ -2,6 +2,7 @@
 
 import importlib
 import sys
+from contextlib import nullcontext
 from types import SimpleNamespace
 
 import pytest
@@ -9,6 +10,11 @@ import torch
 
 from areno.accel.npu import attention, kda, seg_la
 from areno.accel.ops import SegLaMeta
+
+
+@pytest.fixture(autouse=True)
+def reset_flash_availability(monkeypatch):
+    monkeypatch.setattr(attention, "_UNAVAILABLE_FLASH_DEVICES", set())
 
 
 def test_flash_imports_are_device_specific_and_preserve_dependency_errors(monkeypatch):
@@ -29,9 +35,74 @@ def test_flash_imports_are_device_specific_and_preserve_dependency_errors(monkey
             raise ModuleNotFoundError(name=missing)
 
         monkeypatch.setattr(loader, "import_module", fail)
-        error = RuntimeError if missing == "flash_attn_npu" else ModuleNotFoundError
+        error = loader.FlashAttentionUnavailable if missing == "flash_attn_npu" else ModuleNotFoundError
         with pytest.raises(error):
             loader.flash_attention(SimpleNamespace(type="npu"))
+
+
+@pytest.mark.parametrize("device", ["cuda", "npu"])
+@pytest.mark.parametrize(
+    "error",
+    [
+        RuntimeError("Unsupported Ascend device: Ascend910_9382"),
+        RuntimeError("test runtime initialization failure"),
+        ImportError("test undefined symbol"),
+        ModuleNotFoundError(name="flash_attn_npu"),
+        ModuleNotFoundError(name="flash_attn_2_npu"),
+        ModuleNotFoundError(name="torch_npu"),
+    ],
+)
+def test_flash_fallback_only_classifies_optional_npu_availability(monkeypatch, device, error):
+    loader = importlib.import_module("areno.accel.flash_attention")
+
+    def load(name):
+        raise error
+
+    monkeypatch.setattr(loader, "import_module", load)
+    unavailable = device == "npu" and (
+        str(error).startswith("Unsupported Ascend device:")
+        or isinstance(error, ModuleNotFoundError) and error.name == "flash_attn_npu"
+    )
+    expected = loader.FlashAttentionUnavailable if unavailable else type(error)
+    with pytest.raises(expected) as caught:
+        loader.flash_attention(SimpleNamespace(type=device))
+    assert (caught.value.__cause__ if unavailable else caught.value) is error
+
+
+def test_flash_execution_errors_propagate_without_native_retry(monkeypatch):
+    def fail(*args, **kwargs):
+        raise RuntimeError("test FlashAttention execution failure")
+
+    def unexpected_native(device):
+        pytest.fail("failed operator execution must not be retried through native")
+
+    from areno.accel import attention as shared
+
+    monkeypatch.setattr(attention, "flash_attention", lambda device: SimpleNamespace(flash_attn_func=fail))
+    monkeypatch.setattr(shared, "_extension", unexpected_native)
+    q = torch.empty(1, 2, 3, 64, dtype=torch.bfloat16)
+    with pytest.raises(RuntimeError, match="test FlashAttention execution failure"):
+        attention.causal_attention(q, q, q, 0, -1, 0.125)
+    assert not attention._UNAVAILABLE_FLASH_DEVICES
+
+
+def test_unavailable_flash_is_cached_per_device(monkeypatch):
+    calls = []
+    library = object()
+
+    def load(device):
+        calls.append(device)
+        if device == "npu:0":
+            raise attention.FlashAttentionUnavailable("Unsupported Ascend device: Ascend910_9382")
+        return library
+
+    monkeypatch.setattr(attention, "flash_attention", load)
+    with pytest.warns(RuntimeWarning, match="falling back") as caught:
+        for _ in range(3):
+            assert attention._flash_library("npu:0") is None
+    assert len(caught) == 1
+    assert attention._flash_library("npu:1") is library
+    assert calls == ["npu:0", "npu:1"]
 
 
 def test_dense_offset_layout_and_library_autograd(monkeypatch):
@@ -106,8 +177,17 @@ def test_unsupported_dtype_does_not_silently_use_math():
 
 
 @pytest.mark.parametrize("packed", [False, True])
-@pytest.mark.parametrize("dtype,dim", [(torch.float32, 64), (torch.bfloat16, 512), (torch.float16, 1025)])
-def test_native_attention_reuses_shared_autograd_and_preserves_errors(monkeypatch, packed, dtype, dim):
+@pytest.mark.parametrize(
+    "dtype,dim,selection",
+    [
+        (torch.float32, 64, "shape"),
+        (torch.bfloat16, 512, "shape"),
+        (torch.float16, 1025, "shape"),
+        (torch.bfloat16, 64, "native"),
+        (torch.bfloat16, 64, "unavailable"),
+    ],
+)
+def test_native_attention_reuses_shared_autograd_and_preserves_errors(monkeypatch, packed, dtype, dim, selection):
     from areno.accel import attention as shared
 
     calls = []
@@ -123,7 +203,9 @@ def test_native_attention_reuses_shared_autograd_and_preserves_errors(monkeypatc
         return tuple(grad.float() * factor for factor in (2, 3, 4))
 
     def unexpected_library(*args):
-        pytest.fail("out-of-range attention must not import flash-attn-npu")
+        if selection == "unavailable":
+            raise attention.FlashAttentionUnavailable("Unsupported Ascend device: Ascend910_9382")
+        pytest.fail("native attention must not import flash-attn-npu")
 
     name = "areno_varlen_causal_attention" if packed else "areno_causal_attention"
     native = SimpleNamespace(**{name + "_forward": forward, name + "_backward": backward})
@@ -131,11 +213,14 @@ def test_native_attention_reuses_shared_autograd_and_preserves_errors(monkeypatc
     monkeypatch.setattr(shared, "_extension", lambda device: native)
     shape = (3, 2, dim) if packed else (1, 2, 3, dim)
     tensors = [torch.randn(*shape, 2, dtype=dtype)[..., 0].requires_grad_() for _ in range(3)]
-    if packed:
-        cu = torch.tensor([0, 1, 3], dtype=torch.int32)
-        result = attention.varlen_causal_attention(*tensors, cu, 2, 0.125)
-    else:
-        result = attention.causal_attention(*tensors, 0, 2, 0.125)
+    kwargs = {"force_native": selection == "native"}
+    warning = pytest.warns(RuntimeWarning, match="falling back") if selection == "unavailable" else nullcontext()
+    with warning:
+        if packed:
+            cu = torch.tensor([0, 1, 3], dtype=torch.int32)
+            result = attention.varlen_causal_attention(*tensors, cu, 2, 0.125, **kwargs)
+        else:
+            result = attention.causal_attention(*tensors, 0, 2, 0.125, **kwargs)
     result.sum().backward()
     assert [call[0] for call in calls] == ["forward", "backward"]
     assert calls[0][1][-2:] == calls[1][1][-2:] == (2, 0.125)
@@ -149,9 +234,9 @@ def test_native_attention_reuses_shared_autograd_and_preserves_errors(monkeypatc
     monkeypatch.setattr(shared, "_extension", missing)
     with pytest.raises(RuntimeError, match="native extension missing"):
         if packed:
-            attention.varlen_causal_attention(*tensors, cu, 2, 0.125)
+            attention.varlen_causal_attention(*tensors, cu, 2, 0.125, **kwargs)
         else:
-            attention.causal_attention(*tensors, 0, 2, 0.125)
+            attention.causal_attention(*tensors, 0, 2, 0.125, **kwargs)
 
 
 def test_empty_attention_preserves_zero_gradients():

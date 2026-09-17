@@ -81,7 +81,8 @@ def test_sft_rollout_and_checkpoint_reload(tmp_path, optimizer):
         restored.close()
 
 
-def test_http_serve_greedy_generation_and_shutdown():
+@pytest.mark.parametrize("attn_backend", ["native", "flash"])
+def test_http_serve_greedy_generation_and_shutdown(attn_backend):
     model = os.environ.get("ARENO_NPU_TEST_MODEL")
     if not model:
         pytest.skip("Set ARENO_NPU_TEST_MODEL to a local Ascend validation checkpoint")
@@ -100,12 +101,14 @@ def test_http_serve_greedy_generation_and_shutdown():
         default_max_tokens=4,
         decode_progress_interval_s=0,
         chat_template_enable_thinking=False,
+        attn_backend=attn_backend,
     )
     state = app.state.areno_serve
     engine = state.engine._engine
     processes = list(engine.cluster.processes)
     assert engine.config.role == "rollout"
     assert engine.config.runtime.device_type == "npu"
+    assert engine.config.runtime.attn_backend == attn_backend
     with TestClient(app) as client:
         assert client.get("/health").json() == {"status": "ok"}
         assert client.get("/v1/models").json()["data"][0]["id"] == model

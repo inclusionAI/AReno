@@ -79,7 +79,6 @@ class RuntimeConfig:
         if self.device_type not in {"cuda", "npu"}:
             raise ValueError("runtime.device_type must be one of: cuda, npu")
         if self.device_type == "npu":
-            self.attn_backend = "native"
             self.compile_model = False
             self.eager_decode = True
         if self.attn_backend not in {"flash", "native"}:
@@ -96,7 +95,8 @@ class RuntimeConfig:
     def resolve_attn_backend(self, *, model: ModelConfig, devices: list[int]) -> None:
         """Switch flash-attn unsupported hardware or model shapes to native attention."""
 
-        if self.attn_backend != "flash":
+        # NPU library availability is resolved on each worker after set_device.
+        if self.attn_backend != "flash" or self.device_type == "npu":
             return
         reasons = [
             reason
