@@ -4,7 +4,7 @@
 #include <limits>
 #include "torch_npu/csrc/core/npu/NPUGuard.h"
 #include "torch_npu/csrc/core/npu/NPUStream.h"
-#include "torch_npu/csrc/framework/FormatHelper.h"
+#include "tensor_format.h"
 #include "../moe_permute_common.h"
 #include "embedding_launch.h"
 #include "moe.h"
@@ -23,7 +23,7 @@ void check_tensor(const at::Tensor& tensor, const at::Tensor& input, at::ScalarT
                 "MoE tensors must be on the same Ascend NPU device");
     TORCH_CHECK(tensor.scalar_type() == dtype, "MoE tensor dtype mismatch");
     TORCH_CHECK(tensor.is_contiguous(), "MoE native tensors must be contiguous");
-    TORCH_CHECK(at_npu::native::FormatHelper::IsBaseFormatType(tensor), "MoE requires base NPU storage format");
+    TORCH_CHECK(is_base_format(tensor), "MoE requires base NPU storage format");
 }
 
 void check_input(const at::Tensor& input) {

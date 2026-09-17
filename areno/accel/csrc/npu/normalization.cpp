@@ -4,7 +4,7 @@
 #include <tuple>
 #include "torch_npu/csrc/core/npu/NPUGuard.h"
 #include "torch_npu/csrc/core/npu/NPUStream.h"
-#include "torch_npu/csrc/framework/FormatHelper.h"
+#include "tensor_format.h"
 #include "normalization_launch.h"
 
 namespace areno_npu {
@@ -14,7 +14,7 @@ void check_norm_tensor(const at::Tensor& x, bool contiguous = true) {
     TORCH_CHECK(x.scalar_type() == at::kFloat || x.scalar_type() == at::kHalf || x.scalar_type() == at::kBFloat16,
                 "RMSNorm requires FP32, FP16 or BF16 tensors");
     TORCH_CHECK(!contiguous || x.is_contiguous(), "RMSNorm native input must be contiguous");
-    TORCH_CHECK(at_npu::native::FormatHelper::IsBaseFormatType(x), "RMSNorm requires base NPU storage format");
+    TORCH_CHECK(is_base_format(x), "RMSNorm requires base NPU storage format");
 }
 
 void check_like(const at::Tensor& other, const at::Tensor& x, bool contiguous = true) {

@@ -3,7 +3,7 @@
 #include <torch/csrc/utils/pybind.h>
 #include "torch_npu/csrc/core/npu/NPUGuard.h"
 #include "torch_npu/csrc/core/npu/NPUStream.h"
-#include "torch_npu/csrc/framework/FormatHelper.h"
+#include "tensor_format.h"
 #include "optimizer_launch.h"
 
 namespace areno_npu {
@@ -12,7 +12,7 @@ void check_tensor(const at::Tensor& x, const at::Tensor& model) {
     TORCH_CHECK(x.device().type() == c10::DeviceType::PrivateUse1 && x.device() == model.device(),
                 "AdamW tensors must be on the same Ascend NPU device");
     TORCH_CHECK(x.is_contiguous(), "AdamW tensors must be contiguous");
-    TORCH_CHECK(at_npu::native::FormatHelper::IsBaseFormatType(x), "AdamW requires base NPU storage format");
+    TORCH_CHECK(is_base_format(x), "AdamW requires base NPU storage format");
 }
 
 void check_model(const at::Tensor& model, const at::Tensor& grad) {

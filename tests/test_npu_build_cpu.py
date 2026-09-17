@@ -6,6 +6,7 @@ import runpy
 import shutil
 import subprocess
 import sys
+import sysconfig
 import tarfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -100,6 +101,8 @@ def test_kernel_archive_is_linked_and_triggers_extension_rebuild(builder, monkey
     calls = []
     validated = []
     monkeypatch.setitem(builder["build_extensions"].__globals__, "_check_launcher_symbols", validated.append)
+    imported = []
+    monkeypatch.setitem(builder["build_extensions"].__globals__, "_check_extension_import", imported.append)
 
     def mock_cmake(args, *, check):
         assert check
@@ -124,6 +127,7 @@ def test_kernel_archive_is_linked_and_triggers_extension_rebuild(builder, monkey
         assert "areno/accel/csrc/npu/fused_experts.cpp" in self.extensions[0].sources
         assert "areno/accel/csrc/npu/fused_experts_launch.h" in self.extensions[0].depends
         assert "areno/accel/csrc/npu/moe.h" in self.extensions[0].depends
+        assert "areno/accel/csrc/npu/tensor_format.h" in self.extensions[0].depends
         assert {"opapi_nn", "nnopbase", "tiling_api", "platform"}.issubset(self.extensions[0].libraries)
         calls.append("host")
 
@@ -134,12 +138,14 @@ def test_kernel_archive_is_linked_and_triggers_extension_rebuild(builder, monkey
             command.build_extensions()
         assert "host" not in calls
         assert not validated
+        assert not imported
         return
     command.build_extensions()
     assert "-DSOC_VERSION=Ascend910_9391" in calls[0]
     assert calls[1] == ["/test/bin/cmake", "--build", str(kernel_build), "--parallel", "2"]
     assert calls[2] == "host"
     assert validated == [Path(command.get_ext_fullpath(extensions[0].name))]
+    assert imported == validated
 
 
 @pytest.mark.parametrize("defined", [False, True])
@@ -168,6 +174,55 @@ def test_unresolved_template_launchers_fail_during_build(builder, tmp_path, defi
             builder["_check_launcher_symbols"](library)
 
 
+@pytest.mark.parametrize("failure", [None, "missing_symbol", "module_init"])
+def test_built_extension_is_loaded_with_frameworks_before_install(builder, monkeypatch, tmp_path, failure):
+    compiler = shutil.which("clang++") or shutil.which("c++")
+    if compiler is None or shutil.which("nm") is None:
+        pytest.skip("C++ compiler and nm required")
+    # Use a real Python extension and the dynamic loader, with only the two
+    # framework imports stubbed. No Ascend hardware or TorchNPU wheel is needed.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "torch.py").write_text("")
+    (tmp_path / "torch_npu.py").write_text("import sys\nassert 'torch' in sys.modules\n")
+    (tmp_path / "_areno_accel_npu.py").write_text("raise AssertionError('loaded a stale extension')\n")
+    source = tmp_path / "extension.cpp"
+    source.write_text(
+        "#include <Python.h>\n"
+        'extern "C" int areno_test_dependency();\n'
+        + ('extern "C" int areno_test_dependency() { return 1; }\n' if failure != "missing_symbol" else "")
+        + "int (*dependency)() = areno_test_dependency;\n"
+        'static PyModuleDef module = {PyModuleDef_HEAD_INIT, "_areno_accel_npu", nullptr, -1, nullptr};\n'
+        "PyMODINIT_FUNC PyInit__areno_accel_npu() {\n"
+        '    if (!PyDict_GetItemString(PyImport_GetModuleDict(), "torch") ||\n'
+        '        !PyDict_GetItemString(PyImport_GetModuleDict(), "torch_npu")) {\n'
+        '        PyErr_SetString(PyExc_ImportError, "frameworks must be imported first"); return nullptr;\n'
+        "    }\n"
+        + (
+            '    PyErr_SetString(PyExc_RuntimeError, "test module init failure"); return nullptr;\n'
+            if failure == "module_init"
+            else "    return PyModule_Create(&module);\n"
+        )
+        + "}\n"
+    )
+    library = tmp_path / "build output" / "_areno_accel_npu.so"
+    library.parent.mkdir()
+    flags = ["-undefined", "dynamic_lookup"] if sys.platform == "darwin" else []
+    subprocess.run(
+        [compiler, "-shared", "-fPIC", *flags, "-I", sysconfig.get_path("include"), str(source), "-o", str(library)],
+        check=True,
+    )
+    # These errors are invisible to the CANN-only launcher check.
+    builder["_check_launcher_symbols"](library)
+    if failure is None:
+        builder["_check_extension_import"](library)
+    else:
+        detail = "areno_test_dependency" if failure == "missing_symbol" else "test module init failure"
+        with pytest.raises(RuntimeError, match=detail) as error:
+            builder["_check_extension_import"](library)
+        assert "cannot be imported after building" in str(error.value)
+        assert str(library) in str(error.value)
+
+
 def test_sdist_includes_native_build_inputs(tmp_path):
     for name in ("setup.py", "pyproject.toml", "README.md", "LICENSE", "MANIFEST.in"):
         shutil.copy2(ROOT / name, tmp_path / name)
@@ -194,6 +249,7 @@ def test_sdist_includes_native_build_inputs(tmp_path):
         "setup.py",
         "CMakeLists.txt",
         "extension.cpp",
+        "tensor_format.h",
         "activation.cpp",
         "activation_kernel.cpp",
         "activation_launch.h",
