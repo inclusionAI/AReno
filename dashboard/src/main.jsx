@@ -1,3 +1,4 @@
+import { normalizeConfigSections, formatConfigValue } from "./config-display";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import ReactMarkdown from "react-markdown";
@@ -1673,7 +1674,7 @@ function RuntimeCheckDetails({ check, report, onClose }) {
     <div className="runtimeCheckDetails">
       <div className="runtimeCheckDetailLead"><StatusBadge status={check.status || "unknown"} /><div><strong>{check.detail || check.message || "No diagnostic value reported."}</strong>{check.next_step && <p>{check.next_step}</p>}</div></div>
       <div className="runtimeVersionGrid">
-        {facts.map(([label, value]) => <div key={label}><span>{label}</span><strong>{String(value)}</strong></div>)}
+        {facts.map(([label, value]) => <div key={label}><span>{label}</span><strong>{formatConfigValue(value)}</strong></div>)}
       </div>
       <button className="primaryButton fullButton" onClick={onClose}>Done</button>
     </div>
@@ -1817,7 +1818,7 @@ function LocalAgentPlanCard({ plan, onConfirm }) {
     <section className="agentPlanCard">
       <div className="agentPlanHeader"><div><span>Execution plan</span><strong>{plan.objective}</strong></div><StatusBadge status={plan.status || "proposed"} /></div>
       {plan.summary && <p className="agentPlanSummary">{plan.summary}</p>}
-      {editing ? <PlanParameters title="Task parameters" value={parameters} onChange={setParameters} /> : entries.length > 0 && <div className="agentPlanParams">{entries.map(([label, value]) => <label key={label}><span>{label.replaceAll("_", " ")}</span><strong>{String(value)}</strong></label>)}</div>}
+      {editing ? <PlanParameters title="Task parameters" value={parameters} onChange={setParameters} /> : entries.length > 0 && <div className="agentPlanParams">{entries.map(([label, value]) => <label key={label}><span>{label.replaceAll("_", " ")}</span><strong>{formatConfigValue(value)}</strong></label>)}</div>}
 
       <ol className="agentPlanSteps">{(plan.steps || []).map((step, index) => <li key={step.id || index}><span>{index + 1}</span><div><strong>{step.title}</strong>{step.detail && <p>{step.detail}</p>}</div><small>{step.status || "pending"}</small></li>)}</ol>
       {command && <pre className="agentPlanCommand">{command}</pre>}
@@ -2698,26 +2699,6 @@ function ConfigView({ config, launch }) {
   );
 }
 
-function normalizeConfigSections(settings) {
-  if (Array.isArray(settings?.sections)) {
-    return settings.sections
-      .map((section) => ({
-        title: section.title || "Config",
-        items: (section.items || []).filter(({ value }) => value !== undefined && value !== null && value !== ""),
-      }))
-      .filter((section) => section.items.length > 0);
-  }
-  const entries = Object.entries(settings || {})
-    .filter(([, value]) => value !== undefined && value !== null && value !== "")
-    .map(([key, value]) => ({ key, value }));
-  return entries.length ? [{ title: "Launch", items: entries }] : [];
-}
-
-function formatConfigValue(value) {
-  if (Array.isArray(value)) return value.join(" ");
-  if (typeof value === "object") return JSON.stringify(value);
-  return String(value);
-}
 
 function LogView({ logs, waitingForRuntime = false }) {
   const logRef = useRef(null);
