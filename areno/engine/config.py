@@ -58,7 +58,7 @@ class OptimizerConfig:
 
 @dataclass(slots=True)
 class RuntimeConfig:
-    """Runtime allocation config for rollout decode and CUDA graphs."""
+    """Runtime allocation config for rollout decode and device graphs."""
 
     kv_block_size: int = 256
     attn_backend: Literal["flash", "native"] = "flash"
@@ -80,7 +80,6 @@ class RuntimeConfig:
             raise ValueError("runtime.device_type must be one of: cuda, npu")
         if self.device_type == "npu":
             self.compile_model = False
-            self.eager_decode = True
         if self.attn_backend not in {"flash", "native"}:
             raise ValueError("runtime.attn_backend must be one of: flash, native")
         if isinstance(self.optimizer_state_offload, bool):

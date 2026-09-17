@@ -217,6 +217,29 @@ Omit ``--attn-backend native`` to exercise automatic selection. Both modes
 use the same shared serving engine and Ascend kernels. At the accel API,
 ``force_native=True`` also bypasses the optional library.
 
+Decode graph capture now defaults to enabled on NPU, using
+``torch.npu.NPUGraph`` through the shared ``DecodeGraph`` implementation.
+CUDA continues to use ``torch.cuda.CUDAGraph``. Warmup, static input buffers,
+scratch KV blocks, recurrent padding slots and cache invalidation are shared.
+Streams, synchronization and memory checks select the worker's device API.
+TP ranks agree on available memory and on whether capture succeeded; an OOM
+on one rank discards that bucket on all ranks. Other capture errors propagate.
+``--eager-decode`` explicitly disables capture and replay; ``compile_model``
+remains disabled on NPU independently of graph capture.
+
+With ``--decode-progress-interval-s 1``, NPU progress logs report
+``npu_graph=True`` only after graph replay. ``npu_graph=False`` means the
+reporting interval used eager decode or contained no replay. CUDA retains
+its ``cuda_graph`` field. The native attention graph test and the NPU runtime
+test below check changing inputs, cache metadata, padding and replay against
+eager results. Actual graph execution and TP/HCCL capture still require
+target-node acceptance:
+
+.. code-block:: bash
+
+   python -m pytest -q tests/test_npu_runtime.py -k decode_graph
+   python -m pytest -q tests/test_attention_native.py -k 'npu and device_graph'
+
 FP32, head dimensions above 256, and other paged layouts use native Ascend C
 compatibility kernels through the same public accel API and shared autograd
 wrappers as CUDA. Dense and packed forward/backward use FP32 intermediates and

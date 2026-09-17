@@ -26,6 +26,7 @@ from areno.engine.protocol import RolloutPayload
 from areno.engine.runtime.common import _check_token_ids, _device_long
 from areno.engine.runtime.decode_graph import (
     DecodeGraph,
+    all_ranks_graph_ready,
     bucket_for,
     has_graph_capture_memory,
     sync_before_graph_capture,
@@ -134,7 +135,7 @@ class InferenceManager:
             worker._decode_progress_window_start = time.perf_counter()
             worker._decode_progress_window_tokens = 0
             worker._decode_progress_active: dict[int, int] = {}
-            worker._decode_progress_cuda_graph = False
+            worker._decode_progress_graph = False
 
     def __getattr__(self, name):
         return getattr(self.worker, name)
@@ -146,7 +147,7 @@ class InferenceManager:
             setattr(self.worker, name, value)
 
     def _init_infer_cache(self, spec: InferCacheSpec) -> None:
-        """Prepare rollout-only state without rebuilding stable CUDA graph buffers.
+        """Prepare rollout-only state without rebuilding stable device graph buffers.
 
         The cache allocation is tied to the engine lifetime. Later rollouts reset
         KV contents and refresh inference weights, but reuse the same cache and
@@ -183,16 +184,16 @@ class InferenceManager:
                     mark_ready = getattr(self.worker, "_mark_rollout_session_infer_weights_ready", None)
                     if callable(mark_ready):
                         mark_ready()
-                if self.device.type == "cuda":
+                if self.device.type in {"cuda", "npu"}:
                     self._init_decode_graphs()
                 return
-            # Reallocation: prior CUDA graphs were captured against the old
+            # Reallocation: prior graphs were captured against the old
             # cache pointers and are no longer valid.
             self._decode_graphs.clear()
             self._decode_graph_skipped_buckets.clear()
             self._decode_graph_init_attempted = False
         self._infer_batch_size = max_running_seqs
-        # Recurrent models need their own scratch slot for CUDA-graph warmup,
+        # Recurrent models need their own scratch slot for graph warmup,
         # capture, and padded replay rows.  Real requests exclusively own
         # slots [0, max_running_seqs); the extra slot must never be admitted
         # by InferenceBatchState.
@@ -225,7 +226,7 @@ class InferenceManager:
             mark_ready = getattr(self.worker, "_mark_rollout_session_infer_weights_ready", None)
             if callable(mark_ready):
                 mark_ready()
-        if self.device.type == "cuda":
+        if self.device.type in {"cuda", "npu"}:
             self._init_decode_graphs()
 
     @torch.inference_mode()
@@ -771,17 +772,18 @@ class InferenceManager:
             window_elapsed = max(now - self._decode_progress_window_start, 1e-9)
             window_tokens = int(self._decode_progress_window_tokens)
             total_active = sum(self._decode_progress_active.values())
-            cuda_graph = bool(self._decode_progress_cuda_graph)
+            graph_used = bool(self._decode_progress_graph)
             self._decode_progress_window_start = now
             self._decode_progress_next_time = now + interval_s
             self._decode_progress_window_tokens = 0
-            self._decode_progress_cuda_graph = False
+            self._decode_progress_graph = False
         logger.info(
-            "rollout decode progress: dp=%d/%d active=%d cuda_graph=%s tokens_per_second=%.1f",
+            "rollout decode progress: dp=%d/%d active=%d %s_graph=%s tokens_per_second=%.1f",
             ctx.dp_rank,
             ctx.dp_size,
             total_active,
-            cuda_graph,
+            "npu" if self.device.type == "npu" else "cuda",
+            graph_used,
             window_tokens / window_elapsed,
         )
 
@@ -1105,7 +1107,7 @@ class InferenceManager:
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run one decode step (1 token per active sequence) and sample.
 
-        Dispatches to a captured CUDA graph for the matching bucket if one
+        Dispatches to a captured device graph for the matching bucket if one
         exists, otherwise falls back to an eager forward. Returns the sampled
         tokens and their logprobs, both length `active_count`.
         """
@@ -1132,10 +1134,10 @@ class InferenceManager:
             # Graph replay path: copies inputs into the captured input buffers
             # and replays. Only the first `active_count` rows are meaningful;
             # the rest are padding pointed at the scratch block.
-            self._decode_progress_cuda_graph = True
             logits_shard = graph.replay_tensors(input_ids, position_ids, cache_seqlens, block_table, recurrent_slots)[
                 0, :active_count
             ]
+            self._decode_progress_graph = True
             self._last_routing_capture = graph.routing_capture
 
         if sampling_params.temperature == 0.0:
@@ -1193,7 +1195,7 @@ class InferenceManager:
         memory exists before any rank captures. This avoids half-captured states
         when one rank is tighter on memory.
 
-        CUDA graph invariants:
+        Device graph invariants:
           * input_ids/position_ids/cache_seqlens/block_table buffers are stable
             allocations bound at capture time; replay copies new contents in;
           * the scratch block (last index of the KV cache) handles padded rows
@@ -1210,6 +1212,7 @@ class InferenceManager:
         if self.model.training:
             self.model.eval()
         ctx = get_tp_context()
+        accelerator = accelerator_module(self.device)
         # User-configured buckets clamped to [1, max_running_seqs], plus the
         # max so the largest active batch always has a graph.
         buckets = sorted(
@@ -1237,9 +1240,10 @@ class InferenceManager:
             # memory aborts the whole bucket so no rank is left half-captured.
             if not has_graph_capture_memory(self.device, ctx.group, warmup_bytes):
                 if ctx.is_rank0:
-                    free_bytes, _ = torch.cuda.mem_get_info(self.device)
+                    free_bytes, _ = accelerator.mem_get_info(self.device)
                     logger.info(
-                        "skipping decode CUDA graph capture: bucket=%d free_gib=%.2f warmup_peak_gib=%.2f",
+                        "skipping decode %s graph capture: bucket=%d free_gib=%.2f warmup_peak_gib=%.2f",
+                        self.device.type.upper(),
                         bucket,
                         free_bytes / (1024**3),
                         warmup_bytes / (1024**3),
@@ -1247,17 +1251,22 @@ class InferenceManager:
                 sync_before_graph_capture(self.device, ctx.group)
                 self._decode_graph_skipped_buckets.add(bucket)
                 continue
+            captured = True
             try:
                 graph.capture()
             except torch.OutOfMemoryError:
-                # Capture itself can still OOM (extra workspace allocations);
-                # in that case fall back to eager for this bucket and move on.
-                if self.device.type == "cuda":
-                    torch.cuda.empty_cache()
+                captured = False
+            # A rank that captured successfully must also skip when a peer
+            # ran out of memory, keeping TP replay/collective ordering aligned.
+            if not all_ranks_graph_ready(self.device, ctx.group, captured):
+                graph.graph.reset()
+                del graph
+                accelerator.empty_cache()
                 if ctx.is_rank0:
-                    free_bytes, _ = torch.cuda.mem_get_info(self.device)
+                    free_bytes, _ = accelerator.mem_get_info(self.device)
                     logger.warning(
-                        "skipping decode CUDA graph capture after OOM: bucket=%d free_gib=%.2f fallback=eager",
+                        "skipping decode %s graph capture after OOM on a TP rank: bucket=%d free_gib=%.2f fallback=eager",
+                        self.device.type.upper(),
                         bucket,
                         free_bytes / (1024**3),
                     )
@@ -1265,3 +1274,5 @@ class InferenceManager:
                 self._decode_graph_skipped_buckets.add(bucket)
                 continue
             self._decode_graphs[bucket] = graph
+            if ctx.is_rank0:
+                logger.info("captured decode %s graph: bucket=%d", self.device.type.upper(), bucket)
