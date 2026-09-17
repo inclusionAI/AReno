@@ -72,14 +72,15 @@ export function DatasetManager({ request, onSelect }) {
     if (fileInput.current) fileInput.current.value = "";
   }
   return <div className="launcherSections">
-    <p>Manage datasets for Modal training. Upload JSON, JSONL, CSV, TSV, Parquet or Arrow files (up to 16 MiB), or import a public HTTPS file or dataset repository URL.</p>
+    <p>Manage datasets for Modal training. Upload JSON, JSONL, CSV, TSV, Parquet or Arrow files (up to 16 MiB), or import a dataset from a Hugging Face or ModelScope repository link.</p>
     <label className="field"><span>Dataset name (optional)</span><input value={name} onChange={e => setName(e.target.value)} /></label>
     <input ref={fileInput} type="file" accept=".json,.jsonl,.csv,.tsv,.parquet,.arrow" hidden onChange={e => upload(e.target.files?.[0])} />
     <button className="secondaryButton" disabled={pending} onClick={() => fileInput.current?.click()}><Upload size={16} /> Upload file</button>
-    <form className="datasetUrlForm" onSubmit={event => { event.preventDefault(); run(async () => { await request("/datasets/url", { url, name }); setUrl(""); setName(""); setMessage("Dataset imported."); }); }}>
-      <label className="field"><span>Dataset URL</span><input type="url" required placeholder="https://…/dataset.jsonl" value={url} onChange={e => setUrl(e.target.value)} /></label>
-      <button className="secondaryButton" disabled={pending || !url.trim()}><Plus size={16} /> Import URL</button>
+    <form className="datasetUrlForm" onSubmit={event => { event.preventDefault(); run(async () => { await request("/datasets/url", { url, name }); setUrl(""); setName(""); setMessage("Dataset added. Repository download is running in the background."); }); }}>
+      <label className="field"><span>Hugging Face / ModelScope dataset URL</span><input type="url" required placeholder="https://huggingface.co/datasets/owner/name" value={url} onChange={e => setUrl(e.target.value)} /></label>
+      <button className="secondaryButton" disabled={pending || !url.trim()}><Plus size={16} /> Import dataset</button>
     </form>
+    <p className="datasetUrlHint">Hugging Face: <code>https://huggingface.co/datasets/owner/name</code><br />ModelScope: <code>https://modelscope.cn/datasets/owner/name</code></p>
     {pending && <p role="status">Importing dataset…</p>}{message && <p role="status">{message}</p>}
     <div className="datasetList">{datasets.length === 0 && <p>No datasets yet.</p>}{datasets.map(dataset => <div className="datasetRow" key={dataset.id}>
       <div><strong>{dataset.name}</strong><small>{dataset.source_type} · {dataset.sample_status || "saved"}</small><code>{dataset.source}</code></div>

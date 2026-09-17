@@ -2,21 +2,15 @@
 
 from __future__ import annotations
 
-import base64
 import datetime as dt
-import http.client
-import ipaddress
 import json
+import re
 import secrets
-import socket
-import ssl
 import threading
 import time
 from decimal import Decimal
-from pathlib import Path
-from urllib.parse import unquote, urljoin, urlsplit
+from urllib.parse import unquote, urlsplit
 
-from areno.dashboard.flow.assets import DATA_SUFFIXES, MAX_UPLOAD_BYTES
 from areno.dashboard.flow.datasets import resolve_request
 from areno.dashboard.flow.server import Application
 
@@ -34,31 +28,35 @@ class ModalFlow:
     def import_url(self, body):
         url = str(body.get("url", "")).strip()
         parsed = urlsplit(url)
-        parts = parsed.path.strip("/").split("/")
+        host = (parsed.hostname or "").removeprefix("www.")
         if (
-            parsed.scheme == "https"
-            and parsed.hostname in ("huggingface.co", "modelscope.cn")
-            and len(parts) == 3
-            and parts[0] == "datasets"
+            parsed.scheme != "https"
+            or host not in ("huggingface.co", "modelscope.cn")
+            or parsed.username
+            or parsed.password
+            or parsed.port not in (None, 443)
         ):
-            return self.app.post(
-                "/api/datasets",
-                {
-                    "name": body.get("name") or "/".join(parts[1:]),
-                    "source": "/".join(parts[1:]),
-                    "source_type": "repository",
-                    "model_hub": "hf" if parsed.hostname == "huggingface.co" else "modelscope",
-                },
+            raise ValueError("Paste a Hugging Face or ModelScope dataset repository URL")
+        parts = unquote(parsed.path).strip("/").split("/")
+        # ModelScope's dataset overview links commonly end in /summary.
+        if host == "modelscope.cn" and len(parts) == 4 and parts[-1] == "summary":
+            parts.pop()
+        valid_length = len(parts) in (2, 3) if host == "huggingface.co" else len(parts) == 3
+        if (
+            not valid_length
+            or parts[0] != "datasets"
+            or any(not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", part) for part in parts[1:])
+        ):
+            raise ValueError(
+                "Use the dataset repository page: https://huggingface.co/datasets/owner/name or https://modelscope.cn/datasets/owner/name"
             )
-        filename, content = download_dataset(url)
-        asset = self.app.post("/api/uploads", {"name": filename, "content": base64.b64encode(content).decode()})
         return self.app.post(
             "/api/datasets",
             {
-                "name": body.get("name") or filename,
-                "source": asset["path"],
-                "source_type": "upload",
-                "source_name": filename,
+                "name": body.get("name") or "/".join(parts[1:]),
+                "source": "/".join(parts[1:]),
+                "source_type": "repository",
+                "model_hub": "hf" if host == "huggingface.co" else "modelscope",
             },
         )
 
@@ -165,57 +163,3 @@ class ModalFlow:
             job.perf[name] = float(event["value"])
             job.step = max(job.step, int(event.get("step", 0)))
         return job
-
-
-def download_dataset(url):
-    """Fetch a bounded public HTTPS file, pinning validated DNS at each redirect."""
-    original_name = Path(unquote(urlsplit(url).path)).name
-    for _ in range(6):
-        parsed = urlsplit(url)
-        if (
-            parsed.scheme != "https"
-            or not parsed.hostname
-            or parsed.username
-            or parsed.password
-            or parsed.port not in (None, 443)
-        ):
-            raise ValueError("Use a public HTTPS dataset file URL or dataset repository URL")
-        addresses = socket.getaddrinfo(parsed.hostname, 443, type=socket.SOCK_STREAM)
-        if not addresses or any(not ipaddress.ip_address(row[4][0]).is_global for row in addresses):
-            raise ValueError("Dataset URLs must resolve to public internet addresses")
-        connection = http.client.HTTPSConnection(parsed.hostname, timeout=20)
-        try:
-            sock = socket.create_connection((addresses[0][4][0], 443), timeout=20)
-            try:
-                connection.sock = ssl.create_default_context().wrap_socket(sock, server_hostname=parsed.hostname)
-            except Exception:
-                sock.close()
-                raise
-            connection.request(
-                "GET",
-                parsed.path + ("?" + parsed.query if parsed.query else ""),
-                headers={"User-Agent": "AReno-Dashboard"},
-            )
-            response = connection.getresponse()
-            if response.status in (301, 302, 303, 307, 308):
-                location = response.getheader("Location")
-                if not location:
-                    raise ValueError("Dataset redirect has no destination")
-                url = urljoin(url, location)
-                continue
-            if response.status != 200:
-                raise ValueError(f"Dataset download returned HTTP {response.status}")
-            filename = (
-                original_name
-                if Path(original_name).suffix.lower() in DATA_SUFFIXES
-                else Path(unquote(parsed.path)).name
-            )
-            if Path(filename).suffix.lower() not in DATA_SUFFIXES:
-                raise ValueError("The URL must point to a JSON, JSONL, CSV, TSV, Parquet or Arrow file")
-            content = response.read(MAX_UPLOAD_BYTES + 1)
-            if not content or len(content) > MAX_UPLOAD_BYTES:
-                raise ValueError("Dataset files must be non-empty and at most 16 MiB")
-            return filename, content
-        finally:
-            connection.close()
-    raise ValueError("Too many dataset URL redirects")

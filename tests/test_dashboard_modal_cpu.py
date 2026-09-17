@@ -11,7 +11,7 @@ import pytest
 
 from areno.dashboard import server
 from areno.dashboard.flow.store import Store
-from areno.dashboard.modal_flow import ModalFlow, download_dataset
+from areno.dashboard.modal_flow import ModalFlow
 
 
 @pytest.fixture
@@ -115,19 +115,39 @@ def test_uploaded_dataset_snapshot_survives_manager_edits(flow):
 
 
 @pytest.mark.parametrize(
-    "url",
-    ["http://example.com/data.csv", "https://localhost/data.csv", "https://127.0.0.1/data.csv", "file:///tmp/data.csv"],
+    "url,hub,source",
+    [
+        ("https://huggingface.co/datasets/owner/data", "hf", "owner/data"),
+        ("https://huggingface.co/datasets/gsm8k/", "hf", "gsm8k"),
+        ("https://modelscope.cn/datasets/owner/data", "modelscope", "owner/data"),
+        ("https://www.modelscope.cn/datasets/owner/data/summary", "modelscope", "owner/data"),
+    ],
 )
-def test_url_import_rejects_local_targets(url):
+def test_repository_url_import(flow, url, hub, source):
+    dataset = flow.import_url({"url": url, "name": "My dataset"})
+    assert dataset["name"] == "My dataset"
+    assert dataset["source_type"] == "repository"
+    assert dataset["source"] == source
+    assert dataset["model_hub"] == hub
+    flow.app.samples.enqueue.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://example.com/data.csv",
+        "https://127.0.0.1/data.csv",
+        "https://huggingface.co/models/owner/model",
+        "https://modelscope.cn/datasets",
+        "https://huggingface.co/datasets/owner/data/resolve/main/data.csv",
+        "https://huggingface.co@evil.example/datasets/owner/data",
+        "https://huggingface.co/datasets/owner/%2e%2e",
+    ],
+)
+def test_repository_url_rejects_other_sources(flow, url):
     with pytest.raises(ValueError):
-        download_dataset(url)
-
-
-def test_url_upload_uses_dataset_manager(flow, monkeypatch):
-    monkeypatch.setattr("areno.dashboard.modal_flow.download_dataset", lambda _: ("data.csv", b"text\nhello\n"))
-    dataset = flow.import_url({"url": "https://example.com/data.csv", "name": "CSV data"})
-    assert dataset["name"] == "CSV data" and dataset["source_type"] == "upload"
-    assert flow.app.controller.store.datasets()[0]["id"] == dataset["id"]
+        flow.import_url({"url": url})
+    assert flow.app.controller.store.datasets() == []
 
 
 def test_http_preview_csrf_and_dataset_routes(flow):

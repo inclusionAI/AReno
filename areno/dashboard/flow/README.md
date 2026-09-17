@@ -16,7 +16,7 @@ GPU training still runs remotely; local CUDA is not required for the control pla
   repository catalog and prepares a validated plan. Only the dashboard confirmation
   executes it. Plans expire after 30 minutes and can execute once.
 - **Agent → Upload file / URL · Datasets:** upload a dataset file (16 MiB maximum),
-  import a public HTTPS file or Hugging Face / ModelScope dataset repository URL,
+  import a Hugging Face / ModelScope dataset repository URL,
   remove a managed dataset, or attach its ID to chat. Repository downloads run in
   the background; wait for completion before preparing a plan. Removing a dataset
   removes its library entry, not files snapshotted by existing plans/jobs.
