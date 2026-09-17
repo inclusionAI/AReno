@@ -313,7 +313,7 @@ public:
 
 } // namespace areno_npu
 
-template <typename Model, typename Grad, bool FourBit>
+template<typename Model, typename Grad, bool FourBit>
 __global__ __aicore__ void adam_quantized_kernel(GM_ADDR model, GM_ADDR grad, GM_ADDR m, GM_ADDR ms,
     GM_ADDR v, GM_ADDR vs, GM_ADDR signedMap, GM_ADDR unsignedMap, int64_t n,
     int64_t mo, int64_t mso, int64_t vo, int64_t vso, uint32_t blockSize,
@@ -351,7 +351,7 @@ void launch_adamw_quantized(uint32_t blocks, void* stream, bool model_bf16, bool
 
 } // namespace areno_npu
 
-template <typename Model, typename Grad>
+template<typename Model, typename Grad>
 __global__ __aicore__ void adam_factored_step_kernel(GM_ADDR model, GM_ADDR grad, GM_ADDR m, GM_ADDR ms,
     GM_ADDR factors, GM_ADDR mean, GM_ADDR invalid, int64_t n, int64_t mo, int64_t mso,
     int64_t start, int64_t rows, int64_t columns, uint32_t blockSize,

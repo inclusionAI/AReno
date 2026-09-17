@@ -199,7 +199,7 @@ public:
 
 } // namespace areno_npu
 
-template <typename Model, typename Grad, bool Compact>
+template<typename Model, typename Grad, bool Compact>
 __global__ __aicore__ void adam_fp32_kernel(GM_ADDR model, GM_ADDR grad, GM_ADDR low, GM_ADDR carries,
     GM_ADDR moment, GM_ADDR variance, int64_t n, int64_t offset, float b1, float b2,
     float lr, float decay, float eps, float step, float bias) {

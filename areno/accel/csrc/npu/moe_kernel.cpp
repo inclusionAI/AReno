@@ -300,7 +300,7 @@ __global__ __aicore__ void route_fill_kernel(GM_ADDR out, int64_t elements, int3
 }
 
 
-template <typename Id, uint32_t Kind, bool Metadata>
+template<typename Id, uint32_t Kind, bool Metadata>
 __global__ __aicore__ void route_kernel(GM_ADDR keys, GM_ADDR weights, GM_ADDR partial, GM_ADDR counts,
     GM_ADDR rw, GM_ADDR ti, GM_ADDR pos, GM_ADDR aligned, int64_t routes, int64_t columns,
     int64_t start, int64_t experts, int64_t capacity) {
@@ -310,6 +310,21 @@ __global__ __aicore__ void route_kernel(GM_ADDR keys, GM_ADDR weights, GM_ADDR p
     kernel.Init(keys, weights, partial, counts, rw, ti, pos, aligned);
     kernel.Process(routes, columns, start, experts, capacity);
 }
+
+// Materialize device entries before CANN extracts host launcher specializations.
+#define ARENO_ROUTE_INSTANCE(T, K, M) \
+    template void route_kernel<T, areno_npu::K, M>( \
+        GM_ADDR, GM_ADDR, GM_ADDR, GM_ADDR, GM_ADDR, GM_ADDR, GM_ADDR, GM_ADDR, \
+        int64_t, int64_t, int64_t, int64_t, int64_t);
+#define ARENO_ROUTE_INSTANCES(M) \
+    ARENO_ROUTE_INSTANCE(uint8_t, DenseRoutes, M) ARENO_ROUTE_INSTANCE(int64_t, TopKRoutes, M) \
+    ARENO_ROUTE_INSTANCE(int64_t, AlignRoutes, M) ARENO_ROUTE_INSTANCE(int32_t, AlignRoutes, M) \
+    ARENO_ROUTE_INSTANCE(int16_t, AlignRoutes, M) ARENO_ROUTE_INSTANCE(int8_t, AlignRoutes, M) \
+    ARENO_ROUTE_INSTANCE(uint8_t, AlignRoutes, M)
+ARENO_ROUTE_INSTANCES(false)
+ARENO_ROUTE_INSTANCES(true)
+#undef ARENO_ROUTE_INSTANCES
+#undef ARENO_ROUTE_INSTANCE
 
 namespace areno_npu {
 

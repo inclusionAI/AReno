@@ -115,7 +115,7 @@ public:
 
 } // namespace areno_npu
 
-template <typename Grad>
+template<typename Grad>
 __global__ __aicore__ void factored_stats_kernel(GM_ADDR grad, GM_ADDR factors, GM_ADDR invalid,
     int64_t n, int64_t start, int64_t rows, int64_t columns) {
     using namespace AscendC;

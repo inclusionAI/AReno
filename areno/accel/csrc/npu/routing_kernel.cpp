@@ -227,7 +227,7 @@ public:
 
 } // namespace areno_npu
 
-template <typename T, uint32_t Op>
+template<typename T, uint32_t Op>
 __global__ __aicore__ void routing_kernel(GM_ADDR x, GM_ADDR b, GM_ADDR ids, GM_ADDR w, GM_ADDR dx,
     int64_t tokens, int experts, int k, bool renormalize, int groups, int topk_group) {
     using namespace AscendC;
@@ -236,6 +236,19 @@ __global__ __aicore__ void routing_kernel(GM_ADDR x, GM_ADDR b, GM_ADDR ids, GM_
     kernel.Init(x, b, ids, w, dx);
     kernel.Process(tokens, experts, k, renormalize, groups, topk_group);
 }
+
+// Materialize device entries before CANN extracts host launcher specializations.
+#define ARENO_ROUTING_INSTANCE(T, OP) \
+    template void routing_kernel<T, areno_npu::OP>( \
+        GM_ADDR, GM_ADDR, GM_ADDR, GM_ADDR, GM_ADDR, int64_t, int, int, bool, int, int);
+#define ARENO_ROUTING_INSTANCES(T) \
+    ARENO_ROUTING_INSTANCE(T, TopKForward) ARENO_ROUTING_INSTANCE(T, TopKBackward) \
+    ARENO_ROUTING_INSTANCE(T, GroupedRouter)
+ARENO_ROUTING_INSTANCES(float)
+ARENO_ROUTING_INSTANCES(half)
+ARENO_ROUTING_INSTANCES(bfloat16_t)
+#undef ARENO_ROUTING_INSTANCES
+#undef ARENO_ROUTING_INSTANCE
 
 namespace areno_npu {
 

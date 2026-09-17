@@ -16,7 +16,7 @@ __aicore__ constexpr MatmulConfig expert_matmul_config() {
 
 } // namespace areno_npu
 
-template <typename T>
+template<typename T>
 __global__ __aicore__ void expert_matmul_kernel(GM_ADDR in, GM_ADDR w, GM_ADDR out,
     GM_ADDR expertIds, GM_ADDR paddedTotal, int64_t capacity, int64_t n, int64_t k, int64_t outputStride, GM_ADDR workspace) {
     using namespace AscendC;

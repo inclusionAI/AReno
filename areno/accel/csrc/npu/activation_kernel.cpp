@@ -209,7 +209,7 @@ public:
 
 } // namespace areno_npu
 
-template <typename T, uint32_t Op>
+template<typename T, uint32_t Op>
 __global__ __aicore__ void activation_kernel(GM_ADDR out, GM_ADDR in, GM_ADDR grad,
                                             int64_t rows, int64_t width) {
     using namespace AscendC;
@@ -218,6 +218,25 @@ __global__ __aicore__ void activation_kernel(GM_ADDR out, GM_ADDR in, GM_ADDR gr
     kernel.Init(out, in, grad);
     kernel.Process(rows, width);
 }
+
+// CANN discovers launcher specializations from the device object. Calls
+// inside host templates alone do not reliably instantiate that object.
+// Attributes are inherited from the definition. Repeating them here makes
+// CANN's source scanner mistake declarations for kernel definitions.
+#define ARENO_ACTIVATION_INSTANCE(T, OP) \
+    template void activation_kernel<T, areno_npu::OP>( \
+        GM_ADDR, GM_ADDR, GM_ADDR, int64_t, int64_t);
+#define ARENO_ACTIVATION_INSTANCES(T) \
+    ARENO_ACTIVATION_INSTANCE(T, Silu) ARENO_ACTIVATION_INSTANCE(T, DSilu) \
+    ARENO_ACTIVATION_INSTANCE(T, Sigmoid) ARENO_ACTIVATION_INSTANCE(T, DSigmoid) \
+    ARENO_ACTIVATION_INSTANCE(T, Softplus) ARENO_ACTIVATION_INSTANCE(T, DSoftplus) \
+    ARENO_ACTIVATION_INSTANCE(T, SiluMul) ARENO_ACTIVATION_INSTANCE(T, DSiluMul) \
+    ARENO_ACTIVATION_INSTANCE(T, GeluTanhMul) ARENO_ACTIVATION_INSTANCE(T, DGeluTanhMul)
+ARENO_ACTIVATION_INSTANCES(float)
+ARENO_ACTIVATION_INSTANCES(half)
+ARENO_ACTIVATION_INSTANCES(bfloat16_t)
+#undef ARENO_ACTIVATION_INSTANCES
+#undef ARENO_ACTIVATION_INSTANCE
 
 namespace areno_npu {
 
