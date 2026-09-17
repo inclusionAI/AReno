@@ -283,7 +283,10 @@ public:
                     mc = (mCodes.GetValue(i / 2) >> (4 * (i % 2))) & 15u;
                     if constexpr (!Factored) {
                         vc = (vCodes.GetValue(i / 2) >> (4 * (i % 2))) & 15u;
-                        v.SetValue(i, (static_cast<float>(vc) + 1.0f) * vs / 16.0f);
+                        // AI Core scalar conversion requires a signed integer;
+                        // the decoded nibble is in [0, 15], so this is exact.
+                        const int32_t varianceCode = static_cast<int32_t>(vc);
+                        v.SetValue(i, (static_cast<float>(varianceCode) + 1.0f) * vs / 16.0f);
                     }
                 } else {
                     mc = mCodes.GetValue(i); vc = vCodes.GetValue(i);
