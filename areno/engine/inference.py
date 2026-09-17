@@ -1274,5 +1274,3 @@ class InferenceManager:
                 self._decode_graph_skipped_buckets.add(bucket)
                 continue
             self._decode_graphs[bucket] = graph
-            if ctx.is_rank0:
-                logger.info("captured decode %s graph: bucket=%d", self.device.type.upper(), bucket)
