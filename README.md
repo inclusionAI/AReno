@@ -79,8 +79,10 @@ docker run --gpus all --rm -it \
   areno check
 ```
 
-For launching and monitoring local or Modal jobs in the web UI, see the
-[Dashboard guide](docs/cli/dashboard.rst).
+The [Dashboard](docs/cli/dashboard.rst) launches and monitors local or
+[Modal](https://modal.com) training and serving jobs, with agent chat, editable
+plans, GPU/cost estimates, and live metrics and logs. See the
+[Modal setup guide](docs/cli/dashboard-modal.rst).
 
 ## Quick Start
 
