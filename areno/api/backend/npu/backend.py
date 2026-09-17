@@ -67,7 +67,7 @@ class NpuWorker(ArenoWorker):
     def __init__(self, config):
         if config.model.model_type not in {"llama", "qwen3", "qwen3_moe", "gemma4", "phi4mm"}:
             raise ValueError(
-                "this model still calls FLA directly; its operators must be routed through shared accel for NPU"
+                "Ascend hybrid-model integration has not yet passed the required operator and end-to-end validation"
             )
         super().__init__(config)
 

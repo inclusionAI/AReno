@@ -150,7 +150,9 @@ def seg_la_fwd(q, k, v, s, decay_scales, meta, caches=None, softmax_scale=None):
     ):
         raise RuntimeError("seg_la_fwd requires CUDA or NPU tensors on the same device")
     if q.device.type == "npu":
-        return extension(q.device).seg_la_fwd(q, k, v, s, decay_scales, meta, caches, softmax_scale)
+        from areno.accel.npu.seg_la import seg_la_fwd as implementation
+
+        return implementation(q, k, v, s, decay_scales, meta, caches, softmax_scale)
     from areno.accel.kernels.seg_la import seg_la_fwd as implementation
 
     return implementation(q, k, v, s, decay_scales, meta, caches, softmax_scale)

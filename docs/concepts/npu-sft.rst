@@ -16,6 +16,15 @@ CMake and the CANN compiler are required. Source the toolkit's
 Fused experts additionally links the toolkit's ``tiling_api`` and ``platform``
 libraries to query Cube/Vector core counts and Matmul system workspace size.
 
+Attention reuses ``flash-attn-npu==0.3.0``. Linear attention reuses upstream
+FLA at commit ``e52dbc0ea19d3a40d7ab7f9eed855d2b473994d2``, which includes
+Ascend backends. Both are NPU-only dependencies; CUDA dependencies are unchanged.
+The FLA ``[npu]`` extra is deliberately omitted because it pins a different
+TorchNPU stack. Keep the existing CANN-compatible ``torch``, ``torch_npu`` and
+``triton-ascend`` installation. Upstream FLA's pinned CI uses CANN 9.1.0,
+TorchNPU 2.9.0.post6 and Triton Ascend 3.2.2 on A2; compatibility with this
+node's CANN 9.0.0 / TorchNPU 2.10.0.post2 / Triton Ascend 3.2.1 is unverified.
+
 The exact SoC is queried from ``aclrtGetSocName`` after TorchNPU initialization.
 The current kernels target A2/A3 (Ascend 910B variants and 910_93xx); a generic
 ``Ascend910`` display name is not enough to select an ISA. Original Ascend 910
@@ -39,7 +48,7 @@ TorchNPU execution only; it does not test AReno kernels or HCCL.
    python -m pytest -q tests/test_grouped_linear.py -k 'npu and not cpu and not cuda'
    python -m pytest -q tests/test_routing.py -k npu
    python -m pytest -q tests/test_moe_native.py -k npu
-   python -m pytest -q tests/test_attention_native.py -k npu
+   python -m pytest -q tests/test_npu_library_attention.py
    python -m pytest -q tests/test_fused_experts_native.py -k npu
    torchrun --standalone --nproc_per_node=2 -m pytest -q tests/test_npu_optimizer_distributed.py
 
@@ -151,23 +160,31 @@ shards, repeated indices, gradients, storage offsets, padding canaries and
 CUDA graph replay for fixed-shape paths. The native Ascend implementation
 still requires compilation and numerical validation on hardware.
 
-The five native attention entries cover dense and packed forward/backward,
-and paged single-token decode. They follow the CUDA diagnostic attention
-kernel's FP32 online softmax and saved-output derivative, using Ascend C
-vector arithmetic and FP32 atomic K/V gradient accumulation. Packed attention
-supports grouped query heads and reads sequence boundaries on device,
-including empty segments. Dense attention retains query offsets and sliding
-windows. Paged decode copies K/V updates into the caller's cache, evaluates
-the requested number of splits and merges their softmax statistics; empty
-or fully masked splits contribute nothing. Cache lengths remain caller-owned.
-Head dimensions stream through fixed UB tiles, without materializing a QK
-matrix. Heads wider than a tile repeat score calculations for each output
-tile; this implementation has not been benchmarked. The shared Python
-attention/autograd wrappers are unchanged, including CUDA's existing
-reference-based paged-decode backward. Device tests cover FP32/FP16/BF16,
-saved-output gradients, GQA, packed isolation, storage offsets, cache writes,
-empty splits, prefill/decode agreement, numerical stability and streams.
-These Ascend sources have not yet been compiled or run on hardware.
+The custom Ascend attention kernels and their build registration have been
+removed. Dense and packed attention call ``flash-attn-npu`` with its own
+autograd; paged decode calls its KV-cache API and updates the original cache.
+Both shared engine attention routes select the library by tensor device.
+CUDA retains its existing FlashAttention and diagnostic native kernels.
+The Ascend adapter supports FP16/BF16 and head dimensions up to 256. It
+truncates invisible K/V suffixes to preserve explicit query offsets and
+passes sliding windows, GQA and packed boundaries to the library. Packed
+lengths remain on device, with the total token count used as a conservative
+maximum length. KV-cache attention is inference-only. Unsupported dtype or
+head size fails explicitly; there is no custom attention kernel fallback.
+The NPU library acceptance suite covers outputs and gradients, packed
+isolation, empty segments, cache writes, GQA and streams. It does not require
+the AReno C extension. These checks still need to run on the target node.
+
+The unfinished seg-LA Ascend C sources have also been removed. KDA training
+reuses the existing Torch/FLA wrapper, including gate rounding, normalization
+and state layout. Decode calls FLA's recurrent KDA with fused gate and beta
+activation, then writes the selected state slots back. GatedDeltaNet and
+Lightning Attention retain their existing FLA imports; upstream owns device
+dispatch. Regular seg-LA prefill/decode adapts the state pool and head decay
+to FLA simple GLA. These adapters do not implement attention arithmetic.
+FLA state slots must be allocated nonnegative indices. Seg-LA state snapshots
+and tree masks are not integrated and fail explicitly. Numerical equivalence
+and compilation of the FLA paths on the target machine remain unverified.
 
 Fused expert inference uses the existing public entry and model call sites.
 It reuses native route alignment, embedding row transfers and gated activation.
@@ -206,7 +223,8 @@ and memory probes. The backend directory contains only ``__init__.py`` and
 run on Ascend. Worker startup rejects the incomplete native extension before
 starting a training or serving job.
 
-Remaining native families include recurrent operators.
+Remaining work includes the recurrent features listed above, library-stack
+validation, and native extension compilation/numerical acceptance.
 The existing opt-in
 ``tests/test_npu_end_to_end.py`` becomes the SFT/rollout/checkpoint acceptance
 test once these kernels are complete; it is not expected to pass yet.
@@ -231,3 +249,6 @@ Implementation references
 * `CANN 9 static Matmul tiling <https://www.hiascend.com/doc_center/source/en/CANNCommunityEdition/900/API/ascendcopapi/atlasascendc_api_07_0666.html>`_
 * `CANN 9 Matmul output and atomic accumulation <https://www.hiascend.com/doc_center/source/en/CANNCommunityEdition/900/API/ascendcopapi/atlasascendc_api_07_0640.html>`_
 * `Ascend C platform query and linking <https://asc.gitcode.com/api/Utils-API/platform_info/PlatformAscendCManager.html>`_
+* `Ascend FlashAttention library <https://github.com/MinghuasLab/flash-attention-npu/tree/v0.3.0>`_
+* `FLA Ascend installation and dependency matrix <https://github.com/fla-org/flash-linear-attention/blob/e52dbc0ea19d3a40d7ab7f9eed855d2b473994d2/INSTALL.md>`_
+* `FLA Ascend C operators <https://github.com/flashserve/flash-linear-attention-npu>`_

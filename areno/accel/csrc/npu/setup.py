@@ -121,7 +121,6 @@ def build_extensions():
                     "conv",
                     "routing",
                     "moe",
-                    "attention",
                     "fused_experts",
                 )
             ],
@@ -141,7 +140,6 @@ def build_extensions():
                         "conv",
                         "routing",
                         "moe",
-                        "attention",
                         "fused_experts",
                     )
                 ],

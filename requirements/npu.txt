@@ -1,5 +1,8 @@
 # Common AReno dependencies. Keep the CANN-compatible PyTorch/torch_npu installation.
 # Accelerator/platform dependencies from pyproject.toml are deliberately excluded.
+# No [npu] extra: preserve the user's CANN-matched torch/torch_npu/triton-ascend.
+flash-linear-attention @ git+https://github.com/fla-org/flash-linear-attention.git@e52dbc0ea19d3a40d7ab7f9eed855d2b473994d2
+flash-attn-npu==0.3.0
 safetensors>=0.4
 transformers>=5.15,<6
 huggingface-hub>=0.25

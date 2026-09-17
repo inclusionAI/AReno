@@ -1,6 +1,8 @@
-"""Shared CUDA/Ascend native attention contracts, compared with CPU references."""
+"""CUDA diagnostic attention contracts, compared with CPU references.
 
-import importlib.util
+Ascend library integration is covered by test_npu_library_attention.py.
+"""
+
 import math
 
 import pytest
@@ -16,20 +18,12 @@ from areno.accel.attention import (
 DTYPES = [torch.float32, torch.float16, torch.bfloat16]
 
 
-@pytest.fixture(scope="module", params=["cuda", "npu"])
+@pytest.fixture(scope="module", params=["cuda"])
 def backend(request):
     device = request.param
     if device == "cuda":
         if not torch.cuda.is_available():
             pytest.skip("CUDA hardware and compiled kernels are required")
-    else:
-        if importlib.util.find_spec("torch_npu") is None:
-            pytest.skip("Ascend hardware and torch_npu are required")
-        import torch_npu  # noqa: F401
-
-        assert torch.npu.is_available(), "torch_npu is installed but no NPU is available"
-        torch.npu.set_device(0)
-        assert extension(device).attention_implementation == "ascendc"
     return device, extension(device)
 
 
@@ -333,39 +327,6 @@ def test_attention_current_stream_and_tensor_device(backend):
     close(q.grad, torch.zeros(1, 2, 3, 33))
     close(k.grad, torch.zeros(1, 2, 3, 33))
     close(v.grad, torch.tensor([1 + 1 / 2 + 1 / 3, 1 / 2 + 1 / 3, 1 / 3])[None, None, :, None].expand(1, 2, 3, 33))
-
-
-def test_attention_empty_tokens_and_native_validation(backend):
-    device, native = backend
-    if device != "npu":
-        pytest.skip("Ascend validation; CUDA zero-grid behavior is unchanged")
-    q = torch.empty(0, 4, 17, device=device, requires_grad=True)
-    k = torch.empty(0, 2, 17, device=device, requires_grad=True)
-    v = torch.empty_like(k, requires_grad=True)
-    out = areno_varlen_causal_attention(q, k, v, torch.zeros(3, dtype=torch.int32, device=device))
-    out.sum().backward()
-    assert out.shape == q.shape and q.grad.shape == q.shape and k.grad.shape == k.shape and v.grad.shape == v.shape
-    q = torch.empty(2, 3, 0, 17, device=device, requires_grad=True)
-    k = torch.empty(2, 3, 5, 17, device=device, requires_grad=True)
-    v = torch.empty_like(k, requires_grad=True)
-    areno_causal_attention(q, k, v).sum().backward()
-    assert q.grad.numel() == 0
-    close(k.grad, torch.zeros_like(k.cpu()))
-    close(v.grad, torch.zeros_like(v.cpu()))
-    x = torch.ones(1, 2, 3, 17, device=device)
-    with pytest.raises(RuntimeError, match="positions"):
-        native.areno_causal_attention_forward(x, x, x, 1, -1, 0.125)
-    with pytest.raises(RuntimeError, match="dtype"):
-        native.areno_causal_attention_forward(x, x.half(), x.half(), 0, -1, 0.125)
-    with pytest.raises(RuntimeError, match="shape/head"):
-        native.areno_varlen_causal_attention_forward(
-            torch.ones(3, 3, 17, device=device),
-            torch.ones(3, 2, 17, device=device),
-            torch.ones(3, 2, 17, device=device),
-            torch.tensor([0, 3], dtype=torch.int32, device=device),
-            -1,
-            0.125,
-        )
 
 
 def test_attention_cuda_graph_replay(backend):

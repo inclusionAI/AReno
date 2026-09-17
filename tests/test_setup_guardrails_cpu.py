@@ -63,7 +63,13 @@ class SetupGuardrailsTest(unittest.TestCase):
         npu = {Requirement(value).name for value in setup_mod["_runtime_dependencies"](True)}
         default = {Requirement(value).name for value in setup_mod["_runtime_dependencies"](False)}
         self.assertTrue({"transformers", "safetensors", "datasets", "fastapi"} <= npu)
-        self.assertFalse({"torch", "torchvision", "flash-linear-attention", "mlx", "mlx-lm", "mlx-vlm"} & npu)
+        self.assertTrue({"flash-linear-attention", "flash-attn-npu"} <= npu)
+        self.assertFalse({"torch", "torchvision", "triton", "mlx", "mlx-lm", "mlx-vlm"} & npu)
+        fla = next(
+            Requirement(value) for value in setup_mod["_runtime_dependencies"](True) if value.startswith("flash-linear")
+        )
+        self.assertFalse(fla.extras)
+        self.assertTrue(fla.url.endswith("e52dbc0ea19d3a40d7ab7f9eed855d2b473994d2"))
         self.assertTrue({"torch", "torchvision", "flash-linear-attention", "mlx", "mlx-lm", "mlx-vlm"} <= default)
 
     def test_editable_build_selects_dependencies_without_importing_bridge(self):
