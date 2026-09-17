@@ -63,6 +63,22 @@ def _soc_version(cann: Path) -> str:
     return soc
 
 
+def _check_launcher_symbols(extension: Path) -> None:
+    # Shared-library links permit unresolved symbols, so a successful link does
+    # not establish that CANN emitted every template launcher we call.
+    nm = shutil.which("nm")
+    if nm is None:
+        raise RuntimeError("Ascend extension validation requires nm (binutils)")
+    symbols = subprocess.check_output([nm, "-u", str(extension)], text=True)
+    missing = [line.strip() for line in symbols.splitlines() if "aclrtlaunch_" in line]
+    if missing:
+        raise RuntimeError(
+            f"Ascend extension has unresolved CANN kernel launchers: {extension}\n"
+            + "\n".join(missing)
+            + "\nThe device template instances and generated host launchers must match."
+        )
+
+
 def build_extensions():
     if platform.system() != "Linux":
         raise RuntimeError("Build Ascend extensions on Linux with the existing PyTorch and torch_npu installation")
@@ -111,6 +127,8 @@ def build_extensions():
                 ext.extra_objects = [*ext.extra_objects, str(archive)]
                 ext.depends = [*ext.depends, str(archive)]
             super().build_extensions()
+            for ext in self.extensions:
+                _check_launcher_symbols(Path(self.get_ext_fullpath(ext.name)))
 
     return [
         NpuExtension(

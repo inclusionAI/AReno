@@ -94,7 +94,7 @@ __global__ __aicore__ void expert_tokens_kernel(GM_ADDR sorted, GM_ADDR expertId
 }
 
 
-template <typename T>
+template<typename T>
 __global__ __aicore__ void expert_cast_kernel(GM_ADDR in, GM_ADDR out, int64_t rows, int64_t width, int64_t inputStride) {
     using namespace AscendC;
     using namespace areno_npu;
@@ -114,7 +114,7 @@ __global__ __aicore__ void expert_cast_kernel(GM_ADDR in, GM_ADDR out, int64_t r
 }
 
 
-template <typename T>
+template<typename T>
 __global__ __aicore__ void expert_weight_scatter_kernel(GM_ADDR in, GM_ADDR w, GM_ADDR sorted,
     GM_ADDR expertIds, GM_ADDR paddedTotal, GM_ADDR out, int64_t capacity, int64_t routes, int64_t hidden, int64_t inputStride) {
     using namespace AscendC;
@@ -152,7 +152,7 @@ __global__ __aicore__ void expert_weight_scatter_kernel(GM_ADDR in, GM_ADDR w, G
 }
 
 
-template <typename T>
+template<typename T>
 __global__ __aicore__ void expert_reduce_kernel(GM_ADDR in, GM_ADDR out,
     int64_t tokens, int64_t hidden, int64_t topK, float scale) {
     using namespace AscendC;

@@ -89,7 +89,7 @@ public:
 
 } // namespace areno_npu
 
-template <typename T, bool Backward>
+template<typename T, bool Backward>
 __global__ __aicore__ void embedding_kernel(GM_ADDR ids, GM_ADDR input, GM_ADDR output,
     int64_t tokens, int64_t hidden, int64_t start, int64_t end) {
     using namespace AscendC;

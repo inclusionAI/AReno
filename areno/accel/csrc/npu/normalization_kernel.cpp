@@ -212,7 +212,7 @@ public:
 
 } // namespace areno_npu
 
-template <typename T, typename W, bool Backward, bool Scale, uint32_t Gate>
+template<typename T, typename W, bool Backward, bool Scale, uint32_t Gate>
 __global__ __aicore__ void normalization_kernel(GM_ADDR input, GM_ADDR gate, GM_ADDR weight, GM_ADDR grad,
                                                GM_ADDR output, GM_ADDR gradGate, GM_ADDR inv, GM_ADDR gradWeight,
                                                int64_t rows, int64_t width, int64_t groups, float eps) {
@@ -222,6 +222,27 @@ __global__ __aicore__ void normalization_kernel(GM_ADDR input, GM_ADDR gate, GM_
     kernel.Init(input, gate, weight, grad, output, gradGate, inv, gradWeight);
     kernel.Process(rows, width, groups, eps);
 }
+
+// Materialize device entries before CANN extracts host launcher specializations.
+#define ARENO_NORM_INSTANCE(T, W, B, S, G) \
+    template void normalization_kernel<T, W, B, S, G>( \
+        GM_ADDR, GM_ADDR, GM_ADDR, GM_ADDR, GM_ADDR, GM_ADDR, GM_ADDR, GM_ADDR, \
+        int64_t, int64_t, int64_t, float);
+#define ARENO_NORM_INSTANCES(T) \
+    ARENO_NORM_INSTANCE(T, float, false, true, 2) \
+    ARENO_NORM_INSTANCE(T, half, false, true, 2) \
+    ARENO_NORM_INSTANCE(T, bfloat16_t, false, true, 2) \
+    ARENO_NORM_INSTANCE(T, float, true, true, 1) \
+    ARENO_NORM_INSTANCE(T, float, true, true, 0) \
+    ARENO_NORM_INSTANCE(T, float, true, false, 0) \
+    ARENO_NORM_INSTANCE(T, float, false, true, 1) \
+    ARENO_NORM_INSTANCE(T, float, false, true, 0) \
+    ARENO_NORM_INSTANCE(T, float, false, false, 0)
+ARENO_NORM_INSTANCES(float)
+ARENO_NORM_INSTANCES(half)
+ARENO_NORM_INSTANCES(bfloat16_t)
+#undef ARENO_NORM_INSTANCES
+#undef ARENO_NORM_INSTANCE
 
 namespace areno_npu {
 

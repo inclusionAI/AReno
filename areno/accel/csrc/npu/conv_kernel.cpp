@@ -258,7 +258,7 @@ public:
 
 } // namespace areno_npu
 
-template <typename T, uint32_t Op, bool Packed>
+template<typename T, uint32_t Op, bool Packed>
 __global__ __aicore__ void conv_kernel(GM_ADDR x, GM_ADDR w, GM_ADDR g, GM_ADDR p, GM_ADDR out,
     GM_ADDR h, GM_ADDR cu, int64_t batch, int64_t seqlen, int64_t channels, int64_t kernel_size, int64_t segments) {
     using namespace AscendC;
@@ -267,6 +267,23 @@ __global__ __aicore__ void conv_kernel(GM_ADDR x, GM_ADDR w, GM_ADDR g, GM_ADDR 
     kernel.Init(x, w, g, p, out, h, cu);
     kernel.Process(batch, seqlen, channels, kernel_size, segments);
 }
+
+// Materialize device entries before CANN extracts host launcher specializations.
+#define ARENO_CONV_INSTANCE(T, OP, P) \
+    template void conv_kernel<T, areno_npu::OP, P>( \
+        GM_ADDR, GM_ADDR, GM_ADDR, GM_ADDR, GM_ADDR, GM_ADDR, GM_ADDR, \
+        int64_t, int64_t, int64_t, int64_t, int64_t);
+#define ARENO_CONV_INSTANCES(T, P) \
+    ARENO_CONV_INSTANCE(T, ConvForward, P) ARENO_CONV_INSTANCE(T, ConvInputGrad, P) \
+    ARENO_CONV_INSTANCE(T, ConvWeightGrad, P) ARENO_CONV_INSTANCE(T, ConvDecode, P)
+ARENO_CONV_INSTANCES(float, false)
+ARENO_CONV_INSTANCES(float, true)
+ARENO_CONV_INSTANCES(half, false)
+ARENO_CONV_INSTANCES(half, true)
+ARENO_CONV_INSTANCES(bfloat16_t, false)
+ARENO_CONV_INSTANCES(bfloat16_t, true)
+#undef ARENO_CONV_INSTANCES
+#undef ARENO_CONV_INSTANCE
 
 namespace areno_npu {
 

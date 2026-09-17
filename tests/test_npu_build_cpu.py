@@ -98,6 +98,8 @@ def test_kernel_archive_is_linked_and_triggers_extension_rebuild(builder, monkey
     kernel_build = Path(command.build_temp) / "ascendc"
     archive = kernel_build / (archive_relative or "libareno_npu_kernels.a")
     calls = []
+    validated = []
+    monkeypatch.setitem(builder["build_extensions"].__globals__, "_check_launcher_symbols", validated.append)
 
     def mock_cmake(args, *, check):
         assert check
@@ -129,11 +131,39 @@ def test_kernel_archive_is_linked_and_triggers_extension_rebuild(builder, monkey
         with pytest.raises(RuntimeError, match="Ascend C build did not produce"):
             command.build_extensions()
         assert "host" not in calls
+        assert not validated
         return
     command.build_extensions()
     assert "-DSOC_VERSION=Ascend910_9391" in calls[0]
     assert calls[1] == ["/test/bin/cmake", "--build", str(kernel_build), "--parallel", "2"]
     assert calls[2] == "host"
+    assert validated == [Path(command.get_ext_fullpath(extensions[0].name))]
+
+
+@pytest.mark.parametrize("defined", [False, True])
+def test_unresolved_template_launchers_fail_during_build(builder, tmp_path, defined):
+    compiler = shutil.which("clang++") or shutil.which("c++")
+    if compiler is None or shutil.which("nm") is None:
+        pytest.skip("C++ compiler and nm required")
+    # Link an actual shared library. Like CANN's host wrapper, it references
+    # a template specialization that may be absent from the generated stub.
+    source = tmp_path / "launch.cpp"
+    source.write_text(
+        "template<typename T, unsigned Op> unsigned aclrtlaunch_activation_kernel();\n"
+        + ("template<> unsigned aclrtlaunch_activation_kernel<float, 0>() { return 0; }\n" if defined else "")
+        + 'extern "C" unsigned launch() { return aclrtlaunch_activation_kernel<float, 0>(); }\n'
+    )
+    library = tmp_path / "launch.so"
+    flags = ["-undefined", "dynamic_lookup"] if sys.platform == "darwin" else []
+    subprocess.run([compiler, "-shared", "-fPIC", *flags, str(source), "-o", str(library)], check=True)
+    if defined:
+        builder["_check_launcher_symbols"](library)
+    else:
+        with pytest.raises(
+            RuntimeError,
+            match="unresolved CANN kernel launchers.*",
+        ):
+            builder["_check_launcher_symbols"](library)
 
 
 def test_sdist_includes_native_build_inputs(tmp_path):
