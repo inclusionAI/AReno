@@ -164,7 +164,7 @@ def test_npu_initializes_shared_engine_with_tp_dp_and_optimizer(monkeypatch, opt
     assert captured["optimizer_config"].adam_8bit == optimizer.get("adam_8bit", False)
     assert captured["runtime_config"].device_type == "npu"
     assert captured["runtime_config"].activation_checkpointing
-    assert captured["runtime_config"].eager_decode
+    assert not captured["runtime_config"].eager_decode
     assert not captured["runtime_config"].compile_model
     assert captured["runtime_config"].attn_backend == "flash"
     assert config.runtime == {"activation_checkpointing": True}
@@ -215,16 +215,21 @@ def test_npu_worker_uses_shared_optimizer_only_for_training(monkeypatch, role, o
 
 
 @pytest.mark.parametrize("attn_backend", ["flash", "native"])
-def test_npu_config_does_not_probe_cuda(monkeypatch, attn_backend):
+@pytest.mark.parametrize("eager_decode", [False, True])
+def test_npu_config_does_not_probe_cuda(monkeypatch, attn_backend, eager_decode):
     def unexpected_cuda_probe():
         pytest.fail("NPU configuration must not probe CUDA hardware")
 
     monkeypatch.setattr("torch.cuda.is_available", unexpected_cuda_probe)
     config = EngineConfig(
-        model=ModelConfig(), runtime=RuntimeConfig(device_type="npu", attn_backend=attn_backend), tp_size=2, dp_size=2
+        model=ModelConfig(),
+        runtime=RuntimeConfig(device_type="npu", attn_backend=attn_backend, eager_decode=eager_decode),
+        tp_size=2,
+        dp_size=2,
     )
     assert config.devices == [0, 1, 2, 3]
     assert config.model.attn_backend == attn_backend
+    assert config.runtime.eager_decode == eager_decode
 
 
 @pytest.mark.parametrize("attn_backend", ["flash", "native"])
@@ -259,7 +264,7 @@ def test_npu_serve_reuses_shared_engine_with_tp_dp(monkeypatch, attn_backend):
     assert captured["dp_size"] == 2
     assert captured["devices"] == [0, 1, 2, 3]
     assert captured["runtime_config"].device_type == "npu"
-    assert captured["runtime_config"].eager_decode
+    assert not captured["runtime_config"].eager_decode
     assert captured["runtime_config"].attn_backend == attn_backend
 
 

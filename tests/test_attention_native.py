@@ -346,10 +346,9 @@ def test_attention_current_stream_and_tensor_device(backend):
     close(v.grad, torch.tensor([1 + 1 / 2 + 1 / 3, 1 / 2 + 1 / 3, 1 / 3])[None, None, :, None].expand(1, 2, 3, 33))
 
 
-def test_attention_cuda_graph_replay(backend):
+def test_attention_device_graph_replay(backend):
     device, native = backend
-    if device != "cuda":
-        pytest.skip("CUDA graph regression for the shared attention interfaces")
+    api = getattr(torch, device)
     pairs = [values((1, 2, length, 17), torch.float32, device, seed) for length, seed in ((3, 61), (7, 62), (7, 63))]
     q, k, v = [pair[0] for pair in pairs]
     qr, kr, vr = [pair[1] for pair in pairs]
@@ -359,14 +358,14 @@ def test_attention_cuda_graph_replay(backend):
         out = areno_causal_attention(q, k, v, query_start=2, window_left=2, softmax_scale=0.125)
         return out, *native.areno_causal_attention_backward(grad, q, k, v, out, 2, 2, 0.125)
 
-    stream = torch.cuda.Stream()
-    stream.wait_stream(torch.cuda.current_stream())
-    with torch.cuda.stream(stream):
+    stream = api.Stream()
+    stream.wait_stream(api.current_stream())
+    with api.stream(stream):
         for _ in range(3):
             run()
-    torch.cuda.current_stream().wait_stream(stream)
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
+    api.current_stream().wait_stream(stream)
+    graph = api.CUDAGraph() if device == "cuda" else api.NPUGraph()
+    with api.graph(graph, stream=stream):
         outputs = run()
     for multiplier in (1, -1, 2):
         q.copy_(qr * multiplier)

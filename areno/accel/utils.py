@@ -27,9 +27,11 @@ def warn_once(key: str, message: str) -> None:
 
 @torch._dynamo.disable
 def is_cuda_graph_capturing(tensor: torch.Tensor) -> bool:
-    """True if the tensor lives on CUDA and we are inside a graph capture."""
+    """Legacy entry point for graph capture on the tensor's CUDA or NPU device."""
 
-    return tensor.is_cuda and torch.cuda.is_current_stream_capturing()
+    if tensor.device.type in {"cuda", "npu"}:
+        return getattr(torch, tensor.device.type).is_current_stream_capturing()
+    return False
 
 
 @torch._dynamo.disable

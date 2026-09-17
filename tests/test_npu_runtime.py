@@ -1,6 +1,7 @@
-"""Ascend stream/offload/checkpoint acceptance; requires real NPU hardware."""
+"""Ascend graph/stream/offload/checkpoint acceptance; requires real NPU hardware."""
 
 import importlib.util
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -21,6 +22,63 @@ def device(request):
         pytest.skip("a second NPU is required for device 1 coverage")
     with torch.npu.device(request.param):
         yield torch.device("npu", request.param)
+
+
+@torch.inference_mode()
+def test_decode_graph_matches_eager_with_changing_inputs_and_cache(device):
+    from areno.accel import areno_linear, areno_rmsnorm, areno_silu, areno_vocab_embedding
+    from areno.engine.layers.attention_backend.infer import FlashAttnInferBackend
+    from areno.engine.runtime.decode_graph import DecodeGraph
+    from areno.engine.runtime.metadata import InferMeta
+
+    class Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            torch.manual_seed(71)
+            self.embedding = torch.randn(16, 32, device=device, dtype=torch.bfloat16) / 4
+            self.weight = torch.randn(32, 32, device=device, dtype=torch.bfloat16) / 4
+            self.norm = torch.ones(32, device=device, dtype=torch.bfloat16)
+            self.k = torch.randn(9, 4, 2, 16, device=device, dtype=torch.bfloat16) / 4
+            self.v = torch.randn_like(self.k) / 4
+            self.attention = FlashAttnInferBackend("native")
+
+        def forward(self, input_ids, position_ids, infer_meta):
+            x = areno_vocab_embedding(input_ids, self.embedding, 0, 16)
+            x = x + position_ids.unsqueeze(-1).to(x.dtype) / 16
+            x = areno_silu(areno_rmsnorm(areno_linear(x, self.weight), self.norm, 1e-6))
+            q = x.view(1, -1, 2, 16)
+            out = self.attention(q, q * 0.5, q * 0.25, self.k, self.v, infer_meta)
+            return SimpleNamespace(logits_shard=areno_linear(out.flatten(-2), self.weight))
+
+    model = Model().eval()
+    before_k, before_v = model.k.clone(), model.v.clone()
+    graph = DecodeGraph(model, 4, 2, 8, 4, device)
+    graph.warmup()
+    graph.capture()
+    # Warmup and capture must only touch the scratch block.
+    torch.testing.assert_close(model.k[:-1], before_k[:-1], atol=0, rtol=0)
+    torch.testing.assert_close(model.v[:-1], before_v[:-1], atol=0, rtol=0)
+    pointers = (model.k.data_ptr(), model.v.data_ptr(), graph.input_ids.data_ptr())
+    for count, offset in ((4, 0), (2, 3), (1, 4)):
+        model.k.copy_(before_k)
+        model.v.copy_(before_v)
+        tokens = torch.arange(count, device=device) + offset
+        positions = torch.arange(count, device=device) + offset
+        lengths = positions.to(torch.int32)
+        table = torch.arange(count * 2, device=device, dtype=torch.int32).view(count, 2)
+        slots = torch.arange(count, device=device)
+        actual = graph.replay_tensors(tokens, positions, lengths, table, slots)[0, :count].clone()
+        replay_k, replay_v = model.k.clone(), model.v.clone()
+        model.k.copy_(before_k)
+        model.v.copy_(before_v)
+        meta = InferMeta(mode="decode", cache_seqlens=lengths, block_table=table, recurrent_slots=slots)
+        expected = model(tokens.view(1, count), positions.view(1, count), meta).logits_shard[0]
+        torch.npu.synchronize(device)
+        assert torch.isfinite(actual).all()
+        torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
+        torch.testing.assert_close(replay_k[:-1], model.k[:-1], atol=0, rtol=0)
+        torch.testing.assert_close(replay_v[:-1], model.v[:-1], atol=0, rtol=0)
+        assert pointers == (model.k.data_ptr(), model.v.data_ptr(), graph.input_ids.data_ptr())
 
 
 @pytest.mark.parametrize("pageable", [False, True])
