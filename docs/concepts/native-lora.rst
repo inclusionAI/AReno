@@ -165,7 +165,7 @@ Only the listed attention and expert projections receive adapters; one router
 weight is trained directly. This does not adapt all layers or train all routers.
 
 Example: train only selected full parameters
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 To train only that router, append:
 
