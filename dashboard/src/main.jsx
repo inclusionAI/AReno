@@ -180,21 +180,28 @@ function translateDashboard(root, language) {
 
 function usePolling(loader, delay = 2500, deps = []) {
   const [data, setData] = useState(null);
-  const refresh = async () => {
-    try {
-      const value = await loader();
-      setData(value);
-    } catch (err) {
-      // Polling can race dashboard restarts or proxy reconnects. Keep the last
-      // good snapshot instead of surfacing noisy transient fetch failures.
-    }
-  };
+  const refreshRef = useRef(async () => {});
   useEffect(() => {
+    let active = true;
+    let pending = false;
+    const refresh = async () => {
+      if (pending || !active) return;
+      pending = true;
+      try {
+        const value = await loader();
+        if (active) setData(value);
+      } catch {
+        // Keep the last good snapshot during a transient reconnect.
+      } finally {
+        pending = false;
+      }
+    };
+    refreshRef.current = refresh;
     refresh();
     const timer = setInterval(refresh, delay);
-    return () => clearInterval(timer);
+    return () => { active = false; clearInterval(timer); };
   }, deps);
-  return { data, refresh };
+  return { data, refresh: () => refreshRef.current() };
 }
 
 const defaultAgentMessages = [
@@ -2714,16 +2721,21 @@ function formatConfigValue(value) {
 
 function LogView({ logs }) {
   const logRef = useRef(null);
+  const followLatestRef = useRef(true);
+  const text = logs.slice(-80).join("\n");
   useEffect(() => {
     const node = logRef.current;
-    if (node) {
+    if (node && followLatestRef.current) {
       node.scrollTop = node.scrollHeight;
     }
-  }, [logs.length]);
+  }, [text]);
   return (
-    <div className="codeCard" ref={logRef}>
+    <div className="codeCard" ref={logRef} onScroll={(event) => {
+      const node = event.currentTarget;
+      followLatestRef.current = node.scrollHeight - node.clientHeight - node.scrollTop <= 32;
+    }}>
       <div className="codeTitle"><TerminalSquare size={14} /> Logs</div>
-      <pre>{logs.slice(-80).join("\n") || "No logs yet."}</pre>
+      <pre>{text || "No logs yet."}</pre>
     </div>
   );
 }
