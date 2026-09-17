@@ -76,7 +76,8 @@ def test_runtime_only_cann_install_is_rejected(builder, monkeypatch, tmp_path):
         builder["_cann_root"]()
 
 
-def test_kernel_archive_is_linked_and_triggers_extension_rebuild(builder, monkeypatch, tmp_path):
+@pytest.mark.parametrize("archive_relative", ["lib/libareno_npu_kernels.a", "libareno_npu_kernels.a", None])
+def test_kernel_archive_is_linked_and_triggers_extension_rebuild(builder, monkeypatch, tmp_path, archive_relative):
     # Mock compiler execution, not its output's correctness. Verify the build
     # driver cannot omit the device archive or keep a stale host .so after edits.
     monkeypatch.setattr(builder["platform"], "system", lambda: "Linux")
@@ -95,13 +96,13 @@ def test_kernel_archive_is_linked_and_triggers_extension_rebuild(builder, monkey
     command.ensure_finalized()
     command.build_temp = str(tmp_path / "build")
     kernel_build = Path(command.build_temp) / "ascendc"
-    archive = kernel_build / "libareno_npu_kernels.a"
+    archive = kernel_build / (archive_relative or "libareno_npu_kernels.a")
     calls = []
 
     def mock_cmake(args, *, check):
         assert check
         calls.append(args)
-        if "--build" in args:
+        if "--build" in args and archive_relative is not None:
             archive.parent.mkdir(parents=True)
             archive.touch()
 
@@ -124,6 +125,11 @@ def test_kernel_archive_is_linked_and_triggers_extension_rebuild(builder, monkey
 
     monkeypatch.setattr(builder["subprocess"], "run", mock_cmake)
     monkeypatch.setattr(BuildExtension, "build_extensions", mock_host_build)
+    if archive_relative is None:
+        with pytest.raises(RuntimeError, match="Ascend C build did not produce"):
+            command.build_extensions()
+        assert "host" not in calls
+        return
     command.build_extensions()
     assert "-DSOC_VERSION=Ascend910_9391" in calls[0]
     assert calls[1] == ["/test/bin/cmake", "--build", str(kernel_build), "--parallel", "2"]

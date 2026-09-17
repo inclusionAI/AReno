@@ -98,9 +98,15 @@ def build_extensions():
             if jobs := os.environ.get("MAX_JOBS"):
                 command += ["--parallel", str(int(jobs))]
             subprocess.run(command, check=True)
-            archive = kernel_build / "libareno_npu_kernels.a"
-            if not archive.is_file():
-                raise RuntimeError(f"Ascend C build did not produce {archive}")
+            # CANN's generated project may override CMake's archive output
+            # directory and put the final library in lib/.
+            candidates = (
+                kernel_build / "lib/libareno_npu_kernels.a",
+                kernel_build / "libareno_npu_kernels.a",
+            )
+            archive = next((path for path in candidates if path.is_file()), None)
+            if archive is None:
+                raise RuntimeError(f"Ascend C build did not produce a kernel archive; checked {candidates}")
             for ext in self.extensions:
                 ext.extra_objects = [*ext.extra_objects, str(archive)]
                 ext.depends = [*ext.depends, str(archive)]
