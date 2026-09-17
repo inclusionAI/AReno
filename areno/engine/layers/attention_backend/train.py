@@ -136,18 +136,20 @@ def build_train_attention_backend(
 def _flash_attn_train_no_compile(*args, **kwargs) -> torch.Tensor:
     """Dynamo-opaque wrapper for the dense flash-attn training kernel."""
 
-    from flash_attn import flash_attn_func
+    from areno.accel.flash_attention import flash_attention
 
-    return flash_attn_func(*args, **kwargs)
+    q = args[0] if args else kwargs["q"]
+    return flash_attention(q.device).flash_attn_func(*args, **kwargs)
 
 
 @torch._dynamo.disable
 def _flash_attn_varlen_train_no_compile(*args, **kwargs) -> torch.Tensor:
     """Dynamo-opaque wrapper for the packed varlen flash-attn training kernel."""
 
-    from flash_attn import flash_attn_varlen_func
+    from areno.accel.flash_attention import flash_attention
 
-    return flash_attn_varlen_func(*args, **kwargs)
+    q = args[0] if args else kwargs["q"]
+    return flash_attention(q.device).flash_attn_varlen_func(*args, **kwargs)
 
 
 @torch._dynamo.disable

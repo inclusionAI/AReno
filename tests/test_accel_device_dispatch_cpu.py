@@ -182,6 +182,11 @@ def test_public_operators_select_the_input_device(monkeypatch, native_tensors, d
     native = Native()
     monkeypatch.setattr(_extension, "_EXT", native if device.startswith("cuda") else None)
     monkeypatch.setattr(_extension, "_NPU_EXT", native if device.startswith("npu") else None)
+    if device.startswith("npu") and "attention" in op:
+        from areno.accel.npu import attention
+
+        entry = op.removesuffix("_forward")
+        monkeypatch.setattr(attention, entry, getattr(native, f"areno_{op}"))
     calls = forward_calls(lambda shape, dtype=torch.float32: make_tensor(shape, dtype, device))
     with mode, pytest.raises(NativeReached, match=f"^areno_{op}$"):
         calls[op]()
@@ -272,6 +277,7 @@ def test_all_adam_native_entries_select_the_parameter_device(monkeypatch, native
 
 
 def test_npu_training_attention_uses_the_shared_native_wrapper(monkeypatch, native_tensors):
+    from areno.accel.npu import attention
     from areno.engine.layers.attention_backend.train import FlashAttnTrainAttentionBackend
 
     mode, tensor = native_tensors
@@ -280,7 +286,7 @@ def test_npu_training_attention_uses_the_shared_native_wrapper(monkeypatch, nati
     def call(*args):
         raise NativeReached("areno_varlen_causal_attention_forward")
 
-    monkeypatch.setattr(_extension, "_NPU_EXT", SimpleNamespace(areno_varlen_causal_attention_forward=call))
+    monkeypatch.setattr(attention, "varlen_causal_attention", call)
     backend = FlashAttnTrainAttentionBackend("native")
     with mode, pytest.raises(NativeReached, match="areno_varlen_causal_attention_forward"):
         backend(q, q, q, None)
@@ -300,7 +306,7 @@ def test_accel_metadata_imports_do_not_require_triton_or_device_extensions():
     )
 
 
-def test_npu_triton_equivalents_route_to_native_extension(monkeypatch, native_tensors):
+def test_npu_triton_equivalents_route_to_their_ascend_providers(monkeypatch, native_tensors):
     mode, tensor = native_tensors
     x = tensor((2, 2, 4))
     calls = []
@@ -314,6 +320,7 @@ def test_npu_triton_equivalents_route_to_native_extension(monkeypatch, native_te
             return call
 
     monkeypatch.setattr(_extension, "_NPU_EXT", Native())
+    monkeypatch.setitem(sys.modules, "areno.accel.npu.seg_la", Native())
     meta = ops.SegLaMeta(2, 2, x, x, x, x)
     with mode:
         ops.rms_norm_gate_fwd(x, x, x, 1e-6)
@@ -342,7 +349,7 @@ def test_kda_keeps_the_same_native_arguments(monkeypatch, native_tensors, device
     name = "chunk_kda" if variant == "chunk" else "fused_sigmoid_gating_delta_rule_update"
     native = SimpleNamespace(**{name: kernel})
     if device.startswith("npu"):
-        monkeypatch.setattr(_extension, "_NPU_EXT", native)
+        monkeypatch.setitem(sys.modules, "areno.accel.npu.kda", native)
     else:
         module = "kda" if variant == "chunk" else "fused_sigmoid_gating_recurrent"
         monkeypatch.setitem(sys.modules, f"areno.accel.kernels.kda_fla.{module}", native)

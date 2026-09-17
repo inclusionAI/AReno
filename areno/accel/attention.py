@@ -5,6 +5,8 @@ rollout decode through the same CUDA forward kernel. It is slower than
 flash-attn, but keeps causal/window masking and softmax accumulation identical
 across paths so rollout old-logp and train logp can be compared without mixing
 attention implementations.
+
+Ascend calls flash-attn-npu through layout adapters and uses its autograd.
 """
 
 from __future__ import annotations
@@ -140,6 +142,10 @@ def areno_causal_attention(
         raise ValueError("areno_causal_attention head count mismatch")
     if q.shape[-1] != k.shape[-1] or q.shape[-1] != v.shape[-1]:
         raise ValueError("areno_causal_attention head dim mismatch")
+    if q.device.type == "npu":
+        from areno.accel.npu.attention import causal_attention
+
+        return causal_attention(q, k, v, int(query_start), _window_left(window_left), _scale(q, softmax_scale))
     return _ArenoCausalAttention.apply(q, k, v, int(query_start), _window_left(window_left), _scale(q, softmax_scale))
 
 
@@ -209,6 +215,10 @@ def areno_varlen_causal_attention(
         raise ValueError("areno_varlen_causal_attention expects q heads to be divisible by kv heads")
     if q.shape[2] != k.shape[2] or q.shape[2] != v.shape[2]:
         raise ValueError("areno_varlen_causal_attention head dim mismatch")
+    if q.device.type == "npu":
+        from areno.accel.npu.attention import varlen_causal_attention
+
+        return varlen_causal_attention(q, k, v, cu_seqlens, _window_left(window_left), _scale(q, softmax_scale))
     return _ArenoVarlenCausalAttention.apply(q, k, v, cu_seqlens, _window_left(window_left), _scale(q, softmax_scale))
 
 
@@ -295,6 +305,21 @@ def areno_paged_causal_attention_decode(
         raise ValueError("areno_paged_causal_attention_decode expects block_table 2D and cache_seqlens 1D")
     if block_table.dtype != torch.int32 or cache_seqlens.dtype != torch.int32:
         raise ValueError("areno_paged_causal_attention_decode expects int32 block_table and cache_seqlens")
+    if q.device.type == "npu":
+        from areno.accel.npu.attention import paged_causal_attention_decode
+
+        return paged_causal_attention_decode(
+            q,
+            k_update,
+            v_update,
+            k_cache,
+            v_cache,
+            block_table,
+            cache_seqlens,
+            _window_left(window_left),
+            int(num_splits),
+            _scale(q, softmax_scale),
+        )
     return _ArenoPagedCausalAttentionDecode.apply(
         q,
         k_update,
