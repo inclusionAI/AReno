@@ -6,7 +6,8 @@ flash-attn, but keeps causal/window masking and softmax accumulation identical
 across paths so rollout old-logp and train logp can be compared without mixing
 attention implementations.
 
-Ascend calls flash-attn-npu through layout adapters and uses its autograd.
+Ascend uses flash-attn-npu for supported layouts and native C kernels for
+larger heads, FP32 and paged-cache layouts outside the library's range.
 """
 
 from __future__ import annotations

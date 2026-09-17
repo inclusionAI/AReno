@@ -292,6 +292,69 @@ def test_npu_training_attention_uses_the_shared_native_wrapper(monkeypatch, nati
         backend(q, q, q, None)
 
 
+@pytest.mark.parametrize("mode_name", ["packed", "train", "prefill", "decode"])
+@pytest.mark.parametrize(
+    "dtype, dim, block_size",
+    [
+        (torch.bfloat16, 128, 256),
+        (torch.float16, 256, 256),
+        (torch.float32, 64, 256),
+        (torch.bfloat16, 512, 256),
+        (torch.float16, 31, 256),
+        (torch.bfloat16, 128, 4),
+    ],
+)
+def test_npu_attention_selects_library_or_native_by_shape(
+    monkeypatch, native_tensors, mode_name, dtype, dim, block_size
+):
+    from areno.accel.npu import attention
+    from areno.engine.layers.attention_backend.infer import FlashAttnInferBackend
+    from areno.engine.layers.attention_backend.train import FlashAttnTrainAttentionBackend
+
+    mode, tensor = native_tensors
+
+    class Provider:
+        def __init__(self, name):
+            self.name = name
+
+        def __getattr__(self, entry):
+            def call(*args, **kwargs):
+                raise NativeReached(f"{self.name}:{entry}")
+
+            return call
+
+    monkeypatch.setattr(_extension, "_NPU_EXT", Provider("native"))
+    monkeypatch.setattr(attention, "flash_attention", lambda device: Provider("flash"))
+    native = dtype == torch.float32 or dim > 256
+    if mode_name == "decode":
+        native |= bool(dim % 8 or block_size % 256)
+    expected_provider = "native" if native else "flash"
+    entry = {"decode": "paged_causal_attention_decode"}.get(mode_name, "varlen_causal_attention")
+    expected_entry = (
+        f"areno_{entry}_forward"
+        if native
+        else {"decode": "flash_attn_with_kvcache"}.get(mode_name, "flash_attn_varlen_func")
+    )
+    q = tensor((1, 1 if mode_name == "decode" else 2, 2, dim), dtype)
+    cu = tensor((2,), torch.int32)
+    cache = tensor((2, block_size, 2, dim), dtype)
+    meta = SimpleNamespace(
+        mode=mode_name,
+        cu_seqlens=cu,
+        max_seqlen=2,
+        block_table=tensor((1, 2), torch.int32),
+        cache_seqlens=tensor((1,), torch.int32),
+    )
+    with mode, pytest.raises(NativeReached, match=f"^{expected_provider}:{expected_entry}$"):
+        if mode_name == "packed":
+            flat = q.reshape(2, 2, dim)
+            accel.areno_varlen_causal_attention(flat, flat, flat, cu)
+        elif mode_name == "train":
+            FlashAttnTrainAttentionBackend("native")(q, q, q, None)
+        else:
+            FlashAttnInferBackend("native")(q, q, q, cache, cache, meta, update_cache=mode_name == "decode")
+
+
 def test_accel_metadata_imports_do_not_require_triton_or_device_extensions():
     subprocess.run(
         [

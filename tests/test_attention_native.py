@@ -1,8 +1,10 @@
-"""CUDA diagnostic attention contracts, compared with CPU references.
+"""CUDA/NPU native attention contracts, compared with CPU references.
 
-Ascend library integration is covered by test_npu_library_attention.py.
+The NPU fixture selects compatibility kernels explicitly; production dispatch
+and the fast library path have separate boundary and hardware tests.
 """
 
+import importlib.util
 import math
 
 import pytest
@@ -18,13 +20,27 @@ from areno.accel.attention import (
 DTYPES = [torch.float32, torch.float16, torch.bfloat16]
 
 
-@pytest.fixture(scope="module", params=["cuda"])
+@pytest.fixture(scope="module", params=["cuda", "npu"])
 def backend(request):
     device = request.param
     if device == "cuda":
         if not torch.cuda.is_available():
             pytest.skip("CUDA hardware and compiled kernels are required")
-    return device, extension(device)
+        yield device, extension(device)
+        return
+    if importlib.util.find_spec("torch_npu") is None:
+        pytest.skip("Ascend hardware and compiled kernels are required")
+    import torch_npu  # noqa: F401
+
+    from areno.accel.npu import attention
+
+    assert torch.npu.is_available(), "torch_npu is installed but no NPU is available"
+    torch.npu.set_device(0)
+    native = extension(device)
+    assert native.attention_implementation == "ascendc"
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(attention, "_flash_supported", lambda q: False)
+        yield device, native
 
 
 def values(shape, dtype, device, seed, *, strided=False, requires_grad=False):
@@ -98,6 +114,7 @@ def close(actual, reference, storage=None):
         (2, 3, 7, 11, 31, 3, -1),
         (1, 2, 17, 19, 64, 2, 0),
         (2, 1, 5, 13, 257, 4, 2),
+        (1, 2, 5, 7, 512, 2, 3),
         (1, 1, 4, 9, 513, 3, 17),
         (1, 2, 3, 7, 1025, 1, 1),
     ],
