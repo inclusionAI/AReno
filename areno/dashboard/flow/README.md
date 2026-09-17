@@ -8,8 +8,12 @@ Python environment with `pip install -r areno/dashboard/flow/requirements.txt`.
 GPU training still runs remotely; local CUDA is not required for the control plane.
 
 - **Settings → Modal credentials** (from the dashboard header or Agent tab): connect using Token ID and Token Secret,
-  or `MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET` environment variables. Credentials stay
-  in server memory and must be reconnected after a server restart.
+  or `MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET` environment variables. By default,
+  validated credentials are remembered in an owner-only (0600) server-side file
+  inside the private data directory (0700). They never reach browser storage,
+  chat history or job records. Startup automatically reconnects and retries
+  transient connection failures. Uncheck Remember for a session-only connection,
+  or use Forget saved credentials to remove the saved copy.
 - **Launcher → Train / Serve → Run on Modal:** select the model adapter, checkpoint and GPU
   reservation and maximum duration in the extra Modal section. The existing train /
   serve form, presets, advanced settings and preflight stay visible. Estimated
@@ -24,8 +28,9 @@ GPU training still runs remotely; local CUDA is not required for the control pla
   reviewed digest is retained through execution. No source-package install is used.
 - **Agent:** ask for a Modal training or serving task. The agent reads the live
   repository catalog and prepares a validated plan. Only the dashboard confirmation
-  executes it. Plans expire after 30 minutes and can execute once.
-- **Agent → Upload file / URL · Datasets:** upload a dataset file (16 MiB maximum),
+  executes it. Plans persist across dashboard restarts and can execute once.
+  After 30 minutes, edit and save the plan to revalidate it before execution.
+- **Agent → + attachment button:** upload a dataset file (16 MiB maximum),
   import a Hugging Face / ModelScope dataset repository URL,
   remove a managed dataset, or attach its ID to chat. Repository downloads run in
   the background; wait for completion before preparing a plan. Removing a dataset
@@ -58,3 +63,8 @@ pnpm --dir dashboard build
 ```
 
 These checks do not allocate a GPU or submit a live Modal job.
+
+Pricing refresh failures use the last verified public-rate cache (or the bundled
+verified snapshot) with a visible cached-rate date. Refresh estimate retries the
+quote without clearing the plan. After updating dashboard Python code, restart
+the dashboard backend; refreshing the browser only reloads the frontend.

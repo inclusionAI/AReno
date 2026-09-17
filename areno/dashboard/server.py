@@ -2284,9 +2284,13 @@ class Handler(BaseHTTPRequestHandler):
                     )
                 elif suffix == "/datasets/url":
                     self.json(flow.import_url(payload))
-                elif suffix in {"/connect", "/uploads", "/datasets", "/estimate"} or re.fullmatch(
-                    r"/datasets/[a-f0-9]{16}/delete", suffix
-                ):
+                elif suffix in {
+                    "/connect",
+                    "/uploads",
+                    "/datasets",
+                    "/estimate",
+                    "/forget-credentials",
+                } or re.fullmatch(r"/datasets/[a-f0-9]{16}/delete", suffix):
                     self.json(flow.app.post("/api" + suffix, payload))
                 else:
                     raise ValueError("Unsupported Modal route")

@@ -76,3 +76,7 @@ Thumbs.db
 
 # Dashboard Modal job history, uploads and cache
 .areno-modal/
+
+# Never commit remembered Modal credentials, including custom data directories.
+modal-credentials.json
+.modal-credentials-*

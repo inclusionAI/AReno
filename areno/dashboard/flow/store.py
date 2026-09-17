@@ -18,6 +18,7 @@ class Store:
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.executescript("""
           CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, body TEXT NOT NULL);
+          CREATE TABLE IF NOT EXISTS plans (id TEXT PRIMARY KEY, body TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS datasets (id TEXT PRIMARY KEY, body TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS functions (id TEXT PRIMARY KEY, body TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, job TEXT, body TEXT);
@@ -29,6 +30,17 @@ class Store:
             SELECT job, body FROM events WHERE json_extract(body, '$.type') = 'metric';
         """)
         self.db.commit()
+
+    def save_plan(self, identifier, request, expires, status="proposed"):
+        safe = {key: value for key, value in request.items() if key != "endpoint_key"}
+        body = json.dumps({"request": safe, "expires": expires, "status": status})
+        with self.lock, self.db:
+            self.db.execute("INSERT OR REPLACE INTO plans VALUES (?, ?)", (identifier, body))
+
+    def get_plan(self, identifier):
+        with self.lock:
+            row = self.db.execute("SELECT body FROM plans WHERE id=?", (identifier,)).fetchone()
+        return json.loads(row[0]) if row else None
 
     def put(self, record):
         with self.lock, self.db:

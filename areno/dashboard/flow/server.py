@@ -13,6 +13,7 @@ from areno.dashboard.flow.assets import save_upload
 from areno.dashboard.flow.billing import fetch_billing
 from areno.dashboard.flow.catalog import catalog
 from areno.dashboard.flow.controller import Controller
+from areno.dashboard.flow.credentials import Credentials
 from areno.dashboard.flow.datasets import find, resolve_request, save_dataset, save_function, save_script_batch
 from areno.dashboard.flow.inference import test_deployment
 from areno.dashboard.flow.llm import ScriptGenerator
@@ -33,10 +34,63 @@ class Application:
         self.billing_lock = threading.Lock()
         self.image_cache = None
         self.image_lock = threading.Lock()
-        self.pricing = Pricing()
+        self.pricing = Pricing(directory)
         self.llm = ScriptGenerator()
         self.samples = SampleCache(self.controller.store)
         self.controller.cost_estimator = self.pricing.quote
+        self.credentials = Credentials(directory)
+        self.connection_lock = threading.Lock()
+        self.connection_error = None
+        self.reconnecting = False
+        self.reconnect_stop = threading.Event()
+        self.reconnect_thread = None
+        if self.credentials.saved or all(self.controller.env_credentials):
+            self.reconnecting = True
+            self.reconnect_thread = threading.Thread(target=self._auto_reconnect, daemon=True)
+            self.reconnect_thread.start()
+
+    def _stored_credentials(self):
+        return self.credentials.load() or self.controller.env_credentials
+
+    def _auto_reconnect(self):
+        delay = 5
+        while not self.reconnect_stop.is_set():
+            try:
+                with self.connection_lock:
+                    if self.controller.provider is not None:
+                        self.reconnecting = False
+                        return
+                    token_id, token_secret = self._stored_credentials()
+                    self.controller.connect(token_id, token_secret)
+                    self.connection_error = None
+                    self.reconnecting = False
+                    return
+            except Exception as exc:
+                if self.controller.provider is not None:
+                    self.reconnecting = False
+                    return
+                self.connection_error = self.controller.redact(str(exc))
+            if self.reconnect_stop.wait(delay):
+                break
+            delay = min(delay * 2, 60)
+        self.reconnecting = False
+
+    def connect(self, body):
+        with self.connection_lock:
+            token_id, token_secret = body.get("token_id", ""), body.get("token_secret", "")
+            if not isinstance(token_id, str) or not isinstance(token_secret, str):
+                raise ValueError("Modal credentials must be text")
+            token_id, token_secret = token_id.strip(), token_secret.strip()
+            if not token_id and not token_secret:
+                token_id, token_secret = self._stored_credentials()
+            result = self.controller.connect(token_id, token_secret)
+            if body.get("remember", True):
+                self.credentials.save(token_id, token_secret)
+            else:
+                self.credentials.forget()
+            self.connection_error = None
+            self.reconnecting = False
+            return {**result, "credentials_saved": self.credentials.saved}
 
     def get(self, path, query):
         if path == "/api/bootstrap":
@@ -45,6 +99,9 @@ class Application:
                 csrf=self.csrf,
                 connected=self.controller.provider is not None,
                 environment_credentials=all(self.controller.env_credentials),
+                credentials_saved=self.credentials.saved,
+                reconnecting=self.reconnecting,
+                connection_error=self.connection_error,
                 gpu_types=GPU_TYPES,
             )
         if path == "/api/llm":
@@ -103,9 +160,14 @@ class Application:
         if path.startswith("/api/datasets/") and path.endswith("/delete"):
             return self.controller.store.delete_dataset(path.split("/")[3])
         if path == "/api/connect":
-            result = self.controller.connect(body.get("token_id", ""), body.get("token_secret", ""))
+            result = self.connect(body)
             self.billing_cache = None
             return result
+        if path == "/api/forget-credentials":
+            with self.connection_lock:
+                self.reconnect_stop.set()
+                self.credentials.forget()
+            return {"credentials_saved": False, "connected": self.controller.provider is not None}
         if path == "/api/uploads":
             return save_upload(self.controller.store.directory, body.get("name", ""), body.get("content", ""))
         if path == "/api/preview":

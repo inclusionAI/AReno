@@ -979,8 +979,8 @@ function App() {
                   </div>
                 ))}
               </div>
-              <div className="chatDatasetActions"><button className="secondaryButton" onClick={() => setDatasetsOpen(true)}><Database size={15} /> Upload file / URL · Datasets</button></div>
               <div className="chatComposer">
+                <button className="iconButton chatAttachButton" type="button" aria-label="Attach dataset" title="Attach dataset file or Hugging Face / ModelScope URL" onClick={() => setDatasetsOpen(true)}><Plus size={20} /></button>
                 <label className="chatInputField">
                   <textarea
                     aria-label="Message the operations agent"

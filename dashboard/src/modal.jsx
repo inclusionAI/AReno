@@ -16,23 +16,32 @@ export function ModalSettings({ request }) {
   const [status, setStatus] = useState(null);
   const [tokenId, setTokenId] = useState("");
   const [tokenSecret, setTokenSecret] = useState("");
+  const [remember, setRemember] = useState(true);
   const [pending, setPending] = useState(false);
   const [message, setMessage] = useState("");
-  useEffect(() => { request("/bootstrap").then(setStatus).catch(error => setMessage(error.message)); }, []);
+  useEffect(() => {
+    let active = true;
+    const refresh = () => request("/bootstrap").then(value => { if (active) setStatus(value); }).catch(error => { if (active) setMessage(error.message); });
+    refresh(); const timer = setInterval(refresh, 2000);
+    return () => { active = false; clearInterval(timer); };
+  }, []);
   async function connect(event) {
     event.preventDefault(); setPending(true); setMessage("");
     try {
-      await request("/connect", { token_id: tokenId, token_secret: tokenSecret });
+      await request("/connect", { token_id: tokenId, token_secret: tokenSecret, remember });
       setTokenId(""); setTokenSecret("");
       setStatus(await request("/bootstrap")); setMessage("Modal connected.");
     } catch (error) { setMessage(error.message); } finally { setPending(false); }
   }
   return <section className="modalSettings"><h3>Modal credentials</h3>
-    <p>{status?.connected ? "Connected" : "Connect to launch Modal jobs"}. Tokens stay in server memory for this session.</p>
+    <p>{status?.connected ? "Connected" : status?.reconnecting ? "Reconnecting to Modal…" : "Connect to launch Modal jobs"}. {status?.credentials_saved ? "Credentials saved on this server. Automatic reconnect is enabled." : "Credentials are never stored in browser storage or chat."}</p>
+    {status?.connection_error && <p role="status">{status.connection_error}</p>}
     <form onSubmit={connect} className="launcherSections">
       <div className="formGrid"><label className="field"><span>Modal Token ID</span><input type="password" autoComplete="off" value={tokenId} onChange={e => setTokenId(e.target.value)} /></label>
       <label className="field"><span>Modal Token Secret</span><input type="password" autoComplete="new-password" value={tokenSecret} onChange={e => setTokenSecret(e.target.value)} /></label></div>
-      <button className="primaryButton" disabled={pending || !(tokenId && tokenSecret || (!tokenId && !tokenSecret && status?.environment_credentials))}>{pending ? "Connecting…" : tokenId || tokenSecret ? "Connect Modal" : status?.environment_credentials ? "Use environment credentials" : "Connect Modal"}</button>
+      <label className="modalExecutionSwitch"><input type="checkbox" checked={remember} onChange={event => setRemember(event.target.checked)} /><span>Remember credentials on this server and reconnect automatically</span></label>
+      <div className="detailActions"><button className="primaryButton" disabled={pending || !(tokenId && tokenSecret || (!tokenId && !tokenSecret && (status?.environment_credentials || status?.credentials_saved)))}>{pending ? "Connecting…" : tokenId || tokenSecret ? "Connect Modal" : status?.credentials_saved ? "Reconnect saved credentials" : status?.environment_credentials ? "Use environment credentials" : "Connect Modal"}</button>
+      {status?.credentials_saved && <button type="button" className="secondaryButton" disabled={pending} onClick={async () => { setPending(true); try { await request("/forget-credentials", {}); setStatus(await request("/bootstrap")); setMessage("Saved credentials removed. The current connection remains active until restart."); } catch (error) { setMessage(error.message); } finally { setPending(false); } }}>Forget saved credentials</button>}</div>
       {message && <p role="status">{message}</p>}
     </form>
   </section>;
@@ -95,6 +104,7 @@ export function ModalResourceForm({ request, settings, setSettings, onSettings }
   const [quote, setQuote] = useState(null);
   const [quoting, setQuoting] = useState(false);
   const [quoteError, setQuoteError] = useState("");
+  const [quoteRetry, setQuoteRetry] = useState(0);
   useEffect(() => { let active = true; request("/bootstrap").then(value => { if (active) setBootstrap(value); }).catch(error => { if (active) setError(error.message); }); return () => { active = false; }; }, []);
   useEffect(() => {
     let active = true;
@@ -107,7 +117,7 @@ export function ModalResourceForm({ request, settings, setSettings, onSettings }
       finally { if (active) setQuoting(false); }
     }, 400);
     return () => { active = false; clearTimeout(timer); };
-  }, [settings.gpu, settings.count, settings.cpu, settings.memory_gib, settings.duration_hours]);
+  }, [settings.gpu, settings.count, settings.cpu, settings.memory_gib, settings.duration_hours, quoteRetry]);
   return <section className="modalResourceSection">
     <div className="modalResourceHeader"><strong>Modal resources</strong><button type="button" className="secondaryButton" onClick={onSettings}>Modal settings</button></div>
     <p>Container: <code>ghcr.io/inclusionai/areno:latest</code> · fetched from GHCR and pinned when the plan is prepared.</p>
@@ -122,6 +132,8 @@ export function ModalResourceForm({ request, settings, setSettings, onSettings }
       <div className="modalFee" role="status"><span>Estimated fee</span><strong>{quoting ? "Calculating…" : quote ? `$${Number(quote.planned_cost).toFixed(2)} USD` : "Unavailable"}</strong>
         {quote && <small>${Number(quote.hourly_cost).toFixed(2)} / hour × {settings.duration_hours} hours · GPU + CPU + memory</small>}
         {quoteError && <small>{quoteError}</small>}
+        {quote?.rates?.cached && <small>Using cached public rates verified {new Date(quote.rates.fetched_at * 1000).toLocaleDateString()}.</small>}
+        <button type="button" className="secondaryButton" disabled={quoting} onClick={() => setQuoteRetry(value => value + 1)}>Refresh estimate</button>
         <small>Compute estimate at public list rates for the full duration. Actual usage may differ; excludes storage and networking.</small>
       </div>
       <p>Uses the training or serving configuration above. Relative output paths are stored under /artifacts. Modal currently requires the Hugging Face model hub; local input files must be uploaded first.</p>
@@ -132,14 +144,13 @@ export function ModalResourceForm({ request, settings, setSettings, onSettings }
 export function PlanParameters({ title, value = {}, onChange }) {
   const [newKey, setNewKey] = useState("");
   const [newValue, setNewValue] = useState("");
-  function parse(value) { try { return JSON.parse(value); } catch { return value; } }
   return <fieldset className="planParameterGroup"><legend>{title}</legend>
     {Object.entries(value).map(([key, item]) => <div className="planParameterRow" key={key}>
-      <label className="field"><span>{key}</span><input value={typeof item === "string" ? item : JSON.stringify(item)} onChange={event => onChange({ ...value, [key]: parse(event.target.value) })} /></label>
+      <label className="field"><span>{key}</span><input value={typeof item === "string" ? item : JSON.stringify(item)} onChange={event => onChange({ ...value, [key]: event.target.value })} /></label>
       <button type="button" className="secondaryButton" aria-label={`Delete ${title} ${key}`} onClick={() => { const next = { ...value }; delete next[key]; onChange(next); }}>Delete</button>
     </div>)}
     <div className="planParameterAdd"><label className="field"><span>Parameter name</span><input value={newKey} onChange={event => setNewKey(event.target.value)} /></label><label className="field"><span>Value</span><input value={newValue} onChange={event => setNewValue(event.target.value)} /></label>
-      <button type="button" className="secondaryButton" disabled={!newKey.trim() || Object.hasOwn(value, newKey.trim()) || ["__proto__", "constructor", "prototype"].includes(newKey.trim())} onClick={() => { onChange({ ...value, [newKey.trim()]: parse(newValue) }); setNewKey(""); setNewValue(""); }}>Add parameter</button>
+      <button type="button" className="secondaryButton" disabled={!newKey.trim() || Object.hasOwn(value, newKey.trim()) || ["__proto__", "constructor", "prototype"].includes(newKey.trim())} onClick={() => { onChange({ ...value, [newKey.trim()]: newValue }); setNewKey(""); setNewValue(""); }}>Add parameter</button>
     </div>
   </fieldset>;
 }
@@ -151,6 +162,17 @@ export function ModalPlanCard({ plan, request, onConfirm, onUpdate }) {
   const [pending, setPending] = useState("");
   const [message, setMessage] = useState("");
   const [executed, setExecuted] = useState(plan.status === "started");
+  const [estimating, setEstimating] = useState(false);
+  async function refreshEstimate() {
+    if (!current.resources) return;
+    setEstimating(true);
+    try {
+      const estimate = await request("/estimate", { resources: current.resources, hours: current.resources.timeout_seconds / 3600 });
+      setCurrent(value => ({ ...value, estimate, estimate_error: null }));
+    } catch (error) { setCurrent(value => ({ ...value, estimate_error: error.message })); }
+    finally { setEstimating(false); }
+  }
+  useEffect(() => { if (!plan.estimate && plan.resources) refreshEstimate(); }, [plan.id]);
   useEffect(() => { setCurrent(plan); setDraft(plan.workflow || {}); setExecuted(plan.status === "started"); }, [plan]);
   async function save() {
     setPending("Saving…"); setMessage("");
@@ -172,9 +194,11 @@ export function ModalPlanCard({ plan, request, onConfirm, onUpdate }) {
   return <section className="agentPlanCard">
     <div className="agentPlanHeader"><div><span>Modal execution plan</span><strong>{current.objective}</strong></div><span>{executed ? "Started" : "Proposed"}</span></div>
     <p>{current.summary}</p>
-    <div className="modalFee"><span>Estimated fee</span><strong>{editing ? "Save changes to refresh" : estimate ? `$${Number(estimate.planned_cost).toFixed(2)} USD` : "Unavailable"}</strong>
+    <div className="modalFee"><span>Estimated fee</span><strong>{editing ? "Save changes to refresh" : estimating ? "Calculating…" : estimate ? `$${Number(estimate.planned_cost).toFixed(2)} USD` : "Unavailable"}</strong>
       {!editing && estimate && <small>${Number(estimate.hourly_cost).toFixed(2)} / hour · {(current.resources.timeout_seconds / 3600).toFixed(2)} hours</small>}
       {!editing && current.estimate_error && <small>{current.estimate_error}</small>}
+      {!editing && estimate?.rates?.cached && <small>Cached public rates · verified {new Date(estimate.rates.fetched_at * 1000).toLocaleDateString()}</small>}
+      {!editing && <button className="secondaryButton" disabled={estimating || !!pending} onClick={refreshEstimate}>Refresh estimate</button>}
       <small>Compute estimate for the full duration; excludes storage and networking.</small>
     </div>
     {editing ? <div className="planEditor">
@@ -183,7 +207,7 @@ export function ModalPlanCard({ plan, request, onConfirm, onUpdate }) {
       <PlanParameters title="Resources" value={draft.resources} onChange={resources => setDraft({ ...draft, resources })} />
       {(draft.stages || []).map((stage, index) => <div key={index}><label className="field"><span>Stage {index + 1} algorithm</span><input value={stage.algo} onChange={e => setDraft({ ...draft, stages: draft.stages.map((item, i) => i === index ? { ...item, algo: e.target.value } : item) })} /></label><PlanParameters title={`Stage ${index + 1} parameters`} value={stage.params} onChange={params => setDraft({ ...draft, stages: draft.stages.map((item, i) => i === index ? { ...item, params } : item) })} /></div>)}
       {draft.kind === "deployment" && <PlanParameters title="Serving parameters" value={draft.serve} onChange={serve => setDraft({ ...draft, serve })} />}
-      <p>Use AReno parameter names. Values can be text, numbers, true/false, or JSON. Deleting an optional parameter restores its runtime default.</p>
+      <p>Use AReno parameter names. Values are validated when you save; numbers, decimals and true/false are supported. Deleting an optional parameter restores its runtime default.</p>
       <div className="agentPlanActions"><button className="primaryButton" disabled={!!pending} onClick={save}>Save changes &amp; estimate</button><button className="secondaryButton" disabled={!!pending} onClick={() => { setDraft(current.workflow); setEditing(false); setMessage(""); }}>Cancel edits</button></div>
     </div> : <>
       <div className="agentPlanParams">{Object.entries(current.resources || {}).map(([key, value]) => <label key={key}><span>{key.replaceAll("_", " ")}</span><strong>{String(value)}</strong></label>)}</div>

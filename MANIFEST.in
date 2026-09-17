@@ -1,2 +1,4 @@
 recursive-include areno/accel/csrc *.cpp *.cu *.cuh *.h *.hpp
 recursive-include areno/dashboard/dist *.html *.css *.js
+
+include areno/dashboard/flow/pricing_snapshot.json

@@ -94,3 +94,37 @@ def test_seconds_timeout_boundaries_and_precedence():
     assert resources({"timeout_seconds": 1})["timeout_seconds"] == 1
     assert resources({"timeout_seconds": 86400})["timeout_seconds"] == 86400
     assert resources({"timeout_seconds": 90, "timeout_hours": 4})["timeout_seconds"] == 90
+
+
+def test_network_failure_uses_verified_snapshot_with_explicit_cached_label(monkeypatch, tmp_path):
+    pricing = Pricing(tmp_path)
+    monkeypatch.setattr(
+        "areno.dashboard.flow.pricing.urllib.request.urlopen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("offline")),
+    )
+    quote = pricing.quote(reservation(), 2)
+    assert Decimal(quote["planned_cost"]) > 0
+    assert quote["rates"]["cached"] is True
+    assert quote["rates"]["source"] == "https://modal.com/pricing"
+    assert quote["rates"]["fetched_at"] > 0
+    assert "last verified" in quote["rates"]["warning"]
+
+
+def test_live_prices_are_cached_for_later_restart(monkeypatch, tmp_path):
+    import io
+    import json
+
+    monkeypatch.setattr(
+        "areno.dashboard.flow.pricing.urllib.request.urlopen",
+        lambda *_args, **_kwargs: io.BytesIO(fixture_html().encode()),
+    )
+    original = Pricing(tmp_path).quote(reservation(), 2)
+    assert original["rates"]["cached"] is False
+    assert json.loads((tmp_path / "pricing-cache.json").read_text())["gpu_per_second"]["H100"] == "0.001"
+    monkeypatch.setattr(
+        "areno.dashboard.flow.pricing.urllib.request.urlopen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("offline")),
+    )
+    restored = Pricing(tmp_path).quote(reservation(), 2)
+    assert restored["planned_cost"] == original["planned_cost"]
+    assert restored["rates"]["cached"] is True

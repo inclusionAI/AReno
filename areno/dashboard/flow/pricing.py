@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import re
 import threading
 import time
 import urllib.request
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from html.parser import HTMLParser
+from pathlib import Path
 
 from areno.dashboard.flow.workflows import bounded, resources, timeout_seconds
 
@@ -102,17 +104,58 @@ def estimate(raw_resources, hours, rates, count=1):
 
 
 class Pricing:
-    def __init__(self):
+    def __init__(self, directory=None):
         self.cache = None
         self.lock = threading.Lock()
+        self.retry_at = 0
+        self.cache_file = Path(directory) / "pricing-cache.json" if directory else None
+        candidates = [self.cache_file, Path(__file__).with_name("pricing_snapshot.json")]
+        for path in candidates:
+            if path and path.is_file():
+                try:
+                    candidate = json.loads(path.read_text())
+                    if candidate.get("source") != PRICING_URL:
+                        continue
+                    # Validate every stored rate before using it as a fallback.
+                    rates = [
+                        *candidate["gpu_per_second"].values(),
+                        candidate["cpu_per_core_second"],
+                        candidate["memory_per_gib_second"],
+                    ]
+                    if any(not Decimal(str(rate)).is_finite() or Decimal(str(rate)) <= 0 for rate in rates):
+                        continue
+                    if not set(GPU_LABELS).issubset(candidate["gpu_per_second"]):
+                        continue
+                    self.cache = {**candidate, "cached": True}
+                    break
+                except (ValueError, KeyError, TypeError, OSError, InvalidOperation):
+                    continue
 
     def rates(self):
         with self.lock:
-            if self.cache and time.time() - self.cache["fetched_at"] < 900:
+            if self.cache and (
+                time.time() < self.retry_at
+                or (not self.cache.get("cached") and time.time() - self.cache["fetched_at"] < 900)
+            ):
                 return self.cache
             request = urllib.request.Request(PRICING_URL, headers={"User-Agent": "ARenoflow/0.1"})
-            with urllib.request.urlopen(request, timeout=20) as response:
-                self.cache = parse_rates(response.read().decode())
+            try:
+                with urllib.request.urlopen(request, timeout=8) as response:
+                    self.cache = {**parse_rates(response.read().decode()), "cached": False}
+                if self.cache_file:
+                    try:
+                        self.cache_file.write_text(json.dumps(self.cache))
+                    except OSError:
+                        pass
+            except Exception:
+                self.retry_at = time.time() + 60
+                if not self.cache:
+                    raise ValueError("Could not load Modal prices; retry the estimate") from None
+                self.cache = {
+                    **self.cache,
+                    "cached": True,
+                    "warning": "Live prices could not be refreshed; estimate uses the last verified public rates.",
+                }
             return self.cache
 
     def quote(self, reservation, hours, count=1):

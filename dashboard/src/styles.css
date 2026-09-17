@@ -2734,7 +2734,6 @@ textarea:focus {
 .modalSettings { padding-bottom: 24px; }
 .modalUsage { display: grid; gap: 4px; font-variant-numeric: tabular-nums; }
 .modalUsage small, .datasetRow small { color: var(--deck-muted); font-size: 11px; }
-.chatDatasetActions { padding: 12px 16px 0; }
 .datasetUrlForm { display: flex; align-items: end; gap: 12px; }
 .datasetUrlForm .field { flex: 1; min-width: 0; }
 .datasetList { display: grid; gap: 12px; }
@@ -2764,3 +2763,7 @@ textarea:focus {
 .planParameterRow .field, .planParameterAdd .field { flex: 1; min-width: 0; }
 .planImage { overflow-wrap: anywhere; font-size: 11px; }
 @media (max-width: 640px) { .planParameterAdd { flex-wrap: wrap; } }
+
+.agentPrdLayout .chatComposer { grid-template-columns: 40px minmax(0, 1fr) auto; }
+.chatAttachButton { width: 40px; height: 44px; align-self: center; }
+@media (max-width: 640px) { .agentPrdLayout .chatComposer { grid-template-columns: 40px minmax(0, 1fr); } .agentPrdLayout .chatSendButton { grid-column: 2; width: auto; justify-self: end; } }

@@ -218,3 +218,45 @@ def test_invalid_plan_edit_preserves_previous_plan(flow):
     with pytest.raises(ValueError):
         flow.revise(preview["id"], preview["workflow"])
     assert flow.plans[preview["id"]][1]["resources"]["gpu"] == "L4"
+
+
+def test_editor_keeps_decimal_and_boolean_text_until_validated(flow):
+    preview = flow.preview(training())
+    params = preview["workflow"]["stages"][0]["params"]
+    params.update(lr="0.000025", adam_4bit="false", max_steps="35", max_new_tokens="1e3")
+    revised = flow.revise(preview["id"], preview["workflow"])
+    params = revised["workflow"]["stages"][0]["params"]
+    assert params["lr"] == 0.000025
+    assert params["adam_4bit"] is False
+    assert params["max_new_tokens"] == 1000
+    assert "--max-steps 35" in revised["command"]
+
+
+def test_plan_survives_restart_and_cannot_execute_twice(flow):
+    preview = flow.preview(training())
+    restored = ModalFlow(flow.app.controller.store.directory, application=flow.app)
+    restored.revise(preview["id"], preview["workflow"])
+    restored.execute(preview["id"])
+    restarted = ModalFlow(flow.app.controller.store.directory, application=flow.app)
+    with pytest.raises(ValueError, match="already executed"):
+        restarted.execute(preview["id"])
+    with pytest.raises(ValueError, match="already executed"):
+        restarted.revise(preview["id"], preview["workflow"])
+
+
+def test_old_chat_plan_can_be_revalidated_after_restart(flow):
+    preview = flow.preview(training())
+    old_identifier = "old-chat-plan"
+    revised = flow.revise(old_identifier, preview["workflow"])
+    assert revised["id"] == old_identifier
+    assert flow.app.controller.store.get_plan(old_identifier)["status"] == "proposed"
+
+
+def test_plan_storage_excludes_endpoint_secret(flow):
+    request = {**training(), "kind": "deployment", "endpoint_key": "z" * 32}
+    plan = flow.preview(request)
+    stored = flow.app.controller.store.get_plan(plan["id"])
+    assert "z" * 32 not in json.dumps(stored)
+    restored = ModalFlow(flow.app.controller.store.directory, application=flow.app)
+    result = restored.execute(plan["id"])
+    assert len(result["endpoint_key"]) >= 24

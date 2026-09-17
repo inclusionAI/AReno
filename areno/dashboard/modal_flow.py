@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import math
 import re
 import secrets
 import threading
@@ -61,6 +62,32 @@ class ModalFlow:
         )
 
     def preview(self, request):
+        request = json.loads(json.dumps(request))
+        groups = [(stage.setdefault("params", {}), self.app.catalog["train"]) for stage in request.get("stages", [])]
+        if request.get("kind") == "deployment":
+            groups.append((request.setdefault("serve", {}), self.app.catalog["serve"]))
+        for params, schema in groups:
+            for option in schema:
+                key = option["name"]
+                value = params.get(key)
+                if not isinstance(value, str):
+                    continue
+                if value == "":
+                    params.pop(key, None)
+                elif option["type"] == "bool":
+                    if value.lower() not in ("true", "false"):
+                        raise ValueError(f"{key} must be true or false")
+                    params[key] = value.lower() == "true"
+                elif option["type"] in ("int", "float") and not option.get("multiple"):
+                    try:
+                        number = float(value)
+                        if not math.isfinite(number) or (option["type"] == "int" and not number.is_integer()):
+                            raise ValueError()
+                        params[key] = int(number) if option["type"] == "int" else number
+                    except ValueError:
+                        raise ValueError(f"{key} must be a finite {option['type']}") from None
+                elif option.get("multiple") and value.lstrip().startswith("["):
+                    params[key] = json.loads(value)
         request = resolve_request(request, self.app.controller.store)
         for stage in request.get("stages", []):
             params = stage.setdefault("params", {})
@@ -88,6 +115,7 @@ class ModalFlow:
         with self.lock:
             self.plans = {key: value for key, value in self.plans.items() if value[0] > time.time()}
             self.plans[identifier] = (time.time() + 1800, json.loads(json.dumps(request)))
+            self.app.controller.store.save_plan(identifier, request, self.plans[identifier][0])
         return {
             "id": identifier,
             "status": "proposed",
@@ -110,26 +138,43 @@ class ModalFlow:
         if not isinstance(workflow, dict):
             raise ValueError("Workflow must be an object")
         with self.lock:
-            item = self.plans.get(identifier)
-            if not item or item[0] <= time.time():
-                raise ValueError("Plan expired or already executed; prepare another plan")
+            saved = self.app.controller.store.get_plan(identifier)
+            if saved and saved["status"] != "proposed":
+                raise ValueError("Plan already executed; prepare another plan")
+            item = self.plans.get(identifier) or ((saved["expires"], saved["request"]) if saved else None)
+            if not item:
+                # Legacy chat plans predate durable storage; editing revalidates the full workflow.
+                item = (0, {})
             request = json.loads(json.dumps(workflow))
             request.pop("endpoint_key", None)
             if request.get("kind") == "deployment":
                 request["endpoint_key"] = item[1].get("endpoint_key") or secrets.token_urlsafe(32)
             revised = self.preview(request)
-            self.plans[identifier] = self.plans.pop(revised["id"])
+            replacement_id = revised["id"]
+            self.plans[identifier] = self.plans.pop(replacement_id)
+            self.app.controller.store.save_plan(replacement_id, {}, 0, "superseded")
+            self.app.controller.store.save_plan(identifier, self.plans[identifier][1], self.plans[identifier][0])
             revised.update(id=identifier, parameters={"plan_id": identifier})
             return revised
 
     def execute(self, identifier):
         with self.lock:
-            item = self.plans.get(identifier)
-            if not item or item[0] <= time.time():
-                raise ValueError("Plan expired or already executed; preview the task again")
-            record = self.app.post("/api/jobs", item[1])
-            del self.plans[identifier]
-        return {"job_id": "modal-" + record["id"], "endpoint_key": item[1].get("endpoint_key")}
+            saved = self.app.controller.store.get_plan(identifier)
+            item = self.plans.get(identifier) or ((saved["expires"], saved["request"]) if saved else None)
+            if not item or item[0] <= time.time() or (saved and saved["status"] != "proposed"):
+                raise ValueError("Plan expired or already executed; edit and save the plan to revalidate it")
+            request = json.loads(json.dumps(item[1]))
+            if request.get("kind") == "deployment":
+                request.setdefault("endpoint_key", secrets.token_urlsafe(32))
+            self.app.controller.store.save_plan(identifier, request, item[0], "executing")
+            try:
+                record = self.app.post("/api/jobs", request)
+            except Exception:
+                self.app.controller.store.save_plan(identifier, request, item[0])
+                raise
+            self.app.controller.store.save_plan(identifier, request, item[0], "started")
+            self.plans.pop(identifier, None)
+        return {"job_id": "modal-" + record["id"], "endpoint_key": request.get("endpoint_key")}
 
     def jobs(self, job_class):
         return [self.job(record["id"], job_class, detail=False) for record in self.app.controller.store.jobs()]
