@@ -21,8 +21,8 @@ export function modalWorkflow(mode, config, catalog, settings) {
   return {
     kind: mode === "train" ? "training" : "deployment",
     name: `${mode} ${mode === "train" ? config.ckpt : config.model_path}`,
-    model: { adapter: settings.adapter, checkpoint: mode === "train" ? config.ckpt : config.model_path },
-    resources: { gpu: settings.gpu, count: settings.count, cpu: settings.cpu, memory_gib: settings.memory_gib, timeout_seconds: Math.round(settings.duration_hours * 3600) },
+    model: { adapter: settings.adapter, checkpoint: mode === "train" ? config.ckpt : config.model_path, ...(settings.parameters_billion ? { parameters_billion: Number(settings.parameters_billion) } : {}) },
+    resources: { ...(settings.auto_gpu ? { auto_gpu: true } : {}), gpu: settings.gpu, count: settings.count, cpu: settings.cpu, memory_gib: settings.memory_gib, timeout_seconds: Math.round(settings.duration_hours * 3600) },
     estimate_hours: settings.duration_hours,
     ...(mode === "train" ? { stages: [{ algo: config.algo, params }] } : { serve: params }),
   };

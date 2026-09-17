@@ -15,6 +15,7 @@ from areno.dashboard.flow.catalog import catalog
 from areno.dashboard.flow.controller import Controller
 from areno.dashboard.flow.credentials import Credentials
 from areno.dashboard.flow.datasets import find, resolve_request, save_dataset, save_function, save_script_batch
+from areno.dashboard.flow.gpu_estimate import recommend
 from areno.dashboard.flow.inference import test_deployment
 from areno.dashboard.flow.llm import ScriptGenerator
 from areno.dashboard.flow.pricing import Pricing
@@ -147,6 +148,8 @@ class Application:
             return save_script_batch(self.controller.store, body)
         if path == "/api/scripts/generate":
             return self.llm.generate(body, self.controller.store, self.catalog)
+        if path == "/api/recommend-gpu":
+            return recommend(body, self.pricing.cache or self.pricing.rates())
         if path == "/api/estimate":
             return self.pricing.quote(body.get("resources", {}), body.get("hours", 1), body.get("run_count", 1))
         if path == "/api/functions":

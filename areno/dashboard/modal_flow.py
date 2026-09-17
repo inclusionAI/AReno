@@ -100,11 +100,19 @@ class ModalFlow:
         for stage in request.get("stages", []):
             for key in ("dataset_id", "dataset_loader_id", "reward_function_id", "agentic_function_id"):
                 stage.pop(key, None)
+        recommendation = self.app.post("/api/recommend-gpu", request)
+        raw_resources = request.setdefault("resources", {})
+        auto_gpu = raw_resources.get("auto_gpu") in (True, "true")
+        if auto_gpu:
+            if not recommendation.get("available"):
+                raise ValueError(recommendation["reason"])
+            selected = recommendation["recommended"]
+            raw_resources.update(gpu=selected["gpu"], count=selected["count"])
         prepared = self.app.post("/api/preview", request)
         request["image"] = self.app.controller.image_resolver(
             request.get("image") or "ghcr.io/inclusionai/areno:latest"
         )
-        request["resources"] = prepared["resources"]
+        request["resources"] = {**prepared["resources"], **({"auto_gpu": True} if auto_gpu else {})}
         request["estimate_hours"] = prepared["resources"]["timeout_seconds"] / 3600
         estimate, estimate_error = None, None
         try:
@@ -127,6 +135,7 @@ class ModalFlow:
             "resources": prepared["resources"],
             "workflow": {key: value for key, value in request.items() if key != "endpoint_key"},
             "image": request["image"],
+            "gpu_recommendation": recommendation,
             "estimate": estimate,
             "estimate_error": estimate_error,
             "steps": [

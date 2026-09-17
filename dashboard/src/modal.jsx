@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Database, Plus, Upload } from "lucide-react";
+import { modalWorkflow } from "./modal-workflow";
 
 export function ModalUsage({ job, detail = false }) {
   if (job.provider !== "modal") return detail ? null : "—";
@@ -98,13 +99,34 @@ export function DatasetManager({ request, onSelect }) {
   </div>;
 }
 
-export function ModalResourceForm({ request, settings, setSettings, onSettings }) {
+export function ModalResourceForm({ mode, config, request, settings, setSettings, onSettings }) {
   const [bootstrap, setBootstrap] = useState(null);
   const [error, setError] = useState("");
   const [quote, setQuote] = useState(null);
   const [quoting, setQuoting] = useState(false);
   const [quoteError, setQuoteError] = useState("");
   const [quoteRetry, setQuoteRetry] = useState(0);
+  const [recommendation, setRecommendation] = useState(null);
+  const [recommending, setRecommending] = useState(false);
+  const modelInputs = JSON.stringify(config);
+  useEffect(() => {
+    if (!bootstrap) return;
+    let active = true;
+    setRecommendation(null); setRecommending(true);
+    const timer = setTimeout(async () => {
+      try {
+        const workflow = modalWorkflow(mode, config, bootstrap.catalog, settings);
+        const result = await request("/recommend-gpu", workflow);
+        if (!active) return;
+        setRecommendation(result);
+        if (settings.auto_gpu && result.recommended) {
+          setSettings(current => ({ ...current, gpu: result.recommended.gpu, count: result.recommended.count }));
+        }
+      } catch (error) { if (active) setRecommendation({ available: false, reason: error.message }); }
+      finally { if (active) setRecommending(false); }
+    }, 400);
+    return () => { active = false; clearTimeout(timer); };
+  }, [bootstrap, mode, modelInputs, settings.parameters_billion, settings.auto_gpu]);
   useEffect(() => { let active = true; request("/bootstrap").then(value => { if (active) setBootstrap(value); }).catch(error => { if (active) setError(error.message); }); return () => { active = false; }; }, []);
   useEffect(() => {
     let active = true;
@@ -124,12 +146,15 @@ export function ModalResourceForm({ request, settings, setSettings, onSettings }
     {error && <p role="alert">{error}</p>}
     {!bootstrap && !error && <p>Loading Modal catalog…</p>}
     {bootstrap && <>
+      <label className="field"><span><input type="checkbox" checked={!!settings.auto_gpu} onChange={e => setSettings(current => ({ ...current, auto_gpu: e.target.checked }))} /> Automatically select GPU from model and task settings</span></label>
+      <label className="field"><span>Total model parameters (billions, optional override)</span><input type="number" min="0.001" step="any" value={settings.parameters_billion || ""} placeholder="Infer from model name" onChange={e => setSettings(current => ({ ...current, parameters_billion: e.target.value }))} /></label>
+      {recommending ? <p>Estimating GPU memory…</p> : <GpuRecommendation value={recommendation} />}
       <div className="formGrid">
         <label className="field"><span>Model adapter</span><select value={settings.adapter} onChange={e => setSettings(current => ({ ...current, adapter: e.target.value }))}><option value="">Select adapter</option>{bootstrap.catalog.models.map(item => <option key={item.id} value={item.id}>{item.id}</option>)}</select></label>
-        <label className="field"><span>GPU type</span><select value={settings.gpu} onChange={e => setSettings(current => ({ ...current, gpu: e.target.value }))}>{bootstrap.gpu_types.map(gpu => <option key={gpu}>{gpu}</option>)}</select></label>
-        {[["count", "GPU count", 1, 8, 1], ["duration_hours", "Duration / maximum runtime (hours)", 0.01, 24, 0.01], ["cpu", "CPU cores", 1, 64, 1], ["memory_gib", "Memory (GiB)", 4, 512, 1]].map(([key, label, min, max, step]) => <label className="field" key={key}><span>{label}</span><input type="number" min={min} max={max} step={step} value={settings[key]} onChange={e => setSettings(current => ({ ...current, [key]: Number(e.target.value) }))} /></label>)}
+        <label className="field"><span>GPU type</span><select value={settings.gpu} onChange={e => setSettings(current => ({ ...current, gpu: e.target.value, auto_gpu: false }))}>{bootstrap.gpu_types.map(gpu => <option key={gpu}>{gpu}</option>)}</select></label>
+        {[["count", "GPU count", 1, 8, 1], ["duration_hours", "Duration / maximum runtime (hours)", 0.01, 24, 0.01], ["cpu", "CPU cores", 1, 64, 1], ["memory_gib", "Memory (GiB)", 4, 512, 1]].map(([key, label, min, max, step]) => <label className="field" key={key}><span>{label}</span><input type="number" min={min} max={max} step={step} value={settings[key]} onChange={e => setSettings(current => ({ ...current, [key]: Number(e.target.value), ...(key === "count" ? { auto_gpu: false } : {}) }))} /></label>)}
       </div>
-      <div className="modalFee" role="status"><span>Estimated fee</span><strong>{quoting ? "Calculating…" : quote ? `$${Number(quote.planned_cost).toFixed(2)} USD` : "Unavailable"}</strong>
+      <div className="modalFee" role="status"><span>Estimated fee</span><strong>{settings.auto_gpu && recommending ? "Sizing GPU…" : settings.auto_gpu && !recommendation?.available ? "Model sizing required" : quoting ? "Calculating…" : quote ? `$${Number(quote.planned_cost).toFixed(2)} USD` : "Unavailable"}</strong>
         {quote && <small>${Number(quote.hourly_cost).toFixed(2)} / hour × {settings.duration_hours} hours · GPU + CPU + memory</small>}
         {quoteError && <small>{quoteError}</small>}
         {quote?.rates?.cached && <small>Using cached public rates verified {new Date(quote.rates.fetched_at * 1000).toLocaleDateString()}.</small>}
@@ -139,6 +164,19 @@ export function ModalResourceForm({ request, settings, setSettings, onSettings }
       <p>Uses the training or serving configuration above. Relative output paths are stored under /artifacts. Modal currently requires the Hugging Face model hub; local input files must be uploaded first.</p>
     </>}
   </section>;
+}
+
+function GpuRecommendation({ value }) {
+  if (!value) return null;
+  return <div className="modalFee" role="status">
+    <span>GPU memory estimate</span>
+    {value.required_gib_per_gpu != null && <strong>{value.required_gib_per_gpu.toFixed(1)} GiB per GPU including headroom</strong>}
+    {value.recommended && <small>Recommended: {value.recommended.count} × {value.recommended.gpu} · lowest GPU list cost among estimated fits</small>}
+    {value.reason && <small>{value.reason}</small>}
+    {value.parameter_source && <small>{value.parameters_billion}B parameters · {value.parameter_source}</small>}
+    {value.stages?.map((stage, i) => <small key={i}>{stage.algo}: {stage.optimizer.replaceAll("_", " ")}</small>)}
+    {value.assumptions && <details><summary>Memory assumptions</summary>{value.assumptions.map(item => <p key={item}>{item}</p>)}{value.stages?.map((stage, index) => <p key={index}>{Object.entries(stage.components_gib).map(([name, gib]) => `${name.replaceAll("_", " ")}: ${gib.toFixed(1)} GiB`).join(" · ")}</p>)}</details>}
+  </div>;
 }
 
 export function PlanParameters({ title, value = {}, onChange }) {
@@ -194,6 +232,7 @@ export function ModalPlanCard({ plan, request, onConfirm, onUpdate }) {
   return <section className="agentPlanCard">
     <div className="agentPlanHeader"><div><span>Modal execution plan</span><strong>{current.objective}</strong></div><span>{executed ? "Started" : "Proposed"}</span></div>
     <p>{current.summary}</p>
+    {!editing && <GpuRecommendation value={current.gpu_recommendation} />}
     <div className="modalFee"><span>Estimated fee</span><strong>{editing ? "Save changes to refresh" : estimating ? "Calculating…" : estimate ? `$${Number(estimate.planned_cost).toFixed(2)} USD` : "Unavailable"}</strong>
       {!editing && estimate && <small>${Number(estimate.hourly_cost).toFixed(2)} / hour · {(current.resources.timeout_seconds / 3600).toFixed(2)} hours</small>}
       {!editing && current.estimate_error && <small>{current.estimate_error}</small>}

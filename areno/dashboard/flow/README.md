@@ -68,3 +68,15 @@ Pricing refresh failures use the last verified public-rate cache (or the bundled
 verified snapshot) with a visible cached-rate date. Refresh estimate retries the
 quote without clearing the plan. After updating dashboard Python code, restart
 the dashboard backend; refreshing the browser only reloads the frontend.
+
+
+Modal GPU recommendations are shared by the launcher and the agent's
+`recommend_modal_gpu` tool. Automatic selection uses the lowest GPU list price
+among estimated fits at the configured TP/world size; GPU count alone never
+implies model sharding. Full training defaults to Adam 4-bit, including compact
+master metadata, packed first moments, and factored variance. Memory allowances
+include BF16 weights/gradients, activation/KV estimates, and 20% headroom.
+Parameter counts inferred from model names are explicitly approximate; custom
+models can supply `model.parameters_billion` (all experts for MoE). These are
+planning heuristics, not measured GPU probes. Manual GPU selection remains
+available. Auto-selected resources are recalculated when editing a plan.

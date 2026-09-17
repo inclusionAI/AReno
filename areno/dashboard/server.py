@@ -1839,6 +1839,19 @@ def agent_tool_schemas() -> list[dict[str, Any]]:
         {
             "type": "function",
             "function": {
+                "name": "recommend_modal_gpu",
+                "description": "Estimate suitable Modal GPU type/count for the selected model and training/serving configuration. Training defaults to Adam 4-bit. Pass the full workflow request. Include model.parameters_billion if model name does not identify total size. Estimates include memory headroom; do not invent parameter counts.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"request": {"type": "object", "additionalProperties": True}},
+                    "required": ["request"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "prepare_modal_plan",
                 "description": "Validate an Areno Flow workflow and return a reviewable Modal execution plan. Does not launch. Use kind training or deployment, model {adapter,checkpoint}, resources {gpu,count,cpu,memory_gib,timeout_seconds}, stages [{algo,dataset_id,params}] for training or serve parameters for deployment. Never request Modal tokens in chat. Endpoint keys are generated on execution for deployments.",
                 "parameters": {
@@ -2083,6 +2096,12 @@ def execute_agent_tool(tool_call: dict[str, Any]) -> dict[str, Any]:
                 "gpu_types": app.get("/api/bootstrap", {})["gpu_types"],
                 "datasets": app.get("/api/datasets", {}),
             }
+        if name == "recommend_modal_gpu":
+            return {
+                "name": name,
+                "ok": True,
+                "recommendation": modal_flow().app.post("/api/recommend-gpu", args.get("request", {})),
+            }
         if name == "prepare_modal_plan":
             request = args.get("request", {})
             if request.get("kind") == "deployment":
@@ -2307,6 +2326,7 @@ class Handler(BaseHTTPRequestHandler):
                     "/uploads",
                     "/datasets",
                     "/estimate",
+                    "/recommend-gpu",
                     "/forget-credentials",
                 } or re.fullmatch(r"/datasets/[a-f0-9]{16}/delete", suffix):
                     self.json(flow.app.post("/api" + suffix, payload))

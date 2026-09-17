@@ -345,3 +345,21 @@ def test_modal_trainer_state_from_older_logs_and_new_events(flow):
     assert job.finished_at == "1970-01-01T00:01:42+00:00"
     store.update(identifier[6:], updated_at=200)
     assert flow.job(identifier, server.Job).finished_at == job.finished_at
+
+
+def test_auto_gpu_is_shared_with_agent_and_recomputed_on_plan_edit(flow):
+    request = training()
+    request["model"]["checkpoint"] = "org/model-7B"
+    request["resources"]["auto_gpu"] = True
+    result = server.execute_agent_tool(
+        {"function": {"name": "recommend_modal_gpu", "arguments": json.dumps({"request": request})}}
+    )
+    preview = flow.preview(request)
+    assert preview["resources"]["gpu"] == result["recommendation"]["recommended"]["gpu"]
+    assert preview["gpu_recommendation"]["stages"][0]["optimizer"] == "adam_4bit"
+    assert preview["workflow"]["resources"]["auto_gpu"] is True
+    edited = preview["workflow"]
+    edited["model"]["checkpoint"] = "org/model-0.6B"
+    revised = flow.revise(preview["id"], edited)
+    assert revised["gpu_recommendation"]["required_gib_per_gpu"] < preview["gpu_recommendation"]["required_gib_per_gpu"]
+    assert revised["resources"]["gpu"] == revised["gpu_recommendation"]["recommended"]["gpu"]

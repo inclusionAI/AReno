@@ -369,7 +369,7 @@ function App() {
   const [jobFilter, setJobFilter] = useState("all");
   const [launcherMode, setLauncherMode] = useState("train");
   const [launcherModal, setLauncherModal] = useState(false);
-  const [modalResources, setModalResources] = useState({ adapter: "", gpu: "H100", count: 1, cpu: 4, memory_gib: 32, duration_hours: 4 });
+  const [modalResources, setModalResources] = useState({ adapter: "", gpu: "H100", count: 1, cpu: 4, memory_gib: 32, duration_hours: 4, auto_gpu: true });
   const [theme, setTheme] = useState(() => localStorage.getItem("areno-dashboard-theme-v2") || "light");
   const [language, setLanguage] = useState(() => localStorage.getItem(UI_LANGUAGE_STORAGE_KEY) || "en");
   const [busy, setBusy] = useState("");
@@ -2824,7 +2824,7 @@ function LauncherPrdPage({ mode, controls, modal, modalResources, setModalResour
       onModalPlan((await modalApi("/preview", request)).plan);
     } catch (error) { setModalError(error.message); } finally { setModalPending(false); }
   }
-  const resourceForm = modal ? <ModalResourceForm request={modalApi} settings={modalResources} setSettings={setModalResources} onSettings={onModalSettings} /> : null;
+  const resourceForm = modal ? <ModalResourceForm mode={mode} config={config} request={modalApi} settings={modalResources} setSettings={setModalResources} onSettings={onModalSettings} /> : null;
   const command = launcherCommand(mode, config);
   const hasFailure = checks.some((check) => check.status === "fail");
   const runPreflightAction = async (check) => {

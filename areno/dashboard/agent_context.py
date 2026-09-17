@@ -20,6 +20,18 @@ a train task or a serve task. Use tools rather than guessing live runtime state.
 - If a remote checkpoint or dataset is needed and the user has not provided one,
   ask for it before starting the task.
 
+### Modal GPU selection
+
+- Before preparing a Modal plan, call `recommend_modal_gpu` with the selected
+  model and all training/serving settings. Use Adam 4-bit for training estimates
+  and set `adam_4bit=true` unless the user explicitly selects another optimizer.
+- Use the returned GPU and count unless the user has selected resources.
+  Explain the estimated memory per GPU and assumptions. Set resources.auto_gpu
+  to true to re-estimate resources when the plan parameters change.
+- Unknown model size requires a verified total parameter count, including all
+  experts for MoE. Do not invent a model size or promise that an estimate fits.
+- Respect world_size/tp_size; changing GPU count alone does not shard a model.
+
 ### Train task field contract
 
 SFT command shape:
