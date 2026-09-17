@@ -148,7 +148,7 @@ k, and v share a weight, selecting that weight trains all three components;
 it does not select just the q slice.
 
 Example: adapters plus a fullweight router
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 For a compatible Bailing V3 checkpoint, append the following to your normal
 training command. The paths match the scoped Flash case in the shared E2E;
