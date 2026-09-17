@@ -66,7 +66,7 @@ def test_kernel_entries_are_visible_to_generated_host_launchers():
 
 @pytest.mark.parametrize(
     "family, count",
-    [("activation", 30), ("normalization", 27), ("conv", 24), ("routing", 9), ("moe", 14)],
+    [("activation", 30), ("normalization", 27), ("conv", 24), ("routing", 9), ("moe", 14), ("attention", 15)],
 )
 def test_indirect_launchers_have_explicit_device_instances(tmp_path, family, count):
     compiler = shutil.which("clang++") or shutil.which("c++")

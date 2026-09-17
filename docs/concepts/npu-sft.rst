@@ -16,7 +16,8 @@ CMake and the CANN compiler are required. Source the toolkit's
 Fused experts additionally links the toolkit's ``tiling_api`` and ``platform``
 libraries to query Cube/Vector core counts and Matmul system workspace size.
 
-Attention reuses ``flash-attn-npu==0.3.0``. Linear attention reuses upstream
+Attention uses ``flash-attn-npu==0.3.0`` for supported shapes, with native
+compatibility kernels for the cases described below. Linear attention reuses upstream
 FLA at commit ``e52dbc0ea19d3a40d7ab7f9eed855d2b473994d2``, which includes
 Ascend backends. Both are NPU-only dependencies; CUDA dependencies are unchanged.
 The FLA ``[npu]`` extra is deliberately omitted because it pins a different
@@ -49,12 +50,20 @@ TorchNPU execution only; it does not test AReno kernels or HCCL.
    python -m pytest -q tests/test_routing.py -k npu
    python -m pytest -q tests/test_moe_native.py -k npu
    python -m pytest -q tests/test_npu_library_attention.py
+   python -m pytest -q tests/test_attention_native.py -k npu
    python -m pytest -q tests/test_npu_runtime.py
    python -m pytest -q tests/test_fused_experts_native.py -k npu
    torchrun --standalone --nproc_per_node=2 -m pytest -q tests/test_npu_optimizer_distributed.py
 
 Current validation boundary
 ---------------------------
+
+The target node has built the existing Ascend C static archive and the Python
+extension, but importing that extension failed with an unresolved template
+launcher. Kernel template discovery/instantiation and build-time symbol checks
+have been corrected in source; a rebuild and import on the target are still
+required. The newly added native attention kernels have not been compiled on
+Ascend. No AReno kernel numerical acceptance or end-to-end model run is proven.
 
 This is **not complete NPU training/serving support**. The compiled extension
 currently exposes all ten CUDA activation entries: SiLU, sigmoid, softplus,
@@ -129,7 +138,7 @@ are read on device; as with CUDA, callers must provide valid nondecreasing
 offsets spanning all tokens. Empty segments are allowed. Decode leaves history
 updates to the caller. Tests include packed sequence isolation, decode/prefill
 agreement, storage offsets, empty shapes and unused nonfinite weight taps.
-These native sources remain uncompiled and unvalidated on Ascend.
+These native sources still require numerical validation on Ascend.
 
 Routing now includes native softmax top-k forward/backward and grouped
 sigmoid-plus-bias selection. CUDA and NPU use the same C++ top-k insertion
@@ -159,22 +168,35 @@ so backward also handles strided token indices correctly on both devices.
 Compiled CPU tests cover the common allocator; device tests cover expert
 shards, repeated indices, gradients, storage offsets, padding canaries and
 CUDA graph replay for fixed-shape paths. The native Ascend implementation
-still requires compilation and numerical validation on hardware.
+still requires a working extension import and numerical validation on hardware.
 
-The custom Ascend attention kernels and their build registration have been
-removed. Dense and packed attention call ``flash-attn-npu`` with its own
-autograd; paged decode calls its KV-cache API and updates the original cache.
-Both shared engine attention routes select the library by tensor device.
-CUDA retains its existing FlashAttention and diagnostic native kernels.
-The Ascend adapter supports FP16/BF16 and head dimensions up to 256. It
+Dense and packed FP16/BF16 attention with head dimensions up to 256 call
+``flash-attn-npu`` with its own autograd. Supported paged decode calls its
+KV-cache API and updates the original cache. Both shared engine attention
+routes select the implementation by tensor device, dtype and layout.
+CUDA retains its existing FlashAttention and diagnostic native kernels. The adapter
 truncates invisible K/V suffixes to preserve explicit query offsets and
 passes sliding windows, GQA and packed boundaries to the library. Packed
 lengths remain on device, with the total token count used as a conservative
-maximum length. KV-cache attention is inference-only. Unsupported dtype or
-head size fails explicitly; there is no custom attention kernel fallback.
+maximum length. The library KV-cache path is inference-only and requires head
+dimensions divisible by 8 and cache block sizes divisible by 256.
 The NPU library acceptance suite covers outputs and gradients, packed
 isolation, empty segments, cache writes, GQA and streams. It does not require
 the AReno C extension. These checks still need to run on the target node.
+
+FP32, head dimensions above 256, and other paged layouts use native Ascend C
+compatibility kernels through the same public accel API and shared autograd
+wrappers as CUDA. Dense and packed forward/backward use FP32 intermediates and
+bounded 512-column tiles; they do not allocate a full sequence-by-sequence
+score matrix. Packed GQA boundaries and paged cache metadata remain on device.
+Paged decode updates the original cache and reduces split partials in FP32;
+its diagnostic backward reuses the existing shared Torch reference. The
+compatibility path has no fixed head-dimension limit, but is unbenchmarked and
+recomputes scores across head tiles. It is not selected to hide a library
+import or execution failure. The shared CUDA/NPU native suite checks outputs,
+gradients, cache canaries, empty segments, sliding windows, streams and head
+dimensions through 1025. These new kernels still require target compilation
+and numerical acceptance before model support can be claimed.
 
 The unfinished seg-LA Ascend C sources have also been removed. KDA training
 reuses the existing Torch/FLA wrapper, including gate rounding, normalization
@@ -207,15 +229,15 @@ benchmarked. The shared device suite checks tails, repeated experts, local
 expert/TP shards, strided storage, streams and graph replay with changing routes.
 Targeted cases reject premature down-projection rounding, FP16 overflow before
 routing-weight multiplication, and summation in sorted expert order. CPU checks
-validate those references only; the Ascend sources still require compilation
-and numerical validation on the target machine.
+validate those references only; the Ascend sources still require a working
+extension import and numerical validation on the target machine.
 
 Device guards and TorchNPU's current stream are used for each launch. The
 acceptance suite covers tile boundaries, strided tensors, storage offsets,
 empty inputs, softplus tails, saved normalization statistics, every RMSNorm
 input gradient, many-row weight accumulation, non-default streams and
 two-device execution.
-This source has not yet been compiled or numerically validated on Ascend.
+These operator contracts have not yet passed numerical validation on Ascend.
 
 The backend source reuses the CUDA workflows for training, generation, losses,
 optimizers, checkpoints and serving, with Ascend device initialization, HCCL

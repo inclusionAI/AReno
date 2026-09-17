@@ -117,6 +117,8 @@ def test_kernel_archive_is_linked_and_triggers_extension_rebuild(builder, monkey
         assert "areno/accel/csrc/moe_permute_common.h" in self.extensions[0].depends
         assert "areno/accel/csrc/npu/conv_launch.h" in self.extensions[0].depends
         assert "areno/accel/csrc/npu/conv.cpp" in self.extensions[0].sources
+        assert "areno/accel/csrc/npu/attention.cpp" in self.extensions[0].sources
+        assert "areno/accel/csrc/npu/attention_launch.h" in self.extensions[0].depends
         assert "areno/accel/csrc/npu/routing.cpp" in self.extensions[0].sources
         assert "areno/accel/csrc/npu/moe.cpp" in self.extensions[0].sources
         assert "areno/accel/csrc/npu/fused_experts.cpp" in self.extensions[0].sources
@@ -212,6 +214,9 @@ def test_sdist_includes_native_build_inputs(tmp_path):
         "conv.cpp",
         "conv_kernel.cpp",
         "conv_launch.h",
+        "attention.cpp",
+        "attention_kernel.cpp",
+        "attention_launch.h",
         "routing.cpp",
         "routing_kernel.cpp",
         "routing_launch.h",

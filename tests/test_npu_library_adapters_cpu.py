@@ -99,13 +99,59 @@ def test_paged_keeps_cache_identity_and_forwards_updates(monkeypatch):
         attention.paged_causal_attention_decode(q.requires_grad_(), update, update, kc, vc, table, lengths, 7, 1, 0.25)
 
 
-def test_unsupported_attention_does_not_silently_use_math():
-    q = torch.ones(1, 1, 1, 16)
-    with pytest.raises(ValueError, match="FP16/BF16"):
+def test_unsupported_dtype_does_not_silently_use_math():
+    q = torch.ones(1, 1, 1, 16, dtype=torch.float64)
+    with pytest.raises(ValueError, match="FP32/FP16/BF16"):
         attention.causal_attention(q, q, q, 0, -1, 1.0)
-    q = torch.ones(1, 1, 1, 512, dtype=torch.bfloat16)
-    with pytest.raises(ValueError, match="256"):
-        attention.causal_attention(q, q, q, 0, -1, 1.0)
+
+
+@pytest.mark.parametrize("packed", [False, True])
+@pytest.mark.parametrize("dtype,dim", [(torch.float32, 64), (torch.bfloat16, 512), (torch.float16, 1025)])
+def test_native_attention_reuses_shared_autograd_and_preserves_errors(monkeypatch, packed, dtype, dim):
+    from areno.accel import attention as shared
+
+    calls = []
+
+    def forward(q, k, v, *args):
+        calls.append(("forward", args))
+        assert all(t.is_contiguous() for t in (q, k, v))
+        return 2 * q + 3 * k + 4 * v
+
+    def backward(grad, q, k, v, saved, *args):
+        calls.append(("backward", args))
+        torch.testing.assert_close(saved, 2 * q + 3 * k + 4 * v)
+        return tuple(grad.float() * factor for factor in (2, 3, 4))
+
+    def unexpected_library(*args):
+        pytest.fail("out-of-range attention must not import flash-attn-npu")
+
+    name = "areno_varlen_causal_attention" if packed else "areno_causal_attention"
+    native = SimpleNamespace(**{name + "_forward": forward, name + "_backward": backward})
+    monkeypatch.setattr(attention, "flash_attention", unexpected_library)
+    monkeypatch.setattr(shared, "_extension", lambda device: native)
+    shape = (3, 2, dim) if packed else (1, 2, 3, dim)
+    tensors = [torch.randn(*shape, 2, dtype=dtype)[..., 0].requires_grad_() for _ in range(3)]
+    if packed:
+        cu = torch.tensor([0, 1, 3], dtype=torch.int32)
+        result = attention.varlen_causal_attention(*tensors, cu, 2, 0.125)
+    else:
+        result = attention.causal_attention(*tensors, 0, 2, 0.125)
+    result.sum().backward()
+    assert [call[0] for call in calls] == ["forward", "backward"]
+    assert calls[0][1][-2:] == calls[1][1][-2:] == (2, 0.125)
+    for tensor, factor in zip(tensors, (2, 3, 4), strict=True):
+        assert tensor.grad.dtype == dtype
+        torch.testing.assert_close(tensor.grad, torch.full_like(tensor, factor))
+
+    def missing(device):
+        raise RuntimeError("native extension missing")
+
+    monkeypatch.setattr(shared, "_extension", missing)
+    with pytest.raises(RuntimeError, match="native extension missing"):
+        if packed:
+            attention.varlen_causal_attention(*tensors, cu, 2, 0.125)
+        else:
+            attention.causal_attention(*tensors, 0, 2, 0.125)
 
 
 def test_empty_attention_preserves_zero_gradients():

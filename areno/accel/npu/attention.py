@@ -1,4 +1,4 @@
-"""Adapt AReno attention layouts to flash-attn-npu; kernels and autograd stay upstream."""
+"""Select flash-attn-npu or native compatibility kernels by tensor layout."""
 
 import torch
 
@@ -6,10 +6,14 @@ from areno.accel.flash_attention import flash_attention
 
 
 def _check(q, k, v):
-    if q.dtype not in (torch.float16, torch.bfloat16) or k.dtype != q.dtype or v.dtype != q.dtype:
-        raise ValueError("flash-attn-npu requires matching FP16/BF16 q/k/v dtype")
-    if not 0 < q.shape[-1] <= 256:
-        raise ValueError("flash-attn-npu supports head dimensions from 1 through 256")
+    if q.dtype not in (torch.float32, torch.float16, torch.bfloat16) or k.dtype != q.dtype or v.dtype != q.dtype:
+        raise ValueError("NPU attention requires matching FP32/FP16/BF16 q/k/v dtype")
+    if q.shape[-1] <= 0:
+        raise ValueError("NPU attention requires a positive head dimension")
+
+
+def _flash_supported(q):
+    return q.dtype in (torch.float16, torch.bfloat16) and q.shape[-1] <= 256
 
 
 def _window(left):
@@ -25,11 +29,16 @@ def _empty(q, k, v):
 
 def causal_attention(q, k, v, query_start, window_left, softmax_scale):
     _check(q, k, v)
+    window = _window(window_left)
     end = query_start + q.shape[2]
     if k.shape != v.shape or query_start < 0 or end > k.shape[2]:
         raise ValueError("invalid causal attention shape or query positions")
     if not q.numel():
         return _empty(q, k, v)
+    if not _flash_supported(q):
+        from areno.accel.attention import _ArenoCausalAttention
+
+        return _ArenoCausalAttention.apply(q, k, v, query_start, window_left, softmax_scale)
     # FlashAttention aligns causal masks at the bottom right. Truncating the
     # invisible K/V suffix maps AReno's explicit query offset to that contract.
     out = flash_attention(q.device).flash_attn_func(
@@ -37,7 +46,7 @@ def causal_attention(q, k, v, query_start, window_left, softmax_scale):
         k[:, :, :end].transpose(1, 2).contiguous(),
         v[:, :, :end].transpose(1, 2).contiguous(),
         causal=True,
-        window_size=_window(window_left),
+        window_size=window,
         softmax_scale=softmax_scale,
     )
     return out.transpose(1, 2)
@@ -45,10 +54,15 @@ def causal_attention(q, k, v, query_start, window_left, softmax_scale):
 
 def varlen_causal_attention(q, k, v, cu_seqlens, window_left, softmax_scale):
     _check(q, k, v)
+    window = _window(window_left)
     if cu_seqlens.numel() < 2:
         raise ValueError("packed attention requires at least two sequence boundaries")
     if not q.numel():
         return _empty(q, k, v)
+    if not _flash_supported(q):
+        from areno.accel.attention import _ArenoVarlenCausalAttention
+
+        return _ArenoVarlenCausalAttention.apply(q, k, v, cu_seqlens, window_left, softmax_scale)
     cu = cu_seqlens.contiguous()
     return flash_attention(q.device).flash_attn_varlen_func(
         q.contiguous(),
@@ -60,7 +74,7 @@ def varlen_causal_attention(q, k, v, cu_seqlens, window_left, softmax_scale):
         max_seqlen_q=q.shape[0],
         max_seqlen_k=k.shape[0],
         causal=True,
-        window_size=_window(window_left),
+        window_size=window,
         softmax_scale=softmax_scale,
     )
 
@@ -79,8 +93,24 @@ def paged_causal_attention_decode(
 ):
     _check(q, k_cache, v_cache)
     _check(q, k_update, v_update)
+    window = _window(window_left)
     if not k_cache.is_contiguous() or not v_cache.is_contiguous():
         raise ValueError("paged attention needs contiguous caller-owned KV caches for in-place updates")
+    if not _flash_supported(q) or q.shape[-1] % 8 or k_cache.shape[1] % 256:
+        from areno.accel.attention import _ArenoPagedCausalAttentionDecode
+
+        return _ArenoPagedCausalAttentionDecode.apply(
+            q,
+            k_update,
+            v_update,
+            k_cache,
+            v_cache,
+            block_table,
+            cache_seqlens,
+            window_left,
+            num_splits or 8,
+            softmax_scale,
+        )
     if torch.is_grad_enabled() and any(t.requires_grad for t in (q, k_update, v_update, k_cache, v_cache)):
         raise RuntimeError(
             "flash-attn-npu KV-cache attention is inference-only; use dense/varlen attention for training"
@@ -96,7 +126,7 @@ def paged_causal_attention_decode(
         block_table=block_table.contiguous(),
         cache_seqlens=cache_seqlens.contiguous(),
         causal=True,
-        window_size=_window(window_left),
+        window_size=window,
         softmax_scale=softmax_scale,
         num_splits=num_splits,
     )
