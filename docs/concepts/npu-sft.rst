@@ -59,17 +59,21 @@ TorchNPU execution only; it does not test AReno kernels or HCCL.
 Current validation boundary
 ---------------------------
 
-The latest target-node run reached extension loading, where a reference to
-TorchNPU's internal ``FormatHelper::IsBaseFormatType`` failed to resolve.
-All ten NPU bindings now query storage format through the exported
+The latest target-node run successfully imported the extension and reached
+the old validation-only startup guard. That blanket guard and the backend's
+model whitelist have been removed. NPU workers now enter the shared model,
+training and rollout lifecycle after extension loading, device selection and
+HCCL initialization. Missing dependencies and unsupported operator arguments
+still fail at their respective entry points. No AReno kernel numerical
+acceptance or end-to-end model run is proven yet.
+
+All ten NPU bindings query storage format through the exported
 ``get_npu_format`` API, retaining the rejection of packed storage layouts.
 The builder checks CANN launcher symbols and imports the exact new extension
 in a fresh process before completing installation. CPU tests exercise real
-shared-library loading, missing symbols, and initialization failures; a CANN
-rebuild and extension import on the target are still required. No AReno kernel
-numerical acceptance or end-to-end model run is proven.
+shared-library loading, missing symbols, and initialization failures.
 
-This is **not complete NPU training/serving support**. The compiled extension
+The compiled extension
 currently exposes all ten CUDA activation entries: SiLU, sigmoid, softplus,
 SiLU-and-multiply and tanh-GELU-and-multiply, with their backward operators.
 They preserve the public accel wrapper signatures and use tiled Ascend C
@@ -264,15 +268,29 @@ non-default streams, strided checkpoint tensors, disk/CPU offload and optimizer
 checkpoint resume on devices 0 and 1. It has not run on Ascend.
 
 The backend directory contains only ``__init__.py`` and
-``backend.py``. The shared TP/DP rank layout is reused. These paths have not
-run on Ascend. Worker startup rejects the incomplete native extension before
-starting a training or serving job.
+``backend.py``. The shared TP/DP rank layout is reused. The shared serving
+adapter selects the engine's ``rollout`` role, so serving does not allocate
+optimizer state or a training manager. Training retains the selected
+FP32-master, 8-bit or 4-bit optimizer. CPU tests cover those ownership rules
+and device-before-HCCL startup for single-device and partitioned layouts.
 
 Remaining work includes the recurrent features listed above, library-stack
-validation, and native extension compilation/numerical acceptance.
-The existing opt-in
-``tests/test_npu_end_to_end.py`` becomes the SFT/rollout/checkpoint acceptance
-test once these kernels are complete; it is not expected to pass yet.
+validation, and native extension numerical acceptance. The opt-in
+``tests/test_npu_end_to_end.py`` exercises SFT with all three optimizers,
+rollout, checkpoint reload and HTTP serving against a local checkpoint.
+The HTTP test checks model listing, greedy repeatability, batched completions
+and worker shutdown. Run these in a fresh process, separately from kernel
+tests, so the coordinator has not acquired a worker's NPU:
+
+.. code-block:: bash
+
+   python -m pip install pytest httpx
+   ARENO_NPU_TEST_MODEL=/path/to/local/checkpoint python -m pytest -q tests/test_npu_end_to_end.py
+
+Set ``ARENO_NPU_TEST_WORLD_SIZE`` and ``ARENO_NPU_TEST_TP_SIZE`` to exercise
+multiple devices. For example, world size 4 and TP size 2 also exercise two
+data-parallel replicas. HTTP serving uses visible devices ``0..world_size-1``,
+as the CLI does. These acceptance tests still need to pass on Ascend hardware.
 
 Development validation checks packaging, device dispatch and shared workflows
 on CPU. NPU extension compilation and numerical execution must be validated in

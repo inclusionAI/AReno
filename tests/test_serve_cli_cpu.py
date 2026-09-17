@@ -29,6 +29,7 @@ def test_create_app_passes_eager_decode_runtime_config(monkeypatch):
             del args
             captured["runtime_config"] = kwargs["runtime_config"]
             captured["base_model_name_or_path"] = kwargs["base_model_name_or_path"]
+            captured["role"] = kwargs["role"]
             return cls()
 
     monkeypatch.setattr(serve_mod, "load_tokenizer", lambda model_path: SimpleNamespace(eos_token_id=1))
@@ -49,6 +50,7 @@ def test_create_app_passes_eager_decode_runtime_config(monkeypatch):
     assert captured["runtime_config"].eager_decode is True
     assert captured["runtime_config"].attn_backend == "native"
     assert captured["base_model_name_or_path"] == "org/base"
+    assert captured["role"] == "rollout"
 
 
 def test_create_app_can_disable_chat_template_thinking(monkeypatch):

@@ -66,11 +66,6 @@ def flash_attention_unsupported_model_reason(model_config):
     return resolve_reason(model_config)
 
 
-def _serve_loss_fn(*_: Any) -> Any:
-    """Placeholder loss function; serving never trains, so any invocation is an error."""
-    raise RuntimeError("areno serve engine does not support training")
-
-
 class ChatMessage(BaseModel):
     """OpenAI chat message: role plus string or multi-part content."""
 
@@ -229,7 +224,7 @@ class _CudaServeRuntime:
             runtime_config=RuntimeConfig(
                 eager_decode=bool(eager_decode), attn_backend=attn_backend, device_type=device_type
             ),
-            loss_fn=_serve_loss_fn,
+            role="rollout",
             lora_config=lora,
             base_model_name_or_path=base_model_name_or_path,
         )
