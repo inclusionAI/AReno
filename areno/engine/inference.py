@@ -30,6 +30,7 @@ from areno.engine.runtime.decode_graph import (
     has_graph_capture_memory,
     sync_before_graph_capture,
 )
+from areno.engine.runtime.device import accelerator_module
 from areno.engine.runtime.metadata import InferMeta
 from areno.engine.runtime.rollout import _empty_rollout
 from areno.engine.runtime.routing_replay import captured_routing, routing_replay_context
@@ -588,11 +589,12 @@ class InferenceManager:
             active_count=0,
             token_delta=0,
         )
-        if self.device.type == "cuda":
+        accelerator = accelerator_module(self.device)
+        if accelerator is not None:
             try:
-                torch.cuda.synchronize(self.device)
+                accelerator.synchronize(self.device)
             except RuntimeError as exc:
-                raise RuntimeError("CUDA failure detected at rollout decode completion") from exc
+                raise RuntimeError(f"{self.device.type.upper()} failure detected at rollout decode completion") from exc
 
         # Move generated tokens to CPU on rank 0 then broadcast to the rest of
         # the TP group so every rank sees the same final state.

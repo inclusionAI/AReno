@@ -49,6 +49,7 @@ TorchNPU execution only; it does not test AReno kernels or HCCL.
    python -m pytest -q tests/test_routing.py -k npu
    python -m pytest -q tests/test_moe_native.py -k npu
    python -m pytest -q tests/test_npu_library_attention.py
+   python -m pytest -q tests/test_npu_runtime.py
    python -m pytest -q tests/test_fused_experts_native.py -k npu
    torchrun --standalone --nproc_per_node=2 -m pytest -q tests/test_npu_optimizer_distributed.py
 
@@ -218,7 +219,18 @@ This source has not yet been compiled or numerically validated on Ascend.
 
 The backend source reuses the CUDA workflows for training, generation, losses,
 optimizers, checkpoints and serving, with Ascend device initialization, HCCL
-and memory probes. The backend directory contains only ``__init__.py`` and
+and shared memory probes. Training measures each microbatch's peak separately;
+rollout cache probes, synchronization and allocator cleanup select the worker's
+Torch device module. NPU no longer overrides these worker methods. Disk
+optimizer offload uses the same pinned buffers, bounded prefetch and completion
+events for FP32-master, 8-bit and 4-bit AdamW. Prefetch selects pinned memory
+from the bucket's device instead of probing CUDA availability. Checkpoint D2H
+copies reuse the bounded stream queue and source lifetime tracking on NPU;
+pageable staging remains synchronous. ``tests/test_npu_runtime.py`` checks
+non-default streams, strided checkpoint tensors, disk/CPU offload and optimizer
+checkpoint resume on devices 0 and 1. It has not run on Ascend.
+
+The backend directory contains only ``__init__.py`` and
 ``backend.py``. The shared TP/DP rank layout is reused. These paths have not
 run on Ascend. Worker startup rejects the incomplete native extension before
 starting a training or serving job.
