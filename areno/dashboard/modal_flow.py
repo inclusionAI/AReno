@@ -221,7 +221,16 @@ class ModalFlow:
                     break
                 for event in events:
                     cursor = event["cursor"]
-                    if event["type"] != "metric":
+                    if event["type"] == "rollout_sample" and isinstance(event.get("sample"), dict):
+                        job.samples.append(
+                            {
+                                **event["sample"],
+                                "stage_index": event.get("index", 0),
+                                "time": timestamp(event.get("time")),
+                            }
+                        )
+                        job.samples = job.samples[-50:]
+                    elif event["type"] != "metric":
                         job.logs.append(event.get("message") or json.dumps(event, ensure_ascii=False))
                 job.logs = job.logs[-300:]
             if record.get("error"):

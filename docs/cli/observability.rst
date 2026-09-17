@@ -161,8 +161,9 @@ execution:
 These lines are useful for checking whether the configured concurrency,
 trajectory length, and tool-call volume match expectations.
 
-Second, set ``ARENO_LOG_COMPLETIONS`` to a positive integer to log a bounded
-number of prompt/sample trajectories. For agentic rollouts this includes the
+Second, one prompt/sample trajectory per step is logged and recorded for the
+dashboard by default. Set ``ARENO_LOG_COMPLETIONS`` to a positive integer to
+change this bound, or to ``0`` to disable sample capture. For agentic rollouts this includes the
 rendered prompt, message list, final answer, parsed tool calls, sampled tool
 results, token row prefix, and loss-mask summary:
 

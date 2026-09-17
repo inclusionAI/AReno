@@ -180,7 +180,8 @@ def test_pipeline_stops_on_failure_and_passes_real_artifact(tmp_path, monkeypatc
     assert calls[1]["args"] == ["--ckpt", str(tmp_path / "a/final")]
 
 
-def test_final_checkpoint_saved_only_on_success(tmp_path, monkeypatch):
+@pytest.mark.parametrize("sample_limit", [None, "0", "2"])
+def test_final_checkpoint_saved_only_on_success(tmp_path, monkeypatch, sample_limit):
     """Exercise the adapter around AReno's public Trainer without CUDA imports."""
     import sys
     from types import ModuleType
@@ -189,10 +190,18 @@ def test_final_checkpoint_saved_only_on_success(tmp_path, monkeypatch):
         name: ModuleType(name) for name in ["areno", "areno.api", "areno.api.metrics", "areno.cli", "areno.cli.train"]
     }
     calls = []
+    events = []
+    monkeypatch.delenv("ARENO_LOG_COMPLETIONS", raising=False)
+    if sample_limit is not None:
+        monkeypatch.setenv("ARENO_LOG_COMPLETIONS", sample_limit)
+    monkeypatch.setattr(remote, "emit", lambda kind, **data: events.append({"type": kind, **data}))
 
     class Trainer:
         def init(self):
             pass
+
+        def record_rollout_sample(self, sample):
+            calls.append(("sample", sample))
 
         def save_checkpoint(self, path):
             calls.append(("save", path))
@@ -209,6 +218,7 @@ def test_final_checkpoint_saved_only_on_success(tmp_path, monkeypatch):
     def main(**kwargs):
         trainer = modules["areno.api"].Trainer()
         trainer.init()
+        trainer.record_rollout_sample({"completion": "answer", "step": 1})
         trainer.close()
         trainer = modules["areno.api"].Trainer()
         trainer.init()
@@ -222,7 +232,14 @@ def test_final_checkpoint_saved_only_on_success(tmp_path, monkeypatch):
     for name, module in modules.items():
         monkeypatch.setitem(sys.modules, name, module)
     remote.stage_main({"args": [], "save_path": str(tmp_path), "index": 0, "algo": "sft"})
-    assert calls == [("save", str(tmp_path / "final")), ("close",), ("close",)]
+    assert calls == [
+        ("sample", {"completion": "answer", "step": 1}),
+        ("save", str(tmp_path / "final")),
+        ("close",),
+        ("close",),
+    ]
+    assert {"type": "rollout_sample", "sample": {"completion": "answer", "step": 1}, "index": 0} in events
+    assert remote.os.environ["ARENO_LOG_COMPLETIONS"] == (sample_limit or "1")
 
 
 def test_chunked_metric_stream_and_repeated_lines(tmp_path):

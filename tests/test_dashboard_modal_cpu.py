@@ -260,3 +260,23 @@ def test_plan_storage_excludes_endpoint_secret(flow):
     restored = ModalFlow(flow.app.controller.store.directory, application=flow.app)
     result = restored.execute(plan["id"])
     assert len(result["endpoint_key"]) >= 24
+
+
+def test_modal_rollout_samples_reach_job_details_and_survive_reload(flow):
+    identifier = flow.execute(flow.preview(training())["id"])["job_id"]
+    store = flow.app.controller.store
+    for index in range(55):
+        event = {
+            "type": "rollout_sample",
+            "sample": {"step": index, "prompt": "question", "completion": "answer"},
+            "index": 1,
+            "time": 100 + index,
+        }
+        store.event(identifier[6:], event)
+        store.event(identifier[6:], event)  # Reattached stdout must not duplicate samples.
+    for _ in range(2):
+        samples = flow.job(identifier, server.Job).samples
+        assert len(samples) == 50
+        assert samples[0]["step"] == 5
+        assert samples[-1]["completion"] == "answer"
+        assert samples[-1]["stage_index"] == 1

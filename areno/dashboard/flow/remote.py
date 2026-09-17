@@ -78,6 +78,8 @@ def install_dataset_validation(module):
 
 
 def stage_main(stage):
+    # Published images may still default rollout sample capture to disabled.
+    os.environ.setdefault("ARENO_LOG_COMPLETIONS", "1")
     args = cache_model_refs(stage["args"])
     emit("phase", phase="preparing_data")
     import areno.api
@@ -96,6 +98,10 @@ def stage_main(stage):
             emit("phase", phase="training")
             emit("stage", index=stage["index"], status="running", algo=stage["algo"])
             self.flow_initialized = True
+
+        def record_rollout_sample(self, sample):
+            super().record_rollout_sample(sample)
+            emit("rollout_sample", sample=sample, index=stage["index"])
 
         def close(self):
             initialized = getattr(self, "flow_initialized", False)
