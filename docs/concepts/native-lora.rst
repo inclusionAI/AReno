@@ -177,7 +177,7 @@ Do not pass a LoRA rank or adapter path for this mode. The attention, experts,
 and all other unselected parameters remain frozen.
 
 Check the selection before a long run
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Review the configuration summary and target information emitted during
 initialization. Confirm the intended layers and trainable-parameter count.
