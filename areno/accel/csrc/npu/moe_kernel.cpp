@@ -299,16 +299,19 @@ __global__ __aicore__ void route_fill_kernel(GM_ADDR out, int64_t elements, int3
     }
 }
 
-namespace areno_npu {
 
-template <typename Id, RouteKind Kind, bool Metadata>
+template <typename Id, uint32_t Kind, bool Metadata>
 __global__ __aicore__ void route_kernel(GM_ADDR keys, GM_ADDR weights, GM_ADDR partial, GM_ADDR counts,
     GM_ADDR rw, GM_ADDR ti, GM_ADDR pos, GM_ADDR aligned, int64_t routes, int64_t columns,
     int64_t start, int64_t experts, int64_t capacity) {
-    RouteKernel<Id, Kind, Metadata> kernel;
+    using namespace AscendC;
+    using namespace areno_npu;
+    RouteKernel<Id, static_cast<RouteKind>(Kind), Metadata> kernel;
     kernel.Init(keys, weights, partial, counts, rw, ti, pos, aligned);
     kernel.Process(routes, columns, start, experts, capacity);
 }
+
+namespace areno_npu {
 
 template <bool Metadata>
 void launch_routes(uint32_t blocks, void* stream, RouteKind kind, uint32_t storage, const void* keys,

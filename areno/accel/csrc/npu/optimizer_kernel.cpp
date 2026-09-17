@@ -197,14 +197,20 @@ public:
     }
 };
 
+} // namespace areno_npu
+
 template <typename Model, typename Grad, bool Compact>
 __global__ __aicore__ void adam_fp32_kernel(GM_ADDR model, GM_ADDR grad, GM_ADDR low, GM_ADDR carries,
     GM_ADDR moment, GM_ADDR variance, int64_t n, int64_t offset, float b1, float b2,
     float lr, float decay, float eps, float step, float bias) {
+    using namespace AscendC;
+    using namespace areno_npu;
     AdamFp32Kernel<Model, Grad, Compact> kernel;
     kernel.Init(model, grad, low, carries, moment, variance);
     kernel.Process(n, offset, b1, b2, lr, decay, eps, step, bias);
 }
+
+namespace areno_npu {
 
 void launch_adamw_fp32(uint32_t blocks, void* stream, bool model_bf16, bool grad_bf16,
                        bool compact_master, void* model, const void* grad,

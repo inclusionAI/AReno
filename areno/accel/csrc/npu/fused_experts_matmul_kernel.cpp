@@ -14,9 +14,13 @@ __aicore__ constexpr MatmulConfig expert_matmul_config() {
     return config;
 }
 
+} // namespace areno_npu
+
 template <typename T>
 __global__ __aicore__ void expert_matmul_kernel(GM_ADDR in, GM_ADDR w, GM_ADDR out,
     GM_ADDR expertIds, GM_ADDR paddedTotal, int64_t capacity, int64_t n, int64_t k, int64_t outputStride, GM_ADDR workspace) {
+    using namespace AscendC;
+    using namespace areno_npu;
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIC_ONLY);
     using A = MatmulType<TPosition::GM, CubeFormat::ND, T>;
     using B = MatmulType<TPosition::GM, CubeFormat::ND, T, true>;
@@ -61,6 +65,8 @@ __global__ __aicore__ void expert_matmul_kernel(GM_ADDR in, GM_ADDR w, GM_ADDR o
         }
     }
 }
+
+namespace areno_npu {
 
 void launch_expert_matmul(uint32_t blocks, void* stream, uint32_t storage,
     const void* input, const void* weight, float* output, const int32_t* experts,

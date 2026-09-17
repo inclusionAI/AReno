@@ -207,13 +207,19 @@ public:
     }
 };
 
+} // namespace areno_npu
+
 template <typename T, uint32_t Op>
 __global__ __aicore__ void activation_kernel(GM_ADDR out, GM_ADDR in, GM_ADDR grad,
                                             int64_t rows, int64_t width) {
+    using namespace AscendC;
+    using namespace areno_npu;
     ActivationKernel<T, Op> kernel;
     kernel.Init(out, in, grad);
     kernel.Process(rows, width);
 }
+
+namespace areno_npu {
 
 template <typename T>
 void launch_typed(uint32_t blocks, void* stream, Activation op, void* output,

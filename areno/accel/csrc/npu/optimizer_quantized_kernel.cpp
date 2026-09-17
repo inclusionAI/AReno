@@ -311,15 +311,21 @@ public:
     }
 };
 
+} // namespace areno_npu
+
 template <typename Model, typename Grad, bool FourBit>
 __global__ __aicore__ void adam_quantized_kernel(GM_ADDR model, GM_ADDR grad, GM_ADDR m, GM_ADDR ms,
     GM_ADDR v, GM_ADDR vs, GM_ADDR signedMap, GM_ADDR unsignedMap, int64_t n,
     int64_t mo, int64_t mso, int64_t vo, int64_t vso, uint32_t blockSize,
     float beta1, float beta2, float lr, float decay, float eps, float step, float bias) {
+    using namespace AscendC;
+    using namespace areno_npu;
     AdamQuantizedKernel<Model, Grad, FourBit> kernel;
     kernel.Init(model, grad, m, ms, v, vs, signedMap, unsignedMap);
     kernel.Process(n, mo, mso, vo, vso, blockSize, beta1, beta2, lr, decay, eps, step, bias);
 }
+
+namespace areno_npu {
 
 void launch_adamw_quantized(uint32_t blocks, void* stream, bool model_bf16, bool grad_bf16, bool four_bit,
     void* model, const void* grad, uint8_t* moment, float* moment_scale,
@@ -343,16 +349,22 @@ void launch_adamw_quantized(uint32_t blocks, void* stream, bool model_bf16, bool
 #undef ARENO_QUANT_LAUNCH
 }
 
+} // namespace areno_npu
+
 template <typename Model, typename Grad>
 __global__ __aicore__ void adam_factored_step_kernel(GM_ADDR model, GM_ADDR grad, GM_ADDR m, GM_ADDR ms,
     GM_ADDR factors, GM_ADDR mean, GM_ADDR invalid, int64_t n, int64_t mo, int64_t mso,
     int64_t start, int64_t rows, int64_t columns, uint32_t blockSize,
     float beta1, float lr, float decay, float eps, float step, float bias) {
+    using namespace AscendC;
+    using namespace areno_npu;
     AdamQuantizedKernel<Model, Grad, true, true> kernel;
     kernel.Init(model, grad, m, ms, nullptr, nullptr, nullptr, nullptr);
     kernel.InitFactors(factors, mean, invalid);
     kernel.Process(n, mo, mso, 0, 0, blockSize, beta1, 0.0f, lr, decay, eps, step, bias, start, rows, columns);
 }
+
+namespace areno_npu {
 
 void launch_adamw_factored_step(uint32_t blocks, void* stream, bool model_bf16, bool grad_bf16,
     void* model, const void* grad, uint8_t* moment, float* moment_scale,

@@ -87,13 +87,19 @@ public:
     }
 };
 
+} // namespace areno_npu
+
 template <typename T, bool Backward>
 __global__ __aicore__ void embedding_kernel(GM_ADDR ids, GM_ADDR input, GM_ADDR output,
     int64_t tokens, int64_t hidden, int64_t start, int64_t end) {
+    using namespace AscendC;
+    using namespace areno_npu;
     EmbeddingKernel<T, Backward> kernel;
     kernel.Init(ids, input, output);
     kernel.Process(tokens, hidden, start, end);
 }
+
+namespace areno_npu {
 
 void launch_embedding(uint32_t blocks, void* stream, uint32_t storage, bool backward,
     const int64_t* ids, const void* input, void* output, int64_t tokens, int64_t hidden, int64_t start, int64_t end) {

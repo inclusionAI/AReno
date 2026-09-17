@@ -93,10 +93,11 @@ __global__ __aicore__ void expert_tokens_kernel(GM_ADDR sorted, GM_ADDR expertId
     }
 }
 
-namespace areno_npu {
 
 template <typename T>
 __global__ __aicore__ void expert_cast_kernel(GM_ADDR in, GM_ADDR out, int64_t rows, int64_t width, int64_t inputStride) {
+    using namespace AscendC;
+    using namespace areno_npu;
     ExpertIO io;
     io.Init();
     GlobalTensor<float> input;
@@ -112,9 +113,12 @@ __global__ __aicore__ void expert_cast_kernel(GM_ADDR in, GM_ADDR out, int64_t r
     }
 }
 
+
 template <typename T>
 __global__ __aicore__ void expert_weight_scatter_kernel(GM_ADDR in, GM_ADDR w, GM_ADDR sorted,
     GM_ADDR expertIds, GM_ADDR paddedTotal, GM_ADDR out, int64_t capacity, int64_t routes, int64_t hidden, int64_t inputStride) {
+    using namespace AscendC;
+    using namespace areno_npu;
     ExpertIO io;
     io.Init();
     GlobalTensor<float> input, weights;
@@ -147,9 +151,12 @@ __global__ __aicore__ void expert_weight_scatter_kernel(GM_ADDR in, GM_ADDR w, G
     }
 }
 
+
 template <typename T>
 __global__ __aicore__ void expert_reduce_kernel(GM_ADDR in, GM_ADDR out,
     int64_t tokens, int64_t hidden, int64_t topK, float scale) {
+    using namespace AscendC;
+    using namespace areno_npu;
     ExpertIO io;
     io.Init();
     GlobalTensor<T> input, output;
@@ -172,6 +179,8 @@ __global__ __aicore__ void expert_reduce_kernel(GM_ADDR in, GM_ADDR out,
         io.Write(output, io.sum, token * hidden + column, n);
     }
 }
+
+namespace areno_npu {
 
 void launch_expert_tokens(uint32_t blocks, void* stream, const int32_t* aligned,
     const int32_t* experts, const int32_t* total, int64_t* tokens, int64_t capacity, int64_t routes, int64_t top_k) {
