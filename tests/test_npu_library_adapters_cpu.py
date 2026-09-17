@@ -207,6 +207,131 @@ def test_kda_reuses_training_wrapper_and_maps_decode_state(monkeypatch):
     torch.testing.assert_close(state[indices.long()], before[indices.long()] + 10)
 
 
+@pytest.mark.parametrize("device", ["cuda", "npu"])
+def test_lightning_dispatch_preserves_original_arguments(monkeypatch, device):
+    from areno.accel import ops
+
+    q = SimpleNamespace(device=SimpleNamespace(type=device))
+    k, v, decay, cu = object(), object(), object(), object()
+    result = object()
+    calls = []
+
+    def run(*args, **kwargs):
+        calls.append((args, kwargs))
+        return result
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("Lightning Attention imported the wrong device implementation")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "fla.ops.lightning_attn",
+        SimpleNamespace(chunk_lightning_attn=run if device == "cuda" else unexpected),
+    )
+    monkeypatch.setattr(seg_la, "chunk_lightning_attn", run if device == "npu" else unexpected)
+    kwargs = dict(g_gamma=decay, head_first=False, cu_seqlens=cu)
+    assert ops.chunk_lightning_attn(q, k, v, 3, 12, **kwargs) is result
+    assert calls == [((q, k, v, 3, 12), kwargs)]
+
+
+@pytest.mark.parametrize("head_first", [False, True])
+@pytest.mark.parametrize("packed", [False, True])
+def test_lightning_preserves_explicit_decay_layout_and_autograd(monkeypatch, head_first, packed):
+    shape = (1, 7, 2, 4) if packed else (3, 7, 2, 4)
+    leaves = [torch.randn(shape, requires_grad=True) for _ in range(3)]
+    q, k, v = [x.transpose(1, 2) if head_first else x for x in leaves]
+    state = torch.randn(3, 2, 4, 4, requires_grad=True)
+    decay = torch.tensor([-0.01, -0.003])
+    cu = torch.tensor([0, 2, 5, 7]) if packed else None
+    calls = []
+
+    def simple_gla(**kwargs):
+        calls.append(kwargs)
+        assert "head_first" not in kwargs and "layer_idx" not in kwargs and "num_layers" not in kwargs
+        return kwargs["q"] + 2 * kwargs["k"] + 3 * kwargs["v"], 2 * kwargs["initial_state"]
+
+    monkeypatch.setitem(sys.modules, "fla.ops.simple_gla", SimpleNamespace(chunk_simple_gla=simple_gla))
+    out, final = seg_la.chunk_lightning_attn(
+        q,
+        k,
+        v,
+        3,
+        12,
+        scale=0.125,
+        initial_state=state,
+        output_final_state=True,
+        cu_seqlens=cu,
+        g_gamma=decay,
+        head_first=head_first,
+        chunk_size=64,
+    )
+    torch.testing.assert_close(out, q + 2 * k + 3 * v)
+    assert calls[0]["g_gamma"] is decay and calls[0]["initial_state"] is state
+    assert calls[0]["cu_seqlens"] is cu and calls[0]["output_final_state"]
+    assert calls[0]["scale"] == 0.125 and calls[0]["chunk_size"] == 64
+    assert calls[0]["q"].shape == shape
+    (out.sum() + final.sum()).backward()
+    for leaf, expected in zip(leaves, (1, 2, 3), strict=True):
+        torch.testing.assert_close(leaf.grad, torch.full_like(leaf, expected))
+    torch.testing.assert_close(state.grad, torch.full_like(state, 2))
+
+
+def test_lightning_without_explicit_decay_delegates_to_upstream(monkeypatch):
+    q = torch.ones(1, 3, 2, 4)
+    calls = []
+
+    def lightning(**kwargs):
+        calls.append(kwargs)
+        return kwargs["q"], None
+
+    monkeypatch.setitem(sys.modules, "fla.ops.lightning_attn", SimpleNamespace(chunk_lightning_attn=lightning))
+    out, final = seg_la.chunk_lightning_attn(q, q, q, 3, 12, head_first=False)
+    assert out is q and final is None
+    assert calls[0]["layer_idx"] == 3 and calls[0]["num_layers"] == 12
+    assert "head_first" not in calls[0] and "g_gamma" not in calls[0]
+
+    def fail(**kwargs):
+        raise RuntimeError("FLA kernel unavailable")
+
+    monkeypatch.setitem(sys.modules, "fla.ops.simple_gla", SimpleNamespace(chunk_simple_gla=fail))
+    with pytest.raises(RuntimeError, match="FLA kernel unavailable"):
+        seg_la.chunk_lightning_attn(q, q, q, 3, 12, g_gamma=torch.ones(2))
+
+
+@pytest.mark.parametrize("family", ["bailing", "bailing_v3"])
+@pytest.mark.parametrize("packed", [False, True])
+def test_bailing_training_forwards_tp_slopes_and_packed_boundaries(monkeypatch, family, packed):
+    from areno.accel import ops
+
+    model = importlib.import_module(f"areno.models.{family}.model")
+    assert model.chunk_lightning_attn is ops.chunk_lightning_attn
+    layer = model.BailingLinearAttention.__new__(model.BailingLinearAttention)
+    torch.nn.Module.__init__(layer)
+    layer.layer_idx, layer.num_layers = 3, 12
+    layer.slope = model._build_slope_tensor(2, 8, 3, 12, 2, 4)
+    full_slopes = model._build_slope_tensor(8, 8, 3, 12, 0, 1)
+    torch.testing.assert_close(layer.slope, full_slopes[4:6])
+    q = torch.randn(1, 7, 2, 4, dtype=torch.bfloat16, requires_grad=True)
+    k = torch.randn(q.shape, requires_grad=True)
+    v = torch.randn_like(q, requires_grad=True)
+    cu = torch.tensor([0, 2, 5, 7], dtype=torch.int32)
+    calls = []
+
+    def lightning(q, k, v, **kwargs):
+        calls.append(kwargs)
+        assert q.dtype == k.dtype == v.dtype == torch.bfloat16
+        return q + k + v, None
+
+    monkeypatch.setitem(sys.modules, "fla.ops.lightning_attn", SimpleNamespace(chunk_lightning_attn=lightning))
+    meta = SimpleNamespace(packed=True, cu_seqlens=cu) if packed else None
+    layer._forward_train(q, k, v, meta).sum().backward()
+    torch.testing.assert_close(calls[0]["g_gamma"], -full_slopes[4:6])
+    assert calls[0]["cu_seqlens"] is (cu if packed else None)
+    assert calls[0]["head_first"] is False
+    for tensor in (q, k, v):
+        torch.testing.assert_close(tensor.grad, torch.ones_like(tensor))
+
+
 @pytest.mark.parametrize("decode", [False, True])
 def test_seg_la_passes_state_and_decay_to_fla(monkeypatch, decode):
     calls = []
