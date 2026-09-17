@@ -1,6 +1,7 @@
 """Cloud-free lifecycle, persistence, billing and remote orchestration tests."""
 
 import datetime as dt
+import io
 import json
 import time
 from dataclasses import dataclass
@@ -171,7 +172,7 @@ def test_pipeline_stops_on_failure_and_passes_real_artifact(tmp_path, monkeypatc
         path.mkdir(parents=True, exist_ok=True)
         (path / "config.json").write_text("{}")
         (path / "model.safetensors").touch()
-        return SimpleNamespace(wait=lambda: 0 if len(calls) == 1 else 17)
+        return SimpleNamespace(stdout=io.BytesIO(), wait=lambda: 0 if len(calls) == 1 else 17)
 
     monkeypatch.setattr(remote.subprocess, "Popen", popen)
     with pytest.raises(SystemExit) as exc:
@@ -458,3 +459,61 @@ def test_trainer_state_is_persisted_for_job_summaries_and_ignores_old_replay(tmp
     ]
     assert controller._read("job", [remote.PREFIX + json.dumps(event) + "\n" for event in events])
     assert controller.store.get("job")["trainer_state"] == {"stage": "train_start", "step": 4}
+
+
+def test_progress_logs_arrive_before_subprocess_exits():
+    import subprocess
+    import sys
+    import threading
+
+    # The child waits for an explicit acknowledgement before it can exit.
+    # A buffering read() would deadlock here until the timeout.
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-u",
+            "-c",
+            "import sys; sys.stdout.write('loading 10%\\r'); sys.stdout.flush(); sys.stdin.readline(); print('done')",
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    received = threading.Event()
+
+    class Output(io.BytesIO):
+        def flush(self):
+            if b"loading 10%\n" in self.getvalue():
+                received.set()
+
+    output = Output()
+    reader = threading.Thread(target=remote.relay_output, args=(proc.stdout, output), daemon=True)
+    reader.start()
+    try:
+        assert received.wait(5), "Progress was buffered until process exit"
+        assert proc.poll() is None
+        proc.stdin.write(b"continue\n")
+        proc.stdin.flush()
+        assert proc.wait(timeout=5) == 0
+        reader.join(timeout=5)
+        assert output.getvalue() == b"loading 10%\ndone\n"
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        reader.join(timeout=5)
+        proc.stdin.close()
+        proc.stdout.close()
+
+
+def test_output_relay_preserves_split_structured_events():
+    class Chunks:
+        def __init__(self):
+            self.chunks = iter([b'ARENOFLOW_EVENT {"type":', b'"phase","phase":"training"}\n', b""])
+
+        def read1(self, _size):
+            return next(self.chunks)
+
+    output = io.BytesIO()
+    remote.relay_output(Chunks(), output)
+    assert output.getvalue() == b'ARENOFLOW_EVENT {"type":"phase","phase":"training"}\n'

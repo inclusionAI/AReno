@@ -204,6 +204,14 @@ def gateway():
     ThreadingHTTPServer(("0.0.0.0", 8080), Proxy).serve_forever()
 
 
+def relay_output(stream, output=None):
+    """Flush available subprocess bytes; progress updates must not wait for exit."""
+    output = output if output is not None else sys.stdout.buffer
+    while chunk := stream.read1(65536):
+        output.write(chunk.replace(b"\r", b"\n"))
+        output.flush()
+
+
 def main(manifest):
     emit("runtime", image=manifest["image"], source_revision=manifest["revision"])
     if manifest["kind"] == "model_download":
@@ -214,7 +222,9 @@ def main(manifest):
         emit("phase", phase="loading_model")
         args = cache_model_refs(manifest["serve_args"])
         emit("phase", phase="loading_model")
-        proc = subprocess.Popen(["areno", "serve", *args])
+        proc = subprocess.Popen(["areno", "serve", *args], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        output_thread = threading.Thread(target=relay_output, args=(proc.stdout,), daemon=True)
+        output_thread.start()
         for _ in range(900):
             if proc.poll() is not None:
                 raise RuntimeError(f"Serving process exited with code {proc.returncode}")
@@ -233,7 +243,9 @@ def main(manifest):
             raise RuntimeError("Endpoint did not become healthy within 30 minutes")
         threading.Thread(target=gateway, daemon=True).start()
         emit("ready")
-        sys.exit(proc.wait())
+        code = proc.wait()
+        output_thread.join(timeout=5)
+        sys.exit(code)
     previous = None
     for index, stage in enumerate(manifest["stages"]):
         args = [previous if arg == "__previous__" else arg for arg in stage["args"]]
@@ -243,8 +255,10 @@ def main(manifest):
         emit("phase", phase="preparing_data")
         proc = subprocess.Popen(
             [sys.executable, "-u", __file__, "stage", json.dumps({**stage, "args": args, "index": index})],
+            stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
         )
+        relay_output(proc.stdout)
         code = proc.wait()
         if code:
             emit("stage", index=index, status="failed", exit_code=code)

@@ -1520,7 +1520,7 @@ function JobFullDetailPage({ job, refreshNonce, onBack, onStop }) {
       </section>
       <div className="jobDetailDataGrid">
         <ConfigView config={job.config} launch={job.launch} />
-        <LogView logs={logs} />
+        <LogView logs={logs} waitingForRuntime={job.provider === "modal" && job.stage === "starting_runtime" && !["stopped", "failed", "succeeded"].includes(job.status)} />
       </div>
     </div>
   );
@@ -2719,7 +2719,7 @@ function formatConfigValue(value) {
   return String(value);
 }
 
-function LogView({ logs }) {
+function LogView({ logs, waitingForRuntime = false }) {
   const logRef = useRef(null);
   const followLatestRef = useRef(true);
   const text = logs.slice(-80).join("\n");
@@ -2735,6 +2735,7 @@ function LogView({ logs }) {
       followLatestRef.current = node.scrollHeight - node.clientHeight - node.scrollTop <= 32;
     }}>
       <div className="codeTitle"><TerminalSquare size={14} /> Logs</div>
+      {waitingForRuntime && <p className="muted">Starting Modal sandbox — waiting for runtime output.</p>}
       <pre>{text || "No logs yet."}</pre>
     </div>
   );
