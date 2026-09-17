@@ -8,6 +8,7 @@ import platform
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 from setuptools import setup
@@ -79,6 +80,27 @@ def _check_launcher_symbols(extension: Path) -> None:
         )
 
 
+def _check_extension_import(extension: Path) -> None:
+    # Import the exact build output in a fresh process. Importing by package
+    # name could find an older editable .so and miss newly unresolved symbols.
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import importlib.util, sys; import torch; import torch_npu; "
+            "spec = importlib.util.spec_from_file_location('_areno_accel_npu', sys.argv[1]); "
+            "module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)",
+            str(extension.resolve()),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode:
+        raise RuntimeError(
+            f"Ascend extension cannot be imported after building: {extension}\n" + result.stdout + result.stderr
+        )
+
+
 def build_extensions():
     if platform.system() != "Linux":
         raise RuntimeError("Build Ascend extensions on Linux with the existing PyTorch and torch_npu installation")
@@ -128,7 +150,9 @@ def build_extensions():
                 ext.depends = [*ext.depends, str(archive)]
             super().build_extensions()
             for ext in self.extensions:
-                _check_launcher_symbols(Path(self.get_ext_fullpath(ext.name)))
+                extension = Path(self.get_ext_fullpath(ext.name))
+                _check_launcher_symbols(extension)
+                _check_extension_import(extension)
 
     return [
         NpuExtension(
@@ -155,6 +179,7 @@ def build_extensions():
                 "areno/accel/csrc/moe_permute_common.h",
                 "areno/accel/csrc/npu/moe.h",
                 "areno/accel/csrc/npu/kernel_dtype.h",
+                "areno/accel/csrc/npu/tensor_format.h",
                 *[
                     f"areno/accel/csrc/npu/{name}_launch.h"
                     for name in (

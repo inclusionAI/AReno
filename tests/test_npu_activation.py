@@ -161,3 +161,27 @@ def test_native_entry_rejects_invalid_metadata():
         native.areno_d_silu(torch.ones(4, device="npu"), torch.ones(3, device="npu"))
     with pytest.raises(RuntimeError, match="contiguous"):
         native.areno_silu(torch.ones(3, 4, device="npu").t())
+
+
+@pytest.mark.parametrize("storage_format", [0, 2, 29], ids=["NCHW", "ND", "FRACTAL_NZ"])
+def test_native_entry_checks_physical_storage_format(storage_format):
+    import torch_npu
+
+    # Permit creation of a packed tensor specifically to test the raw-pointer
+    # boundary. Restore TorchNPU's setting even when the kernel/guard fails.
+    previous = torch_npu._C._npu_getOption("ALLOW_INTERNAL_FORMAT")
+    torch.npu.config.allow_internal_format = True
+    try:
+        values = torch.linspace(-3, 3, 2 * 17 * 3 * 19).reshape(2, 17, 3, 19).half()
+        source = torch_npu.npu_format_cast(values.to("npu"), storage_format)
+        assert torch_npu.get_npu_format(source) == storage_format
+        assert source.is_contiguous()
+        native = extension("npu")
+        if storage_format == 29:
+            with pytest.raises(RuntimeError, match="base storage format"):
+                native.areno_silu(source)
+        else:
+            result = native.areno_silu(source)
+            torch.testing.assert_close(result.cpu(), F.silu(values.float()).half(), atol=3e-3, rtol=3e-3)
+    finally:
+        torch.npu.config.allow_internal_format = previous == b"enable"

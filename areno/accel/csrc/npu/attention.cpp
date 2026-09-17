@@ -4,7 +4,7 @@
 #include <limits>
 #include "torch_npu/csrc/core/npu/NPUGuard.h"
 #include "torch_npu/csrc/core/npu/NPUStream.h"
-#include "torch_npu/csrc/framework/FormatHelper.h"
+#include "tensor_format.h"
 #include "attention_launch.h"
 
 namespace areno_npu {
@@ -14,7 +14,7 @@ void check_tensor(const at::Tensor& tensor, const at::Tensor& q, at::ScalarType 
                 "attention tensors must be on the same Ascend NPU device");
     TORCH_CHECK(tensor.scalar_type() == dtype, "attention tensor dtype mismatch");
     TORCH_CHECK(tensor.is_contiguous(), "attention native tensors must be contiguous");
-    TORCH_CHECK(at_npu::native::FormatHelper::IsBaseFormatType(tensor), "attention requires base NPU storage format");
+    TORCH_CHECK(is_base_format(tensor), "attention requires base NPU storage format");
 }
 void check_qkv(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v) {
     TORCH_CHECK(q.scalar_type() == at::kFloat || q.scalar_type() == at::kHalf || q.scalar_type() == at::kBFloat16,

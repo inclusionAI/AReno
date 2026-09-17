@@ -59,14 +59,15 @@ TorchNPU execution only; it does not test AReno kernels or HCCL.
 Current validation boundary
 ---------------------------
 
-The target node has compiled the device kernels and Bisheng host wrappers,
-including native attention, but the subsequent generated host stub failed
-because its ordinary C++ compiler could not resolve ``half`` specializations.
-Floating dtype parameters now cross that boundary as integer IDs, with
-FP32/FP16/BF16 resolved inside each kernel. CPU tests cover separate stub
-compilation and linking; a CANN rebuild and extension import on the target
-are still required. No AReno kernel numerical acceptance or end-to-end model
-run is proven.
+The latest target-node run reached extension loading, where a reference to
+TorchNPU's internal ``FormatHelper::IsBaseFormatType`` failed to resolve.
+All ten NPU bindings now query storage format through the exported
+``get_npu_format`` API, retaining the rejection of packed storage layouts.
+The builder checks CANN launcher symbols and imports the exact new extension
+in a fresh process before completing installation. CPU tests exercise real
+shared-library loading, missing symbols, and initialization failures; a CANN
+rebuild and extension import on the target are still required. No AReno kernel
+numerical acceptance or end-to-end model run is proven.
 
 This is **not complete NPU training/serving support**. The compiled extension
 currently exposes all ten CUDA activation entries: SiLU, sigmoid, softplus,

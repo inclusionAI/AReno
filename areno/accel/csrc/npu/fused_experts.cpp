@@ -6,7 +6,7 @@
 #include "tiling/platform/platform_ascendc.h"
 #include "torch_npu/csrc/core/npu/NPUGuard.h"
 #include "torch_npu/csrc/core/npu/NPUStream.h"
-#include "torch_npu/csrc/framework/FormatHelper.h"
+#include "tensor_format.h"
 #include "activation_launch.h"
 #include "embedding_launch.h"
 #include "fused_experts_launch.h"
@@ -20,7 +20,7 @@ uint32_t blocks(int64_t tasks, uint32_t cores) { return static_cast<uint32_t>(st
 void check_tensor(const at::Tensor& tensor, const at::Tensor& input) {
     TORCH_CHECK(tensor.device().type() == c10::DeviceType::PrivateUse1 && tensor.device() == input.device(),
                 "fused_experts tensors must be on the same Ascend NPU device");
-    TORCH_CHECK(at_npu::native::FormatHelper::IsBaseFormatType(tensor), "fused_experts requires base NPU storage format");
+    TORCH_CHECK(is_base_format(tensor), "fused_experts requires base NPU storage format");
 }
 
 struct Platform { uint32_t cube, vector, workspace; };

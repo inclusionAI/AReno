@@ -3,7 +3,7 @@
 #include <torch/csrc/utils/pybind.h>
 #include "torch_npu/csrc/core/npu/NPUGuard.h"
 #include "torch_npu/csrc/core/npu/NPUStream.h"
-#include "torch_npu/csrc/framework/FormatHelper.h"
+#include "tensor_format.h"
 #include "activation_launch.h"
 
 namespace areno_npu {
@@ -14,7 +14,7 @@ void check(const at::Tensor& input, bool contiguous = true) {
     TORCH_CHECK(input.scalar_type() == at::kFloat || input.scalar_type() == at::kHalf ||
                 input.scalar_type() == at::kBFloat16, "NPU activation requires FP32, FP16 or BF16");
     TORCH_CHECK(!contiguous || input.is_contiguous(), "NPU activation input must be contiguous");
-    TORCH_CHECK(at_npu::native::FormatHelper::IsBaseFormatType(input),
+    TORCH_CHECK(is_base_format(input),
                 "NPU activation requires a base storage format; convert packed NPU formats before calling accel");
 }
 

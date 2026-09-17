@@ -3,7 +3,7 @@
 #include <limits>
 #include "torch_npu/csrc/core/npu/NPUGuard.h"
 #include "torch_npu/csrc/core/npu/NPUStream.h"
-#include "torch_npu/csrc/framework/FormatHelper.h"
+#include "tensor_format.h"
 #include "embedding_launch.h"
 
 namespace areno_npu {
@@ -12,7 +12,7 @@ void check_embedding_tensor(const at::Tensor& x, const at::Tensor& weight, bool 
     TORCH_CHECK(x.device().type() == c10::DeviceType::PrivateUse1 && x.device() == weight.device(),
                 "vocab embedding tensors must be on the same Ascend NPU device");
     TORCH_CHECK(!contiguous || x.is_contiguous(), "vocab embedding native inputs must be contiguous");
-    TORCH_CHECK(at_npu::native::FormatHelper::IsBaseFormatType(x), "vocab embedding requires base NPU storage format");
+    TORCH_CHECK(is_base_format(x), "vocab embedding requires base NPU storage format");
 }
 
 void check_embedding(const at::Tensor& ids, const at::Tensor& weight, int64_t start, int64_t end, bool backward) {

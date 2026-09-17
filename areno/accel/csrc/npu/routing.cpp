@@ -3,7 +3,7 @@
 #include <algorithm>
 #include "torch_npu/csrc/core/npu/NPUGuard.h"
 #include "torch_npu/csrc/core/npu/NPUStream.h"
-#include "torch_npu/csrc/framework/FormatHelper.h"
+#include "tensor_format.h"
 #include "../routing_common.h"
 #undef ARENO_ROUTING_INLINE
 #include "routing_launch.h"
@@ -19,7 +19,7 @@ void check_tensor(const at::Tensor& tensor, const at::Tensor& logits, at::Scalar
                 "routing tensors must be on the same Ascend NPU device");
     TORCH_CHECK(tensor.scalar_type() == dtype, "routing tensor dtype mismatch");
     TORCH_CHECK(tensor.is_contiguous(), "routing native tensors must be contiguous");
-    TORCH_CHECK(at_npu::native::FormatHelper::IsBaseFormatType(tensor), "routing requires base NPU storage format");
+    TORCH_CHECK(is_base_format(tensor), "routing requires base NPU storage format");
 }
 
 void check_logits(const at::Tensor& logits, int64_t top_k) {

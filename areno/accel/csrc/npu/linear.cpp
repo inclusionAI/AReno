@@ -6,7 +6,7 @@
 #include "aclnnop/aclnn_mm.h"
 #include "torch_npu/csrc/core/npu/NPUGuard.h"
 #include "torch_npu/csrc/core/npu/NPUStream.h"
-#include "torch_npu/csrc/framework/FormatHelper.h"
+#include "tensor_format.h"
 #include "linear_launch.h"
 #include "../grouped_linear_common.h"
 
@@ -17,7 +17,7 @@ void check_linear_tensor(const at::Tensor& tensor, const at::Tensor& input) {
                 "linear tensors must be on the same Ascend NPU device");
     TORCH_CHECK(tensor.scalar_type() == input.scalar_type(), "linear tensor dtype must match input");
     TORCH_CHECK(tensor.is_contiguous(), "linear native inputs must be contiguous");
-    TORCH_CHECK(at_npu::native::FormatHelper::IsBaseFormatType(tensor), "linear requires base NPU storage format");
+    TORCH_CHECK(is_base_format(tensor), "linear requires base NPU storage format");
 }
 
 int64_t check_linear(const at::Tensor& input, const at::Tensor& weight) {
