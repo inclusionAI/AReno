@@ -24,7 +24,9 @@ def test_request_uses_recorded_endpoint_and_ephemeral_key(monkeypatch):
             json.dumps({"choices": [{"message": {"content": "hello"}}], "usage": {"total_tokens": 3}}).encode()
         )
 
-    monkeypatch.setattr("areno.dashboard.flow.inference.urllib.request.build_opener", lambda *_: SimpleNamespace(open=send))
+    monkeypatch.setattr(
+        "areno.dashboard.flow.inference.urllib.request.build_opener", lambda *_: SimpleNamespace(open=send)
+    )
     job = deployment()
     result = run_inference(
         job,
@@ -73,7 +75,9 @@ def test_authentication_error_does_not_echo_upstream_body(monkeypatch):
             "https://example.modal.run", 401, "private-test-key", {}, io.BytesIO(b"private-test-key")
         )
 
-    monkeypatch.setattr("areno.dashboard.flow.inference.urllib.request.build_opener", lambda *_: SimpleNamespace(open=send))
+    monkeypatch.setattr(
+        "areno.dashboard.flow.inference.urllib.request.build_opener", lambda *_: SimpleNamespace(open=send)
+    )
     with pytest.raises(ValueError, match="authentication failed") as error:
         run_inference(deployment(), {"api_key": "private-test-key", "prompt": "hello"})
     assert "private-test-key" not in str(error.value)

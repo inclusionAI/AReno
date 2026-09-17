@@ -66,7 +66,9 @@ def test_failed_shard_never_publishes_complete_cache(tmp_path, monkeypatch):
         "areno.dashboard.flow.dataset_cache.repository_files",
         lambda _: ([("https://example.com/one", ".jsonl", 4), ("https://example.com/two", ".jsonl", 4)], None, {}),
     )
-    monkeypatch.setattr("areno.dashboard.flow.dataset_cache.urllib.request.urlopen", lambda *args, **kwargs: io.BytesIO(b"x"))
+    monkeypatch.setattr(
+        "areno.dashboard.flow.dataset_cache.urllib.request.urlopen", lambda *args, **kwargs: io.BytesIO(b"x")
+    )
     with pytest.raises(ValueError, match="incomplete"):
         download_repository(dataset, tmp_path)
     assert not (tmp_path / "dataset_cache" / (cache_key(dataset) + ".json")).exists()
