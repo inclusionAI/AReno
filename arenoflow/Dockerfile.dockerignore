@@ -1,9 +1,0 @@
-.git
-**/node_modules
-**/.venv
-**/.data
-**/__pycache__
-**/.pytest_cache
-arenoflow/static
-.env
-.env.*

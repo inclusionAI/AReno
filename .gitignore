@@ -73,3 +73,6 @@ Thumbs.db
 # Environment / secrets
 .env
 .env.*
+
+# Dashboard Modal job history, uploads and cache
+.areno-modal/

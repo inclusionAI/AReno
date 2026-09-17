@@ -32,6 +32,8 @@ import {
   Wrench,
 } from "lucide-react";
 import "./styles.css";
+import { sampleMetricPoints } from "./metrics";
+import { ModalLauncher, ModalSettings, DatasetManager, ModalUsage } from "./modal";
 
 function dashboardBasePath() {
   const moduleScript = document.querySelector('script[type="module"][src]');
@@ -139,6 +141,12 @@ async function api(path, options) {
     throw new Error(data.error || response.statusText);
   }
   return data;
+}
+
+async function modalApi(path, body) {
+  if (body === undefined) return api(`/api/modal${path}`);
+  const bootstrap = await api("/api/modal/bootstrap");
+  return api(`/api/modal${path}`, { method: "POST", headers: { "Content-Type": "application/json", "X-Arenoflow-CSRF": bootstrap.csrf }, body: JSON.stringify(body) });
 }
 
 function classNames(...items) {
@@ -355,6 +363,10 @@ function App() {
   const [language, setLanguage] = useState(() => localStorage.getItem(UI_LANGUAGE_STORAGE_KEY) || "en");
   const [busy, setBusy] = useState("");
   const [agentSettingsOpen, setAgentSettingsOpen] = useState(false);
+  const [dashboardSettingsOpen, setDashboardSettingsOpen] = useState(false);
+  const [datasetsOpen, setDatasetsOpen] = useState(false);
+  const [modalPlan, setModalPlan] = useState(null);
+  const [endpointKey, setEndpointKey] = useState(null);
   const [jobPage, setJobPage] = useState(1);
   const [jobDetailOpen, setJobDetailOpen] = useState(false);
   const [refreshNonce, setRefreshNonce] = useState(0);
@@ -533,7 +545,9 @@ function App() {
   async function executeAgentPlan(plan) {
     setBusy("Executing plan...");
     try {
-      const result = await api("/api/agent/tools/run", {
+      const result = plan.tool === "start_modal"
+        ? await modalApi("/execute", plan.parameters)
+        : await api("/api/agent/tools/run", {
         method: "POST",
         body: JSON.stringify({
           tool: plan.tool || inferPlanRunTool(plan),
@@ -544,6 +558,7 @@ function App() {
         setSelectedJobId(result.job.id);
         await jobs.refresh();
       }
+      if (result.endpoint_key) setEndpointKey(result.endpoint_key);
       return result;
     } finally {
       setBusy("");
@@ -589,6 +604,7 @@ function App() {
   }
 
   async function executeOverviewQuickAction(action, overviewJob = null) {
+    if (action.kind === "modal_launcher") { setLauncherMode("modal"); setActivePage("launcher"); return; }
     if (action.kind === "agent_prompt") {
       const jobContext = overviewJob ? `\n\nTrack this overview job: ${overviewJob.name} (${overviewJob.id}).` : "";
       setSelectedJobId(overviewJob?.id || null);
@@ -793,6 +809,7 @@ function App() {
   }
 
   function applyAgentEvent(messageId, event) {
+    if (event.type === "tool_result" && event.tool_result?.plan?.tool === "start_modal") setModalPlan(event.tool_result.plan);
     setAgentMessages((messages) =>
       messages.map((message) => {
         if (message.id !== messageId) return message;
@@ -889,6 +906,10 @@ function App() {
       return <RuntimePrdPage env={env.data} onRefresh={refreshRuntime} />;
     }
     if (activePage === "launcher") {
+      if (launcherMode === "modal") return <div className="launcherSections">
+        <div className="tabs"><button onClick={() => setLauncherMode("train")}>Train</button><button onClick={() => setLauncherMode("serve")}>Serve</button><button className="active">Modal</button></div>
+        <ModalLauncher request={modalApi} onPlan={setModalPlan} onSettings={() => setDashboardSettingsOpen(true)} onDatasets={() => setDatasetsOpen(true)} />
+      </div>;
       return (
         <LauncherPrdPage
           mode={launcherMode}
@@ -946,6 +967,7 @@ function App() {
                   </div>
                 ))}
               </div>
+              <div className="chatDatasetActions"><button className="secondaryButton" onClick={() => setDatasetsOpen(true)}><Database size={15} /> Upload file / URL · Datasets</button></div>
               <div className="chatComposer">
                 <label className="chatInputField">
                   <textarea
@@ -1020,15 +1042,16 @@ function App() {
           <div className="jobTableWrap">
             {filteredJobs.length === 0 && <EmptyState title="No matching jobs" text="Start a task from Launcher or select another status." />}
             {filteredJobs.length > 0 && <table className="jobTable">
-              <thead><tr><th>Job</th><th>Status</th><th>Stage</th><th>Metric</th><th>Elapsed</th><th>Action</th></tr></thead>
+              <thead><tr><th>Job</th><th>Status</th><th>Stage</th><th>Metric</th><th>Elapsed</th><th>Usage so far</th><th>Action</th></tr></thead>
               <tbody>
             {pagedJobs.map((job) => (
               <tr key={job.id}>
-                <td><strong>{job.name}</strong><span className="mono subline">{job.id} · {job.kind}</span></td>
+                <td><strong>{job.name}</strong><span className="mono subline">{job.id} · {job.kind}{job.provider === "modal" ? " · Modal" : ""}</span></td>
                 <td><StatusBadge status={job.status} /></td>
                 <td>{job.stage || "unknown"} · step {job.step ?? 0}</td>
                 <td>{latestPerfSignal(job)}</td>
                 <td>{formatElapsed(job)}</td>
+                <td><ModalUsage job={job} /></td>
                 <td><button className="secondaryButton tableAction" onClick={() => { setSelectedJobId(job.id); setJobDetailOpen(true); }}>Open</button></td>
               </tr>
             ))}
@@ -1086,6 +1109,7 @@ function App() {
             <p>{pageDescription}</p>
           </div>
           <div className="topActions">
+            <button className="iconButton" title="Dashboard settings" aria-label="Dashboard settings" onClick={() => setDashboardSettingsOpen(true)}><Settings2 size={16} /></button>
             <button className="iconButton" onClick={() => setTheme(theme === "dark" ? "light" : "dark")} title="Toggle theme">
               {theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
             </button>
@@ -1103,6 +1127,13 @@ function App() {
         {busy && <div className="notice">{busy}</div>}
 
         {renderPage()}
+        {dashboardSettingsOpen && <Modal title="Dashboard Settings" onClose={() => setDashboardSettingsOpen(false)}><ModalSettings request={modalApi} /><h3>Agent provider</h3><AgentProviderForm provider={agentProvider} setProvider={setAgentProvider} /></Modal>}
+        {datasetsOpen && <Modal title="Dataset Manager" onClose={() => setDatasetsOpen(false)}><DatasetManager request={modalApi} onSelect={dataset => {
+          setAgentPrompt(current => `${current}${current ? "\n" : ""}Use managed dataset "${dataset.name}" (dataset_id: ${dataset.id}) for the Modal training plan.`);
+          setDatasetsOpen(false); setActivePage("agent"); setAgentChatTab("chat");
+        }} /></Modal>}
+        {modalPlan && <Modal title="Modal Execution Plan" onClose={() => setModalPlan(null)}><AgentPlanCard key={modalPlan.id} plan={modalPlan} onConfirm={executeAgentPlan} /></Modal>}
+        {endpointKey && <Modal title="Serving endpoint key" onClose={() => setEndpointKey(null)}><p>Save this key to authenticate requests to the Modal endpoint. It is shown once and is not saved in chat history.</p><pre className="commandPreview">{endpointKey}</pre><button className="secondaryButton" onClick={() => navigator.clipboard.writeText(endpointKey)}>Copy key</button></Modal>}
         {runtimeCheckResult && <RuntimeCheckResultModal result={runtimeCheckResult} onClose={() => setRuntimeCheckResult(null)} />}
       </main>
     </div>
@@ -1216,6 +1247,7 @@ function OverviewRewardLossChart({ job }) {
   const [series, setSeries] = useState({ reward: [], loss: [], gradnorm: [], seqlen: [] });
   const [names, setNames] = useState({ reward: "", loss: "", gradnorm: "", seqlen: "" });
   const [activeMetric, setActiveMetric] = useState(metricKinds[0]);
+  const [overviewError, setOverviewError] = useState("");
   const [hoveredPoint, setHoveredPoint] = useState(null);
 
   useEffect(() => {
@@ -1225,6 +1257,9 @@ function OverviewRewardLossChart({ job }) {
   useEffect(() => {
     let cancelled = false;
     let timer;
+    setSeries({ reward: [], loss: [], gradnorm: [], seqlen: [] });
+    setNames({ reward: "", loss: "", gradnorm: "", seqlen: "" });
+    setHoveredPoint(null);
     const load = async () => {
       try {
         const data = await api(`/api/jobs/${job.id}/metrics`);
@@ -1236,24 +1271,26 @@ function OverviewRewardLossChart({ job }) {
             : Promise.resolve({ points: [] })
         )));
         if (cancelled) return;
+        setOverviewError("");
         setNames((current) => ({ ...current, ...nextNames }));
         setSeries((current) => ({
           ...current,
           ...Object.fromEntries(metricKinds.map((kind, index) => [kind, normalizeMetricPoints(metricData[index].points)])),
         }));
       } catch {
-        if (!cancelled) setSeries({ reward: [], loss: [], gradnorm: [], seqlen: [] });
+        if (!cancelled) setOverviewError("Metrics refresh delayed; showing the last received data.");
+      } finally {
+        if (!cancelled) timer = window.setTimeout(load, 2500);
       }
     };
     load();
-    timer = window.setInterval(load, 2500);
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
+      window.clearTimeout(timer);
     };
   }, [job.id, algo]);
 
-  const activeSeries = series[activeMetric] || [];
+  const activeSeries = useMemo(() => sampleMetricPoints(series[activeMetric] || []), [series, activeMetric]);
   const plot = buildOverviewMetricPlot(activeSeries);
   const hasPoints = activeSeries.length > 0;
   return (
@@ -1266,6 +1303,7 @@ function OverviewRewardLossChart({ job }) {
           <span className={`${activeMetric}Legend`}><i />{names[activeMetric] || overviewMetricLabel(activeMetric)}<b>{lastMetricValue(activeSeries)}</b></span>
         </div>
       </div>
+      {overviewError && <p className="chartStatus" role="status">{overviewError}</p>}
       {!hasPoints ? <div className="plotEmpty">No {activeMetric} points reported yet.</div> : (
         <div className="metricPlotWrap">
           <svg className="metricPlot overviewPlot" viewBox="0 0 720 220" role="img" aria-label={`${activeMetric} metrics`}>
@@ -1295,7 +1333,7 @@ function selectOverviewMetric(names, type) {
     seqlen: ["rollout/seq_len_mean"],
   }[type] || [];
   for (const preferred of exactPreferences) {
-    const exact = lowered.find((item) => item.key === preferred);
+    const exact = lowered.find((item) => item.key === preferred) || lowered.find((item) => item.key.endsWith(`/${preferred}`));
     if (exact) return exact.name;
   }
   if (type === "reward" || type === "seqlen") return "";
@@ -1309,8 +1347,9 @@ function overviewMetricLabel(kind) {
 
 function normalizeMetricPoints(points = []) {
   return points
-    .filter((point) => Number.isFinite(Number(point.value)))
-    .map((point) => ({ step: Number(point.step || 0), value: Number(point.value), time: point.time }));
+    .filter((point) => point.value != null && Number.isFinite(Number(point.value)) && Number.isFinite(Number(point.step || 0)))
+    .map((point) => ({ step: Number(point.step || 0), value: Number(point.value), time: point.time }))
+    .sort((a, b) => a.step - b.step);
 }
 
 function buildOverviewMetricPlot(points) {
@@ -1421,7 +1460,7 @@ function JobsSelectedDetail({ job, env, onStop }) {
         <section className="panel jobDetailOverviewCard">
           <div className="panelHeader">
             <div><h2>Job Detail: Overview</h2><p>Current health and recent progress for the selected job.</p></div>
-            <div className="detailActions"><StatusBadge status={job.status} />{job.status === "running" && <button className="dangerButton" onClick={onStop}><CircleStop size={16} /> Stop</button>}</div>
+            <div className="detailActions"><StatusBadge status={job.status} />{["running", "queued", "starting", "stopping", "unknown"].includes(job.status) && <button className="dangerButton" onClick={onStop}><CircleStop size={16} /> Stop</button>}</div>
           </div>
           <div className="jobIdentity"><strong>{job.name}</strong><span className="mono subline">{job.id}</span></div>
           <p className="healthSummary"><strong>Health summary:</strong> {jobHealthSummary(job)}</p>
@@ -1449,6 +1488,7 @@ function JobFullDetailPage({ job, refreshNonce, onBack, onStop }) {
         {job.status === "running" && <button className="dangerButton" onClick={onStop}><CircleStop size={16} /> Stop job</button>}
       </div>
       <JobOverview job={job} detail refreshNonce={refreshNonce} />
+      {job.provider === "modal" && <section className="panel"><div className="panelHeader"><h2>Modal usage</h2></div><ModalUsage job={job} detail /></section>}
       <section className="panel jobDetailSection">
         <div className="panelHeader"><div><h2>Metrics</h2><p>Training quality and stage timing for this job.</p></div></div>
         <JobMetricsView job={job} refreshNonce={refreshNonce} />
@@ -1680,20 +1720,17 @@ function AgentHistory({ sessions, activeId, onOpen, onNew }) {
 }
 
 function Modal({ title, children, onClose }) {
-  return (
-    <div className="modalOverlay" role="presentation" onMouseDown={onClose}>
-      <div className="modalCard" role="dialog" aria-modal="true" aria-label={title} onMouseDown={(event) => event.stopPropagation()}>
-        <div className="modalHeader">
-          <div>
-            <h2>{title}</h2>
-            <p>Stored locally in this browser.</p>
-          </div>
-          <button className="iconButton" onClick={onClose}>×</button>
-        </div>
-        {children}
-      </div>
-    </div>
-  );
+  const ref = useRef(null);
+  useEffect(() => {
+    const dialog = ref.current;
+    const previous = document.activeElement;
+    dialog.showModal();
+    return () => { dialog.close(); previous?.focus?.(); };
+  }, []);
+  return <dialog ref={ref} className="modalCard dashboardDialog" aria-label={title} onCancel={event => { event.preventDefault(); onClose(); }} onClick={event => { if (event.target === ref.current) { const box = ref.current.getBoundingClientRect(); if (event.clientX < box.left || event.clientX > box.right || event.clientY < box.top || event.clientY > box.bottom) onClose(); } }}>
+    <div className="modalHeader"><h2>{title}</h2><button className="iconButton" aria-label="Close dialog" onClick={onClose}>×</button></div>
+    {children}
+  </dialog>;
 }
 
 function RuntimeCheckResultModal({ result, onClose }) {
@@ -1745,9 +1782,10 @@ function AgentPlanCard({ plan, onConfirm }) {
   const [parameters, setParameters] = useState(plan.parameters || {});
   const [execution, setExecution] = useState(null);
   useEffect(() => setParameters(plan.parameters || {}), [plan.id]);
-  const entries = Object.entries(parameters);
+  const isModal = plan.tool === "start_modal";
+  const entries = Object.entries(isModal ? plan.resources || {} : parameters);
   const planTool = plan.tool || inferPlanRunTool(plan);
-  const command = commandForPlan(planTool, parameters);
+  const command = isModal ? plan.command : commandForPlan(planTool, parameters);
   const editedPlan = { ...plan, tool: planTool, parameters, command };
   return (
     <section className="agentPlanCard">
@@ -1759,7 +1797,7 @@ function AgentPlanCard({ plan, onConfirm }) {
       <div className="agentPlanActions">
         <button
           className="primaryButton"
-          disabled={execution?.status === "running"}
+          disabled={execution?.status === "running" || (isModal && execution?.status === "ok")}
           onClick={async () => {
             setExecution({ status: "running", message: "Starting..." });
             try {
@@ -1770,7 +1808,7 @@ function AgentPlanCard({ plan, onConfirm }) {
             }
           }}
         >{execution?.status === "running" ? "Executing..." : "Confirm Execution"}</button>
-        {entries.length > 0 && <button className="secondaryButton" onClick={() => setEditing((value) => !value)}>{editing ? "Save Parameters" : "Edit Parameters"}</button>}
+        {!isModal && entries.length > 0 && <button className="secondaryButton" onClick={() => setEditing((value) => !value)}>{editing ? "Save Parameters" : "Edit Parameters"}</button>}
         {command && <button className="secondaryButton" onClick={() => navigator.clipboard.writeText(command)}>Copy Command</button>}
       </div>
       {execution && execution.status !== "running" && <p className={classNames("agentPlanExecution", execution.status)}>{execution.message}</p>}
@@ -2115,6 +2153,11 @@ function timelineItemMatches(item, stage, job) {
 function configValue(job, key) {
   const config = job?.config && Object.keys(job.config).length ? job.config : job?.launch || {};
   if (config[key] !== undefined) return config[key];
+  if (job?.provider === "modal" && config.stages?.length) {
+    const stage = config.stages[config.stages.length - 1];
+    if (key === "algo") return stage.algo;
+    if (stage.params?.[key] !== undefined) return stage.params[key];
+  }
   for (const section of config.sections || []) {
     const item = (section.items || []).find((entry) => entry.key === key);
     if (item) return item.value;
@@ -2139,7 +2182,7 @@ function MetricChart({ jobId, metricsDir, refreshNonce }) {
   const [metricList, setMetricList] = useState([]);
   const [points, setPoints] = useState([]);
   const [metricLoading, setMetricLoading] = useState(false);
-  const [pollTick, setPollTick] = useState(0);
+  const [metricError, setMetricError] = useState("");
   const [hoveredPoint, setHoveredPoint] = useState(null);
   const [prevJobId, setPrevJobId] = useState(jobId);
   // Reset the selection during render (not in an effect) when the job changes so
@@ -2156,60 +2199,52 @@ function MetricChart({ jobId, metricsDir, refreshNonce }) {
   const names = metricNamesFrom(metricList);
   const effectiveName = resolveActiveMetricName(names, selectedName);
   useEffect(() => {
-    if (!jobId) return undefined;
-    const timer = window.setInterval(() => setPollTick((value) => value + 1), 2500);
-    return () => window.clearInterval(timer);
-  }, [jobId]);
-  useEffect(() => {
     let cancelled = false;
+    let timer;
     if (!jobId) return undefined;
-    api(`/api/jobs/${jobId}/metrics`)
-      .then((data) => {
-        if (cancelled) return;
-        const list = data.metrics || [];
-        setMetricList(list);
-        setSelectedName((current) => current || list[0]?.name || "");
-      })
-      .catch(() => {
-        if (!cancelled) setMetricList([]);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [jobId, refreshNonce, pollTick]);
-  useEffect(() => {
-    let cancelled = false;
-    if (!jobId || !effectiveName) {
-      setPoints([]);
-      setMetricLoading(false);
-      return undefined;
+    async function load() {
+      try {
+        const data = await api(`/api/jobs/${jobId}/metrics`);
+        if (!cancelled) {
+          const list = data.metrics || [];
+          setMetricList(list);
+          setSelectedName(current => current || list[0]?.name || "");
+        }
+      } catch {
+        if (!cancelled) setMetricError("Metrics refresh delayed; showing the last received data.");
+      } finally {
+        if (!cancelled) timer = window.setTimeout(load, 2500);
+      }
     }
-    setMetricLoading(true);
-    api(`/api/jobs/${jobId}/metric?name=${encodeURIComponent(effectiveName)}`)
-      .then((data) => {
-        if (cancelled) return;
-        setPoints((data.points || []).filter((point) => Number.isFinite(Number(point.value))).map((point) => ({
-          ...point,
-          step: Number(point.step || 0),
-          value: Number(point.value),
-        })));
-      })
-      .catch(() => {
-        if (!cancelled) setPoints([]);
-      })
-      .finally(() => {
-        if (!cancelled) setMetricLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [jobId, effectiveName, refreshNonce, pollTick]);
+    load();
+    return () => { cancelled = true; window.clearTimeout(timer); };
+  }, [jobId, refreshNonce]);
+  useEffect(() => {
+    let cancelled = false;
+    let timer;
+    setPoints([]);
+    setHoveredPoint(null);
+    setMetricError("");
+    if (!jobId || !effectiveName) { setMetricLoading(false); return undefined; }
+    async function load() {
+      setMetricLoading(true);
+      try {
+        const data = await api(`/api/jobs/${jobId}/metric?name=${encodeURIComponent(effectiveName)}`);
+        if (!cancelled) { setPoints(normalizeMetricPoints(data.points || [])); setMetricError(""); }
+      } catch {
+        if (!cancelled) setMetricError("Metrics refresh delayed; showing the last received data.");
+      } finally {
+        if (!cancelled) { setMetricLoading(false); timer = window.setTimeout(load, 2500); }
+      }
+    }
+    load();
+    return () => { cancelled = true; window.clearTimeout(timer); };
+  }, [jobId, effectiveName, refreshNonce]);
   const activeName = effectiveName;
   const visiblePoints = points;
-  const smoothed = smoothTensorboard(visiblePoints, smooth);
   const smoothingEnabled = smooth > 0;
-  const displayedPoints = smoothingEnabled ? smoothed : visiblePoints;
-  const plot = buildMetricPlot(displayedPoints);
+  const displayedPoints = useMemo(() => sampleMetricPoints(smoothingEnabled ? smoothTensorboard(points, smooth) : points), [points, smooth]);
+  const plot = useMemo(() => buildMetricPlot(displayedPoints), [displayedPoints]);
   return (
     <div className="chart">
       <div className="chartHeader">
@@ -2224,6 +2259,7 @@ function MetricChart({ jobId, metricsDir, refreshNonce }) {
           </label>
         </div>
       </div>
+      {metricError && <p className="chartStatus" role="status">{metricError}</p>}
       {visiblePoints.length === 0 ? (
         <div className="plotEmpty">{metricLoading ? "Loading selected metric..." : "No TensorBoard scalar points loaded yet."}</div>
       ) : (
@@ -2244,8 +2280,8 @@ function MetricChart({ jobId, metricsDir, refreshNonce }) {
         </div>
       )}
       <div className="plotFooter">
-        <span>{activeName || "metric"} · {points.length} points</span>
-        <span>{metricsDir || "no metrics dir"} · {plot.minLabel} to {plot.maxLabel}</span>
+        <span>{activeName || "metric"} · {points.length} points{displayedPoints.length < points.length ? ` · ${displayedPoints.length} plotted` : ""}</span>
+        <span>{metricsDir || "job telemetry"} · {plot.minLabel} to {plot.maxLabel}</span>
       </div>
     </div>
   );
@@ -2763,7 +2799,7 @@ function LauncherPrdPage({ mode, setMode, trainConfig, setTrainConfig, serveConf
       <section className="panel launcher launcherMainCard">
         <div className="panelHeader">
           <div><h2>Task Launcher</h2><p>Configure, validate, and review the generated command before launch.</p></div>
-          <div className="tabs"><button className={classNames(mode === "train" && "active")} onClick={() => setMode("train")}>Train</button><button className={classNames(mode === "serve" && "active")} onClick={() => setMode("serve")}>Serve</button></div>
+          <div className="tabs"><button className={classNames(mode === "train" && "active")} onClick={() => setMode("train")}>Train</button><button className={classNames(mode === "serve" && "active")} onClick={() => setMode("serve")}>Serve</button><button onClick={() => setMode("modal")}>Modal</button></div>
         </div>
         {mode === "train" && presets.length > 0 && <div className="launcherPresetRow">
           {presets.map((preset) => <button key={preset.id} className="presetPill" title={preset.source} onClick={() => setTrainConfig((current) => ({ ...current, ...(preset.preset || {}) }))}>{preset.label}</button>)}
