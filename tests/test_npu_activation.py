@@ -20,7 +20,6 @@ def npu_device():
     torch.npu.set_device(0)
     native = extension("npu")
     assert native.activation_implementation == "ascendc"
-    assert not native.supports_training_and_serving
 
 
 @pytest.mark.parametrize("name", ["silu", "sigmoid", "softplus"])

@@ -32,5 +32,4 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.attr("routing_implementation") = "ascendc";
     m.attr("moe_implementation") = "ascendc";
     m.attr("fused_experts_implementation") = "ascendc_cube";
-    m.attr("supports_training_and_serving") = false;
 }

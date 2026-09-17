@@ -167,8 +167,7 @@ class ArenoEngine:
         processes; blocks until the cluster is ready to accept commands.
         """
 
-        # Loss function is required because the engine always carries a trainer
-        # path; pure-inference engines should still set a no-op loss.
+        # Rollout-only engines do not create a trainer or require a loss.
         if config.role == "train" and config.train_loss_fn is None:
             raise ValueError("ArenoEngine requires train_loss_fn")
         self.config = config

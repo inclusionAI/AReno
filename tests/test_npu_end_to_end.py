@@ -1,4 +1,4 @@
-"""Opt-in Ascend SFT/rollout/checkpoint acceptance against a local model.
+"""Opt-in Ascend SFT/rollout/checkpoint/HTTP acceptance against a local model.
 
 Run in a fresh process, separately from single-process kernel tests, so the
 coordinator has not already acquired a worker's NPU. No assets are downloaded.
@@ -79,3 +79,55 @@ def test_sft_rollout_and_checkpoint_reload(tmp_path, optimizer):
         assert [r.sequences[0].resp_tokens for r in after] == [r.sequences[0].resp_tokens for r in before]
     finally:
         restored.close()
+
+
+def test_http_serve_greedy_generation_and_shutdown():
+    model = os.environ.get("ARENO_NPU_TEST_MODEL")
+    if not model:
+        pytest.skip("Set ARENO_NPU_TEST_MODEL to a local Ascend validation checkpoint")
+    assert Path(model).is_dir(), "ARENO_NPU_TEST_MODEL must be a local checkpoint directory"
+    pytest.importorskip("httpx", reason="FastAPI HTTP acceptance requires httpx")
+    from fastapi.testclient import TestClient
+
+    from areno.cli.serve import create_app
+
+    app = create_app(
+        model_path=model,
+        backend_type=NPU,
+        tp_size=int(os.environ.get("ARENO_NPU_TEST_TP_SIZE", "1")),
+        world_size=int(os.environ.get("ARENO_NPU_TEST_WORLD_SIZE", "1")),
+        max_running_prompts=2,
+        default_max_tokens=4,
+        decode_progress_interval_s=0,
+        chat_template_enable_thinking=False,
+    )
+    state = app.state.areno_serve
+    engine = state.engine._engine
+    processes = list(engine.cluster.processes)
+    assert engine.config.role == "rollout"
+    assert engine.config.runtime.device_type == "npu"
+    with TestClient(app) as client:
+        assert client.get("/health").json() == {"status": "ok"}
+        assert client.get("/v1/models").json()["data"][0]["id"] == model
+        request = {
+            "model": model,
+            "messages": [{"role": "user", "content": "Count from one to five."}],
+            "max_tokens": 4,
+            "temperature": 0,
+        }
+        first = client.post("/v1/chat/completions", json=request)
+        assert first.status_code == 200, first.text
+        result = first.json()
+        assert result["choices"][0]["message"]["role"] == "assistant"
+        assert result["choices"][0]["finish_reason"] in {"stop", "length"}
+        assert 1 <= result["usage"]["completion_tokens"] <= 4
+        assert result["usage"]["prompt_tokens"] > 0
+        repeated = client.post("/v1/chat/completions", json=request)
+        assert repeated.status_code == 200, repeated.text
+        assert repeated.json()["choices"] == result["choices"]
+        batched = client.post("/v1/chat/completions", json={**request, "n": 2})
+        assert batched.status_code == 200, batched.text
+        assert len(batched.json()["choices"]) == 2
+        assert 2 <= batched.json()["usage"]["completion_tokens"] <= 8
+    assert state.closing and not state.active_tasks
+    assert all(not process.is_alive() for process in processes)

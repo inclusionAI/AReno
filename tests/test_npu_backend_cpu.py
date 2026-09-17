@@ -1,5 +1,6 @@
 """NPU selects device hooks while inheriting the existing Torch engine."""
 
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,7 +14,10 @@ from areno.api.backend.cuda.backend import CudaBackend
 from areno.api.backend.npu.backend import NpuBackend, NpuProcess, NpuWorker
 from areno.api.context import Context
 from areno.engine.api import ArenoEngine
-from areno.engine.config import EngineConfig, ModelConfig, RuntimeConfig
+from areno.engine.config import EngineConfig, ModelConfig, OptimizerConfig, RuntimeConfig
+from areno.engine.optim import AdamW4bit, AdamW8bit, AdamWFP32Master
+from areno.engine.parallel.context import TPContext
+from areno.engine.protocol import ClusterPartition, DistributedWorldSpec
 from areno.engine.worker import ArenoWorker
 from tests.npu_stub import register_npu_device
 
@@ -26,6 +30,7 @@ def register_npu_device_name():
 def test_npu_reuses_cuda_workflows():
     assert get_backend_cls(NPU) is NpuBackend
     assert NpuConfig is CudaConfig
+    assert NpuWorker.__init__ is ArenoWorker.__init__
     for method in ("train", "rollout_batch", "rollout_batch_async", "save_checkpoint", "close"):
         assert getattr(NpuBackend, method) is getattr(CudaBackend, method)
     assert NpuWorker.handle is ArenoWorker.handle
@@ -40,19 +45,99 @@ def test_npu_reuses_cuda_workflows():
     }
 
 
-def test_incomplete_extension_rejects_jobs_before_device_or_collective_initialization(monkeypatch):
+@pytest.mark.parametrize("layout", ["single", "train", "rollout"])
+def test_npu_process_selects_device_before_hccl_with_shared_partition_layout(monkeypatch, layout):
+    events = []
+    train = ClusterPartition(
+        "train",
+        0,
+        1 if layout == "single" else 4,
+        1 if layout == "single" else 2,
+        (0,) if layout == "single" else (0, 1, 2, 3),
+    )
+    rollout = None if layout == "single" else ClusterPartition("rollout", 4, 2, 1, (6, 7))
+    world = DistributedWorldSpec("127.0.0.1", 12345, 1 if rollout is None else 6, train, rollout)
+    partition = rollout if layout == "rollout" else train
+    rank = partition.local_world_size - 1
+    device_id = partition.devices[rank]
+    monkeypatch.setitem(sys.modules, "torch_npu", SimpleNamespace())
+
+    def load_extension(device):
+        events.append(("extension", device))
+        # Older builds carried this constant. It must not disable all jobs.
+        return SimpleNamespace(supports_training_and_serving=False)
+
+    monkeypatch.setattr("areno.accel._extension.extension", load_extension)
+    monkeypatch.setattr(
+        torch,
+        "npu",
+        SimpleNamespace(
+            is_available=lambda: events.append(("available",)) or True,
+            set_device=lambda device: events.append(("device", device)),
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr("areno.api.backend.npu.backend.init_process_group", lambda **kw: events.append(("hccl", kw)))
+    monkeypatch.setattr("areno.api.backend.npu.backend.destroy_process_group", lambda: events.append(("close",)))
+    for key in ("RANK", "LOCAL_RANK", "WORLD_SIZE"):
+        monkeypatch.setenv(key, "0")
+    NpuProcess.initialize_process(
+        rank, partition.local_world_size, device_id, world, partition, SimpleNamespace(tp_size=partition.tp_size)
+    )
+    assert events[:3] == [("extension", "npu"), ("available",), ("device", device_id)]
+    assert events[3] == (
+        "hccl",
+        dict(
+            rank=rank,
+            world_size=partition.local_world_size,
+            master_addr=world.master_addr,
+            master_port=world.master_port,
+            device_id=device_id,
+            tp_size=partition.tp_size,
+            global_rank=partition.global_rank_offset + rank,
+            global_world_size=world.global_world_size,
+            train_world_size=train.local_world_size,
+            train_tp_size=train.tp_size,
+            rollout_world_size=rollout.local_world_size if rollout else None,
+            rollout_tp_size=rollout.tp_size if rollout else None,
+            train_devices=train.devices,
+            rollout_devices=rollout.devices if rollout else None,
+            role=partition.role,
+            device=torch.device("npu"),
+            backend="hccl",
+        ),
+    )
+    assert [os.environ[key] for key in ("RANK", "LOCAL_RANK", "WORLD_SIZE")] == [
+        str(partition.global_rank_offset + rank),
+        str(device_id),
+        str(world.global_world_size),
+    ]
+    NpuProcess.close_process()
+    assert events[-1] == ("close",)
+
+
+@pytest.mark.parametrize("missing", ["extension", "device"])
+def test_npu_startup_reports_actual_unavailable_dependency_before_collectives(monkeypatch, missing):
+    def load_extension(device):
+        if missing == "extension":
+            raise ImportError("test native extension load failure")
+        return SimpleNamespace()
+
     def unexpected_initialization(*args, **kwargs):
-        pytest.fail("incomplete NPU kernels must be rejected before initializing devices or collectives")
+        pytest.fail("failed startup must not select a device or initialize collectives")
 
     monkeypatch.setitem(sys.modules, "torch_npu", SimpleNamespace())
-    monkeypatch.setattr(
-        "areno.accel._extension.extension", lambda device: SimpleNamespace(supports_training_and_serving=False)
-    )
-    monkeypatch.setattr(torch, "npu", SimpleNamespace(is_available=unexpected_initialization), raising=False)
+    monkeypatch.setattr("areno.accel._extension.extension", load_extension)
+    monkeypatch.setattr(torch, "npu", SimpleNamespace(is_available=lambda: False, set_device=unexpected_initialization))
     monkeypatch.setattr("areno.api.backend.npu.backend.init_process_group", unexpected_initialization)
     for key in ("RANK", "LOCAL_RANK", "WORLD_SIZE"):
         monkeypatch.setenv(key, "0")
-    with pytest.raises(RuntimeError, match="kernel validation only"):
+    error, message = (
+        (ImportError, "test native extension load failure")
+        if missing == "extension"
+        else (RuntimeError, "no NPU device is available")
+    )
+    with pytest.raises(error, match=message):
         NpuProcess.initialize_process(
             0, 1, 0, SimpleNamespace(global_world_size=1), SimpleNamespace(global_rank_offset=0), SimpleNamespace()
         )
@@ -101,6 +186,34 @@ def test_shared_engine_selects_device_worker_without_starting_processes(device_t
     assert engine.config.dp_size == 2
 
 
+@pytest.mark.parametrize("role", ["train", "rollout"])
+@pytest.mark.parametrize("optimizer_cls", [AdamWFP32Master, AdamW8bit, AdamW4bit])
+def test_npu_worker_uses_shared_optimizer_only_for_training(monkeypatch, role, optimizer_cls):
+    # Exercise the real worker and optimizer construction with CPU tensors;
+    # this checks lifecycle ownership, not NPU arithmetic.
+    import areno.engine.worker as worker_mod
+
+    ctx = TPContext(0, 1, torch.device("cpu"), None)
+    model = torch.nn.Linear(4, 4, bias=False, dtype=torch.bfloat16)
+    monkeypatch.setattr(worker_mod, "get_tp_context", lambda: ctx)
+    monkeypatch.setattr(worker_mod, "build_model_on_device", lambda config, device: model)
+    config = EngineConfig(
+        model=ModelConfig(),
+        runtime=RuntimeConfig(device_type="npu"),
+        optimizer=OptimizerConfig(adam_8bit=optimizer_cls is AdamW8bit, adam_4bit=optimizer_cls is AdamW4bit),
+        role=role,
+        train_loss_fn=(lambda *args: None) if role == "train" else None,
+    )
+    worker = NpuWorker(config)
+    assert worker.model is model
+    if role == "train":
+        assert isinstance(worker.optimizer, optimizer_cls)
+        assert worker.training is not None
+    else:
+        assert worker.optimizer is None
+        assert worker.training is None
+
+
 def test_npu_config_does_not_probe_cuda(monkeypatch):
     def unexpected_cuda_probe():
         pytest.fail("NPU configuration must not probe CUDA hardware")
@@ -137,6 +250,7 @@ def test_npu_serve_reuses_shared_engine_with_tp_dp(monkeypatch):
         base_model_name_or_path=None,
     )
     assert runtime.max_model_len == 4096
+    assert captured["role"] == "rollout"
     assert captured["tp_size"] == 2
     assert captured["dp_size"] == 2
     assert captured["devices"] == [0, 1, 2, 3]

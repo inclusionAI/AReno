@@ -26,12 +26,7 @@ class NpuProcess:
 
         from areno.accel._extension import extension
 
-        native = extension("npu")
-        if not getattr(native, "supports_training_and_serving", False):
-            raise RuntimeError(
-                "The Ascend native extension currently provides kernel validation only; "
-                "training/serving kernels are not complete."
-            )
+        extension("npu")
 
         if not torch.npu.is_available():
             raise RuntimeError("no NPU device is available")
@@ -63,13 +58,6 @@ class NpuProcess:
 
 class NpuWorker(ArenoWorker):
     process_lifecycle = NpuProcess
-
-    def __init__(self, config):
-        if config.model.model_type not in {"llama", "qwen3", "qwen3_moe", "gemma4", "phi4mm"}:
-            raise ValueError(
-                "Ascend hybrid-model integration has not yet passed the required operator and end-to-end validation"
-            )
-        super().__init__(config)
 
 
 @register_backend(BackendType.NPU)
