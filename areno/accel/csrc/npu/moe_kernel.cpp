@@ -210,8 +210,14 @@ public:
     }
 };
 
+} // namespace areno_npu
+
+// CANN generates unqualified calls to non-template *_origin entrypoints.
+// Keep those entries global; helpers and host launchers stay namespaced.
 __global__ __aicore__ void route_offsets_kernel(GM_ADDR c, GM_ADDR off, int64_t experts, int64_t blockSize,
     GM_ADDR blockIds, GM_ADDR paddedTotal, GM_ADDR scratch, int64_t blockCapacity) {
+    using namespace AscendC;
+    using namespace areno_npu;
     RouteIO io;
     io.Init();
     GlobalTensor<int32_t> counts, blocks, total, cumsum;
@@ -249,6 +255,7 @@ __global__ __aicore__ void route_offsets_kernel(GM_ADDR c, GM_ADDR off, int64_t 
 }
 
 __global__ __aicore__ void route_prefix_kernel(GM_ADDR p, GM_ADDR offsets, int64_t tiles, int64_t experts) {
+    using namespace areno_npu;
     RoutePrefixKernel kernel;
     kernel.Init(p, offsets);
     kernel.Process(tiles, experts);
@@ -256,6 +263,8 @@ __global__ __aicore__ void route_prefix_kernel(GM_ADDR p, GM_ADDR offsets, int64
 
 __global__ __aicore__ void route_weight_backward_kernel(GM_ADDR g, GM_ADDR ti, GM_ADDR pos, GM_ADDR out,
     int64_t rows, int64_t top_k) {
+    using namespace AscendC;
+    using namespace areno_npu;
     RouteIO io;
     io.Init();
     GlobalTensor<float> grad, output;
@@ -278,6 +287,8 @@ __global__ __aicore__ void route_weight_backward_kernel(GM_ADDR g, GM_ADDR ti, G
 }
 
 __global__ __aicore__ void route_fill_kernel(GM_ADDR out, int64_t elements, int32_t value) {
+    using namespace AscendC;
+    using namespace areno_npu;
     RouteIO io;
     io.Init();
     GlobalTensor<int32_t> output;
@@ -287,6 +298,8 @@ __global__ __aicore__ void route_fill_kernel(GM_ADDR out, int64_t elements, int3
         io.Fill(output, base, end, value);
     }
 }
+
+namespace areno_npu {
 
 template <typename Id, RouteKind Kind, bool Metadata>
 __global__ __aicore__ void route_kernel(GM_ADDR keys, GM_ADDR weights, GM_ADDR partial, GM_ADDR counts,

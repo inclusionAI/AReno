@@ -56,8 +56,13 @@ public:
     }
 };
 
+} // namespace areno_npu
+
+// CANN's generated non-template wrapper calls this entry in global scope.
 __global__ __aicore__ void expert_tokens_kernel(GM_ADDR sorted, GM_ADDR expertIds, GM_ADDR paddedTotal,
     GM_ADDR out, int64_t capacity, int64_t routes, int64_t topK) {
+    using namespace AscendC;
+    using namespace areno_npu;
     ExpertIO io;
     io.Init();
     GlobalTensor<int32_t> aligned, experts, total;
@@ -87,6 +92,8 @@ __global__ __aicore__ void expert_tokens_kernel(GM_ADDR sorted, GM_ADDR expertId
         io.outputQueue.FreeTensor(local);
     }
 }
+
+namespace areno_npu {
 
 template <typename T>
 __global__ __aicore__ void expert_cast_kernel(GM_ADDR in, GM_ADDR out, int64_t rows, int64_t width, int64_t inputStride) {
