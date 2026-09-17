@@ -7,10 +7,10 @@ Install the optional Modal SDK and dataset preview support in the dashboard's
 Python environment with `pip install -r areno/dashboard/flow/requirements.txt`.
 GPU training still runs remotely; local CUDA is not required for the control plane.
 
-- **Dashboard Settings → Modal workspace:** connect using Token ID and Token Secret,
+- **Settings → Modal credentials** (from the dashboard header or Agent tab): connect using Token ID and Token Secret,
   or `MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET` environment variables. Credentials stay
   in server memory and must be reconnected after a server restart.
-- **Launcher → Modal → Train / Serve:** select the model adapter, checkpoint and GPU
+- **Launcher → Train / Serve → Run on Modal:** select the model adapter, checkpoint and GPU
   reservation, configure parameters, review the execution plan, then execute.
 - **Agent:** ask for a Modal training or serving task. The agent reads the live
   repository catalog and prepares a validated plan. Only the dashboard confirmation

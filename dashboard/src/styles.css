@@ -2743,3 +2743,12 @@ textarea:focus {
 .datasetRow code { overflow-wrap: anywhere; color: var(--deck-text); font-size: 11px; }
 .chartStatus { color: var(--deck-amber); font-size: 12px; }
 @media (max-width: 640px) { .datasetRow, .datasetUrlForm { flex-direction: column; align-items: stretch; } }
+
+.launcherControls { display: flex; align-items: center; flex-wrap: wrap; gap: 16px; }
+.modalExecutionSwitch { display: inline-flex; align-items: center; gap: 8px; min-height: 40px; cursor: pointer; font-size: 13px; color: var(--deck-text); }
+.modalExecutionSwitch input { appearance: none; position: relative; width: 36px; height: 20px; padding: 0; margin: 0; border-radius: 12px; background: var(--deck-panel-2); border: 1px solid var(--deck-line-strong); cursor: pointer; }
+.modalExecutionSwitch input::after { content: ""; position: absolute; width: 14px; height: 14px; top: 2px; left: 2px; border-radius: 50%; background: var(--deck-muted); }
+.modalExecutionSwitch input:checked { background: var(--deck-cyan); border-color: var(--deck-cyan); }
+.modalExecutionSwitch input:checked::after { transform: translateX(16px); background: var(--deck-panel); }
+.modalExecutionSwitch input:focus-visible { outline: 2px solid var(--deck-cyan); outline-offset: 3px; }
+.modalResourceHeader { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 16px; }

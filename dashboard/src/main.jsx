@@ -359,10 +359,10 @@ function App() {
   const [activePage, setActivePage] = useState("overview");
   const [jobFilter, setJobFilter] = useState("all");
   const [launcherMode, setLauncherMode] = useState("train");
+  const [launcherModal, setLauncherModal] = useState(false);
   const [theme, setTheme] = useState(() => localStorage.getItem("areno-dashboard-theme-v2") || "light");
   const [language, setLanguage] = useState(() => localStorage.getItem(UI_LANGUAGE_STORAGE_KEY) || "en");
   const [busy, setBusy] = useState("");
-  const [agentSettingsOpen, setAgentSettingsOpen] = useState(false);
   const [dashboardSettingsOpen, setDashboardSettingsOpen] = useState(false);
   const [datasetsOpen, setDatasetsOpen] = useState(false);
   const [modalPlan, setModalPlan] = useState(null);
@@ -604,7 +604,7 @@ function App() {
   }
 
   async function executeOverviewQuickAction(action, overviewJob = null) {
-    if (action.kind === "modal_launcher") { setLauncherMode("modal"); setActivePage("launcher"); return; }
+    if (action.kind === "modal_launcher") { setLauncherModal(true); setActivePage("launcher"); return; }
     if (action.kind === "agent_prompt") {
       const jobContext = overviewJob ? `\n\nTrack this overview job: ${overviewJob.name} (${overviewJob.id}).` : "";
       setSelectedJobId(overviewJob?.id || null);
@@ -906,14 +906,12 @@ function App() {
       return <RuntimePrdPage env={env.data} onRefresh={refreshRuntime} />;
     }
     if (activePage === "launcher") {
-      if (launcherMode === "modal") return <div className="launcherSections">
-        <div className="tabs"><button onClick={() => setLauncherMode("train")}>Train</button><button onClick={() => setLauncherMode("serve")}>Serve</button><button className="active">Modal</button></div>
-        <ModalLauncher request={modalApi} onPlan={setModalPlan} onSettings={() => setDashboardSettingsOpen(true)} onDatasets={() => setDatasetsOpen(true)} />
-      </div>;
+      const launcherControls = <LauncherControls mode={launcherMode} setMode={setLauncherMode} modal={launcherModal} setModal={setLauncherModal} />;
+      if (launcherModal) return <ModalLauncher mode={launcherMode} controls={launcherControls} request={modalApi} onPlan={setModalPlan} onSettings={() => setDashboardSettingsOpen(true)} onDatasets={() => setDatasetsOpen(true)} />;
       return (
         <LauncherPrdPage
           mode={launcherMode}
-          setMode={setLauncherMode}
+          controls={launcherControls}
           trainConfig={trainConfig}
           setTrainConfig={setTrainConfig}
           serveConfig={serveConfig}
@@ -939,7 +937,7 @@ function App() {
             <div className="agentHeaderActions">
               <StatusBadge status={env.data?.ready ? "ok" : "warn"} />
               <button className="secondaryButton" onClick={newAgentChat}><Plus size={15} /> New Chat</button>
-              <button className="secondaryButton" onClick={() => setAgentSettingsOpen(true)}><Settings2 size={15} /> Settings</button>
+              <button className="secondaryButton" onClick={() => setDashboardSettingsOpen(true)}><Settings2 size={15} /> Settings</button>
             </div>
           </div>
           <div className="pillRow agentContextPills">
@@ -986,11 +984,6 @@ function App() {
                 <button className="primaryButton chatSendButton" disabled={!agentPrompt.trim()} onClick={() => runAgent()}><Send size={16} /> Send</button>
               </div>
             </>
-          )}
-          {agentSettingsOpen && (
-            <Modal title="Agent Settings" onClose={() => setAgentSettingsOpen(false)}>
-              <AgentProviderForm provider={agentProvider} setProvider={setAgentProvider} />
-            </Modal>
           )}
         </section>
         <aside className="agentSideRail">
@@ -2708,7 +2701,14 @@ function LogView({ logs }) {
   );
 }
 
-function LauncherPrdPage({ mode, setMode, trainConfig, setTrainConfig, serveConfig, setServeConfig, onStartTrain, onStartServe, env, presets }) {
+function LauncherControls({ mode, setMode, modal, setModal }) {
+  return <div className="launcherControls">
+    <div className="tabs"><button className={classNames(mode === "train" && "active")} onClick={() => setMode("train")}>Train</button><button className={classNames(mode === "serve" && "active")} onClick={() => setMode("serve")}>Serve</button></div>
+    <label className="modalExecutionSwitch"><input type="checkbox" role="switch" checked={modal} onChange={event => setModal(event.target.checked)} /><span>Run on Modal</span></label>
+  </div>;
+}
+
+function LauncherPrdPage({ mode, controls, trainConfig, setTrainConfig, serveConfig, setServeConfig, onStartTrain, onStartServe, env, presets }) {
   const config = mode === "train" ? trainConfig : serveConfig;
   const [preflightResult, setPreflightResult] = useState(null);
   const [preflightBusy, setPreflightBusy] = useState("");
@@ -2799,7 +2799,7 @@ function LauncherPrdPage({ mode, setMode, trainConfig, setTrainConfig, serveConf
       <section className="panel launcher launcherMainCard">
         <div className="panelHeader">
           <div><h2>Task Launcher</h2><p>Configure, validate, and review the generated command before launch.</p></div>
-          <div className="tabs"><button className={classNames(mode === "train" && "active")} onClick={() => setMode("train")}>Train</button><button className={classNames(mode === "serve" && "active")} onClick={() => setMode("serve")}>Serve</button><button onClick={() => setMode("modal")}>Modal</button></div>
+          {controls}
         </div>
         {mode === "train" && presets.length > 0 && <div className="launcherPresetRow">
           {presets.map((preset) => <button key={preset.id} className="presetPill" title={preset.source} onClick={() => setTrainConfig((current) => ({ ...current, ...(preset.preset || {}) }))}>{preset.label}</button>)}

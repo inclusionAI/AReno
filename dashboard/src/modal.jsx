@@ -27,12 +27,12 @@ export function ModalSettings({ request }) {
       setStatus(await request("/bootstrap")); setMessage("Modal connected.");
     } catch (error) { setMessage(error.message); } finally { setPending(false); }
   }
-  return <section className="modalSettings"><h3>Modal workspace</h3>
+  return <section className="modalSettings"><h3>Modal credentials</h3>
     <p>{status?.connected ? "Connected" : "Connect to launch Modal jobs"}. Tokens stay in server memory for this session.</p>
     <form onSubmit={connect} className="launcherSections">
-      <div className="formGrid"><label className="field"><span>Token ID</span><input type="password" autoComplete="off" value={tokenId} onChange={e => setTokenId(e.target.value)} /></label>
-      <label className="field"><span>Token secret</span><input type="password" autoComplete="new-password" value={tokenSecret} onChange={e => setTokenSecret(e.target.value)} /></label></div>
-      <button className="primaryButton" disabled={pending || !(tokenId && tokenSecret || status?.environment_credentials)}>{pending ? "Connecting…" : tokenId ? "Connect Modal" : "Use environment credentials"}</button>
+      <div className="formGrid"><label className="field"><span>Modal Token ID</span><input type="password" autoComplete="off" value={tokenId} onChange={e => setTokenId(e.target.value)} /></label>
+      <label className="field"><span>Modal Token Secret</span><input type="password" autoComplete="new-password" value={tokenSecret} onChange={e => setTokenSecret(e.target.value)} /></label></div>
+      <button className="primaryButton" disabled={pending || !(tokenId && tokenSecret || (!tokenId && !tokenSecret && status?.environment_credentials))}>{pending ? "Connecting…" : tokenId || tokenSecret ? "Connect Modal" : status?.environment_credentials ? "Use environment credentials" : "Connect Modal"}</button>
       {message && <p role="status">{message}</p>}
     </form>
   </section>;
@@ -89,17 +89,18 @@ export function DatasetManager({ request, onSelect }) {
   </div>;
 }
 
-export function ModalLauncher({ request, onPlan, onSettings, onDatasets }) {
+export function ModalLauncher({ mode, controls, request, onPlan, onSettings, onDatasets }) {
   const [bootstrap, setBootstrap] = useState(null);
   const [datasets, setDatasets] = useState([]);
-  const [kind, setKind] = useState("training");
+  const kind = mode === "serve" ? "deployment" : "training";
   const [adapter, setAdapter] = useState("");
   const [checkpoint, setCheckpoint] = useState("");
   const [datasetId, setDatasetId] = useState("");
   const [datasetPath, setDatasetPath] = useState("");
   const [algo, setAlgo] = useState("sft");
   const [resources, setResources] = useState({ gpu: "H100", count: 1, cpu: 4, memory_gib: 32, timeout_seconds: 14400 });
-  const [options, setOptions] = useState("{}");
+  const [optionsByKind, setOptionsByKind] = useState({ training: "{}", deployment: "{}" });
+  const options = optionsByKind[kind];
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
   useEffect(() => {
@@ -115,11 +116,11 @@ export function ModalLauncher({ request, onPlan, onSettings, onDatasets }) {
       onPlan((await request("/preview", body)).plan);
     } catch (error) { setError(error.message); } finally { setPending(false); }
   }
-  return <section className="panel"><div className="panelHeader"><div><h2>Modal task</h2><p>Run AReno training or serving on a reserved cloud GPU.</p></div><button className="secondaryButton" onClick={onSettings}>Modal settings</button></div>
+  return <section className="panel"><div className="panelHeader"><div><h2>Task Launcher</h2><p>Run AReno {mode === "serve" ? "serving" : "training"} on a reserved Modal GPU.</p></div>{controls}</div>
+    <div className="modalResourceHeader"><strong>Modal configuration</strong><button className="secondaryButton" onClick={onSettings}>Modal settings</button></div>
     {!bootstrap && !error && <p>Loading Modal catalog…</p>}
     {bootstrap && <form onSubmit={preview} className="launcherSections">
       {!bootstrap.connected && <p role="status">Connect your workspace in dashboard Settings before executing a plan.</p>}
-      <div className="tabs"><button type="button" className={kind === "training" ? "active" : ""} onClick={() => setKind("training")}>Train</button><button type="button" className={kind === "deployment" ? "active" : ""} onClick={() => setKind("deployment")}>Serve</button></div>
       <div className="formGrid">
         <label className="field"><span>Model adapter</span><select required value={adapter} onChange={e => setAdapter(e.target.value)}><option value="">Select adapter</option>{bootstrap.catalog.models.map(model => <option key={model.id} value={model.id}>{model.id}</option>)}</select></label>
         <label className="field"><span>Checkpoint / repository</span><input required value={checkpoint} onChange={e => setCheckpoint(e.target.value)} /></label>
@@ -129,7 +130,7 @@ export function ModalLauncher({ request, onPlan, onSettings, onDatasets }) {
         <label className="field"><span>GPU</span><select value={resources.gpu} onChange={e => setResources({ ...resources, gpu: e.target.value })}>{bootstrap.gpu_types.map(gpu => <option key={gpu}>{gpu}</option>)}</select></label>
         {[["count", "GPU count", 1, 8], ["cpu", "CPU cores", 1, 64], ["memory_gib", "Memory (GiB)", 4, 512], ["timeout_seconds", "Maximum lifetime (seconds)", 1, 86400]].map(([key, label, min, max]) => <label className="field" key={key}><span>{label}</span><input required type="number" min={min} max={max} value={resources[key]} onChange={e => setResources({ ...resources, [key]: Number(e.target.value) })} /></label>)}
       </div>
-      <label className="field"><span>Advanced {kind === "training" ? "training" : "serving"} parameters (JSON)</span><textarea className="mono" rows={5} value={options} onChange={e => setOptions(e.target.value)} /></label>
+      <label className="field"><span>Advanced {kind === "training" ? "training" : "serving"} parameters (JSON)</span><textarea className="mono" rows={5} value={options} onChange={e => setOptionsByKind(current => ({ ...current, [kind]: e.target.value }))} /></label>
       <p>Use AReno parameter names for dataset loaders, reward functions, batch sizes and other options. Plans are validated against the repository catalog.</p>
       <div className="detailActions"><button className="primaryButton" disabled={pending}>{pending ? "Preparing…" : "Review execution plan"}</button><button type="button" className="secondaryButton" onClick={onDatasets}><Database size={16} /> Manage datasets</button></div>
     </form>}{error && <p role="alert">{error}</p>}
