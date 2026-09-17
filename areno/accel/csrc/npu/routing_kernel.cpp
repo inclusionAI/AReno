@@ -225,13 +225,19 @@ public:
     }
 };
 
-template <typename T, RoutingOp Op>
+} // namespace areno_npu
+
+template <typename T, uint32_t Op>
 __global__ __aicore__ void routing_kernel(GM_ADDR x, GM_ADDR b, GM_ADDR ids, GM_ADDR w, GM_ADDR dx,
     int64_t tokens, int experts, int k, bool renormalize, int groups, int topk_group) {
-    RoutingKernel<T, Op> kernel;
+    using namespace AscendC;
+    using namespace areno_npu;
+    RoutingKernel<T, static_cast<RoutingOp>(Op)> kernel;
     kernel.Init(x, b, ids, w, dx);
     kernel.Process(tokens, experts, k, renormalize, groups, topk_group);
 }
+
+namespace areno_npu {
 
 template <typename T>
 void launch_routing_typed(uint32_t blocks, void* stream, RoutingOp op, const void* logits, const float* bias,

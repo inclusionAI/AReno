@@ -210,14 +210,20 @@ public:
     }
 };
 
+} // namespace areno_npu
+
 template <typename T, typename W, bool Backward, bool Scale, uint32_t Gate>
 __global__ __aicore__ void normalization_kernel(GM_ADDR input, GM_ADDR gate, GM_ADDR weight, GM_ADDR grad,
                                                GM_ADDR output, GM_ADDR gradGate, GM_ADDR inv, GM_ADDR gradWeight,
                                                int64_t rows, int64_t width, int64_t groups, float eps) {
+    using namespace AscendC;
+    using namespace areno_npu;
     NormalizationKernel<T, W, Backward, Scale, Gate> kernel;
     kernel.Init(input, gate, weight, grad, output, gradGate, inv, gradWeight);
     kernel.Process(rows, width, groups, eps);
 }
+
+namespace areno_npu {
 
 template <typename T>
 void launch_norm_typed(uint32_t blocks, void* stream, uint32_t weightStorage,

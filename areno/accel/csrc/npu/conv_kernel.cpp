@@ -256,13 +256,19 @@ public:
     }
 };
 
-template <typename T, ConvOp Op, bool Packed>
+} // namespace areno_npu
+
+template <typename T, uint32_t Op, bool Packed>
 __global__ __aicore__ void conv_kernel(GM_ADDR x, GM_ADDR w, GM_ADDR g, GM_ADDR p, GM_ADDR out,
     GM_ADDR h, GM_ADDR cu, int64_t batch, int64_t seqlen, int64_t channels, int64_t kernel_size, int64_t segments) {
-    ConvKernel<T, Op, Packed> kernel;
+    using namespace AscendC;
+    using namespace areno_npu;
+    ConvKernel<T, static_cast<ConvOp>(Op), Packed> kernel;
     kernel.Init(x, w, g, p, out, h, cu);
     kernel.Process(batch, seqlen, channels, kernel_size, segments);
 }
+
+namespace areno_npu {
 
 template <typename T, bool Packed>
 void launch_conv_typed(uint32_t blocks, void* stream, ConvOp op, const void* input, const float* weight,

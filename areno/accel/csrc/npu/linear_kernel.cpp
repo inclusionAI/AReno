@@ -80,12 +80,18 @@ public:
     }
 };
 
+} // namespace areno_npu
+
 template <typename T, bool Backward>
 __global__ __aicore__ void linear_bias_kernel(GM_ADDR x, GM_ADDR bias, GM_ADDR y, int64_t rows, int64_t columns) {
+    using namespace AscendC;
+    using namespace areno_npu;
     LinearBiasKernel<T, Backward> kernel;
     kernel.Init(x, bias, y);
     kernel.Process(rows, columns);
 }
+
+namespace areno_npu {
 
 void launch_linear_bias(uint32_t blocks, void* stream, uint32_t storage, bool backward,
                         const void* input, const void* bias, void* output, int64_t rows, int64_t columns) {
