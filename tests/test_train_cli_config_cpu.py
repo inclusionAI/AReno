@@ -175,6 +175,19 @@ def test_train_config_validates_ppo_positive_fields(field, value, message):
         _trainer_config_from_options(**_options(algo="ppo", **{field: value}))
 
 
+def test_mtp_options_reach_the_engine_runtime():
+    policy = _trainer_config_from_options(**_options(algo="gspo", mtp_loss_scale=0.1, speculative_draft_tokens=2))
+    runtime = policy.cuda_config().runtime
+    assert runtime["mtp_loss_scale"] == 0.1
+    assert runtime["speculative_draft_tokens"] == 2
+
+    sft = _trainer_config_from_options(
+        **_options(algo="sft", reward_fn_path=None, reward_ckpt=None, min_lr=0.0, mtp_loss_scale=0.5)
+    )
+    assert sft.cuda_config().runtime["mtp_loss_scale"] == 0.5
+    assert "speculative_draft_tokens" not in sft.cuda_config().runtime
+
+
 def test_train_config_builds_sft_shape_without_rollout_or_role_fields():
     cfg = _trainer_config_from_options(
         **_options(algo="sft", reward_fn_path=None, reward_ckpt=None, min_lr=0.0, attn_backend="native")
@@ -1007,6 +1020,8 @@ def _options(**overrides):
         activation_checkpointing=True,
         drop_rollout_state=False,
         eager_decode=False,
+        speculative_draft_tokens=0,
+        mtp_loss_scale=None,
         attn_backend="flash",
         disable_thinking=False,
         metrics_log_dir=None,
