@@ -1,6 +1,8 @@
 import logging
 from types import SimpleNamespace
 
+import pytest
+
 from areno.api.rewards import RewardRecord
 from areno.api.trainers.policy_only import PolicyOnlyTrainer, _dashboard_safe_value
 
@@ -13,8 +15,11 @@ class _SampleRecorder:
         self.samples.append(sample)
 
 
-def test_agentic_dashboard_sample_includes_output_prompt_and_record(monkeypatch):
-    monkeypatch.setenv("ARENO_LOG_COMPLETIONS", "1")
+@pytest.mark.parametrize("limit", [None, "0", "1", "2"])
+def test_agentic_dashboard_sample_includes_output_prompt_and_record(monkeypatch, limit):
+    monkeypatch.delenv("ARENO_LOG_COMPLETIONS", raising=False)
+    if limit is not None:
+        monkeypatch.setenv("ARENO_LOG_COMPLETIONS", limit)
     recorder = _SampleRecorder()
     trainer = PolicyOnlyTrainer.__new__(PolicyOnlyTrainer)
     trainer.areno = recorder
@@ -38,10 +43,13 @@ def test_agentic_dashboard_sample_includes_output_prompt_and_record(monkeypatch)
         source_record={"video_path": "/data/clip.mp4", "label": "walking"},
         metadata={"prompt_index": 0, "sample_index": 0},
     )
-    batch = SimpleNamespace(reward_records=[reward_record], loss_masks=[[False, True]], token_rows=[[1, 2]])
+    batch = SimpleNamespace(reward_records=[reward_record] * 3, loss_masks=[[False, True]] * 3, token_rows=[[1, 2]] * 3)
 
     trainer._log_agentic_sample_completions(epoch=0, step=3, agent_batch=batch)
 
+    assert len(recorder.samples) == (int(limit) if limit is not None else 1)
+    if limit == "0":
+        return
     sample = recorder.samples[0]
     assert sample["completion"] == reward_record.completion
     assert sample["rendered_completion"] == reward_record.rendered_completion
@@ -57,8 +65,11 @@ def test_dashboard_safe_value_summarizes_large_binary_and_tensor_like_values():
     assert value["features"] == {"type": "SimpleNamespace", "shape": [2, 3], "dtype": "float32"}
 
 
-def test_non_agentic_dashboard_sample_includes_source_record(monkeypatch):
-    monkeypatch.setenv("ARENO_LOG_COMPLETIONS", "1")
+@pytest.mark.parametrize("limit", [None, "0", "1", "2"])
+def test_non_agentic_dashboard_sample_includes_source_record(monkeypatch, limit):
+    monkeypatch.delenv("ARENO_LOG_COMPLETIONS", raising=False)
+    if limit is not None:
+        monkeypatch.setenv("ARENO_LOG_COMPLETIONS", limit)
     recorder = _SampleRecorder()
     trainer = PolicyOnlyTrainer.__new__(PolicyOnlyTrainer)
     trainer.areno = recorder
@@ -71,9 +82,12 @@ def test_non_agentic_dashboard_sample_includes_source_record(monkeypatch):
     )
     prompt_batch = SimpleNamespace(items=[item])
     sequence = SimpleNamespace(resp_tokens=[3], resp_logprobs=[-0.1])
-    rollout_results = [SimpleNamespace(sequences=[sequence])]
+    rollout_results = [SimpleNamespace(sequences=[sequence] * 3)]
 
     trainer._record_sample_completions(tokenizer, 0, 1, prompt_batch, rollout_results)
 
+    assert len(recorder.samples) == (int(limit) if limit is not None else 1)
+    if limit == "0":
+        return
     assert recorder.samples[0]["completion"] == "3"
     assert recorder.samples[0]["source_record"] == item.record

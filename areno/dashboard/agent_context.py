@@ -20,6 +20,18 @@ a train task or a serve task. Use tools rather than guessing live runtime state.
 - If a remote checkpoint or dataset is needed and the user has not provided one,
   ask for it before starting the task.
 
+### Modal GPU selection
+
+- Before preparing a Modal plan, call `recommend_modal_gpu` with the selected
+  model and all training/serving settings. Use Adam 4-bit for training estimates
+  and set `adam_4bit=true` unless the user explicitly selects another optimizer.
+- Use the returned GPU and count unless the user has selected resources.
+  Explain the estimated memory per GPU and assumptions. Set resources.auto_gpu
+  to true to re-estimate resources when the plan parameters change.
+- Unknown model size requires a verified total parameter count, including all
+  experts for MoE. Do not invent a model size or promise that an estimate fits.
+- Respect world_size/tp_size; changing GPU count alone does not shard a model.
+
 ### Train task field contract
 
 SFT command shape:
@@ -66,8 +78,19 @@ Agentic rollout/RL adds:
 
 - Always required: `ckpt`, `dataset_path`, `algo`, `world_size`, `tp_size`,
   `batch_size`, `mini_bs`, and `max_steps`.
-- Usually required: `dataset_loader_fn`; omit only when the dataset path format
-  is known to be handled internally.
+- Always include `dataset_loader_fn` in every training plan and every stage,
+  including Modal and agentic training. Never omit it for a raw dataset URL or
+  a dataset that appears already normalized.
+- Inspect the dataset sample/schema and the loader source before selecting a
+  loader. Reuse a compatible repository loader or provide a dataset-specific
+  loader; never invent a loader path. The file must be available on the target
+  runtime and wired into `params.dataset_loader_fn` for Modal stages.
+- For RL, the loader must produce `prompt` (mapping actual fields such as
+  `question` when appropriate) and preserve reference answers and metadata used
+  by the reward function or agent. For SFT/DPO, normalize to the corresponding
+  training schema. Validate nonempty output and required fields before launch.
+- If no compatible loader is available, explain what loader is needed and ask
+  for it; do not prepare a runnable training plan with the loader missing.
 - Required for rollout/RL algorithms such as `gspo`, `grpo`, and `ppo`:
   `reward_fn_path` or another configured reward source, `n_samples`, and
   `max_running_prompts`.

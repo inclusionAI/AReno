@@ -1,3 +1,4 @@
+import { normalizeConfigSections, formatConfigValue } from "./config-display";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import ReactMarkdown from "react-markdown";
@@ -32,6 +33,9 @@ import {
   Wrench,
 } from "lucide-react";
 import "./styles.css";
+import { sampleMetricPoints } from "./metrics";
+import { modalWorkflow } from "./modal-workflow";
+import { ModalResourceForm, ModalSettings, DatasetManager, ModalUsage, ModalPlanCard, PlanParameters } from "./modal";
 
 function dashboardBasePath() {
   const moduleScript = document.querySelector('script[type="module"][src]');
@@ -141,6 +145,12 @@ async function api(path, options) {
   return data;
 }
 
+async function modalApi(path, body) {
+  if (body === undefined) return api(`/api/modal${path}`);
+  const bootstrap = await api("/api/modal/bootstrap");
+  return api(`/api/modal${path}`, { method: "POST", headers: { "Content-Type": "application/json", "X-Arenoflow-CSRF": bootstrap.csrf }, body: JSON.stringify(body) });
+}
+
 function classNames(...items) {
   return items.filter(Boolean).join(" ");
 }
@@ -171,21 +181,28 @@ function translateDashboard(root, language) {
 
 function usePolling(loader, delay = 2500, deps = []) {
   const [data, setData] = useState(null);
-  const refresh = async () => {
-    try {
-      const value = await loader();
-      setData(value);
-    } catch (err) {
-      // Polling can race dashboard restarts or proxy reconnects. Keep the last
-      // good snapshot instead of surfacing noisy transient fetch failures.
-    }
-  };
+  const refreshRef = useRef(async () => {});
   useEffect(() => {
+    let active = true;
+    let pending = false;
+    const refresh = async () => {
+      if (pending || !active) return;
+      pending = true;
+      try {
+        const value = await loader();
+        if (active) setData(value);
+      } catch {
+        // Keep the last good snapshot during a transient reconnect.
+      } finally {
+        pending = false;
+      }
+    };
+    refreshRef.current = refresh;
     refresh();
     const timer = setInterval(refresh, delay);
-    return () => clearInterval(timer);
+    return () => { active = false; clearInterval(timer); };
   }, deps);
-  return { data, refresh };
+  return { data, refresh: () => refreshRef.current() };
 }
 
 const defaultAgentMessages = [
@@ -281,6 +298,7 @@ const defaultTrainConfig = {
   lr_decay_style: "cosine",
   adam_beta1: 0.9,
   adam_beta2: 0.999,
+  adam_4bit: true,
   adam_8bit: false,
   unfreeze_multimodal_tower: false,
   unfreeze_multimodal_projector: false,
@@ -351,10 +369,14 @@ function App() {
   const [activePage, setActivePage] = useState("overview");
   const [jobFilter, setJobFilter] = useState("all");
   const [launcherMode, setLauncherMode] = useState("train");
+  const [launcherModal, setLauncherModal] = useState(false);
+  const [modalResources, setModalResources] = useState({ adapter: "", gpu: "H100", count: 1, cpu: 4, memory_gib: 32, duration_hours: 4, auto_gpu: true });
   const [theme, setTheme] = useState(() => localStorage.getItem("areno-dashboard-theme-v2") || "light");
   const [language, setLanguage] = useState(() => localStorage.getItem(UI_LANGUAGE_STORAGE_KEY) || "en");
   const [busy, setBusy] = useState("");
-  const [agentSettingsOpen, setAgentSettingsOpen] = useState(false);
+  const [dashboardSettingsOpen, setDashboardSettingsOpen] = useState(false);
+  const [datasetsOpen, setDatasetsOpen] = useState(false);
+  const [endpointKey, setEndpointKey] = useState(null);
   const [jobPage, setJobPage] = useState(1);
   const [jobDetailOpen, setJobDetailOpen] = useState(false);
   const [refreshNonce, setRefreshNonce] = useState(0);
@@ -370,6 +392,7 @@ function App() {
   const [runtimeCheckResult, setRuntimeCheckResult] = useState(null);
   const [runtimeRepair, setRuntimeRepair] = useState(null);
   const chatMessagesRef = useRef(null);
+  const chatFollowLatestRef = useRef(true);
   const env = usePolling(() => api("/api/env"), 5000);
   const jobs = usePolling(() => api("/api/jobs"), 2000);
   const jobDetail = usePolling(() => selectedJobId ? api(`/api/jobs/${selectedJobId}`) : Promise.resolve(null), 3000, [selectedJobId]);
@@ -485,11 +508,15 @@ function App() {
   }, [agentFailure]);
 
   useEffect(() => {
+    chatFollowLatestRef.current = true;
+  }, [activeAgentSessionId]);
+
+  useEffect(() => {
     const node = chatMessagesRef.current;
-    if (node) {
+    if (node && chatFollowLatestRef.current && !node.contains(document.activeElement)) {
       node.scrollTop = node.scrollHeight;
     }
-  }, [agentMessages, agentChatTab]);
+  }, [agentMessages, agentChatTab, activeAgentSessionId]);
 
   const pages = [
     { id: "overview", label: "Overview", icon: <LayoutDashboard size={17} /> },
@@ -530,10 +557,21 @@ function App() {
     }
   }
 
+  function showModalPlanInChat(plan) {
+    setAgentMessages(messages => [...messages, { id: `plan-${plan.id}`, role: "assistant", content: "", events: [{ type: "tool_result", result: { name: "prepare_modal_plan", ok: true, plan } }] }]);
+    setActivePage("agent"); setAgentChatTab("chat");
+  }
+
+  function updateChatPlan(plan) {
+    setAgentMessages(messages => messages.map(message => ({ ...message, events: message.events?.map(event => event.result?.plan?.id === plan.id ? { ...event, result: { ...event.result, plan } } : event) })));
+  }
+
   async function executeAgentPlan(plan) {
     setBusy("Executing plan...");
     try {
-      const result = await api("/api/agent/tools/run", {
+      const result = plan.tool === "start_modal"
+        ? await modalApi("/execute", plan.parameters)
+        : await api("/api/agent/tools/run", {
         method: "POST",
         body: JSON.stringify({
           tool: plan.tool || inferPlanRunTool(plan),
@@ -544,6 +582,7 @@ function App() {
         setSelectedJobId(result.job.id);
         await jobs.refresh();
       }
+      if (result.endpoint_key) setEndpointKey(result.endpoint_key);
       return result;
     } finally {
       setBusy("");
@@ -589,6 +628,7 @@ function App() {
   }
 
   async function executeOverviewQuickAction(action, overviewJob = null) {
+    if (action.kind === "modal_launcher") { setLauncherModal(true); setActivePage("launcher"); return; }
     if (action.kind === "agent_prompt") {
       const jobContext = overviewJob ? `\n\nTrack this overview job: ${overviewJob.name} (${overviewJob.id}).` : "";
       setSelectedJobId(overviewJob?.id || null);
@@ -889,10 +929,16 @@ function App() {
       return <RuntimePrdPage env={env.data} onRefresh={refreshRuntime} />;
     }
     if (activePage === "launcher") {
+      const launcherControls = <LauncherControls mode={launcherMode} setMode={setLauncherMode} modal={launcherModal} setModal={setLauncherModal} />;
       return (
         <LauncherPrdPage
           mode={launcherMode}
-          setMode={setLauncherMode}
+          controls={launcherControls}
+          modal={launcherModal}
+          modalResources={modalResources}
+          setModalResources={setModalResources}
+          onModalPlan={showModalPlanInChat}
+          onModalSettings={() => setDashboardSettingsOpen(true)}
           trainConfig={trainConfig}
           setTrainConfig={setTrainConfig}
           serveConfig={serveConfig}
@@ -918,7 +964,7 @@ function App() {
             <div className="agentHeaderActions">
               <StatusBadge status={env.data?.ready ? "ok" : "warn"} />
               <button className="secondaryButton" onClick={newAgentChat}><Plus size={15} /> New Chat</button>
-              <button className="secondaryButton" onClick={() => setAgentSettingsOpen(true)}><Settings2 size={15} /> Settings</button>
+              <button className="secondaryButton" onClick={() => setDashboardSettingsOpen(true)}><Settings2 size={15} /> Settings</button>
             </div>
           </div>
           <div className="pillRow agentContextPills">
@@ -938,15 +984,19 @@ function App() {
             <AgentHistory sessions={agentSessions} activeId={activeAgentSession.id} onOpen={openAgentSession} onNew={newAgentChat} />
           ) : (
             <>
-              <div className="chatMessages" ref={chatMessagesRef}>
+              <div className="chatMessages" ref={chatMessagesRef} onScroll={(event) => {
+                const node = event.currentTarget;
+                chatFollowLatestRef.current = node.scrollHeight - node.clientHeight - node.scrollTop <= 32;
+              }}>
                 {agentMessages.map((message, index) => (
                   <div key={`${message.id || message.role}-${index}`} className={classNames("chatBubble", message.role)}>
                     <span>{message.role}</span>
-                    {message.events?.length ? <AgentEventList events={message.events} onPlanConfirm={executeAgentPlan} /> : <MarkdownBlock text={message.content} />}
+                    {message.events?.length ? <AgentEventList events={message.events} onPlanConfirm={executeAgentPlan} onPlanUpdate={updateChatPlan} /> : <MarkdownBlock text={message.content} />}
                   </div>
                 ))}
               </div>
               <div className="chatComposer">
+                <button className="iconButton chatAttachButton" type="button" aria-label="Attach dataset" title="Attach dataset file or Hugging Face / ModelScope URL" onClick={() => setDatasetsOpen(true)}><Plus size={20} /></button>
                 <label className="chatInputField">
                   <textarea
                     aria-label="Message the operations agent"
@@ -964,11 +1014,6 @@ function App() {
                 <button className="primaryButton chatSendButton" disabled={!agentPrompt.trim()} onClick={() => runAgent()}><Send size={16} /> Send</button>
               </div>
             </>
-          )}
-          {agentSettingsOpen && (
-            <Modal title="Agent Settings" onClose={() => setAgentSettingsOpen(false)}>
-              <AgentProviderForm provider={agentProvider} setProvider={setAgentProvider} />
-            </Modal>
           )}
         </section>
         <aside className="agentSideRail">
@@ -1020,15 +1065,16 @@ function App() {
           <div className="jobTableWrap">
             {filteredJobs.length === 0 && <EmptyState title="No matching jobs" text="Start a task from Launcher or select another status." />}
             {filteredJobs.length > 0 && <table className="jobTable">
-              <thead><tr><th>Job</th><th>Status</th><th>Stage</th><th>Metric</th><th>Elapsed</th><th>Action</th></tr></thead>
+              <thead><tr><th>Job</th><th>Status</th><th>Stage</th><th>Metric</th><th>Elapsed</th><th>Usage so far</th><th>Action</th></tr></thead>
               <tbody>
             {pagedJobs.map((job) => (
               <tr key={job.id}>
-                <td><strong>{job.name}</strong><span className="mono subline">{job.id} · {job.kind}</span></td>
+                <td><strong>{job.name}</strong><span className="mono subline">{job.id} · {job.kind}{job.provider === "modal" ? " · Modal" : ""}</span></td>
                 <td><StatusBadge status={job.status} /></td>
                 <td>{job.stage || "unknown"} · step {job.step ?? 0}</td>
                 <td>{latestPerfSignal(job)}</td>
                 <td>{formatElapsed(job)}</td>
+                <td><ModalUsage job={job} /></td>
                 <td><button className="secondaryButton tableAction" onClick={() => { setSelectedJobId(job.id); setJobDetailOpen(true); }}>Open</button></td>
               </tr>
             ))}
@@ -1086,6 +1132,7 @@ function App() {
             <p>{pageDescription}</p>
           </div>
           <div className="topActions">
+            <button className="iconButton" title="Dashboard settings" aria-label="Dashboard settings" onClick={() => setDashboardSettingsOpen(true)}><Settings2 size={16} /></button>
             <button className="iconButton" onClick={() => setTheme(theme === "dark" ? "light" : "dark")} title="Toggle theme">
               {theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
             </button>
@@ -1103,6 +1150,12 @@ function App() {
         {busy && <div className="notice">{busy}</div>}
 
         {renderPage()}
+        {dashboardSettingsOpen && <Modal title="Dashboard Settings" onClose={() => setDashboardSettingsOpen(false)}><ModalSettings request={modalApi} /><h3>Agent provider</h3><AgentProviderForm provider={agentProvider} setProvider={setAgentProvider} /></Modal>}
+        {datasetsOpen && <Modal title="Dataset Manager" onClose={() => setDatasetsOpen(false)}><DatasetManager request={modalApi} onSelect={dataset => {
+          setAgentPrompt(current => `${current}${current ? "\n" : ""}Use managed dataset "${dataset.name}" (dataset_id: ${dataset.id}) for the Modal training plan.`);
+          setDatasetsOpen(false); setActivePage("agent"); setAgentChatTab("chat");
+        }} /></Modal>}
+        {endpointKey && <Modal title="Serving endpoint key" onClose={() => setEndpointKey(null)}><p>Save this key to authenticate requests to the Modal endpoint. It is shown once and is not saved in chat history.</p><pre className="commandPreview">{endpointKey}</pre><button className="secondaryButton" onClick={() => navigator.clipboard.writeText(endpointKey)}>Copy key</button></Modal>}
         {runtimeCheckResult && <RuntimeCheckResultModal result={runtimeCheckResult} onClose={() => setRuntimeCheckResult(null)} />}
       </main>
     </div>
@@ -1216,6 +1269,7 @@ function OverviewRewardLossChart({ job }) {
   const [series, setSeries] = useState({ reward: [], loss: [], gradnorm: [], seqlen: [] });
   const [names, setNames] = useState({ reward: "", loss: "", gradnorm: "", seqlen: "" });
   const [activeMetric, setActiveMetric] = useState(metricKinds[0]);
+  const [overviewError, setOverviewError] = useState("");
   const [hoveredPoint, setHoveredPoint] = useState(null);
 
   useEffect(() => {
@@ -1225,6 +1279,9 @@ function OverviewRewardLossChart({ job }) {
   useEffect(() => {
     let cancelled = false;
     let timer;
+    setSeries({ reward: [], loss: [], gradnorm: [], seqlen: [] });
+    setNames({ reward: "", loss: "", gradnorm: "", seqlen: "" });
+    setHoveredPoint(null);
     const load = async () => {
       try {
         const data = await api(`/api/jobs/${job.id}/metrics`);
@@ -1236,24 +1293,26 @@ function OverviewRewardLossChart({ job }) {
             : Promise.resolve({ points: [] })
         )));
         if (cancelled) return;
+        setOverviewError("");
         setNames((current) => ({ ...current, ...nextNames }));
         setSeries((current) => ({
           ...current,
           ...Object.fromEntries(metricKinds.map((kind, index) => [kind, normalizeMetricPoints(metricData[index].points)])),
         }));
       } catch {
-        if (!cancelled) setSeries({ reward: [], loss: [], gradnorm: [], seqlen: [] });
+        if (!cancelled) setOverviewError("Metrics refresh delayed; showing the last received data.");
+      } finally {
+        if (!cancelled) timer = window.setTimeout(load, 2500);
       }
     };
     load();
-    timer = window.setInterval(load, 2500);
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
+      window.clearTimeout(timer);
     };
   }, [job.id, algo]);
 
-  const activeSeries = series[activeMetric] || [];
+  const activeSeries = useMemo(() => sampleMetricPoints(series[activeMetric] || []), [series, activeMetric]);
   const plot = buildOverviewMetricPlot(activeSeries);
   const hasPoints = activeSeries.length > 0;
   return (
@@ -1266,6 +1325,7 @@ function OverviewRewardLossChart({ job }) {
           <span className={`${activeMetric}Legend`}><i />{names[activeMetric] || overviewMetricLabel(activeMetric)}<b>{lastMetricValue(activeSeries)}</b></span>
         </div>
       </div>
+      {overviewError && <p className="chartStatus" role="status">{overviewError}</p>}
       {!hasPoints ? <div className="plotEmpty">No {activeMetric} points reported yet.</div> : (
         <div className="metricPlotWrap">
           <svg className="metricPlot overviewPlot" viewBox="0 0 720 220" role="img" aria-label={`${activeMetric} metrics`}>
@@ -1295,7 +1355,7 @@ function selectOverviewMetric(names, type) {
     seqlen: ["rollout/seq_len_mean"],
   }[type] || [];
   for (const preferred of exactPreferences) {
-    const exact = lowered.find((item) => item.key === preferred);
+    const exact = lowered.find((item) => item.key === preferred) || lowered.find((item) => item.key.endsWith(`/${preferred}`));
     if (exact) return exact.name;
   }
   if (type === "reward" || type === "seqlen") return "";
@@ -1309,8 +1369,9 @@ function overviewMetricLabel(kind) {
 
 function normalizeMetricPoints(points = []) {
   return points
-    .filter((point) => Number.isFinite(Number(point.value)))
-    .map((point) => ({ step: Number(point.step || 0), value: Number(point.value), time: point.time }));
+    .filter((point) => point.value != null && Number.isFinite(Number(point.value)) && Number.isFinite(Number(point.step || 0)))
+    .map((point) => ({ step: Number(point.step || 0), value: Number(point.value), time: point.time }))
+    .sort((a, b) => a.step - b.step);
 }
 
 function buildOverviewMetricPlot(points) {
@@ -1421,7 +1482,7 @@ function JobsSelectedDetail({ job, env, onStop }) {
         <section className="panel jobDetailOverviewCard">
           <div className="panelHeader">
             <div><h2>Job Detail: Overview</h2><p>Current health and recent progress for the selected job.</p></div>
-            <div className="detailActions"><StatusBadge status={job.status} />{job.status === "running" && <button className="dangerButton" onClick={onStop}><CircleStop size={16} /> Stop</button>}</div>
+            <div className="detailActions"><StatusBadge status={job.status} />{["running", "queued", "starting", "stopping", "unknown"].includes(job.status) && <button className="dangerButton" onClick={onStop}><CircleStop size={16} /> Stop</button>}</div>
           </div>
           <div className="jobIdentity"><strong>{job.name}</strong><span className="mono subline">{job.id}</span></div>
           <p className="healthSummary"><strong>Health summary:</strong> {jobHealthSummary(job)}</p>
@@ -1449,6 +1510,7 @@ function JobFullDetailPage({ job, refreshNonce, onBack, onStop }) {
         {job.status === "running" && <button className="dangerButton" onClick={onStop}><CircleStop size={16} /> Stop job</button>}
       </div>
       <JobOverview job={job} detail refreshNonce={refreshNonce} />
+      {job.provider === "modal" && <section className="panel"><div className="panelHeader"><h2>Modal usage</h2></div><ModalUsage job={job} detail /></section>}
       <section className="panel jobDetailSection">
         <div className="panelHeader"><div><h2>Metrics</h2><p>Training quality and stage timing for this job.</p></div></div>
         <JobMetricsView job={job} refreshNonce={refreshNonce} />
@@ -1459,7 +1521,7 @@ function JobFullDetailPage({ job, refreshNonce, onBack, onStop }) {
       </section>
       <div className="jobDetailDataGrid">
         <ConfigView config={job.config} launch={job.launch} />
-        <LogView logs={logs} />
+        <LogView logs={logs} waitingForRuntime={job.provider === "modal" && job.stage === "starting_runtime" && !["stopped", "failed", "succeeded"].includes(job.status)} />
       </div>
     </div>
   );
@@ -1474,7 +1536,8 @@ function jobHealthSummary(job) {
 
 function formatElapsed(job) {
   const start = Date.parse(job?.created_at || "");
-  const end = Date.parse(job?.status === "running" ? new Date().toISOString() : job?.updated_at || "");
+  const terminal = ["stopped", "exited", "failed", "succeeded", "cancelled", "done"].includes(job?.status);
+  const end = terminal ? Date.parse(job?.finished_at || job?.updated_at || "") : Date.now();
   if (!Number.isFinite(start) || !Number.isFinite(end)) return "—";
   const seconds = Math.max(0, Math.round((end - start) / 1000));
   if (seconds < 60) return `${seconds}s`;
@@ -1611,7 +1674,7 @@ function RuntimeCheckDetails({ check, report, onClose }) {
     <div className="runtimeCheckDetails">
       <div className="runtimeCheckDetailLead"><StatusBadge status={check.status || "unknown"} /><div><strong>{check.detail || check.message || "No diagnostic value reported."}</strong>{check.next_step && <p>{check.next_step}</p>}</div></div>
       <div className="runtimeVersionGrid">
-        {facts.map(([label, value]) => <div key={label}><span>{label}</span><strong>{String(value)}</strong></div>)}
+        {facts.map(([label, value]) => <div key={label}><span>{label}</span><strong>{formatConfigValue(value)}</strong></div>)}
       </div>
       <button className="primaryButton fullButton" onClick={onClose}>Done</button>
     </div>
@@ -1680,20 +1743,17 @@ function AgentHistory({ sessions, activeId, onOpen, onNew }) {
 }
 
 function Modal({ title, children, onClose }) {
-  return (
-    <div className="modalOverlay" role="presentation" onMouseDown={onClose}>
-      <div className="modalCard" role="dialog" aria-modal="true" aria-label={title} onMouseDown={(event) => event.stopPropagation()}>
-        <div className="modalHeader">
-          <div>
-            <h2>{title}</h2>
-            <p>Stored locally in this browser.</p>
-          </div>
-          <button className="iconButton" onClick={onClose}>×</button>
-        </div>
-        {children}
-      </div>
-    </div>
-  );
+  const ref = useRef(null);
+  useEffect(() => {
+    const dialog = ref.current;
+    const previous = document.activeElement;
+    dialog.showModal();
+    return () => { dialog.close(); previous?.focus?.(); };
+  }, []);
+  return <dialog ref={ref} className="modalCard dashboardDialog" aria-label={title} onCancel={event => { event.preventDefault(); onClose(); }} onClick={event => { if (event.target === ref.current) { const box = ref.current.getBoundingClientRect(); if (event.clientX < box.left || event.clientX > box.right || event.clientY < box.top || event.clientY > box.bottom) onClose(); } }}>
+    <div className="modalHeader"><h2>{title}</h2><button className="iconButton" aria-label="Close dialog" onClick={onClose}>×</button></div>
+    {children}
+  </dialog>;
 }
 
 function RuntimeCheckResultModal({ result, onClose }) {
@@ -1723,7 +1783,7 @@ function JobMetricsView({ job, refreshNonce }) {
   );
 }
 
-function AgentEventList({ events, onPlanConfirm }) {
+function AgentEventList({ events, onPlanConfirm, onPlanUpdate }) {
   const planEvents = events.filter((event) => event.type === "tool_result" && event.result?.plan);
   const otherEvents = events.filter((event) => !(event.type === "tool_result" && event.result?.plan));
   return (
@@ -1735,31 +1795,37 @@ function AgentEventList({ events, onPlanConfirm }) {
         if (event.type === "tool_result") return <ToolResultCard key={index} result={event.result} />;
         return null;
       })}
-      {planEvents.map((event, index) => <AgentPlanCard key={event.result.plan.id || index} plan={event.result.plan} onConfirm={onPlanConfirm} />)}
+      {planEvents.map((event, index) => <AgentPlanCard key={event.result.plan.id || index} plan={event.result.plan} onConfirm={onPlanConfirm} onUpdate={onPlanUpdate} />)}
     </div>
   );
 }
 
-function AgentPlanCard({ plan, onConfirm }) {
+function AgentPlanCard({ plan, onConfirm, onUpdate }) {
+  return plan.tool === "start_modal" ? <ModalPlanCard plan={plan} request={modalApi} onConfirm={onConfirm} onUpdate={onUpdate} /> : <LocalAgentPlanCard plan={plan} onConfirm={onConfirm} />;
+}
+
+function LocalAgentPlanCard({ plan, onConfirm }) {
   const [editing, setEditing] = useState(false);
   const [parameters, setParameters] = useState(plan.parameters || {});
   const [execution, setExecution] = useState(null);
   useEffect(() => setParameters(plan.parameters || {}), [plan.id]);
-  const entries = Object.entries(parameters);
+  const isModal = plan.tool === "start_modal";
+  const entries = Object.entries(isModal ? plan.resources || {} : parameters);
   const planTool = plan.tool || inferPlanRunTool(plan);
-  const command = commandForPlan(planTool, parameters);
+  const command = isModal ? plan.command : commandForPlan(planTool, parameters);
   const editedPlan = { ...plan, tool: planTool, parameters, command };
   return (
     <section className="agentPlanCard">
       <div className="agentPlanHeader"><div><span>Execution plan</span><strong>{plan.objective}</strong></div><StatusBadge status={plan.status || "proposed"} /></div>
       {plan.summary && <p className="agentPlanSummary">{plan.summary}</p>}
-      {entries.length > 0 && <div className={classNames("agentPlanParams", editing && "editing")}>{entries.map(([label, value]) => <label key={label}><span>{label.replaceAll("_", " ")}</span>{editing ? <input value={String(value)} onChange={(event) => setParameters((current) => ({ ...current, [label]: event.target.value }))} /> : <strong>{String(value)}</strong>}</label>)}</div>}
+      {editing ? <PlanParameters title="Task parameters" value={parameters} onChange={setParameters} /> : entries.length > 0 && <div className="agentPlanParams">{entries.map(([label, value]) => <label key={label}><span>{label.replaceAll("_", " ")}</span><strong>{formatConfigValue(value)}</strong></label>)}</div>}
+
       <ol className="agentPlanSteps">{(plan.steps || []).map((step, index) => <li key={step.id || index}><span>{index + 1}</span><div><strong>{step.title}</strong>{step.detail && <p>{step.detail}</p>}</div><small>{step.status || "pending"}</small></li>)}</ol>
       {command && <pre className="agentPlanCommand">{command}</pre>}
       <div className="agentPlanActions">
         <button
           className="primaryButton"
-          disabled={execution?.status === "running"}
+          disabled={execution?.status === "running" || (isModal && execution?.status === "ok")}
           onClick={async () => {
             setExecution({ status: "running", message: "Starting..." });
             try {
@@ -1770,7 +1836,7 @@ function AgentPlanCard({ plan, onConfirm }) {
             }
           }}
         >{execution?.status === "running" ? "Executing..." : "Confirm Execution"}</button>
-        {entries.length > 0 && <button className="secondaryButton" onClick={() => setEditing((value) => !value)}>{editing ? "Save Parameters" : "Edit Parameters"}</button>}
+        {!isModal && <button className="secondaryButton" onClick={() => setEditing((value) => !value)}>{editing ? "Save Parameters" : "Edit Parameters"}</button>}
         {command && <button className="secondaryButton" onClick={() => navigator.clipboard.writeText(command)}>Copy Command</button>}
       </div>
       {execution && execution.status !== "running" && <p className={classNames("agentPlanExecution", execution.status)}>{execution.message}</p>}
@@ -2115,6 +2181,11 @@ function timelineItemMatches(item, stage, job) {
 function configValue(job, key) {
   const config = job?.config && Object.keys(job.config).length ? job.config : job?.launch || {};
   if (config[key] !== undefined) return config[key];
+  if (job?.provider === "modal" && config.stages?.length) {
+    const stage = config.stages[config.stages.length - 1];
+    if (key === "algo") return stage.algo;
+    if (stage.params?.[key] !== undefined) return stage.params[key];
+  }
   for (const section of config.sections || []) {
     const item = (section.items || []).find((entry) => entry.key === key);
     if (item) return item.value;
@@ -2139,7 +2210,7 @@ function MetricChart({ jobId, metricsDir, refreshNonce }) {
   const [metricList, setMetricList] = useState([]);
   const [points, setPoints] = useState([]);
   const [metricLoading, setMetricLoading] = useState(false);
-  const [pollTick, setPollTick] = useState(0);
+  const [metricError, setMetricError] = useState("");
   const [hoveredPoint, setHoveredPoint] = useState(null);
   const [prevJobId, setPrevJobId] = useState(jobId);
   // Reset the selection during render (not in an effect) when the job changes so
@@ -2156,60 +2227,52 @@ function MetricChart({ jobId, metricsDir, refreshNonce }) {
   const names = metricNamesFrom(metricList);
   const effectiveName = resolveActiveMetricName(names, selectedName);
   useEffect(() => {
-    if (!jobId) return undefined;
-    const timer = window.setInterval(() => setPollTick((value) => value + 1), 2500);
-    return () => window.clearInterval(timer);
-  }, [jobId]);
-  useEffect(() => {
     let cancelled = false;
+    let timer;
     if (!jobId) return undefined;
-    api(`/api/jobs/${jobId}/metrics`)
-      .then((data) => {
-        if (cancelled) return;
-        const list = data.metrics || [];
-        setMetricList(list);
-        setSelectedName((current) => current || list[0]?.name || "");
-      })
-      .catch(() => {
-        if (!cancelled) setMetricList([]);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [jobId, refreshNonce, pollTick]);
-  useEffect(() => {
-    let cancelled = false;
-    if (!jobId || !effectiveName) {
-      setPoints([]);
-      setMetricLoading(false);
-      return undefined;
+    async function load() {
+      try {
+        const data = await api(`/api/jobs/${jobId}/metrics`);
+        if (!cancelled) {
+          const list = data.metrics || [];
+          setMetricList(list);
+          setSelectedName(current => current || list[0]?.name || "");
+        }
+      } catch {
+        if (!cancelled) setMetricError("Metrics refresh delayed; showing the last received data.");
+      } finally {
+        if (!cancelled) timer = window.setTimeout(load, 2500);
+      }
     }
-    setMetricLoading(true);
-    api(`/api/jobs/${jobId}/metric?name=${encodeURIComponent(effectiveName)}`)
-      .then((data) => {
-        if (cancelled) return;
-        setPoints((data.points || []).filter((point) => Number.isFinite(Number(point.value))).map((point) => ({
-          ...point,
-          step: Number(point.step || 0),
-          value: Number(point.value),
-        })));
-      })
-      .catch(() => {
-        if (!cancelled) setPoints([]);
-      })
-      .finally(() => {
-        if (!cancelled) setMetricLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [jobId, effectiveName, refreshNonce, pollTick]);
+    load();
+    return () => { cancelled = true; window.clearTimeout(timer); };
+  }, [jobId, refreshNonce]);
+  useEffect(() => {
+    let cancelled = false;
+    let timer;
+    setPoints([]);
+    setHoveredPoint(null);
+    setMetricError("");
+    if (!jobId || !effectiveName) { setMetricLoading(false); return undefined; }
+    async function load() {
+      setMetricLoading(true);
+      try {
+        const data = await api(`/api/jobs/${jobId}/metric?name=${encodeURIComponent(effectiveName)}`);
+        if (!cancelled) { setPoints(normalizeMetricPoints(data.points || [])); setMetricError(""); }
+      } catch {
+        if (!cancelled) setMetricError("Metrics refresh delayed; showing the last received data.");
+      } finally {
+        if (!cancelled) { setMetricLoading(false); timer = window.setTimeout(load, 2500); }
+      }
+    }
+    load();
+    return () => { cancelled = true; window.clearTimeout(timer); };
+  }, [jobId, effectiveName, refreshNonce]);
   const activeName = effectiveName;
   const visiblePoints = points;
-  const smoothed = smoothTensorboard(visiblePoints, smooth);
   const smoothingEnabled = smooth > 0;
-  const displayedPoints = smoothingEnabled ? smoothed : visiblePoints;
-  const plot = buildMetricPlot(displayedPoints);
+  const displayedPoints = useMemo(() => sampleMetricPoints(smoothingEnabled ? smoothTensorboard(points, smooth) : points), [points, smooth]);
+  const plot = useMemo(() => buildMetricPlot(displayedPoints), [displayedPoints]);
   return (
     <div className="chart">
       <div className="chartHeader">
@@ -2224,6 +2287,7 @@ function MetricChart({ jobId, metricsDir, refreshNonce }) {
           </label>
         </div>
       </div>
+      {metricError && <p className="chartStatus" role="status">{metricError}</p>}
       {visiblePoints.length === 0 ? (
         <div className="plotEmpty">{metricLoading ? "Loading selected metric..." : "No TensorBoard scalar points loaded yet."}</div>
       ) : (
@@ -2244,8 +2308,8 @@ function MetricChart({ jobId, metricsDir, refreshNonce }) {
         </div>
       )}
       <div className="plotFooter">
-        <span>{activeName || "metric"} · {points.length} points</span>
-        <span>{metricsDir || "no metrics dir"} · {plot.minLabel} to {plot.maxLabel}</span>
+        <span>{activeName || "metric"} · {points.length} points{displayedPoints.length < points.length ? ` · ${displayedPoints.length} plotted` : ""}</span>
+        <span>{metricsDir || "job telemetry"} · {plot.minLabel} to {plot.maxLabel}</span>
       </div>
     </div>
   );
@@ -2635,52 +2699,47 @@ function ConfigView({ config, launch }) {
   );
 }
 
-function normalizeConfigSections(settings) {
-  if (Array.isArray(settings?.sections)) {
-    return settings.sections
-      .map((section) => ({
-        title: section.title || "Config",
-        items: (section.items || []).filter(({ value }) => value !== undefined && value !== null && value !== ""),
-      }))
-      .filter((section) => section.items.length > 0);
-  }
-  const entries = Object.entries(settings || {})
-    .filter(([, value]) => value !== undefined && value !== null && value !== "")
-    .map(([key, value]) => ({ key, value }));
-  return entries.length ? [{ title: "Launch", items: entries }] : [];
-}
 
-function formatConfigValue(value) {
-  if (Array.isArray(value)) return value.join(" ");
-  if (typeof value === "object") return JSON.stringify(value);
-  return String(value);
-}
-
-function LogView({ logs }) {
+function LogView({ logs, waitingForRuntime = false }) {
   const logRef = useRef(null);
+  const followLatestRef = useRef(true);
+  const text = logs.slice(-80).join("\n");
   useEffect(() => {
     const node = logRef.current;
-    if (node) {
+    if (node && followLatestRef.current) {
       node.scrollTop = node.scrollHeight;
     }
-  }, [logs.length]);
+  }, [text]);
   return (
-    <div className="codeCard" ref={logRef}>
+    <div className="codeCard" ref={logRef} onScroll={(event) => {
+      const node = event.currentTarget;
+      followLatestRef.current = node.scrollHeight - node.clientHeight - node.scrollTop <= 32;
+    }}>
       <div className="codeTitle"><TerminalSquare size={14} /> Logs</div>
-      <pre>{logs.slice(-80).join("\n") || "No logs yet."}</pre>
+      {waitingForRuntime && <p className="muted">Starting Modal sandbox — waiting for runtime output.</p>}
+      <pre>{text || "No logs yet."}</pre>
     </div>
   );
 }
 
-function LauncherPrdPage({ mode, setMode, trainConfig, setTrainConfig, serveConfig, setServeConfig, onStartTrain, onStartServe, env, presets }) {
+function LauncherControls({ mode, setMode, modal, setModal }) {
+  return <div className="launcherControls">
+    <div className="tabs"><button className={classNames(mode === "train" && "active")} onClick={() => setMode("train")}>Train</button><button className={classNames(mode === "serve" && "active")} onClick={() => setMode("serve")}>Serve</button></div>
+    <label className="modalExecutionSwitch"><input type="checkbox" role="switch" checked={modal} onChange={event => setModal(event.target.checked)} /><span>Run on Modal</span></label>
+  </div>;
+}
+
+function LauncherPrdPage({ mode, controls, modal, modalResources, setModalResources, onModalPlan, onModalSettings, trainConfig, setTrainConfig, serveConfig, setServeConfig, onStartTrain, onStartServe, env, presets }) {
   const config = mode === "train" ? trainConfig : serveConfig;
+  const [modalError, setModalError] = useState("");
+  const [modalPending, setModalPending] = useState(false);
   const [preflightResult, setPreflightResult] = useState(null);
   const [preflightBusy, setPreflightBusy] = useState("");
   const [preflightJob, setPreflightJob] = useState(null);
   const worldSize = Number(config.world_size || 0);
   const tpSize = Number(config.tp_size || 0);
-  const gpuCount = env?.gpus?.length || 0;
-  const smokeTrainTunable = mode === "train";
+  const gpuCount = modal ? Number(modalResources.count) : env?.gpus?.length || 0;
+  const smokeTrainTunable = !modal && mode === "train";
   const smokeInferTunable = smokeTrainTunable && ["gspo", "grpo", "ppo"].includes(String(config.algo || "").toLowerCase());
   useEffect(() => {
     if (!preflightJob?.job?.id || !["created", "running"].includes(preflightJob.job.status)) return undefined;
@@ -2707,7 +2766,7 @@ function LauncherPrdPage({ mode, setMode, trainConfig, setTrainConfig, serveConf
       id: "gpu_count",
       name: "GPU count",
       status: gpuCount === 0 ? "warn" : worldSize <= gpuCount ? "ok" : "warn",
-      detail: gpuCount ? `World size ${worldSize} uses ${gpuCount} visible GPU${gpuCount === 1 ? "" : "s"}.` : "No visible GPU inventory is available.",
+      detail: gpuCount ? `World size ${worldSize} uses ${gpuCount} ${modal ? "reserved Modal" : "visible"} GPU${gpuCount === 1 ? "" : "s"}.` : "No visible GPU inventory is available.",
       tunable: smokeInferTunable && gpuCount > 0,
     },
     {
@@ -2738,9 +2797,19 @@ function LauncherPrdPage({ mode, setMode, trainConfig, setTrainConfig, serveConf
       tunable: smokeInferTunable,
     }] : []),
   ];
+  async function previewModal() {
+    setModalPending(true); setModalError("");
+    try {
+      const bootstrap = await modalApi("/bootstrap");
+      const request = modalWorkflow(mode, config, bootstrap.catalog, modalResources);
+      onModalPlan((await modalApi("/preview", request)).plan);
+    } catch (error) { setModalError(error.message); } finally { setModalPending(false); }
+  }
+  const resourceForm = modal ? <ModalResourceForm mode={mode} config={config} request={modalApi} settings={modalResources} setSettings={setModalResources} onSettings={onModalSettings} /> : null;
   const command = launcherCommand(mode, config);
   const hasFailure = checks.some((check) => check.status === "fail");
   const runPreflightAction = async (check) => {
+    if (modal) { setPreflightResult({ ok: check.status === "ok", check, output: check.detail }); return; }
     const action = check.status !== "ok" && check.tunable ? "tune" : "view";
     setPreflightBusy(check.id);
     try {
@@ -2763,13 +2832,14 @@ function LauncherPrdPage({ mode, setMode, trainConfig, setTrainConfig, serveConf
       <section className="panel launcher launcherMainCard">
         <div className="panelHeader">
           <div><h2>Task Launcher</h2><p>Configure, validate, and review the generated command before launch.</p></div>
-          <div className="tabs"><button className={classNames(mode === "train" && "active")} onClick={() => setMode("train")}>Train</button><button className={classNames(mode === "serve" && "active")} onClick={() => setMode("serve")}>Serve</button></div>
+          {controls}
         </div>
         {mode === "train" && presets.length > 0 && <div className="launcherPresetRow">
           {presets.map((preset) => <button key={preset.id} className="presetPill" title={preset.source} onClick={() => setTrainConfig((current) => ({ ...current, ...(preset.preset || {}) }))}>{preset.label}</button>)}
         </div>}
+        {modal && modalError && <p role="alert">{modalError}</p>}
         <div className="launcherFormScroll">
-          {mode === "train" ? <TrainForm config={trainConfig} setConfig={setTrainConfig} onStart={onStartTrain} /> : <ServeForm config={serveConfig} setConfig={setServeConfig} onStart={onStartServe} />}
+          {mode === "train" ? <TrainForm config={trainConfig} setConfig={setTrainConfig} onStart={modal ? previewModal : onStartTrain} extra={resourceForm} startLabel={modal ? "Review Modal execution plan" : "Start train"} disabled={modal && modalPending} /> : <ServeForm config={serveConfig} setConfig={setServeConfig} onStart={modal ? previewModal : onStartServe} extra={resourceForm} startLabel={modal ? "Review Modal execution plan" : "Start serve"} disabled={modal && modalPending} />}
         </div>
       </section>
       <aside className="launcherSideRail">
@@ -2814,10 +2884,13 @@ function shellQuote(value) {
   return /^[a-zA-Z0-9_./:@+-]+$/.test(text) ? text : `'${text.replaceAll("'", `'\\''`)}'`;
 }
 
-function TrainForm({ config, setConfig, onStart }) {
+function TrainForm({ config, setConfig, onStart, extra, startLabel = "Start train", disabled = false }) {
   const algo = String(config.algo || "sft").toLowerCase();
   const sections = trainLauncherSections(algo);
-  const updateField = (key, value) => setConfig({ ...config, [key]: value });
+  const updateField = (key, value) => setConfig({ ...config, [key]: value,
+    ...(key === "adam_4bit" && value ? { adam_8bit: false } : {}),
+    ...(key === "adam_8bit" && value ? { adam_4bit: false } : {}),
+  });
   const primaryFields = [
     selectField("algo", "Algorithm", ["sft", "dpo", "gspo", "grpo", "ppo"], true),
     field("ckpt", "Checkpoint"),
@@ -2842,7 +2915,8 @@ function TrainForm({ config, setConfig, onStart }) {
         <summary>Advanced settings</summary>
         <div className="launcherAdvancedBody">{advancedSections.map((section) => <div className="launcherSection" key={section.title}><div className="launcherSectionHeader"><strong>{section.title}</strong>{section.note && <span>{section.note}</span>}</div><div className="formGrid">{section.fields.map(renderLauncherField)}</div></div>)}</div>
       </details>
-      <button className="primaryButton launchButton wide" onClick={onStart}><Play size={16} /> Start train</button>
+      {extra}
+      <button className="primaryButton launchButton wide" disabled={disabled} onClick={onStart}><Play size={16} /> {disabled ? "Preparing…" : startLabel}</button>
     </div>
   );
 }
@@ -2920,6 +2994,7 @@ function trainLauncherSections(algo) {
         field("adam_beta2", "Adam beta2", true),
         field("weight_decay", "Weight decay", true),
         field("grad_clip_norm", "Grad clip", true),
+        checkField("adam_4bit", "4-bit Adam"),
         checkField("adam_8bit", "8-bit Adam"),
         checkField("unfreeze_multimodal_tower", "Train media tower"),
         field("multimodal_tower_lr", "Tower LR", true),
@@ -2995,7 +3070,7 @@ function checkField(key, label) {
   return { key, label, compact: true, type: "checkbox" };
 }
 
-function ServeForm({ config, setConfig, onStart }) {
+function ServeForm({ config, setConfig, onStart, extra, startLabel = "Start serve", disabled = false }) {
   return (
     <div className="formGrid">
       {[
@@ -3013,7 +3088,8 @@ function ServeForm({ config, setConfig, onStart }) {
         ["disable_thinking", "Disable thinking"],
         ["extra_args", "Extra args"],
       ].map(([key, label]) => <Field key={key} label={label} value={config[key]} onChange={(value) => setConfig({ ...config, [key]: value })} compact={key !== "model_path"} />)}
-      <button className="primaryButton launchButton wide" onClick={onStart}><Play size={16} /> Start serve</button>
+      {extra}
+      <button className="primaryButton launchButton wide" disabled={disabled} onClick={onStart}><Play size={16} /> {disabled ? "Preparing…" : startLabel}</button>
     </div>
   );
 }
