@@ -13,6 +13,7 @@ space for the prefix-sum step and must be supplied.
 import torch
 
 from areno.accel._extension import extension as _extension
+from areno.accel.utils import on_kernel_device
 
 
 @torch._dynamo.disable
@@ -32,11 +33,11 @@ def areno_moe_align(
     space sized to hold the per-expert offsets; passing ``None`` is rejected
     so that callers manage allocation lifetime explicitly.
     """
-    if topk_ids.device.type != "cuda":
-        raise ValueError("areno_moe_align expects CUDA tensors")
+    if not on_kernel_device(topk_ids, sorted_token_ids, expert_ids, num_tokens_post_pad, cumsum_buffer):
+        raise ValueError("areno_moe_align expects CUDA or NPU tensors on the same device")
     if cumsum_buffer is None:
         raise ValueError("areno_moe_align requires cumsum_buffer")
-    _extension().areno_moe_align(
+    _extension(topk_ids.device).areno_moe_align(
         topk_ids,
         int(num_experts),
         int(block_size),

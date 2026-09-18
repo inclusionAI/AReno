@@ -42,7 +42,6 @@ from typing import Any
 
 import torch
 import torch.distributed as dist
-from fla.ops.lightning_attn import chunk_lightning_attn
 from torch import nn
 from torch.nn import functional as F
 
@@ -61,6 +60,7 @@ from areno.accel.ops import (
     SegLaMeta,
     areno_fused_experts,
     areno_silu_and_mul,
+    chunk_lightning_attn,
     log_once,
     seg_la_fwd,
 )

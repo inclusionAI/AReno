@@ -11,6 +11,7 @@ from areno.engine.data import to_device
 from areno.engine.modeling import param_grad, unwrap_model
 from areno.engine.parallel.context import get_tp_context
 from areno.engine.protocol import TrainPayload
+from areno.engine.runtime.device import accelerator_module
 from areno.engine.runtime.logprobs import (
     packed_next_token_logprobs,
     packed_next_token_logprobs_from_hidden,
@@ -89,8 +90,9 @@ class TrainingManager:
                     directory=offload_directory,
                     batch_size=offload_batch_size,
                 )
-                if worker.device.type == "cuda":
-                    torch.cuda.empty_cache()
+                accelerator = accelerator_module(worker.device)
+                if accelerator is not None:
+                    accelerator.empty_cache()
 
     def _train_step(
         self,
@@ -111,9 +113,10 @@ class TrainingManager:
         data_pack = _pack_train_data(data_pack)
         pack_loss_fn = data_pack.get("_loss_fn")
         auto_tune_probe = callable(pack_loss_fn) and getattr(pack_loss_fn, "__name__", "") == "_dummy_policy_loss"
-        if auto_tune_probe and worker.device.type == "cuda":
-            torch.cuda.synchronize(worker.device)
-            torch.cuda.reset_peak_memory_stats(worker.device)
+        accelerator = accelerator_module(worker.device)
+        if auto_tune_probe and accelerator is not None:
+            accelerator.synchronize(worker.device)
+            accelerator.reset_peak_memory_stats(worker.device)
         data_pack = to_device(data_pack, worker.device)
         data_pack["_activation_checkpointing_enabled"] = worker.config.runtime.activation_checkpointing
         tokens = data_pack["input_ids"].long()
@@ -213,16 +216,16 @@ class TrainingManager:
             worker._global_step += 1
             if worker.adapter_registry is not None:
                 worker.adapter_registry.increment_version()
-            if worker.device.type == "cuda":
-                torch.cuda.empty_cache()
+            if accelerator is not None:
+                accelerator.empty_cache()
         else:
             current_lr = worker.optimizer.lr
             multimodal_lrs = self._current_multimodal_lrs()
         if ctx.is_rank0:
-            if auto_tune_probe and worker.device.type == "cuda":
-                torch.cuda.synchronize(worker.device)
-                total = torch.cuda.get_device_properties(worker.device).total_memory
-                peak = torch.cuda.max_memory_allocated(worker.device)
+            if auto_tune_probe and accelerator is not None:
+                accelerator.synchronize(worker.device)
+                total = accelerator.get_device_properties(worker.device).total_memory
+                peak = accelerator.max_memory_allocated(worker.device)
                 if metrics is None:
                     metrics = {}
                 metrics["auto_tune_worker_peak_mem_frac"] = float(peak) / float(total)

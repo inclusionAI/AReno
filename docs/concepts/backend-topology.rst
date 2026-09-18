@@ -1,7 +1,7 @@
 Backend Topology
 ================
 
-The SDK keeps one public training and serving contract with two native backend
+The SDK keeps one public training and serving contract with native backend
 implementations:
 
 .. code-block:: text
@@ -89,3 +89,12 @@ and checkpoint entry point. The numerical kernels and native checkpoint
 formats differ. CUDA saves its Hugging Face-oriented checkpoint layout; MLX
 saves the model in native MLX format with tokenizer/processor assets and AReno
 metadata.
+
+NPU runtime
+-----------
+
+NPU inherits the CUDA backend and engine workflows. Its backend directory
+contains only the registration/device adapter. Configuration, optimizers,
+losses, training, generation, serving and checkpoints reuse existing code.
+HCCL initialization and NPU execution boundaries are device-specific.
+Native NPU accel kernels remain work in progress; see :doc:`npu-sft`.

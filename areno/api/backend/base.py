@@ -23,6 +23,7 @@ BACKEND_CLS = {}
 BACKEND_MODULES = {
     "CUDA": "areno.api.backend.cuda.backend",
     "MLX": "areno.api.backend.mlx.backend",
+    "NPU": "areno.api.backend.npu.backend",
 }
 
 

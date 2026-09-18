@@ -5,6 +5,7 @@ from __future__ import annotations
 import torch
 
 from areno.accel._extension import extension
+from areno.accel.utils import on_kernel_device
 
 
 @torch._dynamo.disable
@@ -29,8 +30,8 @@ def areno_adamw_fp32_master_step(
     """Update one contiguous model shard without FP32 temporary tensors."""
 
     tensors = (model, low_bits, round_up_bits, grad, exp_avg, exp_avg_sq)
-    if any(not tensor.is_cuda for tensor in tensors):
-        raise ValueError("fused FP32-master AdamW requires CUDA tensors")
+    if not on_kernel_device(*tensors):
+        raise ValueError("fused FP32-master AdamW requires CUDA or NPU tensors on the same device")
     if model.dtype not in {torch.bfloat16, torch.float32}:
         raise TypeError(f"fused FP32-master AdamW requires bfloat16 or float32 model weights, got {model.dtype}")
     if grad.dtype not in {torch.bfloat16, torch.float32}:
@@ -49,7 +50,7 @@ def areno_adamw_fp32_master_step(
         raise ValueError("compact master metadata and Adam moments must have the same length")
     if round_up_bits.numel() < (low_bits.numel() + 7) // 8:
         raise ValueError("packed rounding-carry tensor is too short")
-    extension().areno_adamw_fp32_master_step(
+    extension(model.device).areno_adamw_fp32_master_step(
         model,
         low_bits,
         round_up_bits,
@@ -100,8 +101,8 @@ def areno_adamw_8bit_step(
         signed_codebook,
         unsigned_codebook,
     )
-    if any(not tensor.is_cuda for tensor in tensors):
-        raise ValueError("fused 8-bit AdamW requires CUDA tensors")
+    if not on_kernel_device(*tensors):
+        raise ValueError("fused 8-bit AdamW requires CUDA or NPU tensors on the same device")
     if any(tensor.device != model.device for tensor in tensors[1:]):
         raise ValueError("fused 8-bit AdamW requires every tensor on the model device")
     if model.dtype not in {torch.bfloat16, torch.float32}:
@@ -127,7 +128,7 @@ def areno_adamw_8bit_step(
     block_count = (model.numel() + block_size - 1) // block_size
     if exp_avg_scale.numel() != block_count or exp_avg_sq_scale.numel() != block_count:
         raise ValueError("scale tensors must contain one value per quantization block")
-    extension().areno_adamw_8bit_step(
+    extension(model.device).areno_adamw_8bit_step(
         model,
         grad,
         exp_avg_q,
@@ -166,8 +167,8 @@ def areno_adamw_fp32_state_step(
     """Update BF16/FP32 weights with persistent FP32 Adam moments."""
 
     tensors = (model, grad, exp_avg, exp_avg_sq)
-    if any(not tensor.is_cuda for tensor in tensors):
-        raise ValueError("fused FP32-state AdamW requires CUDA tensors")
+    if not on_kernel_device(*tensors):
+        raise ValueError("fused FP32-state AdamW requires CUDA or NPU tensors on the same device")
     if any(tensor.device != model.device for tensor in tensors[1:]):
         raise ValueError("fused FP32-state AdamW requires every tensor on the model device")
     if model.dtype not in {torch.bfloat16, torch.float32}:
@@ -180,7 +181,7 @@ def areno_adamw_fp32_state_step(
         raise ValueError("fused FP32-state AdamW requires contiguous tensors")
     if any(tensor.numel() != model.numel() for tensor in tensors[1:]):
         raise ValueError("model, gradient, and FP32 moments must have the same number of elements")
-    extension().areno_adamw_fp32_state_step(
+    extension(model.device).areno_adamw_fp32_state_step(
         model,
         grad,
         exp_avg,
@@ -221,8 +222,8 @@ def areno_adamw_4bit_step(
     """Update one model shard directly from packed block-wise moments."""
 
     tensors = (model, grad, exp_avg_q, exp_avg_scale, exp_avg_sq_q, exp_avg_sq_scale)
-    if any(not tensor.is_cuda for tensor in tensors):
-        raise ValueError("fused AdamW4bit requires CUDA tensors")
+    if not on_kernel_device(*tensors):
+        raise ValueError("fused AdamW4bit requires CUDA or NPU tensors on the same device")
     if model.dtype not in {torch.bfloat16, torch.float32}:
         raise TypeError(f"fused AdamW4bit requires bfloat16 or float32 model weights, got {model.dtype}")
     if grad.dtype not in {torch.bfloat16, torch.float32}:
@@ -247,7 +248,7 @@ def areno_adamw_4bit_step(
         raise ValueError("AdamW4bit first-moment scale slice is out of bounds")
     if variance_scale_offset < 0 or variance_scale_offset + scale_numel > exp_avg_sq_scale.numel():
         raise ValueError("AdamW4bit second-moment scale slice is out of bounds")
-    extension().areno_adamw_4bit_step(
+    extension(model.device).areno_adamw_4bit_step(
         model,
         grad,
         exp_avg_q,
@@ -283,8 +284,8 @@ def areno_adamw_4bit_factored_stats(
     """Accumulate matrix row/column gradient-square sums."""
 
     tensors = (grad, factor_sums, invalid)
-    if any(not tensor.is_cuda for tensor in tensors):
-        raise ValueError("fused AdamW4bit factored statistics require CUDA tensors")
+    if not on_kernel_device(*tensors):
+        raise ValueError("fused AdamW4bit factored statistics require CUDA or NPU tensors on the same device")
     if any(tensor.device != grad.device for tensor in tensors[1:]):
         raise ValueError("fused AdamW4bit factored statistics require tensors on one device")
     if grad.dtype not in {torch.bfloat16, torch.float32}:
@@ -297,7 +298,7 @@ def areno_adamw_4bit_factored_stats(
         raise ValueError("AdamW4bit factored statistics have an invalid matrix shape")
     if parameter_shard_start < 0 or parameter_shard_start + grad.numel() > rows * columns:
         raise ValueError("AdamW4bit factored gradient slice is out of bounds")
-    extension().areno_adamw_4bit_factored_stats(
+    extension(grad.device).areno_adamw_4bit_factored_stats(
         grad,
         factor_sums,
         invalid,
@@ -342,8 +343,8 @@ def areno_adamw_4bit_factored_step(
         row_mean,
         invalid,
     )
-    if any(not tensor.is_cuda for tensor in tensors):
-        raise ValueError("fused AdamW4bit factored update requires CUDA tensors")
+    if not on_kernel_device(*tensors):
+        raise ValueError("fused AdamW4bit factored update requires CUDA or NPU tensors on the same device")
     if any(tensor.device != model.device for tensor in tensors[1:]):
         raise ValueError("fused AdamW4bit factored update requires tensors on one device")
     if model.dtype not in {torch.bfloat16, torch.float32} or grad.dtype not in {torch.bfloat16, torch.float32}:
@@ -370,7 +371,7 @@ def areno_adamw_4bit_factored_step(
         raise ValueError("AdamW4bit factored first-moment scale slice is out of bounds")
     if parameter_shard_start < 0 or parameter_shard_start + model.numel() > rows * columns:
         raise ValueError("AdamW4bit factored parameter shard is out of bounds")
-    extension().areno_adamw_4bit_factored_step(
+    extension(model.device).areno_adamw_4bit_factored_step(
         model,
         grad,
         exp_avg_q,

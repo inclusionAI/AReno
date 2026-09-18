@@ -20,6 +20,7 @@ class BackendType(Enum):
 
     CUDA = "CUDA"
     MLX = "MLX"
+    NPU = "NPU"
 
 
 class SamplingParams(BaseModel):
