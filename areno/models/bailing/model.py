@@ -72,10 +72,12 @@ from areno.engine.layers.attention_backend.infer import FlashAttnInferBackend, b
 from areno.engine.layers.attention_backend.train import build_train_attention_backend
 from areno.engine.layers.linear import (
     ColumnParallelLinear,
+    ReplicatedLinear,
     RowParallelLinear,
     _shard_range,
     mark_tensor_parallel_parameter,
 )
+from areno.engine.layers.lora import RoutedExpertLoraBinding, RoutedLoraTarget
 from areno.engine.layers.norm import GroupRMSNormSigmoidGate, RMSNorm
 from areno.engine.layers.rotary import PartialRotaryEmbedding
 from areno.engine.layers.vocab import VocabParallelEmbedding, VocabParallelLMHead
@@ -171,7 +173,9 @@ class BailingGate(nn.Module):
         # Promote to router_dtype (typically fp32) for numerical stability of
         # the sigmoid/top-k selection.
         logits = _areno_linear_no_compile(x.to(dtype=self.weight.dtype), self.weight)
-        topk_idx, topk_weight = self._forward_grouped_topk(logits)
+        topk_idx, _ = self._forward_grouped_topk(logits)
+        selected_scores = torch.sigmoid(logits.float().gather(-1, topk_idx))
+        topk_weight = selected_scores / selected_scores.sum(dim=-1, keepdim=True).clamp_min(1.0e-20)
         topk_idx, topk_weight = resolve_sigmoid_routes(
             self.routing_layer_slot,
             logits,
@@ -326,6 +330,7 @@ class BailingSparseMoeBlock(nn.Module):
             torch.cat((self._infer_gate_weight, self._infer_up_weight), dim=1).contiguous(),
         )
         self._infer_w2_weight = self._updated_infer_weight(self._infer_w2_weight, self._infer_down_weight.contiguous())
+        self.experts.lora_slots.merge_inference_weights_(self._infer_w1_weight, self._infer_w2_weight)
         self._infer_weights_ready = True
 
     @torch.no_grad()
@@ -406,10 +411,26 @@ class BailingGroupedExperts(nn.Module):
             self.hidden_size,
             dtype=config.dtype,
         )
+        self.lora_slots = RoutedExpertLoraBinding(
+            intermediate_size=self.intermediate_size,
+            targets=(
+                RoutedLoraTarget("gate_proj", "linear_fc1.weight", self.hidden_size, self.intermediate_size),
+                RoutedLoraTarget("up_proj", "linear_fc1.weight", self.hidden_size, self.intermediate_size),
+                RoutedLoraTarget("down_proj", "linear_fc2.weight", self.intermediate_size, self.hidden_size),
+                RoutedLoraTarget("linear_fc1", "linear_fc1.weight", self.hidden_size, 2 * self.intermediate_size),
+                RoutedLoraTarget("linear_fc2", "linear_fc2.weight", self.intermediate_size, self.hidden_size),
+            ),
+        )
         # Expert weights are sharded by EP (collapsed into TP); flag them as
         # not-TP/not-SP so the standard TP collectives leave them alone.
         for param in self.parameters():
             mark_tensor_parallel_parameter(param, False, sequence_parallel=False)
+
+    def install_lora_component(self, component: str, slot: nn.Module) -> None:
+        self.lora_slots.bind(component, slot)
+
+    def has_lora(self) -> bool:
+        return bool(self.lora_slots)
 
     def forward(self, flat: torch.Tensor, topk_idx: torch.Tensor, topk_weight: torch.Tensor) -> torch.Tensor:
         return self._forward_fused_permute(flat, topk_idx, topk_weight)
@@ -439,13 +460,16 @@ class BailingGroupedExperts(nn.Module):
                 + fc2_param.reshape(-1)[0] * 0
                 + topk_weight.sum().to(dtype=fc1_param.dtype) * 0
             )
+            zero = zero + self.lora_slots.zero_grad_edge(fc1_param)
             return all_reduce(flat.new_zeros(flat.shape) + zero)
         hidden, _ = _grouped_linear_forward(self.linear_fc1, x.contiguous(), tokens_per_expert)
+        hidden = self.lora_slots.apply_gate_up(x, hidden, tokens_per_expert)
         # Apply routing weight before fc2 so it stays inside the fp32 reduction.
         hidden = (
             _areno_silu_and_mul_no_compile(hidden) * sorted_route_weight.unsqueeze(-1).to(dtype=hidden.dtype)
         ).contiguous()
         expert_out, _ = _grouped_linear_forward(self.linear_fc2, hidden, tokens_per_expert)
+        expert_out = self.lora_slots.apply_down(hidden, expert_out, tokens_per_expert)
         # Unpermute back to original (batch, seq) order, then scale and reduce.
         out = _areno_moe_unpermute_no_compile(
             expert_out, sorted_token_idx, merging_probs=None, restore_shape=flat.shape
@@ -671,6 +695,7 @@ class BailingSoftmaxAttention(nn.Module):
 
     def __init__(self, config: ModelConfig, layer_idx: int):
         super().__init__()
+        self.lora_slots = nn.ModuleDict()
         ctx = get_tp_context()
         self.layer_idx = layer_idx
         # Head-dim split: rope vs non-rope channels on Q/K, plus separate V dim.
@@ -709,8 +734,12 @@ class BailingSoftmaxAttention(nn.Module):
                 bias=False,
                 input_grad_allreduce=False,
             )
-            self.kv_a_proj_with_mqa = nn.Linear(
-                config.hidden_size, self.kv_lora_rank + self.qk_rope_head_dim, bias=False
+            self.kv_a_proj_with_mqa = ReplicatedLinear(
+                config.hidden_size,
+                self.kv_lora_rank + self.qk_rope_head_dim,
+                bias=False,
+                lora_owner=self.lora_slots,
+                lora_component="kv_a_proj_with_mqa",
             )
             mark_tensor_parallel_parameter(
                 self.kv_a_proj_with_mqa.weight, False, sequence_parallel=True, tp_grad_allreduce=True
@@ -964,7 +993,6 @@ class BailingLinearAttention(nn.Module):
             initial_state=None,
             output_final_state=False,
             cu_seqlens=cu_seqlens,
-            head_first=False,
         )
         return out
 
@@ -1305,7 +1333,20 @@ class BailingMoeLinearV2Adapter(ModelAdapter):
         dtype = _parse_dtype(hf_config.get("torch_dtype") or hf_config.get("dtype"))
         num_heads = int(hf_config["num_attention_heads"])
         head_dim = int(hf_config.get("head_dim", hf_config["hidden_size"] // num_heads))
-        rotary_dim = int(hf_config.get("rotary_dim", hf_config.get("qk_rope_head_dim", head_dim)))
+        configured_partial_rotary_factor = hf_config.get("partial_rotary_factor")
+        default_rotary_dim = head_dim * float(
+            configured_partial_rotary_factor if configured_partial_rotary_factor is not None else 1.0
+        )
+        rotary_dim = int(
+            hf_config.get(
+                "rotary_dim",
+                hf_config.get("qk_rope_head_dim", default_rotary_dim),
+            )
+        )
+        partial_rotary_factor = float(
+            configured_partial_rotary_factor if configured_partial_rotary_factor is not None else rotary_dim / head_dim
+        )
+        kv_lora_rank = hf_config.get("kv_lora_rank")
         num_experts = hf_config.get("num_experts", hf_config.get("n_routed_experts"))
         moe_intermediate_size = int(hf_config.get("moe_intermediate_size", hf_config.get("intermediate_size", 0)))
         num_experts_per_tok = int(hf_config.get("num_experts_per_tok", hf_config.get("moe_router_topk", 1)))
@@ -1359,7 +1400,7 @@ class BailingMoeLinearV2Adapter(ModelAdapter):
             hidden_act=str(hf_config.get("hidden_act", "silu")),
             use_bias=_parse_bool(hf_config.get("use_bias"), False),
             layer_group_size=int(hf_config.get("layer_group_size", 1)),
-            partial_rotary_factor=float(hf_config.get("partial_rotary_factor", rotary_dim / head_dim)),
+            partial_rotary_factor=partial_rotary_factor,
             num_experts=num_experts,
             num_experts_per_tok=num_experts_per_tok,
             n_group=n_group,
@@ -1380,10 +1421,15 @@ class BailingMoeLinearV2Adapter(ModelAdapter):
             ),
             num_nextn_predict_layers=int(hf_config.get("num_nextn_predict_layers", 0)),
             mtp_loss_scaling_factor=float(hf_config.get("mtp_loss_scaling_factor", 0.0)),
-            qk_nope_head_dim=int(hf_config.get("qk_nope_head_dim", head_dim)),
+            qk_nope_head_dim=int(
+                hf_config.get(
+                    "qk_nope_head_dim",
+                    head_dim - rotary_dim if kv_lora_rank is None else head_dim,
+                )
+            ),
             qk_rope_head_dim=int(hf_config.get("qk_rope_head_dim", rotary_dim)),
             v_head_dim=int(hf_config.get("v_head_dim", head_dim)),
-            kv_lora_rank=hf_config.get("kv_lora_rank"),
+            kv_lora_rank=kv_lora_rank,
             linear_backend=linear_backend,
             linear_scale=linear_backend == "minimax",
             linear_silu=_parse_bool(hf_config.get("use_linear_silu", hf_config.get("linear_silu")), False),

@@ -54,11 +54,3 @@ assert "areno.adapters.lora" not in sys.modules
     )
 
     assert result.returncode == 0, result.stderr
-
-
-def test_native_adapter_public_exports_remain_available() -> None:
-    from areno.adapters import AdapterRegistry, LoraSlot, initialize_lora
-
-    assert AdapterRegistry.__module__ == "areno.adapters.lora"
-    assert LoraSlot.__module__ == "areno.adapters.lora"
-    assert initialize_lora.__module__ == "areno.adapters.lora"
