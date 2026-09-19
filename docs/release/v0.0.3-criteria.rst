@@ -1,0 +1,82 @@
+v0.0.3 release criteria
+=======================
+
+Use this local checklist to decide whether the ``v0.0.3`` milestone is ready
+to close. It is intentionally separate from the top-level release-hygiene
+checklist, which covers the mechanics of cutting any tagged release.
+
+Milestone scope
+---------------
+
+Before closing the milestone:
+
+* Every issue assigned to ``v0.0.3`` is closed, or explicitly moved to a later
+  milestone.
+* The milestone description names the user-facing theme of the release and any
+  known limitations.
+* The release notes draft is based on closed milestone issues rather than
+  unrelated repository history.
+
+Local CPU validation
+--------------------
+
+The release candidate should pass the CPU tests that do not require CUDA
+hardware:
+
+.. code-block:: bash
+
+   pytest tests/test_cli_diagnostics_cpu.py -q
+   pytest tests/test_config_data_cpu.py tests/test_dataset_loader_api_cpu.py -q
+   pytest tests/test_registry_cpu.py tests/test_registry_discovery_cpu.py -q
+
+If a CPU test is skipped, the skip reason should name the missing optional
+dependency or platform feature. A CPU-only environment must not report GPU
+training as validated.
+
+Diagnostics and docs checks
+---------------------------
+
+Run the diagnostics commands and make sure they produce actionable output:
+
+.. code-block:: bash
+
+   areno check
+   areno env --json
+
+For documentation, build the docs and confirm the release-facing pages render:
+
+.. code-block:: bash
+
+   python -m sphinx -b html docs docs/_build/html
+
+The docs check should cover the quickstart, diagnostics CLI docs, and any
+release note links added for the milestone.
+
+GPU validation language
+-----------------------
+
+Training and serving validation requires a CUDA-capable NVIDIA GPU. When the
+release candidate is checked on a CPU-only machine, record GPU-dependent work
+as skipped, not passed.
+
+Use explicit language such as:
+
+.. code-block:: text
+
+   GPU training smoke: skipped (CPU-only validation host; requires CUDA GPU)
+   GPU serving smoke: skipped (CPU-only validation host; requires CUDA GPU)
+
+If GPU validation is available, record the command, GPU model, CUDA/PyTorch
+versions, and whether the run reached the expected completion signal.
+
+Close-out criteria
+------------------
+
+Close ``v0.0.3`` only after:
+
+* The milestone issue list is empty or intentionally deferred.
+* CPU validation results are recorded in the release notes or maintainer
+  checklist.
+* Docs build status is recorded.
+* GPU-required checks are either completed on CUDA hardware or explicitly
+  skipped with the reason above.
