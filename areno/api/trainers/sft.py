@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -110,11 +111,12 @@ class SFTTrainer:
         # the configured prompt or supervised-response budgets are dropped.
         batch = []
         skipped = 0
+        skipped_reasons = Counter()
         accepted = 0
         total_rows = len(self.dataset)
         for index in range(total_rows):
             # Normalize each supported row schema into one TrainSequence.
-            seq = _record_to_train_sequence(
+            seq, filter_reason = _record_to_train_sequence_with_reason(
                 self.dataset[index],
                 tokenizer,
                 processor,
@@ -123,6 +125,7 @@ class SFTTrainer:
             )
             if seq is None:
                 skipped += 1
+                skipped_reasons[filter_reason or "unknown"] += 1
                 continue
             accepted += 1
             batch.append(seq)
@@ -130,11 +133,16 @@ class SFTTrainer:
                 yield batch
                 batch = []
         if skipped:
-            self.logger.info("stage=sft_dataset_filter skipped_long_or_empty=%d", skipped)
+            self.logger.info(
+                "stage=sft_dataset_filter skipped=%d reasons=%s",
+                skipped,
+                _format_filter_reason_counts(skipped_reasons),
+            )
         if accepted == 0:
+            details = "dataset is empty" if total_rows == 0 else f"filter reasons: {_format_filter_reason_counts(skipped_reasons)}"
             raise ValueError(
                 "SFT dataset produced no valid training rows after filtering: "
-                f"scanned {total_rows} row(s), skipped {skipped} as empty, over-budget, or all-prompt examples. "
+                f"scanned {total_rows} row(s), skipped {skipped}; {details}. "
                 "Check dataset quality, --max-prompt-tokens, and --max-new-tokens."
             )
         if batch:
@@ -153,6 +161,19 @@ class SFTTrainer:
 
 
 def _record_to_train_sequence(record: Any, tokenizer, processor=None, *, max_prompt_tokens: int, max_new_tokens: int):
+    sequence, _ = _record_to_train_sequence_with_reason(
+        record,
+        tokenizer,
+        processor,
+        max_prompt_tokens=max_prompt_tokens,
+        max_new_tokens=max_new_tokens,
+    )
+    return sequence
+
+
+def _record_to_train_sequence_with_reason(
+    record: Any, tokenizer, processor=None, *, max_prompt_tokens: int, max_new_tokens: int
+):
     """Normalize one loader-produced SFT row into backend training format.
 
     `prompt_mask=True` means "do not train this source token"; the backend loss
@@ -167,10 +188,10 @@ def _record_to_train_sequence(record: Any, tokenizer, processor=None, *, max_pro
         if "response" not in record:
             raise ValueError("SFT image rows must contain `response`")
         if record["response"] is None:
-            return None
+            return None, "empty_response"
         response = str(record["response"])
         if not response:
-            return None
+            return None, "empty_response"
         prompt_tokens, features = encode_multimodal_prompt(tokenizer, processor, record)
         try:
             response_tokens = [int(token) for token in tokenizer.encode(response, add_special_tokens=False)]
@@ -180,16 +201,22 @@ def _record_to_train_sequence(record: Any, tokenizer, processor=None, *, max_pro
         tokens = prompt_tokens + response_tokens
         prompt_mask = [True] * len(prompt_tokens) + [False] * len(response_tokens)
         prompt_token_count = len(prompt_tokens)
-        if prompt_token_count > max_prompt_tokens or len(response_tokens) > max_new_tokens:
-            return None
+        filter_reason = _budget_filter_reason(
+            prompt_token_count, len(response_tokens), max_prompt_tokens=max_prompt_tokens, max_new_tokens=max_new_tokens
+        )
+        if filter_reason:
+            return None, filter_reason
         zeros = [0.0] * len(tokens)
-        return areno.api.TrainSequence(
-            prompt_mask=prompt_mask,
-            tokens=tokens,
-            logprobs=zeros,
-            advantages=zeros,
-            features=features,
-            eos_token_id=eos_token_id,
+        return (
+            areno.api.TrainSequence(
+                prompt_mask=prompt_mask,
+                tokens=tokens,
+                logprobs=zeros,
+                advantages=zeros,
+                features=features,
+                eos_token_id=eos_token_id,
+            ),
+            None,
         )
     if "tokens" in record and "prompt_mask" in record:
         tokens = [int(token) for token in record["tokens"]]
@@ -225,49 +252,79 @@ def _record_to_train_sequence(record: Any, tokenizer, processor=None, *, max_pro
                 features = dict(features)
                 features["mrope_position_ids"] = mrope_position_ids
         if len(tokens) < 2:
-            return None
+            return None, "no_response_tokens"
         prompt_tokens = prompt_mask.count(True)
         response_tokens = prompt_mask[1:].count(False)
-        if prompt_tokens > max_prompt_tokens or response_tokens > max_new_tokens or response_tokens == 0:
-            return None
+        if response_tokens == 0:
+            return None, "no_response_tokens"
+        filter_reason = _budget_filter_reason(
+            prompt_tokens, response_tokens, max_prompt_tokens=max_prompt_tokens, max_new_tokens=max_new_tokens
+        )
+        if filter_reason:
+            return None, filter_reason
         zeros = [0.0] * len(tokens)
-        return areno.api.TrainSequence(
-            prompt_mask=prompt_mask,
-            loss_mask=loss_mask,
-            tokens=tokens,
-            logprobs=zeros,
-            advantages=zeros,
-            features=features,
-            eos_token_id=int(record.get("eos_token_id", eos_token_id)),
+        return (
+            areno.api.TrainSequence(
+                prompt_mask=prompt_mask,
+                loss_mask=loss_mask,
+                tokens=tokens,
+                logprobs=zeros,
+                advantages=zeros,
+                features=features,
+                eos_token_id=int(record.get("eos_token_id", eos_token_id)),
+            ),
+            None,
         )
     if "prompt" not in record or "response" not in record:
         raise ValueError(
             "SFT dataset loader must return rows with `prompt` and `response`; "
             "normalize raw dataset fields in --dataset-loader-fn"
         )
-    if record["prompt"] is None or record["response"] is None:
-        return None
+    if record["prompt"] is None:
+        return None, "empty_prompt"
+    if record["response"] is None:
+        return None, "empty_response"
     prompt = str(record["prompt"])
     response = str(record["response"])
     if not response:
-        return None
+        return None, "empty_response"
     tokens, prompt_mask = prompt_response_to_tokens_and_mask(prompt, response, tokenizer, eos_token_id)
 
     if len(tokens) < 2:
-        return None
+        return None, "no_response_tokens"
     prompt_tokens = prompt_mask.count(True)
     response_tokens = prompt_mask[1:].count(False)
-    if prompt_tokens > max_prompt_tokens or response_tokens > max_new_tokens or response_tokens == 0:
-        return None
+    if response_tokens == 0:
+        return None, "no_response_tokens"
+    filter_reason = _budget_filter_reason(
+        prompt_tokens, response_tokens, max_prompt_tokens=max_prompt_tokens, max_new_tokens=max_new_tokens
+    )
+    if filter_reason:
+        return None, filter_reason
     zeros = [0.0] * len(tokens)
     # Dummy rollout fields keep the backend packer shared with RL trainers.
-    return areno.api.TrainSequence(
-        prompt_mask=prompt_mask,
-        tokens=tokens,
-        logprobs=zeros,
-        advantages=zeros,
-        eos_token_id=eos_token_id,
+    return (
+        areno.api.TrainSequence(
+            prompt_mask=prompt_mask,
+            tokens=tokens,
+            logprobs=zeros,
+            advantages=zeros,
+            eos_token_id=eos_token_id,
+        ),
+        None,
     )
+
+
+def _budget_filter_reason(prompt_tokens: int, response_tokens: int, *, max_prompt_tokens: int, max_new_tokens: int):
+    if prompt_tokens > max_prompt_tokens:
+        return "prompt_too_long"
+    if response_tokens > max_new_tokens:
+        return "response_too_long"
+    return None
+
+
+def _format_filter_reason_counts(reasons: Counter) -> str:
+    return ", ".join(f"{reason}={reasons[reason]}" for reason in sorted(reasons))
 
 
 __all__ = ["SFTTrainer"]

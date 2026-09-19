@@ -174,7 +174,45 @@ class TrainerDatasetUtilityTest(unittest.TestCase):
             loss_fn=lambda _pack, _logprobs: None,
         )
 
-        with self.assertRaisesRegex(ValueError, "no valid training rows"):
+        with self.assertRaisesRegex(ValueError, r"no valid training rows.*empty_response=2"):
+            trainer.fit()
+
+        self.assertEqual(backend.train_calls, 0)
+        self.assertTrue(backend.closed)
+
+    def test_sft_filter_error_reports_each_reason(self):
+        """An all-invalid dataset should identify the rows users need to fix."""
+        backend = FakeSFTBackend()
+        trainer = sft_mod.SFTTrainer(
+            _sft_config(),
+            instance=backend,
+            dataset=[
+                {"prompt": "q", "response": ""},
+                {"prompt": "abc", "response": "d"},
+                {"prompt": "q", "response": "abc"},
+                {"tokens": [1, 2], "prompt_mask": [True, True]},
+            ],
+            reward_fn=None,
+            loss_fn=lambda _pack, _logprobs: None,
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"empty_response=1.*no_response_tokens=1.*prompt_too_long=1.*response_too_long=1",
+        ):
+            trainer.fit()
+
+        self.assertEqual(backend.train_calls, 0)
+        self.assertTrue(backend.closed)
+
+    def test_sft_empty_dataset_reports_empty_input(self):
+        """An empty dataset should explain that no rows were scanned."""
+        backend = FakeSFTBackend()
+        trainer = sft_mod.SFTTrainer(
+            _sft_config(), instance=backend, dataset=[], reward_fn=None, loss_fn=lambda _pack, _logprobs: None
+        )
+
+        with self.assertRaisesRegex(ValueError, r"scanned 0 row\(s\).*dataset is empty"):
             trainer.fit()
 
         self.assertEqual(backend.train_calls, 0)
