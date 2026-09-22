@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import platform
 from dataclasses import dataclass, field
+from importlib.util import find_spec
 from typing import Any, Literal
 
 from areno.adapters.config import LoraConfig
@@ -93,6 +94,8 @@ class MlxConfig:
             raise ValueError("MLX LoRA cannot be combined with multimodal tower or projector unfreezing")
 
 
+NpuConfig = CudaConfig
+
 BackendConfig = CudaConfig | MlxConfig
 
 
@@ -102,6 +105,8 @@ def default_backend_type() -> BackendType:
     system = platform.system()
     machine = platform.machine().lower()
     if system == "Linux":
+        if find_spec("torch_npu") is not None:
+            return BackendType.NPU
         return BackendType.CUDA
     if system == "Darwin" and machine in {"arm64", "aarch64"}:
         return BackendType.MLX
@@ -129,7 +134,7 @@ def coerce_backend_config(backend_type: BackendType, custom_config: Any) -> Back
 
     if custom_config is None:
         return None
-    if backend_type == BackendType.CUDA and isinstance(custom_config, CudaConfig):
+    if backend_type in {BackendType.CUDA, BackendType.NPU} and isinstance(custom_config, CudaConfig):
         return custom_config
     if backend_type == BackendType.MLX and isinstance(custom_config, MlxConfig):
         return custom_config

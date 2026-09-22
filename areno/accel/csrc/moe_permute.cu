@@ -4,10 +4,10 @@
 #include <c10/cuda/CUDAGuard.h>
 #include <torch/extension.h>
 
-#include <cstring>
 #include <vector>
 
 #include "atomic_utils.cuh"
+#include "moe_permute_common.h"
 
 namespace areno_accel {
 
@@ -277,24 +277,15 @@ std::vector<torch::Tensor> areno_moe_topk_permute_forward_cuda(
       static_cast<int>(local_num_experts));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 
-  auto counts_cpu = tokens_per_expert_i32.to(torch::kCPU);
-  std::vector<int64_t> offsets_host(static_cast<size_t>(local_num_experts) + 1, 0);
-  const int32_t* counts_ptr = counts_cpu.data_ptr<int32_t>();
-  for (int64_t expert = 0; expert < local_num_experts; ++expert) {
-    offsets_host[static_cast<size_t>(expert) + 1] = offsets_host[static_cast<size_t>(expert)] + counts_ptr[expert];
-  }
-  const int64_t num_out_tokens = offsets_host.back();
-  auto offsets_cpu = torch::empty({local_num_experts + 1}, torch::TensorOptions().dtype(torch::kInt64).device(torch::kCPU));
-  std::memcpy(offsets_cpu.data_ptr<int64_t>(), offsets_host.data(), offsets_host.size() * sizeof(int64_t));
-  auto offsets = offsets_cpu.to(input.device());
-  auto tokens_per_expert = counts_cpu.to(torch::kInt64).to(input.device());
+  auto buffers = areno_accel::moe::allocate_topk(input, tokens_per_expert_i32);
+  auto& output = buffers.output;
+  auto& route_weight = buffers.weight;
+  auto& token_index = buffers.token_index;
+  auto& topk_position = buffers.position;
+  auto& offsets = buffers.offsets;
   auto counters = torch::zeros({local_num_experts}, input.options().dtype(torch::kInt32));
-  auto output = torch::empty({num_out_tokens, hidden}, input.options());
-  auto route_weight = torch::empty({num_out_tokens}, input.options().dtype(torch::kFloat32));
-  auto token_index = torch::empty({num_out_tokens}, input.options().dtype(torch::kInt64));
-  auto topk_position = torch::empty({num_out_tokens}, input.options().dtype(torch::kInt32));
-  if (num_out_tokens == 0) {
-    return {output, route_weight, token_index, topk_position, tokens_per_expert};
+  if (output.size(0) == 0) {
+    return buffers.result();
   }
   blocks = static_cast<int>(std::min<int64_t>(route_count, 65535));
   AT_DISPATCH_FLOATING_TYPES_AND2(at::kHalf, at::kBFloat16, input.scalar_type(), "areno_moe_topk_permute_forward", [&] {
@@ -315,7 +306,7 @@ std::vector<torch::Tensor> areno_moe_topk_permute_forward_cuda(
         static_cast<int>(local_num_experts));
   });
   C10_CUDA_KERNEL_LAUNCH_CHECK();
-  return {output, route_weight, token_index, topk_position, tokens_per_expert};
+  return buffers.result();
 }
 
 torch::Tensor areno_moe_topk_weight_backward_cuda(

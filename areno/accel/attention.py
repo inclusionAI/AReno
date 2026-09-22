@@ -5,6 +5,9 @@ rollout decode through the same CUDA forward kernel. It is slower than
 flash-attn, but keeps causal/window masking and softmax accumulation identical
 across paths so rollout old-logp and train logp can be compared without mixing
 attention implementations.
+
+Ascend uses flash-attn-npu when available for supported layouts. Native C
+kernels handle other cases; ``force_native=True`` bypasses the library entirely.
 """
 
 from __future__ import annotations
@@ -12,6 +15,7 @@ from __future__ import annotations
 import torch
 
 from areno.accel._extension import extension as _extension
+from areno.accel.utils import on_kernel_device
 
 
 def _window_left(window_left: int | None) -> int:
@@ -87,7 +91,7 @@ class _ArenoCausalAttention(torch.autograd.Function):
         window_left: int,
         softmax_scale: float,
     ) -> torch.Tensor:
-        out = _extension().areno_causal_attention_forward(
+        out = _extension(q.device).areno_causal_attention_forward(
             q.contiguous(),
             k.contiguous(),
             v.contiguous(),
@@ -104,7 +108,7 @@ class _ArenoCausalAttention(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, None, None, None]:
         q, k, v, out = ctx.saved_tensors
-        dq, dk, dv = _extension().areno_causal_attention_backward(
+        dq, dk, dv = _extension(grad_output.device).areno_causal_attention_backward(
             grad_output.contiguous(),
             q.contiguous(),
             k.contiguous(),
@@ -126,11 +130,12 @@ def areno_causal_attention(
     query_start: int = 0,
     window_left: int | None = None,
     softmax_scale: float | None = None,
+    force_native: bool = False,
 ) -> torch.Tensor:
     """Apply causal attention to ``(batch, heads, seqlen, head_dim)`` tensors."""
 
-    if not (q.is_cuda and k.is_cuda and v.is_cuda):
-        raise RuntimeError("areno_causal_attention requires CUDA q, k, and v tensors")
+    if not on_kernel_device(q, k, v):
+        raise RuntimeError("areno_causal_attention requires CUDA or NPU q, k, and v tensors on the same device")
     if q.dim() != 4 or k.dim() != 4 or v.dim() != 4:
         raise ValueError("areno_causal_attention expects q/k/v tensors shaped (batch, heads, seqlen, head_dim)")
     if q.shape[0] != k.shape[0] or q.shape[0] != v.shape[0]:
@@ -139,6 +144,12 @@ def areno_causal_attention(
         raise ValueError("areno_causal_attention head count mismatch")
     if q.shape[-1] != k.shape[-1] or q.shape[-1] != v.shape[-1]:
         raise ValueError("areno_causal_attention head dim mismatch")
+    if q.device.type == "npu":
+        from areno.accel.npu.attention import causal_attention
+
+        return causal_attention(
+            q, k, v, int(query_start), _window_left(window_left), _scale(q, softmax_scale), force_native=force_native
+        )
     return _ArenoCausalAttention.apply(q, k, v, int(query_start), _window_left(window_left), _scale(q, softmax_scale))
 
 
@@ -153,7 +164,7 @@ class _ArenoVarlenCausalAttention(torch.autograd.Function):
         window_left: int,
         softmax_scale: float,
     ) -> torch.Tensor:
-        out = _extension().areno_varlen_causal_attention_forward(
+        out = _extension(q.device).areno_varlen_causal_attention_forward(
             q.contiguous(),
             k.contiguous(),
             v.contiguous(),
@@ -169,7 +180,7 @@ class _ArenoVarlenCausalAttention(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, None, None, None]:
         q, k, v, out, cu_seqlens = ctx.saved_tensors
-        dq, dk, dv = _extension().areno_varlen_causal_attention_backward(
+        dq, dk, dv = _extension(grad_output.device).areno_varlen_causal_attention_backward(
             grad_output.contiguous(),
             q.contiguous(),
             k.contiguous(),
@@ -191,11 +202,14 @@ def areno_varlen_causal_attention(
     *,
     window_left: int | None = None,
     softmax_scale: float | None = None,
+    force_native: bool = False,
 ) -> torch.Tensor:
     """Apply packed causal attention to flat ``(tokens, heads, head_dim)`` tensors."""
 
-    if not (q.is_cuda and k.is_cuda and v.is_cuda and cu_seqlens.is_cuda):
-        raise RuntimeError("areno_varlen_causal_attention requires CUDA q, k, v, and cu_seqlens tensors")
+    if not on_kernel_device(q, k, v, cu_seqlens):
+        raise RuntimeError(
+            "areno_varlen_causal_attention requires CUDA or NPU q, k, v, and cu_seqlens tensors on the same device"
+        )
     if q.dim() != 3 or k.dim() != 3 or v.dim() != 3:
         raise ValueError("areno_varlen_causal_attention expects q/k/v tensors shaped (tokens, heads, head_dim)")
     if cu_seqlens.dim() != 1 or cu_seqlens.dtype != torch.int32:
@@ -206,6 +220,12 @@ def areno_varlen_causal_attention(
         raise ValueError("areno_varlen_causal_attention expects q heads to be divisible by kv heads")
     if q.shape[2] != k.shape[2] or q.shape[2] != v.shape[2]:
         raise ValueError("areno_varlen_causal_attention head dim mismatch")
+    if q.device.type == "npu":
+        from areno.accel.npu.attention import varlen_causal_attention
+
+        return varlen_causal_attention(
+            q, k, v, cu_seqlens, _window_left(window_left), _scale(q, softmax_scale), force_native=force_native
+        )
     return _ArenoVarlenCausalAttention.apply(q, k, v, cu_seqlens, _window_left(window_left), _scale(q, softmax_scale))
 
 
@@ -224,7 +244,7 @@ class _ArenoPagedCausalAttentionDecode(torch.autograd.Function):
         num_splits: int,
         softmax_scale: float,
     ) -> torch.Tensor:
-        out = _extension().areno_paged_causal_attention_decode_forward(
+        out = _extension(q.device).areno_paged_causal_attention_decode_forward(
             q.contiguous(),
             k_update.contiguous(),
             v_update.contiguous(),
@@ -277,19 +297,12 @@ def areno_paged_causal_attention_decode(
     window_left: int | None = None,
     num_splits: int = 8,
     softmax_scale: float | None = None,
+    force_native: bool = False,
 ) -> torch.Tensor:
     """Apply single-token paged-cache causal attention to ``(batch, heads, dim)`` Q."""
 
-    if not (
-        q.is_cuda
-        and k_update.is_cuda
-        and v_update.is_cuda
-        and k_cache.is_cuda
-        and v_cache.is_cuda
-        and block_table.is_cuda
-        and cache_seqlens.is_cuda
-    ):
-        raise RuntimeError("areno_paged_causal_attention_decode requires CUDA tensors")
+    if not on_kernel_device(q, k_update, v_update, k_cache, v_cache, block_table, cache_seqlens):
+        raise RuntimeError("areno_paged_causal_attention_decode requires CUDA or NPU tensors on the same device")
     if q.dim() != 3:
         raise ValueError("areno_paged_causal_attention_decode expects q shaped (batch, heads, head_dim)")
     if k_update.dim() != 3 or v_update.dim() != 3:
@@ -300,6 +313,22 @@ def areno_paged_causal_attention_decode(
         raise ValueError("areno_paged_causal_attention_decode expects block_table 2D and cache_seqlens 1D")
     if block_table.dtype != torch.int32 or cache_seqlens.dtype != torch.int32:
         raise ValueError("areno_paged_causal_attention_decode expects int32 block_table and cache_seqlens")
+    if q.device.type == "npu":
+        from areno.accel.npu.attention import paged_causal_attention_decode
+
+        return paged_causal_attention_decode(
+            q,
+            k_update,
+            v_update,
+            k_cache,
+            v_cache,
+            block_table,
+            cache_seqlens,
+            _window_left(window_left),
+            int(num_splits),
+            _scale(q, softmax_scale),
+            force_native=force_native,
+        )
     return _ArenoPagedCausalAttentionDecode.apply(
         q,
         k_update,

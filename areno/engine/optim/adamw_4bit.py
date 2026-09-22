@@ -353,7 +353,7 @@ class AdamW4bit(AdamW8bit):
             if factored_work is not None:
                 updated_factors, _row_mean, invalid = factored_work
                 factor_storage = self._ensure_factored_second_moment(parameter)
-                if invalid.is_cuda:
+                if invalid.device.type in {"cuda", "npu"}:
                     factor_storage.copy_(torch.where(invalid == 0, updated_factors, factor_storage))
                 elif int(invalid.item()) == 0:
                     factor_storage.copy_(updated_factors)
@@ -403,7 +403,7 @@ class AdamW4bit(AdamW8bit):
         grad_shard = grad if bucket.grad_shard is not None else grad.narrow(0, ref.shard_start, ref.shard_numel)
         model_chunk = ref.model_param.detach().reshape(-1).narrow(0, ref.param_start, ref.numel)
         model_shard = model_chunk.narrow(0, ref.shard_start, ref.shard_numel)
-        if model_shard.is_cuda:
+        if model_shard.device.type in {"cuda", "npu"}:
             from areno.accel.optimizer import areno_adamw_4bit_step
 
             areno_adamw_4bit_step(
@@ -484,7 +484,7 @@ class AdamW4bit(AdamW8bit):
             return
         grad_shard = grad if bucket.grad_shard is not None else grad.narrow(0, ref.shard_start, ref.shard_numel)
         parameter_shard_start = ref.param_start + ref.shard_start
-        if grad_shard.is_cuda:
+        if grad_shard.device.type in {"cuda", "npu"}:
             from areno.accel.optimizer import areno_adamw_4bit_factored_stats
 
             areno_adamw_4bit_factored_stats(
@@ -552,12 +552,12 @@ class AdamW4bit(AdamW8bit):
         assert state.exp_avg_scale is not None
         if ref.shard_numel == 0:
             return
-        if not invalid.is_cuda and int(invalid.item()) != 0:
+        if invalid.device.type not in {"cuda", "npu"} and int(invalid.item()) != 0:
             return
         grad_shard = grad if bucket.grad_shard is not None else grad.narrow(0, ref.shard_start, ref.shard_numel)
         parameter_shard_start = ref.param_start + ref.shard_start
         model_shard = ref.model_param.detach().reshape(-1).narrow(0, parameter_shard_start, ref.shard_numel)
-        if model_shard.is_cuda:
+        if model_shard.device.type in {"cuda", "npu"}:
             from areno.accel.optimizer import areno_adamw_4bit_factored_step
 
             areno_adamw_4bit_factored_step(

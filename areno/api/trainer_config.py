@@ -89,12 +89,12 @@ class TrainerConfig:
             self.backend = default_backend_type().value.lower()
         else:
             self.backend = self.backend.lower()
-        if self.backend not in {"cuda", "mlx"}:
-            raise ValueError("backend must be one of: cuda, mlx")
+        if self.backend not in {"cuda", "mlx", "npu"}:
+            raise ValueError("backend must be one of: cuda, mlx, npu")
         if self.adam_4bit and self.adam_8bit:
             raise ValueError("adam_4bit and adam_8bit are mutually exclusive")
-        if self.adam_4bit and self.backend != "cuda":
-            raise ValueError("adam_4bit is only supported by the CUDA backend")
+        if self.adam_4bit and self.backend not in {"cuda", "npu"}:
+            raise ValueError("adam_4bit is only supported by the CUDA and NPU backends")
         if self.attn_backend not in {"flash", "native"}:
             raise ValueError("attn_backend must be one of: flash, native")
         if self.model_hub not in {"hf", "modelscope"}:
@@ -178,7 +178,7 @@ class TrainerConfig:
 
         from areno.api.models import BackendType
 
-        return BackendType.MLX if self.backend.lower() == "mlx" else BackendType.CUDA
+        return BackendType(self.backend.upper())
 
     def backend_config(self):
         """Build the typed configuration for the selected backend."""

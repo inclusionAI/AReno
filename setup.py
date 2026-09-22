@@ -2,15 +2,38 @@ from __future__ import annotations
 
 import os
 import platform
+import runpy
 import shutil
 import sys
 import warnings
 from importlib.util import find_spec
+from pathlib import Path
 
 from setuptools import setup
 
 _METADATA_COMMANDS = {"egg_info", "dist_info", "sdist"}
 _MIN_TORCH_VERSION = (2, 6)
+_ROOT = Path(__file__).resolve().parent
+
+
+def _using_npu() -> bool:
+    return platform.system() == "Linux" and find_spec("torch_npu") is not None
+
+
+def _runtime_dependencies(npu: bool) -> list[str]:
+    path = _ROOT / "requirements" / ("npu.txt" if npu else "default.txt")
+    return [
+        line.strip() for line in path.read_text().splitlines() if line.strip() and not line.lstrip().startswith("#")
+    ]
+
+
+def _extensions(npu: bool):
+    if not npu:
+        return _cuda_extensions()
+    if _metadata_only_command() or os.environ.get("ARENO_BUILD_EXT", "auto").lower() in {"0", "false", "no", "off"}:
+        return [], {}
+    build = runpy.run_path(str(_ROOT / "areno/accel/csrc/npu/setup.py"))
+    return build["build_extensions"]()
 
 
 def _metadata_only_command() -> bool:
@@ -71,6 +94,11 @@ def _cuda_extensions():
                 "areno/accel/csrc/optimizer.cu",
                 "areno/accel/csrc/router.cu",
                 "areno/accel/csrc/topk.cu",
+            ],
+            depends=[
+                "areno/accel/csrc/grouped_linear_common.h",
+                "areno/accel/csrc/routing_common.h",
+                "areno/accel/csrc/moe_permute_common.h",
             ],
             extra_compile_args={
                 "cxx": ["-O3", "-Wno-deprecated-declarations"],
@@ -176,7 +204,8 @@ def _version_at_least(version: str | None, minimum: tuple[int, int]) -> bool:
     return tuple(parts[: len(minimum)]) >= minimum
 
 
-ext_modules, cmdclass = _cuda_extensions()
+npu = _using_npu()
+ext_modules, cmdclass = _extensions(npu)
 
 
-setup(ext_modules=ext_modules, cmdclass=cmdclass)
+setup(ext_modules=ext_modules, cmdclass=cmdclass, install_requires=_runtime_dependencies(npu))

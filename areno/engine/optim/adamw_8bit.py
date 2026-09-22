@@ -24,6 +24,7 @@ from areno.engine.optim.dynamic_quant import (
     UNSIGNED_DYNAMIC_MAP,
     UNSIGNED_DYNAMIC_ZERO,
 )
+from areno.engine.runtime.device import Completion, accelerator_module
 
 _DEFAULT_QUANT_BLOCK_SIZE = 128
 _MAX_FUSED_QUANT_BLOCK_SIZE = 4096
@@ -48,7 +49,7 @@ class _Adam8bitBucketState:
     offload_file: str | None = None
     offload_index: int | None = None
     offload_group: _MmapGroup | None = None
-    offload_ready_events: tuple[torch.cuda.Event, ...] = ()
+    offload_ready_events: tuple[Completion, ...] = ()
 
 
 class AdamW8bit(AdamWFP32Master):
@@ -487,7 +488,7 @@ class AdamW8bit(AdamWFP32Master):
         for name in ("exp_avg_q", "exp_avg_scale", "exp_avg_sq_q", "exp_avg_sq_scale", "exp_avg", "exp_avg_sq"):
             value = saved.get(name)
             setattr(state, name, None if value is None else _host_tensor_to(value, device, prefetched=prefetched))
-        if prefetched and device.type == "cuda":
+        if prefetched and accelerator_module(device) is not None:
             self._retain_disk_prefetch(state.offload_index, saved, device)
 
     def _disk_mmap_group_for_index(self, index: int) -> _MmapGroup | None:
@@ -530,7 +531,7 @@ class AdamW8bit(AdamWFP32Master):
             return
         group = self._get_or_create_mmap_group(indices, self._state_mmap_specs(indices))
         payloads: dict[int, dict[str, torch.Tensor]] = {}
-        ready_events: list[torch.cuda.Event] = []
+        ready_events: list[Completion] = []
         for index in present_indices:
             state = self._states[index]
             payloads[index] = {
@@ -693,7 +694,7 @@ class AdamW8bit(AdamWFP32Master):
         model_shard = ref.model_param.detach().reshape(-1).narrow(0, ref.param_start + ref.shard_start, ref.shard_numel)
         exp_avg = state.exp_avg.narrow(0, ref.shard_bucket_start, ref.shard_numel)
         exp_avg_sq = state.exp_avg_sq.narrow(0, ref.shard_bucket_start, ref.shard_numel)
-        if model_shard.is_cuda:
+        if model_shard.device.type in {"cuda", "npu"}:
             from areno.accel.optimizer import areno_adamw_fp32_state_step
 
             areno_adamw_fp32_state_step(
@@ -754,7 +755,7 @@ class AdamW8bit(AdamWFP32Master):
         moment_scales = state.exp_avg_scale.narrow(0, scale_offset, block_count)
         variance_scales = state.exp_avg_sq_scale.narrow(0, scale_offset, block_count)
 
-        if model_shard.is_cuda:
+        if model_shard.device.type in {"cuda", "npu"}:
             from areno.accel.optimizer import areno_adamw_8bit_step
 
             signed_codebook = _dynamic_codebook(model_shard.device, signed=True)

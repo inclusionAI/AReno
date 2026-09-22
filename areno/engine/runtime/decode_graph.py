@@ -1,4 +1,4 @@
-"""CUDA graph capture/replay for the decode step.
+"""CUDA/NPU graph capture/replay for the decode step.
 
 Decode runs one token per active sequence, so the graph's only batch-size
 degree of freedom is `bucket`. `DecodeGraph` owns the static input buffers
@@ -13,6 +13,7 @@ import torch
 import torch.distributed as dist
 
 from areno.engine.runtime.common import ceil_div as ceil_div  # noqa: F401
+from areno.engine.runtime.device import accelerator_module
 from areno.engine.runtime.metadata import InferMeta
 from areno.engine.runtime.routing_replay import captured_routing, routing_replay_context
 
@@ -28,42 +29,50 @@ def bucket_for(batch_size: int, buckets: list[int]) -> int:
 
 def sync_before_graph_capture(device: torch.device, group) -> None:
     """Place all ranks at a clean synchronization point before graph capture."""
-    # The sequence CUDA-sync → NCCL barrier → CUDA-sync guarantees: all
+    # Device-sync → collective barrier → device-sync guarantees: all
     # outstanding kernels on this device finished, every TP rank reached the
-    # barrier, then any cross-stream queueing introduced by NCCL is drained
+    # barrier, then any cross-stream queueing introduced by the collective is drained
     # before capture begins. Without this, in-flight work could leak into the
     # captured graph and cause replay corruption.
-    if device.type == "cuda":
-        torch.cuda.synchronize(device)
+    accelerator = accelerator_module(device)
+    if accelerator is not None:
+        accelerator.synchronize(device)
     if dist.is_available() and dist.is_initialized():
         if device.type == "cuda":
             dist.barrier(
-                group=group, device_ids=[device.index if device.index is not None else torch.cuda.current_device()]
+                group=group, device_ids=[device.index if device.index is not None else accelerator.current_device()]
             )
         else:
             dist.barrier(group=group)
-    if device.type == "cuda":
-        torch.cuda.synchronize(device)
+    if accelerator is not None:
+        accelerator.synchronize(device)
+
+
+def all_ranks_graph_ready(device: torch.device, group, ready: bool) -> bool:
+    """Keep capture decisions identical across the tensor-parallel group."""
+    if not dist.is_available() or not dist.is_initialized():
+        return ready
+    ok = torch.tensor([int(ready)], device=device, dtype=torch.int32)
+    dist.all_reduce(ok, op=dist.ReduceOp.MIN, group=group)
+    return bool(ok.item())
 
 
 def has_graph_capture_memory(device: torch.device, group, warmup_bytes: int) -> bool:
     """Return true only if every rank has enough free memory for capture."""
-    if device.type != "cuda":
+    accelerator = accelerator_module(device)
+    if accelerator is None:
         return True
-    free_bytes, _ = torch.cuda.mem_get_info(device)
+    free_bytes, _ = accelerator.mem_get_info(device)
     # Capture itself adds bookkeeping over the warmup peak, so demand a 20%
     # headroom margin before letting any rank start to capture.
     required = int(max(warmup_bytes, 1) * 1.2)
-    ok = torch.tensor([1 if free_bytes > required else 0], device=device, dtype=torch.int32)
     # MIN reduce so the result is true only when EVERY rank is happy; one
     # tight rank causes all ranks to skip capture in lockstep.
-    if dist.is_available() and dist.is_initialized():
-        dist.all_reduce(ok, op=dist.ReduceOp.MIN, group=group)
-    return bool(ok.item())
+    return all_ranks_graph_ready(device, group, free_bytes > required)
 
 
 class DecodeGraph:
-    """Reusable CUDA graph for one decode batch bucket.
+    """Reusable device graph for one decode batch bucket.
 
     Decode always runs one token per active sequence. The graph owns static
     input buffers sized to a bucket. Replay copies the current token/cache
@@ -88,7 +97,10 @@ class DecodeGraph:
         self.scratch_block = scratch_block
         self.scratch_recurrent_slot = scratch_recurrent_slot
         self.device = device
-        # Stable input pointers. The captured CUDA graph remembers these as
+        self.accelerator = accelerator_module(device)
+        if self.accelerator is None:
+            raise ValueError("decode graphs require a CUDA or NPU device")
+        # Stable input pointers. The captured graph remembers these as
         # source/destination addresses, so replay must write through the same
         # tensors rather than swapping in fresh allocations.
         self.input_ids = torch.zeros((1, bucket), device=device, dtype=torch.long)
@@ -110,21 +122,27 @@ class DecodeGraph:
             recurrent_slots=self.recurrent_slots,
             capture_routing=capture_routing,
         )
-        self.graph = torch.cuda.CUDAGraph()
+        with self.accelerator.device(device):
+            graph_type = self.accelerator.CUDAGraph if device.type == "cuda" else self.accelerator.NPUGraph
+            self.graph = graph_type()
+            # An explicit per-device stream avoids reusing the graph context's
+            # default capture stream across different devices in one process.
+            self.stream = self.accelerator.Stream(device=device)
         self.logits_shard: torch.Tensor | None = None
         self.routing_capture: torch.Tensor | None = None
 
     @torch.inference_mode()
     def warmup(self, iterations: int = 3) -> int:
         """Run eager decode a few times and return the extra peak bytes observed."""
-        before = torch.cuda.memory_allocated(self.device)
-        torch.cuda.reset_peak_memory_stats(self.device)
+        accelerator = self.accelerator
+        before = accelerator.memory_allocated(self.device)
+        accelerator.reset_peak_memory_stats(self.device)
         # Warmup on a side stream so any one-time allocator behavior happens
         # before capture; the result is the additional bytes we need to keep
         # available when the graph is captured.
-        stream = torch.cuda.Stream(device=self.device)
-        stream.wait_stream(torch.cuda.current_stream(self.device))
-        with torch.cuda.device(self.device), torch.cuda.stream(stream):
+        stream = self.stream
+        stream.wait_stream(accelerator.current_stream(self.device))
+        with accelerator.device(self.device), accelerator.stream(stream):
             for _ in range(iterations):
                 with routing_replay_context(self.meta):
                     logits_shard = self.model(
@@ -133,18 +151,18 @@ class DecodeGraph:
                         infer_meta=self.meta,
                     ).logits_shard
                 del logits_shard
-        torch.cuda.current_stream(self.device).wait_stream(stream)
-        torch.cuda.synchronize(self.device)
-        return max(0, torch.cuda.max_memory_allocated(self.device) - before)
+        accelerator.current_stream(self.device).wait_stream(stream)
+        accelerator.synchronize(self.device)
+        return max(0, accelerator.max_memory_allocated(self.device) - before)
 
     @torch.inference_mode()
     def capture(self) -> None:
         """Capture the model decode call using the graph-owned static buffers."""
-        # The torch.cuda.graph context records every kernel launched inside it.
+        # The device graph context records every kernel launched inside it.
         # All inputs referenced here must already live on the graph's stream
         # and must remain alive at the same addresses for the lifetime of the
         # graph, which is exactly what `self.input_ids/...` provide.
-        with torch.cuda.device(self.device), torch.cuda.graph(self.graph):
+        with self.accelerator.device(self.device), self.accelerator.graph(self.graph, stream=self.stream):
             with routing_replay_context(self.meta):
                 self.logits_shard = self.model(
                     input_ids=self.input_ids, position_ids=self.position_ids, infer_meta=self.meta
