@@ -100,6 +100,4 @@ HCCL initialization and NPU execution boundaries are device-specific.
 The registered algorithms include SFT, DPO, GRPO, GSPO and PPO, with actor,
 reference, reward and critic roles. Native Ascend C attention implements dense
 and packed forward/backward plus paged KV-cache decode forward, selected with
-``--attn-backend native``. Hardware numerical acceptance and performance
-validation remain pending; see :doc:`npu` for implementation coverage and
-remaining limitations.
+``--attn-backend native``. See :doc:`npu` for installation and usage.

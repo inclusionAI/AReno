@@ -30,7 +30,7 @@ AReno's mission is to make LLM RL **accessible** for a broad community of resear
 
 - ✨ **Plug-and-play**: various post-training methods are easily accessible via the `--algo` flag or the same `Trainer` class from Python, no cluster or launcher to set up.
 - 🪶 **Lightweight**: one self-contained train/serve stack with CUDA, Ascend NPU, and Apple Silicon MLX backends.
-- 🔌 **Ascend NPU**: shared SFT, DPO, GRPO, GSPO, PPO, rollout and serving workflows, with native Ascend C attention. See the [NPU integration guide](docs/concepts/npu.rst) for setup and pending hardware validation.
+- 🔌 **Ascend NPU**: shared SFT, DPO, GRPO, GSPO, PPO, rollout and serving workflows, with native Ascend C attention. See the [NPU integration guide](docs/concepts/npu.rst) for installation and usage.
 - 🧰 **Agentic RL ready**: run an agent function against AReno's local OpenAI-compatible proxy, return explicit trajectories, and train from tokens, logprobs, rewards, and loss masks derived by the trainer.
 - 🎞️ **Multimodal**: use image, audio, and video content with compatible model processors through the same OpenAI-style message format in serving and agentic training.
 - 🧩 **Native LoRA**: train TP-aware adapters for Qwen3, Qwen3-MoE, and Bailing-MoE V3, save standard PEFT artifacts, and reload them for training or serving.
@@ -44,7 +44,7 @@ AReno supports Linux (x86_64 or aarch64) with an NVIDIA GPU and CUDA-enabled
 PyTorch 2.6 or newer, plus Apple Silicon macOS through MLX. Windows users can
 use WSL2 for the CUDA path. Ascend NPU integration uses CANN and ``torch_npu``;
 see the [NPU integration guide](docs/concepts/npu.rst) for the target stack,
-source build and validation status. The CLI selects NPU on Linux when
+source build and usage. The CLI selects NPU on Linux when
 ``torch_npu`` is installed, otherwise CUDA, and MLX on native ``arm64`` macOS.
 
 CUDA/WSL2 installation:
