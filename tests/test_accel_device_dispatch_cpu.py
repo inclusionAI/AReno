@@ -418,17 +418,15 @@ def test_npu_native_selection_covers_train_prefill_and_decode(monkeypatch, nativ
         for phase in ("train", "prefill", "decode", "decode"):
             q = tensor((1, 1 if phase == "decode" else 2, 2, 64), torch.bfloat16)
             kv = tensor((*q.shape[:2], 1, 64), torch.bfloat16)
-            meta = SimpleNamespace(
-                mode=phase, cu_seqlens=cu, max_seqlen=2, block_table=table, cache_seqlens=lengths
-            )
+            meta = SimpleNamespace(mode=phase, cu_seqlens=cu, max_seqlen=2, block_table=table, cache_seqlens=lengths)
             with pytest.raises(NativeReached):
                 if phase == "train":
                     FlashAttnTrainAttentionBackend(backend)(q, kv, kv, meta)
                 else:
                     FlashAttnInferBackend(backend)(q, kv, kv, cache, cache, meta, update_cache=phase == "decode")
-    assert entries == ["areno_varlen_causal_attention_forward"] * 2 + [
-        "areno_paged_causal_attention_decode_forward"
-    ] * 2
+    assert (
+        entries == ["areno_varlen_causal_attention_forward"] * 2 + ["areno_paged_causal_attention_decode_forward"] * 2
+    )
     assert imports == ([] if selection == "native" else ["flash_attn_npu"])
     fallback_warnings = [w for w in caught if "falling back to attn_backend='native'" in str(w.message)]
     assert len(fallback_warnings) == (0 if selection == "native" else 1)

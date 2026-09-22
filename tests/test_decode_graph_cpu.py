@@ -126,9 +126,13 @@ def test_cache_initialization_captures_graphs_and_reallocation_invalidates_them(
         offload_train_weights=lambda: None,
     )
     worker = SimpleNamespace(
-        device=device, model=model, _infer_cache_spec=None,
-        _decode_graphs={}, _decode_graph_skipped_buckets=set(),
-        _decode_graph_init_attempted=False, _prepare_actor_onloaded=lambda: None,
+        device=device,
+        model=model,
+        _infer_cache_spec=None,
+        _decode_graphs={},
+        _decode_graph_skipped_buckets=set(),
+        _decode_graph_init_attempted=False,
+        _prepare_actor_onloaded=lambda: None,
     )
     manager = inference.InferenceManager(worker)
 
@@ -138,7 +142,9 @@ def test_cache_initialization_captures_graphs_and_reallocation_invalidates_them(
             self._decode_graphs[1] = captured[-1]
 
     monkeypatch.setattr(inference.InferenceManager, "_init_decode_graphs", capture)
-    spec = inference.InferCacheSpec(max_running_seqs=1, max_cache_len=8, num_blocks=4, block_size=4, max_blocks_per_seq=2)
+    spec = inference.InferCacheSpec(
+        max_running_seqs=1, max_cache_len=8, num_blocks=4, block_size=4, max_blocks_per_seq=2
+    )
     manager._init_infer_cache(spec)
     assert len(captured) == 1
     manager._init_infer_cache(spec)
@@ -182,9 +188,16 @@ def test_inference_graph_capture_and_failure_decisions(monkeypatch, device, resu
     monkeypatch.setattr(inference, "all_ranks_graph_ready", vote)
     runtime = RuntimeConfig(device_type=device.type, eager_decode=result == "eager", decode_graph_buckets=[1])
     worker = SimpleNamespace(
-        device=device, config=SimpleNamespace(runtime=runtime), model=SimpleNamespace(training=False),
-        _decode_graph_init_attempted=False, _decode_graphs={}, _decode_graph_skipped_buckets=set(),
-        _infer_batch_size=1, _max_blocks_per_seq=2, _scratch_block=9, _scratch_recurrent_slot=1,
+        device=device,
+        config=SimpleNamespace(runtime=runtime),
+        model=SimpleNamespace(training=False),
+        _decode_graph_init_attempted=False,
+        _decode_graphs={},
+        _decode_graph_skipped_buckets=set(),
+        _infer_batch_size=1,
+        _max_blocks_per_seq=2,
+        _scratch_block=9,
+        _scratch_recurrent_slot=1,
     )
     manager = inference.InferenceManager(worker)
     if result == "error":

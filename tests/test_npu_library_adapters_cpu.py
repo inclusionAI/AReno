@@ -61,7 +61,8 @@ def test_flash_fallback_only_classifies_optional_npu_availability(monkeypatch, d
     monkeypatch.setattr(loader, "import_module", load)
     unavailable = device == "npu" and (
         str(error).startswith("Unsupported Ascend device:")
-        or isinstance(error, ModuleNotFoundError) and error.name == "flash_attn_npu"
+        or isinstance(error, ModuleNotFoundError)
+        and error.name == "flash_attn_npu"
     )
     expected = loader.FlashAttentionUnavailable if unavailable else type(error)
     with pytest.raises(expected) as caught:
