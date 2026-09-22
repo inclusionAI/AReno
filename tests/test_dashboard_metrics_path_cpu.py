@@ -174,3 +174,51 @@ def test_dashboard_only_resolves_media_referenced_by_sample(tmp_path: Path):
     with patch.object(state, "get_job", return_value=job):
         assert state.resolve_sample_media(job.id, str(allowed)) == allowed
         assert state.resolve_sample_media(job.id, str(blocked)) is None
+
+
+def test_jsonl_metrics_keep_full_history_and_wait_for_partial_lines(tmp_path):
+    import json
+
+    file = tmp_path / "scalars.jsonl"
+    file.write_text("".join(json.dumps({"name": "loss", "value": i, "step": i}) + "\n" for i in range(1001)))
+    job = Job(kind="train", name="history", command=[], config={}, metrics_dir=str(tmp_path))
+    state = DashboardState()
+    with patch.object(state, "_load_tensorboard_scalars"):
+        state._load_metric_files(job)
+        assert len(job.metrics) == 1001
+        with file.open("a") as stream:
+            stream.write('{"name":"loss","value":1001,"step":1001}')
+        state._load_metric_files(job)
+        assert len(job.metrics) == 1001
+        with file.open("a") as stream:
+            stream.write("\n")
+        state._load_metric_files(job)
+        assert len(job.metrics) == 1002
+        state._load_metric_files(job)
+        assert len(job.metrics) == 1002
+
+
+def test_nonfinite_metrics_do_not_break_json_responses():
+    state = DashboardState()
+    job = Job(kind="train", name="finite", command=[], config={}, metrics_dir=None)
+    for value in (float("nan"), float("inf"), -float("inf")):
+        state._add_metric(job, "loss", value, 1)
+    assert job.metrics == []
+
+
+@pytest.mark.parametrize("status", ["stopped", "exited", "failed", "succeeded"])
+def test_terminal_time_survives_updates_and_state_reload(status):
+    job = Job(kind="train", name="elapsed", command=[], config={}, metrics_dir=None)
+    with patch("areno.dashboard.server.now", return_value="2026-09-17T00:01:00+00:00"):
+        job.status = status
+    job.updated_at = "2026-09-17T01:00:00+00:00"
+    with patch("areno.dashboard.server.now", return_value="2026-09-17T02:00:00+00:00"):
+        job.status = status
+        restored = Job.from_json(job.to_json())
+    assert restored.finished_at == "2026-09-17T00:01:00+00:00"
+    assert restored.to_summary_json()["finished_at"] == restored.finished_at
+
+
+def test_legacy_terminal_job_uses_saved_update_time():
+    job = Job.from_json({"status": "exited", "updated_at": "2026-09-17T00:01:00+00:00"})
+    assert job.finished_at == "2026-09-17T00:01:00+00:00"

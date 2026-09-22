@@ -644,9 +644,9 @@ class PolicyOnlyTrainer:
         return train_batch, rewards_all, logprob_stats
 
     def _record_sample_completions(self, tokenizer, epoch: int, step: int, prompt_batch, rollout_results) -> None:
-        # Diagnostics knob: setting ARENO_LOG_COMPLETIONS=N records up to N
-        # decoded completions per step in the metrics directory.
-        limit = int(os.getenv("ARENO_LOG_COMPLETIONS", "0"))
+        # Capture one representative completion per step by default for the dashboard.
+        # ARENO_LOG_COMPLETIONS=N changes the bound; zero explicitly disables it.
+        limit = int(os.getenv("ARENO_LOG_COMPLETIONS", "1"))
         if limit <= 0:
             return
         logged = 0
@@ -674,7 +674,7 @@ class PolicyOnlyTrainer:
     def _log_agentic_sample_completions(self, epoch: int, step: int, agent_batch) -> None:
         # Match non-agentic rollout diagnostics so reward/debug workflows do
         # not depend on rollout mode.
-        limit = int(os.getenv("ARENO_LOG_COMPLETIONS", "0"))
+        limit = int(os.getenv("ARENO_LOG_COMPLETIONS", "1"))
         if limit <= 0:
             return
         for logged, record in enumerate(agent_batch.reward_records):
@@ -715,7 +715,7 @@ class PolicyOnlyTrainer:
                 return
 
     def _emit_completion_sample(self, sample: dict) -> None:
-        """Log an opted-in completion and persist it with rollout metrics."""
+        """Log a representative completion and persist it with rollout metrics."""
 
         self.logger.info("rollout_completion=%s", json.dumps(sample, ensure_ascii=False, default=str))
         self.areno.record_rollout_sample(sample)

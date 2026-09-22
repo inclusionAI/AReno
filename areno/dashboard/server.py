@@ -10,6 +10,7 @@ import math
 import mimetypes
 import os
 import re
+import secrets
 import shlex
 import signal
 import subprocess
@@ -61,6 +62,19 @@ AGENT_RECOVERY_STATE: dict[str, Any] = {
     "updated_at": None,
 }
 FILE_BROWSER = AgentFileBrowser(ROOT)
+MODAL_FLOW = None
+MODAL_FLOW_LOCK = threading.Lock()
+
+
+def modal_flow():
+    global MODAL_FLOW
+    with MODAL_FLOW_LOCK:
+        if MODAL_FLOW is None:
+            from areno.dashboard.modal_flow import ModalFlow
+
+            directory = Path(os.environ.get("ARENOFLOW_DATA_DIR", ROOT / ".areno-modal"))
+            MODAL_FLOW = ModalFlow(directory)
+    return MODAL_FLOW
 
 
 def now() -> str:
@@ -86,6 +100,7 @@ class Job:
         self.config = config
         self.metrics_dir = metrics_dir
         self.cwd = cwd
+        self.finished_at: str | None = None
         self.status = "created"
         self.stage = "created"
         self.role = ""
@@ -103,8 +118,22 @@ class Job:
         self.pid = pid
         self.returncode: int | None = None
         self._metric_keys: set[tuple[str, int, float]] = set()
+        self._metric_file_offsets: dict[str, tuple[int, int]] = {}
         self._timeperf_keys: set[int] = set()
         self._sample_keys: set[tuple[int, int, int]] = set()
+
+    @property
+    def status(self) -> str:
+        return self._status
+
+    @status.setter
+    def status(self, value: str) -> None:
+        self._status = value
+        if value in {"stopped", "exited", "failed", "succeeded", "cancelled", "done"}:
+            if self.finished_at is None:
+                self.finished_at = now()
+        else:
+            self.finished_at = None
 
     @classmethod
     def from_json(cls, item: dict[str, Any]) -> Job:
@@ -124,6 +153,7 @@ class Job:
         job.step = int(item.get("step") or 0)
         job.created_at = item.get("created_at") or job.created_at
         job.updated_at = item.get("updated_at") or job.updated_at
+        job.finished_at = item.get("finished_at") or (job.updated_at if job.finished_at else None)
         job.returncode = item.get("returncode")
         job.logs = list(item.get("logs") or [])
         job.config = dict(item.get("config") or {})
@@ -134,6 +164,11 @@ class Job:
     def to_json(self) -> dict[str, Any]:
         return {
             "id": self.id,
+            **(
+                {"provider": self.provider, "modal": self.modal, "usage": self.usage}
+                if getattr(self, "provider", None) == "modal"
+                else {}
+            ),
             "kind": self.kind,
             "name": self.name,
             "command": self.command,
@@ -148,6 +183,7 @@ class Job:
             "step": self.step,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+            "finished_at": self.finished_at,
             "returncode": self.returncode,
             "pid": self.pid,
             "logs": self.logs[-300:],
@@ -160,6 +196,11 @@ class Job:
     def to_summary_json(self) -> dict[str, Any]:
         return {
             "id": self.id,
+            **(
+                {"provider": self.provider, "modal": self.modal, "usage": self.usage}
+                if getattr(self, "provider", None) == "modal"
+                else {}
+            ),
             "kind": self.kind,
             "name": self.name,
             "metrics_dir": self.metrics_dir,
@@ -170,6 +211,7 @@ class Job:
             "step": self.step,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+            "finished_at": self.finished_at,
             "returncode": self.returncode,
             "pid": self.pid,
             "perf": self.perf,
@@ -244,8 +286,9 @@ class DashboardState:
             self._load_metric_files(job)
             self._save_state()
 
+    @staticmethod
     def _append_timeperf_row(
-        self, job: Job, *, step: int, total: float, segments: dict[str, float], source: str = "metrics"
+        job: Job, *, step: int, total: float, segments: dict[str, float], source: str = "metrics"
     ) -> None:
         if total <= 0:
             return
@@ -291,15 +334,30 @@ class DashboardState:
         self._load_tensorboard_scalars(job, path)
         self._load_rollout_samples(job, path)
         self._load_run_config(job, path)
-        for file in sorted(path.glob("*.jsonl"))[-4:]:
+        for file in sorted(path.glob("*.jsonl")):
             if file.name.startswith("rollout_samples"):
                 continue
             try:
-                for line in file.read_text(encoding="utf-8").splitlines()[-200:]:
-                    item = json.loads(line)
-                    if "name" in item and "value" in item:
-                        self._add_metric(job, str(item["name"]), float(item["value"]), int(item.get("step", job.step)))
-            except Exception:
+                stat = file.stat()
+                inode, offset = job._metric_file_offsets.get(str(file), (stat.st_ino, 0))
+                if inode != stat.st_ino or offset > stat.st_size:
+                    offset = 0
+                with file.open("rb") as stream:
+                    stream.seek(offset)
+                    while line := stream.readline():
+                        if not line.endswith(b"\n"):
+                            break  # A live writer may not have finished this record yet.
+                        offset = stream.tell()
+                        try:
+                            item = json.loads(line)
+                            if isinstance(item, dict) and "name" in item and "value" in item:
+                                self._add_metric(
+                                    job, str(item["name"]), float(item["value"]), int(item.get("step", job.step))
+                                )
+                        except (ValueError, TypeError):
+                            continue
+                job._metric_file_offsets[str(file)] = (stat.st_ino, offset)
+            except OSError:
                 continue
 
     def _load_dashboard_state(self, job: Job, path: Path) -> None:
@@ -418,6 +476,8 @@ class DashboardState:
                 job.config_text = payload["summary_text"]
 
     def _add_metric(self, job: Job, name: str, value: float, step: int) -> None:
+        if not math.isfinite(value):
+            return
         key = (name, step, value)
         if key in job._metric_keys:
             return
@@ -427,6 +487,9 @@ class DashboardState:
         job.step = max(job.step, step)
 
     def stop(self, job_id: str) -> bool:
+        if job_id.startswith("modal-"):
+            modal_flow().app.controller.stop(job_id.removeprefix("modal-"))
+            return True
         with self.lock:
             job = self.jobs.get(job_id)
             if job is None:
@@ -459,13 +522,17 @@ class DashboardState:
 
     def list_jobs(self) -> list[dict[str, Any]]:
         self.scan_registered_jobs()
+        try:
+            remote_jobs = modal_flow().jobs(Job)
+        except ImportError:
+            remote_jobs = []
         with self.lock:
             for job in self.jobs.values():
                 self._refresh_job_status(job)
             self._save_state()
             return [
                 job.to_summary_json()
-                for job in sorted(self.jobs.values(), key=lambda item: item.created_at, reverse=True)
+                for job in sorted([*self.jobs.values(), *remote_jobs], key=lambda item: item.created_at, reverse=True)
             ]
 
     def _refresh_job_status(self, job: Job) -> None:
@@ -487,6 +554,11 @@ class DashboardState:
             return
 
     def get_job(self, job_id: str | None) -> Job | None:
+        if job_id and job_id.startswith("modal-"):
+            try:
+                return modal_flow().job(job_id, Job)
+            except KeyError:
+                return None
         with self.lock:
             job = self.jobs.get(job_id) if job_id else next(iter(self.jobs.values()), None)
             if job is not None:
@@ -1140,7 +1212,9 @@ def runtime_attention() -> dict[str, Any]:
 
 def dashboard_quick_actions() -> list[dict[str, Any]]:
     presets_by_source = {item["source"]: item for item in launcher_presets()}
-    actions: list[dict[str, Any]] = []
+    actions: list[dict[str, Any]] = [
+        {"id": "launch-modal", "label": "Start Modal Task", "kind": "modal_launcher", "target": "launcher"}
+    ]
     for source, action_id, label in (
         ("examples/math/dataset_loader.py", "launch-gspo-gsm8k", "Launch GSPO / GSM8K"),
         ("examples/sft/alpaca/dataset_loader.py", "launch-sft-alpaca", "Launch SFT / Alpaca"),
@@ -1500,7 +1574,10 @@ def build_agent_messages(payload: dict[str, Any]) -> list[dict[str, Any]]:
     job = STATE.get_job(payload.get("job_id"))
     context = job.to_summary_json() if job else {}
     messages: list[dict[str, Any]] = [
-        {"role": "system", "content": f"{agent_system_prompt()}\n\n{agent_language_instruction(payload)}"}
+        {
+            "role": "system",
+            "content": f"{agent_system_prompt()}\n\n{agent_language_instruction(payload)}\nFor Modal/cloud tasks use get_modal_catalog then prepare_modal_plan. Never start Modal from other tools. The user confirms the returned plan in the dashboard. Modal credentials belong in dashboard Settings. Managed dataset IDs can be used in stages. For deployment the dashboard generates an endpoint key; do not ask for secrets in chat.",
+        }
     ]
     for item in normalize_agent_history(payload.get("history")):
         messages.append(item)
@@ -1754,6 +1831,40 @@ def agent_tool_schemas() -> list[dict[str, Any]]:
         {
             "type": "function",
             "function": {
+                "name": "get_modal_catalog",
+                "description": "Get Modal GPU types, model adapters, algorithms, CLI parameters and managed datasets before preparing a Modal task.",
+                "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "recommend_modal_gpu",
+                "description": "Estimate suitable Modal GPU type/count for the selected model and training/serving configuration. Training defaults to Adam 4-bit. Pass the full workflow request. Include model.parameters_billion if model name does not identify total size. Estimates include memory headroom; do not invent parameter counts.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"request": {"type": "object", "additionalProperties": True}},
+                    "required": ["request"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "prepare_modal_plan",
+                "description": "Validate an Areno Flow workflow and return a reviewable Modal execution plan. Does not launch. Use kind training or deployment, model {adapter,checkpoint}, resources {gpu,count,cpu,memory_gib,timeout_seconds}, stages [{algo,dataset_id,params}] for training or serve parameters for deployment. Never request Modal tokens in chat. Endpoint keys are generated on execution for deployments.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"request": {"type": "object", "additionalProperties": True}},
+                    "required": ["request"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "create_plan",
                 "description": "Create a proposed task execution plan for user review before calling tools that start or stop work.",
                 "parameters": {
@@ -1976,6 +2087,26 @@ def execute_agent_tool(tool_call: dict[str, Any]) -> dict[str, Any]:
     except json.JSONDecodeError:
         args = {}
     try:
+        if name == "get_modal_catalog":
+            app = modal_flow().app
+            return {
+                "name": name,
+                "ok": True,
+                "catalog": app.catalog,
+                "gpu_types": app.get("/api/bootstrap", {})["gpu_types"],
+                "datasets": app.get("/api/datasets", {}),
+            }
+        if name == "recommend_modal_gpu":
+            return {
+                "name": name,
+                "ok": True,
+                "recommendation": modal_flow().app.post("/api/recommend-gpu", args.get("request", {})),
+            }
+        if name == "prepare_modal_plan":
+            request = args.get("request", {})
+            if request.get("kind") == "deployment":
+                request["endpoint_key"] = secrets.token_urlsafe(32)
+            return {"name": name, "ok": True, "plan": modal_flow().preview(request)}
         if name == "create_plan":
             objective = str(args.get("objective") or "").strip()
             raw_steps = args.get("steps") if isinstance(args.get("steps"), list) else []
@@ -2110,7 +2241,13 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         try:
             path = self.route_path()
-            if path == "/api/env":
+            if path.startswith("/api/modal/"):
+                suffix = path.removeprefix("/api/modal")
+                allowed = {"/bootstrap", "/datasets", "/functions", "/billing"}
+                if suffix not in allowed:
+                    raise ValueError("Unsupported Modal route")
+                self.json(modal_flow().app.get("/api" + suffix, {}))
+            elif path == "/api/env":
                 self.json(runtime_env())
             elif path == "/api/runtime/attention":
                 self.json(runtime_attention())
@@ -2151,13 +2288,51 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self.static(path)
         except Exception as exc:
-            self.error(str(exc))
+            self.error(MODAL_FLOW.app.controller.redact(str(exc)) if MODAL_FLOW else str(exc))
 
     def do_POST(self) -> None:
         try:
             path = self.route_path()
             payload = self.read_json()
-            if path == "/api/jobs/train":
+            if path.startswith("/api/modal/"):
+                flow = modal_flow()
+                origin = self.headers.get("Origin")
+                host = self.headers.get("Host", "")
+                if (origin and urllib.parse.urlsplit(origin).netloc != host) or not secrets.compare_digest(
+                    self.headers.get("X-Arenoflow-CSRF", ""), flow.app.csrf
+                ):
+                    self.error("Reload the dashboard before changing Modal settings or tasks", HTTPStatus.FORBIDDEN)
+                    return
+                suffix = path.removeprefix("/api/modal")
+                if suffix == "/preview":
+                    if payload.get("kind") == "deployment":
+                        payload["endpoint_key"] = secrets.token_urlsafe(32)
+                    self.json({"plan": flow.preview(payload)})
+                elif suffix == "/revise":
+                    self.json({"plan": flow.revise(str(payload.get("plan_id", "")), payload.get("workflow"))})
+                elif suffix == "/execute":
+                    result = flow.execute(str(payload.get("plan_id", "")))
+                    self.json(
+                        {
+                            "ok": True,
+                            "job": flow.job(result["job_id"], Job).to_json(),
+                            "endpoint_key": result["endpoint_key"],
+                        }
+                    )
+                elif suffix == "/datasets/url":
+                    self.json(flow.import_url(payload))
+                elif suffix in {
+                    "/connect",
+                    "/uploads",
+                    "/datasets",
+                    "/estimate",
+                    "/recommend-gpu",
+                    "/forget-credentials",
+                } or re.fullmatch(r"/datasets/[a-f0-9]{16}/delete", suffix):
+                    self.json(flow.app.post("/api" + suffix, payload))
+                else:
+                    raise ValueError("Unsupported Modal route")
+            elif path == "/api/jobs/train":
                 job = Job(
                     kind="train",
                     name=f"train {payload.get('algo', 'sft')} {payload.get('ckpt', '')}",
@@ -2226,13 +2401,18 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self.error("not found", HTTPStatus.NOT_FOUND)
         except Exception as exc:
-            self.error(str(exc))
+            self.error(MODAL_FLOW.app.controller.redact(str(exc)) if MODAL_FLOW else str(exc))
 
     def read_json(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length") or "0")
         if length == 0:
             return {}
-        return json.loads(self.rfile.read(length).decode("utf-8"))
+        if not 0 < length <= 24 * 1024 * 1024:
+            raise ValueError("Request must be between 1 byte and 24 MiB")
+        body = json.loads(self.rfile.read(length).decode("utf-8"))
+        if not isinstance(body, dict):
+            raise ValueError("JSON body must be an object")
+        return body
 
     def route_path(self) -> str:
         path = self.path.split("?", 1)[0]
