@@ -612,12 +612,19 @@ class TPCluster:
             request_id=request_id, future=ack_future, loop=loop, result_ranks=result_ranks,
         )
         try:
+            # The worker sends its ack only after it has unpickled the payload and
+            # duplicated the send-end into its own process, so closing our copy now
+            # is safe. EOF on the recv-end fires once *every* send-end reference is
+            # closed; holding ours open would block the read loop forever after the
+            # worker finishes.
             await asyncio.wait_for(ack_future, timeout=timeout)
         except BaseException:
             with self._pending_lock:
                 self._pending_calls.pop(request_id, None)
             recv_conn.close()
             raise
+        finally:
+            send_conn.close()
 
         # Read StreamTokenStep objects from the pipe in a thread so we never
         # block the event loop on a blocking recv.

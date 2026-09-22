@@ -111,5 +111,68 @@ class TPClusterResourceTest(unittest.TestCase):
         self.assertEqual(pending.results[2], "dp1")
 
 
+class TPClusterStreamEofTest(unittest.TestCase):
+    """The streaming read loop must terminate once the worker closes its pipe end.
+
+    EOF on a ``multiprocessing.Pipe`` only fires when *every* send-end reference
+    is closed. The coordinator creates the pipe, ships the send end to the worker
+    through the command queue, and must close its own copy; otherwise the recv
+    loop blocks forever after the last token, leaving the SSE response without a
+    finish chunk or ``[DONE]``.
+    """
+
+    def _run_stream_call(self):
+        import asyncio
+
+        from areno.engine.data.batch import StreamTokenStep
+
+        cluster = object.__new__(TPCluster)
+        cluster.config = SimpleNamespace(tp_size=1, dp_size=1)
+        cluster.started = True
+        cluster._request_ids = iter([1])
+        cluster._pending_lock = threading.Lock()
+        cluster._pending_calls = {}
+
+        seen: list[tuple[int, int, str | None]] = []
+        loop = asyncio.new_event_loop()
+
+        def submit(op, payload=None, **kwargs):
+            # Play the worker with a genuinely separate fd, mirroring how the
+            # command queue hands the child an independent duplicate. A plain
+            # pickle round-trip would share the same fd in-process and mask the
+            # bug, so duplicate the descriptor explicitly.
+            import os
+
+            from multiprocessing.connection import Connection
+
+            child_fd = os.dup(payload.stream_conn.fileno())
+            dup_send = Connection(child_fd)
+            kwargs["future"].get_loop().call_soon_threadsafe(kwargs["future"].set_result, None)
+            dup_send.send(StreamTokenStep(prompt_idx=0, token_id=11))
+            dup_send.send(StreamTokenStep(prompt_idx=0, token_id=12, finish_reason="stop"))
+            dup_send.close()
+            return None
+
+        cluster._submit_call = submit
+
+        async def run() -> None:
+            async for step in cluster.stream_call_async(SimpleNamespace()):
+                seen.append((step.prompt_idx, step.token_id, step.finish_reason))
+
+        try:
+            asyncio.set_event_loop(loop)
+            # A hang (the pre-fix behaviour) surfaces as a timeout, not a stall.
+            loop.run_until_complete(asyncio.wait_for(run(), timeout=10))
+        finally:
+            loop.close()
+
+        self.assertEqual(seen, [(0, 11, None), (0, 12, "stop")])
+
+    def test_stream_call_async_ends_when_worker_closes_pipe(self):
+        """Regression: the parent must drop its send-end copy or recv hangs."""
+
+        self._run_stream_call()
+
+
 if __name__ == "__main__":
     unittest.main()
