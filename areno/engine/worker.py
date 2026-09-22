@@ -41,6 +41,7 @@ from areno.engine.protocol import (
     SaveCheckpointPayload,
     WorkerResult,
 )
+from areno.engine.quantization import fp8_decode_active, release_fp8_weights, set_fp8_decode_active
 from areno.engine.runtime.common import pad_rollout_rows
 from areno.engine.runtime.decode_graph import DecodeGraph
 from areno.engine.runtime.rollout import _empty_rollout
@@ -67,6 +68,8 @@ class ArenoWorker:
         self.model = build_model_on_device(config, self.device)
         if config.model_path is not None and not config.dummy_load:
             load_model_weights(self.model, config.model, config.model_path)
+        # quant_method="fp8" quantizes when a decode session materializes infer
+        # weights, because rollout refreshes weights on every policy sync.
         configure_multimodal_training(self.model, config.optimizer, trainable=config.role == "train")
         self.adapter_registry = (
             initialize_lora(self.model, config.lora, seed=config.lora_seed) if config.lora is not None else None
@@ -251,15 +254,22 @@ class ArenoWorker:
         if self.device.type == "cuda":
             torch.cuda.synchronize(self.device)
             torch.cuda.reset_peak_memory_stats(self.device)
-        self.inference._init_infer_cache(
-            InferCacheSpec(
-                max_running_seqs=int(payload.max_running_seqs),
-                max_cache_len=int(payload.max_cache_len),
-                num_blocks=int(payload.num_blocks),
-                block_size=int(payload.block_size),
-                max_blocks_per_seq=int(payload.max_blocks_per_seq),
+        # Capturing decode graphs runs real forwards, so it needs the same
+        # precision the later replay will use.
+        was_active = fp8_decode_active()
+        set_fp8_decode_active(True)
+        try:
+            self.inference._init_infer_cache(
+                InferCacheSpec(
+                    max_running_seqs=int(payload.max_running_seqs),
+                    max_cache_len=int(payload.max_cache_len),
+                    num_blocks=int(payload.num_blocks),
+                    block_size=int(payload.block_size),
+                    max_blocks_per_seq=int(payload.max_blocks_per_seq),
+                )
             )
-        )
+        finally:
+            set_fp8_decode_active(was_active)
         if self.device.type != "cuda":
             return 0.0
         torch.cuda.synchronize(self.device)
@@ -460,6 +470,7 @@ class ArenoWorker:
         self._prepare_actor_onloaded()
         self._rollout_session_active = True
         self._rollout_session_infer_weights_ready = False
+        set_fp8_decode_active(True)
 
     def rollout_session_sync(self, payload: None) -> None:
         """Synchronize TP ranks before agentic request-driven rollout starts."""
@@ -491,6 +502,9 @@ class ArenoWorker:
         finally:
             self._rollout_session_active = False
             self._rollout_session_infer_weights_ready = False
+            # Scoring and training run outside the decode scope, so their
+            # forwards stay bf16 even while an FP8 payload is still resident.
+            set_fp8_decode_active(False)
 
     def _should_drop_rollout_hbm_after_infer(self) -> bool:
         """Return whether one inference call owns the rollout-state teardown."""
@@ -552,6 +566,7 @@ class ArenoWorker:
             return
         self._release_decode_graphs()
         self._infer_cache_spec = None
+        release_fp8_weights(self.model)
         self.model.clear_infer_weights()
         self.model.clear_kv_caches()
         self.model.offload_train_weights()
@@ -593,6 +608,7 @@ class ArenoWorker:
         """Release rollout-only GPU state while keeping CPU-reloadable handles."""
 
         self._release_decode_graphs()
+        release_fp8_weights(self.model)
         self.model.clear_infer_weights()
         offload_kv = getattr(self.model, "offload_kv_caches", None)
         if offload_kv is not None:

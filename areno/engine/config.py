@@ -168,6 +168,7 @@ class ModelConfig:
     qk_norm: bool = True
     v_norm: bool = False
     dtype: torch.dtype = torch.bfloat16
+    quant_method: Literal["none", "fp8", "int4"] = "none"
     hidden_act: str = "silu"
     layer_types: tuple[str, ...] | None = None
     sliding_window: int | None = None

@@ -159,6 +159,10 @@ def test_actor_preserves_disk_optimizer_residency_across_role_swap():
         def offload_train_weights(self):
             calls.append(("weights_offload",))
 
+        def modules(self):
+            # Real models are nn.Module; this stand-in carries no FP8 payloads.
+            return iter(())
+
     class Optimizer:
         def configure_state_offload(self, *, mode, directory, batch_size):
             calls.append(("configure", mode, directory, batch_size))

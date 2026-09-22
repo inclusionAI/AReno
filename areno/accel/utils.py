@@ -9,6 +9,10 @@ import torch
 logger = logging.getLogger(__name__)
 _LOGGED: set[str] = set()
 
+# Largest finite magnitude of E4M3. The weight and activation quantizers must
+# agree on it, so both import this constant instead of restating 448.0.
+FP8_E4M3_MAX = 448.0
+
 
 def log_once(key: str, message: str, *, level: int = logging.DEBUG) -> None:
     """Log ``message`` at most once per process for the given ``key``."""
