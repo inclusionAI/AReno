@@ -203,7 +203,12 @@ def build_chat_completion_response(
         if not tool_calls and tools and tool_call_parser is not None:
             tool_calls = tool_call_parser.parse(raw_text, tools, tool_choice).tool_calls
         finish_reason = "stop" if stop_hit or finish_reasons[index] == "stop" else "length"
-        message: dict[str, Any] = {"role": "assistant", "content": display_text}
+        reasoning_content, content = _split_reasoning_content(
+            tokenizer, token_ids, display_text, stop_strings=stop_strings
+        )
+        message: dict[str, Any] = {"role": "assistant", "content": content}
+        if reasoning_content:
+            message["reasoning_content"] = reasoning_content
         if tool_calls:
             message = {"role": "assistant", "content": None, "tool_calls": tool_calls}
             finish_reason = "tool_calls"
@@ -236,6 +241,105 @@ def _decode(tokenizer: Any, token_ids: list[int], *, skip_special_tokens: bool) 
         return tokenizer.decode(token_ids, skip_special_tokens=skip_special_tokens)
     except TypeError:
         return tokenizer.decode(token_ids)
+
+
+# Literal think markers the chat template uses to separate reasoning from the
+# answer. Bailing V3 registers them as added tokens with ``special=False``, so
+# ``skip_special_tokens=True`` does not remove them from decoded text. Checkpoints
+# disagree on the spelling: ``get_added_vocab`` exposes the word form (leading
+# space plus ``thinking`` / ``response``) while ``added_tokens_decoder`` carries
+# the angle-bracket tag form. Both spellings are listed and compared after
+# stripping the leading space, so either representation resolves to the marker.
+_THINK_OPEN_TEXTS = {" " + "thinking", " " + "<" + "think" + ">"}
+_THINK_CLOSE_TEXTS = {" " + "response", " " + "<" + "/" + "think" + ">"}
+
+
+def _norm_marker(text: str) -> str:
+    return text.lstrip(" ")
+
+
+def _added_token_ids(tokenizer: Any, texts: set[str]) -> set[int]:
+    """Resolve which token ids in ``tokenizer`` correspond to the given markers.
+
+    Reads the tokenizer's added vocabulary rather than relying on a hardcoded id,
+    because ids differ per checkpoint. Unrecognised markers simply contribute no
+    ids, which disables splitting for tokenizers that never define them.
+    """
+
+    wanted = {_norm_marker(text) for text in texts}
+    ids: set[int] = set()
+    decoder = getattr(tokenizer, "added_tokens_decoder", None)
+    if isinstance(decoder, dict):
+        for token_id, entry in decoder.items():
+            content = getattr(entry, "content", None)
+            if content is None and isinstance(entry, dict):
+                content = entry.get("content")
+            if isinstance(content, str) and _norm_marker(content) in wanted:
+                try:
+                    ids.add(int(token_id))
+                except (TypeError, ValueError):
+                    continue
+    if ids:
+        return ids
+    get_added_vocab = getattr(tokenizer, "get_added_vocab", None)
+    if callable(get_added_vocab):
+        try:
+            vocab = get_added_vocab()
+        except Exception:
+            vocab = None
+        if isinstance(vocab, dict):
+            for text, token_id in vocab.items():
+                if isinstance(text, str) and _norm_marker(text) in wanted:
+                    try:
+                        ids.add(int(token_id))
+                    except (TypeError, ValueError):
+                        continue
+    return ids
+
+
+def _split_reasoning_content(
+    tokenizer: Any, token_ids: list[int], display_text: str, *, stop_strings: list[str] | None = None
+) -> tuple[str, str]:
+    """Separate reasoning span from the answer using the chat template semantics.
+
+    The chat template treats everything before ``' response'`` as reasoning and the
+    rest as the answer. This helper applies the same semantics, but locates the
+    markers by **token id** instead of matching substrings on decoded text: the
+    words "thinking"/"response" also occur in ordinary prose, so a substring split
+    would truncate answers at the first literal match. Splitting is enabled only
+    when the tokenizer actually defines the markers; other tokenizers keep the
+    decoded text untouched in ``content``.
+
+    With a marker present, tokens after ``' thinking'`` (if any) up to ``' response'``
+    become ``reasoning_content`` and the remainder becomes ``content``. When the
+    tokenizer defines the markers but the generation has not emitted a closing
+    ``' response'`` yet (e.g. truncated mid-thought at ``max_tokens``), the entire
+    span is reasoning with an empty answer.
+    """
+
+    stop = list(stop_strings or [])
+    open_ids = _added_token_ids(tokenizer, _THINK_OPEN_TEXTS)
+    close_ids = _added_token_ids(tokenizer, _THINK_CLOSE_TEXTS)
+    marker_ids = open_ids | close_ids
+    if not marker_ids:
+        # Tokenizer does not define think markers; behave as before.
+        return "", str(display_text).strip()
+
+    open_pos = next((pos for pos, token_id in enumerate(token_ids) if token_id in open_ids), None)
+    close_pos = next((pos for pos, token_id in enumerate(token_ids) if token_id in close_ids), None)
+    if open_pos is None and close_pos is None:
+        # Markers are defined but were never emitted: the whole turn is reasoning.
+        reasoning, _ = _trim_stop_strings(_decode(tokenizer, list(token_ids), skip_special_tokens=True).strip(), stop)
+        return reasoning, ""
+
+    reasoning_start = 0 if open_pos is None else open_pos + 1
+    if close_pos is None:
+        reasoning_ids, content_ids = list(token_ids[reasoning_start:]), []
+    else:
+        reasoning_ids, content_ids = list(token_ids[reasoning_start:close_pos]), list(token_ids[close_pos + 1 :])
+    reasoning, _ = _trim_stop_strings(_decode(tokenizer, reasoning_ids, skip_special_tokens=True).strip(), stop)
+    content, _ = _trim_stop_strings(_decode(tokenizer, content_ids, skip_special_tokens=True).strip(), stop)
+    return reasoning, content
 
 
 def _trim_stop_strings(text: str, stop: list[str]) -> tuple[str, bool]:

@@ -218,13 +218,38 @@ def test_serve_response_reuses_tool_call_parser():
     assert '"direction":"left"' in choice.message["tool_calls"][0]["function"]["arguments"]
 
 
+class _MarkerTokenizer:
+    """Piece table with added ``thinking``/``response`` tokens at fixed ids.
+
+    ``decode`` joins exactly the requested pieces so token-id based splitting can
+    be exercised without a real checkpoint. Marker ids mirror Bailing V3
+    (`` thinking``=156903, `` response``=156904) and are ``special=False``, so
+    ``skip_special_tokens=True`` keeps them, matching real decoding behaviour.
+    """
+
+    def __init__(self, pieces: dict[int, str]):
+        self._pieces = dict(pieces)
+        self._pieces.setdefault(156903, " thinking")
+        self._pieces.setdefault(156904, " response")
+        self.added_tokens_decoder = {
+            156903: SimpleNamespace(content=" thinking", special=False),
+            156904: SimpleNamespace(content=" response", special=False),
+        }
+
+    def decode(self, token_ids, *, skip_special_tokens=False):
+        del skip_special_tokens
+        return "".join(self._pieces[token_id] for token_id in token_ids)
+
+    def get_added_vocab(self):
+        return {" thinking": 156903, " response": 156904}
+
+
 def test_serve_text_response_preserves_decoded_content():
+    # A tokenizer without think markers keeps the decoded text untouched.
     class ThinkTokenizer:
         def decode(self, token_ids, *, skip_special_tokens=False):
-            del token_ids
-            if skip_special_tokens:
-                return "plan the answer</think>\n\nFinal answer"
-            return "plan the answer</think>\n\nFinal answer<|im_end|>"
+            del token_ids, skip_special_tokens
+            return "plan the answer restate the question"
 
     request = serve_mod.ChatCompletionRequest(
         model="areno",
@@ -243,7 +268,82 @@ def test_serve_text_response_preserves_decoded_content():
 
     choice = response.choices[0]
     assert "reasoning_content" not in choice.message
-    assert choice.message["content"] == "plan the answer</think>\n\nFinal answer"
+    assert choice.message["content"] == "plan the answer restate the question"
+
+
+def test_serve_bailing_style_think_answer_splits_reasoning_content():
+    tokenizer = _MarkerTokenizer(
+        {
+            1: "The user is saying hello - respond warmly.",
+            2: "Hello! Welcome!",
+        }
+    )
+    request = serve_mod.ChatCompletionRequest(
+        model="areno",
+        messages=[serve_mod.ChatMessage(role="user", content="hello")],
+    )
+
+    response = serve_mod._build_response_from(
+        tokenizer, "model", QwenToolCallParser(), request, [10, 21], [[156903, 1, 156904, 2]], ["stop"]
+    )
+
+    choice = response.choices[0]
+    assert choice.message["reasoning_content"] == "The user is saying hello - respond warmly."
+    assert choice.message["content"] == "Hello! Welcome!"
+
+
+def test_serve_bailing_direct_answer_without_open_marker_splits_reasoning_content():
+    # Model emits only the closing marker: everything before it is reasoning (empty
+    # here) and the answer follows, so the marker never leaks into ``content``.
+    tokenizer = _MarkerTokenizer({2: "Hello! How can I help you today?"})
+    request = serve_mod.ChatCompletionRequest(
+        model="areno",
+        messages=[serve_mod.ChatMessage(role="user", content="hi")],
+    )
+
+    response = serve_mod._build_response_from(
+        tokenizer, "model", QwenToolCallParser(), request, [10, 21], [[156904, 2]], ["stop"]
+    )
+
+    choice = response.choices[0]
+    assert "reasoning_content" not in choice.message
+    assert choice.message["content"] == "Hello! How can I help you today?"
+
+
+def test_serve_bailing_unclosed_think_puts_span_in_reasoning_content():
+    # No closing marker (e.g. truncated at max_tokens): the whole span is
+    # reasoning and the answer stays empty, so streaming can reuse the same split.
+    tokenizer = _MarkerTokenizer({1: "still thinking about the greeting"})
+    request = serve_mod.ChatCompletionRequest(
+        model="areno",
+        messages=[serve_mod.ChatMessage(role="user", content="hi")],
+    )
+
+    response = serve_mod._build_response_from(
+        tokenizer, "model", QwenToolCallParser(), request, [10, 21], [[156903, 1]], ["length"]
+    )
+
+    choice = response.choices[0]
+    assert choice.message["reasoning_content"] == "still thinking about the greeting"
+    assert choice.message["content"] == ""
+
+
+def test_serve_plain_response_word_is_not_treated_as_marker():
+    # The English word "response" in ordinary prose must not split the answer;
+    # only the marker token id (156904) does.
+    tokenizer = _MarkerTokenizer({1: "Determine the appropriate response in prose."})
+    request = serve_mod.ChatCompletionRequest(
+        model="areno",
+        messages=[serve_mod.ChatMessage(role="user", content="hi")],
+    )
+
+    response = serve_mod._build_response_from(
+        tokenizer, "model", QwenToolCallParser(), request, [10, 21], [[156903, 1]], ["length"]
+    )
+
+    choice = response.choices[0]
+    assert choice.message["reasoning_content"] == "Determine the appropriate response in prose."
+    assert choice.message["content"] == ""
 
 
 def test_serve_usage_counts_prompt_tokens_once_for_multiple_completions():
