@@ -1135,6 +1135,44 @@ def _trainer_config_from_args(args) -> TrainerConfig:
     )
 
 
+def _build_oom_config_snapshot(trainer_config: TrainerConfig) -> dict:
+    """Extract resolved option values for OOM diagnostics from TrainerConfig."""
+
+    from areno.engine.runtime.oom_diagnostics import build_oom_config_snapshot
+
+    return build_oom_config_snapshot(trainer_config)
+
+
+def _print_oom_guidance(stage_text: str, trainer_config: TrainerConfig) -> None:
+    """Print human-readable and structured OOM guidance to stderr."""
+
+    from areno.engine.runtime.oom_diagnostics import OOMStage, build_oom_guidance, format_oom_guidance
+
+    try:
+        stage = OOMStage(stage_text)
+    except (ValueError, KeyError):
+        stage = OOMStage.UNKNOWN
+
+    config_snapshot = _build_oom_config_snapshot(trainer_config)
+    guidance_text = format_oom_guidance(stage, config_snapshot)
+    if guidance_text:
+        guidance = build_oom_guidance(stage, config_snapshot)
+        click.echo("", err=True)
+        click.echo(guidance_text, err=True)
+        click.echo(
+            f"oom_guidance={json.dumps(guidance.to_dict(), sort_keys=True, separators=(',', ':'))}",
+            err=True,
+        )
+
+
+def _is_cuda_oom_text(error_text: str) -> bool:
+    """Classify a smoke-test error using the same CUDA OOM rules as training."""
+
+    from areno.engine.runtime.oom_diagnostics import is_oom_error
+
+    return is_oom_error(RuntimeError(error_text))
+
+
 def run(trainer_config: TrainerConfig):
     """Build the trainer chosen by `--algo` and run `.fit()` to completion."""
 
@@ -1168,7 +1206,18 @@ def run(trainer_config: TrainerConfig):
         load_from_disk=load_from_disk,
     )
     trainer = build_trainer(trainer_config, instance=api_trainer, dataset=dataset, reward_fn=reward_fn, loss_fn=loss_fn)
-    trainer.fit()
+    try:
+        trainer.fit()
+    except Exception as exc:
+        # Check if the exception has an attached OOM stage (set by the
+        # trainer at explicit call-site boundaries). If not, we don't
+        # guess — UNKNOWN stage means no guidance (backward compatible).
+        stage = getattr(exc, "_oom_stage", "unknown")
+        from areno.engine.runtime.oom_diagnostics import is_oom_error
+
+        if is_oom_error(exc):
+            _print_oom_guidance(stage, trainer_config)
+        raise
 
 
 def _write_dashboard_run_config(config: TrainerConfig) -> None:
@@ -1828,6 +1877,11 @@ def train_command(**options) -> None:
         measurement = smoke_infer_config(trainer_config) if stage == "infer" else smoke_train_config(trainer_config)
         _print_smoke_summary(stage, measurement)
         if not measurement.ok:
+            error_text = measurement.error or ""
+            if _is_cuda_oom_text(error_text):
+                # Smoke test OOM: infer stage from smoke type.
+                oom_stage = "rollout" if stage == "infer" else "training"
+                _print_oom_guidance(oom_stage, trainer_config)
             raise click.ClickException(measurement.error or f"smoke {stage} failed")
         return
     if options.get("tune_params"):

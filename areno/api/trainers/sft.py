@@ -32,6 +32,7 @@ from areno.api.multimodal import (
     record_has_image,
 )
 from areno.api.tokenizer import configure_chat_template_enable_thinking
+from areno.engine.runtime.oom_diagnostics import OOMStage, oom_stage
 
 
 class SFTTrainer:
@@ -52,7 +53,8 @@ class SFTTrainer:
         self.logger = logging.getLogger(f"{self.__class__.__module__}.{self.__class__.__name__}")
 
     def fit(self) -> None:
-        self.areno.init()
+        with oom_stage(OOMStage.MODEL_LOADING):
+            self.areno.init()
         try:
             self._fit_initialized()
         finally:
@@ -83,12 +85,13 @@ class SFTTrainer:
                 # The backend computes next-token logprobs for the supplied
                 # labels; `sft_loss_fn` selects only response/target positions
                 # using the prompt mask produced below.
-                result = self.areno.train(
-                    train_batch,
-                    self.loss_fn,
-                    mini_bs=self.config.mini_bs,
-                    gradient_accumulation_steps=self.config.gradient_accumulation_steps,
-                )
+                with oom_stage(OOMStage.TRAINING):
+                    result = self.areno.train(
+                        train_batch,
+                        self.loss_fn,
+                        mini_bs=self.config.mini_bs,
+                        gradient_accumulation_steps=self.config.gradient_accumulation_steps,
+                    )
                 train_time_s = time.perf_counter() - train_start
                 if isinstance(result, dict):
                     result["policy_train_wall_time_s"] = train_time_s
