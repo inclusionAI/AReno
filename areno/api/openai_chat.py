@@ -244,21 +244,25 @@ def _decode(tokenizer: Any, token_ids: list[int], *, skip_special_tokens: bool) 
 
 
 # Literal think markers the chat template uses to separate reasoning from the
-# answer. Bailing V3 registers them as added tokens with ``special=False``, so
-# ``skip_special_tokens=True`` does not remove them from decoded text. Checkpoints
-# disagree on the spelling: ``get_added_vocab`` exposes the word form (leading
-# space plus ``thinking`` / ``response``) while ``added_tokens_decoder`` carries
-# the angle-bracket tag form. Both spellings are listed and compared after
-# stripping the leading space, so either representation resolves to the marker.
-_THINK_OPEN_TEXTS = {" " + "thinking", " " + "<" + "think" + ">"}
-_THINK_CLOSE_TEXTS = {" " + "response", " " + "<" + "/" + "think" + ">"}
+# answer. They are registered as added tokens with ``special=False``, so
+# ``skip_special_tokens=True`` does not remove them from decoded text. Both the
+# word form (``thinking`` / ``response``) and the angle-bracket form
+# (`` thinking`` / `` response``) are listed because checkpoints disagree on the
+# spelling; the lookup strips surrounding whitespace so either resolves.
+_THINK_OPEN_TEXTS = ("thinking", "<" + "think" + ">")
+_THINK_CLOSE_TEXTS = ("response", "<" + "/" + "think" + ">")
+
+# What a tokenizer emits for a multi-byte character whose trailing bytes have not
+# arrived yet. A decode ending in this character is not stable and is held back
+# by the streaming splitter until the next token completes it.
+_REPLACEMENT_CHAR = "\ufffd"
 
 
 def _norm_marker(text: str) -> str:
-    return text.lstrip(" ")
+    return text.strip()
 
 
-def _added_token_ids(tokenizer: Any, texts: set[str]) -> set[int]:
+def _added_token_ids(tokenizer: Any, texts: tuple[str, ...]) -> set[int]:
     """Resolve which token ids in ``tokenizer`` correspond to the given markers.
 
     Reads the tokenizer's added vocabulary rather than relying on a hardcoded id,
@@ -297,49 +301,188 @@ def _added_token_ids(tokenizer: Any, texts: set[str]) -> set[int]:
     return ids
 
 
+class ReasoningSplitter:
+    """Token-level state machine that separates reasoning from the answer.
+
+    The chat template treats everything before the closing think marker as
+    reasoning and the rest as the answer. Engines implement this as a token
+    state machine rather than a post-hoc substring split, so the same instance
+    serves both the non-streaming path (accumulate the whole turn) and the
+    streaming path (forward per-token deltas as they arrive).
+
+    Markers are located by **token id**, never by decoded text: the words
+    "thinking" / "response" also occur in ordinary prose and inside other added
+    tokens (``</tool_response>``), so a substring split truncates answers at the
+    first literal match.
+
+    Channel assignment follows the chat template:
+
+    * tokens before the opening marker, if any, start in reasoning;
+    * an opening marker moves the machine into reasoning;
+    * a closing marker moves it into the answer;
+    * with the markers defined but never emitted, the whole turn is reasoning
+      (the answer stays empty). This lets a truncated thought stream verbatim.
+
+    When the tokenizer defines no markers at all the splitter is *disabled* and
+    every token is plain content, so non-reasoning models keep their exact
+    previous behaviour.
+    """
+
+    __slots__ = (
+        "_tokenizer",
+        "_open_ids",
+        "_close_ids",
+        "_in_reasoning",
+        "_reasoning_ids",
+        "_content_ids",
+        "_reasoning_emitted",
+        "_content_emitted",
+    )
+
+    def __init__(self, tokenizer: Any, open_ids: set[int], close_ids: set[int]) -> None:
+        self._tokenizer = tokenizer
+        self._open_ids = open_ids
+        self._close_ids = close_ids
+        # Disabled splitter (no markers): everything is content.
+        self._in_reasoning = bool(open_ids or close_ids)
+        self._reasoning_ids: list[int] = []
+        self._content_ids: list[int] = []
+        # Characters already handed to the caller, per channel. Used to emit each
+        # stable character exactly once across incremental decodes.
+        self._reasoning_emitted = 0
+        self._content_emitted = 0
+
+    @classmethod
+    def from_tokenizer(
+        cls,
+        tokenizer: Any,
+        *,
+        open_ids: set[int] | None = None,
+        close_ids: set[int] | None = None,
+    ) -> "ReasoningSplitter":
+        """Build a splitter for *tokenizer*, resolving markers by token id.
+
+        Marker ids are taken from *open_ids* / *close_ids* when given (a model or
+        generation config that declares reasoning tokens), falling back to the
+        tokenizer's added vocabulary. The reference checkpoint's config declares
+        no reasoning tokens, so the added vocabulary is the actual source there;
+        the lookup tolerates both the word (``thinking`` / ``response``) and
+        angle-bracket (`` thinking`` / `` response``) spellings.
+        """
+
+        if open_ids is None:
+            open_ids = _added_token_ids(tokenizer, _THINK_OPEN_TEXTS)
+        if close_ids is None:
+            close_ids = _added_token_ids(tokenizer, _THINK_CLOSE_TEXTS)
+        return cls(tokenizer, set(open_ids), set(close_ids))
+
+    @property
+    def enabled(self) -> bool:
+        """True when the tokenizer defines think markers and splitting applies."""
+
+        return bool(self._open_ids or self._close_ids)
+
+    def push(self, token_id: int) -> tuple[str, str]:
+        """Feed one token, returning the ``(reasoning_delta, content_delta)`` it adds.
+
+        At most one of the two strings is non-empty; both are empty when the
+        token was a consumed marker or contributed nothing visible yet. Deltas
+        are produced by diffing the decoded prefix of the token's own channel,
+        which keeps multi-token BPE pieces and partial UTF-8 sequences intact.
+        """
+
+        if token_id in self._open_ids:
+            self._in_reasoning = True
+            return "", ""
+        if token_id in self._close_ids:
+            self._in_reasoning = False
+            return "", ""
+        if self._in_reasoning:
+            _, delta = self._append(self._reasoning_ids, token_id, self._reasoning_emitted)
+            self._reasoning_emitted += len(delta)
+            return delta, ""
+        _, delta = self._append(self._content_ids, token_id, self._content_emitted)
+        self._content_emitted += len(delta)
+        return "", delta
+
+    def _append(self, channel: list[int], token_id: int, emitted: int) -> tuple[str, str]:
+        """Append *token_id* to *channel*, returning ``(stable_text, delta)``.
+
+        A multi-byte character split across tokens decodes as U+FFFD until its
+        trailing bytes arrive, so the tail of the decode is not stable yet. Only
+        the part before any trailing replacement character is handed out; the
+        caller picks up the remainder on the next push once it is complete.
+        """
+
+        channel.append(token_id)
+        text = self._decode(channel)
+        # Only a *trailing* replacement character marks an incomplete multi-byte
+        # character; a U+FFFD in the middle is genuine decoded content and must
+        # not be held back.
+        stable = text.rstrip(_REPLACEMENT_CHAR) if text.endswith(_REPLACEMENT_CHAR) else text
+        return stable, stable[emitted:]
+
+    def _decode(self, token_ids: list[int]) -> str:
+        return _decode(self._tokenizer, token_ids, skip_special_tokens=True)
+
+    def flush(self) -> tuple[str, str]:
+        """Return the ``(reasoning, content)`` tail still held back.
+
+        A trailing incomplete multi-byte character is withheld during streaming
+        until its bytes arrive. Call this once the stream ends so the final
+        pending text is not dropped.
+        """
+
+        reasoning = self._decode(self._reasoning_ids)
+        content = self._decode(self._content_ids)
+        r_tail = reasoning[self._reasoning_emitted :]
+        c_tail = content[self._content_emitted :]
+        self._reasoning_emitted = len(reasoning)
+        self._content_emitted = len(content)
+        return r_tail, c_tail
+
+    def finish(self) -> tuple[str, str]:
+        """Return the accumulated ``(reasoning, content)`` after stripping.
+
+        Stop-string trimming is applied by the caller, which owns the request's
+        ``stop`` list.
+        """
+
+        return self._decode(self._reasoning_ids).strip(), self._decode(self._content_ids).strip()
+
+    def split(
+        self, token_ids: list[int], display_text: str, *, stop_strings: list[str] | None = None
+    ) -> tuple[str, str]:
+        """Replay *token_ids* through the machine and return stripped spans.
+
+        Non-streaming helper. When the splitter is disabled it preserves the
+        pre-existing behaviour: the decoded text is returned verbatim as content
+        with no reasoning span.
+        """
+
+        if not self.enabled:
+            return "", str(display_text).strip()
+        for token_id in token_ids:
+            self.push(token_id)
+        reasoning, content = self.finish()
+        stop = list(stop_strings or [])
+        reasoning, _ = _trim_stop_strings(reasoning, stop)
+        content, _ = _trim_stop_strings(content, stop)
+        return reasoning, content
+
+
 def _split_reasoning_content(
     tokenizer: Any, token_ids: list[int], display_text: str, *, stop_strings: list[str] | None = None
 ) -> tuple[str, str]:
-    """Separate reasoning span from the answer using the chat template semantics.
+    """Separate the reasoning span from the answer for one completed turn.
 
-    The chat template treats everything before ``' response'`` as reasoning and the
-    rest as the answer. This helper applies the same semantics, but locates the
-    markers by **token id** instead of matching substrings on decoded text: the
-    words "thinking"/"response" also occur in ordinary prose, so a substring split
-    would truncate answers at the first literal match. Splitting is enabled only
-    when the tokenizer actually defines the markers; other tokenizers keep the
-    decoded text untouched in ``content``.
-
-    With a marker present, tokens after ``' thinking'`` (if any) up to ``' response'``
-    become ``reasoning_content`` and the remainder becomes ``content``. When the
-    tokenizer defines the markers but the generation has not emitted a closing
-    ``' response'`` yet (e.g. truncated mid-thought at ``max_tokens``), the entire
-    span is reasoning with an empty answer.
+    Thin wrapper over :class:`ReasoningSplitter` kept for the existing
+    non-streaming call path.
     """
 
-    stop = list(stop_strings or [])
-    open_ids = _added_token_ids(tokenizer, _THINK_OPEN_TEXTS)
-    close_ids = _added_token_ids(tokenizer, _THINK_CLOSE_TEXTS)
-    marker_ids = open_ids | close_ids
-    if not marker_ids:
-        # Tokenizer does not define think markers; behave as before.
-        return "", str(display_text).strip()
-
-    open_pos = next((pos for pos, token_id in enumerate(token_ids) if token_id in open_ids), None)
-    close_pos = next((pos for pos, token_id in enumerate(token_ids) if token_id in close_ids), None)
-    if open_pos is None and close_pos is None:
-        # Markers are defined but were never emitted: the whole turn is reasoning.
-        reasoning, _ = _trim_stop_strings(_decode(tokenizer, list(token_ids), skip_special_tokens=True).strip(), stop)
-        return reasoning, ""
-
-    reasoning_start = 0 if open_pos is None else open_pos + 1
-    if close_pos is None:
-        reasoning_ids, content_ids = list(token_ids[reasoning_start:]), []
-    else:
-        reasoning_ids, content_ids = list(token_ids[reasoning_start:close_pos]), list(token_ids[close_pos + 1 :])
-    reasoning, _ = _trim_stop_strings(_decode(tokenizer, reasoning_ids, skip_special_tokens=True).strip(), stop)
-    content, _ = _trim_stop_strings(_decode(tokenizer, content_ids, skip_special_tokens=True).strip(), stop)
-    return reasoning, content
+    return ReasoningSplitter.from_tokenizer(tokenizer).split(
+        token_ids, display_text, stop_strings=stop_strings
+    )
 
 
 def _trim_stop_strings(text: str, stop: list[str]) -> tuple[str, bool]:

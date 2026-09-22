@@ -32,7 +32,7 @@ from areno.api.multimodal import (
     image_token_counts_from_features,
     mrope_position_ids_from_image_grid,
 )
-from areno.api.openai_chat import build_chat_completion_response, messages_to_prompt_tokens
+from areno.api.openai_chat import ReasoningSplitter, build_chat_completion_response, messages_to_prompt_tokens
 from areno.api.tokenizer import (
     apply_chat_template_with_options,
     configure_chat_template_enable_thinking,
@@ -787,6 +787,38 @@ def _cancel_pending_request(item: PendingRequest) -> None:
     item.cancelled = True
 
 
+def _sse_delta_chunk(
+    *,
+    response_id: str,
+    created: int,
+    model: str,
+    index: int,
+    reasoning_delta: str,
+    content_delta: str,
+) -> str | None:
+    """Build one SSE data line carrying a reasoning and/or content delta.
+
+    Returns ``None`` when the token contributed no visible text (for example a
+    consumed think marker), so callers can skip emitting an empty chunk.
+    """
+
+    delta: dict[str, Any] = {}
+    if reasoning_delta:
+        delta["reasoning_content"] = reasoning_delta
+    if content_delta:
+        delta["content"] = content_delta
+    if not delta:
+        return None
+    chunk = {
+        "id": response_id,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model,
+        "choices": [{"index": index, "delta": delta, "finish_reason": None}],
+    }
+    return f"data: {_json.dumps(chunk, ensure_ascii=False)}\n\n"
+
+
 def _build_cancelled_response(state: ServeState, item: PendingRequest) -> ChatCompletionResponse:
     """Synthesise an empty-token response with stop finish reason for a cancelled request."""
     response_ids = [[] for _ in range(int(item.request.n))]
@@ -897,33 +929,40 @@ async def _stream_chat_completions(
         }
     )
 
-    # Content chunks — one per token as they arrive from the backend.
+    # Content chunks — one per token as they arrive from the backend. Tokens are
+    # routed through the reasoning state machine so a thinking turn streams its
+    # ``reasoning_content`` delta first and the answer follows on ``content``,
+    # matching the non-streaming response shape.
+    splitter = ReasoningSplitter.from_tokenizer(tokenizer)
     collected: list[int] = []
-    prev_text = ""
     finish_reason: str | None = None
+
+    def _delta_chunk(reasoning_delta: str, content_delta: str) -> str | None:
+        return _sse_delta_chunk(
+            response_id=response_id,
+            created=created,
+            model=model,
+            index=0,
+            reasoning_delta=reasoning_delta,
+            content_delta=content_delta,
+        )
+
     try:
         async for step in stream:
             if cancel_event.is_set():
                 finish_reason = "cancelled"
                 break
             collected.append(step.token_id)
-            cur_text = tokenizer.decode(collected, skip_special_tokens=False)
-            delta = cur_text[len(prev_text):] if cur_text.startswith(prev_text) else cur_text
-            prev_text = cur_text
+            chunk = _delta_chunk(*splitter.push(step.token_id))
             if step.finish_reason is not None:
                 finish_reason = step.finish_reason
-            if delta:
-                yield _emit(
-                    {
-                        "id": response_id,
-                        "object": "chat.completion.chunk",
-                        "created": created,
-                        "model": model,
-                        "choices": [
-                            {"index": 0, "delta": {"content": delta}, "finish_reason": None}
-                        ],
-                    }
-                )
+            if chunk is not None:
+                yield chunk
+        # A trailing incomplete multi-byte character stays held back until the
+        # stream ends; emit it now so the final text is complete.
+        tail = _delta_chunk(*splitter.flush())
+        if tail is not None:
+            yield tail
     finally:
         disconnect_task.cancel()
 
@@ -1024,34 +1063,37 @@ async def _build_sse_chunks(
 
     # -- Content chunks ---------------------------------------------------------------
     if n_choices == 1 and response.choices[0].finish_reason != "tool_calls":
-        # Single-choice text response: emit token-level deltas.
+        # Single-choice text response: emit token-level deltas, split into
+        # reasoning and answer channels by the same state machine the
+        # true-streaming path uses.
         choice = response.choices[0]
         token_ids = response_ids[0]
-        prev_text = ""
-        for k in range(1, len(token_ids) + 1):
-            cur_text = tokenizer.decode(token_ids[:k], skip_special_tokens=False)
-            delta = cur_text[len(prev_text):] if cur_text.startswith(prev_text) else cur_text
-            prev_text = cur_text
-            if delta:
-                yield _emit(
-                    {
-                        "id": response.id,
-                        "object": "chat.completion.chunk",
-                        "created": created,
-                        "model": model,
-                        "choices": [
-                            {
-                                "index": choice.index,
-                                "delta": {"content": delta},
-                                "finish_reason": None,
-                            }
-                        ],
-                    }
-                )
+        splitter = ReasoningSplitter.from_tokenizer(tokenizer)
+
+        def _delta_chunk(reasoning_delta: str, content_delta: str) -> str | None:
+            return _sse_delta_chunk(
+                response_id=response.id,
+                created=created,
+                model=model,
+                index=choice.index,
+                reasoning_delta=reasoning_delta,
+                content_delta=content_delta,
+            )
+
+        for token_id in token_ids:
+            chunk = _delta_chunk(*splitter.push(token_id))
+            if chunk is not None:
+                yield chunk
+        # Emit any multi-byte character held back until the sequence ended.
+        tail = _delta_chunk(*splitter.flush())
+        if tail is not None:
+            yield tail
     else:
         # Multi-choice or tool-call response: emit per-choice deltas at once.
         for c in response.choices:
             delta: dict[str, Any] = {}
+            if c.message.get("reasoning_content"):
+                delta["reasoning_content"] = c.message["reasoning_content"]
             if c.message.get("content"):
                 delta["content"] = c.message["content"]
             if c.message.get("tool_calls"):

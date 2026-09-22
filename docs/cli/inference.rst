@@ -212,6 +212,52 @@ can be used when the client and server do not share a filesystem.
 Media support depends on the loaded model processor. See
 :doc:`../concepts/multimodal-inputs` for serving and training guidance.
 
+Reasoning content
+-----------------
+
+Reasoning models wrap their chain of thought in added tokens such as
+``thinking`` / ``response``. AReno applies the chat template's semantics
+(everything before the closing marker is reasoning, everything after is the
+answer) and reports the two spans separately:
+
+* non-streaming responses put the answer in ``message.content`` and, when the
+  turn has a reasoning span, the chain of thought in
+  ``message.reasoning_content``;
+* streaming responses emit ``delta.reasoning_content`` chunks first and
+  ``delta.content`` chunks once the closing marker is seen. The two channels
+  are produced by the same token-level state machine as the non-streaming
+  path, so both modes agree on the split.
+
+Markers are located by **token id**, not by matching text: the words
+"thinking" and "response" also occur in ordinary prose and inside other added
+tokens (such as ``</tool_response>``), so a substring split would truncate
+answers at the first literal match. The ids are read from the tokenizer's
+added vocabulary, and may be overridden with ids declared by a model config.
+
+When the tokenizer defines no reasoning markers, no split happens: the whole
+turn is ``content`` and ``reasoning_content`` is absent, so non-reasoning
+models keep their previous behaviour. When the tokenizer *does* define the
+markers but the generation ends before the closing marker is emitted (for
+example, truncated at the token budget), the entire turn is reported as
+``reasoning_content`` with an empty ``content``; this keeps a truncated thought
+intact and lets the streaming path forward it verbatim.
+
+.. code-block:: json
+
+   {
+     "choices": [
+       {
+         "index": 0,
+         "message": {
+           "role": "assistant",
+           "reasoning_content": "The user greets me, so I should greet back.",
+           "content": "Hello! How can I help you today?"
+         },
+         "finish_reason": "stop"
+       }
+     ]
+   }
+
 Continuous batching behavior
 ----------------------------
 

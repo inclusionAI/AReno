@@ -9,6 +9,8 @@ from __future__ import annotations
 import asyncio
 import json
 from contextlib import contextmanager
+from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -74,12 +76,12 @@ def _tool_call_response() -> ChatCompletionResponse:
 # -- Mock infrastructure ------------------------------------------------------
 
 
-def _make_stream_generator(response_ids: list[list[int]]):
+def _make_stream_generator(response_ids: list[list[int]], *, finish_reason: str = "stop"):
     """Return an async callable that yields ``_ServeStreamStep`` objects.
 
     Each invocation creates a fresh async generator that replays the given token
-    sequences for prompt index 0, appending ``"stop"`` as the finish reason for
-    the last token of each sequence.
+    sequences for prompt index 0, appending *finish_reason* for the last token of
+    each sequence.
     """
 
     from areno.cli.serve import _ServeStreamStep
@@ -88,21 +90,49 @@ def _make_stream_generator(response_ids: list[list[int]]):
         for ids in response_ids:
             for j, token_id in enumerate(ids):
                 is_last = j == len(ids) - 1
-                yield _ServeStreamStep(0, token_id, "stop" if is_last else None)
+                yield _ServeStreamStep(0, token_id, finish_reason if is_last else None)
 
     return _generate
 
 
+def _make_marker_tokenizer(pieces: dict[int, str]):
+    """Build a piece-table tokenizer exposing ``thinking``/``response`` markers.
+
+    Marker ids match the reference Bailing V3 checkpoint (`` thinking``=156903,
+    `` response``=156904) and are ``special=False``, matching how the real
+    tokenizer keeps them under ``skip_special_tokens=True``.  ``decode`` joins
+    exactly the requested pieces so the state machine's channel deltas can be
+    asserted without a real checkpoint.
+    """
+
+    tokenizer = MagicMock()
+    tokenizer.added_tokens_decoder = {
+        156903: SimpleNamespace(content=" thinking", special=False),
+        156904: SimpleNamespace(content=" response", special=False),
+    }
+    tokenizer.decode = lambda ids, **kw: "".join(pieces[i] for i in ids)
+    return tokenizer
+
+
 @contextmanager
-def _mock_serve(response: ChatCompletionResponse, *, response_ids: list[list[int]] | None = None):
+def _mock_serve(
+    response: ChatCompletionResponse,
+    *,
+    response_ids: list[list[int]] | None = None,
+    tokenizer: Any = None,
+    finish_reason: str = "stop",
+):
     """Mock serve-module internals so streaming requests resolve with *response*.
 
     When *response_ids* is given, the mock engine returns a ``_ServeRollout`` so
     the SSE path exercises token-level incremental decode.  The mock tokenizer
     decodes ``[id_1, id_2, …]`` as ``"T1T2…"``, allowing per-token delta diffs.
+    Pass *tokenizer* to override it (e.g. with a marker-aware piece table).
     """
-    mock_tokenizer = MagicMock()
-    mock_tokenizer.decode = lambda ids, **kw: "".join(f"T{i}" for i in ids)
+    if tokenizer is None:
+        tokenizer = MagicMock()
+        tokenizer.decode = lambda ids, **kw: "".join(f"T{i}" for i in ids)
+    mock_tokenizer = tokenizer
 
     mock_engine = MagicMock()
     mock_engine.max_model_len = 4096
@@ -117,7 +147,7 @@ def _mock_serve(response: ChatCompletionResponse, *, response_ids: list[list[int
         )
         # Also wire up generate_rollout_stream_async so the true-streaming
         # path (n=1, no tools) can be exercised with the same token data.
-        mock_engine.generate_rollout_stream_async = _make_stream_generator(response_ids)
+        mock_engine.generate_rollout_stream_async = _make_stream_generator(response_ids, finish_reason=finish_reason)
     else:
         mock_engine.generate_rollout_async = AsyncMock(
             return_value=_ServeRollout(response_ids=[[1]], finish_reason=["stop"])
@@ -401,3 +431,145 @@ class TestStreamingEndpoint:
             assert data["object"] == "chat.completion"
             assert data["choices"][0]["message"]["role"] == "assistant"
             assert data["choices"][0]["message"]["content"] == "T1"
+
+
+def _reasoning_deltas(events: list) -> list[str]:
+    """Extract non-empty reasoning_content delta strings from parsed SSE events."""
+    return [
+        c["choices"][0]["delta"]["reasoning_content"]
+        for c in events
+        if c != "[DONE]"
+        and c.get("choices")
+        and c["choices"][0]["delta"].get("reasoning_content", "") != ""
+    ]
+
+
+class TestStreamingReasoningSplit:
+    """Streaming must route reasoning tokens to ``delta.reasoning_content``.
+
+    The same token-level state machine serves the non-streaming response, so a
+    thinking turn keeps its chains of thought out of the answer channel in both
+    modes.
+    """
+
+    # Pieces: id 156903 = " thinking", id 156904 = "</think>".
+    _PIECES = {
+        156903: " thinking",
+        156904: "</think>",
+        11: "The user greets me.",
+        12: "Hello! How can I help?",
+        13: "plain prose about response words",
+    }
+
+    @staticmethod
+    def _stream(token_ids: list[int], *, finish_reason: str = "stop") -> list:
+        tokenizer = _make_marker_tokenizer(TestStreamingReasoningSplit._PIECES)
+        with _mock_serve(
+            _text_response("ignored", finish_reason=finish_reason),
+            response_ids=[token_ids],
+            tokenizer=tokenizer,
+            finish_reason=finish_reason,
+        ):
+            app = _build_streaming_app()
+            return _collect_sse_events(
+                app,
+                {"messages": [{"role": "user", "content": "Hi"}], "stream": True},
+            )
+
+    def test_reasoning_and_answer_go_to_separate_channels(self):
+        events = self._stream([156903, 11, 156904, 12])
+
+        assert "".join(_reasoning_deltas(events)) == "The user greets me."
+        assert "".join(_content_deltas(events)) == "Hello! How can I help?"
+        # No marker text leaks into either channel.
+        for chunk in _without_sentinel(events):
+            delta = chunk["choices"][0]["delta"]
+            assert "response" not in delta.get("reasoning_content", "")
+            assert "response" not in delta.get("content", "")
+
+    def test_close_only_marker_routes_answer_to_content(self):
+        # run1 shape: the model emits only the closing marker before the answer.
+        events = self._stream([156904, 12])
+
+        assert _reasoning_deltas(events) == []
+        assert "".join(_content_deltas(events)) == "Hello! How can I help?"
+
+    def test_unclosed_think_streams_entirely_as_reasoning(self):
+        # Truncated at max_tokens: no closing marker, so the answer stays empty.
+        events = self._stream([156903, 11], finish_reason="length")
+
+        assert "".join(_reasoning_deltas(events)) == "The user greets me."
+        assert _content_deltas(events) == []
+        assert _without_sentinel(events)[-1]["choices"][0]["finish_reason"] == "length"
+
+    def test_plain_word_response_does_not_split(self):
+        # The English word "response" in prose must not open the answer channel.
+        events = self._stream([156903, 13], finish_reason="length")
+
+        assert "".join(_reasoning_deltas(events)) == "plain prose about response words"
+        assert _content_deltas(events) == []
+
+    def test_no_marker_tokenizer_streams_plain_content(self):
+        # A tokenizer without think markers keeps every token on ``content``.
+        with _mock_serve(_text_response("ignored"), response_ids=[[1, 2, 3]]):
+            app = _build_streaming_app()
+            events = _collect_sse_events(
+                app,
+                {"messages": [{"role": "user", "content": "Hi"}], "stream": True},
+            )
+
+        assert _reasoning_deltas(events) == []
+        assert "".join(_content_deltas(events)) == "T1T2T3"
+
+
+class TestStreamingMultibyteHoldback:
+    """A multi-byte character split across tokens must not stream twice.
+
+    Tokenizers decode a partial multi-byte character as U+FFFD until its trailing
+    bytes arrive. The state machine holds that unstable tail back and flushes it
+    at the end, so the concatenated deltas equal the non-streaming content.
+    """
+
+    # id 156903 = " thinking", id 156904 = "</think>".
+    # ids 21/22 simulate one emoji split across two tokens: decoding either alone
+    # yields the replacement character, only the pair decodes to the emoji.
+    _PIECES = {156903: " thinking", 156904: " response", 20: "Hi "}
+    _PAIR = {21: "\ufffd", 22: "\ufffd"}
+
+    @staticmethod
+    def _tokenizer():
+        tokenizer = _make_marker_tokenizer(
+            {**TestStreamingMultibyteHoldback._PIECES, **TestStreamingMultibyteHoldback._PAIR}
+        )
+        original = tokenizer.decode
+
+        def _decode(ids, **kw):
+            # Emit the replacement char while the pair is incomplete, and the
+            # real emoji once both ids are present.
+            if 21 in ids and 22 in ids:
+                text = "".join(
+                    "" if i in (21, 22) else TestStreamingMultibyteHoldback._PIECES.get(i, "\ufffd")
+                    for i in ids
+                )
+                return text + "🚀"
+            return original(ids, **kw)
+
+        tokenizer.decode = _decode
+        return tokenizer
+
+    def test_split_multibyte_char_not_duplicated(self):
+        token_ids = [156904, 20, 21, 22]
+        with _mock_serve(
+            _text_response("ignored"),
+            response_ids=[token_ids],
+            tokenizer=self._tokenizer(),
+        ):
+            app = _build_streaming_app()
+            events = _collect_sse_events(
+                app,
+                {"messages": [{"role": "user", "content": "Hi"}], "stream": True},
+            )
+
+        streamed = "".join(_content_deltas(events))
+        assert streamed == "Hi 🚀"
+        assert "\ufffd" not in streamed
