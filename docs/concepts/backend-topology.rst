@@ -97,4 +97,6 @@ NPU inherits the CUDA backend and engine workflows. Its backend directory
 contains only the registration/device adapter. Configuration, optimizers,
 losses, training, generation, serving and checkpoints reuse existing code.
 HCCL initialization and NPU execution boundaries are device-specific.
-Native NPU accel kernels remain work in progress; see :doc:`npu-sft`.
+The registered algorithms include SFT, DPO, GRPO, GSPO and PPO, with actor,
+reference, reward and critic roles. Native NPU accel kernels remain work in
+progress; see :doc:`npu` for integration details and hardware validation status.

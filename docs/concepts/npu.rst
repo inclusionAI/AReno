@@ -1,6 +1,14 @@
 Ascend NPU integration
 ======================
 
+The NPU backend integrates Ascend with AReno's shared training, rollout,
+scoring and serving workflows. Its registered training algorithms are SFT,
+DPO, GRPO, GSPO and PPO, with actor, reference, reward and critic model roles.
+It also reuses distributed TP/DP execution, custom losses, optimizer offload
+and checkpoint handling. SFT is one supported workflow, not the scope of the
+NPU adaptation. Hardware validation status and operator limitations are
+documented below.
+
 The target environment is Linux/aarch64, Ascend910_9382, CANN 9.0.0,
 PyTorch 2.10.0+cpu and torch_npu 2.10.0.post2. The CPU-tagged PyTorch
 installation is retained; torch_npu provides the NPU device and operators.
@@ -326,6 +334,8 @@ Remaining work includes the recurrent features listed above, library-stack
 validation, and native extension numerical acceptance. The opt-in
 ``tests/test_npu_end_to_end.py`` exercises SFT with all three optimizers,
 rollout, checkpoint reload and HTTP serving against a local checkpoint.
+This suite's SFT training coverage does not limit the backend's algorithm
+scope; DPO, GRPO, GSPO and PPO also require end-to-end hardware acceptance.
 The HTTP test runs with both ``native`` and ``flash`` selection and checks
 model listing, greedy repeatability, batched completions and worker shutdown.
 Run these in a fresh process, separately from kernel
