@@ -188,6 +188,22 @@ shards, repeated indices, gradients, storage offsets, padding canaries and
 CUDA graph replay for fixed-shape paths. The native Ascend implementation
 still requires a working extension import and numerical validation on hardware.
 
+Attention implementation
+------------------------
+
+Native NPU attention is implemented in Ascend C and connected to the shared
+accel API and engine attention routes. Dense and packed causal attention have
+native forward and backward kernels. Paged decode has native KV-cache updates,
+attention forward and split reduction; its diagnostic backward uses the shared
+Torch reference rather than a native Ascend backward kernel.
+
+The implementation lives in ``areno/accel/csrc/npu/attention_kernel.cpp``
+and ``attention.cpp``, with device/library selection in
+``areno/accel/npu/attention.py``. Select ``--attn-backend native`` for training
+or serving to use these kernels directly. Implementation and runtime routing
+are present; numerical acceptance on Ascend and performance benchmarking
+remain pending.
+
 With ``attn_backend="flash"`` (the default), dense and packed FP16/BF16
 attention with head dimensions up to 256 call
 ``flash-attn-npu`` with its own autograd. Supported paged decode calls its
