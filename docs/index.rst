@@ -51,6 +51,7 @@ AReno documentation
    CLI Reference <reference/cli>
    SDK Reference <sdk/trainer>
    Supported Models <models/supported>
+   Experimental APIs <reference/experimental>
 
 .. toctree::
    :hidden:
