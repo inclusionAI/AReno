@@ -7,6 +7,7 @@ and maintained by the AReno community.
   <a href="https://www.python.org/downloads/"><img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-blue.svg"></a>
   <a href="https://pytorch.org/"><img alt="PyTorch 2.6+" src="https://img.shields.io/badge/PyTorch-2.6%2B-ee4c2c.svg"></a>
   <a href="https://github.com/ml-explore/mlx"><img alt="MLX" src="https://img.shields.io/badge/Apple_Silicon-MLX-555555.svg"></a>
+  <a href="docs/concepts/npu.rst"><img alt="Ascend NPU" src="https://img.shields.io/badge/Ascend-NPU-d0021b.svg"></a>
   <a href="https://asystem-ai.io/docs/areno/"><img alt="Documentation" src="https://img.shields.io/badge/documentation-AReno-2ea44f.svg"></a>
 </p>
 
@@ -30,7 +31,6 @@ AReno's mission is to make LLM RL **accessible** for a broad community of resear
 
 - ✨ **Plug-and-play**: various post-training methods are easily accessible via the `--algo` flag or the same `Trainer` class from Python, no cluster or launcher to set up.
 - 🪶 **Lightweight**: one self-contained train/serve stack with CUDA, Ascend NPU, and Apple Silicon MLX backends.
-- 🔌 **Ascend NPU**: shared SFT, DPO, GRPO, GSPO, PPO, rollout and serving workflows, with native Ascend C attention. See the [NPU integration guide](docs/concepts/npu.rst) for installation and usage.
 - 🧰 **Agentic RL ready**: run an agent function against AReno's local OpenAI-compatible proxy, return explicit trajectories, and train from tokens, logprobs, rewards, and loss masks derived by the trainer.
 - 🎞️ **Multimodal**: use image, audio, and video content with compatible model processors through the same OpenAI-style message format in serving and agentic training.
 - 🧩 **Native LoRA**: train TP-aware adapters for Qwen3, Qwen3-MoE, and Bailing-MoE V3, save standard PEFT artifacts, and reload them for training or serving.
@@ -42,9 +42,8 @@ AReno's mission is to make LLM RL **accessible** for a broad community of resear
 
 AReno supports Linux (x86_64 or aarch64) with an NVIDIA GPU and CUDA-enabled
 PyTorch 2.6 or newer, plus Apple Silicon macOS through MLX. Windows users can
-use WSL2 for the CUDA path. Ascend NPU integration uses CANN and ``torch_npu``;
-see the [NPU integration guide](docs/concepts/npu.rst) for the target stack,
-source build and usage. The CLI selects NPU on Linux when
+use WSL2 for the CUDA path. Ascend NPU integration uses CANN and ``torch_npu``.
+The CLI selects NPU on Linux when
 ``torch_npu`` is installed, otherwise CUDA, and MLX on native ``arm64`` macOS.
 
 CUDA/WSL2 installation:
