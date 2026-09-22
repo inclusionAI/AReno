@@ -73,7 +73,7 @@ class _TextBatchGenerator:
         prompt_features: list[dict | None],
         params: SamplingParams,
     ) -> list[int]:
-        from mlx_lm.generate import StopSequenceMatcher
+        from mlx_lm.generate import SequenceStateMachine
         from mlx_lm.sample_utils import make_sampler
 
         if any(feature is not None for feature in prompt_features):
@@ -84,12 +84,16 @@ class _TextBatchGenerator:
             top_k=max(int(params.top_k), 0),
         )
         stop_sequences = _stop_sequences(self._tokenizer, params)
+        transitions = (
+            {"normal": [(seq, None) for seq in stop_sequences]}
+            if stop_sequences else {}
+        )
         return self._generator.insert(
             prompts,
             max_tokens=[int(params.max_new_tokens)] * len(prompts),
             samplers=[sampler] * len(prompts),
             logits_processors=[[float32_logits_processor] for _ in prompts],
-            stop_matchers=[StopSequenceMatcher(stop_sequences or None) for _ in prompts],
+            state_machines=[SequenceStateMachine(transitions, initial="normal") for _ in prompts],
         )
 
     def next(self) -> list[Any]:
