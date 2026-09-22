@@ -9,15 +9,20 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import io
+import json as _json
 import time
+import uuid
 import warnings
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 from urllib.parse import urlparse
 
 import click
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from areno.adapters import LoraConfig
@@ -27,7 +32,7 @@ from areno.api.multimodal import (
     image_token_counts_from_features,
     mrope_position_ids_from_image_grid,
 )
-from areno.api.openai_chat import build_chat_completion_response, messages_to_prompt_tokens
+from areno.api.openai_chat import ReasoningSplitter, build_chat_completion_response, messages_to_prompt_tokens
 from areno.api.tokenizer import (
     apply_chat_template_with_options,
     configure_chat_template_enable_thinking,
@@ -126,6 +131,22 @@ class ChatCompletionResponse(BaseModel):
     usage: ChatCompletionUsage
 
 
+class ChatCompletionStreamDelta(BaseModel):
+    """Streaming delta payload -- one or more fields populated per chunk."""
+
+    role: str | None = None
+    content: str | None = None
+    tool_calls: list[dict[str, Any]] | None = None
+
+
+class ChatCompletionStreamChoice(BaseModel):
+    """One streaming choice within a chunk, carrying a delta instead of a message."""
+
+    index: int
+    delta: ChatCompletionStreamDelta
+    finish_reason: str | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class BatchKey:
     """Hashable bundle of fields that must match for two requests to share a rollout.
@@ -161,6 +182,50 @@ class PendingRequest:
     cancelled: bool = False
 
 
+class _ServeStreamStep:
+    """Backend-agnostic streaming token step.
+
+    Both :class:`_CudaServeRuntime` and :class:`_MlxServeRuntime` yield
+    these objects from ``generate_rollout_stream_async``, giving the serve
+    layer a single attribute-based interface regardless of backend.
+    """
+
+    __slots__ = ("prompt_idx", "token_id", "finish_reason")
+
+    def __init__(self, prompt_idx: int, token_id: int, finish_reason: str | None = None) -> None:
+        self.prompt_idx = prompt_idx
+        self.token_id = token_id
+        self.finish_reason = finish_reason
+
+
+class _ServeRuntime(Protocol):
+    """Protocol satisfied by ``_CudaServeRuntime`` and ``_MlxServeRuntime``."""
+
+    max_model_len: int
+
+    async def begin_rollout_session_async(self) -> None: ...
+    async def end_rollout_session_async(self) -> None: ...
+    def close(self) -> None: ...
+    async def generate_rollout_async(
+        self,
+        prompts,
+        *,
+        max_new_tokens: int,
+        sampling_params: SamplingParams,
+        prompt_features=None,
+        **kwargs,
+    ) -> _ServeRollout: ...
+    async def generate_rollout_stream_async(
+        self,
+        prompts,
+        *,
+        max_new_tokens: int,
+        sampling_params: SamplingParams,
+        prompt_features=None,
+        **kwargs,
+    ) -> AsyncGenerator[_ServeStreamStep, None]: ...
+
+
 @dataclass(slots=True)
 class ServeState:
     """Process-wide serving state held on `app.state.areno_serve`.
@@ -171,7 +236,7 @@ class ServeState:
     model_path: str
     tokenizer: Any
     processor: Any
-    engine: Any
+    engine: _CudaServeRuntime | _MlxServeRuntime
     max_running_prompts: int
     default_max_tokens: int
     max_model_len: int
@@ -253,6 +318,46 @@ class _CudaServeRuntime:
         )
         return await self._engine.generate_rollout_async(prompts, sampling_params=cuda_sampling, **kwargs)
 
+    async def generate_rollout_stream_async(
+        self,
+        prompts,
+        *,
+        max_new_tokens: int,
+        sampling_params: SamplingParams,
+        prompt_features=None,
+        **kwargs,
+    ) -> AsyncGenerator[_ServeStreamStep, None]:
+        """Stream tokens from the CUDA engine via multiprocessing.Pipe.
+
+        Translates :class:`areno.api.SamplingParams` into the engine-native
+        :class:`areno.engine.data.SamplingParams`, then delegates to the
+        underlying ``ArenoEngine.generate_rollout_stream_async``.  Each
+        yielded :class:`StreamTokenStep` is adapted into a
+        :class:`_ServeStreamStep` so the serve layer sees a uniform type.
+        """
+        from areno.engine.data import SamplingParams as CudaSamplingParams
+
+        cuda_sampling = CudaSamplingParams(
+            temperature=0.0 if sampling_params.greedy else sampling_params.temperature,
+            top_p=sampling_params.top_p,
+            top_k=max(sampling_params.top_k, 0),
+            seed=getattr(sampling_params, "seed", None),
+            stop_token_ids=tuple(sampling_params.stop_token_ids or ()),
+        )
+        stream = self._engine.generate_rollout_stream_async(
+            prompts,
+            max_new_tokens=max_new_tokens,
+            sampling_params=cuda_sampling,
+            prompt_features=prompt_features,
+            **kwargs,
+        )
+        try:
+            async for step in stream:
+                yield _ServeStreamStep(step.prompt_idx, step.token_id, step.finish_reason)
+        finally:
+            with contextlib.suppress(Exception):
+                await stream.aclose()
+
 
 class _MlxServeRuntime:
     """Serve adapter over the same public Trainer lifecycle used by training."""
@@ -309,6 +414,50 @@ class _MlxServeRuntime:
         response_ids = [sequence.resp_tokens for sequence in sequences]
         finish_reason = ["length" if len(tokens) >= max_new_tokens else "stop" for tokens in response_ids]
         return _ServeRollout(response_ids=response_ids, finish_reason=finish_reason)
+
+    async def generate_rollout_stream_async(
+        self,
+        prompts,
+        *,
+        max_new_tokens: int,
+        sampling_params: SamplingParams,
+        prompt_features=None,
+        **kwargs,
+    ) -> AsyncGenerator[_ServeStreamStep, None]:
+        """Stream tokens incrementally from the MLX continuous-batch scheduler.
+
+        Yields :class:`_ServeStreamStep` objects as the decode thread
+        produces tokens.  The generator stops when all sequences complete
+        or the scheduler fails.
+        """
+        del kwargs
+        import queue as _queue
+
+        params = sampling_params.model_copy(update={"max_new_tokens": int(max_new_tokens)})
+        scheduler = self._trainer._backend._rollout_scheduler
+        stream_queue = scheduler.submit_stream(
+            prompts,
+            n_samples=1,
+            sampling_params=params,
+            prompt_features=prompt_features,
+        )
+        loop = asyncio.get_running_loop()
+        try:
+            while True:
+                item = await loop.run_in_executor(None, stream_queue.get)
+                if item is None:
+                    break
+                if isinstance(item, BaseException):
+                    raise item
+                prompt_idx, token_id, finish_reason = item
+                yield _ServeStreamStep(prompt_idx, token_id, finish_reason)
+        except BaseException:
+            try:
+                while True:
+                    stream_queue.get_nowait()
+            except _queue.Empty:
+                pass
+            raise
 
 
 def _create_serve_runtime(
@@ -455,11 +604,9 @@ def create_app(
             ],
         }
 
-    @app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
-    async def chat_completions(raw_request: Request, request: ChatCompletionRequest) -> ChatCompletionResponse:
+    @app.post("/v1/chat/completions")
+    async def chat_completions(raw_request: Request, request: ChatCompletionRequest):
         """Validate the request, encode the prompt, run rollout, and await the response."""
-        if request.stream:
-            raise HTTPException(status_code=400, detail="stream=true is not supported")
         if not request.messages:
             raise HTTPException(status_code=400, detail="messages must be non-empty")
 
@@ -490,9 +637,25 @@ def create_app(
         )
         if state.closing:
             raise HTTPException(status_code=503, detail="server is shutting down")
+
+        if request.stream:
+            # Streaming: true per-token (pipe on CUDA, queue on MLX) for
+            # single-choice no-tool requests; synthetic SSE fallback otherwise.
+            # No background task — cancellation is handled inline.
+            return StreamingResponse(
+                _stream_chat_completions(state, raw_request, pending),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "X-Accel-Buffering": "no",
+                },
+            )
+
         task = asyncio.create_task(_run_request_task(app, pending))
         state.active_tasks.add(task)
         task.add_done_callback(state.active_tasks.discard)
+
         return await _await_pending_response(state, raw_request, pending)
 
     return app
@@ -578,7 +741,7 @@ async def _run_request_rollout(app: FastAPI, item: PendingRequest) -> ChatComple
     return _build_response(state, item.request, item.prompt, rollout.response_ids, rollout.finish_reason)
 
 
-def _set_future_result(future: asyncio.Future, response: ChatCompletionResponse) -> None:
+def _set_future_result(future: asyncio.Future, response: ChatCompletionResponse | None) -> None:
     """Resolve `future` with `response` unless something else got there first."""
     if response is not None and not future.done():
         future.set_result(response)
@@ -624,11 +787,203 @@ def _cancel_pending_request(item: PendingRequest) -> None:
     item.cancelled = True
 
 
+def _sse_delta_chunk(
+    *,
+    response_id: str,
+    created: int,
+    model: str,
+    index: int,
+    reasoning_delta: str,
+    content_delta: str,
+) -> str | None:
+    """Build one SSE data line carrying a reasoning and/or content delta.
+
+    Returns ``None`` when the token contributed no visible text (for example a
+    consumed think marker), so callers can skip emitting an empty chunk.
+    """
+
+    delta: dict[str, Any] = {}
+    if reasoning_delta:
+        delta["reasoning_content"] = reasoning_delta
+    if content_delta:
+        delta["content"] = content_delta
+    if not delta:
+        return None
+    chunk = {
+        "id": response_id,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model,
+        "choices": [{"index": index, "delta": delta, "finish_reason": None}],
+    }
+    return f"data: {_json.dumps(chunk, ensure_ascii=False)}\n\n"
+
+
 def _build_cancelled_response(state: ServeState, item: PendingRequest) -> ChatCompletionResponse:
     """Synthesise an empty-token response with stop finish reason for a cancelled request."""
     response_ids = [[] for _ in range(int(item.request.n))]
     finish_reasons = ["stop" for _ in response_ids]
     return _build_response(state, item.request, item.prompt, response_ids, finish_reasons)
+
+
+async def _stream_chat_completions(
+    state: ServeState, raw_request: Request, pending: PendingRequest
+) -> AsyncGenerator[str, None]:
+    """SSE streaming for the /v1/chat/completions endpoint.
+
+    Single-choice requests without tools use true per-token streaming
+    through the backend engine (``mp.Pipe`` on CUDA, ``queue.Queue`` on
+    MLX).  Multi-choice (``n > 1``) and tool-call requests fall back to
+    synthetic SSE via incremental prefix-decoding on the full response.
+    """
+    request = pending.request
+    key = pending.key
+    n_choices = int(request.n)
+    tokenizer = state.tokenizer
+
+    cancel_event = asyncio.Event()
+
+    async def _watch_disconnect() -> None:
+        while not cancel_event.is_set():
+            if await raw_request.is_disconnected():
+                cancel_event.set()
+                return
+            await asyncio.sleep(0.1)
+
+    disconnect_task = asyncio.create_task(_watch_disconnect())
+
+    # -- Fallback: n > 1 or has tools → synthetic SSE -------------------------
+    if n_choices != 1 or request.tools:
+        prompts = [pending.prompt for _ in range(n_choices)]
+        prompt_features = [pending.prompt_features for _ in prompts] if pending.prompt_features is not None else None
+        try:
+            if not cancel_event.is_set():
+                rollout = await state.engine.generate_rollout_async(
+                    prompts,
+                    max_new_tokens=key.max_new_tokens,
+                    max_running_prompts=max(state.max_running_prompts, len(prompts)),
+                    max_prompt_len=max(state.max_model_len - key.max_new_tokens, len(pending.prompt)),
+                    eos_token_id=key.eos_token_id,
+                    sampling_params=SamplingParams(
+                        temperature=key.temperature,
+                        top_p=key.top_p,
+                        top_k=key.top_k,
+                        seed=key.seed,
+                        stop_token_ids=key.stop_token_ids,
+                    ),
+                    prompt_features=prompt_features,
+                    decode_progress_interval_s=0.0,
+                )
+            if cancel_event.is_set():
+                return
+            response = _build_response(state, request, pending.prompt, rollout.response_ids, rollout.finish_reason)
+            async for chunk in _build_sse_chunks(response, rollout.response_ids, state.tokenizer):
+                yield chunk
+        finally:
+            disconnect_task.cancel()
+        return
+
+    # -- True streaming: n=1, no tools -----------------------------------------
+    prompts = [pending.prompt]
+    prompt_features = [pending.prompt_features] if pending.prompt_features is not None else None
+
+    try:
+        stream = state.engine.generate_rollout_stream_async(
+            prompts,
+            max_new_tokens=key.max_new_tokens,
+            sampling_params=SamplingParams(
+                temperature=key.temperature,
+                top_p=key.top_p,
+                top_k=key.top_k,
+                seed=key.seed,
+                stop_token_ids=key.stop_token_ids,
+            ),
+            prompt_features=prompt_features,
+            # CUDA-only parameters — absorbed by **kwargs on MLX adapters.
+            max_running_prompts=max(state.max_running_prompts, len(prompts)),
+            max_prompt_len=max(state.max_model_len - key.max_new_tokens, len(pending.prompt)),
+            eos_token_id=key.eos_token_id,
+            decode_progress_interval_s=0.0,
+        )
+    except BaseException:
+        disconnect_task.cancel()
+        raise
+
+    response_id = f"chatcmpl-{uuid.uuid4().hex}"
+    created = int(time.time())
+    model = request.model or state.model_path
+
+    def _emit(chunk: dict[str, Any]) -> str:
+        return f"data: {_json.dumps(chunk, ensure_ascii=False)}\n\n"
+
+    # Initial role chunk.
+    yield _emit(
+        {
+            "id": response_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model,
+            "choices": [
+                {"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": None}
+            ],
+        }
+    )
+
+    # Content chunks — one per token as they arrive from the backend. Tokens are
+    # routed through the reasoning state machine so a thinking turn streams its
+    # ``reasoning_content`` delta first and the answer follows on ``content``,
+    # matching the non-streaming response shape.
+    splitter = ReasoningSplitter.from_tokenizer(tokenizer)
+    collected: list[int] = []
+    finish_reason: str | None = None
+
+    def _delta_chunk(reasoning_delta: str, content_delta: str) -> str | None:
+        return _sse_delta_chunk(
+            response_id=response_id,
+            created=created,
+            model=model,
+            index=0,
+            reasoning_delta=reasoning_delta,
+            content_delta=content_delta,
+        )
+
+    try:
+        async for step in stream:
+            if cancel_event.is_set():
+                finish_reason = "cancelled"
+                break
+            collected.append(step.token_id)
+            chunk = _delta_chunk(*splitter.push(step.token_id))
+            if step.finish_reason is not None:
+                finish_reason = step.finish_reason
+            if chunk is not None:
+                yield chunk
+        # A trailing incomplete multi-byte character stays held back until the
+        # stream ends; emit it now so the final text is complete.
+        tail = _delta_chunk(*splitter.flush())
+        if tail is not None:
+            yield tail
+    finally:
+        disconnect_task.cancel()
+
+    finish_reason = finish_reason or "stop"
+    yield _emit(
+        {
+            "id": response_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model,
+            "choices": [
+                {"index": 0, "delta": {}, "finish_reason": finish_reason}
+            ],
+            "usage": {
+                "prompt_tokens": len(pending.prompt),
+                "completion_tokens": len(collected),
+                "total_tokens": len(pending.prompt) + len(collected),
+            },
+        }
+    )
+    yield "data: [DONE]\n\n"
 
 
 def _build_response(
@@ -667,6 +1022,123 @@ def _build_response_from(
         stop_strings=_normalize_stop(request.stop),
     )
     return ChatCompletionResponse(**data)
+
+
+async def _build_sse_chunks(
+    response: ChatCompletionResponse,
+    response_ids: list[list[int]],
+    tokenizer: Any,
+) -> AsyncGenerator[str, None]:
+    """Yield SSE chunks with token-level deltas via incremental partial decode.
+
+    Each content chunk carries the delta text contributed by one additional
+    token, matching OpenAI's per-token streaming granularity.  Multi-choice
+    and tool-call responses fall back to per-choice full-content chunks.
+    """
+
+    created = response.created
+    model = response.model
+    n_choices = len(response.choices)
+
+    def _emit(chunk: dict[str, Any]) -> str:
+        return f"data: {_json.dumps(chunk, ensure_ascii=False)}\n\n"
+
+    # -- Initial role chunk (all choices at once) ------------------------------------
+    yield _emit(
+        {
+            "id": response.id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model,
+            "choices": [
+                {
+                    "index": c.index,
+                    "delta": {"role": "assistant", "content": ""},
+                    "finish_reason": None,
+                }
+                for c in response.choices
+            ],
+        }
+    )
+
+    # -- Content chunks ---------------------------------------------------------------
+    if n_choices == 1 and response.choices[0].finish_reason != "tool_calls":
+        # Single-choice text response: emit token-level deltas, split into
+        # reasoning and answer channels by the same state machine the
+        # true-streaming path uses.
+        choice = response.choices[0]
+        token_ids = response_ids[0]
+        splitter = ReasoningSplitter.from_tokenizer(tokenizer)
+
+        def _delta_chunk(reasoning_delta: str, content_delta: str) -> str | None:
+            return _sse_delta_chunk(
+                response_id=response.id,
+                created=created,
+                model=model,
+                index=choice.index,
+                reasoning_delta=reasoning_delta,
+                content_delta=content_delta,
+            )
+
+        for token_id in token_ids:
+            chunk = _delta_chunk(*splitter.push(token_id))
+            if chunk is not None:
+                yield chunk
+        # Emit any multi-byte character held back until the sequence ended.
+        tail = _delta_chunk(*splitter.flush())
+        if tail is not None:
+            yield tail
+    else:
+        # Multi-choice or tool-call response: emit per-choice deltas at once.
+        for c in response.choices:
+            delta: dict[str, Any] = {}
+            if c.message.get("reasoning_content"):
+                delta["reasoning_content"] = c.message["reasoning_content"]
+            if c.message.get("content"):
+                delta["content"] = c.message["content"]
+            if c.message.get("tool_calls"):
+                delta["tool_calls"] = c.message["tool_calls"]
+            if delta:
+                yield _emit(
+                    {
+                        "id": response.id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": model,
+                        "choices": [
+                            {
+                                "index": c.index,
+                                "delta": delta,
+                                "finish_reason": None,
+                            }
+                        ],
+                    }
+                )
+
+    # -- Finish chunk (all choices + usage) -------------------------------------------
+    yield _emit(
+        {
+            "id": response.id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model,
+            "choices": [
+                {
+                    "index": c.index,
+                    "delta": {},
+                    "finish_reason": c.finish_reason,
+                }
+                for c in response.choices
+            ],
+            "usage": {
+                "prompt_tokens": response.usage.prompt_tokens,
+                "completion_tokens": response.usage.completion_tokens,
+                "total_tokens": response.usage.total_tokens,
+            },
+        }
+    )
+
+    yield "data: [DONE]\n\n"
 
 
 def _encode_messages(
