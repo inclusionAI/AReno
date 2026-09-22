@@ -38,6 +38,10 @@ def _model_with(attention: _Attention) -> SimpleNamespace:
     parameter = torch.nn.Parameter(torch.zeros(1))
     return SimpleNamespace(
         layers=[SimpleNamespace(attention=attention)],
+        mtp_layers=None,
+        mtp_draft_enabled=False,
+        _kda_state_cache=None,
+        _kda_conv_cache=None,
         parameters=lambda: iter((parameter,)),
     )
 

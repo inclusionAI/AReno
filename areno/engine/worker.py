@@ -126,8 +126,16 @@ class ArenoWorker:
         # Per-bucket captured decode CUDA graphs; buckets that OOM during
         # capture get tracked in `_skipped` and fall back to eager forward.
         self._decode_graphs: dict[int, DecodeGraph] = {}
+        # Speculative decoding graphs: verify by bucket, draft by (bucket, tokens_per_seq).
+        self._verify_graphs: dict[int, DecodeGraph] = {}
+        self._draft_graphs: dict[tuple[int, int], DecodeGraph] = {}
         self._decode_graph_skipped_buckets: set[int] = set()
         self._decode_graph_init_attempted = False
+        # Shared CUDA graph memory pool handle for every captured graph.
+        self._decode_graph_pool = None
+        # Largest warmup working set measured so far; the next bucket refuses to
+        # warm up when less HBM than that is free.
+        self._decode_graph_warmup_peak = 0
         # 5-tuple summarising the active cache config; used to decide whether
         # a new `_init_infer_cache` call can reuse the existing allocation.
         self._infer_cache_spec: tuple[int, int, int, int, int] | None = None
@@ -583,8 +591,14 @@ class ArenoWorker:
         """Drop captured decode CUDA graphs and release their cached memory."""
 
         self._decode_graphs.clear()
+        self._verify_graphs.clear()
+        self._draft_graphs.clear()
         self._decode_graph_skipped_buckets.clear()
         self._decode_graph_init_attempted = False
+        # The pool's memory is freed with the last graph that used it; the next
+        # capture round starts from a fresh handle and re-measures the working set.
+        self._decode_graph_pool = None
+        self._decode_graph_warmup_peak = 0
         if self.device.type == "cuda":
             torch.cuda.empty_cache()
 
