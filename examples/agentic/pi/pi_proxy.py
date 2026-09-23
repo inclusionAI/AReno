@@ -18,10 +18,20 @@ class PiProxy:
     instance belongs to exactly one task/sample and uses a private bearer key.
     """
 
-    def __init__(self, ctx, *, max_turns: int = 32, timeout: float = 300):
+    def __init__(
+        self,
+        ctx,
+        *,
+        max_turns: int = 32,
+        timeout: float = 300,
+        bind_host: str = "127.0.0.1",
+        connect_host: str = "127.0.0.1",
+    ):
         if max_turns < 1 or timeout <= 0:
             raise ValueError("max_turns and timeout must be positive")
         self.ctx = ctx
+        self.bind_host = bind_host
+        self.connect_host = connect_host
         self.max_turns = max_turns
         self.timeout = timeout
         self.api_key = secrets.token_hex(24)
@@ -45,11 +55,11 @@ class PiProxy:
                 pass
 
         # Non-daemon request threads are drained before the training phase.
-        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self._server = ThreadingHTTPServer((self.bind_host, 0), Handler)
         self._server.daemon_threads = False
         self._active = True
         port = self._server.server_address[1]
-        self.base_url = f"http://127.0.0.1:{port}/v1"
+        self.base_url = f"http://{self.connect_host}:{port}/v1"
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
         return self

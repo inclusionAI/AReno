@@ -17,7 +17,14 @@ streaming. Pi's own read, bash, edit and write tools run unchanged. The adapter 
 smoke-tested with pi 0.83.0 against the existing AReno proxy and a CPU policy
 double, including a real pi tool call and verification.
 
-## Run
+## Repository tasks with Docker-in-Docker
+
+For real software-engineering issues, use the [ModelScope SWE-bench generator and
+DinD runner](dind/README.md). It runs pi in per-attempt nested containers and grades
+patches in separate clean SWE-bench containers. The two local tasks below remain
+small integration fixtures; they are not the recommended training dataset.
+
+## Run the local fixture
 
 Install pi separately; it is not an AReno dependency:
 
