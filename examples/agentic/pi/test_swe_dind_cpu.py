@@ -31,6 +31,55 @@ def test_unknown_daemon_architecture_is_not_guessed():
         runner.check_dind(SimpleNamespace(info=lambda: {"Labels": ["areno.pi.dind=true"], "Architecture": "unknown"}))
 
 
+@pytest.mark.parametrize(
+    "name", ["v4.gh-proxy.org/docker/ubuntu:22.04", "v4.gh-proxy.org/docker/node:22-bookworm-slim"]
+)
+@pytest.mark.parametrize("initial_arch", [None, "amd64", "arm64"])
+def test_native_image_pull_repairs_wrong_arch_cache(name, initial_arch):
+    import docker
+
+    client = Mock()
+    cache = {}
+    if initial_arch:
+        cache[name] = SimpleNamespace(attrs={"Os": "linux", "Architecture": initial_arch})
+
+    def get(image_name):
+        if image_name not in cache:
+            raise docker.errors.ImageNotFound("missing")
+        return cache[image_name]
+
+    def pull(image_name, **kwargs):
+        assert kwargs["platform"] == "linux/arm64/v8"
+        cache[image_name] = SimpleNamespace(attrs={"Os": "linux", "Architecture": "arm64"})
+
+    client.images.get.side_effect = get
+    client.images.pull.side_effect = pull
+    result = runner.ensure_native_image(client, name, "arm64")
+    assert result.attrs["Architecture"] == "arm64"
+    if initial_arch == "arm64":
+        client.images.pull.assert_not_called()
+    else:
+        client.images.pull.assert_called_once_with(name, platform="linux/arm64/v8")
+
+
+def test_wrong_arch_after_explicit_pull_is_rejected():
+    client = Mock()
+    client.images.get.return_value = SimpleNamespace(attrs={"Os": "linux", "Architecture": "amd64"})
+    with pytest.raises(RuntimeError, match="after an explicit linux/arm64/v8 pull"):
+        runner.ensure_native_image(client, "v4.gh-proxy.org/docker/ubuntu:22.04", "arm64")
+    assert client.images.get.call_count == 2
+
+
+def test_amd64_worker_replaces_arm64_cache():
+    client = Mock()
+    client.images.get.side_effect = [
+        SimpleNamespace(attrs={"Os": "linux", "Architecture": "arm64"}),
+        SimpleNamespace(attrs={"Os": "linux", "Architecture": "amd64"}),
+    ]
+    runner.ensure_native_image(client, "ubuntu:22.04", "x86_64")
+    client.images.pull.assert_called_once_with("ubuntu:22.04", platform="linux/amd64")
+
+
 def image_spec(version="22.04", arch="x86_64"):
     from swebench.harness.test_spec.test_spec import TestSpec
 
@@ -100,11 +149,18 @@ def test_agent_build_routes_ubuntu_and_node_directly(monkeypatch, arch, platform
 
     monkeypatch.setenv("ARENO_PI_DOCKER_PROXY", "v4.gh-proxy.org/docker")
     client = Mock()
-    client.images.get.side_effect = docker.errors.ImageNotFound("missing")
+
+    def get(name):
+        if name.startswith("areno-pi-swe:"):
+            raise docker.errors.ImageNotFound("missing")
+        return SimpleNamespace(attrs={"Os": "linux", "Architecture": "amd64" if arch == "x86_64" else "arm64"})
+
+    client.images.get.side_effect = get
     spec = image_spec(arch=arch)
 
     def build_instances(client, specs, **kwargs):
         assert "v4.gh-proxy.org/docker/ubuntu:22.04" in specs[0].base_dockerfile
+        assert client.images.get.call_args.args == ("v4.gh-proxy.org/docker/ubuntu:22.04",)
         return specs, []
 
     monkeypatch.setattr(builds, "build_instance_images", build_instances)
@@ -114,6 +170,7 @@ def test_agent_build_routes_ubuntu_and_node_directly(monkeypatch, arch, platform
     assert b"FROM node:" not in dockerfile
     assert f"FROM {spec.instance_image_key}".encode() in dockerfile
     assert client.images.build.call_args.kwargs["platform"] == platform
+    assert client.images.get.call_args.args == ("v4.gh-proxy.org/docker/node:22-bookworm-slim",)
 
 
 @pytest.mark.parametrize("arch", ["x86_64", "arm64"])
@@ -156,7 +213,13 @@ def test_base_build_failure_includes_log_without_cache_miss_traceback(monkeypatc
     monkeypatch.setenv("ARENO_PI_DOCKER_PROXY", "v4.gh-proxy.org/docker")
     monkeypatch.setattr(builds, "BASE_IMAGE_BUILD_DIR", tmp_path)
     client = Mock()
-    client.images.get.side_effect = docker.errors.ImageNotFound("cache miss")
+
+    def get(name):
+        if name == "v4.gh-proxy.org/docker/ubuntu:22.04":
+            return SimpleNamespace(attrs={"Os": "linux", "Architecture": "amd64"})
+        raise docker.errors.ImageNotFound("cache miss")
+
+    client.images.get.side_effect = get
     client.api.build.return_value = iter(
         [{"stream": "fixture diagnostic from build stderr\n"}, {"errorDetail": {"message": "fixture build failed"}}]
     )

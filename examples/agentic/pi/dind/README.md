@@ -201,6 +201,26 @@ and grading subprocess. AMD64 selects `linux/amd64`; ARM64 selects
 `linux/arm64/v8`, including the harness's ARM64 Miniconda installer. Image cache
 keys include the architecture. No cross-architecture emulation is configured.
 
+Before building, the adapter inspects the cached Ubuntu and Node images. If a
+tag is missing or cached for another architecture, it explicitly pulls the
+requested platform and inspects the tag again. A mismatched result stops the
+build with a diagnostic. This matters with the classic image store, where an
+AMD64 image pulled earlier can remain under the same tag on an ARM64 worker.
+
+To refresh these inputs manually on ARM64:
+
+```bash
+docker pull --platform linux/arm64/v8 v4.gh-proxy.org/docker/ubuntu:22.04
+docker pull --platform linux/arm64/v8 v4.gh-proxy.org/docker/node:22-bookworm-slim
+docker image inspect --format '{{.Os}}/{{.Architecture}}' \
+  v4.gh-proxy.org/docker/ubuntu:22.04 \
+  v4.gh-proxy.org/docker/node:22-bookworm-slim
+```
+
+Both images must report `linux/arm64`. If either is still AMD64 after the
+explicit pull, check the proxy's platform support and the Docker image store
+before retrying. No global image/cache deletion is needed for this check.
+
 The startup message prints the selected task/grader platform. Check the worker
 with `docker info --format '{{.Architecture}}'`. An ARM64 worker reporting
 `exec /bin/sh: no such file or directory` while running an AMD64 image needs

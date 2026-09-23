@@ -23,7 +23,7 @@ if str(_EXAMPLE_DIR) not in sys.path:
     sys.path.insert(0, str(_EXAMPLE_DIR))
 from pi_proxy import PiProxy  # noqa: E402
 from run_agent import configure_pi, log_tail, run_process  # noqa: E402
-from swe_images import docker_image, docker_platform, proxy_test_spec  # noqa: E402
+from swe_images import docker_image, docker_platform, ensure_native_image, proxy_test_spec  # noqa: E402
 
 _BUILD_LOCK = threading.Lock()
 
@@ -54,8 +54,11 @@ def agent_image(client, spec):
         else:
             return tag
         if not spec.is_remote_image:
+            from swebench.harness.constants import DEFAULT_DOCKER_SPECS
             from swebench.harness.docker_build import BuildImageError, build_instance_images
 
+            ubuntu_version = spec.docker_specs.get("ubuntu_version", DEFAULT_DOCKER_SPECS["ubuntu_version"])
+            ensure_native_image(client, docker_image(f"ubuntu:{ubuntu_version}"), spec.arch)
             try:
                 _, failed = build_instance_images(client, [spec], max_workers=1)
             except BuildImageError as exc:
@@ -66,6 +69,7 @@ def agent_image(client, spec):
                 raise RuntimeError(f"{exc}\nDocker build output (tail):\n{output}") from None
             if failed:
                 raise RuntimeError(f"Could not build SWE-bench environment: {spec.instance_id}")
+        ensure_native_image(client, node_image, spec.arch)
         # No dataset tests/gold patches are added to the agent image.
         dockerfile = (
             f"FROM {node_image} AS pi\n"

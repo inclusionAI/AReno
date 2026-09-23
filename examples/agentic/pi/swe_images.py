@@ -16,6 +16,37 @@ def docker_image(image):
     return f"{proxy}/{image}" if proxy else image
 
 
+def ensure_native_image(client, name, arch):
+    """Replace a tag cached for another CPU before the classic builder uses it."""
+    import docker
+
+    platform = docker_platform(arch)
+    expected_arch = {"x86_64": "amd64", "arm64": "arm64"}[arch]
+
+    def matches(image):
+        return image.attrs.get("Os") == "linux" and image.attrs.get("Architecture") == expected_arch
+
+    try:
+        cached = client.images.get(name)
+    except docker.errors.ImageNotFound:
+        cached = None
+    if cached is not None and matches(cached):
+        return cached
+
+    print(f"[pi/DinD] Pulling {name} for {platform}", flush=True)
+    client.images.pull(name, platform=platform)
+    # Reinspect the tag the builder will resolve, not just the pull response.
+    pulled = client.images.get(name)
+    if not matches(pulled):
+        actual = f"{pulled.attrs.get('Os')}/{pulled.attrs.get('Architecture')}"
+        raise RuntimeError(
+            f"Image {name} is {actual} after an explicit {platform} pull. "
+            "The registry/proxy or Docker image store did not provide the requested architecture; "
+            "refusing to build with this image."
+        )
+    return pulled
+
+
 def proxy_test_spec(spec):
     from swebench.harness.test_spec.test_spec import TestSpec
 
