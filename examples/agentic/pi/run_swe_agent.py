@@ -23,6 +23,7 @@ if str(_EXAMPLE_DIR) not in sys.path:
     sys.path.insert(0, str(_EXAMPLE_DIR))
 from pi_proxy import PiProxy  # noqa: E402
 from run_agent import configure_pi, log_tail, run_process  # noqa: E402
+from swe_images import docker_image, proxy_test_spec  # noqa: E402
 
 _BUILD_LOCK = threading.Lock()
 
@@ -32,50 +33,26 @@ def check_dind(client):
         raise RuntimeError("Use the example DinD entrypoint; refusing an unlabelled Docker daemon")
 
 
-def prepare_build_image(client, image):
-    """Seed the nested daemon's canonical tag from an explicitly configured proxy."""
-    import docker
-
-    proxy = os.environ.get("ARENO_PI_DOCKER_PROXY", "").strip().rstrip("/")
-    if not proxy:
-        return
-    try:
-        client.images.get(image)
-        return
-    except docker.errors.ImageNotFound:
-        pass
-    source = f"{proxy}/{image}"
-    try:
-        pulled = client.images.pull(source, platform="linux/amd64")
-        repository, tag = image.rsplit(":", 1)
-        if not pulled.tag(repository, tag=tag):
-            raise RuntimeError(f"Could not tag {source} as {image}")
-    except docker.errors.APIError as exc:
-        raise RuntimeError(f"Could not prepare {image} from {source} in the nested Docker daemon: {exc}") from exc
-
-
 def agent_image(client, spec):
     import docker
 
+    spec = proxy_test_spec(spec)
     base_image = spec.instance_image_key
-    tag = "areno-pi-swe:" + hashlib.sha256((base_image + "pi-0.83.0-v1").encode()).hexdigest()[:24]
+    node_image = docker_image("node:22-bookworm-slim")
+    tag = "areno-pi-swe:" + hashlib.sha256((base_image + node_image + "pi-0.83.0-v2").encode()).hexdigest()[:24]
     with _BUILD_LOCK:
         try:
             client.images.get(tag)
         except docker.errors.ImageNotFound:
             if not spec.is_remote_image:
-                from swebench.harness.constants import DEFAULT_DOCKER_SPECS
                 from swebench.harness.docker_build import build_instance_images
 
-                ubuntu_version = spec.docker_specs.get("ubuntu_version", DEFAULT_DOCKER_SPECS["ubuntu_version"])
-                prepare_build_image(client, f"ubuntu:{ubuntu_version}")
                 _, failed = build_instance_images(client, [spec], max_workers=1)
                 if failed:
                     raise RuntimeError(f"Could not build SWE-bench environment: {spec.instance_id}")
-            prepare_build_image(client, "node:22-bookworm-slim")
             # No dataset tests/gold patches are added to the agent image.
             dockerfile = (
-                "FROM node:22-bookworm-slim AS pi\n"
+                f"FROM {node_image} AS pi\n"
                 "RUN npm install -g @mariozechner/pi-coding-agent@0.83.0\n"
                 f"FROM {base_image}\n"
                 "COPY --from=pi /usr/local /opt/pi\n"

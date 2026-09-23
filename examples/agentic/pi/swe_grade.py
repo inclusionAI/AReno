@@ -4,6 +4,8 @@ import json
 import sys
 from pathlib import Path
 
+from swe_images import proxy_test_spec
+
 
 def main():
     import docker
@@ -11,7 +13,7 @@ def main():
     from swebench.harness.test_spec.test_spec import make_test_spec
 
     job = json.loads(Path(sys.argv[1]).read_text())
-    spec = make_test_spec(job["instance"], namespace=job["namespace"], arch="x86_64")
+    spec = proxy_test_spec(make_test_spec(job["instance"], namespace=job["namespace"], arch="x86_64"))
     with docker.from_env() as client:
         result = run_instance(
             spec,

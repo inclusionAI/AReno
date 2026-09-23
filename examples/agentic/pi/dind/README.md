@@ -118,23 +118,42 @@ starting training:
 export ARENO_PI_DOCKER_PROXY=v4.gh-proxy.org/docker
 ```
 
-The adapter pulls missing Ubuntu and Node build images through this prefix and
-tags them locally under their canonical names. Existing local images are reused.
-The Ubuntu version follows the task's harness recipe. For the default Ubuntu
-22.04 environment, the equivalent manual preparation is:
+The adapter writes this prefix directly into the Ubuntu and Node `FROM`
+instructions, including the harness-generated base Dockerfile:
 
-```bash
-docker pull --platform linux/amd64 v4.gh-proxy.org/docker/ubuntu:22.04
-docker tag v4.gh-proxy.org/docker/ubuntu:22.04 ubuntu:22.04
-docker pull --platform linux/amd64 v4.gh-proxy.org/docker/node:22-bookworm-slim
-docker tag v4.gh-proxy.org/docker/node:22-bookworm-slim node:22-bookworm-slim
+```dockerfile
+FROM --platform=linux/x86_64 v4.gh-proxy.org/docker/ubuntu:22.04
 ```
 
-Run these commands **inside the outer AReno container**, using its private
-Docker daemon. A pull on the host does not populate DinD's image cache. This
-prefix routes image downloads only; apt, conda, npm and repository downloads
-still need network access. It is an image-name prefix, not a Docker daemon
-`registry-mirrors` URL.
+```dockerfile
+FROM v4.gh-proxy.org/docker/node:22-bookworm-slim AS pi
+```
+
+The Ubuntu version follows the task's harness recipe. Pulling and retagging an
+image alone is insufficient: a builder can still resolve an unqualified `FROM`
+through Docker Hub. Cached task environments remain reusable.
+
+Set the variable **inside the outer AReno container** before starting training.
+If its command uses `/opt/areno-pi/run_swe_agent.py`, pulling the repository does
+not update that image-baked copy. Rebuild the outer image, or use the updated
+checkout directly:
+
+```bash
+export ARENO_PI_DOCKER_PROXY=v4.gh-proxy.org/docker
+# Replace --agent-fn in the training command with this path:
+# --agent-fn /workspace/areno/examples/agentic/pi/run_swe_agent.py
+```
+
+The agent loads its sibling helper and grader scripts from the same directory.
+Alternatively, refresh the existing copy from the updated repository root:
+
+```bash
+cp examples/agentic/pi/*.py /opt/areno-pi/
+```
+
+This prefix routes Ubuntu and Node image downloads only; apt, conda, npm and
+repository downloads still need network access. It is an image-name prefix,
+not a Docker daemon `registry-mirrors` URL.
 
 Pi edits `/testbed` with 64 model turns and a 30-minute deadline by default. It may
 run the repository's existing tests, but receives no injected benchmark tests.
