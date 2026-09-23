@@ -2,7 +2,7 @@
 
 This runs an independent `dockerd` **inside the outer AReno training container**.
 It does not mount the host Docker socket or launch sibling containers on the host
-Docker daemon. The outer container requires a Linux x86-64 Docker host, privileged
+Docker daemon. The outer container requires a Linux AMD64 or ARM64 Docker host, privileged
 DinD support, and the usual GPU runtime for training.
 
 ```text
@@ -160,7 +160,7 @@ The adapter writes this prefix directly into the Ubuntu and Node `FROM`
 instructions, including the harness-generated base Dockerfile:
 
 ```dockerfile
-FROM --platform=linux/x86_64 v4.gh-proxy.org/docker/ubuntu:22.04
+FROM --platform=linux/amd64 v4.gh-proxy.org/docker/ubuntu:22.04
 ```
 
 ```dockerfile
@@ -192,6 +192,26 @@ cp examples/agentic/pi/*.py /opt/areno-pi/
 This prefix routes Ubuntu and Node image downloads only; apt, conda, npm and
 repository downloads still need network access. It is an image-name prefix,
 not a Docker daemon `registry-mirrors` URL.
+
+### Task image architecture
+
+The adapter reads `Architecture` from the private Docker daemon and uses its
+native architecture for the SWE-bench environment, pi image, task container,
+and grading subprocess. AMD64 selects `linux/amd64`; ARM64 selects
+`linux/arm64/v8`, including the harness's ARM64 Miniconda installer. Image cache
+keys include the architecture. No cross-architecture emulation is configured.
+
+The startup message prints the selected task/grader platform. Check the worker
+with `docker info --format '{{.Architecture}}'`. An ARM64 worker reporting
+`exec /bin/sh: no such file or directory` while running an AMD64 image needs
+native ARM64 images or separately configured emulation. Update all example
+Python files, including `swe_images.py` and `swe_grade.py`, in `/opt/areno-pi`
+and start a new training process.
+
+Environment recipes and historical dependencies must also support the selected
+architecture; native image selection does not make AMD64-only packages work on
+ARM64. Use an AMD64 worker for issues whose dependencies require it. Published
+images selected with `ARENO_PI_SWE_NAMESPACE` must exist for that architecture.
 
 Pi edits `/testbed` with 64 model turns and a 30-minute deadline by default. It may
 run the repository's existing tests, but receives no injected benchmark tests.

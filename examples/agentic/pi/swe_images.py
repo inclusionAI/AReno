@@ -5,6 +5,10 @@ import re
 from dataclasses import asdict
 
 
+def docker_platform(arch):
+    return {"x86_64": "linux/amd64", "arm64": "linux/arm64/v8"}[arch]
+
+
 def docker_image(image):
     proxy = os.environ.get("ARENO_PI_DOCKER_PROXY", "").strip().rstrip("/")
     if "://" in proxy or any(char.isspace() for char in proxy):
@@ -15,12 +19,17 @@ def docker_image(image):
 def proxy_test_spec(spec):
     from swebench.harness.test_spec.test_spec import TestSpec
 
-    if docker_image("ubuntu") == "ubuntu":
-        return spec
+    use_proxy = docker_image("ubuntu") != "ubuntu"
 
     class ProxyTestSpec(TestSpec):
         @property
+        def platform(self):
+            return docker_platform(self.arch)
+
+        @property
         def base_dockerfile(self):
+            if not use_proxy:
+                return super().base_dockerfile
             dockerfile, count = re.subn(
                 r"(?m)^(FROM\s+(?:--platform=\S+\s+)?)(ubuntu:\S+)",
                 lambda match: match[1] + docker_image(match[2]),

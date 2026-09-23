@@ -23,14 +23,20 @@ if str(_EXAMPLE_DIR) not in sys.path:
     sys.path.insert(0, str(_EXAMPLE_DIR))
 from pi_proxy import PiProxy  # noqa: E402
 from run_agent import configure_pi, log_tail, run_process  # noqa: E402
-from swe_images import docker_image, proxy_test_spec  # noqa: E402
+from swe_images import docker_image, docker_platform, proxy_test_spec  # noqa: E402
 
 _BUILD_LOCK = threading.Lock()
 
 
 def check_dind(client):
-    if "areno.pi.dind=true" not in client.info().get("Labels", []):
+    info = client.info()
+    if "areno.pi.dind=true" not in info.get("Labels", []):
         raise RuntimeError("Use the example DinD entrypoint; refusing an unlabelled Docker daemon")
+    architecture = info.get("Architecture")
+    architectures = {"x86_64": "x86_64", "amd64": "x86_64", "aarch64": "arm64", "arm64": "arm64"}
+    if architecture not in architectures:
+        raise RuntimeError(f"Unsupported Docker daemon architecture: {architecture!r}; expected AMD64 or ARM64")
+    return architectures[architecture]
 
 
 def agent_image(client, spec):
@@ -44,21 +50,31 @@ def agent_image(client, spec):
         try:
             client.images.get(tag)
         except docker.errors.ImageNotFound:
-            if not spec.is_remote_image:
-                from swebench.harness.docker_build import build_instance_images
+            pass
+        else:
+            return tag
+        if not spec.is_remote_image:
+            from swebench.harness.docker_build import BuildImageError, build_instance_images
 
+            try:
                 _, failed = build_instance_images(client, [spec], max_workers=1)
-                if failed:
-                    raise RuntimeError(f"Could not build SWE-bench environment: {spec.instance_id}")
-            # No dataset tests/gold patches are added to the agent image.
-            dockerfile = (
-                f"FROM {node_image} AS pi\n"
-                "RUN npm install -g @mariozechner/pi-coding-agent@0.83.0\n"
-                f"FROM {base_image}\n"
-                "COPY --from=pi /usr/local /opt/pi\n"
-                "ENV PATH=/opt/pi/bin:/opt/miniconda3/envs/testbed/bin:/opt/miniconda3/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n"
-            )
-            client.images.build(fileobj=io.BytesIO(dockerfile.encode()), tag=tag, rm=True, platform="linux/amd64")
+            except BuildImageError as exc:
+                try:
+                    output = log_tail(Path(exc.log_path))
+                except OSError as log_error:
+                    output = f"Could not read build log: {log_error}"
+                raise RuntimeError(f"{exc}\nDocker build output (tail):\n{output}") from None
+            if failed:
+                raise RuntimeError(f"Could not build SWE-bench environment: {spec.instance_id}")
+        # No dataset tests/gold patches are added to the agent image.
+        dockerfile = (
+            f"FROM {node_image} AS pi\n"
+            "RUN npm install -g @mariozechner/pi-coding-agent@0.83.0\n"
+            f"FROM {base_image}\n"
+            "COPY --from=pi /usr/local /opt/pi\n"
+            "ENV PATH=/opt/pi/bin:/opt/miniconda3/envs/testbed/bin:/opt/miniconda3/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n"
+        )
+        client.images.build(fileobj=io.BytesIO(dockerfile.encode()), tag=tag, rm=True, platform=spec.platform)
     return tag
 
 
@@ -106,10 +122,11 @@ async def run_agent(ctx, batch):
 
     client = docker.from_env(timeout=120)
     try:
-        await asyncio.to_thread(check_dind, client)
+        arch = await asyncio.to_thread(check_dind, client)
     except BaseException:
         client.close()
         raise
+    print(f"[pi/DinD] Task and grader platform: {docker_platform(arch)}", flush=True)
     semaphore = asyncio.Semaphore(ctx.max_running_prompts)
     namespace = os.environ.get("ARENO_PI_SWE_NAMESPACE") or None
 
@@ -119,7 +136,7 @@ async def run_agent(ctx, batch):
             instance = item.record["swebench"]
             timeout = positive_seconds(item.record, "timeout", 1800)
             verify_timeout = positive_seconds(item.record, "verify_timeout", 1800)
-            spec = make_test_spec(instance, namespace=namespace, arch="x86_64")
+            spec = make_test_spec(instance, namespace=namespace, arch=arch)
             image = await asyncio.to_thread(agent_image, client, spec)
             run_id = "areno-pi-" + uuid.uuid4().hex
             network = await acquire_resource(
@@ -148,6 +165,7 @@ async def run_agent(ctx, batch):
                             name=run_id,
                             network=network.name,
                             working_dir="/testbed",
+                            platform=docker_platform(arch),
                             environment={"PI_CODING_AGENT_DIR": "/tmp/pi-config"},
                             cap_drop=["ALL"],
                             security_opt=["no-new-privileges:true"],
@@ -207,6 +225,7 @@ async def run_agent(ctx, batch):
                                     {
                                         "instance": instance,
                                         "namespace": namespace,
+                                        "arch": arch,
                                         "prediction": prediction,
                                         "run_id": run_id,
                                         "timeout": int(verify_timeout),
