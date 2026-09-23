@@ -115,6 +115,41 @@ def annotate_sft_token_mean_packs(
             pack["_sft_grad_scale"] = end - start
 
 
+def annotate_response_token_mean_packs(
+    packs: list[dict],
+    response_token_counts: list[int],
+    *,
+    gradient_accumulation_steps: int | None,
+    data_parallel_size: int,
+) -> None:
+    """Attach global response-token normalizers to optimizer-step packs."""
+
+    if not packs:
+        return
+    if len(packs) != len(response_token_counts):
+        raise ValueError("packs and response_token_counts must have equal length")
+    data_parallel_size = max(int(data_parallel_size), 1)
+    accumulation = accumulation_steps(len(packs), gradient_accumulation_steps)
+    for start in range(0, len(packs), accumulation):
+        end = min(start + accumulation, len(packs))
+        total = max(sum(response_token_counts[start:end]), 1)
+        group_size = end - start
+        for pack in packs[start:end]:
+            batch_size = int(pack["input_ids"].shape[0])
+            dp_scale = data_parallel_size if batch_size >= data_parallel_size else 1
+            pack["_response_token_total"] = total
+            pack["_response_token_grad_scale"] = group_size * dp_scale
+
+
+def loss_reduction(loss_fn: Callable) -> str | None:
+    """Return an optional backend reduction marker from a function or partial."""
+
+    reduction = getattr(loss_fn, "_areno_loss_reduction", None)
+    if reduction is None:
+        reduction = getattr(getattr(loss_fn, "func", None), "_areno_loss_reduction", None)
+    return reduction
+
+
 def sft_target_token_count(seqs: list[TrainSequence]) -> int:
     """Count target tokens using the same shifted masks as training."""
 
@@ -197,8 +232,10 @@ def _sequence_prompt_len(seq: TrainSequence) -> int:
 
 
 __all__ = [
+    "annotate_response_token_mean_packs",
     "annotate_sft_token_mean_packs",
     "is_sft_loss_fn",
+    "loss_reduction",
     "make_routing_replay",
     "make_train_pack",
     "pad_token_id",

@@ -18,6 +18,7 @@ from areno.cli.train import (
     _format_training_config_summary,
     _trainer_config_from_options,
 )
+from areno.experimental.dapo.config import DAPOTrainerConfig
 
 
 def test_train_config_requires_ckpt():
@@ -144,6 +145,78 @@ def test_train_config_does_not_validate_unused_rollout_clip_eps():
 
     assert isinstance(gspo, PolicyTrainerConfig)
     assert isinstance(ppo, PPOTrainerConfig)
+
+
+def test_train_config_builds_dapo_experimental_shape():
+    cfg = _trainer_config_from_options(
+        **_options(
+            algo="dapo",
+            dapo_gen_batch_size=6,
+            dapo_max_num_gen_batches=7,
+            dapo_clip_eps_low=0.1,
+            dapo_clip_eps_high=0.3,
+            dapo_overlong_buffer_len=4,
+            dapo_overlong_penalty_factor=0.5,
+        )
+    )
+
+    assert isinstance(cfg, DAPOTrainerConfig)
+    assert cfg.dapo_gen_batch_size == 6
+    assert cfg.dapo_max_num_gen_batches == 7
+    assert cfg.dapo_clip_eps_low == 0.1
+    assert cfg.dapo_clip_eps_high == 0.3
+    assert cfg.dapo_overlong_buffer_len == 4
+    assert cfg.dapo_overlong_penalty_factor == 0.5
+    assert cfg.gradient_accumulation_steps == 1
+    assert cfg.resolved_max_running_prompts() == 6 * cfg.n_samples
+
+
+def test_train_config_requires_reward_function_for_dapo():
+    with pytest.raises(UsageError, match="--reward-fn-path is required for DAPO"):
+        _trainer_config_from_options(**_options(algo="dapo", reward_fn_path=None, reward_ckpt="reward-model"))
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("n_samples", 1, "--n-samples must be at least 2 for DAPO"),
+        ("dapo_gen_batch_size", 0, "--dapo-gen-batch-size must be positive"),
+        ("dapo_max_num_gen_batches", 0, "--dapo-max-num-gen-batches must be positive"),
+        ("dapo_clip_eps_low", 0.0, "--dapo-clip-eps-low must be positive"),
+        ("dapo_clip_eps_high", 0.0, "--dapo-clip-eps-high must be positive"),
+        ("dapo_overlong_buffer_len", -1, "--dapo-overlong-buffer-len must be non-negative"),
+        ("dapo_overlong_penalty_factor", -0.1, "--dapo-overlong-penalty-factor must be non-negative"),
+    ],
+)
+def test_train_config_validates_dapo_fields(field, value, message):
+    with pytest.raises(UsageError, match=message):
+        _trainer_config_from_options(**_options(algo="dapo", **{field: value}))
+
+
+def test_train_config_rejects_invalid_dapo_modes_and_bounds():
+    with pytest.raises(UsageError, match="DAPO currently supports only the CUDA backend"):
+        _trainer_config_from_options(**_options(algo="dapo", backend="mlx"))
+    with pytest.raises(UsageError, match="--greedy is not supported for DAPO"):
+        _trainer_config_from_options(**_options(algo="dapo", greedy=True))
+    with pytest.raises(UsageError, match="--agent-fn is not supported for DAPO"):
+        _trainer_config_from_options(**_options(algo="dapo", agent_fn="agent.py"))
+    with pytest.raises(UsageError, match="--dapo-clip-eps-high must be greater than or equal"):
+        _trainer_config_from_options(**_options(algo="dapo", dapo_clip_eps_low=0.3, dapo_clip_eps_high=0.2))
+    with pytest.raises(UsageError, match="must not exceed --max-new-tokens"):
+        _trainer_config_from_options(**_options(algo="dapo", max_new_tokens=8, dapo_overlong_buffer_len=9))
+
+
+def test_train_config_ignores_dapo_only_validation_for_other_algorithms():
+    cfg = _trainer_config_from_options(
+        **_options(
+            algo="gspo",
+            dapo_clip_eps_low=0.0,
+            dapo_clip_eps_high=0.0,
+            dapo_overlong_buffer_len=-1,
+        )
+    )
+
+    assert isinstance(cfg, PolicyTrainerConfig)
 
 
 @pytest.mark.parametrize(
@@ -1014,6 +1087,12 @@ def _options(**overrides):
         train_tool_results=False,
         gspo_clip_eps=3.0e-4,
         grpo_clip_eps=0.2,
+        dapo_gen_batch_size=None,
+        dapo_max_num_gen_batches=10,
+        dapo_clip_eps_low=0.2,
+        dapo_clip_eps_high=0.28,
+        dapo_overlong_buffer_len=0,
+        dapo_overlong_penalty_factor=1.0,
         ref_ckpt=None,
         dpo_beta=0.1,
         reward_ckpt="reward-model",
@@ -1033,4 +1112,6 @@ def _options(**overrides):
     defaults.update(overrides)
     if defaults["algo"] == "sft" and "dataset_loader_fn" not in overrides:
         defaults["dataset_loader_fn"] = "examples/sft/alpaca/dataset_loader.py"
+    if defaults["algo"] == "dapo" and "reward_fn_path" not in overrides:
+        defaults["reward_fn_path"] = "examples/math/math_verify_reward.py"
     return defaults
