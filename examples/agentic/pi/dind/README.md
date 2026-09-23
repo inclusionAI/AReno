@@ -57,15 +57,25 @@ The default is a pinned ModelScope snapshot of
 [princeton-nlp/SWE-bench_Lite](https://modelscope.cn/datasets/princeton-nlp/SWE-bench_Lite),
 using its **dev** split for integration experiments. These are real repository
 issues, not invented function exercises. The Lite test split remains held out by
-default. Lite does not provide a training split. For the full SWE-bench training
-split, select its ModelScope mirror explicitly:
+default. Lite does not provide a training split. For more integration tasks,
+the full SWE-bench **dev** split contains 225 issues:
 
 ```bash
 python /opt/areno-pi/generate_dataset.py \
   --dataset princeton-nlp/SWE-bench \
   --revision e571863f65e426a6fa843f2a098eb21ccb5385a2 \
-  --split train --output /tmp/swe-train.jsonl --limit 100
+  --split dev --output /tmp/swe-dev.jsonl
 ```
+
+The original SWE-bench **train** split at this revision is not runnable with this
+grader: all 19,008 rows have an empty `version` and empty `FAIL_TO_PASS` and
+`PASS_TO_PASS` lists. The generator rejects such rows rather than inventing an
+environment version or producing invalid rewards. Preparing these raw training
+issues requires selecting supported environment recipes and running the trusted
+tests before and after the reference fix to establish grading targets. That
+preparation is not performed by this converter. For a separate training corpus,
+select a ModelScope dataset with validated SWE-bench grading metadata and
+environment versions supported by the pinned harness.
 
 The generator uses ModelScope `snapshot_download`, reads only the selected
 split's Parquet files, and records the dataset revision and source checksum.
@@ -91,8 +101,8 @@ areno train \
   --max-steps 1 --save-path /tmp/swe-output
 ```
 
-Use `/tmp/swe-train.jsonl` for the training dataset generated above. Training on dev
-or test data is not a held-out benchmark evaluation. GSPO uses the same adapter.
+These dev tasks are for integration experiments; training on dev or test data
+is not a held-out benchmark evaluation. GSPO uses the same adapter.
 
 The adapter builds task environments with the official SWE-bench image builder and
 installs pi 0.83.0 in a separate `/opt/pi` prefix. Images are cached on the nested
@@ -100,6 +110,31 @@ daemon; the first attempt may require a large image download/build. Build errors
 or unsupported repository versions fail explicitly. Image preparation
 requires network access from the controller. This example pins `swebench==4.1.0`
 because its image naming and grading API are part of the integration contract.
+
+If Docker Hub is unreachable from the nested daemon, set an image proxy before
+starting training:
+
+```bash
+export ARENO_PI_DOCKER_PROXY=v4.gh-proxy.org/docker
+```
+
+The adapter pulls missing Ubuntu and Node build images through this prefix and
+tags them locally under their canonical names. Existing local images are reused.
+The Ubuntu version follows the task's harness recipe. For the default Ubuntu
+22.04 environment, the equivalent manual preparation is:
+
+```bash
+docker pull --platform linux/amd64 v4.gh-proxy.org/docker/ubuntu:22.04
+docker tag v4.gh-proxy.org/docker/ubuntu:22.04 ubuntu:22.04
+docker pull --platform linux/amd64 v4.gh-proxy.org/docker/node:22-bookworm-slim
+docker tag v4.gh-proxy.org/docker/node:22-bookworm-slim node:22-bookworm-slim
+```
+
+Run these commands **inside the outer AReno container**, using its private
+Docker daemon. A pull on the host does not populate DinD's image cache. This
+prefix routes image downloads only; apt, conda, npm and repository downloads
+still need network access. It is an image-name prefix, not a Docker daemon
+`registry-mirrors` URL.
 
 Pi edits `/testbed` with 64 model turns and a 30-minute deadline by default. It may
 run the repository's existing tests, but receives no injected benchmark tests.

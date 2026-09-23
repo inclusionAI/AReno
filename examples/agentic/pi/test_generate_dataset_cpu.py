@@ -48,6 +48,41 @@ def test_missing_test_targets_rejected():
         convert(raw)
 
 
+def test_raw_train_metadata_reports_actionable_error():
+    raw = task()
+    raw.update(version="", test_patch="", FAIL_TO_PASS="[]", PASS_TO_PASS="[]")
+    with pytest.raises(ValueError) as exc:
+        convert_row(raw, dataset="princeton-nlp/SWE-bench", revision="pinned", split="train", source_sha256="abc")
+    message = str(exc.value)
+    for expected in (
+        "split=train",
+        raw["instance_id"],
+        "version",
+        "test_patch",
+        "non-empty FAIL_TO_PASS",
+        "--split dev",
+    ):
+        assert expected in message
+
+
+@pytest.mark.parametrize("field", ["version", "test_patch", "FAIL_TO_PASS", "PASS_TO_PASS"])
+@pytest.mark.parametrize("value", [None, ""])
+def test_incomplete_grading_metadata_rejected(field, value):
+    raw = task()
+    raw[field] = value
+    with pytest.raises(ValueError, match=field):
+        convert(raw)
+    del raw[field]
+    with pytest.raises(ValueError, match=field):
+        convert(raw)
+
+
+def test_explicitly_empty_pass_to_pass_allowed():
+    raw = task()
+    raw["PASS_TO_PASS"] = "[]"
+    assert convert(raw)["swebench"]["PASS_TO_PASS"] == []
+
+
 def test_parquet_generation_selects_only_requested_split(tmp_path):
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")

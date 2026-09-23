@@ -5,6 +5,7 @@ import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -16,6 +17,69 @@ def test_refuses_host_daemon():
     with pytest.raises(RuntimeError, match="unlabelled"):
         runner.check_dind(SimpleNamespace(info=lambda: {"Labels": []}))
     runner.check_dind(SimpleNamespace(info=lambda: {"Labels": ["areno.pi.dind=true"]}))
+
+
+@pytest.mark.parametrize("image", ["ubuntu:22.04", "ubuntu:20.04", "node:22-bookworm-slim"])
+def test_build_images_pulled_from_proxy_and_tagged(monkeypatch, image):
+    import docker
+
+    monkeypatch.setenv("ARENO_PI_DOCKER_PROXY", "v4.gh-proxy.org/docker/")
+    client = Mock()
+    client.images.get.side_effect = docker.errors.ImageNotFound("missing")
+    runner.prepare_build_image(client, image)
+    client.images.pull.assert_called_once_with(f"v4.gh-proxy.org/docker/{image}", platform="linux/amd64")
+    repository, tag = image.rsplit(":", 1)
+    client.images.pull.return_value.tag.assert_called_once_with(repository, tag=tag)
+
+
+def test_build_images_reuse_local_cache(monkeypatch):
+    monkeypatch.setenv("ARENO_PI_DOCKER_PROXY", "v4.gh-proxy.org/docker")
+    client = Mock()
+    runner.prepare_build_image(client, "ubuntu:22.04")
+    client.images.pull.assert_not_called()
+
+
+def test_no_proxy_preserves_normal_docker_build(monkeypatch):
+    monkeypatch.delenv("ARENO_PI_DOCKER_PROXY", raising=False)
+    client = Mock()
+    runner.prepare_build_image(client, "ubuntu:22.04")
+    assert not client.mock_calls
+
+
+def test_proxy_pull_failure_does_not_fall_back_to_hub(monkeypatch):
+    import docker
+
+    monkeypatch.setenv("ARENO_PI_DOCKER_PROXY", "v4.gh-proxy.org/docker")
+    client = Mock()
+    client.images.get.side_effect = docker.errors.ImageNotFound("missing")
+    client.images.pull.side_effect = docker.errors.APIError("timeout")
+    with pytest.raises(RuntimeError, match="Could not prepare ubuntu:22.04"):
+        runner.prepare_build_image(client, "ubuntu:22.04")
+    assert client.images.pull.call_count == 1
+
+
+def test_agent_build_prepares_recipe_images_before_building(monkeypatch):
+    import docker
+    import swebench.harness.docker_build as builds
+
+    monkeypatch.setenv("ARENO_PI_DOCKER_PROXY", "v4.gh-proxy.org/docker")
+    client = Mock()
+    client.images.get.side_effect = docker.errors.ImageNotFound("missing")
+    spec = SimpleNamespace(
+        instance_image_key="sweb.eval.local:latest", is_remote_image=False, docker_specs={"ubuntu_version": "20.04"}
+    )
+
+    def build_instances(client, specs, **kwargs):
+        assert specs == [spec]
+        client.images.pull.assert_called_once_with("v4.gh-proxy.org/docker/ubuntu:20.04", platform="linux/amd64")
+        return [spec], []
+
+    monkeypatch.setattr(builds, "build_instance_images", build_instances)
+    runner.agent_image(client, spec)
+    assert client.images.pull.call_args_list[-1].args == ("v4.gh-proxy.org/docker/node:22-bookworm-slim",)
+    dockerfile = client.images.build.call_args.kwargs["fileobj"].getvalue()
+    assert b"FROM node:22-bookworm-slim AS pi" in dockerfile
+    assert b"FROM sweb.eval.local:latest" in dockerfile
 
 
 @pytest.mark.parametrize("value", [0, -1, float("nan"), float("inf")])

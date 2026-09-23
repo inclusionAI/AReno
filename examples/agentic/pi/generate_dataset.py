@@ -24,17 +24,34 @@ FIELDS = (
 
 def convert_row(row: dict, *, dataset: str, revision: str, split: str, source_sha256: str) -> dict:
     instance = {key: row[key] for key in FIELDS if key in row}
-    for key in ("instance_id", "repo", "base_commit", "version", "problem_statement", "test_patch"):
+    for key in ("instance_id", "repo", "base_commit", "problem_statement"):
         if not isinstance(instance.get(key), str) or not instance[key].strip():
             raise ValueError(f"SWE-bench row requires {key}")
+    missing = []
+    for key in ("version", "test_patch"):
+        if not isinstance(instance.get(key), str) or not instance[key].strip():
+            missing.append(key)
     for key in ("FAIL_TO_PASS", "PASS_TO_PASS"):
-        value = instance.get(key, [])
+        value = instance.get(key)
+        if value is None or value == "":
+            missing.append(key)
+            continue
         value = json.loads(value) if isinstance(value, str) else value
         if not isinstance(value, list) or not all(isinstance(test, str) for test in value):
             raise ValueError(f"{key} must be a list of test names")
         instance[key] = value
-    if not instance["FAIL_TO_PASS"]:
-        raise ValueError("SWE-bench task has no FAIL_TO_PASS tests")
+        if key == "FAIL_TO_PASS" and not value:
+            missing.append("non-empty FAIL_TO_PASS")
+    if missing:
+        raise ValueError(
+            f"{dataset}@{revision} split={split}, instance_id={instance['instance_id']}: "
+            f"missing grading metadata: {', '.join(missing)}. "
+            "Pi/DinD requires a validated SWE-bench environment version and test targets. "
+            "The original SWE-bench train split has empty versions and test targets; "
+            "it cannot be used directly for this RL example. Use --split dev for integration "
+            "experiments, or supply a dataset with validated grading metadata. "
+            "Do not invent a version or derive passing tests from the patch alone."
+        )
     # Never copy the gold patch, hints, test patch or target test names into pi's prompt/files.
     return {
         "prompt": (
@@ -103,9 +120,12 @@ def main() -> None:
         allow_patterns=[f"data/{args.split}-*.parquet", "README.md"],
         cache_dir=str(args.cache_dir) if args.cache_dir else None,
     )
-    count = generate(
-        Path(snapshot), args.output, dataset=args.dataset, revision=revision, split=args.split, limit=args.limit
-    )
+    try:
+        count = generate(
+            Path(snapshot), args.output, dataset=args.dataset, revision=revision, split=args.split, limit=args.limit
+        )
+    except ValueError as exc:
+        parser.exit(2, f"error: {exc}\n")
     print(f"Wrote {count} {args.split} repository tasks to {args.output}")
 
 
