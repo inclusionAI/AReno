@@ -7,7 +7,13 @@ if [ -S /var/run/docker.sock ]; then
 fi
 export DOCKER_HOST=unix:///var/run/docker.sock
 unset DOCKER_TLS_VERIFY DOCKER_CERT_PATH
-dockerd --host="$DOCKER_HOST" --data-root=/var/lib/areno-docker \
+# Nested overlay mounts can fail on the outer container's writable layer.
+# Explicitly disable the containerd image store so the classic driver is used.
+storage_driver=${ARENO_PI_DOCKER_STORAGE_DRIVER:-vfs}
+echo "Starting private Docker with storage driver: $storage_driver (containerd snapshotter disabled)"
+dockerd --config-file=/opt/areno-pi/dind/daemon.json \
+    --storage-driver="$storage_driver" \
+    --host="$DOCKER_HOST" --data-root=/var/lib/areno-docker \
     --label=areno.pi.dind=true > /var/log/areno-dockerd.log 2>&1 &
 daemon_pid=$!
 child_pid=''

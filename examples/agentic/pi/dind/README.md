@@ -44,6 +44,44 @@ Its `areno.pi.dind=true` label is checked by the rollout adapter. Nested image
 storage is ephemeral unless you explicitly attach a dedicated volume at
 `/var/lib/areno-docker`; do not reuse the host daemon's data directory.
 
+### Nested Docker storage
+
+The entrypoint defaults to the classic `vfs` storage driver and disables
+`features.containerd-snapshotter` using its dedicated
+`/opt/areno-pi/dind/daemon.json`. This avoids containerd/overlayfs mount failures
+when the outer container's writable layer cannot support nested overlay mounts.
+Setting `--storage-driver` alone is insufficient when the containerd image store
+is active. VFS copies layers, so builds take more disk space and time.
+
+Confirm the running daemon with:
+
+```bash
+docker info --format '{{.Driver}}'
+```
+
+The default must report `vfs`. To use `overlay2` on a worker where it has been
+validated, attach dedicated compatible storage at `/var/lib/areno-docker` and
+pass `-e ARENO_PI_DOCKER_STORAGE_DRIVER=overlay2` when starting the outer
+container. The outer container still requires `--privileged`.
+
+For an existing image, rebuild it or copy both updated startup files from the
+repository inside the outer container:
+
+```bash
+cp examples/agentic/pi/dind/daemon.json /opt/areno-pi/dind/daemon.json
+cp examples/agentic/pi/dind/entrypoint.sh /usr/local/bin/areno-pi-dind
+chmod +x /usr/local/bin/areno-pi-dind
+```
+
+Then restart the outer container so its entrypoint starts a new nested daemon.
+For containers launched with `--rm`, rebuild and launch a new container instead;
+their writable layer is deleted on exit. Changing storage backends does not
+migrate cached images; expect to rebuild them. Do not delete the old data root
+as a troubleshooting step.
+
+See Docker's [VFS driver documentation](https://docs.docker.com/engine/storage/drivers/vfs-driver/)
+and [daemon feature settings](https://docs.docker.com/reference/cli/dockerd/#feature-options).
+
 ## Generate actual repository tasks from ModelScope
 
 Inside the outer container:
