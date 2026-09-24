@@ -38,6 +38,7 @@ from areno.engine.checkpoints.common import (
 from areno.engine.config import ModelConfig, _parse_dtype
 from areno.engine.layers.attention import CausalSelfAttention
 from areno.engine.layers.linear import mark_tensor_parallel_parameter
+from areno.engine.layers.lora import RoutedExpertLoraBinding, RoutedLoraTarget
 from areno.engine.layers.mlp import GatedMLP
 from areno.engine.layers.norm import RMSNorm
 from areno.engine.layers.vocab import VocabParallelEmbedding, VocabParallelLMHead
@@ -104,37 +105,35 @@ class Qwen3MoeExperts(nn.Module):
         self.down_weight = nn.Parameter(
             torch.empty(self.local_num_experts, self.hidden_size, self.intermediate_size, dtype=config.dtype)
         )
-        self.lora_slots = nn.ModuleDict()
+        self.lora_slots = RoutedExpertLoraBinding(
+            intermediate_size=self.intermediate_size,
+            targets=(
+                RoutedLoraTarget("gate_proj", "gate_up_weight", self.hidden_size, self.intermediate_size),
+                RoutedLoraTarget("up_proj", "gate_up_weight", self.hidden_size, self.intermediate_size),
+                RoutedLoraTarget("down_proj", "down_weight", self.intermediate_size, self.hidden_size),
+            ),
+        )
         mark_tensor_parallel_parameter(self.gate_up_weight, True, sequence_parallel=False, tp_grad_allreduce=False)
         mark_tensor_parallel_parameter(self.down_weight, True, sequence_parallel=False, tp_grad_allreduce=False)
 
     def install_lora_component(self, component: str, slot: nn.Module) -> None:
         """Attach one grouped canonical adapter before optimizer construction."""
 
-        self.lora_slots[component] = slot
+        self.lora_slots.bind(component, slot)
 
     def has_lora(self) -> bool:
         return bool(self.lora_slots)
 
     def has_active_lora(self) -> bool:
-        return self.has_lora() and next(iter(self.lora_slots.values())).enabled
+        return self.lora_slots.active
 
     def _gate_up_forward(self, x: torch.Tensor, tokens_per_expert: torch.Tensor) -> torch.Tensor:
         base = _areno_grouped_linear_no_compile(x.contiguous(), self.gate_up_weight, tokens_per_expert)
-        if not self.has_active_lora():
-            return base
-        gate, up = base.chunk(2, dim=-1)
-        if "gate_proj" in self.lora_slots:
-            gate = gate + self.lora_slots["gate_proj"](x, tokens_per_expert)
-        if "up_proj" in self.lora_slots:
-            up = up + self.lora_slots["up_proj"](x, tokens_per_expert)
-        return torch.cat((gate, up), dim=-1)
+        return self.lora_slots.apply_gate_up(x, base, tokens_per_expert)
 
     def _down_forward(self, x: torch.Tensor, tokens_per_expert: torch.Tensor) -> torch.Tensor:
         out = _areno_grouped_linear_no_compile(x, self.down_weight, tokens_per_expert)
-        if self.has_active_lora() and "down_proj" in self.lora_slots:
-            out = out + self.lora_slots["down_proj"](x, tokens_per_expert)
-        return out
+        return self.lora_slots.apply_down(x, out, tokens_per_expert)
 
     def forward(self, flat: torch.Tensor, topk_idx: torch.Tensor, topk_weight: torch.Tensor) -> torch.Tensor:
         x, route_weight, token_idx, tokens_per_expert = _areno_moe_topk_permute_no_compile(
@@ -154,9 +153,7 @@ class Qwen3MoeExperts(nn.Module):
                 + self.down_weight.reshape(-1)[0] * 0
                 + topk_weight.sum().to(dtype=self.gate_up_weight.dtype) * 0
             )
-            if self.has_active_lora():
-                for slot in self.lora_slots.values():
-                    zero = zero + slot.lora_A.reshape(-1)[0] * 0 + slot.lora_B.reshape(-1)[0] * 0
+            zero = zero + self.lora_slots.zero_grad_edge(self.gate_up_weight)
             return all_reduce(flat.new_zeros(flat.shape) + zero)
         hidden = self._gate_up_forward(x, tokens_per_expert)
         log_once("qwen3_moe_silu_and_mul", "using ARENO fused silu_and_mul kernel for Qwen3-MoE experts")

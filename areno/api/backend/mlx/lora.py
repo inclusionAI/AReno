@@ -35,6 +35,8 @@ class _MlxLoraApi:
 def initialize_lora(model: Any, config: LoraConfig, *, model_type: str) -> MlxLoraState:
     """Freeze one dense Qwen3 policy and inject exact requested LoRA targets."""
 
+    if config.full_parameter_targets:
+        raise ValueError("full_parameter_targets are currently supported by the CUDA backend only")
     if model_type not in _SUPPORTED_MODEL_TYPES:
         supported = ", ".join(sorted(_SUPPORTED_MODEL_TYPES))
         raise ValueError(f"MLX LoRA currently supports dense model types only: {supported}")

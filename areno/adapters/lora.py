@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import math
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
+from enum import Enum
 
 import torch
 import torch.nn.functional as F
@@ -13,8 +16,18 @@ from torch import nn
 
 from areno.accel import areno_grouped_linear
 from areno.adapters.config import LoraConfig
-from areno.engine.layers.linear import ColumnParallelLinear, RowParallelLinear, mark_tensor_parallel_parameter
+from areno.engine.layers.linear import (
+    ColumnParallelLinear,
+    MergedColumnParallelLinear,
+    QKVParallelLinear,
+    ReplicatedLinear,
+    RowParallelLinear,
+    mark_tensor_parallel_parameter,
+)
+from areno.engine.layers.lora import MergedLoraBinding, RoutedExpertLoraBinding
 from areno.engine.parallel.context import get_tp_context
+
+logger = logging.getLogger(__name__)
 
 
 class _AdapterRuntimeState:
@@ -179,23 +192,29 @@ class RoutedExpertLoraSlot(nn.Module):
 
 
 class AdapterRegistry:
-    """Non-owning index over LoRA slots; projection modules remain sole owners."""
+    """One resolved index over every trainable policy parameter."""
 
     def __init__(
         self,
         slots: dict[str, LoraSlot | RoutedExpertLoraSlot],
         config: LoraConfig,
         runtime_state: _AdapterRuntimeState,
+        full_parameters: dict[str, nn.Parameter] | None = None,
     ) -> None:
         self.slots = slots
+        self.full_parameters = {} if full_parameters is None else full_parameters
         self.config = config
         self._runtime_state = runtime_state
         self.version = 0
 
-    def named_parameters(self):
+    def named_adapter_parameters(self):
         for name, slot in self.slots.items():
             yield f"{name}.lora_A.weight", slot.lora_A
             yield f"{name}.lora_B.weight", slot.lora_B
+
+    def named_parameters(self):
+        yield from self.named_adapter_parameters()
+        yield from self.full_parameters.items()
 
     def parameters(self) -> tuple[nn.Parameter, ...]:
         return tuple(parameter for _, parameter in self.named_parameters())
@@ -215,332 +234,322 @@ class AdapterRegistry:
             self._runtime_state.base_only_depth -= 1
 
 
+class LoraExecutionPattern(str, Enum):
+    COLUMN_PARALLEL = "column_parallel"
+    ROW_PARALLEL = "row_parallel"
+    MERGED_COMPONENT = "merged_component"
+    REPLICATED = "replicated"
+    ROUTED_GROUPED_EXPERT = "routed_grouped_expert"
+
+
+@dataclass(frozen=True, slots=True)
+class LoraTargetSpec:
+    """Resolved physical owner for one logical PEFT target."""
+
+    logical_name: str
+    component: str
+    execution_pattern: LoraExecutionPattern
+    owner: nn.Module
+    base_weight: nn.Parameter
+    global_in_features: int
+    global_out_features: int
+    local_in_features: int
+    local_out_features: int
+    component_index: int | None = None
+    output_range: tuple[int, int] | None = None
+
+
 def initialize_lora(model: nn.Module, config: LoraConfig, *, seed: int) -> AdapterRegistry:
-    """Freeze one supported native base and attach its canonical targets."""
+    """Resolve, validate and atomically bind native LoRA wrappers."""
 
     model_config = getattr(model, "config", None)
     model_type = getattr(model_config, "model_type", None)
-    if model_type not in {"qwen3", "qwen3_moe", "bailing_moe_v3"}:
-        raise ValueError("native LoRA currently supports Qwen3 and Bailing-MoE V3 models only")
+    supported_model_types = {
+        "qwen3",
+        "qwen3_moe",
+        "bailing_moe_v3",
+        "olmo2",
+        "phi4mm",
+        "gemma4",
+        "qwen3_5",
+        "qwen3_5_vl",
+        "qwen3_5_moe",
+        "qwen3_5_vl_moe",
+        "minicpmv46",
+        "bailing_moe_linear_v2",
+    }
+    if model_type not in supported_model_types:
+        raise ValueError(
+            "native LoRA does not support "
+            f"model_type={model_type!r}; supported model types: {', '.join(sorted(supported_model_types))}"
+        )
     if model_type == "bailing_moe_v3" and not bool(getattr(model_config, "no_kda_lora", False)):
         raise ValueError("Bailing-MoE V3 native LoRA currently requires no_kda_lora=true")
-    for parameter in model.parameters():
-        parameter.requires_grad_(False)
 
     requested = set(config.target_modules)
-    runtime_state = _AdapterRuntimeState()
-    slots: dict[str, LoraSlot | RoutedExpertLoraSlot] = {}
-    if model_type == "bailing_moe_v3":
-        matched = _initialize_bailing_v3_lora(model, requested, config, seed, runtime_state, slots)
-    else:
-        matched = _initialize_qwen3_lora(model, requested, config, seed, runtime_state, slots)
+    resolved: list[LoraTargetSpec] = []
+    matched: set[str] = set()
+    for spec in _iter_lora_targets(model):
+        selected = _matching_targets(requested, spec.component, spec.logical_name)
+        if selected:
+            resolved.append(spec)
+            matched.update(selected)
     missing = requested - matched
     if missing:
         raise ValueError(f"target_modules are not present in {model_type}: {', '.join(sorted(missing))}")
-    return AdapterRegistry(slots, config, runtime_state)
+    _validate_resolved_targets(resolved)
+    full_parameters = _resolve_full_parameter_targets(model, config.full_parameter_targets)
+    lora_base_ids = {id(spec.base_weight) for spec in resolved}
+    conflicts = sorted(name for name, parameter in full_parameters.items() if id(parameter) in lora_base_ids)
+    if conflicts:
+        raise ValueError("parameters cannot be trained both in full and LoRA modes: " + ", ".join(conflicts[:3]))
+
+    runtime_state = _AdapterRuntimeState()
+    pending = [(spec, _new_slot(spec, config, seed, runtime_state)) for spec in resolved]
+    for parameter in model.parameters():
+        parameter.requires_grad_(False)
+    for parameter in full_parameters.values():
+        parameter.requires_grad_(True)
+
+    slots: dict[str, LoraSlot | RoutedExpertLoraSlot] = {}
+    for spec, slot in pending:
+        _bind_slot(spec, slot)
+        slots[spec.logical_name] = slot
+    registry = AdapterRegistry(slots, config, runtime_state, full_parameters)
+    if get_tp_context().is_rank0:
+        logger.info(
+            "native policy targets resolved: lora=%d, full_parameters=%d, trainable_parameters=%d",
+            len(slots),
+            len(full_parameters),
+            sum(parameter.numel() for parameter in registry.parameters()),
+        )
+    return registry
 
 
-def _initialize_qwen3_lora(
-    model: nn.Module,
-    requested: set[str],
-    config: LoraConfig,
-    seed: int,
-    runtime_state: _AdapterRuntimeState,
-    slots: dict[str, LoraSlot | RoutedExpertLoraSlot],
-) -> set[str]:
-    matched: set[str] = set()
-    model_config = model.config
-    for layer_index, layer in enumerate(model.layers):
-        prefix = f"layers.{layer_index}"
-        qkv = layer.self_attn.qkv_proj
-        for component_index, component in enumerate(("q_proj", "k_proj", "v_proj")):
-            if component not in requested:
-                continue
-            matched.add(component)
-            logical_name = f"{prefix}.self_attn.{component}"
-            slot = LoraSlot(
-                logical_name=logical_name,
-                base_weight=qkv.weight,
-                global_in_features=qkv.in_features,
-                global_out_features=qkv.out_features[component_index],
-                local_in_features=qkv.in_features,
-                local_out_features=qkv.local_out_features[component_index],
-                row_parallel=False,
-                output_range=qkv.shard_ranges[component_index],
-                config=config,
-                seed=seed,
-                runtime_state=runtime_state,
-            )
-            qkv.install_lora_component(component, component_index, slot)
-            slots[logical_name] = slot
+def _resolve_full_parameter_targets(model: nn.Module, selectors: tuple[str, ...]) -> dict[str, nn.Parameter]:
+    """Resolve exact paths or unqualified component names to model parameters."""
 
-        if "o_proj" in requested:
-            matched.add("o_proj")
-            owner = layer.self_attn.o_proj
-            logical_name = f"{prefix}.self_attn.o_proj"
-            slot = _row_slot(logical_name, owner, config, seed, runtime_state)
-            owner.install_lora(slot)
-            slots[logical_name] = slot
-
-        if getattr(model_config, "enable_moe_block", False):
-            matched.update(_install_moe_slots(layer.mlp.experts, prefix, requested, config, seed, runtime_state, slots))
-        else:
-            gate_up = layer.mlp.gate_up_proj
-            for component_index, component in enumerate(("gate_proj", "up_proj")):
-                if component not in requested:
-                    continue
-                matched.add(component)
-                logical_name = f"{prefix}.mlp.{component}"
-                slot = LoraSlot(
-                    logical_name=logical_name,
-                    base_weight=gate_up.weight,
-                    global_in_features=gate_up.in_features,
-                    global_out_features=gate_up.out_features[component_index],
-                    local_in_features=gate_up.in_features,
-                    local_out_features=gate_up.local_out_features[component_index],
-                    row_parallel=False,
-                    config=config,
-                    seed=seed,
-                    runtime_state=runtime_state,
-                )
-                gate_up.install_lora_component(component, component_index, slot)
-                slots[logical_name] = slot
-
-            if "down_proj" in requested:
-                matched.add("down_proj")
-                owner = layer.mlp.down_proj
-                logical_name = f"{prefix}.mlp.down_proj"
-                slot = _row_slot(logical_name, owner, config, seed, runtime_state)
-                owner.install_lora(slot)
-                slots[logical_name] = slot
-
-    return matched
-
-
-def _initialize_bailing_v3_lora(
-    model: nn.Module,
-    requested: set[str],
-    config: LoraConfig,
-    seed: int,
-    runtime_state: _AdapterRuntimeState,
-    slots: dict[str, LoraSlot | RoutedExpertLoraSlot],
-) -> set[str]:
-    matched: set[str] = set()
-    for layer_index, layer in enumerate(model.layers):
-        prefix = f"layers.{layer_index}"
-        attention = layer.attention
-        attention_prefix = f"{prefix}.attention"
-        if hasattr(attention, "q_conv1d_weight"):
-            for component in ("q_proj", "k_proj", "v_proj", "f_proj", "g_proj"):
-                if component in requested:
-                    matched.add(component)
-                    _install_column_slot(
-                        f"{attention_prefix}.{component}",
-                        getattr(attention, component),
-                        config,
-                        seed,
-                        runtime_state,
-                        slots,
-                    )
-            if "o_proj" in requested:
-                matched.add("o_proj")
-                _install_row_slot(
-                    f"{attention_prefix}.o_proj",
-                    attention.o_proj,
-                    config,
-                    seed,
-                    runtime_state,
-                    slots,
-                )
-        else:
-            if "q_proj" in requested and attention.q_proj is not None:
-                matched.add("q_proj")
-                _install_column_slot(
-                    f"{attention_prefix}.q_proj",
-                    attention.q_proj,
-                    config,
-                    seed,
-                    runtime_state,
-                    slots,
-                )
-            for component in ("q_a_proj", "kv_a_proj_with_mqa"):
-                owner = getattr(attention, component, None)
-                if component in requested and owner is not None:
-                    matched.add(component)
-                    slot = _replicated_slot(f"{attention_prefix}.{component}", owner, config, seed, runtime_state)
-                    attention.install_lora_component(component, slot)
-                    slots[slot.logical_name] = slot
-            for component in ("q_b_proj", "kv_b_proj"):
-                owner = getattr(attention, component, None)
-                if component in requested and owner is not None:
-                    matched.add(component)
-                    _install_column_slot(f"{attention_prefix}.{component}", owner, config, seed, runtime_state, slots)
-            if "dense" in requested:
-                matched.add("dense")
-                _install_row_slot(
-                    f"{attention_prefix}.dense",
-                    attention.dense,
-                    config,
-                    seed,
-                    runtime_state,
-                    slots,
-                )
-
-        mlp_prefix = f"{prefix}.mlp"
-        if hasattr(layer.mlp, "experts"):
-            matched.update(_install_moe_slots(layer.mlp.experts, prefix, requested, config, seed, runtime_state, slots))
-            if layer.mlp.shared_experts is not None:
-                matched.update(
-                    _install_dense_mlp_slots(
-                        layer.mlp.shared_experts,
-                        f"{mlp_prefix}.shared_experts",
-                        requested,
-                        config,
-                        seed,
-                        runtime_state,
-                        slots,
-                    )
-                )
-        else:
-            matched.update(
-                _install_dense_mlp_slots(layer.mlp, mlp_prefix, requested, config, seed, runtime_state, slots)
-            )
-    return matched
-
-
-def _install_column_slot(
-    logical_name: str,
-    owner: ColumnParallelLinear,
-    config: LoraConfig,
-    seed: int,
-    runtime_state: _AdapterRuntimeState,
-    slots: dict[str, LoraSlot | RoutedExpertLoraSlot],
-) -> None:
-    slot = LoraSlot(
-        logical_name=logical_name,
-        base_weight=owner.weight,
-        global_in_features=owner.in_features,
-        global_out_features=owner.out_features,
-        local_in_features=owner.in_features,
-        local_out_features=owner.local_out_features,
-        row_parallel=False,
-        config=config,
-        seed=seed,
-        runtime_state=runtime_state,
-    )
-    owner.install_lora(slot)
-    slots[logical_name] = slot
-
-
-def _install_row_slot(
-    logical_name: str,
-    owner: RowParallelLinear,
-    config: LoraConfig,
-    seed: int,
-    runtime_state: _AdapterRuntimeState,
-    slots: dict[str, LoraSlot | RoutedExpertLoraSlot],
-) -> None:
-    slot = _row_slot(logical_name, owner, config, seed, runtime_state)
-    owner.install_lora(slot)
-    slots[logical_name] = slot
-
-
-def _replicated_slot(
-    logical_name: str,
-    owner: nn.Linear,
-    config: LoraConfig,
-    seed: int,
-    runtime_state: _AdapterRuntimeState,
-) -> LoraSlot:
-    return LoraSlot(
-        logical_name=logical_name,
-        base_weight=owner.weight,
-        global_in_features=owner.in_features,
-        global_out_features=owner.out_features,
-        local_in_features=owner.in_features,
-        local_out_features=owner.out_features,
-        row_parallel=False,
-        output_range=(0, owner.out_features),
-        config=config,
-        seed=seed,
-        runtime_state=runtime_state,
-    )
-
-
-def _install_dense_mlp_slots(
-    mlp: nn.Module,
-    prefix: str,
-    requested: set[str],
-    config: LoraConfig,
-    seed: int,
-    runtime_state: _AdapterRuntimeState,
-    slots: dict[str, LoraSlot | RoutedExpertLoraSlot],
-) -> set[str]:
-    matched: set[str] = set()
-    for component in ("gate_proj", "up_proj"):
-        if component in requested:
-            matched.add(component)
-            _install_column_slot(f"{prefix}.{component}", getattr(mlp, component), config, seed, runtime_state, slots)
-    if "down_proj" in requested:
-        matched.add("down_proj")
-        _install_row_slot(f"{prefix}.down_proj", mlp.down_proj, config, seed, runtime_state, slots)
-    return matched
-
-
-def _row_slot(
-    logical_name: str,
-    owner: RowParallelLinear,
-    config: LoraConfig,
-    seed: int,
-    runtime_state: _AdapterRuntimeState,
-) -> LoraSlot:
-    return LoraSlot(
-        logical_name=logical_name,
-        base_weight=owner.weight,
-        global_in_features=owner.in_features,
-        global_out_features=owner.out_features,
-        local_in_features=owner.local_in_features,
-        local_out_features=owner.out_features,
-        row_parallel=True,
-        config=config,
-        seed=seed,
-        runtime_state=runtime_state,
-    )
-
-
-def _install_moe_slots(
-    experts: nn.Module,
-    prefix: str,
-    requested: set[str],
-    config: LoraConfig,
-    seed: int,
-    runtime_state: _AdapterRuntimeState,
-    slots: dict[str, LoraSlot | RoutedExpertLoraSlot],
-) -> set[str]:
-    gate_up_weight = experts.gate_up_weight if hasattr(experts, "gate_up_weight") else experts.linear_fc1.weight
-    down_weight = experts.down_weight if hasattr(experts, "down_weight") else experts.linear_fc2.weight
-    components = (
-        ("gate_proj", experts.hidden_size, experts.intermediate_size, gate_up_weight),
-        ("up_proj", experts.hidden_size, experts.intermediate_size, gate_up_weight),
-        ("down_proj", experts.intermediate_size, experts.hidden_size, down_weight),
-    )
-    matched: set[str] = set()
-    for component, in_features, out_features, base_weight in components:
-        if component not in requested:
+    if not selectors:
+        return {}
+    named_parameters = dict(model.named_parameters())
+    named_modules = dict(model.named_modules())
+    resolved: dict[str, nn.Parameter] = {}
+    owners: dict[int, str] = {}
+    missing = []
+    for selector in selectors:
+        matches: dict[str, nn.Parameter] = {}
+        parameter = named_parameters.get(selector)
+        module = named_modules.get(selector)
+        if parameter is not None:
+            matches[selector] = parameter
+        elif module is not None:
+            prefix = f"{selector}." if selector else ""
+            matches.update((name, candidate) for name, candidate in named_parameters.items() if name.startswith(prefix))
+        elif "." not in selector:
+            for name, candidate in named_parameters.items():
+                parent = name.rsplit(".", 1)[0] if "." in name else ""
+                if name.rsplit(".", 1)[-1] == selector or parent.rsplit(".", 1)[-1] == selector:
+                    matches[name] = candidate
+        if not matches:
+            missing.append(selector)
             continue
-        matched.add(component)
-        logical_name = f"{prefix}.mlp.experts.{{expert}}.{component}"
-        slot = RoutedExpertLoraSlot(
-            logical_name=logical_name,
-            base_weight=base_weight,
-            local_num_experts=experts.local_num_experts,
-            local_expert_start=experts.local_expert_start,
-            in_features=in_features,
-            out_features=out_features,
+        for name, candidate in matches.items():
+            previous = owners.get(id(candidate))
+            if previous is not None and previous != selector:
+                raise ValueError(f"full_parameter_targets {previous!r} and {selector!r} overlap at {name!r}")
+            owners[id(candidate)] = selector
+            resolved[name] = candidate
+    if missing:
+        model_type = getattr(getattr(model, "config", None), "model_type", type(model).__name__)
+        raise ValueError(f"full_parameter_targets are not present in {model_type}: {', '.join(sorted(missing))}")
+    return dict(sorted(resolved.items()))
+
+
+def _iter_lora_targets(model: nn.Module) -> Iterator[LoraTargetSpec]:
+    for module_name, owner in model.named_modules():
+        if not module_name:
+            continue
+        if isinstance(owner, QKVParallelLinear):
+            prefix = module_name.rsplit(".", 1)[0]
+            for index, component in enumerate(owner.lora_components):
+                yield LoraTargetSpec(
+                    logical_name=f"{prefix}.{component}",
+                    component=component,
+                    execution_pattern=LoraExecutionPattern.MERGED_COMPONENT,
+                    owner=owner,
+                    base_weight=owner.weight,
+                    global_in_features=owner.in_features,
+                    global_out_features=owner.out_features[index],
+                    local_in_features=owner.in_features,
+                    local_out_features=owner.local_out_features[index],
+                    component_index=index,
+                    output_range=owner.shard_ranges[index],
+                )
+            continue
+        if isinstance(owner, MergedColumnParallelLinear):
+            prefix = module_name.rsplit(".", 1)[0]
+            for index, component in enumerate(owner.lora_components):
+                yield LoraTargetSpec(
+                    logical_name=f"{prefix}.{component}",
+                    component=component,
+                    execution_pattern=LoraExecutionPattern.MERGED_COMPONENT,
+                    owner=owner,
+                    base_weight=owner.weight,
+                    global_in_features=owner.in_features,
+                    global_out_features=owner.out_features[index],
+                    local_in_features=owner.in_features,
+                    local_out_features=owner.local_out_features[index],
+                    component_index=index,
+                )
+            continue
+        binding = getattr(owner, "lora_slots", None)
+        components = tuple(getattr(owner, "lora_components", ()))
+        if isinstance(binding, MergedLoraBinding) and components:
+            output_ranges = tuple(getattr(owner, "shard_ranges", ()))
+            for index, component in enumerate(components):
+                yield LoraTargetSpec(
+                    logical_name=f"{module_name.rsplit('.', 1)[0]}.{component}",
+                    component=component,
+                    execution_pattern=LoraExecutionPattern.MERGED_COMPONENT,
+                    owner=owner,
+                    base_weight=owner.weight,
+                    global_in_features=owner.in_features,
+                    global_out_features=owner.out_features[index],
+                    local_in_features=owner.in_features,
+                    local_out_features=owner.local_out_features[index],
+                    component_index=index,
+                    output_range=output_ranges[index] if output_ranges else None,
+                )
+            continue
+        if isinstance(owner, ReplicatedLinear):
+            component = module_name.rsplit(".", 1)[-1]
+            yield LoraTargetSpec(
+                logical_name=module_name,
+                component=component,
+                execution_pattern=LoraExecutionPattern.REPLICATED,
+                owner=owner,
+                base_weight=owner.weight,
+                global_in_features=owner.in_features,
+                global_out_features=owner.out_features,
+                local_in_features=owner.in_features,
+                local_out_features=owner.out_features,
+                output_range=(0, owner.out_features),
+            )
+            continue
+        if isinstance(owner, ColumnParallelLinear):
+            component = module_name.rsplit(".", 1)[-1]
+            yield LoraTargetSpec(
+                logical_name=module_name,
+                component=component,
+                execution_pattern=LoraExecutionPattern.COLUMN_PARALLEL,
+                owner=owner,
+                base_weight=owner.weight,
+                global_in_features=owner.in_features,
+                global_out_features=owner.out_features,
+                local_in_features=owner.in_features,
+                local_out_features=owner.local_out_features,
+            )
+            continue
+        if isinstance(owner, RowParallelLinear):
+            component = module_name.rsplit(".", 1)[-1]
+            yield LoraTargetSpec(
+                logical_name=module_name,
+                component=component,
+                execution_pattern=LoraExecutionPattern.ROW_PARALLEL,
+                owner=owner,
+                base_weight=owner.weight,
+                global_in_features=owner.in_features,
+                global_out_features=owner.out_features,
+                local_in_features=owner.local_in_features,
+                local_out_features=owner.out_features,
+            )
+            continue
+        binding = getattr(owner, "lora_slots", None)
+        if isinstance(binding, RoutedExpertLoraBinding):
+            for target in binding.targets:
+                yield LoraTargetSpec(
+                    logical_name=f"{module_name}.{{expert}}.{target.component}",
+                    component=target.component,
+                    execution_pattern=LoraExecutionPattern.ROUTED_GROUPED_EXPERT,
+                    owner=owner,
+                    base_weight=_resolve_parameter(owner, target.weight_path),
+                    global_in_features=target.in_features,
+                    global_out_features=target.out_features,
+                    local_in_features=target.in_features,
+                    local_out_features=target.out_features,
+                )
+
+
+def _resolve_parameter(owner: nn.Module, path: str) -> nn.Parameter:
+    value: object = owner
+    for part in path.split("."):
+        value = getattr(value, part)
+    if not isinstance(value, nn.Parameter):
+        raise TypeError(f"{type(owner).__name__}.{path} is not a Parameter")
+    return value
+
+
+def _validate_resolved_targets(specs: list[LoraTargetSpec]) -> None:
+    names: set[str] = set()
+    for spec in specs:
+        if spec.logical_name in names:
+            raise ValueError(f"duplicate native LoRA target {spec.logical_name}")
+        names.add(spec.logical_name)
+        if spec.execution_pattern in {
+            LoraExecutionPattern.MERGED_COMPONENT,
+            LoraExecutionPattern.ROUTED_GROUPED_EXPERT,
+        }:
+            if spec.component in spec.owner.lora_slots:
+                raise ValueError(f"native LoRA target {spec.logical_name} is already bound")
+        elif spec.owner.lora_slot is not None:
+            raise ValueError(f"native LoRA target {spec.logical_name} is already bound")
+
+
+def _new_slot(
+    spec: LoraTargetSpec,
+    config: LoraConfig,
+    seed: int,
+    runtime_state: _AdapterRuntimeState,
+) -> LoraSlot | RoutedExpertLoraSlot:
+    if spec.execution_pattern is LoraExecutionPattern.ROUTED_GROUPED_EXPERT:
+        return RoutedExpertLoraSlot(
+            logical_name=spec.logical_name,
+            base_weight=spec.base_weight,
+            local_num_experts=spec.owner.local_num_experts,
+            local_expert_start=spec.owner.local_expert_start,
+            in_features=spec.global_in_features,
+            out_features=spec.global_out_features,
             config=config,
             seed=seed,
             runtime_state=runtime_state,
         )
-        experts.install_lora_component(component, slot)
-        slots[logical_name] = slot
-    return matched
+    return LoraSlot(
+        logical_name=spec.logical_name,
+        base_weight=spec.base_weight,
+        global_in_features=spec.global_in_features,
+        global_out_features=spec.global_out_features,
+        local_in_features=spec.local_in_features,
+        local_out_features=spec.local_out_features,
+        row_parallel=spec.execution_pattern is LoraExecutionPattern.ROW_PARALLEL,
+        output_range=spec.output_range,
+        config=config,
+        seed=seed,
+        runtime_state=runtime_state,
+    )
+
+
+def _bind_slot(spec: LoraTargetSpec, slot: LoraSlot | RoutedExpertLoraSlot) -> None:
+    if spec.execution_pattern is LoraExecutionPattern.MERGED_COMPONENT:
+        assert spec.component_index is not None
+        spec.owner.install_lora_component(spec.component, spec.component_index, slot)
+    elif spec.execution_pattern is LoraExecutionPattern.ROUTED_GROUPED_EXPERT:
+        spec.owner.install_lora_component(spec.component, slot)
+    else:
+        spec.owner.install_lora(slot)
+
+
+def _matching_targets(requested: set[str], component: str, logical_name: str) -> set[str]:
+    aliases = {component, logical_name}
+    if ".{expert}." in logical_name:
+        aliases.add(logical_name.replace(".{expert}.", "."))
+    return requested & aliases

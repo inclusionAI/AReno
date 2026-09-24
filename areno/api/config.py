@@ -86,6 +86,8 @@ class MlxConfig:
             raise ValueError("MlxConfig.adapter_path cannot be combined with MlxConfig.lora")
         if self.reference_mode != "independent":
             raise ValueError("MLX currently supports only reference_mode='independent'")
+        if self.lora is not None and self.lora.full_parameter_targets:
+            raise ValueError("full_parameter_targets are currently supported by the CUDA backend only")
         if self.lora is not None and any(
             bool(self.optimizer.get(option))
             for option in ("unfreeze_multimodal_tower", "unfreeze_multimodal_projector")

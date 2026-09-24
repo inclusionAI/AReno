@@ -32,7 +32,7 @@ AReno's mission is to make LLM RL **accessible** for a broad community of resear
 - 🪶 **Lightweight**: one self-contained train/serve stack that installs and loads only the native backend needed by the host—CUDA on Linux or MLX on Apple Silicon.
 - 🧰 **Agentic RL ready**: run an agent function against AReno's local OpenAI-compatible proxy, return explicit trajectories, and train from tokens, logprobs, rewards, and loss masks derived by the trainer.
 - 🎞️ **Multimodal**: use image, audio, and video content with compatible model processors through the same OpenAI-style message format in serving and agentic training.
-- 🧩 **Native LoRA**: train TP-aware adapters for Qwen3, Qwen3-MoE, and Bailing-MoE V3, save standard PEFT artifacts, and reload them for training or serving.
+- 🧩 **Native LoRA**: train TP-aware adapters across supported language-model families, optionally train selected base parameters alongside them, and save/reload adapters for training or serving. See the [native LoRA guide](docs/concepts/native-lora.rst) for model scope and examples.
 - 🧩 **Extensible**: easily register new algorithms, model adapters, reward functions, and hardware backends without changing the core.
 
 ## Installation
@@ -326,9 +326,14 @@ areno train \
   --save-interval 100
 ```
 
-Saved checkpoints contain standard PEFT `adapter_config.json` and
-`adapter_model.safetensors` files. Resume training or serve an adapter by
-supplying the frozen base checkpoint together with `--lora-adapter-path`.
+Pure LoRA checkpoints contain standard PEFT `adapter_config.json` and
+`adapter_model.safetensors` files. Explicit `--full-parameter-targets` can
+train selected base parameters together with LoRA; those saves use AReno's
+versioned hybrid metadata in the same two-file artifact. These saves contain
+LoRA weights and the complete values of selected full parameters, not a complete
+model. Supply the original base checkpoint together with `--lora-adapter-path`
+to initialize a new training run or serve the saved policy. This restores policy
+weights, not optimizer, scheduler, or RNG state.
 See the [native LoRA guide](docs/concepts/native-lora.rst) for supported
 models and targets, agentic training, save/reload, and serving examples.
 

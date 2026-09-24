@@ -31,6 +31,8 @@ BAILING_V3_TARGETS = (
     "gate_proj",
     "up_proj",
     "down_proj",
+    "linear_fc1",
+    "linear_fc2",
 )
 
 NATIVE_LORA_TARGETS = tuple(dict.fromkeys((*QWEN3_DENSE_TARGETS, *BAILING_V3_TARGETS)))
@@ -40,8 +42,8 @@ NATIVE_LORA_TARGETS = tuple(dict.fromkeys((*QWEN3_DENSE_TARGETS, *BAILING_V3_TAR
 class LoraConfig:
     """Supported PEFT-compatible subset for native LoRA model families.
 
-    When ``adapter_path`` is set, its standard PEFT metadata is authoritative
-    for rank, alpha, dropout, and targets.
+    When ``adapter_path`` is set, its PEFT or versioned AReno hybrid metadata
+    is authoritative for rank, alpha, dropout, and targets.
     """
 
     rank: int = 8
@@ -49,6 +51,7 @@ class LoraConfig:
     dropout: float = 0.0
     target_modules: tuple[str, ...] = QWEN3_DENSE_TARGETS
     adapter_path: str | None = None
+    full_parameter_targets: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.adapter_path is not None:
@@ -57,17 +60,23 @@ class LoraConfig:
             object.__setattr__(self, "alpha", float(adapter_config["lora_alpha"]))
             object.__setattr__(self, "dropout", float(adapter_config.get("lora_dropout", 0.0)))
             object.__setattr__(self, "target_modules", tuple(adapter_config["target_modules"]))
+            object.__setattr__(self, "full_parameter_targets", tuple(adapter_config.get("full_parameter_targets", ())))
         object.__setattr__(self, "target_modules", tuple(self.target_modules))
+        object.__setattr__(self, "full_parameter_targets", tuple(self.full_parameter_targets))
         if self.rank < 1:
             raise ValueError("lora rank must be >= 1")
         if self.alpha <= 0:
             raise ValueError("lora alpha must be > 0")
         if self.dropout != 0.0:
             raise ValueError("native LoRA currently requires dropout=0")
-        requested = set(self.target_modules)
-        supported = set(NATIVE_LORA_TARGETS)
-        if not requested or not requested <= supported:
-            raise ValueError(f"target_modules must be a non-empty subset of {NATIVE_LORA_TARGETS}")
+        if not self.target_modules and not self.full_parameter_targets:
+            raise ValueError("at least one LoRA or full-parameter target is required")
+        for field in ("target_modules", "full_parameter_targets"):
+            selectors = getattr(self, field)
+            if any(not isinstance(target, str) or not target.strip() for target in selectors):
+                raise ValueError(f"{field} must contain non-empty selectors")
+            if len(set(selectors)) != len(selectors):
+                raise ValueError(f"{field} contains duplicate selectors")
 
     @property
     def scale(self) -> float:
@@ -76,8 +85,14 @@ class LoraConfig:
 
 def _read_adapter_config(path: str) -> dict:
     adapter_config = json.loads((Path(path) / "adapter_config.json").read_text(encoding="utf-8"))
-    if str(adapter_config.get("peft_type", "")).upper() != "LORA":
-        raise ValueError("adapter_path must contain a PEFT LoRA artifact")
+    artifact_type = str(adapter_config.get("peft_type", "")).upper()
+    if artifact_type not in {"LORA", "ARENO_HYBRID"}:
+        raise ValueError("adapter_path must contain a PEFT LoRA or ARENO_HYBRID artifact")
+    if artifact_type == "ARENO_HYBRID":
+        if adapter_config.get("format_version") != 1 or not adapter_config.get("full_parameter_targets"):
+            raise ValueError("invalid ARENO_HYBRID artifact metadata")
+    elif adapter_config.get("full_parameter_targets"):
+        raise ValueError("full_parameter_targets require an ARENO_HYBRID artifact")
     unsupported = []
     if adapter_config.get("bias", "none") != "none" or bool(adapter_config.get("lora_bias", False)):
         unsupported.append("bias")
