@@ -17,6 +17,13 @@ streaming. Pi's own read, bash, edit and write tools run unchanged. The adapter 
 smoke-tested with pi 0.83.0 against the existing AReno proxy and a CPU policy
 double, including a real pi tool call and verification.
 
+## Software tasks without task-image builds
+
+For a lightweight start, use the [ModelScope BigCodeBench local demo](LOCAL_DEMO.md).
+It provides ten practical file, CSV, archive, checksum and SQLite tasks with
+upstream tests. Pi runs in temporary workspaces in your existing environment;
+no Docker daemon or per-task image is needed.
+
 ## Repository tasks with Docker-in-Docker
 
 For real software-engineering issues, use the [ModelScope SWE-bench generator and
