@@ -1,0 +1,12 @@
+# Optional shared environment for generate_local_dataset.py --profile extended.
+# Install once; generation reports the actual versions used for reference checks.
+numpy>=1.24,<3
+pandas>=2,<3
+scipy>=1.10,<2
+scikit-learn>=1.3,<2
+matplotlib>=3.7,<4
+seaborn>=0.13,<0.14
+Pillow>=10,<13
+Faker>=24
+python-dateutil>=2.8,<3
+pytz>=2024.1

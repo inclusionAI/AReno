@@ -20,9 +20,11 @@ double, including a real pi tool call and verification.
 ## Software tasks without task-image builds
 
 For a lightweight start, use the [ModelScope BigCodeBench local demo](LOCAL_DEMO.md).
-It provides ten practical file, CSV, archive, checksum and SQLite tasks with
-upstream tests. Pi runs in temporary workspaces in your existing environment;
-no Docker daemon or per-task image is needed.
+It scans all 1,140 upstream tasks, selecting standard-library tasks or a larger
+set with dependencies installed once in the existing environment. It includes
+reference-check filtering and selection reports; the original ten tasks remain
+available with `--profile smoke`. Pi runs in temporary workspaces without a
+Docker daemon or per-task image.
 
 ## Repository tasks with Docker-in-Docker
 
