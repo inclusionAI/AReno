@@ -175,3 +175,103 @@ When a trajectory is dropped for exceeding the model context window,
 counts, message counts, assistant turn counts, tool-result counts, and a short
 prompt preview. This is the fastest way to debug overlong agentic examples
 without dumping every token in every trajectory.
+
+Trajectory observability contract
+---------------------------------
+
+One logical trajectory is one prompt/sample pair, even when the agent makes
+multiple model requests. Agent code returns an ``AgentTrajectory`` containing
+one or more ``AgentTrajectoryTurn`` objects. AReno merges turns that carry the
+same ``AgentItem`` and exposes the completed trajectory to the reward function
+as one ``RewardRecord``. This is the v0.0.3 observability boundary; it defines
+what a debugger or future exporter should be able to inspect, but it is not a
+versioned serialization schema.
+
+The completed trajectory has these logical inspection fields:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 22 33 45
+
+   * - Information
+     - Current source
+     - Meaning
+   * - Identity and source
+     - ``RewardRecord.metadata`` and ``source_record``
+     - ``prompt_index`` and ``sample_index`` identify the expanded
+       prompt/sample pair; ``source_record`` retains its dataset record.
+   * - Messages
+     - ``RewardRecord.messages``
+     - Full OpenAI-style conversation, including the final assistant message
+       and tool-role result messages.
+   * - Assistant responses
+     - ``completion``, ``final_answer``, and ``rendered_completion``
+     - Concatenated generated assistant spans, the last assistant response,
+       and the tokenizer chat-template rendering respectively.
+   * - Tool calls and results
+     - ``tool_calls`` and ``tool_results``
+     - Parsed function names/arguments and environment observations. The
+       message list remains the source for their conversation ordering.
+   * - Response tokens and logprobs
+     - ``tokens`` and ``logprobs``
+     - Aligned model-generated response spans across all merged turns. Prompt
+       and tool-context token rows are internal training data, not part of
+       these response-only arrays.
+   * - Reward input and score
+     - ``RewardRecord`` plus the reward function result
+     - ``prompt``, ``answer``, ``source_record``, and the trajectory fields are
+       the reward input. The scalar reward is computed immediately afterward
+       and stored on the train batch; it is not a field of ``RewardRecord``.
+   * - Loss-mask spans
+     - ``RewardRecord.loss_mask`` and ``AgentTrainBatch.loss_masks``
+     - ``RewardRecord.loss_mask`` aligns with response-only ``tokens``.
+       ``AgentTrainBatch.loss_masks`` aligns with the complete training token
+       row, with context and tool-result spans masked by default.
+   * - Trace events
+     - ``RewardRecord.trace``
+     - Ordered normalized ``request``, ``assistant_text``,
+       ``assistant_tool_call``, ``tool_result``, ``finish``, and ``error``
+       events. Events carry only fields relevant to their type.
+   * - Filtered reason
+     - ``agentic trajectory filtered`` warning
+     - Today the only post-trajectory filter is an overlong complete training
+       row. The warning reports the context limit, counts, token-length
+       distribution, trajectory identity, message/tool/trace counts, and a
+       bounded prompt preview. Filtered trajectories do not produce a
+       ``RewardRecord`` or scalar reward.
+
+The contract is exercised by ``tests/test_agentic_cpu.py``. In particular,
+``test_agent_trajectory_turn_extracts_response_metadata`` covers response
+tokens/logprobs, ``test_agentic_tool_request_returns_tool_call_and_reward_record``
+covers tool and reward-record fields,
+``test_agentic_multi_turn_calls_merge_into_one_training_sample`` covers merged
+messages, results, masks, and trace events, and
+``test_agentic_overlong_trajectory_is_filtered_with_warning`` covers filtered
+diagnostics.
+
+Artifact decision
+~~~~~~~~~~~~~~~~~
+
+v0.0.3 documents the in-memory and log contract only. It does not add a full
+trajectory artifact writer. When metrics recording and
+``ARENO_LOG_COMPLETIONS`` are enabled, ``rollout_samples.<pid>.jsonl`` contains
+a bounded diagnostic projection: prompt, messages, final answer, tool calls,
+up to four tool results, and prefixes/summaries of the training token and mask
+rows. It intentionally omits the complete response token/logprob arrays,
+reward record, scalar reward, trace, and filtered trajectories, so consumers
+must not treat it as the canonical trajectory format. A later artifact issue
+should define schema versioning, full-versus-redacted fields, retention, and
+multi-process file ownership before adding such a writer.
+
+Privacy and safety
+~~~~~~~~~~~~~~~~~~
+
+Trajectory diagnostics can contain prompts, dataset records, model responses,
+tool arguments, tool outputs, local paths, source code, credentials returned by
+tools, and other sensitive or untrusted text. Set
+``ARENO_LOG_COMPLETIONS=0`` when sample diagnostics are not needed, restrict
+access to ``metrics_log_dir``, set a short retention period, and redact secrets
+and personal data before sharing logs. Treat logged tool output as data, never
+as instructions to execute. The bounded sample count and truncated
+token/result fields reduce volume; they are not a privacy or secret-redaction
+boundary.
