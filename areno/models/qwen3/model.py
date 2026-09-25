@@ -379,6 +379,7 @@ class Qwen3ForCausalLM(nn.Module):
         position_ids: torch.Tensor | None = None,
         train_meta: TrainMeta | None = None,
         infer_meta: InferMeta | None = None,
+        defer_lm_head: bool = False,
     ) -> CausalLMOutput:
         if position_ids is None:
             # Default to monotonic 0..S-1 positions broadcast across the batch.
@@ -403,7 +404,7 @@ class Qwen3ForCausalLM(nn.Module):
                         infer_meta=infer_meta,
                     )
             hidden_states = self.norm(hidden_states)
-            logits_shard = self.lm_head(hidden_states)
+            logits_shard = None if defer_lm_head else self.lm_head(hidden_states)
         return CausalLMOutput(logits_shard=logits_shard, hidden_states=hidden_states)
 
     def set_kv_caches(

@@ -28,7 +28,13 @@ from areno.engine.config import EngineConfig
 from areno.engine.data import RolloutOutput
 from areno.engine.data.sampling import _truncate_generated
 from areno.engine.inference import InferCacheSpec, InferenceManager
-from areno.engine.modeling import build_model_on_device, build_optimizer, configure_multimodal_training, param_grad
+from areno.engine.modeling import (
+    build_model_on_device,
+    build_optimizer,
+    configure_multimodal_training,
+    param_grad,
+    unwrap_model,
+)
 from areno.engine.parallel.context import get_tp_context
 from areno.engine.policy_sync import policy_plan_metadata, transfer_policy_weights
 from areno.engine.protocol import (
@@ -44,6 +50,7 @@ from areno.engine.protocol import (
 from areno.engine.runtime.common import pad_rollout_rows
 from areno.engine.runtime.decode_graph import DecodeGraph
 from areno.engine.runtime.rollout import _empty_rollout
+from areno.engine.score_head import SCORE_HEAD_LR_GROUP, attach_score_head, save_score_head
 from areno.engine.training import TrainingManager
 from areno.models.registry import load_model_weights, save_model_weights
 
@@ -68,6 +75,16 @@ class ArenoWorker:
         if config.model_path is not None and not config.dummy_load:
             load_model_weights(self.model, config.model, config.model_path)
         configure_multimodal_training(self.model, config.optimizer, trainable=config.role == "train")
+        if config.runtime.score_head:
+            if config.lora is not None:
+                raise ValueError("runtime.score_head does not support native LoRA")
+            attach_score_head(
+                self.model,
+                hidden_size=config.model.hidden_size,
+                dtype=config.model.dtype,
+                device=self.device,
+                model_path=None if config.dummy_load else config.model_path,
+            )
         self.adapter_registry = (
             initialize_lora(self.model, config.lora, seed=config.lora_seed) if config.lora is not None else None
         )
@@ -116,6 +133,14 @@ class ArenoWorker:
                 ),
             },
         }
+        if config.runtime.score_head:
+            # Reuse the per-group LR machinery; only `lr` differs from the actor.
+            self.multimodal_lr_schedules[SCORE_HEAD_LR_GROUP] = {
+                "lr": opt.lr if opt.score_head_lr is None else opt.score_head_lr,
+                "min_lr": opt.min_lr,
+                "decay_steps": opt.lr_decay_steps,
+                "decay_style": opt.lr_decay_style,
+            }
         self._global_step = 0
         # Paged-KV state: refreshed when the rollout spec changes.
         self._infer_batch_size = 0  # max concurrent sequences supported
@@ -657,6 +682,11 @@ class ArenoWorker:
         """Persist the actor's weights to disk (rank 0 returns the resolved path)."""
         self._prepare_actor_onloaded()
         path = save_model_weights(self.model, self.config.model, payload.path, self.config.model_path)
+        score_head = getattr(unwrap_model(self.model), "score_head", None)
+        ctx = get_tp_context()
+        if score_head is not None and ctx.dp_rank == 0 and ctx.rank == 0:
+            # The head is replicated, so one writer is enough.
+            save_score_head(score_head, path or payload.path)
         return {"path": path} if path is not None else None
 
     def export_adapter(self, payload: ExportAdapterPayload) -> dict | None:
