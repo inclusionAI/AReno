@@ -71,7 +71,7 @@ class GroupedSoftmaxLossTest(unittest.TestCase):
         group = torch.full((4,), -1.0)
         loss, _ = grouped_softmax_loss(scores, group, torch.zeros(4), torch.ones(4), brier_weight=0.5)
         loss.backward()
-        self.assertEqual(float(loss), 0.0)
+        self.assertEqual(float(loss.detach()), 0.0)
         self.assertTrue(torch.equal(scores.grad, torch.zeros(4)))
 
     def test_loss_fn_reads_sequence_labels(self):
