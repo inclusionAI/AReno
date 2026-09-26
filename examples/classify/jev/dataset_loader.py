@@ -79,6 +79,7 @@ def record_to_questions(record: dict, *, label_smoothing: float = 0.0) -> list[d
                 "type": question["type"],
                 "record_id": record["id"],
                 "question_id": question_id,
+                "source_group": record.get("source_group", ""),
             }
         )
     return rows
