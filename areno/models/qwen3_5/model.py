@@ -1155,6 +1155,7 @@ class Qwen35ForCausalLM(nn.Module):
         train_meta: TrainMeta | None = None,
         infer_meta: InferMeta | None = None,
         features: dict[str, Any] | list[dict[str, Any] | None] | None = None,
+        defer_lm_head: bool = False,
     ) -> CausalLMOutput:
         hidden_states = self.embed_tokens(input_ids)
         hidden_states = self._apply_multimodal_features(hidden_states, input_ids, features)
@@ -1166,7 +1167,9 @@ class Qwen35ForCausalLM(nn.Module):
         )
         if feature_position_ids is not None:
             position_ids = feature_position_ids
-        return self.forward_from_embeddings(hidden_states, position_ids, train_meta, infer_meta)
+        return self.forward_from_embeddings(
+            hidden_states, position_ids, train_meta, infer_meta, defer_lm_head=defer_lm_head
+        )
 
     def forward_from_embeddings(
         self,
@@ -1174,6 +1177,7 @@ class Qwen35ForCausalLM(nn.Module):
         position_ids: torch.Tensor | None = None,
         train_meta: TrainMeta | None = None,
         infer_meta: InferMeta | None = None,
+        defer_lm_head: bool = False,
     ) -> CausalLMOutput:
         if position_ids is None:
             position_ids = (
@@ -1199,7 +1203,7 @@ class Qwen35ForCausalLM(nn.Module):
                         infer_meta=infer_meta,
                     )
             hidden_states = self.norm(hidden_states).to(dtype=hidden_states.dtype)
-            logits_shard = self.lm_head(hidden_states)
+            logits_shard = None if defer_lm_head else self.lm_head(hidden_states)
         return CausalLMOutput(logits_shard=logits_shard, hidden_states=hidden_states)
 
     @torch._dynamo.disable
@@ -1425,6 +1429,7 @@ class Qwen35VLForConditionalGeneration(nn.Module):
         train_meta: TrainMeta | None = None,
         infer_meta: InferMeta | None = None,
         features: dict[str, Any] | list[dict[str, Any] | None] | None = None,
+        defer_lm_head: bool = False,
     ) -> CausalLMOutput:
         return self.language_model(
             input_ids,
@@ -1432,6 +1437,7 @@ class Qwen35VLForConditionalGeneration(nn.Module):
             train_meta=train_meta,
             infer_meta=infer_meta,
             features=self._project_pixel_values(features, input_ids.device, input_ids.shape[0]),
+            defer_lm_head=defer_lm_head,
         )
 
     @torch._dynamo.disable

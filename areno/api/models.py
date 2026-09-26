@@ -78,7 +78,9 @@ class TrainSequence(BaseModel):
     positions, so loss functions can train only on response tokens while still
     conditioning on the prompt. Optional fields (`returns`, `values`,
     `ref_logprobs`) are only populated for algorithms that need them (PPO with
-    a critic and reference model).
+    a critic and reference model). `sequence_labels` carries per-sequence
+    scalars (for example a group id and target probability) for sequence-level
+    losses; every row in one batch must use the same keys.
     """
 
     prompt_mask: list[bool] = Field(default_factory=list)
@@ -95,3 +97,4 @@ class TrainSequence(BaseModel):
     reward: float = Field(default=0.0)
     eos_token_id: int = Field(default=0)
     routed_experts: Any | None = Field(default=None)
+    sequence_labels: dict[str, float] = Field(default_factory=dict)

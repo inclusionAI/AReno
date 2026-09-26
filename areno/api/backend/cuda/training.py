@@ -44,6 +44,9 @@ def make_train_pack(seqs: list[TrainSequence], *, include_routing_replay: bool =
     features = [seq.features for seq in seqs]
     if any(feature is not None for feature in features):
         pack["features"] = features
+    labels = _make_sequence_labels(seqs)
+    if labels is not None:
+        pack["sequence_labels"] = labels
     if include_routing_replay:
         routing_replay = make_routing_replay(
             [seq.tokens for seq in seqs], [seq.routed_experts for seq in seqs], width=max_len
@@ -188,6 +191,20 @@ def _make_advantages(
     from areno.engine.runtime.common import pad_rows
 
     return pad_rows([seq.advantages for seq in seqs], dtype=torch.float32, width=max_len)
+
+
+def _make_sequence_labels(seqs: list[TrainSequence]) -> dict[str, torch.Tensor] | None:
+    """Stack per-sequence scalars into batch-major tensors (DP-sliceable)."""
+
+    keys = set(seqs[0].sequence_labels)
+    if any(set(seq.sequence_labels) != keys for seq in seqs):
+        raise ValueError("every TrainSequence in a batch must carry the same sequence_labels keys")
+    if not keys:
+        return None
+    return {
+        key: torch.tensor([float(seq.sequence_labels[key]) for seq in seqs], dtype=torch.float32)
+        for key in sorted(keys)
+    }
 
 
 def _sequence_prompt_len(seq: TrainSequence) -> int:
