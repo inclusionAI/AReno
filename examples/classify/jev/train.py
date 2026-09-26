@@ -50,7 +50,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--optimizer-state-offload", default="none", choices=["none", "cpu", "disk"])
     parser.add_argument("--optimizer-state-offload-dir", default=None)
     parser.add_argument("--attn-backend", default="flash", choices=["flash", "native"])
-    parser.add_argument("--metrics-log-dir", default=None)
+    parser.add_argument(
+        "--metrics-log-dir", default="/tmp/areno/tfevent", help="TensorBoard dir read by `areno dashboard` (same default as `areno train`)"
+    )
     parser.add_argument("--seed", type=int, default=17)
     return parser.parse_args()
 
@@ -99,6 +101,7 @@ def main() -> None:
         seed=args.seed,
     )
     config = resolve_model_refs_for_config(config)
+    _register_with_dashboard(config)
     questions = load_questions(args.records, args.split, label_smoothing=args.label_smoothing)
     logging.info("loaded %d %s questions from %s", len(questions), args.split, args.records)
 
@@ -112,6 +115,32 @@ def main() -> None:
     loss_fn = get_algorithm(config.algo).make_loss_fn(config)
     trainer = build_trainer(config, instance=instance, dataset=questions, reward_fn=None, loss_fn=loss_fn)
     trainer.fit()
+
+
+def _register_with_dashboard(config) -> None:
+    """Show this run in `areno dashboard` exactly like an `areno train` job.
+
+    The dashboard only discovers processes listed in its registry
+    (~/.areno/dashboard-jobs.json) and reads their TensorBoard scalars from
+    `metrics_log_dir`; every `Trainer.train` result key appears there as
+    `train/<key>` (loss, classify_ce, classify_brier, classify_top1, lr, ...).
+    """
+
+    if not config.metrics_log_dir:
+        return
+    try:
+        from areno.cli.dashboard_registry import register_dashboard_job
+        from areno.cli.train import _training_config_settings, _write_dashboard_run_config
+
+        register_dashboard_job(
+            kind="train",
+            name=f"train {config.algo} {config.ckpt}",
+            config=_training_config_settings(config),
+            metrics_dir=config.metrics_log_dir,
+        )
+        _write_dashboard_run_config(config)
+    except Exception as exc:  # dashboard visibility is optional; never block training on it
+        logging.warning("dashboard registration skipped: %s", exc)
 
 
 if __name__ == "__main__":
