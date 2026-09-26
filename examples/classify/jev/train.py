@@ -45,6 +45,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--label-smoothing", type=float, default=0.0)
     parser.add_argument("--lr-decay-style", default="cosine", choices=["constant", "linear", "cosine"])
     parser.add_argument("--no-activation-checkpointing", action="store_true")
+    parser.add_argument("--adam-4bit", action="store_true", help="4-bit AdamW state (large MoE on one GPU)")
+    parser.add_argument("--adam-8bit", action="store_true", help="8-bit AdamW state")
+    parser.add_argument("--optimizer-state-offload", default="none", choices=["none", "cpu", "disk"])
+    parser.add_argument("--optimizer-state-offload-dir", default=None)
     parser.add_argument("--attn-backend", default="flash", choices=["flash", "native"])
     parser.add_argument("--metrics-log-dir", default=None)
     parser.add_argument("--seed", type=int, default=17)
@@ -81,6 +85,10 @@ def main() -> None:
         weight_decay=0.01,
         grad_clip_norm=1.0,
         activation_checkpointing=not args.no_activation_checkpointing,
+        adam_4bit=args.adam_4bit,
+        adam_8bit=args.adam_8bit,
+        optimizer_state_offload=args.optimizer_state_offload,
+        optimizer_state_offload_dir=args.optimizer_state_offload_dir,
         attn_backend=args.attn_backend,
         metrics_log_dir=args.metrics_log_dir,
         brier_weight=args.brier_weight,
