@@ -5,14 +5,13 @@
     GET  /v1/models, /health
 
 The checkpoint is an AReno classify output (`step_XXXXXX/`): an HF backbone
-plus `score_head.safetensors`, e.g. `~/areno-runs/ling-3.0-tiny-jev`. The
-backbone is loaded with `trust_remote_code=True`, so Ling (`bailing_hybrid`)
-works through its own modeling code.
+plus `score_head.safetensors`, e.g. `~/areno-runs/ling-3.0-tiny-jev`. It is
+loaded through AReno's own model adapter (`SequenceScorer`), not the
+checkpoint's `trust_remote_code` modeling file, so the forward is the same one
+used in training.
 
-Candidate paths are encoded exactly as in training (`dataset_loader.py`). All
-paths of one request are scored in one right-padded batch; each path is read
-at its own last token. `--batch-mode auto` first checks that padded scores
-match unpadded ones and falls back to one path per forward if they do not.
+Candidate paths are encoded exactly as in training (`dataset_loader.py`) and
+all paths of one request are scored in one packed varlen forward (no padding).
 
 Answers follow jev-forge's `Predictor.decide`:
     noul   -> {"type": "noul", "noul": P(true)}
@@ -97,36 +96,19 @@ def confidence_from(probabilities: list[float]) -> float:
 
 
 class DecisionModel:
-    """HF backbone + score head; scores candidate paths, returns Jev answers."""
+    """AReno scorer + Jev encoding; returns Jev answers."""
 
-    def __init__(self, checkpoint: str, *, max_length: int, temperature: float, batch_mode: str, max_batch: int):
+    def __init__(self, checkpoint: str, *, max_length: int, temperature: float, attn_backend: str, max_tokens: int):
         import torch
-        from safetensors.torch import load_file
-        from torch import nn
-        from transformers import AutoModel, AutoTokenizer
+
+        from areno.experimental.classify.scorer import SequenceScorer
 
         self.torch = torch
-        root = Path(checkpoint).expanduser().resolve(strict=True)
-        self.tokenizer = AutoTokenizer.from_pretrained(str(root), trust_remote_code=True)
-        pad = self.tokenizer.pad_token_id
-        self.pad_id = int(pad if pad is not None else (self.tokenizer.eos_token_id or 0))
-        self.backbone = (
-            AutoModel.from_pretrained(str(root), trust_remote_code=True, dtype=torch.bfloat16).cuda().eval()
-        )
-        state = load_file(str(root / "score_head.safetensors"))
-        hidden = int(state["0.weight"].shape[0])
-        self.head = nn.Sequential(nn.Linear(hidden, hidden), nn.GELU(), nn.Linear(hidden, 1))
-        self.head.load_state_dict(state)
-        self.head = self.head.cuda().float().eval()
+        self.scorer = SequenceScorer(checkpoint, attn_backend=attn_backend, max_tokens=max_tokens)
+        self.tokenizer = self.scorer.tokenizer
         self.max_length = max_length
         self.temperature = temperature
-        self.max_batch = max_batch
         self.calls = 0
-        if batch_mode == "auto":
-            self.padded = self._padding_matches_sequential()
-        else:
-            self.padded = batch_mode == "padded"
-        logger.info("batch mode: %s", "padded (parallel)" if self.padded else "sequential")
 
     def _encode(self, text: str) -> list[int]:
         return [int(t) for t in self.tokenizer.encode(text, add_special_tokens=False)]
@@ -148,47 +130,9 @@ class DecisionModel:
         return encoded
 
     def score(self, leaves: list[list[int]]):
-        """One logit per path; padded batches when enabled, else one path per forward."""
+        """One logit per path, all paths in one packed forward."""
 
-        torch = self.torch
-        with torch.inference_mode():
-            if not self.padded:
-                rows = []
-                for leaf in leaves:
-                    ids = torch.tensor([leaf], device="cuda")
-                    rows.append(self.backbone(input_ids=ids).last_hidden_state[0, -1])
-                return self.head(torch.stack(rows).float()).squeeze(-1)
-            out = []
-            for start in range(0, len(leaves), self.max_batch):
-                chunk = leaves[start : start + self.max_batch]
-                width = max(len(leaf) for leaf in chunk)
-                ids = torch.full((len(chunk), width), self.pad_id, dtype=torch.long)
-                mask = torch.zeros((len(chunk), width), dtype=torch.long)
-                for row, leaf in enumerate(chunk):
-                    ids[row, : len(leaf)] = torch.tensor(leaf)
-                    mask[row, : len(leaf)] = 1
-                hidden = self.backbone(input_ids=ids.cuda(), attention_mask=mask.cuda()).last_hidden_state
-                last = mask.sum(dim=1).cuda() - 1
-                rows = hidden[torch.arange(len(chunk), device="cuda"), last]
-                out.append(self.head(rows.float()).squeeze(-1))
-            return torch.cat(out)
-
-    def _padding_matches_sequential(self) -> bool:
-        probe = {
-            "q": {
-                "type": "choice",
-                "instructions": "Which option fits?",
-                "criteria": {"a": "short", "b": "a noticeably longer option description", "c": "mid length"},
-            }
-        }
-        leaves = self.encode("probe state for padding check", probe)[0][2]
-        self.padded = False
-        sequential = self.score(leaves)
-        self.padded = True
-        padded = self.score(leaves)
-        diff = float((sequential - padded).abs().max())
-        logger.info("padding self-check: max |padded - sequential| = %.4g", diff)
-        return diff < 5e-2
+        return self.scorer.score(leaves)
 
     def decide(self, state: str, questions: dict) -> tuple[dict, int]:
         torch = self.torch
@@ -239,7 +183,7 @@ def build_app(model: DecisionModel, model_name: str, api_key: str | None):
 
     @app.get("/health")
     def health():
-        return {"ready": True, "model": model_name, "calls": model.calls, "parallel": model.padded}
+        return {"ready": True, "model": model_name, "calls": model.calls}
 
     @app.get("/v1/models")
     def models():
@@ -291,8 +235,8 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8123)
     parser.add_argument("--max-length", type=int, default=512, help="longest candidate path accepted")
     parser.add_argument("--temperature", type=float, default=1.0, help="calibration temperature")
-    parser.add_argument("--batch-mode", choices=["auto", "padded", "sequential"], default="auto")
-    parser.add_argument("--max-batch", type=int, default=64, help="candidate paths per forward")
+    parser.add_argument("--attn-backend", choices=["flash", "native"], default="flash")
+    parser.add_argument("--max-tokens", type=int, default=16384, help="packed tokens per forward")
     parser.add_argument("--api-key", default=None, help="require `Authorization: Bearer <key>` when set")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
@@ -301,8 +245,8 @@ def main() -> None:
         args.checkpoint,
         max_length=args.max_length,
         temperature=args.temperature,
-        batch_mode=args.batch_mode,
-        max_batch=args.max_batch,
+        attn_backend=args.attn_backend,
+        max_tokens=args.max_tokens,
     )
     name = args.model_name or Path(args.checkpoint).expanduser().name
     import uvicorn
