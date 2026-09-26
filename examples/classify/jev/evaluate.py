@@ -7,11 +7,12 @@ source group:
 - accuracy: argmax of the prediction equals argmax of the gold distribution
 - ce:       cross-entropy of the prediction against the gold distribution
 - kl:       KL(gold || prediction)
+- tv:       total variation, 0.5 * sum |p - gold|
 - brier:    sum over options of (p - gold)^2
 
-The typed-decisions leaderboard reports accuracy / KL / Brier on its `test`
-split; its exact metric code is not published in the dataset card, so treat
-the comparison as approximate.
+KL / TV / Brier reproduce the typed-decisions card's `Uniform` row exactly
+(0.444 / 0.381 / 0.238), so those columns compare directly with its
+leaderboard. Accuracy matches for any model without argmax ties.
 
     python examples/classify/jev/evaluate.py --checkpoint ~/areno-runs/ling-3.0-tiny-jev \
         --records ~/data/jev-records/typed-decisions --split test --output eval.json
@@ -40,12 +41,13 @@ def question_metrics(probs: list[float], gold: list[float]) -> dict[str, float]:
         "accuracy": float(predicted == expected),
         "ce": -sum(g * math.log(max(p, eps)) for p, g in zip(probs, gold, strict=True)),
         "kl": sum(g * math.log(max(g, eps) / max(p, eps)) for p, g in zip(probs, gold, strict=True) if g > 0),
+        "tv": 0.5 * sum(abs(p - g) for p, g in zip(probs, gold, strict=True)),
         "brier": sum((p - g) ** 2 for p, g in zip(probs, gold, strict=True)),
     }
 
 
 def summarize(rows: list[dict]) -> dict[str, float]:
-    keys = ("accuracy", "ce", "kl", "brier")
+    keys = ("accuracy", "ce", "kl", "tv", "brier")
     return {"n": len(rows), **{key: sum(row[key] for row in rows) / len(rows) for key in keys}}
 
 
@@ -116,7 +118,10 @@ def main() -> None:
         summary["by_group"] = {key: summarize(value) for key, value in sorted(by_group.items())}
 
     def line(name: str, s: dict) -> str:
-        return f"{name:>28}: n={s['n']:6d} acc={s['accuracy']:.3f} ce={s['ce']:.4f} kl={s['kl']:.4f} brier={s['brier']:.4f}"
+        return (
+            f"{name:>28}: n={s['n']:6d} acc={s['accuracy']:.3f} ce={s['ce']:.4f} "
+            f"kl={s['kl']:.4f} tv={s['tv']:.4f} brier={s['brier']:.4f}"
+        )
 
     print(line("all", summary["all"]))
     for key, value in summary["by_type"].items():
