@@ -17,6 +17,18 @@ cross-entropy plus `brier_weight` × Brier.
 | head-only warmup, `head_lr` | `score_head_warmup_steps` keeps the backbone LR at 0; `score_head_lr` is a separate LR group |
 | `best.safetensors` | `step_XXXXXX/` HF backbone + `score_head.safetensors`; convert with `export_jevforge.py` |
 
+## Data
+
+| Use | Dataset | Where |
+| --- | --- | --- |
+| train | Open-Jev v1.1 (ModelScope `ZefanCai/Open-Jev-v1.1`, CC0 / WANLI CC BY 4.0) | not vendored (59 MB): `bash examples/classify/jev/data/fetch_open_jev.sh` downloads pinned revisions, checks sha256, converts to records |
+| eval | typed-decisions (`LocalLLaMA/typed-decisions`, Apache-2.0) | vendored in `data/typed-decisions/` (0.8 MB parquet); convert with `convert_datasets.py typed-decisions` |
+
+`evaluate.py` reports accuracy / CE / KL / Brier per question type and group.
+The decisions API (`serve_decisions.py`) and evaluation run on AReno's own model
+through `areno/experimental/classify/scorer.py`, not on the checkpoint's
+`trust_remote_code` modeling file.
+
 ## Run
 
 ```bash
