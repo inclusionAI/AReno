@@ -40,5 +40,8 @@ python examples/classify/jev/export_jevforge.py \
 - **The head-only warmup sets the backbone LR to 0 instead of freezing it.**
   AdamW still accumulates backbone moments during those steps.
 - **Supported families:** the score head works only with model families whose
-  forward accepts `defer_lm_head` (qwen3, qwen3_5, gemma4). It does not work
-  with native LoRA.
+  forward accepts `defer_lm_head` (qwen3, qwen3_5, gemma4, bailing_moe_v3 /
+  Ling-3.0). It does not work with native LoRA. `export_jevforge.py` and
+  jev-forge load the backbone with `trust_remote_code=False`, so Ling
+  (`bailing_hybrid`) checkpoints can be trained here but not exported to
+  jev-forge unless your transformers build ships that architecture.

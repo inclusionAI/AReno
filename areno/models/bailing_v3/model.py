@@ -1635,6 +1635,7 @@ class BailingMoeV3ForCausalLM(nn.Module):
         position_ids: torch.Tensor | None = None,
         train_meta: TrainMeta | None = None,
         infer_meta: InferMeta | None = None,
+        defer_lm_head: bool = False,
     ) -> CausalLMOutput:
         if position_ids is None:
             position_ids = torch.arange(input_ids.shape[1], device=input_ids.device).unsqueeze(0).expand_as(input_ids)
@@ -1647,6 +1648,8 @@ class BailingMoeV3ForCausalLM(nn.Module):
             for layer in self.layers:
                 hidden_states = layer(hidden_states, position_ids, train_meta, infer_meta)
             hidden_states = self.norm(hidden_states)
+            if defer_lm_head:
+                return CausalLMOutput(hidden_states=hidden_states)
             logits_input = hidden_states
             if self.lm_head.weight.dtype == torch.float32:
                 logits_input = hidden_states.float()
