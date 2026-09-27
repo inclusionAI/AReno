@@ -24,6 +24,7 @@ from areno.engine.runtime.train_step import (
     _pack_train_data,
     _train_meta,
 )
+from areno.engine.score_head import packed_sequence_scores
 
 
 class TrainingManager:
@@ -130,14 +131,24 @@ class TrainingManager:
         }
         if data_pack.get("features") is not None:
             model_kwargs["features"] = data_pack["features"]
-        defer_lm_head = (
+        score_head = getattr(unwrap_model(train_model), "score_head", None)
+        defer_lm_head = score_head is not None or (
             worker.config.model.model_type == "gemma4" and ctx.world_size == 1 and "train_cu_seqlens" in data_pack
         )
         if defer_lm_head:
             model_kwargs["defer_lm_head"] = True
         with routing_replay_context(train_meta):
             out = train_model(**model_kwargs)
-        if defer_lm_head:
+        if score_head is not None:
+            # Scoring runs hand the loss one scalar per sequence, not logprobs.
+            logprobs = packed_sequence_scores(
+                score_head,
+                out.hidden_states,
+                data_pack["train_cu_seqlens"],
+                int(data_pack["packed_num_sequences"]),
+                sequence_parallel=train_meta.sequence_parallel,
+            )
+        elif defer_lm_head:
             logprobs = packed_next_token_logprobs_from_hidden(
                 out.hidden_states,
                 tokens,
@@ -249,6 +260,9 @@ class TrainingManager:
         """Compute the actor learning rate for a given optimizer step."""
 
         worker = self.worker
+        if step <= worker.config.optimizer.score_head_warmup_steps:
+            # Head-only warmup: the backbone does not move yet.
+            return 0.0
         return self._scheduled_lr(
             step,
             base_lr=worker.base_lr,

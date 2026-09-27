@@ -50,10 +50,18 @@ class OptimizerConfig:
     multimodal_projector_min_lr: float | None = None
     multimodal_projector_lr_decay_steps: int | None = None
     multimodal_projector_lr_decay_style: Literal["constant", "linear", "cosine"] | None = None
+    # Sequence-scoring head (see `RuntimeConfig.score_head`): its own LR, and a
+    # head-only warmup that holds the backbone LR at zero for the first steps.
+    score_head_lr: float | None = None
+    score_head_warmup_steps: int = 0
 
     def __post_init__(self) -> None:
         if self.adam_4bit and self.adam_8bit:
             raise ValueError("optimizer.adam_4bit and optimizer.adam_8bit are mutually exclusive")
+        if self.score_head_lr is not None and self.score_head_lr <= 0:
+            raise ValueError("optimizer.score_head_lr must be positive")
+        if self.score_head_warmup_steps < 0:
+            raise ValueError("optimizer.score_head_warmup_steps must be non-negative")
 
 
 @dataclass(slots=True)
@@ -70,6 +78,10 @@ class RuntimeConfig:
     optimizer_state_offload_batch_size: int = 1
     eager_decode: bool = False
     rollout_routing_replay: bool = False
+    # Attach a trainable per-sequence scoring head to the actor. Training then
+    # skips the LM head and hands the loss one scalar score per sequence
+    # (read from the last token's hidden state) instead of token logprobs.
+    score_head: bool = False
     decode_graph_buckets: list[int] = field(
         default_factory=lambda: [1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 56, 64, 96, 128, 192, 256]
     )
