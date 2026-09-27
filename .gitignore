@@ -80,3 +80,6 @@ Thumbs.db
 # Never commit remembered Modal credentials, including custom data directories.
 modal-credentials.json
 .modal-credentials-*
+
+# Generated figure PDFs (vector exports; PNGs are committed and referenced by docs)
+docs/_static/figures/*.pdf
