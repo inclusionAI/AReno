@@ -73,3 +73,6 @@ Thumbs.db
 # Environment / secrets
 .env
 .env.*
+
+# Generated figure PDFs (vector exports; PNGs are committed and referenced by docs)
+docs/_static/figures/*.pdf

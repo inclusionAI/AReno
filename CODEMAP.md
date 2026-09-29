@@ -43,6 +43,10 @@ backend-only view.
   construction in `areno/api/trainer_factory.py`.
 - Losses: `sft_loss_fn`, `dpo_loss_fn`, `gspo_loss_fn`, `grpo_loss_fn`, and
   `ppo_loss_fn` under `areno/api/loss_fns/`.
+- Sequence scoring: `RuntimeConfig.score_head` attaches the actor head in
+  `areno/engine/score_head.py`; the experimental `classify` algorithm lives
+  in `areno/experimental/classify/`, with a JevForge example under
+  `examples/classify/jev/`.
 - Models: the `ModelAdapter` contract in `areno/models/base.py`,
   `register_adapter` and checkpoint dispatch in `areno/models/registry.py`, and
   one implementation directory per model family under `areno/models/`.
