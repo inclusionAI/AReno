@@ -132,7 +132,22 @@ The writer lives in ``areno.api.metrics``. It records three namespaces:
    ``rollout/advantages_std``, ``rollout/logprobs_mean``,
    ``rollout/seq_len_mean``, ``rollout/prompt_len_mean``,
    ``rollout/response_len_mean``, ``rollout/num_sequences``,
+   ``rollout/effective_loss_tokens``, ``rollout/total_input_tokens``,
+   ``rollout/masked_tokens``, ``rollout/effective_length_mean``,
    ``rollout/skipped_long``, and ``rollout/total_skipped_long``.
+
+   The four effective-token scalars are derived from the same mask the loss
+   consumes, so they describe what the step actually trained on rather than the
+   raw response length: ``effective_loss_tokens`` is the count of next-token
+   targets that contributed to the loss (prompt positions and response spans the
+   loss mask dropped are excluded); ``total_input_tokens`` is the real
+   pre-padding token count; ``masked_tokens`` is ``total_input_tokens`` minus
+   ``effective_loss_tokens`` (prompt tokens, padding, and loss-masked-out
+   response spans); and ``effective_length_mean`` is the per-sequence mean of
+   the effective count. Unlike ``rollout/response_len_mean`` — which is computed
+   from ``prompt_mask`` alone and so overcounts agentic batches where
+   ``loss_mask`` narrows the trainable span — these scalars reflect the true
+   trainable-token budget per update.
 
 ``train/*``
    Every scalar returned in ``train_stats``. Typical examples are
