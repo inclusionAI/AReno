@@ -1,4 +1,4 @@
-"""Import-boundary checks for backend-neutral adapter configuration."""
+"""Import-boundary checks for the backend-neutral SDK and adapter configuration."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 
-def test_config_imports_do_not_load_torch_or_native_lora() -> None:
+def test_sdk_imports_do_not_load_torch_or_native_lora() -> None:
     project_root = Path(__file__).resolve().parents[1]
     script = r"""
 import importlib.abc
@@ -30,16 +30,28 @@ class BlockHeavyImports(importlib.abc.MetaPathFinder):
 
 sys.meta_path.insert(0, BlockHeavyImports())
 
+from areno import Trainer
 from areno.adapters import LoraConfig as PublicLoraConfig
 from areno.adapters.config import LoraConfig
+from areno.api import MLX, Trainer as ApiTrainer
+from areno.api.agentic import RolloutSession, _routing_to_cpu_tensor
 from areno.api.backend.mlx.lora import MlxLoraState
 from areno.api.config import MlxConfig
+from areno.api.multimodal import image_token_counts_from_features
 from areno.api.trainer_config import TrainerConfig
 
 assert PublicLoraConfig is LoraConfig
 assert MlxLoraState.__module__ == "areno.api.backend.mlx.lora"
 assert MlxConfig(lora=LoraConfig()).lora is not None
 assert TrainerConfig(algo="sft", backend="mlx", ckpt="model", dataset_path="data").backend == "mlx"
+assert Trainer is ApiTrainer
+trainer = Trainer(world_size=1, model_path="unused", backend_type=MLX)
+session = RolloutSession(None, sampling_params=None)
+assert session.max_running_prompts == 1
+assert _routing_to_cpu_tensor(None) is None
+assert image_token_counts_from_features(None) == []
+assert image_token_counts_from_features({"processor_expanded_image_tokens": True}) == []
+trainer.close()
 assert "torch" not in sys.modules
 assert "mlx" not in sys.modules
 assert "areno.adapters.lora" not in sys.modules

@@ -8,8 +8,6 @@ import threading
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-import torch
-
 from areno.api.tokenizer import apply_chat_template_with_options, normalize_token_ids
 
 _MODALITIES = ("image", "video", "audio")
@@ -464,6 +462,8 @@ def image_token_counts_from_features(features: dict[str, Any] | None) -> list[in
         return []
     if features.get("processor_expanded_image_tokens"):
         return []
+    import torch
+
     grid = features.get("image_grid_thw")
     if grid is None:
         target_sizes = features.get("target_sizes")
