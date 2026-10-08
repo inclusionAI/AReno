@@ -78,7 +78,6 @@ class ArenoWorker:
             if self.device.type != "cuda":
                 raise ValueError("QLoRA requires CUDA")
             initialize_qlora(self.model)
-            config.optimizer.paged = True
         if config.runtime.compile_model:
             self.model = torch.compile(self.model)
         if self.adapter_registry is not None and config.lora.adapter_path is not None:

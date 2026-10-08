@@ -139,6 +139,11 @@ class RuntimeConfig:
 
         if self.eager_decode or lora is None:
             return
+        if lora.qlora and model.model_type == "bailing_moe_v3":
+            # Quantized experts use routed grouped GEMMs, whose permuted row
+            # count is dynamic. Do not build a dense BF16 fused-inference copy.
+            self.eager_decode = True
+            return
         if model.model_type == "qwen3_moe" and {
             "gate_proj",
             "up_proj",
@@ -310,6 +315,7 @@ class EngineConfig:
                 raise ValueError("QLoRA paged optimizer cannot combine with explicit optimizer state offload")
             if self.model.model_type not in {"qwen3", "bailing_moe_v3"}:
                 raise ValueError("QLoRA currently supports Qwen3 dense and Bailing-MoE V3")
+            self.optimizer.paged = True
         if self.sequence_parallel is not None:
             self.model.sequence_parallel = bool(self.sequence_parallel)
         self.model.validate_tp(self.tp_size)
