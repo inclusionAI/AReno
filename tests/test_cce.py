@@ -51,6 +51,9 @@ def test_cce_noncontiguous_empty_and_graph():
     empty = cut_logprobs(x[:0], w, labels[:0])
     dx, dw = torch.autograd.grad(empty.sum(), (x, w))
     assert not dx.count_nonzero() and not dw.count_nonzero()
+    # Use fresh leaves: previous autograd nodes were created on the default stream.
+    x = x.detach().contiguous().requires_grad_()
+    w = w.detach().contiguous().requires_grad_()
     # Warm up on a side stream before capture.
     stream = torch.cuda.Stream()
     stream.wait_stream(torch.cuda.current_stream())

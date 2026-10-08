@@ -1366,6 +1366,8 @@ class Qwen35ForCausalLM(nn.Module):
 
 
 class Qwen35VLForConditionalGeneration(nn.Module):
+    supports_cce = True
+
     def __init__(self, config: ModelConfig):
         super().__init__()
         if config.vision_config is None:
@@ -1435,6 +1437,7 @@ class Qwen35VLForConditionalGeneration(nn.Module):
         train_meta: TrainMeta | None = None,
         infer_meta: InferMeta | None = None,
         features: dict[str, Any] | list[dict[str, Any] | None] | None = None,
+        defer_lm_head: bool = False,
     ) -> CausalLMOutput:
         return self.language_model(
             input_ids,
@@ -1442,6 +1445,7 @@ class Qwen35VLForConditionalGeneration(nn.Module):
             train_meta=train_meta,
             infer_meta=infer_meta,
             features=self._project_pixel_values(features, input_ids.device, input_ids.shape[0]),
+            defer_lm_head=defer_lm_head,
         )
 
     @torch._dynamo.disable
