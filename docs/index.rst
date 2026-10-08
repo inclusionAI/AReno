@@ -30,7 +30,6 @@ AReno documentation
    Dataset Formats <concepts/dataset-formats>
    Multimodal Inputs <concepts/multimodal-inputs>
    Native LoRA <concepts/native-lora>
-   QLoRA <concepts/qlora>
    8-bit AdamW <concepts/adamw-8bit>
    4-bit AdamW <concepts/adamw-4bit>
    Reward Functions <concepts/reward-functions>
