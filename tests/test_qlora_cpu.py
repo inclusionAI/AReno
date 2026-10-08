@@ -9,6 +9,17 @@ import torch.nn.functional as F
 
 from areno.accel.nf4 import NF4_VALUES, NF4Weight, nf4_linear
 from areno.adapters import LoraConfig
+from areno.engine.parallel.context import TPContext, get_tp_context, set_tp_context
+
+
+@pytest.fixture(autouse=True)
+def single_rank_cpu_context():
+    previous = get_tp_context()
+    set_tp_context(TPContext(rank=0, world_size=1, device=torch.device("cpu"), group=None))
+    try:
+        yield
+    finally:
+        set_tp_context(previous)
 
 
 def test_qlora_config_enables_paging_and_preserves_base_layout_cpu():
