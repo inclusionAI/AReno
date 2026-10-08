@@ -27,8 +27,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
-import torch
-
 from areno.api.multimodal import encode_multimodal_prompt, encode_processor_messages, modality_token_ids
 from areno.api.openai_chat import (
     build_chat_completion_response,
@@ -42,6 +40,8 @@ from areno.api.tokenizer import apply_chat_template_with_options
 from areno.api.tool_call_parser import get_tool_call_parser, infer_tool_call_parser_name
 
 if TYPE_CHECKING:
+    import torch
+
     from areno.api.models import SamplingParams
 
 logger = logging.getLogger(__name__)
@@ -803,6 +803,8 @@ def _multimodal_encoding_cache_key(messages: list[dict[str, Any]], tools: list[d
 def _routing_to_cpu_tensor(routed_experts: Any | None) -> torch.Tensor | None:
     if routed_experts is None:
         return None
+    import torch
+
     if isinstance(routed_experts, torch.Tensor):
         routes = routed_experts.detach().to(device="cpu", dtype=torch.int16)
     else:
