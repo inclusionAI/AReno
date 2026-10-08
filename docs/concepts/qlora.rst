@@ -17,6 +17,8 @@ an NF4 base with double quantization and a paged optimizer::
 ``--lora-*`` options. The SDK equivalent is ``LoraConfig(qlora=True)``.
 It supports Qwen3 dense and Bailing-MoE V3 models with native LoRA support.
 QLoRA is opt-in and independent of CCE.
+Separate train and rollout engines must use the same TP size, so both
+quantize identical base-weight shards.
 
 The three components
 --------------------

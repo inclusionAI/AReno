@@ -11,6 +11,21 @@ from areno.accel.nf4 import NF4_VALUES, NF4Weight, nf4_linear
 from areno.adapters import LoraConfig
 
 
+def test_qlora_config_enables_paging_and_preserves_base_layout_cpu():
+    from areno.api.config import CudaConfig, MlxConfig
+    from areno.engine.config import EngineConfig, ModelConfig, RuntimeConfig
+
+    lora = LoraConfig(qlora=True)
+    config = EngineConfig(model=ModelConfig(), lora=lora, devices=[0])
+    assert config.optimizer.paged
+    with pytest.raises(ValueError, match="matching train and rollout TP"):
+        CudaConfig(lora=lora, tp_size=1, rollout_tp_size=2, rollout_devices=[1, 2])
+    with pytest.raises(ValueError, match="QLoRA requires CUDA"):
+        MlxConfig(lora=lora)
+    with pytest.raises(ValueError, match="explicit optimizer state offload"):
+        EngineConfig(model=ModelConfig(), lora=lora, runtime=RuntimeConfig(optimizer_state_offload="cpu"), devices=[0])
+
+
 @pytest.mark.parametrize("shape", [(1, 1), (7, 65), (64, 256), (3, 129, 65)])
 def test_nf4_format_roundtrip_and_error_cpu(shape):
     torch.manual_seed(42)
