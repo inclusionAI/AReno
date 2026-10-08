@@ -10,10 +10,9 @@ Supports two activation layouts:
   trained efficiently.
 
 The ``native`` backend keeps rollout prefill/decode on native kernels while
-training uses PyTorch's SDPA math backend to avoid the slow native backward
-diagnostic kernel.
-Unsupported flash-attn shapes fail with an actionable message instead of
-silently falling back.
+CUDA training uses PyTorch's SDPA math backend unless kernel matching is
+requested. NPU training uses native Ascend kernels, including when the optional
+flash library is unavailable or the tensor layout is unsupported.
 """
 
 from __future__ import annotations
@@ -74,8 +73,9 @@ class FlashAttnTrainAttentionBackend(TrainAttentionBackend):
         softmax_scale: float | None = None,
     ) -> torch.Tensor:
         call = build_attention_call(q, k, v, window_size, softmax_scale)
-        if use_native_attention(self.attn_backend):
-            native_fn = _native_train_areno if self.native_train_matches_rollout and q.is_cuda else _native_train
+        if use_native_attention(self.attn_backend, call.q):
+            use_kernel = q.device.type == "npu" or (self.native_train_matches_rollout and q.is_cuda)
+            native_fn = _native_train_areno if use_kernel else _native_train
             out = native_fn(call.q, call.k, call.v, meta, call.window_size, call.softmax_scale)
             return call.trim_value_dim(out)
         require_flash_attention_supported(call, mode="training attention")
@@ -135,18 +135,20 @@ def build_train_attention_backend(
 def _flash_attn_train_no_compile(*args, **kwargs) -> torch.Tensor:
     """Dynamo-opaque wrapper for the dense flash-attn training kernel."""
 
-    from flash_attn import flash_attn_func
+    from areno.accel.flash_attention import flash_attention
 
-    return flash_attn_func(*args, **kwargs)
+    q = args[0] if args else kwargs["q"]
+    return flash_attention(q.device).flash_attn_func(*args, **kwargs)
 
 
 @torch._dynamo.disable
 def _flash_attn_varlen_train_no_compile(*args, **kwargs) -> torch.Tensor:
     """Dynamo-opaque wrapper for the packed varlen flash-attn training kernel."""
 
-    from flash_attn import flash_attn_varlen_func
+    from areno.accel.flash_attention import flash_attention
 
-    return flash_attn_varlen_func(*args, **kwargs)
+    q = args[0] if args else kwargs["q"]
+    return flash_attention(q.device).flash_attn_varlen_func(*args, **kwargs)
 
 
 @torch._dynamo.disable
@@ -204,6 +206,7 @@ def _native_train_areno(
         cu_seqlens,
         window_left=_native_window_left(window_size),
         softmax_scale=softmax_scale,
+        force_native=True,
     )
     return out.view_as(q)
 

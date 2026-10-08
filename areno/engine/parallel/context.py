@@ -101,9 +101,14 @@ def init_process_group(
     train_devices: tuple[int, ...] | None = None,
     rollout_devices: tuple[int, ...] | None = None,
     role: Literal["train", "rollout"] = "train",
+    device: torch.device | None = None,
+    backend: str | None = None,
 ) -> TPContext:
     """Initialize process groups and derive local TP/DP rank coordinates."""
-    if torch.cuda.is_available():
+    if device is not None or backend is not None:
+        if device is None or backend is None:
+            raise ValueError("explicit process-group device and backend must be supplied together")
+    elif torch.cuda.is_available():
         torch.cuda.set_device(device_id)
         device = torch.device("cuda", device_id)
         backend = "nccl"

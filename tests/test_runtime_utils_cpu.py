@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -154,7 +155,10 @@ class DecodeGraphUtilityTest(unittest.TestCase):
         """Graph capture and padded rows must not mutate a live request slot."""
 
         fake_graph = SimpleNamespace(replay=lambda: None)
-        with patch("torch.cuda.CUDAGraph", return_value=fake_graph):
+        api = SimpleNamespace(
+            NPUGraph=lambda: fake_graph, Stream=lambda **kwargs: None, device=lambda device: nullcontext()
+        )
+        with patch("areno.engine.runtime.decode_graph.accelerator_module", return_value=api):
             graph = DecodeGraph(
                 SimpleNamespace(),
                 bucket=4,

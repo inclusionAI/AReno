@@ -13,8 +13,8 @@ The backend serves two distinct modes signalled by `InferMeta.mode`:
 
 The ``native`` backend selects the areno_accel native attention path that
 shares forward math with training attention for logprob diagnostics.
-Unsupported flash-attn shapes fail with an actionable message instead of
-silently falling back.
+NPU workers also select native attention when the optional flash library is
+unavailable or the tensor layout is unsupported.
 """
 
 from __future__ import annotations
@@ -73,7 +73,7 @@ class FlashAttnInferBackend(nn.Module):
             # Persist freshly computed K/V for the prompt into paged cache.
             if update_cache:
                 _store_prefill_cache(k_flat, v_flat, k_cache, v_cache, meta)
-            if use_native_attention(self.attn_backend):
+            if use_native_attention(self.attn_backend, call.q):
                 out = _native_prefill(
                     call.q,
                     call.k,
@@ -115,7 +115,7 @@ class FlashAttnInferBackend(nn.Module):
                 if self.decode_num_splits is not None
                 else (1 if call.window_size != (-1, -1) else 0)
             )
-            if use_native_attention(self.attn_backend):
+            if use_native_attention(self.attn_backend, call.q, block_size=k_cache.shape[1]):
                 if not update_cache:
                     raise ValueError("native decode requires update_cache=True")
                 out = _native_decode(
@@ -172,18 +172,20 @@ def build_infer_attention_backend(
 def _flash_attn_varlen_no_compile(*args, **kwargs) -> torch.Tensor:
     """Dynamo-opaque wrapper so torch.compile does not specialize flash-attn."""
 
-    from flash_attn import flash_attn_varlen_func
+    from areno.accel.flash_attention import flash_attention
 
-    return flash_attn_varlen_func(*args, **kwargs)
+    q = args[0] if args else kwargs["q"]
+    return flash_attention(q.device).flash_attn_varlen_func(*args, **kwargs)
 
 
 @torch._dynamo.disable
 def _flash_attn_with_kvcache_no_compile(*args, **kwargs) -> torch.Tensor:
     """Dynamo-opaque wrapper for the kvcache-aware flash-attn entrypoint."""
 
-    from flash_attn import flash_attn_with_kvcache
+    from areno.accel.flash_attention import flash_attention
 
-    return flash_attn_with_kvcache(*args, **kwargs)
+    q = args[0] if args else kwargs["q"]
+    return flash_attention(q.device).flash_attn_with_kvcache(*args, **kwargs)
 
 
 def _window_left(window_size: tuple[int, int]) -> int | None:
@@ -214,6 +216,7 @@ def _native_prefill(
         meta.cu_seqlens,
         window_left=_window_left(window_size),
         softmax_scale=softmax_scale,
+        force_native=True,
     )
 
 
@@ -247,6 +250,7 @@ def _native_decode(
         window_left=_window_left(window_size),
         num_splits=8,
         softmax_scale=softmax_scale,
+        force_native=True,
     ).to(dtype=out_dtype)
 
 

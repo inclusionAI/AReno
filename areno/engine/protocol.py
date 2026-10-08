@@ -624,26 +624,30 @@ def _worker_entry(
     ranks with the original traceback.
     """
 
+    lifecycle = getattr(worker_cls, "process_lifecycle", None)
     try:
-        # Rendezvous on the shared port; this blocks until every rank arrives.
-        init_process_group(
-            rank=rank,
-            world_size=world_size,
-            master_addr=world_spec.master_addr,
-            master_port=world_spec.master_port,
-            device_id=device_id,
-            tp_size=config.tp_size,
-            global_rank=partition.global_rank_offset + rank,
-            global_world_size=world_spec.global_world_size,
-            train_world_size=world_spec.train.local_world_size,
-            train_tp_size=world_spec.train.tp_size,
-            rollout_world_size=world_spec.rollout.local_world_size if world_spec.rollout is not None else None,
-            rollout_tp_size=world_spec.rollout.tp_size if world_spec.rollout is not None else None,
-            train_devices=world_spec.train.devices,
-            rollout_devices=world_spec.rollout.devices if world_spec.rollout is not None else None,
-            role=partition.role,
-        )
-        torch.set_float32_matmul_precision("high")
+        if lifecycle is None:
+            # Rendezvous on the shared port; this blocks until every rank arrives.
+            init_process_group(
+                rank=rank,
+                world_size=world_size,
+                master_addr=world_spec.master_addr,
+                master_port=world_spec.master_port,
+                device_id=device_id,
+                tp_size=config.tp_size,
+                global_rank=partition.global_rank_offset + rank,
+                global_world_size=world_spec.global_world_size,
+                train_world_size=world_spec.train.local_world_size,
+                train_tp_size=world_spec.train.tp_size,
+                rollout_world_size=world_spec.rollout.local_world_size if world_spec.rollout is not None else None,
+                rollout_tp_size=world_spec.rollout.tp_size if world_spec.rollout is not None else None,
+                train_devices=world_spec.train.devices,
+                rollout_devices=world_spec.rollout.devices if world_spec.rollout is not None else None,
+                role=partition.role,
+            )
+            torch.set_float32_matmul_precision("high")
+        else:
+            lifecycle.initialize_process(rank, world_size, device_id, world_spec, partition, config)
         worker = worker_cls(config)
         # Inject coordinator-facing handles so worker methods can report
         # request-id-scoped results without re-importing this module.
@@ -682,7 +686,10 @@ def _worker_entry(
             result_q.put((rank, WorkerResult(ok=False, error=error, request_id=failed_request_id)))
     finally:
         try:
-            destroy_process_group()
+            if lifecycle is None:
+                destroy_process_group()
+            else:
+                lifecycle.close_process()
         except Exception:
             # CUDA OOM can leave NCCL in an error state. Worker teardown should
             # not emit a second traceback or keep the coordinator from reaping

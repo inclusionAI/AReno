@@ -92,7 +92,7 @@ class GroupRMSNormSigmoidGate(nn.Module):
         gate = gate.view(*shape[:-1], self.groups_per_rank, self.group_width)
         if not can_use_cuda_kernel(x, "fused group RMSNorm sigmoid gate kernel"):
             raise RuntimeError("ARENO group RMSNorm sigmoid gate requires the fused CUDA kernel")
-        from areno.accel.kernels.group_rmsnorm import rms_norm_gate_fwd
+        from areno.accel.ops import rms_norm_gate_fwd
 
         log_once("group_rmsnorm_sigmoid_gate", "using fused group RMSNorm sigmoid gate kernel")
         # Flatten the leading dims into a single batch so the kernel only

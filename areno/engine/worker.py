@@ -43,6 +43,7 @@ from areno.engine.protocol import (
 )
 from areno.engine.runtime.common import pad_rollout_rows
 from areno.engine.runtime.decode_graph import DecodeGraph
+from areno.engine.runtime.device import accelerator_module
 from areno.engine.runtime.rollout import _empty_rollout
 from areno.engine.training import TrainingManager
 from areno.models.registry import load_model_weights, save_model_weights
@@ -248,9 +249,10 @@ class ArenoWorker:
     def probe_rollout_cache(self, payload: RolloutCacheProbePayload) -> float:
         """Allocate rollout KV cache and capture decode graphs without decoding."""
 
-        if self.device.type == "cuda":
-            torch.cuda.synchronize(self.device)
-            torch.cuda.reset_peak_memory_stats(self.device)
+        accelerator = accelerator_module(self.device)
+        if accelerator is not None:
+            accelerator.synchronize(self.device)
+            accelerator.reset_peak_memory_stats(self.device)
         self.inference._init_infer_cache(
             InferCacheSpec(
                 max_running_seqs=int(payload.max_running_seqs),
@@ -260,11 +262,11 @@ class ArenoWorker:
                 max_blocks_per_seq=int(payload.max_blocks_per_seq),
             )
         )
-        if self.device.type != "cuda":
+        if accelerator is None:
             return 0.0
-        torch.cuda.synchronize(self.device)
-        total = torch.cuda.get_device_properties(self.device).total_memory
-        peak = torch.cuda.max_memory_allocated(self.device)
+        accelerator.synchronize(self.device)
+        total = accelerator.get_device_properties(self.device).total_memory
+        peak = accelerator.max_memory_allocated(self.device)
         return float(peak) / float(total)
 
     def run_rollout_command(self, command: Command) -> list[tuple[int | None, RolloutOutput | None]]:
@@ -466,8 +468,9 @@ class ArenoWorker:
 
         del payload
         ctx = get_tp_context()
-        if self.device.type == "cuda":
-            torch.cuda.synchronize(self.device)
+        accelerator = accelerator_module(self.device)
+        if accelerator is not None:
+            accelerator.synchronize(self.device)
         if ctx.group is not None:
             if ctx.device.type == "cuda":
                 dist.barrier(
@@ -476,8 +479,8 @@ class ArenoWorker:
                 )
             else:
                 dist.barrier(group=ctx.group)
-        if self.device.type == "cuda":
-            torch.cuda.synchronize(self.device)
+        if accelerator is not None:
+            accelerator.synchronize(self.device)
 
     def rollout_session_end(self, payload: None) -> None:
         """Finalize rollout state before scoring or training starts."""
@@ -566,8 +569,9 @@ class ArenoWorker:
             self.optimizer.offload_state(mode=mode, directory=directory, batch_size=batch_size)
         self._train_state_ready = False
         self._actor_on_device = False
-        if self.device.type == "cuda":
-            torch.cuda.empty_cache()
+        accelerator = accelerator_module(self.device)
+        if accelerator is not None:
+            accelerator.empty_cache()
 
     def _optimizer_offload_options(self) -> tuple[str, str | None, int]:
         """Return the configured actor optimizer residency policy."""
@@ -585,8 +589,9 @@ class ArenoWorker:
         self._decode_graphs.clear()
         self._decode_graph_skipped_buckets.clear()
         self._decode_graph_init_attempted = False
-        if self.device.type == "cuda":
-            torch.cuda.empty_cache()
+        accelerator = accelerator_module(self.device)
+        if accelerator is not None:
+            accelerator.empty_cache()
 
     @torch.no_grad()
     def _drop_rollout_hbm(self) -> None:
@@ -598,8 +603,9 @@ class ArenoWorker:
         if offload_kv is not None:
             offload_kv()
         self._train_state_ready = False
-        if self.device.type == "cuda":
-            torch.cuda.empty_cache()
+        accelerator = accelerator_module(self.device)
+        if accelerator is not None:
+            accelerator.empty_cache()
 
     @torch.inference_mode()
     def score_logprobs(self, payload: dict) -> list[list[float]] | None:

@@ -25,45 +25,12 @@ matmuls.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 import torch
 import triton
 import triton.language as tl
 
 from areno.accel import areno_gelu_tanh_and_mul, areno_moe_align, areno_silu_and_mul
-
-
-@dataclass(slots=True)
-class FusedMoeConfig:
-    """Static configuration for one fused MoE layer.
-
-    Attributes:
-        num_experts: Total number of experts in this layer.
-        hidden_size: Model hidden dimension (size of the per-token MoE input
-            and the final per-token output).
-        intermediate_size: Width of the MLP expansion inside each expert,
-            i.e. the column count of ``w1`` (before the SiLU+mul halving).
-        top_k: Number of experts each token is routed to.
-        routed_scaling_factor: Multiplier applied during the top-k sum-reduce
-            (DeepSeek-style routed-expert rescaling).
-        block_size_m: M tile size of the grouped matmul. Tokens are padded to
-            multiples of this so each tile sees one expert exclusively.
-        block_size_n: N tile size (output features per program).
-        block_size_k: K tile size (reduction inner dim per iteration).
-        group_size_m: L2-friendly M-supergroup factor; controls the
-            ``pid_m / pid_n`` swizzle inside the matmul kernel.
-    """
-
-    num_experts: int
-    hidden_size: int
-    intermediate_size: int
-    top_k: int
-    routed_scaling_factor: float = 1.0
-    block_size_m: int = 16
-    block_size_n: int = 64
-    block_size_k: int = 64
-    group_size_m: int = 8
+from areno.accel.ops import FusedMoeConfig
 
 
 def is_available() -> bool:

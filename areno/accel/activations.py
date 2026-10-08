@@ -11,6 +11,7 @@ producing an output with half the last-dimension size.
 import torch
 
 from areno.accel._extension import extension as _extension
+from areno.accel.utils import on_kernel_device
 
 
 def _activation_out(x: torch.Tensor, out: torch.Tensor | None) -> torch.Tensor:
@@ -23,13 +24,17 @@ def _activation_out(x: torch.Tensor, out: torch.Tensor | None) -> torch.Tensor:
         return torch.empty(expected_shape, device=x.device, dtype=x.dtype)
     if tuple(out.shape) != expected_shape:
         raise ValueError(f"activation output shape must be {expected_shape}, got {tuple(out.shape)}")
+    if not on_kernel_device(x, out):
+        raise RuntimeError("activation input and output must be on the same CUDA or NPU device")
+    if out.dtype != x.dtype:
+        raise TypeError("activation input and output must have the same dtype")
     return out
 
 
-def _can_use_cuda_extension(x: torch.Tensor) -> bool:
-    """Guard that the input lives on CUDA; the kernels have no CPU path."""
-    if not x.is_cuda:
-        raise RuntimeError("ARENO activation kernels require CUDA tensors")
+def _can_use_extension(x: torch.Tensor) -> bool:
+    """Guard that the input lives on a native kernel device; there is no CPU path."""
+    if not on_kernel_device(x):
+        raise RuntimeError("ARENO activation kernels require CUDA or NPU tensors on the same device")
     return True
 
 
@@ -39,7 +44,7 @@ class _SiluMul(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x: torch.Tensor) -> torch.Tensor:
         out = _activation_out(x, None)
-        _extension().areno_silu_and_mul(out, x.contiguous())
+        _extension(out.device).areno_silu_and_mul(out, x.contiguous())
         ctx.save_for_backward(x)
         return out
 
@@ -47,7 +52,7 @@ class _SiluMul(torch.autograd.Function):
     def backward(ctx, grad_output: torch.Tensor) -> tuple[torch.Tensor]:
         (x,) = ctx.saved_tensors
         grad_input = torch.empty_like(x)
-        _extension().areno_d_silu_and_mul(grad_input, grad_output.contiguous(), x.contiguous())
+        _extension(grad_input.device).areno_d_silu_and_mul(grad_input, grad_output.contiguous(), x.contiguous())
         return (grad_input,)
 
 
@@ -56,14 +61,14 @@ class _Silu(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, x: torch.Tensor) -> torch.Tensor:
-        out = _extension().areno_silu(x.contiguous())
+        out = _extension(x.device).areno_silu(x.contiguous())
         ctx.save_for_backward(x)
         return out
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor) -> tuple[torch.Tensor]:
         (x,) = ctx.saved_tensors
-        return (_extension().areno_d_silu(grad_output.contiguous(), x.contiguous()),)
+        return (_extension(grad_output.device).areno_d_silu(grad_output.contiguous(), x.contiguous()),)
 
 
 class _Sigmoid(torch.autograd.Function):
@@ -71,14 +76,14 @@ class _Sigmoid(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, x: torch.Tensor) -> torch.Tensor:
-        out = _extension().areno_sigmoid(x.contiguous())
+        out = _extension(x.device).areno_sigmoid(x.contiguous())
         ctx.save_for_backward(out)
         return out
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor) -> tuple[torch.Tensor]:
         (out,) = ctx.saved_tensors
-        return (_extension().areno_d_sigmoid(grad_output.contiguous(), out.contiguous()),)
+        return (_extension(grad_output.device).areno_d_sigmoid(grad_output.contiguous(), out.contiguous()),)
 
 
 class _Softplus(torch.autograd.Function):
@@ -86,14 +91,14 @@ class _Softplus(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, x: torch.Tensor) -> torch.Tensor:
-        out = _extension().areno_softplus(x.contiguous())
+        out = _extension(x.device).areno_softplus(x.contiguous())
         ctx.save_for_backward(x)
         return out
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor) -> tuple[torch.Tensor]:
         (x,) = ctx.saved_tensors
-        return (_extension().areno_d_softplus(grad_output.contiguous(), x.contiguous()),)
+        return (_extension(grad_output.device).areno_d_softplus(grad_output.contiguous(), x.contiguous()),)
 
 
 class _GeluTanhMul(torch.autograd.Function):
@@ -102,7 +107,7 @@ class _GeluTanhMul(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x: torch.Tensor) -> torch.Tensor:
         out = _activation_out(x, None)
-        _extension().areno_gelu_tanh_and_mul(out, x.contiguous())
+        _extension(out.device).areno_gelu_tanh_and_mul(out, x.contiguous())
         ctx.save_for_backward(x)
         return out
 
@@ -110,7 +115,7 @@ class _GeluTanhMul(torch.autograd.Function):
     def backward(ctx, grad_output: torch.Tensor) -> tuple[torch.Tensor]:
         (x,) = ctx.saved_tensors
         grad_input = torch.empty_like(x)
-        _extension().areno_d_gelu_tanh_and_mul(grad_input, grad_output.contiguous(), x.contiguous())
+        _extension(grad_input.device).areno_d_gelu_tanh_and_mul(grad_input, grad_output.contiguous(), x.contiguous())
         return (grad_input,)
 
 
@@ -122,40 +127,40 @@ def areno_silu_and_mul(x: torch.Tensor, out: torch.Tensor | None = None) -> torc
     supplied the autograd path is skipped and the kernel writes in-place.
     """
     result = _activation_out(x, out)
-    _can_use_cuda_extension(x)
+    _can_use_extension(x)
     # Only enter the autograd Function when we actually need gradients; the
     # plain kernel path is used for inference / when an out buffer is given.
     if out is None and torch.is_grad_enabled() and x.requires_grad:
         return _SiluMul.apply(x)
-    _extension().areno_silu_and_mul(result, x.contiguous())
+    _extension(result.device).areno_silu_and_mul(result, x.contiguous())
     return result
 
 
 @torch._dynamo.disable
 def areno_silu(x: torch.Tensor) -> torch.Tensor:
     """Apply SiLU with an ARENO CUDA kernel."""
-    _can_use_cuda_extension(x)
+    _can_use_extension(x)
     if torch.is_grad_enabled() and x.requires_grad:
         return _Silu.apply(x)
-    return _extension().areno_silu(x.contiguous())
+    return _extension(x.device).areno_silu(x.contiguous())
 
 
 @torch._dynamo.disable
 def areno_sigmoid(x: torch.Tensor) -> torch.Tensor:
     """Apply sigmoid with an ARENO CUDA kernel."""
-    _can_use_cuda_extension(x)
+    _can_use_extension(x)
     if torch.is_grad_enabled() and x.requires_grad:
         return _Sigmoid.apply(x)
-    return _extension().areno_sigmoid(x.contiguous())
+    return _extension(x.device).areno_sigmoid(x.contiguous())
 
 
 @torch._dynamo.disable
 def areno_softplus(x: torch.Tensor) -> torch.Tensor:
     """Apply softplus(beta=1, threshold=20) with an ARENO CUDA kernel."""
-    _can_use_cuda_extension(x)
+    _can_use_extension(x)
     if torch.is_grad_enabled() and x.requires_grad:
         return _Softplus.apply(x)
-    return _extension().areno_softplus(x.contiguous())
+    return _extension(x.device).areno_softplus(x.contiguous())
 
 
 @torch._dynamo.disable
@@ -166,8 +171,8 @@ def areno_gelu_tanh_and_mul(x: torch.Tensor, out: torch.Tensor | None = None) ->
     formulation used by Gemma-family MLPs.
     """
     result = _activation_out(x, out)
-    _can_use_cuda_extension(x)
+    _can_use_extension(x)
     if out is None and torch.is_grad_enabled() and x.requires_grad:
         return _GeluTanhMul.apply(x)
-    _extension().areno_gelu_tanh_and_mul(result, x.contiguous())
+    _extension(result.device).areno_gelu_tanh_and_mul(result, x.contiguous())
     return result
