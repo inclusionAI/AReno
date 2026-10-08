@@ -113,3 +113,43 @@ def test_cce_real_losses_and_adapter_gradients(algo):
     (grad,) = torch.autograd.grad(loss, adapter)
     torch.testing.assert_close(loss, ref_loss, atol=2e-6, rtol=2e-5)
     torch.testing.assert_close(grad, ref_grad, atol=2e-5, rtol=2e-4)
+
+
+def test_cce_qwen_model_deferred_head_parity():
+    from areno.adapters import LoraConfig
+    from areno.adapters.lora import initialize_lora
+    from areno.engine.config import ModelConfig
+    from areno.engine.runtime.logprobs import packed_cut_logprobs, packed_next_token_logprobs
+    from areno.engine.runtime.metadata import TrainMeta
+    from areno.models.qwen3.model import Qwen3ForCausalLM
+
+    torch.manual_seed(71)
+    config = ModelConfig(
+        vocab_size=256,
+        hidden_size=128,
+        intermediate_size=256,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+        head_dim=64,
+        dtype=torch.bfloat16,
+        attn_backend="native",
+    )
+    model = Qwen3ForCausalLM(config).to(device="cuda", dtype=torch.bfloat16)
+    initialize_lora(model, LoraConfig(rank=8), seed=1)
+    params = tuple(p for p in model.parameters() if p.requires_grad)
+    tokens = torch.randint(256, (1, 16), device="cuda")
+    cu = torch.tensor([0, 7, 16], device="cuda", dtype=torch.int32)
+    positions = torch.cat((torch.arange(7), torch.arange(9))).cuda()[None]
+    meta = TrainMeta(cu_seqlens=cu, max_seqlen=9, packed=True, activation_checkpointing=True)
+    expected_out = model(tokens, position_ids=positions, train_meta=meta)
+    expected = packed_next_token_logprobs(expected_out.logits_shard, tokens, cu)
+    upstream = torch.linspace(-1, 1, expected.numel(), device="cuda")
+    expected_grads = torch.autograd.grad(expected, params, upstream)
+    actual_out = model(tokens, position_ids=positions, train_meta=meta, defer_lm_head=True)
+    assert actual_out.logits_shard is None
+    actual = packed_cut_logprobs(actual_out.hidden_states, tokens, cu, model.lm_head)
+    grads = torch.autograd.grad(actual, params, upstream)
+    torch.testing.assert_close(actual, expected, atol=8e-3, rtol=2e-2)
+    for got, ref in zip(grads, expected_grads, strict=True):
+        torch.testing.assert_close(got, ref, atol=8e-3, rtol=2e-2)
