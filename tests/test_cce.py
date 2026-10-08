@@ -60,7 +60,7 @@ def test_cce_noncontiguous_empty_and_graph():
             x.grad = w.grad = None
     torch.cuda.current_stream().wait_stream(stream)
     graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
+    with torch.cuda.graph(graph, stream=stream):
         out = cut_logprobs(x, w, labels)
         out.sum().backward()
     graph.replay()
@@ -80,3 +80,33 @@ def test_cce_large_vocab_ling_fp32_head():
     print({"logprob_max_abs": (actual - expected).abs().max().item(), "dx_max_abs": (dx - dx_ref).abs().max().item()})
     torch.testing.assert_close(actual, expected, atol=2e-5, rtol=2e-5)
     torch.testing.assert_close(dx, dx_ref, atol=2e-5, rtol=2e-4)
+
+
+@pytest.mark.parametrize("algo", ["sft", "dpo", "gspo", "grpo", "ppo"])
+def test_cce_real_losses_and_adapter_gradients(algo):
+    from areno.api.backend.cuda import losses
+
+    torch.manual_seed(19)
+    x = torch.randn(12, 64, device="cuda")
+    adapter = (torch.randn(64, 64, device="cuda") * 0.02).requires_grad_()
+    w = torch.randn(257, 64, device="cuda") * 0.1
+    labels = torch.randint(257, (12,), device="cuda")
+    hidden = x @ adapter
+    expected = reference(hidden, w, labels, 0)
+    pack = {
+        "packed_response_mask": torch.tensor([0, 0, 1, 1, 0, 1] * 2, device="cuda"),
+        "packed_logprobs": expected.detach() + 0.05,
+        "packed_ref_logprobs": expected.detach() - 0.1,
+        "packed_advantages": torch.tensor([1.0] * 6 + [-0.7] * 6, device="cuda"),
+        "packed_seq_ids": torch.tensor([0] * 6 + [1] * 6, device="cuda"),
+        "packed_num_sequences": 2,
+    }
+    fn = getattr(losses, f"{algo}_loss_fn")
+    kwargs = {"use_kl_loss": True} if algo == "ppo" else {}
+    ref_loss, _ = fn(pack, expected, **kwargs)
+    (ref_grad,) = torch.autograd.grad(ref_loss, adapter, retain_graph=True)
+    actual = cut_logprobs(hidden, w, labels)
+    loss, _ = fn(pack, actual, **kwargs)
+    (grad,) = torch.autograd.grad(loss, adapter)
+    torch.testing.assert_close(loss, ref_loss, atol=2e-6, rtol=2e-5)
+    torch.testing.assert_close(grad, ref_grad, atol=2e-5, rtol=2e-4)
