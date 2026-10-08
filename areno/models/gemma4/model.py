@@ -628,6 +628,8 @@ class Gemma4DecoderLayer(nn.Module):
 class Gemma4ForCausalLM(nn.Module):
     """Top-level Gemma4 model orchestrating PLE, KV sharing, and the LM head."""
 
+    supports_cce = True
+
     def __init__(self, config: ModelConfig):
         super().__init__()
         self.config = config
@@ -881,7 +883,11 @@ class Gemma4ForCausalLM(nn.Module):
                 if kv_for_share is not None:
                     shared_kv_by_layer[layer_idx] = kv_for_share
             hidden_states = self.norm(hidden_states)
-            logits_shard = None if defer_lm_head else self.lm_head(hidden_states)
+            if defer_lm_head:
+                hidden_states = self.lm_head.prepare_hidden(hidden_states)
+                logits_shard = None
+            else:
+                logits_shard = self.lm_head(hidden_states)
             if logits_shard is not None and self.final_logit_softcapping:
                 # Gemma uses tanh-based logit softcap to limit extreme values.
                 cap = float(self.final_logit_softcapping)

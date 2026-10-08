@@ -133,6 +133,7 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "score_micro_bs",
             "gradient_accumulation_steps",
             "activation_checkpointing",
+            "cce",
             "lora_rank",
             "lora_alpha",
             "lora_dropout",
@@ -910,6 +911,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             multimodal_projector_lr_decay_steps=args.multimodal_projector_lr_decay_steps,
             multimodal_projector_lr_decay_style=args.multimodal_projector_lr_decay_style,
             activation_checkpointing=args.activation_checkpointing,
+            cce=getattr(args, "cce", True),
             keep_rollout_state=not args.drop_rollout_state,
             optimizer_state_offload=args.optimizer_state_offload,
             optimizer_state_offload_dir=args.optimizer_state_offload_dir,
@@ -970,6 +972,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             multimodal_projector_lr_decay_steps=args.multimodal_projector_lr_decay_steps,
             multimodal_projector_lr_decay_style=args.multimodal_projector_lr_decay_style,
             activation_checkpointing=args.activation_checkpointing,
+            cce=getattr(args, "cce", True),
             keep_rollout_state=not args.drop_rollout_state,
             optimizer_state_offload=args.optimizer_state_offload,
             optimizer_state_offload_dir=args.optimizer_state_offload_dir,
@@ -1038,6 +1041,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
             multimodal_projector_lr_decay_steps=args.multimodal_projector_lr_decay_steps,
             multimodal_projector_lr_decay_style=args.multimodal_projector_lr_decay_style,
             activation_checkpointing=args.activation_checkpointing,
+            cce=getattr(args, "cce", True),
             keep_rollout_state=not args.drop_rollout_state,
             optimizer_state_offload=args.optimizer_state_offload,
             optimizer_state_offload_dir=args.optimizer_state_offload_dir,
@@ -1107,6 +1111,7 @@ def _trainer_config_from_args(args) -> TrainerConfig:
         multimodal_projector_lr_decay_steps=args.multimodal_projector_lr_decay_steps,
         multimodal_projector_lr_decay_style=args.multimodal_projector_lr_decay_style,
         activation_checkpointing=args.activation_checkpointing,
+        cce=getattr(args, "cce", True),
         keep_rollout_state=not args.drop_rollout_state,
         optimizer_state_offload=args.optimizer_state_offload,
         optimizer_state_offload_dir=args.optimizer_state_offload_dir,
@@ -1235,6 +1240,7 @@ def _training_config_settings(config: TrainerConfig) -> dict:
                 "attn_backend",
                 "eager_decode",
                 "activation_checkpointing",
+                "cce",
                 "keep_rollout_state",
                 "optimizer_state_offload",
                 "optimizer_state_offload_dir",
@@ -1755,6 +1761,12 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
 )
 @click.option("--weight-decay", type=float, default=1.0e-2, show_default=True, help="Policy optimizer weight decay.")
 @click.option("--grad-clip-norm", type=float, default=1.0, show_default=True, help="Policy gradient clipping norm.")
+@click.option(
+    "--cce/--no-cce",
+    default=True,
+    show_default=True,
+    help="Fuse CUDA training vocabulary projection and log-probs without materializing logits.",
+)
 @click.option(
     "--activation-checkpointing/--no-activation-checkpointing",
     default=True,

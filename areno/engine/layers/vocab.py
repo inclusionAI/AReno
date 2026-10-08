@@ -73,6 +73,15 @@ class VocabParallelLMHead(nn.Module):
         mark_tensor_parallel_parameter(self.weight, True, sequence_parallel=True)
         nn.init.normal_(self.weight, mean=0.0, std=0.02)
 
+    def prepare_hidden(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Cross the same TP/SP boundary before a deferred vocabulary projection."""
+        hidden_states = (
+            gather_from_sequence_parallel_region(hidden_states)
+            if is_sequence_parallel_active()
+            else copy_to_tensor_parallel_region(hidden_states)
+        )
+        return hidden_states.to(dtype=getattr(self, "projection_dtype", self.weight.dtype))
+
     @torch._dynamo.disable
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         # Reassemble the full hidden activation: in SP mode it is sharded

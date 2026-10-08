@@ -362,6 +362,8 @@ class Qwen3MoeDecoderLayer(QwenDecoderLayer):
 class Qwen3ForCausalLM(nn.Module):
     """Top-level Qwen3 causal LM with vocab-parallel embedding/LM head."""
 
+    supports_cce = True
+
     def __init__(self, config: ModelConfig):
         super().__init__()
         self.config = config
@@ -379,6 +381,7 @@ class Qwen3ForCausalLM(nn.Module):
         position_ids: torch.Tensor | None = None,
         train_meta: TrainMeta | None = None,
         infer_meta: InferMeta | None = None,
+        defer_lm_head: bool = False,
     ) -> CausalLMOutput:
         if position_ids is None:
             # Default to monotonic 0..S-1 positions broadcast across the batch.
@@ -403,7 +406,11 @@ class Qwen3ForCausalLM(nn.Module):
                         infer_meta=infer_meta,
                     )
             hidden_states = self.norm(hidden_states)
-            logits_shard = self.lm_head(hidden_states)
+            if defer_lm_head:
+                hidden_states = self.lm_head.prepare_hidden(hidden_states)
+                logits_shard = None
+            else:
+                logits_shard = self.lm_head(hidden_states)
         return CausalLMOutput(logits_shard=logits_shard, hidden_states=hidden_states)
 
     def set_kv_caches(

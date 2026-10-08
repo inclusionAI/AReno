@@ -804,6 +804,8 @@ class MiniCPMDecoderLayer(nn.Module):
 class MiniCPMV46ForCausalLM(nn.Module):
     """MiniCPM-V-4.6 language model with an AReno-owned vision path."""
 
+    supports_cce = True
+
     def __init__(self, config: ModelConfig):
         super().__init__()
         self.config = config
@@ -910,6 +912,7 @@ class MiniCPMV46ForCausalLM(nn.Module):
         train_meta: TrainMeta | None = None,
         infer_meta: InferMeta | None = None,
         features: dict[str, Any] | list[dict[str, Any] | None] | None = None,
+        defer_lm_head: bool = False,
     ) -> CausalLMOutput:
         if position_ids is None:
             position_ids = torch.arange(input_ids.shape[1], device=input_ids.device).unsqueeze(0).expand_as(input_ids)
@@ -936,7 +939,11 @@ class MiniCPMV46ForCausalLM(nn.Module):
                     infer_meta=infer_meta,
                 )
             hidden_states = self.norm(hidden_states)
-            logits_shard = self.lm_head(hidden_states)
+            if defer_lm_head:
+                hidden_states = self.lm_head.prepare_hidden(hidden_states)
+                logits_shard = None
+            else:
+                logits_shard = self.lm_head(hidden_states)
         return CausalLMOutput(logits_shard=logits_shard, hidden_states=hidden_states)
 
     @torch._dynamo.disable

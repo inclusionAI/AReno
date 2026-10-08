@@ -69,6 +69,7 @@ class TrainerConfig:
     multimodal_projector_lr_decay_steps: int | None = None
     multimodal_projector_lr_decay_style: str | None = None
     activation_checkpointing: bool = True
+    cce: bool = True
     keep_rollout_state: bool = True
     optimizer_state_offload: str | bool = "none"
     optimizer_state_offload_dir: str | None = None
@@ -219,6 +220,7 @@ class TrainerConfig:
             optimizer=self.optimizer_config(),
             runtime={
                 "activation_checkpointing": self.activation_checkpointing,
+                "cce": self.cce,
                 "keep_rollout_state": self.keep_rollout_state,
                 "optimizer_state_offload": self.optimizer_state_offload,
                 "optimizer_state_offload_dir": self.optimizer_state_offload_dir,
@@ -269,6 +271,7 @@ class RolloutTrainerConfig(TrainerConfig):
             optimizer=self.optimizer_config(),
             runtime={
                 "activation_checkpointing": self.activation_checkpointing,
+                "cce": self.cce,
                 "keep_rollout_state": self.keep_rollout_state,
                 "optimizer_state_offload": self.optimizer_state_offload,
                 "optimizer_state_offload_dir": self.optimizer_state_offload_dir,

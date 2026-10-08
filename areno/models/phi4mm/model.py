@@ -342,6 +342,8 @@ class Phi4MMLMHead(VocabParallelLMHead):
     boundaries while doing the final projection in FP32.
     """
 
+    projection_dtype = torch.float32
+
     @torch._dynamo.disable
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         hidden_states = (
@@ -355,6 +357,8 @@ class Phi4MMLMHead(VocabParallelLMHead):
 
 class Phi4MMForCausalLM(nn.Module):
     """Text-only Phi-4 causal LM with a truly tied vocab-parallel head."""
+
+    supports_cce = True
 
     def __init__(self, config: ModelConfig):
         super().__init__()
@@ -386,11 +390,16 @@ class Phi4MMForCausalLM(nn.Module):
         position_ids: torch.Tensor | None = None,
         train_meta: TrainMeta | None = None,
         infer_meta: InferMeta | None = None,
+        defer_lm_head: bool = False,
     ) -> CausalLMOutput:
         use_sequence_parallel = bool(train_meta is not None and train_meta.sequence_parallel)
         with sequence_parallel_region(use_sequence_parallel):
             hidden_states = self.model(input_ids, position_ids, train_meta, infer_meta)
-            logits_shard = self.lm_head(hidden_states)
+            if defer_lm_head:
+                hidden_states = self.lm_head.prepare_hidden(hidden_states)
+                logits_shard = None
+            else:
+                logits_shard = self.lm_head(hidden_states)
         return CausalLMOutput(logits_shard=logits_shard, hidden_states=hidden_states)
 
     def set_kv_caches(

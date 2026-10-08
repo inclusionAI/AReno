@@ -1120,6 +1120,8 @@ class BailingDecoderLayer(nn.Module):
 class BailingMoeLinearV2ForCausalLM(nn.Module):
     """Top-level Bailing-MoE-Linear-V2 causal LM."""
 
+    supports_cce = True
+
     def __init__(self, config: ModelConfig):
         super().__init__()
         self.config = config
@@ -1134,6 +1136,7 @@ class BailingMoeLinearV2ForCausalLM(nn.Module):
         position_ids: torch.Tensor | None = None,
         train_meta: TrainMeta | None = None,
         infer_meta: InferMeta | None = None,
+        defer_lm_head: bool = False,
     ) -> CausalLMOutput:
         if position_ids is None:
             position_ids = torch.arange(input_ids.shape[1], device=input_ids.device).unsqueeze(0).expand_as(input_ids)
@@ -1146,6 +1149,8 @@ class BailingMoeLinearV2ForCausalLM(nn.Module):
             for layer in self.layers:
                 hidden_states = layer(hidden_states, position_ids, train_meta, infer_meta)
             hidden_states = self.norm(hidden_states)
+            if defer_lm_head:
+                return CausalLMOutput(hidden_states=self.lm_head.prepare_hidden(hidden_states))
             return CausalLMOutput(logits_shard=self.lm_head(hidden_states), hidden_states=hidden_states)
 
     def set_kv_caches(

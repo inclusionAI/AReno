@@ -1042,3 +1042,11 @@ def _options(**overrides):
     if defaults["algo"] == "sft" and "dataset_loader_fn" not in overrides:
         defaults["dataset_loader_fn"] = "examples/sft/alpaca/dataset_loader.py"
     return defaults
+
+
+@pytest.mark.parametrize("algo", ["sft", "dpo", "gspo", "grpo", "ppo"])
+@pytest.mark.parametrize("enabled", [True, False])
+def test_cce_cli_propagates_to_all_trainers(algo, enabled):
+    config = _trainer_config_from_options(**_options(algo=algo, cce=enabled))
+    assert config.cce is enabled
+    assert config.backend_config().runtime["cce"] is enabled

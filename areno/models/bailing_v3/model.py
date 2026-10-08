@@ -1617,6 +1617,8 @@ class BailingDecoderLayer(nn.Module):
 class BailingMoeV3ForCausalLM(nn.Module):
     """Top-level Bailing-MoE V3 causal LM."""
 
+    supports_cce = True
+
     def __init__(self, config: ModelConfig):
         super().__init__()
         self.config = config
@@ -1635,6 +1637,7 @@ class BailingMoeV3ForCausalLM(nn.Module):
         position_ids: torch.Tensor | None = None,
         train_meta: TrainMeta | None = None,
         infer_meta: InferMeta | None = None,
+        defer_lm_head: bool = False,
     ) -> CausalLMOutput:
         if position_ids is None:
             position_ids = torch.arange(input_ids.shape[1], device=input_ids.device).unsqueeze(0).expand_as(input_ids)
@@ -1650,6 +1653,8 @@ class BailingMoeV3ForCausalLM(nn.Module):
             logits_input = hidden_states
             if self.lm_head.weight.dtype == torch.float32:
                 logits_input = hidden_states.float()
+            if defer_lm_head:
+                return CausalLMOutput(hidden_states=self.lm_head.prepare_hidden(logits_input))
             return CausalLMOutput(logits_shard=self.lm_head(logits_input), hidden_states=hidden_states)
 
     def set_kv_caches(

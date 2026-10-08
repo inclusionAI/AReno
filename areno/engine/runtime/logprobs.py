@@ -127,6 +127,28 @@ def packed_next_token_logprobs_from_hidden(
     return selected
 
 
+def packed_cut_logprobs(hidden_states, tokens, cu_seqlens, lm_head, *, logit_softcap=None):
+    """Score packed next tokens through CCE; hidden already crossed the head TP boundary."""
+    from areno.accel.cce import cut_logprobs
+
+    flat_tokens = tokens.reshape(-1)
+    keep = torch.ones(flat_tokens.numel(), device=tokens.device, dtype=torch.bool)
+    keep[cu_seqlens[1:].long() - 1] = False
+    positions = torch.arange(flat_tokens.numel(), device=tokens.device)[keep]
+    labels = flat_tokens[positions + 1]
+    hidden = hidden_states.reshape(-1, hidden_states.shape[-1]).index_select(0, positions)
+    ctx = get_tp_context()
+    return cut_logprobs(
+        hidden,
+        lm_head.weight.to(dtype=hidden.dtype),
+        labels,
+        softcap=float(logit_softcap or 0.0),
+        vocab_start=lm_head.vocab_start,
+        group=ctx.group,
+        world_size=ctx.world_size,
+    )
+
+
 def vocab_parallel_selected_logprobs(logits_shard: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
     """Select label logprobs without gathering full vocabulary logits.
 

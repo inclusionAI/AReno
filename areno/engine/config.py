@@ -64,6 +64,7 @@ class RuntimeConfig:
     attn_backend: Literal["flash", "native"] = "flash"
     compile_model: bool = True
     activation_checkpointing: bool = True
+    cce: bool = True
     keep_rollout_state: bool = True
     optimizer_state_offload: Literal["none", "cpu", "disk"] | bool = "none"
     optimizer_state_offload_dir: str | None = None
