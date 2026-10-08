@@ -79,6 +79,11 @@ docker run --gpus all --rm -it \
   areno check
 ```
 
+The [Dashboard](docs/cli/dashboard.rst) launches and monitors local or
+[Modal](https://modal.com) training and serving jobs, with agent chat, editable
+plans, GPU/cost estimates, and live metrics and logs. See the
+[Modal setup guide](docs/cli/dashboard-modal.rst).
+
 ## Quick Start
 
 AReno provides core API abstractions for LLM post-training, with AReno SDK, RL loop is a short cycle of `Trainer` calls. Each step below maps a concept to the SDK call that performs it:

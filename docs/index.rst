@@ -38,6 +38,7 @@ AReno documentation
    :maxdepth: 1
    :caption: Cookbook
 
+   Dashboard <cli/dashboard>
    cookbook/writing-loaders-and-rewards
    cookbook/math-rlvr
    cookbook/tictactoe-agentic-rl
