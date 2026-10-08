@@ -34,6 +34,7 @@ class _CutLogprobs(torch.autograd.Function):
                 128,
                 64,
                 softcap,
+                num_stages=1,
             )
             lse[begin:end] = torch.logsumexp(partial, dim=0)
         if world_size > 1:
@@ -77,6 +78,7 @@ class _CutLogprobs(torch.autograd.Function):
                 ctx.softcap,
                 need_x,
                 need_w,
+                num_stages=1,
             )
         return (
             dx.to(hidden.dtype) if need_x else None,
