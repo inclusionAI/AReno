@@ -146,3 +146,81 @@ def test_paged_optimizer_matches_nonpaged_and_roundtrips(mode):
         if tensor is None:
             tensor = state.exp_avg
         assert extension(a.device).areno_is_managed(tensor)
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("adapters", [False, True])
+def test_nf4_moe_graph_replays_changed_routes_and_adapters(dtype, adapters):
+    from types import SimpleNamespace
+
+    from areno.accel.kernels.nf4_moe import nf4_experts
+    from areno.accel.ops import FusedMoeConfig
+
+    torch.manual_seed(77)
+    experts, hidden, width, tokens, top_k = 5, 65, 33, 7, 2
+    q1 = NF4Weight(torch.randn(experts, 2 * width, hidden, device="cuda", dtype=dtype) * 0.03)
+    q2 = NF4Weight(torch.randn(experts, hidden, width, device="cuda", dtype=dtype) * 0.03)
+    w1, w2 = q1.dequantize(), q2.dequantize()
+    x = torch.randn(tokens, hidden, device="cuda", dtype=dtype)
+    ids = torch.randint(experts, (tokens, top_k), device="cuda", dtype=torch.int32)
+    weights = torch.rand(tokens, top_k, device="cuda")
+    config = FusedMoeConfig(experts, hidden, width, top_k, routed_scaling_factor=1.25)
+    slots = {}
+    if adapters:
+        for name, size_in, size_out in (
+            ("gate_proj", hidden, width),
+            ("up_proj", hidden, width),
+            ("down_proj", width, hidden),
+        ):
+            slots[name] = SimpleNamespace(
+                rank=8,
+                out_features=size_out,
+                lora_A=torch.randn(experts, 8, size_in, device="cuda", dtype=dtype) * 0.1,
+                lora_B=torch.randn(experts, size_out, 8, device="cuda", dtype=dtype) * 0.1,
+                scale=torch.tensor(2.0, device="cuda"),
+            )
+
+    def reference():
+        out = torch.zeros_like(x, dtype=torch.float32)
+        for t in range(tokens):
+            for k in range(top_k):
+                expert = int(ids[t, k])
+                gu = F.linear(x[t], w1[expert])
+                gate, up = gu.chunk(2)
+                for name, target in (("gate_proj", gate), ("up_proj", up)):
+                    if name in slots:
+                        slot = slots[name]
+                        target.add_(F.linear(F.linear(x[t], slot.lora_A[expert]), slot.lora_B[expert]) * slot.scale)
+                # Native SiLU kernel computes the activation and product in FP32.
+                activated = (F.silu(gate.float()) * up.float()).to(dtype) * weights[t, k].to(dtype)
+                y = F.linear(activated, w2[expert])
+                if "down_proj" in slots:
+                    slot = slots["down_proj"]
+                    y += F.linear(F.linear(activated, slot.lora_A[expert]), slot.lora_B[expert]) * slot.scale
+                out[t] += y.float()
+        return out.to(dtype) * config.routed_scaling_factor
+
+    def candidate():
+        return nf4_experts(x, q1, q2, ids, weights, slots, config)
+
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        for _ in range(3):
+            candidate()
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        output = candidate()
+    for iteration in range(3):
+        # Populate formerly unused experts, all-zero masked routes, and live
+        # adapter updates without recapturing or caching dense merged weights.
+        ids.copy_((torch.arange(tokens * top_k, device="cuda").view(tokens, top_k) + iteration) % experts)
+        weights[0].zero_()
+        x.mul_(0.9)
+        for slot in slots.values():
+            slot.lora_B.add_(0.002)
+        graph.replay()
+        torch.testing.assert_close(output, candidate(), atol=0, rtol=0)
+        torch.testing.assert_close(output, reference(), atol=2e-3, rtol=3e-2)
+        assert torch.isfinite(output).all()

@@ -313,7 +313,9 @@ class BailingSparseMoeBlock(nn.Module):
         expert_input = hidden_states.to(dtype=projection_dtype(self.experts.linear_fc1))
         with sequence_parallel_region(False):
             flat = expert_input.view(-1, hidden)
-            if self.training or not self._infer_weights_ready:
+            if not self.training and getattr(self.experts.linear_fc1, "quantized_weight", None) is not None:
+                out = self._forward_nf4_moe(flat, topk_idx, topk_weight).view(bsz, seqlen, hidden)
+            elif self.training or not self._infer_weights_ready:
                 # Permute/unpermute path is autograd-friendly.
                 out = self.experts(flat, topk_idx, topk_weight).view(bsz, seqlen, hidden)
             else:
@@ -340,7 +342,9 @@ class BailingSparseMoeBlock(nn.Module):
         with sequence_parallel_region(False):
             topk_idx, topk_weight, _ = self.gate(hidden_states, num_padding_tokens)
             flat = expert_input.view(-1, hidden)
-            if self.training or not self._infer_weights_ready:
+            if not self.training and getattr(self.experts.linear_fc1, "quantized_weight", None) is not None:
+                out = self._forward_nf4_moe(flat, topk_idx, topk_weight).view(bsz, seqlen, hidden)
+            elif self.training or not self._infer_weights_ready:
                 out = self.experts(flat, topk_idx, topk_weight).view(bsz, seqlen, hidden)
             else:
                 out = self._forward_fused_moe(flat, topk_idx, topk_weight).view(bsz, seqlen, hidden)
@@ -402,6 +406,22 @@ class BailingSparseMoeBlock(nn.Module):
         self._infer_w1_weight = torch.empty(0, device=device, dtype=dtype)
         self._infer_w2_weight = torch.empty(0, device=device, dtype=dtype)
         self._infer_weights_ready = False
+
+    @torch._dynamo.disable
+    def _forward_nf4_moe(self, flat, topk_idx, topk_weight):
+        from areno.accel.kernels.nf4_moe import nf4_experts
+
+        local_idx, local_weight = self.experts.local_routes(topk_idx, topk_weight)
+        out = nf4_experts(
+            flat,
+            self.experts.linear_fc1.quantized_weight,
+            self.experts.linear_fc2.quantized_weight,
+            local_idx,
+            local_weight,
+            self.experts.lora_slots if self.experts.has_active_lora() else {},
+            self._fused_moe_config,
+        )
+        return all_reduce(out)
 
     def _forward_fused_moe(self, flat: torch.Tensor, topk_idx: torch.Tensor, topk_weight: torch.Tensor) -> torch.Tensor:
         if self._infer_w1_weight.numel() == 0:

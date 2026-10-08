@@ -139,11 +139,6 @@ class RuntimeConfig:
 
         if self.eager_decode or lora is None:
             return
-        if lora.qlora and model.model_type == "bailing_moe_v3":
-            # Quantized experts use routed grouped GEMMs, whose permuted row
-            # count is dynamic. Do not build a dense BF16 fused-inference copy.
-            self.eager_decode = True
-            return
         if model.model_type == "qwen3_moe" and {
             "gate_proj",
             "up_proj",

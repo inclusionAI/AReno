@@ -18,6 +18,9 @@ def test_qlora_config_enables_paging_and_preserves_base_layout_cpu():
     lora = LoraConfig(qlora=True)
     config = EngineConfig(model=ModelConfig(), lora=lora, devices=[0])
     assert config.optimizer.paged
+    runtime = RuntimeConfig()
+    runtime.resolve_eager_decode(model=ModelConfig(model_type="bailing_moe_v3"), lora=lora)
+    assert not runtime.eager_decode
     with pytest.raises(ValueError, match="matching train and rollout TP"):
         CudaConfig(lora=lora, tp_size=1, rollout_tp_size=2, rollout_devices=[1, 2])
     with pytest.raises(ValueError, match="QLoRA requires CUDA"):
