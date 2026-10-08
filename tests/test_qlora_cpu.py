@@ -125,3 +125,38 @@ def test_qlora_native_projection_replacement_cpu():
     assert model.layers[0].self_attn.qkv_proj.weight is None
     assert {id(p) for p in model.parameters() if p.requires_grad} == adapter_ids
     assert not copy.deepcopy(model).layers[0].self_attn.qkv_proj.quantized_weight.packed.requires_grad
+
+
+def test_qlora_adapter_export_reload_restores_quantization_cpu(tmp_path):
+    from areno.adapters.lora import initialize_lora
+    from areno.adapters.peft import export_peft_adapter, load_peft_adapter
+    from areno.adapters.qlora import initialize_qlora
+    from areno.engine.config import ModelConfig
+    from areno.models.qwen3.model import Qwen3ForCausalLM
+
+    torch.manual_seed(59)
+    model = Qwen3ForCausalLM(
+        ModelConfig(
+            hidden_size=64,
+            intermediate_size=128,
+            num_hidden_layers=1,
+            num_attention_heads=1,
+            num_key_value_heads=1,
+            head_dim=64,
+            vocab_size=128,
+        )
+    )
+    restored = copy.deepcopy(model)
+    registry = initialize_lora(model, LoraConfig(qlora=True), seed=2)
+    initialize_qlora(model)
+    with torch.no_grad():
+        for slot in registry.slots.values():
+            slot.lora_B.normal_(0, 0.02)
+    export_peft_adapter(registry, tmp_path, base_model_name_or_path="local-test-base")
+    config = LoraConfig(adapter_path=str(tmp_path))
+    assert config.qlora
+    restored_registry = initialize_lora(restored, config, seed=7)
+    initialize_qlora(restored)
+    load_peft_adapter(restored_registry, tmp_path)
+    for key, value in model.state_dict().items():
+        torch.testing.assert_close(value, restored.state_dict()[key], atol=0, rtol=0)
