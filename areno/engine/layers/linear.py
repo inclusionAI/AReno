@@ -121,7 +121,7 @@ class ColumnParallelLinear(nn.Module):
             x = gather_from_sequence_parallel_region(x)
         elif self.input_grad_allreduce:
             x = copy_to_tensor_parallel_region(x)
-        out = _areno_linear_forward(x, self.weight, self.bias)
+        out = _projection_forward(self, x, self.bias)
         if self.lora_slot is not None and self.lora_slot.enabled:
             out = out + self.lora_slot(x)
         if self.gather_output:
@@ -181,7 +181,7 @@ class MergedColumnParallelLinear(nn.Module):
             if is_sequence_parallel_active()
             else copy_to_tensor_parallel_region(x)
         )
-        out = _areno_linear_forward(x, self.weight, self.bias)
+        out = _projection_forward(self, x, self.bias)
         if not self.lora_slots:
             return out
         parts = list(out.split(self.local_out_features, dim=-1))
@@ -278,7 +278,7 @@ class RowParallelLinear(nn.Module):
             ctx = get_tp_context()
             start, end = _shard_range(self.in_features, ctx.rank, ctx.world_size)
             x = x[..., start:end]
-        out = _areno_linear_forward(x, self.weight, None)
+        out = _projection_forward(self, x, None)
         if self.lora_slot is not None and self.lora_slot.enabled:
             out = out + self.lora_slot(x)
         # Partial sum -> cross-rank reduction. SP mode also re-shards along
@@ -295,3 +295,17 @@ def _areno_linear_forward(x: torch.Tensor, weight: torch.Tensor, bias: torch.Ten
     if x.ndim >= 3 and torch.is_grad_enabled():
         return F.linear(x, weight, bias)
     return areno_linear(x, weight, bias)
+
+
+def projection_dtype(module):
+    quantized = getattr(module, "quantized_weight", None)
+    return quantized.compute_dtype if quantized is not None else module.weight.dtype
+
+
+def _projection_forward(module, x, bias):
+    quantized = getattr(module, "quantized_weight", None)
+    if quantized is not None:
+        from areno.accel.nf4 import nf4_linear
+
+        return nf4_linear(x, quantized, bias)
+    return _areno_linear_forward(x, module.weight, bias)

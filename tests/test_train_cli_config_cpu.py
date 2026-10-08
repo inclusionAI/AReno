@@ -25,6 +25,12 @@ def test_train_config_requires_ckpt():
         _trainer_config_from_options(**_options(ckpt=None, algo="sft"))
 
 
+def test_qlora_cli_enables_default_rank_without_explicit_lora():
+    cfg = _trainer_config_from_options(**_options(qlora=True, lora_rank=None, lora_adapter_path=None))
+    assert cfg.lora.qlora and cfg.lora.rank == 8
+    assert cfg.cuda_config().lora.qlora
+
+
 def test_train_config_requires_dataset_path():
     with pytest.raises(UsageError, match="--dataset-path is required"):
         _trainer_config_from_options(**_options(dataset_path=None, algo="sft"))

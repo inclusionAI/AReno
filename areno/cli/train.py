@@ -134,6 +134,7 @@ TRAIN_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "gradient_accumulation_steps",
             "activation_checkpointing",
             "lora_rank",
+            "qlora",
             "lora_alpha",
             "lora_dropout",
             "lora_target_modules",
@@ -413,7 +414,7 @@ def _require_positive_float(value: float, option_name: str) -> None:
 def _lora_config_from_options(args):
     rank = getattr(args, "lora_rank", None)
     adapter_path = getattr(args, "lora_adapter_path", None)
-    if rank is None and adapter_path is None:
+    if rank is None and adapter_path is None and not getattr(args, "qlora", False):
         return None
     from areno.adapters import LoraConfig
 
@@ -425,6 +426,7 @@ def _lora_config_from_options(args):
             dropout=args.lora_dropout,
             target_modules=targets,
             adapter_path=adapter_path,
+            qlora=getattr(args, "qlora", False),
         )
     except ValueError as exc:
         raise click.UsageError(str(exc)) from exc
@@ -529,6 +531,7 @@ def _format_training_config_summary(
                 ("mini_bs", str(config.mini_bs)),
                 ("score_micro_bs", str(config.score_micro_bs)),
                 ("gradient_accumulation_steps", _format_optional(config.gradient_accumulation_steps, default="auto")),
+                ("qlora", "yes" if config.lora is not None and config.lora.qlora else "no"),
                 ("lora_rank", str(config.lora.rank) if config.lora is not None else "disabled"),
                 ("lora_alpha", str(config.lora.alpha) if config.lora is not None else "n/a"),
                 ("lora_dropout", str(config.lora.dropout) if config.lora is not None else "n/a"),
@@ -1668,6 +1671,7 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     help="Override global concurrent rollout prompts; defaults to batch-size * n-samples.",
 )
 @click.option("--lr", type=float, default=1.0e-6, show_default=True, help="Policy optimizer learning rate.")
+@click.option("--qlora", is_flag=True, help="Enable native NF4 + double quantization + paged optimizer (CUDA).")
 @click.option("--lora-rank", type=int, default=None, help="Enable native LoRA with this rank.")
 @click.option("--lora-alpha", type=float, default=16.0, show_default=True, help="Native LoRA alpha.")
 @click.option("--lora-dropout", type=float, default=0.0, show_default=True, help="Native LoRA dropout (must be 0).")

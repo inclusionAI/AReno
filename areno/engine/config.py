@@ -39,6 +39,7 @@ class OptimizerConfig:
     grad_clip_norm: float | None = None
     adam_8bit: bool = False
     adam_4bit: bool = False
+    paged: bool = False
     fp32_master_bucket_numel: int = 16 * 1024 * 1024
     unfreeze_multimodal_tower: bool = False
     unfreeze_multimodal_projector: bool = False
@@ -302,6 +303,13 @@ class EngineConfig:
     def __post_init__(self) -> None:
         """Infer DP/devices and validate the distributed layout."""
 
+        if self.lora is not None and self.lora.qlora:
+            if self.runtime.device_type != "cuda":
+                raise ValueError("QLoRA requires CUDA")
+            if self.runtime.optimizer_state_offload != "none":
+                raise ValueError("QLoRA paged optimizer cannot combine with explicit optimizer state offload")
+            if self.model.model_type not in {"qwen3", "bailing_moe_v3"}:
+                raise ValueError("QLoRA currently supports Qwen3 dense and Bailing-MoE V3")
         if self.sequence_parallel is not None:
             self.model.sequence_parallel = bool(self.sequence_parallel)
         self.model.validate_tp(self.tp_size)

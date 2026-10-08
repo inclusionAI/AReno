@@ -261,7 +261,12 @@ void areno_adamw_fp32_state_step_cuda(
     double step_size,
     double bias_correction2_sqrt);
 
+torch::Tensor areno_managed_empty_like(torch::Tensor prototype);
+bool areno_is_managed(torch::Tensor tensor);
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("areno_managed_empty_like", &areno_managed_empty_like, "Allocate CUDA managed optimizer storage");
+  m.def("areno_is_managed", &areno_is_managed, "Inspect CUDA managed pointer type");
   m.def("areno_adamw_fp32_master_step", &areno_adamw_fp32_master_step_cuda, "ARENO compact FP32-master AdamW step");
   m.def("areno_adamw_4bit_step", &areno_adamw_4bit_step_cuda, "ARENO packed block-wise AdamW4bit step");
   m.def(

@@ -77,6 +77,7 @@ from areno.engine.layers.linear import (
     RowParallelLinear,
     _shard_range,
     mark_tensor_parallel_parameter,
+    projection_dtype,
 )
 from areno.engine.layers.norm import GroupRMSNormSigmoidGate, RMSNorm
 from areno.engine.layers.rotary import PartialRotaryEmbedding
@@ -126,7 +127,7 @@ class BailingDenseMLP(nn.Module):
         _cast_linear_weights(self.down_proj, config.dtype)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        proj_input = x.to(dtype=self.gate_proj.weight.dtype)
+        proj_input = x.to(dtype=projection_dtype(self.gate_proj))
         gate = self.gate_proj(proj_input)
         up = self.up_proj(proj_input)
         # Fused SiLU(gate) * up kernel — same as areno_silu_and_mul but reused
@@ -309,7 +310,7 @@ class BailingSparseMoeBlock(nn.Module):
         if moe_sequence_parallel:
             hidden_states = gather_from_sequence_parallel_region(hidden_states)
         bsz, seqlen, hidden = hidden_states.shape
-        expert_input = hidden_states.to(dtype=self.experts.linear_fc1.weight.dtype)
+        expert_input = hidden_states.to(dtype=projection_dtype(self.experts.linear_fc1))
         with sequence_parallel_region(False):
             flat = expert_input.view(-1, hidden)
             if self.training or not self._infer_weights_ready:
@@ -335,7 +336,7 @@ class BailingSparseMoeBlock(nn.Module):
         if moe_sequence_parallel:
             hidden_states = gather_from_sequence_parallel_region(hidden_states)
         bsz, seqlen, hidden = hidden_states.shape
-        expert_input = hidden_states.to(dtype=self.experts.linear_fc1.weight.dtype)
+        expert_input = hidden_states.to(dtype=projection_dtype(self.experts.linear_fc1))
         with sequence_parallel_region(False):
             topk_idx, topk_weight, _ = self.gate(hidden_states, num_padding_tokens)
             flat = expert_input.view(-1, hidden)
@@ -359,6 +360,9 @@ class BailingSparseMoeBlock(nn.Module):
         down projection. Buffers are reused across calls if the shape/device
         already match to avoid reallocating on every weight refresh.
         """
+        if getattr(self.experts.linear_fc1, "quantized_weight", None) is not None:
+            self.clear_infer_weights()
+            return
         gate_weights, up_weights, down_weights = self.experts.inference_weights()
         self._infer_gate_weight = self._updated_infer_weight(
             self._infer_gate_weight, gate_weights.to(dtype=self.config.dtype).contiguous()
@@ -491,11 +495,9 @@ class BailingGroupedExperts(nn.Module):
         if x.shape[0] == 0:
             # Every TP/DP replica must produce gradients for the same parameter
             # set even when this rank owns no active routes.
-            zero = (
-                self.linear_fc1.weight.reshape(-1)[0] * 0
-                + self.linear_fc2.weight.reshape(-1)[0] * 0
-                + topk_weight.sum().to(dtype=self.linear_fc1.weight.dtype) * 0
-            )
+            zero = topk_weight.sum().to(dtype=projection_dtype(self.linear_fc1)) * 0
+            if self.linear_fc1.weight is not None:
+                zero = zero + self.linear_fc1.weight.reshape(-1)[0] * 0 + self.linear_fc2.weight.reshape(-1)[0] * 0
             if self.has_active_lora():
                 for slot in self.lora_slots.values():
                     zero = zero + slot.lora_A.reshape(-1)[0] * 0 + slot.lora_B.reshape(-1)[0] * 0
@@ -595,6 +597,8 @@ class BailingGroupedExperts(nn.Module):
     @torch.no_grad()
     def offload_to_cpu(self) -> None:
         """Move all expert params to CPU (used during inference-only phases)."""
+        if getattr(self.linear_fc1, "quantized_weight", None) is not None:
+            return  # Rollout uses the same packed base and live adapters.
         for param in self.parameters():
             param.data = param.data.to(device="cpu")
 
@@ -622,6 +626,11 @@ class ArenoGroupedLinear(nn.Module):
         self.weight = nn.Parameter(torch.empty(num_gemms, out_features, in_features, dtype=dtype))
 
     def forward(self, x: torch.Tensor, tokens_per_expert: torch.Tensor | Sequence[int]) -> torch.Tensor:
+        quantized = getattr(self, "quantized_weight", None)
+        if quantized is not None:
+            from areno.accel.nf4 import nf4_grouped_linear
+
+            return nf4_grouped_linear(x, quantized, tokens_per_expert)
         if isinstance(tokens_per_expert, torch.Tensor):
             if tokens_per_expert.numel() != self.num_gemms:
                 raise ValueError(f"expected {self.num_gemms} expert token counts, got {tokens_per_expert.numel()}")
@@ -887,7 +896,7 @@ class BailingSoftmaxAttention(nn.Module):
         train_meta: TrainMeta | None,
         infer_meta: InferMeta | None,
     ) -> torch.Tensor:
-        hidden_states = hidden_states.to(dtype=self.dense.weight.dtype)
+        hidden_states = hidden_states.to(dtype=projection_dtype(self.dense))
         q, k, v = self._project(hidden_states, position_ids)
         bsz, seqlen = q.shape[:2]
         if infer_meta is not None:
@@ -1298,6 +1307,7 @@ class BailingKDAAttention(nn.Module):
         use_packed_lora = (
             infer_meta is not None
             and self._infer_lora_A.numel() > 0
+            and getattr(self.q_proj, "quantized_weight", None) is None
             and all(slot is not None and slot.enabled for slot in slots)
         )
         if not use_packed_lora:
@@ -1320,7 +1330,7 @@ class BailingKDAAttention(nn.Module):
         infer_meta: InferMeta | None,
     ) -> torch.Tensor:
         del position_ids
-        hidden_states = hidden_states.to(dtype=self.q_proj.weight.dtype)
+        hidden_states = hidden_states.to(dtype=projection_dtype(self.q_proj))
         q, k, v, f, gate = self._project_qkvfg(hidden_states, infer_meta)
         batch, seqlen = q.shape[:2]
         q = self._causal_conv(q, self.q_conv1d_weight, 0, train_meta, infer_meta)
