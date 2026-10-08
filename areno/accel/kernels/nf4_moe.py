@@ -90,6 +90,7 @@ def _project(x, weight, routes, top_k, config):
         config.block_size_n,
         config.block_size_k,
         num_warps=4,
+        num_stages=1,
         enable_fp_fusion=False,
     )
     return out
