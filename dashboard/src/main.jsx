@@ -34,6 +34,7 @@ import {
 } from "lucide-react";
 import "./styles.css";
 import { sampleMetricPoints } from "./metrics";
+import { runtimeSummary, runtimeFacts } from "./runtime";
 import { modalWorkflow } from "./modal-workflow";
 import { ModalResourceForm, ModalSettings, DatasetManager, ModalUsage, ModalPlanCard, PlanParameters } from "./modal";
 
@@ -1610,7 +1611,7 @@ function formatRelativeTime(value) {
 function RuntimePrdPage({ env, onRefresh }) {
   const [selectedCheck, setSelectedCheck] = useState(null);
   const report = env?.report || {};
-  const torch = report.torch || {};
+  const summary = runtimeSummary(report);
   const checks = env?.checks || [];
   const gpus = env?.gpus || report?.torch?.gpus || [];
   const warnCount = env?.check_counts?.warn ?? checks.filter((check) => String(check.status).toLowerCase() === "warn").length;
@@ -1620,7 +1621,7 @@ function RuntimePrdPage({ env, onRefresh }) {
     <div className="runtimePrdPage">
       <section className="runtimeSummaryGrid">
         <SummaryCard label="AReno Check" value={env?.ready ? "Ready" : env ? "Needs attention" : "Checking"} detail={`Last refreshed ${new Date().toLocaleTimeString()}`} tone={env?.ready ? "ok" : "warn"} />
-        <SummaryCard label="PyTorch / CUDA" value={`${torch.version || "n/a"} / ${torch.cuda_runtime || torch.cuda_build || "n/a"}`} detail={torch.cuda_available ? "Compatible runtime detected" : "CUDA runtime unavailable"} tone={torch.cuda_available ? "ok" : "warn"} />
+        <SummaryCard {...summary} />
         <SummaryCard label="Dependency Risk" value={dependencyRisk} detail={runtimeRiskLabel(checks)} tone={failCount || warnCount ? "warn" : "ok"} />
       </section>
       <div className="runtimePrdLayout">
@@ -1640,7 +1641,7 @@ function RuntimePrdPage({ env, onRefresh }) {
         <section className="panel runtimeGpuPanel">
           <div className="panelHeader"><div><h2>GPU Cards</h2><p>Memory pressure and utilization before launch.</p></div></div>
           <div className="runtimeGpuList">
-            {gpus.length === 0 && <EmptyState title="No GPUs reported" text="GPU cards appear when CUDA devices are visible." />}
+            {gpus.length === 0 && <EmptyState title="No GPUs reported" text={"metal" in report ? "Metal is unavailable. Review the MLX environment checks." : "GPU cards appear when CUDA devices are visible."} />}
             {gpus.map((gpu, index) => <RuntimeGpuCard key={gpu.index ?? index} gpu={gpu} index={index} />)}
           </div>
         </section>
@@ -1655,21 +1656,7 @@ function RuntimePrdPage({ env, onRefresh }) {
 }
 
 function RuntimeCheckDetails({ check, report, onClose }) {
-  const torch = report?.torch || {};
-  const cuda = report?.cuda || {};
-  const facts = [
-    ["AReno", report?.areno?.version],
-    ["Python", report?.python?.version],
-    ["PyTorch", torch.version],
-    ["CUDA build", torch.cuda_build],
-    ["CUDA runtime", torch.cuda_runtime],
-    ["CUDA available", torch.cuda_available],
-    ["Visible GPUs", torch.device_count],
-    ["NVCC", cuda.nvcc?.version || cuda.nvcc?.path],
-    ["NVIDIA driver", cuda.driver?.driver_version],
-    ["Driver CUDA", cuda.driver?.cuda_version],
-    ["Platform", report?.platform?.platform],
-  ].filter(([, value]) => value !== undefined && value !== null && value !== "");
+  const facts = runtimeFacts(report);
   return (
     <div className="runtimeCheckDetails">
       <div className="runtimeCheckDetailLead"><StatusBadge status={check.status || "unknown"} /><div><strong>{check.detail || check.message || "No diagnostic value reported."}</strong>{check.next_step && <p>{check.next_step}</p>}</div></div>
@@ -1687,6 +1674,13 @@ function runtimeRiskLabel(checks) {
 }
 
 function RuntimeGpuCard({ gpu, index }) {
+  if (gpu.backend === "mlx") {
+    return (
+      <div className="runtimeGpuCard">
+        <div><strong>GPU {gpu.index ?? index} · {gpu.name}</strong><span>Metal available · Memory and utilization not reported</span></div>
+      </div>
+    );
+  }
   const used = Number(gpu.memory_used_mb ?? gpu.memory_used ?? 0);
   const total = Number(gpu.memory_total_mb ?? gpu.memory_total ?? 0);
   const util = Number(gpu.utilization ?? gpu.utilization_gpu ?? 0);

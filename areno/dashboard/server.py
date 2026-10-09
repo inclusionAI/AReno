@@ -1079,27 +1079,32 @@ def runtime_env() -> dict[str, Any]:
     }
     report, check_items, check_counts = cached_env_checks()
     gpus = []
-    try:
-        output = run_text(
-            [
-                "nvidia-smi",
-                "--query-gpu=name,memory.used,memory.total,utilization.gpu",
-                "--format=csv,noheader,nounits",
-            ]
-        )
-        for line in output.splitlines():
-            name, used, total, util = [part.strip() for part in line.split(",")]
-            gpus.append(
-                {"name": name, "memory_used_mb": int(used), "memory_total_mb": int(total), "utilization": int(util)}
-            )
-    except Exception:
-        pass
-    if gpus:
-        gpu_summary = " / ".join(
-            f"{gpu['name']} {gpu['memory_used_mb']}/{gpu['memory_total_mb']}MB" for gpu in gpus[:2]
-        )
+    if "metal" in report:
+        if report["metal"]["available"]:
+            gpus.append({"name": "Apple Silicon GPU", "backend": "mlx"})
+        gpu_summary = "Apple Silicon GPU (Metal)" if gpus else "Metal unavailable"
     else:
-        gpu_summary = "not detected"
+        try:
+            output = run_text(
+                [
+                    "nvidia-smi",
+                    "--query-gpu=name,memory.used,memory.total,utilization.gpu",
+                    "--format=csv,noheader,nounits",
+                ]
+            )
+            for line in output.splitlines():
+                name, used, total, util = [part.strip() for part in line.split(",")]
+                gpus.append(
+                    {"name": name, "memory_used_mb": int(used), "memory_total_mb": int(total), "utilization": int(util)}
+                )
+        except Exception:
+            pass
+        if gpus:
+            gpu_summary = " / ".join(
+                f"{gpu['name']} {gpu['memory_used_mb']}/{gpu['memory_total_mb']}MB" for gpu in gpus[:2]
+            )
+        else:
+            gpu_summary = "not detected"
     return {
         "repo": repo,
         "report": report,
