@@ -3,13 +3,17 @@
 #include <ATen/cuda/Exceptions.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <torch/extension.h>
+#define ARENO_ROUTING_INLINE __device__ __forceinline__
+#include "routing_common.h"
+#undef ARENO_ROUTING_INLINE
 
 namespace areno_accel {
 
 constexpr int kRouterThreads = 128;
-constexpr int kMaxRouterExperts = 512;
-constexpr int kMaxRouterGroups = 64;
-constexpr int kMaxRouterTopK = 16;
+constexpr int kMaxRouterExperts = routing::kMaxExperts;
+constexpr int kMaxRouterGroups = routing::kMaxGroups;
+constexpr int kMaxRouterTopK = routing::kMaxTopK;
+using routing::insert_topk;
 
 template <typename scalar_t>
 __device__ __forceinline__ float to_float(scalar_t value) {
@@ -18,20 +22,6 @@ __device__ __forceinline__ float to_float(scalar_t value) {
 
 __device__ __forceinline__ float sigmoid(float x) {
   return 1.0f / (1.0f + expf(-x));
-}
-
-__device__ __forceinline__ void insert_topk(float value, int index, float* values, int* indices, int k) {
-  for (int pos = 0; pos < k; ++pos) {
-    if (value > values[pos] || (value == values[pos] && index < indices[pos])) {
-      for (int move = k - 1; move > pos; --move) {
-        values[move] = values[move - 1];
-        indices[move] = indices[move - 1];
-      }
-      values[pos] = value;
-      indices[pos] = index;
-      break;
-    }
-  }
 }
 
 template <typename scalar_t>

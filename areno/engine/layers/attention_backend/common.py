@@ -109,10 +109,18 @@ def expand_kv_heads(x: torch.Tensor, num_q_heads: int) -> torch.Tensor:
     )
 
 
-def use_native_attention(attn_backend: AttnBackend) -> bool:
+def use_native_attention(
+    attn_backend: AttnBackend, q: torch.Tensor | None = None, *, block_size: int | None = None
+) -> bool:
     """Return whether attention should bypass flash-attn and use native attention."""
 
-    return attn_backend == "native"
+    if attn_backend == "native":
+        return True
+    if q is not None and q.device.type == "npu":
+        from areno.accel.npu.attention import native_attention_required
+
+        return native_attention_required(q, block_size=block_size)
+    return False
 
 
 def require_flash_attention_supported(call: AttentionCall, *, mode: str) -> None:

@@ -25,6 +25,7 @@ AReno documentation
 
    Training Loop <concepts/training-loop>
    Backend Topology <concepts/backend-topology>
+   NPU <concepts/npu>
    Chat Templates <concepts/chat-templates>
    Dataset Formats <concepts/dataset-formats>
    Multimodal Inputs <concepts/multimodal-inputs>
@@ -38,6 +39,7 @@ AReno documentation
    :maxdepth: 1
    :caption: Cookbook
 
+   Dashboard <cli/dashboard>
    cookbook/writing-loaders-and-rewards
    cookbook/math-rlvr
    cookbook/tictactoe-agentic-rl

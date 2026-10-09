@@ -11,6 +11,7 @@ extra reduction.
 import torch
 
 from areno.accel._extension import extension as _extension
+from areno.accel.utils import on_kernel_device
 
 
 def _kernel_weight(weight: torch.Tensor) -> torch.Tensor:
@@ -23,14 +24,14 @@ class _RMSNorm(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
-        out, inv_rms = _extension().areno_rmsnorm_forward(x.contiguous(), weight.contiguous(), float(eps))
+        out, inv_rms = _extension(x.device).areno_rmsnorm_forward(x.contiguous(), weight.contiguous(), float(eps))
         ctx.save_for_backward(x, weight, inv_rms)
         return out
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, None]:
         x, weight, inv_rms = ctx.saved_tensors
-        grad_input, grad_weight = _extension().areno_rmsnorm_backward(
+        grad_input, grad_weight = _extension(grad_output.device).areno_rmsnorm_backward(
             grad_output.contiguous(),
             x.contiguous(),
             weight.contiguous(),
@@ -47,7 +48,7 @@ class _OptionalScaleRMSNorm(torch.autograd.Function):
         use_scale = weight is not None
         # Kernel takes a concrete tensor even when scale is unused; pass empty.
         kernel_weight = weight if use_scale else torch.empty(0, device=x.device, dtype=torch.float32)
-        out, inv_rms = _extension().areno_optional_scale_rmsnorm_forward(
+        out, inv_rms = _extension(x.device).areno_optional_scale_rmsnorm_forward(
             x.contiguous(),
             kernel_weight.contiguous(),
             float(eps),
@@ -60,7 +61,7 @@ class _OptionalScaleRMSNorm(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor | None, None]:
         x, weight, inv_rms = ctx.saved_tensors
-        grad_input, grad_weight = _extension().areno_optional_scale_rmsnorm_backward(
+        grad_input, grad_weight = _extension(grad_output.device).areno_optional_scale_rmsnorm_backward(
             grad_output.contiguous(),
             x.contiguous(),
             weight.contiguous(),
@@ -75,7 +76,7 @@ class _RMSNormSiluGate(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, x: torch.Tensor, gate: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
-        out, inv_rms = _extension().areno_rmsnorm_silu_gate_forward(
+        out, inv_rms = _extension(x.device).areno_rmsnorm_silu_gate_forward(
             x.contiguous(),
             gate.contiguous(),
             weight.contiguous(),
@@ -87,7 +88,7 @@ class _RMSNormSiluGate(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, None]:
         x, gate, weight, inv_rms = ctx.saved_tensors
-        grad_input, grad_gate, grad_weight = _extension().areno_rmsnorm_silu_gate_backward(
+        grad_input, grad_gate, grad_weight = _extension(grad_output.device).areno_rmsnorm_silu_gate_backward(
             grad_output.contiguous(),
             x.contiguous(),
             gate.contiguous(),
@@ -104,8 +105,8 @@ def areno_rmsnorm(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Te
     Normalizes over the last dimension. Output dtype matches ``x``; ``weight``
     is internally cast to float32 to match the kernel signature.
     """
-    if not x.is_cuda:
-        raise RuntimeError("areno_rmsnorm requires CUDA input")
+    if not on_kernel_device(x, weight):
+        raise RuntimeError("areno_rmsnorm requires CUDA or NPU input on the same device")
     weight = _kernel_weight(weight)
     return _RMSNorm.apply(x, weight, float(eps))
 
@@ -116,8 +117,8 @@ def areno_optional_scale_rmsnorm(x: torch.Tensor, weight: torch.Tensor | None, e
 
     Passing ``weight=None`` skips the per-channel multiply entirely.
     """
-    if not x.is_cuda:
-        raise RuntimeError("areno_optional_scale_rmsnorm requires CUDA input")
+    if not on_kernel_device(x, weight):
+        raise RuntimeError("areno_optional_scale_rmsnorm requires CUDA or NPU input on the same device")
     if weight is not None:
         weight = _kernel_weight(weight)
     return _OptionalScaleRMSNorm.apply(x, weight, float(eps))
@@ -130,8 +131,8 @@ def areno_rmsnorm_silu_gate(x: torch.Tensor, gate: torch.Tensor, weight: torch.T
     Computes ``rmsnorm(x) * silu(gate) * weight``; ``x`` and ``gate`` must
     share shape, ``weight`` is the per-channel gain over the last dimension.
     """
-    if not x.is_cuda or not gate.is_cuda:
-        raise RuntimeError("areno_rmsnorm_silu_gate requires CUDA input and gate")
+    if not on_kernel_device(x, gate, weight):
+        raise RuntimeError("areno_rmsnorm_silu_gate requires CUDA or NPU input and gate on the same device")
     if x.shape != gate.shape:
         raise ValueError(f"input/gate shape mismatch: {tuple(x.shape)} vs {tuple(gate.shape)}")
     weight = _kernel_weight(weight)

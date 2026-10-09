@@ -9,6 +9,7 @@ all-reduce reconstructs the full embedding.
 import torch
 
 from areno.accel._extension import extension as _extension
+from areno.accel.utils import on_kernel_device
 
 
 class _VocabEmbedding(torch.autograd.Function):
@@ -16,7 +17,7 @@ class _VocabEmbedding(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, input_ids: torch.Tensor, weight: torch.Tensor, vocab_start: int, vocab_end: int) -> torch.Tensor:
-        out = _extension().areno_vocab_embedding_forward(
+        out = _extension(input_ids.device).areno_vocab_embedding_forward(
             input_ids.contiguous(), weight.contiguous(), int(vocab_start), int(vocab_end)
         )
         ctx.save_for_backward(input_ids, weight)
@@ -27,7 +28,7 @@ class _VocabEmbedding(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor) -> tuple[None, torch.Tensor, None, None]:
         input_ids, weight = ctx.saved_tensors
-        grad_weight = _extension().areno_vocab_embedding_backward(
+        grad_weight = _extension(grad_output.device).areno_vocab_embedding_backward(
             grad_output.contiguous(),
             input_ids.contiguous(),
             weight,
@@ -47,8 +48,8 @@ def areno_vocab_embedding(
     shape ``(vocab_end - vocab_start, hidden)``. Returns embeddings with shape
     ``(*input_ids.shape, hidden)`` ready for tensor-parallel reduction.
     """
-    if not input_ids.is_cuda or not weight.is_cuda:
-        raise RuntimeError("areno_vocab_embedding requires CUDA input_ids and weight")
+    if not on_kernel_device(input_ids, weight):
+        raise RuntimeError("areno_vocab_embedding requires CUDA or NPU input_ids and weight on the same device")
     if input_ids.dtype != torch.long:
         raise TypeError("areno_vocab_embedding input_ids must be int64")
     return _VocabEmbedding.apply(input_ids, weight, int(vocab_start), int(vocab_end))

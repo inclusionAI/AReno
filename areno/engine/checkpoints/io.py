@@ -30,9 +30,10 @@ from safetensors.torch import save_file
 
 from areno.engine.layers.linear import _shard_range
 from areno.engine.parallel.context import get_tp_context
+from areno.engine.runtime.device import Completion, accelerator_module
 
 _ASYNC_CPU_COPY_MAX_BYTES = 2 * 1024**3
-_PENDING_CPU_COPY_BUCKETS: list[tuple[torch.cuda.Stream, int, torch.Tensor]] = []
+_PENDING_CPU_COPY_BUCKETS: list[tuple[Completion, int, torch.Tensor]] = []
 _POLICY_PLAN_ACTIVE: ContextVar[bool] = ContextVar("areno_policy_plan_active", default=False)
 _PAGEABLE_CHECKPOINT_STAGING: ContextVar[bool] = ContextVar("areno_pageable_checkpoint_staging", default=False)
 
@@ -836,15 +837,16 @@ def _gathered_tensor_to_cpu(gathered: torch.Tensor, dim: int) -> torch.Tensor:
 
 
 def _tensor_to_cpu(tensor: torch.Tensor) -> torch.Tensor:
-    """Copy a CUDA tensor to pinned CPU memory using a dedicated async stream.
+    """Copy an accelerator tensor to pinned CPU memory on a dedicated stream.
 
-    Each copy gets its own CUDA stream and pinned destination buffer so D2H
+    Each copy gets its own stream and pinned destination buffer so D2H
     transfers overlap with subsequent compute. The pending bucket queue caps
     in-flight bytes via `_ASYNC_CPU_COPY_MAX_BYTES`; older copies are
     synchronized when the budget would be exceeded.
     """
 
-    if not tensor.is_cuda:
+    accelerator = accelerator_module(tensor.device)
+    if accelerator is None:
         return tensor.cpu()
     if _PAGEABLE_CHECKPOINT_STAGING.get():
         return tensor.detach().to(device="cpu", non_blocking=False)
@@ -853,10 +855,10 @@ def _tensor_to_cpu(tensor: torch.Tensor) -> torch.Tensor:
     copy_bytes = tensor.numel() * tensor.element_size()
     # Make sure this copy fits in the in-flight budget once admitted.
     _sync_pending_cpu_copies(max_pending_bytes=max(0, _ASYNC_CPU_COPY_MAX_BYTES - copy_bytes))
-    stream = torch.cuda.Stream(device=tensor.device)
-    # Ensure the copy stream sees writes from the default stream first.
-    stream.wait_stream(torch.cuda.current_stream(tensor.device))
-    with torch.cuda.stream(stream):
+    stream = accelerator.Stream(device=tensor.device)
+    # Ensure the copy stream sees writes from the producer's current stream.
+    stream.wait_stream(accelerator.current_stream(tensor.device))
+    with accelerator.stream(stream):
         output.copy_(source, non_blocking=True)
     # record_stream prevents the allocator from reusing source memory while
     # the async copy is still in flight on `stream`.

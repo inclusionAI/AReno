@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-import sys
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -109,37 +108,8 @@ def _single_tp() -> SimpleNamespace:
 
 
 @pytest.fixture
-def bailing_model_module(monkeypatch: pytest.MonkeyPatch):
-    """Import the model without requiring optional FLA kernels in CPU CI."""
-
-    fla = ModuleType("fla")
-    fla.__path__ = []
-    fla_ops = ModuleType("fla.ops")
-    fla_ops.__path__ = []
-    lightning_attn = ModuleType("fla.ops.lightning_attn")
-    lightning_attn.chunk_lightning_attn = lambda *args, **kwargs: None
-    kda = ModuleType("areno.accel.kda")
-    kda.areno_kda_chunk = lambda *args, **kwargs: None
-    kda.areno_kda_recurrent_update = lambda *args, **kwargs: None
-    accel_ops = ModuleType("areno.accel.ops")
-
-    class _KernelConfig:
-        def __init__(self, *args, **kwargs) -> None:
-            pass
-
-    accel_ops.FusedMoeConfig = _KernelConfig
-    accel_ops.SegLaMeta = _KernelConfig
-    accel_ops.areno_fused_experts = lambda *args, **kwargs: None
-    accel_ops.areno_silu_and_mul = lambda *args, **kwargs: None
-    accel_ops.can_use_cuda_kernel = lambda *args, **kwargs: False
-    accel_ops.log_once = lambda *args, **kwargs: None
-    accel_ops.rms_norm_gate_fwd = lambda *args, **kwargs: None
-    accel_ops.seg_la_fwd = lambda *args, **kwargs: None
-    monkeypatch.setitem(sys.modules, "fla", fla)
-    monkeypatch.setitem(sys.modules, "fla.ops", fla_ops)
-    monkeypatch.setitem(sys.modules, "fla.ops.lightning_attn", lightning_attn)
-    monkeypatch.setitem(sys.modules, "areno.accel.kda", kda)
-    monkeypatch.setitem(sys.modules, "areno.accel.ops", accel_ops)
+def bailing_model_module():
+    """Kernel imports are lazy, so CPU tests can use the real model module."""
 
     from areno.models.bailing_v3 import model as bailing_model
 

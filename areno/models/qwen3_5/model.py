@@ -1363,6 +1363,60 @@ class Qwen35VLForConditionalGeneration(nn.Module):
         self.config = config
         self.language_model = Qwen35ForCausalLM(config)
         self.visual = Qwen35VisionTransformer(config.vision_config, config.dtype)
+        self._initialize_multimodal_training()
+
+    def _initialize_multimodal_training(self) -> None:
+        # The visual encoder runs before the language model's TP/SP boundary.
+        # Its input gradients are already reduced/gathered by that boundary;
+        # summing its replicated parameter gradients again would scale by TP.
+        for parameter in self.visual.parameters():
+            mark_tensor_parallel_parameter(parameter, False, sequence_parallel=False, tp_grad_allreduce=False)
+        self.configure_multimodal_training(
+            unfreeze_tower=False,
+            unfreeze_projector=False,
+            tower_lr=None,
+            projector_lr=None,
+            base_lr=0.0,
+        )
+
+    def configure_multimodal_training(
+        self,
+        *,
+        unfreeze_tower: bool,
+        unfreeze_projector: bool,
+        tower_lr: float | None,
+        projector_lr: float | None,
+        base_lr: float,
+        trainable: bool = True,
+    ) -> None:
+        """Configure the vision encoder and its nested merger independently."""
+
+        projector_ids = {id(parameter) for parameter in self.visual.merger.parameters()}
+        for parameter in self.visual.parameters():
+            is_projector = id(parameter) in projector_ids
+            unfreeze = unfreeze_projector if is_projector else unfreeze_tower
+            configured_lr = projector_lr if is_projector else tower_lr
+            parameter.requires_grad_(unfreeze and trainable)
+            # Rollout models need the same sync layout without enabling grads.
+            parameter._areno_policy_sync = unfreeze
+            if unfreeze and trainable:
+                parameter._areno_lr_group = "projector" if is_projector else "tower"
+                parameter._areno_lr = base_lr if configured_lr is None else configured_lr
+            else:
+                for attribute in ("_areno_lr_group", "_areno_lr"):
+                    if hasattr(parameter, attribute):
+                        delattr(parameter, attribute)
+        self._train_multimodal_tower = unfreeze_tower and trainable
+        self._train_multimodal_projector = unfreeze_projector and trainable
+        self.train(self.training)
+
+    def train(self, mode: bool = True):
+        """Keep frozen vision modules in eval mode, including the nested merger."""
+
+        super().train(mode)
+        self.visual.train(mode and self._train_multimodal_tower)
+        self.visual.merger.train(mode and self._train_multimodal_projector)
+        return self
 
     def forward(
         self,
@@ -1475,6 +1529,7 @@ class Qwen35MoeVLForConditionalGeneration(Qwen35VLForConditionalGeneration):
         self.config = config
         self.language_model = Qwen35MoeForCausalLM(config)
         self.visual = Qwen35VisionTransformer(config.vision_config, config.dtype)
+        self._initialize_multimodal_training()
 
 
 def _mrope_section(rope: dict[str, Any]) -> tuple[int, int, int] | None:

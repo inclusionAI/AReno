@@ -35,39 +35,11 @@ skip the load/store mask construction, which speeds up the tight inner loop
 materially.
 """
 
-from dataclasses import dataclass
-
 import torch
 import triton
 import triton.language as tl
 
-
-# arg `meta` of `seg_la_fwd` is SegLaMeta
-@dataclass
-class SegLaMeta:
-    """Per-batch metadata required to dispatch segmented linear attention.
-
-    The kernel processes many variable-length requests in one launch; this
-    struct packs the descriptors. ``q_offsets`` gives the start index of each
-    request inside the flattened (sum_l, heads, head_dim) Q/K/V tensors,
-    ``q_lengths`` gives each request's length. ``s_offsets`` is the slot id
-    in the persistent state pool (or ``-1`` to skip an entry), and
-    ``s_scales`` is 0 for the very first prefill chunk of a request (state
-    zero-initialised inside the kernel) or 1 for continuation chunks (state
-    loaded from ``S``).
-    """
-
-    batch_size: int  # batch size, num of requests
-    max_q_length: int  # max(seq_lens)
-    q_offsets: torch.Tensor  # [bs+1], query_start_locations,
-    s_offsets: torch.Tensor  # [bs], slot_ids
-    q_lengths: torch.Tensor  # [bs], query length
-    s_scales: torch.Tensor  # [bs], prefill = 0, decode = 1
-    s_offsets_stride: int = 0
-    q_offsets_stride: int = 0
-    s_scales_stride: int = 0
-    decay_scales_stride: int = 0
-    mask: torch.Tensor | None = None  # Currently not supported
+from areno.accel.ops import SegLaMeta as SegLaMeta
 
 
 # fused

@@ -170,32 +170,11 @@ def _load_qwen35_visual(model: Qwen35VLModel, index: SafetensorsIndex) -> None:
 
 
 def _save_qwen35_visual(tensors: dict[str, torch.Tensor | None], model: Qwen35VLModel) -> None:
-    prefix = "model.visual"
-    visual = model.visual
-    tensors[f"{prefix}.patch_embed.proj.weight"] = rank0_tensor(visual.patch_embed.proj.weight)
-    tensors[f"{prefix}.patch_embed.proj.bias"] = rank0_tensor(visual.patch_embed.proj.bias)
-    tensors[f"{prefix}.pos_embed.weight"] = rank0_tensor(visual.pos_embed.weight)
-    for idx, block in enumerate(visual.blocks):
-        block_prefix = f"{prefix}.blocks.{idx}"
-        tensors[f"{block_prefix}.attn.qkv.weight"] = rank0_tensor(block.attn.qkv.weight)
-        tensors[f"{block_prefix}.attn.qkv.bias"] = rank0_tensor(block.attn.qkv.bias)
-        tensors[f"{block_prefix}.attn.proj.weight"] = rank0_tensor(block.attn.proj.weight)
-        tensors[f"{block_prefix}.attn.proj.bias"] = rank0_tensor(block.attn.proj.bias)
-        tensors[f"{block_prefix}.mlp.linear_fc1.weight"] = rank0_tensor(block.mlp.linear_fc1.weight)
-        tensors[f"{block_prefix}.mlp.linear_fc1.bias"] = rank0_tensor(block.mlp.linear_fc1.bias)
-        tensors[f"{block_prefix}.mlp.linear_fc2.weight"] = rank0_tensor(block.mlp.linear_fc2.weight)
-        tensors[f"{block_prefix}.mlp.linear_fc2.bias"] = rank0_tensor(block.mlp.linear_fc2.bias)
-        tensors[f"{block_prefix}.norm1.weight"] = rank0_tensor(block.norm1.weight)
-        tensors[f"{block_prefix}.norm1.bias"] = rank0_tensor(block.norm1.bias)
-        tensors[f"{block_prefix}.norm2.weight"] = rank0_tensor(block.norm2.weight)
-        tensors[f"{block_prefix}.norm2.bias"] = rank0_tensor(block.norm2.bias)
-    merger_prefix = f"{prefix}.merger"
-    tensors[f"{merger_prefix}.linear_fc1.weight"] = rank0_tensor(visual.merger.linear_fc1.weight)
-    tensors[f"{merger_prefix}.linear_fc1.bias"] = rank0_tensor(visual.merger.linear_fc1.bias)
-    tensors[f"{merger_prefix}.linear_fc2.weight"] = rank0_tensor(visual.merger.linear_fc2.weight)
-    tensors[f"{merger_prefix}.linear_fc2.bias"] = rank0_tensor(visual.merger.linear_fc2.bias)
-    tensors[f"{merger_prefix}.norm.weight"] = rank0_tensor(visual.merger.norm.weight)
-    tensors[f"{merger_prefix}.norm.bias"] = rank0_tensor(visual.merger.norm.bias)
+    policy = isinstance(tensors, PolicyTensorStore)
+    for name, parameter in model.visual.named_parameters():
+        if policy and not getattr(parameter, "_areno_policy_sync", False):
+            continue
+        tensors[f"model.visual.{name}"] = rank0_tensor(parameter)
 
 
 def _copy_param(dst: torch.Tensor, src: torch.Tensor) -> None:
@@ -204,12 +183,14 @@ def _copy_param(dst: torch.Tensor, src: torch.Tensor) -> None:
     dst.copy_(src.to(device=dst.device, dtype=dst.dtype))
 
 
-def build_qwen35_policy_plan(model: Qwen35ForCausalLM) -> PolicyTensorStore:
+def build_qwen35_policy_plan(model: Qwen35ForCausalLM | Qwen35VLModel) -> PolicyTensorStore:
     """Build a live canonical layout for direct train-to-rollout sync."""
 
     tensors = PolicyTensorStore()
     prefix = model.config.checkpoint_prefix
     with policy_plan_scope():
+        if isinstance(model, Qwen35VLForConditionalGeneration):
+            _save_qwen35_visual(tensors, model)
         _save_embedding_norm_head(tensors, model, prefix)
         for layer_idx, layer in enumerate(model.layers):
             _save_layer(tensors, layer, f"{prefix}.layers.{layer_idx}")

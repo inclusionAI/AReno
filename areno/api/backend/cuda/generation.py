@@ -48,6 +48,7 @@ def rollout_options(ctx: Context, sampling_params: SamplingParams):
             temperature=0.0 if sampling_params.greedy else sampling_params.temperature,
             top_p=sampling_params.top_p,
             top_k=max(0, sampling_params.top_k),
+            seed=sampling_params.seed,
             stop_token_ids=stop_token_ids,
             suppress_token_ids=suppress_token_ids,
             suppress_special_tokens=False,

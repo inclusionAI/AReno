@@ -1,0 +1,19 @@
+{
+  "gpu_per_second": {
+    "T4": "0.000164",
+    "L4": "0.000222",
+    "A10G": "0.000306",
+    "L40S": "0.000542",
+    "A100-40GB": "0.000583",
+    "A100-80GB": "0.000694",
+    "H100": "0.001097",
+    "H200": "0.001261",
+    "B200": "0.001736"
+  },
+  "cpu_per_core_second": "0.00003942",
+  "memory_per_gib_second": "0.00000667",
+  "source": "https://modal.com/pricing",
+  "fetched_at": 1789630601.897438,
+  "currency": "USD",
+  "basis": "Public Sandbox list rates; requested CPU and memory; compute only"
+}
