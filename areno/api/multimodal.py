@@ -196,6 +196,10 @@ def _encode_phi4mm_messages(
     features = {
         key: value for key, value in encoded.items() if key not in {"input_ids", "attention_mask", "token_type_ids"}
     }
+    # Match Phi4MM's official InputMode enum: VISION=1, SPEECH=2,
+    # VISION_SPEECH=3. Mixed requests use the vision LoRA and the vision-side
+    # audio projector rather than the speech variants.
+    features["input_mode"] = 3 if images and audios else 1 if images else 2
     token_ids = modality_token_ids(processor)
     features["modality_token_ids"] = token_ids
     features["image_token_id"] = token_ids["image"]

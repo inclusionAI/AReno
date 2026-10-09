@@ -237,6 +237,11 @@ def _pad_packed_multimodal_features(features: dict | None, padding: int) -> dict
         padded["image_token_mask"] = torch.cat(
             (image_mask, torch.zeros(padding, device=image_mask.device, dtype=torch.bool)), dim=0
         )
+    audio_mask = padded.get("audio_token_mask")
+    if isinstance(audio_mask, torch.Tensor):
+        padded["audio_token_mask"] = torch.cat(
+            (audio_mask, torch.zeros(padding, device=audio_mask.device, dtype=torch.bool)), dim=0
+        )
     positions = padded.get("mrope_position_ids")
     if isinstance(positions, torch.Tensor):
         padded["mrope_position_ids"] = torch.cat(
@@ -263,14 +268,18 @@ def _pack_multimodal_features(
         return None
     packed_rows: list[dict] = []
     packed_masks: list[torch.Tensor] = []
+    packed_audio_masks: list[torch.Tensor] = []
     packed_positions: list[torch.Tensor] = []
     image_token_id = None
+    audio_token_id = None
+    has_audio_feature = False
     has_any_feature = False
     for row_idx, row in enumerate(features):
         length = int(lengths[row_idx].item())
         row_tokens = input_ids[row_idx, :length]
         if not isinstance(row, dict):
             packed_masks.append(torch.zeros(length, device=device, dtype=torch.bool))
+            packed_audio_masks.append(torch.zeros(length, device=device, dtype=torch.bool))
             packed_positions.append(torch.arange(length, device=device, dtype=torch.long).view(1, -1).expand(3, -1))
             continue
         has_any_feature = True
@@ -278,24 +287,45 @@ def _pack_multimodal_features(
         row_image_token_id = row.get("image_token_id")
         if row_image_token_id is not None:
             image_token_id = int(row_image_token_id)
-        packed_masks.append(_row_image_token_mask(row, row_tokens, row_idx, image_token_id))
+        row_audio_token_id = row.get("audio_token_id")
+        if row_audio_token_id is None:
+            row_audio_token_id = (row.get("modality_token_ids") or {}).get("audio")
+        if row_audio_token_id is not None:
+            audio_token_id = int(row_audio_token_id)
+        row_image_mask = _row_modality_token_mask(row, row_tokens, row_idx, "image", image_token_id)
+        row_audio_mask = _row_modality_token_mask(row, row_tokens, row_idx, "audio", audio_token_id)
+        packed_masks.append(row_image_mask & ~row_audio_mask)
+        packed_audio_masks.append(row_audio_mask)
+        has_audio_feature = has_audio_feature or row.get("audio_token_mask") is not None or any(
+            key in row for key in ("input_audio_embeds", "audio_embeds", "audio_embed_sizes")
+        )
         packed_positions.append(_row_mrope_positions(row, length, device))
     if not has_any_feature:
         return None
     packed: dict = {"image_feature_rows": packed_rows}
+    if has_audio_feature:
+        packed["audio_feature_rows"] = packed_rows
     if image_token_id is not None:
         packed["image_token_id"] = image_token_id
+    if audio_token_id is not None:
+        packed["audio_token_id"] = audio_token_id
     if packed_masks:
         packed["image_token_mask"] = torch.cat(packed_masks, dim=0).to(device=device, dtype=torch.bool)
+    if has_audio_feature and packed_audio_masks:
+        packed["audio_token_mask"] = torch.cat(packed_audio_masks, dim=0).to(device=device, dtype=torch.bool)
     if packed_positions:
         packed["mrope_position_ids"] = torch.cat(packed_positions, dim=1).to(device=device, dtype=torch.long)
     return packed
 
 
-def _row_image_token_mask(
-    row: dict, row_tokens: torch.Tensor, row_idx: int, image_token_id: int | None
+def _row_modality_token_mask(
+    row: dict,
+    row_tokens: torch.Tensor,
+    row_idx: int,
+    modality: str,
+    token_id: int | None,
 ) -> torch.Tensor:
-    mask = row.get("image_token_mask")
+    mask = row.get(f"{modality}_token_mask")
     if mask is not None:
         mask = mask if isinstance(mask, torch.Tensor) else torch.as_tensor(mask)
         if mask.ndim == 2:
@@ -303,8 +333,8 @@ def _row_image_token_mask(
         mask = mask.reshape(-1).to(device=row_tokens.device, dtype=torch.bool)
         if int(mask.numel()) >= int(row_tokens.numel()):
             return mask[: row_tokens.numel()]
-    if image_token_id is not None:
-        return row_tokens == int(image_token_id)
+    if token_id is not None:
+        return row_tokens == int(token_id)
     return torch.zeros(int(row_tokens.numel()), device=row_tokens.device, dtype=torch.bool)
 
 

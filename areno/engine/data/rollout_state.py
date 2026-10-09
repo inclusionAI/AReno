@@ -338,8 +338,10 @@ class InferenceBatchState:
         mrope_position_parts: list[torch.Tensor] = []
         has_mrope_positions = False
         feature_mask: list[bool] = []
+        audio_feature_mask: list[bool] = []
         image_features: list[dict] = []
         image_sequence_modes: list[bool] = []
+        audio_sequence_modes: list[bool] = []
         cu_seqlens = [0]
         sample_indices: list[int] = []
         block_table: list[list[int]] = []
@@ -361,9 +363,14 @@ class InferenceBatchState:
             )
             feature_mask.extend(prompt_mask)
             feature_mask.extend([False] * response_len)
+            audio_feature_mask.extend(
+                _prompt_modality_mask(self.prompt_features[seq_id], self.prompts[seq_id], "audio")
+            )
+            audio_feature_mask.extend([False] * response_len)
             if prompt_image_features is not None:
                 image_features.append(prompt_image_features)
             image_sequence_modes.append(_prompt_has_image(self.prompt_features[seq_id], self.prompts[seq_id]))
+            audio_sequence_modes.append(_prompt_has_audio(self.prompt_features[seq_id], self.prompts[seq_id]))
             prompt_mrope = _slice_prompt_mrope_positions(self.prompt_features[seq_id], 0, len(self.prompts[seq_id]))
             if prompt_mrope is not None:
                 has_mrope_positions = True
@@ -388,8 +395,10 @@ class InferenceBatchState:
             position_ids,
             mrope_position_parts if has_mrope_positions else None,
             feature_mask,
+            audio_feature_mask,
             image_features,
             image_sequence_modes,
+            audio_sequence_modes,
             cu_seqlens,
             sample_indices,
             block_table,

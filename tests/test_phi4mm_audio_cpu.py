@@ -8,6 +8,7 @@ from areno.api.multimodal import encode_processor_messages, modality_token_ids
 from areno.engine.config import ModelConfig
 from areno.engine.data.rollout_state import InferenceBatchState, payload_to_infer_meta
 from areno.engine.parallel.context import TPContext, get_tp_context, set_tp_context
+from areno.engine.runtime.train_step import _pack_multimodal_features
 from areno.models.phi4mm.audio import Phi4MMAudioConfig, Phi4MMAudioEmbedding
 
 
@@ -219,6 +220,58 @@ def test_phi4mm_speech_lora_state_survives_chunked_prefill_and_decode():
     assert model.model.speech_lora_slots.tolist() == [True]
 
 
+def test_phi4mm_cache_reprefill_restores_audio_features_and_mode():
+    features = {
+        "audio_embeds": torch.ones(1, 16),
+        "audio_token_id": 200011,
+        "modality_token_ids": {"audio": 200011},
+    }
+    state = InferenceBatchState(
+        [[200011, 1]],
+        max_new_tokens=2,
+        max_prefill_tokens=4,
+        max_cache_len=4,
+        kv_block_size=2,
+        num_cache_blocks=2,
+        prompt_features=[features],
+    )
+    state.build_prefill_payload()
+    state.ensure_decode_blocks([0], [2])
+
+    payload = state.build_cache_reprefill_payload(
+        [0],
+        generated=torch.tensor([[2]], dtype=torch.long),
+        response_lens=torch.tensor([1], dtype=torch.long),
+    )
+
+    assert payload["features"]["audio_sequence_mask"].tolist() == [True]
+    assert payload["features"]["audio_token_mask"].tolist() == [True, False, False]
+    assert payload["features"]["image_token_mask"].tolist() == [False, False, False]
+    assert payload["features"]["audio_feature_rows"][0]["audio_embeds"] is features["audio_embeds"]
+
+
+def test_phi4mm_packed_training_keeps_audio_rows_and_masks():
+    audio = torch.ones(2, 16)
+    packed = _pack_multimodal_features(
+        [
+            {
+                "audio_embeds": audio,
+                "audio_token_id": 200011,
+                "modality_token_ids": {"audio": 200011},
+            },
+            None,
+        ],
+        torch.tensor([[1, 200011, 200011, 2], [3, 4, 0, 0]]),
+        torch.tensor([4, 2]),
+        torch.device("cpu"),
+    )
+
+    assert packed["audio_token_id"] == 200011
+    assert packed["audio_token_mask"].tolist() == [False, True, True, False, False, False]
+    assert packed["image_token_mask"].tolist() == [False] * 6
+    assert packed["audio_feature_rows"][0]["audio_embeds"] is audio
+
+
 def test_phi4mm_multi_audio_merge_preserves_segment_order():
     pytest.importorskip("triton")
     from areno.models.phi4mm.model import Phi4MMAdapter
@@ -363,3 +416,51 @@ def test_phi4mm_processor_bridge_numbers_audio_placeholders(monkeypatch):
     assert tokens == [1, 200011, 200011, 2]
     assert features["audio_token_id"] == 200011
     assert features["input_audio_embeds"].shape == (2, 8, 80)
+    assert features["input_mode"] == 2
+
+
+def test_phi4mm_processor_bridge_marks_combined_vision_speech_mode(monkeypatch):
+    class Tokenizer:
+        def convert_tokens_to_ids(self, token):
+            return {"<|endoftext10|>": 200010, "<|endoftext11|>": 200011}[token]
+
+        def apply_chat_template(self, messages, *, tokenize, add_generation_prompt):
+            assert tokenize is False
+            assert add_generation_prompt is True
+            assert messages[0]["content"] == "<|image_1|><|audio_1|>Describe"
+            return "rendered"
+
+    class Phi4MMProcessor:
+        tokenizer = Tokenizer()
+
+        def __call__(self, *, text, images, audios, return_tensors):
+            assert text == "rendered"
+            assert images == ["image"]
+            assert audios == ["audio"]
+            assert return_tensors == "pt"
+            return {
+                "input_ids": torch.tensor([[1, 200010, 200011, 2]]),
+                "input_image_embeds": torch.zeros(1, 1, 3, 8, 8),
+                "input_audio_embeds": torch.zeros(1, 8, 80),
+                "audio_embed_sizes": torch.tensor([1]),
+            }
+
+    Phi4MMProcessor.__module__ = "transformers_modules.phi4mm"
+    monkeypatch.setattr("areno.api.multimodal._load_phi4mm_image", lambda _reference: "image")
+    monkeypatch.setattr("areno.api.multimodal._load_phi4mm_audio", lambda _reference: "audio")
+
+    _, features = encode_processor_messages(
+        Phi4MMProcessor(),
+        [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "url": "one.png"},
+                    {"type": "audio", "url": "one.wav"},
+                    {"type": "text", "text": "Describe"},
+                ],
+            }
+        ],
+    )
+
+    assert features["input_mode"] == 3
