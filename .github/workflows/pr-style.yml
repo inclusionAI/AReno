@@ -10,6 +10,21 @@ permissions:
   contents: read
 
 jobs:
+  check-pr-commits:
+    name: check-pr-commits
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require exactly one commit in the PR
+        env:
+          PR_COMMIT_COUNT: ${{ github.event.pull_request.commits }}
+        run: |
+          if [[ "$PR_COMMIT_COUNT" != "1" ]]; then
+            echo "::error::PR must contain exactly one commit; found: $PR_COMMIT_COUNT."
+            echo "::error::Squash your commits into one, then update the PR branch with git push --force-with-lease."
+            exit 1
+          fi
+
   check-pr-title:
     name: check-pr-title
     runs-on: ubuntu-latest
