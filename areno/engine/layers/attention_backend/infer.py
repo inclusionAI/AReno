@@ -73,7 +73,11 @@ class FlashAttnInferBackend(nn.Module):
             # Persist freshly computed K/V for the prompt into paged cache.
             if update_cache:
                 _store_prefill_cache(k_flat, v_flat, k_cache, v_cache, meta)
-            if meta.cache_seqlens is not None:
+            # The cached-prefix path uses paged KV indexing that is currently
+            # implemented for CUDA.  NPU prefill still dispatches through its
+            # regular varlen/native selector; passing the cache metadata must
+            # not force CUDA-only indexing on an NPU tensor.
+            if meta.cache_seqlens is not None and call.q.device.type != "npu":
                 out = _prefill_with_cached_prefix(
                     call.q,
                     call.k,
