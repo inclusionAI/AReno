@@ -16,6 +16,12 @@ Native LoRA currently supports these CUDA model adapters:
 * Qwen3-MoE
 * Bailing-MoE V3 checkpoints with ``no_kda_lora=true``
 
+On Apple Silicon, the MLX backend supports dense Qwen3 LoRA and includes an
+experimental Ling-3.0-tiny attention-only resolver. Ling MLX numerical and
+real-checkpoint validation is pending. Its target subset differs from CUDA:
+see :doc:`../getting-started/mlx` for the explicit target list, MLX-LM
+requirements and validation entry points.
+
 The default target modules are ``q_proj``, ``k_proj``, ``v_proj``,
 ``o_proj``, ``gate_proj``, ``up_proj``, and ``down_proj``. Select a subset
 with ``--lora-target-modules``. Bailing-MoE V3 additionally supports its

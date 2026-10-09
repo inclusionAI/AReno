@@ -1,4 +1,4 @@
-"""PEFT-compatible LoRA injection for dense MLX-LM policies."""
+"""PEFT-compatible LoRA injection for supported MLX-LM projections."""
 
 from __future__ import annotations
 
@@ -11,7 +11,8 @@ from typing import Any
 from areno.adapters.config import LoraConfig
 
 _PEFT_PREFIX = "base_model.model.model."
-_SUPPORTED_MODEL_TYPES = frozenset({"qwen3"})
+_BAILING_KDA_TARGETS = ("q_proj", "k_proj", "v_proj", "f_proj", "o_proj")
+_BAILING_MLA_TARGETS = ("q_a_proj", "q_b_proj", "kv_a_proj_with_mqa", "dense")
 
 
 @dataclass(slots=True)
@@ -32,24 +33,100 @@ class _MlxLoraApi:
     tree_unflatten: Any
 
 
-def initialize_lora(model: Any, config: LoraConfig, *, model_type: str) -> MlxLoraState:
-    """Freeze one dense Qwen3 policy and inject exact requested LoRA targets."""
+def _qwen3_targets(model: Any, requested: set[str], model_config: dict[str, Any]) -> list[tuple[str, Any]]:
+    del model_config
+    targets = []
+    for path, module in model.named_modules():
+        if path.rsplit(".", 1)[-1] not in requested:
+            continue
+        if not path.startswith("model.layers."):
+            raise ValueError(f"MLX LoRA target {path!r} is outside the dense transformer layers")
+        targets.append((path, module))
+    return targets
 
-    if model_type not in _SUPPORTED_MODEL_TYPES:
-        supported = ", ".join(sorted(_SUPPORTED_MODEL_TYPES))
-        raise ValueError(f"MLX LoRA currently supports dense model types only: {supported}")
 
-    api = _mlx_lora_api()
+def _bailing_v3_targets(model: Any, requested: set[str], model_config: dict[str, Any]) -> list[tuple[str, Any]]:
+    architectures = model_config.get("architectures") or ()
+    if isinstance(architectures, str):
+        architectures = (architectures,)
+    if "BailingMoeV3ForCausalLM" not in architectures:
+        raise ValueError("MLX Ling LoRA requires architecture BailingMoeV3ForCausalLM")
+    allowed = set(_BAILING_KDA_TARGETS + _BAILING_MLA_TARGETS)
+    if not requested <= allowed:
+        raise ValueError(
+            f"unsupported MLX Ling LoRA targets: {', '.join(sorted(requested - allowed))}; "
+            f"use --lora-target-modules {','.join(_BAILING_KDA_TARGETS + _BAILING_MLA_TARGETS)}"
+        )
+    if model_config.get("quantization") is not None:
+        raise ValueError("MLX Ling LoRA requires a non-quantized checkpoint; QLoRA is not supported yet")
+    args = getattr(model, "args", None)
+    layers = getattr(getattr(model, "model", None), "layers", None)
+    if args is None or not layers or len(layers) != args.num_hidden_layers:
+        raise ValueError("MLX Ling LoRA requires the MLX-LM Bailing V3 model and complete decoder layers")
+    if not args.no_kda_lora or not args.kda_safe_gate or not args.rope_interleave or args.q_lora_rank is None:
+        raise ValueError(
+            "MLX Ling LoRA requires no_kda_lora=true, kda_safe_gate=true, rope_interleave=true and q_lora_rank"
+        )
+
+    # Validate all layers before freezing or replacing any module. Dimensions
+    # follow the loaded model args, including reduced models used in tests.
+    hidden, heads = args.hidden_size, args.num_attention_heads
+    kda_width = heads * args.head_dim
+    kda_shapes = {name: (kda_width, hidden) for name in _BAILING_KDA_TARGETS if name != "o_proj"}
+    kda_shapes["o_proj"] = (hidden, kda_width)
+    mla_shapes = {
+        "q_a_proj": (args.q_lora_rank, hidden),
+        "q_b_proj": (heads * (args.qk_nope_head_dim + args.qk_rope_head_dim), args.q_lora_rank),
+        "kv_a_proj_with_mqa": (args.kv_lora_rank + args.qk_rope_head_dim, hidden),
+        "dense": (hidden, heads * args.v_head_dim),
+    }
+    modules = dict(model.named_modules())
+    targets = []
+    for index, layer in enumerate(layers):
+        if not isinstance(getattr(layer, "is_linear", None), bool):
+            raise ValueError(f"MLX Ling LoRA layer {index} has no KDA/MLA discriminator")
+        shapes = kda_shapes if layer.is_linear else mla_shapes
+        for name in sorted(requested & shapes.keys()):
+            path = f"model.layers.{index}.attention.{name}"
+            module = modules.get(path)
+            if module is None:
+                raise ValueError(f"MLX Ling LoRA target {path!r} is missing")
+            shape = tuple(getattr(getattr(module, "weight", None), "shape", ()))
+            if shape != shapes[name]:
+                raise ValueError(f"MLX Ling LoRA target {path!r} has shape {shape}, expected {shapes[name]}")
+            targets.append((path, module))
+    expected_paths = {path for path, _ in targets}
+    unexpected = {path for path in modules if path.rsplit(".", 1)[-1] in requested and path not in expected_paths}
+    if unexpected:
+        raise ValueError(f"MLX Ling LoRA targets outside supported attention paths: {sorted(unexpected)}")
+    return targets
+
+
+_TARGET_RESOLVERS = {"qwen3": _qwen3_targets, "bailing_hybrid": _bailing_v3_targets}
+
+
+def initialize_lora(
+    model: Any,
+    config: LoraConfig,
+    *,
+    model_type: str,
+    model_config: dict[str, Any] | None = None,
+) -> MlxLoraState:
+    """Validate a model family's projections, freeze the base and inject LoRA."""
+
+    resolver = _TARGET_RESOLVERS.get(model_type)
+    if resolver is None:
+        supported = ", ".join(sorted(_TARGET_RESOLVERS))
+        raise ValueError(f"MLX LoRA supports model types: {supported}")
+
     requested = set(config.target_modules)
+    resolved = resolver(model, requested, model_config or {})
+    api = _mlx_lora_api()
     matched: set[str] = set()
     targets: list[tuple[str, str, Any]] = []
-    for module_path, module in model.named_modules():
+    for module_path, module in resolved:
         target_name = module_path.rsplit(".", 1)[-1]
-        if target_name not in requested:
-            continue
         matched.add(target_name)
-        if not module_path.startswith("model.layers."):
-            raise ValueError(f"MLX LoRA target {module_path!r} is outside the dense transformer layers")
         if isinstance(module, api.quantized_linear_type):
             raise ValueError(f"MLX LoRA target {module_path!r} is quantized; QLoRA is not supported yet")
         if not isinstance(module, api.linear_type):

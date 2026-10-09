@@ -98,11 +98,16 @@ class MlxBackend(Backend):
         else:
             if self.provider.is_multimodal:
                 raise ValueError("MLX LoRA currently supports text-only checkpoints")
-            self._lora_state = initialize_lora(
-                self.model,
-                self.config.lora,
-                model_type=str(self.model_config.get("model_type", "")),
-            )
+            try:
+                self._lora_state = initialize_lora(
+                    self.model,
+                    self.config.lora,
+                    model_type=str(self.model_config.get("model_type", "")),
+                    model_config=self.model_config,
+                )
+            except Exception:
+                self.close()
+                raise
         self.optimizer, self._optimizer_groups = build_optimizer(
             optimizer_config,
             state_precision_for_parameter=self.provider.optimizer_state_precision,
@@ -577,7 +582,12 @@ class MlxBackend(Backend):
             if layers is None and hasattr(model, "model"):
                 layers = getattr(model.model, "layers", None)
             if layers:
-                grad_checkpoint(layers[0])
+                # MLX-LM patches the class, not just this instance. Repeated
+                # load/train/reload in one process must not nest wrappers.
+                layer_type = type(layers[0])
+                if not getattr(layer_type.__call__, "_areno_gradient_checkpointing", False):
+                    grad_checkpoint(layers[0])
+                    layer_type.__call__._areno_gradient_checkpointing = True
         except (AttributeError, IndexError, TypeError):
             return
 
