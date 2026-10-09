@@ -1,114 +1,162 @@
 # Train with the pi coding agent
 
-Run the real [pi coding agent](https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent)
-as AReno's rollout harness. All integration code lives in this example.
+Use the [pi coding agent](https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent)
+as AReno's rollout harness on software tasks from ModelScope BigCodeBench.
+The generator prepares JSONL records; the dataset loader normalizes them; the
+runner executes pi and grades its changes in the existing training environment.
 
 ```text
-pi CLI → example secondary proxy → existing AReno rollout proxy → current policy
+ModelScope → generate_dataset.py → JSONL → dataset_loader.py
+                                              ↓
+                                         run_agent.py
+                                              ↓
+pi CLI → example secondary proxy → AReno rollout proxy → current policy
                 ↓
-       exact per-turn trajectories → existing AReno trainer
+       exact per-turn trajectories + verifier reward → AReno trainer
 ```
 
-The secondary proxy adapts pi's streaming Chat Completions requests to AReno's
-non-streaming endpoint. It saves the upstream `areno` metadata, including exact
-input tokens, generated tokens, logprobs and routing replay IDs. It then emits
-buffered SSE chunks for pi. This is protocol compatibility, not incremental token
-streaming. Pi's own read, bash, edit and write tools run unchanged. The adapter was
-smoke-tested with pi 0.83.0 against the existing AReno proxy and a CPU policy
-double, including a real pi tool call and verification.
+All integration code lives in this example. Pi's read, bash, edit and write tools
+run unchanged. The secondary proxy adapts pi's streaming Chat Completions requests
+to AReno's non-streaming endpoint, preserving exact input tokens, generated
+tokens, log-probabilities and routing replay IDs. It emits buffered SSE after
+each completed model call, rather than incremental token streaming.
 
-## Software tasks without task-image builds
+## Install
 
-For a lightweight start, use the [ModelScope BigCodeBench local demo](LOCAL_DEMO.md).
-It scans all 1,140 upstream tasks, selecting standard-library tasks or a larger
-set with dependencies installed once in the existing environment. It includes
-reference-check filtering and selection reports; the original ten tasks remain
-available with `--profile smoke`. Pi runs in temporary workspaces without a
-Docker daemon or per-task image.
-
-## Repository tasks with Docker-in-Docker
-
-For real software-engineering issues, use the [ModelScope SWE-bench generator and
-DinD runner](dind/README.md). It runs pi in per-attempt nested containers and grades
-patches in separate clean SWE-bench containers. The two local tasks below remain
-small integration fixtures; they are not the recommended training dataset.
-
-## Run the local fixture
-
-Install pi separately; it is not an AReno dependency:
+Use an existing AReno training environment with Python 3.10+ and Node.js 22+.
+Run these commands from the repository root. Both `node` and `pi` must be on the
+training process's `PATH`:
 
 ```bash
-npm install -g @mariozechner/pi-coding-agent
+node --version
+python -m pip install -r examples/agentic/pi/requirements.txt
+npm install -g @mariozechner/pi-coding-agent@0.83.0
+pi --version
 ```
 
-Use a local, tool-capable checkpoint and an existing AReno training environment:
+Set `ARENO_PI_EXECUTABLE` if pi uses a different executable or wrapper. A custom
+pi path does not provide Node.js; its runtime must still be available.
+
+## Generate the dataset
+
+The generator downloads [bigcode/bigcodebench from ModelScope](https://modelscope.cn/datasets/bigcode/bigcodebench)
+at revision `a4da68573cf2ead10e049a580ba0016d9eb5f281`, split `v0.1.4`.
+It scans all 1,140 upstream tasks, preserves their grading tests and selects tasks
+for one shared environment:
+
+| Profile | Selection | Candidates on Python 3.12 |
+| --- | --- | ---: |
+| `stdlib` (default) | Standard-library tasks after portability screening | 197 |
+| `extended` | Standard library plus shared third-party dependencies | 865 |
+| `smoke` | Ten reviewed file, CSV, ZIP, hashing and SQLite tasks | 10 |
+
+These counts precede executable reference checks and depend on the environment.
+The extended set includes the standard-library set. These are software utility
+tasks with file/database side effects and edge cases, not whole-repository issues.
 
 ```bash
+python examples/agentic/pi/generate_dataset.py \
+  --output /tmp/pi-engineering.jsonl \
+  --check-reference
+```
+
+`--check-reference` executes the upstream reference solution and unfinished stub
+against the same tests in separate temporary workspaces. Bulk selection retains
+only tasks whose reference passes and whose stub fails. Generated records contain
+no reference solution. Without this flag, generation screens source and dependency
+metadata without executing dataset code.
+
+Use `--limit 50` for 50 accepted tasks, `--profile smoke` for the ten-task subset,
+or repeat `--task-id BigCodeBench/ID` for explicit selection. Omit the limit to
+process every candidate. Explicit selections and the smoke profile fail if any
+requested task is rejected. Failed generation preserves an existing output file.
+
+For the larger shared-dependency profile, install its packages once in the same
+environment used by AReno and pi:
+
+```bash
+python -m pip install -r examples/agentic/pi/requirements-extended.txt
+python examples/agentic/pi/generate_dataset.py \
+  --profile extended \
+  --output /tmp/pi-engineering.jsonl \
+  --check-reference
+```
+
+The shared packages cover numerical, data, plotting and image-processing tasks.
+There is no package installation during rollout. Grading uses Matplotlib's
+noninteractive `Agg` backend.
+
+Every generation writes `OUTPUT.report.json` (override with `--report`), recording
+the pinned revision, selected IDs, exclusion reasons, reference-check status,
+Python version and installed dependency versions. Source checksums are stored
+with each task. Selection order is numeric task ID; the generator does not fall
+back to Hugging Face. Portability screening excludes unsupported dependencies,
+external process/network/GUI requirements and shared path literals; it is a
+conservative heuristic, not a sandbox.
+
+## Train
+
+```bash
+export MPLBACKEND=Agg
 areno train \
   --ckpt /path/to/tool-capable-checkpoint \
-  --dataset-path examples/agentic/pi/dataset.jsonl \
+  --dataset-path /tmp/pi-engineering.jsonl \
   --dataset-loader-fn examples/agentic/pi/dataset_loader.py \
   --agent-fn examples/agentic/pi/run_agent.py \
   --reward-fn-path examples/agentic/pi/reward.py \
-  --algo grpo \
-  --world-size 1 --tp-size 1 \
-  --batch-size 1 --n-samples 4 \
+  --algo grpo --world-size 1 --tp-size 1 \
+  --batch-size 4 --mini-bs 4 --n-samples 4 \
   --max-running-prompts 4 \
-  --max-new-tokens 2048 --max-context-len 32768
+  --max-new-tokens 4096 --max-context-len 32768 \
+  --max-steps 20 --save-path /tmp/pi-output
 ```
 
-`--algo gspo` uses the same example. Set `ARENO_PI_EXECUTABLE` to a different pi
-executable or wrapper if needed. No separate `areno serve` process is required:
-the training session owns the upstream policy and its lifecycle. This example
-uses synchronous rollout batches, so all attempts finish before weights change.
-Pi's advertised output limit is removed by the secondary proxy; AReno's
-`--max-new-tokens` controls generation length.
+Use `--algo gspo` for GSPO. The training session owns the current policy and
+rollout endpoint; no separate serving process is needed. AReno's
+`--max-new-tokens` controls generation length. Synchronous rollout batches finish
+before weights change, and concurrency follows `--max-running-prompts`.
 
-Each attempt gets a fresh workspace, pi config directory, loopback proxy and
-bearer key. Pi runs in print mode without saved sessions, extensions, skills or
-prompt templates. Automatic compaction and retries are disabled to keep
-auxiliary model calls out of the training trace. The upstream context limit
-still applies to every actual model call. Concurrency follows
-`--max-running-prompts`.
+## Dataset contract and rewards
 
-## Dataset and reward
+Each JSONL record contains:
 
-Each JSONL row contains:
+- `prompt`: the task instruction.
+- `files`: relative workspace paths mapped to initial text contents.
+- `verify`: trusted Python verification code, kept outside the initial workspace.
+- Optional `source`: dataset revision, task ID, checksum and required packages.
+- Optional `max_turns`, `timeout` and `verify_timeout`: per-attempt budgets.
 
-- `prompt` or `problem_statement`: the task given to pi.
-- `files`: relative file paths mapped to initial text contents.
-- `verify`: trusted Python assertions run on the resulting workspace after pi exits.
-- Optional `max_turns` (32), `timeout` (300 seconds), `verify_timeout` (30 seconds).
+`dataset_loader.py` validates the record and also accepts `problem_statement`
+as a prompt fallback. Other datasets can use the same runner by emitting this
+contract.
 
-The loader always normalizes the task to `prompt`. Verification code is kept out
-of the agent's initial files and executed by the example, rather than accepting
-the agent's claim that its tests passed. Replace it with a task-specific verifier
-for larger datasets.
+Pi edits `solution.py` and can run its own tests. After it exits, the controller
+executes the edited implementation and upstream grading tests in a separate
+Python process. Reward is 1 only when pi finishes within budget and the nonempty
+test suite passes without skipped tests; otherwise it is 0. All model turns of
+an attempt share its task reward. Failed attempts with usable traces remain
+negative training examples. Transport/metadata failures and attempts without
+model calls are marked invalid and logged. Tool results remain prompt context,
+not generated actions. `pi_result` retains process status and log tails.
 
-Reward is 1 when pi finishes successfully within budget and verification passes;
-otherwise it is 0. Failed or timed-out attempts with usable traces remain
-training examples. Transport/metadata failures and attempts with no model calls
-are marked invalid and excluded, with a warning. Every attempt's model turns
-share its task reward through AReno's existing trajectory grouping. Actual
-per-turn contexts are preserved; tool results are prompt tokens, not newly
-generated actions. The sample-local `pi_result` also retains process status and
-the tail of pi/verifier logs for reward inspection.
+Each attempt receives its own temporary workspace, pi configuration, secondary
+proxy and bearer key. Sessions, extensions, skills, prompt templates, automatic
+compaction and retries are disabled. Timeouts terminate process groups, including
+tool children; proxy shutdown drains in-flight model requests.
 
-Workspaces and configuration are isolated between attempts, but a temporary
-directory is **not an OS security sandbox**. Pi executes shell commands and the
-verifier executes dataset code. Run this example with trusted tasks in a
-disposable container or VM; do not give an untrusted policy access to host secrets.
-Timeouts terminate the process group, including tool children. Proxy shutdown
-drains outstanding requests before returning trajectories; an in-flight model
-request can take up to the upstream HTTP timeout after pi is stopped.
+Temporary workspaces are not an OS security sandbox. Pi and dataset verification
+execute code with the current user's permissions. Use trusted tasks in a disposable
+container or VM. This workflow runs in that existing environment and does not
+build per-task images. Training on these tasks is not a held-out benchmark evaluation.
 
 ## CPU checks
 
 ```bash
-python -m pytest -q examples/agentic/pi/test_pi_cpu.py
+python -m pytest -q examples/agentic/pi/test_generate_dataset_cpu.py \
+  examples/agentic/pi/test_pi_cpu.py
 ```
 
-These checks use a fake policy and a fixture process, not a GPU or downloaded
-model. They cover the secondary HTTP/SSE path, exact training tokens and masks,
-sample isolation, verifier rewards, request limits and process cleanup. A real
-pi/model training run remains a separate hardware integration check.
+The offline tests cover dataset selection, provenance, reference filtering,
+verification, the secondary proxy, exact training tokens/masks, task rewards and
+process cleanup. They use a fake policy and fixture process, without downloading
+a model or running GPU training.

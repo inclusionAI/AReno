@@ -1,5 +1,6 @@
-# Optional shared environment for generate_local_dataset.py --profile extended.
+# Optional shared environment for generate_dataset.py --profile extended.
 # Install once; generation reports the actual versions used for reference checks.
+-r requirements.txt
 numpy>=1.24,<3
 pandas>=2,<3
 scipy>=1.10,<2
