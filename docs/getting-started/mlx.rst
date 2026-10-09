@@ -98,9 +98,79 @@ rank, alpha, dropout, and target modules. The same option can serve an exported
 adapter with ``areno serve`` while ``--model-path`` continues to identify its
 base checkpoint.
 
-MLX LoRA currently requires an unquantized Qwen3 Dense text checkpoint,
+MLX LoRA requires an unquantized text checkpoint,
 ``--lora-dropout 0``, and ``--reference-mode independent``. QLoRA, Qwen3 MoE,
 multimodal LoRA, multiple adapters, and ``reuse_actor_base`` are not supported.
+
+Ling-3.0-tiny attention LoRA (experimental)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The MLX LoRA resolver also implements Ling-3.0-tiny attention projections for
+``model_type=bailing_hybrid`` with architecture ``BailingMoeV3ForCausalLM``.
+Numerical and real-checkpoint validation on Apple Silicon is still pending;
+this is not yet a validated 48 GB training recipe.
+
+Use an MLX-LM version containing ``mlx_lm.models.bailing_moe_v3`` and its
+architecture mapping. The implementation was designed against upstream
+revision ``1840cbba9cb3f8125b8cf7e137606256a2f162d1``. MLX-LM 0.31.3 in the
+development environment did not contain this module; satisfying AReno's
+dependency lower bound alone does not establish Ling compatibility.
+
+Explicitly select a nonempty subset of these targets:
+
+* KDA: ``q_proj``, ``k_proj``, ``v_proj``, ``f_proj``, ``o_proj``.
+* MLA: ``q_a_proj``, ``q_b_proj``, ``kv_a_proj_with_mqa``, ``dense``.
+
+For example, after the validation gates have passed, use a local non-quantized
+model and short Alpaca-format training data:
+
+.. code-block:: bash
+
+   areno train \
+     --ckpt "$MODEL_DIR" \
+     --dataset-path "$TRAIN_JSONL" \
+     --dataset-loader-fn examples/sft/alpaca/dataset_loader.py \
+     --algo sft --world-size 1 --tp-size 1 \
+     --batch-size 1 --mini-bs 1 \
+     --lora-rank 8 --lora-alpha 16 \
+     --lora-target-modules q_proj,k_proj,v_proj,f_proj,o_proj,q_a_proj,q_b_proj,kv_a_proj_with_mqa,dense \
+     --activation-checkpointing --max-steps 2 \
+     --save-path outputs/ling-tiny-mlx-lora --save-interval 1
+
+All applicable layers must contain the requested ordinary linear projections
+with the expected dimensions. The Qwen3 default target list includes MLP
+projections and is rejected for Ling. Expert/MLP targets, ``g_proj`` and
+``kv_b_proj`` are deliberately excluded. In MLX, ``kv_b_proj`` is transformed
+into two head-specific modules; ordinary Linear LoRA cannot wrap it directly.
+The architectural setting ``no_kda_lora=true`` does not prohibit adding
+post-training adapters.
+
+Only adapter arrays are trainable. The base, routers, expert biases, experts,
+embeddings, norms and convolutions remain frozen. Adapter saving and loading
+use the same PEFT two-file format and metadata precedence as Qwen3. Actual
+CUDA/Transformers interoperability remains a separate validation gate.
+
+The opt-in validation entry points do not download assets:
+
+.. code-block:: bash
+
+   ARENO_E2E_MLX_BAILING_SYNTHETIC=1 \
+     python -m pytest -q tests/test_mlx_bailing_v3_lora_e2e.py -k reduced
+
+   ARENO_E2E_MLX_BAILING_MODEL="$MODEL_DIR" \
+     python -m pytest -q -s tests/test_mlx_bailing_v3_lora_e2e.py -k real \
+       --basetemp outputs/ling-lora-validation-new
+
+Choose a fresh ``--basetemp`` directory: pytest clears an existing directory
+at that path. The real-model gate defaults to 128 tokens and two optimizer
+steps, then reloads the adapter and trains another step. Set
+``ARENO_E2E_MLX_BAILING_STEPS=10`` for the stability check or
+``ARENO_E2E_MLX_BAILING_TOKENS`` for the bounded synthetic input length.
+Each real-model test directory contains ``ling-validation.json`` with step
+metrics and cumulative memory peaks. Memory-pressure/swap monitoring, a
+coherent-generation assessment, and the serve API check remain separate
+manual acceptance checks. These tests do not certify a memory budget by
+themselves.
 
 Memory controls
 ~~~~~~~~~~~~~~~

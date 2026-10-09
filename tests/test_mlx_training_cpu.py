@@ -253,7 +253,8 @@ def test_mlx_backend_forwards_legacy_native_adapter_path(monkeypatch):
     assert backend.config is config
 
 
-def test_mlx_backend_injects_peft_lora_before_building_optimizer(monkeypatch):
+@pytest.mark.parametrize("fail_injection", [False, True])
+def test_mlx_backend_injects_peft_lora_before_building_optimizer(monkeypatch, fail_injection):
     from areno.adapters import LoraConfig
     from areno.api.backend.mlx.backend import MlxBackend
     from areno.api.config import MlxConfig
@@ -263,6 +264,7 @@ def test_mlx_backend_injects_peft_lora_before_building_optimizer(monkeypatch):
     mlx_core_module = ModuleType("mlx.core")
     mlx_core_module.metal = SimpleNamespace(is_available=lambda: False)
     mlx_core_module.eval = lambda *args: events.append("eval")
+    mlx_core_module.clear_cache = lambda: events.append("clear_cache")
     mlx_module.core = mlx_core_module
     monkeypatch.setitem(sys.modules, "mlx", mlx_module)
     monkeypatch.setitem(sys.modules, "mlx.core", mlx_core_module)
@@ -298,11 +300,14 @@ def test_mlx_backend_injects_peft_lora_before_building_optimizer(monkeypatch):
         events.append("load_provider")
         return provider
 
-    def inject(model_arg, config_arg, *, model_type):
+    def inject(model_arg, config_arg, *, model_type, model_config):
         assert model_arg is model
         assert config_arg is config.lora
         assert model_type == "qwen3"
+        assert model_config is provider.config
         events.append("initialize_lora")
+        if fail_injection:
+            raise ValueError("invalid target")
         return lora_state
 
     def make_optimizer(optimizer_config, *, state_precision_for_parameter):
@@ -323,6 +328,13 @@ def test_mlx_backend_injects_peft_lora_before_building_optimizer(monkeypatch):
         tokenizer=tokenizer,
     )
 
+    if fail_injection:
+        with pytest.raises(ValueError, match="invalid target"):
+            backend.initialize(ctx)
+        assert backend.model is None and backend.provider is None
+        assert backend._lora_state is None and backend.optimizer is None
+        assert events == ["load_provider", "initialize_lora", "clear_cache"]
+        return
     backend.initialize(ctx)
 
     assert events[:3] == ["load_provider", "initialize_lora", "build_optimizer"]

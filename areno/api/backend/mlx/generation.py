@@ -73,8 +73,17 @@ class _TextBatchGenerator:
         prompt_features: list[dict | None],
         params: SamplingParams,
     ) -> list[int]:
-        from mlx_lm.generate import StopSequenceMatcher
         from mlx_lm.sample_utils import make_sampler
+
+        # MLX-LM 0.32 separates immutable stop sequences from stream matchers.
+        try:
+            from mlx_lm.generate import StopSequences as StopState
+        except ImportError:
+            from mlx_lm.generate import StopSequenceMatcher as StopState
+
+            stop_option = "stop_matchers"
+        else:
+            stop_option = "stop_sequences"
 
         if any(feature is not None for feature in prompt_features):
             raise ValueError("text-only MLX checkpoints cannot consume multimodal prompt features")
@@ -89,7 +98,7 @@ class _TextBatchGenerator:
             max_tokens=[int(params.max_new_tokens)] * len(prompts),
             samplers=[sampler] * len(prompts),
             logits_processors=[[float32_logits_processor] for _ in prompts],
-            stop_matchers=[StopSequenceMatcher(stop_sequences or None) for _ in prompts],
+            **{stop_option: [StopState(stop_sequences or None) for _ in prompts]},
         )
 
     def next(self) -> list[Any]:
