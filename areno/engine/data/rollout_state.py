@@ -268,6 +268,13 @@ class InferenceBatchState:
             "cache_block_offsets": torch.tensor(cache_block_offsets, dtype=torch.long),
             "recurrent_slots": torch.tensor(recurrent_slots, dtype=torch.long),
             "prefill_seq_ids": list(prefill_seq_ids),
+            "sequence_lengths": torch.tensor(
+                [
+                    max(len(self.prompts[seq_id]), position_ids[cu_seqlens[row + 1] - 1] + 1)
+                    for row, seq_id in enumerate(prefill_seq_ids)
+                ],
+                dtype=torch.int32,
+            ),
         }
         if any(feature_mask) or image_features or any(image_sequence_modes) or mrope_position_parts is not None:
             payload["features"] = _prefill_multimodal_features(
@@ -664,11 +671,19 @@ def payload_to_infer_meta(payload: dict, device: torch.device) -> InferMeta:
         # Prefill consumes a packed-varlen layout: `cu_seqlens` and `max_seqlen`
         # drive the attention kernel, while `cache_block_ids/offsets` tell the
         # KV writer where each prompt token's KV should be stored.
+        prefix_lengths = payload["position_ids"][payload["cu_seqlens"][:-1].long()].to(dtype=torch.int32)
+        cached_prefix = prefix_lengths.to(device, non_blocking=True) if bool(prefix_lengths.any()) else None
         return InferMeta(
             mode="prefill",
             sample_indices=payload["sample_indices"].to(device, non_blocking=True),
             cu_seqlens=payload["cu_seqlens"].to(device, non_blocking=True),
             max_seqlen=int(payload["max_seqlen"]),
+            cache_seqlens=cached_prefix,
+            sequence_lengths=(
+                payload["sequence_lengths"].to(device, non_blocking=True)
+                if payload.get("sequence_lengths") is not None
+                else None
+            ),
             block_table=payload["block_table"].to(device, non_blocking=True),
             cache_block_ids=payload["cache_block_ids"].to(device, non_blocking=True),
             cache_block_offsets=payload["cache_block_offsets"].to(device, non_blocking=True),

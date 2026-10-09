@@ -341,6 +341,10 @@ def _normalize_image_content_part(part: Any) -> Any:
 
 
 def _processor_chat_text(processor: Any, messages: list[dict[str, Any]], *, tools: Any = None) -> str:
+    if type(processor).__name__ == "Phi4MMProcessor":
+        # Phi's tokenizer template accepts strings, while its processor expands
+        # numbered image markers into the crop-dependent visual token spans.
+        messages = _phi4mm_image_messages(messages)
     apply_chat_template = getattr(processor, "apply_chat_template", None)
     if callable(apply_chat_template):
         kwargs = {"tokenize": False, "add_generation_prompt": True}
@@ -362,6 +366,27 @@ def _processor_chat_text(processor: Any, messages: list[dict[str, Any]], *, tool
     if tools:
         raise ValueError("image input with tools requires a processor or tokenizer chat template that supports tools")
     return _messages_fallback_text(_messages_for_text_fallback(messages))
+
+
+def _phi4mm_image_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized = []
+    image_index = 0
+    for message in messages:
+        item = dict(message)
+        content = item.get("content")
+        if isinstance(content, list):
+            parts = []
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "image":
+                    image_index += 1
+                    parts.append(f"<|image_{image_index}|>\n")
+                elif isinstance(part, dict) and part.get("type") == "text":
+                    parts.append(str(part.get("text", "")))
+                else:
+                    raise ValueError("Phi4MM image messages support only image and text content")
+            item["content"] = "".join(parts)
+        normalized.append(item)
+    return normalized
 
 
 def _messages_for_text_fallback(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:

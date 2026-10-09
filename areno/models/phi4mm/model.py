@@ -322,6 +322,8 @@ def _phi4mm_longrope_sequence_length(
         return sequence_length
 
     if infer_meta is not None:
+        if infer_meta.sequence_lengths is not None:
+            return int(infer_meta.sequence_lengths.max().item())
         sequence_length = int(position_ids.max().item()) + 1
         if sequence_length > original_max_position_embeddings:
             if infer_meta.cu_seqlens is None:
@@ -351,7 +353,12 @@ def _phi4mm_prefill_longrope_factor_mask(
         raise ValueError("Phi4MM prefill requires cu_seqlens for LongRoPE selection")
     flat_positions = position_ids.reshape(-1)
     sequence_ends = infer_meta.cu_seqlens[1:].to(dtype=torch.long) - 1
-    long_by_sequence = flat_positions[sequence_ends].ge(original_max_position_embeddings)
+    sequence_lengths = infer_meta.sequence_lengths
+    if sequence_lengths is None:
+        sequence_lengths = flat_positions[sequence_ends] + 1
+    elif sequence_lengths.numel() != sequence_ends.numel():
+        raise ValueError("Phi4MM prefill sequence_lengths must contain one length per packed sequence")
+    long_by_sequence = sequence_lengths.gt(original_max_position_embeddings)
     # `cu_seqlens` boundaries identify which packed sequence owns each token.
     # Unlike repeat_interleave, bucketize keeps the output shape statically
     # determined by position_ids, which is safe for graph capture.
@@ -406,7 +413,11 @@ class Phi4MMAttention(CausalSelfAttention):
             # eager validation remains a useful guard against a caller trying
             # to append a chunk to short-factor cached keys, but must not run
             # while Dynamo/CUDA Graph capture is active.
-            if not torch.compiler.is_compiling() and not is_cuda_graph_capturing(q):
+            if (
+                infer_meta.sequence_lengths is None
+                and not torch.compiler.is_compiling()
+                and not is_cuda_graph_capturing(q)
+            ):
                 _phi4mm_longrope_sequence_length(
                     position_ids,
                     train_meta,
