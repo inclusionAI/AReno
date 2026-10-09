@@ -1,8 +1,8 @@
 """Setup diagnostics for the AReno command line.
 
 These commands intentionally avoid importing AReno engine/model modules. They
-only inspect the Python environment, optional dependencies, CUDA toolchain, and
-the compiled extension importability.
+only inspect the Python environment and native runtime dependencies: MLX/Metal
+on Apple Silicon, or the CUDA toolchain and compiled extension on Linux.
 """
 
 from __future__ import annotations
@@ -71,10 +71,7 @@ def check_command() -> None:
 def collect_env() -> dict[str, Any]:
     """Collect a lightweight support report without initializing the engine."""
 
-    torch_info = _torch_info()
-    cuda_home = _cuda_home()
-    nvcc_path = shutil.which("nvcc")
-    return {
+    report: dict[str, Any] = {
         "areno": {"version": _package_version("areno")},
         "python": {"version": platform.python_version(), "executable": sys.executable},
         "platform": {
@@ -82,19 +79,6 @@ def collect_env() -> dict[str, Any]:
             "release": platform.release(),
             "machine": platform.machine(),
             "platform": platform.platform(),
-        },
-        "torch": torch_info,
-        "cuda": {
-            "cuda_home": os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH"),
-            "inferred_cuda_home": cuda_home,
-            "nvcc": _nvcc_info(nvcc_path),
-            "driver": _nvidia_smi_driver_info(),
-        },
-        "gpus": torch_info.get("gpus", []),
-        "dependencies": {
-            "flash_attn": _dependency_info("flash-attn", "flash_attn"),
-            "flash_linear_attention": _dependency_info("flash-linear-attention", "fla"),
-            "areno_accel": _dependency_info(None, "areno.accel._areno_accel"),
         },
         "install": {
             "build_ext_disabled": _build_ext_disabled(),
@@ -105,6 +89,64 @@ def collect_env() -> dict[str, Any]:
             "hf_cache": os.environ.get("HF_HUB_CACHE") or str(Path.home() / ".cache" / "huggingface" / "hub"),
         },
     }
+
+    if _is_mlx_platform(report):
+        mlx = _dependency_info("mlx", "mlx.core")
+        report["dependencies"] = {"mlx": mlx}
+        report["metal"] = _metal_info(mlx)
+        for distribution, module in (("mlx-lm", "mlx_lm"), ("mlx-vlm", "mlx_vlm")):
+            # Retrying a failed native mlx.core import through its dependents
+            # can abort the process with duplicate nanobind registrations.
+            if mlx["imported"]:
+                dep = _dependency_info(distribution, module)
+            else:
+                dep = {
+                    "distribution": distribution,
+                    "module": module,
+                    "version": _package_version(distribution),
+                    "imported": False,
+                    "error": "Import skipped because mlx.core failed to import",
+                }
+            report["dependencies"][module] = dep
+    else:
+        torch_info = _torch_info()
+        cuda_home = _cuda_home()
+        nvcc_path = shutil.which("nvcc")
+        report.update(
+            {
+                "torch": torch_info,
+                "cuda": {
+                    "cuda_home": os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH"),
+                    "inferred_cuda_home": cuda_home,
+                    "nvcc": _nvcc_info(nvcc_path),
+                    "driver": _nvidia_smi_driver_info(),
+                },
+                "gpus": torch_info.get("gpus", []),
+                "dependencies": {
+                    "flash_attn": _dependency_info("flash-attn", "flash_attn"),
+                    "flash_linear_attention": _dependency_info("flash-linear-attention", "fla"),
+                    "areno_accel": _dependency_info(None, "areno.accel._areno_accel"),
+                },
+            }
+        )
+    return report
+
+
+def _is_mlx_platform(report: dict[str, Any]) -> bool:
+    # Match native backend selection without importing areno.api (which rejects
+    # unsupported platforms before diagnostics can explain the problem).
+    host = report["platform"]
+    return host["system"] == "Darwin" and host["machine"].lower() in {"arm64", "aarch64"}
+
+
+def _metal_info(mlx: dict[str, Any]) -> dict[str, Any]:
+    if not mlx["imported"]:
+        return {"available": False, "error": mlx["error"]}
+    try:
+        mx = import_module("mlx.core")
+        return {"available": bool(mx.metal.is_available()), "error": None}
+    except Exception as exc:
+        return {"available": False, "error": f"{type(exc).__name__}: {exc}"}
 
 
 @dataclass(frozen=True)
@@ -131,16 +173,56 @@ def run_checks(report: dict[str, Any]) -> list[CheckResult]:
 
     system = report["platform"]["system"]
     machine = report["platform"]["machine"]
-    platform_ok = system == "Linux"
+    is_mlx = _is_mlx_platform(report)
+    platform_ok = system == "Linux" or is_mlx
     results.append(
         _result(
             platform_ok,
             "Supported platform",
             f"{system} {machine}",
-            "Run AReno on Linux with an NVIDIA CUDA GPU. On Windows, use WSL2.",
+            "Use Apple Silicon with native arm64 Python for MLX, or Linux with an NVIDIA CUDA GPU. On Windows, use WSL2.",
         )
     )
 
+    if is_mlx:
+        results.extend(_mlx_checks(report))
+    elif system == "Linux":
+        results.extend(_cuda_checks(report))
+    for label, path in report["paths"].items():
+        results.append(_writable_path_check(label, path))
+    return results
+
+
+def _mlx_checks(report: dict[str, Any]) -> list[CheckResult]:
+    results: list[CheckResult] = []
+    for label in ("mlx", "mlx_lm", "mlx_vlm"):
+        dep = report["dependencies"][label]
+        next_step = "Install AReno's MLX dependencies with native arm64 Python: python -m pip install -e ."
+        if label == "mlx_vlm":
+            next_step = "For multimodal models, install mlx-vlm: python -m pip install -e ."
+        results.append(
+            _result(
+                bool(dep["imported"]),
+                f"{label} import",
+                (dep.get("version") or "imported") if dep["imported"] else dep.get("error", "not importable"),
+                next_step,
+                warn=label == "mlx_vlm",
+            )
+        )
+    metal = report["metal"]
+    results.append(
+        _result(
+            bool(metal["available"]),
+            "MLX Metal availability",
+            metal.get("error") or f"mlx.core.metal.is_available()={metal['available']}",
+            "Use a Metal-enabled MLX installation on Apple Silicon with native arm64 Python.",
+        )
+    )
+    return results
+
+
+def _cuda_checks(report: dict[str, Any]) -> list[CheckResult]:
+    results: list[CheckResult] = []
     torch_info = report["torch"]
     torch_imported = bool(torch_info["imported"])
     results.append(
@@ -228,8 +310,6 @@ def run_checks(report: dict[str, Any]) -> list[CheckResult]:
         )
     )
 
-    for label, path in report["paths"].items():
-        results.append(_writable_path_check(label, path))
     return results
 
 
@@ -443,6 +523,29 @@ def _print_env_report(report: dict[str, Any]) -> None:
     click.echo(f"  Python: {report['python']['version']} ({report['python']['executable']})")
     platform_info = report["platform"]
     click.echo(f"  Platform: {platform_info['platform']} [{platform_info['machine']}]")
+    if _is_mlx_platform(report):
+        click.echo("  Backend: MLX")
+        click.echo(f"  Metal available: {report['metal']['available']}")
+        if report["metal"].get("error"):
+            click.echo(f"    {report['metal']['error']}")
+    else:
+        _print_cuda_report(report)
+    click.echo("  Dependencies:")
+    for name, dep in report["dependencies"].items():
+        status = "ok" if dep["imported"] else "missing"
+        version = dep["version"] or "unknown"
+        click.echo(f"    {name}: {status} (version={version})")
+        if dep["error"]:
+            click.echo(f"      {dep['error']}")
+    install = report.get("install", {})
+    click.echo("  Install:")
+    click.echo(f"    ARENO_BUILD_EXT disabled: {install.get('build_ext_disabled', False)}")
+    click.echo("  Environment variables:")
+    for name, value in report["env"].items():
+        click.echo(f"    {name}={value if value is not None else '<unset>'}")
+
+
+def _print_cuda_report(report: dict[str, Any]) -> None:
     torch_info = report["torch"]
     click.echo(f"  PyTorch: {torch_info.get('version') or 'not importable'}")
     click.echo(f"  PyTorch CUDA build: {torch_info.get('cuda_build') or 'none'}")
@@ -469,16 +572,3 @@ def _print_env_report(report: dict[str, Any]) -> None:
             click.echo(f"    [{gpu['index']}] {gpu['name']} (cc {gpu['capability']})")
     else:
         click.echo("    none visible")
-    click.echo("  Dependencies:")
-    for name, dep in report["dependencies"].items():
-        status = "ok" if dep["imported"] else "missing"
-        version = dep["version"] or "unknown"
-        click.echo(f"    {name}: {status} (version={version})")
-        if dep["error"]:
-            click.echo(f"      {dep['error']}")
-    install = report.get("install", {})
-    click.echo("  Install:")
-    click.echo(f"    ARENO_BUILD_EXT disabled: {install.get('build_ext_disabled', False)}")
-    click.echo("  Environment variables:")
-    for name, value in report["env"].items():
-        click.echo(f"    {name}={value if value is not None else '<unset>'}")

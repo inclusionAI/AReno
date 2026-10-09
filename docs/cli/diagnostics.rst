@@ -4,7 +4,7 @@ Diagnostics CLI reference
 =========================
 
 ``areno env`` and ``areno check`` help diagnose setup problems before a user
-hits low-level Python, CUDA, or PyTorch errors.
+hits low-level Python, MLX, CUDA, or PyTorch errors.
 
 ``areno env`` is a descriptive support report. It does not initialize the AReno
 engine or load model weights. Use it when collecting information for an issue.
@@ -19,7 +19,14 @@ For machine-readable issue reports:
 
    areno env --json
 
-The report includes:
+The report includes AReno and Python versions, platform details, selected
+environment variables, and runtime dependencies for the host platform.
+On Apple Silicon (macOS with native ``arm64`` or ``aarch64`` Python), it
+reports ``mlx``, ``mlx-lm``, ``mlx-vlm``, and Metal availability without
+probing PyTorch or CUDA. The JSON report contains ``dependencies`` and
+``metal`` instead of the CUDA-specific ``torch``, ``cuda``, and ``gpus`` fields.
+
+On Linux, the CUDA report includes:
 
 * AReno version
 * Python version and executable
@@ -63,7 +70,15 @@ Example output:
 extension. If the installed ``areno_accel`` extension imports successfully,
 they are not required for runtime readiness.
 
-Checks include:
+All platforms check Python version, platform support, and writable cache/log
+locations. Apple Silicon checks ``mlx`` and ``mlx-lm`` imports and Metal
+availability. Missing or broken ``mlx-vlm`` produces a warning because it is
+needed for multimodal models. PyTorch, NVIDIA GPUs, CUDA tools, FlashAttention,
+FLA, and ``areno_accel`` are not required on MLX; ``ARENO_BUILD_EXT=0`` is not
+a failure on this platform. Intel Macs and Python running under Rosetta are
+not supported by the native MLX backend.
+
+Linux CUDA checks include:
 
 * Python version
 * supported platform
@@ -77,4 +92,7 @@ Checks include:
 * writable cache/log locations
 
 ``WARN`` items usually indicate degraded or incomplete setup. ``FAIL`` items
-mean AReno is not ready to run the CUDA training/inference engine.
+mean AReno is not ready to run the checked training/inference backend.
+The command exits with status 1 when any check fails, otherwise 0. A successful
+check confirms basic runtime prerequisites; it does not load a model or validate
+a training or serving workload.
