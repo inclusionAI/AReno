@@ -10,6 +10,71 @@ from areno.accel.attention import areno_paged_causal_attention_decode, areno_var
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="native attention equivalence tests require CUDA")
 
 
+@pytest.mark.parametrize("backend", ["native", "flash"])
+@pytest.mark.parametrize("window_left", [None, 3])
+@torch.inference_mode()
+def test_chunked_prefill_reads_cached_prefix_in_mixed_batch(backend, window_left):
+    from areno.engine.layers.attention_backend.infer import FlashAttnInferBackend
+    from areno.engine.runtime.metadata import InferMeta
+
+    if backend == "flash":
+        pytest.importorskip("flash_attn")
+    torch.manual_seed(37)
+    device = torch.device("cuda")
+    dtype = torch.float16
+    block_size = 256
+    q = torch.randn(1, 5, 4, 32, device=device, dtype=dtype)
+    k = torch.randn(1, 5, 2, 32, device=device, dtype=dtype)
+    v = torch.randn_like(k)
+    k_cache = torch.randn(6, block_size, 2, 32, device=device, dtype=dtype)
+    v_cache = torch.randn_like(k_cache)
+    block_table = torch.tensor([[2, 0, 4], [1, 3, 5]], device=device, dtype=torch.int32)
+    prefixes = [block_size + 1, 0]
+    offsets = [0, 3, 5]
+    block_ids, block_offsets = [], []
+    expected_k, expected_v = k_cache.clone(), v_cache.clone()
+    for row, (start, end) in enumerate(zip(offsets[:-1], offsets[1:], strict=True)):
+        positions = torch.arange(prefixes[row], prefixes[row] + end - start, device=device)
+        ids = block_table[row, positions // block_size].long()
+        block_ids.append(ids)
+        block_offsets.append(positions % block_size)
+        expected_k[ids, positions % block_size] = k[0, start:end]
+        expected_v[ids, positions % block_size] = v[0, start:end]
+    meta = InferMeta(
+        mode="prefill",
+        cu_seqlens=torch.tensor(offsets, dtype=torch.int32, device=device),
+        max_seqlen=3,
+        cache_seqlens=torch.tensor(prefixes, dtype=torch.int32, device=device),
+        block_table=block_table,
+        cache_block_ids=torch.cat(block_ids),
+        cache_block_offsets=torch.cat(block_offsets),
+    )
+
+    actual = FlashAttnInferBackend(backend)(
+        q, k, v, k_cache, v_cache, meta, window_size=None if window_left is None else (window_left, 0)
+    )
+    expected = []
+    for row, (start, end) in enumerate(zip(offsets[:-1], offsets[1:], strict=True)):
+        positions = torch.arange(prefixes[row] + end - start, device=device)
+        ids = block_table[row, positions // block_size].long()
+        keys = _expand_kv_heads(expected_k[ids, positions % block_size], 4).transpose(0, 1).unsqueeze(0)
+        values = _expand_kv_heads(expected_v[ids, positions % block_size], 4).transpose(0, 1).unsqueeze(0)
+        expected.append(
+            _sdpa_reference(
+                q[0, start:end].transpose(0, 1).unsqueeze(0),
+                keys,
+                values,
+                query_start=prefixes[row],
+                window_left=window_left,
+                softmax_scale=32**-0.5,
+            )
+        )
+    expected = torch.cat([value.transpose(1, 2) for value in expected], dim=1)
+    _assert_close(actual, expected)
+    torch.testing.assert_close(k_cache, expected_k, atol=0, rtol=0)
+    torch.testing.assert_close(v_cache, expected_v, atol=0, rtol=0)
+
+
 def _tolerance(dtype: torch.dtype) -> tuple[float, float]:
     if dtype == torch.float32:
         return 2e-5, 2e-4

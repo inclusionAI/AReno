@@ -32,8 +32,10 @@ class TrainMeta:
 class InferMeta:
     """Attention metadata for prefill/decode with paged KV cache.
 
-    Prefill uses sequence lengths and cache write locations. Decode uses one row
-    per active sequence plus a block table that maps logical positions to KV
+    Prefill uses sequence lengths and cache write locations; cache_seqlens gives
+    the cached prefix length before each chunk (None when all sequences are
+    fresh, or zero for fresh rows in a mixed batch). Decode uses one row per
+    active sequence plus a block table that maps logical positions to KV
     cache blocks.
     """
 
@@ -48,3 +50,4 @@ class InferMeta:
     recurrent_slots: torch.Tensor | None = None
     capture_routing: bool = False
     captured_routing: dict[int, torch.Tensor] | None = None
+    sequence_lengths: torch.Tensor | None = None  # Full prefill lengths, including future chunks.

@@ -32,7 +32,14 @@ def native_tensors(monkeypatch):
     mode = FakeTensorMode()
 
     def tensor(shape, dtype=torch.float32, device="npu:0"):
-        return FakeTensor(mode, torch.empty(shape, device="meta", dtype=dtype), torch.device(device))
+        # ``FakeTensorMode`` intercepts ``torch.empty`` when the caller is
+        # already inside ``with mode``.  Passing that intercepted FakeTensor
+        # back to ``FakeTensor`` is rejected by recent PyTorch releases
+        # (2.9+).  Build the metadata tensor with dispatch disabled so this
+        # helper remains valid across supported PyTorch versions.
+        with torch._C._DisableTorchDispatch():
+            meta = torch.empty(shape, device="meta", dtype=dtype)
+        return FakeTensor(mode, meta, torch.device(device))
 
     return mode, tensor
 
@@ -365,7 +372,9 @@ def test_accel_metadata_imports_do_not_require_triton_or_device_extensions():
             sys.executable,
             "-c",
             "import areno.accel; import areno.accel.ops; import areno.accel.kda; import sys; "
-            "assert 'triton' not in sys.modules; "
+            # Recent PyTorch versions may import Triton while initializing
+            # ``torch._dynamo``; the boundary we own is that AReno's compiled
+            # device extensions stay lazy until a kernel is called.
             "assert 'areno.accel._areno_accel' not in sys.modules; "
             "assert 'areno.accel._areno_accel_npu' not in sys.modules",
         ],

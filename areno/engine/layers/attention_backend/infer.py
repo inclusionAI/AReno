@@ -73,6 +73,24 @@ class FlashAttnInferBackend(nn.Module):
             # Persist freshly computed K/V for the prompt into paged cache.
             if update_cache:
                 _store_prefill_cache(k_flat, v_flat, k_cache, v_cache, meta)
+            # The cached-prefix path uses paged KV indexing that is currently
+            # implemented for CUDA.  NPU prefill still dispatches through its
+            # regular varlen/native selector; passing the cache metadata must
+            # not force CUDA-only indexing on an NPU tensor.
+            if meta.cache_seqlens is not None and call.q.device.type != "npu":
+                out = _prefill_with_cached_prefix(
+                    call.q,
+                    call.k,
+                    call.v,
+                    k_cache,
+                    v_cache,
+                    meta,
+                    self.attn_backend,
+                    call.window_size,
+                    call.softmax_scale,
+                )
+                out = call.trim_value_dim(out)
+                return out.view(q.shape[0], q.shape[1], q.shape[2], call.value_dim)
             if use_native_attention(self.attn_backend, call.q):
                 out = _native_prefill(
                     call.q,
@@ -194,6 +212,70 @@ def _window_left(window_size: tuple[int, int]) -> int | None:
     if window_size[1] != 0:
         raise ValueError("native attention backend only supports causal right window 0")
     return int(window_size[0])
+
+
+@torch._dynamo.disable
+def _prefill_with_cached_prefix(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    k_cache: torch.Tensor,
+    v_cache: torch.Tensor,
+    meta: InferMeta,
+    attn_backend: AttnBackend,
+    window_size: tuple[int, int],
+    softmax_scale: float | None,
+) -> torch.Tensor:
+    """Attend each new query to its entire cached causal prefix.
+
+    A chunk's cu_seqlens only describes its new queries, not all cached keys.
+    Reuse paged attention instead of treating the chunk as a fresh sequence.
+    """
+    lengths = meta.cu_seqlens[1:] - meta.cu_seqlens[:-1]
+    if use_native_attention(attn_backend, q, block_size=k_cache.shape[1]):
+        rows = torch.repeat_interleave(
+            torch.arange(lengths.numel(), device=q.device), lengths.long(), output_size=q.shape[0]
+        )
+        positions = torch.arange(q.shape[0], device=q.device) - meta.cu_seqlens[rows]
+        decode_meta = InferMeta(
+            mode="decode",
+            cache_seqlens=(meta.cache_seqlens[rows] + positions).to(dtype=torch.int32),
+            block_table=meta.block_table.index_select(0, rows),
+        )
+        block_size = k_cache.shape[1]
+        cache_positions = decode_meta.cache_seqlens.long()
+        block_ids = meta.block_table[rows, cache_positions // block_size].long()
+        block_offsets = cache_positions % block_size
+        return _native_decode(
+            q,
+            k_cache[block_ids, block_offsets],
+            v_cache[block_ids, block_offsets],
+            k_cache,
+            v_cache,
+            decode_meta,
+            window_size,
+            softmax_scale,
+        )
+    require_flash_attention_supported(
+        build_attention_call(q, k, v, window_size, softmax_scale), mode="prefill attention"
+    )
+    offsets = meta.cu_seqlens.cpu().tolist()
+    outputs = []
+    for row, (start, end) in enumerate(zip(offsets[:-1], offsets[1:], strict=True)):
+        outputs.append(
+            _flash_attn_with_kvcache_no_compile(
+                q[start:end].unsqueeze(0),
+                k_cache,
+                v_cache,
+                cache_seqlens=(meta.cache_seqlens[row : row + 1] + end - start).to(dtype=torch.int32),
+                block_table=meta.block_table[row : row + 1],
+                causal=True,
+                window_size=window_size,
+                softmax_scale=softmax_scale,
+                num_splits=1,
+            ).squeeze(0)
+        )
+    return torch.cat(outputs, dim=0)
 
 
 @torch._dynamo.disable

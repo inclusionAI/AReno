@@ -444,6 +444,26 @@ def test_phi4mm_longrope_rejects_chunked_prefill_crossing_boundary():
         _phi4mm_longrope_sequence_length(positions, None, infer_meta, 32)
 
 
+@pytest.mark.parametrize("start", [0, 28, 36])
+def test_phi4mm_chunked_longrope_uses_full_prompt_length_from_first_chunk(start):
+    attention = Phi4MMAdapter().build(_tiny_model_config()).model.layers[0].self_attn
+    positions = torch.arange(start, start + 4).unsqueeze(0)
+    meta = InferMeta(
+        mode="prefill",
+        cu_seqlens=torch.tensor([0, 4], dtype=torch.int32),
+        max_seqlen=4,
+        sequence_lengths=torch.tensor([40], dtype=torch.int32),
+    )
+    q = torch.randn(1, 4, attention.local_heads, attention.head_dim)
+    k = torch.randn(1, 4, attention.local_kv_heads, attention.head_dim)
+
+    actual_q, actual_k = attention.apply_rotary(q, k, positions, None, meta)
+    expected_q, expected_k = attention.rope(q, k, positions, sequence_length=40)
+
+    torch.testing.assert_close(actual_q, expected_q, rtol=0, atol=0)
+    torch.testing.assert_close(actual_k, expected_k, rtol=0, atol=0)
+
+
 def test_phi4mm_longrope_requires_runtime_reprefill_for_cached_boundary_crossing():
     below_boundary = InferMeta(mode="decode", cache_seqlens=torch.tensor([31], dtype=torch.int32))
     crossing_boundary = InferMeta(mode="decode", cache_seqlens=torch.tensor([32], dtype=torch.int32))

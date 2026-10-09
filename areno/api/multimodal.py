@@ -339,6 +339,10 @@ def _normalize_image_content_part(part: Any) -> Any:
 
 
 def _processor_chat_text(processor: Any, messages: list[dict[str, Any]], *, tools: Any = None) -> str:
+    if type(processor).__name__ == "Phi4MMProcessor":
+        # Phi's tokenizer template accepts strings, while its processor expands
+        # numbered image markers into the crop-dependent visual token spans.
+        messages = _phi4mm_image_messages(messages)
     apply_chat_template = getattr(processor, "apply_chat_template", None)
     if callable(apply_chat_template):
         kwargs = {"tokenize": False, "add_generation_prompt": True}
@@ -360,6 +364,27 @@ def _processor_chat_text(processor: Any, messages: list[dict[str, Any]], *, tool
     if tools:
         raise ValueError("image input with tools requires a processor or tokenizer chat template that supports tools")
     return _messages_fallback_text(_messages_for_text_fallback(messages))
+
+
+def _phi4mm_image_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized = []
+    image_index = 0
+    for message in messages:
+        item = dict(message)
+        content = item.get("content")
+        if isinstance(content, list):
+            parts = []
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "image":
+                    image_index += 1
+                    parts.append(f"<|image_{image_index}|>\n")
+                elif isinstance(part, dict) and part.get("type") == "text":
+                    parts.append(str(part.get("text", "")))
+                else:
+                    raise ValueError("Phi4MM image messages support only image and text content")
+            item["content"] = "".join(parts)
+        normalized.append(item)
+    return normalized
 
 
 def _messages_for_text_fallback(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -427,25 +452,36 @@ def _image_processor_from_processor(processor: Any):
 
 
 def _image_token_id(tokenizer: Any, processor: Any) -> int | None:
+    get_vocab = getattr(tokenizer, "get_vocab", None)
+    vocab = get_vocab() if callable(get_vocab) else None
+    known_vocab = vocab if isinstance(vocab, dict) else None
     for obj in (processor, tokenizer):
-        for attr in ("image_token_id", "image_token_index"):
+        for attr in ("image_token_id", "image_token_index", "special_image_token_id"):
             value = getattr(obj, attr, None)
             if isinstance(value, int):
                 return int(value)
         token = getattr(obj, "image_token", None)
         if isinstance(token, str):
-            convert = getattr(tokenizer, "convert_tokens_to_ids", None)
-            if callable(convert):
-                token_id = convert(token)
-                if isinstance(token_id, int) and token_id >= 0:
-                    return int(token_id)
-    convert = getattr(tokenizer, "convert_tokens_to_ids", None)
-    if callable(convert):
-        for token in ("<|image_pad|>", "<|image|>", "<image>"):
-            token_id = convert(token)
-            if isinstance(token_id, int) and token_id >= 0:
-                return int(token_id)
+            token_id = _token_id_if_present(tokenizer, token, known_vocab)
+            if token_id is not None:
+                return token_id
+    for token in ("<|image_pad|>", "<|image|>", "<image>", "<|endoftext10|>"):
+        token_id = _token_id_if_present(tokenizer, token, known_vocab)
+        if token_id is not None:
+            return token_id
     return None
+
+
+def _token_id_if_present(tokenizer: Any, token: str, vocab: dict[str, int] | None) -> int | None:
+    """Resolve a token without accepting a tokenizer's unknown-token fallback."""
+
+    if vocab is not None and token not in vocab:
+        return None
+    convert = getattr(tokenizer, "convert_tokens_to_ids", None)
+    if not callable(convert):
+        return None
+    token_id = convert(token)
+    return int(token_id) if isinstance(token_id, int) and token_id >= 0 else None
 
 
 def image_token_counts_from_features(features: dict[str, Any] | None) -> list[int]:

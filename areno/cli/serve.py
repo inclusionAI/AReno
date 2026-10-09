@@ -873,6 +873,10 @@ def _processor_chat_text(
 ) -> str:
     apply_chat_template = getattr(processor, "apply_chat_template", None)
     messages = _normalize_processor_multimodal_messages(messages)
+    if type(processor).__name__ == "Phi4MMProcessor":
+        from areno.api.multimodal import _phi4mm_image_messages
+
+        messages = _phi4mm_image_messages(messages)
     if callable(apply_chat_template):
         kwargs = {"tokenize": False, "add_generation_prompt": True}
         if tools:
@@ -913,25 +917,9 @@ def _normalize_processor_content_part(part: Any) -> Any:
 
 
 def _image_token_id(tokenizer: Any, processor: Any) -> int | None:
-    for obj in (processor, tokenizer):
-        for attr in ("image_token_id", "image_token_index"):
-            value = getattr(obj, attr, None)
-            if isinstance(value, int):
-                return int(value)
-        token = getattr(obj, "image_token", None)
-        if isinstance(token, str):
-            convert = getattr(tokenizer, "convert_tokens_to_ids", None)
-            if callable(convert):
-                token_id = convert(token)
-                if isinstance(token_id, int) and token_id >= 0:
-                    return int(token_id)
-    convert = getattr(tokenizer, "convert_tokens_to_ids", None)
-    if callable(convert):
-        for token in ("<|image_pad|>", "<|image|>", "<image>"):
-            token_id = convert(token)
-            if isinstance(token_id, int) and token_id >= 0:
-                return int(token_id)
-    return None
+    from areno.api.multimodal import _image_token_id as resolve_image_token_id
+
+    return resolve_image_token_id(tokenizer, processor)
 
 
 def _generation_eos_token_ids(model_path: str, tokenizer: Any) -> tuple[int, ...]:
