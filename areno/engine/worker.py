@@ -72,6 +72,12 @@ class ArenoWorker:
         self.adapter_registry = (
             initialize_lora(self.model, config.lora, seed=config.lora_seed) if config.lora is not None else None
         )
+        if config.lora is not None and config.lora.qlora:
+            from areno.adapters.qlora import initialize_qlora
+
+            if self.device.type != "cuda":
+                raise ValueError("QLoRA requires CUDA")
+            initialize_qlora(self.model)
         if config.runtime.compile_model:
             self.model = torch.compile(self.model)
         if self.adapter_registry is not None and config.lora.adapter_path is not None:

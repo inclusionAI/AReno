@@ -103,6 +103,12 @@ def build_optimizer(params, optimizer_config, ctx, *, lr: float | None = None):
         optimizer_cls = AdamW8bit
     else:
         optimizer_cls = AdamWFP32Master
+    if optimizer_config.paged:
+        from areno.engine.optim.paged import PagedAdamW4bit, PagedAdamW8bit, PagedAdamWFP32Master
+
+        optimizer_cls = {AdamW4bit: PagedAdamW4bit, AdamW8bit: PagedAdamW8bit, AdamWFP32Master: PagedAdamWFP32Master}[
+            optimizer_cls
+        ]
     return optimizer_cls(
         params,
         lr=optimizer_config.lr if lr is None else float(lr),

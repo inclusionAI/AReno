@@ -34,6 +34,7 @@ AReno's mission is to make LLM RL **accessible** for a broad community of resear
 - 🧰 **Agentic RL ready**: run an agent function against AReno's local OpenAI-compatible proxy, return explicit trajectories, and train from tokens, logprobs, rewards, and loss masks derived by the trainer.
 - 🎞️ **Multimodal**: use image, audio, and video content with compatible model processors through the same OpenAI-style message format in serving and agentic training.
 - 🧩 **Native LoRA**: train TP-aware adapters for Qwen3, Qwen3-MoE, and Bailing-MoE V3, save standard PEFT artifacts, and reload them for training or serving.
+- 🗜️ **QLoRA**: train Qwen3 dense and Bailing-MoE V3 adapters on CUDA with NF4 weights, double quantization, and paged optimizers.
 - 🧩 **Extensible**: easily register new algorithms, model adapters, reward functions, and hardware backends without changing the core.
 
 ## Installation
@@ -338,6 +339,14 @@ Saved checkpoints contain standard PEFT `adapter_config.json` and
 supplying the frozen base checkpoint together with `--lora-adapter-path`.
 See the [native LoRA guide](docs/concepts/native-lora.rst) for supported
 models and targets, agentic training, save/reload, and serving examples.
+
+#### QLoRA
+
+For CUDA Qwen3 dense and Bailing-MoE V3, add `--qlora --adam-4bit` to the
+training command above to use NF4 weights, double quantization, and paged
+Adam4bit. `--qlora` enables rank 8 / alpha 16 LoRA by default; the existing
+`--lora-*` options override these settings. Saved adapters automatically
+restore their quantization mode through `--lora-adapter-path`.
 
 ### Serving
 

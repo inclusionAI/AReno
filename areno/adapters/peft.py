@@ -126,6 +126,14 @@ def export_peft_adapter(
     (output_path / "adapter_config.json").write_text(
         json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
+    quantization_path = output_path / "areno_quantization_config.json"
+    if registry.config.qlora:
+        quantization_path.write_text(
+            json.dumps({"format": "nf4-dq-v1", "block_size": 64, "scale_block_size": 256}, indent=2) + "\n",
+            encoding="utf-8",
+        )
+    elif quantization_path.exists():
+        quantization_path.unlink()
     save_file(state, output_path / "adapter_model.safetensors")
     return str(output_path)
 

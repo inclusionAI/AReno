@@ -45,6 +45,10 @@ class CudaConfig:
     lora: LoraConfig | None = None
     reference_mode: Literal["independent", "reuse_actor_base"] = "independent"
 
+    def __post_init__(self) -> None:
+        if self.lora is not None and self.lora.qlora and self.resolved_rollout_tp_size() != self.tp_size:
+            raise ValueError("QLoRA requires matching train and rollout TP sizes for identical base quantization")
+
     def uses_separate_rollout_engine(self) -> bool:
         """Return whether rollout runs on its own CUDA device partition."""
 
@@ -83,6 +87,8 @@ class MlxConfig:
     reference_mode: Literal["independent", "reuse_actor_base"] = "independent"
 
     def __post_init__(self) -> None:
+        if self.lora is not None and self.lora.qlora:
+            raise ValueError("QLoRA requires CUDA")
         if self.adapter_path is not None and self.lora is not None:
             raise ValueError("MlxConfig.adapter_path cannot be combined with MlxConfig.lora")
         if self.reference_mode != "independent":
