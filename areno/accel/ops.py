@@ -158,10 +158,11 @@ def chunk_lightning_attn(q, k, v, *args, **kwargs):
     # FLA 0.5.2 accepts sequence-first tensors and removed head_first.
     # Ascend's wrapper still consumes that option itself.
     head_first = kwargs.pop("head_first", False)
-    if head_first:
-        q, k, v = (tensor.transpose(1, 2) for tensor in (q, k, v))
+    if not head_first:
+        return implementation(q, k, v, *args, **kwargs)
+    q, k, v = (tensor.transpose(1, 2) for tensor in (q, k, v))
     out, state = implementation(q, k, v, *args, **kwargs)
-    return (out.transpose(1, 2) if head_first else out), state
+    return out.transpose(1, 2), state
 
 
 def seg_la_fwd(q, k, v, s, decay_scales, meta, caches=None, softmax_scale=None):

@@ -1,4 +1,5 @@
 """Execute migrated GQA/MLA projections and FLA against native CUDA."""
+
 from __future__ import annotations
 
 import importlib
@@ -28,9 +29,17 @@ def _cuda_tp_context():
 @pytest.mark.parametrize("factor", (0.5, 1.0))
 def test_projection_fft_lora_parity_and_backward(family, mla, factor):
     module = importlib.import_module(f"areno.models.{family}.model")
-    config = ModelConfig(hidden_size=128, head_dim=32, num_attention_heads=4, num_key_value_heads=2,
-        kv_lora_rank=16 if mla else None, partial_rotary_factor=factor,
-        dtype=torch.bfloat16, attn_backend="native", sequence_parallel=False)
+    config = ModelConfig(
+        hidden_size=128,
+        head_dim=32,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        kv_lora_rank=16 if mla else None,
+        partial_rotary_factor=factor,
+        dtype=torch.bfloat16,
+        attn_backend="native",
+        sequence_parallel=False,
+    )
     policy = nn.Module()
     policy.config = config
     policy.attention = module.BailingSoftmaxAttention(config, 0).to("cuda", dtype=torch.bfloat16)
@@ -40,8 +49,7 @@ def test_projection_fft_lora_parity_and_backward(family, mla, factor):
     hidden = torch.randn(1, 32, 128, device="cuda", dtype=torch.bfloat16)
     positions = torch.arange(32, device="cuda").unsqueeze(0)
     expected = tuple(t.detach() for t in policy.attention._project(hidden, positions))
-    target = "attention.q_proj" if mla else "attention.q_proj"
-    initialize_lora(policy, LoraConfig(rank=4, alpha=4, target_modules=(target,)), seed=7)
+    initialize_lora(policy, LoraConfig(rank=4, alpha=4, target_modules=("attention.q_proj",)), seed=7)
     actual = policy.attention._project(hidden, positions)
     for before, after in zip(expected, actual, strict=True):
         torch.testing.assert_close(before, after, atol=0, rtol=0)
@@ -54,8 +62,15 @@ def test_projection_fft_lora_parity_and_backward(family, mla, factor):
 @pytest.mark.parametrize("packed", (False, True))
 def test_fla_052_training_call_backward(family, packed):
     module = importlib.import_module(f"areno.models.{family}.model")
-    config = ModelConfig(hidden_size=128, head_dim=32, num_attention_heads=4,
-        num_key_value_heads=4, num_hidden_layers=2, dtype=torch.bfloat16, sequence_parallel=False)
+    config = ModelConfig(
+        hidden_size=128,
+        head_dim=32,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        num_hidden_layers=2,
+        dtype=torch.bfloat16,
+        sequence_parallel=False,
+    )
     attention = module.BailingLinearAttention(config, 0).to("cuda", dtype=torch.bfloat16)
     tensors = [torch.randn(1, 64, 4, 32, device="cuda", dtype=torch.bfloat16, requires_grad=True) for _ in range(3)]
     cu_seqlens = torch.tensor([0, 32, 64], device="cuda", dtype=torch.int32) if packed else None
