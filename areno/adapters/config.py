@@ -31,6 +31,8 @@ BAILING_V3_TARGETS = (
     "gate_proj",
     "up_proj",
     "down_proj",
+    "linear_fc1",
+    "linear_fc2",
 )
 
 NATIVE_LORA_TARGETS = tuple(dict.fromkeys((*QWEN3_DENSE_TARGETS, *BAILING_V3_TARGETS)))
@@ -71,10 +73,10 @@ class LoraConfig:
             raise ValueError("lora alpha must be > 0")
         if self.dropout != 0.0:
             raise ValueError("native LoRA currently requires dropout=0")
-        requested = set(self.target_modules)
-        supported = set(NATIVE_LORA_TARGETS)
-        if not requested or not requested <= supported:
-            raise ValueError(f"target_modules must be a non-empty subset of {NATIVE_LORA_TARGETS}")
+        if not self.target_modules or any(
+            not isinstance(target, str) or not target.strip() for target in self.target_modules
+        ):
+            raise ValueError("target_modules must contain non-empty module selectors")
 
     @property
     def scale(self) -> float:
@@ -83,7 +85,7 @@ class LoraConfig:
 
 def _read_adapter_config(path: str) -> dict:
     adapter_config = json.loads((Path(path) / "adapter_config.json").read_text(encoding="utf-8"))
-    if str(adapter_config.get("peft_type", "")).upper() != "LORA":
+    if str(adapter_config.get("peft_type", "")).upper() not in {"LORA", "ARENO_LORA_POLICY"}:
         raise ValueError("adapter_path must contain a PEFT LoRA artifact")
     unsupported = []
     if adapter_config.get("bias", "none") != "none" or bool(adapter_config.get("lora_bias", False)):

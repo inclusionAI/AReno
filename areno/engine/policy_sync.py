@@ -100,6 +100,8 @@ def build_adapter_policy_plan(registry: AdapterRegistry) -> PolicyTensorStore:
                     publish=_column_range_publisher(slot, ctx.rank, ctx.world_size),
                 ),
             )
+    for name, tensor in registry.policy_state.named_tensors():
+        plan.add_layout(f"areno_policy_state.{name}", _replicated_layout(tensor))
     return plan
 
 

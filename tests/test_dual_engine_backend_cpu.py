@@ -143,3 +143,37 @@ def test_close_releases_both_engines() -> None:
 
     assert rollout.events == ["close"]
     assert train.events == ["close"]
+
+
+@pytest.mark.parametrize("with_lora", [False, True])
+def test_separate_rollout_preserves_media_policy_selection(monkeypatch, with_lora: bool) -> None:
+    from areno import ArenoEngine
+    from areno.adapters import LoraConfig
+    from areno.api import CudaConfig
+    from areno.engine import protocol
+
+    options = []
+
+    def make_engine(_model_path, **kwargs):
+        options.append(kwargs)
+        return _Engine(kwargs["role"], ())
+
+    monkeypatch.setattr(ArenoEngine, "from_pretrained", staticmethod(make_engine))
+    monkeypatch.setattr(protocol, "start_partitioned_clusters", lambda *_args: None)
+    config = CudaConfig(
+        tp_size=2,
+        devices=[0, 1],
+        rollout_devices=[2],
+        rollout_tp_size=1,
+        optimizer={"unfreeze_multimodal_projector": True, "multimodal_projector_lr": 2e-5},
+        lora=LoraConfig(rank=4) if with_lora else None,
+    )
+    backend = CudaBackend()
+    backend.initialize(SimpleNamespace(custom_config=config, world_size=2, model_path="local-checkpoint"))
+    try:
+        assert [option["role"] for option in options] == ["train", "rollout"]
+        for option in options:
+            assert option["optimizer_config"].unfreeze_multimodal_projector
+            assert option["optimizer_config"].multimodal_projector_lr == 2e-5
+    finally:
+        backend.close()

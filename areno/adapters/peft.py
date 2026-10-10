@@ -10,6 +10,7 @@ import torch.distributed as dist
 from safetensors.torch import load_file, save_file
 
 from areno.adapters.lora import AdapterRegistry, LoraSlot, RoutedExpertLoraSlot
+from areno.adapters.policy_state import read_policy_metadata
 from areno.engine.parallel.context import get_tp_context
 
 _PREFIX = "base_model.model.model."
@@ -36,6 +37,20 @@ def load_peft_adapter(registry: AdapterRegistry, path: str | Path) -> None:
         actual_shape = tuple(tensors[key].shape)
         if actual_shape != expected_shape:
             raise ValueError(f"PEFT adapter tensor {key!r} has shape {actual_shape}, expected {expected_shape}")
+
+    policy = dict(registry.policy_state.named_tensors())
+    # Standard PEFT adapters may initialize a new FFT-compatible policy with
+    # router updates or media unfreeze enabled. They carry only A/B; supplemental
+    # state is required only when the artifact declares that it saved it.
+    if read_policy_metadata(str(input_path)):
+        auxiliary = load_file(input_path / "areno_policy_state.safetensors", device="cpu")
+        if auxiliary.keys() != policy.keys():
+            raise ValueError("adapter auxiliary policy tensor keys do not match the model")
+        for name, tensor in policy.items():
+            if auxiliary[name].shape != tensor.shape or auxiliary[name].dtype != tensor.dtype:
+                raise ValueError(f"adapter auxiliary policy tensor {name!r} has an incompatible shape or dtype")
+        for name, tensor in policy.items():
+            tensor.copy_(auxiliary[name])
 
     for logical_name, slot in registry.slots.items():
         if isinstance(slot, RoutedExpertLoraSlot):
@@ -135,6 +150,14 @@ def export_peft_adapter(
     elif quantization_path.exists():
         quantization_path.unlink()
     save_file(state, output_path / "adapter_model.safetensors")
+    if registry.policy_state.active:
+        config["peft_type"] = "ARENO_LORA_POLICY"
+        config["areno_policy_state"] = registry.policy_state.metadata()
+        auxiliary = {name: tensor.detach().cpu().contiguous() for name, tensor in registry.policy_state.named_tensors()}
+        save_file(auxiliary, output_path / "areno_policy_state.safetensors")
+        (output_path / "adapter_config.json").write_text(
+            json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
     return str(output_path)
 
 

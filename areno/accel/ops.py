@@ -60,6 +60,7 @@ class FusedMoeConfig:
         top_k: Number of experts each token is routed to.
         routed_scaling_factor: Multiplier applied during the top-k sum-reduce
             (DeepSeek-style routed-expert rescaling).
+        swiglu_limit: Optional Flash-V3 clipping limit for the SiLU gate and up branch.
         block_size_m: M tile size of the grouped matmul. Tokens are padded to
             multiples of this so each tile sees one expert exclusively.
         block_size_n: N tile size (output features per program).
@@ -77,6 +78,7 @@ class FusedMoeConfig:
     block_size_n: int = 64
     block_size_k: int = 64
     group_size_m: int = 8
+    swiglu_limit: float | None = None
 
 
 @dataclass

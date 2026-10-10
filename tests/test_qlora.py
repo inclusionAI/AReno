@@ -149,8 +149,9 @@ def test_paged_optimizer_matches_nonpaged_and_roundtrips(mode):
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
-@pytest.mark.parametrize("adapters", [False, True])
-def test_nf4_moe_graph_replays_changed_routes_and_adapters(dtype, adapters):
+@pytest.mark.parametrize("adapters", [False, True, "fused"])
+@pytest.mark.parametrize("swiglu_limit", [None, 0.02])
+def test_nf4_moe_graph_replays_changed_routes_and_adapters(dtype, adapters, swiglu_limit):
     from types import SimpleNamespace
 
     from areno.accel.kernels.nf4_moe import nf4_experts
@@ -164,14 +165,19 @@ def test_nf4_moe_graph_replays_changed_routes_and_adapters(dtype, adapters):
     x = torch.randn(tokens, hidden, device="cuda", dtype=dtype)
     ids = torch.randint(experts, (tokens, top_k), device="cuda", dtype=torch.int32)
     weights = torch.rand(tokens, top_k, device="cuda")
-    config = FusedMoeConfig(experts, hidden, width, top_k, routed_scaling_factor=1.25)
+    config = FusedMoeConfig(experts, hidden, width, top_k, routed_scaling_factor=1.25, swiglu_limit=swiglu_limit)
     slots = {}
     if adapters:
-        for name, size_in, size_out in (
-            ("gate_proj", hidden, width),
-            ("up_proj", hidden, width),
-            ("down_proj", width, hidden),
-        ):
+        targets = (
+            (
+                ("gate_proj", hidden, width),
+                ("up_proj", hidden, width),
+                ("down_proj", width, hidden),
+            )
+            if adapters != "fused"
+            else (("linear_fc1", hidden, 2 * width), ("linear_fc2", width, hidden))
+        )
+        for name, size_in, size_out in targets:
             slots[name] = SimpleNamespace(
                 rank=8,
                 out_features=size_out,
@@ -186,16 +192,26 @@ def test_nf4_moe_graph_replays_changed_routes_and_adapters(dtype, adapters):
             for k in range(top_k):
                 expert = int(ids[t, k])
                 gu = F.linear(x[t], w1[expert])
+                if "linear_fc1" in slots:
+                    slot = slots["linear_fc1"]
+                    gu += F.linear(F.linear(x[t], slot.lora_A[expert]), slot.lora_B[expert]) * slot.scale
                 gate, up = gu.chunk(2)
                 for name, target in (("gate_proj", gate), ("up_proj", up)):
                     if name in slots:
                         slot = slots[name]
                         target.add_(F.linear(F.linear(x[t], slot.lora_A[expert]), slot.lora_B[expert]) * slot.scale)
                 # Native SiLU kernel computes the activation and product in FP32.
-                activated = (F.silu(gate.float()) * up.float()).to(dtype) * weights[t, k].to(dtype)
+                if swiglu_limit is None:
+                    activated = (F.silu(gate.float()) * up.float()).to(dtype)
+                else:
+                    activated = F.silu(gate).clamp(max=swiglu_limit) * up.clamp(-swiglu_limit, swiglu_limit)
+                activated = activated * weights[t, k].to(dtype)
                 y = F.linear(activated, w2[expert])
                 if "down_proj" in slots:
                     slot = slots["down_proj"]
+                    y += F.linear(F.linear(activated, slot.lora_A[expert]), slot.lora_B[expert]) * slot.scale
+                if "linear_fc2" in slots:
+                    slot = slots["linear_fc2"]
                     y += F.linear(F.linear(activated, slot.lora_A[expert]), slot.lora_B[expert]) * slot.scale
                 out[t] += y.float()
         return out.to(dtype) * config.routed_scaling_factor

@@ -12,9 +12,17 @@ Support
 
 Native LoRA currently supports these CUDA model adapters:
 
-* Qwen3
-* Qwen3-MoE
-* Bailing-MoE V3 checkpoints with ``no_kda_lora=true``
+* Llama, OLMo2, Qwen3 and Qwen3-MoE
+* Qwen3.5 dense, MoE and vision-language variants
+* Gemma4, Phi4MM and MiniCPM-V 4.6 language projections
+* Legacy Bailing-MoE and Bailing-MoE V3 native projections
+
+Bindings follow the working full-parameter model's native projection layout,
+including packed and replicated projections. A checkpoint architecture must
+first be supported by that model's FFT constructor and loader. LoRA does not
+add a separate ``no_kda_lora`` flag requirement; it does not introduce a missing
+two-stage KDA base architecture. Native-module coverage is broader than the
+real-checkpoint profiles qualified by an individual experiment.
 
 On Apple Silicon, the MLX backend supports dense Qwen3 LoRA and includes an
 experimental Ling-3.0-tiny attention-only resolver. Ling MLX numerical and
@@ -26,13 +34,24 @@ The default target modules are ``q_proj``, ``k_proj``, ``v_proj``,
 ``o_proj``, ``gate_proj``, ``up_proj``, and ``down_proj``. Select a subset
 with ``--lora-target-modules``. Bailing-MoE V3 additionally supports its
 native attention projection names, including ``q_a_proj``, ``q_b_proj``,
-``kv_a_proj_with_mqa``, and ``kv_b_proj``.
+``kv_a_proj_with_mqa``, and ``kv_b_proj``. Flash V3 checkpoints may select
+their fused routed-expert projections as ``linear_fc1`` and ``linear_fc2``.
+Concrete projection paths such as ``layers.2.mlp.experts.linear_fc1`` are
+accepted when only specific layers should receive adapters.
 
 LoRA dropout must currently be zero. Standard PEFT LoRA adapters are accepted,
 but options that change the adapter structure, such as DoRA, RS-LoRA, bias
 training, rank patterns, alpha patterns, or ``modules_to_save``, are rejected
-with a configuration error. Bailing-MoE V3 router-bias updates must also be
-disabled so the base policy remains frozen.
+with a configuration error. Dropout on the adapter is a LoRA-specific option
+rather than an FFT compatibility requirement.
+
+Existing FFT multimodal tower/projector unfreeze options can accompany language
+LoRA. Those explicitly selected media parameters remain trainable; other base
+parameters stay frozen. Existing adaptive router-bias updates also remain
+available. The engine publishes this additional policy state alongside A/B,
+and the base-only reference view restores its original checkpoint values.
+Routed-expert rollout consumes merged inference tiles through the native fused
+path, with graph buffers refreshed after updates.
 
 Train
 -----
@@ -88,8 +107,13 @@ Tic-Tac-Toe tool-calling policy:
 Save and reload
 ---------------
 
-Each LoRA save directory contains PEFT-compatible
-``adapter_config.json`` and ``adapter_model.safetensors`` files. The save is
+Each LoRA save directory contains
+``adapter_config.json`` and ``adapter_model.safetensors`` files. A/B-only saves
+are standard PEFT LoRA artifacts. When media unfreeze or adaptive router state
+is present, the artifact uses ``peft_type=ARENO_LORA_POLICY`` and adds
+``areno_policy_state.safetensors``; reload these combined policies through
+AReno. Step-local routing counters are excluded. A standard PEFT adapter can
+also initialize a new run with these FFT options enabled. The save is
 adapter-only: continue to pass the original base checkpoint with ``--ckpt``.
 To initialize a new training run from a saved adapter:
 
