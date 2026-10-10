@@ -53,7 +53,15 @@ class ModelAdapter(ABC):
 
     @abstractmethod
     def build(self, config: ModelConfig) -> nn.Module:
-        """Instantiate the nn.Module described by ``config`` (no weights yet)."""
+        """Instantiate the nn.Module described by ``config`` (no weights yet).
+
+        Causal models accept ``defer_lm_head=True`` during training and return
+        final normalized ``hidden_states`` with ``logits_shard=None``. The
+        shared runtime then scores packed targets through the model's
+        ``lm_head`` in bounded token chunks. Output transforms performed
+        outside the head must also be exposed to that scoring path (currently
+        ``final_logit_softcapping``).
+        """
 
         raise NotImplementedError
 

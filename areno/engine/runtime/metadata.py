@@ -26,6 +26,7 @@ class TrainMeta:
     activation_checkpointing: bool = False
     num_padding_tokens: int = 0
     routing_replay: torch.Tensor | None = None
+    mst_chunk_size: int = 0
 
 
 @dataclass(slots=True)

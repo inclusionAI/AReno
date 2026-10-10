@@ -26,7 +26,7 @@ from areno.engine.parallel.collectives import (
     sequence_parallel_region,
 )
 from areno.engine.runtime.metadata import InferMeta, TrainMeta
-from areno.engine.runtime.recompute import checkpoint_layer
+from areno.engine.runtime.recompute import checkpoint_layer, tokenwise_forward
 from areno.models.base import CausalLMOutput, ModelAdapter
 from areno.models.phi4mm.vision import Phi4MMExtendedEmbedding, Phi4MMVisionConfig
 
@@ -465,6 +465,19 @@ class Phi4MMDecoderLayer(nn.Module):
             self.mlp.gate_up_proj.vision_lora_mask = mask
             self.mlp.down_proj.vision_lora_mask = mask
 
+    def _masked_mlp(self, hidden_states: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        # The mask is token-aligned state: slice and checkpoint it together
+        # with activations rather than reusing the full-sequence module mask.
+        gate_mask = self.mlp.gate_up_proj.vision_lora_mask
+        down_mask = self.mlp.down_proj.vision_lora_mask
+        try:
+            self.mlp.gate_up_proj.vision_lora_mask = mask.view(hidden_states.shape[:-1])
+            self.mlp.down_proj.vision_lora_mask = mask.view(hidden_states.shape[:-1])
+            return self.mlp(hidden_states)
+        finally:
+            self.mlp.gate_up_proj.vision_lora_mask = gate_mask
+            self.mlp.down_proj.vision_lora_mask = down_mask
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -477,7 +490,20 @@ class Phi4MMDecoderLayer(nn.Module):
         hidden_states = residual + self.self_attn(hidden_states, position_ids, train_meta, infer_meta)
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
-        return residual + self.mlp(hidden_states)
+        mask = getattr(self.mlp.gate_up_proj, "vision_lora_mask", None)
+        if infer_meta is not None or not getattr(train_meta, "mst_chunk_size", 0):
+            # In SP the projection owns a full-sequence mask even though its
+            # input is sharded. Preserve that layout on the original path.
+            return residual + self.mlp(hidden_states)
+        mlp_fn = self.mlp if mask is None else self._masked_mlp
+        token_args = () if mask is None else (mask.reshape(-1),)
+        return residual + tokenwise_forward(
+            mlp_fn,
+            hidden_states,
+            *token_args,
+            train_meta=train_meta,
+            infer_meta=infer_meta,
+        )
 
 
 class Phi4MMModel(nn.Module):
@@ -705,11 +731,12 @@ class Phi4MMForCausalLM(nn.Module):
         train_meta: TrainMeta | None = None,
         infer_meta: InferMeta | None = None,
         features: dict[str, Any] | list[dict[str, Any] | None] | None = None,
+        defer_lm_head: bool = False,
     ) -> CausalLMOutput:
         use_sequence_parallel = bool(train_meta is not None and train_meta.sequence_parallel)
         with sequence_parallel_region(use_sequence_parallel):
             hidden_states = self.model(input_ids, position_ids, train_meta, infer_meta, features)
-            logits_shard = self.lm_head(hidden_states)
+            logits_shard = None if defer_lm_head else self.lm_head(hidden_states)
         return CausalLMOutput(logits_shard=logits_shard, hidden_states=hidden_states)
 
     def set_kv_caches(

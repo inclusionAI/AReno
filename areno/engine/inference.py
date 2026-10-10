@@ -61,8 +61,8 @@ def _cancel_stop_token(stop_token_ids: list[int], eos_token_id: int | tuple[int,
 
     if stop_token_ids:
         return int(stop_token_ids[0])
-    if isinstance(eos_token_id, tuple) and eos_token_id:
-        return int(eos_token_id[0])
+    if isinstance(eos_token_id, tuple):
+        return int(eos_token_id[0]) if eos_token_id else 0
     if eos_token_id is not None:
         return int(eos_token_id)
     return 0
@@ -901,7 +901,12 @@ class InferenceManager:
             state.decode_position_deltas(new_rows.detach().cpu().tolist()), device=self.device, dtype=torch.long
         )
         new_position_ids = new_cache_seqlens.to(torch.long) + new_position_deltas
-        new_block_table = prefill.block_table.to(self.device, non_blocking=True).int()
+        # A bounded chunk can finish some prompts and partially prefill the
+        # next one. Only completed prompts enter decode and its KV row table.
+        sampled_prefill_rows = torch.searchsorted(prefill.raw["cu_seqlens"][1:], prefill.sample_indices + 1)
+        new_block_table = (
+            prefill.block_table.index_select(0, sampled_prefill_rows).to(self.device, non_blocking=True).int()
+        )
         remove = torch.zeros(int(new_rows.numel()), device=self.device, dtype=torch.bool)
         finished = None
         if stop_token_tensor is not None:

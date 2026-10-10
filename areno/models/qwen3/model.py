@@ -50,7 +50,7 @@ from areno.engine.parallel.collectives import (
 )
 from areno.engine.parallel.context import get_tp_context
 from areno.engine.runtime.metadata import InferMeta, TrainMeta
-from areno.engine.runtime.recompute import checkpoint_layer, checkpoint_routed_moe_layer
+from areno.engine.runtime.recompute import checkpoint_layer, checkpoint_routed_moe_layer, tokenwise_forward
 from areno.engine.runtime.routing_replay import resolve_softmax_routes
 from areno.models.base import CausalLMOutput, ModelAdapter
 from areno.models.qwen3.checkpoint import CHECKPOINT_SPEC, QWEN3_MOE_CHECKPOINT_SPEC
@@ -79,7 +79,12 @@ class QwenDecoderLayer(nn.Module):
         hidden_states = residual + self.self_attn(hidden_states, position_ids, train_meta, infer_meta)
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = residual + self.mlp(hidden_states)
+        hidden_states = residual + tokenwise_forward(
+            self.mlp,
+            hidden_states,
+            train_meta=train_meta,
+            infer_meta=infer_meta,
+        )
         return hidden_states
 
 
@@ -379,6 +384,7 @@ class Qwen3ForCausalLM(nn.Module):
         position_ids: torch.Tensor | None = None,
         train_meta: TrainMeta | None = None,
         infer_meta: InferMeta | None = None,
+        defer_lm_head: bool = False,
     ) -> CausalLMOutput:
         if position_ids is None:
             # Default to monotonic 0..S-1 positions broadcast across the batch.
@@ -403,7 +409,7 @@ class Qwen3ForCausalLM(nn.Module):
                         infer_meta=infer_meta,
                     )
             hidden_states = self.norm(hidden_states)
-            logits_shard = self.lm_head(hidden_states)
+            logits_shard = None if defer_lm_head else self.lm_head(hidden_states)
         return CausalLMOutput(logits_shard=logits_shard, hidden_states=hidden_states)
 
     def set_kv_caches(

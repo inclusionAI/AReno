@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import torch
 import torch.distributed as dist
+from torch.func import functional_call
 from torch.utils.checkpoint import checkpoint
 
 from areno.engine.parallel.context import get_tp_context
@@ -108,9 +109,25 @@ def packed_next_token_logprobs_from_hidden(
     labels = flat_tokens[positions + 1]
     flat_hidden = hidden_states.reshape(-1, hidden_states.shape[-1])
     cap = float(logit_softcap or 0.0)
+    projection_parameters = None
+    if torch.is_grad_enabled() and lm_head.weight.dtype in (torch.bfloat16, torch.float16):
+        projection_dtype = lm_head(flat_hidden[:0].to(lm_head.weight.dtype).unsqueeze(0)).dtype
+        if projection_dtype == torch.float32:
+            # Some heads keep BF16 tied weights but project in FP32. Cast
+            # parameters once for the whole loss graph: casting inside each
+            # chunk would round every partial weight gradient back to BF16
+            # before summing it, unlike the full-sequence projection.
+            projection_parameters = {name: param.float() for name, param in lm_head.named_parameters()}
 
     def score_chunk(chunk_hidden: torch.Tensor, chunk_labels: torch.Tensor) -> torch.Tensor:
-        logits = lm_head(chunk_hidden)
+        # Preserve the model forward's [batch, tokens, hidden] layout. Native
+        # parallel heads dispatch 2D inputs to a different fused linear path,
+        # which would change the backward arithmetic solely due to chunking.
+        states = chunk_hidden.to(lm_head.weight.dtype).unsqueeze(0)
+        if projection_parameters is None:
+            logits = lm_head(states).squeeze(0)
+        else:
+            logits = functional_call(lm_head, projection_parameters, (states,)).squeeze(0)
         if cap:
             logits = cap * torch.tanh(logits / cap)
         return vocab_parallel_selected_logprobs(logits, chunk_labels)
@@ -177,13 +194,23 @@ def _selected_logprobs_components_forward(
     if world_size > 1:
         dist.all_reduce(global_max, op=dist.ReduceOp.MAX, group=group)
 
-    exp_sum = torch.zeros_like(global_max, dtype=torch.float32)
-    for start in range(0, local_vocab, vocab_chunk_size):
-        end = min(start + vocab_chunk_size, local_vocab)
-        exp_sum += torch.exp(logits_shard[..., start:end].float() - global_max.unsqueeze(-1)).sum(dim=-1)
-    if world_size > 1:
-        dist.all_reduce(exp_sum, op=dist.ReduceOp.SUM, group=group)
-    logsumexp = global_max + exp_sum.log()
+    if (
+        world_size == 1
+        and logits_shard.ndim == 2
+        and logits_shard.device.type == "cuda"
+        and logits_shard.dtype != torch.float64
+    ):
+        from areno.engine.runtime._logprob_kernels import row_logsumexp
+
+        logsumexp = row_logsumexp(logits_shard, global_max, vocab_chunk_size)
+    else:
+        exp_sum = torch.zeros_like(global_max, dtype=torch.float32)
+        for start in range(0, local_vocab, vocab_chunk_size):
+            end = min(start + vocab_chunk_size, local_vocab)
+            exp_sum += torch.exp(logits_shard[..., start:end].float() - global_max.unsqueeze(-1)).sum(dim=-1)
+        if world_size > 1:
+            dist.all_reduce(exp_sum, op=dist.ReduceOp.SUM, group=group)
+        logsumexp = global_max + exp_sum.log()
 
     safe_labels = local_labels.clamp(min=0, max=max(local_vocab - 1, 0))
     target = logits_shard.gather(-1, safe_labels.unsqueeze(-1)).squeeze(-1).float()
@@ -223,14 +250,24 @@ def _selected_logprobs_components(
     if world_size > 1:
         dist.all_reduce(global_max, op=dist.ReduceOp.MAX, group=group)
 
-    exp_sum = torch.zeros_like(global_max, dtype=torch.float32)
-    for start in range(0, local_vocab, vocab_chunk_size):
-        end = min(start + vocab_chunk_size, local_vocab)
-        shifted = logits_shard[..., start:end].float() - global_max.unsqueeze(-1)
-        exp_sum += torch.exp(shifted).sum(dim=-1)
-    if world_size > 1:
-        dist.all_reduce(exp_sum, op=dist.ReduceOp.SUM, group=group)
-    logsumexp = global_max + exp_sum.log()
+    if (
+        world_size == 1
+        and logits_shard.ndim == 2
+        and logits_shard.device.type == "cuda"
+        and logits_shard.dtype != torch.float64
+    ):
+        from areno.engine.runtime._logprob_kernels import row_logsumexp
+
+        logsumexp = row_logsumexp(logits_shard, global_max, vocab_chunk_size)
+    else:
+        exp_sum = torch.zeros_like(global_max, dtype=torch.float32)
+        for start in range(0, local_vocab, vocab_chunk_size):
+            end = min(start + vocab_chunk_size, local_vocab)
+            shifted = logits_shard[..., start:end].float() - global_max.unsqueeze(-1)
+            exp_sum += torch.exp(shifted).sum(dim=-1)
+        if world_size > 1:
+            dist.all_reduce(exp_sum, op=dist.ReduceOp.SUM, group=group)
+        logsumexp = global_max + exp_sum.log()
 
     # Off-shard label indices are clamped to a valid local position; the
     # resulting target value is zeroed via `local_mask` so the SUM-reduce

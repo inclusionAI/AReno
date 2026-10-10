@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 import areno.engine.inference as inference_mod
@@ -63,6 +64,63 @@ class _FakeInferenceManager(InferenceManager):
         return next_tokens + 1, torch.zeros_like(next_tokens, dtype=torch.float32) - float(sample_step)
 
 
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_long_prompt_prefill_is_bounded_without_shortening_rows(asynchronous):
+    """Keep long-context activations bounded while consuming every prompt token."""
+
+    class Manager(_FakeInferenceManager):
+        def __init__(self):
+            super().__init__()
+            self.widths = []
+
+        def _run_prefill_payload(self, payload):
+            self.widths.append(payload.input_ids.numel())
+            return super()._run_prefill_payload(payload)
+
+        def _infer_next_token_tensor(self, payload):
+            self.widths.append(payload.input_ids.numel())
+            return super()._infer_next_token_tensor(payload)
+
+    manager = Manager()
+    ctx = SimpleNamespace(is_rank0=True, dp_rank=0, dp_size=1)
+
+    class Cluster:
+        def call(self, op, payload):
+            assert op is Op.INFER_ROLLOUT
+            assert payload.max_running_seqs == 4
+            state = InferenceBatchState(
+                payload.prompts_by_dp[0],
+                payload.max_new_tokens,
+                max_running_seqs=payload.max_running_seqs,
+                max_cache_len=payload.max_cache_len,
+                max_prefill_tokens=payload.max_prefill_tokens,
+                kv_block_size=payload.block_size,
+                num_cache_blocks=payload.num_blocks,
+            )
+            with PatchedContext(inference_mod, get_tp_context=lambda: ctx, broadcast_object=lambda value, src=0: value):
+                manager._generate_rollout_tokens_no_sync(state, SamplingParams(), None, prompt_indices=[0, 1, 2, 3])
+            return [state.to_rollout()]
+
+        async def call_async(self, op, payload, **kwargs):
+            return self.call(op, payload)
+
+    engine = object.__new__(ArenoEngine)
+    engine.cluster = Cluster()
+    engine.config = SimpleNamespace(tp_size=1, dp_size=1, runtime=SimpleNamespace(kv_block_size=256))
+    prompts = [[index] * 32769 for index in range(4)]
+    kwargs = dict(max_new_tokens=1, max_running_prompts=4)
+    result = (
+        asyncio.run(engine._generate_rollout_async_once(prompts, **kwargs))
+        if asynchronous
+        else engine.generate_rollout(prompts, **kwargs)
+    )
+    assert result.prompt_ids == prompts
+    assert result.response_ids == [[1]] * 4
+    assert manager.prefill_only_chunks > 0
+    assert sum(manager.widths) == sum(map(len, prompts))
+    assert max(manager.widths) <= 8192
+
+
 def test_drop_rollout_state_is_deferred_until_agentic_session_end():
     worker = object.__new__(worker_mod.ArenoWorker)
     worker.config = SimpleNamespace(
@@ -94,6 +152,36 @@ def test_drop_rollout_state_is_deferred_until_agentic_session_end():
     assert events == ["prepare", "drop"]
 
     assert worker._should_drop_rollout_hbm_after_infer()
+
+
+def test_drop_rollout_state_discards_cache_storage_and_invalidates_reuse():
+    """CPU cache copies still consume unified RAM after rollout has ended."""
+
+    model = SimpleNamespace(cache=torch.ones(1024), clear_infer_weights=lambda: None)
+    copies = []
+
+    def offload():
+        copies.append(model.cache.numel())
+        model.cache = model.cache.clone()
+
+    def clear():
+        model.cache = torch.empty(0)
+
+    model.offload_kv_caches = offload
+    model.clear_kv_caches = clear
+    worker = object.__new__(worker_mod.ArenoWorker)
+    worker.model = model
+    worker.device = torch.device("cpu")
+    worker._infer_cache_spec = (4, 8, 4, 16, 4)
+    worker._train_state_ready = True
+    worker._release_decode_graphs = lambda: None
+
+    worker._drop_rollout_hbm()
+
+    assert model.cache.numel() == 0
+    assert copies == []
+    assert worker._infer_cache_spec is None
+    assert not worker._train_state_ready
 
 
 def test_infer_cache_reuse_skips_weight_conversion_within_agentic_session():
