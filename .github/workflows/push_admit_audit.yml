@@ -5,6 +5,7 @@ on:
 
 jobs:
   audit:
+    if: github.repository == 'inclusionAI/AReno'
     runs-on: ubuntu-latest
     environment: push_check
     env:
