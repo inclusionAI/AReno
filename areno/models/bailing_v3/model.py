@@ -839,8 +839,20 @@ class BailingSoftmaxAttention(nn.Module):
         ctx = get_tp_context()
         self.layer_idx = layer_idx
         # Head-dim split: rope vs non-rope channels on Q/K, plus separate V dim.
-        self.qk_nope_head_dim = config.qk_nope_head_dim or config.head_dim
-        self.qk_rope_head_dim = config.qk_rope_head_dim or int(config.head_dim * config.partial_rotary_factor)
+        if config.qk_nope_head_dim or config.qk_rope_head_dim:
+            # Zero is meaningful for full RoPE; do not replace it with a default.
+            self.qk_nope_head_dim = config.qk_nope_head_dim
+            self.qk_rope_head_dim = config.qk_rope_head_dim
+        else:
+            self.qk_rope_head_dim = int(config.head_dim * config.partial_rotary_factor)
+            self.qk_nope_head_dim = (
+                config.head_dim - self.qk_rope_head_dim if config.kv_lora_rank is None else config.head_dim
+            )
+        if config.kv_lora_rank is None and (
+            min(self.qk_nope_head_dim, self.qk_rope_head_dim) < 0
+            or self.qk_nope_head_dim + self.qk_rope_head_dim != config.head_dim
+        ):
+            raise ValueError("standard GQA Q/K dimensions must sum to checkpoint head_dim")
         self.v_head_dim = config.v_head_dim or config.head_dim
         self.head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
         self.num_heads = config.num_attention_heads
@@ -981,6 +993,8 @@ class BailingSoftmaxAttention(nn.Module):
             if self.query_layernorm is not None:
                 q = self.query_layernorm(q)
                 k = self.key_layernorm(k)
+            if self.qk_rope_head_dim == 0:
+                return q, k, v
             q_rope, k_rope = self.rope(q[..., -self.qk_rope_head_dim :], k[..., -self.qk_rope_head_dim :], position_ids)
             return (
                 torch.cat((q[..., : self.qk_nope_head_dim], q_rope), dim=-1),
@@ -1876,7 +1890,9 @@ class BailingMoeV3Adapter(ModelAdapter):
         dtype = _parse_dtype(hf_config.get("torch_dtype") or hf_config.get("dtype"))
         num_heads = int(hf_config["num_attention_heads"])
         head_dim = int(hf_config.get("head_dim", hf_config["hidden_size"] // num_heads))
-        rotary_dim = int(hf_config.get("rotary_dim", hf_config.get("qk_rope_head_dim", head_dim)))
+        default_rotary_dim = int(head_dim * float(hf_config.get("partial_rotary_factor", 1.0)))
+        rotary_dim = int(hf_config.get("rotary_dim", hf_config.get("qk_rope_head_dim", default_rotary_dim)))
+        kv_lora_rank = hf_config.get("kv_lora_rank")
         num_experts = hf_config.get("num_experts", hf_config.get("n_routed_experts"))
         moe_intermediate_size = int(hf_config.get("moe_intermediate_size", hf_config.get("intermediate_size", 0)))
         num_experts_per_tok = int(hf_config.get("num_experts_per_tok", hf_config.get("moe_router_topk", 1)))
@@ -1949,11 +1965,13 @@ class BailingMoeV3Adapter(ModelAdapter):
             ),
             num_nextn_predict_layers=int(hf_config.get("num_nextn_predict_layers", 0)),
             mtp_loss_scaling_factor=float(hf_config.get("mtp_loss_scaling_factor", 0.0)),
-            qk_nope_head_dim=int(hf_config.get("qk_nope_head_dim", head_dim)),
+            qk_nope_head_dim=int(
+                hf_config.get("qk_nope_head_dim", head_dim - rotary_dim if kv_lora_rank is None else head_dim)
+            ),
             qk_rope_head_dim=int(hf_config.get("qk_rope_head_dim", rotary_dim)),
             v_head_dim=int(hf_config.get("v_head_dim", head_dim)),
             q_lora_rank=hf_config.get("q_lora_rank"),
-            kv_lora_rank=hf_config.get("kv_lora_rank"),
+            kv_lora_rank=kv_lora_rank,
             kda_safe_gate=_parse_bool(hf_config.get("kda_safe_gate"), False),
             kda_lower_bound=(
                 float(hf_config["kda_lower_bound"]) if hf_config.get("kda_lower_bound") is not None else None

@@ -148,13 +148,20 @@ def rms_norm_gate_fwd(
 
 
 def chunk_lightning_attn(q, k, v, *args, **kwargs):
-    """Keep CUDA's FLA call intact and adapt the Ascend FLA interface."""
+    """Adapt layout arguments at each backend boundary."""
     if q.device.type == "npu":
         from areno.accel.npu.seg_la import chunk_lightning_attn as implementation
-    else:
-        from fla.ops.lightning_attn import chunk_lightning_attn as implementation
+        return implementation(q, k, v, *args, **kwargs)
 
-    return implementation(q, k, v, *args, **kwargs)
+    from fla.ops.lightning_attn import chunk_lightning_attn as implementation
+
+    # FLA 0.5.2 accepts sequence-first tensors and removed head_first.
+    # Ascend's wrapper still consumes that option itself.
+    head_first = kwargs.pop("head_first", False)
+    if head_first:
+        q, k, v = (tensor.transpose(1, 2) for tensor in (q, k, v))
+    out, state = implementation(q, k, v, *args, **kwargs)
+    return (out.transpose(1, 2) if head_first else out), state
 
 
 def seg_la_fwd(q, k, v, s, decay_scales, meta, caches=None, softmax_scale=None):
