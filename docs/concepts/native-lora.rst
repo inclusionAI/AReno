@@ -78,6 +78,79 @@ the default target list covers attention and MLP projections:
 The resolved LoRA rank, alpha, dropout, target modules, and adapter path are
 shown in the configuration summary printed before model loading.
 
+Selecting full parameters
+-------------------------
+
+Use ``--full-parameter-targets`` to update original parameters rather than
+attach adapters to them. This is useful for parameters outside the supported
+LoRA projections, or modules you deliberately want to train in full. Full
+training allocates gradients and optimizer state for those parameters:
+selecting a large embedding or expert subtree can substantially increase memory.
+
+The option takes comma-separated selectors, not regexes or wildcards.
+Each selector is resolved against the native AReno model:
+
+* An **exact parameter path** selects only that parameter. In a Bailing V3
+  model with this layout, ``layers.2.mlp.gate.weight`` selects one router weight.
+* An **exact module path** selects its entire parameter subtree.
+  ``layers.2.mlp.gate`` includes any other parameters owned by that router,
+  not just its weight.
+* An **unqualified name** matches parameter names or immediate parent-module
+  names across the model. This is intentionally broad: ``weight`` selects
+  every parameter named ``weight``. Prefer exact paths for scoped experiments.
+
+These are native parameter/module paths, not necessarily Hugging Face
+checkpoint keys. LoRA selectors can identify logical projections inside fused
+weights. Full-parameter selectors identify actual physical parameters. If q,
+k, and v share a weight, selecting that weight trains all three components;
+it does not select just the q slice.
+
+Example: adapters plus a fullweight router
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+For a compatible Bailing V3 checkpoint, append the following to your normal
+training command. The paths match the scoped Flash case in the shared E2E;
+check your model layout before reusing them:
+
+.. code-block:: bash
+
+   --lora-rank 64 \
+   --lora-alpha 64 \
+   --lora-target-modules layers.0.attention.q_proj,layers.0.attention.k_proj,layers.2.mlp.experts.linear_fc1,layers.2.mlp.experts.linear_fc2 \
+   --full-parameter-targets layers.2.mlp.gate.weight
+
+Only the listed attention and expert projections receive adapters; one router
+weight is trained directly. This does not adapt all layers or train all routers.
+
+Example: train only selected full parameters
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+To train only that router, append:
+
+.. code-block:: bash
+
+   --full-parameter-targets layers.2.mlp.gate.weight
+
+Do not pass a LoRA rank or adapter path for this mode. The attention, experts,
+and all other unselected parameters remain frozen.
+
+Check the selection before a long run
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Review the configuration summary and target information emitted during
+initialization. Confirm the intended layers and trainable-parameter count.
+Unknown selectors fail rather than being silently ignored.
+
+Overlapping full-parameter selectors fail too. Do not select both
+``layers.2.mlp.gate`` and ``layers.2.mlp.gate.weight``: the module already
+includes the weight. The same base parameter cannot be both LoRA-adapted and
+fully trained, including when logical names refer to shared fused storage.
+
+For a comparison with full training, account for every intended parameter.
+Increasing LoRA rank does not unfreeze uncovered norms, routers, embeddings,
+or heads. Select them explicitly if they are trainable in your baseline.
+Use an independent frozen reference when any actor base parameters are trainable.
+
 Agentic LoRA uses the normal agent hooks. For example, this trains the
 Tic-Tac-Toe tool-calling policy:
 
@@ -159,3 +232,19 @@ For algorithms that require a frozen reference policy, use
 actor's frozen base checkpoint. AReno temporarily disables the adapter to
 evaluate the base policy, avoiding a second model copy. Keep the default
 ``independent`` mode when the reference checkpoint is different.
+
+Hybrid artifacts
+----------------
+
+``full_parameter_targets`` may be set in ``LoraConfig`` or through
+``--full-parameter-targets``. Selected full parameters are saved as canonical
+checkpoint tensors alongside A/B in a versioned ``ARENO_HYBRID`` artifact.
+Their complete current values are restored on reload; unselected parameters
+come from the original base checkpoint. Adaptive router buffers and media
+state retain their existing policy-state sidecar. This is an AReno artifact,
+not an external PEFT codec or an optimizer/scheduler/RNG resume checkpoint.
+
+Hybrid training requires an independent frozen reference: ``reuse_actor_base``
+is rejected because selected actor base parameters are trainable. Native NF4
+QLoRA remains available for LoRA; combining QLoRA with explicit full targets
+is currently rejected because its quantized base has no dense checkpoint layout.

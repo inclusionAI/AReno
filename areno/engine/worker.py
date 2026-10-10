@@ -92,7 +92,9 @@ class ArenoWorker:
         if config.runtime.compile_model:
             self.model = torch.compile(self.model)
         if self.adapter_registry is not None and config.lora.adapter_path is not None:
-            load_peft_adapter(self.adapter_registry, config.lora.adapter_path)
+            load_peft_adapter(
+                self.adapter_registry, config.lora.adapter_path, model=self.model, model_config=config.model
+            )
         opt = config.optimizer
         optimizer_parameters = (
             self.adapter_registry.parameters() if self.adapter_registry is not None else self.model.parameters()
@@ -685,7 +687,7 @@ class ArenoWorker:
         return {"path": path} if path is not None else None
 
     def export_adapter(self, payload: ExportAdapterPayload) -> dict | None:
-        """Write the native adapter in standard PEFT format."""
+        """Write the native LoRA or explicit hybrid adapter artifact."""
 
         if self.adapter_registry is None:
             raise RuntimeError("export_adapter requires native LoRA")
@@ -694,6 +696,8 @@ class ArenoWorker:
         path = export_peft_adapter(
             self.adapter_registry,
             payload.path,
+            model=self.model,
+            model_config=self.config.model,
             base_model_name_or_path=(self.config.base_model_name_or_path or self.config.model_path),
         )
         return {"path": path} if path is not None else None

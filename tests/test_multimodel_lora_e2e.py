@@ -291,7 +291,8 @@ def test_multimodel_lora_rollout_train_reload(tmp_path: Path, monkeypatch) -> No
 
     initial_path = tmp_path / "adapter-initial"
     trained_path = tmp_path / "adapter-trained"
-    lora = LoraConfig(rank=4, alpha=4.0, target_modules=case.targets)
+    full_targets = tuple(filter(None, os.getenv("ARENO_E2E_FULL_PARAMETER_TARGETS", "").split(",")))
+    lora = LoraConfig(rank=4, alpha=4.0, target_modules=case.targets, full_parameter_targets=full_targets)
     observed = _ObservedTrainer(
         Trainer(_train_world_size(case), os.fspath(model_path), custom_config=_cuda_config(lora, case))
     )
@@ -444,6 +445,12 @@ def test_multimodel_lora_rollout_train_reload(tmp_path: Path, monkeypatch) -> No
         for target in case.targets:
             owner, component = target.rsplit(".", 1)
             assert any(f"{owner}." in name and f".{component}.lora_B.weight" in name for name in changed), target
+    if full_targets:
+        full_keys = {name for name in trained if ".lora_" not in name}
+        assert full_keys and full_keys <= changed, "every selected full parameter must update"
+        metadata = json.loads((trained_path / "adapter_config.json").read_text())
+        assert metadata["peft_type"] == "ARENO_HYBRID"
+        assert tuple(metadata["full_parameter_targets"]) == full_targets
     before = torch.tensor(initial_logprobs)
     after = torch.tensor(trained_logprobs)
     assert torch.isfinite(before).all() and torch.isfinite(after).all()
@@ -478,6 +485,8 @@ def test_multimodel_lora_rollout_train_reload(tmp_path: Path, monkeypatch) -> No
         json.dumps(
             {
                 "case": case_name,
+                "full_parameter_targets": full_targets,
+                "changed_policy_keys": sorted(changed),
                 "tokens": parity_tokens,
                 "rollout_prompt_tokens": rollout_tokens,
                 "image_input": image_input,

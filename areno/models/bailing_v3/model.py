@@ -190,6 +190,10 @@ class BailingGate(nn.Module):
         # the sigmoid/top-k selection.
         logits = _areno_linear_no_compile(x.to(dtype=self.weight.dtype), self.weight)
         topk_idx, topk_weight = self._forward_grouped_topk(logits)
+        if self.weight.requires_grad and torch.is_grad_enabled():
+            # The fused selection has no backward; differentiate selected scores.
+            selected_scores = torch.sigmoid(logits.float().gather(-1, topk_idx))
+            topk_weight = selected_scores / selected_scores.sum(dim=-1, keepdim=True).clamp_min(1.0e-20)
         topk_idx, topk_weight = resolve_sigmoid_routes(
             self.routing_layer_slot,
             logits,
