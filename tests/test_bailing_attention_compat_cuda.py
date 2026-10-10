@@ -30,6 +30,7 @@ def _cuda_tp_context():
 def test_projection_fft_lora_parity_and_backward(family, mla, factor):
     module = importlib.import_module(f"areno.models.{family}.model")
     config = ModelConfig(
+        model_type="bailing_moe_linear_v2" if family == "bailing" else "bailing_moe_v3",
         hidden_size=128,
         head_dim=32,
         num_attention_heads=4,
@@ -49,7 +50,8 @@ def test_projection_fft_lora_parity_and_backward(family, mla, factor):
     hidden = torch.randn(1, 32, 128, device="cuda", dtype=torch.bfloat16)
     positions = torch.arange(32, device="cuda").unsqueeze(0)
     expected = tuple(t.detach() for t in policy.attention._project(hidden, positions))
-    initialize_lora(policy, LoraConfig(rank=4, alpha=4, target_modules=("attention.q_proj",)), seed=7)
+    target = "attention.q_proj" if mla else "attention.query_key_value"
+    initialize_lora(policy, LoraConfig(rank=4, alpha=4, target_modules=(target,)), seed=7)
     actual = policy.attention._project(hidden, positions)
     for before, after in zip(expected, actual, strict=True):
         torch.testing.assert_close(before, after, atol=0, rtol=0)
@@ -63,11 +65,13 @@ def test_projection_fft_lora_parity_and_backward(family, mla, factor):
 def test_fla_052_training_call_backward(family, packed):
     module = importlib.import_module(f"areno.models.{family}.model")
     config = ModelConfig(
+        model_type="bailing_moe_linear_v2" if family == "bailing" else "bailing_moe_v3",
         hidden_size=128,
         head_dim=32,
         num_attention_heads=4,
         num_key_value_heads=4,
         num_hidden_layers=2,
+        linear_backend="seg_la",
         dtype=torch.bfloat16,
         sequence_parallel=False,
     )
