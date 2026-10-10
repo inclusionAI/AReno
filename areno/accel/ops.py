@@ -60,6 +60,7 @@ class FusedMoeConfig:
         top_k: Number of experts each token is routed to.
         routed_scaling_factor: Multiplier applied during the top-k sum-reduce
             (DeepSeek-style routed-expert rescaling).
+        swiglu_limit: Optional Flash-V3 clipping limit for the SiLU gate and up branch.
         block_size_m: M tile size of the grouped matmul. Tokens are padded to
             multiples of this so each tile sees one expert exclusively.
         block_size_n: N tile size (output features per program).
@@ -77,6 +78,7 @@ class FusedMoeConfig:
     block_size_n: int = 64
     block_size_k: int = 64
     group_size_m: int = 8
+    swiglu_limit: float | None = None
 
 
 @dataclass
@@ -146,13 +148,21 @@ def rms_norm_gate_fwd(
 
 
 def chunk_lightning_attn(q, k, v, *args, **kwargs):
-    """Keep CUDA's FLA call intact and adapt the Ascend FLA interface."""
+    """Adapt layout arguments at each backend boundary."""
     if q.device.type == "npu":
         from areno.accel.npu.seg_la import chunk_lightning_attn as implementation
-    else:
-        from fla.ops.lightning_attn import chunk_lightning_attn as implementation
+        return implementation(q, k, v, *args, **kwargs)
 
-    return implementation(q, k, v, *args, **kwargs)
+    from fla.ops.lightning_attn import chunk_lightning_attn as implementation
+
+    # FLA 0.5.2 accepts sequence-first tensors and removed head_first.
+    # Ascend's wrapper still consumes that option itself.
+    head_first = kwargs.pop("head_first", False)
+    if not head_first:
+        return implementation(q, k, v, *args, **kwargs)
+    q, k, v = (tensor.transpose(1, 2) for tensor in (q, k, v))
+    out, state = implementation(q, k, v, *args, **kwargs)
+    return out.transpose(1, 2), state
 
 
 def seg_la_fwd(q, k, v, s, decay_scales, meta, caches=None, softmax_scale=None):

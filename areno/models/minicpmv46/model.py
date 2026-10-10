@@ -404,7 +404,12 @@ class MiniCPMFullAttention(nn.Module):
         # (q, gate, k, v) live in one fused projection. The gate is sized like
         # q (it gates per Q-head), then sigmoid'd to multiply the attention
         # output before ``o_proj``.
-        self.qkv_proj = MergedColumnParallelLinear(config.hidden_size, (q_size, q_size, kv_size, kv_size), bias=False)
+        self.qkv_proj = MergedColumnParallelLinear(
+            config.hidden_size,
+            (q_size, q_size, kv_size, kv_size),
+            bias=False,
+            lora_components=("q_proj", "q_gate_proj", "k_proj", "v_proj"),
+        )
         self.o_proj = RowParallelLinear(self.num_heads * self.head_dim, config.hidden_size, bias=False)
         self.q_norm = RMSNorm(config.head_dim, config.rms_norm_eps)
         self.k_norm = RMSNorm(config.head_dim, config.rms_norm_eps)
@@ -513,10 +518,14 @@ class MiniCPMGatedDeltaNet(nn.Module):
             config.hidden_size,
             (self.key_dim, self.key_dim, self.value_dim, self.value_dim),
             bias=False,
+            lora_components=("in_proj_q", "in_proj_k", "in_proj_v", "in_proj_z"),
         )
         # Fused (b, a) projection — per-head scalars.
         self.in_proj_ba = MergedColumnParallelLinear(
-            config.hidden_size, (self.num_value_heads, self.num_value_heads), bias=False
+            config.hidden_size,
+            (self.num_value_heads, self.num_value_heads),
+            bias=False,
+            lora_components=("in_proj_b", "in_proj_a"),
         )
         # Depthwise causal conv1d weight: one filter per channel (groups=channels).
         self.conv1d_weight = nn.Parameter(

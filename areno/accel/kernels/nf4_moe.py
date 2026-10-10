@@ -9,8 +9,7 @@ import torch
 import triton
 import triton.language as tl
 
-from areno.accel import areno_silu_and_mul
-from areno.accel.kernels.fused_moe import _align_block_size, _invoke_matmul, _sum_reduce
+from areno.accel.kernels.fused_moe import _align_block_size, _apply_gated_activation, _invoke_matmul, _sum_reduce
 
 
 @triton.jit
@@ -131,15 +130,19 @@ def nf4_experts(hidden, fc1, fc2, ids, weights, slots, config):
     routes = sorted_ids, expert_ids, used, ids, weights
     gate_up = _project(hidden, fc1, routes, ids.shape[1], config)
     width = fc1.shape[1] // 2
+    if "linear_fc1" in slots:
+        gate_up.add_(_adapter(hidden, slots["linear_fc1"], routes, ids.shape[1], config))
     if "gate_proj" in slots:
         gate_up[..., :width].add_(_adapter(hidden, slots["gate_proj"], routes, ids.shape[1], config))
     if "up_proj" in slots:
         gate_up[..., width:].add_(_adapter(hidden, slots["up_proj"], routes, ids.shape[1], config))
     activated = torch.empty((ids.numel(), width), device=hidden.device, dtype=hidden.dtype)
-    areno_silu_and_mul(gate_up.view(-1, 2 * width), activated)
+    _apply_gated_activation(gate_up.view(-1, 2 * width), activated, activation="silu", swiglu_limit=config.swiglu_limit)
     # Match training: round the weighted activation before the down projection.
     activated.mul_(weights.reshape(-1, 1).to(hidden.dtype))
     expert_out = _project(activated, fc2, routes, 1, config)
+    if "linear_fc2" in slots:
+        expert_out.add_(_adapter(activated, slots["linear_fc2"], routes, 1, config))
     if "down_proj" in slots:
         expert_out.add_(_adapter(activated, slots["down_proj"], routes, 1, config))
     out = torch.empty_like(hidden)
