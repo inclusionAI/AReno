@@ -359,7 +359,7 @@ def test_shared_training_probe_measures_each_microbatch(monkeypatch, device_type
         optimizer=SimpleNamespace(lr=0.001, model_params=list(model.parameters())),
         loss_fn=lambda pack, logprobs: (logprobs.sum(), {"existing": 2.0}),
     )
-    monkeypatch.setattr(training, "get_tp_context", lambda: SimpleNamespace(dp_rank=0, is_rank0=True))
+    monkeypatch.setattr(training, "get_tp_context", lambda: SimpleNamespace(dp_rank=0, is_rank0=True, world_size=1))
     monkeypatch.setattr(training, "_pack_train_data", lambda pack: pack)
     monkeypatch.setattr(training, "to_device", lambda pack, device: pack)
     monkeypatch.setattr(training, "_train_meta", lambda *a, **kw: SimpleNamespace(sequence_parallel=False))

@@ -601,13 +601,14 @@ class ArenoWorker:
 
     @torch.no_grad()
     def _drop_rollout_hbm(self) -> None:
-        """Release rollout-only GPU state while keeping CPU-reloadable handles."""
+        """Discard rollout-only state before returning to training."""
 
         self._release_decode_graphs()
         self.model.clear_infer_weights()
-        offload_kv = getattr(self.model, "offload_kv_caches", None)
-        if offload_kv is not None:
-            offload_kv()
+        # A host copy still consumes the same physical RAM on unified-memory
+        # GPUs. These caches will be refilled for the next policy rollout.
+        self.model.clear_kv_caches()
+        self._infer_cache_spec = None
         self._train_state_ready = False
         accelerator = accelerator_module(self.device)
         if accelerator is not None:

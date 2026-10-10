@@ -10,6 +10,7 @@ from torch.utils.checkpoint import checkpoint
 
 from areno.engine.parallel.collectives import sequence_parallel_region
 from areno.engine.runtime.metadata import InferMeta, TrainMeta
+from areno.engine.runtime.mst import mini_sequence_forward
 
 
 def _disable_dynamo_frame(fn: Callable[..., Any]) -> Callable[..., Any]:
@@ -32,6 +33,25 @@ def should_checkpoint_layer(train_meta: TrainMeta | None, infer_meta: InferMeta 
     )
 
 
+def tokenwise_forward(
+    function: Callable[..., torch.Tensor],
+    hidden_states: torch.Tensor,
+    *token_args: torch.Tensor,
+    train_meta: TrainMeta | None = None,
+    infer_meta: InferMeta | None = None,
+) -> torch.Tensor:
+    """Schedule an explicitly token-independent block; keep attention outside.
+
+    Extra arguments must have one leading row per flattened token (for
+    example fixed routes, route weights or modality masks). Routing itself
+    must execute before this boundary, so replay and counters run only once.
+    """
+    size = getattr(train_meta, "mst_chunk_size", 0) if infer_meta is None else 0
+    if size:
+        return mini_sequence_forward(function, hidden_states, *token_args, chunk_size=size)
+    return function(hidden_states, *token_args)
+
+
 @_disable_dynamo_frame
 def checkpoint_layer(
     layer_fn: Callable[..., Any],
@@ -39,9 +59,12 @@ def checkpoint_layer(
     *args: Any,
     train_meta: TrainMeta | None = None,
     infer_meta: InferMeta | None = None,
+    tokenwise: bool = False,
 ) -> Any:
     """Checkpoint one decoder layer, recomputing its activations in backward."""
 
+    if tokenwise and infer_meta is None and getattr(train_meta, "mst_chunk_size", 0):
+        return mini_sequence_forward(layer_fn, hidden_states, *args, chunk_size=train_meta.mst_chunk_size)
     if not should_checkpoint_layer(train_meta, infer_meta):
         return layer_fn(hidden_states, *args)
 
@@ -89,5 +112,6 @@ def checkpoint_routed_moe_layer(
         topk_weight,
         train_meta=train_meta,
         infer_meta=infer_meta,
+        tokenwise=True,
     )
     return attended + expert_output

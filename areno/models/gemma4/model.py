@@ -67,7 +67,7 @@ from areno.engine.parallel.collectives import (
 )
 from areno.engine.parallel.context import get_tp_context
 from areno.engine.runtime.metadata import InferMeta, TrainMeta
-from areno.engine.runtime.recompute import checkpoint_layer
+from areno.engine.runtime.recompute import checkpoint_layer, tokenwise_forward
 from areno.engine.runtime.routing_replay import resolve_softmax_routes
 from areno.models.base import CausalLMOutput, ModelAdapter
 from areno.models.gemma4.checkpoint import checkpoint_spec
@@ -603,7 +603,12 @@ class Gemma4DecoderLayer(nn.Module):
                 infer_meta,
             )
         else:
-            hidden_states = self.mlp(dense_input)
+            hidden_states = tokenwise_forward(
+                self.mlp,
+                dense_input,
+                train_meta=train_meta,
+                infer_meta=infer_meta,
+            )
         hidden_states = self.post_feedforward_layernorm(hidden_states)
         hidden_states = hidden_states + residual
         if per_layer_input is not None:
@@ -1602,6 +1607,7 @@ def _gemma4_moe_feedforward_no_compile(
         dense_input,
         train_meta=train_meta,
         infer_meta=infer_meta,
+        tokenwise=True,
     )
     router_logits = layer.router(residual)
     topk_idx, topk_weight = layer.moe.route(router_logits)
@@ -1624,6 +1630,7 @@ def _gemma4_moe_feedforward_no_compile(
             topk_weight,
             train_meta=train_meta,
             infer_meta=infer_meta,
+            tokenwise=True,
         )
     if moe_sequence_parallel:
         moe_hidden = scatter_to_sequence_parallel_region(moe_hidden)

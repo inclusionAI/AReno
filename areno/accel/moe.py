@@ -21,6 +21,14 @@ from areno.accel._extension import extension as _extension
 from areno.accel.utils import on_kernel_device
 
 
+def _unpermute(x: torch.Tensor, token_index: torch.Tensor, tokens: int, hidden: int) -> torch.Tensor:
+    if x.device.type == "cuda" and x.dtype in (torch.float32, torch.bfloat16, torch.float16):
+        from areno.accel.kernels.moe_unpermute import deterministic_unpermute
+
+        return deterministic_unpermute(x, token_index, tokens, hidden)
+    return _extension(x.device).areno_moe_unpermute_forward(x.contiguous(), token_index, tokens, hidden)
+
+
 class _MoePermute(torch.autograd.Function):
     """Autograd glue for routing-map driven MoE permute."""
 
@@ -45,9 +53,7 @@ class _MoePermute(torch.autograd.Function):
     ) -> tuple[torch.Tensor, None, None, None]:
         del grad_route_weight, grad_token_index
         (token_index,) = ctx.saved_tensors
-        grad_x = _extension(grad_out.device).areno_moe_unpermute_forward(
-            grad_out.contiguous(), token_index, ctx.tokens, ctx.hidden
-        )
+        grad_x = _unpermute(grad_out, token_index, ctx.tokens, ctx.hidden)
         return grad_x, None, None, None
 
 
@@ -88,9 +94,7 @@ class _MoeTopKPermute(torch.autograd.Function):
     ) -> tuple[torch.Tensor, None, torch.Tensor, None, None]:
         del grad_token_index, grad_tokens_per_expert
         token_index, topk_position = ctx.saved_tensors
-        grad_x = _extension(grad_out.device).areno_moe_unpermute_forward(
-            grad_out.contiguous(), token_index, ctx.tokens, ctx.hidden
-        )
+        grad_x = _unpermute(grad_out, token_index, ctx.tokens, ctx.hidden)
         grad_topk_weight = _extension(grad_route_weight.device).areno_moe_topk_weight_backward(
             grad_route_weight.contiguous(),
             token_index,
@@ -108,11 +112,13 @@ class _MoeUnpermute(torch.autograd.Function):
     def forward(ctx, x: torch.Tensor, token_index: torch.Tensor, tokens: int, hidden: int) -> torch.Tensor:
         token_index = token_index.contiguous()
         ctx.save_for_backward(token_index)
-        return _extension(x.device).areno_moe_unpermute_forward(x.contiguous(), token_index, int(tokens), int(hidden))
+        return _unpermute(x, token_index, int(tokens), int(hidden))
 
     @staticmethod
     def backward(ctx, grad_out: torch.Tensor) -> tuple[torch.Tensor, None, None, None]:
         (token_index,) = ctx.saved_tensors
+        if not token_index.numel():
+            return grad_out.new_empty((0, grad_out.shape[-1])), None, None, None
         return (
             _extension(grad_out.device).areno_moe_gather_by_token_index(grad_out.contiguous(), token_index),
             None,
@@ -168,7 +174,8 @@ def areno_moe_unpermute(x: torch.Tensor, token_index: torch.Tensor, restore_shap
     """Scatter-add expert-major rows back to token-major order.
 
     ``restore_shape`` is ``(tokens, hidden)`` of the pre-permute layout.
-    Tokens that were routed to multiple experts accumulate via atomic add.
+    CUDA routes sum in expert-major order with FP32 accumulation; NPU uses
+    its native reduction. Backward gathers each route's token derivative.
     """
     if not on_kernel_device(x, token_index):
         raise RuntimeError("areno_moe_unpermute requires CUDA or NPU tensors on the same device")

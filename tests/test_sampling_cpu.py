@@ -10,6 +10,15 @@ from areno.engine.data import SamplingParams, sampling
 class SamplingTest(unittest.TestCase):
     """Sampling tests cover CPU-only filtering and stop-token helpers."""
 
+    def test_cancellation_token_accepts_ignored_eos(self):
+        from areno.engine.inference import _cancel_stop_token
+
+        self.assertEqual(_cancel_stop_token([], ()), 0)
+        self.assertEqual(_cancel_stop_token([], None), 0)
+        self.assertEqual(_cancel_stop_token([], (2, 3)), 2)
+        self.assertEqual(_cancel_stop_token([], 2), 2)
+        self.assertEqual(_cancel_stop_token([7], ()), 7)
+
     def test_greedy_respects_min_new_tokens_and_suppression(self):
         """Greedy sampling should mask EOS and suppressed ids before argmax."""
         logits = torch.tensor([[10.0, 9.0, 8.0, 7.0]])

@@ -16,6 +16,7 @@ from areno.engine.runtime.logprobs import (
     packed_next_token_logprobs,
     packed_next_token_logprobs_from_hidden,
 )
+from areno.engine.runtime.mst import training_chunk_size
 from areno.engine.runtime.routing_replay import routing_replay_context
 from areno.engine.runtime.train_step import (
     _clip_grad_norm,
@@ -119,6 +120,7 @@ class TrainingManager:
             accelerator.reset_peak_memory_stats(worker.device)
         data_pack = to_device(data_pack, worker.device)
         data_pack["_activation_checkpointing_enabled"] = worker.config.runtime.activation_checkpointing
+        data_pack["_mst_chunk_size"] = training_chunk_size(worker.device.type, ctx.world_size)
         tokens = data_pack["input_ids"].long()
         position_ids = data_pack.get("position_ids")
         train_meta = _train_meta(
@@ -133,9 +135,10 @@ class TrainingManager:
         }
         if data_pack.get("features") is not None:
             model_kwargs["features"] = data_pack["features"]
-        defer_lm_head = (
+        existing_chunked_head = (
             worker.config.model.model_type == "gemma4" and ctx.world_size == 1 and "train_cu_seqlens" in data_pack
         )
+        defer_lm_head = existing_chunked_head or bool(getattr(train_meta, "mst_chunk_size", 0))
         if defer_lm_head:
             model_kwargs["defer_lm_head"] = True
         with routing_replay_context(train_meta):
@@ -147,6 +150,9 @@ class TrainingManager:
                 data_pack["train_cu_seqlens"],
                 train_model.lm_head,
                 logit_softcap=getattr(train_model, "final_logit_softcapping", None),
+                # Retain the pre-existing head bound independently of the
+                # tokenwise block schedule; widening it would regress memory.
+                chunk_size=256 if existing_chunked_head else (getattr(train_meta, "mst_chunk_size", 0) or 256),
             )
         else:
             logprobs = packed_next_token_logprobs(out.logits_shard, tokens, data_pack["train_cu_seqlens"])

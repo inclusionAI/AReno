@@ -89,6 +89,7 @@ from areno.engine.parallel.collectives import (
 )
 from areno.engine.parallel.context import get_tp_context
 from areno.engine.runtime.metadata import InferMeta, TrainMeta
+from areno.engine.runtime.recompute import tokenwise_forward
 from areno.engine.runtime.routing_replay import resolve_sigmoid_routes
 from areno.models.bailing.checkpoint import CHECKPOINT_SPEC
 from areno.models.base import CausalLMOutput, ModelAdapter
@@ -273,7 +274,9 @@ class BailingSparseMoeBlock(nn.Module):
             routed_scaling_factor=self.config.routed_scaling_factor,
         )
 
-    def forward(self, hidden_states: torch.Tensor, num_padding_tokens: int = 0) -> torch.Tensor:
+    def forward(
+        self, hidden_states: torch.Tensor, num_padding_tokens: int = 0, *, train_meta: TrainMeta | None = None
+    ) -> torch.Tensor:
         # In SP mode we need the full (un-scattered) hidden states for routing
         # since the router weight isn't sharded along the sequence dim.
         moe_sequence_parallel = is_sequence_parallel_active()
@@ -286,7 +289,13 @@ class BailingSparseMoeBlock(nn.Module):
             flat = hidden_states.view(-1, hidden)
             if self.training:
                 # Permute/unpermute path is autograd-friendly.
-                out = self.experts(flat, topk_idx, topk_weight).view(bsz, seqlen, hidden)
+                out = tokenwise_forward(
+                    self.experts,
+                    flat,
+                    topk_idx,
+                    topk_weight,
+                    train_meta=train_meta,
+                ).view(bsz, seqlen, hidden)
             else:
                 # Inference: fused-MoE kernel over the stacked w1/w2 weights.
                 out = self._forward_fused_moe(flat, topk_idx, topk_weight).view(bsz, seqlen, hidden)
@@ -294,7 +303,11 @@ class BailingSparseMoeBlock(nn.Module):
             out = scatter_to_sequence_parallel_region(out)
         if self.shared_experts is not None:
             shared_input = sequence_parallel_hidden_states if moe_sequence_parallel else hidden_states
-            out = out + self.shared_experts(shared_input)
+            out = out + tokenwise_forward(
+                self.shared_experts,
+                shared_input,
+                train_meta=train_meta,
+            )
         return out
 
     @torch.no_grad()
@@ -1113,8 +1126,15 @@ class BailingDecoderLayer(nn.Module):
         mlp_input = self.post_attention_layernorm(hidden_states)
         if isinstance(self.mlp, BailingSparseMoeBlock):
             num_padding_tokens = train_meta.num_padding_tokens if train_meta is not None else 0
-            return residual + self.mlp(mlp_input, num_padding_tokens)
-        return residual + self.mlp(mlp_input)
+            return residual + self.mlp(
+                mlp_input, num_padding_tokens, train_meta=train_meta if infer_meta is None else None
+            )
+        return residual + tokenwise_forward(
+            self.mlp,
+            mlp_input,
+            train_meta=train_meta,
+            infer_meta=infer_meta,
+        )
 
 
 class BailingMoeLinearV2ForCausalLM(nn.Module):
@@ -1134,6 +1154,7 @@ class BailingMoeLinearV2ForCausalLM(nn.Module):
         position_ids: torch.Tensor | None = None,
         train_meta: TrainMeta | None = None,
         infer_meta: InferMeta | None = None,
+        defer_lm_head: bool = False,
     ) -> CausalLMOutput:
         if position_ids is None:
             position_ids = torch.arange(input_ids.shape[1], device=input_ids.device).unsqueeze(0).expand_as(input_ids)
@@ -1146,7 +1167,9 @@ class BailingMoeLinearV2ForCausalLM(nn.Module):
             for layer in self.layers:
                 hidden_states = layer(hidden_states, position_ids, train_meta, infer_meta)
             hidden_states = self.norm(hidden_states)
-            return CausalLMOutput(logits_shard=self.lm_head(hidden_states), hidden_states=hidden_states)
+            return CausalLMOutput(
+                logits_shard=None if defer_lm_head else self.lm_head(hidden_states), hidden_states=hidden_states
+            )
 
     def set_kv_caches(
         self, kv_caches: list[tuple[torch.Tensor, torch.Tensor]], *, num_slots: int | None = None

@@ -194,6 +194,18 @@ def test_public_operators_select_the_input_device(monkeypatch, native_tensors, d
 
         entry = op.removesuffix("_forward")
         monkeypatch.setattr(attention, entry, getattr(native, f"areno_{op}"))
+    if device.startswith("cuda") and op == "moe_unpermute_forward":
+        # CUDA now dispatches this reduction to an owned Triton kernel.
+        # Mock its boundary without importing a GPU dependency on CPU hosts.
+        def deterministic_unpermute(x, token_index, tokens, hidden):
+            assert x.device.type == token_index.device.type == "cuda"
+            raise NativeReached(f"areno_{op}")
+
+        monkeypatch.setitem(
+            sys.modules,
+            "areno.accel.kernels.moe_unpermute",
+            SimpleNamespace(deterministic_unpermute=deterministic_unpermute),
+        )
     calls = forward_calls(lambda shape, dtype=torch.float32: make_tensor(shape, dtype, device))
     with mode, pytest.raises(NativeReached, match=f"^areno_{op}$"):
         calls[op]()

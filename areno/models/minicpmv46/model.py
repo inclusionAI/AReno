@@ -45,7 +45,7 @@ from areno.engine.layers.vocab import VocabParallelEmbedding, VocabParallelLMHea
 from areno.engine.parallel.collectives import scatter_to_sequence_parallel_region, sequence_parallel_region
 from areno.engine.parallel.context import get_tp_context
 from areno.engine.runtime.metadata import InferMeta, TrainMeta
-from areno.engine.runtime.recompute import checkpoint_layer
+from areno.engine.runtime.recompute import checkpoint_layer, tokenwise_forward
 from areno.models._shared.dynamo_wrappers import (
     _areno_depthwise_causal_conv1d_silu_decode_no_compile,
     _areno_depthwise_causal_conv1d_silu_no_compile,
@@ -797,7 +797,12 @@ class MiniCPMDecoderLayer(nn.Module):
             self.input_layernorm(hidden_states), position_ids, train_meta, infer_meta
         )
         residual = hidden_states
-        hidden_states = residual + self.mlp(self.post_attention_layernorm(hidden_states))
+        hidden_states = residual + tokenwise_forward(
+            self.mlp,
+            self.post_attention_layernorm(hidden_states),
+            train_meta=train_meta,
+            infer_meta=infer_meta,
+        )
         return hidden_states
 
 
@@ -910,6 +915,7 @@ class MiniCPMV46ForCausalLM(nn.Module):
         train_meta: TrainMeta | None = None,
         infer_meta: InferMeta | None = None,
         features: dict[str, Any] | list[dict[str, Any] | None] | None = None,
+        defer_lm_head: bool = False,
     ) -> CausalLMOutput:
         if position_ids is None:
             position_ids = torch.arange(input_ids.shape[1], device=input_ids.device).unsqueeze(0).expand_as(input_ids)
@@ -936,7 +942,7 @@ class MiniCPMV46ForCausalLM(nn.Module):
                     infer_meta=infer_meta,
                 )
             hidden_states = self.norm(hidden_states)
-            logits_shard = self.lm_head(hidden_states)
+            logits_shard = None if defer_lm_head else self.lm_head(hidden_states)
         return CausalLMOutput(logits_shard=logits_shard, hidden_states=hidden_states)
 
     @torch._dynamo.disable
