@@ -864,6 +864,11 @@ class Phi4MMForCausalLM(nn.Module):
         self.model = Phi4MMModel(config)
         self.lm_head = Phi4MMLMHead(config.hidden_size, config.vocab_size, dtype=config.dtype)
         self._tie_word_embeddings()
+        # Standalone model users retain the regular PyTorch trainable default;
+        # ArenoWorker immediately applies the optimizer's explicit multimodal
+        # freeze/unfreeze policy during initialization.
+        self._train_multimodal_tower = True
+        self._train_multimodal_projector = True
 
     def _tie_word_embeddings(self) -> None:
         embedding = self.model.embed_tokens
@@ -872,6 +877,100 @@ class Phi4MMForCausalLM(nn.Module):
         if self.lm_head.weight.shape != embedding.weight.shape:
             raise ValueError("Phi4MM embedding and LM head local weight shapes differ")
         self.lm_head.weight = embedding.weight
+
+    def _multimodal_parameter_groups(self) -> tuple[list[nn.Parameter], list[nn.Parameter]]:
+        """Return Phi's encoder/tower and projector parameters separately."""
+
+        tower_modules: list[nn.Module] = []
+        projector_modules: list[nn.Module] = []
+        projector_parameters: list[nn.Parameter] = []
+        extended = self.model.embed_tokens_extend
+        if extended is not None:
+            image = getattr(extended, "image_embed", None)
+            if image is not None:
+                tower_modules.append(image.img_processor)
+                projector_modules.append(image.img_projection)
+                projector_parameters.extend((image.glb_GN, image.sub_GN))
+            audio = getattr(extended, "audio_embed", None)
+            if audio is not None:
+                tower_modules.append(audio.encoder)
+                projector_modules.append(audio.audio_projection)
+        projector_ids = {id(parameter) for module in projector_modules for parameter in module.parameters()}
+        tower_params = [
+            parameter
+            for module in tower_modules
+            for parameter in module.parameters()
+            if id(parameter) not in projector_ids
+        ]
+        projector_params = projector_parameters + [
+            parameter for module in projector_modules for parameter in module.parameters()
+        ]
+        return tower_params, projector_params
+
+    @staticmethod
+    def _configure_multimodal_parameters(
+        params: list[nn.Parameter],
+        group: str,
+        unfreeze: bool,
+        configured_lr: float | None,
+        base_lr: float,
+        *,
+        trainable: bool,
+    ) -> None:
+        for parameter in params:
+            parameter.requires_grad_(unfreeze and trainable)
+            # Rollout workers still need selected media weights in policy sync.
+            parameter._areno_policy_sync = unfreeze
+            if unfreeze and trainable:
+                parameter._areno_lr_group = group
+                parameter._areno_lr = base_lr if configured_lr is None else configured_lr
+            else:
+                for attribute in ("_areno_lr_group", "_areno_lr"):
+                    if hasattr(parameter, attribute):
+                        delattr(parameter, attribute)
+
+    def configure_multimodal_training(
+        self,
+        *,
+        unfreeze_tower: bool,
+        unfreeze_projector: bool,
+        tower_lr: float | None,
+        projector_lr: float | None,
+        base_lr: float,
+        trainable: bool = True,
+    ) -> None:
+        """Configure Phi vision/audio tower and projector training groups."""
+
+        tower_params, projector_params = self._multimodal_parameter_groups()
+        if unfreeze_tower and not tower_params:
+            raise ValueError("Phi4MM checkpoint has no multimodal tower parameters to unfreeze")
+        if unfreeze_projector and not projector_params:
+            raise ValueError("Phi4MM checkpoint has no multimodal projector parameters to unfreeze")
+        self._configure_multimodal_parameters(
+            tower_params, "tower", unfreeze_tower, tower_lr, base_lr, trainable=trainable
+        )
+        self._configure_multimodal_parameters(
+            projector_params, "projector", unfreeze_projector, projector_lr, base_lr, trainable=trainable
+        )
+        self._train_multimodal_tower = unfreeze_tower and trainable
+        self._train_multimodal_projector = unfreeze_projector and trainable
+        self.train(self.training)
+
+    def train(self, mode: bool = True):
+        """Keep frozen media modules in eval mode while training the text trunk."""
+
+        super().train(mode)
+        extended = self.model.embed_tokens_extend
+        if extended is not None:
+            image = getattr(extended, "image_embed", None)
+            if image is not None:
+                image.img_processor.train(mode and self._train_multimodal_tower)
+                image.img_projection.train(mode and self._train_multimodal_projector)
+            audio = getattr(extended, "audio_embed", None)
+            if audio is not None:
+                audio.encoder.train(mode and self._train_multimodal_tower)
+                audio.audio_projection.train(mode and self._train_multimodal_projector)
+        return self
 
     @property
     def layers(self) -> nn.ModuleList:
