@@ -16,6 +16,7 @@ class ArenoCli(click.Group):
 
     _COMMANDS = {
         "check": ("areno.cli.diagnostics", "check_command", "Check whether this machine is ready to run AReno."),
+        "debug": ("areno.cli.debug", "debug_command", "Collect runtime failure evidence for diagnostics."),
         "env": ("areno.cli.diagnostics", "env_command", "Print an AReno environment/support report."),
         "agent": ("areno.cli.agent", "agent_command", "Ask a coding agent to run an AReno train/serve job."),
         "dashboard": ("areno.cli.dashboard", "dashboard_command", "Start or stop the AReno React dashboard."),
