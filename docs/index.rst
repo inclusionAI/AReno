@@ -43,6 +43,7 @@ AReno documentation
    cookbook/writing-loaders-and-rewards
    cookbook/math-rlvr
    cookbook/tictactoe-agentic-rl
+   cookbook/2048-agentic-rl
    cookbook/duelgrid-visual-agent
 
 .. toctree::
