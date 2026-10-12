@@ -12,10 +12,28 @@ import json
 from pathlib import Path
 from typing import Any
 
-from areno.engine.data.tokenizer import load_processor as load_processor  # noqa: F401
-from areno.engine.data.tokenizer import load_tokenizer as load_tokenizer  # noqa: F401
-
+# The tokenizer loaders live in ``areno.engine.data.tokenizer`` and pull in
+# HuggingFace ``transformers`` on first use. Re-exporting them eagerly here
+# would force an engine-module import whenever the public API (``areno.api``,
+# ``areno.api.trainer``) is imported. Wrap them lazily so importing this seam
+# module stays free of engine-heavy imports; callers pay the cost on first call.
 _CHAT_TEMPLATE_ENABLE_THINKING_ATTR = "_areno_chat_template_enable_thinking"
+
+
+def load_tokenizer(model_path: str | Path):
+    """Load a HF tokenizer, retrying once with safe special-token defaults."""
+
+    from areno.engine.data.tokenizer import load_tokenizer as _load_tokenizer
+
+    return _load_tokenizer(model_path)
+
+
+def load_processor(model_path: str | Path):
+    """Load a HF processor when the checkpoint provides one, else None."""
+
+    from areno.engine.data.tokenizer import load_processor as _load_processor
+
+    return _load_processor(model_path)
 
 
 def configure_chat_template_enable_thinking(tokenizer, enable_thinking: bool | None) -> None:
