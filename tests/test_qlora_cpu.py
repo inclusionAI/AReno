@@ -174,3 +174,66 @@ def test_qlora_adapter_export_reload_restores_quantization_cpu(tmp_path):
     load_peft_adapter(restored_registry, tmp_path)
     for key, value in model.state_dict().items():
         torch.testing.assert_close(value, restored.state_dict()[key], atol=0, rtol=0)
+
+
+def test_qlora_merged_and_packed_bindings_keep_nf4_base_cpu():
+    from areno.adapters.lora import initialize_lora
+    from areno.adapters.qlora import initialize_qlora
+    from areno.engine.config import ModelConfig
+    from areno.engine.layers.linear import ColumnParallelLinear, MergedColumnParallelLinear
+    from areno.engine.layers.lora import PackedColumnLoraBinding
+
+    model = torch.nn.Module()
+    model.config = ModelConfig()
+    model.merged = MergedColumnParallelLinear(32, (16, 16), lora_components=("gate_proj", "up_proj"))
+    names = ("q_proj", "k_proj", "v_proj", "f_proj", "g_proj")
+    for name in names:
+        setattr(model, name, ColumnParallelLinear(32, 16, bias=False))
+    registry = initialize_lora(
+        model, LoraConfig(rank=2, target_modules=names + ("merged.gate_proj", "merged.up_proj"), qlora=True), seed=4
+    )
+    with torch.no_grad():
+        for slot in registry.slots.values():
+            slot.lora_B.normal_(0, 0.02)
+    projections = tuple(getattr(model, name) for name in names)
+    binding = PackedColumnLoraBinding()
+    binding.prepare(projections)
+    initialize_qlora(model)
+    x = torch.randn(3, 32, requires_grad=True)
+    expected = F.linear(x, model.merged.quantized_weight.dequantize(), model.merged.bias)
+    expected += torch.cat(tuple(slot(x) for slot in model.merged.lora_slots.values()), dim=-1)
+    torch.testing.assert_close(model.merged(x), expected)
+    assert binding.packed_A.numel() > 0 and all(projection.weight is None for projection in projections)
+    for packed, direct in zip(
+        binding.project(x, projections, use_cache=True), (p(x) for p in projections), strict=True
+    ):
+        torch.testing.assert_close(packed, direct, rtol=0, atol=0)
+
+
+def test_qlora_empty_bailing_expert_keeps_input_and_adapter_edges_cpu(monkeypatch):
+    from areno.adapters.lora import initialize_lora
+    from areno.adapters.qlora import initialize_qlora
+    from areno.engine.config import ModelConfig
+    from areno.models.bailing_v3 import model as bailing
+
+    model = torch.nn.Module()
+    model.config = ModelConfig(model_type="bailing_moe_v3", hidden_size=32, moe_intermediate_size=16, num_experts=2)
+    model.experts = bailing.BailingGroupedExperts(model.config)
+    registry = initialize_lora(
+        model, LoraConfig(rank=2, qlora=True, target_modules=("experts.linear_fc1", "experts.linear_fc2")), seed=4
+    )
+    initialize_qlora(model)
+
+    def empty_routes(flat, *args):
+        return (
+            flat.new_empty((0, 32)),
+            flat.new_empty(0),
+            torch.empty(0, dtype=torch.long),
+            torch.zeros(2, dtype=torch.int32),
+        )
+
+    monkeypatch.setattr(bailing, "_areno_moe_topk_permute_no_compile", empty_routes)
+    x = torch.randn(4, 32, requires_grad=True)
+    model.experts(x, torch.zeros(4, 1, dtype=torch.long), torch.ones(4, 1)).sum().backward()
+    assert x.grad is not None and not x.grad.any()
+    assert all(p.grad is not None and not p.grad.any() for p in registry.parameters())

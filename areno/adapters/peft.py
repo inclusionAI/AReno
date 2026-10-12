@@ -1,4 +1,4 @@
-"""Standard PEFT safetensors import/export for native TP LoRA slots."""
+"""Safetensors import/export for native LoRA and explicit hybrid policies."""
 
 from __future__ import annotations
 
@@ -10,21 +10,27 @@ import torch.distributed as dist
 from safetensors.torch import load_file, save_file
 
 from areno.adapters.lora import AdapterRegistry, LoraSlot, RoutedExpertLoraSlot
+from areno.adapters.policy_state import read_policy_metadata
 from areno.engine.parallel.context import get_tp_context
+from areno.engine.policy_sync import build_full_parameter_policy_plan
 
 _PREFIX = "base_model.model.model."
+_FULL_PREFIX = "base_model.model."
+_POLICY_IO_BUCKET_BYTES = 64 * 1024**2
 
 
 @torch.no_grad()
-def load_peft_adapter(registry: AdapterRegistry, path: str | Path) -> None:
-    """Copy one supported PEFT adapter into the registry's stable A/B storage."""
+def load_peft_adapter(registry: AdapterRegistry, path: str | Path, *, model=None, model_config=None) -> None:
+    """Copy one native adapter artifact into stable trainable policy storage."""
 
     input_path = Path(path)
     tensors = load_file(input_path / "adapter_model.safetensors", device="cpu")
     ctx = get_tp_context()
     expected_shapes = _expected_peft_shapes(registry, ctx.world_size)
+    full_plan = build_full_parameter_policy_plan(model, model_config, registry)
+    expected_full_keys = {_full_key(key) for key in full_plan}
     actual_keys = set(tensors)
-    expected_keys = set(expected_shapes)
+    expected_keys = set(expected_shapes) | expected_full_keys
     if actual_keys != expected_keys:
         missing = sorted(expected_keys - actual_keys)
         unexpected = sorted(actual_keys - expected_keys)
@@ -36,6 +42,27 @@ def load_peft_adapter(registry: AdapterRegistry, path: str | Path) -> None:
         actual_shape = tuple(tensors[key].shape)
         if actual_shape != expected_shape:
             raise ValueError(f"PEFT adapter tensor {key!r} has shape {actual_shape}, expected {expected_shape}")
+    for key, task in full_plan.items():
+        expected_shape = task.policy_layout().shape
+        actual_shape = tuple(tensors[_full_key(key)].shape)
+        if actual_shape != expected_shape:
+            raise ValueError(
+                f"hybrid policy tensor {_full_key(key)!r} has shape {actual_shape}, expected {expected_shape}"
+            )
+
+    policy = dict(registry.policy_state.named_tensors())
+    # Standard PEFT adapters may initialize a new FFT-compatible policy with
+    # router updates or media unfreeze enabled. They carry only A/B; supplemental
+    # state is required only when the artifact declares that it saved it.
+    if read_policy_metadata(str(input_path)):
+        auxiliary = load_file(input_path / "areno_policy_state.safetensors", device="cpu")
+        if auxiliary.keys() != policy.keys():
+            raise ValueError("adapter auxiliary policy tensor keys do not match the model")
+        for name, tensor in policy.items():
+            if auxiliary[name].shape != tensor.shape or auxiliary[name].dtype != tensor.dtype:
+                raise ValueError(f"adapter auxiliary policy tensor {name!r} has an incompatible shape or dtype")
+        for name, tensor in policy.items():
+            tensor.copy_(auxiliary[name])
 
     for logical_name, slot in registry.slots.items():
         if isinstance(slot, RoutedExpertLoraSlot):
@@ -61,6 +88,9 @@ def load_peft_adapter(registry: AdapterRegistry, path: str | Path) -> None:
         slot.lora_A.copy_(local_A.to(device=slot.lora_A.device, dtype=slot.lora_A.dtype))
         slot.lora_B.copy_(local_B.to(device=slot.lora_B.device, dtype=slot.lora_B.dtype))
 
+    for key, task in full_plan.items():
+        _load_policy_tensor(task.policy_layout(), tensors[_full_key(key)])
+
 
 @torch.no_grad()
 def export_peft_adapter(
@@ -68,8 +98,10 @@ def export_peft_adapter(
     path: str | Path,
     *,
     base_model_name_or_path: str | None,
+    model=None,
+    model_config=None,
 ) -> str | None:
-    """Gather the authoritative DP0 TP shards and write a PEFT adapter."""
+    """Gather the authoritative DP0 TP shards and write one adapter artifact."""
 
     ctx = get_tp_context()
     if ctx.dp_rank != 0:
@@ -106,6 +138,12 @@ def export_peft_adapter(
             )
         state[_key(logical_name, "A")] = canonical_A.float().cpu().contiguous()
         state[_key(logical_name, "B")] = canonical_B.float().cpu().contiguous()
+
+    full_plan = build_full_parameter_policy_plan(model, model_config, registry)
+    for key, task in full_plan.items():
+        canonical = _gather_policy_tensor(task.policy_layout())
+        if canonical is not None:
+            state[_full_key(key)] = canonical
     if ctx.rank != 0:
         return None
 
@@ -118,11 +156,18 @@ def export_peft_adapter(
         "inference_mode": True,
         "lora_alpha": registry.config.alpha,
         "lora_dropout": registry.config.dropout,
-        "peft_type": "LORA",
+        "peft_type": "ARENO_HYBRID" if registry.full_parameters else "LORA",
         "r": registry.config.rank,
         "target_modules": list(registry.config.target_modules),
         "task_type": "CAUSAL_LM",
     }
+    if registry.full_parameters:
+        config.update(
+            {
+                "format_version": 1,
+                "full_parameter_targets": list(registry.config.full_parameter_targets),
+            }
+        )
     (output_path / "adapter_config.json").write_text(
         json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
@@ -135,6 +180,15 @@ def export_peft_adapter(
     elif quantization_path.exists():
         quantization_path.unlink()
     save_file(state, output_path / "adapter_model.safetensors")
+    if registry.policy_state.active:
+        if not registry.full_parameters:
+            config["peft_type"] = "ARENO_LORA_POLICY"
+        config["areno_policy_state"] = registry.policy_state.metadata()
+        auxiliary = {name: tensor.detach().cpu().contiguous() for name, tensor in registry.policy_state.named_tensors()}
+        save_file(auxiliary, output_path / "areno_policy_state.safetensors")
+        (output_path / "adapter_config.json").write_text(
+            json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
     return str(output_path)
 
 
@@ -165,6 +219,44 @@ def _gather_replicated_column(slot: LoraSlot, gathered: list[torch.Tensor], worl
 
 def _key(logical_name: str, component: str) -> str:
     return f"{_PREFIX}{logical_name}.lora_{component}.weight"
+
+
+def _full_key(checkpoint_key: str) -> str:
+    return f"{_FULL_PREFIX}{checkpoint_key}"
+
+
+def _gather_policy_tensor(layout) -> torch.Tensor | None:
+    """Gather one canonical policy tensor to TP rank zero in bounded chunks."""
+
+    ctx = get_tp_context()
+    element_size = torch.empty((), dtype=layout.dtype).element_size()
+    capacity = max(_POLICY_IO_BUCKET_BYTES // element_size, 1)
+    output = torch.empty(layout.numel, dtype=layout.dtype, device="cpu") if ctx.rank == 0 else None
+    for offset in range(0, layout.numel, capacity):
+        count = min(capacity, layout.numel - offset)
+        chunk = torch.empty(count, dtype=layout.dtype, device=ctx.device)
+        layout.read_chunk(offset, chunk, include_replicated=ctx.rank == 0)
+        if ctx.world_size > 1:
+            dist.reduce(chunk, dst=ctx.tp_global_rank(0), group=ctx.group)
+        if output is not None:
+            output[offset : offset + count].copy_(chunk, non_blocking=False)
+    return output.reshape(layout.shape).contiguous() if output is not None else None
+
+
+def _load_policy_tensor(layout, canonical: torch.Tensor) -> None:
+    """Scatter a canonical CPU artifact tensor into this rank's live views."""
+
+    actual_shape = tuple(canonical.shape)
+    if actual_shape != layout.shape:
+        raise ValueError(f"hybrid policy tensor has shape {actual_shape}, expected {layout.shape}")
+    ctx = get_tp_context()
+    flat = canonical.reshape(-1)
+    element_size = torch.empty((), dtype=layout.dtype).element_size()
+    capacity = max(_POLICY_IO_BUCKET_BYTES // element_size, 1)
+    for offset in range(0, layout.numel, capacity):
+        count = min(capacity, layout.numel - offset)
+        chunk = flat[offset : offset + count].to(device=ctx.device, dtype=layout.dtype)
+        layout.write_chunk(offset, chunk)
 
 
 def _expected_peft_shapes(registry: AdapterRegistry, tp_size: int) -> dict[str, tuple[int, ...]]:

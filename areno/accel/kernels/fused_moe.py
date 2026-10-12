@@ -28,6 +28,7 @@ from __future__ import annotations
 import torch
 import triton
 import triton.language as tl
+from torch.nn import functional as F
 
 from areno.accel import areno_gelu_tanh_and_mul, areno_moe_align, areno_silu_and_mul
 from areno.accel.ops import FusedMoeConfig
@@ -346,6 +347,27 @@ def _sum_reduce(x: torch.Tensor, out: torch.Tensor, routed_scaling_factor: float
     )
 
 
+def _apply_gated_activation(
+    source: torch.Tensor,
+    out: torch.Tensor,
+    *,
+    activation: str,
+    swiglu_limit: float | None,
+) -> None:
+    """Apply the fused-MoE gate activation, including Flash-V3 clipping."""
+    if activation == "silu":
+        if swiglu_limit is None:
+            areno_silu_and_mul(source, out)
+        else:
+            gate, up = source.chunk(2, dim=-1)
+            limit = float(swiglu_limit)
+            out.copy_(F.silu(gate).clamp(max=limit) * up.clamp(min=-limit, max=limit))
+    elif activation == "gelu_tanh":
+        areno_gelu_tanh_and_mul(source, out)
+    else:
+        raise ValueError(f"unsupported fused MoE activation {activation!r}")
+
+
 def fused_experts(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
@@ -415,12 +437,12 @@ def fused_experts(
         config=config,
     )
     # Gated activation: out[:, i] = act(in[:, i]) * in[:, intermediate + i].
-    if activation == "silu":
-        areno_silu_and_mul(intermediate1.view(-1, w1.shape[1]), intermediate2)
-    elif activation == "gelu_tanh":
-        areno_gelu_tanh_and_mul(intermediate1.view(-1, w1.shape[1]), intermediate2)
-    else:
-        raise ValueError(f"unsupported fused MoE activation {activation!r}")
+    _apply_gated_activation(
+        intermediate1.view(-1, w1.shape[1]),
+        intermediate2,
+        activation=activation,
+        swiglu_limit=config.swiglu_limit,
+    )
     # Down projection with routed weight folded in. top_k=1 because each
     # source token has already been expanded across the M axis.
     _invoke_matmul(

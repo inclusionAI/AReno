@@ -240,6 +240,7 @@ class CudaBackend(Backend):
             dp_size=len(rollout_devices) // rollout_tp_size,
             devices=rollout_devices,
             dummy_load=cfg.dummy_load,
+            optimizer_config=OptimizerConfig(**cfg.optimizer),
             runtime_config=rollout_runtime,
             loss_fn=None,
             role="rollout",

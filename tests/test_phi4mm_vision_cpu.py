@@ -78,6 +78,31 @@ def test_phi4mm_adapter_constructs_native_vision_path():
     assert model.model.embed_tokens_extend.image_embed.img_processor.encoder.layers.__len__() == 2
 
 
+def test_phi4mm_vision_wrappers_preserve_native_language_lora_targets():
+    from areno.adapters import LoraConfig
+    from areno.adapters.lora import initialize_lora
+    from areno.models.phi4mm.model import Phi4MMAdapter
+
+    model = Phi4MMAdapter().build(Phi4MMAdapter().config_from_hf(_config())).float()
+    targets = tuple(
+        f"model.layers.0.{path}"
+        for path in (
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj",
+            "self_attn.o_proj",
+            "mlp.gate_proj",
+            "mlp.up_proj",
+            "mlp.down_proj",
+        )
+    )
+    registry = initialize_lora(model, LoraConfig(rank=2, alpha=2, target_modules=targets), seed=7)
+
+    assert set(registry.slots) == set(targets)
+    assert len(model.model.layers[0].self_attn.qkv_proj.lora_A) == 1
+    assert not model.model.layers[0].self_attn.qkv_proj.lora_A["vision"].weight.requires_grad
+
+
 def test_phi4mm_vision_attention_uses_memory_efficient_sdpa(monkeypatch):
     from areno.models.phi4mm import vision
 

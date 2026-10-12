@@ -317,7 +317,8 @@ def test_lightning_dispatch_preserves_original_arguments(monkeypatch, device):
     monkeypatch.setattr(seg_la, "chunk_lightning_attn", run if device == "npu" else unexpected)
     kwargs = dict(g_gamma=decay, head_first=False, cu_seqlens=cu)
     assert ops.chunk_lightning_attn(q, k, v, 3, 12, **kwargs) is result
-    assert calls == [((q, k, v, 3, 12), kwargs)]
+    expected_kwargs = kwargs if device == "npu" else {key: value for key, value in kwargs.items() if key != "head_first"}
+    assert calls == [((q, k, v, 3, 12), expected_kwargs)]
 
 
 @pytest.mark.parametrize("head_first", [False, True])
@@ -413,7 +414,7 @@ def test_bailing_training_forwards_tp_slopes_and_packed_boundaries(monkeypatch, 
     layer._forward_train(q, k, v, meta).sum().backward()
     torch.testing.assert_close(calls[0]["g_gamma"], -full_slopes[4:6])
     assert calls[0]["cu_seqlens"] is (cu if packed else None)
-    assert calls[0]["head_first"] is False
+    assert "head_first" not in calls[0]
     for tensor in (q, k, v):
         torch.testing.assert_close(tensor.grad, torch.ones_like(tensor))
 

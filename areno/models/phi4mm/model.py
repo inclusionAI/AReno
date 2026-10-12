@@ -121,8 +121,15 @@ def _vision_lora_config(config: ModelConfig) -> tuple[int, float, float] | None:
 
 
 class _Phi4MMColumnLoRA(MergedColumnParallelLinear):
-    def __init__(self, in_features: int, out_features: tuple[int, ...], config: ModelConfig):
-        super().__init__(in_features, out_features, bias=False)
+    def __init__(
+        self,
+        in_features: int,
+        out_features: tuple[int, ...],
+        config: ModelConfig,
+        *,
+        lora_components: tuple[str, ...],
+    ):
+        super().__init__(in_features, out_features, bias=False, lora_components=lora_components)
         lora = _vision_lora_config(config)
         self.vision_lora_scale = 0.0
         self.vision_lora_dropout = 0.0
@@ -382,6 +389,7 @@ class Phi4MMAttention(CausalSelfAttention):
                 config.num_key_value_heads * config.head_dim,
             ),
             config,
+            lora_components=("q_proj", "k_proj", "v_proj"),
         )
         self.o_proj = _Phi4MMRowLoRA(config.num_attention_heads * config.head_dim, config.hidden_size, config)
 
@@ -454,7 +462,10 @@ class Phi4MMDecoderLayer(nn.Module):
         self.mlp = GatedMLP(config)
         if config.vision_config is not None:
             self.mlp.gate_up_proj = _Phi4MMColumnLoRA(
-                config.hidden_size, (config.intermediate_size, config.intermediate_size), config
+                config.hidden_size,
+                (config.intermediate_size, config.intermediate_size),
+                config,
+                lora_components=("gate_proj", "up_proj"),
             )
             self.mlp.down_proj = _Phi4MMRowLoRA(config.intermediate_size, config.hidden_size, config)
 

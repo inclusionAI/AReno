@@ -23,6 +23,7 @@ import torch.distributed as dist
 from areno import _configure_torch_runtime
 from areno.adapters import initialize_lora
 from areno.adapters.peft import export_peft_adapter, load_peft_adapter
+from areno.adapters.policy_state import read_policy_metadata
 from areno.api.backend.cuda.roles import RoleManager, WorkerRole
 from areno.engine.config import EngineConfig
 from areno.engine.data import RolloutOutput
@@ -68,6 +69,11 @@ class ArenoWorker:
         self.model = build_model_on_device(config, self.device)
         if config.model_path is not None and not config.dummy_load:
             load_model_weights(self.model, config.model, config.model_path)
+        if config.lora is not None:
+            policy_options = read_policy_metadata(config.lora.adapter_path).get("multimodal_unfreeze", {})
+            for option in ("unfreeze_multimodal_tower", "unfreeze_multimodal_projector"):
+                if policy_options.get(option, False):
+                    setattr(config.optimizer, option, True)
         configure_multimodal_training(self.model, config.optimizer, trainable=config.role == "train")
         self.adapter_registry = (
             initialize_lora(self.model, config.lora, seed=config.lora_seed) if config.lora is not None else None
@@ -78,10 +84,17 @@ class ArenoWorker:
             if self.device.type != "cuda":
                 raise ValueError("QLoRA requires CUDA")
             initialize_qlora(self.model)
+        if self.adapter_registry is not None:
+            self.adapter_registry.policy_state.multimodal_unfreeze = {
+                option: bool(getattr(config.optimizer, option))
+                for option in ("unfreeze_multimodal_tower", "unfreeze_multimodal_projector")
+            }
         if config.runtime.compile_model:
             self.model = torch.compile(self.model)
         if self.adapter_registry is not None and config.lora.adapter_path is not None:
-            load_peft_adapter(self.adapter_registry, config.lora.adapter_path)
+            load_peft_adapter(
+                self.adapter_registry, config.lora.adapter_path, model=self.model, model_config=config.model
+            )
         opt = config.optimizer
         optimizer_parameters = (
             self.adapter_registry.parameters() if self.adapter_registry is not None else self.model.parameters()
@@ -575,6 +588,8 @@ class ArenoWorker:
             self.optimizer.offload_state(mode=mode, directory=directory, batch_size=batch_size)
         self._train_state_ready = False
         self._actor_on_device = False
+        self._policy_sync_plan = None
+        self._policy_sync_metadata = None
         accelerator = accelerator_module(self.device)
         if accelerator is not None:
             accelerator.empty_cache()
@@ -672,14 +687,17 @@ class ArenoWorker:
         return {"path": path} if path is not None else None
 
     def export_adapter(self, payload: ExportAdapterPayload) -> dict | None:
-        """Write the native adapter in standard PEFT format."""
+        """Write the native LoRA or explicit hybrid adapter artifact."""
 
         if self.adapter_registry is None:
             raise RuntimeError("export_adapter requires native LoRA")
         self._prepare_actor_onloaded()
+        self.model.onload_train_weights(self.device)
         path = export_peft_adapter(
             self.adapter_registry,
             payload.path,
+            model=self.model,
+            model_config=self.config.model,
             base_model_name_or_path=(self.config.base_model_name_or_path or self.config.model_path),
         )
         return {"path": path} if path is not None else None

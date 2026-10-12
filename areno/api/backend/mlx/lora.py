@@ -114,6 +114,8 @@ def initialize_lora(
 ) -> MlxLoraState:
     """Validate a model family's projections, freeze the base and inject LoRA."""
 
+    if config.full_parameter_targets:
+        raise ValueError("full_parameter_targets are currently supported by the CUDA backend only")
     resolver = _TARGET_RESOLVERS.get(model_type)
     if resolver is None:
         supported = ", ".join(sorted(_TARGET_RESOLVERS))
