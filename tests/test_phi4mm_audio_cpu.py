@@ -4,6 +4,7 @@ import pytest
 import torch
 from safetensors.torch import save_file
 
+from areno.api.backend.cuda.roles import _pack_score_rows
 from areno.api.multimodal import encode_processor_messages, modality_token_ids
 from areno.engine.config import ModelConfig
 from areno.engine.data.rollout_state import InferenceBatchState, payload_to_infer_meta
@@ -250,6 +251,56 @@ def test_phi4mm_cache_reprefill_restores_audio_features_and_mode():
     assert payload["features"]["audio_feature_rows"][0]["audio_embeds"] is features["audio_embeds"]
 
 
+def test_phi4mm_audio_only_prefill_slices_features_and_masks_audio_tokens():
+    audio_embeds = torch.arange(2 * 16, dtype=torch.float32).view(2, 16)
+    features = {
+        "audio_embeds": audio_embeds,
+        "audio_token_id": 200011,
+        "modality_token_ids": {"audio": 200011},
+    }
+    state = InferenceBatchState(
+        [[200011, 1, 200011, 2]],
+        max_new_tokens=1,
+        max_prefill_tokens=4,
+        max_cache_len=8,
+        kv_block_size=4,
+        num_cache_blocks=2,
+        prompt_features=[features],
+    )
+
+    payload = state.build_prefill_payload()
+
+    assert payload["features"]["image_token_mask"].tolist() == [False, False, False, False]
+    assert payload["features"]["audio_token_mask"].tolist() == [True, False, True, False]
+    torch.testing.assert_close(payload["features"]["audio_feature_rows"][0]["audio_embeds"], audio_embeds)
+
+
+def test_phi4mm_chunked_audio_prefill_keeps_audio_embedding_offsets():
+    audio_embeds = torch.arange(2 * 16, dtype=torch.float32).view(2, 16)
+    features = {
+        "audio_embeds": audio_embeds,
+        "audio_token_id": 200011,
+        "modality_token_ids": {"audio": 200011},
+    }
+    state = InferenceBatchState(
+        [[200011, 1, 200011, 2]],
+        max_new_tokens=1,
+        max_prefill_tokens=2,
+        max_cache_len=8,
+        kv_block_size=2,
+        num_cache_blocks=4,
+        prompt_features=[features],
+    )
+
+    first = state.build_prefill_payload()
+    second = state.build_prefill_payload()
+
+    torch.testing.assert_close(first["features"]["audio_feature_rows"][0]["audio_embeds"], audio_embeds[:1])
+    torch.testing.assert_close(second["features"]["audio_feature_rows"][0]["audio_embeds"], audio_embeds[1:])
+    assert first["features"]["audio_token_mask"].tolist() == [True, False]
+    assert second["features"]["audio_token_mask"].tolist() == [True, False]
+
+
 def test_phi4mm_packed_training_keeps_audio_rows_and_masks():
     audio = torch.ones(2, 16)
     packed = _pack_multimodal_features(
@@ -270,6 +321,27 @@ def test_phi4mm_packed_training_keeps_audio_rows_and_masks():
     assert packed["audio_token_mask"].tolist() == [False, True, True, False, False, False]
     assert packed["image_token_mask"].tolist() == [False] * 6
     assert packed["audio_feature_rows"][0]["audio_embeds"] is audio
+
+
+def test_phi4mm_logprob_packing_preserves_audio_features():
+    audio = torch.ones(2, 16)
+    packed, lengths = _pack_score_rows(
+        [[1, 200011, 200011, 2]],
+        torch.device("cpu"),
+        0,
+        features=[
+            {
+                "audio_embeds": audio,
+                "audio_token_id": 200011,
+                "modality_token_ids": {"audio": 200011},
+            }
+        ],
+    )
+
+    assert lengths == [4]
+    assert packed["features"]["audio_token_mask"].tolist() == [False, True, True, False]
+    assert packed["features"]["image_token_mask"].tolist() == [False] * 4
+    assert packed["features"]["audio_feature_rows"][0]["audio_embeds"] is audio
 
 
 def test_phi4mm_multi_audio_merge_preserves_segment_order():
