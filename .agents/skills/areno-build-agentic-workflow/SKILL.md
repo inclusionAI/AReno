@@ -17,7 +17,11 @@ python .agents/skills/areno-run-training/scripts/inspect_dataset.py \
 ```
 
 ## Workflow
-
+0. **(Optional) Scaffold a project.** Start from a runnable, dependency-light
+   skeleton with `scripts/generate_agentic_project.py --name <name>`, then fill
+   in the domain. Generated output runs one fixed episode immediately and
+   reuses existing AReno contracts; see
+   [references/generator-output.md](references/generator-output.md).
 1. Define one deterministic environment/game domain and valid dataset records.
 2. Keep dataset loaders processor/tokenizer independent.
 3. Define strict JSON tool schemas and bounded execution. Read [references/message-contract.md](references/message-contract.md).
