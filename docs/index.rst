@@ -53,6 +53,7 @@ AReno documentation
    CLI Reference <reference/cli>
    SDK Reference <sdk/trainer>
    Supported Models <models/supported>
+   Phi-4 Multimodal <models/phi4mm>
 
 .. toctree::
    :hidden:

@@ -9,6 +9,8 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from areno.accel.activations import areno_silu
+
 
 @dataclass(frozen=True, slots=True)
 class Phi4MMAudioConfig:
@@ -31,7 +33,13 @@ class Phi4MMAudioConfig:
 
 class _Swish(nn.Module):
     def forward(self, value: torch.Tensor) -> torch.Tensor:
-        return value * torch.sigmoid(value)
+        return _silu(value)
+
+
+def _silu(value: torch.Tensor) -> torch.Tensor:
+    if value.device.type in {"cuda", "npu"}:
+        return areno_silu(value)
+    return value * torch.sigmoid(value)
 
 
 class _GLULinear(nn.Module):
@@ -40,8 +48,12 @@ class _GLULinear(nn.Module):
         self.linear = nn.Linear(input_dim, output_dim * 2, dtype=dtype)
 
     def forward(self, value: torch.Tensor) -> torch.Tensor:
-        left, gate = self.linear(value).chunk(2, dim=-1)
-        return left * (gate * torch.sigmoid(gate))
+        projected = self.linear(value)
+        left, gate = projected.chunk(2, dim=-1)
+        # The checkpoint stores [left, gate], whereas silu_and_mul activates
+        # the first half. Use the elementwise fused SiLU so the gate half keeps
+        # the official semantics without allocating a reordered 2H tensor.
+        return left * _silu(gate)
 
 
 class _FeedForward(nn.Module):
@@ -71,7 +83,7 @@ class _GLUPointWiseConv(nn.Module):
         value = self.ext_pw_conv_1d(value.transpose(1, 2))
         left = value[:, : self.output_dim] + self.b1
         gate = value[:, self.output_dim :] + self.b2
-        return (left * (gate * torch.sigmoid(gate))).transpose(1, 2)
+        return (left * _silu(gate)).transpose(1, 2)
 
 
 class _DepthWiseSeperableConv1d(nn.Module):
@@ -106,7 +118,7 @@ class _ConvModule(nn.Module):
         value = self.glu(self.layer_norm(value)).transpose(1, 2)
         value = self.dw_sep_conv_1d(value)
         value = value[:, :, : -(self.kernel_size - 1)]
-        value = value * torch.sigmoid(value)
+        value = _silu(value)
         return self.ext_pw_conv_1d(value).transpose(1, 2)
 
 
@@ -147,13 +159,22 @@ class _MultiHeadedAttention(nn.Module):
         query = self.linear_q(value).view(batch, -1, self.h, self.d_k).transpose(1, 2) * self.inv_sqrt_d_k
         key = self.linear_k(value).view(batch, -1, self.h, self.d_k).transpose(1, 2)
         projected = self.linear_v(value).view(batch, -1, self.h, self.d_k).transpose(1, 2)
-        scores = torch.matmul(query, key.transpose(-2, -1)) + relative_attention_bias
+        attention_bias = relative_attention_bias
         if mask is not None:
             invalid = ~mask.unsqueeze(1)
-            attention = torch.softmax(scores.masked_fill(invalid, -torch.inf), dim=-1).masked_fill(invalid, 0.0)
-        else:
-            attention = torch.softmax(scores, dim=-1)
-        output = torch.matmul(attention.to(projected.dtype), projected)
+            attention_bias = attention_bias.masked_fill(invalid, -torch.inf)
+        # Query already includes the checkpoint's 1/sqrt(d_k) scaling, so
+        # scale=1 preserves the reference computation while SDPA avoids
+        # materializing separate score and softmax tensors on accelerators.
+        output = F.scaled_dot_product_attention(
+            query,
+            key,
+            projected,
+            attn_mask=attention_bias,
+            dropout_p=0.0,
+            is_causal=False,
+            scale=1.0,
+        )
         output = output.transpose(1, 2).contiguous().view(batch, -1, self.h * self.d_k)
         return self.linear_out(output)
 

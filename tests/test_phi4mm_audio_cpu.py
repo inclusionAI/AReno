@@ -140,6 +140,40 @@ def test_phi4mm_audio_encoder_reduces_time_and_respects_padding():
     assert torch.isfinite(output).all()
 
 
+def test_phi4mm_audio_sdpa_matches_reference_attention_and_gradients():
+    from areno.models.phi4mm.audio import _MultiHeadedAttention
+
+    torch.manual_seed(9)
+    module = _MultiHeadedAttention(hidden_size=8, num_heads=2, dtype=torch.float32).eval()
+    value = torch.randn(2, 5, 8, requires_grad=True)
+    relative_bias = torch.randn(1, 2, 5, 5)
+    valid_keys = torch.tensor([[True] * 5, [True, True, True, False, False]])
+    mask = valid_keys[:, None, :].expand(-1, 5, -1)
+
+    actual = module(value, mask, relative_bias)
+    actual.square().mean().backward()
+    actual_input_grad = value.grad.detach().clone()
+    actual_parameter_grads = {name: parameter.grad.detach().clone() for name, parameter in module.named_parameters()}
+
+    module.zero_grad(set_to_none=True)
+    reference_value = value.detach().clone().requires_grad_(True)
+
+    query = module.linear_q(reference_value).view(2, 5, 2, 4).transpose(1, 2) * module.inv_sqrt_d_k
+    key = module.linear_k(reference_value).view(2, 5, 2, 4).transpose(1, 2)
+    projected = module.linear_v(reference_value).view(2, 5, 2, 4).transpose(1, 2)
+    invalid = ~mask.unsqueeze(1)
+    scores = (query @ key.transpose(-2, -1) + relative_bias).masked_fill(invalid, -torch.inf)
+    attention = torch.softmax(scores, dim=-1).masked_fill(invalid, 0.0)
+    expected = (attention @ projected).transpose(1, 2).contiguous().view(2, 5, 8)
+    expected = module.linear_out(expected)
+    expected.square().mean().backward()
+
+    torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)
+    torch.testing.assert_close(actual_input_grad, reference_value.grad, rtol=2e-5, atol=1e-6)
+    for name, parameter in module.named_parameters():
+        torch.testing.assert_close(actual_parameter_grads[name], parameter.grad, rtol=2e-5, atol=1e-6)
+
+
 def test_phi4mm_audio_checkpoint_names_match_official_layout():
     module = Phi4MMAudioEmbedding(_tiny_audio_config(), language_hidden_size=16, dtype=torch.float32)
     keys = set(module.state_dict())

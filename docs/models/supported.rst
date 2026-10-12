@@ -40,7 +40,8 @@ family is available on both backends.
    * - Phi-4 Multimodal
      - Native text, image, audio, and combined image/audio support for
        ``phi4mm`` checkpoints, including the SigLIP vision tower, Conformer
-       audio encoder, modality projectors, and vision/speech LoRA weights.
+       audio encoder, modality projectors, and vision/speech LoRA weights. See
+       :doc:`phi4mm` for serving, training, and checkpoint details.
 
 .. important::
 
