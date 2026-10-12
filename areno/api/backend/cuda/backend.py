@@ -34,8 +34,10 @@ from areno.api.backend.cuda.checkpoint import save_checkpoint
 from areno.api.backend.cuda.generation import rollout_options
 from areno.api.backend.cuda.losses import dispatch_loss
 from areno.api.backend.cuda.training import (
+    annotate_response_token_mean_packs,
     annotate_sft_token_mean_packs,
     is_sft_loss_fn,
+    loss_reduction,
     make_train_pack,
     pad_token_id,
     sft_target_token_count,
@@ -101,7 +103,7 @@ class CudaBackend(Backend):
     @classmethod
     def capabilities(cls) -> BackendCapabilities:
         return BackendCapabilities(
-            algorithms=frozenset({"sft", "dpo", "gspo", "grpo", "ppo"}),
+            algorithms=frozenset({"sft", "dpo", "gspo", "grpo", "ppo", "dapo"}),
             model_roles=frozenset({"actor", "ref", "reward", "critic"}),
             multimodal=True,
             distributed=True,
@@ -514,6 +516,8 @@ class CudaBackend(Backend):
         packs = []
         is_sft = is_sft_loss_fn(loss_fn)
         sft_target_counts = [] if is_sft else None
+        uses_response_token_mean = loss_reduction(loss_fn) == "response_token_mean"
+        response_token_counts = [] if uses_response_token_mean else None
         for start in range(0, len(batch_data), mini_bs):
             seqs = batch_data[start : start + mini_bs]
             pack = make_train_pack(seqs)
@@ -521,11 +525,20 @@ class CudaBackend(Backend):
             packs.append(pack)
             if is_sft:
                 sft_target_counts.append(sft_target_token_count(seqs))
+            if uses_response_token_mean:
+                response_token_counts.append(sft_target_token_count(seqs))
         if is_sft:
             annotate_sft_token_mean_packs(
                 packs,
                 sft_target_counts,
                 gradient_accumulation_steps=gradient_accumulation_steps,
+            )
+        if uses_response_token_mean:
+            annotate_response_token_mean_packs(
+                packs,
+                response_token_counts,
+                gradient_accumulation_steps=gradient_accumulation_steps,
+                data_parallel_size=max(int(getattr(engine.config, "dp_size", 1)), 1),
             )
         stats_list = engine.step(packs, gradient_accumulation_steps=gradient_accumulation_steps)
         if self._separate_rollout and any(bool(stats.stepped) for stats in stats_list):
