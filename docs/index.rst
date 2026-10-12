@@ -29,6 +29,7 @@ AReno documentation
    Chat Templates <concepts/chat-templates>
    Dataset Formats <concepts/dataset-formats>
    Multimodal Inputs <concepts/multimodal-inputs>
+   Profiling and Optimization <concepts/profiling>
    Native LoRA <concepts/native-lora>
    8-bit AdamW <concepts/adamw-8bit>
    4-bit AdamW <concepts/adamw-4bit>
@@ -53,6 +54,7 @@ AReno documentation
    CLI Reference <reference/cli>
    SDK Reference <sdk/trainer>
    Supported Models <models/supported>
+   Phi-4 Multimodal <models/phi4mm>
 
 .. toctree::
    :hidden:
