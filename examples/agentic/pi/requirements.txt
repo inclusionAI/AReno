@@ -1,0 +1,3 @@
+# Dataset preparation dependencies; install AReno in the same environment first.
+modelscope>=1.40.1
+pyarrow

@@ -7,6 +7,7 @@ on:
     paths:
       - "areno/**"
       - "tests/**"
+      - "examples/agentic/pi/**"
       - "pyproject.toml"
       - ".github/workflows/cpu_unit_tests.yml"
   pull_request:
@@ -15,6 +16,7 @@ on:
     paths:
       - "areno/**"
       - "tests/**"
+      - "examples/agentic/pi/**"
       - "pyproject.toml"
       - ".github/workflows/cpu_unit_tests.yml"
   workflow_dispatch:
@@ -79,4 +81,4 @@ jobs:
           ARENO_BUILD_EXT=0 python -m pip install -e . --no-build-isolation --no-deps
 
       - name: Run unit tests
-        run: python -m pytest tests/ -k cpu
+        run: python -m pytest tests/ examples/agentic/pi/ -k cpu
