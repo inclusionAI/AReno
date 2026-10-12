@@ -2,14 +2,26 @@ from __future__ import annotations
 
 import pytest
 import torch
+import torch.nn.functional as F
 from safetensors.torch import save_file
 
+from areno.api.backend.cuda.roles import _pack_score_rows
 from areno.api.multimodal import encode_processor_messages, modality_token_ids
-from areno.engine.config import ModelConfig
+from areno.engine.checkpoints.common import save_checkpoint_weights
+from areno.engine.config import ModelConfig, OptimizerConfig
 from areno.engine.data.rollout_state import InferenceBatchState, payload_to_infer_meta
+from areno.engine.modeling import configure_multimodal_training
 from areno.engine.parallel.context import TPContext, get_tp_context, set_tp_context
 from areno.engine.runtime.train_step import _pack_multimodal_features
+from areno.models.phi4mm import Phi4MMAdapter
 from areno.models.phi4mm.audio import Phi4MMAudioConfig, Phi4MMAudioEmbedding
+from areno.models.phi4mm.checkpoint import (
+    CHECKPOINT_SPEC,
+    _lora_checkpoint_keys,
+    _multimodal_checkpoint_keys,
+    _save_multimodal_weights,
+    audit_phi4mm_checkpoint,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -250,6 +262,161 @@ def test_phi4mm_cache_reprefill_restores_audio_features_and_mode():
     assert payload["features"]["audio_feature_rows"][0]["audio_embeds"] is features["audio_embeds"]
 
 
+def test_phi4mm_audio_only_prefill_slices_features_and_masks_audio_tokens():
+    audio_embeds = torch.arange(2 * 16, dtype=torch.float32).view(2, 16)
+    features = {
+        "audio_embeds": audio_embeds,
+        "audio_token_id": 200011,
+        "modality_token_ids": {"audio": 200011},
+    }
+    state = InferenceBatchState(
+        [[200011, 1, 200011, 2]],
+        max_new_tokens=1,
+        max_prefill_tokens=4,
+        max_cache_len=8,
+        kv_block_size=4,
+        num_cache_blocks=2,
+        prompt_features=[features],
+    )
+
+    payload = state.build_prefill_payload()
+
+    assert payload["features"]["image_token_mask"].tolist() == [False, False, False, False]
+    assert payload["features"]["audio_token_mask"].tolist() == [True, False, True, False]
+    torch.testing.assert_close(payload["features"]["audio_feature_rows"][0]["audio_embeds"], audio_embeds)
+
+
+def test_phi4mm_audio_training_groups_and_modes():
+    model = Phi4MMAdapter().build(_tiny_model_config())
+    audio = model.model.embed_tokens_extend.audio_embed
+    configure_multimodal_training(model, OptimizerConfig(lr=1e-3), trainable=True)
+    assert all(not parameter.requires_grad for parameter in audio.parameters())
+    assert not audio.encoder.training
+    assert not audio.audio_projection.training
+
+    configure_multimodal_training(
+        model,
+        OptimizerConfig(
+            lr=1e-3,
+            unfreeze_multimodal_tower=True,
+            unfreeze_multimodal_projector=True,
+            multimodal_tower_lr=2e-4,
+            multimodal_projector_lr=3e-4,
+        ),
+        trainable=True,
+    )
+
+    assert all(parameter.requires_grad for parameter in audio.encoder.parameters())
+    assert all(parameter.requires_grad for parameter in audio.audio_projection.parameters())
+    assert {parameter._areno_lr_group for parameter in audio.encoder.parameters()} == {"tower"}
+    assert {parameter._areno_lr_group for parameter in audio.audio_projection.parameters()} == {"projector"}
+    assert audio.encoder.training
+    assert audio.audio_projection.training
+
+
+def test_phi4mm_audio_train_save_reload_inference_closes(tmp_path, monkeypatch):
+    from areno.engine.layers import linear, mlp, norm, vocab
+
+    monkeypatch.setenv("ARENO_CKPT_PROGRESS", "0")
+    monkeypatch.setattr(vocab, "areno_vocab_embedding", lambda ids, weight, start, end: F.embedding(ids, weight))
+    monkeypatch.setattr(linear, "areno_linear", F.linear)
+    monkeypatch.setattr(
+        norm, "_areno_rmsnorm_no_compile", lambda value, weight, eps: F.rms_norm(value, (value.shape[-1],), weight, eps)
+    )
+    monkeypatch.setattr(
+        mlp,
+        "_areno_silu_and_mul_no_compile",
+        lambda value: F.silu(value.chunk(2, dim=-1)[0]) * value.chunk(2, dim=-1)[1],
+    )
+    torch.manual_seed(17)
+    adapter = Phi4MMAdapter()
+    config = _tiny_model_config()
+    config.attn_backend = "native"
+    config.audio_token_id = 20
+    first = adapter.build(config).float()
+    seed = tmp_path / "seed"
+    save_checkpoint_weights(
+        first,
+        str(seed),
+        None,
+        CHECKPOINT_SPEC,
+        extra_tensors_fn=lambda tensors: _save_multimodal_weights(tensors, first),
+    )
+    configure_multimodal_training(
+        first,
+        OptimizerConfig(
+            lr=1e-3,
+            unfreeze_multimodal_tower=True,
+            unfreeze_multimodal_projector=True,
+        ),
+        trainable=True,
+    )
+    audio = first.model.embed_tokens_extend.audio_embed
+    trainable = [parameter for parameter in audio.parameters() if parameter.requires_grad]
+    optimizer = torch.optim.SGD(trainable, lr=1e-3)
+    features = {
+        "input_audio_embeds": torch.randn(1, 8, 80),
+        "audio_attention_mask": torch.ones(1, 8, dtype=torch.bool),
+        "audio_embed_sizes": torch.tensor([1]),
+        "audio_token_id": 20,
+        "input_mode": 2,
+    }
+    tokens = torch.tensor([[1, 20, 2]])
+    projector_before = audio.audio_projection["speech"][0].weight.detach().clone()
+    first.train()
+    loss = F.cross_entropy(first(tokens, features=features).logits_shard[:, -1], torch.tensor([3]))
+    loss.backward()
+    assert any(parameter.grad is not None for parameter in audio.encoder.parameters())
+    assert any(parameter.grad is not None for parameter in audio.audio_projection.parameters())
+    optimizer.step()
+    assert not torch.equal(projector_before, audio.audio_projection["speech"][0].weight)
+
+    output = tmp_path / "output"
+    adapter.save_weights(first, output, seed)
+
+    second = adapter.build(config).float()
+    adapter.load_weights(second, output)
+    first.eval()
+    second.eval()
+    with torch.no_grad():
+        trained_logits = first(tokens, features=features).logits_shard
+        reloaded_logits = second(tokens, features=features).logits_shard
+    torch.testing.assert_close(reloaded_logits, trained_logits, rtol=0, atol=0)
+    audit = audit_phi4mm_checkpoint(
+        output,
+        len(second.layers),
+        _multimodal_checkpoint_keys(second),
+        _lora_checkpoint_keys(second),
+    )
+    assert audit.audio_skipped == 0
+
+
+def test_phi4mm_chunked_audio_prefill_keeps_audio_embedding_offsets():
+    audio_embeds = torch.arange(2 * 16, dtype=torch.float32).view(2, 16)
+    features = {
+        "audio_embeds": audio_embeds,
+        "audio_token_id": 200011,
+        "modality_token_ids": {"audio": 200011},
+    }
+    state = InferenceBatchState(
+        [[200011, 1, 200011, 2]],
+        max_new_tokens=1,
+        max_prefill_tokens=2,
+        max_cache_len=8,
+        kv_block_size=2,
+        num_cache_blocks=4,
+        prompt_features=[features],
+    )
+
+    first = state.build_prefill_payload()
+    second = state.build_prefill_payload()
+
+    torch.testing.assert_close(first["features"]["audio_feature_rows"][0]["audio_embeds"], audio_embeds[:1])
+    torch.testing.assert_close(second["features"]["audio_feature_rows"][0]["audio_embeds"], audio_embeds[1:])
+    assert first["features"]["audio_token_mask"].tolist() == [True, False]
+    assert second["features"]["audio_token_mask"].tolist() == [True, False]
+
+
 def test_phi4mm_packed_training_keeps_audio_rows_and_masks():
     audio = torch.ones(2, 16)
     packed = _pack_multimodal_features(
@@ -270,6 +437,27 @@ def test_phi4mm_packed_training_keeps_audio_rows_and_masks():
     assert packed["audio_token_mask"].tolist() == [False, True, True, False, False, False]
     assert packed["image_token_mask"].tolist() == [False] * 6
     assert packed["audio_feature_rows"][0]["audio_embeds"] is audio
+
+
+def test_phi4mm_logprob_packing_preserves_audio_features():
+    audio = torch.ones(2, 16)
+    packed, lengths = _pack_score_rows(
+        [[1, 200011, 200011, 2]],
+        torch.device("cpu"),
+        0,
+        features=[
+            {
+                "audio_embeds": audio,
+                "audio_token_id": 200011,
+                "modality_token_ids": {"audio": 200011},
+            }
+        ],
+    )
+
+    assert lengths == [4]
+    assert packed["features"]["audio_token_mask"].tolist() == [False, True, True, False]
+    assert packed["features"]["image_token_mask"].tolist() == [False] * 4
+    assert packed["features"]["audio_feature_rows"][0]["audio_embeds"] is audio
 
 
 def test_phi4mm_multi_audio_merge_preserves_segment_order():
