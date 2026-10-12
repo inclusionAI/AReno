@@ -1,0 +1,12 @@
+{
+    "name": "Demo User",
+    "age": 21,
+    "occupation": "student developer",
+    "personality": ["curious", "technical", "reflective", "prefers gentle criticism"],
+    "preferences": [
+        "likes concrete compliments",
+        "dislikes generic praise",
+        "prefers affirmation before criticism",
+        "wants specific and actionable suggestions"
+    ]
+}
