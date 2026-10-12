@@ -33,7 +33,8 @@ AReno's mission is to make LLM RL **accessible** for a broad community of resear
 - 🪶 **Lightweight**: one self-contained train/serve stack with CUDA, Ascend NPU, and Apple Silicon MLX backends.
 - 🧰 **Agentic RL ready**: run an agent function against AReno's local OpenAI-compatible proxy, return explicit trajectories, and train from tokens, logprobs, rewards, and loss masks derived by the trainer.
 - 🎞️ **Multimodal**: use image, audio, and video content with compatible model processors through the same OpenAI-style message format in serving and agentic training.
-- 🧩 **Native LoRA**: train TP-aware adapters for Qwen3, Qwen3-MoE, and Bailing-MoE V3, save standard PEFT artifacts, and reload them for training or serving.
+- 🧩 **Native LoRA**: train TP-aware adapters for Llama, Qwen3/Qwen3-MoE, Qwen3.5, OLMo2, Gemma4, Phi4MM, MiniCPM-V 4.6, and Bailing-MoE (including V3/Flash V3) through the native CUDA engine.
+- 🔀 **Hybrid training**: combine LoRA projections with selected fully trainable parameters, such as norms, MoE routers, or multimodal projectors; synchronize and save them as one policy.
 - 🗜️ **QLoRA**: train Qwen3 dense and Bailing-MoE V3 adapters on CUDA with NF4 weights, double quantization, and paged optimizers.
 - 🧩 **Extensible**: easily register new algorithms, model adapters, reward functions, and hardware backends without changing the core.
 
@@ -317,9 +318,15 @@ For the full list of training options, run `areno train --help`.
 
 #### Native LoRA
 
-Enable CUDA-native LoRA by passing a rank. AReno freezes the base model and
-trains the selected projection adapters through the same rollout and training
-engine, including agentic RL:
+Enable CUDA-native LoRA by passing a rank. In a pure LoRA run, AReno freezes
+the base model and trains the selected projection adapters through the same
+rollout and training engine, including agentic RL. Supported native model
+adapters include Llama, Qwen3/Qwen3-MoE, Qwen3.5 dense/MoE/VL, OLMo2, Gemma4,
+Phi4MM, MiniCPM-V 4.6, and legacy Bailing-MoE and Bailing-MoE V3/Flash V3.
+Targets depend on the checkpoint's native projection layout; see the
+[native LoRA guide](docs/concepts/native-lora.rst) for model and target coverage.
+
+For example:
 
 ```bash
 areno train \
@@ -334,19 +341,62 @@ areno train \
   --save-interval 100
 ```
 
-Pure LoRA checkpoints contain standard PEFT `adapter_config.json` and
-`adapter_model.safetensors` files. Explicit `--full-parameter-targets` can
-train selected base parameters together with LoRA; those saves use AReno's
-versioned hybrid metadata in the same two-file artifact. Resume training or serve an adapter by
-supplying the frozen base checkpoint together with `--lora-adapter-path`.
-See the [native LoRA guide](docs/concepts/native-lora.rst) for supported
-models and targets, agentic training, save/reload, and serving examples.
+LoRA saves contain `adapter_config.json` and `adapter_model.safetensors`.
+Reload policy weights for a new training run or serving by supplying the
+original base checkpoint together with `--lora-adapter-path`. These saves do
+not restore optimizer, scheduler, or RNG state for exact training resume.
+
+#### Hybrid training
+
+Choose how each part of the model learns: use LoRA for selected projections
+and full updates for parameters you want to train directly. For example,
+adapt attention/MLP projections while training a normalization parameter or
+MoE router in full. All other base parameters remain frozen. Norms, embeddings,
+and output heads are not automatically unfrozen; select them explicitly when
+needed. Full updates allocate gradients and optimizer state for the selected
+parameters, so choosing a large embedding or expert subtree increases memory.
+
+Add `--full-parameter-targets` to a LoRA run. This example combines Qwen3 LoRA
+with one fully trainable norm parameter:
+
+```bash
+areno train \
+  --ckpt Qwen/Qwen3-0.6B \
+  --dataset-path gsm8k:main \
+  --dataset-loader-fn examples/math/dataset_loader.py \
+  --reward-fn-path examples/math/math_verify_reward.py \
+  --algo gspo \
+  --lora-rank 8 \
+  --lora-alpha 16 \
+  --full-parameter-targets layers.0.input_layernorm.weight \
+  --save-path outputs/qwen3-hybrid \
+  --save-interval 100
+```
+
+`--lora-target-modules` selects adapter projections; `--full-parameter-targets`
+selects native parameters or whole module subtrees. Use comma-separated exact
+paths for scoped updates. Missing targets and overlap between LoRA and full
+updates are rejected. Omit `--lora-rank` to train only the selected full
+parameters without adapters.
+
+LoRA and selected full parameters share optimizer ownership, policy
+synchronization, and rollout versioning. Hybrid saves use AReno's versioned
+`ARENO_HYBRID` metadata and include complete selected parameter values alongside
+any LoRA A/B tensors. Existing multimodal unfreeze options can also accompany
+LoRA; media parameters and adaptive router state use an additional
+`areno_policy_state.safetensors` sidecar. Reload these combined policies through
+AReno with `--lora-adapter-path` and the original base checkpoint.
+
+Explicit full targets currently use the native CUDA backend, require the
+default `--reference-mode independent`, and cannot be combined with NF4 QLoRA.
+See the [native LoRA guide](docs/concepts/native-lora.rst) for target selection,
+media unfreeze options, agentic training, and save/reload details.
 
 #### QLoRA
 
 For CUDA Qwen3 dense and Bailing-MoE V3, add `--qlora --adam-4bit` to the
-training command above to use NF4 weights, double quantization, and paged
-Adam4bit. `--qlora` enables rank 8 / alpha 16 LoRA by default; the existing
+pure LoRA command in the Native LoRA section to use NF4 weights, double
+quantization, and paged Adam4bit. `--qlora` enables rank 8 / alpha 16 LoRA by default; the existing
 `--lora-*` options override these settings. Saved adapters automatically
 restore their quantization mode through `--lora-adapter-path`.
 

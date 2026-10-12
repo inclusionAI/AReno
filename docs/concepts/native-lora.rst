@@ -2,8 +2,8 @@ Native LoRA
 ===========
 
 AReno can train and serve LoRA adapters directly in its CUDA engine. The base
-model stays frozen while the LoRA A and B parameters participate in the same
-tensor-parallel, data-parallel, sequence-parallel, rollout, and optimizer
+model stays frozen in pure LoRA runs while the A and B parameters participate
+in the same tensor-parallel, data-parallel, sequence-parallel, rollout, and optimizer
 paths as full-parameter training. No external PEFT runtime is required during
 training or inference.
 
@@ -78,8 +78,23 @@ the default target list covers attention and MLP projections:
 The resolved LoRA rank, alpha, dropout, target modules, and adapter path are
 shown in the configuration summary printed before model loading.
 
-Selecting full parameters
--------------------------
+Hybrid training
+---------------
+
+Choose which parts of a model receive low-rank updates and which parameters
+remain fully trainable. For example, adapt attention and MLP projections with
+LoRA while training selected norms, MoE routers, or media projectors in full.
+Both sets belong to the same policy: optimizer updates, synchronization,
+rollout versions, and saved artifacts include all selected trainable weights.
+All other base parameters stay frozen. AReno does not automatically unfreeze
+norms, embeddings, or the output head.
+
+This selective combination is also discussed in
+`RL Learning with LoRA: A Diverse Deep Dive <https://kalomaze.bearblog.dev/rl-lora-ddd/>`_.
+That implementation uses ``target_modules`` and ``modules_to_save``;
+AReno uses native ``target_modules`` and ``full_parameter_targets`` selectors.
+The latter are explicit native parameter/module selections, not PEFT
+``modules_to_save`` or regex patterns.
 
 Use ``--full-parameter-targets`` to update original parameters rather than
 attach adapters to them. This is useful for parameters outside the supported
@@ -182,8 +197,9 @@ Save and reload
 
 Each LoRA save directory contains
 ``adapter_config.json`` and ``adapter_model.safetensors`` files. A/B-only saves
-are standard PEFT LoRA artifacts. When media unfreeze or adaptive router state
-is present, the artifact uses ``peft_type=ARENO_LORA_POLICY`` and adds
+use PEFT-style LoRA metadata and tensor names. Cross-framework compatibility
+is not established for every native model layout. When media unfreeze or
+adaptive router state is present, the artifact uses ``peft_type=ARENO_LORA_POLICY`` and adds
 ``areno_policy_state.safetensors``; reload these combined policies through
 AReno. Step-local routing counters are excluded. A standard PEFT adapter can
 also initialize a new run with these FFT options enabled. The save is
@@ -244,7 +260,8 @@ come from the original base checkpoint. Adaptive router buffers and media
 state retain their existing policy-state sidecar. This is an AReno artifact,
 not an external PEFT codec or an optimizer/scheduler/RNG resume checkpoint.
 
-Hybrid training requires an independent frozen reference: ``reuse_actor_base``
+Explicit full-parameter hybrid training currently uses the native CUDA backend
+and requires an independent frozen reference: ``reuse_actor_base``
 is rejected because selected actor base parameters are trainable. Native NF4
 QLoRA remains available for LoRA; combining QLoRA with explicit full targets
 is currently rejected because its quantized base has no dense checkpoint layout.
