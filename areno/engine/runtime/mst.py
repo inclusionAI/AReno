@@ -4,6 +4,11 @@ from __future__ import annotations
 
 import logging
 import os
+import time
+from contextlib import contextmanager
+from contextvars import ContextVar
+from datetime import datetime, timedelta, timezone
+from weakref import WeakKeyDictionary
 
 import psutil
 import torch
@@ -28,6 +33,51 @@ def training_chunk_size(device_type: str, tp_size: int) -> int:
 
 
 logger = logging.getLogger(__name__)
+_SCHEDULES = WeakKeyDictionary()
+_TRAIN_PROGRESS = ContextVar("mst_train_progress", default=None)
+
+
+class _TrainingProgress:
+    """Wall-clock feedback for the current microbatch, not the whole job."""
+
+    def __init__(self):
+        self.total = 0
+        self.completed = 0
+        self.started = None
+        self.last_log = None
+
+    def begin(self):
+        if self.started is None:
+            self.started = self.last_log = time.monotonic()
+
+    def advance(self, count, chunk):
+        self.completed += count
+        now = time.monotonic()
+        if self.started is None or now - self.last_log < 15 or not self.completed:
+            return
+        self.last_log = now
+        elapsed = now - self.started
+        # Attention VJPs and optimizer work are not part of this token count;
+        # leave a margin and explicitly label this as a rough estimate.
+        remaining = elapsed / self.completed * max(0, self.total - self.completed) * 1.25 + 5
+        finish = datetime.now(timezone.utc) + timedelta(seconds=remaining)
+        logger.info(
+            "train ETA remaining~%.1fs estimated_finish=%s MST_progress=%d/%d chunk=%d (rough estimate)",
+            remaining,
+            finish.isoformat(timespec="seconds"),
+            self.completed,
+            self.total,
+            chunk,
+        )
+
+
+@contextmanager
+def mst_training_progress():
+    token = _TRAIN_PROGRESS.set(_TrainingProgress())
+    try:
+        yield
+    finally:
+        _TRAIN_PROGRESS.reset(token)
 
 
 class _AdaptiveChunks:
@@ -66,31 +116,47 @@ class _AdaptiveChunks:
         old = self.size
         if pressure >= self.memory_fraction:
             self.size = max(1, self.size // 2)
-            self.cooldown = 4
+            self.cooldown = 8
             self.stable = 0
         elif self.cooldown:
             self.cooldown -= 1
         elif pressure < self.memory_fraction * 0.95:
             self.stable += 1
-            if self.stable >= 2:
-                self.size = min(self.maximum, self.size + max(1, self.size // 4))
+            if self.stable >= 4:
+                self.size = min(self.maximum, self.size + 256) if self.size < self.maximum else self.size
                 self.stable = 0
         else:
             self.stable = 0
         if self.size != old:
-            logger.info(
-                "MST chunk %d -> %d, memory pressure %.3f / %.3f", old, self.size, pressure, self.memory_fraction
+            logger.log(
+                logging.INFO if self.size < old else logging.DEBUG,
+                "MST chunk %d -> %d, memory pressure %.3f / %.3f",
+                old,
+                self.size,
+                pressure,
+                self.memory_fraction,
             )
 
-    def oom(self):
-        self.size = max(1, self.size // 2)
+    def oom(self, failed_size=None):
+        self.size = max(1, (self.size if failed_size is None else failed_size) // 2)
+        self.cooldown = 8
         self.maximum = self.size
         self.stable = 0
         logger.warning("MST allocation failed; retrying uncommitted chunk with %d tokens", self.size)
 
 
-def _adaptive_chunks(device, initial, maximum):
-    return _AdaptiveChunks(device, initial, maximum) if device.type == "cuda" else None
+def _adaptive_chunks(device, initial, maximum, owner=None):
+    if device.type != "cuda":
+        return None
+    if owner is None:
+        return _AdaptiveChunks(device, initial, maximum)
+    key = (device, os.environ.get("ARENO_MST_MEM_FRAC", "0.9"), initial)
+    schedules = _SCHEDULES.setdefault(owner, {})
+    if key not in schedules:
+        schedules[key] = _AdaptiveChunks(device, initial, maximum)
+    schedule = schedules[key]
+    schedule.maximum = maximum
+    return schedule
 
 
 def _chunk_vjp(ctx, inputs, parameters, flat, grad_output, start, end):
@@ -120,13 +186,17 @@ class _RecomputedBlock(torch.autograd.Function):
     """Preserve the canonical forward geometry; chunk its recomputed VJP."""
 
     @staticmethod
-    def forward(ctx, execute, chunk_size, input_count, *tensors):
+    def forward(ctx, execute, owner, chunk_size, input_count, *tensors):
+        ctx.owner = owner
         ctx.execute = execute
         ctx.chunk_size = chunk_size
         ctx.input_count = input_count
         ctx.save_for_backward(*tensors)
         inputs = tensors[:input_count]
         ctx.device = inputs[0].device
+        ctx.progress = _TRAIN_PROGRESS.get() if ctx.device.type == "cuda" else None
+        if ctx.progress is not None:
+            ctx.progress.total += inputs[0].numel() // inputs[0].shape[-1]
         ctx.cpu_rng = torch.get_rng_state()
         ctx.cuda_rng = torch.cuda.get_rng_state(ctx.device) if ctx.device.type == "cuda" else None
         ctx.autocast_enabled = torch.is_autocast_enabled(ctx.device.type)
@@ -150,9 +220,11 @@ class _RecomputedBlock(torch.autograd.Function):
         input_grads = [torch.zeros_like(value) if value.requires_grad else None for value in inputs]
         parameter_grads = [None] * len(parameters)
         size = flat.shape[0] if ctx.stochastic else ctx.chunk_size
-        adaptive = _adaptive_chunks(ctx.device, size, flat.shape[0]) if not ctx.stochastic else None
+        adaptive = _adaptive_chunks(ctx.device, size, flat.shape[0], ctx.owner) if not ctx.stochastic else None
         # Stochastic blocks must replay the whole draw, since splitting a
         # dropout draw changes its mask. Keep the caller's RNG state intact.
+        if ctx.progress is not None:
+            ctx.progress.begin()
         devices = [ctx.device.index] if ctx.cuda_rng is not None else []
         with torch.random.fork_rng(devices=devices, enabled=ctx.stochastic):
             if ctx.stochastic:
@@ -165,7 +237,7 @@ class _RecomputedBlock(torch.autograd.Function):
                     pressure = adaptive.pressure()
                     if pressure >= adaptive.memory_fraction:
                         adaptive.observe(pressure)
-                    size = adaptive.size
+                    size = min(adaptive.size, flat.shape[0] - start)
                 end = min(start + size, flat.shape[0])
                 retry = False
                 try:
@@ -173,7 +245,7 @@ class _RecomputedBlock(torch.autograd.Function):
                 except torch.cuda.OutOfMemoryError:
                     if adaptive is None or size <= 1:
                         raise
-                    adaptive.oom()
+                    adaptive.oom(size)
                     retry = True
                 if retry:
                     # Leave the exception scope first: its traceback owns the
@@ -209,6 +281,8 @@ class _RecomputedBlock(torch.autograd.Function):
                         parameter_grads[index] = gradient
                     else:
                         parameter_grads[index].add_(gradient)
+                if ctx.progress is not None:
+                    ctx.progress.advance(end - start, size)
                 start = end
                 del grads
                 gradient = None
@@ -216,7 +290,7 @@ class _RecomputedBlock(torch.autograd.Function):
             value.to(parameter.dtype) if value is not None else None
             for value, parameter in zip(parameter_grads, parameters)
         ]
-        return (None, None, None, *input_grads, *parameter_grads)
+        return (None, None, None, None, *input_grads, *parameter_grads)
 
 
 @torch._dynamo.disable
@@ -244,7 +318,9 @@ def mini_sequence_forward(function, hidden_states, *token_args, chunk_size: int)
 
     if torch.is_grad_enabled() and flat.shape[0] > chunk_size and isinstance(owner, nn.Module):
         parameters = tuple(parameter for parameter in owner.parameters() if parameter.requires_grad)
-        return _RecomputedBlock.apply(execute, chunk_size, len(token_args) + 1, hidden_states, *token_args, *parameters)
+        return _RecomputedBlock.apply(
+            execute, owner, chunk_size, len(token_args) + 1, hidden_states, *token_args, *parameters
+        )
 
     outputs = []
     for start in range(0, flat.shape[0], chunk_size):

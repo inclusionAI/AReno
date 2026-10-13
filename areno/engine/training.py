@@ -16,7 +16,7 @@ from areno.engine.runtime.logprobs import (
     packed_next_token_logprobs,
     packed_next_token_logprobs_from_hidden,
 )
-from areno.engine.runtime.mst import training_chunk_size
+from areno.engine.runtime.mst import mst_training_progress, training_chunk_size
 from areno.engine.runtime.routing_replay import routing_replay_context
 from areno.engine.runtime.train_step import (
     _clip_grad_norm,
@@ -95,6 +95,7 @@ class TrainingManager:
                 if accelerator is not None:
                     accelerator.empty_cache()
 
+    @mst_training_progress()
     def _train_step(
         self,
         data_pack_shards: list[dict],

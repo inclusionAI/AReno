@@ -408,18 +408,18 @@ def test_mst_adaptive_budget_cpu(monkeypatch):
 
     schedule = _AdaptiveChunks(torch.device("cpu"), 8192, 65536)
     assert schedule.size == 1024
-    schedule.observe(0.5)
-    schedule.observe(0.5)
+    for _ in range(4):
+        schedule.observe(0.5)
     assert schedule.size == 1280
     schedule.observe(0.75)
     assert schedule.size == 1280
     schedule.observe(0.81)
     assert schedule.size == 640
-    for _ in range(6):
+    for _ in range(12):
         schedule.observe(0.5)
-    assert schedule.size == 800  # Resume growth after pressure falls and cooldown expires.
+    assert schedule.size == 896  # Resume growth after pressure falls and cooldown expires.
     schedule.oom()
-    assert schedule.size == 400
+    assert schedule.size == 448
 
 
 def test_mst_adaptive_unified_memory_pressure_cpu(monkeypatch):
@@ -483,8 +483,8 @@ def test_mst_respects_memory_budget_cpu(monkeypatch, budget):
 
     monkeypatch.setenv("ARENO_MST_MEM_FRAC", str(budget))
     schedule = _AdaptiveChunks(torch.device("cpu"), 1024, 65536)
-    schedule.observe(budget * 0.8)
-    schedule.observe(budget * 0.8)
+    for _ in range(4):
+        schedule.observe(budget * 0.8)
     assert schedule.size == 1280
     schedule.observe(budget * 0.98)
     assert schedule.size == 1280
@@ -501,8 +501,8 @@ def test_mst_spark_uses_reclaimable_host_memory_cpu(monkeypatch):
     monkeypatch.setenv("ARENO_MST_MEM_FRAC", "0.8")
     schedule = mst._AdaptiveChunks(torch.device("cuda"), 1024, 65536)
     assert schedule.pressure() == pytest.approx(0.6)
-    schedule.observe(schedule.pressure())
-    schedule.observe(schedule.pressure())
+    for _ in range(4):
+        schedule.observe(schedule.pressure())
     assert schedule.size == 1280
     monkeypatch.setattr(mst.psutil, "virtual_memory", lambda: SimpleNamespace(available=15, total=100))
     schedule.observe(schedule.pressure())
@@ -511,3 +511,74 @@ def test_mst_spark_uses_reclaimable_host_memory_cpu(monkeypatch):
     discrete = mst._AdaptiveChunks(torch.device("cuda"), 1024, 65536)
     monkeypatch.setattr(mst.psutil, "virtual_memory", lambda: SimpleNamespace(available=40, total=100))
     assert discrete.pressure() == pytest.approx(0.8)
+
+
+def test_mst_reuses_schedule_per_module_and_releases_dead_owners(monkeypatch):
+    import gc
+    import weakref
+
+    from areno.engine.runtime import mst
+
+    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda _: SimpleNamespace(name="NVIDIA GB10"))
+    device = torch.device("cuda:0")
+    owner, other = nn.Linear(2, 2), nn.Linear(2, 2)
+    schedule = mst._adaptive_chunks(device, 1024, 65536, owner)
+    for _ in range(8):
+        schedule.observe(0.4)
+    assert schedule.size == 1536
+    assert mst._adaptive_chunks(device, 1024, 65536, owner) is schedule
+    assert mst._adaptive_chunks(device, 1024, 65536, other).size == 1024
+    assert mst._adaptive_chunks(device, 1024, 100, owner).size == 1536
+    schedule.observe(0.4)
+    assert schedule.size == 1536
+    reference = weakref.ref(owner)
+    del owner
+    gc.collect()
+    assert reference() is None
+
+
+def test_mst_fixed_growth_and_hysteresis(monkeypatch):
+    from areno.engine.runtime.mst import _AdaptiveChunks
+
+    monkeypatch.setenv("ARENO_MST_MEM_FRAC", "0.8")
+    schedule = _AdaptiveChunks(torch.device("cpu"), 1024, 65536)
+    for expected in [1280, 1536, 1792]:
+        for _ in range(4):
+            schedule.observe(0.4)
+        assert schedule.size == expected
+    for _ in range(20):
+        schedule.observe(0.79)
+    assert schedule.size == 1792
+    schedule.observe(0.81)
+    assert schedule.size == 896
+    for _ in range(8):
+        schedule.observe(0.4)
+    assert schedule.size == 896
+
+
+def test_mst_current_train_eta_and_log_throttle(monkeypatch, caplog):
+    import logging
+
+    from areno.engine.runtime import mst
+
+    monkeypatch.setattr(mst.logger, "handlers", [caplog.handler])
+    monkeypatch.setattr(mst.logger, "propagate", False)
+    clock = [100.0]
+    monkeypatch.setattr(mst.time, "monotonic", lambda: clock[0])
+    with mst.mst_training_progress():
+        progress = mst._TRAIN_PROGRESS.get()
+        progress.total = 400
+        progress.begin()
+        clock[0] = 110.0
+        progress.advance(100, 1024)
+        assert not caplog.records
+        clock[0] = 120.0
+        with caplog.at_level(logging.INFO, logger=mst.__name__):
+            progress.advance(100, 1280)
+        assert "remaining~30.0s" in caplog.text
+        assert "MST_progress=200/400" in caplog.text
+        assert "rough estimate" in caplog.text
+        clock[0] = 125.0
+        progress.advance(100, 1280)
+        assert len(caplog.records) == 1
+    assert mst._TRAIN_PROGRESS.get() is None
