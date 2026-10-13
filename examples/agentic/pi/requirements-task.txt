@@ -1,3 +1,4 @@
 # Install once in a shared Python 3.12 task environment, not once per case.
 # tinydb itself is imported from each attempt's workspace, never site-packages.
 pytest==8.3.5
+PyYAML==6.0.2

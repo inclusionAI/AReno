@@ -105,7 +105,7 @@ def convert_row(raw: dict, pristine: dict[str, bytes], *, python: str, digest: s
         write_snapshot(root, pristine)
         gold = check_task(root, verifier, python)
         if gold["returncode"] != 0 or not gold["complete"]:
-            raise ValueError("pristine reference fails the fixed shared environment")
+            raise ValueError("pristine reference fails the fixed shared environment: " + gold["failure_output"][-2000:])
         # SWE-smith patch introduces the bug; it is NOT a gold repair patch.
         subprocess.run(["git", "apply", "--check", "-"], cwd=root, input=raw["patch"], text=True, check=True)
         subprocess.run(["git", "apply", "-"], cwd=root, input=raw["patch"], text=True, check=True)

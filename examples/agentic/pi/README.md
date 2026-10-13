@@ -72,7 +72,8 @@ reference passes all tests. It excludes incompatible cases and records them in
 `OUTPUT.report.json`, along with selected IDs, source checksum, dependency
 versions and per-test outcomes. `REPRODUCTION.md` contains the verified failing
 pytest output to guide investigation. Workspace pytest configuration omits optional
-coverage plugins; the test code is unchanged. Records omit gold repairs and reference code.
+coverage plugins; the test code is unchanged. The shared environment includes
+pinned pytest and PyYAML, so YAML storage regression tests also run without skips. Records omit gold repairs and reference code.
 Selection happens before policy evaluation and does not filter on reward.
 `--limit` and `--seed` allow larger or different selections from this same dataset.
 
