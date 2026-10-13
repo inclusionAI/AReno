@@ -62,10 +62,12 @@ def prepare(raw, cache, python):
     paths = re.findall(r"^\+\+\+ b/(.+)$", raw["patch"], re.MULTILINE)
     if not paths or any(not p.startswith(package + "/") or "/tests/" in p for p in paths):
         raise ValueError("repair changes files outside the editable package")
-    f2p = json.loads(raw["FAIL_TO_PASS"])
+    selection = raw.get("selection", {})
+    f2p = selection.get("fail_to_pass", json.loads(raw["FAIL_TO_PASS"]))
     all_p2p = json.loads(raw["PASS_TO_PASS"])
     # Keep every failing regression plus a deterministic sample of passing tests.
     p2p = sorted(t for t in set(all_p2p) - set(f2p) if ("[" not in t or t.endswith("]")) and "/n/fs/" not in t)[:20]
+    p2p = selection.get("pass_to_pass", p2p)
     tests = sorted(set(f2p + p2p))
     if not f2p or not p2p:
         raise ValueError("missing regression outcomes")
@@ -114,6 +116,9 @@ def prepare(raw, cache, python):
         test_patch_sha256=hashlib.sha256(raw["test_patch"].encode()).hexdigest(),
     )
     source["task_id"] = raw["instance_id"]
+    for key in ["issue_url", "issue_title", "problem_statement_sha256"]:
+        if key in selection:
+            source[key] = selection[key]
     return {
         "prompt": f"Resolve this real upstream issue in {raw['repo']}. Your current directory is the repository root. "
         f"Only changes under {package}/ are graded against immutable upstream tests. "
@@ -130,16 +135,37 @@ def prepare(raw, cache, python):
     }, {"task_id": raw["instance_id"], "broken": broken, "reference": gold}
 
 
+def source_rows(snapshot):
+    import pyarrow.parquet as pq
+
+    checksums = {
+        "test": "db4f70ef735b3162c74801ddcdf8d7bae8d704193788c6d844f898c20b571cbb",
+        "dev": "d758d54540aa4140d0274ed0cc93b8288aa6f323c3c603e2557e7666a47fc41b",
+    }
+    rows = {}
+    for split, expected in checksums.items():
+        path = snapshot / f"data/{split}-00000-of-00001.parquet"
+        if hashlib.sha256(path.read_bytes()).hexdigest() != expected:
+            raise ValueError(f"{split} source does not match the pinned ModelScope release")
+        rows.update({row["instance_id"]: dict(row, split=split) for row in pq.read_table(path).to_pylist()})
+    return rows
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--snapshot", type=Path, help="Previously downloaded pinned ModelScope snapshot")
-    parser.add_argument("--repo-cache", type=Path, required=True)
+    parser.add_argument("--repo-cache", type=Path, default=Path.home() / ".cache/areno/pi-repositories")
     parser.add_argument("--python", required=True, help="Shared task environment Python")
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--manifest", type=Path, default=Path(__file__).with_name("swebench_100.json"))
     parser.add_argument("--limit", type=int, default=100)
     parser.add_argument("--workers", type=int, default=2)
-    parser.add_argument("--repos", nargs="+", default=list(PACKAGES))
     args = parser.parse_args()
+    selection = json.loads(args.manifest.read_text())[: args.limit]
+    if args.limit < 1 or args.workers < 1 or len(selection) != args.limit:
+        parser.error("limit must fit the manifest; workers must be positive")
+    if len({r["issue_url"] for r in selection}) != len(selection):
+        raise ValueError("manifest must contain distinct upstream issues")
     if args.snapshot is None:
         from modelscope.hub.snapshot_download import snapshot_download
 
@@ -151,30 +177,43 @@ def main():
                 allow_patterns=[f"data/{split}-00000-of-00001.parquet" for split in ("test", "dev")],
             )
         )
-    import pyarrow.parquet as pq
-
+    source = source_rows(args.snapshot)
     rows = []
-    for split in ["test", "dev"]:
-        rows.extend(
-            dict(row, split=split)
-            for row in pq.read_table(args.snapshot / f"data/{split}-00000-of-00001.parquet").to_pylist()
-            if row["repo"] in args.repos
-        )
-    rows.sort(key=lambda r: (r["repo"] == "psf/requests", len(r["patch"]), r["instance_id"]))
+    for item in selection:
+        row = source[item["task_id"]]
+        if (
+            row["repo"] != item["repo"]
+            or row["base_commit"] != item["base_commit"]
+            or hashlib.sha256(row["problem_statement"].encode()).hexdigest() != item["problem_statement_sha256"]
+        ):
+            raise ValueError(f"manifest/source mismatch: {item['task_id']}")
+        rows.append(dict(row, selection=item))
+    args.repo_cache.mkdir(parents=True, exist_ok=True)
+    for repo in sorted({row["repo"] for row in rows}):
+        path = args.repo_cache / repo.split("/")[-1]
+        if not (path / ".git").exists():
+            subprocess.run(
+                ["git", "clone", "--filter=blob:none", "--no-checkout", f"https://github.com/{repo}.git", str(path)],
+                check=True,
+            )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     tasks = args.output.with_suffix(".tasks")
     tasks.mkdir(exist_ok=True)
-    report = {"accepted": [], "rejected": []}
+    environment = subprocess.check_output(
+        [
+            args.python,
+            "-I",
+            "-c",
+            "import sys,json,importlib.metadata as m; print(json.dumps({'python':sys.version,'packages':sorted((d.metadata['Name'],d.version) for d in m.distributions())}))",
+        ],
+        text=True,
+    )
+    report = {"environment": json.loads(environment), "accepted": [], "rejected": []}
 
     def work(row):
-        task_path = tasks / (row["instance_id"] + ".json")
-        evidence_path = tasks / (row["instance_id"] + ".report.json")
-        if task_path.exists() and evidence_path.exists():
-            return row["instance_id"], json.loads(evidence_path.read_text()), None
         try:
             task, evidence = prepare(row, args.repo_cache, args.python)
-            task_path.write_text(json.dumps(task))
-            evidence_path.write_text(json.dumps(evidence))
+            (tasks / (row["instance_id"] + ".json")).write_text(json.dumps(task))
             return row["instance_id"], evidence, None
         except Exception as exc:
             return row["instance_id"], None, str(exc)
@@ -188,13 +227,14 @@ def main():
                 report["accepted"].append(evidence)
                 print("ACCEPT", len(report["accepted"]), task_id, flush=True)
             args.output.with_suffix(".report.json").write_text(json.dumps(report, indent=2))
-    accepted = report["accepted"][: args.limit]
-    with args.output.open("w") as stream:
-        for evidence in accepted:
+    if len(report["accepted"]) != args.limit:
+        raise SystemExit(f"Only {len(report['accepted'])}/{args.limit} passed; training dataset not published")
+    pending = args.output.with_suffix(".pending.jsonl")
+    with pending.open("w") as stream:
+        for evidence in report["accepted"]:
             stream.write((tasks / (evidence["task_id"] + ".json")).read_text() + "\n")
-    if len(accepted) < args.limit:
-        raise SystemExit(f"Only {len(accepted)}/{args.limit} cases passed validation; see report")
-    print(f"Wrote {len(accepted)} validated real-issue tasks to {args.output}")
+    pending.replace(args.output)
+    print(f"Wrote {args.limit} validated real-issue tasks to {args.output}")
 
 
 if __name__ == "__main__":

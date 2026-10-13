@@ -1,4 +1,5 @@
 """Real-issue packaging, archive safety and immutable regression grading."""
+
 import base64
 import io
 import json
@@ -15,12 +16,18 @@ from swebench_verify import unpack
 
 
 def test_real_repair_keeps_broken_source_and_immutable_tests(tmp_path, monkeypatch):
-    monkeypatch.setattr("generate_swebench.archive_files", lambda *_: {
-        "pydicom/__init__.py": b"def answer():\n    return 0\n",
-        "tests/test_answer.py": b"from pydicom import answer\ndef test_stable():\n    assert isinstance(answer(), int)\n",
-    })
+    monkeypatch.setattr(
+        "generate_swebench.archive_files",
+        lambda *_: {
+            "pydicom/__init__.py": b"def answer():\n    return 0\n",
+            "tests/test_answer.py": b"from pydicom import answer\ndef test_stable():\n    assert isinstance(answer(), int)\n",
+        },
+    )
     raw = {
-        "repo": "pydicom/pydicom", "instance_id": "pydicom__pydicom-123", "base_commit": "fixture", "split": "dev",
+        "repo": "pydicom/pydicom",
+        "instance_id": "pydicom__pydicom-123",
+        "base_commit": "fixture",
+        "split": "dev",
         "problem_statement": "The answer should be 42.",
         "FAIL_TO_PASS": json.dumps(["tests/test_answer.py::test_answer"]),
         "PASS_TO_PASS": json.dumps(["tests/test_answer.py::test_stable"]),
@@ -40,7 +47,15 @@ def test_real_repair_keeps_broken_source_and_immutable_tests(tmp_path, monkeypat
     assert check_task(tmp_path, row["verify"], sys.executable)["returncode"] == 0
 
 
-@pytest.mark.parametrize("name,kind", [("../escape", tarfile.REGTYPE), ("/escape", tarfile.REGTYPE), (".pi/config", tarfile.REGTYPE), ("link", tarfile.SYMTYPE)])
+@pytest.mark.parametrize(
+    "name,kind",
+    [
+        ("../escape", tarfile.REGTYPE),
+        ("/escape", tarfile.REGTYPE),
+        (".pi/config", tarfile.REGTYPE),
+        ("link", tarfile.SYMTYPE),
+    ],
+)
 def test_archive_rejects_unsafe_entries(tmp_path, name, kind):
     data = io.BytesIO()
     with tarfile.open(fileobj=data, mode="w:gz") as archive:
@@ -50,3 +65,14 @@ def test_archive_rejects_unsafe_entries(tmp_path, name, kind):
         archive.addfile(entry, io.BytesIO())
     with pytest.raises(ValueError, match="invalid snapshot"):
         unpack(base64.b64encode(data.getvalue()), tmp_path)
+
+
+def test_frozen_manifest_has_100_distinct_real_issue_repairs():
+    rows = json.loads(Path(__file__).with_name("swebench_100.json").read_text())
+    assert len(rows) == len({r["issue_url"] for r in rows}) == len({r["task_id"] for r in rows}) == 100
+    for row in rows:
+        assert row["synthetic"] is False
+        assert row["issue_url"].startswith(f"https://github.com/{row['repo']}/issues/")
+        assert len(row["base_commit"]) == 40
+        assert row["fail_to_pass"] and row["pass_to_pass"]
+        assert not set(row["fail_to_pass"]) & set(row["pass_to_pass"])

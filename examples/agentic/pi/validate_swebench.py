@@ -4,16 +4,24 @@ from __future__ import annotations
 
 import argparse
 import gzip
+import hashlib
 import json
 import tempfile
 from pathlib import Path
 
 from generate_dataset import check_task, write_snapshot
-from generate_swebench import apply
+from generate_swebench import apply, source_rows
 from swebench_verify import unpack
 
 
 def validate(row, raw, python):
+    source = row["source"]
+    if (
+        source["base_commit"] != raw["base_commit"]
+        or source["repo"] != raw["repo"]
+        or source["problem_statement_sha256"] != hashlib.sha256(raw["problem_statement"].encode()).hexdigest()
+    ):
+        raise ValueError("task provenance does not match the pinned source")
     with tempfile.TemporaryDirectory(prefix="areno-pi-revalidate-") as directory:
         root = Path(directory)
         unpack(row["workspace_archive"], root)
@@ -42,25 +50,26 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--limit", type=int, default=100)
     args = parser.parse_args()
-    import pyarrow.parquet as pq
-
-    raw = {
-        r["instance_id"]: r
-        for split in ("test", "dev")
-        for r in pq.read_table(args.snapshot / f"data/{split}-00000-of-00001.parquet").to_pylist()
-    }
+    if args.limit < 1:
+        parser.error("limit must be positive")
+    raw = source_rows(args.snapshot)
     report = {"accepted": [], "rejected": []}
     manifest = []
+    seen = set()
     opener = gzip.open if args.input.suffix == ".gz" else open
     pending = args.output.with_suffix(".pending.jsonl")
+    args.output.parent.mkdir(parents=True, exist_ok=True)
     with opener(args.input, "rt") as source, pending.open("w") as output:
         for line in source:
             row = json.loads(line)
             task_id = row["source"]["task_id"]
             try:
+                if row["source"]["issue_url"] in seen:
+                    raise ValueError("duplicate upstream issue")
                 evidence = validate(row, raw[task_id], args.python)
                 report["accepted"].append(evidence)
                 manifest.append(row["source"])
+                seen.add(row["source"]["issue_url"])
                 output.write(line)
                 output.flush()
                 print("ACCEPT", len(manifest), task_id, flush=True)

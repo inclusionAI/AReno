@@ -162,7 +162,12 @@ async def run_agent(ctx, batch):
                 async with PiProxy(ctx, max_turns=int(item.record.get("max_turns", 32)), timeout=timeout) as proxy:
                     config_dir = root / "pi-config"
                     configure_pi(config_dir, proxy)
-                    env = dict(task_env, PI_CODING_AGENT_DIR=str(config_dir))
+                    env = dict(
+                        task_env,
+                        PI_CODING_AGENT_DIR=str(config_dir),
+                        PYTHONPATH=os.pathsep.join([str(workspace), str(workspace / "src")]),
+                        PYTEST_DISABLE_PLUGIN_AUTOLOAD="1",
+                    )
                     command = [
                         executable,
                         "--print",
