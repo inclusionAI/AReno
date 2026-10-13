@@ -1,4 +1,4 @@
-"""Generate repository-level sqlparse repair tasks from ModelScope SWE-smith."""
+"""Generate repository-level tinydb repair tasks from ModelScope SWE-smith."""
 
 from __future__ import annotations
 
@@ -20,11 +20,11 @@ from pathlib import Path
 
 DATASET = "SWE-bench/SWE-smith"
 REVISION = "552363dc45a3bdce7ff4f3d7cdaf6945117f66ca"
-REPO = "swesmith/andialbrecht__sqlparse.e57923b3"
-UPSTREAM = "https://github.com/andialbrecht/sqlparse.git"
-COMMIT = "e57923b3aa823c524c807953cecc48cf6eec2cb2"
+REPO = "swesmith/msiemens__tinydb.10644a0e"
+UPSTREAM = "https://github.com/msiemens/tinydb.git"
+COMMIT = "10644a0e07ad180c5b756aba272ee6b0dbd12df8"
 # The pinned source locates this repository in this one shard.
-SHARD = "data/train-00003-of-00011.parquet"
+SHARD = "data/train-00004-of-00011.parquet"
 
 
 def repository_files(cache: Path) -> dict[str, bytes]:
@@ -74,6 +74,10 @@ def check_task(root: Path, verifier: str, python: str) -> dict:
         raise ValueError(f"verifier failed without outcomes (exit {process.returncode}): {output[-2000:]}")
     summary = json.loads(summaries[-1])
     summary["returncode"] = process.returncode
+    failure_output = output.split("ARENO_SWE_TEST_RESULT=", 1)[0]
+    summary["failure_output"] = (
+        re.sub(r"/[^\s]*areno-pi-grade-[^/\s]+", "<grader>", failure_output)[-8000:] if process.returncode else ""
+    )
     return summary
 
 
@@ -82,7 +86,7 @@ def convert_row(raw: dict, pristine: dict[str, bytes], *, python: str, digest: s
         raise ValueError("task must have an issue statement for the pinned repository")
     paths = re.findall(r"^\+\+\+ b/(.+)$", raw["patch"], re.MULTILINE)
     if not paths or any(
-        not name.startswith("sqlparse/") or not name.endswith(".py") or ".." in Path(name).parts for name in paths
+        not name.startswith("tinydb/") or not name.endswith(".py") or ".." in Path(name).parts for name in paths
     ):
         raise ValueError("select package-only repairs")
     if len(set(paths)) != 1:
@@ -120,30 +124,39 @@ def convert_row(raw: dict, pristine: dict[str, bytes], *, python: str, digest: s
                 files[name] = content.decode("utf-8")
             except UnicodeDecodeError:
                 binary[name] = base64.b64encode(content).decode()
+    # The shared environment needs pytest only, not upstream coverage plugins.
+    files["pytest.ini"] = "[pytest]\naddopts = -q\n"
+    files["REPRODUCTION.md"] = "# Verified failing regression tests\n\n```text\n" + broken["failure_output"] + "\n```\n"
     files.setdefault(
         "AGENTS.md",
         "# Repository workspace\n\n"
-        "The current working directory is this task's sqlparse repository root. "
+        "The current working directory is this task's tinydb repository root. "
         "Use relative paths here; do not search other workspaces or /testbed.\n\n"
-        "- sqlparse/sql.py: Token and TokenList classes.\n"
-        "- sqlparse/engine/grouping.py: SQL token grouping.\n"
-        "- sqlparse/keywords.py and sqlparse/tokens.py: keyword and token definitions.\n"
+        "- tinydb/queries.py: query predicates and matching.\n"
+        "- tinydb/table.py and tinydb/database.py: documents, tables and database API.\n"
+        "- tinydb/operations.py: document update operations.\n"
+        "- tinydb/storages.py and tinydb/middlewares.py: JSON/memory storage and caching.\n"
+        "- REPRODUCTION.md: verified failures for this task.\n"
         "- tests/: existing pytest regression tests.\n\n"
         "Python and pytest are already installed. Do not install packages or fetch source. "
-        "Reproduce the reported failing tests, edit package code, and rerun the regression suite.\n",
+        "Read REPRODUCTION.md and the failing tests first. Use rg to locate the affected function and "
+        "read only the relevant section of the implementation. Apply a focused repair and run pytest. "
+        "Do not repeatedly reread entire files. Run the regression suite with "
+        "python -m pytest -q -c /dev/null tests/. Finish once the tests pass.\n",
     )
     prompt = (
-        "Fix the following bug report in this sqlparse repository. Inspect the implementation, reproduce "
+        "Fix the following bug report in this tinydb repository. Inspect the implementation, reproduce "
         "the failures, edit the package, and run relevant pytest tests. Preserve existing public behavior. "
         "Your current working directory is the repository root. Use relative paths within it; "
         "do not inspect other workspaces. "
-        "Only changes under sqlparse/ are graded; the controller runs immutable upstream regression tests "
+        "Only changes under tinydb/ are graded; the controller runs immutable upstream regression tests "
         "in a fresh directory. pytest is already installed in the shared Python environment. "
         "Do not install packages, fetch external source, or replace the repository with an upstream copy.\n\n"
         + raw["problem_statement"]
         + "\n\nStart by reproducing these failing regression tests:\n"
         + shlex.join(["python", "-m", "pytest", "-q", "-c", "/dev/null", *f2p])
         + "\nRead the relevant implementation sections and apply a minimal repair. "
+        "Read REPRODUCTION.md for the verified failure output. "
         "Use read/edit tools or a Python heredoc for multiline code. Then rerun the failing tests "
         "and regression suite before finishing."
     )
@@ -162,10 +175,10 @@ def convert_row(raw: dict, pristine: dict[str, bytes], *, python: str, digest: s
             "sha256": digest,
             "fail_to_pass": f2p,
             "pass_to_pass": p2p,
-            "difficulty": "focused",
+            "difficulty": "small-repair",
         },
         "max_turns": 32,
-        "timeout": 1800,
+        "timeout": 3600,
         "verify_timeout": 120,
     }
     evidence = {"task_id": raw["instance_id"], "changed_files": paths, "reference": gold, "broken": broken}
@@ -173,17 +186,38 @@ def convert_row(raw: dict, pristine: dict[str, bytes], *, python: str, digest: s
 
 
 def select_candidates(raw_rows: list[dict], seed: int) -> list[dict]:
-    candidates = [
-        row
-        for row in raw_rows
-        if row["problem_statement"]
-        and (".func_basic__" in row["instance_id"] or ".lm_rewrite__" in row["instance_id"])
-        and row["patch"].count("diff --git") == 1
-        and 1 <= len(row["FAIL_TO_PASS"]) <= 8
-    ]
+    candidates = []
+    for row in raw_rows:
+        changed_lines = sum(
+            line.startswith(("+", "-")) and not line.startswith(("+++", "---")) for line in row["patch"].splitlines()
+        )
+        if (
+            row["problem_statement"]
+            and ".func_basic__" in row["instance_id"]
+            and row["patch"].count("diff --git") == 1
+            and 1 <= len(row["FAIL_TO_PASS"]) <= 2
+            and 1 <= changed_lines <= 8
+        ):
+            candidates.append(row)
     candidates.sort(key=lambda row: row["instance_id"])
     random.Random(seed).shuffle(candidates)
-    return candidates
+    # Cover different package areas first; avoid duplicate mutations of the
+    # same failure without consulting policy rewards or repair solutions.
+    groups, seen = {}, set()
+    for row in candidates:
+        signature = tuple(sorted(row["FAIL_TO_PASS"]))
+        if signature in seen:
+            continue
+        seen.add(signature)
+        paths = re.findall(r"^\+\+\+ b/(.+)$", row["patch"], re.MULTILINE)
+        if paths:
+            groups.setdefault(paths[0], []).append(row)
+    return [
+        group[index]
+        for index in range(max(map(len, groups.values()), default=0))
+        for group in groups.values()
+        if index < len(group)
+    ]
 
 
 def generate(
@@ -233,7 +267,7 @@ def generate(
         "base_commit": COMMIT,
         "source_sha256": digest,
         "seed": seed,
-        "difficulty": "focused",
+        "difficulty": "small-repair",
         "candidate_count": len(candidates),
         "accepted": len(rows),
         "selected_task_ids": [r["source"]["task_id"] for r in rows],
@@ -252,7 +286,7 @@ def generate(
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=Path("pi-swesmith.jsonl"))
-    parser.add_argument("--repo-cache", type=Path, default=Path(".cache/pi-sqlparse-source"))
+    parser.add_argument("--repo-cache", type=Path, default=Path(".cache/pi-tinydb-source"))
     parser.add_argument("--python", default=sys.executable, help="shared task environment Python executable")
     parser.add_argument("--limit", type=int, default=4)
     parser.add_argument("--seed", type=int, default=0)

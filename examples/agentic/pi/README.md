@@ -2,7 +2,7 @@
 
 Use the [pi coding agent](https://pi.dev) as AReno's rollout harness for repository
 repair tasks from [ModelScope SWE-smith](https://modelscope.cn/datasets/SWE-bench/SWE-smith).
-Pi inspects a broken sqlparse repository, edits package code and runs pytest.
+Pi inspects a broken TinyDB repository, edits package code and runs pytest.
 All cases use one preinstalled Python environment, with separate working
 directories and no per-case environment installation or image builds.
 
@@ -57,10 +57,12 @@ python examples/agentic/pi/generate_dataset.py \
   --python "$ARENO_PI_PYTHON" --output /tmp/pi-swesmith.jsonl
 ```
 
-The default selects four single-file sqlparse repairs, with 1–8 failing tests,
-using seed 0. It pins SWE-smith revision
-`552363dc45a3bdce7ff4f3d7cdaf6945117f66ca` and sqlparse commit
-`e57923b3aa823c524c807953cecc48cf6eec2cb2`. Only the repository's dataset shard is
+The default selects four small, single-file TinyDB repairs using seed 0: at most
+eight changed patch lines and one or two failing tests. It covers different
+package areas first and excludes duplicate failure sets. These selection rules
+use dataset metadata before policy evaluation, without filtering on reward. It pins SWE-smith revision
+`552363dc45a3bdce7ff4f3d7cdaf6945117f66ca` and TinyDB commit
+`10644a0e07ad180c5b756aba272ee6b0dbd12df8`. Only the repository's dataset shard is
 downloaded from ModelScope. There is no Hugging Face fallback.
 
 Pi receives repository source, tests, documentation and the issue description.
@@ -68,13 +70,15 @@ The generator applies each upstream bug-injection patch and checks that every
 `FAIL_TO_PASS` test fails, every `PASS_TO_PASS` test passes, and the pristine
 reference passes all tests. It excludes incompatible cases and records them in
 `OUTPUT.report.json`, along with selected IDs, source checksum, dependency
-versions and per-test outcomes. Records omit gold repairs and reference code.
+versions and per-test outcomes. `REPRODUCTION.md` contains the verified failing
+pytest output to guide investigation. Workspace pytest configuration omits optional
+coverage plugins; the test code is unchanged. Records omit gold repairs and reference code.
 Selection happens before policy evaluation and does not filter on reward.
 `--limit` and `--seed` allow larger or different selections from this same dataset.
 
 ## Train
 
-The default example uses Ling 3.0 Tiny with QLoRA, 4-bit Adam, LoRA rank 32,
+The default example uses Ling 3.0 Tiny with QLoRA, 4-bit Adam, LoRA rank 64,
 GRPO, four tasks and four samples per task, with 16 concurrent attempts:
 
 ```bash
@@ -86,19 +90,20 @@ areno train \
   --agent-fn examples/agentic/pi/run_agent.py \
   --reward-fn-path examples/agentic/pi/reward.py \
   --algo grpo --world-size 1 --tp-size 1 \
-  --qlora --lora-rank 32 --lora-alpha 64 --adam-4bit \
+  --qlora --lora-rank 64 --lora-alpha 128 --adam-4bit \
   --batch-size 4 --mini-bs 1 --n-samples 4 --max-running-prompts 16 \
-  --max-context-len 32768 --max-new-tokens 4096 --disable-thinking \
-  --lr 1e-5 --max-steps 1 --drop-rollout-state \
-  --metrics-log-dir /tmp/pi-swesmith-metrics --save-path /tmp/pi-swesmith-output
+  --max-context-len 65536 --max-new-tokens 4096 --disable-thinking \
+  --lr 1e-5 --min-lr 1e-5 --epochs 200 --max-steps 200 --drop-rollout-state \
+  --metrics-log-dir /tmp/pi-swesmith-metrics
 ```
 
 The training session owns the policy and rollout endpoint; no separate serving
 process is needed. Generation length follows AReno's CLI settings. Thinking is
 disabled in this example to limit long reasoning turns. Each attempt has a
-32-call budget, a 1,800-second execution budget and a 120-second grading budget.
+32-call budget, a 3,600-second execution budget and a 120-second grading budget.
 Pi's HTTP timeout follows the execution budget, including queued model calls.
-Synchronous rollout completes before weights change.
+Synchronous rollout completes before weights change. No checkpoint path is set
+in this run; only metrics and attempt records are retained.
 
 ## Rewards and task records
 
@@ -107,7 +112,7 @@ Each JSONL record contains `prompt`, initial `files`, optional base64
 also supplies `max_turns`, `timeout` and `verify_timeout`.
 `dataset_loader.py` validates this contract.
 
-The controller grades only submitted `sqlparse/` code in a fresh directory,
+The controller grades only submitted `tinydb/` code in a fresh directory,
 using immutable upstream tests. Editing visible tests or pytest configuration
 cannot weaken grading. Reward is 1 only when pi finishes within budget and all
 expected tests pass without skips; otherwise it is 0. Every model turn receives
@@ -121,10 +126,9 @@ attempt has independent configuration and proxy credentials; sessions,
 extensions, skills, automatic compaction and retries are disabled. Cleanup
 terminates tool process groups and drains in-flight model requests.
 
-Calculate success over attempts, not model turns. In the 16-attempt Ling
-rollout with these settings, 2 repairs passed and 14 attempts reached the time
-budget: mean reward **0.125**, with no invalid attempts. This is a bounded smoke
-result, not a held-out benchmark score or a difficulty estimate free of timeouts.
+Calculate success over attempts, not model turns. Report timeouts and invalid
+attempts separately. These are synthetic bug injections in a real repository;
+training results on selected tasks are not a held-out benchmark score.
 
 Temporary directories are not an OS security sandbox. Run trusted tasks in an
 existing disposable container or VM: pi and dataset verification execute with

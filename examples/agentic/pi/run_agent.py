@@ -145,7 +145,7 @@ async def run_agent(ctx, batch):
         async with semaphore:
             # iter_samples shares dataset records across samples. Rewards must not.
             item = copy.deepcopy(original)
-            timeout = float(item.record.get("timeout", 1800))
+            timeout = float(item.record.get("timeout", 3600))
             verify_timeout_s = float(item.record.get("verify_timeout", 120))
             if not math.isfinite(verify_timeout_s) or verify_timeout_s <= 0:
                 raise ValueError("verify_timeout must be finite and positive")

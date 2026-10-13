@@ -1,4 +1,4 @@
-"""Grade a sqlparse workspace against immutable SWE-smith regression tests."""
+"""Grade a tinydb workspace against immutable SWE-smith regression tests."""
 
 import base64
 import json
@@ -15,13 +15,13 @@ def verify(workspace: Path, protected_files: dict[str, str], test_ids: list[str]
     # conftest, pytest configuration or scripts cannot weaken the trusted suite.
     with tempfile.TemporaryDirectory(prefix="areno-pi-grade-") as directory:
         root = Path(directory)
-        package = workspace / "sqlparse"
+        package = workspace / "tinydb"
         if not package.is_dir() or package.is_symlink():
-            raise ValueError("missing sqlparse package")
+            raise ValueError("missing tinydb package")
         for source in package.rglob("*"):
             if source.is_symlink():
                 raise ValueError("symlinks are not supported in submitted package code")
-        shutil.copytree(package, root / "sqlparse", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        shutil.copytree(package, root / "tinydb", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
         for name, encoded in protected_files.items():
             relative = Path(name)
             if relative.is_absolute() or ".." in relative.parts or relative.parts[0] != "tests":

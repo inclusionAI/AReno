@@ -23,7 +23,7 @@ class PiProxy:
         ctx,
         *,
         max_turns: int = 32,
-        timeout: float = 1800,
+        timeout: float = 3600,
         bind_host: str = "127.0.0.1",
         connect_host: str = "127.0.0.1",
     ):
