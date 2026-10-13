@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 import os
 
+import psutil
 import torch
 from torch import nn
 from torch.utils.checkpoint import checkpoint
@@ -23,6 +25,80 @@ def training_chunk_size(device_type: str, tp_size: int) -> int:
     if size < 0:
         raise ValueError("ARENO_MST_CHUNK_SIZE must be nonnegative")
     return size
+
+
+logger = logging.getLogger(__name__)
+
+
+class _AdaptiveChunks:
+    """Conservative feedback without resetting the trainer's peak counters.
+
+    CUDA reserved memory retains transient allocation pressure after tensors
+    die. Device-wide free memory also includes other processes; host available
+    memory accounts for CPU allocations competing with CUDA on unified RAM.
+    This is feedback, not a hard cap on allocations outside MST.
+    """
+
+    def __init__(self, device, initial, maximum):
+        self.device = device
+        self.size = min(initial, 1024, maximum)
+        self.maximum = maximum
+        self.stable = 0
+
+    def pressure(self):
+        free, total = torch.cuda.mem_get_info(self.device)
+        host = psutil.virtual_memory()
+        return max(1 - free / total, 1 - host.available / host.total)
+
+    def observe(self, pressure):
+        old = self.size
+        if pressure >= 0.8:
+            self.size = max(1, self.size // 2)
+            # Remember an unsafe size for this block instead of oscillating.
+            self.maximum = min(self.maximum, self.size)
+            self.stable = 0
+        elif pressure < 0.7:
+            self.stable += 1
+            if self.stable >= 2:
+                self.size = min(self.maximum, self.size + max(1, self.size // 4))
+                self.stable = 0
+        else:
+            self.stable = 0
+        if self.size != old:
+            logger.debug("MST chunk %d -> %d, memory pressure %.3f", old, self.size, pressure)
+
+    def oom(self):
+        self.size = max(1, self.size // 2)
+        self.maximum = self.size
+        self.stable = 0
+        logger.warning("MST allocation failed; retrying uncommitted chunk with %d tokens", self.size)
+
+
+def _adaptive_chunks(device, initial, maximum):
+    return _AdaptiveChunks(device, initial, maximum) if device.type == "cuda" else None
+
+
+def _chunk_vjp(ctx, inputs, parameters, flat, grad_output, start, end):
+    # Keep temporary graphs in a separate frame so a failed allocation can be
+    # released before retrying. No input/parameter gradient is committed here.
+    states = flat[start:end]
+    if inputs[0].ndim == 3:
+        states = states.unsqueeze(0)
+    chunks = [states, *(value[start:end] for value in inputs[1:])]
+    chunks = [value.detach().requires_grad_(original.requires_grad) for value, original in zip(chunks, inputs)]
+    targets = [value for value in chunks if value.requires_grad] + list(parameters)
+    with (
+        torch.enable_grad(),
+        torch.autocast(ctx.device.type, enabled=ctx.autocast_enabled, dtype=ctx.autocast_dtype),
+    ):
+        output = ctx.execute(*chunks)
+        grads = torch.autograd.grad(
+            output,
+            targets,
+            grad_output.reshape(-1, grad_output.shape[-1])[start:end].view_as(output),
+            allow_unused=True,
+        )
+    return grads
 
 
 class _RecomputedBlock(torch.autograd.Function):
@@ -59,6 +135,7 @@ class _RecomputedBlock(torch.autograd.Function):
         input_grads = [torch.zeros_like(value) if value.requires_grad else None for value in inputs]
         parameter_grads = [None] * len(parameters)
         size = flat.shape[0] if ctx.stochastic else ctx.chunk_size
+        adaptive = _adaptive_chunks(ctx.device, size, flat.shape[0]) if not ctx.stochastic else None
         # Stochastic blocks must replay the whole draw, since splitting a
         # dropout draw changes its mask. Keep the caller's RNG state intact.
         devices = [ctx.device.index] if ctx.cuda_rng is not None else []
@@ -67,29 +144,37 @@ class _RecomputedBlock(torch.autograd.Function):
                 torch.set_rng_state(ctx.cpu_rng)
                 if ctx.cuda_rng is not None:
                     torch.cuda.set_rng_state(ctx.cuda_rng, ctx.device)
-            for start in range(0, flat.shape[0], size):
+            start = 0
+            while start < flat.shape[0]:
+                if adaptive is not None:
+                    pressure = adaptive.pressure()
+                    if pressure >= 0.8:
+                        adaptive.observe(pressure)
+                    size = adaptive.size
                 end = min(start + size, flat.shape[0])
-                states = flat[start:end]
-                if inputs[0].ndim == 3:
-                    states = states.unsqueeze(0)
-                chunks = [states, *(value[start:end] for value in inputs[1:])]
-                chunks = [
-                    value.detach().requires_grad_(original.requires_grad) for value, original in zip(chunks, inputs)
-                ]
-                targets = [value for value in chunks if value.requires_grad] + list(parameters)
-                with (
-                    torch.enable_grad(),
-                    torch.autocast(ctx.device.type, enabled=ctx.autocast_enabled, dtype=ctx.autocast_dtype),
-                ):
-                    output = ctx.execute(*chunks)
-                    grads = torch.autograd.grad(
-                        output,
-                        targets,
-                        grad_output.reshape(-1, grad_output.shape[-1])[start:end].view_as(output),
-                        allow_unused=True,
-                    )
+                retry = False
+                try:
+                    grads = _chunk_vjp(ctx, inputs, parameters, flat, grad_output, start, end)
+                except torch.cuda.OutOfMemoryError:
+                    if adaptive is None or size <= 1:
+                        raise
+                    adaptive.oom()
+                    retry = True
+                if retry:
+                    # Leave the exception scope first: its traceback owns the
+                    # failed graph. Successful chunks are never replayed.
+                    torch.cuda.empty_cache()
+                    continue
+                if adaptive is not None:
+                    pressure = adaptive.pressure()
+                    adaptive.observe(pressure)
+                    if pressure >= 0.8:
+                        # Release the previous chunk's cached high-water mark;
+                        # otherwise reserved memory would force repeated
+                        # shrinking even after the live tensors are gone.
+                        torch.cuda.empty_cache()
                 offset = 0
-                for index, value in enumerate(chunks):
+                for index, value in enumerate(inputs):
                     if not value.requires_grad:
                         continue
                     gradient = grads[offset]
@@ -109,6 +194,9 @@ class _RecomputedBlock(torch.autograd.Function):
                         parameter_grads[index] = gradient
                     else:
                         parameter_grads[index].add_(gradient)
+                start = end
+                del grads
+                gradient = None
         parameter_grads = [
             value.to(parameter.dtype) if value is not None else None
             for value, parameter in zip(parameter_grads, parameters)

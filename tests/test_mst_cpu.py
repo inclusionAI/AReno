@@ -400,3 +400,77 @@ def test_mst_disabled_preserves_phi4_full_sequence_mask_cpu():
     torch.testing.assert_close(result, expected)
     result.sum().backward()
     assert x.grad is not None
+
+
+def test_mst_adaptive_budget_cpu():
+    from areno.engine.runtime.mst import _AdaptiveChunks
+
+    schedule = _AdaptiveChunks(torch.device("cpu"), 8192, 65536)
+    assert schedule.size == 1024
+    schedule.observe(0.5)
+    schedule.observe(0.5)
+    assert schedule.size == 1280
+    schedule.observe(0.75)
+    assert schedule.size == 1280
+    schedule.observe(0.81)
+    assert schedule.size == 640
+    for _ in range(6):
+        schedule.observe(0.5)
+    assert schedule.size == 640  # Do not repeatedly grow into the unsafe size.
+    schedule.oom()
+    assert schedule.size == 320
+
+
+def test_mst_adaptive_unified_memory_pressure_cpu(monkeypatch):
+    from areno.engine.runtime import mst
+
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda _: (70, 100))
+    monkeypatch.setattr(mst.psutil, "virtual_memory", lambda: SimpleNamespace(available=15, total=100))
+    schedule = mst._AdaptiveChunks(torch.device("cpu"), 1024, 2048)
+    assert schedule.pressure() == pytest.approx(0.85)
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda _: (10, 100))
+    assert schedule.pressure() == pytest.approx(0.9)
+
+
+@pytest.mark.parametrize("oom", [False, True])
+def test_mst_adaptive_vjp_and_retry_cpu(monkeypatch, oom):
+    from areno.engine.runtime import mst
+
+    torch.manual_seed(73)
+    block = nn.Sequential(nn.Linear(8, 31), nn.SiLU(), nn.Linear(31, 8)).double()
+    other = copy.deepcopy(block)
+    x = torch.randn(2, 23, 8, dtype=torch.double, requires_grad=True)
+    y = x.detach().clone().requires_grad_()
+    schedule = mst._AdaptiveChunks(x.device, 3, 46)
+    pressure = iter([0.5] * 7 + [0.81] + [0.5] * 200)
+    monkeypatch.setattr(schedule, "pressure", lambda: next(pressure))
+    monkeypatch.setattr(mst, "_adaptive_chunks", lambda *args: schedule)
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
+    original = mst._chunk_vjp
+    calls = []
+    failed = False
+
+    def vjp(*args):
+        nonlocal failed
+        start, end = args[-2:]
+        calls.append((start, end))
+        grads = original(*args)
+        if oom and not failed and start > 0:
+            failed = True
+            raise torch.cuda.OutOfMemoryError("simulated allocation failure before gradient commit")
+        return grads
+
+    monkeypatch.setattr(mst, "_chunk_vjp", vjp)
+    expected = block(x)
+    actual = mst.mini_sequence_forward(other, y, chunk_size=3)
+    upstream = torch.randn_like(actual)
+    reference = torch.autograd.grad(expected, (x, *block.parameters()), upstream)
+    got = torch.autograd.grad(actual, (y, *other.parameters()), upstream)
+    torch.testing.assert_close(actual, expected, atol=1e-12, rtol=1e-12)
+    for a, b in zip(got, reference, strict=True):
+        torch.testing.assert_close(a, b, atol=1e-11, rtol=1e-11)
+    assert len({end - start for start, end in calls}) > 1
+    if oom:
+        assert failed
+        assert calls[1][0] == calls[2][0]
+        assert calls[2][1] < calls[1][1]
