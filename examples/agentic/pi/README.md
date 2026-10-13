@@ -80,7 +80,8 @@ Selection happens before policy evaluation and does not filter on reward.
 ## Train
 
 The default example uses Ling 3.0 Tiny with QLoRA, 4-bit Adam, LoRA rank 64,
-GRPO, four tasks and four samples per task, with 16 concurrent attempts:
+GRPO, four tasks, two prompts per batch and four samples per task, with eight
+concurrent attempts:
 
 ```bash
 export ARENO_PI_RESULT_DIR=/tmp/pi-swesmith-attempts
@@ -92,7 +93,7 @@ areno train \
   --reward-fn-path examples/agentic/pi/reward.py \
   --algo grpo --world-size 1 --tp-size 1 \
   --qlora --lora-rank 64 --lora-alpha 128 --adam-4bit \
-  --batch-size 4 --mini-bs 1 --n-samples 4 --max-running-prompts 16 \
+  --batch-size 2 --mini-bs 1 --n-samples 4 --max-running-prompts 8 \
   --max-context-len 65536 --max-new-tokens 4096 --disable-thinking \
   --lr 1e-5 --min-lr 1e-5 --epochs 200 --max-steps 200 --drop-rollout-state \
   --metrics-log-dir /tmp/pi-swesmith-metrics
