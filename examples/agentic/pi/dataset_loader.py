@@ -1,9 +1,25 @@
 """Normalize self-contained pi coding tasks for AReno training."""
 
+import json
+from pathlib import Path
+
+
+def _rows(dataset_path, default_loader):
+    path = Path(dataset_path)
+    if path.is_file() and path.suffix == ".jsonl":
+        # Archives can exceed an Arrow JSON reader's block size. Stream local
+        # records directly, without making a second full-file string copy.
+        with path.open() as stream:
+            for line in stream:
+                if line.strip():
+                    yield json.loads(line)
+    else:
+        yield from default_loader(dataset_path)
+
 
 def load_training_dataset(dataset_path, *, default_loader, **kwargs):
     records = []
-    for row in default_loader(dataset_path):
+    for row in _rows(dataset_path, default_loader):
         record = dict(row)
         prompt = record.get("prompt") or record.get("problem_statement")
         if not isinstance(prompt, str) or not prompt.strip():

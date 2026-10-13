@@ -76,3 +76,16 @@ def test_frozen_manifest_has_100_distinct_real_issue_repairs():
         assert len(row["base_commit"]) == 40
         assert row["fail_to_pass"] and row["pass_to_pass"]
         assert not set(row["fail_to_pass"]) & set(row["pass_to_pass"])
+
+
+def test_local_archive_records_do_not_use_arrow_json_loader(tmp_path):
+    from dataset_loader import load_training_dataset
+
+    row = {"prompt": "repair", "files": {}, "verify": "pass", "workspace_archive": "archive"}
+    path = tmp_path / "tasks.jsonl"
+    path.write_text(json.dumps(row) + "\n\n")
+
+    def forbidden_loader(_):
+        raise AssertionError("local task records must not go through the Arrow JSON reader")
+
+    assert load_training_dataset(str(path), default_loader=forbidden_loader) == [row]
