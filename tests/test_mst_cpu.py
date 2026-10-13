@@ -199,6 +199,36 @@ def test_mst_automatic_schedule_cpu(device, tp, expected):
     assert training_chunk_size(device, tp) == expected
 
 
+def test_mst_internal_schedule_override_cpu(monkeypatch):
+    from areno.engine.runtime.mst import training_chunk_size
+
+    monkeypatch.setenv("ARENO_MST_CHUNK_SIZE", "8192")
+    assert training_chunk_size("cuda", 1) == 8192
+    assert training_chunk_size("cuda", 2) == 0
+    assert training_chunk_size("cpu", 1) == 0
+    monkeypatch.setenv("ARENO_MST_CHUNK_SIZE", "0")
+    assert training_chunk_size("cuda", 1) == 0
+    monkeypatch.setenv("ARENO_MST_CHUNK_SIZE", "-1")
+    with pytest.raises(ValueError, match="nonnegative"):
+        training_chunk_size("cuda", 1)
+
+
+def test_mst_large_chunks_keep_gradients_cpu():
+    torch.manual_seed(19)
+    block = nn.Sequential(nn.Linear(8, 31), nn.SiLU(), nn.Linear(31, 8)).double()
+    other = copy.deepcopy(block)
+    x = torch.randn(16391, 8, dtype=torch.double, requires_grad=True)
+    y = x.detach().clone().requires_grad_()
+    expected = block(x)
+    actual = mini_sequence_forward(other, y, chunk_size=8192)
+    upstream = torch.randn_like(actual)
+    reference = torch.autograd.grad(expected, (x, *block.parameters()), upstream)
+    got = torch.autograd.grad(actual, (y, *other.parameters()), upstream)
+    torch.testing.assert_close(actual, expected, atol=1e-12, rtol=1e-12)
+    for a, b in zip(got, reference, strict=True):
+        torch.testing.assert_close(a, b, atol=1e-9, rtol=1e-10)
+
+
 def test_mst_has_no_public_option_cpu():
     from areno.api.trainer_config import TrainerConfig
     from areno.cli.train import train_command

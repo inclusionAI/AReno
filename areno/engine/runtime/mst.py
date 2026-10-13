@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import torch
 from torch import nn
 from torch.utils.checkpoint import checkpoint
@@ -13,7 +15,14 @@ def training_chunk_size(device_type: str, tp_size: int) -> int:
     """Select the internal training schedule only for supported execution paths."""
     # Token partitioning under TP/SP needs a separate collective schedule.
     # This policy depends on execution layout, never on the model family.
-    return 1024 if device_type == "cuda" and tp_size == 1 else 0
+    if device_type != "cuda" or tp_size != 1:
+        return 0
+    # Internal tuning for runs with memory headroom: larger chunks amortize
+    # recomputation and repeated QLoRA dequantization without changing the CLI.
+    size = int(os.environ.get("ARENO_MST_CHUNK_SIZE", "1024"))
+    if size < 0:
+        raise ValueError("ARENO_MST_CHUNK_SIZE must be nonnegative")
+    return size
 
 
 class _RecomputedBlock(torch.autograd.Function):
