@@ -402,7 +402,8 @@ def test_mst_disabled_preserves_phi4_full_sequence_mask_cpu():
     assert x.grad is not None
 
 
-def test_mst_adaptive_budget_cpu():
+def test_mst_adaptive_budget_cpu(monkeypatch):
+    monkeypatch.setenv("ARENO_MST_MEM_FRAC", "0.8")
     from areno.engine.runtime.mst import _AdaptiveChunks
 
     schedule = _AdaptiveChunks(torch.device("cpu"), 8192, 65536)
@@ -474,3 +475,18 @@ def test_mst_adaptive_vjp_and_retry_cpu(monkeypatch, oom):
         assert failed
         assert calls[1][0] == calls[2][0]
         assert calls[2][1] < calls[1][1]
+
+
+@pytest.mark.parametrize("budget", [0.5, 0.8, 0.95])
+def test_mst_respects_memory_budget_cpu(monkeypatch, budget):
+    from areno.engine.runtime.mst import _AdaptiveChunks
+
+    monkeypatch.setenv("ARENO_MST_MEM_FRAC", str(budget))
+    schedule = _AdaptiveChunks(torch.device("cpu"), 1024, 65536)
+    schedule.observe(budget * 0.8)
+    schedule.observe(budget * 0.8)
+    assert schedule.size == 1280
+    schedule.observe(budget * 0.95)
+    assert schedule.size == 1280
+    schedule.observe(budget)
+    assert schedule.size == 640

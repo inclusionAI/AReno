@@ -1048,3 +1048,24 @@ def _options(**overrides):
     if defaults["algo"] == "sft" and "dataset_loader_fn" not in overrides:
         defaults["dataset_loader_fn"] = "examples/sft/alpaca/dataset_loader.py"
     return defaults
+
+
+@pytest.mark.parametrize("fraction", [None, "0.55", "0.82"])
+def test_train_cli_passes_mst_budget_and_restores_environment(monkeypatch, fraction):
+    import os
+
+    from areno.engine.runtime.mst import _AdaptiveChunks
+
+    seen = []
+    monkeypatch.setenv("ARENO_MST_MEM_FRAC", "0.33")
+    monkeypatch.setattr(train_cli, "_trainer_config_from_options", lambda **kwargs: object())
+
+    def run(config, options):
+        seen.append(_AdaptiveChunks(None, 1024, 8192).memory_fraction)
+        raise RuntimeError("test exit")
+
+    monkeypatch.setattr(train_cli, "_run_train_command", run)
+    result = CliRunner().invoke(train_cli.train_command, [] if fraction is None else ["--mem-frac", fraction])
+    assert isinstance(result.exception, RuntimeError)
+    assert seen == [0.9 if fraction is None else float(fraction)]
+    assert os.environ["ARENO_MST_MEM_FRAC"] == "0.33"

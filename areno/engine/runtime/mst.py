@@ -41,6 +41,9 @@ class _AdaptiveChunks:
 
     def __init__(self, device, initial, maximum):
         self.device = device
+        self.memory_fraction = float(os.environ.get("ARENO_MST_MEM_FRAC", "0.9"))
+        if not 0 < self.memory_fraction <= 1:
+            raise ValueError("MST memory fraction must be in (0, 1]")
         self.size = min(initial, 1024, maximum)
         self.maximum = maximum
         self.stable = 0
@@ -52,12 +55,12 @@ class _AdaptiveChunks:
 
     def observe(self, pressure):
         old = self.size
-        if pressure >= 0.8:
+        if pressure >= self.memory_fraction:
             self.size = max(1, self.size // 2)
             # Remember an unsafe size for this block instead of oscillating.
             self.maximum = min(self.maximum, self.size)
             self.stable = 0
-        elif pressure < 0.7:
+        elif pressure < self.memory_fraction * 0.875:
             self.stable += 1
             if self.stable >= 2:
                 self.size = min(self.maximum, self.size + max(1, self.size // 4))
@@ -148,7 +151,7 @@ class _RecomputedBlock(torch.autograd.Function):
             while start < flat.shape[0]:
                 if adaptive is not None:
                     pressure = adaptive.pressure()
-                    if pressure >= 0.8:
+                    if pressure >= adaptive.memory_fraction:
                         adaptive.observe(pressure)
                     size = adaptive.size
                 end = min(start + size, flat.shape[0])
@@ -168,7 +171,7 @@ class _RecomputedBlock(torch.autograd.Function):
                 if adaptive is not None:
                     pressure = adaptive.pressure()
                     adaptive.observe(pressure)
-                    if pressure >= 0.8:
+                    if pressure >= adaptive.memory_fraction:
                         # Release the previous chunk's cached high-water mark;
                         # otherwise reserved memory would force repeated
                         # shrinking even after the live tensors are gone.

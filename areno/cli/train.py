@@ -17,6 +17,7 @@ import ast
 import importlib.util
 import json
 import logging
+import os
 import shutil
 import textwrap
 from dataclasses import asdict, fields, is_dataclass
@@ -1565,7 +1566,7 @@ def _dataset_builder_for_suffix(suffix: str) -> str:
     type=float,
     default=0.9,
     show_default=True,
-    help="Target maximum GPU memory fraction for --tune-params probing.",
+    help="Target memory fraction for adaptive MST and --tune-params probing.",
 )
 @click.option(
     "--tune-max-samples",
@@ -1832,6 +1833,20 @@ def train_command(**options) -> None:
     """Click entrypoint for training."""
 
     trainer_config = _trainer_config_from_options(**options)
+    # Spawned workers inherit the CLI budget; restore it for repeated CLI
+    # invocations in the same process, including smoke/tune failures.
+    previous = os.environ.get("ARENO_MST_MEM_FRAC")
+    os.environ["ARENO_MST_MEM_FRAC"] = str(options["mem_frac"])
+    try:
+        _run_train_command(trainer_config, options)
+    finally:
+        if previous is None:
+            os.environ.pop("ARENO_MST_MEM_FRAC", None)
+        else:
+            os.environ["ARENO_MST_MEM_FRAC"] = previous
+
+
+def _run_train_command(trainer_config, options) -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     if options.get("smoke_infer") or options.get("smoke_train"):
         from areno.cli.auto_tune import smoke_infer_config, smoke_train_config
