@@ -22,6 +22,7 @@ _EXAMPLE_DIR = str(Path(__file__).resolve().parent)
 if _EXAMPLE_DIR not in sys.path:
     sys.path.insert(0, _EXAMPLE_DIR)
 from pi_proxy import PiProxy  # noqa: E402
+from swebench_verify import unpack  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -155,6 +156,8 @@ async def run_agent(ctx, batch):
                 root = Path(directory)
                 workspace = root / "workspace"
                 workspace.mkdir()
+                if item.record.get("workspace_archive"):
+                    unpack(item.record["workspace_archive"], workspace)
                 write_files(workspace, item.record["files"], item.record.get("binary_files"))
                 async with PiProxy(ctx, max_turns=int(item.record.get("max_turns", 32)), timeout=timeout) as proxy:
                     config_dir = root / "pi-config"

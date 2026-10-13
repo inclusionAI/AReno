@@ -15,6 +15,8 @@ def load_training_dataset(dataset_path, *, default_loader, **kwargs):
         if not isinstance(record.get("verify"), str) or not record["verify"].strip():
             raise ValueError("pi task requires trusted Python verify code")
         binary = record.get("binary_files", {})
+        if "workspace_archive" in record and not isinstance(record["workspace_archive"], str):
+            raise ValueError("workspace_archive must be a base64 tar.gz string")
         if not isinstance(binary, dict) or not all(
             isinstance(k, str) and isinstance(v, str) for k, v in binary.items()
         ):
