@@ -33,9 +33,9 @@ logger = logging.getLogger(__name__)
 class _AdaptiveChunks:
     """Conservative feedback without resetting the trainer's peak counters.
 
-    CUDA reserved memory retains transient allocation pressure after tensors
-    die. Device-wide free memory also includes other processes; host available
-    memory accounts for CPU allocations competing with CUDA on unified RAM.
+    On discrete GPUs, device-wide free memory includes other CUDA processes.
+    On integrated GPUs, CUDA free can exclude reclaimable host page cache;
+    use system available memory for that shared physical pool instead.
     This is feedback, not a hard cap on allocations outside MST.
     """
 
@@ -47,20 +47,30 @@ class _AdaptiveChunks:
         self.size = min(initial, 1024, maximum)
         self.maximum = maximum
         self.stable = 0
+        self.cooldown = 0
+        self.unified_memory = False
+        if getattr(device, "type", None) == "cuda":
+            properties = torch.cuda.get_device_properties(device)
+            # PyTorch does not expose cudaDeviceProp.integrated in every build.
+            self.unified_memory = bool(getattr(properties, "integrated", False)) or "GB10" in properties.name
 
     def pressure(self):
-        free, total = torch.cuda.mem_get_info(self.device)
         host = psutil.virtual_memory()
-        return max(1 - free / total, 1 - host.available / host.total)
+        host_pressure = 1 - host.available / host.total
+        if self.unified_memory:
+            return host_pressure
+        free, total = torch.cuda.mem_get_info(self.device)
+        return max(1 - free / total, host_pressure)
 
     def observe(self, pressure):
         old = self.size
         if pressure >= self.memory_fraction:
             self.size = max(1, self.size // 2)
-            # Remember an unsafe size for this block instead of oscillating.
-            self.maximum = min(self.maximum, self.size)
+            self.cooldown = 4
             self.stable = 0
-        elif pressure < self.memory_fraction * 0.875:
+        elif self.cooldown:
+            self.cooldown -= 1
+        elif pressure < self.memory_fraction * 0.95:
             self.stable += 1
             if self.stable >= 2:
                 self.size = min(self.maximum, self.size + max(1, self.size // 4))
@@ -68,7 +78,9 @@ class _AdaptiveChunks:
         else:
             self.stable = 0
         if self.size != old:
-            logger.debug("MST chunk %d -> %d, memory pressure %.3f", old, self.size, pressure)
+            logger.info(
+                "MST chunk %d -> %d, memory pressure %.3f / %.3f", old, self.size, pressure, self.memory_fraction
+            )
 
     def oom(self):
         self.size = max(1, self.size // 2)

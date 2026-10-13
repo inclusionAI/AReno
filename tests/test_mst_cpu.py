@@ -417,9 +417,9 @@ def test_mst_adaptive_budget_cpu(monkeypatch):
     assert schedule.size == 640
     for _ in range(6):
         schedule.observe(0.5)
-    assert schedule.size == 640  # Do not repeatedly grow into the unsafe size.
+    assert schedule.size == 800  # Resume growth after pressure falls and cooldown expires.
     schedule.oom()
-    assert schedule.size == 320
+    assert schedule.size == 400
 
 
 def test_mst_adaptive_unified_memory_pressure_cpu(monkeypatch):
@@ -486,7 +486,28 @@ def test_mst_respects_memory_budget_cpu(monkeypatch, budget):
     schedule.observe(budget * 0.8)
     schedule.observe(budget * 0.8)
     assert schedule.size == 1280
-    schedule.observe(budget * 0.95)
+    schedule.observe(budget * 0.98)
     assert schedule.size == 1280
     schedule.observe(budget)
     assert schedule.size == 640
+
+
+def test_mst_spark_uses_reclaimable_host_memory_cpu(monkeypatch):
+    from areno.engine.runtime import mst
+
+    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda _: SimpleNamespace(name="NVIDIA GB10"))
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda _: (20, 100))
+    monkeypatch.setattr(mst.psutil, "virtual_memory", lambda: SimpleNamespace(available=40, total=100))
+    monkeypatch.setenv("ARENO_MST_MEM_FRAC", "0.8")
+    schedule = mst._AdaptiveChunks(torch.device("cuda"), 1024, 65536)
+    assert schedule.pressure() == pytest.approx(0.6)
+    schedule.observe(schedule.pressure())
+    schedule.observe(schedule.pressure())
+    assert schedule.size == 1280
+    monkeypatch.setattr(mst.psutil, "virtual_memory", lambda: SimpleNamespace(available=15, total=100))
+    schedule.observe(schedule.pressure())
+    assert schedule.size == 640
+    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda _: SimpleNamespace(name="NVIDIA H100"))
+    discrete = mst._AdaptiveChunks(torch.device("cuda"), 1024, 65536)
+    monkeypatch.setattr(mst.psutil, "virtual_memory", lambda: SimpleNamespace(available=40, total=100))
+    assert discrete.pressure() == pytest.approx(0.8)
