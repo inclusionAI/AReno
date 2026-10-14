@@ -123,7 +123,7 @@ class _AdaptiveChunks:
         elif pressure < self.memory_fraction * 0.95:
             self.stable += 1
             if self.stable >= 4:
-                self.size = min(self.maximum, self.size + 256) if self.size < self.maximum else self.size
+                self.size = min(self.maximum, self.size + 512) if self.size < self.maximum else self.size
                 self.stable = 0
         else:
             self.stable = 0

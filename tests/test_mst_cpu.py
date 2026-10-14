@@ -410,16 +410,16 @@ def test_mst_adaptive_budget_cpu(monkeypatch):
     assert schedule.size == 1024
     for _ in range(4):
         schedule.observe(0.5)
-    assert schedule.size == 1280
+    assert schedule.size == 1536
     schedule.observe(0.75)
-    assert schedule.size == 1280
+    assert schedule.size == 1536
     schedule.observe(0.81)
-    assert schedule.size == 640
+    assert schedule.size == 768
     for _ in range(12):
         schedule.observe(0.5)
-    assert schedule.size == 896  # Resume growth after pressure falls and cooldown expires.
+    assert schedule.size == 1280  # Resume growth after pressure falls and cooldown expires.
     schedule.oom()
-    assert schedule.size == 448
+    assert schedule.size == 640
 
 
 def test_mst_adaptive_unified_memory_pressure_cpu(monkeypatch):
@@ -485,11 +485,11 @@ def test_mst_respects_memory_budget_cpu(monkeypatch, budget):
     schedule = _AdaptiveChunks(torch.device("cpu"), 1024, 65536)
     for _ in range(4):
         schedule.observe(budget * 0.8)
-    assert schedule.size == 1280
+    assert schedule.size == 1536
     schedule.observe(budget * 0.98)
-    assert schedule.size == 1280
+    assert schedule.size == 1536
     schedule.observe(budget)
-    assert schedule.size == 640
+    assert schedule.size == 768
 
 
 def test_mst_spark_uses_reclaimable_host_memory_cpu(monkeypatch):
@@ -503,10 +503,10 @@ def test_mst_spark_uses_reclaimable_host_memory_cpu(monkeypatch):
     assert schedule.pressure() == pytest.approx(0.6)
     for _ in range(4):
         schedule.observe(schedule.pressure())
-    assert schedule.size == 1280
+    assert schedule.size == 1536
     monkeypatch.setattr(mst.psutil, "virtual_memory", lambda: SimpleNamespace(available=15, total=100))
     schedule.observe(schedule.pressure())
-    assert schedule.size == 640
+    assert schedule.size == 768
     monkeypatch.setattr(torch.cuda, "get_device_properties", lambda _: SimpleNamespace(name="NVIDIA H100"))
     discrete = mst._AdaptiveChunks(torch.device("cuda"), 1024, 65536)
     monkeypatch.setattr(mst.psutil, "virtual_memory", lambda: SimpleNamespace(available=40, total=100))
@@ -525,12 +525,12 @@ def test_mst_reuses_schedule_per_module_and_releases_dead_owners(monkeypatch):
     schedule = mst._adaptive_chunks(device, 1024, 65536, owner)
     for _ in range(8):
         schedule.observe(0.4)
-    assert schedule.size == 1536
+    assert schedule.size == 2048
     assert mst._adaptive_chunks(device, 1024, 65536, owner) is schedule
     assert mst._adaptive_chunks(device, 1024, 65536, other).size == 1024
-    assert mst._adaptive_chunks(device, 1024, 100, owner).size == 1536
+    assert mst._adaptive_chunks(device, 1024, 100, owner).size == 2048
     schedule.observe(0.4)
-    assert schedule.size == 1536
+    assert schedule.size == 2048
     reference = weakref.ref(owner)
     del owner
     gc.collect()
@@ -542,18 +542,18 @@ def test_mst_fixed_growth_and_hysteresis(monkeypatch):
 
     monkeypatch.setenv("ARENO_MST_MEM_FRAC", "0.8")
     schedule = _AdaptiveChunks(torch.device("cpu"), 1024, 65536)
-    for expected in [1280, 1536, 1792]:
+    for expected in [1536, 2048, 2560]:
         for _ in range(4):
             schedule.observe(0.4)
         assert schedule.size == expected
     for _ in range(20):
         schedule.observe(0.79)
-    assert schedule.size == 1792
+    assert schedule.size == 2560
     schedule.observe(0.81)
-    assert schedule.size == 896
+    assert schedule.size == 1280
     for _ in range(8):
         schedule.observe(0.4)
-    assert schedule.size == 896
+    assert schedule.size == 1280
 
 
 def test_mst_current_train_eta_and_log_throttle(monkeypatch, caplog):
