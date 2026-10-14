@@ -16,7 +16,6 @@ to the matching public method.
 from __future__ import annotations
 
 import gc
-import logging
 import queue
 
 import torch
@@ -606,9 +605,7 @@ class ArenoWorker:
     def _drop_rollout_hbm(self) -> None:
         """Discard rollout-only state before returning to training."""
 
-        logger = logging.getLogger(__name__)
         accelerator = accelerator_module(self.device)
-        logger.info("rollout release start")
         if accelerator is not None:
             # A completed HTTP response does not own every graph/cache write.
             # Finish device work before destroying graph-owned storage.
@@ -625,7 +622,6 @@ class ArenoWorker:
         if accelerator is not None:
             accelerator.synchronize(self.device)
             accelerator.empty_cache()
-        logger.info("rollout release complete; train state can be onloaded")
 
     @torch.inference_mode()
     def score_logprobs(self, payload: dict) -> list[list[float]] | None:

@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import logging
 import math
-import time
 
 import torch
 import torch.distributed as dist
@@ -28,8 +26,6 @@ from areno.engine.runtime.train_step import (
     _pack_train_data,
     _train_meta,
 )
-
-logger = logging.getLogger(__name__)
 
 
 class TrainingManager:
@@ -77,14 +73,6 @@ class TrainingManager:
         results = []
         try:
             for index, data_pack_shards in enumerate(packs):
-                started = time.monotonic()
-                logger.info(
-                    "train microbatch %d/%d start accumulation=%d optimizer_step=%s",
-                    index + 1,
-                    len(packs),
-                    accumulation_steps,
-                    (index + 1) % accumulation_steps == 0 or index == len(packs) - 1,
-                )
                 group_start = (index // accumulation_steps) * accumulation_steps
                 group_size = min(accumulation_steps, len(packs) - group_start)
                 allow_step = (index + 1) % accumulation_steps == 0 or index == len(packs) - 1
@@ -94,9 +82,6 @@ class TrainingManager:
                         allow_step=allow_step,
                         grad_scale=group_size,
                     )
-                )
-                logger.info(
-                    "train microbatch %d/%d complete elapsed=%.2fs", index + 1, len(packs), time.monotonic() - started
                 )
             return results
         finally:
@@ -157,12 +142,6 @@ class TrainingManager:
         defer_lm_head = existing_chunked_head or bool(getattr(train_meta, "mst_chunk_size", 0))
         if defer_lm_head:
             model_kwargs["defer_lm_head"] = True
-        logger.info(
-            "train forward start packed_tokens=%d sequences=%d mst_chunk=%d",
-            tokens.numel(),
-            data_pack["train_cu_seqlens"].numel() - 1,
-            data_pack["_mst_chunk_size"],
-        )
         with routing_replay_context(train_meta):
             out = train_model(**model_kwargs)
         if defer_lm_head:
@@ -178,7 +157,6 @@ class TrainingManager:
             )
         else:
             logprobs = packed_next_token_logprobs(out.logits_shard, tokens, data_pack["train_cu_seqlens"])
-        logger.info("train forward complete; computing loss")
         loss_out = worker.loss_fn(data_pack, logprobs)
         metrics = None
         if isinstance(loss_out, tuple):
@@ -187,9 +165,7 @@ class TrainingManager:
             loss = loss_out
         if not isinstance(loss, torch.Tensor):
             raise TypeError("train_loss_fn must return a torch.Tensor")
-        logger.info("train backward start")
         (loss / max(grad_scale, 1)).backward()
-        logger.info("train backward enqueued; synchronizing gradients")
         stream_gradient_shards = bool(getattr(worker.optimizer, "stream_gradient_shards", False))
         if stream_gradient_shards:
             # AdamW4bit consumes each microbatch directly into compact BF16 DP
@@ -236,9 +212,7 @@ class TrainingManager:
             current_lr = self._lr_for_step(worker._global_step + 1)
             worker.optimizer.lr = current_lr
             multimodal_lrs = self._set_multimodal_lrs(worker._global_step + 1)
-            logger.info("train optimizer start")
             worker.optimizer.step()
-            logger.info("train optimizer enqueued")
             state_memory_metrics = getattr(worker.optimizer, "state_memory_metrics", None)
             state_quantizer = getattr(worker.optimizer, "state_quantizer", None)
             if callable(state_memory_metrics) and state_quantizer == "dynamic-tree-v1":
