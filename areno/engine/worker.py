@@ -45,7 +45,7 @@ from areno.engine.protocol import (
 )
 from areno.engine.runtime.common import pad_rollout_rows
 from areno.engine.runtime.decode_graph import DecodeGraph
-from areno.engine.runtime.device import accelerator_module
+from areno.engine.runtime.device import accelerator_module, configure_unified_memory_budget
 from areno.engine.runtime.rollout import _empty_rollout
 from areno.engine.training import TrainingManager
 from areno.models.registry import load_model_weights, save_model_weights
@@ -65,6 +65,7 @@ class ArenoWorker:
         self.config = config
         ctx = get_tp_context()
         self.device = ctx.device
+        configure_unified_memory_budget(self.device)
         # Build the actor model directly on the shard's device, then wrap in
         # torch.compile so subsequent forward calls use the compiled graph.
         self.model = build_model_on_device(config, self.device)
