@@ -15,6 +15,8 @@ to the matching public method.
 
 from __future__ import annotations
 
+import gc
+import logging
 import queue
 
 import torch
@@ -603,6 +605,13 @@ class ArenoWorker:
     def _drop_rollout_hbm(self) -> None:
         """Discard rollout-only state before returning to training."""
 
+        logger = logging.getLogger(__name__)
+        accelerator = accelerator_module(self.device)
+        logger.info("rollout release start")
+        if accelerator is not None:
+            # A completed HTTP response does not own every graph/cache write.
+            # Finish device work before destroying graph-owned storage.
+            accelerator.synchronize(self.device)
         self._release_decode_graphs()
         self.model.clear_infer_weights()
         # A host copy still consumes the same physical RAM on unified-memory
@@ -610,9 +619,12 @@ class ArenoWorker:
         self.model.clear_kv_caches()
         self._infer_cache_spec = None
         self._train_state_ready = False
-        accelerator = accelerator_module(self.device)
+        # Graph wrappers may retain cycles after their registry is cleared.
+        gc.collect()
         if accelerator is not None:
+            accelerator.synchronize(self.device)
             accelerator.empty_cache()
+        logger.info("rollout release complete; train state can be onloaded")
 
     @torch.inference_mode()
     def score_logprobs(self, payload: dict) -> list[list[float]] | None:
