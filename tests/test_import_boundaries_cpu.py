@@ -62,10 +62,11 @@ def test_cuda_worker_configures_torch_runtime_before_model_build(monkeypatch):
         raise ModelBuildReached
 
     monkeypatch.setattr(worker_mod, "_configure_torch_runtime", lambda: events.append("configure_torch"))
+    monkeypatch.setattr(worker_mod, "configure_unified_memory_budget", lambda device: events.append("configure_memory"))
     monkeypatch.setattr(worker_mod, "get_tp_context", lambda: SimpleNamespace(device="cuda:0"))
     monkeypatch.setattr(worker_mod, "build_model_on_device", build_model)
 
     with pytest.raises(ModelBuildReached):
         worker_mod.ArenoWorker(SimpleNamespace())
 
-    assert events == ["configure_torch", "build_model"]
+    assert events == ["configure_torch", "configure_memory", "build_model"]

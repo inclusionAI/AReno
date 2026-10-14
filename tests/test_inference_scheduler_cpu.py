@@ -1054,3 +1054,26 @@ def _rollout_command(request_id: int, prompts: list[list[int]], *, target: int, 
         block_size=4,
     )
     return Command(op=Op.INFER_ROLLOUT, payload=payload, request_id=request_id)
+
+
+def test_rollout_release_drains_device_before_and_after_storage_teardown(monkeypatch):
+    calls = []
+    worker = object.__new__(worker_mod.ArenoWorker)
+    worker.device = torch.device("cuda", 0)
+    worker._infer_cache_spec = object()
+    worker._train_state_ready = True
+    worker.model = SimpleNamespace(
+        clear_infer_weights=lambda: calls.append("infer_weights"),
+        clear_kv_caches=lambda: calls.append("kv_cache"),
+    )
+    worker._release_decode_graphs = lambda: calls.append("graphs")
+    accelerator = SimpleNamespace(
+        synchronize=lambda device: calls.append("sync"),
+        empty_cache=lambda: calls.append("empty"),
+    )
+    monkeypatch.setattr(worker_mod, "accelerator_module", lambda device: accelerator)
+    monkeypatch.setattr(worker_mod.gc, "collect", lambda: calls.append("gc"))
+    worker._drop_rollout_hbm()
+    assert calls == ["sync", "graphs", "infer_weights", "kv_cache", "gc", "sync", "empty"]
+    assert worker._infer_cache_spec is None
+    assert not worker._train_state_ready

@@ -15,6 +15,7 @@ to the matching public method.
 
 from __future__ import annotations
 
+import gc
 import queue
 
 import torch
@@ -43,7 +44,7 @@ from areno.engine.protocol import (
 )
 from areno.engine.runtime.common import pad_rollout_rows
 from areno.engine.runtime.decode_graph import DecodeGraph
-from areno.engine.runtime.device import accelerator_module
+from areno.engine.runtime.device import accelerator_module, configure_unified_memory_budget
 from areno.engine.runtime.rollout import _empty_rollout
 from areno.engine.training import TrainingManager
 from areno.models.registry import load_model_weights, save_model_weights
@@ -63,6 +64,7 @@ class ArenoWorker:
         self.config = config
         ctx = get_tp_context()
         self.device = ctx.device
+        configure_unified_memory_budget(self.device)
         # Build the actor model directly on the shard's device, then wrap in
         # torch.compile so subsequent forward calls use the compiled graph.
         self.model = build_model_on_device(config, self.device)
@@ -603,6 +605,11 @@ class ArenoWorker:
     def _drop_rollout_hbm(self) -> None:
         """Discard rollout-only state before returning to training."""
 
+        accelerator = accelerator_module(self.device)
+        if accelerator is not None:
+            # A completed HTTP response does not own every graph/cache write.
+            # Finish device work before destroying graph-owned storage.
+            accelerator.synchronize(self.device)
         self._release_decode_graphs()
         self.model.clear_infer_weights()
         # A host copy still consumes the same physical RAM on unified-memory
@@ -610,8 +617,10 @@ class ArenoWorker:
         self.model.clear_kv_caches()
         self._infer_cache_spec = None
         self._train_state_ready = False
-        accelerator = accelerator_module(self.device)
+        # Graph wrappers may retain cycles after their registry is cleared.
+        gc.collect()
         if accelerator is not None:
+            accelerator.synchronize(self.device)
             accelerator.empty_cache()
 
     @torch.inference_mode()
