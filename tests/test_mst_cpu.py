@@ -566,7 +566,7 @@ def test_mst_speed_search_selects_measured_optimum(monkeypatch):
     assert schedule.size == 768
 
 
-def test_mst_can_select_smaller_chunks_and_reprobe_changed_speed(monkeypatch):
+def test_mst_can_select_smaller_chunks_and_stops_probing_after_stabilizing(monkeypatch):
     from areno.engine.runtime.mst import _AdaptiveChunks
 
     schedule = _AdaptiveChunks(torch.device("cpu"), 1024, 65536)
@@ -578,10 +578,32 @@ def test_mst_can_select_smaller_chunks_and_reprobe_changed_speed(monkeypatch):
     _measure_mst_candidate(schedule, 30)
     _measure_mst_candidate(schedule, 10)
     assert schedule.size == schedule.best_size == 512
-    for _ in range(129):
+    for _ in range(1000):
         schedule.observe(0.4)
         schedule.record_timing(512, 512 * 9)
-    assert schedule.size == 1024  # Periodic re-evaluation after stable use.
+    assert schedule.size == schedule.best_size == 512
+    assert schedule._frozen
+    assert schedule.start_timing(512) is None
+    # Memory backoff remains available without restarting the throughput search.
+    schedule.observe(1)
+    assert schedule.size == 256
+    assert schedule._frozen
+    schedule.oom()
+    assert schedule.size == 128
+    for _ in range(1000):
+        schedule.observe(0.4)
+        schedule.record_timing(128, 128)
+    # This microbatch's OOM ceiling prevents an immediate failed retry.
+    assert schedule.size == 128
+    assert schedule.throughput_baseline == 512
+    assert schedule.start_timing(128) is None
+    # A later microbatch can recover gradually as memory headroom returns.
+    schedule.maximum = 65536
+    for _ in range(8):
+        schedule.observe(0.4)
+    assert schedule.size == 512
+    assert schedule.start_timing(512) is None
+    assert schedule._frozen
 
 
 def test_mst_warmup_noise_tails_and_unfinished_events_do_not_drive_search(monkeypatch):

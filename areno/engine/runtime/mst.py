@@ -103,20 +103,21 @@ class _AdaptiveChunks:
         self.unified_memory = False
         self._pending = deque()
         self._generation = 0
+        self._frozen = False
+        self.throughput_baseline = None
         self._reset_search()
         if getattr(device, "type", None) == "cuda":
             properties = torch.cuda.get_device_properties(device)
             self.unified_memory = bool(getattr(properties, "integrated", False)) or "GB10" in properties.name
 
     def _reset_search(self):
-        self.best_size = self.size
+        self.best_size = self.throughput_baseline if self._frozen else self.size
         self.best_cost = None
         self._costs = deque(maxlen=4)
         self._warm = False
         self._direction = 1
         self._blocked = set()
-        self._holding = False
-        self._held_samples = 0
+        self._holding = self._frozen
         self._generation += 1
         self._pending.clear()
 
@@ -139,6 +140,13 @@ class _AdaptiveChunks:
             self.cooldown -= 1
         elif pressure < self.memory_fraction * 0.95:
             self.stable += 1
+            if self._frozen and self.stable >= 8:
+                # Recover headroom gradually, capped at the measured speed optimum.
+                # No new CUDA event measurements are needed after calibration.
+                ceiling = min(self.throughput_baseline, self.maximum)
+                if self.size < ceiling:
+                    self.size = min(ceiling, self.size + 512)
+                    self.stable = 0
         else:
             self.stable = 0
         if self.size != old:
@@ -159,8 +167,7 @@ class _AdaptiveChunks:
         if self.maximum < self.best_size:
             return  # A short tail cannot replace a full-chunk speed measurement.
         if self.cooldown or self.stable < 4:
-            self._holding = True
-            self._select(self.best_size)
+            self._finish_search()
             return
         for direction in (self._direction, -self._direction):
             candidate = min(self.maximum, max(1, self.best_size + direction * 512))
@@ -169,27 +176,23 @@ class _AdaptiveChunks:
             self._direction = direction
             self._select(candidate)
             return
-        self._holding = True
-        self._held_samples = 0
+        self._finish_search()
+
+    def _finish_search(self):
         self._select(self.best_size)
+        self.throughput_baseline = self.best_size
+        self._holding = self._frozen = True
+        self._pending.clear()
+        logger.debug("MST throughput probe finished; reuse stable chunk=%d", self.size)
 
     def record_timing(self, size, milliseconds):
         """Accept only complete chunks, excluding warmup and timing noise."""
-        if size != self.size or self.cooldown or not math.isfinite(milliseconds) or milliseconds <= 0:
+        if self._frozen or size != self.size or self.cooldown or not math.isfinite(milliseconds) or milliseconds <= 0:
             return
         if not self._warm:
             self._warm = True  # First execution may include kernel compilation.
             return
         self._costs.append(milliseconds / size)
-        if self._holding:
-            self._held_samples += 1
-            if self._held_samples >= 128 and self.stable >= 4:
-                self.best_cost = median(self._costs)
-                self._blocked.clear()
-                self._direction = 1
-                self._holding = False
-                self._probe()
-            return
         if len(self._costs) < 4:
             return
         cost = median(self._costs)
@@ -207,7 +210,7 @@ class _AdaptiveChunks:
                 self.record_timing(size, begin.elapsed_time(end))
 
     def start_timing(self, size):
-        if self.device.type != "cuda" or size != self.size or len(self._pending) >= 8:
+        if self._frozen or self.device.type != "cuda" or size != self.size or len(self._pending) >= 8:
             return None
         begin, end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
         begin.record(torch.cuda.current_stream(self.device))
