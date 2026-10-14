@@ -402,24 +402,31 @@ def test_mst_disabled_preserves_phi4_full_sequence_mask_cpu():
     assert x.grad is not None
 
 
+def _measure_mst_candidate(schedule, cost_per_token):
+    size = schedule.size
+    for _ in range(5):
+        schedule.observe(0.4)
+        schedule.record_timing(size, size * cost_per_token)
+
+
 def test_mst_adaptive_budget_cpu(monkeypatch):
     monkeypatch.setenv("ARENO_MST_MEM_FRAC", "0.8")
     from areno.engine.runtime.mst import _AdaptiveChunks
 
     schedule = _AdaptiveChunks(torch.device("cpu"), 8192, 65536)
-    assert schedule.size == 1024
-    for _ in range(4):
+    for _ in range(12):
         schedule.observe(0.5)
-    assert schedule.size == 1536
-    schedule.observe(0.75)
+    assert schedule.size == 1024  # Headroom alone must not increase chunks.
+    _measure_mst_candidate(schedule, 10)
     assert schedule.size == 1536
     schedule.observe(0.81)
     assert schedule.size == 768
     for _ in range(12):
         schedule.observe(0.5)
-    assert schedule.size == 1280  # Resume growth after pressure falls and cooldown expires.
+    assert schedule.size == 768
     schedule.oom()
-    assert schedule.size == 640
+    assert schedule.size == 384
+    assert schedule.best_size == 384 and schedule.best_cost is None
 
 
 def test_mst_adaptive_unified_memory_pressure_cpu(monkeypatch):
@@ -485,11 +492,11 @@ def test_mst_respects_memory_budget_cpu(monkeypatch, budget):
     schedule = _AdaptiveChunks(torch.device("cpu"), 1024, 65536)
     for _ in range(4):
         schedule.observe(budget * 0.8)
-    assert schedule.size == 1536
+    assert schedule.size == 1024
     schedule.observe(budget * 0.98)
-    assert schedule.size == 1536
+    assert schedule.size == 1024
     schedule.observe(budget)
-    assert schedule.size == 768
+    assert schedule.size == 512
 
 
 def test_mst_spark_uses_reclaimable_host_memory_cpu(monkeypatch):
@@ -503,10 +510,10 @@ def test_mst_spark_uses_reclaimable_host_memory_cpu(monkeypatch):
     assert schedule.pressure() == pytest.approx(0.6)
     for _ in range(4):
         schedule.observe(schedule.pressure())
-    assert schedule.size == 1536
+    assert schedule.size == 1024
     monkeypatch.setattr(mst.psutil, "virtual_memory", lambda: SimpleNamespace(available=15, total=100))
     schedule.observe(schedule.pressure())
-    assert schedule.size == 768
+    assert schedule.size == 512
     monkeypatch.setattr(torch.cuda, "get_device_properties", lambda _: SimpleNamespace(name="NVIDIA H100"))
     discrete = mst._AdaptiveChunks(torch.device("cuda"), 1024, 65536)
     monkeypatch.setattr(mst.psutil, "virtual_memory", lambda: SimpleNamespace(available=40, total=100))
@@ -525,35 +532,87 @@ def test_mst_reuses_schedule_per_module_and_releases_dead_owners(monkeypatch):
     schedule = mst._adaptive_chunks(device, 1024, 65536, owner)
     for _ in range(8):
         schedule.observe(0.4)
-    assert schedule.size == 2048
+    assert schedule.size == 1024
     assert mst._adaptive_chunks(device, 1024, 65536, owner) is schedule
     assert mst._adaptive_chunks(device, 1024, 65536, other).size == 1024
-    assert mst._adaptive_chunks(device, 1024, 100, owner).size == 2048
+    assert mst._adaptive_chunks(device, 1024, 100, owner).size == 1024
     schedule.observe(0.4)
-    assert schedule.size == 2048
+    assert schedule.size == 1024
     reference = weakref.ref(owner)
     del owner
     gc.collect()
     assert reference() is None
 
 
-def test_mst_fixed_growth_and_hysteresis(monkeypatch):
+def test_mst_speed_search_selects_measured_optimum(monkeypatch):
     from areno.engine.runtime.mst import _AdaptiveChunks
 
     monkeypatch.setenv("ARENO_MST_MEM_FRAC", "0.8")
     schedule = _AdaptiveChunks(torch.device("cpu"), 1024, 65536)
-    for expected in [1536, 2048, 2560]:
-        for _ in range(4):
-            schedule.observe(0.4)
-        assert schedule.size == expected
+    _measure_mst_candidate(schedule, 10)
+    assert schedule.size == 1536
+    _measure_mst_candidate(schedule, 8)
+    assert schedule.size == 2048
+    _measure_mst_candidate(schedule, 9)
+    assert schedule.size == 1024  # Probe below the best, not the larger loser.
+    _measure_mst_candidate(schedule, 10)
+    assert schedule.size == schedule.best_size == 1536
+    assert schedule._holding
     for _ in range(20):
         schedule.observe(0.79)
-    assert schedule.size == 2560
+        schedule.record_timing(1536, 1536 * 8.1)
+    assert schedule.size == 1536
     schedule.observe(0.81)
-    assert schedule.size == 1280
-    for _ in range(8):
+    assert schedule.size == 768
+
+
+def test_mst_can_select_smaller_chunks_and_reprobe_changed_speed(monkeypatch):
+    from areno.engine.runtime.mst import _AdaptiveChunks
+
+    schedule = _AdaptiveChunks(torch.device("cpu"), 1024, 65536)
+    _measure_mst_candidate(schedule, 10)
+    _measure_mst_candidate(schedule, 12)  # 1536 is slower.
+    assert schedule.size == 512
+    _measure_mst_candidate(schedule, 7)
+    assert schedule.size == 1
+    _measure_mst_candidate(schedule, 30)
+    _measure_mst_candidate(schedule, 10)
+    assert schedule.size == schedule.best_size == 512
+    for _ in range(129):
         schedule.observe(0.4)
-    assert schedule.size == 1280
+        schedule.record_timing(512, 512 * 9)
+    assert schedule.size == 1024  # Periodic re-evaluation after stable use.
+
+
+def test_mst_warmup_noise_tails_and_unfinished_events_do_not_drive_search(monkeypatch):
+    from areno.engine.runtime.mst import _AdaptiveChunks
+
+    schedule = _AdaptiveChunks(torch.device("cpu"), 1024, 65536)
+    schedule.observe(0.4)
+    schedule.record_timing(1024, 1e8)  # Discard first execution.
+    for cost in [10, 10.1, 9.9, 10]:
+        schedule.observe(0.4)
+        schedule.record_timing(1024, cost * 1024)
+    assert schedule.size == 1536
+    _measure_mst_candidate(schedule, 9.8)  # <5% gain is indistinguishable from noise.
+    assert schedule.best_size == 1024
+    old = schedule.size
+    schedule.record_timing(17, 0.001)  # Partial tail cannot look artificially fast.
+    assert schedule.size == old
+    from unittest.mock import Mock
+
+    begin = Mock()
+    end = Mock()
+    end.query.return_value = False
+    schedule._pending.append((begin, end, old, schedule._generation))
+    schedule.poll_timings()
+    begin.elapsed_time.assert_not_called()
+    end.synchronize.assert_not_called()
+    end.query.return_value = True
+    begin.elapsed_time.return_value = old * 11
+    schedule.poll_timings()
+    begin.elapsed_time.assert_called_once_with(end)
+    end.synchronize.assert_not_called()
 
 
 def test_mst_current_train_eta_and_log_throttle(monkeypatch, caplog):
@@ -582,3 +641,52 @@ def test_mst_current_train_eta_and_log_throttle(monkeypatch, caplog):
         progress.advance(100, 1280)
         assert len(caplog.records) == 1
     assert mst._TRAIN_PROGRESS.get() is None
+
+
+def test_mst_speed_driven_chunks_preserve_forward_and_gradients_cpu(monkeypatch):
+    from areno.engine.runtime import mst
+
+    torch.manual_seed(17)
+    block = nn.Sequential(nn.Linear(8, 19), nn.SiLU(), nn.Linear(19, 8)).double()
+    other = copy.deepcopy(block)
+    x = torch.randn(1, 4096, 8, dtype=torch.double, requires_grad=True)
+    y = x.detach().clone().requires_grad_()
+    schedule = mst._AdaptiveChunks(x.device, 64, 4096)
+    monkeypatch.setattr(mst, "_adaptive_chunks", lambda *args: schedule)
+    monkeypatch.setattr(schedule, "pressure", lambda: 0.4)
+    monkeypatch.setattr(schedule, "start_timing", lambda size: size if size == schedule.size else None)
+    monkeypatch.setattr(
+        schedule,
+        "end_timing",
+        lambda size: schedule.record_timing(size, size * (10 if size == 64 else 8)) if size else None,
+    )
+    expected = block(x)
+    actual = mst.mini_sequence_forward(other, y, chunk_size=64)
+    upstream = torch.randn_like(actual)
+    reference = torch.autograd.grad(expected, (x, *block.parameters()), upstream)
+    got = torch.autograd.grad(actual, (y, *other.parameters()), upstream)
+    assert schedule.size > 64
+    torch.testing.assert_close(actual, expected, atol=1e-12, rtol=1e-12)
+    for observed, baseline in zip(got, reference, strict=True):
+        torch.testing.assert_close(observed, baseline, atol=1e-10, rtol=1e-11)
+
+
+def test_mst_pending_cuda_events_are_bounded_without_synchronization_cpu(monkeypatch):
+    from unittest.mock import Mock
+
+    from areno.engine.runtime import mst
+
+    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda _: SimpleNamespace(name="NVIDIA GB10"))
+    event = Mock()
+    event.query.return_value = False
+    factory = Mock(return_value=event)
+    monkeypatch.setattr(torch.cuda, "Event", factory)
+    monkeypatch.setattr(torch.cuda, "current_stream", lambda _: "stream")
+    schedule = mst._AdaptiveChunks(torch.device("cuda"), 1024, 4096)
+    for _ in range(12):
+        schedule.end_timing(schedule.start_timing(1024))
+        schedule.poll_timings()
+    assert len(schedule._pending) == 8
+    assert factory.call_count == 16
+    event.synchronize.assert_not_called()
+    assert schedule.start_timing(17) is None

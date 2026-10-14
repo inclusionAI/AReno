@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import time
+from collections import deque
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
+from statistics import median
 from weakref import WeakKeyDictionary
 
 import psutil
@@ -81,12 +84,11 @@ def mst_training_progress():
 
 
 class _AdaptiveChunks:
-    """Conservative feedback without resetting the trainer's peak counters.
+    """Search for measured token throughput within the memory budget.
 
-    On discrete GPUs, device-wide free memory includes other CUDA processes.
-    On integrated GPUs, CUDA free can exclude reclaimable host page cache;
-    use system available memory for that shared physical pool instead.
-    This is feedback, not a hard cap on allocations outside MST.
+    GPU event results are read only after query() reports completion. Bounded
+    pending measurements avoid synchronizing the training stream. Each module
+    keeps its own schedule; partial tail chunks never influence the search.
     """
 
     def __init__(self, device, initial, maximum):
@@ -99,10 +101,24 @@ class _AdaptiveChunks:
         self.stable = 0
         self.cooldown = 0
         self.unified_memory = False
+        self._pending = deque()
+        self._generation = 0
+        self._reset_search()
         if getattr(device, "type", None) == "cuda":
             properties = torch.cuda.get_device_properties(device)
-            # PyTorch does not expose cudaDeviceProp.integrated in every build.
             self.unified_memory = bool(getattr(properties, "integrated", False)) or "GB10" in properties.name
+
+    def _reset_search(self):
+        self.best_size = self.size
+        self.best_cost = None
+        self._costs = deque(maxlen=4)
+        self._warm = False
+        self._direction = 1
+        self._blocked = set()
+        self._holding = False
+        self._held_samples = 0
+        self._generation += 1
+        self._pending.clear()
 
     def pressure(self):
         host = psutil.virtual_memory()
@@ -118,30 +134,96 @@ class _AdaptiveChunks:
             self.size = max(1, self.size // 2)
             self.cooldown = 8
             self.stable = 0
+            self._reset_search()
         elif self.cooldown:
             self.cooldown -= 1
         elif pressure < self.memory_fraction * 0.95:
             self.stable += 1
-            if self.stable >= 4:
-                self.size = min(self.maximum, self.size + 512) if self.size < self.maximum else self.size
-                self.stable = 0
         else:
             self.stable = 0
         if self.size != old:
-            logger.log(
-                logging.INFO if self.size < old else logging.DEBUG,
-                "MST chunk %d -> %d, memory pressure %.3f / %.3f",
-                old,
-                self.size,
-                pressure,
-                self.memory_fraction,
+            logger.info(
+                "MST chunk %d -> %d, memory pressure %.3f / %.3f", old, self.size, pressure, self.memory_fraction
             )
+
+    def _select(self, size):
+        old = self.size
+        self.size = size
+        self._costs.clear()
+        self._warm = False
+        self._generation += 1
+        if old != size:
+            logger.debug("MST chunk %d -> %d, throughput probe; best=%d", old, size, self.best_size)
+
+    def _probe(self):
+        if self.maximum < self.best_size:
+            return  # A short tail cannot replace a full-chunk speed measurement.
+        if self.cooldown or self.stable < 4:
+            self._holding = True
+            self._select(self.best_size)
+            return
+        for direction in (self._direction, -self._direction):
+            candidate = min(self.maximum, max(1, self.best_size + direction * 512))
+            if direction in self._blocked or candidate == self.best_size:
+                continue
+            self._direction = direction
+            self._select(candidate)
+            return
+        self._holding = True
+        self._held_samples = 0
+        self._select(self.best_size)
+
+    def record_timing(self, size, milliseconds):
+        """Accept only complete chunks, excluding warmup and timing noise."""
+        if size != self.size or self.cooldown or not math.isfinite(milliseconds) or milliseconds <= 0:
+            return
+        if not self._warm:
+            self._warm = True  # First execution may include kernel compilation.
+            return
+        self._costs.append(milliseconds / size)
+        if self._holding:
+            self._held_samples += 1
+            if self._held_samples >= 128 and self.stable >= 4:
+                self.best_cost = median(self._costs)
+                self._blocked.clear()
+                self._direction = 1
+                self._holding = False
+                self._probe()
+            return
+        if len(self._costs) < 4:
+            return
+        cost = median(self._costs)
+        if self.best_cost is None or cost < self.best_cost * 0.95:
+            self.best_size, self.best_cost = size, cost
+            self._blocked.clear()
+        else:
+            self._blocked.add(self._direction)
+        self._probe()
+
+    def poll_timings(self):
+        while self._pending and self._pending[0][1].query():
+            begin, end, size, generation = self._pending.popleft()
+            if generation == self._generation:
+                self.record_timing(size, begin.elapsed_time(end))
+
+    def start_timing(self, size):
+        if self.device.type != "cuda" or size != self.size or len(self._pending) >= 8:
+            return None
+        begin, end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+        begin.record(torch.cuda.current_stream(self.device))
+        return begin, end, size, self._generation
+
+    def end_timing(self, measurement):
+        if measurement is not None:
+            measurement[1].record(torch.cuda.current_stream(self.device))
+            self._pending.append(measurement)
 
     def oom(self, failed_size=None):
         self.size = max(1, (self.size if failed_size is None else failed_size) // 2)
         self.cooldown = 8
         self.maximum = self.size
         self.stable = 0
+        self._reset_search()
         logger.warning("MST allocation failed; retrying uncommitted chunk with %d tokens", self.size)
 
 
@@ -234,12 +316,14 @@ class _RecomputedBlock(torch.autograd.Function):
             start = 0
             while start < flat.shape[0]:
                 if adaptive is not None:
+                    adaptive.poll_timings()
                     pressure = adaptive.pressure()
                     if pressure >= adaptive.memory_fraction:
                         adaptive.observe(pressure)
                     size = min(adaptive.size, flat.shape[0] - start)
                 end = min(start + size, flat.shape[0])
                 retry = False
+                measurement = adaptive.start_timing(size) if adaptive is not None else None
                 try:
                     grads = _chunk_vjp(ctx, inputs, parameters, flat, grad_output, start, end)
                 except torch.cuda.OutOfMemoryError:
@@ -281,6 +365,8 @@ class _RecomputedBlock(torch.autograd.Function):
                         parameter_grads[index] = gradient
                     else:
                         parameter_grads[index].add_(gradient)
+                if adaptive is not None:
+                    adaptive.end_timing(measurement)
                 if ctx.progress is not None:
                     ctx.progress.advance(end - start, size)
                 start = end
