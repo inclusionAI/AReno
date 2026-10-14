@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import secrets
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError
 from urllib.request import ProxyHandler, Request, build_opener
+
+logger = logging.getLogger(__name__)
 
 
 class PiProxy:
@@ -22,6 +26,7 @@ class PiProxy:
         self,
         ctx,
         *,
+        item=None,
         max_turns: int = 32,
         timeout: float = 3600,
         bind_host: str = "127.0.0.1",
@@ -30,6 +35,7 @@ class PiProxy:
         if max_turns < 1 or timeout <= 0:
             raise ValueError("max_turns and timeout must be positive")
         self.ctx = ctx
+        self.item = item
         self.bind_host = bind_host
         self.connect_host = connect_host
         self.max_turns = max_turns
@@ -99,6 +105,8 @@ class PiProxy:
                     self._json(handler, 429, {"error": {"message": "pi turn limit reached"}})
                     return
                 self._requests += 1
+                started = time.monotonic()
+                self._record_running()
                 upstream = dict(body, stream=False)
                 # Generation length is owned by areno train, not pi's model catalog.
                 for key in ("stream_options", "max_tokens", "max_completion_tokens"):
@@ -120,6 +128,7 @@ class PiProxy:
                     raise ValueError("upstream did not return exact input tokens")
                 self._restore_tool_reasoning(response)
                 self.trace.append((upstream, response))
+                self._publish_turn(upstream, response, len(self.trace) - 1, time.monotonic() - started)
             try:
                 if stream:
                     self._stream(handler, response, include_usage)
@@ -141,6 +150,43 @@ class PiProxy:
                 self._json(handler, status, {"error": {"message": message}})
             except (OSError, TimeoutError):
                 pass
+
+    def _recorder(self):
+        trainer = getattr(self.ctx, "_trainer", None)
+        return getattr(trainer, "record_agent_event", None) if self.item is not None else None
+
+    def _record_running(self):
+        recorder = self._recorder()
+        if recorder is not None:
+            try:
+                recorder(
+                    "sample", prompt_idx=self.item.prompt_index, sample_idx=self.item.sample_index, status="running"
+                )
+            except Exception:
+                logger.warning("Could not report pi request start", exc_info=True)
+
+    def _publish_turn(self, request, response, turn, seconds):
+        recorder = self._recorder()
+        if recorder is None:
+            return
+        try:
+            metadata = response["areno"]
+            recorder(
+                "turn",
+                prompt_idx=self.item.prompt_index,
+                sample_idx=self.item.sample_index,
+                turn=turn,
+                messages=request["messages"],
+                response=response["choices"][0]["message"],
+                input_tokens=len(metadata["input_tokens"]),
+                output_tokens=len(metadata["response_tokens"]),
+                seconds=seconds,
+            )
+            # Reconstruction must preserve training tokens/logprobs while
+            # avoiding a second live event for this already reported response.
+            metadata["_dashboard_turn_reported"] = True
+        except Exception:
+            logger.warning("Could not report completed pi turn", exc_info=True)
 
     def _restore_tool_reasoning(self, response):
         """Keep sampled thinking in pi's tool-call replay without changing tokens."""
