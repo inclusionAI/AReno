@@ -17,6 +17,7 @@ from areno.engine.runtime.logprobs import (
     packed_next_token_logprobs_from_hidden,
 )
 from areno.engine.runtime.mst import mst_training_progress, training_chunk_size
+from areno.engine.runtime.observability import capture_training_events, event_reporter, report_training_event
 from areno.engine.runtime.routing_replay import routing_replay_context
 from areno.engine.runtime.train_step import (
     _clip_grad_norm,
@@ -73,6 +74,31 @@ class TrainingManager:
         results = []
         try:
             for index, data_pack_shards in enumerate(packs):
+                metadata = data_pack_shards[get_tp_context().dp_rank]
+                directory = metadata.get("_dashboard_events_dir")
+                self._event_reporter = None
+                if directory:
+                    from areno.api.agent_events import AgentEvents
+
+                    if not hasattr(self, "_event_writer"):
+                        self._event_writer = AgentEvents(
+                            directory, owner_pid=metadata["_dashboard_owner_pid"], device=worker.device
+                        )
+                        if __import__("os").environ.get("ARENO_AGENT_EVENT_STDOUT") == "1":
+                            import json
+
+                            self._event_writer.callback = lambda e: print(
+                                "ARENOFLOW_EVENT "
+                                + json.dumps(
+                                    dict(
+                                        type="agent_event",
+                                        event=e,
+                                        index=int(__import__("os").environ.get("ARENO_AGENT_EVENT_STAGE", "0")),
+                                    )
+                                ),
+                                flush=True,
+                            )
+                    self._event_reporter = event_reporter(self._event_writer, metadata["_dashboard_step"])
                 group_start = (index // accumulation_steps) * accumulation_steps
                 group_size = min(accumulation_steps, len(packs) - group_start)
                 allow_step = (index + 1) % accumulation_steps == 0 or index == len(packs) - 1
@@ -95,6 +121,7 @@ class TrainingManager:
                 if accelerator is not None:
                     accelerator.empty_cache()
 
+    @capture_training_events
     @mst_training_progress()
     def _train_step(
         self,
@@ -142,6 +169,9 @@ class TrainingManager:
         defer_lm_head = existing_chunked_head or bool(getattr(train_meta, "mst_chunk_size", 0))
         if defer_lm_head:
             model_kwargs["defer_lm_head"] = True
+        report_training_event(
+            "forward_start", tokens=tokens.numel(), sequences=data_pack["train_cu_seqlens"].numel() - 1
+        )
         with routing_replay_context(train_meta):
             out = train_model(**model_kwargs)
         if defer_lm_head:
@@ -157,6 +187,7 @@ class TrainingManager:
             )
         else:
             logprobs = packed_next_token_logprobs(out.logits_shard, tokens, data_pack["train_cu_seqlens"])
+        report_training_event("loss")
         loss_out = worker.loss_fn(data_pack, logprobs)
         metrics = None
         if isinstance(loss_out, tuple):
@@ -165,7 +196,9 @@ class TrainingManager:
             loss = loss_out
         if not isinstance(loss, torch.Tensor):
             raise TypeError("train_loss_fn must return a torch.Tensor")
+        report_training_event("backward_start")
         (loss / max(grad_scale, 1)).backward()
+        report_training_event("backward_end")
         stream_gradient_shards = bool(getattr(worker.optimizer, "stream_gradient_shards", False))
         if stream_gradient_shards:
             # AdamW4bit consumes each microbatch directly into compact BF16 DP
@@ -212,7 +245,9 @@ class TrainingManager:
             current_lr = self._lr_for_step(worker._global_step + 1)
             worker.optimizer.lr = current_lr
             multimodal_lrs = self._set_multimodal_lrs(worker._global_step + 1)
+            report_training_event("optimizer_start")
             worker.optimizer.step()
+            report_training_event("optimizer_end")
             state_memory_metrics = getattr(worker.optimizer, "state_memory_metrics", None)
             state_quantizer = getattr(worker.optimizer, "state_quantizer", None)
             if callable(state_memory_metrics) and state_quantizer == "dynamic-tree-v1":

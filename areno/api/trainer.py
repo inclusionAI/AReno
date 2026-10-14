@@ -92,6 +92,8 @@ class Trainer:
         if backend_cls is None:
             raise ValueError(f"unsupported backend type: {self._backend_type}")
         self._backend = backend_cls()
+        if self._metrics is not None:
+            self._backend._dashboard_events_dir = str(self._metrics._log_dir)
         self._backend.initialize(self._ctx)
         components = self._backend.runtime_components()
         if components.tokenizer is not None:
@@ -445,6 +447,11 @@ class Trainer:
             )
         self.finish_step()
         return result
+
+    def record_agent_event(self, kind: str, **data: Any) -> None:
+        """Record structured harness events when metrics recording is enabled."""
+        if self._metrics is not None:
+            self._metrics.agent_events.record(kind, step=data.pop("step", self._ctx.global_step), **data)
 
     def record_rollout_sample(self, sample: dict[str, Any]) -> None:
         """Persist a representative rollout sample when metrics recording is enabled."""

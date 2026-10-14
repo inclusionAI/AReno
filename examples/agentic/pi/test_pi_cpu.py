@@ -442,3 +442,41 @@ def test_invalid_harness_attempt_is_retained_without_task_reward(fake_pi, tmp_pa
     assert data["result"]["valid"] is False
     assert data["result"]["proxy_errors"]
     assert "reward" not in data["result"]
+
+
+def test_pi_reports_turns_before_agent_finishes_without_duplicate_reconstruction():
+    from areno.api.agent_events import capture_agent_turns
+
+    events = []
+
+    def record(kind, **data):
+        events.append((kind, data))
+
+    async def check(ctx):
+        ctx._trainer = SimpleNamespace(record_agent_event=record)
+        items = list(AgentBatch([{}], ["same task"], [[0]], 2).iter_samples())
+        with capture_agent_turns(record):
+            async with PiProxy(ctx, item=items[0]) as first, PiProxy(ctx, item=items[1]) as second:
+                request = {"model": "policy", "messages": [{"role": "user", "content": "fix it"}], "stream": True}
+                await asyncio.gather(asyncio.to_thread(post, first, request), asyncio.to_thread(post, second, request))
+                live = [data for kind, data in events if kind == "turn"]
+                assert sorted((data["sample_idx"], data["turn"]) for data in live) == [(0, 0), (1, 0)]
+                assert all(data["response"]["tool_calls"][0]["function"]["name"] == "write" for data in live)
+                await asyncio.to_thread(
+                    post,
+                    first,
+                    dict(request, messages=[{"role": "tool", "tool_call_id": "call_1", "content": "written"}]),
+                )
+                live = [data for kind, data in events if kind == "turn"]
+                assert len(live) == 3 and live[-1]["turn"] == 1
+                assert live[-1]["messages"][-1]["content"] == "written"
+                turns = first.turns(items[0])
+                assert turns[0].input_tokens == [101, 102]
+                assert turns[0].response_tokens == [31, 32]
+                assert turns[0].response_logprobs == [-0.1, -0.2]
+                assert len([data for kind, data in events if kind == "turn"]) == 3
+                assert turns[1].response_tokens == [33, 34]
+                assert live[-1]["seconds"] >= 0
+
+    with upstream() as (ctx, _):
+        asyncio.run(check(ctx))

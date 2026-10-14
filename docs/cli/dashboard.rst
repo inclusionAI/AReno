@@ -100,7 +100,7 @@ for its detailed views:
 
 * **Metrics** show recorded scalar series. Charts reduce rendered points for
   long runs while retaining the recorded metric history.
-* **Runtime timeperf** shows per-step timing segments when the trainer reports
+* **Step timeline** shows per-step timing segments when the trainer reports
   timing metrics. It remains empty before those measurements are available.
 * **Rollout Sample** shows captured prompts, completions, and associated record
   fields. One sample per rollout step is captured by default;
@@ -114,6 +114,66 @@ The stage indicator reflects reported trainer state. Elapsed time freezes when
 a job stops, exits, fails, or succeeds. Use the stop action to terminate a task;
 closing its detail view does not stop it. For metric tags, timing semantics, and
 rollout sample contents, see :doc:`observability`.
+
+Training detail workspace
+-------------------------
+
+Training jobs share an execution workspace in **Jobs > Open**. Ordinary jobs
+show captured prompt/completion samples, media, loss, gradients, memory, and
+training progress. Jobs without rollout samples still show their recorded
+training metrics. Agentic jobs additionally show harness turns, tool calls,
+file changes, and grading results. The sample matrix groups captures by
+prompt or task and step. Select an attempt to replay its model turns,
+thinking, tool arguments and outputs, code edits, and grader results. Use **+**
+on another sample to compare attempts side by side. **Training signal** shows
+the exact loss mask for each recorded model turn.
+
+The compact **Step timeline** card stays fixed on the right while scrolling.
+The card evenly samples at most ten records across the step history. Use
+**Search step** to find an exact step in the complete history, including
+records outside the sampled list. Select a step to filter its samples, or
+**Clear filter** to return to all steps.
+**AVG** shows mean phase durations over all recorded steps and clears the
+step filter when selected. Hover or focus a row for its total and phase
+durations. Collapse the card when needed; on small screens it starts collapsed at the
+bottom right. Phase timings appear only in this card.
+
+Below the conversation, inspect reward distributions, per-sample
+scores, failure reasons, context growth, tool timing and execution order,
+training loss, gradient norm, native logprob differences, memory residency,
+MST progress, and task reward history. Select timeline or metric points to
+filter the step; tool timing and execution-map items jump to tool output.
+**Learning signal** separates prompt groups with varying rewards from all-zero,
+all-perfect, other equal-reward, and insufficiently scored groups. **Sampling
+funnel** tracks requested, returned, scored, accepted, and completed-training
+episodes. One episode can produce several model-turn training rows; the funnel
+keeps those counts separate. **Dataset mix & outcomes** reports source shares,
+mean rewards, row counts, and context-token volume, including repeated history.
+Select a source to filter the sample matrix.
+
+**Run notices** brings reported incidents, skipped updates, and warning/error logs into the workspace. These views require
+the corresponding histories from a current trainer; missing data remains empty.
+No independent evaluation curves are added.
+
+Reward summaries cover all matching samples. The sample matrix uniformly selects
+at most ten steps, including the first and latest, and pages their samples.
+Selecting a specific step exposes all its samples. Completed harness turns
+appear live as they are constructed; tool cards replace repeated raw tool-call
+markup. At conversation scroll boundaries, scrolling continues on the page.
+
+Run with ``--metrics-log-dir`` to retain structured histories. Agentic histories
+are independent of ``ARENO_LOG_COMPLETIONS``. Harness integrations can use ``Trainer.record_agent_event`` to report live
+tool and grader details. Generic agent trajectories still provide model turns, rewards, masks, and
+recorded tool calls/results after rollout. Tool execution durations and grader
+diagnostics require explicit harness events. Unreported values remain empty. Modal jobs use the
+same views when their AReno image includes structured event reporting. Ordinary
+rollout captures also populate this workspace, including existing sample files;
+``ARENO_LOG_COMPLETIONS`` controls how many ordinary completions are captured.
+
+New events follow the conversation only while you are at the bottom. Scrolling
+up preserves your position, and **New events** returns to the latest output.
+Large outputs can be downloaded from their tool cards. CUDA allocations are
+part of host memory on unified-memory systems; do not add the two series.
 
 Settings and troubleshooting
 ----------------------------
@@ -140,3 +200,15 @@ Modal jobs
    :maxdepth: 1
 
    dashboard-modal
+
+MST charts show recorded chunk sizes. Microbatch counters are not recorded in
+the workspace. Progress reporting survives autograd thread changes and does
+not introduce device synchronization.
+
+The Pi secondary proxy reports each completed model turn before returning it to
+the agent, with explicit prompt/sample identity. Deferred trajectory reconstruction
+preserves training data and does not duplicate those live turn events.
+
+Memory residency defaults to the last five minutes of recorded data, and MST
+to the last minute. Both offer one-, five-, and fifteen-minute windows. The
+windows follow the latest recorded timestamp, including for completed jobs.

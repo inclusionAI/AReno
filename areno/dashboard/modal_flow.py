@@ -10,8 +10,10 @@ import secrets
 import threading
 import time
 from decimal import Decimal
+from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
+from areno.dashboard.agent_events import EventIndex
 from areno.dashboard.flow.datasets import resolve_request
 from areno.dashboard.flow.events import dashboard_state
 from areno.dashboard.flow.server import Application
@@ -26,6 +28,7 @@ class ModalFlow:
         self.app = application or Application(directory)
         self.lock = threading.RLock()
         self.plans = {}
+        self.agent_indexes = {}
 
     def import_url(self, body):
         url = str(body.get("url", "")).strip()
@@ -197,9 +200,15 @@ class ModalFlow:
             name=record["name"],
             command=record.get("commands", []),
             config=manifest,
-            metrics_dir=None,
+            metrics_dir=str(self.app.controller.store.directory / "agent_events" / record["id"]),
         )
         job.id = "modal-" + record["id"]
+        directory = Path(job.metrics_dir)
+        if directory.is_dir():
+            with self.lock:
+                if record["id"] not in self.agent_indexes:
+                    self.agent_indexes[record["id"]] = EventIndex(directory)
+                job.agent_index = self.agent_indexes[record["id"]]
         job.provider = "modal"
         job.status = {"ready": "running", "cancelled": "stopped"}.get(record["status"], record["status"])
         job.stage = record.get("phase") or str(record.get("stage", "queued"))

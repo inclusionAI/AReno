@@ -27,6 +27,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
+from areno.api.agent_events import report_agent_turn
 from areno.api.multimodal import encode_multimodal_prompt, encode_processor_messages, modality_token_ids
 from areno.api.openai_chat import (
     build_chat_completion_response,
@@ -145,6 +146,7 @@ class AgentTrajectoryTurn:
 
     def __post_init__(self) -> None:
         if self.response is None:
+            report_agent_turn(self)
             return
         metadata = _chat_response_agentic_metadata(self.response)
         self.input_tokens = list(metadata.get("input_tokens") or [])
@@ -154,6 +156,7 @@ class AgentTrajectoryTurn:
         self.routing_replay_id = metadata.get("routing_replay_id") or None
         self.filtered = bool(metadata.get("filtered", False))
         self.parsed_tool_calls = _chat_response_message_tool_calls(self.response)
+        report_agent_turn(self)
 
 
 @dataclass(slots=True)

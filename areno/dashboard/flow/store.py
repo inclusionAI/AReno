@@ -67,6 +67,14 @@ class Store:
 
     def event(self, job_id, event):
         with self.lock, self.db:
+            if event.get("type") == "agent_event" and isinstance(event.get("event"), dict):
+                record = dict(event["event"])
+                record["id"] = f"{event.get('index', 0)}:{record['id']}"
+                directory = self.directory / "agent_events" / job_id
+                directory.mkdir(parents=True, exist_ok=True)
+                with (directory / "agent_events.modal.jsonl").open("a", encoding="utf-8") as stream:
+                    stream.write(json.dumps(record, ensure_ascii=False) + "\n")
+                return
             body = json.dumps(event, sort_keys=True)
             if event.get("type") == "metric":
                 self.db.execute("INSERT OR IGNORE INTO metric_events(job, body) VALUES (?, ?)", (job_id, body))

@@ -19,6 +19,7 @@ from torch import nn
 from torch.utils.checkpoint import checkpoint
 
 from areno.engine.parallel.collectives import is_sequence_parallel_active, sequence_parallel_region
+from areno.engine.runtime.observability import training_event_reporter
 
 
 def training_chunk_size(device_type: str, tp_size: int) -> int:
@@ -275,6 +276,7 @@ class _RecomputedBlock(torch.autograd.Function):
         ctx.owner = owner
         ctx.execute = execute
         ctx.chunk_size = chunk_size
+        ctx.event_reporter = training_event_reporter()
         ctx.input_count = input_count
         ctx.save_for_backward(*tensors)
         inputs = tensors[:input_count]
@@ -325,6 +327,8 @@ class _RecomputedBlock(torch.autograd.Function):
                         adaptive.observe(pressure)
                     size = min(adaptive.size, flat.shape[0] - start)
                 end = min(start + size, flat.shape[0])
+                if ctx.event_reporter is not None:
+                    ctx.event_reporter(phase="mst", chunk_size=size, tokens_completed=start, tokens_total=flat.shape[0])
                 retry = False
                 measurement = adaptive.start_timing(size) if adaptive is not None else None
                 try:

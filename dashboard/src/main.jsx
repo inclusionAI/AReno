@@ -28,11 +28,11 @@ import {
   Settings2,
   Sun,
   TerminalSquare,
-  Timer,
   Volume2,
   Wrench,
 } from "lucide-react";
 import "./styles.css";
+import { AgenticJobDetail } from "./agentic";
 import { sampleMetricPoints } from "./metrics";
 import { runtimeSummary, runtimeFacts } from "./runtime";
 import { modalWorkflow } from "./modal-workflow";
@@ -1511,14 +1511,11 @@ function JobFullDetailPage({ job, refreshNonce, onBack, onStop }) {
         {job.status === "running" && <button className="dangerButton" onClick={onStop}><CircleStop size={16} /> Stop job</button>}
       </div>
       <JobOverview job={job} detail refreshNonce={refreshNonce} />
+      {job.kind === "train" && <AgenticJobDetail key={job.id} job={job} api={api} base={API_BASE} renderMedia={sample => <SampleMedia jobId={job.id} media={sampleMedia(sample)} />} />}
       {job.provider === "modal" && <section className="panel"><div className="panelHeader"><h2>Modal usage</h2></div><ModalUsage job={job} detail /></section>}
       <section className="panel jobDetailSection">
-        <div className="panelHeader"><div><h2>Metrics</h2><p>Training quality and stage timing for this job.</p></div></div>
+        <div className="panelHeader"><div><h2>Metrics</h2><p>Recorded training metrics for this job.</p></div></div>
         <JobMetricsView job={job} refreshNonce={refreshNonce} />
-      </section>
-      <section className="panel jobDetailSection">
-        <div className="panelHeader"><div><h2>Rollout Sample</h2><p>Prompt and completion output captured during rollout.</p></div></div>
-        <SampleView samples={job.samples || []} jobId={job.id} hideTitle />
       </section>
       <div className="jobDetailDataGrid">
         <ConfigView config={job.config} launch={job.launch} />
@@ -1766,13 +1763,8 @@ function RuntimeCheckResultModal({ result, onClose }) {
 
 function JobMetricsView({ job, refreshNonce }) {
   return (
-    <div className="jobMetricsGrid">
-      <div className="panel insetPanel">
-        <MetricChart jobId={job?.id} metricsDir={job?.metrics_dir} refreshNonce={refreshNonce} />
-      </div>
-      <div className="panel insetPanel">
-        <TimePerfView rows={job?.timeperf || []} job={job} />
-      </div>
+    <div className="panel insetPanel">
+      <MetricChart jobId={job?.id} metricsDir={job?.metrics_dir} refreshNonce={refreshNonce} />
     </div>
   );
 }
@@ -2355,111 +2347,6 @@ function compactNumber(value) {
   if (!Number.isFinite(value)) return "n/a";
   if (Math.abs(value) >= 1000 || Math.abs(value) < 0.001) return value.toExponential(2);
   return value.toFixed(4).replace(/0+$/, "").replace(/\.$/, "");
-}
-
-function TimePerfView({ rows, job }) {
-  const normalizedRows = normalizeTimePerfRows(rows || [], job);
-  const visible = sampleTimePerfRows(normalizedRows, 7).reverse();
-  const avgTotal = normalizedRows.length ? normalizedRows.reduce((sum, row) => sum + Number(row.total_s || 0), 0) / normalizedRows.length : 0;
-  const maxTotal = Math.max(1, ...visible.map((row) => Number(row.total_s || 0)));
-  const segmentNames = Array.from(new Set(normalizedRows.flatMap((row) => (row.segments || []).map((segment) => segment.name)))).slice(0, 8);
-  return (
-    <div className="timePerf">
-      <div className="timePerfHeader">
-        <div>
-          <div className="codeTitle inline"><Timer size={14} /> Runtime timeperf</div>
-        </div>
-        <div className="legend">
-          {segmentNames.map((name) => <span key={name}><i className={segmentClass(name)} /> {name}</span>)}
-          <b>avg {avgTotal ? `${avgTotal.toFixed(1)}s` : "n/a"}</b>
-        </div>
-      </div>
-      {visible.length === 0 ? (
-        <div className="sampleEmpty">No step timing captured yet.</div>
-      ) : (
-        <div className="timeRows">
-          {visible.map((row) => {
-            const total = Number(row.total_s || 0);
-            const width = Math.max(10, (total / maxTotal) * 100);
-            const segments = row.segments?.length
-              ? row.segments
-              : [];
-            return (
-              <div key={`${row.step}-${row.time}`} className="timeRow">
-                <label>step {row.step}</label>
-                <div className="timeTrack">
-                  <div className="timeStack" style={{ width: `${width}%` }}>
-                    {segments.map((segment) => {
-                      const seconds = Number(segment.seconds || 0);
-                      const pct = (seconds / Math.max(total, 1)) * 100;
-                      return (
-                        <span
-                          key={segment.name}
-                          className={segmentClass(segment.name)}
-                          style={{ width: `${pct}%` }}
-                          title={`${segment.name}: ${seconds.toFixed(1)}s`}
-                        >
-                          {pct > 11 ? `${seconds.toFixed(1)}s` : ""}
-                        </span>
-                      );
-                    })}
-                  </div>
-                </div>
-                <strong>{total.toFixed(1)}s</strong>
-              </div>
-            );
-          })}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function normalizeTimePerfRows(rows, job) {
-  const algo = String(configValue(job, "algo") || "").toLowerCase();
-  const valid = timePerfSegmentsForAlgorithm(algo, job?.kind);
-  return rows.map((row) => {
-    const kept = [];
-    let other = 0;
-    for (const segment of row.segments || []) {
-      const seconds = Number(segment.seconds || 0);
-      if (valid.has(segment.name)) kept.push({ ...segment, seconds });
-      else other += seconds;
-    }
-    if (other > 0) {
-      const existing = kept.find((segment) => segment.name === "other");
-      if (existing) existing.seconds += other;
-      else kept.push({ name: "other", seconds: other });
-    }
-    return { ...row, segments: kept };
-  });
-}
-
-function timePerfSegmentsForAlgorithm(algo, kind) {
-  if (kind === "serve") return new Set(["load", "prefill", "decode", "other"]);
-  if (algo === "sft") return new Set(["train", "save", "other"]);
-  if (algo === "dpo") return new Set(["ref log probs", "train", "save", "other"]);
-  if (algo === "ppo") return new Set(["rollout", "make_sample", "reward", "old policy log probs", "actor log probs", "ref log probs", "value", "advantages", "sync weight", "train", "save", "other"]);
-  return new Set(["rollout", "make_sample", "reward", "old policy log probs", "actor log probs", "ref log probs", "advantages", "sync weight", "train", "save", "other"]);
-}
-
-function sampleTimePerfRows(rows, limit) {
-  if (rows.length <= limit) return rows.slice();
-  if (limit <= 1) return rows.slice(-1);
-  const lastIndex = rows.length - 1;
-  const selected = new Set();
-  for (let index = 0; index < limit; index += 1) {
-    selected.add(Math.round((index * lastIndex) / (limit - 1)));
-  }
-  selected.add(lastIndex);
-  return Array.from(selected)
-    .sort((a, b) => a - b)
-    .slice(-limit)
-    .map((index) => rows[index]);
-}
-
-function segmentClass(name) {
-  return `seg-${String(name || "other").replace(/[^a-zA-Z0-9]+/g, "-")}`;
 }
 
 function normalizeDisplayName(name) {

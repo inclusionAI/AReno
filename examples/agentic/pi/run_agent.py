@@ -156,7 +156,9 @@ async def run_agent(ctx, batch):
                 workspace = root / "workspace"
                 workspace.mkdir()
                 write_files(workspace, item.record["files"], item.record.get("binary_files"))
-                async with PiProxy(ctx, max_turns=int(item.record.get("max_turns", 32)), timeout=timeout) as proxy:
+                async with PiProxy(
+                    ctx, item=item, max_turns=int(item.record.get("max_turns", 32)), timeout=timeout
+                ) as proxy:
                     config_dir = root / "pi-config"
                     configure_pi(config_dir, proxy)
                     env = dict(task_env, PI_CODING_AGENT_DIR=str(config_dir))
