@@ -1,19 +1,10 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
-import {
-  Check,
-  ChevronDown,
-  Clock,
-  Code,
-  Download,
-  Search,
-  X,
-} from "lucide-react";
+import { ChevronDown, Clock, Search, X } from "lucide-react";
 import {
   sampleTrace,
   rewardHistogram,
   isAgenticJob,
-  valueText,
   numeric,
   rewardVariation,
   runtimeNotices,
@@ -172,27 +163,6 @@ function Spark({ series, onSelect, format = fmt, xFormat = fmt }) {
     </>
   );
 }
-function DownloadButton({ data, name }) {
-  return (
-    <button
-      className="av-icon"
-      title="Download full output"
-      aria-label="Download full output"
-      onClick={() => {
-        const url = URL.createObjectURL(
-          new Blob([valueText(data)], { type: "text/plain" }),
-        );
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = name;
-        a.click();
-        setTimeout(() => URL.revokeObjectURL(url), 1000);
-      }}
-    >
-      <Download size={14} />
-    </button>
-  );
-}
 function Conversation(props) {
   return <TrajectoryViewer {...props} />;
 }
@@ -246,53 +216,6 @@ function useTrace(jobId, sampleId, api, base) {
   }, [jobId, sampleId]);
   return { events, state };
 }
-function Tests({ grader }) {
-  if (!grader) return <Empty>Waiting for grader results</Empty>;
-  const r = grader.result || {};
-  const text = r.verify_log || "";
-  const tests =
-    grader.tests ||
-    text
-      .split("\n")
-      .filter((l) => /^(FAILED|PASSED|ERROR)\s/.test(l))
-      .map((l) => ({
-        name: l.replace(/^(FAILED|PASSED|ERROR)\s+/, ""),
-        status: l.startsWith("PASSED") ? "passed" : "failed",
-      }));
-  return (
-    <>
-      <div className="av-testsummary">
-        <span className={`av-status av-${grader.status}`}>{grader.status}</span>
-        <span>Exit {r.verify_returncode ?? "—"}</span>
-        <span>{r.verify_timed_out ? "Timed out" : "Verifier"}</span>
-      </div>
-      {tests.length ? (
-        <div className="av-tests">
-          {tests.map((t, i) => (
-            <div key={i}>
-              <span className={`av-status av-${t.status}`}>
-                {t.status === "passed" ? <Check size={14} /> : <X size={14} />}
-              </span>
-              <code>{t.name}</code>
-              <small>{t.group || "Group not recorded"}</small>
-            </div>
-          ))}
-        </div>
-      ) : (
-        <p className="av-muted">
-          Individual test names and FAIL_TO_PASS / PASS_TO_PASS groups were not
-          recorded.
-        </p>
-      )}
-      <details>
-        <summary>
-          Grader output <DownloadButton data={text} name="grader-output.txt" />
-        </summary>
-        <pre>{text || "Not recorded"}</pre>
-      </details>
-    </>
-  );
-}
 function ToolGraph({ tools, onJump }) {
   if (!tools.length) return <Empty />;
   const visible = tools.slice(-24);
@@ -341,49 +264,6 @@ function ToolGraph({ tools, onJump }) {
         Observed execution order · last 24 calls
       </small>
     </>
-  );
-}
-function Changes({ tools }) {
-  const edits = tools.filter((t) => ["edit", "write"].includes(t.name));
-  if (!edits.length) return <Empty>No file edits recorded</Empty>;
-  return (
-    <div className="av-changes">
-      {edits.map((t) => {
-        let a = t.arguments || {};
-        if (typeof a === "string") {
-          try {
-            a = JSON.parse(a);
-          } catch {
-            a = {};
-          }
-        }
-        const changes = a.edits || [a];
-        return (
-          <details key={t.tool_id}>
-            <summary>
-              <Code size={14} />
-              {a.path || a.file_path || t.name}
-            </summary>
-            {changes.map((c, i) => (
-              <div className="av-diff" key={i}>
-                {(c.oldText || c.old_string || "").split("\n").map((l, j) => (
-                  <div className="av-deletion" key={`a${j}`}>
-                    − {l}
-                  </div>
-                ))}
-                {(c.newText || c.new_string || c.content || "")
-                  .split("\n")
-                  .map((l, j) => (
-                    <div className="av-addition" key={`b${j}`}>
-                      + {l}
-                    </div>
-                  ))}
-              </div>
-            ))}
-          </details>
-        );
-      })}
-    </div>
   );
 }
 function LearningSignal({ overview, onSelect }) {
@@ -901,14 +781,6 @@ export function AgenticJobDetail({ job, api, base, renderMedia }) {
     : rewardHistogram(samples);
   const scored = samples.filter((s) => numeric(s.reward));
   const history = overview.history || [];
-  const failure =
-    overview.stats?.failures ||
-    samples.reduce((acc, s) => {
-      if (s.reason) acc[s.reason] = (acc[s.reason] || 0) + 1;
-      else if (s.status === "failed")
-        acc.execution_error = (acc.execution_error || 0) + 1;
-      return acc;
-    }, {});
   const agentic = isAgenticJob(job, samples);
   const hasRewards =
     (overview.stats?.scored || 0) > 0 ||
@@ -1266,35 +1138,6 @@ export function AgenticJobDetail({ job, api, base, renderMedia }) {
             {!scored.length && <Empty />}
           </Panel>
         )}
-        {agentic && (
-          <Panel title="Tests & grading" note="Selected sample">
-            <Tests grader={data.grader} />
-          </Panel>
-        )}
-        {(agentic || Object.keys(failure).length > 0) && (
-          <Panel
-            title="Failure reasons"
-            note="Execution outcomes, separate from reward"
-          >
-            {Object.keys(failure).length ? (
-              <div className="av-bars">
-                {Object.entries(failure).map(([name, count]) => (
-                  <div key={name}>
-                    <span>{name.replaceAll("_", " ")}</span>
-                    <i
-                      style={{
-                        width: `${(count / Math.max(...Object.values(failure))) * 100}%`,
-                      }}
-                    />
-                    <strong>{count}</strong>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <Empty>No failure reasons recorded on this page</Empty>
-            )}
-          </Panel>
-        )}
         <Panel
           title="Context & token growth"
           note="Exact token counts · selected sample"
@@ -1424,14 +1267,6 @@ export function AgenticJobDetail({ job, api, base, renderMedia }) {
             note="Actual calls, their order and outcomes"
           >
             <ToolGraph tools={data.tools} onJump={jump} />
-          </Panel>
-        )}
-        {agentic && (
-          <Panel
-            title="Files & code changes"
-            note="Edits captured by the harness"
-          >
-            <Changes tools={data.tools} />
           </Panel>
         )}
         {agentic && (

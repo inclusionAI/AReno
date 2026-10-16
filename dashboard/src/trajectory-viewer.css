@@ -954,14 +954,6 @@
 .tv-workspace > .av-inspector dt {
   margin-top: 0;
 }
-.jobFullDetailPage:has(.tv-root) {
-  padding-right: 0;
-}
-body:has(.tv-root) .av-floating-timeline {
-  position: static;
-  width: min(calc(100% - 48px), 900px);
-  margin: 24px auto;
-}
 .tv-workspace .av-chatcolumns.av-comparing {
   display: block;
 }
