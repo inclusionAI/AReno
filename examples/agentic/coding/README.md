@@ -107,3 +107,33 @@ The reward is `1.0` when the trajectory applies a patch, runs every required
 test command successfully, and submits `solved`. It gives partial credit for
 passing tests without a final solved submission and negative reward for failed
 or unsupported trajectories.
+
+## Dashboard demo
+
+`dashboard_demo.jsonl` contains two bounded, self-contained tasks: fixing empty
+JSON configuration input and merging configuration without mutating the inputs.
+Their test commands use Python's standard-library `unittest`; no task dependency
+installation is needed. Each attempt has at most eight model turns. The agent
+must reproduce the failing test, inspect the code, patch it, retest, and submit.
+Model failures remain visible; this demo does not script successful responses.
+
+Use an existing AReno environment and a local checkpoint:
+
+```bash
+areno train \
+  --ckpt /path/to/local/checkpoint \
+  --dataset-path examples/agentic/coding/dashboard_demo.jsonl \
+  --dataset-loader-fn examples/agentic/coding/dataset_loader.py \
+  --reward-fn-path examples/agentic/coding/reward.py \
+  --agent-fn examples/agentic/coding/run_agent.py \
+  --algo gspo --world-size 1 --tp-size 1 \
+  --batch-size 1 --n-samples 2 --mini-bs 1 --max-running-prompts 1 \
+  --max-prompt-tokens 4096 --max-context-len 8192 --max-new-tokens 512 \
+  --max-steps 2 --epochs 1 --adam-4bit --drop-rollout-state \
+  --disable-thinking --metrics-log-dir /tmp/areno-coding-dashboard-demo
+```
+
+Open the resulting training job in the dashboard. Its workspace shows captured
+turns, tools, rewards, exact loss masks, and training metrics. Append
+`?job=<job-id>` to the dashboard URL to open a job directly. Two steps exercise
+the workflow; they do not establish learning convergence.
