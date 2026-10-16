@@ -75,15 +75,23 @@ class _TextBatchGenerator:
     ) -> list[int]:
         from mlx_lm.sample_utils import make_sampler
 
-        # MLX-LM 0.32 separates immutable stop sequences from stream matchers.
+        # MLX-LM stop-sequence API drifted across releases; resolve newest first:
+        #   0.32  StopSequences        + stop_sequences=
+        #   0.31  SequenceStateMachine  + state_machines=  (transient middle release)
+        #   0.30  StopSequenceMatcher   + stop_matchers=
         try:
             from mlx_lm.generate import StopSequences as StopState
-        except ImportError:
-            from mlx_lm.generate import StopSequenceMatcher as StopState
 
-            stop_option = "stop_matchers"
-        else:
             stop_option = "stop_sequences"
+        except ImportError:
+            try:
+                from mlx_lm.generate import SequenceStateMachine as StopState
+
+                stop_option = "state_machines"
+            except ImportError:
+                from mlx_lm.generate import StopSequenceMatcher as StopState
+
+                stop_option = "stop_matchers"
 
         if any(feature is not None for feature in prompt_features):
             raise ValueError("text-only MLX checkpoints cannot consume multimodal prompt features")
@@ -93,12 +101,17 @@ class _TextBatchGenerator:
             top_k=max(int(params.top_k), 0),
         )
         stop_sequences = _stop_sequences(self._tokenizer, params)
+        if stop_option == "state_machines":
+            transitions = {"normal": [(sequence, None) for sequence in stop_sequences]} if stop_sequences else {}
+            stops = [StopState(transitions, initial="normal") for _ in prompts]
+        else:
+            stops = [StopState(stop_sequences or None) for _ in prompts]
         return self._generator.insert(
             prompts,
             max_tokens=[int(params.max_new_tokens)] * len(prompts),
             samplers=[sampler] * len(prompts),
             logits_processors=[[float32_logits_processor] for _ in prompts],
-            **{stop_option: [StopState(stop_sequences or None) for _ in prompts]},
+            **{stop_option: stops},
         )
 
     def next(self) -> list[Any]:
